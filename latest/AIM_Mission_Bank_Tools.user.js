@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.97
+// @version      1.98
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.97';
+    const SCRIPT_VERSION = '1.98';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -8940,6 +8940,89 @@ ${snapPlacemarks}
     }
 
     // ========================================================
+    // Legacy Mission Bank detection (TOP only) — v1.98
+    // Some sites (first seen: 1465) are served Percepto's LEGACY
+    // Angular Mission Bank on the current app build: the react-pages
+    // iframe never exists, so every iframe-gated MBT feature (SUM,
+    // Stage, badges, inline editing) silently never appears. Fail
+    // loudly instead: a console warning each time the bank is opened
+    // on such a site, plus one dismissible toast per site per session,
+    // so "MBT is broken" reads as "this site is on the legacy path".
+    // ========================================================
+    const LEGACY_TOAST_ID = 'aim-mb-legacy-toast';
+    const LEGACY_WAIT_MS = 8000;     // grace for the iframe to mount on slow loads
+    const LEGACY_WATCH_MAX_MS = 30000; // stop polling after this per navigation
+    const legacyToastShownSites = new Set();
+
+    function hasReactPagesIframe() {
+        try {
+            return [...document.querySelectorAll('iframe')].some(f => (f.src || '').includes('/react-pages/'));
+        } catch (e) { return false; }
+    }
+
+    function removeLegacyToast() {
+        const el = document.getElementById(LEGACY_TOAST_ID);
+        if (el) el.remove();
+    }
+
+    function showLegacyToast() {
+        if (document.getElementById(LEGACY_TOAST_ID)) return;
+        const toast = document.createElement('div');
+        toast.id = LEGACY_TOAST_ID;
+        toast.style.cssText = [
+            'position:fixed', 'bottom:18px', 'right:18px', 'z-index:2147483646',
+            'max-width:340px', 'background:#1f1f28', 'color:#ddd',
+            'border:1px solid #444', 'border-left:3px solid #e6a23c',
+            'border-radius:6px', 'padding:10px 30px 10px 12px',
+            'font:12px/1.5 -apple-system,"Segoe UI",Roboto,sans-serif',
+            'box-shadow:0 4px 14px rgba(0,0,0,.45)',
+        ].join(';');
+        toast.innerHTML = `
+            <div style="font-weight:600;color:#5fd3f3;margin-bottom:3px">AIM Mission Bank Tools</div>
+            This site uses Percepto's <b>legacy Mission Bank</b> — MBT tools (SUM, Stage, badges, inline editing) aren't available here. Other sites are unaffected.
+            <span data-aim-legacy-close style="position:absolute;top:6px;right:9px;cursor:pointer;color:#888;font-size:14px">✕</span>`;
+        toast.querySelector('[data-aim-legacy-close]').addEventListener('click', removeLegacyToast);
+        (document.body || document.documentElement).appendChild(toast);
+    }
+
+    function startLegacyBankWatch() {
+        let timer = null;
+        const stop = () => { if (timer) { clearInterval(timer); timer = null; } };
+        const check = () => {
+            stop();
+            // Scoped to the Mission Bank route only — mission-log and other
+            // pages may legitimately have no react-pages iframe.
+            if (!isOnMissionBank()) { removeLegacyToast(); return; }
+            let waited = 0;
+            let warned = false;
+            timer = setInterval(() => {
+                if (!isOnMissionBank()) { stop(); removeLegacyToast(); return; }
+                if (hasReactPagesIframe()) {
+                    // Iframe showed up (slow load, or Percepto migrated the
+                    // site mid-session) — retract any false alarm.
+                    if (warned) console.log(`${TAG} react-pages iframe appeared after ${waited / 1000}s — legacy warning retracted.`);
+                    stop();
+                    removeLegacyToast();
+                    return;
+                }
+                waited += 2000;
+                if (!warned && waited >= LEGACY_WAIT_MS) {
+                    warned = true;
+                    const siteID = mbCurrentSiteID() || '?';
+                    console.warn(`${TAG} legacy Mission Bank detected on site ${siteID} — no react-pages iframe after ${waited / 1000}s. MBT UI is unavailable on this site (Percepto serves it the legacy Angular bank).`);
+                    if (!legacyToastShownSites.has(siteID)) {
+                        legacyToastShownSites.add(siteID);
+                        showLegacyToast();
+                    }
+                }
+                if (waited >= LEGACY_WATCH_MAX_MS) stop();
+            }, 2000);
+        };
+        check();
+        window.addEventListener('hashchange', check);
+    }
+
+    // ========================================================
     // Init
     // ========================================================
     function init() {
@@ -9006,6 +9089,11 @@ ${snapPlacemarks}
             // path is safe. Harmless to leave on.
             installSaveDiffProbe();
             installSaveHotkey();
+        }
+        // TOP-only: watch for sites served the legacy Angular Mission Bank
+        // (no react-pages iframe) and say so instead of silently missing.
+        if (CONTEXT === 'TOP') {
+            try { startLegacyBankWatch(); } catch (e) { console.warn(`${TAG} legacy-bank watch failed to start:`, e); }
         }
         // Re-evaluate injection on hashchange (URL → Mission Bank)
         try {

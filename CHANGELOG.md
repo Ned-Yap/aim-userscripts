@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-16 — Legacy Mission Bank detection — Mission Bank Tools v1.98 (dev/latest)
+
+Some sites (first seen: site 1465) are served Percepto's **legacy Angular Mission Bank** even on the current app build — the react-pages iframe never exists, so every MBT feature (SUM, ➕ Stage, badges, inline editing) silently never appeared, looking like a broken script. MBT now detects this from the top frame (no react-pages iframe within 8 s of opening the Mission Bank) and says so: a console warning plus a one-time dismissible toast — *"This site uses Percepto's legacy Mission Bank — MBT tools aren't available here."* Retracts itself automatically if the iframe shows up late (slow load). No behavior change on normal sites.
+
 ## 2026-07-14 — 🚀 PROMOTED TO PROD: Mission Bank Tools v1.97 (coworkers jump from v1.46) + Asset Inspector v4.164.4 hotfix
 
 **Mission Bank Tools v1.97 is now the coworker release.** Everything from the v1.47–v1.97 dev arc ships at once:
