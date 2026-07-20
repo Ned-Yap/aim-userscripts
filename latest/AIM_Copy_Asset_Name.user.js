@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.192
+// @version      4.193
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -65,7 +65,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.192';
+    const SCRIPT_VERSION = '4.193';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -170,6 +170,7 @@
         translineShowFt: 1000,// hide HIFLD lines AND T-L tower dots beyond this
         tfrShowNm: 3,         // TFRs beyond this are ignored entirely
         droneWindMph: 28,     // drone max wind/gust rating — wake-estimate comparison in the Profile view
+        airCacheHours: 6,     // FAA response cache TTL (0 = off) — dodges the AIS servers' 429 rate limit on repeat runs
     };
     const AIR_ENABLE_DEFAULTS = { airspace: true, strips: true, obstacles: true, laanc: true, sua: true, stadiums: true, translines: true, tfr: true, tfrAuto: true, turbines: true };
     // HIFLD (Homeland Infrastructure Foundation-Level Data) — federal
@@ -2242,21 +2243,87 @@
         const deg = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
         return AIR_COMPASS[Math.round(deg / 22.5) % 16];
     }
+    // ---- FAA response cache. The FAA AIS ArcGIS services rate-limit
+    // aggressively (429 "Too many requests") when the check is re-run
+    // repeatedly. Every airQueryFAA response is cached in GM storage
+    // keyed by the full query URL; within the TTL (CP: airCacheHours,
+    // 0 = off) the query is served locally with NO network call, and on
+    // a failed fetch ANY cached copy — even expired — is served instead
+    // of failing the layer (surfaced in the panel with its age). FAA AIS
+    // data changes on 28-day charting cycles, so hours-stale data is
+    // operationally identical. Live TFRs do NOT pass through here.
+    // Pruning: index entry tracks ages; entries beyond 40 or older than
+    // 7 days are tombstoned ('' — GM_deleteValue isn't granted).
+    const AIR_CACHE_PREFIX = 'aim-air-cache-v1::';
+    const AIR_CACHE_INDEX = 'aim-air-cache-v1-index';
+    const AIR_CACHE_MAX_ENTRIES = 40;
+    const AIR_CACHE_MAX_AGE_MS = 7 * 24 * 3600e3;
+    let airCacheHits = [];   // [{label, ageMin, stale}] — reset per check run
+    function airCacheHash(s) {
+        let h = 5381;
+        for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+        return (h >>> 0).toString(36);
+    }
+    function airCachePut(key, data) {
+        try {
+            elevGmSet(key, JSON.stringify({ t: Date.now(), d: data }));
+            let idx = {};
+            try { idx = JSON.parse(elevGmGet(AIR_CACHE_INDEX, '{}')) || {}; } catch (e) {}
+            idx[key] = Date.now();
+            const keys = Object.keys(idx).sort((a, b) => idx[a] - idx[b]);
+            const cutoff = Date.now() - AIR_CACHE_MAX_AGE_MS;
+            keys.forEach((k, i) => {
+                if (idx[k] < cutoff || i < keys.length - AIR_CACHE_MAX_ENTRIES) {
+                    elevGmSet(k, '');
+                    delete idx[k];
+                }
+            });
+            elevGmSet(AIR_CACHE_INDEX, JSON.stringify(idx));
+        } catch (e) { console.warn(`${TAG} FAA cache write failed:`, e); }
+    }
+    function airCacheGet(key) {
+        try {
+            const raw = elevGmGet(key, null);
+            if (!raw) return null;
+            const o = JSON.parse(raw);
+            return (o && o.d) ? o : null;
+        } catch (e) { return null; }
+    }
     // One FAA layer query via GM_xmlhttpRequest (cross-origin; @connect
     // services6.arcgis.com). Throws on HTTP / ArcGIS-level errors so the
-    // caller can surface the failure — never silently returns partial data.
+    // caller can surface the failure — never silently returns partial
+    // data. Cache-first within the TTL; cache-fallback on failure.
     async function airQueryFAA(service, params) {
         const qs = new URLSearchParams(Object.assign({ f: 'json' }, params)).toString();
         // `service` is an FAA AIS service name, or a full layer URL for
         // non-FAA sources (HIFLD).
         const base = /^https?:/i.test(service) ? service : `${AIR_FAA_BASE}/${service}/FeatureServer/0`;
         const url = `${base}/query?${qs}`;
-        const r = await elevGmRequest({ method: 'GET', url, timeout: 25000 });
-        if (!r.ok) throw new Error(`HTTP ${r.status || 'network error'}`);
-        let d;
-        try { d = JSON.parse(r.responseText); } catch (e) { throw new Error('bad JSON'); }
-        if (d.error) throw new Error(d.error.message || `ArcGIS error ${d.error.code}`);
-        return d;
+        const ttlMs = Math.max(0, (typeof airThresholds.airCacheHours === 'number' ? airThresholds.airCacheHours : 6)) * 3600e3;
+        const key = AIR_CACHE_PREFIX + airCacheHash(url);
+        const label = /^https?:/i.test(service) ? 'HIFLD lines' : service.replace(/_/g, ' ');
+        const cached = ttlMs > 0 ? airCacheGet(key) : null;
+        if (cached && Date.now() - cached.t < ttlMs) {
+            airCacheHits.push({ label, ageMin: Math.round((Date.now() - cached.t) / 60000), stale: false });
+            return cached.d;
+        }
+        try {
+            const r = await elevGmRequest({ method: 'GET', url, timeout: 25000 });
+            if (!r.ok) throw new Error(`HTTP ${r.status || 'network error'}`);
+            let d;
+            try { d = JSON.parse(r.responseText); } catch (e) { throw new Error('bad JSON'); }
+            if (d.error) throw new Error(d.error.message || `ArcGIS error ${d.error.code}`);
+            if (ttlMs > 0) airCachePut(key, d);
+            return d;
+        } catch (e) {
+            if (cached) {
+                const ageMin = Math.round((Date.now() - cached.t) / 60000);
+                airCacheHits.push({ label, ageMin, stale: true });
+                console.warn(`${TAG} FAA query failed (${e && e.message || e}) — serving "${label}" from cache, ${ageMin} min old`);
+                return cached.d;
+            }
+            throw e;
+        }
     }
     function airPointQuery(service, lat, lng, meters, outFields, returnGeometry) {
         return airQueryFAA(service, {
@@ -2632,6 +2699,7 @@
         const sitePtOnly = sitePts.filter(p => p.t === 8 || p.t === 98);
         const flightSegs = siteSegs.filter(sg => sg.t === 15 || sg.t === 16);
         const errors = [];
+        airCacheHits = [];   // fresh tally of cache-served layers this run
         const grab = (label, promise) => promise.catch(e => {
             errors.push(`${label}: ${e && e.message ? e.message : e}`);
             return null;
@@ -3039,6 +3107,7 @@
             }
         }
 
+        inventory.cacheServed = airCacheHits.slice();
         return { violations, inventory, errors, laancGrids, meta: { clat, clng, siteRadM, entCount: ents.length, ptCount: sitePts.length } };
     }
 
@@ -3170,6 +3239,13 @@
             : '<span style="color:#5fff5f;font-weight:700;">No airspace violations ✓</span>'}</div>`);
         if (res.errors && res.errors.length) {
             res.errors.forEach(e => line('high', `<span style="color:#ff8080">FAA query failed — ${airEsc(e)} (results below are PARTIAL)</span>`));
+        }
+        if (inv.cacheServed && inv.cacheServed.length) {
+            const fmtAge = (m) => m < 90 ? `${m} min` : `${Math.round(m / 60)} h`;
+            const stale = inv.cacheServed.filter(c => c.stale);
+            const fresh = inv.cacheServed.length - stale.length;
+            stale.forEach(c => line('warn', `⚡ FAA rate-limited — "${airEsc(c.label)}" served from local cache (${fmtAge(c.ageMin)} old)`));
+            if (fresh) line('info', `⚡ ${fresh} FAA layer${fresh === 1 ? '' : 's'} served from local cache (within the ${th.airCacheHours} h TTL — no network hit)`);
         }
 
         if (airEnabled.airspace) {
@@ -5763,6 +5839,7 @@
                 { id: 'windmillFt', label: 'Windmill / turbine standoff', type: 'number', min: 0, max: 5000, step: 50, default: AIR_THRESH_DEFAULTS.windmillFt, unit: 'ft' },
                 { id: 'turbines', label: 'Info · Turbine specs lookup (USGS USWTDB)', type: 'boolean', default: AIR_ENABLE_DEFAULTS.turbines },
                 { id: 'droneWindMph', label: 'Drone max wind rating (wake estimate)', type: 'number', min: 5, max: 60, step: 1, default: AIR_THRESH_DEFAULTS.droneWindMph, unit: 'mph' },
+                { id: 'airCacheHours', label: 'FAA data cache TTL (0 = off)', type: 'number', min: 0, max: 72, step: 1, default: AIR_THRESH_DEFAULTS.airCacheHours, unit: 'h' },
                 { id: 'tlTowerFt', label: 'T-L tower standoff (from FFZ/FP)', type: 'number', min: 0, max: 2000, step: 25, default: AIR_THRESH_DEFAULTS.tlTowerFt, unit: 'ft' },
                 { id: 'tlClearFt', label: 'Fly-over clearance — all obstacles (floor above top)', type: 'number', min: 0, max: 300, step: 10, default: AIR_THRESH_DEFAULTS.tlClearFt, unit: 'ft' },
                 { id: 'obstacleShowNm', label: 'Show obstacles within', type: 'number', min: 0.25, max: 10, step: 0.25, default: AIR_THRESH_DEFAULTS.obstacleShowNm, unit: 'NM' },

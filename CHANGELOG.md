@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-20 — ⚡ FAA response cache — no more "Too many requests" on repeat runs — Asset Inspector v4.193 (dev/latest)
+
+The FAA AIS servers 429-rate-limit when the airspace check is re-run repeatedly (e.g. while iterating on a site). Every FAA/HIFLD query response is now cached locally (Tampermonkey storage, keyed by the exact query):
+
+- **Re-run within the TTL** (new CP setting "FAA data cache TTL", default 6 h, 0 = off) → the layer is served from cache with **no network call at all**, shown as an ⚡ info line. FAA AIS data only changes on 28-day charting cycles, so hours-old data is operationally identical.
+- **FAA rate-limits or errors anyway** → instead of a red "results are PARTIAL" failure, the layer falls back to the last cached copy — even an expired one — with an ⚡ warning naming the layer and the cache age.
+- Live TFRs deliberately bypass the cache (they're real-time and have their own 10-min list cache). Cache self-prunes (40 entries / 7 days max).
+
 ## 2026-07-20 — 💨 Wake round 2: the picture stops overselling "clear" — Asset Inspector v4.192 (dev/latest)
 
 The wake drawing now shows the near-field effects the plain cone can't, and the verdict respects them:
