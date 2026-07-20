@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.186
+// @version      4.187
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -65,7 +65,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.186';
+    const SCRIPT_VERSION = '4.187';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -3918,12 +3918,14 @@
                 + `<line x1="${px - 4}" y1="${pb}" x2="${px + 4}" y2="${pb}" stroke="rgba(159,180,192,0.7)"/>`
                 + `<text x="${px + 6}" y="${(pa + pb) / 2 + 3}" fill="#9fb4c0" font-size="10">${label}</text>`;
         };
-        const dimH = (y, x1, x2, label) => {
+        const dimH = (y, x1, x2, label, labelX) => {
+            // labelX (world) shifts the label off-center — e.g. clear of a
+            // tower drawn right where the midpoint would put the text.
             const py = Number(Y(y)), pa = Number(X(x1)), pb = Number(X(x2));
             return `<line x1="${pa}" y1="${py}" x2="${pb}" y2="${py}" stroke="rgba(159,180,192,0.7)" stroke-width="1"/>`
                 + `<line x1="${pa}" y1="${py - 4}" x2="${pa}" y2="${py + 4}" stroke="rgba(159,180,192,0.7)"/>`
                 + `<line x1="${pb}" y1="${py - 4}" x2="${pb}" y2="${py + 4}" stroke="rgba(159,180,192,0.7)"/>`
-                + `<text x="${(pa + pb) / 2}" y="${py - 5}" fill="#9fb4c0" font-size="10" text-anchor="middle">${label}</text>`;
+                + `<text x="${labelX != null ? Number(X(labelX)) : (pa + pb) / 2}" y="${py - 5}" fill="#9fb4c0" font-size="10" text-anchor="middle">${label}</text>`;
         };
         // Flight band (the FFZ/FP interior is on the drone side).
         el.push(`<rect x="${X(wL)}" y="${Y(ceilY)}" width="${((0 - wL) * s).toFixed(1)}" height="${Math.max(2, (ceilY - floorY) * s).toFixed(1)}" fill="rgba(95,255,95,0.13)" stroke="rgba(95,255,95,0.5)" stroke-dasharray="5,4" stroke-width="1"/>`);
@@ -3955,7 +3957,7 @@
             // number that matters when the band sits under the rotor. The
             // rotor-Ø dim sits well BELOW it so the labels never collide.
             const discBotY = hubY - st.bladeFt;
-            el.push(dimH(Math.max(discBotY - 44, gO + 8), xO - st.bladeFt, xO + st.bladeFt, `rotor Ø ${Math.round(2 * st.bladeFt)} ft`));
+            el.push(dimH(Math.max(discBotY - 44, gO + 8), xO - st.bladeFt, xO + st.bladeFt, `rotor Ø ${Math.round(2 * st.bladeFt)} ft`, xO - st.bladeFt * 0.5));
             const cgX = (xO - st.bladeFt) * 0.55;   // clearance dim sits mid-air, left of the disc
             el.push(`<line x1="${X(Math.min(cgX - 15, xO - st.bladeFt - 14))}" y1="${Y(discBotY)}" x2="${X(xO + st.bladeFt + 14)}" y2="${Y(discBotY)}" stroke="rgba(255,176,32,0.8)" stroke-width="1" stroke-dasharray="2,3"/>`);
             el.push(`<text x="${X(xO - st.bladeFt * 0.55)}" y="${Number(Y(discBotY)) - 6}" fill="#ffb020" font-size="10" text-anchor="middle">disc bottom ${Math.round(st.hubFt - st.bladeFt)} ft AGL</text>`);
