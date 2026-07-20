@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.193
+// @version      4.194
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -65,7 +65,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.193';
+    const SCRIPT_VERSION = '4.194';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -2259,6 +2259,7 @@
     const AIR_CACHE_MAX_ENTRIES = 40;
     const AIR_CACHE_MAX_AGE_MS = 7 * 24 * 3600e3;
     let airCacheHits = [];   // [{label, ageMin, stale}] — reset per check run
+    let airRetryToasted = false;   // one cooloff toast per run, not one per layer
     function airCacheHash(s) {
         let h = 5381;
         for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
@@ -2307,12 +2308,16 @@
             airCacheHits.push({ label, ageMin: Math.round((Date.now() - cached.t) / 60000), stale: false });
             return cached.d;
         }
-        try {
+        const doFetch = async () => {
             const r = await elevGmRequest({ method: 'GET', url, timeout: 25000 });
             if (!r.ok) throw new Error(`HTTP ${r.status || 'network error'}`);
             let d;
             try { d = JSON.parse(r.responseText); } catch (e) { throw new Error('bad JSON'); }
             if (d.error) throw new Error(d.error.message || `ArcGIS error ${d.error.code}`);
+            return d;
+        };
+        try {
+            const d = await doFetch();
             if (ttlMs > 0) airCachePut(key, d);
             return d;
         } catch (e) {
@@ -2321,6 +2326,23 @@
                 airCacheHits.push({ label, ageMin, stale: true });
                 console.warn(`${TAG} FAA query failed (${e && e.message || e}) — serving "${label}" from cache, ${ageMin} min old`);
                 return cached.d;
+            }
+            // 429 with nothing cached: Esri's org-level rate limit runs a
+            // ~1-min cooloff, so wait it out ONCE and retry — staggered a
+            // few seconds so parallel layers don't re-burst in the same
+            // instant and re-trip the limit.
+            if (/too many|429/i.test(String(e && e.message || e))) {
+                if (!airRetryToasted) {
+                    airRetryToasted = true;
+                    try { showToast('FAA rate-limited — waiting out the ~1 min cooloff, retrying automatically…', 'rgba(255,176,32,0.6)'); } catch (e2) {}
+                }
+                const waitMs = 70000 + Math.floor(Math.random() * 10000);
+                console.warn(`${TAG} 429 on "${label}" — retrying in ${Math.round(waitMs / 1000)} s`);
+                await new Promise(res => setTimeout(res, waitMs));
+                const d = await doFetch();   // still limited → throws to the caller as before
+                if (ttlMs > 0) airCachePut(key, d);
+                console.log(`${TAG} 429 retry succeeded for "${label}" — cached`);
+                return d;
             }
             throw e;
         }
@@ -2700,6 +2722,7 @@
         const flightSegs = siteSegs.filter(sg => sg.t === 15 || sg.t === 16);
         const errors = [];
         airCacheHits = [];   // fresh tally of cache-served layers this run
+        airRetryToasted = false;
         const grab = (label, promise) => promise.catch(e => {
             errors.push(`${label}: ${e && e.message ? e.message : e}`);
             return null;
