@@ -6,6 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-20 — 💨 Wake round 2: the picture stops overselling "clear" — Asset Inspector v4.192 (dev/latest)
+
+The wake drawing now shows the near-field effects the plain cone can't, and the verdict respects them:
+
+- **Tip-vortex zone** — hatched amber strip hugging the underside of the disc rim out to 2D: the strongest coherent turbulence the turbine makes lives exactly there, so "just under the disc" is no longer drawn as clean air.
+- **Tower shadow** — faint band downwind of the mast (ground → hub, ~300 ft): the tower's own bluff-body wake at ALL altitudes, including under the rotor.
+- **Meander margin** — soft ±60 ft fringe outside both envelope edges: real wakes wander, the edge is fuzzy, and the drawing now says so.
+- **Honest verdict ladder** — outside the mean cone is no longer automatic green: *UNDER TIP-VORTEX ZONE* / *within 60 ft of envelope edge — treat as inside* / *in TOWER SHADOW* all report amber; "within rating" inside 1.5D is downgraded with "near-wake, estimates saturate here"; green now means clear of wake, vortex, AND shadow zones.
+
 ## 2026-07-20 — 💨 Wake-turbulence estimate in the Profile view — Asset Inspector v4.191 (dev/latest)
 
 Windmill profiles now include a **wake-turbulence screening estimate** built on the industry-standard engineering models (Jensen wake deficit + Crespo-Hernández added turbulence):

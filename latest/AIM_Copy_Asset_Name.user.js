@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.191
+// @version      4.192
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -65,7 +65,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.191';
+    const SCRIPT_VERSION = '4.192';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -3609,6 +3609,11 @@
     // stacking, yaw error. Gust estimate = V·(1 + 2.5·TI_total).
     const AIR_WAKE_K = 0.075;
     const AIR_WAKE_I0 = 0.10;
+    // Near-field effects the cone alone doesn't capture (all rough,
+    // deliberately conservative):
+    const AIR_WAKE_TIPVORT_FT = 50;      // tip vortices trail at the disc rim — margin band below the lower envelope edge (≤2D)
+    const AIR_WAKE_MEANDER_FT = 60;      // wake meander — envelope edge is fuzzy by about this much
+    const AIR_WAKE_TOWERSHADOW_FT = 300; // bluff-body tower wake extends ~this far downwind (~20 tower diameters), ground → hub
     function airProfWakeCalc(st) {
         if (st.kind !== 'windmill' || !st.wakeOn) return null;
         const D = 2 * st.bladeFt;
@@ -3634,6 +3639,11 @@
         out.inCone = Math.abs(st.droneY - hubY) <= out.coneR;
         out.below = st.droneY < hubY - out.coneR;
         out.zone = xD < 2 ? 'severe' : xD < 5 ? 'strong' : xD < 10 ? 'moderate' : 'negligible';
+        // Honest-uncertainty flags (checked when OUTSIDE the mean cone):
+        out.edgeDist = Math.abs(st.droneY - hubY) - out.coneR;   // + = outside envelope
+        out.nearEdge = !out.inCone && out.edgeDist < AIR_WAKE_MEANDER_FT;
+        out.inTipZone = !out.inCone && st.droneY < hubY && (hubY - out.coneR) - st.droneY <= AIR_WAKE_TIPVORT_FT && xD <= 2;
+        out.inTowerShadow = st.droneY < hubY && dx > 0 && dx <= AIR_WAKE_TOWERSHADOW_FT;
         out.active = true;
         return out;
     }
@@ -4030,11 +4040,27 @@
             // 5–10D moderate; envelope expands at k=0.075 per ft.
             if (wake && !wake.idle && !wake.crosswind) {
                 const wr = (dx) => wake.D / 2 + AIR_WAKE_K * dx;
+                // Tower shadow — bluff-body wake off the mast itself,
+                // ground → hub, downwind. Weak but real; drawn UNDER the
+                // rotor-wake bands.
+                el.push(`<rect x="${X(xO - AIR_WAKE_TOWERSHADOW_FT)}" y="${Y(hubY)}" width="${(AIR_WAKE_TOWERSHADOW_FT * s).toFixed(1)}" height="${((hubY - gO) * s).toFixed(1)}" fill="rgba(150,165,195,0.08)"/>`);
+                addLbl(Number(X(xO - AIR_WAKE_TOWERSHADOW_FT * 0.55)), Number(Y(gO + (hubY - gO) * 0.12)), 'tower shadow', { fill: 'rgba(150,165,195,0.75)', size: 9, anchor: 'middle', pr: 7 });
                 [[0, 2, 'rgba(255,85,85,0.10)'], [2, 5, 'rgba(255,176,32,0.08)'], [5, 10, 'rgba(255,255,120,0.05)']].forEach(([z0, z1, fill]) => {
                     const x0 = xO - z0 * wake.D, x1 = xO - z1 * wake.D;
                     const r0 = wr(z0 * wake.D), r1 = wr(z1 * wake.D);
                     el.push(`<polygon points="${X(x0)},${Y(hubY + r0)} ${X(x1)},${Y(hubY + r1)} ${X(x1)},${Y(hubY - r1)} ${X(x0)},${Y(hubY - r0)}" fill="${fill}"/>`);
                 });
+                // Meander margin — the envelope edge is fuzzy (~±60 ft):
+                // faint bands OUTSIDE both edges out to 10D.
+                const mFar = 10 * wake.D;
+                const mPoly = (sign) => `<polygon points="${X(xO)},${Y(hubY + sign * wr(0))} ${X(xO - mFar)},${Y(hubY + sign * wr(mFar))} ${X(xO - mFar)},${Y(hubY + sign * (wr(mFar) + AIR_WAKE_MEANDER_FT))} ${X(xO)},${Y(hubY + sign * (wr(0) + AIR_WAKE_MEANDER_FT))}" fill="rgba(255,176,32,0.045)"/>`;
+                el.push(mPoly(1), mPoly(-1));
+                addLbl(Number(X(xO - 4 * wake.D)), Number(Y(hubY - wr(4 * wake.D) - AIR_WAKE_MEANDER_FT)) + 10, `meander ±${AIR_WAKE_MEANDER_FT} ft — edge is fuzzy`, { fill: 'rgba(255,176,32,0.6)', size: 9, anchor: 'middle', pr: 7 });
+                // Tip-vortex zone — strongest coherent turbulence trails at
+                // the disc RIM; hatched strip under the lower edge to 2D.
+                const tvFar = 2 * wake.D;
+                el.push(`<polygon points="${X(xO)},${Y(hubY - wr(0))} ${X(xO - tvFar)},${Y(hubY - wr(tvFar))} ${X(xO - tvFar)},${Y(hubY - wr(tvFar) - AIR_WAKE_TIPVORT_FT)} ${X(xO)},${Y(hubY - wr(0) - AIR_WAKE_TIPVORT_FT)}" fill="url(#aimProfHatch)"/>`);
+                addLbl(Number(X(xO - wake.D)), Number(Y(hubY - wr(wake.D) - AIR_WAKE_TIPVORT_FT)) + 11, 'tip-vortex zone', { fill: '#ffb020', size: 9, anchor: 'middle', pr: 6 });
                 [2, 5, 10].forEach(z => {
                     const zx = xO - z * wake.D;
                     addLbl(Number(X(zx)), Number(Y(hubY + wr(z * wake.D))) - 3, `${z}D`, { fill: 'rgba(255,176,32,0.7)', size: 9, anchor: 'middle', pr: 7 });
@@ -4125,7 +4151,9 @@
         el.push(`<text x="${pad + ref * s + 5}" y="${H - 7}" fill="#9fb4c0" font-size="10">${ref} ft (uniform scale)</text>`);
         flushLabels();
         wrap.querySelector('[data-prof-svg]').innerHTML =
-            `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="display:block;background:rgba(20,28,40,0.6);border-radius:6px;">${el.join('')}</svg>`;
+            `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="display:block;background:rgba(20,28,40,0.6);border-radius:6px;">`
+            + '<defs><pattern id="aimProfHatch" width="8" height="8" patternTransform="rotate(45)" patternUnits="userSpaceOnUse"><line x1="0" y1="0" x2="0" y2="8" stroke="rgba(255,176,32,0.4)" stroke-width="1.5"/></pattern></defs>'
+            + `${el.join('')}</svg>`;
         const bandCol = bandBest < 100 ? '#ff5555' : bandBest < thr ? '#ffb020' : '#5fff5f';
         const wmReads = (st.kind === 'windmill' && near.disc && near.tower) ? (() => {
             const discBotAgl = Math.round(st.hubFt - st.bladeFt);
@@ -4138,10 +4166,24 @@
                 else if (wake.crosswind) wakeSpan = '<span>💨 Wake: crosswind — wake blows past the flight area, not into it</span>';
                 else if (wake.upwind) wakeSpan = '<span>💨 Wake: drone is UPWIND of the rotor here — clear of wake</span>';
                 else {
+                    // Verdict ladder, most severe condition wins. Outside
+                    // the mean cone is NOT automatically clear: tip
+                    // vortices, meander, and tower shadow all live there.
                     const g2 = Math.round(wake.gustMph), rat = Math.round(st.droneRatingMph || 0);
-                    const vd = !wake.inCone ? ['clear — outside wake envelope vertically', '#5fff5f']
-                        : g2 > rat ? ['OVER DRONE RATING', '#ff5555']
-                        : g2 > rat * 0.85 ? ['MARGINAL', '#ffb020'] : ['within rating', '#5fff5f'];
+                    let vd;
+                    if (wake.inCone) {
+                        vd = g2 > rat ? ['OVER DRONE RATING', '#ff5555']
+                            : g2 > rat * 0.85 ? ['MARGINAL', '#ffb020'] : ['within rating', '#5fff5f'];
+                        if (wake.xD < 1.5) vd = [`${vd[0]} — near-wake, estimates saturate here`, vd[1] === '#5fff5f' ? '#ffb020' : vd[1]];
+                    } else if (wake.inTipZone) {
+                        vd = ['UNDER TIP-VORTEX ZONE — treat as turbulent', '#ffb020'];
+                    } else if (wake.nearEdge) {
+                        vd = [`within ${AIR_WAKE_MEANDER_FT} ft of envelope edge (meander) — treat as inside`, '#ffb020'];
+                    } else if (wake.inTowerShadow) {
+                        vd = ['clear of rotor wake · in TOWER SHADOW (light–moderate chop)', '#ffb020'];
+                    } else {
+                        vd = ['clear — outside wake, vortex, and shadow zones', '#5fff5f'];
+                    }
                     wakeSpan = `<span>💨 Wake @ ${wake.xD.toFixed(1)}D (${wake.zone}): ${wake.inCone ? '' : wake.below ? 'drone below envelope · ' : 'drone above envelope · '}TI +${Math.round(wake.addTI * 100)}% → ~${Math.round(wake.totalTI * 100)}% · est gusts ~${g2} mph vs ${rat} mph — <strong style="color:${vd[1]}">${vd[0]}</strong></span>`;
                 }
             }
