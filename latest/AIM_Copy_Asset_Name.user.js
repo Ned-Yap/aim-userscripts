@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.190
+// @version      4.191
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -65,7 +65,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.190';
+    const SCRIPT_VERSION = '4.191';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -169,6 +169,7 @@
         obstacleShowNm: 1.5,  // hide non-T-L obstacles beyond this (panel + dots)
         translineShowFt: 1000,// hide HIFLD lines AND T-L tower dots beyond this
         tfrShowNm: 3,         // TFRs beyond this are ignored entirely
+        droneWindMph: 28,     // drone max wind/gust rating — wake-estimate comparison in the Profile view
     };
     const AIR_ENABLE_DEFAULTS = { airspace: true, strips: true, obstacles: true, laanc: true, sua: true, stadiums: true, translines: true, tfr: true, tfrAuto: true, turbines: true };
     // HIFLD (Homeland Infrastructure Foundation-Level Data) — federal
@@ -3596,6 +3597,46 @@
         if (voltNum >= 69) return 70;
         return 50;
     }
+    // ---- Wake-turbulence screening estimate (windmills only). ----
+    // Industry-standard engineering models, NOT CFD: Jensen wake deficit
+    // (dV/V = (1−√(1−Ct)) / (1+2kx/D)²) + Crespo-Hernández added
+    // turbulence intensity (ΔI = 0.73·a^0.8325·I0^0.0325·(x/D)^−0.32),
+    // k=0.075 onshore, ambient TI 10%. Ct approximated by operating
+    // regime from wind speed (GE-class curve). Distances in rotor
+    // diameters D: <2D severe, 2–5D strong, 5–10D moderate, >10D ~ambient.
+    // Worst-case geometry: drone directly DOWNWIND of the rotor.
+    // Screening aid only — ignores terrain, stability, multi-turbine
+    // stacking, yaw error. Gust estimate = V·(1 + 2.5·TI_total).
+    const AIR_WAKE_K = 0.075;
+    const AIR_WAKE_I0 = 0.10;
+    function airProfWakeCalc(st) {
+        if (st.kind !== 'windmill' || !st.wakeOn) return null;
+        const D = 2 * st.bladeFt;
+        if (!(D > 0)) return null;
+        const V = Math.max(0, st.windMph || 0);
+        const ct = V < 7 ? 0 : V < 25 ? 0.75 : V < 35 ? 0.5 : 0.3;
+        const out = { D, V, ct, idle: ct === 0, crosswind: !st.downwind, active: false };
+        if (out.idle || out.crosswind) return out;
+        const dx = st.distFt - st.droneX;          // rotor plane → drone, downwind
+        out.upwind = dx <= 0;
+        if (out.upwind) return out;
+        const xD = dx / D;
+        const a2 = (1 - Math.sqrt(1 - ct)) / 2;    // induction factor
+        out.xD = xD;
+        out.deficit = (1 - Math.sqrt(1 - ct)) / Math.pow(1 + 2 * AIR_WAKE_K * xD, 2);
+        // Crespo-Hernández is fit for the 3D–15D far wake; clamp the near
+        // wake at 0.5D so it saturates instead of blowing up.
+        out.addTI = 0.73 * Math.pow(a2, 0.8325) * Math.pow(AIR_WAKE_I0, 0.0325) * Math.pow(Math.max(xD, 0.5), -0.32);
+        out.totalTI = Math.sqrt(AIR_WAKE_I0 * AIR_WAKE_I0 + out.addTI * out.addTI);
+        out.gustMph = V * (1 + 2.5 * out.totalTI);
+        const hubY = st.obsGndFt + st.hubFt;
+        out.coneR = D / 2 + AIR_WAKE_K * dx;       // wake half-width at the drone
+        out.inCone = Math.abs(st.droneY - hubY) <= out.coneR;
+        out.below = st.droneY < hubY - out.coneR;
+        out.zone = xD < 2 ? 'severe' : xD < 5 ? 'strong' : xD < 10 ? 'moderate' : 'negligible';
+        out.active = true;
+        return out;
+    }
     function closeAirProfModal() {
         if (airProfState && airProfState._ro) { try { airProfState._ro.disconnect(); } catch (e) {} }
         const el = document.getElementById(AIR_PROF_MODAL_ID);
@@ -3664,6 +3705,11 @@
         st.droneX = 0; st.droneY = null;   // derived each render from droneAglFt
         airProfReband(st);
         st.droneAglFt = Math.round((st.floorAglFt + st.ceilAglFt) / 2);   // auto-mid until touched
+        // Wake-estimate controls (used by windmills only).
+        st.wakeOn = true;
+        st.downwind = true;                        // worst case: drone directly downwind
+        st.windMph = 15;
+        st.droneRatingMph = airThresholds.droneWindMph;
         st.real = { distFt: st.distFt, floorAglFt: st.floorAglFt, ceilAglFt: st.ceilAglFt, hubFt: st.hubFt, bladeFt: st.bladeFt, aglFt: st.aglFt };
         airProfState = st;
         airProfBuildModal(st);
@@ -3774,6 +3820,12 @@
             <div style="padding:6px 12px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;">
                 ${numIn('distFt', 'Distance', 25)}${numIn('floorAglFt', 'Floor (AGL)', 10)}${numIn('ceilAglFt', 'Ceiling (AGL)', 10)}${numIn('droneAglFt', '🛩 Drone alt', 5)}${kindIns}
             </div>
+            ${st.kind === 'windmill' ? `<div style="padding:0 12px 6px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;">
+                <label style="display:flex;align-items:center;gap:4px;white-space:nowrap;cursor:pointer;"><input type="checkbox" data-prof-chk="wakeOn"${st.wakeOn ? ' checked' : ''}> 💨 Wake estimate</label>
+                ${numIn('windMph', 'Wind', 5).replace('> ft<', '> mph<')}
+                ${numIn('droneRatingMph', 'Drone max wind', 2).replace('> ft<', '> mph<')}
+                <label style="display:flex;align-items:center;gap:4px;white-space:nowrap;cursor:pointer;" title="Worst case: the drone sits directly downwind of the rotor. Uncheck for crosswind days (wake blows past, not toward the flight area)."><input type="checkbox" data-prof-chk="downwind"${st.downwind ? ' checked' : ''}> drone downwind (worst case)</label>
+            </div>` : ''}
             <div data-prof-svg style="flex:1;min-height:200px;padding:2px 8px;touch-action:none;cursor:grab;overflow:hidden;"></div>
             <div data-prof-read style="padding:6px 12px 4px;display:flex;gap:16px;flex-wrap:wrap;font-size:12px;border-top:1px solid rgba(122,223,230,0.2);"></div>
             <div data-prof-note style="padding:0 12px 8px;opacity:0.55;font-size:10.5px;"></div>`;
@@ -3792,6 +3844,8 @@
             }
         });
         wrap.addEventListener('input', (e) => {
+            const ck = e.target.getAttribute && e.target.getAttribute('data-prof-chk');
+            if (ck) { st[ck] = !!e.target.checked; airProfRender(); return; }
             const k = e.target.getAttribute && e.target.getAttribute('data-prof-k');
             if (!k) return;
             const v = Number(e.target.value);
@@ -3883,6 +3937,7 @@
         st.droneY = gD + st.droneAglFt;
         const dAltInp = wrap.querySelector('input[data-prof-k="droneAglFt"]');
         if (dAltInp && document.activeElement !== dAltInp) dAltInp.value = Math.round(st.droneAglFt);
+        const wake = airProfWakeCalc(st);
         const hubY = gO + st.hubFt;
         const topY = st.kind === 'windmill' ? hubY + st.bladeFt : gO + st.aglFt;
         const thr = st.kind === 'windmill' ? airThresholds.windmillFt : st.kind === 'wire' ? airThresholds.tlTowerFt : airThresholds.obstacleFt;
@@ -3970,6 +4025,21 @@
         }
         // Obstacle.
         if (st.kind === 'windmill') {
+            // Wake cone (downwind = toward the flight area, worst case).
+            // Zone bands in rotor diameters: <2D severe / 2–5D strong /
+            // 5–10D moderate; envelope expands at k=0.075 per ft.
+            if (wake && !wake.idle && !wake.crosswind) {
+                const wr = (dx) => wake.D / 2 + AIR_WAKE_K * dx;
+                [[0, 2, 'rgba(255,85,85,0.10)'], [2, 5, 'rgba(255,176,32,0.08)'], [5, 10, 'rgba(255,255,120,0.05)']].forEach(([z0, z1, fill]) => {
+                    const x0 = xO - z0 * wake.D, x1 = xO - z1 * wake.D;
+                    const r0 = wr(z0 * wake.D), r1 = wr(z1 * wake.D);
+                    el.push(`<polygon points="${X(x0)},${Y(hubY + r0)} ${X(x1)},${Y(hubY + r1)} ${X(x1)},${Y(hubY - r1)} ${X(x0)},${Y(hubY - r0)}" fill="${fill}"/>`);
+                });
+                [2, 5, 10].forEach(z => {
+                    const zx = xO - z * wake.D;
+                    addLbl(Number(X(zx)), Number(Y(hubY + wr(z * wake.D))) - 3, `${z}D`, { fill: 'rgba(255,176,32,0.7)', size: 9, anchor: 'middle', pr: 7 });
+                });
+            }
             el.push(`<path d="M${X(xO - 6)},${Y(gO)} L${X(xO - 2)},${Y(hubY)} L${X(xO + 2)},${Y(hubY)} L${X(xO + 6)},${Y(gO)} Z" fill="#b8c4cc" stroke="#8fa0aa"/>`);
             el.push(`<circle cx="${X(xO)}" cy="${Y(hubY)}" r="${Math.max(3, 6 * s).toFixed(1)}" fill="#dfe9f0"/>`);
             [90, 210, 330].forEach(a => {
@@ -4062,10 +4132,24 @@
             const dUnder = Math.round((st.obsGndFt + st.hubFt - st.bladeFt) - st.droneY);
             const cgap = Math.round((st.obsGndFt + st.hubFt - st.bladeFt) - (st.droneGndFt + st.ceilAglFt));
             const cgapCol = cgap < 0 ? '#ff5555' : cgap < airThresholds.tlClearFt ? '#ffb020' : '#5fff5f';
+            let wakeSpan = '';
+            if (wake) {
+                if (wake.idle) wakeSpan = `<span>💨 Wake: turbine likely idle at ${Math.round(wake.V)} mph (cut-in ~7 mph) — minimal wake</span>`;
+                else if (wake.crosswind) wakeSpan = '<span>💨 Wake: crosswind — wake blows past the flight area, not into it</span>';
+                else if (wake.upwind) wakeSpan = '<span>💨 Wake: drone is UPWIND of the rotor here — clear of wake</span>';
+                else {
+                    const g2 = Math.round(wake.gustMph), rat = Math.round(st.droneRatingMph || 0);
+                    const vd = !wake.inCone ? ['clear — outside wake envelope vertically', '#5fff5f']
+                        : g2 > rat ? ['OVER DRONE RATING', '#ff5555']
+                        : g2 > rat * 0.85 ? ['MARGINAL', '#ffb020'] : ['within rating', '#5fff5f'];
+                    wakeSpan = `<span>💨 Wake @ ${wake.xD.toFixed(1)}D (${wake.zone}): ${wake.inCone ? '' : wake.below ? 'drone below envelope · ' : 'drone above envelope · '}TI +${Math.round(wake.addTI * 100)}% → ~${Math.round(wake.totalTI * 100)}% · est gusts ~${g2} mph vs ${rat} mph — <strong style="color:${vd[1]}">${vd[0]}</strong></span>`;
+                }
+            }
             return `<span>→ swept disc: <strong style="color:${near.disc.d <= near.tower.d ? col : '#dfe9f0'}">${Math.round(near.disc.d).toLocaleString()} ft</strong></span>
                 <span>→ tower: <strong style="color:${near.tower.d < near.disc.d ? col : '#dfe9f0'}">${Math.round(near.tower.d).toLocaleString()} ft</strong></span>
                 <span>Ceiling → disc bottom: <strong style="color:${cgapCol}">${cgap < 0 ? `${Math.abs(cgap).toLocaleString()} ft INTO disc` : `${cgap.toLocaleString()} ft`}</strong></span>
-                <span>Disc bottom: <strong>${discBotAgl} ft AGL</strong> (${dUnder >= 0 ? `${dUnder.toLocaleString()} ft above drone` : `${Math.abs(dUnder).toLocaleString()} ft BELOW drone`})</span>`;
+                <span>Disc bottom: <strong>${discBotAgl} ft AGL</strong> (${dUnder >= 0 ? `${dUnder.toLocaleString()} ft above drone` : `${Math.abs(dUnder).toLocaleString()} ft BELOW drone`})</span>
+                ${wakeSpan}`;
         })() : `<span>Drone→obstacle: <strong style="color:${col}">${Math.round(near.d).toLocaleString()} ft</strong></span>`;
         wrap.querySelector('[data-prof-read]').innerHTML = `
             ${wmReads}
@@ -4078,6 +4162,7 @@
             + `${st.demDrone === 'ok' ? 'Drone-side ground from DEM' : st.demDrone === 'pending' ? 'Fetching drone-side ground elevation…' : 'Grounds assumed level'}`
             + `${st.kind !== 'wire' ? ' · obstacle ground from FAA AMSL−AGL' : ''}`
             + `${st.estSpecs ? ' · ⚠ hub/blade ESTIMATED from FAA height (no USWTDB match) — edit to actuals' : ''}`
+            + `${st.kind === 'windmill' && st.wakeOn ? ' · Wake = Jensen + Crespo-Hernández screening estimate (ignores terrain, stability, neighboring turbines) — planning aid, NOT a clearance' : ''}`
             + ' · DOF coordinates are accurate to tens of ft.';
     }
 
@@ -5635,6 +5720,7 @@
                 { id: 'obstacleMinAglFt', label: 'Ignore obstacles shorter than', type: 'number', min: 0, max: 500, step: 10, default: AIR_THRESH_DEFAULTS.obstacleMinAglFt, unit: 'ft' },
                 { id: 'windmillFt', label: 'Windmill / turbine standoff', type: 'number', min: 0, max: 5000, step: 50, default: AIR_THRESH_DEFAULTS.windmillFt, unit: 'ft' },
                 { id: 'turbines', label: 'Info · Turbine specs lookup (USGS USWTDB)', type: 'boolean', default: AIR_ENABLE_DEFAULTS.turbines },
+                { id: 'droneWindMph', label: 'Drone max wind rating (wake estimate)', type: 'number', min: 5, max: 60, step: 1, default: AIR_THRESH_DEFAULTS.droneWindMph, unit: 'mph' },
                 { id: 'tlTowerFt', label: 'T-L tower standoff (from FFZ/FP)', type: 'number', min: 0, max: 2000, step: 25, default: AIR_THRESH_DEFAULTS.tlTowerFt, unit: 'ft' },
                 { id: 'tlClearFt', label: 'Fly-over clearance — all obstacles (floor above top)', type: 'number', min: 0, max: 300, step: 10, default: AIR_THRESH_DEFAULTS.tlClearFt, unit: 'ft' },
                 { id: 'obstacleShowNm', label: 'Show obstacles within', type: 'number', min: 0.25, max: 10, step: 0.25, default: AIR_THRESH_DEFAULTS.obstacleShowNm, unit: 'NM' },

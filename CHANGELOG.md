@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-20 — 💨 Wake-turbulence estimate in the Profile view — Asset Inspector v4.191 (dev/latest)
+
+Windmill profiles now include a **wake-turbulence screening estimate** built on the industry-standard engineering models (Jensen wake deficit + Crespo-Hernández added turbulence):
+
+- **Shaded wake cone** drawn downwind of the rotor toward the flight area, banded by severity in rotor diameters: red < 2D, amber 2–5D, yellow 5–10D (labeled), expanding exactly as the model says the wake spreads.
+- **Inputs**: wind speed (mph), the drone's max wind rating (prefilled from a new Control Panel setting, default 28 mph), a "drone downwind (worst case)" toggle, and a master 💨 Wake estimate checkbox.
+- **Readout with a verdict**: distance in D, added turbulence intensity, estimated gusts inside the wake vs the drone's rating — *within rating / MARGINAL / OVER DRONE RATING*, or *clear* when the drone sits outside the wake envelope vertically. Smart edge cases: below ~7 mph the turbine is flagged as likely idle; crosswind and drone-upwind geometries report as clear.
+- Example that surprised us in testing: at 1,000 ft downwind of a GE 2.82-127 (2.4D), the wake envelope reaches **down to ~91 ft AGL** — normal band altitudes are inside it, with ~+16% added turbulence and ~22 mph effective gusts in a 15 mph ambient wind.
+- Footer states the honest limits: ignores terrain, atmospheric stability, and neighboring turbines — a planning aid, **not** a clearance.
+
 ## 2026-07-20 — 📐 Profile view round 3: ceiling → rotor-floor clearance front and center — Asset Inspector v4.186 (dev/latest)
 
 - **Ceiling → disc bottom** now has its own **big colored dimension line** drawn mid-air between the drone column and the disc (with a dashed guide extending your band ceiling across to it): green when the gap clears the fly-over clearance threshold, amber when tight, and red reading "ceiling N ft INTO disc" when your band ceiling reaches into the swept rotor. Same number added to the readout row.
