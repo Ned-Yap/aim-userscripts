@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.185
+// @version      4.186
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -65,7 +65,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.185';
+    const SCRIPT_VERSION = '4.186';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -3927,7 +3927,7 @@
         };
         // Flight band (the FFZ/FP interior is on the drone side).
         el.push(`<rect x="${X(wL)}" y="${Y(ceilY)}" width="${((0 - wL) * s).toFixed(1)}" height="${Math.max(2, (ceilY - floorY) * s).toFixed(1)}" fill="rgba(95,255,95,0.13)" stroke="rgba(95,255,95,0.5)" stroke-dasharray="5,4" stroke-width="1"/>`);
-        el.push(`<text x="6" y="${Number(Y(ceilY)) - 16}" fill="#5fff5f" font-size="10">${airEsc(st.srcName)} band ${Math.round(st.floorAglFt)}–${Math.round(st.ceilAglFt)} ft AGL</text>`);
+        el.push(`<text x="6" y="${Number(Y(ceilY)) - 26}" fill="#5fff5f" font-size="10">${airEsc(st.srcName)} band ${Math.round(st.floorAglFt)}–${Math.round(st.ceilAglFt)} ft AGL</text>`);
         // Standoff bubble (faint) — the CP threshold for this type.
         if (st.kind === 'windmill') {
             el.push(`<circle cx="${X(xO)}" cy="${Y(hubY)}" r="${((st.bladeFt + thr) * s).toFixed(1)}" fill="none" stroke="rgba(255,85,85,0.3)" stroke-dasharray="3,5"/>`);
@@ -3951,12 +3951,24 @@
             el.push(dimV(xO - st.bladeFt - 28, gO, hubY, `hub ${Math.round(st.hubFt)} ft`));
             el.push(dimV(xO + st.bladeFt + 30, gO, topY, `tip ${Math.round(st.hubFt + st.bladeFt)} ft`));
             el.push(dimV(xO + 14, hubY, topY, `blade ${Math.round(st.bladeFt)} ft`));
-            el.push(dimH(Math.max(hubY - st.bladeFt - 18, gO + 8), xO - st.bladeFt, xO + st.bladeFt, `rotor Ø ${Math.round(2 * st.bladeFt)} ft`));
             // Disc BOTTOM — the lowest point the blades sweep down to; the
-            // number that matters when the band sits under the rotor.
+            // number that matters when the band sits under the rotor. The
+            // rotor-Ø dim sits well BELOW it so the labels never collide.
             const discBotY = hubY - st.bladeFt;
-            el.push(`<line x1="${X(xO - st.bladeFt - 14)}" y1="${Y(discBotY)}" x2="${X(xO + st.bladeFt + 14)}" y2="${Y(discBotY)}" stroke="rgba(255,176,32,0.8)" stroke-width="1" stroke-dasharray="2,3"/>`);
-            el.push(`<text x="${X(xO)}" y="${Number(Y(discBotY)) + 12}" fill="#ffb020" font-size="10" text-anchor="middle">disc bottom ${Math.round(st.hubFt - st.bladeFt)} ft AGL</text>`);
+            el.push(dimH(Math.max(discBotY - 44, gO + 8), xO - st.bladeFt, xO + st.bladeFt, `rotor Ø ${Math.round(2 * st.bladeFt)} ft`));
+            const cgX = (xO - st.bladeFt) * 0.55;   // clearance dim sits mid-air, left of the disc
+            el.push(`<line x1="${X(Math.min(cgX - 15, xO - st.bladeFt - 14))}" y1="${Y(discBotY)}" x2="${X(xO + st.bladeFt + 14)}" y2="${Y(discBotY)}" stroke="rgba(255,176,32,0.8)" stroke-width="1" stroke-dasharray="2,3"/>`);
+            el.push(`<text x="${X(xO - st.bladeFt * 0.55)}" y="${Number(Y(discBotY)) - 6}" fill="#ffb020" font-size="10" text-anchor="middle">disc bottom ${Math.round(st.hubFt - st.bladeFt)} ft AGL</text>`);
+            // ⭐ Band CEILING → disc bottom — the "can we fly under it"
+            // number, drawn BIG between the drone column and the disc.
+            const gapFt = Math.round(discBotY - ceilY);
+            const cgCol = gapFt < 0 ? '#ff5555' : gapFt < airThresholds.tlClearFt ? '#ffb020' : '#5fff5f';
+            const cgA = Number(Y(ceilY)), cgB = Number(Y(discBotY)), cgPx = Number(X(cgX));
+            el.push(`<line x1="${X(0)}" y1="${Y(ceilY)}" x2="${cgPx}" y2="${Y(ceilY)}" stroke="rgba(95,255,95,0.35)" stroke-dasharray="3,4"/>`);
+            el.push(`<line x1="${cgPx}" y1="${cgA}" x2="${cgPx}" y2="${cgB}" stroke="${cgCol}" stroke-width="2"/>`
+                + `<line x1="${cgPx - 6}" y1="${cgA}" x2="${cgPx + 6}" y2="${cgA}" stroke="${cgCol}" stroke-width="2"/>`
+                + `<line x1="${cgPx - 6}" y1="${cgB}" x2="${cgPx + 6}" y2="${cgB}" stroke="${cgCol}" stroke-width="2"/>`
+                + `<text x="${cgPx + 9}" y="${(cgA + cgB) / 2 + 4}" fill="${cgCol}" font-size="12" font-weight="700">${gapFt < 0 ? `ceiling ${Math.abs(gapFt)} ft INTO disc` : `ceiling → disc bottom ${gapFt} ft`}</text>`);
         } else if (st.kind === 'mast') {
             el.push(`<rect x="${X(xO - 4)}" y="${Y(topY)}" width="${Math.max(3, 8 * s).toFixed(1)}" height="${((topY - gO) * s).toFixed(1)}" fill="#c47b7b" stroke="#a05555"/>`);
             el.push(dimV(xO + 20, gO, topY, `height ${Math.round(st.aglFt)} ft`));
@@ -3969,7 +3981,7 @@
         }
         // Ghost drones at band min / max on the band edge (labels sit to
         // the LEFT so they don't collide with the live drone / band text).
-        const drone = (x, y, opacity, tag, tagLeft) => {
+        const drone = (x, y, opacity, tag, tagLeft, tagDy) => {
             const px = Number(X(x)), py = Number(Y(y));
             return `<g opacity="${opacity}">
                 <line x1="${px - 8}" y1="${py - 4}" x2="${px + 8}" y2="${py + 4}" stroke="#7adfe6" stroke-width="2.5"/>
@@ -3978,11 +3990,13 @@
                 <circle cx="${px + 8}" cy="${py - 4}" r="3.5" fill="none" stroke="#7adfe6" stroke-width="1.5"/>
                 <circle cx="${px - 8}" cy="${py + 4}" r="3.5" fill="none" stroke="#7adfe6" stroke-width="1.5"/>
                 <circle cx="${px + 8}" cy="${py + 4}" r="3.5" fill="none" stroke="#7adfe6" stroke-width="1.5"/>
-                ${tag ? `<text x="${tagLeft ? px - 14 : px + 14}" y="${py + 3}" fill="#7adfe6" font-size="10"${tagLeft ? ' text-anchor="end"' : ''}>${tag}</text>` : ''}
+                ${tag ? `<text x="${tagLeft ? px - 14 : px + 14}" y="${py + (tagDy == null ? 3 : tagDy)}" fill="#7adfe6" font-size="10"${tagLeft ? ' text-anchor="end"' : ''}>${tag}</text>` : ''}
             </g>`;
         };
-        el.push(drone(0, floorY, 0.4, `min ${Math.round(st.floorAglFt)} ft`, true));
-        el.push(drone(0, ceilY, 0.4, `max ${Math.round(st.ceilAglFt)} ft`, true));
+        // min tag drops below, max tag rises above — so a thin band never
+        // stacks the two labels on top of each other (or the live drone's).
+        el.push(drone(0, floorY, 0.4, `min ${Math.round(st.floorAglFt)} ft`, true, 13));
+        el.push(drone(0, ceilY, 0.4, `max ${Math.round(st.ceilAglFt)} ft`, true, -7));
         // Live (draggable) drone + approach lines. Windmills show BOTH
         // distances — swept disc AND tower — since at band altitudes the
         // drone is usually below the disc and the tower is what you'd hit.
@@ -4003,7 +4017,7 @@
         }
         const outBand = st.droneY < floorY - 0.5 || st.droneY > ceilY + 0.5;
         el.push(drone(st.droneX, st.droneY, 1, ''));
-        el.push(`<text x="${X(st.droneX)}" y="${Number(Y(st.droneY)) + 22}" fill="${outBand ? '#ff8080' : '#7adfe6'}" font-size="10" text-anchor="middle">🛩 ${Math.round(st.droneY - gD)} ft AGL${outBand ? ' (OUTSIDE band)' : ''}</text>`);
+        el.push(`<text x="${Number(X(st.droneX)) + 15}" y="${Number(Y(st.droneY)) + 16}" fill="${outBand ? '#ff8080' : '#7adfe6'}" font-size="10">🛩 ${Math.round(st.droneY - gD)} ft AGL${outBand ? ' (OUTSIDE band)' : ''}</text>`);
         // Adaptive scale bar (uniform scale at any zoom).
         const ref = [5, 10, 25, 50, 100, 250, 500, 1000, 2500].find(r2 => r2 * s >= 60) || 5000;
         el.push(`<line x1="${pad}" y1="${H - 10}" x2="${pad + ref * s}" y2="${H - 10}" stroke="#9fb4c0" stroke-width="2"/>`);
@@ -4014,8 +4028,11 @@
         const wmReads = (st.kind === 'windmill' && near.disc && near.tower) ? (() => {
             const discBotAgl = Math.round(st.hubFt - st.bladeFt);
             const dUnder = Math.round((st.obsGndFt + st.hubFt - st.bladeFt) - st.droneY);
+            const cgap = Math.round((st.obsGndFt + st.hubFt - st.bladeFt) - (st.droneGndFt + st.ceilAglFt));
+            const cgapCol = cgap < 0 ? '#ff5555' : cgap < airThresholds.tlClearFt ? '#ffb020' : '#5fff5f';
             return `<span>→ swept disc: <strong style="color:${near.disc.d <= near.tower.d ? col : '#dfe9f0'}">${Math.round(near.disc.d).toLocaleString()} ft</strong></span>
                 <span>→ tower: <strong style="color:${near.tower.d < near.disc.d ? col : '#dfe9f0'}">${Math.round(near.tower.d).toLocaleString()} ft</strong></span>
+                <span>Ceiling → disc bottom: <strong style="color:${cgapCol}">${cgap < 0 ? `${Math.abs(cgap).toLocaleString()} ft INTO disc` : `${cgap.toLocaleString()} ft`}</strong></span>
                 <span>Disc bottom: <strong>${discBotAgl} ft AGL</strong> (${dUnder >= 0 ? `${dUnder.toLocaleString()} ft above drone` : `${Math.abs(dUnder).toLocaleString()} ft BELOW drone`})</span>`;
         })() : `<span>Drone→obstacle: <strong style="color:${col}">${Math.round(near.d).toLocaleString()} ft</strong></span>`;
         wrap.querySelector('[data-prof-read]').innerHTML = `

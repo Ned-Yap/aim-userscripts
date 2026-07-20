@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-20 — 📐 Profile view round 3: ceiling → rotor-floor clearance front and center — Asset Inspector v4.186 (dev/latest)
+
+- **Ceiling → disc bottom** now has its own **big colored dimension line** drawn mid-air between the drone column and the disc (with a dashed guide extending your band ceiling across to it): green when the gap clears the fly-over clearance threshold, amber when tight, and red reading "ceiling N ft INTO disc" when your band ceiling reaches into the swept rotor. Same number added to the readout row.
+- Base-area declutter: min/max ghost labels split above/below so they can't stack, the live drone's label moved beside it, the band label raised, and the rotor-Ø measurement moved well below the disc-bottom line so those labels never collide.
+
 ## 2026-07-20 — 📐 Profile view round 2: zoom, pan, resize, on-diagram measurements — Asset Inspector v4.185 (dev/latest)
 
 Live-test feedback on the Profile view, all shipped same-day:
