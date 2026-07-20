@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.182
+// @version      4.183
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -21,6 +21,7 @@
 // @connect      services6.arcgis.com
 // @connect      services1.arcgis.com
 // @connect      tfr.faa.gov
+// @connect      energy.usgs.gov
 // @run-at       document-end
 // ==/UserScript==
 
@@ -64,7 +65,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.182';
+    const SCRIPT_VERSION = '4.183';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -169,7 +170,7 @@
         translineShowFt: 1000,// hide HIFLD lines AND T-L tower dots beyond this
         tfrShowNm: 3,         // TFRs beyond this are ignored entirely
     };
-    const AIR_ENABLE_DEFAULTS = { airspace: true, strips: true, obstacles: true, laanc: true, sua: true, stadiums: true, translines: true, tfr: true, tfrAuto: true };
+    const AIR_ENABLE_DEFAULTS = { airspace: true, strips: true, obstacles: true, laanc: true, sua: true, stadiums: true, translines: true, tfr: true, tfrAuto: true, turbines: true };
     // HIFLD (Homeland Infrastructure Foundation-Level Data) — federal
     // high-voltage transmission-line GEOMETRY. Independent of our KMLs;
     // used to cross-check shielding coverage. Informational only.
@@ -2264,6 +2265,66 @@
             returnGeometry: returnGeometry ? 'true' : 'false', outSR: '4326',
         });
     }
+    // ---- USWTDB turbine details (USGS U.S. Wind Turbine Database). ----
+    // energy.usgs.gov/api/uswtdb/v1/turbines is a public PostgREST API
+    // (no auth, quarterly refresh, utility-scale only). Each row carries
+    // faa_ors, which matches the DOF layer's OAS_Number format EXACTLY
+    // ("48-015850") — so a windmill obstacle joins to its real turbine by
+    // ID, with nearest-within-AIR_TB_MATCH_FT as the fallback for rows
+    // missing an ORS. Heights are METERS: t_hh = hub (base) height,
+    // t_rd = rotor diameter (blade = half), t_ttlh = total tip height.
+    // Enrichment only — a failed fetch logs + degrades to plain DOF data,
+    // never blocks the airspace check.
+    const AIR_USWTDB_URL = 'https://energy.usgs.gov/api/uswtdb/v1/turbines';
+    const AIR_TB_MATCH_FT = 500;   // spatial fallback match radius
+    async function airFetchTurbines(clat, clng, meters) {
+        const dLat = meters / 110540;
+        const dLng = meters / (111320 * Math.max(0.2, Math.cos(clat * Math.PI / 180)));
+        const qs = `ylat=gte.${(clat - dLat).toFixed(5)}&ylat=lte.${(clat + dLat).toFixed(5)}`
+            + `&xlong=gte.${(clng - dLng).toFixed(5)}&xlong=lte.${(clng + dLng).toFixed(5)}`
+            + '&select=faa_ors,p_name,t_manu,t_model,t_hh,t_rd,t_ttlh,ylat,xlong&limit=2000';
+        const r = await elevGmRequest({ method: 'GET', url: `${AIR_USWTDB_URL}?${qs}`, timeout: 25000 });
+        if (!r.ok) throw new Error(`HTTP ${r.status || 'network error'}`);
+        let d;
+        try { d = JSON.parse(r.responseText); } catch (e) { throw new Error('bad JSON'); }
+        if (!Array.isArray(d)) throw new Error('unexpected response shape');
+        return d;
+    }
+    function airMatchTurbine(turbines, ors, lat, lng) {
+        if (!turbines || !turbines.length) return null;
+        let row = ors ? turbines.find(t2 => t2.faa_ors === ors) : null;
+        if (!row) {
+            // DOF coords are only accurate to tens of ft, so the spatial
+            // fallback stays generous — but exact-ORS always wins above.
+            let bestD = AIR_TB_MATCH_FT / M_TO_FT;
+            turbines.forEach(t2 => {
+                if (typeof t2.ylat !== 'number' || typeof t2.xlong !== 'number') return;
+                const d = approxMeters(lat, lng, t2.ylat, t2.xlong);
+                if (d < bestD) { bestD = d; row = t2; }
+            });
+        }
+        if (!row) return null;
+        const ft = (m2) => (typeof m2 === 'number' && isFinite(m2)) ? Math.round(m2 * M_TO_FT) : null;
+        return {
+            manu: (row.t_manu || '').trim(), model: (row.t_model || '').trim(),
+            project: (row.p_name || '').trim(),
+            hubFt: ft(row.t_hh), rotorFt: ft(row.t_rd),
+            bladeFt: (typeof row.t_rd === 'number' && isFinite(row.t_rd)) ? Math.round(row.t_rd / 2 * M_TO_FT) : null,
+            tipFt: ft(row.t_ttlh),
+        };
+    }
+    // One-line spec string, e.g. "GE Wind GE1.5-87 (Horse Hollow III) —
+    // hub/base 262 ft · blade 143 ft · rotor Ø 285 ft · tip 405 ft".
+    function airTbText(tb) {
+        if (!tb) return '';
+        const bits = [];
+        if (tb.hubFt != null) bits.push(`hub/base ${tb.hubFt} ft`);
+        if (tb.bladeFt != null) bits.push(`blade ${tb.bladeFt} ft`);
+        if (tb.rotorFt != null) bits.push(`rotor Ø ${tb.rotorFt} ft`);
+        if (tb.tipFt != null) bits.push(`tip ${tb.tipFt} ft`);
+        const name = [tb.manu, tb.model].filter(Boolean).join(' ') || 'turbine';
+        return `${name}${tb.project ? ` (${tb.project})` : ''} — ${bits.join(' · ') || 'no height data'}`;
+    }
     // Every vertex of every FLYABLE site entity — the "site" for distance
     // purposes, so a strip 3 NM from the site's far edge flags even when
     // the centroid is further out. Only geometry the drone actually
@@ -2574,11 +2635,20 @@
         });
         const invM = Math.max(th.inventoryMi * MI_TO_M, th.stripNm * NM_TO_M) + siteRadM;
         const obsInvM = Math.max(5 * MI_TO_M, th.obstacleFt / M_TO_FT) + siteRadM;
+        // USWTDB enrichment rides along with the FAA queries but fails
+        // SOFT (own inventory note, not the red "results PARTIAL" path) —
+        // it only decorates windmill obstacles, it can't change a verdict.
+        const tbPromise = (airEnabled.obstacles && airEnabled.turbines)
+            ? airFetchTurbines(clat, clng, obsInvM).catch(e => {
+                console.warn(`${TAG} USWTDB turbine fetch failed:`, e);
+                return { __err: (e && e.message) || String(e) };
+            })
+            : Promise.resolve(null);
         const [apRes, obRes, asRes, laRes] = await Promise.all([
             airEnabled.strips ? grab('Airports', airPointQuery('US_Airport', clat, clng, invM,
                 'IDENT,NAME,ICAO_ID,TYPE_CODE,PRIVATEUSE,ELEVATION', true)) : Promise.resolve(null),
             airEnabled.obstacles ? grab('Obstacles', airPointQuery('Digital_Obstacle_File', clat, clng, obsInvM,
-                'Type_Code,AGL,AMSL,Lighting,Quantity,City,Lat_DD,Long_DD', false)) : Promise.resolve(null),
+                'OAS_Number,Type_Code,AGL,AMSL,Lighting,Quantity,City,Lat_DD,Long_DD', false)) : Promise.resolve(null),
             airEnabled.airspace ? grab('Airspace', airPointQuery('Class_Airspace', clat, clng, invM,
                 'NAME,CLASS,LOWER_VAL,UPPER_VAL,LOWER_UOM,IDENT', true)) : Promise.resolve(null),
             airEnabled.laanc ? grab('LAANC grids', airPointQuery('FAA_UAS_FacilityMap_Data', clat, clng,
@@ -2689,6 +2759,10 @@
         // ---- 3. FAA obstacles near site entities (towers, turbines…). ----
         if (obRes && Array.isArray(obRes.features)) {
             if (obRes.exceededTransferLimit || obRes.features.length >= 2000) inventory.obstacleTruncated = true;
+            const tbRes = await tbPromise;
+            const turbines = Array.isArray(tbRes) ? tbRes : null;
+            if (tbRes && tbRes.__err) inventory.turbineErr = tbRes.__err;
+            let tbWindmills = 0, tbMatched = 0;
             // Display filter is wider than any violation threshold, so the
             // exact-scan prefilter keys off the largest relevant distance.
             const dispTlM = th.translineShowFt / M_TO_FT;
@@ -2708,6 +2782,13 @@
                 const lit = (a.Lighting || '').trim();
                 const isTL = /^T-?L\b/i.test(type) || /UTILITY POLE/i.test(type);
                 const isWindmill = /WINDMILL|WIND TURBINE|WTG|TURBINE/i.test(type);
+                // USWTDB join: exact FAA ORS id first, nearby coords second.
+                let tb = null;
+                if (isWindmill && turbines) {
+                    tb = airMatchTurbine(turbines, (a.OAS_Number || '').trim(), oLat, oLng);
+                    tbWindmills++;
+                    if (tb) tbMatched++;
+                }
                 // Windmills get their own (tighter) standoff per SOP — and
                 // their distance is to the FLIGHT geometry (FFZ/FP), since a
                 // turbine near a non-flyable asset polygon is no hazard.
@@ -2729,10 +2810,10 @@
                 if (useNear.pt && typeof useNear.pt.floorM === 'number' && typeof a.AMSL === 'number') {
                     tlCleared = useNear.pt.floorM * M_TO_FT >= a.AMSL + th.tlClearFt;
                 }
-                const entry = { type, agl, lit, distFt: isFinite(useDistFt) ? useDistFt : distFt, distMi: (isFinite(useNear.d) ? useNear.d : near.d) / MI_TO_M, qty: (a.Quantity || '').trim(), lat: oLat, lng: oLng, src: (useNear.pt && useNear.pt.src) || (near.pt && near.pt.src) || null, hit: false, show: false };
+                const entry = { type, agl, lit, tb, distFt: isFinite(useDistFt) ? useDistFt : distFt, distMi: (isFinite(useNear.d) ? useNear.d : near.d) / MI_TO_M, qty: (a.Quantity || '').trim(), lat: oLat, lng: oLng, src: (useNear.pt && useNear.pt.src) || (near.pt && near.pt.src) || null, hit: false, show: false };
                 if (couldHit && !tlCleared && isFinite(useDistFt) && useDistFt < vioFt && agl != null && agl >= th.obstacleMinAglFt) {
                     entry.hit = true;
-                    const note = `violation: FAA ${isWindmill ? 'WINDMILL/turbine' : `obstacle ${type}`} (${agl} ft AGL${lit && lit !== 'N' ? ', lit' : ', unlit'}) is ${useDistFt < 100 ? `effectively ON ${entry.src || 'the flight geometry'} (< 100 ft — DOF coords are only accurate to tens of ft)` : `${useDistFt.toLocaleString()} ft from ${entry.src || 'the nearest flight segment'}`} (threshold ${vioFt} ft)${useNear.pt && typeof useNear.pt.floorM === 'number' && typeof a.AMSL === 'number' ? ` — segment floor ${Math.round(useNear.pt.floorM * M_TO_FT).toLocaleString()} ft MSL vs obstacle top ${a.AMSL.toLocaleString()} ft MSL` : ''}`;
+                    const note = `violation: FAA ${isWindmill ? 'WINDMILL/turbine' : `obstacle ${type}`} (${agl} ft AGL${lit && lit !== 'N' ? ', lit' : ', unlit'}) is ${useDistFt < 100 ? `effectively ON ${entry.src || 'the flight geometry'} (< 100 ft — DOF coords are only accurate to tens of ft)` : `${useDistFt.toLocaleString()} ft from ${entry.src || 'the nearest flight segment'}`} (threshold ${vioFt} ft)${useNear.pt && typeof useNear.pt.floorM === 'number' && typeof a.AMSL === 'number' ? ` — segment floor ${Math.round(useNear.pt.floorM * M_TO_FT).toLocaleString()} ft MSL vs obstacle top ${a.AMSL.toLocaleString()} ft MSL` : ''}${tb ? ` — USWTDB: ${airTbText(tb)}` : ''}`;
                     if (useNear.pt) {
                         // Corridor spans the obstacle AND the violated FFZ/FP spot.
                         violations.push({ shape: 'polygon', polygon: airWrapBox(oLat, oLng, useNear.pt.lat, useNear.pt.lng, 15), note, severity: 'high' });
@@ -2746,6 +2827,7 @@
                 inventory.obstacles.push(entry);
             });
             inventory.obstacles.sort((x, y) => x.distFt - y.distFt);
+            inventory.turbineInfo = turbines ? { windmills: tbWindmills, matched: tbMatched } : null;
         }
 
         // ---- 3b. Special Use Airspace + Prohibited Areas. Restricted (R) /
@@ -3114,11 +3196,17 @@
             const summary = Object.keys(byType).sort((a, b) => byType[b] - byType[a]).map(t => `${airEsc(t)} ×${byType[t]}`).join(' · ') || 'none in range';
             section(`FAA obstacles (${obsShown.length} shown · T-L within ${th.translineShowFt.toLocaleString()} ft, others within ${th.obstacleShowNm} NM)`);
             line('info', `${summary}${obsHiddenN ? ` · ${obsHiddenN} further out hidden` : ''}${inv.obstacleTruncated ? ' · list truncated at 2000' : ''}`);
+            if (airEnabled.turbines && inv.turbineErr) {
+                line('warn', `USWTDB turbine lookup failed — ${airEsc(inv.turbineErr)} (windmill specs unavailable this run)`);
+            } else if (airEnabled.turbines && inv.turbineInfo && inv.turbineInfo.windmills) {
+                line('info', `USWTDB: turbine specs matched for ${inv.turbineInfo.matched} of ${inv.turbineInfo.windmills} windmill${inv.turbineInfo.windmills === 1 ? '' : 's'}`);
+            }
+            const tbLine = (o) => o.tb ? `<br><span style="opacity:0.78;padding-left:14px;">🌀 ${airEsc(airTbText(o.tb))}</span>` : '';
             obsShown.filter(o => o.hit).forEach(o => line('high',
-                `<strong>${airEsc(o.type)}</strong> ${o.agl != null ? `${o.agl} ft AGL` : ''}${o.lit && o.lit !== 'N' ? ' (lit)' : ' (unlit)'} — ${obsDist(o)} from ${o.src ? airEsc(o.src) : 'site'}`,
+                `<strong>${airEsc(o.type)}</strong> ${o.agl != null ? `${o.agl} ft AGL` : ''}${o.lit && o.lit !== 'N' ? ' (lit)' : ' (unlit)'} — ${obsDist(o)} from ${o.src ? airEsc(o.src) : 'site'}${tbLine(o)}`,
                 { lat: o.lat, lng: o.lng, zoom: 17 }));
             obsShown.filter(o => !o.hit).slice(0, 10).forEach(o => line('ok',
-                `${airEsc(o.type)} ${o.agl != null ? `${o.agl} ft AGL` : ''} — ${obsDist(o)}`,
+                `${airEsc(o.type)} ${o.agl != null ? `${o.agl} ft AGL` : ''} — ${obsDist(o)}${tbLine(o)}`,
                 { lat: o.lat, lng: o.lng, zoom: 17 }));
         }
 
@@ -3211,6 +3299,9 @@
         if (airEnabled.obstacles) {
             const oS = inv.obstacles.filter(o => o.show);
             out.push(`FAA obstacles in range: ${oS.length} (nearest ${oS.length ? `${oS[0].type} at ${oS[0].distFt.toLocaleString()} ft` : '—'})`);
+            if (inv.turbineErr) out.push(`  ⚠ USWTDB turbine lookup failed — ${inv.turbineErr}`);
+            oS.filter(o => o.tb).slice(0, 15).forEach(o =>
+                out.push(`  - ${o.type}${o.agl != null ? ` ${o.agl} ft AGL` : ''} at ${o.distFt.toLocaleString()} ft — ${airTbText(o.tb)} [USWTDB]`));
         }
         return out.join('\n');
     }
@@ -3370,7 +3461,10 @@
             b.marker_height = Math.round(item.heightM * 100) / 100;
             b.validated = false;
             b.arcs = [];
-            b.description = `FAA DOF obstacle${item.o.lit && item.o.lit !== 'N' ? ' (lit)' : ''} — auto-placed by Airspace Checker`;
+            // Windmills matched in USWTDB carry the full turbine spec so
+            // the GM itself documents the hazard (user 2026-07-20).
+            b.description = `FAA DOF obstacle${item.o.lit && item.o.lit !== 'N' ? ' (lit)' : ''} — auto-placed by Airspace Checker`
+                + (item.o.tb ? ` | USWTDB: ${airTbText(item.o.tb)}` : '');
             b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
             try {
                 const r = await fetch('https://percepto.app/map_objects/', {
@@ -3395,7 +3489,7 @@
         const plan = airBuildGmPlan(res, sid);
         if (!plan.create.length && !plan.skipped.length) { showToast('No flagged obstacles to mark'); return; }
         const rows = plan.create.map(c =>
-            `<div style="margin:3px 0;"><span style="color:#5fff5f">＋</span> <strong>${airEsc(c.name)}</strong> — ${airEsc(c.markerType)}, height ${c.o.agl != null ? c.o.agl : '?'} ft</div>`).join('')
+            `<div style="margin:3px 0;"><span style="color:#5fff5f">＋</span> <strong>${airEsc(c.name)}</strong> — ${airEsc(c.markerType)}, height ${c.o.agl != null ? c.o.agl : '?'} ft${c.o.tb ? `<br><span style="opacity:0.7;padding-left:16px;">🌀 ${airEsc(airTbText(c.o.tb))} → GM description</span>` : ''}</div>`).join('')
             + plan.skipped.map(s =>
             `<div style="margin:3px 0;opacity:0.65;"><span style="color:#ffb020">－</span> ${airEsc(airGmTitleType(s.o.type))} ${s.o.agl != null ? `${s.o.agl} ft` : ''} — skipped: ${airEsc(s.reason)}</div>`).join('');
         const wrap = document.createElement('div');
@@ -4987,6 +5081,7 @@
                 { id: 'obstacleFt', label: 'Obstacle proximity', type: 'number', min: 100, max: 26400, step: 100, default: AIR_THRESH_DEFAULTS.obstacleFt, unit: 'ft' },
                 { id: 'obstacleMinAglFt', label: 'Ignore obstacles shorter than', type: 'number', min: 0, max: 500, step: 10, default: AIR_THRESH_DEFAULTS.obstacleMinAglFt, unit: 'ft' },
                 { id: 'windmillFt', label: 'Windmill / turbine standoff', type: 'number', min: 0, max: 5000, step: 50, default: AIR_THRESH_DEFAULTS.windmillFt, unit: 'ft' },
+                { id: 'turbines', label: 'Info · Turbine specs lookup (USGS USWTDB)', type: 'boolean', default: AIR_ENABLE_DEFAULTS.turbines },
                 { id: 'tlTowerFt', label: 'T-L tower standoff (from FFZ/FP)', type: 'number', min: 0, max: 2000, step: 25, default: AIR_THRESH_DEFAULTS.tlTowerFt, unit: 'ft' },
                 { id: 'tlClearFt', label: 'Fly-over clearance — all obstacles (floor above top)', type: 'number', min: 0, max: 300, step: 10, default: AIR_THRESH_DEFAULTS.tlClearFt, unit: 'ft' },
                 { id: 'obstacleShowNm', label: 'Show obstacles within', type: 'number', min: 0.25, max: 10, step: 0.25, default: AIR_THRESH_DEFAULTS.obstacleShowNm, unit: 'NM' },

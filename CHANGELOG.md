@@ -6,6 +6,17 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-20 — 🌀 Turbine specs from USGS wind-turbine database — Asset Inspector v4.183 (dev/latest)
+
+The Airspace Validator now enriches every FAA windmill obstacle with its real turbine specs from the **USGS U.S. Wind Turbine Database (USWTDB)** — matched exactly by FAA ORS number (falling back to nearest-within-500-ft), no auth or setup needed. For each matched turbine you get **manufacturer + model, project name, hub/base height, blade length, rotor diameter, and total tip height** (all in ft):
+
+- **Airspace panel** — a 🌀 spec line under each windmill row (flagged or not), plus a "matched X of Y windmills" status line.
+- **Violation notes** (the drawn Validator issues) carry the full spec.
+- **Copy report** — per-windmill spec lines.
+- **📍 Create GMs** — the created General Marker's **description now documents the turbine** (`FAA DOF obstacle — auto-placed by Airspace Checker | USWTDB: GE Wind GE1.5-87 (Horse Hollow III) — hub/base 262 ft · blade 143 ft · rotor Ø 285 ft · tip 405 ft`), and the preview modal shows what each GM will say.
+
+New Control Panel toggle under Airspace Validator: *Info · Turbine specs lookup (USGS USWTDB)* (on by default). A failed lookup degrades gracefully to plain FAA data with a warning line — it never blocks the check. Note: USWTDB covers utility-scale turbines and refreshes quarterly, so a lone ranch turbine or brand-new build may not match.
+
 ## 2026-07-16 — Legacy Mission Bank detection — Mission Bank Tools v1.98 (dev/latest)
 
 Some sites (first seen: site 1465) are served Percepto's **legacy Angular Mission Bank** even on the current app build — the react-pages iframe never exists, so every MBT feature (SUM, ➕ Stage, badges, inline editing) silently never appeared, looking like a broken script. MBT now detects this from the top frame (no react-pages iframe within 8 s of opening the Mission Bank) and says so: a console warning plus a one-time dismissible toast — *"This site uses Percepto's legacy Mission Bank — MBT tools aren't available here."* Retracts itself automatically if the iframe shows up late (slow load). No behavior change on normal sites.
