@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.194
+// @version      4.195
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -65,7 +65,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.194';
+    const SCRIPT_VERSION = '4.195';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -4143,7 +4143,7 @@
                 // ground → hub, downwind. Weak but real; drawn UNDER the
                 // rotor-wake bands.
                 el.push(`<rect x="${X(xO - AIR_WAKE_TOWERSHADOW_FT)}" y="${Y(hubY)}" width="${(AIR_WAKE_TOWERSHADOW_FT * s).toFixed(1)}" height="${((hubY - gO) * s).toFixed(1)}" fill="rgba(150,165,195,0.08)"/>`);
-                addLbl(Number(X(xO - AIR_WAKE_TOWERSHADOW_FT * 0.55)), Number(Y(gO + (hubY - gO) * 0.12)), 'tower shadow', { fill: 'rgba(150,165,195,0.75)', size: 9, anchor: 'middle', pr: 7 });
+                el.push(dimH(gO + (hubY - gO) * 0.08, xO - AIR_WAKE_TOWERSHADOW_FT, xO, `tower shadow ~${AIR_WAKE_TOWERSHADOW_FT} ft`, xO - AIR_WAKE_TOWERSHADOW_FT * 0.5));
                 [[0, 2, 'rgba(255,85,85,0.10)'], [2, 5, 'rgba(255,176,32,0.08)'], [5, 10, 'rgba(255,255,120,0.05)']].forEach(([z0, z1, fill]) => {
                     const x0 = xO - z0 * wake.D, x1 = xO - z1 * wake.D;
                     const r0 = wr(z0 * wake.D), r1 = wr(z1 * wake.D);
@@ -4279,7 +4279,7 @@
                     } else if (wake.nearEdge) {
                         vd = [`within ${AIR_WAKE_MEANDER_FT} ft of envelope edge (meander) — treat as inside`, '#ffb020'];
                     } else if (wake.inTowerShadow) {
-                        vd = ['clear of rotor wake · in TOWER SHADOW (light–moderate chop)', '#ffb020'];
+                        vd = [`clear of rotor wake · in TOWER SHADOW, ${Math.round(st.distFt - st.droneX).toLocaleString()} ft of its ~${AIR_WAKE_TOWERSHADOW_FT} ft reach (light–moderate chop)`, '#ffb020'];
                     } else {
                         vd = ['clear — outside wake, vortex, and shadow zones', '#5fff5f'];
                     }
