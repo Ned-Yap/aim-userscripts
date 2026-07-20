@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.189
+// @version      4.190
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -65,7 +65,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.189';
+    const SCRIPT_VERSION = '4.190';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -3661,8 +3661,9 @@
     function airProfLaunch(st) {
         st.touched = {};
         st.droneDragged = false;
-        st.droneX = 0; st.droneY = null;   // set on first render (mid-band)
+        st.droneX = 0; st.droneY = null;   // derived each render from droneAglFt
         airProfReband(st);
+        st.droneAglFt = Math.round((st.floorAglFt + st.ceilAglFt) / 2);   // auto-mid until touched
         st.real = { distFt: st.distFt, floorAglFt: st.floorAglFt, ceilAglFt: st.ceilAglFt, hubFt: st.hubFt, bladeFt: st.bladeFt, aglFt: st.aglFt };
         airProfState = st;
         airProfBuildModal(st);
@@ -3771,7 +3772,7 @@
             </div>
             ${st.sub ? `<div style="padding:4px 12px 0;opacity:0.75;font-size:11px;">${airEsc(st.sub)}</div>` : ''}
             <div style="padding:6px 12px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;">
-                ${numIn('distFt', 'Distance', 25)}${numIn('floorAglFt', 'Floor (AGL)', 10)}${numIn('ceilAglFt', 'Ceiling (AGL)', 10)}${kindIns}
+                ${numIn('distFt', 'Distance', 25)}${numIn('floorAglFt', 'Floor (AGL)', 10)}${numIn('ceilAglFt', 'Ceiling (AGL)', 10)}${numIn('droneAglFt', '🛩 Drone alt', 5)}${kindIns}
             </div>
             <div data-prof-svg style="flex:1;min-height:200px;padding:2px 8px;touch-action:none;cursor:grab;overflow:hidden;"></div>
             <div data-prof-read style="padding:6px 12px 4px;display:flex;gap:16px;flex-wrap:wrap;font-size:12px;border-top:1px solid rgba(122,223,230,0.2);"></div>
@@ -3784,6 +3785,7 @@
             if (e.target.closest('[data-prof-reset]')) {
                 Object.assign(st, st.real);
                 st.touched = {}; st.droneDragged = false; st.droneY = null; st.droneX = 0;
+                st.droneAglFt = null;   // re-derives to band midpoint
                 airProfReband(st);
                 wrap.querySelectorAll('input[data-prof-k]').forEach(inp => { inp.value = Math.round(st[inp.getAttribute('data-prof-k')]); });
                 airProfRender();
@@ -3827,7 +3829,8 @@
                 const w = toWorld(e);
                 if (!w) return;
                 st.droneX = Math.min(Math.max(w.x, -2000), st.distFt + 2000);
-                st.droneY = Math.max(w.y, Math.min(st.droneGndFt, st.obsGndFt) + 3);
+                st.droneAglFt = Math.max(w.y, Math.min(st.droneGndFt, st.obsGndFt) + 3) - st.droneGndFt;
+                st.touched.droneAglFt = true;
                 st.droneDragged = true;
                 airProfRender();
             } else if (panning) {
@@ -3874,7 +3877,12 @@
         if (!wrap) return;
         const gD = st.droneGndFt, gO = st.obsGndFt, xO = st.distFt;
         const floorY = gD + st.floorAglFt, ceilY = gD + st.ceilAglFt;
-        if (st.droneY == null) { st.droneY = (floorY + ceilY) / 2; st.droneX = 0; }
+        // Drone altitude: auto-tracks the band midpoint until the user
+        // types a value or drags the drone; then their number wins.
+        if (st.droneAglFt == null || !st.touched.droneAglFt) st.droneAglFt = Math.round((st.floorAglFt + st.ceilAglFt) / 2);
+        st.droneY = gD + st.droneAglFt;
+        const dAltInp = wrap.querySelector('input[data-prof-k="droneAglFt"]');
+        if (dAltInp && document.activeElement !== dAltInp) dAltInp.value = Math.round(st.droneAglFt);
         const hubY = gO + st.hubFt;
         const topY = st.kind === 'windmill' ? hubY + st.bladeFt : gO + st.aglFt;
         const thr = st.kind === 'windmill' ? airThresholds.windmillFt : st.kind === 'wire' ? airThresholds.tlTowerFt : airThresholds.obstacleFt;

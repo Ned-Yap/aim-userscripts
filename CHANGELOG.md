@@ -13,6 +13,7 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 - **v4.187** — the rotor Ø label itself shifted onto the left half of its measurement line, out from behind the turbine mast.
 - **v4.188** — **collision-aware labels**: every annotation (measurements, distances, clearance, drone tags, band label) now lays out by priority and auto-nudges up/down when it would overlap another label, so the diagram stays readable when zoomed out. The ceiling→disc-bottom clearance and live distances get first pick of position; decorative measurements move around them.
 - **v4.189** — removed the on-diagram rotor-Ø measurement (floating below the disc it read like a lateral distance; the header spec line and blade callout already carry it).
+- **v4.190** — new **🛩 Drone alt (AGL)** input: defaults to the floor/ceiling midpoint and keeps tracking it as you edit the band or distance; typing a value (or dragging the drone) pins it to your altitude instead, and the field live-updates while you drag. ↺ Real values returns it to auto-midpoint.
 
 ## 2026-07-20 — 📐 Profile view round 2: zoom, pan, resize, on-diagram measurements — Asset Inspector v4.185 (dev/latest)
 
