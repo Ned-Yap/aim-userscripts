@@ -11,6 +11,7 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 - **Ceiling → disc bottom** now has its own **big colored dimension line** drawn mid-air between the drone column and the disc (with a dashed guide extending your band ceiling across to it): green when the gap clears the fly-over clearance threshold, amber when tight, and red reading "ceiling N ft INTO disc" when your band ceiling reaches into the swept rotor. Same number added to the readout row.
 - Base-area declutter: min/max ghost labels split above/below so they can't stack, the live drone's label moved beside it, the band label raised, and the rotor-Ø measurement moved well below the disc-bottom line so those labels never collide.
 - **v4.187** — the rotor Ø label itself shifted onto the left half of its measurement line, out from behind the turbine mast.
+- **v4.188** — **collision-aware labels**: every annotation (measurements, distances, clearance, drone tags, band label) now lays out by priority and auto-nudges up/down when it would overlap another label, so the diagram stays readable when zoomed out. The ceiling→disc-bottom clearance and live distances get first pick of position; decorative measurements move around them.
 
 ## 2026-07-20 — 📐 Profile view round 2: zoom, pan, resize, on-diagram measurements — Asset Inspector v4.185 (dev/latest)
 
