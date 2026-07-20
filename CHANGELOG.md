@@ -6,6 +6,17 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-20 — 📐 Profile view round 2: zoom, pan, resize, on-diagram measurements — Asset Inspector v4.185 (dev/latest)
+
+Live-test feedback on the Profile view, all shipped same-day:
+
+- **Zoom & pan** — mouse wheel zooms at the cursor, dragging empty space pans, ＋/− buttons and **⤢ Fit** in the header; the scale bar adapts and the view stays 1:1 at every zoom.
+- **Resizable window** — drag the bottom-right corner; the diagram fills whatever size you give it (default is also much larger now).
+- **On-diagram measurements** — dimension callouts drawn like a blueprint: **hub height** (left), **tip height** (right), **blade length** (along the up-blade), **rotor Ø** (across the disc), mast height, and assumed conductor height for lines.
+- **Distance to the tower AND the disc** — windmills now show BOTH approach lines at once (the closest one bold + colored, the other dimmed), since at band altitudes you're usually below the disc and the tower is what you'd actually hit. Both numbers are in the readout row too.
+- **Disc bottom marked** — a dashed amber line at the lowest blade-sweep point with its ft AGL, plus a readout of how far above (or BELOW) your drone that bottom edge is.
+- Readability: faint AGL gridlines with labels, ghost-drone labels moved out of the way of the band label.
+
 ## 2026-07-20 — 📐 Obstacle Profile view — see the drone vs the turbine, to scale — Asset Inspector v4.184 (dev/latest)
 
 Every obstacle row (and transmission-line row) in the Airspace panel now has a **📐 button** that opens a **to-scale side-elevation view**: your FFZ/FP altitude band on one side, the obstacle on the other, at the true horizontal distance — 1 ft horizontal = 1 ft vertical, always.
