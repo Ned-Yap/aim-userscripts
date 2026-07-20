@@ -13,6 +13,7 @@ The FAA AIS servers 429-rate-limit when the airspace check is re-run repeatedly 
 - **Re-run within the TTL** (new CP setting "FAA data cache TTL", default 6 h, 0 = off) → the layer is served from cache with **no network call at all**, shown as an ⚡ info line. FAA AIS data only changes on 28-day charting cycles, so hours-old data is operationally identical.
 - **FAA rate-limits or errors anyway** → instead of a red "results are PARTIAL" failure, the layer falls back to the last cached copy — even an expired one — with an ⚡ warning naming the layer and the cache age.
 - Live TFRs deliberately bypass the cache (they're real-time and have their own 10-min list cache). Cache self-prunes (40 entries / 7 days max).
+- **v4.194** — a 429 with nothing cached now **auto-retries after the ~1-minute cooloff** (staggered so parallel layers don't re-burst together), with a toast so the run doesn't look hung. One successful retry seeds the cache for the next 6 hours.
 
 ## 2026-07-20 — 💨 Wake round 2: the picture stops overselling "clear" — Asset Inspector v4.192 (dev/latest)
 
