@@ -23,6 +23,7 @@ The wake drawing now shows the near-field effects the plain cone can't, and the 
 - **Tower shadow** — faint band downwind of the mast (ground → hub, ~300 ft): the tower's own bluff-body wake at ALL altitudes, including under the rotor.
 - **Meander margin** — soft ±60 ft fringe outside both envelope edges: real wakes wander, the edge is fuzzy, and the drawing now says so.
 - **Honest verdict ladder** — outside the mean cone is no longer automatic green: *UNDER TIP-VORTEX ZONE* / *within 60 ft of envelope edge — treat as inside* / *in TOWER SHADOW* all report amber; "within rating" inside 1.5D is downgraded with "near-wake, estimates saturate here"; green now means clear of wake, vortex, AND shadow zones.
+- **v4.195** — the tower-shadow band gets a measured dimension line (~300 ft reach) on the drawing, and its verdict states how far into that reach the drone sits.
 
 ## 2026-07-20 — 💨 Wake-turbulence estimate in the Profile view — Asset Inspector v4.191 (dev/latest)
 
