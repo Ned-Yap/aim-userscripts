@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.183
+// @version      4.184
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -65,7 +65,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.183';
+    const SCRIPT_VERSION = '4.184';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -2402,17 +2402,19 @@
                 e.arcs.forEach((a, i) => {
                     if (a && a.point_a && a.point_b && typeof a.point_a.lat === 'number' && typeof a.point_b.lat === 'number') {
                         segs.push({ aLat: a.point_a.lat, aLng: a.point_a.lng, bLat: a.point_b.lat, bLng: a.point_b.lng, src: `FP "${nm}" seg #${i + 1}`, t: 15,
-                            floorM: (typeof a.min_alt === 'number') ? a.min_alt : null });
+                            floorM: (typeof a.min_alt === 'number') ? a.min_alt : null,
+                            ceilM: (typeof a.max_alt === 'number') ? a.max_alt : null });
                     }
                 });
             } else if (e.type === 3 || e.type === 16) {
                 const cs = (entityCoords(e) || []).filter(c => c && typeof c.lat === 'number');
                 const src = `${typeReg(e.type).short} "${nm}"`;
                 const floorM = (e.type === 16 && e.restrictions && typeof e.restrictions.minAlt === 'number') ? e.restrictions.minAlt : null;
+                const ceilM = (e.type === 16 && e.restrictions && typeof e.restrictions.maxAlt === 'number') ? e.restrictions.maxAlt : null;
                 for (let i = 0; i < cs.length; i++) {
                     const a = cs[i], b = cs[(i + 1) % cs.length];
                     if (cs.length >= 2 && (i < cs.length - 1 || cs.length >= 3)) {
-                        segs.push({ aLat: a.lat, aLng: a.lng, bLat: b.lat, bLng: b.lng, src, t: e.type, floorM });
+                        segs.push({ aLat: a.lat, aLng: a.lng, bLat: b.lat, bLng: b.lng, src, t: e.type, floorM, ceilM });
                     }
                 }
             }
@@ -2426,7 +2428,7 @@
         let best = Infinity, bestPt = null;
         for (const sg of segs) {
             const c = airClosestOnSeg(lat, lng, [sg.aLat, sg.aLng], [sg.bLat, sg.bLng]);
-            if (c.d < best) { best = c.d; bestPt = { lat: c.lat, lng: c.lng, src: sg.src, floorM: (typeof sg.floorM === 'number') ? sg.floorM : null }; }
+            if (c.d < best) { best = c.d; bestPt = { lat: c.lat, lng: c.lng, src: sg.src, floorM: (typeof sg.floorM === 'number') ? sg.floorM : null, ceilM: (typeof sg.ceilM === 'number') ? sg.ceilM : null }; }
         }
         for (const p of pts) {
             const d = approxMeters(lat, lng, p.lat, p.lng);
@@ -2810,7 +2812,17 @@
                 if (useNear.pt && typeof useNear.pt.floorM === 'number' && typeof a.AMSL === 'number') {
                     tlCleared = useNear.pt.floorM * M_TO_FT >= a.AMSL + th.tlClearFt;
                 }
-                const entry = { type, agl, lit, tb, distFt: isFinite(useDistFt) ? useDistFt : distFt, distMi: (isFinite(useNear.d) ? useNear.d : near.d) / MI_TO_M, qty: (a.Quantity || '').trim(), lat: oLat, lng: oLng, src: (useNear.pt && useNear.pt.src) || (near.pt && near.pt.src) || null, hit: false, show: false };
+                const entry = { type, agl, lit, tb, distFt: isFinite(useDistFt) ? useDistFt : distFt, distMi: (isFinite(useNear.d) ? useNear.d : near.d) / MI_TO_M, qty: (a.Quantity || '').trim(), lat: oLat, lng: oLng, src: (useNear.pt && useNear.pt.src) || (near.pt && near.pt.src) || null, hit: false, show: false,
+                    // Profile-view data: obstacle top MSL + the nearest flight
+                    // segment's altitude band (MSL ft) and location (for DEM).
+                    amsl: (typeof a.AMSL === 'number') ? a.AMSL : null,
+                    isWindmill, isTL,
+                    band: (useNear.pt && typeof useNear.pt.floorM === 'number') ? {
+                        floorFt: Math.round(useNear.pt.floorM * M_TO_FT),
+                        ceilFt: (typeof useNear.pt.ceilM === 'number') ? Math.round(useNear.pt.ceilM * M_TO_FT) : null,
+                    } : null,
+                    nearLat: (useNear.pt && typeof useNear.pt.lat === 'number') ? useNear.pt.lat : null,
+                    nearLng: (useNear.pt && typeof useNear.pt.lng === 'number') ? useNear.pt.lng : null };
                 if (couldHit && !tlCleared && isFinite(useDistFt) && useDistFt < vioFt && agl != null && agl >= th.obstacleMinAglFt) {
                     entry.hit = true;
                     const note = `violation: FAA ${isWindmill ? 'WINDMILL/turbine' : `obstacle ${type}`} (${agl} ft AGL${lit && lit !== 'N' ? ', lit' : ', unlit'}) is ${useDistFt < 100 ? `effectively ON ${entry.src || 'the flight geometry'} (< 100 ft — DOF coords are only accurate to tens of ft)` : `${useDistFt.toLocaleString()} ft from ${entry.src || 'the nearest flight segment'}`} (threshold ${vioFt} ft)${useNear.pt && typeof useNear.pt.floorM === 'number' && typeof a.AMSL === 'number' ? ` — segment floor ${Math.round(useNear.pt.floorM * M_TO_FT).toLocaleString()} ft MSL vs obstacle top ${a.AMSL.toLocaleString()} ft MSL` : ''}${tb ? ` — USWTDB: ${airTbText(tb)}` : ''}`;
@@ -2982,10 +2994,29 @@
                 });
                 const volt = (a.VOLTAGE != null && Number(a.VOLTAGE) > 0) ? `${Number(a.VOLTAGE)} kV` : (a.VOLT_CLASS || 'unknown kV');
                 const tDistFt = Math.round(best * M_TO_FT);
+                // Profile-view data: nearest FLIGHT segment to the line's
+                // closest point (band + distance measured to where we fly,
+                // matching the obstacle rules — sitePts distance above is
+                // the legacy vs-all-entities number kept for the list).
+                let prof = null;
+                if (bestPt && flightSegs.length) {
+                    const fn = airMinToSiteGeom(bestPt[0], bestPt[1], flightSegs, []);
+                    if (fn.pt) {
+                        prof = {
+                            distFt: Math.round(fn.d * M_TO_FT), src: fn.pt.src,
+                            nearLat: fn.pt.lat, nearLng: fn.pt.lng,
+                            band: (typeof fn.pt.floorM === 'number') ? {
+                                floorFt: Math.round(fn.pt.floorM * M_TO_FT),
+                                ceilFt: (typeof fn.pt.ceilM === 'number') ? Math.round(fn.pt.ceilM * M_TO_FT) : null,
+                            } : null,
+                        };
+                    }
+                }
+                const voltNum = Number(a.VOLTAGE) || 0;
                 inventory.translines.push({
-                    volt, owner: (a.OWNER || '').trim(), status: (a.STATUS || '').trim(),
+                    volt, voltNum, owner: (a.OWNER || '').trim(), status: (a.STATUS || '').trim(),
                     distFt: tDistFt, distMi: best / MI_TO_M,
-                    src: bestSrc, nearPt: bestPt, paths,
+                    src: bestSrc, nearPt: bestPt, paths, prof,
                     show: tDistFt <= th.translineShowFt,   // noise filter
                 });
             });
@@ -3108,6 +3139,11 @@
         closeAirspacePanel();
         const inv = res.inventory;
         const th = airThresholds;
+        // Profile view needs the raw result + stable indexes after render.
+        airProfRes = res;
+        (inv.obstacles || []).forEach((o, i) => { o._pi = i; });
+        (inv.translines || []).forEach((t, i) => { t._pi = i; });
+        const profBtn = (attr, i) => ` <button ${attr}="${i}" title="Profile view — drone vs obstacle, to scale" style="background:none;border:1px solid rgba(122,223,230,0.35);color:#7adfe6;border-radius:4px;padding:0 5px;margin-left:5px;cursor:pointer;font-size:10px;line-height:1.5;">📐</button>`;
         // DOF horizontal accuracy is tens of feet — a single-digit distance
         // is false precision, so anything under 100 ft reads "on site".
         const obsDist = (o) => o.distFt < 100 ? 'on site (&lt; 100 ft)'
@@ -3182,7 +3218,7 @@
                 // which can be miles out in open country.
                 const rep = t.nearPt || t.paths[0][Math.floor(t.paths[0].length / 2)];
                 line('info',
-                    `<strong>${airEsc(t.volt)}</strong>${t.owner ? ` — ${airEsc(t.owner)}` : ''} · ${t.distFt < 5000 ? `${t.distFt.toLocaleString()} ft` : `${t.distMi.toFixed(1)} mi`} from ${t.src ? airEsc(t.src) : 'site'}`,
+                    `<strong>${airEsc(t.volt)}</strong>${t.owner ? ` — ${airEsc(t.owner)}` : ''} · ${t.distFt < 5000 ? `${t.distFt.toLocaleString()} ft` : `${t.distMi.toFixed(1)} mi`} from ${t.src ? airEsc(t.src) : 'site'}${profBtn('data-air-prof-tl', t._pi)}`,
                     { lat: rep[0], lng: rep[1], zoom: 15 });
             });
             if (tlShown.length > 8) line('info', `…and ${tlShown.length - 8} more within range (drawn on map)`);
@@ -3203,10 +3239,10 @@
             }
             const tbLine = (o) => o.tb ? `<br><span style="opacity:0.78;padding-left:14px;">🌀 ${airEsc(airTbText(o.tb))}</span>` : '';
             obsShown.filter(o => o.hit).forEach(o => line('high',
-                `<strong>${airEsc(o.type)}</strong> ${o.agl != null ? `${o.agl} ft AGL` : ''}${o.lit && o.lit !== 'N' ? ' (lit)' : ' (unlit)'} — ${obsDist(o)} from ${o.src ? airEsc(o.src) : 'site'}${tbLine(o)}`,
+                `<strong>${airEsc(o.type)}</strong> ${o.agl != null ? `${o.agl} ft AGL` : ''}${o.lit && o.lit !== 'N' ? ' (lit)' : ' (unlit)'} — ${obsDist(o)} from ${o.src ? airEsc(o.src) : 'site'}${profBtn('data-air-prof', o._pi)}${tbLine(o)}`,
                 { lat: o.lat, lng: o.lng, zoom: 17 }));
             obsShown.filter(o => !o.hit).slice(0, 10).forEach(o => line('ok',
-                `${airEsc(o.type)} ${o.agl != null ? `${o.agl} ft AGL` : ''} — ${obsDist(o)}${tbLine(o)}`,
+                `${airEsc(o.type)} ${o.agl != null ? `${o.agl} ft AGL` : ''} — ${obsDist(o)}${profBtn('data-air-prof', o._pi)}${tbLine(o)}`,
                 { lat: o.lat, lng: o.lng, zoom: 17 }));
         }
 
@@ -3230,6 +3266,14 @@
         wrap.addEventListener('click', (e) => {
             if (e.target.closest('[data-air-close]')) { closeAirspacePanel(); return; }
             if (e.target.closest('[data-air-gms]')) { showAirGmModal(res, sid); return; }
+            // 📐 sits inside a jump row — must win over data-air-jump.
+            const profEl = e.target.closest('[data-air-prof],[data-air-prof-tl]');
+            if (profEl) {
+                e.stopPropagation();
+                if (profEl.hasAttribute('data-air-prof')) airProfOpenObstacle(+profEl.getAttribute('data-air-prof'));
+                else airProfOpenTransline(+profEl.getAttribute('data-air-prof-tl'));
+                return;
+            }
             if (e.target.closest('[data-air-copy]')) {
                 const text = airBuildReport(res, sid, siteName);
                 navigator.clipboard.writeText(text).then(
@@ -3526,6 +3570,356 @@
             }
         });
         document.body.appendChild(wrap);
+    }
+
+    // ============================================================
+    // 📐 Obstacle Profile view — to-scale side elevation of the drone's
+    // FFZ/FP altitude band vs a windmill (tower + swept rotor disc),
+    // a mast-type obstacle, or a transmission-line conductor. Opens
+    // prefilled from the airspace check's REAL numbers (USWTDB specs,
+    // FAA heights, nearest-flight-segment band + distance); every
+    // number is then editable as a what-if sandbox and the drone is
+    // draggable with the closest-approach line following live. All
+    // geometry shares one ft-MSL frame (terrain offset between the
+    // flight area and the obstacle base is visible) at uniform scale —
+    // 1 ft horizontal = 1 ft vertical, always.
+    // ============================================================
+    const AIR_PROF_MODAL_ID = 'aim-airspace-profile';
+    let airProfRes = null;      // last airspace result (set on panel render)
+    let airProfState = null;    // live model while the modal is open
+    // HIFLD lines carry no height data — assumed conductor height by
+    // voltage class, editable in the modal.
+    function airProfWireDefaultFt(voltNum) {
+        if (voltNum >= 345) return 120;
+        if (voltNum >= 230) return 100;
+        if (voltNum >= 100) return 80;
+        if (voltNum >= 69) return 70;
+        return 50;
+    }
+    function closeAirProfModal() {
+        const el = document.getElementById(AIR_PROF_MODAL_ID);
+        if (el) el.remove();
+        airProfState = null;
+    }
+    function airProfOpenObstacle(idx) {
+        const o = airProfRes && airProfRes.inventory.obstacles && airProfRes.inventory.obstacles[idx];
+        if (!o) { showToast('Profile data unavailable — rerun the airspace check', 'rgba(255,96,96,0.55)'); return; }
+        const agl = (typeof o.agl === 'number') ? o.agl : 200;
+        const obsGnd = (typeof o.amsl === 'number' && typeof o.agl === 'number') ? o.amsl - o.agl : 0;
+        const st = {
+            kind: o.isWindmill ? 'windmill' : 'mast',
+            label: `${o.type} ${typeof o.agl === 'number' ? `${o.agl} ft AGL` : ''}`,
+            sub: o.tb ? airTbText(o.tb) : '',
+            srcName: o.src || 'nearest flight segment',
+            estSpecs: o.isWindmill && !o.tb,   // hub/blade guessed from AGL, no USWTDB match
+            distFt: Math.max(10, o.distFt || 10),
+            obsGndFt: obsGnd, droneGndFt: obsGnd, demDrone: 'none',
+            bandMsl: o.band ? { floorFt: o.band.floorFt, ceilFt: o.band.ceilFt } : null,
+            floorAglFt: 100, ceilAglFt: 210,
+            hubFt: (o.tb && o.tb.hubFt != null) ? o.tb.hubFt : Math.round(agl * 0.64),
+            bladeFt: (o.tb && o.tb.bladeFt != null) ? o.tb.bladeFt : Math.round(agl * 0.36),
+            aglFt: agl,
+            demLL: { drone: (o.nearLat != null) ? [o.nearLat, o.nearLng] : null, obs: null },
+        };
+        airProfLaunch(st);
+    }
+    function airProfOpenTransline(idx) {
+        const t = airProfRes && airProfRes.inventory.translines && airProfRes.inventory.translines[idx];
+        if (!t) { showToast('Profile data unavailable — rerun the airspace check', 'rgba(255,96,96,0.55)'); return; }
+        const p = t.prof;
+        const st = {
+            kind: 'wire',
+            label: `${t.volt} transmission line`,
+            sub: `${t.owner || 'unknown owner'} — conductor height ASSUMED by voltage class, edit to match the actual structures`,
+            srcName: (p && p.src) || t.src || 'nearest flight segment',
+            distFt: Math.max(10, (p && p.distFt) || t.distFt || 10),
+            obsGndFt: 0, droneGndFt: 0, demDrone: 'none',
+            bandMsl: (p && p.band) ? { floorFt: p.band.floorFt, ceilFt: p.band.ceilFt } : null,
+            floorAglFt: 100, ceilAglFt: 210,
+            hubFt: 0, bladeFt: 0,
+            aglFt: airProfWireDefaultFt(t.voltNum || 0),
+            demLL: { drone: (p && p.nearLat != null) ? [p.nearLat, p.nearLng] : null, obs: t.nearPt || null },
+        };
+        airProfLaunch(st);
+    }
+    // Re-derive the AGL band inputs from the authoritative MSL band
+    // whenever the drone-side ground estimate changes — unless the user
+    // already edited that field (their number wins).
+    function airProfReband(st) {
+        if (!st.bandMsl || st.bandMsl.floorFt == null) return;
+        if (!st.touched.floorAglFt) st.floorAglFt = Math.max(0, st.bandMsl.floorFt - st.droneGndFt);
+        if (!st.touched.ceilAglFt && st.bandMsl.ceilFt != null) st.ceilAglFt = Math.max(st.floorAglFt, st.bandMsl.ceilFt - st.droneGndFt);
+    }
+    function airProfLaunch(st) {
+        st.touched = {};
+        st.droneDragged = false;
+        st.droneX = 0; st.droneY = null;   // set on first render (mid-band)
+        airProfReband(st);
+        st.real = { distFt: st.distFt, floorAglFt: st.floorAglFt, ceilAglFt: st.ceilAglFt, hubFt: st.hubFt, bladeFt: st.bladeFt, aglFt: st.aglFt };
+        airProfState = st;
+        airProfBuildModal(st);
+        airProfRender();
+        // DEM refinement (async, cached): drone-side ground always; the
+        // obstacle side only for wires (FAA AMSL−AGL is the surveyed
+        // ground for DOF obstacles — better than DEM at a fuzzy coord).
+        const want = [];
+        if (st.demLL.drone) { st.demDrone = 'pending'; want.push(['drone', st.demLL.drone]); }
+        if (st.kind === 'wire' && st.demLL.obs) want.push(['obs', st.demLL.obs]);
+        want.forEach(([side, ll]) => {
+            fetchElevation(ll[0], ll[1]).then(m => {
+                if (airProfState !== st) return;
+                if (m == null) { if (side === 'drone') st.demDrone = 'none'; airProfRender(); return; }
+                const ftv = Math.round(m * M_TO_FT);
+                if (side === 'drone') {
+                    st.droneGndFt = ftv; st.demDrone = 'ok';
+                    if (st.kind === 'wire' && !st.demLL.obs) st.obsGndFt = ftv;
+                    airProfReband(st);
+                    airProfSyncInputs(st);
+                } else {
+                    st.obsGndFt = ftv;
+                }
+                airProfRender();
+            }).catch(e => console.warn(`${TAG} profile DEM fetch failed:`, e));
+        });
+    }
+    // Shortest 2D distance from the drone to the obstacle, plus the
+    // nearest point on the obstacle (for drawing the approach line).
+    function airProfClosest(st, x, y) {
+        const xO = st.distFt;
+        if (st.kind === 'windmill') {
+            const hubY = st.obsGndFt + st.hubFt;
+            const dc = Math.hypot(xO - x, hubY - y);
+            const dDisc = Math.max(0, dc - st.bladeFt);
+            const discPt = dc > 1e-6 ? [xO + (x - xO) / dc * st.bladeFt, hubY + (y - hubY) / dc * st.bladeFt] : [xO, hubY + st.bladeFt];
+            const ty = Math.min(Math.max(y, st.obsGndFt), hubY);
+            const dTower = Math.hypot(xO - x, ty - y);
+            return dDisc <= dTower ? { d: dDisc, pt: discPt } : { d: dTower, pt: [xO, ty] };
+        }
+        if (st.kind === 'mast') {
+            const ty = Math.min(Math.max(y, st.obsGndFt), st.obsGndFt + st.aglFt);
+            return { d: Math.hypot(xO - x, ty - y), pt: [xO, ty] };
+        }
+        const wy = st.obsGndFt + st.aglFt;
+        return { d: Math.hypot(xO - x, wy - y), pt: [xO, wy] };
+    }
+    // Closest possible approach from ANYWHERE in the band edge (the
+    // vertical segment at x=0 between floor and ceiling, MSL).
+    function airProfBandClosest(st) {
+        const f = st.droneGndFt + st.floorAglFt, c = st.droneGndFt + st.ceilAglFt;
+        const probe = (y) => airProfClosest(st, 0, y).d;
+        if (st.kind === 'windmill') {
+            const hubY = st.obsGndFt + st.hubFt;
+            return Math.min(probe(Math.min(Math.max(hubY, f), c)), probe(f), probe(c));
+        }
+        if (st.kind === 'mast') {
+            const topY = st.obsGndFt + st.aglFt;
+            const yStar = Math.min(Math.max((f + c) / 2, st.obsGndFt), topY);
+            return Math.min(probe(Math.min(Math.max(yStar, f), c)), probe(f), probe(c));
+        }
+        const wy = st.obsGndFt + st.aglFt;
+        return probe(Math.min(Math.max(wy, f), c));
+    }
+    function airProfSyncInputs(st) {
+        const wrap = document.getElementById(AIR_PROF_MODAL_ID);
+        if (!wrap) return;
+        wrap.querySelectorAll('input[data-prof-k]').forEach(inp => {
+            const k = inp.getAttribute('data-prof-k');
+            if (!st.touched[k] && document.activeElement !== inp) inp.value = Math.round(st[k]);
+        });
+    }
+    function airProfBuildModal(st) {
+        closeAirProfModal();
+        airProfState = st;   // closeAirProfModal nulled it
+        const wrap = document.createElement('div');
+        wrap.id = AIR_PROF_MODAL_ID;
+        wrap.style.cssText = 'position:fixed;top:80px;right:40px;width:740px;z-index:2147483002;'
+            + 'background:rgba(13,18,27,0.98);border:1px solid rgba(122,223,230,0.55);border-radius:10px;'
+            + 'color:#dfe9f0;font:12px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,0.65);';
+        const numIn = (k, label, step) =>
+            `<label style="display:flex;align-items:center;gap:4px;white-space:nowrap;">${label}
+                <input data-prof-k="${k}" type="number" step="${step || 10}" value="${Math.round(st[k])}"
+                    style="width:64px;background:rgba(255,255,255,0.08);border:1px solid rgba(122,223,230,0.35);border-radius:4px;color:#dfe9f0;padding:1px 4px;font-size:12px;"> ft</label>`;
+        const kindIns = st.kind === 'windmill'
+            ? numIn('hubFt', 'Hub/base', 10) + numIn('bladeFt', 'Blade', 5)
+            : st.kind === 'mast' ? numIn('aglFt', 'Height', 10) : numIn('aglFt', 'Wire height', 5);
+        wrap.innerHTML = `
+            <div data-prof-drag style="cursor:move;padding:7px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid rgba(122,223,230,0.25);">
+                <span style="color:#7adfe6;font-weight:700;">📐 Obstacle profile</span>
+                <span style="opacity:0.8;">${airEsc(st.label)}</span>
+                <span style="flex:1"></span>
+                <button data-prof-reset title="Reset all numbers to the real values from the airspace check" style="background:none;border:1px solid rgba(223,233,240,0.35);color:#dfe9f0;border-radius:5px;padding:1px 8px;cursor:pointer;">↺ Real values</button>
+                <button data-prof-close style="background:none;border:none;color:#dfe9f0;font-size:15px;cursor:pointer;">✕</button>
+            </div>
+            ${st.sub ? `<div style="padding:4px 12px 0;opacity:0.75;font-size:11px;">${airEsc(st.sub)}</div>` : ''}
+            <div style="padding:6px 12px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;">
+                ${numIn('distFt', 'Distance', 25)}${numIn('floorAglFt', 'Floor (AGL)', 10)}${numIn('ceilAglFt', 'Ceiling (AGL)', 10)}${kindIns}
+            </div>
+            <div data-prof-svg style="padding:0 8px;touch-action:none;cursor:crosshair;"></div>
+            <div data-prof-read style="padding:6px 12px 4px;display:flex;gap:16px;flex-wrap:wrap;font-size:12px;border-top:1px solid rgba(122,223,230,0.2);"></div>
+            <div data-prof-note style="padding:0 12px 8px;opacity:0.55;font-size:10.5px;"></div>`;
+        wrap.addEventListener('click', (e) => {
+            if (e.target.closest('[data-prof-close]')) { closeAirProfModal(); return; }
+            if (e.target.closest('[data-prof-reset]')) {
+                Object.assign(st, st.real);
+                st.touched = {}; st.droneDragged = false; st.droneY = null; st.droneX = 0;
+                airProfReband(st);
+                wrap.querySelectorAll('input[data-prof-k]').forEach(inp => { inp.value = Math.round(st[inp.getAttribute('data-prof-k')]); });
+                airProfRender();
+            }
+        });
+        wrap.addEventListener('input', (e) => {
+            const k = e.target.getAttribute && e.target.getAttribute('data-prof-k');
+            if (!k) return;
+            const v = Number(e.target.value);
+            if (!isFinite(v)) return;
+            st[k] = Math.max(k === 'distFt' ? 10 : 0, v);
+            st.touched[k] = true;
+            if (k === 'floorAglFt' && st.ceilAglFt < st.floorAglFt && !st.touched.ceilAglFt) st.ceilAglFt = st.floorAglFt;
+            airProfRender();
+        });
+        // Drone drag — listeners live on the persistent SVG host (the
+        // SVG itself is rebuilt every render).
+        const host = () => wrap.querySelector('[data-prof-svg]');
+        const toWorld = (ev) => {
+            const svg = host().querySelector('svg');
+            if (!svg || !st._view) return null;
+            const r = svg.getBoundingClientRect();
+            const v = st._view;
+            return { x: v.xMin + (ev.clientX - r.left - v.pad) / v.s, y: v.yMin + (v.H - v.pad - (ev.clientY - r.top)) / v.s };
+        };
+        let dragging = false;
+        wrap.querySelector('[data-prof-svg]').addEventListener('pointerdown', (e) => {
+            const w = toWorld(e);
+            if (!w || st.droneY == null) return;
+            const v = st._view;
+            const dPx = Math.hypot((w.x - st.droneX) * v.s, (w.y - st.droneY) * v.s);
+            if (dPx <= 22) { dragging = true; e.preventDefault(); e.target.setPointerCapture && e.target.setPointerCapture(e.pointerId); }
+        });
+        wrap.querySelector('[data-prof-svg]').addEventListener('pointermove', (e) => {
+            if (!dragging) return;
+            const w = toWorld(e);
+            if (!w) return;
+            st.droneX = Math.min(Math.max(w.x, -150), st.distFt + 300);
+            st.droneY = Math.max(w.y, Math.min(st.droneGndFt, st.obsGndFt) + 3);
+            st.droneDragged = true;
+            airProfRender();
+        });
+        wrap.querySelector('[data-prof-svg]').addEventListener('pointerup', () => { dragging = false; });
+        // Header drag (same minimal pattern as the airspace panel).
+        let hdrDrag = null;
+        wrap.querySelector('[data-prof-drag]').addEventListener('mousedown', (e) => {
+            if (e.target.closest('button')) return;
+            const r = wrap.getBoundingClientRect();
+            hdrDrag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+            e.preventDefault();
+        });
+        document.addEventListener('mousemove', (e) => {
+            if (!hdrDrag) return;
+            wrap.style.left = `${e.clientX - hdrDrag.dx}px`;
+            wrap.style.top = `${e.clientY - hdrDrag.dy}px`;
+            wrap.style.right = 'auto';
+        });
+        document.addEventListener('mouseup', () => { hdrDrag = null; });
+        document.body.appendChild(wrap);
+    }
+    function airProfRender() {
+        const st = airProfState;
+        if (!st) return;
+        const wrap = document.getElementById(AIR_PROF_MODAL_ID);
+        if (!wrap) return;
+        const gD = st.droneGndFt, gO = st.obsGndFt, xO = st.distFt;
+        const floorY = gD + st.floorAglFt, ceilY = gD + st.ceilAglFt;
+        if (st.droneY == null) { st.droneY = (floorY + ceilY) / 2; st.droneX = 0; }
+        const hubY = gO + st.hubFt;
+        const topY = st.kind === 'windmill' ? hubY + st.bladeFt : gO + st.aglFt;
+        const thr = st.kind === 'windmill' ? airThresholds.windmillFt : st.kind === 'wire' ? airThresholds.tlTowerFt : airThresholds.obstacleFt;
+        // World bounds (expand to keep a dragged drone in frame).
+        const yMin = Math.min(gD, gO) - 30;
+        const yMax = Math.max(topY, ceilY, st.droneY) + 50;
+        const xMin = Math.min(-90, st.droneX - 40);
+        const xMax = Math.max(xO + (st.kind === 'windmill' ? st.bladeFt : 30) + 60, st.droneX + 40);
+        const W = 724, H = 380, pad = 34;
+        const s = Math.min((W - 2 * pad) / (xMax - xMin), (H - 2 * pad) / (yMax - yMin));
+        st._view = { xMin, yMin, s, pad, W, H };
+        const X = (x) => (pad + (x - xMin) * s).toFixed(1);
+        const Y = (y) => (H - pad - (y - yMin) * s).toFixed(1);
+        const el = [];
+        // Ground (linear between the two known grounds) + earth fill.
+        el.push(`<path d="M${X(xMin)},${Y(gD)} L${X(0)},${Y(gD)} L${X(xO)},${Y(gO)} L${X(xMax)},${Y(gO)} L${X(xMax)},${H - 4} L${X(xMin)},${H - 4} Z" fill="rgba(90,70,40,0.35)" stroke="#8a6d3b" stroke-width="1.5"/>`);
+        // Flight band (the FFZ/FP interior is on the drone side).
+        el.push(`<rect x="${X(xMin)}" y="${Y(ceilY)}" width="${((0 - xMin) * s).toFixed(1)}" height="${Math.max(2, (ceilY - floorY) * s).toFixed(1)}" fill="rgba(95,255,95,0.13)" stroke="rgba(95,255,95,0.5)" stroke-dasharray="5,4" stroke-width="1"/>`);
+        el.push(`<text x="${X(xMin) + 4}" y="${Y(ceilY) - 4}" fill="#5fff5f" font-size="10">${airEsc(st.srcName)} band ${Math.round(st.floorAglFt)}–${Math.round(st.ceilAglFt)} ft AGL</text>`);
+        // Standoff bubble (faint) — the CP threshold for this type.
+        if (st.kind === 'windmill') {
+            el.push(`<circle cx="${X(xO)}" cy="${Y(hubY)}" r="${((st.bladeFt + thr) * s).toFixed(1)}" fill="none" stroke="rgba(255,85,85,0.3)" stroke-dasharray="3,5"/>`);
+        } else if (st.kind === 'wire') {
+            el.push(`<circle cx="${X(xO)}" cy="${Y(gO + st.aglFt)}" r="${(thr * s).toFixed(1)}" fill="none" stroke="rgba(255,85,85,0.3)" stroke-dasharray="3,5"/>`);
+        } else {
+            el.push(`<rect x="${X(xO - thr)}" y="${Y(topY + thr)}" width="${(2 * thr * s).toFixed(1)}" height="${((st.aglFt + 2 * thr) * s).toFixed(1)}" rx="${(thr * s).toFixed(1)}" fill="none" stroke="rgba(255,85,85,0.3)" stroke-dasharray="3,5"/>`);
+        }
+        // Obstacle.
+        if (st.kind === 'windmill') {
+            el.push(`<path d="M${X(xO - 6)},${Y(gO)} L${X(xO - 2)},${Y(hubY)} L${X(xO + 2)},${Y(hubY)} L${X(xO + 6)},${Y(gO)} Z" fill="#b8c4cc" stroke="#8fa0aa"/>`);
+            el.push(`<circle cx="${X(xO)}" cy="${Y(hubY)}" r="${Math.max(3, 6 * s).toFixed(1)}" fill="#dfe9f0"/>`);
+            [90, 210, 330].forEach(a => {
+                const rad = a * Math.PI / 180;
+                el.push(`<line x1="${X(xO)}" y1="${Y(hubY)}" x2="${X(xO + Math.cos(rad) * st.bladeFt)}" y2="${Y(hubY + Math.sin(rad) * st.bladeFt)}" stroke="#dfe9f0" stroke-width="2.5" stroke-linecap="round"/>`);
+            });
+            el.push(`<circle cx="${X(xO)}" cy="${Y(hubY)}" r="${(st.bladeFt * s).toFixed(1)}" fill="rgba(255,176,32,0.07)" stroke="rgba(255,176,32,0.65)" stroke-dasharray="6,4"/>`);
+            el.push(`<text x="${X(xO + st.bladeFt) - 2}" y="${Y(hubY) - 4}" fill="#ffb020" font-size="10" text-anchor="end">swept disc</text>`);
+            el.push(`<text x="${X(xO)}" y="${Y(topY) - 6}" fill="#9fb4c0" font-size="10" text-anchor="middle">tip ${Math.round(st.hubFt + st.bladeFt)} ft AGL</text>`);
+        } else if (st.kind === 'mast') {
+            el.push(`<rect x="${X(xO - 4)}" y="${Y(topY)}" width="${Math.max(3, 8 * s).toFixed(1)}" height="${((topY - gO) * s).toFixed(1)}" fill="#c47b7b" stroke="#a05555"/>`);
+            el.push(`<text x="${X(xO)}" y="${Y(topY) - 6}" fill="#9fb4c0" font-size="10" text-anchor="middle">top ${Math.round(st.aglFt)} ft AGL</text>`);
+        } else {
+            const wy = gO + st.aglFt;
+            el.push(`<line x1="${X(xO)}" y1="${Y(gO)}" x2="${X(xO)}" y2="${Y(wy + 12)}" stroke="#9aa8b2" stroke-width="2"/>`);
+            el.push(`<line x1="${X(xO - 25)}" y1="${Y(wy + 8)}" x2="${X(xO + 25)}" y2="${Y(wy + 8)}" stroke="#9aa8b2" stroke-width="2"/>`);
+            el.push(`<circle cx="${X(xO)}" cy="${Y(wy)}" r="4" fill="#ffb020" stroke="#dfe9f0"/>`);
+            el.push(`<text x="${X(xO)}" y="${Y(wy + 12) - 6}" fill="#9fb4c0" font-size="10" text-anchor="middle">conductor ~${Math.round(st.aglFt)} ft (assumed)</text>`);
+        }
+        // Ghost drones at band min / max on the band edge.
+        const drone = (x, y, opacity, tag) => {
+            const px = Number(X(x)), py = Number(Y(y));
+            return `<g opacity="${opacity}">
+                <line x1="${px - 8}" y1="${py - 4}" x2="${px + 8}" y2="${py + 4}" stroke="#7adfe6" stroke-width="2.5"/>
+                <line x1="${px - 8}" y1="${py + 4}" x2="${px + 8}" y2="${py - 4}" stroke="#7adfe6" stroke-width="2.5"/>
+                <circle cx="${px - 8}" cy="${py - 4}" r="3.5" fill="none" stroke="#7adfe6" stroke-width="1.5"/>
+                <circle cx="${px + 8}" cy="${py - 4}" r="3.5" fill="none" stroke="#7adfe6" stroke-width="1.5"/>
+                <circle cx="${px - 8}" cy="${py + 4}" r="3.5" fill="none" stroke="#7adfe6" stroke-width="1.5"/>
+                <circle cx="${px + 8}" cy="${py + 4}" r="3.5" fill="none" stroke="#7adfe6" stroke-width="1.5"/>
+                ${tag ? `<text x="${px + 14}" y="${py + 3}" fill="#7adfe6" font-size="10">${tag}</text>` : ''}
+            </g>`;
+        };
+        el.push(drone(0, floorY, 0.4, `min ${Math.round(st.floorAglFt)} ft`));
+        el.push(drone(0, ceilY, 0.4, `max ${Math.round(st.ceilAglFt)} ft`));
+        // Live (draggable) drone + closest-approach line.
+        const near = airProfClosest(st, st.droneX, st.droneY);
+        const bandBest = airProfBandClosest(st);
+        const col = near.d < 100 ? '#ff5555' : near.d < thr ? '#ffb020' : '#5fff5f';
+        el.push(`<line x1="${X(st.droneX)}" y1="${Y(st.droneY)}" x2="${X(near.pt[0])}" y2="${Y(near.pt[1])}" stroke="${col}" stroke-width="1.5" stroke-dasharray="7,4"/>`);
+        const midX = (st.droneX + near.pt[0]) / 2, midY = (st.droneY + near.pt[1]) / 2;
+        el.push(`<text x="${X(midX)}" y="${Y(midY) - 6}" fill="${col}" font-size="12" font-weight="700" text-anchor="middle">${Math.round(near.d).toLocaleString()} ft</text>`);
+        const outBand = st.droneY < floorY - 0.5 || st.droneY > ceilY + 0.5;
+        el.push(drone(st.droneX, st.droneY, 1, ''));
+        el.push(`<text x="${X(st.droneX)}" y="${Number(Y(st.droneY)) + 22}" fill="${outBand ? '#ff8080' : '#7adfe6'}" font-size="10" text-anchor="middle">🛩 ${Math.round(st.droneY - gD)} ft AGL${outBand ? ' (OUTSIDE band)' : ''}</text>`);
+        // Scale bar (100 ft) + axis hint.
+        el.push(`<line x1="${pad}" y1="${H - 10}" x2="${pad + 100 * s}" y2="${H - 10}" stroke="#9fb4c0" stroke-width="2"/>`);
+        el.push(`<text x="${pad + 100 * s + 5}" y="${H - 7}" fill="#9fb4c0" font-size="10">100 ft (uniform scale)</text>`);
+        wrap.querySelector('[data-prof-svg]').innerHTML =
+            `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="display:block;background:rgba(20,28,40,0.6);border-radius:6px;">${el.join('')}</svg>`;
+        const bandCol = bandBest < 100 ? '#ff5555' : bandBest < thr ? '#ffb020' : '#5fff5f';
+        wrap.querySelector('[data-prof-read]').innerHTML = `
+            <span>Drone→obstacle: <strong style="color:${col}">${Math.round(near.d).toLocaleString()} ft</strong></span>
+            <span>Closest possible in band: <strong style="color:${bandCol}">${Math.round(bandBest).toLocaleString()} ft</strong></span>
+            <span>Lateral: <strong>${Math.round(st.distFt - st.droneX).toLocaleString()} ft</strong></span>
+            <span>Standoff: <strong>${thr.toLocaleString()} ft</strong> (red ring)</span>
+            <span>Ground Δ: <strong>${gO - gD >= 0 ? '+' : ''}${Math.round(gO - gD)} ft</strong> at obstacle</span>`;
+        wrap.querySelector('[data-prof-note]').textContent =
+            `Drag the drone to explore. ${st.demDrone === 'ok' ? 'Drone-side ground from DEM' : st.demDrone === 'pending' ? 'Fetching drone-side ground elevation…' : 'Grounds assumed level'}`
+            + `${st.kind !== 'wire' ? ' · obstacle ground from FAA AMSL−AGL' : ''}`
+            + `${st.estSpecs ? ' · ⚠ hub/blade ESTIMATED from FAA height (no USWTDB match) — edit to actuals' : ''}`
+            + ' · DOF coordinates are accurate to tens of ft.';
     }
 
     function findEntityAtLatLng(lat, lng, siteID) {

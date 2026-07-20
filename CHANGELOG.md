@@ -6,6 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-20 — 📐 Obstacle Profile view — see the drone vs the turbine, to scale — Asset Inspector v4.184 (dev/latest)
+
+Every obstacle row (and transmission-line row) in the Airspace panel now has a **📐 button** that opens a **to-scale side-elevation view**: your FFZ/FP altitude band on one side, the obstacle on the other, at the true horizontal distance — 1 ft horizontal = 1 ft vertical, always.
+
+- **Windmills** draw as a real turbine: tower to the hub, three blades, and the **swept rotor disc** (dashed amber circle) — sized from the USWTDB specs (or estimated from FAA height if unmatched, clearly flagged). Towers/antennas draw as a mast; transmission lines as a conductor cross-section at an assumed-by-voltage height (editable).
+- **Ghost drones sit at your band's min and max**; a **live drone is draggable anywhere** — the dashed closest-approach line and big ft readout follow it (green/amber/red vs the CP standoff threshold, which is drawn as a faint red bubble around the obstacle).
+- Readouts: drone→obstacle distance, **closest possible approach from anywhere in the band** (e.g. Pioneer Hutt: 612 ft lateral but only **426 ft** to the disc from the band ceiling), lateral gap, and ground elevation difference — everything is drawn in a shared ft-MSL frame, so a turbine on higher ground visibly sits higher.
+- **Every number is editable** (distance, floor/ceiling AGL, hub, blade, height) as a what-if sandbox, with **↺ Real values** to snap back. Drone-side ground refines from DEM automatically; obstacle ground uses the FAA's surveyed AMSL−AGL.
+
 ## 2026-07-20 — 🌀 Turbine specs from USGS wind-turbine database — Asset Inspector v4.183 (dev/latest)
 
 The Airspace Validator now enriches every FAA windmill obstacle with its real turbine specs from the **USGS U.S. Wind Turbine Database (USWTDB)** — matched exactly by FAA ORS number (falling back to nearest-within-500-ft), no auth or setup needed. For each matched turbine you get **manufacturer + model, project name, hub/base height, blade length, rotor diameter, and total tip height** (all in ft):
