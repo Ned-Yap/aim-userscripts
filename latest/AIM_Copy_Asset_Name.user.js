@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.188
+// @version      4.189
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -65,7 +65,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.188';
+    const SCRIPT_VERSION = '4.189';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -3976,10 +3976,10 @@
             el.push(dimV(xO + st.bladeFt + 30, gO, topY, `tip ${Math.round(st.hubFt + st.bladeFt)} ft`));
             el.push(dimV(xO + 14, hubY, topY, `blade ${Math.round(st.bladeFt)} ft`));
             // Disc BOTTOM — the lowest point the blades sweep down to; the
-            // number that matters when the band sits under the rotor. The
-            // rotor-Ø dim sits well BELOW it so the labels never collide.
+            // number that matters when the band sits under the rotor.
+            // (No rotor-Ø dim on the drawing — floating near the band it
+            // read as a lateral distance; the header + blade dim cover it.)
             const discBotY = hubY - st.bladeFt;
-            el.push(dimH(Math.max(discBotY - 44, gO + 8), xO - st.bladeFt, xO + st.bladeFt, `rotor Ø ${Math.round(2 * st.bladeFt)} ft`, xO - st.bladeFt * 0.5));
             const cgX = (xO - st.bladeFt) * 0.55;   // clearance dim sits mid-air, left of the disc
             el.push(`<line x1="${X(Math.min(cgX - 15, xO - st.bladeFt - 14))}" y1="${Y(discBotY)}" x2="${X(xO + st.bladeFt + 14)}" y2="${Y(discBotY)}" stroke="rgba(255,176,32,0.8)" stroke-width="1" stroke-dasharray="2,3"/>`);
             addLbl(Number(X(xO - st.bladeFt * 0.55)), Number(Y(discBotY)) - 6, `disc bottom ${Math.round(st.hubFt - st.bladeFt)} ft AGL`, { fill: '#ffb020', anchor: 'middle', pr: 4 });
