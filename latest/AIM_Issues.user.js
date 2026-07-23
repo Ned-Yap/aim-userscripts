@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.32
+// @version      1.33
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -57,7 +57,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.32';
+    const SCRIPT_VERSION = '1.33';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -3985,18 +3985,24 @@
                          font-size:9px;font-weight:900;line-height:1;
                          border:1.5px solid rgba(0,0,0,0.65);
                          pointer-events:none;z-index:2">✓</span>` : '';
-        // v1.32: inline SVG instead of layered emoji — the 🛡 emoji rendered
-        // dark + muddy on the dark marker disc. Bright lavender shield with a
-        // deep-purple outline, and a red prohibition ring + slash (🚫-style)
-        // over it, all crisp at any marker size.
+        // v1.33: the marker's SILHOUETTE is now the shield — renderOneIssue
+        // drops the dark circular disc for this category, so the purple
+        // shield shape itself is the marker (unmistakable at a glance), with
+        // a white-cased red prohibition ring + slash on top. v1.32's
+        // shield-inside-a-circle left no room for either shape to read at
+        // normal marker sizes.
         const glyphHtml = `
-            <svg viewBox="0 0 24 24" style="width:82%;height:82%;display:block">
-                <path d="M12 2 L20 5 V11 C20 16.5 16.6 20.4 12 22 C7.4 20.4 4 16.5 4 11 V5 Z"
-                      fill="#f1e8ff" stroke="#7a3fd1" stroke-width="1.5"/>
-                <circle cx="12" cy="12" r="9.4" fill="none" stroke="#ff2d2d" stroke-width="2.6"/>
-                <line x1="5.4" y1="5.4" x2="18.6" y2="18.6" stroke="#ff2d2d" stroke-width="2.6" stroke-linecap="round"/>
+            <svg viewBox="0 0 24 24" style="width:100%;height:100%;display:block;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.85))">
+                <path d="M12 1 L21 4.2 V11 C21 17 17.2 21.3 12 23 C6.8 21.3 3 17 3 11 V4.2 Z"
+                      fill="${c}" stroke="#14171b" stroke-width="2"/>
+                <path d="M12 2.6 L19.6 5.4 V11 C19.6 16.2 16.4 19.9 12 21.4 C7.6 19.9 4.4 16.2 4.4 11 V5.4 Z"
+                      fill="none" stroke="#f1e8ff" stroke-width="0.9" opacity="0.85"/>
+                <circle cx="12" cy="11.5" r="7.4" fill="none" stroke="#ffffff" stroke-width="4.4"/>
+                <line x1="7" y1="6.5" x2="17" y2="16.5" stroke="#ffffff" stroke-width="4.4" stroke-linecap="round"/>
+                <circle cx="12" cy="11.5" r="7.4" fill="none" stroke="#e01414" stroke-width="2.7"/>
+                <line x1="7" y1="6.5" x2="17" y2="16.5" stroke="#e01414" stroke-width="2.7" stroke-linecap="round"/>
             </svg>${approvedTick}`;
-        return { glyphHtml, color: c };
+        return { glyphHtml, color: c, shieldMarker: true };
     }
 
     function renderOneIssue(issue, opts) {
@@ -4081,6 +4087,11 @@
             const markerSize = isHidden ? hMarker : vMarker;
             const fontSize = Math.max(9, Math.round(markerSize * 0.55));
             const borderWidth = isHidden ? 1 : 2;
+            // v1.33: unshielded markers ARE the shield — no dark disc around
+            // the glyph (the SVG silhouette is the marker), bumped 25% so the
+            // shield shape + prohibition sign read at normal sizes.
+            const shieldMarker = !!icoMeta.shieldMarker;
+            const effSize = shieldMarker ? Math.round(markerSize * 1.25) : markerSize;
             // v1.00: green ? pulsing badge when the user hasn't seen the
             // latest events on this issue. unseenHistoryFor excludes the
             // user's own actions — only OTHERS' activity triggers it.
@@ -4104,20 +4115,20 @@
                 className: 'aim-issues-icon-marker',
                 html: `<div data-issue-id="${issue.id}" style="
                     position:relative;
-                    width:${markerSize}px;height:${markerSize}px;border-radius:${markerSize / 2}px;
-                    background:rgba(20,23,27,${isHidden ? 0.6 : 0.92});
-                    border:${borderWidth}px ${isHidden ? 'dashed' : 'solid'} ${icoMeta.color};
+                    width:${effSize}px;height:${effSize}px;border-radius:${shieldMarker ? 0 : effSize / 2}px;
+                    background:${shieldMarker ? 'transparent' : `rgba(20,23,27,${isHidden ? 0.6 : 0.92})`};
+                    border:${shieldMarker ? 'none' : `${borderWidth}px ${isHidden ? 'dashed' : 'solid'} ${icoMeta.color}`};
                     color:${icoMeta.color};
                     opacity:${markerOpacity};
                     display:flex;align-items:center;justify-content:center;
                     font-size:${fontSize}px;font-weight:700;
-                    box-shadow:${isHidden ? 'none' : '0 2px 6px rgba(0,0,0,0.6)'};
+                    box-shadow:${(isHidden || shieldMarker) ? 'none' : '0 2px 6px rgba(0,0,0,0.6)'};
                     pointer-events:auto;
                     cursor:pointer;
                     ${isHidden ? 'filter:grayscale(0.3);' : ''}
                 ">${icoMeta.glyphHtml}${activityBadge}</div>`,
-                iconSize: [markerSize, markerSize],
-                iconAnchor: [markerSize / 2, markerSize / 2],
+                iconSize: [effSize, effSize],
+                iconAnchor: [effSize / 2, effSize / 2],
             });
             const markerPane = (map.getPane && map.getPane('aim-issues-markers')) ? 'aim-issues-markers' : undefined;
             marker = L.marker(c, { icon: divIcon, interactive: true, bubblingMouseEvents: false, pane: markerPane });
