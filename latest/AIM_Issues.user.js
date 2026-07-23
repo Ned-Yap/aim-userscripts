@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.33
+// @version      1.34
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -57,7 +57,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.33';
+    const SCRIPT_VERSION = '1.34';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -3997,10 +3997,10 @@
                       fill="${c}" stroke="#14171b" stroke-width="2"/>
                 <path d="M12 2.6 L19.6 5.4 V11 C19.6 16.2 16.4 19.9 12 21.4 C7.6 19.9 4.4 16.2 4.4 11 V5.4 Z"
                       fill="none" stroke="#f1e8ff" stroke-width="0.9" opacity="0.85"/>
-                <circle cx="12" cy="11.5" r="7.4" fill="none" stroke="#ffffff" stroke-width="4.4"/>
-                <line x1="7" y1="6.5" x2="17" y2="16.5" stroke="#ffffff" stroke-width="4.4" stroke-linecap="round"/>
-                <circle cx="12" cy="11.5" r="7.4" fill="none" stroke="#e01414" stroke-width="2.7"/>
-                <line x1="7" y1="6.5" x2="17" y2="16.5" stroke="#e01414" stroke-width="2.7" stroke-linecap="round"/>
+                <g opacity="0.7" stroke="#e01414">
+                    <circle cx="12" cy="11.5" r="5.8" fill="none" stroke-width="2.2"/>
+                    <line x1="7.9" y1="7.4" x2="16.1" y2="15.6" stroke-width="2.2" stroke-linecap="round"/>
+                </g>
             </svg>${approvedTick}`;
         return { glyphHtml, color: c, shieldMarker: true };
     }
