@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.31
+// @version      1.32
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -57,7 +57,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.31';
+    const SCRIPT_VERSION = '1.32';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -3985,10 +3985,17 @@
                          font-size:9px;font-weight:900;line-height:1;
                          border:1.5px solid rgba(0,0,0,0.65);
                          pointer-events:none;z-index:2">✓</span>` : '';
+        // v1.32: inline SVG instead of layered emoji — the 🛡 emoji rendered
+        // dark + muddy on the dark marker disc. Bright lavender shield with a
+        // deep-purple outline, and a red prohibition ring + slash (🚫-style)
+        // over it, all crisp at any marker size.
         const glyphHtml = `
-            <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;line-height:1">🛡<span
-                style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
-                       color:#ff5d5d;font-weight:900;font-size:1.05em;text-shadow:0 0 2px #000,0 0 2px #000">✕</span></span>${approvedTick}`;
+            <svg viewBox="0 0 24 24" style="width:82%;height:82%;display:block">
+                <path d="M12 2 L20 5 V11 C20 16.5 16.6 20.4 12 22 C7.4 20.4 4 16.5 4 11 V5 Z"
+                      fill="#f1e8ff" stroke="#7a3fd1" stroke-width="1.5"/>
+                <circle cx="12" cy="12" r="9.4" fill="none" stroke="#ff2d2d" stroke-width="2.6"/>
+                <line x1="5.4" y1="5.4" x2="18.6" y2="18.6" stroke="#ff2d2d" stroke-width="2.6" stroke-linecap="round"/>
+            </svg>${approvedTick}`;
         return { glyphHtml, color: c };
     }
 
