@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-23 — ✏ Reshape issue polygons — AIM Issues v1.30 (dev/latest)
+
+You can now redraw an issue's shape without deleting + re-flagging it. M2 the issue icon → **✏ Reshape** in the popup footer:
+
+- The current shape turns **grey dashed** (only while you're reshaping — it never shows otherwise), and the normal draw tools take over: click-drag = rectangle, Shift+click = polygon.
+- The new shape stages in green with an **Apply / Redraw / Cancel** toolbar — nothing changes until you Apply. Esc steps back (staged shape → sketch → cancel reshape).
+- Same permissions as delete: the creator or an approver (plus anyone on local-only issues). Not available on validator issues (those regenerate on every run).
+- Reshapes are audited in the issue history (`✏ reshaped`), sync-safe across coworkers' browsers (a stale copy can't clobber a fresh reshape), recompute the affected-entities list, and post a threaded Slack reply with the new entity count — no pings.
+- Bonus fix: the panel/tooltip "last event" line and the Sheets-export comment count no longer mislabel assignment events as comments.
+
 ## 2026-07-20 — ⚡ FAA response cache — no more "Too many requests" on repeat runs — Asset Inspector v4.193 (dev/latest)
 
 The FAA AIS servers 429-rate-limit when the airspace check is re-run repeatedly (e.g. while iterating on a site). Every FAA/HIFLD query response is now cached locally (Tampermonkey storage, keyed by the exact query):
