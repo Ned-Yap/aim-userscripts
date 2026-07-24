@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-23 — ⭐ PROMOTED TO PROD: AIM Issues v1.34 (coworkers jump from v1.29)
+
+The whole day's arc ships to everyone. What's new since v1.29:
+
+- **✏ Reshape** (v1.30) — redraw an issue's polygon from its popup; old shape ghosts grey dashed while you draw, green staged preview + Apply/Redraw/Cancel confirm. Sync-safe and audited.
+- **🛡✕ Unshielded Routes** (v1.31–v1.34) — new issue type: Type picker on create + one-click convert on existing issues; purple polygon with a shield-silhouette marker (subtle red no-sign); **stays visible when approved** as a permanent accepted-unshielded marker; filterable via panel category chips; Slack-labeled; optional per-category approvers via `approvers.json` `categoryApprovers` (empty for now = no process change).
+- Assorted: assignment events no longer mislabeled as comments in the panel last-event line + Sheets comment counts.
+
+Update via Tampermonkey dashboard → Check for userscript updates.
+
 ## 2026-07-23 — 🛡✕ Unshielded Routes — AIM Issues v1.31 (dev/latest)
 
 A new issue type for marking accepted-unshielded flight sections, with the full issues machinery behind it (history, sync, Slack, approvals, reshape):

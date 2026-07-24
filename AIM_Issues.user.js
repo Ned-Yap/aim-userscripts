@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.29
+// @version      1.34
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -57,7 +57,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.29';
+    const SCRIPT_VERSION = '1.34';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -82,6 +82,7 @@
     const TOKEN_KEY = 'aim-github-token';          // shared with Map Styler
     const USERNAME_KEY = 'aim-issues-github-login'; // ours
     const APPROVERS_KEY = 'aim-issues-approvers';   // cached approver list
+    const CAT_APPROVERS_KEY = 'aim-issues-cat-approvers';  // v1.31: cached per-category approver map
     const SLACK_CONFIG_KEY = 'aim-issues-slack-config'; // cached slack-config.json
 
     // ------- v1.00 approver oversight + activity-indicator constants -------
@@ -264,12 +265,50 @@
               const obj = JSON.parse(raw); return (obj && typeof obj === 'object') ? obj : null; }
         catch (e) { return null; }
     })();
+    // v1.31: per-category approvers. approvers.json may carry an optional
+    //   "categoryApprovers": { "unshielded": ["DanielleC-AIM", ...] }
+    // block — those logins get approver powers ONLY for issues of that
+    // category (union with the global approvers list, who can approve
+    // everything). Absent/empty block = identical to pre-v1.31 behavior.
+    let categoryApprovers = (function() {
+        try { const raw = gmGet(CAT_APPROVERS_KEY, ''); if (!raw) return {};
+              const obj = JSON.parse(raw); return (obj && typeof obj === 'object') ? obj : {}; }
+        catch (e) { return {}; }
+    })();
     function isApprover() {
         if (!cachedUsername) return false;                // local-only / no token
         return approversList.includes(cachedUsername);
     }
+    // v1.31: issue category. Only 'unshielded' is meaningful today; any
+    // other/absent value renders + behaves as a normal issue (so old
+    // clients and old records degrade gracefully).
+    const CATEGORY_META = {
+        unshielded: { text: 'UNSHIELDED ROUTE', short: 'Unshielded', color: '#b26bff' },
+    };
+    function issueCategory(issue) {
+        return (issue && issue.category === 'unshielded') ? 'unshielded' : 'issue';
+    }
+    function isUnshielded(issue) { return issueCategory(issue) === 'unshielded'; }
+    // Per-issue approver check: global approver OR category approver for
+    // this issue's category. This is what all moderation gates use.
+    function isApproverFor(issue) {
+        if (isApprover()) return true;
+        if (!cachedUsername || !issue) return false;
+        const list = categoryApprovers[issueCategory(issue)];
+        return Array.isArray(list) && list.includes(cachedUsername);
+    }
+    // Can this user approve ANYTHING? Gates the review-oriented panel UI
+    // (pending shortcut); per-issue power still comes from isApproverFor.
+    function isAnyApprover() {
+        if (isApprover()) return true;
+        if (!cachedUsername) return false;
+        return Object.values(categoryApprovers).some(l => Array.isArray(l) && l.includes(cachedUsername));
+    }
     function currentRole() {
         return isApprover() ? 'approver' : 'csm';
+    }
+    function roleFor(issue) {
+        return isApproverFor(issue) ? 'approver' : 'csm';
     }
     const shaBySite = {};                                // {[siteID]: 'sha-from-last-GET-or-PUT'}
     // syncStatus drives the small dot on the 🚩 button:
@@ -290,6 +329,10 @@
     const issueAffectedCache = new Map();                 // issueId → array of affected entities
     const issueLayers = new Map();               // issueId → { polygon, marker }
     let drawingState = null;
+    // v1.30: reshape flow — non-null while the user is redrawing an issue's
+    // polygon from the status modal. { issueId, ghost, pending, previewLayer }.
+    // The grey dashed ghost exists ONLY while this is set.
+    let reshapeState = null;
     let drawToolbarEl = null;
     let noteModalEl = null;
     let statusModalEl = null;
@@ -299,6 +342,9 @@
     // v1.00: include pending_fix + pending_ignore by default; keep legacy
     // ready-for-review for grandfathered issues.
     const panelFilters = new Set(['open', 'pending_fix', 'pending_ignore', 'ready-for-review', 'resolved', 'ignored']);
+    // v1.31: category filter — both shown by default. Same M1 toggle / M2
+    // solo semantics as the status chips.
+    const panelCategoryFilters = new Set(['issue', 'unshielded']);
     // v0.29: priority filter chips. Uses the literal string 'none' for
     // issues with no priority (issue.priority === null/undefined). All
     // four active by default. M1 toggle, M2 solo (same as status chips).
@@ -477,6 +523,9 @@
         // .site-select widget isn't mounted yet on initial load.
         siteName = readSiteName();
         if (!siteName && newId) tickReadSiteName(0);
+        // v1.30: a site nav mid-reshape abandons the reshape (the ghost's map
+        // is going away with the old site's layers).
+        cancelReshape({ silent: true });
         clearIssueLayers();
         hiddenIds.clear();
         // v0.17: invalidate entity caches on site change
@@ -616,7 +665,14 @@
             const list = (data && Array.isArray(data.approvers)) ? data.approvers : [];
             approversList = list;
             gmSet(APPROVERS_KEY, JSON.stringify(list));
-            console.log(`${TAG} approvers loaded (${list.length}): ${list.join(', ')} — you are ${isApprover() ? 'an APPROVER ✓' : 'a CSM'}`);
+            // v1.31: optional per-category approvers block (union with global).
+            const catMap = (data && data.categoryApprovers && typeof data.categoryApprovers === 'object')
+                ? data.categoryApprovers : {};
+            categoryApprovers = catMap;
+            gmSet(CAT_APPROVERS_KEY, JSON.stringify(catMap));
+            const catNote = Object.keys(catMap).filter(k => (catMap[k] || []).length)
+                .map(k => `${k}: ${catMap[k].join(', ')}`).join(' | ');
+            console.log(`${TAG} approvers loaded (${list.length}): ${list.join(', ')}${catNote ? ` · category approvers — ${catNote}` : ''} — you are ${isApprover() ? 'an APPROVER ✓' : (isAnyApprover() ? 'a CATEGORY APPROVER ✓' : 'a CSM')}`);
             // Refresh UI that depends on role
             if (panelEl) renderIssuesPanel();
             renderButtonState();
@@ -814,8 +870,10 @@
         // re-rendering the parent on every transition never re-pings them —
         // the actual ping happens in the assignment thread reply.
         const assignedSuffix = issue.assignee ? ` · 👤 @${slackEsc(issue.assignee)}` : '';
+        // v1.31: unshielded routes are labeled as such on the parent board.
+        const kindLabel = isUnshielded(issue) ? '🛡✕ *Unshielded Route*' : 'issue';
         const lines = [
-            `${b.icon} *${b.text}* — issue on ${link}${pri}`,
+            `${b.icon} *${b.text}* — ${kindLabel} on ${link}${pri}`,
             `>${note}`,
             `_${slackEsc(issue.shape || 'shape')} · filed by ${creator}${assignedSuffix}_`,
         ];
@@ -1111,6 +1169,46 @@
         }
     }
 
+    // v1.31: category conversion → threaded reply + parent board refresh (the
+    // parent label changes between "issue" and "Unshielded Route"). No pings.
+    async function postSlackCategoryChange(issue, from, to, by) {
+        if (!slackPostable(issue)) return;
+        try {
+            await ensureSlackThread(issue);
+            const actor = slackPlain(by);
+            const head = (to === 'unshielded')
+                ? `🛡 ${actor} marked this as an *Unshielded Route*`
+                : `🚩 ${actor} converted this back to a *normal issue*`;
+            const text = issue.slackThreadTs ? head
+                       : `${head}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack()})_`;
+            await slackPost(text, issue.slackThreadTs || null);
+            if (issue.slackThreadTs) await slackUpdate(issue.slackThreadTs, slackParentText(issue));
+            markSlackPosted(issue);
+        } catch (e) {
+            console.warn(`${TAG} postSlackCategoryChange threw:`, e);
+        }
+    }
+
+    // v1.30: reshape → threaded reply with the refreshed affected-entity
+    // count. No mentions — geometry edits aren't actionable pings. Parent
+    // board untouched (status/note unchanged, and it carries no geometry).
+    async function postSlackReshape(issue, by) {
+        if (!slackPostable(issue)) return;
+        try {
+            await ensureSlackThread(issue);   // adopt pre-Slack issues
+            const actor = slackPlain(by);
+            const affected = affectedEntitiesFor(issue);
+            const nVerts = Array.isArray(issue.polygon) ? issue.polygon.length : '?';
+            const head = `✏ ${actor} *reshaped* this issue's area (${nVerts}-point ${slackEsc(issue.shape || 'polygon')}) — now affects ${affected.length} entit${affected.length === 1 ? 'y' : 'ies'}`;
+            const text = issue.slackThreadTs ? head
+                       : `${head}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack()})_`;
+            await slackPost(text, issue.slackThreadTs || null);
+            markSlackPosted(issue);
+        } catch (e) {
+            console.warn(`${TAG} postSlackReshape threw:`, e);
+        }
+    }
+
     // ===== v1.29: Slack watermark + on-open reconcile + manual resend =====
     //
     // The watermark `slackPostedHistoryLen` records how many history entries
@@ -1143,6 +1241,8 @@
         if (h.toStatus === 'deleted') return `${by} deleted`;
         if (h.kind === 'assign') return h.toAssignee ? `${by} assigned → ${slackMention(h.toAssignee) || ('@' + slackEsc(h.toAssignee))}` : `${by} unassigned`;
         if (h.kind === 'priority') return `${by} set priority → ${slackEsc((h.toPriority || 'none'))}`;
+        if (h.kind === 'reshape') return `${by} reshaped the area`;
+        if (h.kind === 'category') return (h.toCategory === 'unshielded') ? `${by} marked as Unshielded Route` : `${by} converted to normal issue`;
         if (h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus)) return `${by} commented: ${slackEsc((h.note || '').slice(0, 80))}`;
         if (!h.fromStatus) return `${by} created`;
         const f = (STATUS_LABEL[h.fromStatus] || { text: h.fromStatus }).text;
@@ -1207,7 +1307,7 @@
     function resendIssueToSlack(id) {
         const issue = currentSiteIssues.find(i => i.id === id);
         if (!issue) return;
-        if (!isApprover()) { showToast('Only an approver can resend to Slack.', 4000); return; }
+        if (!isApproverFor(issue)) { showToast('Only an approver can resend to Slack.', 4000); return; }
         if (issue.createdBy === 'local-only' || issue.source === 'validator') {
             showToast('This issue type doesn\'t post to Slack.', 4000); return;
         }
@@ -1293,6 +1393,38 @@
         return out;
     }
 
+    // v1.30: latest valid kind:'reshape' entry in a (union-merged) history —
+    // its polygon/toShape are the current geometry. Returns null when the
+    // history holds no reshape (i.e. the creation polygon still stands).
+    // >= on the tie-break so a same-timestamp duplicate resolves to the later
+    // list position, matching mergeHistoryArrays' stable sort.
+    function latestReshapeFromHistory(history) {
+        let best = null, bestAt = -Infinity;
+        (history || []).forEach(h => {
+            if (!h || h.kind !== 'reshape') return;
+            if (!Array.isArray(h.polygon) || h.polygon.length < 3) return;
+            const t = new Date(h.at).getTime();
+            const at = isNaN(t) ? 0 : t;
+            if (at >= bestAt) { bestAt = at; best = h; }
+        });
+        return best;
+    }
+
+    // v1.31: derive category from the last kind:'category' conversion in a
+    // (union-merged) history; falls back to the stored field for issues
+    // created directly with a category (creation category is in both copies).
+    function categoryFromHistory(history, fallback) {
+        let best = null, bestAt = -Infinity;
+        (history || []).forEach(h => {
+            if (!h || h.kind !== 'category') return;
+            const t = new Date(h.at).getTime();
+            const at = isNaN(t) ? 0 : t;
+            if (at >= bestAt) { bestAt = at; best = h; }
+        });
+        if (best) return best.toCategory || undefined;
+        return fallback;
+    }
+
     // v1.26: derive the deleted flag from a (union-merged) history. Scans for
     // the last delete (toStatus==='deleted') vs reinstate (kind==='reinstate')
     // event; whichever is chronologically latest decides. Returns the stored
@@ -1327,11 +1459,25 @@
                 console.log(`${TAG} mergeIssueObjects(${a.id}): local hist=${aLen} + remote hist=${bLen} → merged=${history.length}, status=${status}`);
             }
         } catch (e) {}
-        // Immutable fields (polygon / note / surface / shape / createdAt /
-        // createdBy / id) don't change after creation, so both copies hold
-        // the same values — taking from either side is fine. Use spread
-        // with `a` first for stable ordering of fields.
+        // Immutable fields (note / surface / createdAt / createdBy / id)
+        // don't change after creation, so both copies hold the same values —
+        // taking from either side is fine. Use spread with `a` first for
+        // stable ordering of fields. polygon/shape are NO LONGER immutable
+        // (v1.30 reshape) — they're re-derived from history just below.
         const merged = { ...a, ...b, history, status };
+        // v1.30: polygon/shape mutate via reshape. The latest kind:'reshape'
+        // entry in the union-merged history is the source of truth (mirrors
+        // the deleted-from-history pattern) — without this, whichever copy
+        // spread last would silently clobber a fresh reshape with stale
+        // geometry. No reshape entry → both copies hold the creation polygon.
+        const reshape = latestReshapeFromHistory(history);
+        if (reshape) {
+            merged.polygon = reshape.polygon;
+            if (reshape.toShape) merged.shape = reshape.toShape;
+        }
+        // v1.31: category mutates via the convert action — same derive-from-
+        // history rule so a conversion survives sync in any tab order.
+        merged.category = categoryFromHistory(history, a.category || b.category);
         // v1.29: the Slack watermark must merge by MAX — a stale copy with a
         // lower (or missing) watermark must not win, or we'd re-backfill what
         // another session already posted. Keep undefined only if BOTH are unset
@@ -2091,8 +2237,10 @@
         let badge = buttonEl.querySelector('.aim-issues-badge');
         const live = liveIssues(currentSiteIssues);
         const n = live.length;
-        const pending = isApprover()
-            ? live.filter(i => i.status === 'pending_fix' || i.status === 'pending_ignore').length
+        // v1.31: per-issue approval power — a category approver's badge only
+        // counts pendings they can actually approve.
+        const pending = isAnyApprover()
+            ? live.filter(i => (i.status === 'pending_fix' || i.status === 'pending_ignore') && isApproverFor(i)).length
             : 0;
         const showAttention = pending > 0;
         const badgeText = showAttention ? String(pending) : (n > 0 ? String(n) : '');
@@ -2167,18 +2315,14 @@
         renderButtonState();
     }
 
-    function enterFlagMode() {
-        const map = getLeafletMap();
-        if (!map) {
-            showToast('Map not ready — try again in a second.', 3000);
-            flagModeActive = false;
-            renderButtonState();
-            return;
-        }
+    // v1.30: draw-session binding shared by BOTH flag mode (new issue) and
+    // reshape mode (redraw an existing issue's polygon). One session at a
+    // time — the entry points cancel the other mode before binding.
+    function bindDrawSession(map) {
         const container = map.getContainer ? map.getContainer() : null;
         if (container) container.style.cursor = 'crosshair';
         // Disable map drag so our mousedown→drag isn't fighting Leaflet pan.
-        // Re-enabled on exit. Same trick Leaflet's own draw plugin uses.
+        // Re-enabled on unbind. Same trick Leaflet's own draw plugin uses.
         try { if (map.dragging) map.dragging.disable(); } catch (e) {}
         try { if (map.doubleClickZoom) map.doubleClickZoom.disable(); } catch (e) {}
         // Bind Leaflet events for draw — latlng is delivered to us directly.
@@ -2188,11 +2332,9 @@
         map.on('click',     onMapClick);
         map.on('dblclick',  onMapDblClick);
         window.addEventListener('keydown', onWindowKeyDown, true);
-        showToast('Flag mode ON — click-drag for rectangle, Shift+click for polygon. Esc to exit.', 4000);
     }
 
-    function exitFlagMode(opts) {
-        opts = opts || {};
+    function unbindDrawSession() {
         const map = getLeafletMap();
         if (map) {
             const container = map.getContainer ? map.getContainer() : null;
@@ -2206,13 +2348,36 @@
             try { if (map.doubleClickZoom) map.doubleClickZoom.enable(); } catch (e) {}
         }
         window.removeEventListener('keydown', onWindowKeyDown, true);
+    }
+
+    function enterFlagMode() {
+        const map = getLeafletMap();
+        if (!map) {
+            showToast('Map not ready — try again in a second.', 3000);
+            flagModeActive = false;
+            renderButtonState();
+            return;
+        }
+        cancelReshape({ silent: true });   // one draw mode at a time
+        bindDrawSession(map);
+        showToast('Flag mode ON — click-drag for rectangle, Shift+click for polygon. Esc to exit.', 4000);
+    }
+
+    function exitFlagMode(opts) {
+        opts = opts || {};
+        unbindDrawSession();
         discardDraw({ silent: true });
         if (!opts.silent) showToast('Flag mode OFF.', 1800);
     }
 
     function onWindowKeyDown(e) {
         if (e.key === 'Escape') {
+            // v1.30: layered Esc during reshape — first Esc discards the
+            // staged/pending shape (back to drawing), next Esc cancels the
+            // whole reshape and restores the original rendering.
+            if (reshapeState && reshapeState.pending) { discardReshapePending(); return; }
             if (drawingState) discardDraw({ silent: false });
+            else if (reshapeState) cancelReshape({ silent: false });
             else setFlagMode(false);
             return;
         }
@@ -2223,7 +2388,11 @@
     }
 
     function onMapMouseDown(e) {
-        if (!flagModeActive || !masterEnabled) return;
+        // v1.30: the same handlers serve flag mode AND reshape mode.
+        if ((!flagModeActive && !reshapeState) || !masterEnabled) return;
+        // While a reshaped-but-unconfirmed shape awaits Apply/Redraw/Cancel,
+        // ignore new draws — the toolbar owns the next step.
+        if (reshapeState && reshapeState.pending) return;
         const oe = e.originalEvent;
         if (!oe) return;
         if (oe.button !== 0) return;
@@ -2278,6 +2447,9 @@
         clearPreview();
         drawingState = null;
         tearDownDrawToolbar();
+        // v1.30: in reshape mode the drawn shape replaces an existing issue's
+        // polygon (after confirm) instead of opening the new-issue note modal.
+        if (reshapeState) { stageReshapePending('rectangle', polygonLatLngs); return; }
         openNoteModal('rectangle', polygonLatLngs);
     }
 
@@ -2315,6 +2487,8 @@
         clearPreview();
         drawingState = null;
         tearDownDrawToolbar();
+        // v1.30: reshape mode — stage the replacement shape for confirm.
+        if (reshapeState) { stageReshapePending('polygon', latlngs); return; }
         openNoteModal('polygon', latlngs);
     }
 
@@ -2323,6 +2497,9 @@
         clearPreview();
         drawingState = null;
         tearDownDrawToolbar();
+        // v1.30: discarding a sketch mid-reshape stays IN reshape mode —
+        // bring back the instruction toolbar so the user can draw again.
+        if (reshapeState && !reshapeState.pending) buildReshapeToolbar('idle');
         if (!opts.silent) showToast('Draw cancelled.', 1800);
     }
 
@@ -2465,6 +2642,207 @@
         drawToolbarEl = null;
     }
 
+    // ------- v1.30: Reshape (redraw an issue's polygon) -------
+    // Entered ONLY from the status modal's ✏ Reshape button (M2 on the issue
+    // icon → modal → Reshape), so the grey dashed ghost of the current shape
+    // exists only while the user is actively looking at / reshaping that
+    // issue. Flow: ghost the old shape → draw a replacement rect/polygon with
+    // the same tools as creation → ✓ Apply / ↶ Redraw / ✗ Cancel. The new
+    // polygon is recorded as a kind:'reshape' history entry — the audit trail
+    // AND the distributed-sync source of truth (mergeIssueObjects re-derives
+    // polygon/shape from the latest reshape entry in the union history, so a
+    // coworker's stale copy can't clobber a fresh reshape).
+    const RESHAPE_GHOST_STYLE = {
+        color: '#9aa0a6', weight: 2, opacity: 0.85, dashArray: '6,6',
+        fillColor: '#9aa0a6', fillOpacity: 0.06,
+        interactive: false, bubblingMouseEvents: false,
+    };
+
+    function startReshape(issueId) {
+        const issue = currentSiteIssues.find(i => i.id === issueId);
+        if (!issue) { showToast('Issue not found — cannot reshape.', 3000); return; }
+        if (issue.deleted) { showToast('Deleted issues cannot be reshaped.', 3000); return; }
+        if (issue.source === 'validator') { showToast('Validator issues are regenerated on each run — reshape not applicable.', 3500); return; }
+        const map = getLeafletMap();
+        const L = getL();
+        if (!map || !L) { showToast('Map not ready — try again in a second.', 3000); return; }
+        if (flagModeActive) setFlagMode(false);   // one draw mode at a time
+        cancelReshape({ silent: true });          // idempotent restart
+        // Swap the normal rendering for the grey dashed ghost. renderOneIssue
+        // skips this issue while reshapeState holds its id, so a background
+        // sync re-render can't paint the old shape back under the session.
+        const prior = issueLayers.get(issueId);
+        if (prior) {
+            try { if (prior.polygon) map.removeLayer(prior.polygon); } catch (e) {}
+            try { if (prior.marker)  map.removeLayer(prior.marker);  } catch (e) {}
+            issueLayers.delete(issueId);
+        }
+        let ghost = null;
+        try {
+            const polyPane = (map.getPane && map.getPane('aim-issues-polygons')) ? 'aim-issues-polygons' : undefined;
+            ghost = L.polygon(issue.polygon, { ...RESHAPE_GHOST_STYLE, pane: polyPane }).addTo(map);
+            if (ghost._path) { try { ghost._path.style.pointerEvents = 'none'; } catch (e) {} }
+        } catch (e) {
+            console.warn(`${TAG} reshape ghost render failed:`, e);
+        }
+        reshapeState = { issueId, ghost, pending: null, previewLayer: null };
+        bindDrawSession(map);
+        buildReshapeToolbar('idle');
+        showToast('Reshape — old shape is grey dashed. Click-drag = rectangle, Shift+click = polygon. Esc to cancel.', 5000);
+        console.log(`${TAG} reshape started for ${issueId}`);
+    }
+
+    // Tear down the reshape session and restore the issue's normal rendering.
+    function cancelReshape(opts) {
+        opts = opts || {};
+        if (!reshapeState) return;
+        const st = reshapeState;
+        // Null FIRST so discardDraw / renderOneIssue behave normally below.
+        reshapeState = null;
+        const map = getLeafletMap();
+        try { if (st.ghost && map) map.removeLayer(st.ghost); } catch (e) {}
+        try { if (st.previewLayer && map) map.removeLayer(st.previewLayer); } catch (e) {}
+        discardDraw({ silent: true });   // clears any in-progress sketch + toolbar
+        unbindDrawSession();
+        const issue = currentSiteIssues.find(i => i.id === st.issueId);
+        if (issue && !issue.deleted) renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
+        if (!opts.silent) showToast('Reshape cancelled — original shape kept.', 2500);
+    }
+
+    // A finished draw in reshape mode is STAGED, not applied — the green
+    // preview + Apply/Redraw/Cancel toolbar guard against an accidental
+    // rectangle drag silently overwriting the shape.
+    function stageReshapePending(shape, latlngsObjs) {
+        if (!reshapeState) return;
+        const map = getLeafletMap();
+        const L = getL();
+        reshapeState.pending = { shape, latlngsObjs };
+        try {
+            if (reshapeState.previewLayer && map) map.removeLayer(reshapeState.previewLayer);
+            reshapeState.previewLayer = null;
+            if (map && L) {
+                reshapeState.previewLayer = L.polygon(latlngsObjs.map(c => [c.lat, c.lng]), {
+                    color: '#5fff5f', weight: 3, opacity: 0.95, dashArray: '8,6',
+                    fillColor: '#5fff5f', fillOpacity: 0.12,
+                    interactive: false, bubblingMouseEvents: false,
+                }).addTo(map);
+                if (reshapeState.previewLayer._path) {
+                    try { reshapeState.previewLayer._path.style.pointerEvents = 'none'; } catch (e) {}
+                }
+            }
+        } catch (e) { console.warn(`${TAG} reshape preview render failed:`, e); }
+        buildReshapeToolbar('pending');
+    }
+
+    function discardReshapePending() {
+        if (!reshapeState || !reshapeState.pending) return;
+        const map = getLeafletMap();
+        try { if (reshapeState.previewLayer && map) map.removeLayer(reshapeState.previewLayer); } catch (e) {}
+        reshapeState.previewLayer = null;
+        reshapeState.pending = null;
+        buildReshapeToolbar('idle');
+    }
+
+    function confirmReshape() {
+        if (!reshapeState || !reshapeState.pending) return;
+        const st = reshapeState;
+        const { shape, latlngsObjs } = st.pending;
+        const issue = currentSiteIssues.find(i => i.id === st.issueId);
+        // Tear the session down BEFORE mutating so renderOneIssue (called by
+        // applyReshape) paints the new shape instead of being skipped.
+        reshapeState = null;
+        const map = getLeafletMap();
+        try { if (st.ghost && map) map.removeLayer(st.ghost); } catch (e) {}
+        try { if (st.previewLayer && map) map.removeLayer(st.previewLayer); } catch (e) {}
+        tearDownDrawToolbar();
+        unbindDrawSession();
+        if (!issue || issue.deleted) {
+            showToast('Issue vanished mid-reshape — nothing changed.', 3500);
+            return;
+        }
+        applyReshape(issue, shape, latlngsObjs.map(c => [c.lat, c.lng]));
+    }
+
+    // The mutation. Mirrors applyComment's save + sync + Slack pattern.
+    function applyReshape(issue, shape, polygon) {
+        const nowIso = new Date().toISOString();
+        const by = cachedUsername || 'local-only';
+        if (!Array.isArray(issue.history)) issue.history = [];
+        // The NEW polygon rides in the history entry — that's what lets the
+        // reshape survive distributed sync (mergeIssueObjects re-derives
+        // polygon/shape from the latest reshape entry in the union history).
+        issue.history.push({
+            at: nowIso,
+            by,
+            fromStatus: issue.status || 'open',
+            toStatus: issue.status || 'open',
+            kind: 'reshape',
+            fromShape: issue.shape || null,
+            toShape: shape,
+            polygon,
+            note: '',
+        });
+        issue.shape = shape;
+        issue.polygon = polygon;
+        issueAffectedCache.delete(issue.id);   // affected entities must recompute
+        saveIssuesToStorage(siteID, currentSiteIssues);
+        renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
+        renderButtonState();
+        if (panelEl) renderIssuesPanel();
+        console.log(`${TAG} reshaped ${issue.id} → ${shape}, ${polygon.length} vertices by @${by}`);
+        const wasLocalOnly = (issue.createdBy === 'local-only');
+        if (cachedToken && !wasLocalOnly) {
+            showToast('Issue reshaped — pushing to GitHub…', 2500);
+            commitIssuesToGitHub(`@${by}: reshape ${issue.id.slice(0, 14)}`);
+            postSlackReshape(issue, by);
+        } else {
+            showToast('Issue reshaped (local only).', 2500);
+        }
+    }
+
+    // Reshape-mode toolbar (replaces the standard draw toolbar slot).
+    // stage 'idle' = waiting for a draw; 'pending' = staged shape awaiting
+    // Apply/Redraw/Cancel. While actually sketching, the standard
+    // buildDrawToolbar takes over; discardDraw restores 'idle'.
+    function buildReshapeToolbar(stage) {
+        tearDownDrawToolbar();
+        const tb = document.createElement('div');
+        tb.id = 'aim-issues-draw-toolbar';
+        tb.style.cssText = `
+            position:fixed;bottom:100px;left:50%;transform:translateX(-50%);
+            background:#1f2228;border:2px solid #9aa0a6;border-radius:8px;
+            padding:10px 16px;z-index:99999;
+            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;
+            color:#e6e6e6;display:flex;align-items:center;gap:12px;
+            box-shadow:0 4px 16px rgba(0,0,0,0.5);
+        `;
+        const label = document.createElement('span');
+        label.style.cssText = 'color:#c8cdd4;font-weight:600';
+        tb.appendChild(label);
+        if (stage === 'pending') {
+            label.textContent = '✏ New shape staged (green) — apply it?';
+            const applyBtn = document.createElement('button');
+            applyBtn.textContent = '✓ Apply new shape';
+            applyBtn.style.cssText = 'padding:7px 14px;background:#5fff5f;color:#000;border:none;border-radius:4px;cursor:pointer;font:inherit;font-weight:700';
+            applyBtn.onclick = () => confirmReshape();
+            tb.appendChild(applyBtn);
+            const redrawBtn = document.createElement('button');
+            redrawBtn.textContent = '↶ Redraw';
+            redrawBtn.style.cssText = 'padding:7px 14px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit';
+            redrawBtn.onclick = () => discardReshapePending();
+            tb.appendChild(redrawBtn);
+        } else {
+            label.textContent = '✏ Reshaping issue — drag = rectangle · Shift+click = polygon';
+        }
+        const cancelBtn = document.createElement('button');
+        cancelBtn.textContent = '✗ Cancel reshape (Esc)';
+        cancelBtn.style.cssText = 'padding:7px 14px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit';
+        cancelBtn.onclick = () => cancelReshape({ silent: false });
+        tb.appendChild(cancelBtn);
+        document.body.appendChild(tb);
+        drawToolbarEl = tb;
+    }
+
     // ------- Note modal -------
     function openNoteModal(shape, latlngsObjs) {
         closeNoteModal();
@@ -2513,10 +2891,27 @@
                     @${escHtml(l)}
                 </button>`).join('')}
             </div>` : '';
+        // v1.31: type picker — normal Issue vs Unshielded Route. Unshielded
+        // routes render purple + shield-✕, stay visible when approved, and
+        // are separately filterable in the panel.
+        const catMeta = CATEGORY_META.unshielded;
+        const typeRowHtml = `
+            <div style="font-size:12px;color:#aaa;margin-bottom:6px">Type</div>
+            <div id="aim-issues-type-row" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+                <button type="button" class="aim-issues-type-chip" data-category=""
+                    style="padding:5px 12px;background:#ff4d4d;color:#fff;border:1.5px solid #ff4d4d;border-radius:14px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">
+                    🚩 Issue
+                </button>
+                <button type="button" class="aim-issues-type-chip" data-category="unshielded"
+                    style="padding:5px 12px;background:transparent;color:${catMeta.color};border:1.5px solid ${catMeta.color};border-radius:14px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">
+                    🛡✕ Unshielded Route
+                </button>
+            </div>`;
         card.innerHTML = `
             <div style="font-size:15px;font-weight:600;color:#ff8585;margin-bottom:10px">
                 New issue · ${shape} · ${latlngsObjs.length} vertex${latlngsObjs.length === 1 ? '' : 'es'}
             </div>
+            ${typeRowHtml}
             <div style="font-size:12px;color:#aaa;margin-bottom:8px">
                 Describe the issue. Required.
             </div>
@@ -2591,6 +2986,33 @@
             c.addEventListener('pointerdown', h, true);
             c.addEventListener('click', h, true);
         });
+        // v1.31: type chips — single-select, default normal Issue. Same
+        // pointerdown+click debounce as the priority chips.
+        let selectedCategory = null;   // null = normal issue
+        const typeChips = card.querySelectorAll('.aim-issues-type-chip');
+        const paintTypeChips = () => {
+            typeChips.forEach(c => {
+                const cat = c.dataset.category || null;
+                const isSel = (selectedCategory === cat);
+                const color = cat ? CATEGORY_META.unshielded.color : '#ff4d4d';
+                c.style.background = isSel ? color : 'transparent';
+                c.style.color = isSel ? (cat ? '#1a0d26' : '#fff') : color;
+            });
+        };
+        let lastTypeFire = 0;
+        typeChips.forEach(c => {
+            const h = (e) => {
+                e.preventDefault(); e.stopPropagation();
+                const now = Date.now();
+                if (now - lastTypeFire < 250) return;   // ignore the paired event
+                lastTypeFire = now;
+                selectedCategory = c.dataset.category || null;
+                paintTypeChips();
+            };
+            c.addEventListener('pointerdown', h, true);
+            c.addEventListener('click', h, true);
+        });
+        paintTypeChips();
         // v1.03: notify chips — independent multi-select toggle. Filled = on.
         // v1.06: Leaflet intermittently swallows `click` on elements inside
         // the map iframe, so the first 1-2 taps did nothing. Listen on BOTH
@@ -2637,7 +3059,7 @@
             save.style.cursor = 'not-allowed';
             closeNoteModal();
             try {
-                createIssue({ shape, latlngsObjs, note, priority: selectedPriority, notify: Array.from(notifySelected) });
+                createIssue({ shape, latlngsObjs, note, priority: selectedPriority, notify: Array.from(notifySelected), category: selectedCategory });
             } catch (e) {
                 console.error(`${TAG} createIssue threw:`, e);
                 showToast('Issue created — render failed, refresh to recover. See console.', 5000);
@@ -2656,7 +3078,7 @@
         noteModalEl = null;
     }
 
-    function createIssue({ shape, latlngsObjs, note, priority, notify }) {
+    function createIssue({ shape, latlngsObjs, note, priority, notify, category }) {
         if (!siteID) { showToast('No site loaded — issue discarded.', 4000); return; }
         const nowIso = new Date().toISOString();
         const id = `iss_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -2681,6 +3103,9 @@
                 { at: nowIso, by, fromStatus: null, toStatus: 'open', note },
             ],
         };
+        // v1.31: category. Only stamped when non-default so normal issues
+        // keep their pre-v1.31 record shape byte-for-byte.
+        if (category === 'unshielded') issue.category = 'unshielded';
         currentSiteIssues.push(issue);
         saveIssuesToStorage(siteID, currentSiteIssues);
         renderOneIssue(issue);
@@ -2714,7 +3139,8 @@
         // approve/reject/direct-resolve role). Lets them clean up TEST/junk
         // issues they didn't create. The deletion is attributed to the
         // approver in history + tombstone, so the audit log stays honest.
-        const canModerate = isApprover();
+        // v1.31: per-issue (category approvers count for their category).
+        const canModerate = isApproverFor(issue);
         if (!isCreator && !isLocalOnly && !canModerate) {
             showToast(`Only @${issue.createdBy} or an approver can delete this issue.`, 4500);
             return;
@@ -2782,7 +3208,7 @@
         if (!issue) return;
         // Belt-and-suspenders — the UI only shows the button to approvers, but
         // re-assert here in case a future entry point forgets.
-        if (!isApprover()) {
+        if (!isApproverFor(issue)) {
             showToast('Only an approver can reinstate a deleted issue.', 4500);
             return;
         }
@@ -3345,7 +3771,8 @@
             const affectedList = affected.map(a => `${a.typeShort} ${a.name}${a.subtype ? ' (' + a.subtype + ')' : ''}`).join('<br>');
             // v0.28: comment count + priority cells
             const commentCount = (issue.history || []).filter(h =>
-                h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus && h.kind !== 'priority')
+                h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus
+                    && h.kind !== 'priority' && h.kind !== 'assign' && h.kind !== 'reshape' && h.kind !== 'category')
             ).length;
             const priM = issue.priority ? priorityMeta(issue.priority) : null;
             const histText = (issue.history || []).map(h => {
@@ -3356,6 +3783,8 @@
                 } else if (!h.fromStatus) trans = `created (${h.toStatus})`;
                 else if (h.toStatus === 'deleted') trans = `deleted`;
                 else if (h.kind === 'assign') trans = h.toAssignee ? `assigned → @${h.toAssignee}` : `unassigned`;
+                else if (h.kind === 'reshape') trans = `reshaped (${Array.isArray(h.polygon) ? h.polygon.length : '?'}-point ${h.toShape || 'polygon'})`;
+                else if (h.kind === 'category') trans = (h.toCategory === 'unshielded') ? 'marked as Unshielded Route' : 'converted to normal issue';
                 else if (h.kind === 'comment' || h.fromStatus === h.toStatus) trans = `comment`;
                 else trans = `${h.fromStatus} → ${h.toStatus}`;
                 return `[${fmtDateTime(h.at)}] @${h.by}: ${trans}${note}`;
@@ -3412,7 +3841,8 @@
             const affected = affectedEntitiesFor(issue);
             const affectedList = affected.map(a => `${a.typeShort} ${a.name}${a.subtype ? ' (' + a.subtype + ')' : ''}`).join(' | ');
             const commentCount = (issue.history || []).filter(h =>
-                h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus && h.kind !== 'priority')
+                h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus
+                    && h.kind !== 'priority' && h.kind !== 'assign' && h.kind !== 'reshape' && h.kind !== 'category')
             ).length;
             const priLabel = issue.priority ? priorityMeta(issue.priority).text : '';
             const histText = (issue.history || []).map(h => {
@@ -3423,6 +3853,8 @@
                 } else if (!h.fromStatus) trans = `created (${h.toStatus})`;
                 else if (h.toStatus === 'deleted') trans = `deleted`;
                 else if (h.kind === 'assign') trans = h.toAssignee ? `assigned → @${h.toAssignee}` : `unassigned`;
+                else if (h.kind === 'reshape') trans = `reshaped (${Array.isArray(h.polygon) ? h.polygon.length : '?'}-point ${h.toShape || 'polygon'})`;
+                else if (h.kind === 'category') trans = (h.toCategory === 'unshielded') ? 'marked as Unshielded Route' : 'converted to normal issue';
                 else if (h.kind === 'comment' || h.fromStatus === h.toStatus) trans = `comment`;
                 else trans = `${h.fromStatus} → ${h.toStatus}`;
                 return `[${fmtDateTime(h.at)}] @${h.by}: ${trans}${note}`;
@@ -3525,8 +3957,60 @@
         }
     }
 
+    // v1.31: category-aware wrappers. Unshielded routes render CONSTANT
+    // purple (the color says "unshielded route", not a status) with a
+    // shield-✕ glyph; status still shows via dash pattern + the approved ✓
+    // chip. Normal issues fall through to the status-driven look.
+    function styleForIssue(issue) {
+        if (!isUnshielded(issue)) return styleForStatus(issue.status);
+        const c = CATEGORY_META.unshielded.color;
+        // Approved (resolved) = permanent accepted marker: solid outline.
+        // Everything else keeps the dashed "work item" look. Ignored dims
+        // via isIssueDimmed like a normal issue.
+        const solid = (issue.status === 'resolved');
+        return { color: c, fill: c, fillOpacity: 0.15, dashArray: solid ? null : '10,6', weight: 3 };
+    }
+    // Shield with an ✕ struck through, layered in HTML (no such emoji
+    // exists). Returned as glyphHtml — renderOneIssue drops it into the
+    // divIcon. The approved ✓ chip rides bottom-right, mirroring the green
+    // "?" activity badge top-right.
+    function iconForIssue(issue) {
+        if (!isUnshielded(issue)) return { glyphHtml: iconForStatus(issue.status).glyph, color: iconForStatus(issue.status).color };
+        const c = CATEGORY_META.unshielded.color;
+        const approvedTick = (issue.status === 'resolved') ? `
+            <span style="position:absolute;bottom:-5px;right:-5px;
+                         width:13px;height:13px;border-radius:50%;
+                         background:#5fff5f;color:#000;
+                         display:flex;align-items:center;justify-content:center;
+                         font-size:9px;font-weight:900;line-height:1;
+                         border:1.5px solid rgba(0,0,0,0.65);
+                         pointer-events:none;z-index:2">✓</span>` : '';
+        // v1.33: the marker's SILHOUETTE is now the shield — renderOneIssue
+        // drops the dark circular disc for this category, so the purple
+        // shield shape itself is the marker (unmistakable at a glance), with
+        // a white-cased red prohibition ring + slash on top. v1.32's
+        // shield-inside-a-circle left no room for either shape to read at
+        // normal marker sizes.
+        const glyphHtml = `
+            <svg viewBox="0 0 24 24" style="width:100%;height:100%;display:block;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.85))">
+                <path d="M12 1 L21 4.2 V11 C21 17 17.2 21.3 12 23 C6.8 21.3 3 17 3 11 V4.2 Z"
+                      fill="${c}" stroke="#14171b" stroke-width="2"/>
+                <path d="M12 2.6 L19.6 5.4 V11 C19.6 16.2 16.4 19.9 12 21.4 C7.6 19.9 4.4 16.2 4.4 11 V5.4 Z"
+                      fill="none" stroke="#f1e8ff" stroke-width="0.9" opacity="0.85"/>
+                <g opacity="0.7" stroke="#e01414">
+                    <circle cx="12" cy="11.5" r="5.8" fill="none" stroke-width="2.2"/>
+                    <line x1="7.9" y1="7.4" x2="16.1" y2="15.6" stroke-width="2.2" stroke-linecap="round"/>
+                </g>
+            </svg>${approvedTick}`;
+        return { glyphHtml, color: c, shieldMarker: true };
+    }
+
     function renderOneIssue(issue, opts) {
         if (!issue) return;
+        // v1.30: while this issue is being reshaped, the grey ghost owns the
+        // visual — skip normal rendering so a background re-render (sync,
+        // toggle change) doesn't paint the old shape back under the session.
+        if (reshapeState && reshapeState.issueId === issue.id) return;
         opts = opts || {};
         const isHidden = !!opts.isHidden;
         const map = getLeafletMap();
@@ -3545,8 +4029,8 @@
             try { if (prior.polygon) map.removeLayer(prior.polygon); } catch (e) {}
             try { if (prior.marker)  map.removeLayer(prior.marker);  } catch (e) {}
         }
-        const st = styleForStatus(issue.status);
-        const icoMeta = iconForStatus(issue.status);
+        const st = styleForIssue(issue);
+        const icoMeta = iconForIssue(issue);
         // v0.3: stroke weight + opacities are user-tunable via Control Panel.
         // Status only drives color + dash pattern; size/opacity are global.
         const vWeight  = Number(getT('render.visible-weight'))  || 3;
@@ -3603,6 +4087,11 @@
             const markerSize = isHidden ? hMarker : vMarker;
             const fontSize = Math.max(9, Math.round(markerSize * 0.55));
             const borderWidth = isHidden ? 1 : 2;
+            // v1.33: unshielded markers ARE the shield — no dark disc around
+            // the glyph (the SVG silhouette is the marker), bumped 25% so the
+            // shield shape + prohibition sign read at normal sizes.
+            const shieldMarker = !!icoMeta.shieldMarker;
+            const effSize = shieldMarker ? Math.round(markerSize * 1.25) : markerSize;
             // v1.00: green ? pulsing badge when the user hasn't seen the
             // latest events on this issue. unseenHistoryFor excludes the
             // user's own actions — only OTHERS' activity triggers it.
@@ -3626,20 +4115,20 @@
                 className: 'aim-issues-icon-marker',
                 html: `<div data-issue-id="${issue.id}" style="
                     position:relative;
-                    width:${markerSize}px;height:${markerSize}px;border-radius:${markerSize / 2}px;
-                    background:rgba(20,23,27,${isHidden ? 0.6 : 0.92});
-                    border:${borderWidth}px ${isHidden ? 'dashed' : 'solid'} ${icoMeta.color};
+                    width:${effSize}px;height:${effSize}px;border-radius:${shieldMarker ? 0 : effSize / 2}px;
+                    background:${shieldMarker ? 'transparent' : `rgba(20,23,27,${isHidden ? 0.6 : 0.92})`};
+                    border:${shieldMarker ? 'none' : `${borderWidth}px ${isHidden ? 'dashed' : 'solid'} ${icoMeta.color}`};
                     color:${icoMeta.color};
                     opacity:${markerOpacity};
                     display:flex;align-items:center;justify-content:center;
                     font-size:${fontSize}px;font-weight:700;
-                    box-shadow:${isHidden ? 'none' : '0 2px 6px rgba(0,0,0,0.6)'};
+                    box-shadow:${(isHidden || shieldMarker) ? 'none' : '0 2px 6px rgba(0,0,0,0.6)'};
                     pointer-events:auto;
                     cursor:pointer;
                     ${isHidden ? 'filter:grayscale(0.3);' : ''}
-                ">${icoMeta.glyph}${activityBadge}</div>`,
-                iconSize: [markerSize, markerSize],
-                iconAnchor: [markerSize / 2, markerSize / 2],
+                ">${icoMeta.glyphHtml}${activityBadge}</div>`,
+                iconSize: [effSize, effSize],
+                iconAnchor: [effSize / 2, effSize / 2],
             });
             const markerPane = (map.getPane && map.getPane('aim-issues-markers')) ? 'aim-issues-markers' : undefined;
             marker = L.marker(c, { icon: divIcon, interactive: true, bubblingMouseEvents: false, pane: markerPane });
@@ -3697,6 +4186,14 @@
             const toP = last.toPriority ? priorityMeta(last.toPriority).text : 'NONE';
             return `Priority → ${toP}`;
         }
+        // v1.30: assign/reshape must precede the comment fallback — both also
+        // have fromStatus === toStatus (assign previously mislabeled as
+        // "Commented" in the panel/tooltip last-event line).
+        if (last.kind === 'assign') {
+            return last.toAssignee ? `👤 Assigned → @${last.toAssignee}` : '👤 Unassigned';
+        }
+        if (last.kind === 'reshape') return '✏ Reshaped';
+        if (last.kind === 'category') return (last.toCategory === 'unshielded') ? '🛡 Marked Unshielded' : '🚩 Marked Issue';
         if (last.kind === 'comment' || (last.fromStatus && last.fromStatus === last.toStatus)) {
             return `💬 Commented`;
         }
@@ -3743,6 +4240,14 @@
             const toMeta = h.toPriority ? priorityMeta(h.toPriority) : { color: '#888' };
             return `<b>@${by}</b> set priority → <span style="color:${toMeta.color}">${toP}</span>${note}`;
         }
+        if (h.kind === 'reshape') {
+            return `✏ <b>@${by}</b> reshaped the area`;
+        }
+        if (h.kind === 'category') {
+            return (h.toCategory === 'unshielded')
+                ? `🛡 <b>@${by}</b> marked as Unshielded Route`
+                : `🚩 <b>@${by}</b> converted to normal issue`;
+        }
         if (h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus)) {
             return `💬 <b>@${by}</b> commented${note}`;
         }
@@ -3787,6 +4292,10 @@
         const priHtml = issue.priority
             ? `<span style="display:inline-block;padding:1px 6px;border-radius:8px;background:${priorityMeta(issue.priority).color};color:${priorityMeta(issue.priority).textColor};font-size:9px;font-weight:700;letter-spacing:0.5px;margin-left:6px">🎯 ${priorityMeta(issue.priority).text}</span>`
             : '';
+        // v1.31: unshielded-route chip inline with the header line
+        const catHtml = isUnshielded(issue)
+            ? `<span style="display:inline-block;padding:1px 6px;border-radius:8px;background:${CATEGORY_META.unshielded.color};color:#1a0d26;font-size:9px;font-weight:700;letter-spacing:0.5px;margin-left:6px">🛡✕ UNSHIELDED ROUTE</span>`
+            : '';
         // v1.00: unseen-activity callout — green-tinted block listing
         // what's new since the user last opened this issue. Clears once
         // the user opens the status modal.
@@ -3809,7 +4318,7 @@
         }
         return `
             <div style="line-height:1.35">
-                <div style="font-weight:700;color:${headerColor};font-size:13px;margin-bottom:6px">${headerLabel} &middot; ${age}${priHtml}</div>
+                <div style="font-weight:700;color:${headerColor};font-size:13px;margin-bottom:6px">${headerLabel} &middot; ${age}${catHtml}${priHtml}</div>
                 <div style="color:#ffffff;font-size:13px;font-weight:600;margin-bottom:6px">${safeNote}</div>
                 <div style="color:#a8c4ff;font-size:11px;font-weight:600">@${safeBy}</div>
                 ${affectsHtml}
@@ -3865,6 +4374,10 @@
     function isIssueDimmed(issue) {
         if (!issue) return false;
         if (hiddenIds.has(issue.id)) return true;
+        // v1.31: an APPROVED unshielded route is a permanent "known-accepted
+        // unshielded section" marker — it stays fully visible. Ignored still
+        // dims (an ignored flag isn't an accepted route).
+        if (isUnshielded(issue) && issue.status === 'resolved') return false;
         if (issue.status === 'resolved' || issue.status === 'ignored') return true;
         return false;
     }
@@ -3874,8 +4387,11 @@
         if (!issue) return;
         // v0.8: resolved/ignored are background by status — M1 is a no-op
         // on those (toggling session-hide wouldn't change anything visually
-        // and would just confuse the user).
-        if (issue.status === 'resolved' || issue.status === 'ignored') {
+        // and would just confuse the user). v1.31: EXCEPT approved unshielded
+        // routes, which stay fully visible by design — allow session-hide so
+        // they can still be tucked away temporarily.
+        const approvedUnshielded = isUnshielded(issue) && issue.status === 'resolved';
+        if ((issue.status === 'resolved' || issue.status === 'ignored') && !approvedUnshielded) {
             showToast(`Already in background (${issue.status}).`, 2500);
             return;
         }
@@ -4115,6 +4631,54 @@
         return true;
     }
 
+    // v1.31: category conversion (normal Issue ↔ Unshielded Route). Doesn't
+    // change status. Audited via kind:'category' + fromCategory/toCategory —
+    // mergeIssueObjects derives category from the latest such entry so the
+    // conversion survives distributed sync. Gate matches delete (creator /
+    // local-only / per-issue approver); re-asserted here belt-and-suspenders.
+    function applyCategoryChange(issueId, newCategory) {
+        const issue = currentSiteIssues.find(i => i.id === issueId);
+        if (!issue) return false;
+        const from = issueCategory(issue);
+        const to = (newCategory === 'unshielded') ? 'unshielded' : 'issue';
+        if (from === to) return false;   // no-op
+        const isCreator = !!(issue.createdBy && cachedUsername && issue.createdBy === cachedUsername);
+        const isLocalOnly = (issue.createdBy === 'local-only');
+        if (!isCreator && !isLocalOnly && !isApproverFor(issue)) {
+            showToast(`Only @${issue.createdBy} or an approver can convert this issue.`, 4500);
+            return false;
+        }
+        const nowIso = new Date().toISOString();
+        const by = cachedUsername || 'local-only';
+        if (!Array.isArray(issue.history)) issue.history = [];
+        issue.history.push({
+            at: nowIso,
+            by,
+            fromStatus: issue.status || 'open',
+            toStatus: issue.status || 'open',
+            kind: 'category',
+            fromCategory: from,
+            toCategory: to,
+            note: '',
+        });
+        if (to === 'unshielded') issue.category = 'unshielded';
+        else delete issue.category;
+        saveIssuesToStorage(siteID, currentSiteIssues);
+        renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
+        renderButtonState();
+        if (panelEl) renderIssuesPanel();
+        console.log(`${TAG} category ${issueId}: ${from} → ${to} by @${by}`);
+        const wasLocalOnly = (issue.createdBy === 'local-only');
+        if (cachedToken && !wasLocalOnly) {
+            showToast(to === 'unshielded' ? 'Marked as Unshielded Route — pushing…' : 'Converted to normal issue — pushing…', 2500);
+            commitIssuesToGitHub(`@${by}: category → ${to}`);
+            postSlackCategoryChange(issue, from, to, by);
+        } else {
+            showToast(to === 'unshielded' ? 'Marked as Unshielded Route (local only).' : 'Converted to normal issue (local only).', 2500);
+        }
+        return true;
+    }
+
     // v0.28: priority change. Doesn't change status. Audited via a history
     // entry with kind='priority' + fromPriority/toPriority fields.
     function applyPriorityChange(issueId, newPriority, optionalNote) {
@@ -4215,7 +4779,9 @@
             // v1.00: role-gated transition list. CSMs see Propose buttons;
             // approvers see Direct + Approve/Reject. Transitions with no
             // `roles` field are shown to everyone (e.g. Re-open).
-            const role = currentRole();
+            // v1.31: role is PER-ISSUE — categoryApprovers members are
+            // approvers only on issues of their category.
+            const role = roleFor(liveIssue);
             const allTransitions = STATUS_TRANSITIONS[status] || [];
             const transitions = allTransitions.filter(t =>
                 !t.roles || t.roles.includes(role)
@@ -4259,6 +4825,15 @@
                     label = h.toAssignee
                         ? `👤 assigned → <span style="color:#5fb3ff;font-weight:700">@${escHtml(h.toAssignee)}</span>`
                         : `👤 <span style="color:#888;font-weight:700">unassigned</span>`;
+                } else if (h.kind === 'reshape') {
+                    // v1.30: must precede the comment branch — reshape entries
+                    // also have fromStatus === toStatus.
+                    const nVerts = Array.isArray(h.polygon) ? h.polygon.length : '?';
+                    label = `✏ <span style="color:#c8cdd4;font-weight:700">reshaped</span> → ${nVerts}-point ${escHtml(h.toShape || 'polygon')}`;
+                } else if (h.kind === 'category') {
+                    label = (h.toCategory === 'unshielded')
+                        ? `🛡 marked as <span style="color:${CATEGORY_META.unshielded.color};font-weight:700">UNSHIELDED ROUTE</span>`
+                        : `🚩 converted to <span style="color:#ff8585;font-weight:700">normal issue</span>`;
                 } else if (h.kind === 'comment' || h.fromStatus === h.toStatus) {
                     label = `💬 commented`;
                     labelColor = '#a8c4ff';
@@ -4277,7 +4852,9 @@
             // v1.25: approvers can delete any issue (see deleteIssue). The
             // label flags WHY the button is available so the deleter knows
             // they're acting as an approver on someone else's issue.
-            const canModerate = isApprover();
+            // v1.31: per-issue (global approver, or category approver on
+            // issues of their category).
+            const canModerate = isApproverFor(liveIssue);
             // v1.26: a tombstoned issue shows Reinstate (approver-only) instead
             // of Delete, and suppresses all transition/comment/priority actions.
             const isDeleted = !!liveIssue.deleted;
@@ -4303,6 +4880,30 @@
             // for normal, non-deleted, Slack-eligible issues.
             const canResend = canModerate && !isDeleted
                 && liveIssue.createdBy !== 'local-only' && liveIssue.source !== 'validator';
+            // v1.30: reshape (redraw the polygon). Same gate as delete —
+            // creator, local-only, or approver — on live, non-validator
+            // issues (validator shapes are regenerated on each run).
+            const canReshape = (isCreator || isLocalOnly || canModerate) && !isDeleted
+                && liveIssue.source !== 'validator';
+            const reshapeBtnHtml = canReshape
+                ? `<button id="aim-issues-modal-reshape"
+                       title="Redraw this issue's shape — the current shape shows grey dashed while you draw the replacement"
+                       style="padding:7px 14px;background:#2a2f36;color:#c8cdd4;border:1px solid #9aa0a6;border-radius:4px;cursor:pointer;font:inherit;font-weight:700">
+                       ✏ Reshape
+                   </button>`
+                : '';
+            // v1.31: category convert — same gate as reshape. Toggles between
+            // normal Issue and Unshielded Route (one-click migration for
+            // sections that were flagged as plain issues pre-v1.31).
+            const canConvert = canReshape;
+            const isUnsh = isUnshielded(liveIssue);
+            const convertBtnHtml = canConvert
+                ? `<button id="aim-issues-modal-convert"
+                       title="${isUnsh ? 'Convert back to a normal issue' : 'Mark as an Unshielded Route — purple shield-✕ marker that stays visible when approved'}"
+                       style="padding:7px 14px;background:#241536;color:${CATEGORY_META.unshielded.color};border:1px solid ${CATEGORY_META.unshielded.color};border-radius:4px;cursor:pointer;font:inherit;font-weight:700">
+                       ${isUnsh ? '🚩 Mark as Issue' : '🛡 Mark Unshielded'}
+                   </button>`
+                : '';
             const resendBtnHtml = canResend
                 ? `<button id="aim-issues-modal-resend"
                        title="Re-post this issue's current status to its Slack thread (creates the thread if missing)"
@@ -4594,12 +5195,13 @@
                         ${confLabel}
                     </button>
                 </div>`;
-            } else if (canDelete || canReinstate || canResend) {
-                // deleteBtnHtml carries margin-right:auto, pushing resend to the
-                // right edge; if there's no delete button, resend still aligns
+            } else if (canDelete || canReinstate || canResend || canReshape || canConvert) {
+                // deleteBtnHtml carries margin-right:auto, pushing the
+                // non-destructive actions (convert/reshape/resend) to the
+                // right edge; if there's no delete button, they still align
                 // right via the spacer.
                 const spacer = deleteBtnHtml ? '' : '<span style="margin-right:auto"></span>';
-                footerHtml = `<div style="${footerBase}">${deleteBtnHtml}${reinstateBtnHtml}${spacer}${resendBtnHtml}</div>`;
+                footerHtml = `<div style="${footerBase}">${deleteBtnHtml}${reinstateBtnHtml}${spacer}${convertBtnHtml}${reshapeBtnHtml}${resendBtnHtml}</div>`;
             }
             card.innerHTML = `
                 <div id="aim-issues-modal-header"
@@ -4608,6 +5210,7 @@
                      title="Drag to move the popup">
                     <span style="color:#aaa;font-size:14px;font-weight:600">Issue ·</span>
                     <span style="color:${statusMeta.color};font-weight:700;font-size:14px">${statusMeta.text}</span>
+                    ${isUnshielded(liveIssue) ? `<span title="Unshielded Route — stays visible on the map when approved" style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:9px;background:#241536;color:${CATEGORY_META.unshielded.color};font-size:9px;font-weight:700;border:1px solid ${CATEGORY_META.unshielded.color}77;letter-spacing:0.3px">🛡✕ UNSHIELDED</span>` : ''}
                     ${headerPri}
                     ${roleChip}
                     ${slackBadge}
@@ -4965,6 +5568,25 @@
                     setTimeout(() => { try { render(); } catch (e) {} }, 1500);
                 };
             }
+            // v1.30: Reshape — closes the modal (the ghost + draw session
+            // take over the map; the modal would just cover it). Single
+            // click is safe: the reshape has its own Apply/Cancel confirm.
+            const reshapeBtn = card.querySelector('#aim-issues-modal-reshape');
+            if (reshapeBtn) {
+                reshapeBtn.onclick = () => {
+                    closeStatusModal();
+                    startReshape(liveIssue.id);
+                };
+            }
+            // v1.31: category convert toggle. Non-destructive + audited, so
+            // single click; re-render reflects the new chip/buttons.
+            const convertBtn = card.querySelector('#aim-issues-modal-convert');
+            if (convertBtn) {
+                convertBtn.onclick = () => {
+                    applyCategoryChange(liveIssue.id, isUnshielded(liveIssue) ? 'issue' : 'unshielded');
+                    render();
+                };
+            }
         }
 
         // v0.30: drag/resize for the modal. Closure-scoped so it sees `card`,
@@ -5117,6 +5739,8 @@
     function panelMatchesIssue(issue) {
         const st = issue.status || 'open';
         if (!panelFilters.has(st)) return false;
+        // v1.31: category filter (normal issues vs unshielded routes).
+        if (!panelCategoryFilters.has(issueCategory(issue))) return false;
         // v1.12: "Assigned to me" filter.
         if (panelAssignedToMe && (issue.assignee || null) !== (cachedUsername || null)) return false;
         // v0.29: priority filter — 'none' represents null/undefined.
@@ -5167,10 +5791,8 @@
             const s = i.status || 'open';
             if (countsByStatus[s] !== undefined) countsByStatus[s]++;
         });
-        // v1.00: pending count for the "Pending my review" shortcut
-        // (approvers only — gated below).
-        const pendingCount = (countsByStatus['pending_fix'] || 0)
-                           + (countsByStatus['pending_ignore'] || 0);
+        // v1.00's flat pendingCount replaced in v1.31 by myPendingCount
+        // (per-issue approval power) computed below with the shortcut chip.
 
         const safeSearch = escHtml(panelSearch);
         const syncDot = ({
@@ -5210,10 +5832,40 @@
             </button>`;
         }).filter(Boolean).join('');
 
+        // v1.31: category chips — 🚩 Issues vs 🛡✕ Unshielded Routes. Same
+        // M1 toggle / M2 solo semantics as the status chips.
+        const catCounts = { issue: 0, unshielded: 0 };
+        liveSiteIssues.forEach(i => { catCounts[issueCategory(i)]++; });
+        const catChipsHtml = [
+            { key: 'issue', label: '🚩 Issues', color: '#ff8585' },
+            { key: 'unshielded', label: '🛡✕ Unshielded', color: CATEGORY_META.unshielded.color },
+        ].map(c => {
+            const active = panelCategoryFilters.has(c.key);
+            return `<button class="aim-issues-panel-catchip" data-category="${c.key}"
+                title="${active ? 'Click to hide' : 'Click to show'} ${c.key === 'unshielded' ? 'unshielded routes' : 'normal issues'} — M2 to solo"
+                style="
+                    padding:5px 10px;border-radius:14px;font:inherit;font-size:11px;font-weight:700;
+                    border:1.5px solid ${c.color};
+                    background:${active ? c.color : 'transparent'};
+                    color:${active ? (c.key === 'unshielded' ? '#1a0d26' : '#2a0d0d') : c.color};
+                    cursor:pointer;opacity:${active ? 1 : 0.55};
+                    display:inline-flex;align-items:center;gap:6px">
+                <span>${c.label}</span>
+                <span style="background:rgba(0,0,0,0.25);padding:1px 5px;border-radius:8px;font-size:10px">${catCounts[c.key]}</span>
+            </button>`;
+        }).join('');
+
         // v1.00: "Pending my review" shortcut chip — approvers only.
         // M1 click: solo pending_fix + pending_ignore (hide everything else).
         // Always visible when role=approver, even if count is 0.
+        // v1.31: shown to ANYONE with approval power (global or category);
+        // the count only includes pendings THIS user can approve.
         const role = currentRole();
+        const canReviewSomething = isAnyApprover();
+        const myPendingCount = canReviewSomething
+            ? liveSiteIssues.filter(i =>
+                (i.status === 'pending_fix' || i.status === 'pending_ignore') && isApproverFor(i)).length
+            : 0;
         // v1.12: "Assigned to me" filter chip — everyone, when authed.
         const myAssignedCount = cachedUsername
             ? liveSiteIssues.filter(i => (i.assignee || null) === cachedUsername).length : 0;
@@ -5228,19 +5880,19 @@
                 <span>👤 Assigned to me</span>
                 <span style="background:rgba(0,0,0,0.25);padding:1px 5px;border-radius:8px;font-size:10px">${myAssignedCount}</span>
             </button>` : '';
-        const pendingShortcutHtml = (role === 'approver') ? `
+        const pendingShortcutHtml = canReviewSomething ? `
             <button id="aim-issues-panel-pending-shortcut"
                 title="Solo pending issues (Pending Fix + Pending Ignore) — for your review"
                 style="
                     padding:5px 10px;border-radius:14px;font:inherit;font-size:11px;font-weight:700;
                     border:1.5px dashed #5fff5f;
                     background:transparent;color:#5fff5f;
-                    cursor:pointer;opacity:${pendingCount > 0 ? 1 : 0.7};
+                    cursor:pointer;opacity:${myPendingCount > 0 ? 1 : 0.7};
                     display:inline-flex;align-items:center;gap:6px">
                 <span>⚡ Pending my review</span>
-                <span style="background:${pendingCount > 0 ? '#ffa726' : 'rgba(0,0,0,0.25)'};
-                             color:${pendingCount > 0 ? '#000' : '#bbb'};
-                             padding:1px 5px;border-radius:8px;font-size:10px">${pendingCount}</span>
+                <span style="background:${myPendingCount > 0 ? '#ffa726' : 'rgba(0,0,0,0.25)'};
+                             color:${myPendingCount > 0 ? '#000' : '#bbb'};
+                             padding:1px 5px;border-radius:8px;font-size:10px">${myPendingCount}</span>
             </button>` : '';
         // v1.26: approver-only "Deleted" toggle chip. Switches the row list to
         // tombstoned issues (struck-through) so an approver can review + ♻
@@ -5362,6 +6014,10 @@
                 const priChip = priM
                     ? `<div style="margin-top:3px"><span style="display:inline-block;padding:1px 5px;border-radius:6px;background:${priM.color};color:${priM.textColor};font-size:9px;font-weight:700">🎯 ${priM.text}</span></div>`
                     : '';
+                // v1.31: unshielded-route chip under the status pill
+                const catChip = isUnshielded(issue)
+                    ? `<div style="margin-top:3px"><span style="display:inline-block;padding:1px 5px;border-radius:6px;background:${CATEGORY_META.unshielded.color};color:#1a0d26;font-size:9px;font-weight:700">🛡✕ UNSHLD</span></div>`
+                    : '';
                 // v1.00: status badge needs dark text for bright backgrounds.
                 const darkText = (issue.status === 'pending_fix'
                     || issue.status === 'ready-for-review'
@@ -5379,6 +6035,9 @@
                             const toP = h.toPriority ? priorityMeta(h.toPriority).text : 'NONE';
                             return `@${by}: priority → ${toP}`;
                         }
+                        if (h.kind === 'assign') return h.toAssignee ? `@${by}: 👤 assigned → @${h.toAssignee}` : `@${by}: 👤 unassigned`;
+                        if (h.kind === 'reshape') return `@${by}: ✏ reshaped the area`;
+                        if (h.kind === 'category') return (h.toCategory === 'unshielded') ? `@${by}: 🛡 marked Unshielded Route` : `@${by}: converted to normal issue`;
                         if (h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus)) {
                             return `@${by}: 💬 ${(h.note || '').slice(0, 80)}`;
                         }
@@ -5408,6 +6067,7 @@
                         <span style="display:inline-block;padding:2px 6px;border-radius:8px;
                                      background:${meta.color};color:${darkText ? '#000' : '#fff'};
                                      font-size:10px;font-weight:700">${meta.text}</span>
+                        ${catChip}
                         ${priChip}
                         ${issue.deleted ? `<div style="font-size:9px;color:#ff8585;margin-top:2px;font-weight:700" title="Deleted by @${escHtml(issue.deletedBy || '?')}">🗑 DELETED</div>` : ''}
                         ${sessionHidden ? '<div style="font-size:9px;color:#5fff5f;margin-top:2px">HIDDEN</div>' : ''}
@@ -5455,6 +6115,7 @@
             <div style="padding:10px 14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;
                         border-bottom:1px solid rgba(255,255,255,0.06);background:#181b21">
                 ${chipsHtml}
+                ${catChipsHtml}
                 ${pendingShortcutHtml}
                 ${deletedChipHtml}
                 ${assignedToMeChipHtml}
@@ -5603,6 +6264,26 @@
                 } else {
                     panelFilters.add(st);
                 }
+                renderIssuesPanel();
+            };
+        });
+        // v1.31: category chips — same M1 toggle / M2 solo semantics
+        const ALL_CATEGORIES = ['issue', 'unshielded'];
+        panelEl.querySelectorAll('.aim-issues-panel-catchip').forEach(chip => {
+            chip.onclick = () => {
+                const c = chip.dataset.category;
+                if (panelCategoryFilters.has(c)) panelCategoryFilters.delete(c);
+                else panelCategoryFilters.add(c);
+                renderIssuesPanel();
+            };
+            chip.oncontextmenu = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const c = chip.dataset.category;
+                const isCurrentlySolo = (panelCategoryFilters.size === 1 && panelCategoryFilters.has(c));
+                panelCategoryFilters.clear();
+                if (isCurrentlySolo) ALL_CATEGORIES.forEach(x => panelCategoryFilters.add(x));
+                else panelCategoryFilters.add(c);
                 renderIssuesPanel();
             };
         });
