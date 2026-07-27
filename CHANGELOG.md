@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-27 — Import CSRF fix — AIM Site Diff v0.51 (dev/latest)
+
+First live run hit "no csrftoken cookie" in the map iframe. Token resolution is now a ladder — iframe document → page document → top window document → a priming `/sites/` GET and re-read — with a console trace of which step hit and, on total failure, a names-only dump of what cookies each frame can see.
+
 ## 2026-07-27 — 📥 Import shadow entities → new site — AIM Site Diff v0.50 (dev/latest)
 
 Copy a Site Setup onto a fresh (empty) site, picking what comes over — Phase 3a of the migration suite, CSM Full mode only:

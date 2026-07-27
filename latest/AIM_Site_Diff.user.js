@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Diff
 // @namespace    http://tampermonkey.net/
-// @version      0.50
+// @version      0.51
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @description  Site comparison suite: shadow-site ghost overlay (per-type show/color/opacity), swipe divider, significant-change diff (→ AIM Issues), and Phase 3a Import — create-only copy of shadow entities (assets etc.) onto the current site with dry-run preview + verify. Full migration executor later.
@@ -43,7 +43,7 @@
     }
 
     const SCRIPT_ID = 'aim-site-diff';
-    const SCRIPT_VERSION = '0.50';
+    const SCRIPT_VERSION = '0.51';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const PANE_NAME = 'aim-site-diff-pane';
     const HL_PANE_NAME = 'aim-site-diff-hl';
@@ -1731,9 +1731,56 @@
         catch (e) { console.warn(`${TAG} saveImportTypes:`, e); }
     }
 
-    function getCsrfToken() {
-        const m = (document.cookie || '').match(/(?:^|;\s*)csrftoken=([^;]+)/);
-        return m ? decodeURIComponent(m[1]) : null;
+    function readCsrfFrom(doc) {
+        try {
+            const m = ((doc && doc.cookie) || '').match(/(?:^|;\s*)csrftoken=([^;]+)/);
+            return m ? decodeURIComponent(m[1]) : null;
+        } catch (e) { return null; }
+    }
+
+    // v0.51: a single document.cookie read came back empty in the map
+    // iframe on a live run even though credentialed fetches worked, so
+    // resolve the token through a ladder: sandbox doc → page doc
+    // (unsafeWindow) → TOP document (same-origin; where the Asset
+    // Inspector's proven reads happen) → priming GET + re-read.
+    async function resolveCsrfToken() {
+        const attempts = [];
+        let t = readCsrfFrom(document);
+        attempts.push(`iframe doc: ${t ? 'HIT' : 'miss'}`);
+        if (!t && typeof unsafeWindow !== 'undefined' && unsafeWindow.document) {
+            t = readCsrfFrom(unsafeWindow.document);
+            attempts.push(`page doc: ${t ? 'HIT' : 'miss'}`);
+        }
+        if (!t) {
+            try { t = readCsrfFrom(window.top.document); attempts.push(`top doc: ${t ? 'HIT' : 'miss'}`); }
+            catch (e) { attempts.push('top doc: unreachable'); }
+        }
+        if (!t) {
+            // Django refreshes the csrftoken cookie on views that call
+            // get_token — hit a cheap authenticated GET, then re-read all
+            // three documents.
+            try {
+                await fetchWithTimeout('/sites/', { credentials: 'same-origin', headers: { 'Accept': 'application/json' } }, 15000);
+                t = readCsrfFrom(document)
+                    || (typeof unsafeWindow !== 'undefined' && unsafeWindow.document ? readCsrfFrom(unsafeWindow.document) : null);
+                if (!t) { try { t = readCsrfFrom(window.top.document); } catch (e) {} }
+                attempts.push(`after priming GET: ${t ? 'HIT' : 'miss'}`);
+            } catch (e) {
+                attempts.push('priming GET failed');
+                console.warn(`${TAG} csrf priming fetch failed:`, e);
+            }
+        }
+        console.log(`${TAG} csrf token resolution: ${attempts.join(' → ')}`);
+        if (!t) {
+            // Diagnostic — names only, never values
+            try {
+                const names = (document.cookie || '').split(';').map(c => c.split('=')[0].trim()).filter(Boolean);
+                let topNames = [];
+                try { topNames = (window.top.document.cookie || '').split(';').map(c => c.split('=')[0].trim()).filter(Boolean); } catch (e) {}
+                console.warn(`${TAG} csrftoken not found. Cookie names — iframe: [${names.join(', ')}] · top: [${topNames.join(', ')}]`);
+            } catch (e) {}
+        }
+        return t;
     }
 
     const impSiteCfgCache = {};
@@ -1923,8 +1970,13 @@
         impState.armed = false;
         impState.running = true;
         renderImportPlan();
-        const csrf = getCsrfToken();
-        if (!csrf) { setImpStatus('no csrftoken cookie — cannot authenticate', '#ff5252'); impState.running = false; return; }
+        setImpStatus('resolving CSRF token…');
+        const csrf = await resolveCsrfToken();
+        if (!csrf) {
+            setImpStatus('no csrftoken cookie visible from any frame — console shows which cookies each frame CAN see. Try a full page reload, then re-run.', '#ff5252');
+            impState.running = false;
+            return;
+        }
         const created = [];
         const errors = [];
         try {
