@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.196
+// @version      4.197
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -65,7 +65,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.196';
+    const SCRIPT_VERSION = '4.197';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -8171,6 +8171,379 @@
         return { ok: failed === 0, restored, failed };
     }
     window.__aim_ai_rollback = () => rollbackDirectApiRun();
+
+    // ============================================================
+    // v4.197 — Bulk → 🗑 Delete (FFZ / FP / NFZ mass delete)
+    // Recon 2026-07-27: DELETE /map_objects/<id>/ → 200 (cookie +
+    // X-CSRFToken). Rails:
+    //   · scope hard-limited to NFZ(4) / FP(15) / FFZ(16) — assets,
+    //     GMs, Base, Safe are NEVER deletable from here
+    //   · NFZs live INSIDE FFZs and can't outlive them — companions
+    //     auto-added, executor order NFZ → FP → FFZ
+    //   · mission-reference pre-flight — missions string-scanned for
+    //     doomed entity ids; hits get a red per-row warning (restored
+    //     entities get NEW ids, so a mission ref dangles even after a
+    //     revert)
+    //   · auto-backup BEFORE anything arms: fresh full dump
+    //     downloaded + window-stashed; slider disabled until it lands
+    //   · super-confirm: ack checkbox + slider dragged to 100% and
+    //     HELD 5 s with live countdown; release = instant cancel
+    //   · revert path: the backup re-uploads as a Site Diff shadow →
+    //     create-only 📥 Import restores; optional in-the-moment
+    //     checkbox arms that shadow automatically over
+    //     AIM_SITEDIFF_CTRL (Site Diff v0.61+)
+    // ============================================================
+    const DELETABLE_TYPES = { 4: 'NFZ', 15: 'FP', 16: 'FFZ' };
+    const DELETE_ORDER = [4, 15, 16];
+    const DELETE_GAP_MS = 120;
+    const BULKDEL_MODAL_ID = 'aim-ai-bulkdel-modal';
+
+    function bulkDelResolveSelection(siteID) {
+        const bucket = mapObjectsBySite[siteID];
+        const all = (bucket && Array.isArray(bucket.entities)) ? bucket.entities : [];
+        const ids = new Set();
+        sumPanelState.selectedIds.forEach(k => ids.add(String(k).split(':')[0]));
+        const deletable = [], excluded = [];
+        all.forEach(e => {
+            if (!e || !ids.has(String(e.id))) return;
+            if (DELETABLE_TYPES[e.type]) deletable.push({ ent: e, required: null, missionRefs: [] });
+            else excluded.push(e);
+        });
+        return { siteID, all, deletable, excluded, missionScan: null, abort: false, running: false };
+    }
+
+    // NFZs inside a selected FFZ are REQUIRED companions — the FFZ can't
+    // be removed while they exist (and they can't exist without it).
+    function bulkDelAddNfzCompanions(plan) {
+        const have = new Set(plan.deletable.map(r => String(r.ent.id)));
+        plan.deletable.filter(r => r.ent.type === 16).forEach(r => {
+            const poly = Array.isArray(r.ent.coords) ? r.ent.coords : [];
+            if (poly.length < 3) return;
+            plan.all.forEach(n => {
+                if (!n || n.type !== 4 || have.has(String(n.id))) return;
+                const cs = Array.isArray(n.coords) ? n.coords : [];
+                if (cs.some(c => c && pointInPolygon(c.lat, c.lng, poly))) {
+                    have.add(String(n.id));
+                    plan.deletable.push({ ent: n, required: `inside FFZ "${r.ent.name}" — NFZs can't outlive their FFZ`, missionRefs: [] });
+                }
+            });
+        });
+    }
+
+    async function bulkDelScanMissionRefs(plan) {
+        try {
+            const r = await fetch(`/available_app/?site_id=${encodeURIComponent(plan.siteID)}&type=1`, {
+                credentials: 'same-origin', headers: { 'Accept': 'application/json' },
+            });
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const data = await r.json();
+            const missions = Array.isArray(data) ? data : (Array.isArray(data.results) ? data.results : []);
+            plan.missionScan = { ok: true, count: missions.length };
+            missions.forEach(m => {
+                let s = '';
+                try { s = JSON.stringify(m); } catch (e) { return; }
+                plan.deletable.forEach(row => {
+                    if (new RegExp(`\\b${row.ent.id}\\b`).test(s)) {
+                        row.missionRefs.push(String(m.name || m.id || 'unnamed mission'));
+                    }
+                });
+            });
+        } catch (e) {
+            plan.missionScan = { ok: false, error: String(e && e.message || e) };
+            console.warn(`${TAG} 🗑 mission-reference scan failed:`, e);
+        }
+    }
+
+    function bulkDelDownloadJson(name, data) {
+        const json = JSON.stringify(data, null, 2);
+        const blob = new Blob([json], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const topDoc = (window.top && window.top.document) ? window.top.document : document;
+        const a = topDoc.createElement('a');
+        a.href = url;
+        a.download = name;
+        (topDoc.body || document.body).appendChild(a);
+        a.click();
+        setTimeout(() => { try { a.remove(); URL.revokeObjectURL(url); } catch (e) {} }, 1500);
+    }
+
+    async function bulkDelExecute(plan, ui) {
+        if (liteBlockedWrite('bulk delete')) return;
+        const csrf = getCsrfToken();
+        if (!csrf) {
+            ui.status('no CSRF token — make one native save/edit anywhere in Percepto (token auto-captures), then retry', '#ff5555');
+            return;
+        }
+        plan.running = true;
+        ui.runStarted();
+        const ordered = [];
+        DELETE_ORDER.forEach(t => plan.deletable.forEach(r => { if (r.ent.type === t) ordered.push(r); }));
+        const results = { deleted: [], failed: [], aborted: false, verifyProblems: [] };
+        for (let i = 0; i < ordered.length; i++) {
+            if (plan.abort) { results.aborted = true; break; }
+            const r = ordered[i];
+            const label = `${DELETABLE_TYPES[r.ent.type]} "${r.ent.name || r.ent.id}"`;
+            ui.status(`deleting ${i + 1}/${ordered.length} — ${label}…`);
+            try {
+                const resp = await fetch(`https://percepto.app/map_objects/${encodeURIComponent(r.ent.id)}/`, {
+                    method: 'DELETE', credentials: 'same-origin',
+                    headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' },
+                });
+                if (resp.status === 403) {
+                    try { ((typeof unsafeWindow !== 'undefined') ? unsafeWindow : window).localStorage.removeItem(CSRF_LS_KEY); } catch (e2) {}
+                    results.failed.push({ id: r.ent.id, name: r.ent.name, reason: 'server 403 — CSRF rejected; banked token cleared. Make one native edit and re-run.' });
+                    results.aborted = true;
+                    break;   // stale token poisons every remaining DELETE — stop now
+                }
+                if (!resp.ok && resp.status !== 404) {
+                    const t = await resp.text();
+                    throw new Error(`server ${resp.status} — ${(t || '').slice(0, 150)}`);
+                }
+                results.deleted.push({ id: r.ent.id, name: r.ent.name, type: r.ent.type, note: resp.status === 404 ? 'was already gone (404)' : '' });
+            } catch (e) {
+                console.warn(`${TAG} 🗑 delete failed for ${label}:`, e);
+                results.failed.push({ id: r.ent.id, name: r.ent.name, reason: String(e && e.message || e) });
+            }
+            await sleep(DELETE_GAP_MS);
+        }
+        // Verify against a fresh fetch — every deleted id must be GONE
+        ui.status('verifying against a fresh fetch…');
+        try {
+            delete mapObjectsBySite[plan.siteID];
+            await fetchMapObjects(plan.siteID, true);
+            const fresh = (mapObjectsBySite[plan.siteID] && mapObjectsBySite[plan.siteID].entities) || [];
+            results.deleted.forEach(d => {
+                if (fresh.some(e => e && e.id === d.id)) results.verifyProblems.push(`"${d.name}" (id ${d.id}) still present after delete`);
+            });
+        } catch (e) {
+            results.verifyProblems.push('verify fetch failed — check the site manually');
+        }
+        sumPanelState.selectedIds.clear();
+        try { if (document.getElementById(SUM_PANEL_ID)) renderSummaryPanel(plan.siteID); } catch (e) {}
+        // Optional in-the-moment revert-shadow arm (Site Diff v0.61+)
+        let shadowArmed = false;
+        if (ui.armShadow() && window.__aim_ai_preDeleteBackup) {
+            try {
+                const ch = new BroadcastChannel('AIM_SITEDIFF_CTRL');
+                ch.postMessage({
+                    type: 'SET_FILE_SHADOW',
+                    siteId: String(plan.siteID),
+                    name: plan.backupName,
+                    entities: window.__aim_ai_preDeleteBackup.entities,
+                });
+                ch.close();
+                shadowArmed = true;
+            } catch (e) { console.warn(`${TAG} 🗑 revert-shadow arm failed:`, e); }
+        }
+        const report = {
+            ranAt: new Date().toISOString(), siteID: plan.siteID, backupFile: plan.backupName,
+            deleted: results.deleted, failed: results.failed, aborted: results.aborted,
+            verifyProblems: results.verifyProblems, revertShadowArmed: shadowArmed,
+        };
+        window.__aim_ai_lastBulkDelete = report;
+        console.log(`${TAG} 🗑 bulk delete done: ${results.deleted.length} deleted, ${results.failed.length} failed${results.aborted ? ' (ABORTED)' : ''}, ${results.verifyProblems.length} verify problems`, report);
+        plan.running = false;
+        ui.finished(report);
+    }
+
+    function openBulkDeleteModal() {
+        if (liteBlockedWrite('bulk delete')) return;
+        const siteID = getCurrentSiteID();
+        if (!siteID) { showToast('No site loaded', 'rgba(255,85,85,0.7)'); return; }
+        if (!sumPanelState.selectedIds.size) {
+            showToast('Select rows first — ☑ the FFZs / FPs / NFZs to delete', 'rgba(255,85,85,0.7)');
+            return;
+        }
+        const old = document.getElementById(BULKDEL_MODAL_ID);
+        if (old) old.remove();
+
+        const modal = document.createElement('div');
+        modal.id = BULKDEL_MODAL_ID;
+        modal.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2147480060;'
+            + 'width:600px;max-width:94vw;max-height:84vh;overflow-y:auto;background:#1a1214;color:#e6e6e6;'
+            + 'border:2px solid #ff5555;border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,0.75);'
+            + 'font:12px/1.5 monospace;padding:0;';
+        modal.innerHTML = ''
+            + '<div style="padding:9px 14px;border-bottom:1px solid #552;color:#ff5555;font-weight:bold;font-size:14px;">'
+            + '🗑 BULK DELETE — this removes entities from the LIVE site'
+            + '<span id="aim-bd-close" style="float:right;cursor:pointer;color:#888">✕</span></div>'
+            + '<div id="aim-bd-body" style="padding:10px 14px;"><span style="color:#aaa">Fetching fresh site data…</span></div>';
+        document.body.appendChild(modal);
+        modal.querySelector('#aim-bd-close').addEventListener('click', () => {
+            if (planRef && planRef.running) { showToast('Run in progress — use ✋ Abort first', 'rgba(255,85,85,0.7)'); return; }
+            modal.remove();
+        });
+
+        let planRef = null;
+        const body = () => modal.querySelector('#aim-bd-body');
+
+        (async () => {
+            try {
+                // Fresh fetch FIRST — the plan and the backup must both
+                // reflect the server's current state, not a stale cache.
+                delete mapObjectsBySite[siteID];
+                await fetchMapObjects(siteID, true);
+                const plan = bulkDelResolveSelection(siteID);
+                planRef = plan;
+                if (!plan.deletable.length) {
+                    body().innerHTML = '<span style="color:#ffa030">Nothing deletable in the selection — only FFZs, FPs and NFZs can be deleted here'
+                        + (plan.excluded.length ? ` (${plan.excluded.length} selected row(s) are other types)` : '') + '.</span>';
+                    return;
+                }
+                bulkDelAddNfzCompanions(plan);
+                body().innerHTML = '<span style="color:#aaa">Scanning missions for references…</span>';
+                await bulkDelScanMissionRefs(plan);
+                // Auto-backup BEFORE anything arms
+                body().innerHTML = '<span style="color:#aaa">Downloading backup…</span>';
+                const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+                plan.backupName = `aim-predelete-site${siteID}-${stamp}.json`;
+                const snap = { siteID, when: new Date().toISOString(), reason: 'pre-bulk-delete', count: plan.all.length, entities: plan.all };
+                window.__aim_ai_preDeleteBackup = snap;
+                bulkDelDownloadJson(plan.backupName, snap);
+                renderBulkDeletePlan(plan);
+            } catch (e) {
+                console.warn(`${TAG} 🗑 modal prepare failed:`, e);
+                body().innerHTML = `<span style="color:#ff5555">Prepare failed — ${escapeHtmlAI(String(e && e.message || e))}. Nothing was deleted.</span>`;
+            }
+        })();
+
+        function escapeHtmlAI(s) {
+            return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        function renderBulkDeletePlan(plan) {
+            const counts = {};
+            plan.deletable.forEach(r => { counts[r.ent.type] = (counts[r.ent.type] || 0) + 1; });
+            const countLine = DELETE_ORDER.filter(t => counts[t])
+                .map(t => `${counts[t]} ${DELETABLE_TYPES[t]}${counts[t] > 1 ? 's' : ''}`).join(' + ');
+            const refCount = plan.deletable.filter(r => r.missionRefs.length).length;
+            const rows = plan.deletable.map(r => {
+                const chip = r.ent.type === 16 ? '#5fff5f' : (r.ent.type === 15 ? '#7adfe6' : '#ff5252');
+                return `<div style="padding:2px 6px;border-bottom:1px solid #2a1a1a;">`
+                    + `<span style="color:${chip};font-weight:bold">${DELETABLE_TYPES[r.ent.type]}</span> ${escapeHtmlAI(String(r.ent.name || r.ent.id))}`
+                    + (r.required ? `<br><span style="color:#ffa030">↳ auto-added: ${escapeHtmlAI(r.required)}</span>` : '')
+                    + (r.missionRefs.length ? `<br><span style="color:#ff5555;font-weight:bold">⚠ referenced by mission(s): ${escapeHtmlAI(r.missionRefs.join(', '))} — a revert creates NEW ids, mission refs will NOT rebind</span>` : '')
+                    + '</div>';
+            }).join('');
+            const scanNote = plan.missionScan && plan.missionScan.ok
+                ? `mission scan: ${plan.missionScan.count} mission(s) checked${refCount ? `, <span style="color:#ff5555">${refCount} entity(ies) referenced</span>` : ', no references ✓'}`
+                : '<span style="color:#ffa030">⚠ mission scan FAILED — references unknown, proceed with extra caution</span>';
+            body().innerHTML = ''
+                + `<div style="margin-bottom:8px;">Site <b>${escapeHtmlAI(String(plan.siteID))}</b> — deleting <b style="color:#ff5555">${countLine}</b>`
+                + (plan.excluded.length ? ` · <span style="color:#888">${plan.excluded.length} selected row(s) excluded (not FFZ/FP/NFZ)</span>` : '')
+                + `<br><span style="color:#888">${scanNote}</span>`
+                + `<br><span style="color:#5fff5f">💾 backup saved: ${escapeHtmlAI(plan.backupName)}</span> <span style="color:#888">— re-upload it as this site's shadow → 📥 Import to restore</span></div>`
+                + `<div style="max-height:30vh;overflow-y:auto;border:1px solid #2a1a1a;margin-bottom:10px;">${rows}</div>`
+                + '<label style="display:flex;gap:8px;align-items:center;margin-bottom:6px;cursor:pointer;">'
+                + `<input type="checkbox" id="aim-bd-ack"> I understand these ${plan.deletable.length} entities will be DELETED from this site</label>`
+                + '<label style="display:flex;gap:8px;align-items:center;margin-bottom:10px;cursor:pointer;">'
+                + '<input type="checkbox" id="aim-bd-shadow" checked> Arm the revert shadow in Site Diff after the delete (instant 📥 Import restore)</label>'
+                + '<div id="aim-bd-slider-wrap" style="opacity:0.45;pointer-events:none;">'
+                + '<div style="color:#ff5555;font-weight:bold;margin-bottom:4px;">Slide to the end and HOLD for 5 seconds:</div>'
+                + '<div id="aim-bd-track" style="position:relative;height:38px;background:linear-gradient(90deg,#3a1518,#7a1f24);border:1px solid #ff5555;border-radius:19px;user-select:none;touch-action:none;">'
+                + '<div id="aim-bd-knob" style="position:absolute;top:2px;left:2px;width:34px;height:34px;background:#ff5555;border-radius:50%;cursor:grab;display:flex;align-items:center;justify-content:center;font-size:16px;">🗑</div>'
+                + '<div id="aim-bd-track-label" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#ffb3b3;pointer-events:none;">slide ➜</div>'
+                + '</div></div>'
+                + '<div id="aim-bd-countdown" style="display:none;margin-top:10px;padding:10px;background:#7a1f24;border-radius:6px;color:#fff;font-weight:bold;font-size:15px;text-align:center;"></div>'
+                + '<div id="aim-bd-status" style="margin-top:8px;min-height:18px;color:#aaa;"></div>'
+                + '<div id="aim-bd-actions" style="margin-top:8px;display:flex;gap:14px;"></div>';
+
+            const ack = body().querySelector('#aim-bd-ack');
+            const sliderWrap = body().querySelector('#aim-bd-slider-wrap');
+            ack.addEventListener('change', () => {
+                sliderWrap.style.opacity = ack.checked ? '1' : '0.45';
+                sliderWrap.style.pointerEvents = ack.checked ? 'auto' : 'none';
+            });
+
+            const track = body().querySelector('#aim-bd-track');
+            const knob = body().querySelector('#aim-bd-knob');
+            const countdownEl = body().querySelector('#aim-bd-countdown');
+            const statusEl = body().querySelector('#aim-bd-status');
+            const actionsEl = body().querySelector('#aim-bd-actions');
+            let holdTimer = null, holdLeft = 0, dragging = false, fired = false;
+
+            const setKnob = (px) => {
+                const max = track.clientWidth - knob.offsetWidth - 4;
+                const x = Math.max(2, Math.min(max + 2, px));
+                knob.style.left = x + 'px';
+                return (x - 2) / max;
+            };
+            const cancelHold = () => {
+                if (holdTimer) { clearInterval(holdTimer); holdTimer = null; }
+                countdownEl.style.display = 'none';
+            };
+            const resetKnob = () => { cancelHold(); knob.style.left = '2px'; };
+
+            knob.addEventListener('pointerdown', (ev) => {
+                if (fired || (planRef && planRef.running)) return;
+                dragging = true;
+                knob.setPointerCapture(ev.pointerId);
+                ev.preventDefault();
+            });
+            knob.addEventListener('pointermove', (ev) => {
+                if (!dragging || fired) return;
+                const r = track.getBoundingClientRect();
+                const frac = setKnob(ev.clientX - r.left - knob.offsetWidth / 2);
+                if (frac >= 0.95) {
+                    if (!holdTimer) {
+                        holdLeft = 5;
+                        countdownEl.style.display = 'block';
+                        countdownEl.textContent = `⚠ DELETING ${plan.deletable.length} ENTITIES FROM SITE ${plan.siteID} IN ${holdLeft}s — RELEASE TO CANCEL`;
+                        holdTimer = setInterval(() => {
+                            holdLeft--;
+                            if (holdLeft <= 0) {
+                                cancelHold();
+                                fired = true;
+                                dragging = false;
+                                bulkDelExecute(plan, ui);
+                                return;
+                            }
+                            countdownEl.textContent = `⚠ DELETING ${plan.deletable.length} ENTITIES FROM SITE ${plan.siteID} IN ${holdLeft}s — RELEASE TO CANCEL`;
+                        }, 1000);
+                    }
+                } else {
+                    cancelHold();
+                }
+            });
+            const release = () => {
+                if (fired) return;
+                dragging = false;
+                resetKnob();
+            };
+            knob.addEventListener('pointerup', release);
+            knob.addEventListener('pointercancel', release);
+
+            const ui = {
+                status: (msg, color) => { statusEl.innerHTML = `<span style="color:${color || '#aaa'}">${msg}</span>`; },
+                armShadow: () => !!body().querySelector('#aim-bd-shadow') && body().querySelector('#aim-bd-shadow').checked,
+                runStarted: () => {
+                    sliderWrap.style.display = 'none';
+                    ack.disabled = true;
+                    actionsEl.innerHTML = '<span id="aim-bd-abort" style="cursor:pointer;color:#ffa030;font-weight:bold">✋ Abort (finishes current delete, keeps the rest)</span>';
+                    actionsEl.querySelector('#aim-bd-abort').addEventListener('click', () => {
+                        plan.abort = true;
+                        ui.status('aborting after the in-flight delete…', '#ffa030');
+                    });
+                },
+                finished: (report) => {
+                    const ok = !report.failed.length && !report.verifyProblems.length && !report.aborted;
+                    const col = ok ? '#5fff5f' : (report.deleted.length ? '#ffa030' : '#ff5555');
+                    ui.status(
+                        `Done — <b>${report.deleted.length} deleted</b>`
+                        + (report.failed.length ? `, <span style="color:#ff5555">${report.failed.length} FAILED</span>` : '')
+                        + (report.aborted ? ', <span style="color:#ffa030">ABORTED early</span>' : '')
+                        + (report.verifyProblems.length ? `, <span style="color:#ff5555">${report.verifyProblems.length} verify problem(s)</span>` : ', all verified gone ✓')
+                        + (report.revertShadowArmed ? ' · revert shadow armed — open 📥 Import to restore' : ''), col);
+                    actionsEl.innerHTML = ''
+                        + '<span id="aim-bd-log" style="cursor:pointer;color:#7adfe6">📄 Download run log</span>'
+                        + `<span style="color:#888">restore: upload ${escapeHtmlAI(plan.backupName)} as this site's shadow → 📥 Import</span>`;
+                    actionsEl.querySelector('#aim-bd-log').addEventListener('click', () => {
+                        bulkDelDownloadJson(`aim-bulkdelete-log-site${plan.siteID}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.json`, report);
+                    });
+                },
+            };
+        }
+    }
 
     // ---- Overlap self-check geometry (rail 3) ----
     // lat/lng treated as planar x/y — fine at site scale. Ray-cast PIP.
@@ -16360,6 +16733,18 @@
         validBtn.style.cssText = bulkBtnStyle;
         attachBulkPopover(validBtn, (anchor, onClose) => buildBulkValidatePopover(anchor, onClose));
         if (!LITE) optsRow.appendChild(validBtn);       // Bulk → Valid — write, CSM-only
+
+        // --- v4.197: Bulk → 🗑 Delete button ---
+        // Mass-delete selected FFZs / FPs / NFZs behind the super-confirm
+        // modal (auto-backup + ack + 5s hold-slider). See the bulk-delete
+        // section near the direct-API rails for the full design notes.
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.textContent = 'Bulk → 🗑 Delete';
+        delBtn.title = 'Mass-delete selected FFZs / FPs / NFZs — auto-backup + triple confirmation (5s hold slider)';
+        delBtn.style.cssText = 'background:transparent;color:#ff5555;border:1px solid rgba(255,85,85,0.5);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+        delBtn.onclick = (ev) => { ev.stopPropagation(); openBulkDeleteModal(); };
+        if (!LITE) optsRow.appendChild(delBtn);         // Bulk → Delete — write, CSM-only
 
         // Popover: pick a target (✓ Valid / ✗ Invalid), scope, and entity-
         // type filter, preview the count, then queue one validated edit per

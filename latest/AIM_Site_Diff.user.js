@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Diff
 // @namespace    http://tampermonkey.net/
-// @version      0.60
+// @version      0.61
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @description  Site comparison suite: shadow-site ghost overlay (per-type show/color/opacity), swipe divider, significant-change diff (→ AIM Issues), and Phase 3a Import — create-only copy of shadow entities (assets etc.) onto the current site with dry-run preview + verify. Full migration executor later.
@@ -115,7 +115,7 @@
     }
 
     const SCRIPT_ID = 'aim-site-diff';
-    const SCRIPT_VERSION = '0.60';
+    const SCRIPT_VERSION = '0.61';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const PANE_NAME = 'aim-site-diff-pane';
     const HL_PANE_NAME = 'aim-site-diff-hl';
@@ -2694,9 +2694,36 @@
     }
 
     // ------------------------------------------------------------------
+    // Sibling-script control channel (v0.61) — the Asset Inspector's
+    // Bulk → 🗑 Delete arms the revert path here: it hands us its
+    // pre-delete backup, we bank it as this site's file-shadow so
+    // 📥 Import can restore in two clicks. GM storage is per-script,
+    // hence the BroadcastChannel handoff.
+    // ------------------------------------------------------------------
+    function setupSiblingCtrl() {
+        try {
+            const ch = new BroadcastChannel('AIM_SITEDIFF_CTRL');
+            ch.onmessage = (ev) => {
+                const m = ev.data || {};
+                if (m.type !== 'SET_FILE_SHADOW' || !m.siteId || !Array.isArray(m.entities) || !m.entities.length) return;
+                const sid = String(m.siteId);
+                const name = String(m.name || 'predelete-backup.json');
+                try {
+                    storeShadowFile(sid, name, m.entities);
+                    pairs[sid] = { kind: 'file', name };
+                    savePairs();
+                    console.log(`${TAG} revert shadow armed for site ${sid} — "${name}" (${m.entities.length} entities) via AIM_SITEDIFF_CTRL`);
+                    if (sid === String(siteID)) renderShadow(false);
+                } catch (e) { console.warn(`${TAG} SET_FILE_SHADOW failed:`, e); }
+            };
+        } catch (e) { console.warn(`${TAG} sibling ctrl channel unavailable:`, e); }
+    }
+
+    // ------------------------------------------------------------------
     // Init
     // ------------------------------------------------------------------
     setupControlPanel();
+    setupSiblingCtrl();
     registerWithControlPanel();
     if (!patchLeafletMap()) {
         let patchTries = 0;

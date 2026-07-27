@@ -6,6 +6,20 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-27 — 🗑 Bulk Delete with super-confirm — Asset Inspector v4.197 + Site Diff v0.61 (dev/latest)
+
+Mass-delete FFZs / FPs / NFZs from a site — built for the "accidentally imported/added a pile of entities" case, with maximum guardrails:
+
+- **SUM panel → Bulk → 🗑 Delete** (red button, CSM Full only): operates on the checked rows. Hard scope limit — only NFZ/FP/FFZ are deletable; assets and everything else are refused outright.
+- **NFZ dependency handling**: NFZs can't outlive their FFZ, so NFZs inside a selected FFZ are auto-added as required companions, and deletion runs NFZ → FP → FFZ.
+- **Mission-reference pre-flight**: the site's missions are scanned for the doomed entity ids; any hit gets a loud red warning (restored entities get new ids — mission refs won't rebind after a revert).
+- **Auto-backup gates everything**: a fresh full site dump downloads before the confirmation even unlocks; it's also stashed in memory.
+- **Triple confirmation**: preview list → acknowledge checkbox → drag a slider to the end and **hold 5 seconds** through a live red countdown; release at any point cancels instantly.
+- **Execution rails**: sequential `DELETE /map_objects/<id>/` with ✋ Abort, 403-CSRF instant stop, per-id fresh-fetch verify that everything is actually gone, downloadable run log.
+- **Revert in two clicks**: optional in-the-moment checkbox (default on) arms the backup as the site's Site Diff shadow over the new `AIM_SITEDIFF_CTRL` channel (Site Diff v0.61) — restoring is then just 📥 Import. The backup file also re-uploads manually any time.
+
+Endpoint recon'd live: `DELETE /map_objects/<id>/` → 200.
+
 ## 2026-07-27 — ⚡ Import power-line KMLs too — AIM Site Diff v0.60 (dev/latest)
 
 The 📥 Import panel gets a **⚡ Power lines** checkbox: copies every `<sourceID>-*` file (distro + trans KMLs) in the private data repo to `<targetID>-*` via the GitHub Contents API, so the new site's shielding outlines light up without manual repo work.
