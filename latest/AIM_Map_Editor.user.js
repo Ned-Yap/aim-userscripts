@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.55
+// @version      0.56
 // @description  Edit Percepto map entities (flight paths + FFZs) from the map. AGL VIEW (Shift+G): on Mountain-terrain (MSL) sites, an overlay over the native editor shows + edits altitudes as height-above-ground (AGL/Δ/MSL columns, color-coded, live-linked) — backend stays MSL; works for flight-path segments AND FFZ bands; also augments Percepto's hover ALT tooltip with AGL. Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH) — and on ANY other mid-path vertex it SEVERS the path there; then either delete the unwanted piece and Save, or use the red chip's "💾 Save as N separate paths" to keep BOTH pieces as independent flight paths (direct POST /map_objects/: largest piece keeps the original id+name, others created as <name>_splitN; JSON backup + create-before-trim ordering + fresh-fetch verify + mandatory refresh overlay; a validated path's pieces stay validated). After the refresh an AUTO-VERIFY re-audits the saved paths against a fresh server fetch and toasts the verdict (structure, counts, shape parity, validated flag). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -76,7 +76,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.55';
+    const SCRIPT_VERSION = '0.56';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -2344,7 +2344,29 @@
     // ==================================================================
     const SPLIT_MODAL_ID = 'aim-fpe-split-modal';
     let splitBusy = false;
-    function csrfToken() { const m = (document.cookie || '').match(/(?:^|;\s*)csrftoken=([^;]+)/); return m ? decodeURIComponent(m[1]) : null; }
+    // v0.56: percepto made session+csrftoken cookies HttpOnly (PER-32471)
+    // — cookie read now misses for everyone. Primary source = the shared
+    // localStorage bank ('aim-sd-csrf') that the Asset Inspector / Site
+    // Diff sniffers fill from Percepto's own X-CSRFToken headers (both
+    // scripts are always installed alongside this one). Cookie + DOM
+    // reads kept as fallbacks.
+    function csrfToken() {
+        try {
+            const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+            const raw = w.localStorage.getItem('aim-sd-csrf');
+            if (raw) {
+                const s = JSON.parse(raw);
+                if (s && typeof s.t === 'string' && s.t.length >= 16) return s.t;
+            }
+        } catch (e) {}
+        const m = (document.cookie || '').match(/(?:^|;\s*)csrftoken=([^;]+)/);
+        if (m) return decodeURIComponent(m[1]);
+        try {
+            const inp = document.querySelector('input[name="csrfmiddlewaretoken"]');
+            if (inp && inp.value) return inp.value;
+        } catch (e) {}
+        return null;
+    }
     function topSiteId() { try { const m = ((window.top.location.hash || '')).match(/#\/site\/(\d+)\//); return m ? Number(m[1]) : null; } catch (e) { return null; } }
     async function fetchSiteCfg(siteId) {
         try { const r = await fetch(`https://percepto.app/sites/${siteId}/`, { credentials: 'include' }); return r.ok ? await r.json() : null; }
@@ -2489,7 +2511,7 @@
         } catch (e) { warn('backup download failed (continuing — in-memory backup kept)', e); }
         unsafeWindow.__aim_fpe_split_backup = clone(st);
         const token = csrfToken();
-        if (!token) throw new Error('no csrftoken cookie — cannot authenticate');
+        if (!token) throw new Error('no CSRF token — make one native save/edit anywhere in Percepto (token auto-captures), then retry');
         const cfg = await fetchSiteCfg(plan.siteId);
         // read-shape → write-shape (same mapping as AIM_FP_Surgery_Cut / Asset Inspector buildWriteBody)
         const mkBody = (arcs) => {

@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-27 — 🚨 PROD HOTFIX: Asset Inspector v4.164.5 — CSRF token capture (Percepto HttpOnly change)
+
+Percepto's weekly release (PER-32471) added the HttpOnly flag to the session + CSRF cookies. That's good security — but it silently broke **every AIM direct-API write** (bulk AGL/Delta/Min/Max, bulk Valid, ⊕ Generate, ✦ Advanced Draw commit, airspace 📍 marker creation), which authenticated by reading the CSRF cookie that JavaScript can no longer see.
+
+**Fix:** the script now captures the token from Percepto's *own* requests — a passive sniffer banks the `X-CSRFToken` header the app itself sends, with cookie/DOM/page-scrape fallbacks. **If a bulk tool says "no CSRF token": make one small native save/edit anywhere in Percepto (the token auto-captures), then retry — once per login session at most.**
+
+Same fix in dev/latest: Asset Inspector v4.196, Map Editor v0.56.
+
 ## 2026-07-27 — Import CSRF: sniff the app's own token — AIM Site Diff v0.52 (dev/latest)
 
 v0.51's cookie-names diagnostic proved the cause: Percepto's auth cookies (session + csrftoken) are **HttpOnly** in this session — sent on requests but invisible to JavaScript in every frame, so no cookie read can ever work. v0.52 captures the token the way the app itself must carry it:

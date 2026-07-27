@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.195
+// @version      4.196
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -65,7 +65,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.195';
+    const SCRIPT_VERSION = '4.196';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -3583,7 +3583,7 @@
         if (liteBlockedWrite('create GMs')) return { created: 0, failed: 0, errors: [] };
         const out = { created: 0, failed: 0, errors: [] };
         const csrf = getCsrfToken();
-        if (!csrf) { out.errors.push('no csrftoken cookie — cannot authenticate'); return out; }
+        if (!csrf) { out.errors.push('no CSRF token — make one native save/edit anywhere in Percepto (token auto-captures), then retry'); return out; }
         let siteCfg = null;
         try { siteCfg = await fetchSiteConfig(sid); } catch (e) { console.warn(`${TAG} site cfg fetch failed:`, e); }
         // Clone an existing GM's write body as the template when one exists
@@ -7615,10 +7615,123 @@
         return j;
     }
 
-    function getCsrfToken() {
-        const m = (document.cookie || '').match(/(?:^|;\s*)csrftoken=([^;]+)/);
-        return m ? decodeURIComponent(m[1]) : null;
+    // ============================================================
+    // v4.196 (mirrors prod hotfix v4.164.5) — Percepto's weekly release (PER-32471,
+    // 2026-07-27) added HttpOnly to the session + csrftoken cookies,
+    // so document.cookie can no longer see them and EVERY direct-API
+    // write lost its token. Primary source now = a passive sniffer
+    // that captures the X-CSRFToken header from Percepto's OWN
+    // fetch/XHR requests and banks it in localStorage (key shared
+    // with the other AIM scripts; a banked token stays valid until
+    // login rotates the CSRF secret). getCsrfToken() stays
+    // synchronous: banked → cookie (pre-HttpOnly sessions) → DOM
+    // form token. An async rendered-page scrape primes the bank when
+    // everything else misses. First direct-API write in a fresh
+    // session may need ONE native save/edit so the sniffer can
+    // capture — after that it's transparent.
+    // ============================================================
+    const CSRF_LS_KEY = 'aim-sd-csrf';   // shared bank — same key as AIM Site Diff
+
+    function csrfRealWin() { return (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window; }
+
+    function stashSniffedCsrf(token, from) {
+        if (!token || typeof token !== 'string' || token.length < 16) return;
+        try {
+            const w = csrfRealWin();
+            const prev = w.localStorage.getItem(CSRF_LS_KEY);
+            w.localStorage.setItem(CSRF_LS_KEY, JSON.stringify({ t: token, at: Date.now(), from }));
+            if (!prev || JSON.parse(prev).t !== token) console.log(`${TAG} banked CSRF token from ${from}`);
+        } catch (e) {}
     }
+
+    function readSniffedCsrf() {
+        try {
+            const raw = csrfRealWin().localStorage.getItem(CSRF_LS_KEY);
+            if (!raw) return null;
+            const s = JSON.parse(raw);
+            if (s && typeof s.t === 'string' && s.t.length >= 16) return s.t;
+        } catch (e) {}
+        return null;
+    }
+
+    function installCsrfSniffer() {
+        try {
+            const w = csrfRealWin();
+            if (w.__aimSdCsrfSniffed) return;   // one instance per frame across ALL AIM scripts
+            w.__aimSdCsrfSniffed = true;
+            const origFetch = w.fetch;
+            if (typeof origFetch === 'function') {
+                w.fetch = function (input, init) {
+                    try {
+                        const h = (init && init.headers) || (input && typeof input === 'object' && input.headers) || null;
+                        if (h) {
+                            if (typeof h.get === 'function') {
+                                const v = h.get('X-CSRFToken');
+                                if (v) stashSniffedCsrf(v, 'a native fetch request');
+                            } else if (typeof h === 'object') {
+                                for (const k of Object.keys(h)) {
+                                    if (/^x-csrftoken$/i.test(k)) { stashSniffedCsrf(h[k], 'a native fetch request'); break; }
+                                }
+                            }
+                        }
+                    } catch (e) {}
+                    return origFetch.apply(this, arguments);
+                };
+            }
+            const XHR = w.XMLHttpRequest;
+            if (XHR && XHR.prototype && XHR.prototype.setRequestHeader && !XHR.prototype.__aimCsrfHeaderWrapped) {
+                XHR.prototype.__aimCsrfHeaderWrapped = true;
+                const origSet = XHR.prototype.setRequestHeader;
+                XHR.prototype.setRequestHeader = function (name, value) {
+                    try { if (/^x-csrftoken$/i.test(String(name))) stashSniffedCsrf(String(value), 'a native XHR request'); } catch (e) {}
+                    return origSet.apply(this, arguments);
+                };
+            }
+            console.log(`${TAG} CSRF sniffer armed (${CONTEXT} frame)`);
+        } catch (e) { console.warn(`${TAG} CSRF sniffer install failed:`, e); }
+    }
+
+    function readDomCsrf(doc) {
+        try {
+            const inp = doc.querySelector('input[name="csrfmiddlewaretoken"]');
+            if (inp && inp.value) return inp.value;
+            const meta = doc.querySelector('meta[name="csrf-token"], meta[name="csrf_token"], meta[name="csrftoken"]');
+            if (meta && meta.content) return meta.content;
+        } catch (e) {}
+        return null;
+    }
+
+    function getCsrfToken() {
+        const t = readSniffedCsrf();
+        if (t) return t;
+        const m = (document.cookie || '').match(/(?:^|;\s*)csrftoken=([^;]+)/);
+        if (m) return decodeURIComponent(m[1]);
+        let d = readDomCsrf(document);
+        if (!d) { try { d = readDomCsrf(window.top.document); } catch (e) {} }
+        return d || null;
+    }
+
+    // Django accepts a MASKED form token (csrfmiddlewaretoken) in the
+    // X-CSRFToken header — a rendered page from the same session can
+    // seed the bank without waiting for a native save.
+    async function primeCsrfBank() {
+        if (getCsrfToken()) return;
+        for (const path of ['/', '/admin/login/']) {
+            try {
+                const r = await fetch(path, { credentials: 'same-origin', headers: { 'Accept': 'text/html' } });
+                if (!r.ok) continue;
+                const html = await r.text();
+                let m = html.match(/name=["']csrfmiddlewaretoken["'][^>]*value=["']([^"']+)["']/);
+                if (!m) m = html.match(/value=["']([^"']{32,128})["'][^>]*name=["']csrfmiddlewaretoken["']/);
+                if (!m) m = html.match(/csrf[_-]?token["']?\s*[:=]\s*["']([A-Za-z0-9+/=]{32,128})["']/i);
+                if (m) { stashSniffedCsrf(m[1], `a page scrape (${path})`); return; }
+            } catch (e) {}
+        }
+        console.warn(`${TAG} CSRF token not yet available — it will be captured automatically from the next native save/edit (HttpOnly cookies, PER-32471).`);
+    }
+
+    installCsrfSniffer();
+    primeCsrfBank();
 
     // Convert a fetched (read-shape) entity into the exact write body
     // Percepto's editor POSTs. Confirmed field mapping (FFZ + FP):
@@ -7862,7 +7975,7 @@
 
         const csrf = getCsrfToken();
         if (!csrf) {
-            applyState.errors.push({ entityName: label, reason: 'no csrftoken cookie — cannot authenticate POST' });
+            applyState.errors.push({ entityName: label, reason: 'no CSRF token — make one native save/edit anywhere in Percepto (token auto-captures), then retry' });
             return { ok: false, reason: 'no csrftoken', appliedCount: 0 };
         }
         let resp;
@@ -13796,7 +13909,7 @@
         const res = { created: 0, updated: 0, failed: 0, skipped: 0, invalid: 0, ids: [], errors: [], merged: [], dryRun };
         if (!ffzs || !ffzs.length) return res;
         const csrf = getCsrfToken();
-        if (!csrf && !dryRun) { res.errors.push('no csrftoken cookie — cannot authenticate'); return res; }
+        if (!csrf && !dryRun) { res.errors.push('no CSRF token — make one native save/edit anywhere in Percepto (token auto-captures), then retry'); return res; }
         let siteCfg = null;
         try { siteCfg = await fetchSiteConfig(siteID); } catch (e) { console.warn(`${GEN_TAG} site cfg fetch failed:`, e); }
         const bucket = mapObjectsBySite[siteID];
@@ -13859,7 +13972,7 @@
         res.found = drafts.length;
         if (!drafts.length) return res;
         const csrf = getCsrfToken();
-        if (!csrf && !dryRun) { res.errors.push('no csrftoken cookie'); return res; }
+        if (!csrf && !dryRun) { res.errors.push('no CSRF token — make one native save/edit first, then retry'); return res; }
         for (const e of drafts) {
             if (dryRun) { res.deleted++; continue; }
             try {
@@ -13932,7 +14045,7 @@
         res.validatedCount = pending.filter(f => f._origValidated).length;
         if (dryRun) { res.updated = pending.length; return res; }
         const csrf = getCsrfToken();
-        if (!csrf) { res.errors.push('no csrftoken cookie — cannot authenticate'); return res; }
+        if (!csrf) { res.errors.push('no CSRF token — make one native save/edit anywhere in Percepto (token auto-captures), then retry'); return res; }
         let siteCfg = null;
         try { siteCfg = await fetchSiteConfig(siteID); } catch (e) { console.warn(`${GEN_TAG} site cfg fetch failed:`, e); }
         // Per-edit validated decision (ask BEFORE writing, grouped at the start).
