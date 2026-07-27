@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-27 — 📥 Import shadow entities → new site — AIM Site Diff v0.50 (dev/latest)
+
+Copy a Site Setup onto a fresh (empty) site, picking what comes over — Phase 3a of the migration suite, CSM Full mode only:
+
+- **Source is the existing shadow** — a live site *or* an uploaded `/map_objects` JSON backup, chosen via the same 🗺 shadow picker. Target is the site you're on. Direction is the reverse of the migration plan.
+- **Create-only, always**: entity `id` stripped so the server creates fresh; existing target entities are never modified or deleted, and a source entity whose type+name already exists on the target is skipped automatically.
+- Per-type checkboxes (Assets on by default; FFZ / FP / NFZ / Markers available; Base Stations + Safe Zones are hardware-bound and never imported), dry-run preview list, target-not-empty warning, 💾 source backup download.
+- Run is armed by a double click, then sequential `POST /map_objects/` with the proven write recipe (verbatim field copy incl. subtype + validated flag, `custom.new_poi_type_str` for assets, `mountain_terrain_site` from the target site config), followed by a fresh-fetch verify of every created id + a downloadable run log.
+- Also fixes v0.40's 🧭 Plan migration, which failed on a missing `typeReg` helper.
+
 ## 2026-07-23 — ⭐ PROMOTED TO PROD: AIM Issues v1.34 (coworkers jump from v1.29)
 
 The whole day's arc ships to everyone. What's new since v1.29:
