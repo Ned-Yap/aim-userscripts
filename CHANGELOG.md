@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-27 — Import CSRF: sniff the app's own token — AIM Site Diff v0.52 (dev/latest)
+
+v0.51's cookie-names diagnostic proved the cause: Percepto's auth cookies (session + csrftoken) are **HttpOnly** in this session — sent on requests but invisible to JavaScript in every frame, so no cookie read can ever work. v0.52 captures the token the way the app itself must carry it:
+
+- **Passive CSRF sniffer in both frames** — watches Percepto's own outgoing fetch/XHR calls for an `X-CSRFToken` header and banks the value in localStorage. Any native save action feeds it.
+- Resolution ladder: sniffed native token → cookie reads (kept for sessions where the cookie is still visible) → DOM `csrfmiddlewaretoken`/meta probe → scraping a rendered page (`/`, `/admin/login/`) for the masked form token (Django accepts it in the header).
+- A 403 mid-run aborts immediately, clears the banked token, and says to make one native edit and re-run — instead of 403-ing down the whole list.
+
+If the import says "no CSRF token yet": make one small native edit anywhere in Percepto (save any entity / move a marker), then re-run.
+
 ## 2026-07-27 — Import CSRF fix — AIM Site Diff v0.51 (dev/latest)
 
 First live run hit "no csrftoken cookie" in the map iframe. Token resolution is now a ladder — iframe document → page document → top window document → a priming `/sites/` GET and re-read — with a console trace of which step hit and, on total failure, a names-only dump of what cookies each frame can see.

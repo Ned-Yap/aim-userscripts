@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Diff
 // @namespace    http://tampermonkey.net/
-// @version      0.51
+// @version      0.52
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @description  Site comparison suite: shadow-site ghost overlay (per-type show/color/opacity), swipe divider, significant-change diff (→ AIM Issues), and Phase 3a Import — create-only copy of shadow entities (assets etc.) onto the current site with dry-run preview + verify. Full migration executor later.
@@ -37,13 +37,85 @@
 
     const TAG = '[AIM DIFF]';
     const IS_IFRAME = window !== window.top;
+
+    // --------------------------------------------------------------
+    // CSRF sniffer (v0.52) — Percepto's auth cookies are HttpOnly in
+    // at least some sessions (live-confirmed 2026-07-27: document.cookie
+    // shows ONLY Amplitude cookies in both frames while credentialed
+    // fetches still work), so the cookie can never be read directly.
+    // Instead, passively watch the app's OWN outgoing fetch/XHR calls
+    // for an X-CSRFToken header and bank the value in localStorage
+    // (Percepto wipes sessionStorage; localStorage survives). Installed
+    // in BOTH frames — the token is the same session-wide.
+    // --------------------------------------------------------------
+    const CSRF_LS_KEY = 'aim-sd-csrf';
+
+    function stashSniffedCsrf(token, from) {
+        if (!token || typeof token !== 'string' || token.length < 16) return;
+        try {
+            const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+            const prev = w.localStorage.getItem(CSRF_LS_KEY);
+            w.localStorage.setItem(CSRF_LS_KEY, JSON.stringify({ t: token, at: Date.now(), from }));
+            if (!prev || JSON.parse(prev).t !== token) console.log(`${TAG} banked CSRF token from a native ${from} request`);
+        } catch (e) {}
+    }
+
+    function readSniffedCsrf() {
+        try {
+            const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+            const raw = w.localStorage.getItem(CSRF_LS_KEY);
+            if (!raw) return null;
+            const s = JSON.parse(raw);
+            if (s && typeof s.t === 'string' && s.t.length >= 16) return s.t;
+        } catch (e) {}
+        return null;
+    }
+
+    function installCsrfSniffer() {
+        try {
+            const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+            if (w.__aimSdCsrfSniffed) return;
+            w.__aimSdCsrfSniffed = true;
+            const origFetch = w.fetch;
+            if (typeof origFetch === 'function') {
+                w.fetch = function (input, init) {
+                    try {
+                        const h = (init && init.headers) || (input && typeof input === 'object' && input.headers) || null;
+                        if (h) {
+                            if (typeof h.get === 'function') {
+                                const v = h.get('X-CSRFToken');
+                                if (v) stashSniffedCsrf(v, 'fetch');
+                            } else if (typeof h === 'object') {
+                                for (const k of Object.keys(h)) {
+                                    if (/^x-csrftoken$/i.test(k)) { stashSniffedCsrf(h[k], 'fetch'); break; }
+                                }
+                            }
+                        }
+                    } catch (e) {}
+                    return origFetch.apply(this, arguments);
+                };
+            }
+            const XHR = w.XMLHttpRequest;
+            if (XHR && XHR.prototype && XHR.prototype.setRequestHeader) {
+                const origSet = XHR.prototype.setRequestHeader;
+                XHR.prototype.setRequestHeader = function (name, value) {
+                    try { if (/^x-csrftoken$/i.test(String(name))) stashSniffedCsrf(String(value), 'xhr'); } catch (e) {}
+                    return origSet.apply(this, arguments);
+                };
+            }
+            console.log(`${TAG} CSRF sniffer installed (${IS_IFRAME ? 'iframe' : 'top'} frame)`);
+        } catch (e) { console.warn(`${TAG} csrf sniffer install failed:`, e); }
+    }
+
+    installCsrfSniffer();
+
     if (!IS_IFRAME) {
-        try { console.log(`${TAG} top frame — idle (map is in iframe)`); } catch (e) {}
+        try { console.log(`${TAG} top frame — CSRF sniffer active, otherwise idle (map is in iframe)`); } catch (e) {}
         return;
     }
 
     const SCRIPT_ID = 'aim-site-diff';
-    const SCRIPT_VERSION = '0.51';
+    const SCRIPT_VERSION = '0.52';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const PANE_NAME = 'aim-site-diff-pane';
     const HL_PANE_NAME = 'aim-site-diff-hl';
@@ -1738,48 +1810,61 @@
         } catch (e) { return null; }
     }
 
-    // v0.51: a single document.cookie read came back empty in the map
-    // iframe on a live run even though credentialed fetches worked, so
-    // resolve the token through a ladder: sandbox doc → page doc
-    // (unsafeWindow) → TOP document (same-origin; where the Asset
-    // Inspector's proven reads happen) → priming GET + re-read.
+    function readDomCsrf(doc) {
+        try {
+            const inp = doc.querySelector('input[name="csrfmiddlewaretoken"]');
+            if (inp && inp.value) return inp.value;
+            const meta = doc.querySelector('meta[name="csrf-token"], meta[name="csrf_token"], meta[name="csrftoken"]');
+            if (meta && meta.content) return meta.content;
+        } catch (e) {}
+        return null;
+    }
+
+    // Django accepts a MASKED form token (csrfmiddlewaretoken) in the
+    // X-CSRFToken header — scraping any same-session server-rendered
+    // page works even when the cookie itself is HttpOnly-invisible.
+    async function scrapeCsrfFromPage(path) {
+        try {
+            const r = await fetchWithTimeout(path, { credentials: 'same-origin', headers: { 'Accept': 'text/html' } }, 15000);
+            if (!r.ok) return null;
+            const html = await r.text();
+            let m = html.match(/name=["']csrfmiddlewaretoken["'][^>]*value=["']([^"']+)["']/);
+            if (!m) m = html.match(/value=["']([^"']{32,128})["'][^>]*name=["']csrfmiddlewaretoken["']/);
+            if (!m) m = html.match(/csrf[_-]?token["']?\s*[:=]\s*["']([A-Za-z0-9+/=]{32,128})["']/i);
+            return m ? m[1] : null;
+        } catch (e) { return null; }
+    }
+
+    // v0.52 ladder. Percepto's csrftoken cookie is HttpOnly in at least
+    // some sessions (live-confirmed: only Amplitude cookies visible in
+    // both frames while credentialed fetches work), so the sniffed
+    // native-request token is the PRIMARY source; cookie reads are kept
+    // for sessions where the cookie is still JS-visible; DOM + rendered
+    // -page scrapes are last-ditch.
     async function resolveCsrfToken() {
         const attempts = [];
-        let t = readCsrfFrom(document);
-        attempts.push(`iframe doc: ${t ? 'HIT' : 'miss'}`);
-        if (!t && typeof unsafeWindow !== 'undefined' && unsafeWindow.document) {
-            t = readCsrfFrom(unsafeWindow.document);
-            attempts.push(`page doc: ${t ? 'HIT' : 'miss'}`);
+        let t = readSniffedCsrf();
+        attempts.push(`sniffed native token: ${t ? 'HIT' : 'miss'}`);
+        if (!t) {
+            t = readCsrfFrom(document)
+                || (typeof unsafeWindow !== 'undefined' && unsafeWindow.document ? readCsrfFrom(unsafeWindow.document) : null);
+            if (!t) { try { t = readCsrfFrom(window.top.document); } catch (e) {} }
+            attempts.push(`cookies: ${t ? 'HIT' : 'miss'}`);
         }
         if (!t) {
-            try { t = readCsrfFrom(window.top.document); attempts.push(`top doc: ${t ? 'HIT' : 'miss'}`); }
-            catch (e) { attempts.push('top doc: unreachable'); }
+            t = readDomCsrf(document);
+            if (!t) { try { t = readDomCsrf(window.top.document); } catch (e) {} }
+            attempts.push(`DOM token: ${t ? 'HIT' : 'miss'}`);
         }
         if (!t) {
-            // Django refreshes the csrftoken cookie on views that call
-            // get_token — hit a cheap authenticated GET, then re-read all
-            // three documents.
-            try {
-                await fetchWithTimeout('/sites/', { credentials: 'same-origin', headers: { 'Accept': 'application/json' } }, 15000);
-                t = readCsrfFrom(document)
-                    || (typeof unsafeWindow !== 'undefined' && unsafeWindow.document ? readCsrfFrom(unsafeWindow.document) : null);
-                if (!t) { try { t = readCsrfFrom(window.top.document); } catch (e) {} }
-                attempts.push(`after priming GET: ${t ? 'HIT' : 'miss'}`);
-            } catch (e) {
-                attempts.push('priming GET failed');
-                console.warn(`${TAG} csrf priming fetch failed:`, e);
-            }
+            t = await scrapeCsrfFromPage('/');
+            attempts.push(`scrape /: ${t ? 'HIT' : 'miss'}`);
+        }
+        if (!t) {
+            t = await scrapeCsrfFromPage('/admin/login/');
+            attempts.push(`scrape /admin/login/: ${t ? 'HIT' : 'miss'}`);
         }
         console.log(`${TAG} csrf token resolution: ${attempts.join(' → ')}`);
-        if (!t) {
-            // Diagnostic — names only, never values
-            try {
-                const names = (document.cookie || '').split(';').map(c => c.split('=')[0].trim()).filter(Boolean);
-                let topNames = [];
-                try { topNames = (window.top.document.cookie || '').split(';').map(c => c.split('=')[0].trim()).filter(Boolean); } catch (e) {}
-                console.warn(`${TAG} csrftoken not found. Cookie names — iframe: [${names.join(', ')}] · top: [${topNames.join(', ')}]`);
-            } catch (e) {}
-        }
         return t;
     }
 
@@ -1973,7 +2058,7 @@
         setImpStatus('resolving CSRF token…');
         const csrf = await resolveCsrfToken();
         if (!csrf) {
-            setImpStatus('no csrftoken cookie visible from any frame — console shows which cookies each frame CAN see. Try a full page reload, then re-run.', '#ff5252');
+            setImpStatus('no CSRF token yet — make ONE small native edit anywhere in Percepto (e.g. save any entity or move a marker), which lets the sniffer capture the app\'s own token, then re-run. Console shows the resolution trace.', '#ff5252');
             impState.running = false;
             return;
         }
@@ -1994,12 +2079,20 @@
                         body: JSON.stringify(body),
                     }, 30000);
                     const txt = await r.text();
+                    if (r.status === 403) {
+                        // Stale/rejected token poisons EVERY remaining POST —
+                        // clear the banked one and abort instead of 403-ing
+                        // down the whole list.
+                        try { ((typeof unsafeWindow !== 'undefined') ? unsafeWindow : window).localStorage.removeItem(CSRF_LS_KEY); } catch (e2) {}
+                        throw new Error(`CSRF-ABORT: server 403 — banked token cleared; make one native edit (so the sniffer re-captures) and re-run. ${(txt || '').slice(0, 120)}`);
+                    }
                     if (!r.ok) throw new Error(`server ${r.status} — ${(txt || '').slice(0, 200)}`);
                     let j = null;
                     try { j = JSON.parse(txt); } catch (e) {}
                     if (!j || !j.map_objects || j.map_objects.id == null) throw new Error(`unexpected response — ${(txt || '').slice(0, 150)}`);
                     created.push({ id: j.map_objects.id, name: ent.name, type: ent.type });
                 } catch (e) {
+                    if (String(e && e.message || '').startsWith('CSRF-ABORT')) throw e;
                     console.warn(`${TAG} import create failed for ${label}:`, e);
                     errors.push({ name: ent.name, type: ent.type, reason: String(e && e.message || e) });
                 }
