@@ -6,6 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-27 — ⚡ Import power-line KMLs too — AIM Site Diff v0.60 (dev/latest)
+
+The 📥 Import panel gets a **⚡ Power lines** checkbox: copies every `<sourceID>-*` file (distro + trans KMLs) in the private data repo to `<targetID>-*` via the GitHub Contents API, so the new site's shielding outlines light up without manual repo work.
+
+- Create-only like the rest of the import — existing target files are skipped, and the PUT carries no SHA so GitHub refuses to overwrite even in a race.
+- Needs a live-site shadow (JSON backups carry no site id) and the shared GitHub token from AIM Controls; the row explains itself when either is missing.
+- Binary-safe copy (raw media type, works for .kmz and >1 MB files); on success it broadcasts REFETCH_KMLS so Map Styler draws the new site's lines without a reload.
+- Runs after the entity creates; can also run alone with zero entity types checked. Results land in the same summary + downloadable run log.
+
 ## 2026-07-27 — 🚨 PROD HOTFIX: Asset Inspector v4.164.5 — CSRF token capture (Percepto HttpOnly change)
 
 Percepto's weekly release (PER-32471) added the HttpOnly flag to the session + CSRF cookies. That's good security — but it silently broke **every AIM direct-API write** (bulk AGL/Delta/Min/Max, bulk Valid, ⊕ Generate, ✦ Advanced Draw commit, airspace 📍 marker creation), which authenticated by reading the CSRF cookie that JavaScript can no longer see.

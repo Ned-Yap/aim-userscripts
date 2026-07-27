@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Diff
 // @namespace    http://tampermonkey.net/
-// @version      0.52
+// @version      0.60
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @description  Site comparison suite: shadow-site ghost overlay (per-type show/color/opacity), swipe divider, significant-change diff (→ AIM Issues), and Phase 3a Import — create-only copy of shadow entities (assets etc.) onto the current site with dry-run preview + verify. Full migration executor later.
@@ -115,7 +115,7 @@
     }
 
     const SCRIPT_ID = 'aim-site-diff';
-    const SCRIPT_VERSION = '0.52';
+    const SCRIPT_VERSION = '0.60';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const PANE_NAME = 'aim-site-diff-pane';
     const HL_PANE_NAME = 'aim-site-diff-hl';
@@ -1783,8 +1783,21 @@
     // Full/CSM mode only.
     // ==================================================================
     const KEY_IMPORT_TYPES = 'aim-sd-import-types';
+    const KEY_IMPORT_KML = 'aim-sd-import-kml';
     const IMPORT_SKIP_TYPES = { 8: 'Base Station', 98: 'Safe Zone' };   // hardware-bound — never imported
     const IMPORT_POST_GAP_MS = 120;
+
+    // Power-line KMLs live OUTSIDE Percepto — per-site files in the
+    // private data repo (<siteID>-distro.kml / <siteID>-trans.kml),
+    // fetched by Map Styler with the shared PAT. "Importing" them =
+    // copying every <srcID>-* root file to <tgtID>-* via the GitHub
+    // Contents API (create-only — existing target files are skipped).
+    // api.github.com sends CORS headers, so plain fetch works — no
+    // GM_xmlhttpRequest / @connect needed.
+    const DATA_REPO = 'Ned-Yap/aim-userscripts-data';
+    const DATA_BRANCH = 'main';
+    const GH_API = 'https://api.github.com';
+    let cachedToken = '';   // PAT from Control Panel TOKEN_VALUE broadcast
 
     function loadImportTypes() {
         const def = { fp: false, ffz: false, nfz: false, asset: true, gm: false };
@@ -1802,6 +1815,7 @@
         try { gmSet(KEY_IMPORT_TYPES, JSON.stringify(importTypes)); }
         catch (e) { console.warn(`${TAG} saveImportTypes:`, e); }
     }
+    let importKml = gmGet(KEY_IMPORT_KML, false) === true;
 
     function readCsrfFrom(doc) {
         try {
@@ -1972,6 +1986,7 @@
             });
             impState = {
                 srcLabel: shadowSourceLabel(src),
+                srcSiteId: src.kind === 'site' ? src.id : null,
                 targetCount: target.length,
                 rows, running: false, armed: false, report: null,
             };
@@ -2017,20 +2032,34 @@
         const targetNote = impState.targetCount
             ? `<span style="color:#ffa030">⚠ target already has ${impState.targetCount} entities</span>`
             : '<span style="color:#5fff5f">target site is empty ✓</span>';
+        const kmlPossible = !!impState.srcSiteId;
+        const kmlOn = !!(importKml && kmlPossible);
+        let kmlNote;
+        if (!kmlPossible) kmlNote = '<span style="color:#888">needs a live-site shadow (JSON backups carry no site id)</span>';
+        else {
+            kmlNote = `<span style="color:#888">copy ${escapeHtml(String(impState.srcSiteId))}-* → ${escapeHtml(String(siteID))}-* in the data repo (create-only)</span>`
+                + (cachedToken ? '' : ' <span style="color:#ffa030">— needs the GitHub token (AIM Controls gear)</span>');
+        }
+        const kmlRow = `<label style="display:flex;gap:8px;align-items:center;padding:4px 6px;border-bottom:1px solid #222834;`
+            + `cursor:${kmlPossible ? 'pointer' : 'default'};${kmlPossible ? '' : 'opacity:0.55;'}">`
+            + `<input type="checkbox" data-imp-kml="1" ${kmlOn ? 'checked' : ''} ${(!kmlPossible || impState.running) ? 'disabled' : ''}>`
+            + `<span style="color:#ffd54f;min-width:100px">⚡ Power lines</span>${kmlNote}</label>`;
+        const runnable = sel.length || kmlOn;
         const runLabel = impState.armed
-            ? `⚠ Click again to CREATE ${sel.length} — this writes to the server`
-            : `🚀 Create ${sel.length} entities on this site`;
-        const runColor = impState.armed ? '#ff5252' : (sel.length ? '#5fff5f' : '#555');
+            ? `⚠ Click again to RUN (${sel.length} entities${kmlOn ? ' + KMLs' : ''}) — this writes for real`
+            : `🚀 Create ${sel.length} entities${kmlOn ? ' + copy power-line KMLs' : ''}`;
+        const runColor = impState.armed ? '#ff5252' : (runnable ? '#5fff5f' : '#555');
         setImpBody(''
             + `<div style="padding:4px 6px;border-bottom:1px solid #222834;">`
             + `SOURCE: ${escapeHtml(impState.srcLabel)} → TARGET: this site (${escapeHtml(String(siteID))}) · ${targetNote}<br>`
             + `<span style="color:#888">Create-only: existing target entities are never touched. Fields copy verbatim (incl. validated flag).</span></div>`
             + `<div style="padding:4px 0;border-bottom:1px solid #222834;">${typeRows}</div>`
+            + kmlRow
             + `<div style="max-height:34vh;overflow-y:auto;">${preview || '<div style="color:#888;padding:6px">Nothing selected to create.</div>'}`
             + (sel.length > 400 ? `<div style="color:#888;padding:4px 6px">…and ${sel.length - 400} more</div>` : '') + '</div>'
             + `<div id="aim-sd-imp-status" style="padding:4px 6px;border-top:1px solid #222834;min-height:18px;"></div>`
             + `<div style="padding:6px;display:flex;gap:12px;flex-wrap:wrap;border-top:1px solid #222834;">`
-            + `<span data-imp="run" style="cursor:${sel.length ? 'pointer' : 'default'};color:${runColor};font-weight:bold">${runLabel}</span>`
+            + `<span data-imp="run" style="cursor:${runnable ? 'pointer' : 'default'};color:${runColor};font-weight:bold">${runLabel}</span>`
             + `<span data-imp="backup-src" style="cursor:pointer;color:#7adfe6">💾 Backup source JSON</span>`
             + `<span data-imp="refresh" style="cursor:pointer;color:#7adfe6">⟳ Re-check</span>`
             + (impState.report ? `<span data-imp="log" style="cursor:pointer;color:#ffa030">📄 Download run log</span>` : '')
@@ -2040,7 +2069,8 @@
     async function runImport() {
         if (!impState || impState.running) return;
         const sel = importSelectedRows();
-        if (!sel.length) { setImpStatus('Nothing selected.', '#888'); return; }
+        const kmlOn = !!(importKml && impState.srcSiteId);
+        if (!sel.length && !kmlOn) { setImpStatus('Nothing selected.', '#888'); return; }
         if (!impState.armed) {
             impState.armed = true;
             renderImportPlan();
@@ -2055,17 +2085,20 @@
         impState.armed = false;
         impState.running = true;
         renderImportPlan();
-        setImpStatus('resolving CSRF token…');
-        const csrf = await resolveCsrfToken();
-        if (!csrf) {
-            setImpStatus('no CSRF token yet — make ONE small native edit anywhere in Percepto (e.g. save any entity or move a marker), which lets the sniffer capture the app\'s own token, then re-run. Console shows the resolution trace.', '#ff5252');
-            impState.running = false;
-            return;
+        let csrf = null;
+        if (sel.length) {
+            setImpStatus('resolving CSRF token…');
+            csrf = await resolveCsrfToken();
+            if (!csrf) {
+                setImpStatus('no CSRF token yet — make ONE small native edit anywhere in Percepto (e.g. save any entity or move a marker), which lets the sniffer capture the app\'s own token, then re-run. Console shows the resolution trace.', '#ff5252');
+                impState.running = false;
+                return;
+            }
         }
         const created = [];
         const errors = [];
         try {
-            const cfg = await fetchTargetSiteCfg(siteID, true);
+            const cfg = sel.length ? await fetchTargetSiteCfg(siteID, true) : null;
             for (let i = 0; i < sel.length; i++) {
                 const ent = sel[i].ent;
                 const label = `${typeReg(ent.type).short} "${ent.name || '(unnamed)'}"`;
@@ -2099,33 +2132,64 @@
                 await new Promise(res => setTimeout(res, IMPORT_POST_GAP_MS));
             }
             // Verify — fresh fetch of the target, every created id must be there
-            setImpStatus('verifying against a fresh fetch…');
             const verifyProblems = [];
-            const fresh = await fetchShadowEntities(String(siteID), true);
-            if (!fresh) {
-                verifyProblems.push('verify fetch failed — created entities unconfirmed, check the site manually');
-            } else {
-                created.forEach(c => {
-                    if (!fresh.some(e => e && e.id === c.id)) verifyProblems.push(`created "${c.name}" (id ${c.id}) missing from fresh fetch`);
-                });
+            if (sel.length) {
+                setImpStatus('verifying against a fresh fetch…');
+                const fresh = await fetchShadowEntities(String(siteID), true);
+                if (!fresh) {
+                    verifyProblems.push('verify fetch failed — created entities unconfirmed, check the site manually');
+                } else {
+                    created.forEach(c => {
+                        if (!fresh.some(e => e && e.id === c.id)) verifyProblems.push(`created "${c.name}" (id ${c.id}) missing from fresh fetch`);
+                    });
+                }
+            }
+            // Power-line KMLs last — a CSRF/entity abort never leaves
+            // half-copied repo files, and a KML failure never blocks entities
+            let kmlResult = null;
+            if (kmlOn) {
+                setImpStatus('copying power-line KMLs…');
+                kmlResult = await copyPowerLineKmls(impState.srcSiteId, siteID, m => setImpStatus(escapeHtml(m)));
             }
             impState.report = {
                 ranAt: new Date().toISOString(),
                 targetSite: siteID,
                 source: impState.srcLabel,
                 created, errors, verifyProblems,
+                kml: kmlResult,
             };
-            const col = errors.length || verifyProblems.length ? (created.length ? '#ffa030' : '#ff5252') : '#5fff5f';
+            const kmlBad = !!(kmlResult && kmlResult.errors.length);
+            const col = errors.length || verifyProblems.length || kmlBad
+                ? ((created.length || (kmlResult && kmlResult.copied.length)) ? '#ffa030' : '#ff5252') : '#5fff5f';
+            const kmlMsg = kmlResult
+                ? ` · KMLs: <b>${kmlResult.copied.length} copied</b>`
+                    + (kmlResult.skipped.length ? `, ${kmlResult.skipped.length} skipped` : '')
+                    + (kmlResult.errors.length ? `, <span style="color:#ff5252">${kmlResult.errors.length} FAILED</span>` : '')
+                : '';
             console.log(`${TAG} import done: ${created.length} created, ${errors.length} failed, ${verifyProblems.length} verify problems`, impState.report);
             impState.running = false;
             renderImportPlan();
-            setImpStatus(
-                `Done — <b>${created.length} created</b>`
+            const doneMsg = `Done — <b>${created.length} created</b>`
                 + (errors.length ? `, <span style="color:#ff5252">${errors.length} FAILED</span>` : '')
-                + (verifyProblems.length ? `, <span style="color:#ff5252">${verifyProblems.length} verify problem(s)</span>` : ', all verified ✓')
-                + ' · see run log / console for detail', col);
-            // Re-check so freshly-created entities now show as "exists"
-            if (!errors.length && !verifyProblems.length) setTimeout(() => { if (impState && !impState.running) prepareImport().then(() => { setImpStatus(`Done — ${created.length} created, all verified ✓ (re-checked)`, '#5fff5f'); }); }, 800);
+                + (verifyProblems.length ? `, <span style="color:#ff5252">${verifyProblems.length} verify problem(s)</span>` : (sel.length ? ', all verified ✓' : ''))
+                + kmlMsg + ' · see run log / console for detail';
+            setImpStatus(doneMsg, col);
+            // Re-check so freshly-created entities now show as "exists" —
+            // carrying the report across (prepareImport builds a fresh
+            // impState, which would drop the run-log button)
+            if (!errors.length && !verifyProblems.length && sel.length) {
+                const rep = impState.report;
+                setTimeout(() => {
+                    if (!impState || impState.running) return;
+                    prepareImport().then(() => {
+                        if (impState && !impState.running) {
+                            impState.report = rep;
+                            renderImportPlan();
+                            setImpStatus(doneMsg + ' (re-checked)', col);
+                        }
+                    });
+                }, 800);
+            }
         } catch (e) {
             console.warn(`${TAG} runImport threw:`, e);
             impState.report = { ranAt: new Date().toISOString(), targetSite: siteID, source: impState.srcLabel, created, errors, verifyProblems: ['run aborted: ' + String(e && e.message || e)] };
@@ -2133,6 +2197,73 @@
             renderImportPlan();
             setImpStatus(`Import aborted after ${created.length} create(s) — ${escapeHtml(String(e && e.message || e))}. Created entities remain on the site (create-only, nothing was overwritten).`, '#ff5252');
         }
+    }
+
+    async function copyPowerLineKmls(srcId, tgtId, progress) {
+        const out = { copied: [], skipped: [], errors: [] };
+        if (!cachedToken) {
+            out.errors.push('no GitHub token — set the PAT in AIM Controls (gear), then re-run');
+            return out;
+        }
+        const hdrJson = { 'Authorization': `Bearer ${cachedToken}`, 'Accept': 'application/vnd.github+json' };
+        let listing;
+        try {
+            const r = await fetchWithTimeout(`${GH_API}/repos/${DATA_REPO}/contents/?ref=${DATA_BRANCH}`, { headers: hdrJson }, 30000);
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            listing = await r.json();
+            if (!Array.isArray(listing)) throw new Error('unexpected listing shape');
+        } catch (e) {
+            out.errors.push(`could not list the data repo: ${String(e && e.message || e)}`);
+            return out;
+        }
+        const prefix = `${srcId}-`;
+        const files = listing.filter(f => f && f.type === 'file' && String(f.name).startsWith(prefix));
+        if (!files.length) {
+            out.errors.push(`no ${prefix}* files in the data repo — site ${srcId} has no power-line KMLs`);
+            return out;
+        }
+        const existing = new Set(listing.map(f => f.name));
+        for (const f of files) {
+            const tgtName = `${tgtId}-${f.name.slice(prefix.length)}`;
+            if (existing.has(tgtName)) { out.skipped.push(`${tgtName} (already exists)`); continue; }
+            progress(`copying ${f.name} → ${tgtName}…`);
+            try {
+                // Raw media type works for any size up to 100 MB and is
+                // binary-safe (.kmz) — the JSON content field caps at 1 MB.
+                const raw = await fetchWithTimeout(
+                    `${GH_API}/repos/${DATA_REPO}/contents/${encodeURIComponent(f.name)}?ref=${DATA_BRANCH}`,
+                    { headers: { 'Authorization': `Bearer ${cachedToken}`, 'Accept': 'application/vnd.github.raw' } }, 60000);
+                if (!raw.ok) throw new Error(`source GET HTTP ${raw.status}`);
+                const bytes = new Uint8Array(await raw.arrayBuffer());
+                let bin = '';
+                for (let i = 0; i < bytes.length; i += 0x8000) {
+                    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+                }
+                const b64 = btoa(bin);
+                const put = await fetchWithTimeout(
+                    `${GH_API}/repos/${DATA_REPO}/contents/${encodeURIComponent(tgtName)}`,
+                    {
+                        method: 'PUT',
+                        headers: Object.assign({ 'Content-Type': 'application/json' }, hdrJson),
+                        // No sha → create-only; GitHub 422s instead of overwriting if it appeared meanwhile
+                        body: JSON.stringify({ message: `[AIM site ${tgtId}] import power-line KML from site ${srcId} (${f.name})`, content: b64, branch: DATA_BRANCH }),
+                    }, 60000);
+                if (put.status !== 200 && put.status !== 201) {
+                    const t = await put.text();
+                    throw new Error(`PUT HTTP ${put.status} — ${(t || '').slice(0, 150)}`);
+                }
+                out.copied.push(tgtName);
+            } catch (e) {
+                console.warn(`${TAG} KML copy failed for ${f.name}:`, e);
+                out.errors.push(`${f.name}: ${String(e && e.message || e)}`);
+            }
+        }
+        if (out.copied.length) {
+            // Map Styler re-fetches its KMLs on this signal — the new site
+            // gets its power lines without a reload.
+            try { if (controlChannel) controlChannel.postMessage({ type: 'REFETCH_KMLS' }); } catch (e) {}
+        }
+        return out;
     }
 
     function backupImportSource() {
@@ -2174,8 +2305,16 @@
                 }
             });
             impPanelEl.addEventListener('change', (ev) => {
+                if (impState && impState.running) return;
+                const kcb = ev.target.closest('input[data-imp-kml]');
+                if (kcb) {
+                    importKml = !!kcb.checked;
+                    gmSet(KEY_IMPORT_KML, importKml);
+                    if (impState) { impState.armed = false; renderImportPlan(); }
+                    return;
+                }
                 const cb = ev.target.closest('input[data-imp-type]');
-                if (!cb || (impState && impState.running)) return;
+                if (!cb) return;
                 const key = cb.getAttribute('data-imp-type');
                 if (!(key in importTypes)) return;
                 importTypes[key] = !!cb.checked;
@@ -2201,6 +2340,7 @@
             });
         }
         impPanelEl.style.display = 'block';
+        try { if (controlChannel && !cachedToken) controlChannel.postMessage({ type: 'REQUEST_TOKEN' }); } catch (e) {}
         prepareImport();
     }
 
@@ -2507,7 +2647,13 @@
             if (msg.type === 'REQUEST_REGISTRATIONS') registerWithControlPanel();
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) handleSetToggle(msg);
             else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID) handleAction(msg.actionId);
+            else if (msg.type === 'TOKEN_VALUE') {
+                cachedToken = String(msg.token || '');
+                // The import panel shows a "needs token" hint — refresh it
+                if (impState && !impState.running && impPanelEl && impPanelEl.style.display !== 'none') renderImportPlan();
+            }
         };
+        try { controlChannel.postMessage({ type: 'REQUEST_TOKEN' }); } catch (e) {}
     }
 
     // ------------------------------------------------------------------
