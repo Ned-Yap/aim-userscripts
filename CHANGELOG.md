@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-28 — 🔗 Merge: create-400 fix — MBT v2.02 (dev/latest)
+
+The merged mission's create was rejected (400): steps concatenated from several missions carried each mission's server-assigned instruction ids, and the mixed ids broke the save. Every merged step is now normalized to the clean create shape (no ids) before the save — the same shape the generator's creates use. Single-mission 📥 Copy was never affected.
+
 ## 2026-07-28 — 🔗 Merge: section-prefixed mission names — MBT v2.01 (dev/latest)
 
 Pad-to-mission matching is now rank-based instead of exact: exact name → ends with `" - <pad name>"` (the `NNE - SMITH SN 48-37 03 203H` section-prefix convention) → contains. If several missions survive a rank (a `Merged - A + B` name also *contains* pad names), the merge panel shows a pick-one chooser with step counts instead of guessing. Missions already in the list are excluded from matching.
