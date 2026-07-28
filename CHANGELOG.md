@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-28 — 🔗 Merge: section-prefixed mission names — MBT v2.01 (dev/latest)
+
+Pad-to-mission matching is now rank-based instead of exact: exact name → ends with `" - <pad name>"` (the `NNE - SMITH SN 48-37 03 203H` section-prefix convention) → contains. If several missions survive a rank (a `Merged - A + B` name also *contains* pad names), the merge panel shows a pick-one chooser with step counts instead of guessing. Missions already in the list are excluded from matching.
+
 ## 2026-07-28 — 🔗 Merge M2 vs Asset Inspector conflict — MBT v2.00 + Asset Inspector v4.199 (dev/latest)
 
 Right-clicking a pad in 🔗 merge mode popped the Asset Inspector's entity inspector instead of picking the pad. Fixed with the same synchronous-DOM-flag protocol Click-to-Add uses: merge mode sets `data-aim-merge="1"` on `<html>` and the Asset Inspector's window contextmenu handler bails while it's set. Update BOTH scripts — the flag needs AI v4.199+ to be honored.

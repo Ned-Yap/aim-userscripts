@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.00
+// @version      2.01
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.00';
+    const SCRIPT_VERSION = '2.01';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -3430,14 +3430,31 @@
     // v1.48 Section+Battery merge which passes fetched instructions raw).
     // ════════════════════════════════════════════════════════════════════════
     const PCM_PANEL_ID = 'aim-mb-pcm-panel';
-    const pcm = { on: false, picks: [], markers: [], missions: null, assets: null, bound: null, panelEl: null, customName: null };
+    const pcm = { on: false, picks: [], markers: [], missions: null, assets: null, bound: null, panelEl: null, customName: null, pendingChoice: null };
 
     function pcmStepCount(m) { return mbMissionBody(m).length; }
 
     function pcmFindMission(name) {
+        const c = pcmFindMissionCandidates(name);
+        return c.length === 1 ? c[0] : null;
+    }
+
+    // v2.01: mission names carry section prefixes ("NNE - SMITH SN 48-37 03
+    // 203H" for pad "SMITH SN 48-37 03 203H" — the generator's
+    // "{section} - {asset}" template). Rank matches: exact → ends with
+    // " - <pad>" → contains. Multiple survivors at a rank → the panel shows
+    // a pick-one chooser instead of guessing (a "Merged - A + B" mission
+    // also CONTAINS pad names, so contains can tie).
+    function pcmFindMissionCandidates(name) {
         const want = String(name || '').trim().toLowerCase();
-        if (!want || !Array.isArray(pcm.missions)) return null;
-        return pcm.missions.find(m => String((m && m.name) || '').trim().toLowerCase() === want) || null;
+        if (!want || !Array.isArray(pcm.missions)) return [];
+        const all = pcm.missions.filter(m => m && typeof m.name === 'string' && m.name.trim());
+        const norm = m => m.name.trim().toLowerCase();
+        let c = all.filter(m => norm(m) === want);
+        if (c.length) return c;
+        c = all.filter(m => norm(m).endsWith('- ' + want) || norm(m).endsWith('– ' + want));
+        if (c.length) return c;
+        return all.filter(m => norm(m).indexOf(want) >= 0);
     }
 
     async function pcmEnter() {
@@ -3474,7 +3491,7 @@
         pcmUnbind();
         pcmClearMarkers();
         if (pcm.panelEl) { try { pcm.panelEl.remove(); } catch (e) {} pcm.panelEl = null; }
-        pcm.picks = []; pcm.customName = null;
+        pcm.picks = []; pcm.customName = null; pcm.pendingChoice = null;
         const btn = document.querySelector('[data-pcm-toggle]');
         if (btn) btn.classList.remove('active');
     }
@@ -3502,11 +3519,21 @@
         if (!hit) return;   // not on a pad — let native / other AIM handlers run
         e.preventDefault(); e.stopPropagation();
         const idx = pcm.picks.findIndex(p => p.asset.id === hit.id);
-        if (idx >= 0) { pcm.picks.splice(idx, 1); pcmRefresh(); return; }
-        const mission = pcmFindMission(hit.name);
-        if (!mission) { showToast(`No mission named "${hit.name}" on this site.`, '#ff9800', 3500); return; }
-        pcm.picks.push({ asset: hit, mission });
-        pcmRefresh();
+        if (idx >= 0) { pcm.picks.splice(idx, 1); pcm.pendingChoice = null; pcmRefresh(); return; }
+        const cands = pcmFindMissionCandidates(hit.name).filter(m => !pcm.picks.some(p => p.mission.id === m.id));
+        if (!cands.length) {
+            const any = pcmFindMissionCandidates(hit.name).length;
+            showToast(any ? `Pad "${hit.name}"'s mission is already in the list.` : `No mission matching "${hit.name}" on this site.`, '#ff9800', 3500);
+            return;
+        }
+        if (cands.length === 1) {
+            pcm.picks.push({ asset: hit, mission: cands[0] });
+            pcm.pendingChoice = null;
+            pcmRefresh();
+            return;
+        }
+        pcm.pendingChoice = { asset: hit, candidates: cands.slice(0, 8) };
+        pcmRenderPanel();
     }
 
     function pcmClearMarkers() {
@@ -3553,6 +3580,11 @@
                 Right-click (M2) pads in order — pad #1's mission leads. M2 a numbered pad to remove it.
                 Keeps the FIRST mission's takeoff + the LAST mission's landing; everything between is the missions' editable steps in click order.
             </div>
+            ${pcm.pendingChoice ? `<div style="padding:6px 10px;border-bottom:1px solid #3a3320;background:rgba(255,213,79,0.07);">
+                <div style="font-size:11px;color:#ffd54f;margin-bottom:4px;">Pad "${escapeHtml(pcm.pendingChoice.asset.name)}" matches ${pcm.pendingChoice.candidates.length} missions — pick one:</div>
+                ${pcm.pendingChoice.candidates.map((m, i) => `<button data-pcm-cand="${i}" style="display:block;width:100%;text-align:left;margin:2px 0;padding:3px 8px;background:#0e1218;border:1px solid #3a4350;border-radius:4px;color:#e6e6e6;cursor:pointer;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(m.name)} <span style="color:#9ad;">· ${pcmStepCount(m)} steps</span></button>`).join('')}
+                <button data-pcm-cand-cancel style="margin-top:3px;padding:2px 8px;background:none;border:none;color:#888;cursor:pointer;font-size:10px;">cancel</button>
+            </div>` : ''}
             <div style="overflow:auto;flex:1;padding:2px 8px;">${rows || '<div style="padding:10px;color:#888;font-size:11px;">No pads picked yet.</div>'}</div>
             <div style="display:flex;gap:8px;align-items:center;padding:7px 12px;border-top:1px solid #2a2f38;">
                 <label style="font-size:11px;color:#9ad;">Name</label>
@@ -3566,7 +3598,20 @@
         document.body.appendChild(el);
         pcm.panelEl = el;
         el.querySelector('[data-pcm-close]').onclick = () => pcmExit();
-        el.querySelector('[data-pcm-clear]').onclick = () => { pcm.picks = []; pcm.customName = null; pcmRefresh(); };
+        el.querySelector('[data-pcm-clear]').onclick = () => { pcm.picks = []; pcm.customName = null; pcm.pendingChoice = null; pcmRefresh(); };
+        el.querySelectorAll('[data-pcm-cand]').forEach(b => {
+            b.onclick = () => {
+                const ch = pcm.pendingChoice;
+                if (!ch) return;
+                const m = ch.candidates[Number(b.getAttribute('data-pcm-cand'))];
+                if (!m) return;
+                pcm.picks.push({ asset: ch.asset, mission: m });
+                pcm.pendingChoice = null;
+                pcmRefresh();
+            };
+        });
+        const candCancel = el.querySelector('[data-pcm-cand-cancel]');
+        if (candCancel) candCancel.onclick = () => { pcm.pendingChoice = null; pcmRenderPanel(); };
         el.querySelector('[data-pcm-go]').onclick = () => pcmCommit();
         const nameEl = el.querySelector('[data-pcm-name]');
         nameEl.oninput = () => { pcm.customName = nameEl.value; };
