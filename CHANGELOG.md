@@ -6,6 +6,13 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-28 — 📥 Cross-site mission copy + 🔗 pad-click merge — Mission Bank Tools v1.99 (dev/latest)
+
+Two new toolbar buttons in the MBT SUM panel:
+
+- **📥 Copy** — pull missions from another site into this one. Enter the source site ID → pick-list (all checked by default, all/none links) → create-only copy via Percepto's own save path; mission names already on this site are auto-skipped. Coordinates are absolute GPS so cloned sites line up perfectly.
+- **🔗 Merge** — build one mission from several by clicking pads on the map. Toggle merge mode, then **right-click (M2) asset pads in order**: each pad's name resolves to its same-named mission, a numbered badge drops on the pad, and the side panel shows the ordered list (M2 a numbered pad or ✕ a row to remove, order renumbers). The merged mission keeps the FIRST mission's takeoff + the LAST mission's landing, with every mission's editable steps concatenated in click order (10 + 7 → 17 steps). Namable (default `Merged - PadA + PadB`), created as a NEW mission — originals untouched, dup-name guard.
+
 ## 2026-07-27 — 🗑 Bulk Delete with super-confirm — Asset Inspector v4.197 + Site Diff v0.61 (dev/latest)
 
 Mass-delete FFZs / FPs / NFZs from a site — built for the "accidentally imported/added a pile of entities" case, with maximum guardrails:

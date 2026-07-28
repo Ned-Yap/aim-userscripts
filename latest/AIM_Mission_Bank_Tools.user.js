@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.98
+// @version      1.99
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.98';
+    const SCRIPT_VERSION = '1.99';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -3411,6 +3411,306 @@
     }
 
     // ── Merge panel + commit ─────────────────────────────────────────────────
+    // ════════════════════════════════════════════════════════════════════════
+    // v1.99 — PAD-CLICK MERGE + CROSS-SITE MISSION COPY
+    //
+    // Pad-click merge (🔗): right-click (M2) asset pads on the map IN ORDER;
+    // each pad's name resolves to the mission with the SAME name (user rule:
+    // pad name = mission name, snapshots always belong to their pad). The
+    // merged mission = first mission's takeoff + every mission's editable
+    // steps in click order + last mission's returnHome (user rule: all
+    // takeoffs/landings are identical — keep first TO, last LAND). Created
+    // as a NEW mission via the proven ctx.saveApp({id:null}) path; originals
+    // untouched.
+    //
+    // Cross-site copy (📥): fetch another site's missions, pick-list
+    // (default all), create-only onto THIS site via the same saveApp path —
+    // dup names skipped. Coordinates are absolute GPS, so cloned sites line
+    // up. Instruction ids ride along and are ignored on create (same as the
+    // v1.48 Section+Battery merge which passes fetched instructions raw).
+    // ════════════════════════════════════════════════════════════════════════
+    const PCM_PANEL_ID = 'aim-mb-pcm-panel';
+    const pcm = { on: false, picks: [], markers: [], missions: null, assets: null, bound: null, panelEl: null, customName: null };
+
+    function pcmStepCount(m) { return mbMissionBody(m).length; }
+
+    function pcmFindMission(name) {
+        const want = String(name || '').trim().toLowerCase();
+        if (!want || !Array.isArray(pcm.missions)) return null;
+        return pcm.missions.find(m => String((m && m.name) || '').trim().toLowerCase() === want) || null;
+    }
+
+    async function pcmEnter() {
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded.', '#ff5252', 3000); return; }
+        showToast('🔗 Merge mode — loading pads + missions…', '#7adfe6', 2500);
+        try {
+            const [ent, missions] = await Promise.all([
+                genFetchEntities(sid),
+                new Promise((res, rej) => fetchMissions(sid, res, rej)),
+            ]);
+            pcm.assets = (ent && ent.assets) || [];
+            pcm.missions = missions || [];
+        } catch (e) {
+            console.warn(`${TAG} [pcm] load failed`, e);
+            showToast('Merge mode: failed to load pads/missions (see console).', '#ff5252', 4000);
+            return;
+        }
+        if (!pcm.assets.length) { showToast('No asset pads found on this site.', '#ff9800', 3500); return; }
+        pcm.on = true; pcm.picks = []; pcm.customName = null;
+        pcmBind();
+        pcmRefresh();
+        showToast('🔗 Merge mode ON — right-click (M2) pads in order. M2 a numbered pad to remove it.', '#5fff5f', 5000);
+    }
+
+    function pcmExit() {
+        pcm.on = false;
+        pcmUnbind();
+        pcmClearMarkers();
+        if (pcm.panelEl) { try { pcm.panelEl.remove(); } catch (e) {} pcm.panelEl = null; }
+        pcm.picks = []; pcm.customName = null;
+        const btn = document.querySelector('[data-pcm-toggle]');
+        if (btn) btn.classList.remove('active');
+    }
+
+    function pcmBind() {
+        pcmUnbind();
+        const c = document.querySelector('.leaflet-container');
+        if (!c) { showToast('Merge mode: map not found.', '#ff5252', 3000); return; }
+        const h = (e) => pcmOnContextMenu(e);
+        c.addEventListener('contextmenu', h, true);
+        pcm.bound = { c, h };
+    }
+    function pcmUnbind() {
+        if (pcm.bound) { try { pcm.bound.c.removeEventListener('contextmenu', pcm.bound.h, true); } catch (e) {} pcm.bound = null; }
+    }
+
+    function pcmOnContextMenu(e) {
+        if (!pcm.on) return;
+        const map = getLeafletMap();
+        if (!map || typeof map.mouseEventToLatLng !== 'function') return;
+        let ll;
+        try { ll = map.mouseEventToLatLng(e); } catch (err) { return; }
+        const pt = { lat: ll.lat, lng: ll.lng };
+        const hit = (pcm.assets || []).find(a => a && a.ring && a.ring.length >= 3 && genPointInPoly(pt, a.ring));
+        if (!hit) return;   // not on a pad — let native / other AIM handlers run
+        e.preventDefault(); e.stopPropagation();
+        const idx = pcm.picks.findIndex(p => p.asset.id === hit.id);
+        if (idx >= 0) { pcm.picks.splice(idx, 1); pcmRefresh(); return; }
+        const mission = pcmFindMission(hit.name);
+        if (!mission) { showToast(`No mission named "${hit.name}" on this site.`, '#ff9800', 3500); return; }
+        pcm.picks.push({ asset: hit, mission });
+        pcmRefresh();
+    }
+
+    function pcmClearMarkers() {
+        pcm.markers.forEach(m => { try { m.remove(); } catch (e) {} });
+        pcm.markers = [];
+    }
+    function pcmDrawMarkers() {
+        pcmClearMarkers();
+        const L = composerGetL(), map = getLeafletMap();
+        if (!L || !map) return;
+        pcm.picks.forEach((p, i) => {
+            const c = genCentroid(p.asset.ring);
+            const icon = L.divIcon({
+                className: 'aim-mb-pcm-badge',
+                html: `<div style="width:26px;height:26px;border-radius:50%;background:#7adfe6;color:#04222a;font:800 14px/26px monospace;text-align:center;border:2px solid #04222a;box-shadow:0 1px 6px rgba(0,0,0,0.6);">${i + 1}</div>`,
+                iconSize: [26, 26], iconAnchor: [13, 13],
+            });
+            try { pcm.markers.push(L.marker([c.lat, c.lng], { icon, interactive: false }).addTo(map)); } catch (e) {}
+        });
+    }
+    function pcmRefresh() { pcmDrawMarkers(); pcmRenderPanel(); }
+
+    function pcmRenderPanel() {
+        if (pcm.panelEl) { try { pcm.panelEl.remove(); } catch (e) {} pcm.panelEl = null; }
+        const total = pcm.picks.reduce((s, pk) => s + pcmStepCount(pk.mission), 0);
+        const defName = pcm.picks.length ? ('Merged - ' + pcm.picks.map(pk => pk.asset.name).join(' + ')) : '';
+        const nameVal = pcm.customName != null ? pcm.customName : defName;
+        const rows = pcm.picks.map((pk, i) => `<div style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;font-size:11px;">
+            <span style="color:#7adfe6;font-weight:800;min-width:14px;">${i + 1}</span>
+            <span style="flex:1;color:#e6e6e6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(String(pk.mission.name || ''))}</span>
+            <span style="color:#9ad;white-space:nowrap;">${pcmStepCount(pk.mission)} steps</span>
+            <button data-pcm-rm="${i}" style="background:none;border:none;color:#ff8a8a;cursor:pointer;font-size:12px;">✕</button>
+        </div>`).join('');
+        const el = document.createElement('div');
+        el.id = PCM_PANEL_ID;
+        el.style.cssText = 'position:fixed;top:60px;right:24px;width:340px;max-height:74vh;display:flex;flex-direction:column;z-index:2147483601;'
+            + 'background:#161a20;border:1px solid #7adfe6;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        el.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(122,223,230,0.08);border-bottom:1px solid rgba(122,223,230,0.3);">
+                <span style="font-weight:800;color:#7adfe6;font-size:14px;">🔗 Merge by pad clicks</span>
+                <button data-pcm-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button>
+            </div>
+            <div style="padding:7px 12px;font-size:10px;color:#789;border-bottom:1px solid #2a2f38;line-height:1.5;">
+                Right-click (M2) pads in order — pad #1's mission leads. M2 a numbered pad to remove it.
+                Keeps the FIRST mission's takeoff + the LAST mission's landing; everything between is the missions' editable steps in click order.
+            </div>
+            <div style="overflow:auto;flex:1;padding:2px 8px;">${rows || '<div style="padding:10px;color:#888;font-size:11px;">No pads picked yet.</div>'}</div>
+            <div style="display:flex;gap:8px;align-items:center;padding:7px 12px;border-top:1px solid #2a2f38;">
+                <label style="font-size:11px;color:#9ad;">Name</label>
+                <input data-pcm-name type="text" value="${escapeHtml(nameVal)}" style="flex:1;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:4px;padding:3px 6px;font-size:11px;" />
+            </div>
+            <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
+                <span data-pcm-status style="flex:1;font-size:11px;color:#9ad;">${pcm.picks.length} mission(s) · ${total} steps</span>
+                <button data-pcm-clear style="padding:5px 9px;background:rgba(255,255,255,0.12);border:none;color:#ddd;border-radius:5px;cursor:pointer;font-size:11px;">Clear</button>
+                <button data-pcm-go style="padding:6px 12px;background:#5fff5f;border:none;color:#04220a;border-radius:6px;cursor:pointer;font-weight:800;" ${pcm.picks.length >= 2 ? '' : 'disabled'}>🔗 Create (${total})</button>
+            </div>`;
+        document.body.appendChild(el);
+        pcm.panelEl = el;
+        el.querySelector('[data-pcm-close]').onclick = () => pcmExit();
+        el.querySelector('[data-pcm-clear]').onclick = () => { pcm.picks = []; pcm.customName = null; pcmRefresh(); };
+        el.querySelector('[data-pcm-go]').onclick = () => pcmCommit();
+        const nameEl = el.querySelector('[data-pcm-name]');
+        nameEl.oninput = () => { pcm.customName = nameEl.value; };
+        el.querySelectorAll('[data-pcm-rm]').forEach(b => {
+            b.onclick = () => { pcm.picks.splice(Number(b.getAttribute('data-pcm-rm')), 1); pcmRefresh(); };
+        });
+    }
+
+    let pcmBusy = false;
+    async function pcmCommit() {
+        if (pcmBusy) return;
+        if (pcm.picks.length < 2) { showToast('Pick at least 2 pads to merge.', '#ff9800', 3000); return; }
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4000); return; }
+        const nameEl = pcm.panelEl && pcm.panelEl.querySelector('[data-pcm-name]');
+        const name = ((nameEl && nameEl.value) || '').trim();
+        if (!name) { showToast('Give the merged mission a name.', '#ff9800', 3000); return; }
+        if (pcmFindMission(name)) { showToast(`A mission named "${name}" already exists — pick another name.`, '#ff9800', 4500); return; }
+        const first = pcm.picks[0].mission, last = pcm.picks[pcm.picks.length - 1].mission;
+        const to = ((first.instructions || []).find(i => i && i.type === 0)) || mbMakeStep(0, 20);
+        const rh = (Array.from(last.instructions || []).reverse().find(i => i && i.type === 99)) || mbMakeStep(99);
+        const body = [];
+        pcm.picks.forEach(p => mbMissionBody(p.mission).forEach(st => body.push(st)));
+        const instrs = [to].concat(body, [rh]);
+        const statusEl = pcm.panelEl && pcm.panelEl.querySelector('[data-pcm-status]');
+        if (statusEl) statusEl.textContent = `Creating "${name}" (${body.length} steps)…`;
+        pcmBusy = true;
+        try {
+            await ctx.saveApp({ id: null, type: 1, instructions: instrs, data_report_object_arr: [] }, name);
+        } catch (e) {
+            pcmBusy = false;
+            console.warn(`${TAG} [pcm] create failed`, e);
+            showToast(`🔗 Merge create FAILED — ${String(e && e.message || e)}`, '#ff5252', 6000);
+            if (statusEl) statusEl.textContent = 'Create failed — see console.';
+            return;
+        }
+        pcmBusy = false;
+        const refreshed = refreshMissionList();
+        showToast(`🔗 Created "${name}" — ${body.length} steps from ${pcm.picks.length} missions.${refreshed ? '' : ' Reload the list to see it.'}`, '#5fff5f', 6500);
+        console.log(`${TAG} [pcm] merged ${pcm.picks.length} missions → "${name}" (${body.length} steps + takeoff/land)`);
+        pcmExit();
+    }
+
+    // ---------------- Cross-site mission copy ----------------
+    const CPM_PANEL_ID = 'aim-mb-copy-panel';
+    let cpmBusy = false;
+
+    function openCopyMissionsPanel() {
+        const old = document.getElementById(CPM_PANEL_ID);
+        if (old) { old.remove(); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded.', '#ff5252', 3000); return; }
+        let lastSrc = '';
+        try { if (typeof GM_getValue === 'function') lastSrc = GM_getValue('aim-mb-copy-src', '') || ''; } catch (e) {}
+        const p = document.createElement('div');
+        p.id = CPM_PANEL_ID;
+        p.style.cssText = 'position:fixed;top:60px;right:24px;width:390px;max-height:80vh;display:flex;flex-direction:column;z-index:2147483601;'
+            + 'background:#161a20;border:1px solid #7adfe6;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        p.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(122,223,230,0.08);border-bottom:1px solid rgba(122,223,230,0.3);">
+                <span style="font-weight:800;color:#7adfe6;font-size:14px;">📥 Copy missions → site ${escapeHtml(String(sid))}</span>
+                <button data-cpm-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;padding:8px 12px;border-bottom:1px solid #2a2f38;">
+                <label style="font-size:11px;color:#9ad;white-space:nowrap;">Source site ID</label>
+                <input data-cpm-src type="text" value="${escapeHtml(lastSrc)}" style="width:90px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:4px;padding:3px 6px;font-size:12px;" />
+                <button data-cpm-load style="padding:4px 10px;background:#7adfe6;border:none;color:#04222a;border-radius:5px;cursor:pointer;font-weight:800;font-size:11px;">Load</button>
+            </div>
+            <div data-cpm-list style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;color:#888;">Enter the source site ID and Load. Copy is create-only — mission names already on this site are skipped.</div>
+            <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
+                <span data-cpm-status style="flex:1;font-size:11px;color:#9ad;"></span>
+                <button data-cpm-go style="padding:6px 12px;background:#5fff5f;border:none;color:#04220a;border-radius:6px;cursor:pointer;font-weight:800;" disabled>📥 Copy 0</button>
+            </div>`;
+        document.body.appendChild(p);
+        p.querySelector('[data-cpm-close]').onclick = () => { if (!cpmBusy) p.remove(); };
+        let loaded = null;
+        const listEl = p.querySelector('[data-cpm-list]');
+        const goBtn = p.querySelector('[data-cpm-go]');
+        const statusEl = p.querySelector('[data-cpm-status]');
+        const updateGo = () => {
+            const n = loaded ? listEl.querySelectorAll('input[data-cpm-pick]:checked').length : 0;
+            goBtn.textContent = `📥 Copy ${n}`;
+            goBtn.disabled = cpmBusy || !n;
+        };
+        p.querySelector('[data-cpm-load]').onclick = async () => {
+            const srcId = String(p.querySelector('[data-cpm-src]').value || '').trim();
+            if (!/^\d+$/.test(srcId)) { showToast('Source site ID must be a number.', '#ff9800', 3000); return; }
+            if (srcId === String(sid)) { showToast('Source IS this site — use 🔗 Merge for same-site work.', '#ff9800', 4000); return; }
+            try { if (typeof GM_setValue === 'function') GM_setValue('aim-mb-copy-src', srcId); } catch (e) {}
+            listEl.innerHTML = '<div style="padding:8px;color:#9ad;">Loading…</div>';
+            try {
+                const [srcArr, tgtArr] = await Promise.all([
+                    fetch(`/available_app/?site_id=${encodeURIComponent(srcId)}&type=1`, { credentials: 'include' })
+                        .then(r => { if (!r.ok) throw new Error(`source HTTP ${r.status}`); return r.json(); }),
+                    fetch(`/available_app/?site_id=${encodeURIComponent(sid)}&type=1`, { credentials: 'include' })
+                        .then(r => { if (!r.ok) throw new Error(`target HTTP ${r.status}`); return r.json(); }),
+                ]);
+                if (!Array.isArray(srcArr)) throw new Error('unexpected source response shape');
+                const tgtNames = new Set((Array.isArray(tgtArr) ? tgtArr : []).map(m => String((m && m.name) || '').trim().toLowerCase()));
+                loaded = { src: srcArr };
+                if (!srcArr.length) { listEl.innerHTML = '<div style="padding:8px;color:#ff9800;">Source site has no missions.</div>'; updateGo(); return; }
+                listEl.innerHTML = `<div style="padding:4px 2px;color:#9ad;">${srcArr.length} mission(s) on site ${escapeHtml(srcId)} · <a data-cpm-all href="#" style="color:#7adfe6;">all</a> / <a data-cpm-none href="#" style="color:#7adfe6;">none</a></div>`
+                    + srcArr.map((m, i) => {
+                        const dup = tgtNames.has(String((m && m.name) || '').trim().toLowerCase());
+                        const steps = mbMissionBody(m).length;
+                        return `<label style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;${dup ? 'opacity:0.5;' : 'cursor:pointer;'}">
+                            <input type="checkbox" data-cpm-pick="${i}" ${dup ? 'disabled' : 'checked'} />
+                            <span style="flex:1;color:#e6e6e6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(String(m.name || ('#' + m.id)))}</span>
+                            <span style="color:#9ad;white-space:nowrap;">${steps} steps</span>
+                            ${dup ? '<span style="color:#ff9800;font-size:10px;white-space:nowrap;">exists — skipped</span>' : ''}
+                        </label>`;
+                    }).join('');
+                listEl.querySelectorAll('input[data-cpm-pick]').forEach(cb => { cb.onchange = updateGo; });
+                const allA = listEl.querySelector('[data-cpm-all]'), noneA = listEl.querySelector('[data-cpm-none]');
+                if (allA) allA.onclick = (ev) => { ev.preventDefault(); listEl.querySelectorAll('input[data-cpm-pick]:not(:disabled)').forEach(cb => { cb.checked = true; }); updateGo(); };
+                if (noneA) noneA.onclick = (ev) => { ev.preventDefault(); listEl.querySelectorAll('input[data-cpm-pick]').forEach(cb => { if (!cb.disabled) cb.checked = false; }); updateGo(); };
+                updateGo();
+            } catch (e) {
+                console.warn(`${TAG} [copy] load failed`, e);
+                listEl.innerHTML = `<div style="padding:8px;color:#ff8a8a;">Load failed — ${escapeHtml(String(e && e.message || e))}</div>`;
+                loaded = null;
+                updateGo();
+            }
+        };
+        goBtn.onclick = async () => {
+            if (!loaded || cpmBusy) return;
+            const ctx = findMissionAppCtx();
+            if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4000); return; }
+            const picks = Array.from(listEl.querySelectorAll('input[data-cpm-pick]:checked'))
+                .map(cb => loaded.src[Number(cb.getAttribute('data-cpm-pick'))]).filter(Boolean);
+            if (!picks.length) return;
+            cpmBusy = true; updateGo();
+            let ok = 0, fail = 0;
+            for (let i = 0; i < picks.length; i++) {
+                const m = picks[i];
+                statusEl.textContent = `Copying ${i + 1}/${picks.length} — ${m.name}…`;
+                try {
+                    await ctx.saveApp({ id: null, type: 1, instructions: (m.instructions || []), data_report_object_arr: [] }, m.name);
+                    ok++;
+                } catch (e) { fail++; console.warn(`${TAG} [copy] failed "${m.name}"`, e); }
+            }
+            cpmBusy = false;
+            const refreshed = ok ? refreshMissionList() : false;
+            statusEl.textContent = `Done — copied ${ok}${fail ? `, ${fail} failed` : ''}.`;
+            showToast(`📥 Copied ${ok} mission(s)${fail ? ` · ${fail} failed (see console)` : ''}.${ok && !refreshed ? ' Reload the list to see them.' : ''}`, ok ? '#5fff5f' : '#ff5252', 7000);
+            console.log(`${TAG} [copy] copied ${ok}, failed ${fail} → site ${sid}`);
+            updateGo();
+        };
+    }
+
     const MB_MERGE_PANEL_ID = 'aim-mb-merge-panel';
     let mbMergeBusy = false;
     function mbCloseMergePanel() { const p = document.getElementById(MB_MERGE_PANEL_ID); if (p) p.remove(); }
@@ -5360,6 +5660,8 @@
                 <button class="aim-mb-tbtn" data-cols>Columns ▾</button>
                 <button class="aim-mb-tbtn" data-bulk-rename title="Find & replace text across the SELECTED missions' names (e.g. N - → NNE - )">✎ Rename ▾</button>
                 <button class="aim-mb-tbtn" data-bulk-delete title="Permanently delete the SELECTED missions from the server" style="color:#ff8a8a;">🗑 Delete</button>
+                <button class="aim-mb-tbtn" data-copy-missions title="Copy missions from another site into this one (create-only, dup names skipped)">📥 Copy</button>
+                <button class="aim-mb-tbtn ${pcm.on ? 'active' : ''}" data-pcm-toggle title="Merge missions by right-clicking pads on the map in order (pad name = mission name)">🔗 Merge</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'imperial' ? 'active' : ''}" data-unit="imperial">mi</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'metric' ? 'active' : ''}" data-unit="metric">km</button>
                 <button class="aim-mb-tbtn" data-settings title="Battery → flights thresholds">⚙</button>
@@ -5641,6 +5943,14 @@
         // Bulk delete (selected)
         const bdBtn = panelEl.querySelector('[data-bulk-delete]');
         if (bdBtn) bdBtn.onclick = () => openBulkDeletePopover(bdBtn);
+        // v1.99 — cross-site mission copy + pad-click merge mode
+        const cpBtn = panelEl.querySelector('[data-copy-missions]');
+        if (cpBtn) cpBtn.onclick = () => openCopyMissionsPanel();
+        const pcmBtn = panelEl.querySelector('[data-pcm-toggle]');
+        if (pcmBtn) pcmBtn.onclick = async () => {
+            if (pcm.on) { pcmExit(); }
+            else { await pcmEnter(); if (pcm.on) pcmBtn.classList.add('active'); }
+        };
         // Settings (thresholds)
         const settingsBtn = panelEl.querySelector('[data-settings]');
         if (settingsBtn) settingsBtn.onclick = () => openSettingsPopover(settingsBtn);
