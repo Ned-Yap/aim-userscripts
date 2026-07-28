@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.01
+// @version      2.02
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.01';
+    const SCRIPT_VERSION = '2.02';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -3620,6 +3620,25 @@
         });
     }
 
+    // v2.02: LIVE 400 FIX — a merged create concatenates instructions from
+    // SEVERAL missions, each carrying its own server-assigned instruction
+    // ids (+ other read-shape fields); the mixed/foreign ids 400 the create.
+    // (A single-mission copy passes raw instructions fine — one mission's
+    // ids are self-consistent.) Normalize every merged step down to the
+    // exact field set the generator's proven creates use: no id, deep-
+    // cloned location/extras.
+    function pcmNormStep(s) {
+        return {
+            type: s.type,
+            value1: s.value1 === undefined ? null : s.value1,
+            value2: s.value2 === undefined ? null : s.value2,
+            location: s.location ? JSON.parse(JSON.stringify(s.location)) : null,
+            extra_options: s.extra_options ? JSON.parse(JSON.stringify(s.extra_options)) : {},
+            polygon_points: s.polygon_points ? JSON.parse(JSON.stringify(s.polygon_points)) : null,
+            snapshot_points: s.snapshot_points ? JSON.parse(JSON.stringify(s.snapshot_points)) : null,
+        };
+    }
+
     let pcmBusy = false;
     async function pcmCommit() {
         if (pcmBusy) return;
@@ -3631,10 +3650,10 @@
         if (!name) { showToast('Give the merged mission a name.', '#ff9800', 3000); return; }
         if (pcmFindMission(name)) { showToast(`A mission named "${name}" already exists — pick another name.`, '#ff9800', 4500); return; }
         const first = pcm.picks[0].mission, last = pcm.picks[pcm.picks.length - 1].mission;
-        const to = ((first.instructions || []).find(i => i && i.type === 0)) || mbMakeStep(0, 20);
-        const rh = (Array.from(last.instructions || []).reverse().find(i => i && i.type === 99)) || mbMakeStep(99);
+        const to = pcmNormStep(((first.instructions || []).find(i => i && i.type === 0)) || mbMakeStep(0, 20));
+        const rh = pcmNormStep((Array.from(last.instructions || []).reverse().find(i => i && i.type === 99)) || mbMakeStep(99));
         const body = [];
-        pcm.picks.forEach(p => mbMissionBody(p.mission).forEach(st => body.push(st)));
+        pcm.picks.forEach(p => mbMissionBody(p.mission).forEach(st => body.push(pcmNormStep(st))));
         const instrs = [to].concat(body, [rh]);
         const statusEl = pcm.panelEl && pcm.panelEl.querySelector('[data-pcm-status]');
         if (statusEl) statusEl.textContent = `Creating "${name}" (${body.length} steps)…`;
