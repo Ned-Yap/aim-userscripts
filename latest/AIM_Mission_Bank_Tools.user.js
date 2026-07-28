@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.99
+// @version      2.00
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.99';
+    const SCRIPT_VERSION = '2.00';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -3458,6 +3458,11 @@
         }
         if (!pcm.assets.length) { showToast('No asset pads found on this site.', '#ff9800', 3500); return; }
         pcm.on = true; pcm.picks = []; pcm.customName = null;
+        // Synchronous DOM flag (same protocol as Click-to-Add's
+        // data-aim-clickadd): the Asset Inspector's window contextmenu
+        // handler bails while this is set (AI v4.199+), so M2 on a pad
+        // reaches OUR handler instead of popping the entity inspector.
+        try { document.documentElement.setAttribute('data-aim-merge', '1'); } catch (e) {}
         pcmBind();
         pcmRefresh();
         showToast('🔗 Merge mode ON — right-click (M2) pads in order. M2 a numbered pad to remove it.', '#5fff5f', 5000);
@@ -3465,6 +3470,7 @@
 
     function pcmExit() {
         pcm.on = false;
+        try { document.documentElement.removeAttribute('data-aim-merge'); } catch (e) {}
         pcmUnbind();
         pcmClearMarkers();
         if (pcm.panelEl) { try { pcm.panelEl.remove(); } catch (e) {} pcm.panelEl = null; }

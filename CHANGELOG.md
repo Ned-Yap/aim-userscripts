@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-28 — 🔗 Merge M2 vs Asset Inspector conflict — MBT v2.00 + Asset Inspector v4.199 (dev/latest)
+
+Right-clicking a pad in 🔗 merge mode popped the Asset Inspector's entity inspector instead of picking the pad. Fixed with the same synchronous-DOM-flag protocol Click-to-Add uses: merge mode sets `data-aim-merge="1"` on `<html>` and the Asset Inspector's window contextmenu handler bails while it's set. Update BOTH scripts — the flag needs AI v4.199+ to be honored.
+
 ## 2026-07-28 — AGL hover tooltip un-freeze — Asset Inspector v4.198 (dev/latest)
 
 Live bug from site 1631: the AGL line our script adds to Percepto's `ALT(ft)` hover tooltip **froze at the first hover point's ground** while sliding along one FFZ/FP — Percepto reuses a single tooltip element and the MSL text never changes across one entity, so the rebuild never triggered. It now recomputes whenever the cursor moves ≥ ~3 m, so the AGL genuinely tracks the terrain under the cursor, and the line is labeled "· ground at cursor" to distinguish it from the SUM panel's AGL column (which is referenced to the zone's **centroid** ground — the number Bulk → AGL targets). The two agreeing everywhere is impossible for a flat MSL band over sloped ground; now each is labeled for what it measures.
