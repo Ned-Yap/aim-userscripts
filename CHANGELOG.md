@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-28 — AGL hover tooltip un-freeze — Asset Inspector v4.198 (dev/latest)
+
+Live bug from site 1631: the AGL line our script adds to Percepto's `ALT(ft)` hover tooltip **froze at the first hover point's ground** while sliding along one FFZ/FP — Percepto reuses a single tooltip element and the MSL text never changes across one entity, so the rebuild never triggered. It now recomputes whenever the cursor moves ≥ ~3 m, so the AGL genuinely tracks the terrain under the cursor, and the line is labeled "· ground at cursor" to distinguish it from the SUM panel's AGL column (which is referenced to the zone's **centroid** ground — the number Bulk → AGL targets). The two agreeing everywhere is impossible for a flat MSL band over sloped ground; now each is labeled for what it measures.
+
 ## 2026-07-28 — 📥 Cross-site mission copy + 🔗 pad-click merge — Mission Bank Tools v1.99 (dev/latest)
 
 Two new toolbar buttons in the MBT SUM panel:

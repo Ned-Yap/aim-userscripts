@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.197
+// @version      4.198
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -65,7 +65,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.197';
+    const SCRIPT_VERSION = '4.198';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -5585,6 +5585,9 @@
             if (g == null) g = elevNearest(aglTipLastLL.lat, aglTipLastLL.lng, AGL_TIP_NEAREST_M);
             if (g == null) { fetchElevation(aglTipLastLL.lat, aglTipLastLL.lng).then(retry).catch(aglTipWarnOnce); return; }
             el.setAttribute('data-aim-agl', m[0]); // record the MSL text we augmented, to detect reuse with new values
+            // v4.198: also record WHERE this line was computed, so cursor
+            // movement along the same entity (same MSL text) can invalidate it
+            el.setAttribute('data-aim-agl-ll', `${aglTipLastLL.lat.toFixed(6)},${aglTipLastLL.lng.toFixed(6)}`);
             const gFt = g * 3.28084;
             const lo = Math.round(parseFloat(m[1].replace(/,/g, '')) - gFt);
             const hi = Math.round(parseFloat(m[2].replace(/,/g, '')) - gFt);
@@ -5592,10 +5595,39 @@
             const add = document.createElement('div');
             add.setAttribute('data-aim-agl-line', '1');
             add.style.cssText = 'color:#7fd1ff;font-size:15px;font-weight:700;margin-bottom:3px';
-            add.textContent = `${lo} – ${hi} ft AGL`;
+            add.innerHTML = `${lo} – ${hi} ft AGL <span style="font-size:10px;color:#9ad;font-weight:400">· ground at cursor</span>`;
             el.insertBefore(add, el.firstChild);
         } catch (e) { aglTipWarnOnce(e); }
     }
+    // v4.198 — LIVE BUG FIX (site 1631): Percepto reuses ONE tooltip element
+    // and the MSL text is constant across a whole FFZ/FP, so the mutation
+    // watchers never re-fire while the cursor slides along one entity — the
+    // FIRST hover's ground froze into the AGL line (a constant "108 ft AGL"
+    // along a border whose centroid-referenced SUM AGL is 100). Recompute on
+    // cursor movement: once the cursor is ≥ ~3 m from where the line was
+    // computed, strip + rebuild against the ground under the new position.
+    let aglTipMoveAt = 0;
+    function aglTipCursorRefresh() {
+        if (!aglHoverTipEnabled || !aglTipLastLL) return;
+        const now = Date.now();
+        if (now - aglTipMoveAt < 120) return;   // throttle — cache lookups are cheap but not free
+        aglTipMoveAt = now;
+        try {
+            const host = document.querySelector('[data-aim-agl]');
+            if (!host || !host.isConnected || host.offsetParent === null) return;   // no visible augmented tooltip
+            const prev = (host.getAttribute('data-aim-agl-ll') || '').split(',');
+            if (prev.length === 2) {
+                const dLat = (aglTipLastLL.lat - parseFloat(prev[0])) * 111320;
+                const dLng = (aglTipLastLL.lng - parseFloat(prev[1])) * 111320 * Math.cos(aglTipLastLL.lat * Math.PI / 180);
+                if (Math.hypot(dLat, dLng) < 3) return;   // hasn't meaningfully moved
+            }
+            host.querySelectorAll('[data-aim-agl-line]').forEach(d => d.remove());
+            host.removeAttribute('data-aim-agl');
+            host.removeAttribute('data-aim-agl-ll');
+            refreshAglHoverTip(host);
+        } catch (e) { aglTipWarnOnce(e); }
+    }
+
     // Pre-fetch the site's MSL/AGL mode so the very first hover can augment
     // (one small GET, cached per site).
     function warmAglTipMode() {
@@ -5612,6 +5644,7 @@
                 try {
                     const mp = getLeafletMap();
                     if (mp && mp.mouseEventToLatLng) aglTipLastLL = mp.mouseEventToLatLng(e);
+                    aglTipCursorRefresh();   // v4.198 — un-freeze the AGL line as the cursor moves along one entity
                 } catch (er) { aglTipWarnOnce(er); }
             }, true);
             // Observe the whole document: the tooltip may portal OUTSIDE the map
