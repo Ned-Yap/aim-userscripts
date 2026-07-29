@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-28 — ⛰ Profiler: session DEM cache — Asset Inspector v4.201 (dev/latest)
+
+Re-running the profiler to tweak parameters (Δ, absorb tiers, AGL band, despeckle, P95) no longer refetches the elevation grid — the raster is cached for the session and only refetched when the site, margin, or cell size changes. Param iteration is now near-instant (~0.2 s instead of 2–8 s). The cache is memory-only (freed on site switch) — deliberately not persisted to Tampermonkey storage, since a ~5 MB raster would bloat GM values for data 3DEP returns in seconds.
+
 ## 2026-07-28 — ⛰ Terrain Profiler (Phase 1, read-only) — Asset Inspector v4.200 (dev/latest)
 
 New **⛰ Profiler** button in the SUM panel toolbar (+ its own "Terrain Profiler" Control Panel card, Site Setup scope). Answers "where does a giant fixed-floor FFZ break the AGL band?" on high-relief sites:

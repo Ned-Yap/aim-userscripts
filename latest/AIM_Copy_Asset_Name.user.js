@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.200
+// @version      4.201
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -67,7 +67,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.200';
+    const SCRIPT_VERSION = '4.201';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -5772,6 +5772,7 @@
     let terMoveHandler = null;
     let terBadgeEl = null;
     let terRunning = false;
+    let terDemCache = null;   // { key, dem } — session-only raster cache (terrain doesn't change between param tweaks)
 
     // Web-mercator helpers — the DEM is requested and displayed in 3857,
     // so row↔latitude conversions must go through mercator Y (linear-lat
@@ -6360,7 +6361,7 @@
         terRunning = true;
         const t0 = performance.now();
         try {
-            showToast('⛰ Profiler: fetching DEM…');
+            showToast('⛰ Profiler: running…');
             await Promise.resolve(fetchMapObjects(sid, false));
             const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
             const pts = airCollectSitePoints(ents);
@@ -6373,8 +6374,24 @@
             const th = { ...terThresholds };
             const mLat = th.marginFt / 364000;
             const mLng = th.marginFt / (364000 * Math.cos(((minLat + maxLat) / 2) * Math.PI / 180));
-            const dem0 = await terFetchDem(minLng - mLng, minLat - mLat, maxLng + mLng, maxLat + mLat);
-            if (terEnabled.median) dem0.vals = terMedianFilter(dem0.vals, dem0.w, dem0.h);
+            const west = minLng - mLng, south = minLat - mLat, east = maxLng + mLng, north = maxLat + mLat;
+            // Session DEM cache — the terrain doesn't change between param
+            // tweaks, so re-runs reuse the raster. Refetch only when the
+            // site, bbox (margin), or cell size changes.
+            const demKey = `${sid}|${west.toFixed(6)},${south.toFixed(6)},${east.toFixed(6)},${north.toFixed(6)}|${th.cellFt}`;
+            let demRaw;
+            if (terDemCache && terDemCache.key === demKey) {
+                demRaw = terDemCache.dem;
+                console.log(`${TAG} profiler: DEM served from session cache (${demRaw.w}×${demRaw.h})`);
+            } else {
+                showToast('⛰ Profiler: fetching DEM…');
+                demRaw = await terFetchDem(west, south, east, north);
+                terDemCache = { key: demKey, dem: demRaw };
+            }
+            // Never mutate the cached raster — derive the working copy.
+            const dem0 = Object.assign({}, demRaw, {
+                vals: terEnabled.median ? terMedianFilter(demRaw.vals, demRaw.w, demRaw.h) : demRaw.vals,
+            });
             const seg = terSegment(dem0, th);
             terState = { sid, siteLabel: getCurrentSiteName() || `site ${sid}`, dem: dem0, seg, thresholds: th };
             terRenderOverlay();
@@ -6404,6 +6421,7 @@
             terRemoveLayer();
             terClosePanel();
             terState = null;
+            terDemCache = null;   // ~5 MB raster — free it on site switch
             console.log(`${TAG} terrain profile cleared (site changed)`);
         }
     });
