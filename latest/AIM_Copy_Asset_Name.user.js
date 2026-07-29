@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.201
+// @version      4.202
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -67,7 +67,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.201';
+    const SCRIPT_VERSION = '4.202';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -5734,16 +5734,29 @@
         absorbAc: 0.5,    // islands below this: silently absorbed
         nfzMaxAc: 5,      // absorbed islands up to this: NFZ candidates
         opacity: 0.55,    // overlay opacity
+        simplifyFt: 66,   // Phase 2: boundary simplification tolerance
+        nfzBufFt: 25,     // Phase 2: outward buffer around NFZ hulls
+        namePrefix: 'FFZ ', // Phase 2: created-FFZ name prefix (string)
     };
     const TER_ENABLE_DEFAULTS = {
         median: true,     // 3×3 median despeckle before banding
         floorP95: false,  // floor ref = P95 elevation instead of true max
+        clipSite: true,   // mask the DEM to the union of existing FFZs —
+                          // outside the site footprint nothing matters
+                          // (and NFZs can't even exist there)
     };
     function loadTerThresholds() {
         const out = { ...TER_THRESH_DEFAULTS };
         try {
             const raw = elevGmGet(TER_THRESH_KEY, null);
-            if (raw) { const o = JSON.parse(raw); for (const k in TER_THRESH_DEFAULTS) if (typeof o[k] === 'number' && isFinite(o[k])) out[k] = o[k]; }
+            if (raw) {
+                const o = JSON.parse(raw);
+                for (const k in TER_THRESH_DEFAULTS) {
+                    if (typeof o[k] !== typeof TER_THRESH_DEFAULTS[k]) continue;
+                    if (typeof o[k] === 'number' && !isFinite(o[k])) continue;
+                    out[k] = o[k];
+                }
+            }
         } catch (e) { console.warn(`${TAG} loadTerThresholds threw:`, e); }
         return out;
     }
@@ -5843,6 +5856,47 @@
         };
     }
 
+    // Rasterize the union of the site's existing FFZ rings into a cell
+    // mask (scanline fill per ring, OR'd). With clipSite on, cells
+    // outside the footprint become no-data BEFORE segmentation — so
+    // regions, stats, floors, the overlay, and NFZ candidates simply
+    // don't exist beyond the site perimeter (user rule: outside the
+    // setup nothing matters, and NFZs can't live outside an FFZ).
+    function terSiteMask(dem, ents) {
+        const rings = [];
+        (ents || []).forEach(e => {
+            if (e.type !== 16) return;
+            const cs = (entityCoords(e) || []).filter(c => c && typeof c.lat === 'number');
+            if (cs.length >= 3) rings.push(cs);
+        });
+        if (!rings.length) return null;
+        const w = dem.w, h = dem.h;
+        const toX = (lng) => (terMercX(lng) - dem.mercX1) / (dem.mercX2 - dem.mercX1) * w;
+        const toY = (lat) => (dem.mercY2 - terMercY(lat)) / (dem.mercY2 - dem.mercY1) * h;
+        const mask = new Uint8Array(w * h);
+        rings.forEach(cs => {
+            const px = cs.map(c => [toX(c.lng), toY(c.lat)]);
+            let mnY = Infinity, mxY = -Infinity;
+            px.forEach(p => { if (p[1] < mnY) mnY = p[1]; if (p[1] > mxY) mxY = p[1]; });
+            const y0 = Math.max(0, Math.floor(mnY)), y1 = Math.min(h - 1, Math.ceil(mxY));
+            for (let y = y0; y <= y1; y++) {
+                const cy = y + 0.5;
+                const xs = [];
+                for (let i = 0, j = px.length - 1; i < px.length; j = i++) {
+                    const a = px[j], b = px[i];
+                    if ((a[1] > cy) === (b[1] > cy)) continue;
+                    xs.push(a[0] + (b[0] - a[0]) * (cy - a[1]) / (b[1] - a[1]));
+                }
+                xs.sort((q, r2) => q - r2);
+                for (let k = 0; k + 1 < xs.length; k += 2) {
+                    const xA = Math.max(0, Math.round(xs[k])), xB = Math.min(w - 1, Math.round(xs[k + 1]) - 1);
+                    for (let x = xA; x <= xB; x++) mask[y * w + x] = 1;
+                }
+            }
+        });
+        return mask;
+    }
+
     // 3×3 median despeckle (NaN-aware).
     function terMedianFilter(vals, w, h) {
         const out = new Float32Array(vals.length);
@@ -5933,7 +5987,7 @@
         for (let i = 0; i < n; i++) if (labels[i] >= 0) cellsOf[labels[i]]++;
         const absorbCells = th.absorbAc / cellAcres;
         const nfzCells = Math.max(absorbCells, th.nfzMaxAc / cellAcres);
-        const candGrid = new Uint8Array(n);          // 1 = cell belongs to an NFZ candidate
+        const candGrid = new Int16Array(n);          // 0 = none, else NFZ-candidate index + 1
         const nfzCands = [];                          // {cells, acres, meanFt, targetRoot, cx, cy, dir}
         for (let pass = 0; pass < 12; pass++) {
             const rootCells = new Float64Array(nextLabel);
@@ -5980,8 +6034,9 @@
                 if (rootCells[t] >= nfzCells && sCells >= absorbCells) {
                     // island absorbed into a real region → NFZ candidate
                     const list = members.get(s) || [];
+                    const cId = nfzCands.length + 1;   // candGrid carries the candidate id (Phase 2 traces cells per candidate)
                     let sum = 0, sx = 0, sy = 0;
-                    for (const i of list) { candGrid[i] = 1; sum += vals[i]; sx += i % w; sy += (i / w) | 0; }
+                    for (const i of list) { candGrid[i] = cId; sum += vals[i]; sx += i % w; sy += (i / w) | 0; }
                     nfzCands.push({
                         cells: sCells, acres: sCells * cellAcres,
                         meanFt: list.length ? sum / list.length : NaN,
@@ -6274,19 +6329,22 @@
                 ${num('nfzMaxAc', 'NFZ≤', th.nfzMaxAc, 0.5, 'Absorbed islands up to this acreage become NFZ candidates')}
                 ${chk('median', 'despeckle', terEnabled.median, '3×3 median filter before banding')}
                 ${chk('floorP95', 'P95 floor', terEnabled.floorP95, 'Floor from the 95th-percentile elevation instead of the true max')}
+                ${chk('clipSite', 'site only', terEnabled.clipSite, 'Mask the DEM to the union of existing FFZs — ignore terrain outside the site footprint')}
                 <button data-ter-rerun style="background:rgba(201,166,255,0.15);border:1px solid rgba(201,166,255,0.5);color:#c9a6ff;border-radius:5px;padding:2px 10px;cursor:pointer;font-weight:600;">⟳ Re-run</button>
             </div>
             <div style="padding:8px 12px;overflow-y:auto;">
                 <div style="margin-bottom:4px;">Relief <strong>${Math.round(seg.mnFt).toLocaleString()}–${Math.round(seg.mxFt).toLocaleString()} ft</strong>
                     (${Math.round(seg.mxFt - seg.mnFt)} ft) → <strong style="color:#c9a6ff">${seg.order.length} region${seg.order.length === 1 ? '' : 's'}</strong>
                     · <span style="color:#ff35d0">${seg.nfzCands.length} NFZ candidate${seg.nfzCands.length === 1 ? '' : 's'}</span>
-                    · grid ${st.dem.w}×${st.dem.h} @ ~${Math.round(st.dem.cellXft)} ft</div>
+                    · grid ${st.dem.w}×${st.dem.h} @ ~${Math.round(st.dem.cellXft)} ft${st.maskNote ? ` · ${esc(st.maskNote)}` : ''}</div>
                 ${th.deltaFt > th.maxAglFt - th.minAglFt ? `<div style="color:#ffb020;margin-bottom:4px;">⚠ Δ ${th.deltaFt} ft exceeds the AGL window (${th.maxAglFt - th.minAglFt} ft) — no fixed band can satisfy both bounds.</div>` : ''}
                 <div style="color:#c9a6ff;font-weight:600;margin:8px 0 4px;border-bottom:1px solid rgba(201,166,255,0.25);padding-bottom:2px;">Regions (largest first — proposed FFZ splits)</div>
                 ${rows.join('')}
                 ${cands.length ? `<div style="color:#ff35d0;font-weight:600;margin:10px 0 4px;border-bottom:1px solid rgba(255,53,208,0.3);padding-bottom:2px;">NFZ candidates (outliers to fence off, not split on)</div>${cands.join('')}` : ''}
+                ${terBSectionHtml()}
             </div>`;
         wrap.addEventListener('click', (e) => {
+            if (terBHandleClick(e, wrap)) return;
             if (e.target.closest('[data-ter-close]')) { terClosePanel(); return; }
             if (e.target.closest('[data-ter-copy]')) {
                 navigator.clipboard.writeText(terBuildReport()).then(
@@ -6392,8 +6450,24 @@
             const dem0 = Object.assign({}, demRaw, {
                 vals: terEnabled.median ? terMedianFilter(demRaw.vals, demRaw.w, demRaw.h) : demRaw.vals,
             });
+            // Site-footprint mask (clipSite): everything outside the union
+            // of existing FFZs becomes no-data before segmentation.
+            let maskNote = '';
+            if (terEnabled.clipSite) {
+                const mask = terSiteMask(dem0, ents);
+                if (mask) {
+                    const vv = (dem0.vals === demRaw.vals) ? new Float32Array(demRaw.vals) : dem0.vals;
+                    let kept = 0;
+                    for (let i = 0; i < vv.length; i++) { if (!mask[i]) vv[i] = NaN; else kept++; }
+                    dem0.vals = vv;
+                    maskNote = `masked to site footprint (${Math.round(kept / vv.length * 100)}% of grid)`;
+                } else {
+                    maskNote = 'no FFZs on site — full rectangle profiled';
+                }
+            }
             const seg = terSegment(dem0, th);
-            terState = { sid, siteLabel: getCurrentSiteName() || `site ${sid}`, dem: dem0, seg, thresholds: th };
+            terBClearStage();   // staged Phase-2 geometry belongs to the previous segmentation
+            terState = { sid, siteLabel: getCurrentSiteName() || `site ${sid}`, dem: dem0, seg, thresholds: th, maskNote };
             terRenderOverlay();
             terRenderPanel();
             const ms = Math.round(performance.now() - t0);
@@ -6409,6 +6483,7 @@
     }
 
     function terrainProfilerClear() {
+        terBClearStage();
         terRemoveLayer();
         terClosePanel();
         terState = null;
@@ -6418,6 +6493,7 @@
     // Site nav invalidates the profile — the overlay belongs to one site.
     window.addEventListener('hashchange', () => {
         if (terState && terState.sid !== getCurrentSiteID()) {
+            terBClearStage();
             terRemoveLayer();
             terClosePanel();
             terState = null;
@@ -6425,6 +6501,745 @@
             console.log(`${TAG} terrain profile cleared (site changed)`);
         }
     });
+
+    // ============================================================
+    // ⛰ Terrain Profiler — Phase 2: FFZ / NFZ auto-builder (v4.202,
+    // feature #203). Turns the profiled regions into REAL entities:
+    //   • vectorize the label grid into polygons whose shared borders
+    //     are simplified ONCE (arc/topology approach — adjacent FFZs
+    //     butt exactly, no sliver gaps/overlaps to trip the SOP checks)
+    //   • regions that enclose an island (hole) are SLICED into simple
+    //     hole-free pieces with polygon-clipping (Percepto polygons
+    //     can't store holes)
+    //   • NFZ candidates → buffered convex hulls clipped to stay
+    //     entirely inside their parent FFZ piece (containment rule)
+    //   • staged preview (vector layers + checkboxes) → create-only
+    //     commit with the Advanced-Draw-style rails: CSRF, template
+    //     body, unique names, backup stash + download, sequential
+    //     POSTs with 403 abort, fresh-fetch verify, run log, and a
+    //     double-click-armed Undo that deletes exactly what this run
+    //     created. FFZs commit first; NFZs only after FFZs verify.
+    // ============================================================
+    let terBState = null;   // { sid, pieces, nfzs, arcs, rings, createdIds, runLog, committing }
+    let terBLayers = [];    // staged preview vector layers on the map
+    let terBArm = 0;        // double-click arm timestamps (commit / undo)
+    let terBUndoArm = 0;
+
+    function terBClearStage() {
+        const map = getLeafletMap();
+        terBLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        terBLayers = [];
+        terBState = null;
+        terBArm = 0; terBUndoArm = 0;
+    }
+
+    function terBPC() {
+        try { if (typeof polygonClipping !== 'undefined' && polygonClipping) return polygonClipping; } catch (e) {}
+        try { return unsafeWindow && unsafeWindow.polygonClipping; } catch (e) {}
+        return null;
+    }
+
+    // --- Douglas-Peucker on [x,y] lattice points, endpoints pinned ---
+    function terBSimplify(pts, tol) {
+        if (!tol || pts.length <= 2) return pts.slice();
+        const keep = new Uint8Array(pts.length);
+        keep[0] = 1; keep[pts.length - 1] = 1;
+        const st = [[0, pts.length - 1]];
+        const t2 = tol * tol;
+        while (st.length) {
+            const [a, b] = st.pop();
+            if (b - a < 2) continue;
+            const ax = pts[a][0], ay = pts[a][1], bx = pts[b][0], by = pts[b][1];
+            const dx = bx - ax, dy = by - ay;
+            const len2 = dx * dx + dy * dy;
+            let worst = -1, worstD = -1;
+            for (let i = a + 1; i < b; i++) {
+                let d;
+                if (!len2) { const ex = pts[i][0] - ax, ey = pts[i][1] - ay; d = ex * ex + ey * ey; }
+                else {
+                    const t = ((pts[i][0] - ax) * dx + (pts[i][1] - ay) * dy) / len2;
+                    const tc = Math.max(0, Math.min(1, t));
+                    const ex = pts[i][0] - (ax + tc * dx), ey = pts[i][1] - (ay + tc * dy);
+                    d = ex * ex + ey * ey;
+                }
+                if (d > worstD) { worstD = d; worst = i; }
+            }
+            if (worstD > t2) { keep[worst] = 1; st.push([a, worst]); st.push([worst, b]); }
+        }
+        const out = [];
+        for (let i = 0; i < pts.length; i++) if (keep[i]) out.push(pts[i]);
+        return out;
+    }
+
+    // --- Vectorize the label grid into shared-boundary arcs + per-region
+    // ring descriptions (arc sequences). Lattice corners: x∈[0..w], y∈[0..h].
+    function terBVectorize(seg, dem) {
+        const { regGrid } = seg;
+        const w = dem.w, h = dem.h, W1 = w + 1;
+        const Lb = (x, y) => (x < 0 || y < 0 || x >= w || y >= h) ? -1 : regGrid[y * w + x];
+        const vE = (x, y) => Lb(x - 1, y) !== Lb(x, y);      // vertical edge, corners (x,y)-(x,y+1); y∈[0..h-1], x∈[0..w]
+        const hE = (x, y) => Lb(x, y - 1) !== Lb(x, y);      // horizontal edge, corners (x,y)-(x+1,y); x∈[0..w-1], y∈[0..h]
+        const eIdV = (x, y) => (y * W1 + x) * 2;
+        const eIdH = (x, y) => (y * W1 + x) * 2 + 1;
+        const edgeCount = (x, y) => {
+            let c = 0;
+            if (y > 0 && vE(x, y - 1)) c++;
+            if (y < h && vE(x, y)) c++;
+            if (x > 0 && hE(x - 1, y)) c++;
+            if (x < w && hE(x, y)) c++;
+            return c;
+        };
+        const isNode = (x, y) => edgeCount(x, y) > 2;
+        const incident = (x, y) => {
+            const out = [];
+            if (y > 0 && vE(x, y - 1)) out.push({ eid: eIdV(x, y - 1), ox: x, oy: y - 1 });
+            if (y < h && vE(x, y)) out.push({ eid: eIdV(x, y), ox: x, oy: y + 1 });
+            if (x > 0 && hE(x - 1, y)) out.push({ eid: eIdH(x - 1, y), ox: x - 1, oy: y });
+            if (x < w && hE(x, y)) out.push({ eid: eIdH(x, y), ox: x + 1, oy: y });
+            return out;
+        };
+        const nEdgeSlots = (h + 1) * W1 * 2;
+        const edgeArc = new Int32Array(nEdgeSlots).fill(-1);
+        const arcs = [];   // { pts:[[x,y]..], closed }
+        const walkArc = (sx, sy, eid0, nx, ny) => {
+            const pts = [[sx, sy]];
+            let lastEid = eid0, cx = nx, cy = ny;
+            const eids = [eid0];
+            for (;;) {
+                pts.push([cx, cy]);
+                if ((cx === sx && cy === sy) || isNode(cx, cy)) break;
+                const inc = incident(cx, cy);
+                let nxt = null;
+                for (const e2 of inc) if (e2.eid !== lastEid) { nxt = e2; break; }
+                if (!nxt) break;
+                lastEid = nxt.eid; eids.push(nxt.eid);
+                cx = nxt.ox; cy = nxt.oy;
+            }
+            const id = arcs.length;
+            arcs.push({ pts, closed: pts.length > 2 && pts[0][0] === pts[pts.length - 1][0] && pts[0][1] === pts[pts.length - 1][1] });
+            eids.forEach(e2 => { edgeArc[e2] = id; });
+            return id;
+        };
+        // Seed arcs from every node corner, then sweep for pure loops.
+        for (let y = 0; y <= h; y++) {
+            for (let x = 0; x <= w; x++) {
+                if (!isNode(x, y)) continue;
+                for (const e2 of incident(x, y)) if (edgeArc[e2.eid] === -1) walkArc(x, y, e2.eid, e2.ox, e2.oy);
+            }
+        }
+        for (let y = 0; y < h; y++) for (let x = 0; x <= w; x++) if (vE(x, y) && edgeArc[eIdV(x, y)] === -1) walkArc(x, y, eIdV(x, y), x, y + 1);
+        for (let y = 0; y <= h; y++) for (let x = 0; x < w; x++) if (hE(x, y) && edgeArc[eIdH(x, y)] === -1) walkArc(x, y, eIdH(x, y), x + 1, y);
+        // --- Ring reconstruction: stitch DIRECTED ARCS (region on the LEFT
+        // of travel) end-to-end with a left-hand rule at nodes. Arc-level
+        // stitching (not edge-level) so rings are always arc-aligned —
+        // simplification then can't desync neighbors.
+        const DIR_RANK = { '0,-1': 0, '1,0': 1, '0,1': 2, '-1,0': 3 };   // up,right,down,left (CW order)
+        const stepKey = (a, b) => `${Math.sign(b[0] - a[0])},${Math.sign(b[1] - a[1])}`;
+        // Side labels of each arc relative to FORWARD traversal (pts[0]→pts[1]).
+        const arcSide = arcs.map(A => {
+            const p0 = A.pts[0], p1 = A.pts[1];
+            const dx = p1[0] - p0[0], dy = p1[1] - p0[1];
+            let leftCell, rightCell;
+            if (dx === 1) { leftCell = [p0[0], p0[1] - 1]; rightCell = [p0[0], p0[1]]; }
+            else if (dx === -1) { leftCell = [p1[0], p1[1]]; rightCell = [p1[0], p1[1] - 1]; }
+            else if (dy === 1) { leftCell = [p0[0], p0[1]]; rightCell = [p0[0] - 1, p0[1]]; }
+            else { leftCell = [p0[0] - 1, p1[1]]; rightCell = [p0[0], p1[1]]; }
+            return { left: Lb(leftCell[0], leftCell[1]), right: Lb(rightCell[0], rightCell[1]) };
+        });
+        // Directed-arc records per region.
+        const dirArc = (ai, fwd) => {
+            const P = arcs[ai].pts;
+            const n2 = P.length;
+            return fwd
+                ? { arc: ai, fwd, from: P[0], to: P[n2 - 1], outDir: stepKey(P[0], P[1]), inDir: stepKey(P[n2 - 2], P[n2 - 1]) }
+                : { arc: ai, fwd, from: P[n2 - 1], to: P[0], outDir: stepKey(P[n2 - 1], P[n2 - 2]), inDir: stepKey(P[1], P[0]) };
+        };
+        const regionDirArcs = new Map();   // regionIdx → [dirArcRec]
+        arcs.forEach((A, ai) => {
+            const s = arcSide[ai];
+            if (s.left >= 0) { let l = regionDirArcs.get(s.left); if (!l) { l = []; regionDirArcs.set(s.left, l); } l.push(dirArc(ai, true)); }
+            if (s.right >= 0) { let l = regionDirArcs.get(s.right); if (!l) { l = []; regionDirArcs.set(s.right, l); } l.push(dirArc(ai, false)); }
+        });
+        const ringsByRegion = new Map();   // regionIdx → [ { arcSeq:[{arc,fwd}] } ]
+        regionDirArcs.forEach((dlist, r) => {
+            const byStart = new Map();     // "x,y" → [rec]
+            dlist.forEach(rec => {
+                const k = `${rec.from[0]},${rec.from[1]}`;
+                let l = byStart.get(k);
+                if (!l) { l = []; byStart.set(k, l); }
+                l.push(rec);
+            });
+            const usedRec = new Set();
+            const rings = [];
+            for (const seed of dlist) {
+                if (usedRec.has(seed)) continue;
+                const ringArcs = [seed];
+                usedRec.add(seed);
+                let cur = seed;
+                let guard = 0;
+                for (;;) {
+                    if (guard++ > dlist.length + 2) { console.warn(`${TAG} builder: ring guard tripped (region ${r})`); break; }
+                    const cands = byStart.get(`${cur.to[0]},${cur.to[1]}`) || [];
+                    // left-hand rule: rotate CW from the reverse of the
+                    // incoming direction, first candidate wins
+                    const revRank = DIR_RANK[cur.inDir.split(',').map(v => -v).join(',')];
+                    let best = null, bestRot = 9;
+                    for (const c of cands) {
+                        const rot0 = ((DIR_RANK[c.outDir] - revRank) + 4) % 4;
+                        const eff = rot0 === 0 ? 4 : rot0;
+                        if (eff < bestRot) { bestRot = eff; best = c; }
+                    }
+                    if (!best) { console.warn(`${TAG} builder: open boundary chain (region ${r}) — ring dropped`); ringArcs.length = 0; break; }
+                    if (best === ringArcs[0]) break;   // ring closed
+                    if (usedRec.has(best)) { console.warn(`${TAG} builder: ring re-entered a used arc (region ${r}) — ring dropped`); ringArcs.length = 0; break; }
+                    usedRec.add(best);
+                    ringArcs.push(best);
+                    cur = best;
+                }
+                if (ringArcs.length) rings.push({ arcSeq: ringArcs.map(rec => ({ arc: rec.arc, fwd: rec.fwd })) });
+            }
+            ringsByRegion.set(r, rings);
+        });
+        return { arcs, ringsByRegion };
+    }
+
+    // Emit a ring's lattice points from its (simplified) arcs.
+    function terBRingPoints(ring, arcs) {
+        const out = [];
+        for (const s of ring.arcSeq) {
+            const A = arcs[s.arc];
+            const pts = A.simp || A.pts;
+            const seq = s.fwd ? pts : pts.slice().reverse();
+            const start = out.length ? 1 : 0;   // skip the shared junction point
+            for (let i = start; i < seq.length; i++) out.push(seq[i]);
+        }
+        // drop a duplicated closing point
+        while (out.length > 1 && out[0][0] === out[out.length - 1][0] && out[0][1] === out[out.length - 1][1]) out.pop();
+        return out;
+    }
+
+    function terBLatticeToLL(dem, x, y) {
+        const lng = dem.bounds.west + (x / dem.w) * (dem.bounds.east - dem.bounds.west);
+        const lat = terInvMercY(dem.mercY2 - (y / dem.h) * (dem.mercY2 - dem.mercY1));
+        return { lat, lng };
+    }
+
+    function terBSignedArea(pts) {
+        let a = 0;
+        for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) a += (pts[j][0] * pts[i][1] - pts[i][0] * pts[j][1]);
+        return a / 2;
+    }
+
+    // Slice a polygon-with-holes ([outer, hole…] in [lng,lat]) into
+    // hole-free rings via horizontal cuts through each hole's centroid.
+    function terBSliceHoles(poly, depth) {
+        if (poly.length <= 1) return [poly[0]];
+        const PC = terBPC();
+        if (!PC) return [poly[0]];   // no clipping lib → drop holes (logged by caller)
+        if (depth > 12) return [poly[0]];
+        const hole = poly[1];
+        let clat = 0;
+        hole.forEach(p => { clat += p[1]; });
+        clat /= hole.length;
+        let mnLng = Infinity, mxLng = -Infinity, mnLat = Infinity, mxLat = -Infinity;
+        poly[0].forEach(p => {
+            if (p[0] < mnLng) mnLng = p[0]; if (p[0] > mxLng) mxLng = p[0];
+            if (p[1] < mnLat) mnLat = p[1]; if (p[1] > mxLat) mxLat = p[1];
+        });
+        const eps = 1e-7;
+        const rects = [
+            [[[mnLng - eps, clat], [mxLng + eps, clat], [mxLng + eps, mxLat + eps], [mnLng - eps, mxLat + eps], [mnLng - eps, clat]]],
+            [[[mnLng - eps, mnLat - eps], [mxLng + eps, mnLat - eps], [mxLng + eps, clat], [mnLng - eps, clat], [mnLng - eps, mnLat - eps]]],
+        ];
+        const out = [];
+        for (const rect of rects) {
+            let res = null;
+            try { res = PC.intersection([poly], [rect]); } catch (e) { console.warn(`${TAG} builder: hole slice threw:`, e); }
+            (res || []).forEach(p => {
+                terBSliceHoles(p, (depth || 0) + 1).forEach(r2 => { if (r2 && r2.length >= 3) out.push(r2); });
+            });
+        }
+        return out.length ? out : [poly[0]];
+    }
+
+    const terBNormRing = (ring) => {
+        const out = ring.slice();
+        while (out.length > 1 && out[0][0] === out[out.length - 1][0] && out[0][1] === out[out.length - 1][1]) out.pop();
+        return out;
+    };
+
+    // Convex hull (Andrew monotone chain) on [x,y] points.
+    function terBHull(pts) {
+        const P = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+        if (P.length < 3) return P;
+        const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+        const lower = [];
+        for (const p of P) { while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop(); lower.push(p); }
+        const upper = [];
+        for (let i = P.length - 1; i >= 0; i--) { const p = P[i]; while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop(); upper.push(p); }
+        lower.pop(); upper.pop();
+        return lower.concat(upper);
+    }
+
+    // Outward offset of a convex lattice polygon by d cells.
+    function terBOffsetConvex(hull, d) {
+        if (hull.length < 3) {
+            // degenerate — square around the centroid
+            let cx = 0, cy = 0;
+            hull.forEach(p => { cx += p[0]; cy += p[1]; });
+            cx /= hull.length || 1; cy /= hull.length || 1;
+            const s = Math.max(d, 1);
+            return [[cx - s, cy - s], [cx + s, cy - s], [cx + s, cy + s], [cx - s, cy + s]];
+        }
+        let cx = 0, cy = 0;
+        hull.forEach(p => { cx += p[0]; cy += p[1]; });
+        cx /= hull.length; cy /= hull.length;
+        const n = hull.length;
+        // offset each edge outward, then intersect consecutive edge lines
+        const lines = [];
+        for (let i = 0; i < n; i++) {
+            const a = hull[i], b = hull[(i + 1) % n];
+            let nx = b[1] - a[1], ny = -(b[0] - a[0]);
+            const len = Math.hypot(nx, ny) || 1;
+            nx /= len; ny /= len;
+            const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+            if ((mx + nx - cx) * (mx - cx) + (my + ny - cy) * (my - cy) < (mx - cx) * (mx - cx) + (my - cy) * (my - cy)) { nx = -nx; ny = -ny; }
+            lines.push({ px: a[0] + nx * d, py: a[1] + ny * d, dx: b[0] - a[0], dy: b[1] - a[1] });
+        }
+        const out = [];
+        for (let i = 0; i < n; i++) {
+            const l1 = lines[(i + n - 1) % n], l2 = lines[i];
+            const den = l1.dx * l2.dy - l1.dy * l2.dx;
+            if (Math.abs(den) < 1e-12) { out.push([l2.px, l2.py]); continue; }
+            const t = ((l2.px - l1.px) * l2.dy - (l2.py - l1.py) * l2.dx) / den;
+            out.push([l1.px + t * l1.dx, l1.py + t * l1.dy]);
+        }
+        return out;
+    }
+
+    // --- Stage: vectorize + simplify + slice + NFZ hulls → terBState ---
+    function terBStage() {
+        const st = terState;
+        if (!st) { showToast('Run the profiler first', 'rgba(255,96,96,0.55)'); return; }
+        terBClearStage();
+        const t0 = performance.now();
+        const seg = st.seg, dem = st.dem, th = terThresholds;
+        const tolCells = Math.max(0, (th.simplifyFt || 0) / Math.max(1, dem.cellXft));
+        const topo = terBVectorize(seg, dem);
+        topo.arcs.forEach(A => { A.tol = tolCells; A.simp = terBSimplify(A.pts, tolCells); });
+        const log = [];
+        // Self-intersection repair loop: halve the tolerance of the arcs of
+        // any failing region ring and rebuild (shared arcs stay shared).
+        for (let iter = 0; iter < 5; iter++) {
+            const badArcs = new Set();
+            topo.ringsByRegion.forEach((rings, r) => {
+                rings.forEach(ring => {
+                    const pts = terBRingPoints(ring, topo.arcs);
+                    if (pts.length < 3) return;
+                    const ll = pts.map(p => terBLatticeToLL(dem, p[0], p[1]));
+                    if (ringSelfIntersects(ll)) ring.arcSeq.forEach(s => badArcs.add(s.arc));
+                });
+            });
+            if (!badArcs.size) break;
+            let changed = 0;
+            badArcs.forEach(aId => {
+                const A = topo.arcs[aId];
+                const nt = (iter >= 3) ? 0 : A.tol / 2;
+                if (nt !== A.tol) { A.tol = nt; A.simp = terBSimplify(A.pts, nt); changed++; }
+            });
+            if (!changed) break;
+            log.push(`simplify repair: relaxed ${badArcs.size} arc(s) (pass ${iter + 1})`);
+        }
+        // Build pieces per region (slicing holes).
+        const pieces = [];
+        const pieceRegion = [];
+        seg.order.forEach(gi => {
+            const rg = seg.regions[gi];
+            const rings = topo.ringsByRegion.get(gi) || [];
+            if (!rings.length) return;
+            const built = rings.map(ring => {
+                const pts = terBRingPoints(ring, topo.arcs);
+                return { pts, area: Math.abs(terBSignedArea(pts)) };
+            }).filter(r2 => r2.pts.length >= 3);
+            if (!built.length) return;
+            built.sort((a, b) => b.area - a.area);
+            const outer = built[0], holes = built.slice(1);
+            const toLLPair = (p) => { const q = terBLatticeToLL(dem, p[0], p[1]); return [q.lng, q.lat]; };
+            const polyLL = [outer.pts.map(toLLPair)].concat(holes.map(h2 => h2.pts.map(toLLPair)));
+            // close rings for polygon-clipping
+            polyLL.forEach(r2 => r2.push(r2[0].slice()));
+            let flat;
+            if (holes.length) {
+                flat = terBSliceHoles(polyLL, 0).map(terBNormRing);
+                log.push(`${rg.name}: ${holes.length} enclosed island(s) → sliced into ${flat.length} piece(s)`);
+            } else {
+                flat = [terBNormRing(polyLL[0])];
+            }
+            flat.forEach((ringLL, pi) => {
+                if (ringLL.length < 3) return;
+                const points = ringLL.map(p => ({ lat: p[1], lng: p[0] }));
+                if (ringSelfIntersects(points)) { log.push(`${rg.name}${flat.length > 1 ? String.fromCharCode(97 + pi) : ''}: self-intersecting after slicing — SKIPPED`); return; }
+                // area in acres (equirectangular)
+                const latRef = points[0].lat * Math.PI / 180;
+                let a2 = 0;
+                for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+                    a2 += (points[j].lng * points[i].lat - points[i].lng * points[j].lat);
+                }
+                const acres = Math.abs(a2 / 2) * 111320 * Math.cos(latRef) * 110540 / 4046.8564224;
+                pieces.push({
+                    region: gi, name: `${rg.name}${flat.length > 1 ? String.fromCharCode(97 + pi) : ''}`,
+                    points, acres,
+                    floorMSL: rg.floorMSL, ceilMSL: rg.ceilMSL,
+                    bandLo: rg.bandLo, bandHi: rg.bandHi,
+                    verts: points.length,
+                    infeasible: rg.bandHeight <= 0,
+                    selected: rg.bandHeight > 0,
+                });
+                pieceRegion.push(gi);
+            });
+        });
+        // NFZ candidate hulls (candGrid carries candidate index + 1).
+        const nfzs = [];
+        const bufCells = Math.max(0, (th.nfzBufFt || 0) / Math.max(1, dem.cellXft));
+        const candCells = new Map();
+        const cg = seg.candGrid;
+        for (let i = 0; i < cg.length; i++) {
+            const c = cg[i];
+            if (!c) continue;
+            let list = candCells.get(c - 1);
+            if (!list) { list = []; candCells.set(c - 1, list); }
+            list.push(i);
+        }
+        seg.nfzCands.forEach((cand, ci) => {
+            const cells = candCells.get(ci);
+            if (!cells || !cells.length) return;
+            const corners = [];
+            cells.forEach(i => {
+                const x = i % dem.w, y = (i / dem.w) | 0;
+                corners.push([x, y], [x + 1, y], [x, y + 1], [x + 1, y + 1]);
+            });
+            const hull = terBOffsetConvex(terBHull(corners), bufCells);
+            let ringLL = hull.map(p => { const q = terBLatticeToLL(dem, p[0], p[1]); return [q.lng, q.lat]; });
+            // containment: clip to the parent piece that holds the centroid
+            const ctr = terCandCentroid(cand);
+            let parent = -1;
+            for (let pi = 0; pi < pieces.length; pi++) {
+                if (pieces[pi].region === cand.region && pointInPolygon(ctr.lat, ctr.lng, pieces[pi].points)) { parent = pi; break; }
+            }
+            if (parent === -1) { for (let pi = 0; pi < pieces.length; pi++) if (pointInPolygon(ctr.lat, ctr.lng, pieces[pi].points)) { parent = pi; break; } }
+            let clipped = false;
+            if (parent >= 0) {
+                const PC = terBPC();
+                if (PC) {
+                    try {
+                        const pp = pieces[parent].points.map(p => [p.lng, p.lat]);
+                        pp.push(pp[0].slice());
+                        const hh = ringLL.slice(); hh.push(hh[0].slice());
+                        const res = PC.intersection([[hh]], [[pp]]);
+                        let bestR = null, bestA = -1;
+                        (res || []).forEach(p => {
+                            const r2 = terBNormRing(p[0]);
+                            const A2 = Math.abs(terBSignedArea(r2));
+                            if (A2 > bestA) { bestA = A2; bestR = r2; }
+                        });
+                        if (bestR && bestR.length >= 3) {
+                            if (bestR.length !== ringLL.length) clipped = true;
+                            ringLL = bestR;
+                        }
+                    } catch (e) { console.warn(`${TAG} builder: NFZ clip threw:`, e); }
+                }
+            }
+            const points = ringLL.map(p => ({ lat: p[1], lng: p[0] }));
+            if (points.length < 3 || ringSelfIntersects(points)) return;
+            nfzs.push({
+                name: `NFZ ${cand.dir || 'outlier'} ${cand.region >= 0 ? seg.regions[cand.region].name : ''} ${nfzs.length + 1}`.replace(/\s+/g, ' ').trim(),
+                points, acres: cand.acres, dir: cand.dir, parent, clipped,
+                orphan: parent === -1,
+                selected: parent !== -1,
+            });
+        });
+        const ms = Math.round(performance.now() - t0);
+        const totalVerts = pieces.reduce((s2, p) => s2 + p.verts, 0);
+        log.unshift(`staged ${pieces.length} FFZ piece(s) (${totalVerts} vertices) + ${nfzs.length} NFZ(s) in ${ms} ms · simplify ${th.simplifyFt} ft`);
+        terBState = { sid: st.sid, pieces, nfzs, runLog: log, createdIds: [], committing: false };
+        terBDrawPreview();
+        terRenderPanel();
+        console.log(`${TAG} builder: ${log[0]}`);
+    }
+
+    function terBDrawPreview() {
+        const bs = terBState;
+        if (!bs) return;
+        const L = getLeafletL();
+        const map = getLeafletMap();
+        if (!L || !map) return;
+        terBLayers.forEach(l => { try { map.removeLayer(l); } catch (e) {} });
+        terBLayers = [];
+        const seg = terState && terState.seg;
+        bs.pieces.forEach(p => {
+            try {
+                const c = seg ? terColorFor((p.bandLo + p.bandHi) / 2, seg.mnFt, seg.mxFt) : [255, 225, 77];
+                const col = `rgb(${c[0]},${c[1]},${c[2]})`;
+                const pl = L.polygon(p.points.map(q => [q.lat, q.lng]), {
+                    color: p.selected ? '#ffe14d' : '#666666', weight: 2.5, opacity: p.selected ? 0.95 : 0.5,
+                    dashArray: '7,5', fillColor: col, fillOpacity: p.selected ? 0.10 : 0.03, interactive: false,
+                });
+                pl.addTo(map);
+                terBLayers.push(pl);
+            } catch (e) {}
+        });
+        bs.nfzs.forEach(z => {
+            try {
+                const pl = L.polygon(z.points.map(q => [q.lat, q.lng]), {
+                    color: '#ff35d0', weight: 2, opacity: z.selected ? 0.95 : 0.45,
+                    dashArray: '3,4', fillColor: '#ff35d0', fillOpacity: z.selected ? 0.18 : 0.05, interactive: false,
+                });
+                pl.addTo(map);
+                terBLayers.push(pl);
+            } catch (e) {}
+        });
+    }
+
+    // --- Commit: create-only, FFZs then NFZs, full rails ---
+    async function terBCommit() {
+        if (liteBlockedWrite('build terrain FFZs/NFZs')) return;
+        const bs = terBState;
+        const st = terState;
+        if (!bs || !st) { showToast('Nothing staged', 'rgba(255,96,96,0.55)'); return; }
+        if (bs.committing) { showToast('Commit already running…'); return; }
+        const sid = getCurrentSiteID();
+        if (!sid || sid !== bs.sid) { showToast('Site changed since staging — re-run the profiler', 'rgba(255,96,96,0.55)'); return; }
+        const selP = bs.pieces.filter(p => p.selected);
+        const selN = bs.nfzs.filter(z => z.selected);
+        if (!selP.length && !selN.length) { showToast('Nothing selected', 'rgba(255,96,96,0.55)'); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { showToast('No CSRF token — make one native save/edit anywhere in Percepto first, then retry', 'rgba(255,96,96,0.55)'); return; }
+        bs.committing = true;
+        bs.runLog = [];
+        const logL = (m) => { bs.runLog.push(m); console.log(`${TAG} builder: ${m}`); };
+        try {
+            let siteCfg = null;
+            try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
+            if (siteCfg && siteCfg.mountain_terrain) {
+                logL('ABORT: this is a mountain-terrain site — the profiler’s MSL floor math does not apply.');
+                showToast('Aborted — mountain-terrain site (MSL floors invalid)', 'rgba(255,96,96,0.55)');
+                return;
+            }
+            await fetchMapObjects(sid, true);
+            const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+            const tmplFfz = ents.find(e => e.type === 16 && entityCoords(e));
+            const tmplNfz = ents.find(e => e.type === 4 && entityCoords(e));
+            let tmplFfzBody = null, tmplNfzBody = null;
+            if (tmplFfz) { try { tmplFfzBody = buildWriteBody(tmplFfz, siteCfg); } catch (e) {} }
+            if (tmplNfz) { try { tmplNfzBody = buildWriteBody(tmplNfz, siteCfg); } catch (e) {} }
+            const usedF = new Set(ents.filter(e => e.type === 16 && e.name).map(e => e.name));
+            const usedN = new Set(ents.filter(e => e.type === 4 && e.name).map(e => e.name));
+            const uniq = (base, used) => { base = genCleanName(base) || 'FFZ'; if (!used.has(base)) { used.add(base); return base; } let i = 2, n2; do { n2 = `${base}_${i++}`; } while (used.has(n2)); used.add(n2); return n2; };
+            const prefix = (terThresholds.namePrefix !== undefined) ? String(terThresholds.namePrefix) : 'FFZ ';
+            // Build all bodies FIRST (backup covers exactly what we send).
+            const ffzWrites = selP.map(p => {
+                const body = genCreateBody({
+                    name: `${prefix}${p.bandLo}-${p.bandHi} ${p.name}`,
+                    points: p.points,
+                    restrictions: { minAlt: p.floorMSL / M_TO_FT, maxAlt: p.ceilMSL / M_TO_FT },
+                }, sid, siteCfg, tmplFfzBody);
+                body.name = uniq(body.name, usedF);
+                return { piece: p, body };
+            });
+            const nfzWrites = selN.map(z => {
+                let b;
+                if (tmplNfzBody) { b = JSON.parse(JSON.stringify(tmplNfzBody)); delete b.id; }
+                else b = { type: 4, description: '', custom: {}, params: {}, asset_waypoints: null, constantly_present_asset_name: false, general_marker_type: '', marker_height: 0, is_unshielded: false, restrictions: [] };
+                b.type = 4;
+                b.name = uniq(z.name, usedN);
+                b.description = '';
+                b.site_id = sid;
+                b.points = z.points;
+                b.validated = false;
+                b.arcs = [];
+                b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
+                return { zone: z, body: b };
+            });
+            // Backup: stash + download of everything about to be created.
+            const backup = { site: sid, at: new Date().toISOString(), ffzs: ffzWrites.map(w => w.body), nfzs: nfzWrites.map(w => w.body) };
+            try { localStorage.setItem(`aim_ter_build_backup:${sid}`, JSON.stringify(backup)); } catch (e) {}
+            try { downloadJSONFile(`terrain-build-${sid}-${Date.now()}.json`, JSON.stringify(backup, null, 1)); } catch (e) { logL('backup download failed (stash in localStorage still written)'); }
+            // Sequential creates — FFZs first.
+            const created = [];
+            const post = async (body, label) => {
+                const r = await fetch('https://percepto.app/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
+                const txt = await r.text();
+                let json = null;
+                try { json = JSON.parse(txt); } catch (e) {}
+                const saved = json && json.map_objects;
+                if (r.status === 403) { throw Object.assign(new Error('403 forbidden — write permission lost, ABORTING run'), { fatal: true }); }
+                if (r.status === 200 && saved && saved.id != null) return saved.id;
+                throw new Error(`server ${r.status} ${(txt || '').slice(0, 120)}`);
+            };
+            let fOk = 0, fFail = 0;
+            for (const w2 of ffzWrites) {
+                try {
+                    const id = await post(w2.body, w2.body.name);
+                    created.push({ id, name: w2.body.name, type: 16 });
+                    fOk++;
+                    logL(`✓ FFZ "${w2.body.name}" → #${id} (floor ${w2.piece.floorMSL} / ceil ${w2.piece.ceilMSL} ft)`);
+                } catch (e) {
+                    fFail++;
+                    logL(`✗ FFZ "${w2.body.name}": ${e.message}`);
+                    if (e.fatal) throw e;
+                }
+            }
+            // Verify FFZs before touching NFZs (containment order rule).
+            await fetchMapObjects(sid, true);
+            const after = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+            const byId = new Set(after.map(e => e.id));
+            const missing = created.filter(c => !byId.has(c.id));
+            if (missing.length) logL(`⚠ verify: ${missing.length} created FFZ(s) NOT found on re-fetch — check the site before trusting this run`);
+            else if (created.length) logL(`verify ✓ all ${created.length} FFZ(s) present on fresh fetch`);
+            let nOk = 0, nFail = 0;
+            if (nfzWrites.length && fFail === 0) {
+                for (const w2 of nfzWrites) {
+                    try {
+                        const id = await post(w2.body, w2.body.name);
+                        created.push({ id, name: w2.body.name, type: 4 });
+                        nOk++;
+                        logL(`✓ NFZ "${w2.body.name}" → #${id}`);
+                    } catch (e) {
+                        nFail++;
+                        logL(`✗ NFZ "${w2.body.name}": ${e.message}`);
+                        if (e.fatal) throw e;
+                    }
+                }
+                await fetchMapObjects(sid, true);
+                const after2 = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+                const byId2 = new Set(after2.map(e => e.id));
+                const missN = created.filter(c => c.type === 4 && !byId2.has(c.id));
+                logL(missN.length ? `⚠ verify: ${missN.length} NFZ(s) missing on re-fetch` : (nOk ? `verify ✓ all ${nOk} NFZ(s) present` : 'no NFZs created'));
+            } else if (nfzWrites.length) {
+                logL(`NFZ creates SKIPPED — ${fFail} FFZ create(s) failed (fix + re-run; NFZs need their parent FFZs)`);
+            }
+            bs.createdIds = created;
+            logL(`DONE: ${fOk}/${ffzWrites.length} FFZ · ${nOk}/${nfzWrites.length} NFZ created${fFail + nFail ? ` · ${fFail + nFail} FAILED` : ''}`);
+            showToast(fFail + nFail ? `Build: ${fOk + nOk} created, ${fFail + nFail} FAILED — see panel log` : `Build ✓ ${fOk} FFZ + ${nOk} NFZ created`, fFail + nFail ? 'rgba(255,96,96,0.55)' : undefined);
+        } catch (e) {
+            logL(`RUN ABORTED: ${e && e.message ? e.message : e}`);
+            showToast('Build aborted — see panel log', 'rgba(255,96,96,0.55)');
+        } finally {
+            bs.committing = false;
+            terRenderPanel();
+        }
+    }
+
+    // Undo THIS RUN: delete exactly the ids we created (NFZs first).
+    async function terBUndo() {
+        const bs = terBState;
+        if (!bs || !bs.createdIds || !bs.createdIds.length) { showToast('Nothing to undo', 'rgba(255,96,96,0.55)'); return; }
+        if (liteBlockedWrite('undo terrain build')) return;
+        const csrf = getCsrfToken();
+        if (!csrf) { showToast('No CSRF token', 'rgba(255,96,96,0.55)'); return; }
+        const sid = getCurrentSiteID();
+        const logL = (m) => { bs.runLog.push(m); console.log(`${TAG} builder: ${m}`); };
+        const order = bs.createdIds.slice().sort((a, b) => (b.type === 4 ? 1 : 0) - (a.type === 4 ? 1 : 0));
+        let ok = 0, fail = 0;
+        for (const c of order) {
+            try {
+                const r = await fetch(`https://percepto.app/map_objects/${c.id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
+                if (r.status === 200 || r.status === 204) { ok++; }
+                else { fail++; logL(`undo ✗ ${c.name} (#${c.id}): server ${r.status}`); }
+            } catch (e) { fail++; logL(`undo ✗ ${c.name}: ${e && e.message || e}`); }
+        }
+        logL(`UNDO: deleted ${ok}/${order.length}${fail ? ` · ${fail} failed` : ''}`);
+        bs.createdIds = bs.createdIds.filter(c => false);
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        showToast(fail ? `Undo: ${ok} deleted, ${fail} failed` : `Undo ✓ ${ok} deleted`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+        terRenderPanel();
+    }
+
+    // --- Build section UI (rendered inside the profiler panel) ---
+    function terBSectionHtml() {
+        if (LITE) return '';
+        const th = terThresholds;
+        const bs = terBState;
+        const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+        const h = [];
+        h.push(`<div style="color:#ffe14d;font-weight:600;margin:12px 0 4px;border-bottom:1px solid rgba(255,225,77,0.3);padding-bottom:2px;">🏗 Build (Phase 2 — creates real entities)</div>`);
+        h.push(`<div style="display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;margin:4px 0 6px;">`
+            + `<label title="Boundary simplification tolerance — bigger = fewer vertices, straighter edges" style="display:flex;align-items:center;gap:4px;">simplify<input data-ter-p="simplifyFt" type="number" value="${th.simplifyFt}" step="10" style="width:58px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(255,225,77,0.35);border-radius:4px;padding:2px 4px;font:inherit;">ft</label>`
+            + `<label title="Outward buffer around each NFZ candidate hull" style="display:flex;align-items:center;gap:4px;">NFZ buf<input data-ter-p="nfzBufFt" type="number" value="${th.nfzBufFt}" step="5" style="width:52px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(255,53,208,0.35);border-radius:4px;padding:2px 4px;font:inherit;">ft</label>`
+            + `<label title="Name prefix for created FFZs" style="display:flex;align-items:center;gap:4px;">prefix<input data-ter-prefix type="text" value="${esc(th.namePrefix !== undefined ? th.namePrefix : 'FFZ ')}" style="width:70px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(255,225,77,0.35);border-radius:4px;padding:2px 4px;font:inherit;"></label>`
+            + `<button data-ter-stage style="background:rgba(255,225,77,0.13);border:1px solid rgba(255,225,77,0.5);color:#ffe14d;border-radius:5px;padding:2px 10px;cursor:pointer;font-weight:600;">🏗 Stage</button>`
+            + `</div>`);
+        if (!bs) {
+            h.push(`<div style="opacity:0.75;">Stage to preview the FFZ polygons (dashed) + NFZ hulls (magenta) before anything is written.</div>`);
+            return h.join('');
+        }
+        const selP = bs.pieces.filter(p => p.selected).length;
+        const selN = bs.nfzs.filter(z => z.selected).length;
+        h.push(`<div style="margin:2px 0 4px;">Staged: <strong style="color:#ffe14d">${bs.pieces.length} FFZ piece(s)</strong> (${selP} selected) · <strong style="color:#ff35d0">${bs.nfzs.length} NFZ(s)</strong> (${selN} selected)</div>`);
+        bs.pieces.forEach((p, i) => {
+            h.push(`<div style="margin:1px 0;line-height:1.4;${p.infeasible ? 'opacity:0.55;' : ''}">`
+                + `<label style="cursor:pointer;display:flex;align-items:flex-start;gap:5px;"><input data-ter-selp="${i}" type="checkbox" ${p.selected ? 'checked' : ''} ${p.infeasible ? 'disabled' : ''} style="margin-top:2px;">`
+                + `<span><strong style="color:#ffe14d">${esc(p.name)}</strong> · band ${p.bandLo}–${p.bandHi} · ${p.acres < 10 ? p.acres.toFixed(1) : Math.round(p.acres).toLocaleString()} ac · ${p.verts} verts · floor ${p.floorMSL.toLocaleString()} / ceil ${p.ceilMSL.toLocaleString()} ft${p.infeasible ? ' · <span style="color:#ff5555">infeasible band</span>' : ''}</span></label></div>`);
+        });
+        bs.nfzs.forEach((z, i) => {
+            h.push(`<div style="margin:1px 0;line-height:1.4;${z.orphan ? 'opacity:0.55;' : ''}">`
+                + `<label style="cursor:pointer;display:flex;align-items:flex-start;gap:5px;"><input data-ter-seln="${i}" type="checkbox" ${z.selected ? 'checked' : ''} ${z.orphan ? 'disabled' : ''} style="margin-top:2px;">`
+                + `<span><strong style="color:#ff35d0">${esc(z.name)}</strong> · ${z.acres.toFixed(1)} ac ${esc(z.dir || '')}${z.clipped ? ' · clipped to FFZ' : ''}${z.orphan ? ' · <span style="color:#ff5555">no parent FFZ — skipped</span>' : ''}</span></label></div>`);
+        });
+        h.push(`<div style="display:flex;gap:8px;margin:8px 0 2px;align-items:center;">`
+            + `<button data-ter-commit style="background:rgba(95,255,95,0.13);border:1px solid rgba(95,255,95,0.5);color:#7dffae;border-radius:5px;padding:3px 12px;cursor:pointer;font-weight:700;">⚡ Commit ${selP + selN} (double-click)</button>`
+            + (bs.createdIds && bs.createdIds.length ? `<button data-ter-undo style="background:rgba(255,96,96,0.12);border:1px solid rgba(255,96,96,0.5);color:#ff8080;border-radius:5px;padding:3px 12px;cursor:pointer;">🗑 Undo run (${bs.createdIds.length}) (double-click)</button>` : '')
+            + `</div>`);
+        if (bs.runLog && bs.runLog.length) {
+            h.push(`<div style="margin-top:6px;max-height:140px;overflow-y:auto;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:6px 8px;font-size:11px;">`
+                + bs.runLog.map(l2 => `<div style="margin:1px 0;">${esc(l2)}</div>`).join('') + `</div>`);
+        }
+        return h.join('');
+    }
+
+    // Returns true when the click was handled by the Build section.
+    function terBHandleClick(e, wrap) {
+        const stageBtn = e.target.closest('[data-ter-stage]');
+        if (stageBtn) {
+            // pull the two build params + prefix first
+            const sInp = wrap.querySelector('[data-ter-p="simplifyFt"]');
+            const bInp = wrap.querySelector('[data-ter-p="nfzBufFt"]');
+            const pInp = wrap.querySelector('[data-ter-prefix]');
+            if (sInp) { const v = parseFloat(sInp.value); if (isFinite(v) && v >= 0) terThresholds.simplifyFt = v; }
+            if (bInp) { const v = parseFloat(bInp.value); if (isFinite(v) && v >= 0) terThresholds.nfzBufFt = v; }
+            if (pInp) terThresholds.namePrefix = pInp.value;
+            saveTerThresholds();
+            terBStage();
+            return true;
+        }
+        const selP = e.target.closest('[data-ter-selp]');
+        if (selP && terBState) {
+            const p = terBState.pieces[+selP.getAttribute('data-ter-selp')];
+            if (p) { p.selected = !!selP.checked; terBDrawPreview(); }
+            return true;
+        }
+        const selN = e.target.closest('[data-ter-seln]');
+        if (selN && terBState) {
+            const z = terBState.nfzs[+selN.getAttribute('data-ter-seln')];
+            if (z) { z.selected = !!selN.checked; terBDrawPreview(); }
+            return true;
+        }
+        if (e.target.closest('[data-ter-commit]')) {
+            const now = Date.now();
+            if (now - terBArm > 1600) { terBArm = now; showToast('Click Commit again within 1.5 s to CREATE the entities'); return true; }
+            terBArm = 0;
+            terBCommit();
+            return true;
+        }
+        if (e.target.closest('[data-ter-undo]')) {
+            const now = Date.now();
+            if (now - terBUndoArm > 1600) { terBUndoArm = now; showToast('Click Undo again within 1.5 s to DELETE this run’s entities'); return true; }
+            terBUndoArm = 0;
+            terBUndo();
+            return true;
+        }
+        return false;
+    }
 
     // Idempotent (CP echoes from TOP + IFRAME — same contract as
     // handleSopToggle / handleAirspaceToggle).
@@ -6434,7 +7249,7 @@
             const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
             if (v === terMasterEnabled) return;
             terMasterEnabled = v;
-            if (!v) { terRemoveLayer(); terClosePanel(); terState = null; }
+            if (!v) { terBClearStage(); terRemoveLayer(); terClosePanel(); terState = null; }
             return;
         }
         if (Object.prototype.hasOwnProperty.call(terEnabled, id)) {
@@ -6700,6 +7515,9 @@
                 { id: 'nfzMaxAc', label: 'NFZ candidate up to', type: 'number', min: 0, max: 200, step: 0.5, default: TER_THRESH_DEFAULTS.nfzMaxAc, unit: 'ac' },
                 { id: 'median', label: 'Despeckle DEM (3×3 median)', type: 'boolean', default: TER_ENABLE_DEFAULTS.median },
                 { id: 'floorP95', label: 'Floor ref = P95 elevation (ignore top spikes)', type: 'boolean', default: TER_ENABLE_DEFAULTS.floorP95 },
+                { id: 'clipSite', label: 'Mask to site footprint (existing FFZ union)', type: 'boolean', default: TER_ENABLE_DEFAULTS.clipSite },
+                { id: 'simplifyFt', label: 'Build · simplify tolerance', type: 'number', min: 0, max: 500, step: 10, default: TER_THRESH_DEFAULTS.simplifyFt, unit: 'ft' },
+                { id: 'nfzBufFt', label: 'Build · NFZ hull buffer', type: 'number', min: 0, max: 200, step: 5, default: TER_THRESH_DEFAULTS.nfzBufFt, unit: 'ft' },
                 { id: 'opacity', label: 'Overlay opacity', type: 'number', min: 0.1, max: 1, step: 0.05, default: TER_THRESH_DEFAULTS.opacity },
                 { id: 'ter-run', label: '⛰ Run profiler', type: 'button', action: 'ter-run' },
                 { id: 'ter-clear', label: 'Clear overlay + panel', type: 'button', action: 'ter-clear' },

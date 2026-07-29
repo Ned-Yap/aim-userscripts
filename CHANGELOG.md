@@ -6,6 +6,18 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-28 — ⛰ Terrain Profiler Phase 2: FFZ/NFZ auto-builder + site-footprint mask — Asset Inspector v4.202 (dev/latest)
+
+The profiler now **builds the site setup it proposed** — and stops caring about land outside your site:
+
+- **Site-footprint mask (new, default on):** the DEM is clipped to the union of the site's existing FFZs before anything is computed. Terrain outside the perimeter no longer creates regions, NFZ candidates, or (critically) inflates a region's floor via an out-of-site hill. "site only" checkbox in the panel; falls back to the full rectangle on a site with no FFZs yet.
+- **🏗 Build section** (CSM Full only) in the profiler panel: **Stage** vectorizes the regions into FFZ polygons whose shared borders are simplified ONCE (topology/arc approach — adjacent zones butt exactly, no sliver gaps/overlaps), slices any region that encloses an island into simple hole-free pieces (Percepto polygons can't hold holes), and turns NFZ candidates into buffered convex hulls clipped to stay entirely inside their parent FFZ. Everything previews as dashed vector layers with per-piece checkboxes before a single write.
+- **⚡ Commit** (double-click armed): create-only, sequential `POST /map_objects/` with the full rails — CSRF, template body cloning, unique names, backup (download + localStorage stash) of the exact bodies sent, 403 instant abort, fresh-fetch verify. **FFZs commit and verify first; NFZs only after** (an NFZ can only exist inside an FFZ). Proposed floors/ceilings ride along (`restrictions` in meters MSL). Mountain-terrain sites are refused (the MSL floor math doesn't apply).
+- **🗑 Undo run** (double-click armed): deletes exactly the entities this run created, NFZs first.
+- Params: simplify tolerance (66 ft), NFZ hull buffer (25 ft), FFZ name prefix — panel-inline + Control Panel.
+
+Offline-verified against real 3DEP data: butt-join invariant (every interior border shared by exactly 2 zones), zero region cells outside the masked footprint, hole-free pieces, no self-intersecting rings.
+
 ## 2026-07-28 — ⛰ Profiler: session DEM cache — Asset Inspector v4.201 (dev/latest)
 
 Re-running the profiler to tweak parameters (Δ, absorb tiers, AGL band, despeckle, P95) no longer refetches the elevation grid — the raster is cached for the session and only refetched when the site, margin, or cell size changes. Param iteration is now near-instant (~0.2 s instead of 2–8 s). The cache is memory-only (freed on site switch) — deliberately not persisted to Tampermonkey storage, since a ~5 MB raster would bloat GM values for data 3DEP returns in seconds.
