@@ -1,14 +1,17 @@
 // ==UserScript==
 // @name         Latest - AIM Absolute Altitude
 // @namespace    http://tampermonkey.net/
-// @version      1.11
+// @version      1.12
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Altitude_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Altitude_Tampermonkey.user.js
 // @description  Adds Shift+A hotkey for the Absolute Altitude tool, with segment cleanup. Registers with the AIM Control Panel for master toggle + hotkey rebinding.
 // @author       Payden
 // @match        *://percepto.app/*
+// @match        *://qa.percepto.app/*
 // @match        https://percepto.app/*
+// @match        https://qa.percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
+// @match        https://qa.percepto.app/static/dist/react-pages/*
 // @grant        none
 // @run-at       document-end
 // ==/UserScript==
@@ -129,7 +132,7 @@
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-altitude';
-    const SCRIPT_VERSION = '1.11';
+    const SCRIPT_VERSION = '1.12';
     let controlChannel = null;
     let controlPanelDetected = false;
     let masterEnabled = true;

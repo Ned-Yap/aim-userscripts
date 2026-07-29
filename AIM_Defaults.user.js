@@ -1,13 +1,15 @@
 // ==UserScript==
 // @name         AIM Defaults
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Defaults.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Defaults.user.js
 // @description  Streamline the constant Percepto chores. Smart site navigation (land on your default section, keep your section when switching sites) + map-layer defaults (auto-off layers + Feeder Line bring-to-top) on every new site. Configurable in the AIM Control Panel.
 // @author       Payden
 // @match        *://percepto.app/*
+// @match        *://qa.percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
+// @match        https://qa.percepto.app/static/dist/react-pages/*
 // @grant        none
 // @run-at       document-start
 // ==/UserScript==
@@ -88,7 +90,7 @@
     // ---------------------------------------------------------------------------
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-defaults';
-    const SCRIPT_VERSION = '1.0';
+    const SCRIPT_VERSION = '1.1';
     let controlChannel = null;
 
     function setupControlPanel() {

@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         AIM Sidebar Resizer
 // @namespace    http://tampermonkey.net/
-// @version      3.3
+// @version      3.4
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Sidebar_Resizer.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Sidebar_Resizer.user.js
 // @description  TEMPORARILY DISABLED (v3.3) — was breaking AIM load. Script no-ops at init until fixed. Safe to keep installed.
 // @author       Payden / Gemini
 // @match        *://percepto.app/*
+// @match        *://qa.percepto.app/*
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==

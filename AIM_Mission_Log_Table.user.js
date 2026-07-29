@@ -1,14 +1,17 @@
 // ==UserScript==
 // @name         AIM Mission Log Table
 // @namespace    http://tampermonkey.net/
-// @version      1.7
+// @version      1.8
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Log_Table.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Log_Table.user.js
 // @description  Makes the Mission Log table's columns drag-to-reorder and drag-edge-to-resize. Layout persists in localStorage and is continuously re-applied over Percepto's React re-renders. Shift+double-click any header resets. Also adds a per-row 📥 button that downloads that mission's drone flight path (LAT/LNG/ALT) as a 3D KML — path + time-animated track + a labeled waypoint every 10% (alt m/ft, AGL, speed, heading, battery, local time) + a flight summary. No hotkeys.
 // @author       Payden
 // @match        *://percepto.app/*
+// @match        *://qa.percepto.app/*
 // @match        https://percepto.app/*
+// @match        https://qa.percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
+// @match        https://qa.percepto.app/static/dist/react-pages/*
 // @grant        none
 // @run-at       document-end
 // ==/UserScript==

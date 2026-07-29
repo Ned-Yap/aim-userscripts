@@ -1,14 +1,17 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.115
+// @version      34.116
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
 // @author       Payden
 // @match        *://percepto.app/*
+// @match        *://qa.percepto.app/*
 // @match        https://percepto.app/*
+// @match        https://qa.percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
+// @match        https://qa.percepto.app/static/dist/react-pages/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_xmlhttpRequest
@@ -40,7 +43,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.115';
+    const SCRIPT_VERSION = '34.116';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -92,7 +95,7 @@
     // above (e.g. midstream / T&D taxonomies) — gray dashed, no panel row.
     const ASSET_STATE_FALLBACK = { color: '#9aa0a6', width: 10, dashed: true, fill: false, fillColor: '#9aa0a6', opacity: 0.25 };
     const stateSlug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
+    const MAP_OBJECTS_URL = '/map_objects/?getPoiMapObjectsAsList=true&site_id=';
     // Builds the per-state Control Panel rows appended to the Assets category.
     function buildAssetStateToggles() {
         const out = [

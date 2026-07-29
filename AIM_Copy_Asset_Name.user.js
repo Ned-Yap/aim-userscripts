@@ -2,14 +2,17 @@
 // @name         AIM Copy Asset Name
 // @name:en      AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.164.5
+// @version      4.164.6
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
 // @author       Payden
 // @match        *://percepto.app/*
+// @match        *://qa.percepto.app/*
 // @match        https://percepto.app/*
+// @match        https://qa.percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
+// @match        https://qa.percepto.app/static/dist/react-pages/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_xmlhttpRequest
@@ -51,14 +54,14 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.164.5';
+    const SCRIPT_VERSION = '4.164.6';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
     console.log(`${TAG} v${SCRIPT_VERSION} loading`);
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
-    const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
+    const MAP_OBJECTS_URL = '/map_objects/?getPoiMapObjectsAsList=true&site_id=';
 
     let controlChannel = null;
     let masterEnabled = true;
@@ -3329,7 +3332,7 @@
             b.description = `FAA DOF obstacle${item.o.lit && item.o.lit !== 'N' ? ' (lit)' : ''} — auto-placed by Airspace Checker`;
             b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
             try {
-                const r = await fetch('https://percepto.app/map_objects/', {
+                const r = await fetch('/map_objects/', {
                     method: 'POST', credentials: 'same-origin',
                     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf },
                     body: JSON.stringify(b),
@@ -6432,7 +6435,7 @@
     async function fetchSiteConfig(siteID, force) {
         if (!siteID) throw new Error('no siteID');
         if (!force && siteCfgCache[siteID]) return siteCfgCache[siteID];
-        const r = await fetch(`https://percepto.app/sites/${encodeURIComponent(siteID)}/`, { credentials: 'same-origin' });
+        const r = await fetch(`/sites/${encodeURIComponent(siteID)}/`, { credentials: 'same-origin' });
         if (!r.ok) throw new Error(`/sites/${siteID}/ HTTP ${r.status}`);
         const j = await r.json();
         siteCfgCache[siteID] = j;
@@ -6769,7 +6772,7 @@
         }
         let resp;
         try {
-            const r = await fetch('https://percepto.app/map_objects/', {
+            const r = await fetch('/map_objects/', {
                 method: 'POST',
                 credentials: 'same-origin',
                 headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf },
@@ -6888,7 +6891,7 @@
         let restored = 0, failed = 0;
         for (const ent of snap.entities) {
             try {
-                const r = await fetch('https://percepto.app/map_objects/', {
+                const r = await fetch('/map_objects/', {
                     method: 'POST', credentials: 'same-origin',
                     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf },
                     body: JSON.stringify(ent.body),
@@ -12624,7 +12627,7 @@
             }
             if (dryRun) { if (w.kind === 'upsert') res.updated++; else res.created++; continue; }
             try {
-                const r = await fetch('https://percepto.app/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
+                const r = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
                 const txt = await r.text(); let json = null; try { json = JSON.parse(txt); } catch (e) {}
                 const saved = json && json.map_objects;
                 if (r.status === 200 && saved) {
@@ -12656,7 +12659,7 @@
         for (const e of drafts) {
             if (dryRun) { res.deleted++; continue; }
             try {
-                const r = await fetch(`https://percepto.app/map_objects/${e.id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
+                const r = await fetch(`/map_objects/${e.id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
                 if (r.status === 200 || r.status === 204) res.deleted++;
                 else { res.failed++; res.errors.push(`${e.name} (#${e.id}): server ${r.status}`); }
             } catch (err) { res.failed++; res.errors.push(`${e.name}: ${err && err.message || err}`); }
@@ -12753,7 +12756,7 @@
                 else { body.validated = false; res.validatedReset++; }
             }
             try {
-                const r = await fetch('https://percepto.app/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
+                const r = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
                 const txt = await r.text(); let json = null; try { json = JSON.parse(txt); } catch (e) {}
                 const saved = json && json.map_objects;
                 if (r.status === 200 && saved) {

@@ -1,14 +1,17 @@
 // ==UserScript==
 // @name         AIM Inspector
 // @namespace    http://tampermonkey.net/
-// @version      1.8
+// @version      1.9
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Inspector.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Inspector.user.js
 // @description  Cross-frame Leaflet / AIM investigation & control panel. Toggle with Shift+I. Snapshot with Shift+Alt+I.
 // @author       Payden
 // @match        *://percepto.app/*
+// @match        *://qa.percepto.app/*
 // @match        https://percepto.app/*
+// @match        https://qa.percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
+// @match        https://qa.percepto.app/static/dist/react-pages/*
 // @grant        none
 // @run-at       document-start
 // ==/UserScript==
@@ -32,7 +35,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.8';
+    const VERSION = '1.9';
     const IS_TOP = window === window.top;
     const FRAME_ID = (IS_TOP ? 'TOP' : 'IFRAME') + '@' + location.pathname;
     const TAG = `[AIM INSPECT ${IS_TOP ? 'TOP' : 'IF'}]`;

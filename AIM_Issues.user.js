@@ -1,14 +1,17 @@
 // ==UserScript==
 // @name         AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.34
+// @version      1.35
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
 // @author       Payden
 // @match        *://percepto.app/*
+// @match        *://qa.percepto.app/*
 // @match        https://percepto.app/*
+// @match        https://qa.percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
+// @match        https://qa.percepto.app/static/dist/react-pages/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -57,7 +60,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.34';
+    const SCRIPT_VERSION = '1.35';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -323,7 +326,7 @@
     // v0.17: affected-entities detection. Fetched once per site change
     // from /map_objects/ (Percepto's entity list, same endpoint Asset
     // Inspector uses). Cached + invalidated when entities reload.
-    const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
+    const MAP_OBJECTS_URL = '/map_objects/?getPoiMapObjectsAsList=true&site_id=';
     let mapObjects = null;                                // { siteID, entities: [...] }
     let mapObjectsFetching = false;
     const issueAffectedCache = new Map();                 // issueId → array of affected entities
@@ -832,7 +835,7 @@
         const name = (sidOverride ? nameOverride : siteName);
         const label = name ? slackEsc(name) : `site ${sid}`;
         const q = issueId ? `?aim_issue=${encodeURIComponent(issueId)}` : '';
-        return `<https://percepto.app/${q}#/site/${sid}/control-panel/site-setup|${label}>`;
+        return `<${location.origin}/${q}#/site/${sid}/control-panel/site-setup|${label}>`;
     }
 
     // v1.08: status badge for the parent message — icon + label + whether to
@@ -3812,7 +3815,7 @@
             // v0.29: Site Name is a link to the site-setup URL. Sheets +
             // Excel both honor <a href> in pasted HTML — cell becomes
             // clickable, displays the name as link text.
-            const siteUrl = siteId ? `https://percepto.app/#/site/${encodeURIComponent(siteId)}/control-panel/site-setup` : '';
+            const siteUrl = siteId ? `${location.origin}/#/site/${encodeURIComponent(siteId)}/control-panel/site-setup` : '';
             const siteNameCell = (siteName_ && siteUrl)
                 ? `<a href="${siteUrl}" style="color:#1a73e8;text-decoration:underline">${escHtml(siteName_)}</a>`
                 : escHtml(siteName_ || '');

@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         AIM Bulk Mission Adder
 // @namespace    http://tampermonkey.net/
-// @version      1.13
+// @version      1.14
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Mission_Adder.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Mission_Adder.user.js
 // @description  Bulk add missions via Shift+B or Green Button. Turbo speed + Auto-Clone + High Contrast List.
 // @author       Payden / Gemini
 // @match        *://percepto.app/*
+// @match        *://qa.percepto.app/*
 // @grant        none
 // @run-at       document-start
 // ==/UserScript==
@@ -31,7 +32,7 @@
         const IS_TOP = window === window.top;
         const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
         const SCRIPT_ID = 'aim-bulk-mission-adder';
-        const SCRIPT_VERSION = '1.13';
+        const SCRIPT_VERSION = '1.14';
         let controlChannel = null;
         let controlPanelDetected = false;
         let masterEnabled = true;

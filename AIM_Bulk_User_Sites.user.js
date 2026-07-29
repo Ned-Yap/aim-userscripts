@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         AIM Bulk User Sites
 // @namespace    http://tampermonkey.net/
-// @version      1.10
+// @version      1.11
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_User_Sites.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_User_Sites.user.js
 // @description  Bulk-fill the Admin "User Site batch create" page. Paste emails + site names (one per line), auto-selects matches in the lists. Favorites strip for users/sites you add over and over. Hotkey Shift+B.
 // @author       Payden
 // @match        *://percepto.app/admin/percepto/usersite/batch_create*
+// @match        *://qa.percepto.app/admin/percepto/usersite/batch_create*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @run-at       document-idle

@@ -6,6 +6,18 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-29 — QA server support — ALL scripts (prod + dev/latest)
+
+Every userscript now also runs on **https://qa.percepto.app** (including the admin Bulk User Sites page at `qa.percepto.app/admin/...`). This is an **addition** — nothing changes on the normal `percepto.app` URLs.
+
+- Every `@match` header gained a `qa.percepto.app` twin.
+- Hardcoded `https://percepto.app/...` API URLs (`/map_objects/`, `/sites/`, `/location_altitude/`) are now origin-relative, so a QA tab reads/writes **QA's** server and a prod tab prod's — a QA tab can no longer accidentally POST to production.
+- Site links in AIM Issues (Slack messages + issue exports) now use the current origin, so links generated on QA point to QA.
+
+All 41 files bumped one patch each (prod: Control Panel v1.35, Asset Inspector v4.164.6, Map Styler v34.116, Mission Bank Tools v1.98, Issues v1.35, Altitude v1.9, Ruler v2.8, Clear All v1.5, New Entity v1.9, Bulk Mission Adder v1.14, Perf Shield v1.18, Inspector v1.9, Defaults v1.1, Map Nav v0.10, Mission Log Table v1.8, Mission Log CT v1.3, PLE v0.18, QME v0.3, Bulk User Sites v1.11, Sidebar Resizer v3.4; dev/latest copies bumped equivalently).
+
+Note: Tampermonkey applies the new `@match` list automatically with the version update — no reinstall needed.
+
 ## 2026-07-28 — ⛰ Profiler: no more "page unresponsive" — Asset Inspector v4.204 (dev/latest)
 
 The remaining stall (Chrome's "wait / exit page" dialog on big sites) is gone: the profiler's heavy passes — median despeckle, segmentation/absorption, overlay painting — now run **cooperatively async**, yielding to the browser every few dozen rows (the same pattern that fixed the SOP validators on large sites). PNG encoding for the overlay also moved from the blocking `toDataURL` to async `toBlob` (encodes off the main thread; object URLs revoked on cleanup). Same results, same total time — the page just stays alive while it works.

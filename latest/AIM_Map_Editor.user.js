@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         Latest - AIM Map Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.56
+// @version      0.57
 // @description  Edit Percepto map entities (flight paths + FFZs) from the map. AGL VIEW (Shift+G): on Mountain-terrain (MSL) sites, an overlay over the native editor shows + edits altitudes as height-above-ground (AGL/Δ/MSL columns, color-coded, live-linked) — backend stays MSL; works for flight-path segments AND FFZ bands; also augments Percepto's hover ALT tooltip with AGL. Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH) — and on ANY other mid-path vertex it SEVERS the path there; then either delete the unwanted piece and Save, or use the red chip's "💾 Save as N separate paths" to keep BOTH pieces as independent flight paths (direct POST /map_objects/: largest piece keeps the original id+name, others created as <name>_splitN; JSON backup + create-before-trim ordering + fresh-fetch verify + mandatory refresh overlay; a validated path's pieces stay validated). After the refresh an AUTO-VERIFY re-audits the saved paths against a fresh server fetch and toasts the verdict (structure, counts, shape parity, validated flag). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
+// @match        *://qa.percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
+// @match        https://qa.percepto.app/static/dist/react-pages/*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Map_Editor.user.js
@@ -76,7 +78,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.56';
+    const SCRIPT_VERSION = '0.57';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -115,7 +117,7 @@
         if (fpeAltModeCache[sid]) return fpeAltModeCache[sid];
         let mode = 'unknown';
         try {
-            const r = await fetch(`https://percepto.app/sites/${sid}/`, { credentials: 'same-origin' });
+            const r = await fetch(`/sites/${sid}/`, { credentials: 'same-origin' });
             if (r.ok) { const j = await r.json(); if (typeof j.mountain_terrain === 'boolean') mode = j.mountain_terrain ? 'msl' : 'agl'; }
         } catch (e) { warn('alt-mode fetch failed', e); }
         if (mode !== 'unknown') fpeAltModeCache[sid] = mode; // don't cache a transient fetch failure
@@ -848,7 +850,7 @@
     }
     async function rawFetchElev(lat, lng, attempt) {
         if (breakerOpen()) return null; // quota looks blown — don't poke the penalty box
-        const url = 'https://percepto.app/location_altitude/?location=' + encodeURIComponent(JSON.stringify({ lat, lng }));
+        const url = '/location_altitude/?location=' + encodeURIComponent(JSON.stringify({ lat, lng }));
         try {
             const res = await fetch(url, { credentials: 'include' });
             if (res.status === 429) {
@@ -2369,11 +2371,11 @@
     }
     function topSiteId() { try { const m = ((window.top.location.hash || '')).match(/#\/site\/(\d+)\//); return m ? Number(m[1]) : null; } catch (e) { return null; } }
     async function fetchSiteCfg(siteId) {
-        try { const r = await fetch(`https://percepto.app/sites/${siteId}/`, { credentials: 'include' }); return r.ok ? await r.json() : null; }
+        try { const r = await fetch(`/sites/${siteId}/`, { credentials: 'include' }); return r.ok ? await r.json() : null; }
         catch (e) { warn('site cfg fetch failed (assuming mountain_terrain=false)', e); return null; }
     }
     async function fetchSiteEntities(siteId) {
-        const r = await fetch(`https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=${encodeURIComponent(siteId)}&_t=${Date.now()}`, { credentials: 'include', cache: 'no-store' });
+        const r = await fetch(`/map_objects/?getPoiMapObjectsAsList=true&site_id=${encodeURIComponent(siteId)}&_t=${Date.now()}`, { credentials: 'include', cache: 'no-store' });
         if (!r.ok) throw new Error(`entity list fetch: HTTP ${r.status}`);
         const j = await r.json();
         return Array.isArray(j) ? j : [];
@@ -2525,7 +2527,7 @@
             return body;
         };
         const post = async (body, label) => {
-            const r = await fetch('https://percepto.app/map_objects/', {
+            const r = await fetch('/map_objects/', {
                 method: 'POST', credentials: 'include',
                 headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': token },
                 body: JSON.stringify(body),

@@ -1,14 +1,17 @@
 // ==UserScript==
 // @name         AIM Mission Log CT
 // @namespace    http://tampermonkey.net/
-// @version      1.2
+// @version      1.3
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Log_CT.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Log_CT.user.js
 // @description  Rewrites the Mission Log TIME column from the site's fixed GMT-5 stamps into real local Central Time. "Jun 11, 2026 13:28" -> "06/11/2026 - 1:28pm CT". Also relabels the header site clock to CT. No hotkeys.
 // @author       Payden
 // @match        *://percepto.app/*
+// @match        *://qa.percepto.app/*
 // @match        https://percepto.app/*
+// @match        https://qa.percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
+// @match        https://qa.percepto.app/static/dist/react-pages/*
 // @grant        none
 // @run-at       document-end
 // ==/UserScript==
