@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-28 — 🔗 Merge v2: movable panel, renumber, filter, efficient order, re-editable merges — MBT v2.03 (dev/latest)
+
+Batch of merge-mode upgrades from live use:
+
+- **Movable panel** — drag it by the header; the position sticks across re-renders.
+- **Renumber in place** — M2 directly on a numbered badge opens a "Move to #" popup (Set / Remove); no more unwinding picks to fix one slot. M2 elsewhere on a picked pad still removes it.
+- **Asset-type filter** — a dropdown of the site's asset types (with counts); with one selected, only pads of that type respond to M2 (others toast and are ignored).
+- **⚡ Far→near** — one click reorders the current picks furthest → closest from the base station (the drone works its way home — same convention as the Section+Battery merge).
+- **Re-editable merges** — every Create/Update saves its ordered pick list as a *recipe*. The "✏ saved merges…" dropdown reloads one instantly: badges + ordered list reappear (that's also your on-map order display for an existing merged mission), reorder however, and the button becomes **💾 Update** — the existing mission is updated in place, steps rebuilt fresh from the *current* source missions. Source missions resolve by name at load; renamed/deleted ones warn loudly.
+
 ## 2026-07-28 — 🔗 Merge: create-400 fix — MBT v2.02 (dev/latest)
 
 The merged mission's create was rejected (400): steps concatenated from several missions carried each mission's server-assigned instruction ids, and the mixed ids broke the save. Every merged step is now normalized to the clean create shape (no ids) before the save — the same shape the generator's creates use. Single-mission 📥 Copy was never affected.
