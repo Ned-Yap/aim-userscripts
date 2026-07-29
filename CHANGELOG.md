@@ -6,6 +6,17 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-28 — ⛰ Profiler: tab-freeze fix + small-region rescue — Asset Inspector v4.203 (dev/latest)
+
+**Fixes the page freeze** reported when re-running the profiler / staging on a real site. Root cause: when a simplified region border self-intersected, the repair pass relaxed it all the way to **raw stair-step geometry** — a real site-footprint boundary is tens of thousands of lattice vertices, and the self-intersect check is O(n²), so the tab locked solid. Reproduced offline with a jagged 25-polygon footprint (the repair path triggers there), now resolves in one pass in ~160 ms. Rails added so nothing in the builder can freeze the page again:
+
+- Repair tolerance floors at 1 cell (~33 ft) — never raw lattice.
+- Self-intersect checks skip rings over 1,500 vertices (logged, not silent).
+- The whole repair loop is time-budgeted (5 s) and bails loudly on overrun.
+- Stage is wrapped so any failure toasts + logs instead of hanging.
+
+Also: **regions smaller than the simplify tolerance no longer vanish silently** — closed boundary loops now keep a coarse valid ring (real-site test: 96 staged pieces where v4.202 produced 16), and anything still too small to vectorize is counted in the run log with a hint to lower the tolerance.
+
 ## 2026-07-28 — ⛰ Terrain Profiler Phase 2: FFZ/NFZ auto-builder + site-footprint mask — Asset Inspector v4.202 (dev/latest)
 
 The profiler now **builds the site setup it proposed** — and stops caring about land outside your site:

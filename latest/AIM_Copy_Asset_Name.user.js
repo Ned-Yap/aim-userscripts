@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.202
+// @version      4.203
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -67,7 +67,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.202';
+    const SCRIPT_VERSION = '4.203';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6539,6 +6539,33 @@
         return null;
     }
 
+    // Simplify one arc. CLOSED loops can't be DP'd with both anchors on the
+    // same point (any loop smaller than the tolerance collapses to nothing —
+    // small regions were silently vanishing): split the loop at the point
+    // farthest from pts[0], simplify both halves, and rejoin.
+    function terBSimplifyArc(A, tol) {
+        if (!A.closed || A.pts.length < 5) return terBSimplify(A.pts, tol);
+        const pts = A.pts;
+        let far = 1, farD = -1;
+        for (let i = 1; i < pts.length - 1; i++) {
+            const dx = pts[i][0] - pts[0][0], dy = pts[i][1] - pts[0][1];
+            const d = dx * dx + dy * dy;
+            if (d > farD) { farD = d; far = i; }
+        }
+        const h1 = terBSimplify(pts.slice(0, far + 1), tol);
+        const h2 = terBSimplify(pts.slice(far), tol);
+        const joined = h1.concat(h2.slice(1));
+        if (joined.length >= 5) return joined;   // ≥4 distinct points (closed dup included)
+        // Loop smaller than the tolerance — DP collapses it to a line and
+        // the region silently vanishes. Keep a coarse-but-valid ring instead.
+        if (pts.length <= 9) return pts.slice();
+        const step = Math.ceil((pts.length - 1) / 8);
+        const out = [];
+        for (let i = 0; i < pts.length - 1; i += step) out.push(pts[i]);
+        out.push(pts[pts.length - 1]);
+        return out;
+    }
+
     // --- Douglas-Peucker on [x,y] lattice points, endpoints pinned ---
     function terBSimplify(pts, tol) {
         if (!tol || pts.length <= 2) return pts.slice();
@@ -6819,6 +6846,15 @@
 
     // --- Stage: vectorize + simplify + slice + NFZ hulls → terBState ---
     function terBStage() {
+        try { terBStageInner(); }
+        catch (e) {
+            console.warn(`${TAG} builder: stage threw:`, e);
+            showToast(`Stage failed — ${e && e.message ? e.message : e}`, 'rgba(255,96,96,0.55)');
+            terBClearStage();
+            terRenderPanel();
+        }
+    }
+    function terBStageInner() {
         const st = terState;
         if (!st) { showToast('Run the profiler first', 'rgba(255,96,96,0.55)'); return; }
         terBClearStage();
@@ -6826,26 +6862,37 @@
         const seg = st.seg, dem = st.dem, th = terThresholds;
         const tolCells = Math.max(0, (th.simplifyFt || 0) / Math.max(1, dem.cellXft));
         const topo = terBVectorize(seg, dem);
-        topo.arcs.forEach(A => { A.tol = tolCells; A.simp = terBSimplify(A.pts, tolCells); });
+        topo.arcs.forEach(A => { A.tol = tolCells; A.simp = terBSimplifyArc(A, tolCells); });
         const log = [];
         // Self-intersection repair loop: halve the tolerance of the arcs of
         // any failing region ring and rebuild (shared arcs stay shared).
-        for (let iter = 0; iter < 5; iter++) {
+        // HARD RAILS (v4.203 — a live run froze the tab without these):
+        //   • tolerance floor = 1 cell, NEVER raw lattice (a site-boundary
+        //     arc can be tens of thousands of stair-step vertices)
+        //   • ringSelfIntersects is O(n²) — skip rings > 1500 pts (log it)
+        //   • whole loop is time-budgeted; on overrun we bail loudly
+        const REPAIR_BUDGET_MS = 5000;
+        const repairT0 = performance.now();
+        for (let iter = 0; iter < 3; iter++) {
+            if (performance.now() - repairT0 > REPAIR_BUDGET_MS) { log.push('⚠ simplify repair: time budget hit — kept current geometry (raise simplify tolerance if a piece looks wrong)'); break; }
             const badArcs = new Set();
+            let skippedBig = 0;
             topo.ringsByRegion.forEach((rings, r) => {
                 rings.forEach(ring => {
                     const pts = terBRingPoints(ring, topo.arcs);
                     if (pts.length < 3) return;
+                    if (pts.length > 1500) { skippedBig++; return; }   // O(n²) guard
                     const ll = pts.map(p => terBLatticeToLL(dem, p[0], p[1]));
                     if (ringSelfIntersects(ll)) ring.arcSeq.forEach(s => badArcs.add(s.arc));
                 });
             });
+            if (skippedBig && !iter) log.push(`${skippedBig} very large ring(s) skipped the self-intersect check (>1500 verts)`);
             if (!badArcs.size) break;
             let changed = 0;
             badArcs.forEach(aId => {
                 const A = topo.arcs[aId];
-                const nt = (iter >= 3) ? 0 : A.tol / 2;
-                if (nt !== A.tol) { A.tol = nt; A.simp = terBSimplify(A.pts, nt); changed++; }
+                const nt = Math.max(1, A.tol / 2);   // floor at 1 cell — never raw
+                if (nt !== A.tol) { A.tol = nt; A.simp = terBSimplifyArc(A, nt); changed++; }
             });
             if (!changed) break;
             log.push(`simplify repair: relaxed ${badArcs.size} arc(s) (pass ${iter + 1})`);
@@ -6853,15 +6900,17 @@
         // Build pieces per region (slicing holes).
         const pieces = [];
         const pieceRegion = [];
+        let droppedRegions = 0;
         seg.order.forEach(gi => {
             const rg = seg.regions[gi];
+            const before = pieces.length;
             const rings = topo.ringsByRegion.get(gi) || [];
-            if (!rings.length) return;
+            if (!rings.length) { droppedRegions++; return; }
             const built = rings.map(ring => {
                 const pts = terBRingPoints(ring, topo.arcs);
                 return { pts, area: Math.abs(terBSignedArea(pts)) };
             }).filter(r2 => r2.pts.length >= 3);
-            if (!built.length) return;
+            if (!built.length) { droppedRegions++; return; }
             built.sort((a, b) => b.area - a.area);
             const outer = built[0], holes = built.slice(1);
             const toLLPair = (p) => { const q = terBLatticeToLL(dem, p[0], p[1]); return [q.lng, q.lat]; };
@@ -6878,7 +6927,7 @@
             flat.forEach((ringLL, pi) => {
                 if (ringLL.length < 3) return;
                 const points = ringLL.map(p => ({ lat: p[1], lng: p[0] }));
-                if (ringSelfIntersects(points)) { log.push(`${rg.name}${flat.length > 1 ? String.fromCharCode(97 + pi) : ''}: self-intersecting after slicing — SKIPPED`); return; }
+                if (points.length <= 1500 && ringSelfIntersects(points)) { log.push(`${rg.name}${flat.length > 1 ? String.fromCharCode(97 + pi) : ''}: self-intersecting after slicing — SKIPPED`); return; }
                 // area in acres (equirectangular)
                 const latRef = points[0].lat * Math.PI / 180;
                 let a2 = 0;
@@ -6897,7 +6946,9 @@
                 });
                 pieceRegion.push(gi);
             });
+            if (pieces.length === before) droppedRegions++;
         });
+        if (droppedRegions) log.push(`${droppedRegions} region(s) too small to vectorize at this tolerance — dropped (lower simplify ft to keep them)`);
         // NFZ candidate hulls (candGrid carries candidate index + 1).
         const nfzs = [];
         const bufCells = Math.max(0, (th.nfzBufFt || 0) / Math.max(1, dem.cellXft));
