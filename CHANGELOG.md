@@ -6,6 +6,19 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-29 — QA/prod environment isolation + cross-server Site Diff (dev/latest)
+
+Prod and QA are **separate databases** — the same numeric site ID can be two different sites. This update makes every script treat them that way (dev/latest only for now):
+
+- **Site Diff v0.70 — cross-SERVER shadows.** The shadow picker now has Prod/QA tabs: a QA site can shadow (and 📥 Import from) its prod original directly — no JSON export needed. Cross-server reads go through `GM_xmlhttpRequest` with that server's own login cookies, so you need to be logged into both servers in the same browser. The badge/labels tag cross-server shadows (e.g. `[Prod]`), and the power-line KML copy follows each side's file naming. Shadow pairings are now stored per-environment (any pairing saved on QA in the last few days will need re-picking once).
+- **Map Styler v34.120 — QA gets its own KML files.** On QA, shielding KMLs read/write `qa-<id>-distro.kml` / `qa-<id>-trans.kml` so QA sites no longer render the prod twin's power lines. New QA-only Control Panel toggle **"QA: use PROD power-line KMLs"** for QA sites that genuinely mirror their prod twin — read-only while on (commit/split/create are blocked so QA edits can never touch prod's files). Local hides / pending commits / caches are env-separated.
+- **Asset Inspector v4.210** — the team-shared elevation cache uses `elevations/qa-<id>-elevation.json` on QA (prod files untouched), and the per-site DEM cache + 📍 Base picker choice are env-keyed.
+- **AIM Issues v1.36** — QA issues sync to their own `issues/qa-<id>-issues.json` files (never merged into prod's), the stale-sweep only touches its own environment's files, and **every Slack message from QA is tagged `[QA]`**.
+- **Site Watch v0.21** — a QA leader tab audits into `site-watch-qa/` with its own state/lease, digest tagged `[QA]`.
+- **Mission Bank Tools v2.05** — merge recipes + cross-site-copy source memory are env-keyed.
+
+Prod-side behavior is completely unchanged — prod keys/files keep their existing names.
+
 ## 2026-07-29 — QA server support — ALL scripts (prod + dev/latest)
 
 Every userscript now also runs on **https://qa.percepto.app** (including the admin Bulk User Sites page at `qa.percepto.app/admin/...`). This is an **addition** — nothing changes on the normal `percepto.app` URLs.

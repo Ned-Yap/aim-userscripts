@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Site Diff
 // @namespace    http://tampermonkey.net/
-// @version      0.62
+// @version      0.70
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
-// @description  Site comparison suite: shadow-site ghost overlay (per-type show/color/opacity), swipe divider, significant-change diff (→ AIM Issues), and Phase 3a Import — create-only copy of shadow entities (assets etc.) onto the current site with dry-run preview + verify. Full migration executor later.
+// @description  Site comparison suite: shadow-site ghost overlay (per-type show/color/opacity), swipe divider, significant-change diff (→ AIM Issues), and Phase 3a Import — create-only copy of shadow entities (assets etc.) onto the current site with dry-run preview + verify. v0.70: cross-SERVER shadows — a QA site can shadow/import from a prod site and vice versa (picker server tabs; needs a login on both servers). Full migration executor later.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -12,7 +12,10 @@
 // @match        https://qa.percepto.app/static/dist/react-pages/*
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
+// @connect      percepto.app
+// @connect      qa.percepto.app
 // @run-at       document-end
 // ==/UserScript==
 
@@ -117,7 +120,7 @@
     }
 
     const SCRIPT_ID = 'aim-site-diff';
-    const SCRIPT_VERSION = '0.62';
+    const SCRIPT_VERSION = '0.70';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const PANE_NAME = 'aim-site-diff-pane';
     const HL_PANE_NAME = 'aim-site-diff-hl';
@@ -128,9 +131,52 @@
     const KEY_PAIRS = 'aim-sd-pairs';
     const KEY_SITES_CACHE = 'aim-sd-sites-cache';
     const KEY_DIFF = 'aim-sd-diff';
-    const KEY_FILE_PREFIX = 'aim-sd-file-';   // + siteID → stored JSON-backup shadow
+    const KEY_FILE_PREFIX = 'aim-sd-file-';   // + envSiteKey(siteID) → stored JSON-backup shadow
 
-    console.log(`${TAG} v${SCRIPT_VERSION} loading`);
+    // ------------------------------------------------------------------
+    // Server model (v0.70). Prod and QA are separate databases — the same
+    // numeric site ID can be two different sites. Everything keyed by site
+    // ID in GM storage (shared across origins!) uses envSiteKey() so the
+    // two servers never share per-site state. Cross-server shadow fetches
+    // go through GM_xmlhttpRequest (carries the OTHER domain's cookies and
+    // bypasses CORS — needs @connect for both hosts).
+    // ------------------------------------------------------------------
+    const IS_QA = location.hostname === 'qa.percepto.app' || location.hostname.endsWith('.qa.percepto.app');
+    const THIS_SERVER = IS_QA ? 'qa' : 'prod';
+    const OTHER_SERVER = IS_QA ? 'prod' : 'qa';
+    const SERVER_ORIGINS = { prod: 'https://percepto.app', qa: 'https://qa.percepto.app' };
+    const SERVER_LABELS = { prod: 'Prod', qa: 'QA' };
+    function envSiteKey(sid) { return IS_QA ? `qa-${sid}` : String(sid); }
+    // Data-repo KML files are namespaced the same way: prod = <id>-distro.kml,
+    // QA = qa-<id>-distro.kml (must stay in lockstep with Map Styler's naming).
+    function kmlEnvPrefix(server) { return server === 'qa' ? 'qa-' : ''; }
+
+    function gmFetchJson(url, ms) {
+        return new Promise((resolve, reject) => {
+            if (typeof GM_xmlhttpRequest !== 'function') {
+                reject(new Error('GM_xmlhttpRequest unavailable — check @grant'));
+                return;
+            }
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url,
+                timeout: ms || 20000,
+                headers: { 'Accept': 'application/json' },
+                onload: (res) => {
+                    if (res.status < 200 || res.status >= 300) {
+                        reject(new Error(`HTTP ${res.status}${res.status === 401 || res.status === 403 ? ' — log into that server in another tab first' : ''}`));
+                        return;
+                    }
+                    try { resolve(JSON.parse(res.responseText)); }
+                    catch (e) { reject(new Error('response was not JSON — probably that server\'s login page; log into it in another tab first')); }
+                },
+                ontimeout: () => reject(new Error('timeout')),
+                onerror: () => reject(new Error('network error')),
+            });
+        });
+    }
+
+    console.log(`${TAG} v${SCRIPT_VERSION} loading (server: ${THIS_SERVER})`);
 
     // Per-type registry. Shadow defaults are deliberately warm/shifted hues so
     // they never read as the native palette (FP cyan / FFZ green / NFZ red).
@@ -242,26 +288,40 @@
     let masterEnabled = gmGet(KEY_MASTER, false) === true;
     let style = loadStyle();
     let diffCfg = loadDiffCfg();
-    let pairs = loadPairs();               // { siteId: '<shadowSiteId>' | {kind:'file', name} }
+    let pairs = loadPairs();               // { envSiteKey: '<shadowSiteId>' | {kind:'site', id, server} | {kind:'file', name} }
     const shadowCache = {};                // { cacheKey: { entities, fetchedAt } }
-    let sitesList = null;                  // [{id, name}]
+    const sitesListByServer = { prod: null, qa: null };   // server → [{id, name}]
     let siteID = null;
     let controlChannel = null;
 
-    // Shadow source model: a pairs[] value is either a site-id string
-    // (v0.10 format, kept as-is) or {kind:'file', name} for an uploaded
-    // /map_objects JSON backup (stored per-site in GM, survives reloads).
+    // Shadow source model: a pairs[] value is one of
+    //   - a site-id string (pre-v0.70 format = same-server site, kept as-is)
+    //   - {kind:'site', id, server:'prod'|'qa'} (v0.70+ — server-explicit)
+    //   - {kind:'file', name} for an uploaded /map_objects JSON backup.
+    // Pairs are keyed by envSiteKey(siteID) so a prod site and a QA site
+    // with the same numeric ID keep independent pairings.
     function shadowSourceFor(sid) {
-        const v = sid ? pairs[sid] : null;
+        const v = sid ? pairs[envSiteKey(sid)] : null;
         if (!v) return null;
-        if (typeof v === 'string') return { kind: 'site', id: v };
+        if (typeof v === 'string') return { kind: 'site', id: v, server: THIS_SERVER };
+        if (v && v.kind === 'site' && v.id) {
+            return { kind: 'site', id: String(v.id), server: v.server === 'qa' ? 'qa' : (v.server === 'prod' ? 'prod' : THIS_SERVER) };
+        }
         if (v && v.kind === 'file') return v;
         return null;
     }
+    function setPair(sid, value) { pairs[envSiteKey(sid)] = value; savePairs(); }
+    function clearPair(sid) { delete pairs[envSiteKey(sid)]; savePairs(); }
     function shadowSourceLabel(src) {
         if (!src) return '';
-        if (src.kind === 'site') return siteLabel(src.id);
+        if (src.kind === 'site') {
+            const tag = src.server !== THIS_SERVER ? ` [${SERVER_LABELS[src.server]}]` : '';
+            return `${siteLabel(src.id, src.server)}${tag}`;
+        }
         return `file "${src.name}"`;
+    }
+    function srcCacheKey(src, sid) {
+        return src.kind === 'site' ? `${src.server}:${src.id}` : fileCacheKey(sid);
     }
 
     // ------------------------------------------------------------------
@@ -382,24 +442,34 @@
         return null;
     }
 
-    async function fetchShadowEntities(shadowId, force) {
-        if (!force && shadowCache[shadowId]) return shadowCache[shadowId].entities;
-        let url = `/map_objects/?getPoiMapObjectsAsList=true&site_id=${encodeURIComponent(shadowId)}`;
-        if (force) url += `&_t=${Date.now()}`;
+    // src = {id, server}. Same-server → plain cookie fetch; cross-server →
+    // GM_xmlhttpRequest against the other origin (its cookies ride along).
+    async function fetchShadowEntities(src, force) {
+        const server = (src && src.server) || THIS_SERVER;
+        const id = String(src && src.id != null ? src.id : src);
+        const cacheKey = `${server}:${id}`;
+        if (!force && shadowCache[cacheKey]) return shadowCache[cacheKey].entities;
+        let path = `/map_objects/?getPoiMapObjectsAsList=true&site_id=${encodeURIComponent(id)}`;
+        if (force) path += `&_t=${Date.now()}`;
         try {
-            const r = await fetchWithTimeout(url, {
-                credentials: 'same-origin',
-                cache: force ? 'no-store' : 'default',
-                headers: { 'Accept': 'application/json' },
-            }, 20000);
-            if (!r.ok) throw new Error(`HTTP ${r.status}`);
-            const data = await r.json();
+            let data;
+            if (server !== THIS_SERVER) {
+                data = await gmFetchJson(SERVER_ORIGINS[server] + path, 20000);
+            } else {
+                const r = await fetchWithTimeout(path, {
+                    credentials: 'same-origin',
+                    cache: force ? 'no-store' : 'default',
+                    headers: { 'Accept': 'application/json' },
+                }, 20000);
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                data = await r.json();
+            }
             if (!Array.isArray(data)) throw new Error('response not an array');
-            shadowCache[shadowId] = { entities: data, fetchedAt: Date.now() };
-            console.log(`${TAG} loaded ${data.length} entities for shadow site ${shadowId}`);
+            shadowCache[cacheKey] = { entities: data, fetchedAt: Date.now() };
+            console.log(`${TAG} loaded ${data.length} entities for shadow site ${id} (${server})`);
             return data;
         } catch (e) {
-            console.warn(`${TAG} shadow fetch failed for site ${shadowId}:`, e);
+            console.warn(`${TAG} shadow fetch failed for site ${id} on ${server}:`, e);
             return null;
         }
     }
@@ -426,7 +496,7 @@
     function storeShadowFile(sid, name, entities) {
         shadowCache[fileCacheKey(sid)] = { entities, fetchedAt: Date.now() };
         try {
-            gmSet(KEY_FILE_PREFIX + sid, JSON.stringify({ name, savedAt: Date.now(), entities }));
+            gmSet(KEY_FILE_PREFIX + envSiteKey(sid), JSON.stringify({ name, savedAt: Date.now(), entities }));
         } catch (e) {
             // A very large backup may exceed storage limits — overlay still
             // works this session from memory, it just won't survive a reload.
@@ -438,7 +508,7 @@
         const cached = shadowCache[fileCacheKey(sid)];
         if (cached) return cached.entities;
         try {
-            const raw = gmGet(KEY_FILE_PREFIX + sid, null);
+            const raw = gmGet(KEY_FILE_PREFIX + envSiteKey(sid), null);
             if (raw) {
                 const stored = JSON.parse(raw);
                 if (stored && Array.isArray(stored.entities)) {
@@ -452,7 +522,7 @@
 
     async function getShadowEntities(sid, src, force) {
         if (!src) return null;
-        if (src.kind === 'site') return fetchShadowEntities(src.id, force);
+        if (src.kind === 'site') return fetchShadowEntities(src, force);
         const ents = loadShadowFileEntities(sid);
         if (!ents) console.warn(`${TAG} shadow file "${src.name}" not found in storage — re-upload it via the picker`);
         return ents;
@@ -468,16 +538,23 @@
         return [];
     }
 
-    async function fetchSiteList(force) {
-        if (sitesList && !force) return sitesList;
+    async function fetchSiteList(server, force) {
+        const srv = server || THIS_SERVER;
+        if (sitesListByServer[srv] && !force) return sitesListByServer[srv];
+        const cacheGmKey = srv === 'prod' ? KEY_SITES_CACHE : `${KEY_SITES_CACHE}-qa`;
         try {
-            const r = await fetchWithTimeout('/sites/', {
-                credentials: 'same-origin',
-                headers: { 'Accept': 'application/json' },
-            }, 20000);
-            if (!r.ok) throw new Error(`HTTP ${r.status}`);
-            const text = await r.text();
-            const list = extractList(JSON.parse(text));
+            let parsed;
+            if (srv !== THIS_SERVER) {
+                parsed = await gmFetchJson(`${SERVER_ORIGINS[srv]}/sites/`, 20000);
+            } else {
+                const r = await fetchWithTimeout('/sites/', {
+                    credentials: 'same-origin',
+                    headers: { 'Accept': 'application/json' },
+                }, 20000);
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                parsed = JSON.parse(await r.text());
+            }
+            const list = extractList(parsed);
             const seen = new Set();
             const out = [];
             for (const s of list) {
@@ -487,27 +564,28 @@
                 out.push({ id, name: String(s.name || s.site_name || s.title || `site ${id}`) });
             }
             if (out.length) {
-                sitesList = out;
-                gmSet(KEY_SITES_CACHE, JSON.stringify(out));
+                sitesListByServer[srv] = out;
+                gmSet(cacheGmKey, JSON.stringify(out));
                 return out;
             }
             throw new Error('empty site list');
         } catch (e) {
-            console.warn(`${TAG} site list fetch failed:`, e);
+            console.warn(`${TAG} site list fetch failed (${srv}):`, e);
             try {
-                const cached = gmGet(KEY_SITES_CACHE, null);
+                const cached = gmGet(cacheGmKey, null);
                 if (cached) {
-                    sitesList = JSON.parse(cached);
-                    return sitesList;
+                    sitesListByServer[srv] = JSON.parse(cached);
+                    return sitesListByServer[srv];
                 }
             } catch (e2) {}
             return null;
         }
     }
 
-    function siteLabel(id) {
-        if (sitesList) {
-            const s = sitesList.find(x => x.id === String(id));
+    function siteLabel(id, server) {
+        const list = sitesListByServer[server || THIS_SERVER];
+        if (list) {
+            const s = list.find(x => x.id === String(id));
             if (s) return s.name;
         }
         return `site ${id}`;
@@ -633,9 +711,16 @@
     // ------------------------------------------------------------------
     // Badge (small map indicator so a shadowed map is never a mystery)
     // ------------------------------------------------------------------
+    const siteListRequested = { prod: false, qa: false };
     function updateBadge() {
         let b = document.getElementById('aim-sd-badge');
         const src = (masterEnabled && siteID) ? shadowSourceFor(siteID) : null;
+        // Cross-server shadow: pull that server's site list once so the
+        // badge shows the site's NAME, not just "site <id>".
+        if (src && src.kind === 'site' && !sitesListByServer[src.server] && !siteListRequested[src.server]) {
+            siteListRequested[src.server] = true;
+            fetchSiteList(src.server, false).then(list => { if (list) updateBadge(); });
+        }
         if (!src || !document.querySelector('.leaflet-container')) {
             if (b) b.style.display = 'none';
             return;
@@ -654,7 +739,7 @@
             });
             document.body.appendChild(b);
         }
-        const cached = shadowCache[src.kind === 'site' ? src.id : fileCacheKey(siteID)];
+        const cached = shadowCache[srcCacheKey(src, siteID)];
         const count = cached ? ` · ${cached.entities.length}` : '';
         b.textContent = `◈ Shadow: ${shadowSourceLabel(src)}${count}`;
         b.style.display = 'block';
@@ -668,7 +753,7 @@
     function pickerStatusHtml() {
         const src = siteID ? shadowSourceFor(siteID) : null;
         if (!src) return '<span style="color:#888">No shadow selected for this site. Pick the Live (original) site below, or load a JSON backup.</span>';
-        const cached = shadowCache[src.kind === 'site' ? src.id : fileCacheKey(siteID)];
+        const cached = shadowCache[srcCacheKey(src, siteID)];
         const count = cached ? ` — ${cached.entities.length} entities` : '';
         const idBit = src.kind === 'site' ? ` <span style="color:#666">#${src.id}</span>` : '';
         return `Shadowing <span style="color:#ffa030">${escapeHtml(shadowSourceLabel(src))}</span>${idBit}${count}`;
@@ -678,25 +763,42 @@
         return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
 
+    let pickerServer = THIS_SERVER;   // which server's site list the picker is showing
+
+    function renderPickerTabs() {
+        const tabsEl = pickerEl && pickerEl.querySelector('#aim-sd-tabs');
+        if (!tabsEl) return;
+        tabsEl.innerHTML = ['prod', 'qa'].map(srv => {
+            const active = srv === pickerServer;
+            const label = `${SERVER_LABELS[srv]}${srv === THIS_SERVER ? ' (this server)' : ''}`;
+            return `<span data-srv="${srv}" style="cursor:pointer;padding:2px 10px;border-radius:3px;`
+                + (active ? 'background:#22303f;color:#7adfe6;font-weight:bold;' : 'color:#888;')
+                + `">${label}</span>`;
+        }).join('');
+    }
+
     function renderPickerList(filter) {
         const listEl = pickerEl && pickerEl.querySelector('#aim-sd-list');
         if (!listEl) return;
         const f = (filter || '').trim().toLowerCase();
         const rows = [];
         if (/^\d+$/.test(f)) {
-            rows.push(`<div class="aim-sd-row" data-sid="${f}" style="color:#7adfe6">➜ Use site ID ${f} directly</div>`);
+            rows.push(`<div class="aim-sd-row" data-sid="${f}" data-srv="${pickerServer}" style="color:#7adfe6">➜ Use site ID ${f} directly (${SERVER_LABELS[pickerServer]})</div>`);
         }
-        if (sitesList) {
-            sitesList
-                .filter(s => s.id !== siteID)
+        const list = sitesListByServer[pickerServer];
+        if (list) {
+            const cur = shadowSourceFor(siteID);
+            list
+                .filter(s => !(pickerServer === THIS_SERVER && s.id === siteID))
                 .filter(s => !f || s.name.toLowerCase().includes(f) || s.id.includes(f))
                 .slice(0, 200)
                 .forEach(s => {
-                    const cur = shadowSourceFor(siteID);
-                    const active = !!(cur && cur.kind === 'site' && cur.id === s.id);
-                    rows.push(`<div class="aim-sd-row" data-sid="${s.id}" style="${active ? 'color:#ffa030;' : ''}">`
+                    const active = !!(cur && cur.kind === 'site' && cur.id === s.id && cur.server === pickerServer);
+                    rows.push(`<div class="aim-sd-row" data-sid="${s.id}" data-srv="${pickerServer}" style="${active ? 'color:#ffa030;' : ''}">`
                         + `${escapeHtml(s.name)} <span style="color:#666">#${s.id}</span>${active ? ' ◈' : ''}</div>`);
                 });
+        } else if (pickerServer !== THIS_SERVER) {
+            rows.push(`<div style="color:#888;padding:4px 6px">Loading ${SERVER_LABELS[pickerServer]} site list… If it never loads, log into ${SERVER_ORIGINS[pickerServer].replace('https://', '')} in another tab, then ⟳ Refresh. You can also type a numeric site ID above.</div>`);
         } else {
             rows.push('<div style="color:#888;padding:4px 6px">Site list unavailable — type a numeric site ID above.</div>');
         }
@@ -714,6 +816,7 @@
                 + '<div style="padding:7px 10px;color:#7adfe6;font-weight:bold;border-bottom:1px solid #2a3140;">'
                 + '◈ Site Diff — shadow site <span id="aim-sd-close" style="float:right;cursor:pointer;color:#888">✕</span></div>'
                 + '<div id="aim-sd-status" style="padding:6px 10px;border-bottom:1px solid #222834;"></div>'
+                + '<div id="aim-sd-tabs" style="padding:6px 10px 0;display:flex;gap:6px;"></div>'
                 + '<div style="padding:6px 10px;"><input id="aim-sd-search" type="text" placeholder="Search sites or type a site ID…" '
                 + 'style="width:100%;box-sizing:border-box;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:4px 6px;font:inherit;outline:none;"></div>'
                 + '<div id="aim-sd-list" style="max-height:280px;overflow-y:auto;padding:0 4px 4px;"></div>'
@@ -732,16 +835,29 @@
 
             pickerEl.querySelector('#aim-sd-close').addEventListener('click', () => { pickerEl.style.display = 'none'; });
             pickerEl.querySelector('#aim-sd-search').addEventListener('input', (ev) => renderPickerList(ev.target.value));
+            pickerEl.querySelector('#aim-sd-tabs').addEventListener('click', (ev) => {
+                const tab = ev.target.closest('[data-srv]');
+                if (!tab) return;
+                const srv = tab.getAttribute('data-srv');
+                if (srv === pickerServer) return;
+                pickerServer = srv;
+                renderPickerTabs();
+                renderPickerList(pickerEl.querySelector('#aim-sd-search').value);
+                fetchSiteList(srv, false).then(() => {
+                    if (pickerEl.style.display !== 'none' && pickerServer === srv) {
+                        renderPickerList(pickerEl.querySelector('#aim-sd-search').value);
+                    }
+                });
+            });
             pickerEl.querySelector('#aim-sd-clear').addEventListener('click', () => {
-                if (siteID && pairs[siteID]) {
-                    console.log(`${TAG} cleared shadow pairing for site ${siteID}`);
+                if (siteID && pairs[envSiteKey(siteID)]) {
+                    console.log(`${TAG} cleared shadow pairing for site ${siteID} (${THIS_SERVER})`);
                     const src = shadowSourceFor(siteID);
                     if (src && src.kind === 'file') {
                         delete shadowCache[fileCacheKey(siteID)];
-                        gmSet(KEY_FILE_PREFIX + siteID, '');   // drop the stored backup too
+                        gmSet(KEY_FILE_PREFIX + envSiteKey(siteID), '');   // drop the stored backup too
                     }
-                    delete pairs[siteID];
-                    savePairs();
+                    clearPair(siteID);
                     renderShadow(false);
                     refreshPickerStatus();
                     renderPickerList(pickerEl.querySelector('#aim-sd-search').value);
@@ -765,8 +881,7 @@
                             return;
                         }
                         storeShadowFile(siteID, f.name, v.entities);
-                        pairs[siteID] = { kind: 'file', name: f.name };
-                        savePairs();
+                        setPair(siteID, { kind: 'file', name: f.name });
                         console.log(`${TAG} site ${siteID} now shadows JSON backup "${f.name}" (${v.entities.length} entities, ${v.drawable} drawable)`);
                         if (!masterEnabled) {
                             console.log(`${TAG} note: master toggle is OFF — enable "Site Diff" in the Control Panel to see the overlay`);
@@ -783,7 +898,7 @@
                 reader.readAsText(f);
             });
             pickerEl.querySelector('#aim-sd-refresh').addEventListener('click', () => {
-                fetchSiteList(true).then(() => renderPickerList(pickerEl.querySelector('#aim-sd-search').value));
+                fetchSiteList(pickerServer, true).then(() => renderPickerList(pickerEl.querySelector('#aim-sd-search').value));
                 renderShadow(true);
             });
             // Row clicks via delegation — the list is rebuilt on every keystroke
@@ -791,10 +906,12 @@
                 const row = ev.target.closest('[data-sid]');
                 if (!row || !siteID) return;
                 const sid = row.getAttribute('data-sid');
-                if (sid === siteID) return;
-                pairs[siteID] = sid;
-                savePairs();
-                console.log(`${TAG} site ${siteID} now shadows site ${sid}`);
+                const srv = row.getAttribute('data-srv') || pickerServer;
+                // Same id on the OTHER server is a legitimate shadow — only
+                // block shadowing this exact site on this server.
+                if (srv === THIS_SERVER && sid === siteID) return;
+                setPair(siteID, { kind: 'site', id: sid, server: srv });
+                console.log(`${TAG} site ${siteID} (${THIS_SERVER}) now shadows site ${sid} (${srv})`);
                 if (!masterEnabled) {
                     console.log(`${TAG} note: master toggle is OFF — enable "Site Diff" in the Control Panel to see the overlay`);
                 }
@@ -804,8 +921,9 @@
         }
         pickerEl.style.display = 'block';
         refreshPickerStatus();
+        renderPickerTabs();
         renderPickerList(pickerEl.querySelector('#aim-sd-search').value);
-        fetchSiteList(false).then(() => {
+        fetchSiteList(pickerServer, false).then(() => {
             if (pickerEl.style.display !== 'none') {
                 refreshPickerStatus();
                 renderPickerList(pickerEl.querySelector('#aim-sd-search').value);
@@ -1093,7 +1211,7 @@
         setDiffStatus('Running diff…');
         try {
             const [mine, theirs] = await Promise.all([
-                fetchShadowEntities(siteID, true),          // THIS (Offline) site — always fresh
+                fetchShadowEntities({ id: siteID, server: THIS_SERVER }, true),   // THIS (Offline) site — always fresh
                 getShadowEntities(siteID, src, false),      // shadow (Live) baseline
             ]);
             if (!mine) { setDiffStatus('Could not fetch this site\'s entities.'); return; }
@@ -1550,7 +1668,7 @@
         setMigBody('<span style="color:#aaa">Building plan…</span>');
         try {
             const [offline, live] = await Promise.all([
-                fetchShadowEntities(siteID, true),
+                fetchShadowEntities({ id: siteID, server: THIS_SERVER }, true),
                 getShadowEntities(siteID, src, true),
             ]);
             if (!offline || !live) { setMigBody('Could not fetch one of the sides — see console.'); return; }
@@ -1703,7 +1821,7 @@
         const src = shadowSourceFor(siteID);
         if (!src) { openMigPanel(); setMigBody('Pick a shadow (the Live site) first.'); return; }
         if (src.kind !== 'site') { openMigPanel(); setMigBody('Shadow is already a JSON file — nothing to back up.'); return; }
-        const ents = await fetchShadowEntities(src.id, true);
+        const ents = await fetchShadowEntities(src, true);
         if (!ents) { openMigPanel(); setMigBody('Backup fetch failed — see console.'); return; }
         const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
         const name = `site-${src.id}-map_objects-${stamp}.json`;
@@ -1955,7 +2073,7 @@
             setImpBody('<div style="padding:8px">Pick a shadow first (🗺 Choose shadow) — the shadow is the SOURCE this import copies FROM. A live site or an uploaded JSON backup both work.</div>');
             return;
         }
-        if (src.kind === 'site' && String(src.id) === String(siteID)) {
+        if (src.kind === 'site' && src.server === THIS_SERVER && String(src.id) === String(siteID)) {
             setImpBody('<div style="padding:8px"><span style="color:#ff5252">The shadow IS this site — nothing to import.</span></div>');
             return;
         }
@@ -1963,7 +2081,7 @@
         try {
             const [source, target] = await Promise.all([
                 getShadowEntities(siteID, src, src.kind === 'site'),
-                fetchShadowEntities(String(siteID), true),
+                fetchShadowEntities({ id: String(siteID), server: THIS_SERVER }, true),
             ]);
             if (!source || !target) {
                 setImpBody('<div style="padding:8px"><span style="color:#ff5252">Could not load one of the sides — see console.</span>'
@@ -1989,6 +2107,7 @@
             impState = {
                 srcLabel: shadowSourceLabel(src),
                 srcSiteId: src.kind === 'site' ? src.id : null,
+                srcServer: src.kind === 'site' ? src.server : null,
                 targetCount: target.length,
                 rows, running: false, armed: false, report: null,
             };
@@ -2039,7 +2158,9 @@
         let kmlNote;
         if (!kmlPossible) kmlNote = '<span style="color:#888">needs a live-site shadow (JSON backups carry no site id)</span>';
         else {
-            kmlNote = `<span style="color:#888">copy ${escapeHtml(String(impState.srcSiteId))}-* → ${escapeHtml(String(siteID))}-* in the data repo (create-only)</span>`
+            const srcKml = `${kmlEnvPrefix(impState.srcServer)}${impState.srcSiteId}`;
+            const tgtKml = `${kmlEnvPrefix(THIS_SERVER)}${siteID}`;
+            kmlNote = `<span style="color:#888">copy ${escapeHtml(srcKml)}-* → ${escapeHtml(tgtKml)}-* in the data repo (create-only)</span>`
                 + (cachedToken ? '' : ' <span style="color:#ffa030">— needs the GitHub token (AIM Controls gear)</span>');
         }
         const kmlRow = `<label style="display:flex;gap:8px;align-items:center;padding:4px 6px;border-bottom:1px solid #222834;`
@@ -2137,7 +2258,7 @@
             const verifyProblems = [];
             if (sel.length) {
                 setImpStatus('verifying against a fresh fetch…');
-                const fresh = await fetchShadowEntities(String(siteID), true);
+                const fresh = await fetchShadowEntities({ id: String(siteID), server: THIS_SERVER }, true);
                 if (!fresh) {
                     verifyProblems.push('verify fetch failed — created entities unconfirmed, check the site manually');
                 } else {
@@ -2151,7 +2272,7 @@
             let kmlResult = null;
             if (kmlOn) {
                 setImpStatus('copying power-line KMLs…');
-                kmlResult = await copyPowerLineKmls(impState.srcSiteId, siteID, m => setImpStatus(escapeHtml(m)));
+                kmlResult = await copyPowerLineKmls(impState.srcSiteId, impState.srcServer, siteID, m => setImpStatus(escapeHtml(m)));
             }
             impState.report = {
                 ranAt: new Date().toISOString(),
@@ -2201,7 +2322,7 @@
         }
     }
 
-    async function copyPowerLineKmls(srcId, tgtId, progress) {
+    async function copyPowerLineKmls(srcId, srcServer, tgtId, progress) {
         const out = { copied: [], skipped: [], errors: [] };
         if (!cachedToken) {
             out.errors.push('no GitHub token — set the PAT in AIM Controls (gear), then re-run');
@@ -2218,15 +2339,17 @@
             out.errors.push(`could not list the data repo: ${String(e && e.message || e)}`);
             return out;
         }
-        const prefix = `${srcId}-`;
+        // KML files are env-namespaced: prod = <id>-*, QA = qa-<id>-*. The
+        // source prefix follows the SHADOW's server, the target this one's.
+        const prefix = `${kmlEnvPrefix(srcServer)}${srcId}-`;
         const files = listing.filter(f => f && f.type === 'file' && String(f.name).startsWith(prefix));
         if (!files.length) {
-            out.errors.push(`no ${prefix}* files in the data repo — site ${srcId} has no power-line KMLs`);
+            out.errors.push(`no ${prefix}* files in the data repo — site ${srcId} (${srcServer || THIS_SERVER}) has no power-line KMLs`);
             return out;
         }
         const existing = new Set(listing.map(f => f.name));
         for (const f of files) {
-            const tgtName = `${tgtId}-${f.name.slice(prefix.length)}`;
+            const tgtName = `${kmlEnvPrefix(THIS_SERVER)}${tgtId}-${f.name.slice(prefix.length)}`;
             if (existing.has(tgtName)) { out.skipped.push(`${tgtName} (already exists)`); continue; }
             progress(`copying ${f.name} → ${tgtName}…`);
             try {
@@ -2712,8 +2835,9 @@
                 const name = String(m.name || 'predelete-backup.json');
                 try {
                     storeShadowFile(sid, name, m.entities);
-                    pairs[sid] = { kind: 'file', name };
-                    savePairs();
+                    // BroadcastChannel is per-origin, so this is always a
+                    // same-server handoff — envSiteKey applies cleanly.
+                    setPair(sid, { kind: 'file', name });
                     console.log(`${TAG} revert shadow armed for site ${sid} — "${name}" (${m.entities.length} entities) via AIM_SITEDIFF_CTRL`);
                     if (sid === String(siteID)) renderShadow(false);
                 } catch (e) { console.warn(`${TAG} SET_FILE_SHADOW failed:`, e); }

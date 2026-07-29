@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.04
+// @version      2.05
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,13 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.04';
+    const SCRIPT_VERSION = '2.05';
+
+    // Server model (v2.05): prod and QA are separate databases — the same
+    // numeric site ID is two different sites. GM storage is shared across
+    // origins, so per-site keys are env-namespaced (QA = qa-<id>).
+    const IS_QA = location.hostname === 'qa.percepto.app' || location.hostname.endsWith('.qa.percepto.app');
+    const envSiteKey = (sid) => IS_QA ? `qa-${sid}` : String(sid);
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -3449,6 +3455,10 @@
     // from its source missions) without re-clicking every pad. Stored in GM;
     // source missions resolve by NAME at load time so renames surface loudly.
     const PCM_RECIPES_KEY = 'aim-mb-merge-recipes';
+    // v2.05: recipe keys are env-namespaced — prod and QA are separate
+    // databases, so site 1583 on QA is NOT prod's 1583. GM storage is
+    // shared across origins; bare-ID keys would leak recipes between them.
+    function pcmRecipeKey(siteId, name) { return `${envSiteKey(siteId)}::${name}`; }
     function pcmLoadRecipes() {
         try {
             if (typeof GM_getValue === 'function') {
@@ -3462,7 +3472,7 @@
         try {
             if (typeof GM_setValue !== 'function') return;
             const all = pcmLoadRecipes();
-            all[`${siteId}::${name}`] = {
+            all[pcmRecipeKey(siteId, name)] = {
                 site: String(siteId), name, at: Date.now(),
                 picks: pcm.picks.map(p => ({ assetId: p.asset.id, assetName: p.asset.name, missionName: p.mission.name })),
             };
@@ -3473,13 +3483,13 @@
         try {
             if (typeof GM_setValue !== 'function') return;
             const all = pcmLoadRecipes();
-            delete all[`${siteId}::${name}`];
+            delete all[pcmRecipeKey(siteId, name)];
             GM_setValue(PCM_RECIPES_KEY, JSON.stringify(all));
         } catch (e) {}
     }
     function pcmSiteRecipes(siteId) {
         const all = pcmLoadRecipes();
-        return Object.keys(all).filter(k => k.indexOf(`${siteId}::`) === 0).map(k => all[k]).sort((a, b) => b.at - a.at);
+        return Object.keys(all).filter(k => k.indexOf(`${envSiteKey(siteId)}::`) === 0).map(k => all[k]).sort((a, b) => b.at - a.at);
     }
     function pcmLoadRecipe(rec) {
         const missing = [];
@@ -3872,7 +3882,7 @@
         const sid = getCurrentSiteID();
         if (!sid) { showToast('No site loaded.', '#ff5252', 3000); return; }
         let lastSrc = '';
-        try { if (typeof GM_getValue === 'function') lastSrc = GM_getValue('aim-mb-copy-src', '') || ''; } catch (e) {}
+        try { if (typeof GM_getValue === 'function') lastSrc = GM_getValue(IS_QA ? 'qa-aim-mb-copy-src' : 'aim-mb-copy-src', '') || ''; } catch (e) {}
         const p = document.createElement('div');
         p.id = CPM_PANEL_ID;
         p.style.cssText = 'position:fixed;top:60px;right:24px;width:390px;max-height:80vh;display:flex;flex-direction:column;z-index:2147483601;'
@@ -3907,7 +3917,7 @@
             const srcId = String(p.querySelector('[data-cpm-src]').value || '').trim();
             if (!/^\d+$/.test(srcId)) { showToast('Source site ID must be a number.', '#ff9800', 3000); return; }
             if (srcId === String(sid)) { showToast('Source IS this site — use 🔗 Merge for same-site work.', '#ff9800', 4000); return; }
-            try { if (typeof GM_setValue === 'function') GM_setValue('aim-mb-copy-src', srcId); } catch (e) {}
+            try { if (typeof GM_setValue === 'function') GM_setValue(IS_QA ? 'qa-aim-mb-copy-src' : 'aim-mb-copy-src', srcId); } catch (e) {}
             listEl.innerHTML = '<div style="padding:8px;color:#9ad;">Loading…</div>';
             try {
                 const [srcArr, tgtArr] = await Promise.all([

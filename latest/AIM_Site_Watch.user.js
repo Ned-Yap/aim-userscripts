@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.20
+// @version      0.21
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON (and optionally its missions) on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Daily Slack digest. Configurable in the AIM Control Panel ("Site Watch").
@@ -76,24 +76,32 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.20';
+    const SCRIPT_VERSION = '0.21';
+
+    // Server model (v0.21): prod and QA are separate databases with their own
+    // site lists — the same numeric ID is two different sites. A QA leader
+    // tab therefore audits into its OWN repo tree (site-watch-qa/), keeps its
+    // own GM state/lease (GM storage is shared across origins), and tags its
+    // Slack digest [QA].
+    const IS_QA = location.hostname === 'qa.percepto.app' || location.hostname.endsWith('.qa.percepto.app');
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ---- GitHub (data repo) ----
     const GITHUB_API_BASE = 'https://api.github.com';
     const DATA_REPO = 'Ned-Yap/aim-userscripts-data';
     const DATA_BRANCH = 'main';
-    const WATCH_DIR = 'site-watch';
+    const WATCH_DIR = IS_QA ? 'site-watch-qa' : 'site-watch';
     const CSV_PATH = `${WATCH_DIR}/changes.csv`;
     const CSV_HEADER = 'timestamp_utc,site_id,site_name,change,entity_type,entity_name,object_id,field,was,is';
     const TOKEN_KEY = 'aim-github-token';   // shared with Map Styler / AIM Issues
 
     // ---- this script's own GM storage keys ----
-    const STATE_KEY = 'aim-site-watch-state-v1';
-    const META_KEY = 'aim-site-watch-meta';
-    const CONFIG_KEY = 'aim-site-watch-config';
-    const MASTER_KEY = 'aim-site-watch-master';
-    const LEADER_KEY = 'aim-site-watch-leader';
+    const ENV_SFX = IS_QA ? '-qa' : '';   // per-env GM state — QA and prod audits never share
+    const STATE_KEY = `aim-site-watch-state-v1${ENV_SFX}`;
+    const META_KEY = `aim-site-watch-meta${ENV_SFX}`;
+    const CONFIG_KEY = 'aim-site-watch-config';           // user prefs — deliberately shared
+    const MASTER_KEY = 'aim-site-watch-master';           // master toggle — deliberately shared
+    const LEADER_KEY = `aim-site-watch-leader${ENV_SFX}`; // per-env lease: a QA tab must not steal prod's
     // ---- daily Slack digest (bot token, reused from AIM Issues' slack-config.json) ----
     // The bot (csmissues) + channel (CSM-Site-Issues) live in the SAME private
     // repo Site Watch already reads (DATA_REPO). chat.postMessage returns a
@@ -101,8 +109,8 @@
     const SLACK_CONFIG_PATH = 'slack-config.json';
     const SLACK_POST_URL = 'https://slack.com/api/chat.postMessage';
     const SLACK_CONFIG_KEY = 'aim-site-watch-slack-config';   // cached {botToken,channelId}
-    const DIGEST_DAY_KEY = 'aim-site-watch-digest-day';       // PT day (YYYY-MM-DD) already posted
-    const DIGEST_AT_KEY = 'aim-site-watch-digest-at';         // ISO cutoff of the last digest
+    const DIGEST_DAY_KEY = `aim-site-watch-digest-day${ENV_SFX}`;   // PT day (YYYY-MM-DD) already posted
+    const DIGEST_AT_KEY = `aim-site-watch-digest-at${ENV_SFX}`;     // ISO cutoff of the last digest
 
     // ---- tunables ----
     const DEFAULTS = {
@@ -979,6 +987,7 @@
     // success, null on any failure. Never throws.
     async function slackPost(text, threadTs, channelOverride) {
         if (!slackEnabled()) return null;
+        if (IS_QA) text = `[QA] ${text}`;   // QA digests are unmistakable in the channel
         try {
             const body = { channel: channelOverride || slackConfig.channelId, text };
             if (threadTs) body.thread_ts = threadTs;

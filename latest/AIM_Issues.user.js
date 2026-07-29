@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.35
+// @version      1.36
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -60,7 +60,14 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.35';
+    const SCRIPT_VERSION = '1.36';
+
+    // Server model (v1.36): prod and QA are separate databases — the same
+    // numeric site ID is two different sites. QA issues live in their own
+    // qa-<id>-issues.json files (never merged into prod's), and every Slack
+    // message from a QA tab is tagged [QA].
+    const IS_QA = location.hostname === 'qa.percepto.app' || location.hostname.endsWith('.qa.percepto.app');
+    const envSiteKey = (sid) => IS_QA ? `qa-${sid}` : String(sid);
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -72,7 +79,7 @@
     const GITHUB_API_BASE = 'https://api.github.com';
     const ISSUES_REPO = 'Ned-Yap/aim-userscripts-data';
     const ISSUES_BRANCH = 'main';
-    const ISSUES_PATH = (sid) => `issues/${sid}-issues.json`;
+    const ISSUES_PATH = (sid) => `issues/${envSiteKey(sid)}-issues.json`;
     const APPROVERS_PATH = 'approvers.json';
     // v1.03: Slack notifications. Bot token + channel ID + name→SlackID map
     // live in aim-userscripts-data/slack-config.json (same private repo +
@@ -785,6 +792,7 @@
     // directly because TOP is exactly where the cross-site sweep must run.
     async function slackPostRaw(text, threadTs) {
         if (!slackEnabled()) return null;
+        if (IS_QA) text = `[QA] ${text}`;   // QA traffic is unmistakable in the channel
         try {
             const body = { channel: slackConfig.channelId, text };
             if (threadTs) body.thread_ts = threadTs;
@@ -895,6 +903,7 @@
     // stale sweep (TOP frame) uses it to refresh parent boards on other sites.
     async function slackUpdateRaw(ts, text) {
         if (!slackEnabled() || !ts) return false;
+        if (IS_QA) text = `[QA] ${text}`;   // keep the tag through parent-board updates
         try {
             const resp = await ghRequest({
                 method: 'POST',
@@ -1661,8 +1670,12 @@
         const arr = JSON.parse(resp.responseText);
         if (!Array.isArray(arr)) return [];
         const sids = [];
+        // Each server sweeps ONLY its own files: prod = <id>-issues.json,
+        // QA = qa-<id>-issues.json. Without this split a QA tab would bump
+        // prod issues (and build site links to the wrong origin).
+        const fileRe = IS_QA ? /^qa-(\d+)-issues\.json$/ : /^(\d+)-issues\.json$/;
         for (const f of arr) {
-            const m = f && f.name && f.name.match(/^(\d+)-issues\.json$/);
+            const m = f && f.name && f.name.match(fileRe);
             if (m) sids.push(m[1]);
         }
         return sids;

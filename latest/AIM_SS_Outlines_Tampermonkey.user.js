@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.117
+// @version      34.120
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -43,7 +43,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.117';
+    const SCRIPT_VERSION = '34.120';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -66,6 +66,31 @@
     // works on its own with Shift+O.
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-styler';
+
+    // --- Server model (v34.120). Prod and QA are separate databases: the
+    // same numeric site ID is two different sites, so per-site KML files
+    // and GM-persisted per-site state are env-namespaced (QA = qa-<id>).
+    // GM storage is shared across origins — never key it by bare site ID.
+    const IS_QA = location.hostname === 'qa.percepto.app' || location.hostname.endsWith('.qa.percepto.app');
+    function envSiteKey(sid) { return IS_QA ? `qa-${sid}` : String(sid); }
+    // GM keys that embed a site id get the same env prefix.
+    function gmEnvKey(key) { return IS_QA ? `qa-${key}` : key; }
+    // Data-repo KML base name for a site. On QA the "qa-prod-kmls" toggle
+    // can point reads at the PROD twin's files (same numeric ID) — for
+    // sites cloned from prod where the real-world lines are identical.
+    function kmlSiteBase(siteID) {
+        if (!IS_QA) return String(siteID);
+        return toggleState['qa-prod-kmls'] === true ? String(siteID) : `qa-${siteID}`;
+    }
+    // While QA is viewing PROD's KMLs, every write path (commit / split /
+    // create) is blocked so QA edits can never land in prod's files.
+    function kmlWritesBlocked() {
+        if (IS_QA && toggleState['qa-prod-kmls'] === true) {
+            showKMLToast('QA is viewing PROD\'s KMLs (read-only). Turn off "Use PROD power-line KMLs" to edit QA\'s own files.', 8000);
+            return true;
+        }
+        return false;
+    }
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -162,6 +187,8 @@
     ];
     const TOGGLES = [
         { id: 'master', label: 'Show all overlays', type: 'boolean', default: true, master: true },
+        // QA-only: read the prod twin's KML files (write paths lock while on).
+        ...(IS_QA ? [{ id: 'qa-prod-kmls', label: 'QA: use PROD power-line KMLs (same site #, read-only)', type: 'boolean', default: false }] : []),
         {
             type: 'category',
             id: 'fp-cat',
@@ -3683,7 +3710,7 @@
         // not cached at the GitHub CDN). Always do the network fetch
         // so coworkers' changes propagate as soon as they happen.
         if (!kmlFeatures[key]) {
-            const cached = gmGet(KML_CACHE_PREFIX + key, null);
+            const cached = gmGet(KML_CACHE_PREFIX + gmEnvKey(key), null);
             if (cached && Array.isArray(cached.features)) {
                 kmlFeatures[key] = cached.features;
                 if (cached.path) kmlResolvedPath[key] = cached.path;
@@ -3718,11 +3745,12 @@
         // tracked in kmlResolvedPath[key] so commits/splits hit the same
         // file the fetch resolved.
         const cap = type.charAt(0).toUpperCase() + type.slice(1);
+        const base = kmlSiteBase(siteID);   // env-aware: QA = qa-<id> unless qa-prod-kmls
         const candidates = [
-            { name: `${siteID}-${type}.kml`, ext: 'kml' },
-            { name: `${siteID}-${cap}.kml`, ext: 'kml' },
-            { name: `${siteID}-${type}.kmz`, ext: 'kmz' },
-            { name: `${siteID}-${cap}.kmz`, ext: 'kmz' },
+            { name: `${base}-${type}.kml`, ext: 'kml' },
+            { name: `${base}-${cap}.kml`, ext: 'kml' },
+            { name: `${base}-${type}.kmz`, ext: 'kmz' },
+            { name: `${base}-${cap}.kmz`, ext: 'kmz' },
         ];
 
         // v34.53: fetch via api.github.com Contents endpoint instead of
@@ -3797,7 +3825,7 @@
                             try {
                                 const features = parseKML(xmlText);
                                 kmlFeatures[key] = features;
-                                gmSet(KML_CACHE_PREFIX + key, { features, at: Date.now(), path: c.name });
+                                gmSet(KML_CACHE_PREFIX + gmEnvKey(key), { features, at: Date.now(), path: c.name });
                                 console.log(`${TAG} ${type} KML for site ${siteID} loaded (${features.length} features, source: ${c.name})`);
                                 // v34.54: drop any stale commitOps entries from GM
                                 // storage whose pmIdx no longer references a real
@@ -3867,7 +3895,7 @@
             return doc.async('string').then(text => {
                 const features = parseKML(text);
                 kmlFeatures[key] = features;
-                gmSet(KML_CACHE_PREFIX + key, { features, at: Date.now(), path: sourceName });
+                gmSet(KML_CACHE_PREFIX + gmEnvKey(key), { features, at: Date.now(), path: sourceName });
                 console.log(`${TAG} ${type} KMZ for site ${siteID} loaded (${features.length} features, source: ${sourceName}, entry: ${doc.name})`);
                 kmlFetching.delete(key);
                 if (isActive) runUpdate();
@@ -3953,7 +3981,7 @@
     // ============================================================
 
     function pendingKey(siteID, type) {
-        return `${KML_PENDING_PREFIX}${siteID}-${type}`;
+        return `${KML_PENDING_PREFIX}${envSiteKey(siteID)}-${type}`;
     }
 
     function getPending(siteID, type) {
@@ -4072,7 +4100,7 @@
     // see what they're about to commit.
     // ============================================================
     function commitOpsKey(siteID, type) {
-        return `${KML_COMMIT_OPS_PREFIX}${siteID}-${type}`;
+        return `${KML_COMMIT_OPS_PREFIX}${envSiteKey(siteID)}-${type}`;
     }
 
     function emptyCommitOps() { return { ops: {}, added: [] }; }
@@ -4538,7 +4566,7 @@
             const features = parseKML(xmlText);
             kmlFeatures[k] = features;
             const path = kmlResolvedPath[k] || `${siteID}-${type}.kml`;
-            gmSet(KML_CACHE_PREFIX + k, { features, at: Date.now(), path });
+            gmSet(KML_CACHE_PREFIX + gmEnvKey(k), { features, at: Date.now(), path });
             kmlMissing.delete(k);
             console.log(`${TAG} applyCommittedXmlToLocalState[${k}]: features ${beforeCount} → ${features.length}`);
             return true;
@@ -4548,7 +4576,7 @@
             // render at least gets SOMETHING.
             console.warn(`${TAG} post-commit local parse failed; falling back to refetch:`, e);
             delete kmlFeatures[k];
-            gmSet(KML_CACHE_PREFIX + k, null);
+            gmSet(KML_CACHE_PREFIX + gmEnvKey(k), null);
             kmlMissing.delete(k);
             fetchKMLForSite(siteID, true);
             return false;
@@ -5003,6 +5031,7 @@
     function splitMultiSegmentPlacemarks(type) {
         const siteID = getCurrentSiteID();
         if (!siteID) { showKMLToast('No site loaded — open a site first.', 3000); return; }
+        if (kmlWritesBlocked()) return;
         const pCount = pendingCount(siteID, type);
         if (pCount > 0) {
             showKMLToast(`Refusing to split: ${pCount} pending ${type} hide${pCount === 1 ? '' : 's'}. Clear them first (the split would shift placemark indices).`, 9000);
@@ -5354,6 +5383,7 @@
     function commitPendingOps(type) {
         const siteID = getCurrentSiteID();
         if (!siteID) { showKMLToast('No site loaded — open a site first.', 3000); return; }
+        if (kmlWritesBlocked()) return;
 
         // v34.54: prune stale ops first.
         const pruned = pruneStaleOps(siteID, type);
@@ -8127,6 +8157,19 @@
                 if (msg.toggleId === 'asset.locked') {
                     applyAssetLockClass();
                 }
+                // QA prod-KML source flipped — the filename base changed, so
+                // drop everything loaded and refetch under the new names.
+                if (msg.toggleId === 'qa-prod-kmls') {
+                    kmlMissing.clear();
+                    const sid = getCurrentSiteID();
+                    if (sid) {
+                        KML_TYPES.forEach(t => { delete kmlFeatures[kmlKey(sid, t)]; });
+                        fetchKMLForSite(sid, true);
+                    }
+                    showKMLToast(newVal
+                        ? 'QA now reads PROD\'s power-line KMLs (write paths locked).'
+                        : 'QA back on its own qa-* KML files.', 5000);
+                }
                 // Color-by-state flipped on → kick off the entity fetch now so
                 // the styling appears without waiting for another interaction.
                 // (Tags are re-matched every runUpdate, so no clearing needed on
@@ -8431,7 +8474,8 @@
             showKMLToast('Tampermonkey grants need re-approval — open the script in Tampermonkey.', 6000);
             return;
         }
-        const path = `${siteID}-${type}.kml`;
+        if (kmlWritesBlocked()) return;
+        const path = `${kmlSiteBase(siteID)}-${type}.kml`;
         const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}`;
         const xmlText = buildEmptyKML(siteID, type);
         let contentB64;
@@ -8467,7 +8511,7 @@
                         kmlFeatures[key] = [];
                         kmlResolvedPath[key] = path;
                         kmlMissing.delete(key);
-                        gmSet(KML_CACHE_PREFIX + key, { features: [], at: Date.now(), path });
+                        gmSet(KML_CACHE_PREFIX + gmEnvKey(key), { features: [], at: Date.now(), path });
                         // Cache the new SHA so the first real commit can skip
                         // the GET (same fast-path the commit code uses).
                         try {

@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.205
+// @version      4.210
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,14 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.205';
+    const SCRIPT_VERSION = '4.210';
+
+    // Server model (v4.210): prod and QA are separate databases — the same
+    // numeric site ID is two different sites. Per-site keys in GM storage
+    // (shared across origins) and in the shared data repo are therefore
+    // env-namespaced: QA = qa-<id>, prod = bare <id> (unchanged).
+    const IS_QA = location.hostname === 'qa.percepto.app' || location.hostname.endsWith('.qa.percepto.app');
+    const envSiteKey = (sid) => IS_QA ? `qa-${sid}` : String(sid);
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -405,7 +412,7 @@
     // altitude-endpoint memory for the discovery story.
     // ============================================================
     const CACHE_KEY_ELEVATIONS = 'aim-ai-elev-cache'; // LEGACY global blob (v4.66 and earlier) — now READ-ONLY fallback, migrated per-site on access
-    const elevSiteKey = (siteID) => `aim-ai-elev-v2-${siteID}`; // v4.67 — per-site DEM cache (small loads/writes, bounded, aligns with the per-site shared files)
+    const elevSiteKey = (siteID) => `aim-ai-elev-v2-${envSiteKey(siteID)}`; // v4.67 — per-site DEM cache (small loads/writes, bounded, aligns with the per-site shared files); v4.210 env-namespaced (QA ≠ prod)
     const CACHE_KEY_COLUMN_ORDER = 'aim-ai-column-order'; // ordered list of visible column keys
     const CACHE_KEY_COLUMN_WIDTHS = 'aim-ai-column-widths'; // {colKey: px} per-user resized widths
     const CACHE_KEY_BASE_GM = 'aim-ai-base-gm';            // {siteID: gmEntityId} chosen basestation marker (route feature)
@@ -994,7 +1001,7 @@
     const ELEV_REPO_BRANCH = 'main';
     const ELEV_GITHUB_API = 'https://api.github.com';
     const ELEV_RAW_BASE = `https://raw.githubusercontent.com/${ELEV_REPO}/${ELEV_REPO_BRANCH}`;
-    const elevPathFor = (siteID) => `elevations/${siteID}-elevation.json`;
+    const elevPathFor = (siteID) => `elevations/${envSiteKey(siteID)}-elevation.json`;   // QA sites share via qa-<id> files
     let elevSharedToken = '';
     const elevRemoteMerged = new Set();    // sites we've already pulled this session
     const elevRemoteSha = {};              // sha per site for PUT conflict-aware update
@@ -11613,8 +11620,8 @@
     }
     function setBaseGmId(siteID, gmId) {
         const m = loadBaseGmMap();
-        if (gmId == null) delete m[String(siteID)];
-        else m[String(siteID)] = gmId;
+        if (gmId == null) delete m[envSiteKey(siteID)];
+        else m[envSiteKey(siteID)] = gmId;
         elevGmSet(CACHE_KEY_BASE_GM, m);
     }
     function gmPoint(e) {
@@ -11625,7 +11632,7 @@
     // (type-8 or GM). Otherwise: all type-8 installed bases, else all GMs named
     // /base/i. Returns { bases: [entity…], auto: boolean }.
     function resolveBases(siteID, entities) {
-        const stored = loadBaseGmMap()[String(siteID)];
+        const stored = loadBaseGmMap()[envSiteKey(siteID)];
         if (stored != null) {
             const e = (entities || []).find(x => (x.type === 8 || x.type === 19) && x.id === stored && gmPoint(x));
             if (e) return { bases: [e], auto: false };
@@ -17508,7 +17515,7 @@
             const ents = bucket ? (bucket.entities || []) : [];
             const type8 = ents.filter(e => e.type === 8 && gmPoint(e));
             const gms = ents.filter(e => e.type === 19 && gmPoint(e));
-            const overrideId = loadBaseGmMap()[String(siteID)];
+            const overrideId = loadBaseGmMap()[envSiteKey(siteID)];
             const mkBaseRow = (label, onPick, opts) => {
                 opts = opts || {};
                 const row = document.createElement('div');
