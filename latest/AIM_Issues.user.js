@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.36
+// @version      1.37
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -60,7 +60,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.36';
+    const SCRIPT_VERSION = '1.37';
 
     // Server model (v1.36): prod and QA are separate databases — the same
     // numeric site ID is two different sites. QA issues live in their own
@@ -343,6 +343,9 @@
     // polygon from the status modal. { issueId, ghost, pending, previewLayer }.
     // The grey dashed ghost exists ONLY while this is set.
     let reshapeState = null;
+    // v1.37: move-icon flow — non-null while the user is dragging an issue's
+    // marker to a custom spot. { issueId, pending: [lat,lng]|null }.
+    let markerMoveState = null;
     let drawToolbarEl = null;
     let noteModalEl = null;
     let statusModalEl = null;
@@ -536,6 +539,7 @@
         // v1.30: a site nav mid-reshape abandons the reshape (the ghost's map
         // is going away with the old site's layers).
         cancelReshape({ silent: true });
+        cancelMarkerMove({ silent: true });   // v1.37: same for a mid-move nav
         clearIssueLayers();
         hiddenIds.clear();
         // v0.17: invalidate entity caches on site change
@@ -1254,6 +1258,7 @@
         if (h.kind === 'assign') return h.toAssignee ? `${by} assigned → ${slackMention(h.toAssignee) || ('@' + slackEsc(h.toAssignee))}` : `${by} unassigned`;
         if (h.kind === 'priority') return `${by} set priority → ${slackEsc((h.toPriority || 'none'))}`;
         if (h.kind === 'reshape') return `${by} reshaped the area`;
+        if (h.kind === 'markermove') return h.markerPos ? `${by} moved the map icon` : `${by} reset the map icon position`;
         if (h.kind === 'category') return (h.toCategory === 'unshielded') ? `${by} marked as Unshielded Route` : `${by} converted to normal issue`;
         if (h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus)) return `${by} commented: ${slackEsc((h.note || '').slice(0, 80))}`;
         if (!h.fromStatus) return `${by} created`;
@@ -1422,6 +1427,28 @@
         return best;
     }
 
+    // v1.37: derive the marker's custom position from a (union-merged)
+    // history. The latest kind:'markermove' entry wins (markerPos may be
+    // null = "reset to auto"), EXCEPT when a reshape is chronologically
+    // newer — a redrawn polygon invalidates the old hand-placed spot, so
+    // reshape resets the icon to automatic placement. No markermove entry
+    // at all → fallback (stored field; normally undefined = auto).
+    function markerPosFromHistory(history, fallback) {
+        let best = null, bestAt = -Infinity, reshapeAt = -Infinity;
+        (history || []).forEach(h => {
+            if (!h) return;
+            const t = new Date(h.at).getTime();
+            const at = isNaN(t) ? 0 : t;
+            if (h.kind === 'reshape') { if (at >= reshapeAt) reshapeAt = at; return; }
+            if (h.kind !== 'markermove') return;
+            if (at >= bestAt) { bestAt = at; best = h; }
+        });
+        if (!best) return fallback;
+        if (reshapeAt > bestAt) return null;
+        const p = best.markerPos;
+        return (Array.isArray(p) && p.length === 2 && isFinite(p[0]) && isFinite(p[1])) ? p : null;
+    }
+
     // v1.31: derive category from the last kind:'category' conversion in a
     // (union-merged) history; falls back to the stored field for issues
     // created directly with a category (creation category is in both copies).
@@ -1490,6 +1517,9 @@
         // v1.31: category mutates via the convert action — same derive-from-
         // history rule so a conversion survives sync in any tab order.
         merged.category = categoryFromHistory(history, a.category || b.category);
+        // v1.37: custom marker position — same derive-from-history rule
+        // (latest markermove wins; a newer reshape resets it to auto).
+        merged.markerPos = markerPosFromHistory(history, a.markerPos || b.markerPos);
         // v1.29: the Slack watermark must merge by MAX — a stale copy with a
         // lower (or missing) watermark must not win, or we'd re-backfill what
         // another session already posted. Keep undefined only if BOTH are unset
@@ -2392,6 +2422,7 @@
             // staged/pending shape (back to drawing), next Esc cancels the
             // whole reshape and restores the original rendering.
             if (reshapeState && reshapeState.pending) { discardReshapePending(); return; }
+            if (markerMoveState) { cancelMarkerMove({ silent: false }); return; }
             if (drawingState) discardDraw({ silent: false });
             else if (reshapeState) cancelReshape({ silent: false });
             else setFlagMode(false);
@@ -2683,6 +2714,7 @@
         const L = getL();
         if (!map || !L) { showToast('Map not ready — try again in a second.', 3000); return; }
         if (flagModeActive) setFlagMode(false);   // one draw mode at a time
+        cancelMarkerMove({ silent: true });       // one edit mode at a time
         cancelReshape({ silent: true });          // idempotent restart
         // Swap the normal rendering for the grey dashed ghost. renderOneIssue
         // skips this issue while reshapeState holds its id, so a background
@@ -2800,6 +2832,10 @@
         });
         issue.shape = shape;
         issue.polygon = polygon;
+        // v1.37: a redrawn polygon invalidates any hand-placed icon spot —
+        // back to automatic placement (markerPosFromHistory applies the same
+        // rule on merge, keyed off the reshape being chronologically newer).
+        issue.markerPos = null;
         issueAffectedCache.delete(issue.id);   // affected entities must recompute
         saveIssuesToStorage(siteID, currentSiteIssues);
         renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
@@ -2854,6 +2890,134 @@
         cancelBtn.textContent = '✗ Cancel reshape (Esc)';
         cancelBtn.style.cssText = 'padding:7px 14px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit';
         cancelBtn.onclick = () => cancelReshape({ silent: false });
+        tb.appendChild(cancelBtn);
+        document.body.appendChild(tb);
+        drawToolbarEl = tb;
+    }
+
+    // ------- v1.37: Move icon (custom marker position) -------
+    // Entered ONLY from the status modal's 📍 Move icon button. The issue's
+    // marker becomes draggable; the drop is STAGED (green toolbar) and only
+    // persists on Apply. The position rides in a kind:'markermove' history
+    // entry so it survives distributed sync (mergeIssueObjects re-derives
+    // markerPos from the union history, mirroring reshape). "Reset to auto"
+    // applies markerPos:null → back to bestInteriorPoint placement.
+    function startMarkerMove(issueId) {
+        const issue = currentSiteIssues.find(i => i.id === issueId);
+        if (!issue) { showToast('Issue not found — it may have been deleted in a sync.', 3500); return; }
+        if (issue.deleted) { showToast('Deleted issues cannot be edited.', 3000); return; }
+        if (issue.source === 'validator') { showToast('Validator issues are regenerated on each run — move not applicable.', 3500); return; }
+        const map = getLeafletMap();
+        const L = getL();
+        if (!map || !L) { showToast('Map not ready — try again in a second.', 3000); return; }
+        if (flagModeActive) setFlagMode(false);   // one edit mode at a time
+        cancelReshape({ silent: true });
+        cancelMarkerMove({ silent: true });       // idempotent restart
+        markerMoveState = { issueId, pending: null };
+        renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
+        buildMarkerMoveToolbar('idle');
+        showToast('Move icon — drag the marker to where you want it, then Apply.', 4000);
+        console.log(`${TAG} marker move started for ${issueId}`);
+    }
+
+    function cancelMarkerMove(opts) {
+        opts = opts || {};
+        if (!markerMoveState) return;
+        const st = markerMoveState;
+        // Null FIRST so renderOneIssue paints the normal (non-draggable)
+        // marker back at its stored/auto position.
+        markerMoveState = null;
+        tearDownDrawToolbar();
+        const issue = currentSiteIssues.find(i => i.id === st.issueId);
+        if (issue && !issue.deleted) renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
+        if (!opts.silent) showToast('Move cancelled — icon position kept.', 2500);
+    }
+
+    function confirmMarkerMove(resetToAuto) {
+        if (!markerMoveState) return;
+        const st = markerMoveState;
+        if (!resetToAuto && !st.pending) { showToast('Drag the icon first (or use ↺ Reset to auto).', 3000); return; }
+        markerMoveState = null;
+        tearDownDrawToolbar();
+        const issue = currentSiteIssues.find(i => i.id === st.issueId);
+        if (!issue || issue.deleted) {
+            showToast('Issue vanished mid-move — nothing changed.', 3500);
+            return;
+        }
+        applyMarkerMove(issue, resetToAuto ? null : st.pending);
+    }
+
+    // The mutation. Mirrors applyReshape's save + sync pattern, minus Slack —
+    // an icon nudge is cosmetic, so the watermark advances silently to keep
+    // the backfill sweep from posting a catch-up line about it.
+    function applyMarkerMove(issue, markerPos) {
+        const nowIso = new Date().toISOString();
+        const by = cachedUsername || 'local-only';
+        if (!Array.isArray(issue.history)) issue.history = [];
+        issue.history.push({
+            at: nowIso,
+            by,
+            fromStatus: issue.status || 'open',
+            toStatus: issue.status || 'open',
+            kind: 'markermove',
+            markerPos: markerPos || null,
+            note: '',
+        });
+        issue.markerPos = markerPos || null;
+        // Silent Slack watermark bump — see comment above.
+        if (issue.createdBy !== 'local-only' && issue.slackPostedHistoryLen != null) {
+            issue.slackPostedHistoryLen = issue.history.length;
+        }
+        saveIssuesToStorage(siteID, currentSiteIssues);
+        renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
+        if (panelEl) renderIssuesPanel();
+        console.log(`${TAG} marker ${markerPos ? `moved to [${markerPos[0].toFixed(6)}, ${markerPos[1].toFixed(6)}]` : 'reset to auto'} on ${issue.id} by @${by}`);
+        const wasLocalOnly = (issue.createdBy === 'local-only');
+        if (cachedToken && !wasLocalOnly) {
+            showToast(markerPos ? 'Icon moved — pushing to GitHub…' : 'Icon reset to auto — pushing to GitHub…', 2500);
+            commitIssuesToGitHub(`@${by}: move icon ${issue.id.slice(0, 14)}`);
+        } else {
+            showToast(markerPos ? 'Icon moved (local only).' : 'Icon reset to auto (local only).', 2500);
+        }
+    }
+
+    // Move-icon toolbar. stage 'idle' = not dragged yet; 'pending' = a drop
+    // is staged awaiting Apply/Cancel. Reuses the shared draw-toolbar slot.
+    function buildMarkerMoveToolbar(stage) {
+        tearDownDrawToolbar();
+        const tb = document.createElement('div');
+        tb.id = 'aim-issues-draw-toolbar';
+        tb.style.cssText = `
+            position:fixed;bottom:100px;left:50%;transform:translateX(-50%);
+            background:#1f2228;border:2px solid #9aa0a6;border-radius:8px;
+            padding:10px 16px;z-index:99999;
+            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;
+            color:#e6e6e6;display:flex;align-items:center;gap:12px;
+            box-shadow:0 4px 16px rgba(0,0,0,0.5);
+        `;
+        const label = document.createElement('span');
+        label.style.cssText = 'color:#c8cdd4;font-weight:600';
+        tb.appendChild(label);
+        if (stage === 'pending') {
+            label.textContent = '📍 New spot staged — apply it?';
+            const applyBtn = document.createElement('button');
+            applyBtn.textContent = '✓ Apply new spot';
+            applyBtn.style.cssText = 'padding:7px 14px;background:#5fff5f;color:#000;border:none;border-radius:4px;cursor:pointer;font:inherit;font-weight:700';
+            applyBtn.onclick = () => confirmMarkerMove(false);
+            tb.appendChild(applyBtn);
+        } else {
+            label.textContent = '📍 Drag the issue icon to its new spot';
+        }
+        const resetBtn = document.createElement('button');
+        resetBtn.textContent = '↺ Reset to auto';
+        resetBtn.title = 'Put the icon back at its automatic (computed) position';
+        resetBtn.style.cssText = 'padding:7px 14px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit';
+        resetBtn.onclick = () => confirmMarkerMove(true);
+        tb.appendChild(resetBtn);
+        const cancelBtn = document.createElement('button');
+        cancelBtn.textContent = '✗ Cancel (Esc)';
+        cancelBtn.style.cssText = 'padding:7px 14px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit';
+        cancelBtn.onclick = () => cancelMarkerMove({ silent: false });
         tb.appendChild(cancelBtn);
         document.body.appendChild(tb);
         drawToolbarEl = tb;
@@ -3788,7 +3952,7 @@
             // v0.28: comment count + priority cells
             const commentCount = (issue.history || []).filter(h =>
                 h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus
-                    && h.kind !== 'priority' && h.kind !== 'assign' && h.kind !== 'reshape' && h.kind !== 'category')
+                    && h.kind !== 'priority' && h.kind !== 'assign' && h.kind !== 'reshape' && h.kind !== 'category' && h.kind !== 'markermove')
             ).length;
             const priM = issue.priority ? priorityMeta(issue.priority) : null;
             const histText = (issue.history || []).map(h => {
@@ -3800,6 +3964,7 @@
                 else if (h.toStatus === 'deleted') trans = `deleted`;
                 else if (h.kind === 'assign') trans = h.toAssignee ? `assigned → @${h.toAssignee}` : `unassigned`;
                 else if (h.kind === 'reshape') trans = `reshaped (${Array.isArray(h.polygon) ? h.polygon.length : '?'}-point ${h.toShape || 'polygon'})`;
+                else if (h.kind === 'markermove') trans = h.markerPos ? 'moved the map icon' : 'reset the map icon';
                 else if (h.kind === 'category') trans = (h.toCategory === 'unshielded') ? 'marked as Unshielded Route' : 'converted to normal issue';
                 else if (h.kind === 'comment' || h.fromStatus === h.toStatus) trans = `comment`;
                 else trans = `${h.fromStatus} → ${h.toStatus}`;
@@ -3858,7 +4023,7 @@
             const affectedList = affected.map(a => `${a.typeShort} ${a.name}${a.subtype ? ' (' + a.subtype + ')' : ''}`).join(' | ');
             const commentCount = (issue.history || []).filter(h =>
                 h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus
-                    && h.kind !== 'priority' && h.kind !== 'assign' && h.kind !== 'reshape' && h.kind !== 'category')
+                    && h.kind !== 'priority' && h.kind !== 'assign' && h.kind !== 'reshape' && h.kind !== 'category' && h.kind !== 'markermove')
             ).length;
             const priLabel = issue.priority ? priorityMeta(issue.priority).text : '';
             const histText = (issue.history || []).map(h => {
@@ -3870,6 +4035,7 @@
                 else if (h.toStatus === 'deleted') trans = `deleted`;
                 else if (h.kind === 'assign') trans = h.toAssignee ? `assigned → @${h.toAssignee}` : `unassigned`;
                 else if (h.kind === 'reshape') trans = `reshaped (${Array.isArray(h.polygon) ? h.polygon.length : '?'}-point ${h.toShape || 'polygon'})`;
+                else if (h.kind === 'markermove') trans = h.markerPos ? 'moved the map icon' : 'reset the map icon';
                 else if (h.kind === 'category') trans = (h.toCategory === 'unshielded') ? 'marked as Unshielded Route' : 'converted to normal issue';
                 else if (h.kind === 'comment' || h.fromStatus === h.toStatus) trans = `comment`;
                 else trans = `${h.fromStatus} → ${h.toStatus}`;
@@ -4088,7 +4254,16 @@
         // v0.23: bestInteriorPoint (pole-of-inaccessibility variant) instead
         // of arithmetic centroid — guarantees the icon lands INSIDE the
         // polygon even for L-shapes / C-shapes / concave outlines.
-        const c = bestInteriorPoint(issue.polygon);
+        // v1.37: a hand-placed position (📍 Move icon) overrides the
+        // automatic one. During an active move session, a staged-but-not-
+        // applied drop wins so a background sync re-render can't snap the
+        // marker back mid-session.
+        const inMoveSession = !!(markerMoveState && markerMoveState.issueId === issue.id);
+        const mp = issue.markerPos;
+        const customPos = (Array.isArray(mp) && mp.length === 2 && isFinite(mp[0]) && isFinite(mp[1])) ? mp : null;
+        const c = (inMoveSession && markerMoveState.pending)
+            ? markerMoveState.pending
+            : (customPos || bestInteriorPoint(issue.polygon));
         let marker = null;
         // v0.21: wrap marker code in try/catch. A coworker hit "polygon
         // renders but icon doesn't" — meant something in here threw silently
@@ -4147,7 +4322,7 @@
                 iconAnchor: [effSize / 2, effSize / 2],
             });
             const markerPane = (map.getPane && map.getPane('aim-issues-markers')) ? 'aim-issues-markers' : undefined;
-            marker = L.marker(c, { icon: divIcon, interactive: true, bubblingMouseEvents: false, pane: markerPane });
+            marker = L.marker(c, { icon: divIcon, interactive: true, bubblingMouseEvents: false, pane: markerPane, draggable: inMoveSession });
             marker.bindTooltip(buildTooltipHtml(issue, { isHidden }), {
                 direction: 'top',
                 offset: L.point(0, -8),
@@ -4170,14 +4345,31 @@
                     } catch (e) {}
                 }
             };
-            marker.on('click', (ev) => {
-                swallow(ev);
-                toggleSessionHide(issue.id);
-            });
-            marker.on('contextmenu', (ev) => {
-                swallow(ev);
-                openStatusModal(issue);
-            });
+            if (inMoveSession) {
+                // v1.37: in a move session the marker is a drag handle only —
+                // click/contextmenu are suppressed so a sloppy drop can't
+                // toggle hide or pop the modal. Each drop stages the position
+                // for the Apply/Cancel toolbar.
+                marker.on('click', swallow);
+                marker.on('contextmenu', swallow);
+                marker.on('dragend', () => {
+                    if (!markerMoveState || markerMoveState.issueId !== issue.id) return;
+                    try {
+                        const ll = marker.getLatLng();
+                        markerMoveState.pending = [ll.lat, ll.lng];
+                        buildMarkerMoveToolbar('pending');
+                    } catch (e) { console.warn(`${TAG} marker dragend failed:`, e); }
+                });
+            } else {
+                marker.on('click', (ev) => {
+                    swallow(ev);
+                    toggleSessionHide(issue.id);
+                });
+                marker.on('contextmenu', (ev) => {
+                    swallow(ev);
+                    openStatusModal(issue);
+                });
+            }
             marker.addTo(map);
         } } catch (e) {
             console.error(`${TAG} marker render failed for issue ${issue.id}:`, e);
@@ -4209,6 +4401,7 @@
             return last.toAssignee ? `👤 Assigned → @${last.toAssignee}` : '👤 Unassigned';
         }
         if (last.kind === 'reshape') return '✏ Reshaped';
+        if (last.kind === 'markermove') return '📍 Icon moved';
         if (last.kind === 'category') return (last.toCategory === 'unshielded') ? '🛡 Marked Unshielded' : '🚩 Marked Issue';
         if (last.kind === 'comment' || (last.fromStatus && last.fromStatus === last.toStatus)) {
             return `💬 Commented`;
@@ -4258,6 +4451,9 @@
         }
         if (h.kind === 'reshape') {
             return `✏ <b>@${by}</b> reshaped the area`;
+        }
+        if (h.kind === 'markermove') {
+            return h.markerPos ? `📍 <b>@${by}</b> moved the map icon` : `📍 <b>@${by}</b> reset the map icon`;
         }
         if (h.kind === 'category') {
             return (h.toCategory === 'unshielded')
@@ -4846,6 +5042,12 @@
                     // also have fromStatus === toStatus.
                     const nVerts = Array.isArray(h.polygon) ? h.polygon.length : '?';
                     label = `✏ <span style="color:#c8cdd4;font-weight:700">reshaped</span> → ${nVerts}-point ${escHtml(h.toShape || 'polygon')}`;
+                } else if (h.kind === 'markermove') {
+                    // v1.37: must precede the comment branch — markermove
+                    // entries also have fromStatus === toStatus.
+                    label = h.markerPos
+                        ? `📍 <span style="color:#c8cdd4;font-weight:700">moved the map icon</span>`
+                        : `📍 <span style="color:#888;font-weight:700">reset the map icon to auto</span>`;
                 } else if (h.kind === 'category') {
                     label = (h.toCategory === 'unshielded')
                         ? `🛡 marked as <span style="color:${CATEGORY_META.unshielded.color};font-weight:700">UNSHIELDED ROUTE</span>`
@@ -4906,6 +5108,17 @@
                        title="Redraw this issue's shape — the current shape shows grey dashed while you draw the replacement"
                        style="padding:7px 14px;background:#2a2f36;color:#c8cdd4;border:1px solid #9aa0a6;border-radius:4px;cursor:pointer;font:inherit;font-weight:700">
                        ✏ Reshape
+                   </button>`
+                : '';
+            // v1.37: move icon — same gate as reshape. Lets the user drag
+            // the issue's marker to a custom spot (the automatic interior-
+            // point placement isn't always visually centered, e.g. long thin
+            // unshielded-route corridors).
+            const moveIconBtnHtml = canReshape
+                ? `<button id="aim-issues-modal-moveicon"
+                       title="Drag this issue's map icon to a custom spot (Apply/Cancel toolbar guards the drop; reshaping later resets it to automatic)"
+                       style="padding:7px 14px;background:#2a2f36;color:#c8cdd4;border:1px solid #9aa0a6;border-radius:4px;cursor:pointer;font:inherit;font-weight:700">
+                       📍 Move icon
                    </button>`
                 : '';
             // v1.31: category convert — same gate as reshape. Toggles between
@@ -5217,7 +5430,7 @@
                 // right edge; if there's no delete button, they still align
                 // right via the spacer.
                 const spacer = deleteBtnHtml ? '' : '<span style="margin-right:auto"></span>';
-                footerHtml = `<div style="${footerBase}">${deleteBtnHtml}${reinstateBtnHtml}${spacer}${convertBtnHtml}${reshapeBtnHtml}${resendBtnHtml}</div>`;
+                footerHtml = `<div style="${footerBase}">${deleteBtnHtml}${reinstateBtnHtml}${spacer}${convertBtnHtml}${reshapeBtnHtml}${moveIconBtnHtml}${resendBtnHtml}</div>`;
             }
             card.innerHTML = `
                 <div id="aim-issues-modal-header"
@@ -5592,6 +5805,16 @@
                 reshapeBtn.onclick = () => {
                     closeStatusModal();
                     startReshape(liveIssue.id);
+                };
+            }
+            // v1.37: Move icon — closes the modal (the draggable marker +
+            // Apply/Cancel toolbar take over the map). Single click is safe:
+            // the move has its own staged confirm.
+            const moveIconBtn = card.querySelector('#aim-issues-modal-moveicon');
+            if (moveIconBtn) {
+                moveIconBtn.onclick = () => {
+                    closeStatusModal();
+                    startMarkerMove(liveIssue.id);
                 };
             }
             // v1.31: category convert toggle. Non-destructive + audited, so
@@ -6053,6 +6276,7 @@
                         }
                         if (h.kind === 'assign') return h.toAssignee ? `@${by}: 👤 assigned → @${h.toAssignee}` : `@${by}: 👤 unassigned`;
                         if (h.kind === 'reshape') return `@${by}: ✏ reshaped the area`;
+                        if (h.kind === 'markermove') return `@${by}: 📍 moved the map icon`;
                         if (h.kind === 'category') return (h.toCategory === 'unshielded') ? `@${by}: 🛡 marked Unshielded Route` : `@${by}: converted to normal issue`;
                         if (h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus)) {
                             return `@${by}: 💬 ${(h.note || '').slice(0, 80)}`;

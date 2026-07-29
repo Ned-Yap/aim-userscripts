@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-29 — AIM Issues v1.37 (dev/latest): 📍 Move icon
+
+- **AIM Issues v1.37 — movable issue markers.** The map icon (including the purple Unshielded Route shield) sits at an automatically computed interior point, which can look off-center on long thin shapes. New **📍 Move icon** button in the issue's status modal (same permissions as ✏ Reshape): the marker becomes draggable, the drop is staged with an Apply / Reset-to-auto / Cancel toolbar (Esc cancels), and the custom spot syncs to everyone like any other issue change. ✏ Reshaping an issue later resets its icon back to automatic placement.
+
 ## 2026-07-29 — QA/prod environment isolation + cross-server Site Diff (dev/latest)
 
 Prod and QA are **separate databases** — the same numeric site ID can be two different sites. This update makes every script treat them that way (dev/latest only for now):
