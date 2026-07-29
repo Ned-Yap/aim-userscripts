@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.199
+// @version      4.200
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -15,7 +15,9 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_openInTab
 // @require      https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/vendor/polygon-clipping-0.15.7.umd.js
+// @require      https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/vendor/lerc-2.0.0.js
 // @connect      api.github.com
+// @connect      elevation.nationalmap.gov
 // @connect      raw.githubusercontent.com
 // @connect      api.opentopodata.org
 // @connect      services6.arcgis.com
@@ -65,7 +67,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.199';
+    const SCRIPT_VERSION = '4.200';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -5702,6 +5704,739 @@
     } catch (e) { console.warn(`${TAG} could not expose __aimAglTipStatus:`, e); }
 
     // ============================================================
+    // ⛰ Terrain Profiler (v4.200 — feature #203 Phase 1, READ-ONLY).
+    // Answers "where does a giant fixed-floor FFZ break the AGL band?"
+    // One LERC exportImage pull of the RAW 3DEP DEM for the site extent
+    // (real elevation values, not a rendered picture), greedy elevation
+    // banding (each band spans ≤ deltaFt of relief — greedy cover
+    // provably minimizes band count), connected-component regions,
+    // size-tiered outlier absorption:
+    //   < absorbAc            → absorbed silently (DEM speckle/berms)
+    //   absorbAc … nfzMaxAc   → absorbed, flagged as NFZ CANDIDATE
+    //                           (bump = floor risk, pit = ceiling risk)
+    //   > nfzMaxAc            → real terrain, its own region
+    // then a colored region overlay + a floating stats panel with a
+    // proposed fixed floor/ceiling per region. NO writes — the FFZ
+    // auto-builder is Phase 2.
+    // ============================================================
+    const TER_SCRIPT_ID = 'aim-terrain-profiler';
+    const TER_PANEL_ID = 'aim-ter-panel';
+    const TER_THRESH_KEY = 'aim-ai-terrain-thresholds';
+    const TER_ENABLE_KEY = 'aim-ai-terrain-enables';
+    const TER_URL = 'https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage';
+    const TER_MAX_PX = 2048;              // per-axis request cap (service limit head-room)
+    const TER_THRESH_DEFAULTS = {
+        minAglFt: 80,     // AGL floor target (client SOP; universal — editable)
+        maxAglFt: 200,    // AGL ceiling target
+        deltaFt: 30,      // max in-band terrain relief per region
+        cellFt: 33,       // DEM sample cell (~10 m = native 3DEP 1/3 arc-sec)
+        marginFt: 500,    // extra ring around the entity bbox
+        absorbAc: 0.5,    // islands below this: silently absorbed
+        nfzMaxAc: 5,      // absorbed islands up to this: NFZ candidates
+        opacity: 0.55,    // overlay opacity
+    };
+    const TER_ENABLE_DEFAULTS = {
+        median: true,     // 3×3 median despeckle before banding
+        floorP95: false,  // floor ref = P95 elevation instead of true max
+    };
+    function loadTerThresholds() {
+        const out = { ...TER_THRESH_DEFAULTS };
+        try {
+            const raw = elevGmGet(TER_THRESH_KEY, null);
+            if (raw) { const o = JSON.parse(raw); for (const k in TER_THRESH_DEFAULTS) if (typeof o[k] === 'number' && isFinite(o[k])) out[k] = o[k]; }
+        } catch (e) { console.warn(`${TAG} loadTerThresholds threw:`, e); }
+        return out;
+    }
+    function saveTerThresholds() {
+        try { elevGmSet(TER_THRESH_KEY, JSON.stringify(terThresholds)); }
+        catch (e) { console.warn(`${TAG} saveTerThresholds threw:`, e); }
+    }
+    function loadTerEnabled() {
+        const out = { ...TER_ENABLE_DEFAULTS };
+        try {
+            const raw = elevGmGet(TER_ENABLE_KEY, null);
+            if (raw) { const o = JSON.parse(raw); for (const k in TER_ENABLE_DEFAULTS) if (typeof o[k] === 'boolean') out[k] = o[k]; }
+        } catch (e) { console.warn(`${TAG} loadTerEnabled threw:`, e); }
+        return out;
+    }
+    function saveTerEnabled() {
+        try { elevGmSet(TER_ENABLE_KEY, JSON.stringify(terEnabled)); }
+        catch (e) { console.warn(`${TAG} saveTerEnabled threw:`, e); }
+    }
+    let terMasterEnabled = true;
+    let terThresholds = loadTerThresholds();
+    let terEnabled = loadTerEnabled();
+    let terState = null;      // full result of the last run (see terrainProfilerRun)
+    let terLayer = null;      // L.imageOverlay on the map
+    let terLayerMap = null;
+    let terMoveHandler = null;
+    let terBadgeEl = null;
+    let terRunning = false;
+
+    // Web-mercator helpers — the DEM is requested and displayed in 3857,
+    // so row↔latitude conversions must go through mercator Y (linear-lat
+    // math would misplace rows on tall sites).
+    const terMercX = (lng) => lng * 20037508.342789244 / 180;
+    const terMercY = (lat) => Math.log(Math.tan((90 + lat) * Math.PI / 360)) / (Math.PI / 180) * 20037508.342789244 / 180;
+    const terInvMercY = (y) => (2 * Math.atan(Math.exp(y * Math.PI / 20037508.342789244)) - Math.PI / 2) * 180 / Math.PI;
+
+    // Binary GM fetch — elevGmRequest is text-only; LERC needs arraybuffer.
+    function terFetchLerc(url) {
+        return new Promise((resolve, reject) => {
+            try {
+                GM_xmlhttpRequest({
+                    method: 'GET', url, responseType: 'arraybuffer', timeout: 45000,
+                    onload: (r) => (r.status >= 200 && r.status < 300 && r.response) ? resolve(r.response) : reject(new Error(`3DEP HTTP ${r.status}`)),
+                    onerror: () => reject(new Error('3DEP network error')),
+                    ontimeout: () => reject(new Error('3DEP timeout (45 s)')),
+                });
+            } catch (e) { reject(e); }
+        });
+    }
+
+    // Fetch the raw DEM grid (feet) for a geographic bbox. Size is derived
+    // FROM the bbox aspect — exportImage silently ADJUSTS the bbox when
+    // size aspect ≠ bbox aspect (engraved terrain-overlay gotcha).
+    async function terFetchDem(west, south, east, north) {
+        const LercLib = (typeof Lerc !== 'undefined' && Lerc) || (typeof unsafeWindow !== 'undefined' && unsafeWindow.Lerc) || null;
+        if (!LercLib || typeof LercLib.decode !== 'function') throw new Error('LERC decoder missing (vendor @require failed — reinstall the script)');
+        const x1 = terMercX(west), x2 = terMercX(east);
+        const y1 = terMercY(south), y2 = terMercY(north);
+        const cosLat = Math.cos(((south + north) / 2) * Math.PI / 180);
+        const cellM = Math.max(3, terThresholds.cellFt / M_TO_FT);
+        const groundWm = (x2 - x1) * cosLat, groundHm = (y2 - y1) * cosLat;
+        let w = Math.round(groundWm / cellM), h = Math.round(groundHm / cellM);
+        if (w > TER_MAX_PX || h > TER_MAX_PX) {
+            const s = TER_MAX_PX / Math.max(w, h);
+            w = Math.round(w * s); h = Math.round(h * s);
+            console.log(`${TAG} profiler: cell size coarsened to ~${Math.round((groundWm / w) * M_TO_FT)} ft to stay under ${TER_MAX_PX}px (site larger than cellFt allows)`);
+        }
+        w = Math.max(32, w); h = Math.max(32, h);
+        const params = new URLSearchParams({
+            bbox: `${x1},${y1},${x2},${y2}`, bboxSR: '3857', imageSR: '3857',
+            size: `${w},${h}`, format: 'lerc', pixelType: 'F32',
+            noDataInterpretation: 'esriNoDataMatchAny',
+            interpolation: 'RSP_BilinearInterpolation', f: 'image',
+        });
+        const buf = await terFetchLerc(`${TER_URL}?${params.toString()}`);
+        let dec;
+        try { dec = LercLib.decode(buf); }
+        catch (e) { throw new Error(`LERC decode failed — ${e && e.message ? e.message : e}`); }
+        if (!dec || !dec.pixels || !dec.pixels[0]) throw new Error('LERC decode returned no pixels');
+        w = dec.width; h = dec.height;
+        const raw = dec.pixels[0];
+        const mask = dec.maskData || null;   // when present: 1 = valid
+        const n = w * h;
+        const vals = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+            const v = raw[i];
+            vals[i] = ((mask ? mask[i] : 1) && isFinite(v) && v > -1000 && v < 9000) ? v * M_TO_FT : NaN;
+        }
+        return {
+            vals, w, h,
+            bounds: { south, west, north, east },
+            mercY1: y1, mercY2: y2, mercX1: x1, mercX2: x2,
+            cellXft: (groundWm / w) * M_TO_FT,
+            cellYft: (groundHm / h) * M_TO_FT,
+            cellAcres: ((groundWm / w) * (groundHm / h)) / 4046.8564224,
+        };
+    }
+
+    // 3×3 median despeckle (NaN-aware).
+    function terMedianFilter(vals, w, h) {
+        const out = new Float32Array(vals.length);
+        const buf = new Float32Array(9);
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                const i = y * w + x;
+                if (isNaN(vals[i])) { out[i] = NaN; continue; }
+                let k = 0;
+                for (let dy = -1; dy <= 1; dy++) {
+                    const yy = y + dy;
+                    if (yy < 0 || yy >= h) continue;
+                    for (let dx = -1; dx <= 1; dx++) {
+                        const xx = x + dx;
+                        if (xx < 0 || xx >= w) continue;
+                        const v = vals[yy * w + xx];
+                        if (!isNaN(v)) buf[k++] = v;
+                    }
+                }
+                for (let a = 1; a < k; a++) { const t = buf[a]; let b = a - 1; while (b >= 0 && buf[b] > t) { buf[b + 1] = buf[b]; b--; } buf[b + 1] = t; }
+                out[i] = buf[k >> 1];
+            }
+        }
+        return out;
+    }
+
+    // Core segmentation: banding → components → tiered absorption → stats.
+    function terSegment(dem, th) {
+        const { vals, w, h, cellAcres } = dem;
+        const n = w * h;
+        let mnFt = Infinity, mxFt = -Infinity;
+        for (let i = 0; i < n; i++) { const v = vals[i]; if (!isNaN(v)) { if (v < mnFt) mnFt = v; if (v > mxFt) mxFt = v; } }
+        if (!isFinite(mnFt)) throw new Error('DEM empty — no valid elevation in the requested area');
+        const base = Math.floor(mnFt);
+        const nb = Math.max(1, Math.ceil(mxFt) - base + 1);       // 1-ft bins
+        const hist = new Float64Array(nb);
+        for (let i = 0; i < n; i++) { const v = vals[i]; if (!isNaN(v)) hist[Math.min(nb - 1, Math.max(0, Math.floor(v) - base))]++; }
+        // Greedy band cover — optimal band COUNT for "every elevation in
+        // some ≤delta window": each band starts at the lowest uncovered
+        // occupied bin and spans deltaFt.
+        const deltaBins = Math.max(1, Math.round(th.deltaFt));
+        const bandLoFt = [];
+        const bandOfBin = new Int16Array(nb).fill(-1);
+        let b = 0;
+        while (b < nb) {
+            if (!hist[b]) { b++; continue; }
+            bandLoFt.push(base + b);
+            const hi = Math.min(nb - 1, b + deltaBins - 1);
+            for (let k = b; k <= hi; k++) bandOfBin[k] = bandLoFt.length - 1;
+            b = hi + 1;
+        }
+        const bandIdx = new Int16Array(n).fill(-1);
+        for (let i = 0; i < n; i++) {
+            const v = vals[i];
+            if (!isNaN(v)) bandIdx[i] = bandOfBin[Math.min(nb - 1, Math.max(0, Math.floor(v) - base))];
+        }
+        // Connected components (4-connectivity, explicit stack).
+        const labels = new Int32Array(n).fill(-1);
+        const labelBand = [];
+        let nextLabel = 0;
+        const stack = [];
+        for (let seed = 0; seed < n; seed++) {
+            if (labels[seed] !== -1 || bandIdx[seed] < 0) continue;
+            const bd = bandIdx[seed];
+            const lab = nextLabel++;
+            labelBand.push(bd);
+            stack.length = 0; stack.push(seed);
+            labels[seed] = lab;
+            while (stack.length) {
+                const i = stack.pop();
+                const x = i % w, y = (i / w) | 0;
+                if (x > 0 && labels[i - 1] === -1 && bandIdx[i - 1] === bd) { labels[i - 1] = lab; stack.push(i - 1); }
+                if (x < w - 1 && labels[i + 1] === -1 && bandIdx[i + 1] === bd) { labels[i + 1] = lab; stack.push(i + 1); }
+                if (y > 0 && labels[i - w] === -1 && bandIdx[i - w] === bd) { labels[i - w] = lab; stack.push(i - w); }
+                if (y < h - 1 && labels[i + w] === -1 && bandIdx[i + w] === bd) { labels[i + w] = lab; stack.push(i + w); }
+            }
+        }
+        // Tiered absorption with union-find. Every root smaller than
+        // nfzMaxAc wants to merge into its dominant (longest shared
+        // boundary) neighbor. Merging INTO A BIG region records an NFZ
+        // candidate when the island was ≥ absorbAc; small→small merges
+        // just coalesce (the combo may grow past the threshold and
+        // survive as a real region). Iterate to a fixed point.
+        const parent = new Int32Array(nextLabel);
+        for (let i = 0; i < nextLabel; i++) parent[i] = i;
+        const find = (a) => { while (parent[a] !== a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; };
+        const cellsOf = new Float64Array(nextLabel);
+        for (let i = 0; i < n; i++) if (labels[i] >= 0) cellsOf[labels[i]]++;
+        const absorbCells = th.absorbAc / cellAcres;
+        const nfzCells = Math.max(absorbCells, th.nfzMaxAc / cellAcres);
+        const candGrid = new Uint8Array(n);          // 1 = cell belongs to an NFZ candidate
+        const nfzCands = [];                          // {cells, acres, meanFt, targetRoot, cx, cy, dir}
+        for (let pass = 0; pass < 12; pass++) {
+            const rootCells = new Float64Array(nextLabel);
+            for (let i = 0; i < nextLabel; i++) rootCells[find(i)] += cellsOf[i];
+            // Boundary-contact tally between distinct roots + member-cell
+            // lists for small roots (needed to stamp candidate cells).
+            const contact = new Map();
+            const members = new Map();
+            for (let y2 = 0; y2 < h; y2++) {
+                for (let x2 = 0; x2 < w; x2++) {
+                    const i = y2 * w + x2;
+                    const la = labels[i];
+                    if (la < 0) continue;
+                    const ra = find(la);
+                    if (rootCells[ra] < nfzCells) {
+                        let list = members.get(ra);
+                        if (!list) { list = []; members.set(ra, list); }
+                        list.push(i);
+                    }
+                    if (x2 < w - 1) {
+                        const lb = labels[i + 1];
+                        if (lb >= 0) { const rb = find(lb); if (rb !== ra) { const k = ra < rb ? ra * nextLabel + rb : rb * nextLabel + ra; contact.set(k, (contact.get(k) || 0) + 1); } }
+                    }
+                    if (y2 < h - 1) {
+                        const lb = labels[i + w];
+                        if (lb >= 0) { const rb = find(lb); if (rb !== ra) { const k = ra < rb ? ra * nextLabel + rb : rb * nextLabel + ra; contact.set(k, (contact.get(k) || 0) + 1); } }
+                    }
+                }
+            }
+            const bestN = new Map();
+            contact.forEach((cnt, k) => {
+                const a = Math.floor(k / nextLabel), b2 = k % nextLabel;
+                if (rootCells[a] < nfzCells) { const cur = bestN.get(a); if (!cur || cnt > cur.cnt) bestN.set(a, { o: b2, cnt }); }
+                if (rootCells[b2] < nfzCells) { const cur = bestN.get(b2); if (!cur || cnt > cur.cnt) bestN.set(b2, { o: a, cnt }); }
+            });
+            if (!bestN.size) break;
+            let merged = 0;
+            const smalls = [...bestN.keys()].sort((s1, s2) => rootCells[s1] - rootCells[s2]);
+            for (const s of smalls) {
+                if (find(s) !== s) continue;                  // got merged earlier this pass
+                const t = find(bestN.get(s).o);
+                if (t === s) continue;
+                const sCells = rootCells[s];
+                if (rootCells[t] >= nfzCells && sCells >= absorbCells) {
+                    // island absorbed into a real region → NFZ candidate
+                    const list = members.get(s) || [];
+                    let sum = 0, sx = 0, sy = 0;
+                    for (const i of list) { candGrid[i] = 1; sum += vals[i]; sx += i % w; sy += (i / w) | 0; }
+                    nfzCands.push({
+                        cells: sCells, acres: sCells * cellAcres,
+                        meanFt: list.length ? sum / list.length : NaN,
+                        targetRoot: t,
+                        cx: list.length ? sx / list.length : 0,
+                        cy: list.length ? sy / list.length : 0,
+                    });
+                }
+                parent[s] = t;
+                merged++;
+            }
+            if (!merged) break;
+        }
+        // Final relabel to compact region indexes + per-region histograms.
+        const regOf = new Map();
+        const regions = [];
+        const regGrid = new Int32Array(n).fill(-1);
+        for (let i = 0; i < n; i++) {
+            const l = labels[i];
+            if (l < 0) continue;
+            const r = find(l);
+            let gi = regOf.get(r);
+            if (gi === undefined) {
+                gi = regions.length;
+                regOf.set(r, gi);
+                regions.push({ root: r, band: labelBand[r], cells: 0, sx: 0, sy: 0, hist: new Uint32Array(nb) });
+            }
+            const rg = regions[gi];
+            regGrid[i] = gi;
+            rg.cells++;
+            rg.sx += i % w;
+            rg.sy += (i / w) | 0;
+            rg.hist[Math.min(nb - 1, Math.max(0, Math.floor(vals[i]) - base))]++;
+        }
+        // Resolve candidate targets to region indexes + bump/pit direction.
+        nfzCands.forEach(c => {
+            const gi = regOf.get(find(c.targetRoot));
+            c.region = (gi === undefined) ? -1 : gi;
+            if (c.region >= 0) {
+                const lo = bandLoFt[regions[c.region].band], hi2 = lo + th.deltaFt;
+                c.dir = c.meanFt > hi2 ? 'bump' : (c.meanFt < lo ? 'pit' : 'mixed');
+            } else c.dir = '?';
+        });
+        // Per-region stats + proposed altitudes.
+        const pct = (histArr, cells, p) => {
+            const target = cells * p;
+            let acc = 0;
+            for (let k = 0; k < histArr.length; k++) { acc += histArr[k]; if (acc >= target) return base + k + 0.5; }
+            return base + histArr.length - 0.5;
+        };
+        regions.forEach((rg, gi) => {
+            let lo = -1, hi2 = -1;
+            for (let k = 0; k < nb; k++) if (rg.hist[k]) { if (lo < 0) lo = k; hi2 = k; }
+            rg.minFt = base + lo; rg.maxFt = base + hi2 + 1;
+            rg.p5 = pct(rg.hist, rg.cells, 0.05);
+            rg.p50 = pct(rg.hist, rg.cells, 0.50);
+            rg.p95 = pct(rg.hist, rg.cells, 0.95);
+            rg.acres = rg.cells * cellAcres;
+            rg.bandLo = bandLoFt[rg.band];
+            rg.bandHi = rg.bandLo + th.deltaFt;
+            let inBand = 0;
+            const bLo = Math.max(0, rg.bandLo - base), bHi = Math.min(nb - 1, rg.bandHi - base - 1);
+            for (let k = bLo; k <= bHi; k++) inBand += rg.hist[k];
+            rg.pctInBand = rg.cells ? (inBand / rg.cells) * 100 : 0;
+            const floorRef = terEnabled.floorP95 ? rg.p95 : rg.maxFt;
+            const ceilRef = terEnabled.floorP95 ? rg.p5 : rg.minFt;
+            rg.floorMSL = Math.ceil(floorRef + th.minAglFt);
+            rg.ceilMSL = Math.floor(ceilRef + th.maxAglFt);
+            rg.bandHeight = rg.ceilMSL - rg.floorMSL;
+            rg.aglAtLow = rg.floorMSL - rg.minFt;    // AGL floor over the LOWEST ground
+            rg.aglAtHigh = rg.floorMSL - rg.maxFt;   // AGL floor over the HIGHEST ground
+            rg.flags = [];
+            if (rg.bandHeight <= 0) rg.flags.push('infeasible: floor ≥ ceiling');
+            else if (rg.bandHeight < 40) rg.flags.push(`thin band (${rg.bandHeight} ft)`);
+            if (rg.aglAtLow > th.maxAglFt) rg.flags.push(`pit busts max AGL (${Math.round(rg.aglAtLow)} ft over low ground)`);
+            if (rg.aglAtHigh < th.minAglFt) rg.flags.push(`spike under min AGL (${Math.round(rg.aglAtHigh)} ft over high ground)`);
+            rg.idx = gi;
+        });
+        const order = regions.map((rg, gi) => gi).sort((a, b2) => regions[b2].acres - regions[a].acres);
+        order.forEach((gi, rank) => { regions[gi].name = `R${rank + 1}`; regions[gi].rank = rank; });
+        return { regions, order, regGrid, candGrid, nfzCands, bandLoFt, mnFt, mxFt, base, nb };
+    }
+
+    // Region color: elevation-band midpoint over the site range mapped
+    // red (low) → cream (mid) → blue (high) — matches the Map Styler
+    // terrain legend so the two overlays read the same way.
+    function terColorFor(elevFt, mnFt, mxFt) {
+        const lerp = (a, b2, t) => Math.round(a + (b2 - a) * t);
+        const t = mxFt > mnFt ? Math.max(0, Math.min(1, (elevFt - mnFt) / (mxFt - mnFt))) : 0.5;
+        const lo2 = [224, 74, 58], mid = [247, 237, 201], hi2 = [90, 143, 224];
+        const c = t < 0.5
+            ? [lerp(lo2[0], mid[0], t * 2), lerp(lo2[1], mid[1], t * 2), lerp(lo2[2], mid[2], t * 2)]
+            : [lerp(mid[0], hi2[0], (t - 0.5) * 2), lerp(mid[1], hi2[1], (t - 0.5) * 2), lerp(mid[2], hi2[2], (t - 0.5) * 2)];
+        return c;
+    }
+
+    function terRenderOverlay() {
+        const st = terState;
+        if (!st) return;
+        const L = getLeafletL();
+        const map = getLeafletMap();
+        if (!L || !map) { showToast('Map not available for the overlay', 'rgba(255,96,96,0.55)'); return; }
+        terRemoveLayer();
+        const { dem, seg } = st;
+        const { w, h } = dem;
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        const img = ctx.createImageData(w, h);
+        const d = img.data;
+        const { regGrid, candGrid, regions, mnFt, mxFt } = seg;
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                const i = y * w + x;
+                const gi = regGrid[i];
+                const o = i * 4;
+                if (gi < 0) { d[o + 3] = 0; continue; }
+                let c;
+                if (candGrid[i]) c = [255, 53, 208];   // NFZ candidate — magenta
+                else c = terColorFor((regions[gi].bandLo + regions[gi].bandHi) / 2, mnFt, mxFt);
+                // darken region borders so butt-joins are legible
+                const edge = (x > 0 && regGrid[i - 1] !== gi) || (x < w - 1 && regGrid[i + 1] !== gi)
+                    || (y > 0 && regGrid[i - w] !== gi) || (y < h - 1 && regGrid[i + w] !== gi);
+                const m = edge ? 0.35 : 1;
+                d[o] = c[0] * m; d[o + 1] = c[1] * m; d[o + 2] = c[2] * m; d[o + 3] = edge ? 255 : 210;
+            }
+        }
+        ctx.putImageData(img, 0, 0);
+        const bd = dem.bounds;
+        try {
+            terLayer = L.imageOverlay(canvas.toDataURL('image/png'),
+                [[bd.south, bd.west], [bd.north, bd.east]],
+                { opacity: terThresholds.opacity, pane: 'tilePane', zIndex: 9993, interactive: false });
+            terLayer.addTo(map);
+            terLayerMap = map;
+        } catch (e) {
+            console.warn(`${TAG} profiler overlay add failed:`, e);
+            showToast('Overlay failed — see console', 'rgba(255,96,96,0.55)');
+            return;
+        }
+        // Hover badge: region under the cursor.
+        terMoveHandler = (ev) => {
+            try { terUpdateBadge(ev.latlng, ev.originalEvent); } catch (e) {}
+        };
+        try { map.on('mousemove', terMoveHandler); } catch (e) { terMoveHandler = null; }
+    }
+
+    function terCellAt(latlng) {
+        const st = terState;
+        if (!st || !latlng) return -1;
+        const { dem } = st;
+        const bd = dem.bounds;
+        if (latlng.lat < bd.south || latlng.lat > bd.north || latlng.lng < bd.west || latlng.lng > bd.east) return -1;
+        const x = Math.floor((terMercX(latlng.lng) - dem.mercX1) / (dem.mercX2 - dem.mercX1) * dem.w);
+        const y = Math.floor((dem.mercY2 - terMercY(latlng.lat)) / (dem.mercY2 - dem.mercY1) * dem.h);
+        if (x < 0 || x >= dem.w || y < 0 || y >= dem.h) return -1;
+        return y * dem.w + x;
+    }
+
+    function terUpdateBadge(latlng, mouseEv) {
+        const st = terState;
+        const i = terCellAt(latlng);
+        const gi = (i >= 0 && st) ? st.seg.regGrid[i] : -1;
+        if (gi < 0) { if (terBadgeEl) terBadgeEl.style.display = 'none'; return; }
+        const rg = st.seg.regions[gi];
+        if (!terBadgeEl) {
+            terBadgeEl = document.createElement('div');
+            terBadgeEl.style.cssText = 'position:fixed;z-index:2147483200;pointer-events:none;background:rgba(16,22,32,0.92);'
+                + 'border:1px solid rgba(201,166,255,0.55);border-radius:6px;padding:4px 8px;color:#dfe9f0;'
+                + 'font:11px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,0.5);white-space:nowrap;';
+            document.body.appendChild(terBadgeEl);
+        }
+        const elevFt = st.dem.vals[i];
+        terBadgeEl.innerHTML = `<strong style="color:#c9a6ff">${rg.name}</strong> · band ${rg.bandLo.toLocaleString()}–${rg.bandHi.toLocaleString()} ft`
+            + ` · ${rg.acres < 10 ? rg.acres.toFixed(1) : Math.round(rg.acres).toLocaleString()} ac`
+            + `<br>floor <strong>${rg.floorMSL.toLocaleString()}</strong> / ceil <strong>${rg.ceilMSL.toLocaleString()}</strong> ft MSL`
+            + (st.seg.candGrid[i] ? ' · <span style="color:#ff35d0">NFZ candidate</span>' : '')
+            + (isNaN(elevFt) ? '' : ` · here ${Math.round(elevFt).toLocaleString()} ft`);
+        if (mouseEv && typeof mouseEv.clientX === 'number') {
+            terBadgeEl.style.left = `${mouseEv.clientX + 14}px`;
+            terBadgeEl.style.top = `${mouseEv.clientY + 14}px`;
+        }
+        terBadgeEl.style.display = 'block';
+    }
+
+    function terRemoveLayer() {
+        if (terLayer) {
+            try { (terLayerMap || getLeafletMap()).removeLayer(terLayer); } catch (e) {}
+        }
+        if (terMoveHandler && terLayerMap) {
+            try { terLayerMap.off('mousemove', terMoveHandler); } catch (e) {}
+        }
+        terLayer = null; terLayerMap = null; terMoveHandler = null;
+        if (terBadgeEl) { try { terBadgeEl.remove(); } catch (e) {} terBadgeEl = null; }
+    }
+
+    function terRegionCentroid(rg) {
+        const st = terState;
+        const dem = st.dem;
+        const cx = rg.sx / rg.cells, cy = rg.sy / rg.cells;
+        const lng = dem.bounds.west + (cx + 0.5) / dem.w * (dem.bounds.east - dem.bounds.west);
+        const lat = terInvMercY(dem.mercY2 - (cy + 0.5) / dem.h * (dem.mercY2 - dem.mercY1));
+        return { lat, lng };
+    }
+    function terCandCentroid(c) {
+        const st = terState;
+        const dem = st.dem;
+        const lng = dem.bounds.west + (c.cx + 0.5) / dem.w * (dem.bounds.east - dem.bounds.west);
+        const lat = terInvMercY(dem.mercY2 - (c.cy + 0.5) / dem.h * (dem.mercY2 - dem.mercY1));
+        return { lat, lng };
+    }
+
+    function terBuildReport() {
+        const st = terState;
+        if (!st) return '';
+        const th = st.thresholds;
+        const seg = st.seg;
+        const out = [`TERRAIN PROFILE — ${st.siteLabel}`];
+        out.push(`Params: AGL ${th.minAglFt}–${th.maxAglFt} ft · Δ ${th.deltaFt} ft · cell ~${Math.round(st.dem.cellXft)} ft · absorb <${th.absorbAc} ac · NFZ ≤${th.nfzMaxAc} ac · floor ref ${terEnabled.floorP95 ? 'P95' : 'max'}`);
+        out.push(`Site relief: ${Math.round(seg.mnFt).toLocaleString()}–${Math.round(seg.mxFt).toLocaleString()} ft (${Math.round(seg.mxFt - seg.mnFt)} ft) → ${seg.order.length} region(s), ${seg.nfzCands.length} NFZ candidate(s)`);
+        seg.order.forEach(gi => {
+            const rg = seg.regions[gi];
+            out.push(`  ${rg.name}: band ${rg.bandLo}–${rg.bandHi} ft · ${rg.acres.toFixed(1)} ac · elev ${Math.round(rg.minFt)}–${Math.round(rg.maxFt)} ft (${rg.pctInBand.toFixed(1)}% in band)`
+                + ` · floor ${rg.floorMSL} / ceil ${rg.ceilMSL} ft MSL (AGL ${Math.round(rg.aglAtHigh)}–${Math.round(rg.aglAtLow)} ft)`
+                + (rg.flags.length ? ` · ⚠ ${rg.flags.join('; ')}` : ''));
+        });
+        seg.nfzCands.forEach((c, i) => {
+            const parentName = c.region >= 0 ? seg.regions[c.region].name : '?';
+            out.push(`  NFZ cand #${i + 1}: ${c.acres.toFixed(1)} ac ${c.dir} in ${parentName} (mean ${Math.round(c.meanFt)} ft)`);
+        });
+        return out.join('\n');
+    }
+
+    function terRenderPanel() {
+        terClosePanel();
+        const st = terState;
+        if (!st) return;
+        const seg = st.seg;
+        const th = st.thresholds;
+        const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+        const num = (id, label, val, step, title) =>
+            `<label title="${title || ''}" style="display:flex;align-items:center;gap:4px;">${label}`
+            + `<input data-ter-p="${id}" type="number" value="${val}" step="${step}" style="width:62px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(201,166,255,0.35);border-radius:4px;padding:2px 4px;font:inherit;"></label>`;
+        const chk = (id, label, val, title) =>
+            `<label title="${title || ''}" style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input data-ter-e="${id}" type="checkbox" ${val ? 'checked' : ''}>${label}</label>`;
+        const rows = [];
+        const ROW_CAP = 60;   // display cap — the overlay + report still carry everything
+        seg.order.slice(0, ROW_CAP).forEach(gi => {
+            const rg = seg.regions[gi];
+            const c = terColorFor((rg.bandLo + rg.bandHi) / 2, seg.mnFt, seg.mxFt);
+            const chip = `<span style="display:inline-block;width:11px;height:11px;border-radius:2px;background:rgb(${c[0]},${c[1]},${c[2]});border:1px solid rgba(0,0,0,0.6);vertical-align:-1px;"></span>`;
+            const flags = rg.flags.length ? `<br><span style="color:#ffb020;padding-left:18px;">⚠ ${esc(rg.flags.join(' · '))}</span>` : '';
+            rows.push(`<div data-ter-jump="${gi}" title="Click to view on map" style="margin:3px 0;line-height:1.45;cursor:pointer;" onmouseover="this.style.background='rgba(201,166,255,0.10)'" onmouseout="this.style.background=''">`
+                + `${chip} <strong style="color:#c9a6ff">${rg.name}</strong> · band ${rg.bandLo.toLocaleString()}–${rg.bandHi.toLocaleString()} ft`
+                + ` · <strong>${rg.acres < 10 ? rg.acres.toFixed(1) : Math.round(rg.acres).toLocaleString()} ac</strong>`
+                + ` · ${rg.pctInBand.toFixed(rg.pctInBand >= 99.95 ? 0 : 1)}% in band`
+                + `<br><span style="opacity:0.85;padding-left:18px;">floor <strong>${rg.floorMSL.toLocaleString()}</strong> / ceil <strong>${rg.ceilMSL.toLocaleString()}</strong> ft MSL`
+                + ` · AGL ${Math.round(rg.aglAtHigh)}–${Math.round(rg.aglAtLow)} ft over ground ${Math.round(rg.minFt).toLocaleString()}–${Math.round(rg.maxFt).toLocaleString()} ft</span>${flags}</div>`);
+        });
+        if (seg.order.length > ROW_CAP) rows.push(`<div style="opacity:0.7;margin:3px 0;">…and ${seg.order.length - ROW_CAP} smaller region(s) — on the overlay + in the report, hidden here for panel speed</div>`);
+        const CAND_CAP = 40;
+        const cands = seg.nfzCands.slice(0, CAND_CAP).map((c, i) => {
+            const parentName = c.region >= 0 ? seg.regions[c.region].name : '?';
+            const dirTxt = c.dir === 'bump' ? '⛰ bump (floor risk)' : c.dir === 'pit' ? '🕳 pit (ceiling risk)' : c.dir;
+            return `<div data-ter-cjump="${i}" title="Click to view on map" style="margin:2px 0;line-height:1.45;cursor:pointer;" onmouseover="this.style.background='rgba(255,53,208,0.10)'" onmouseout="this.style.background=''">`
+                + `<span style="color:#ff35d0">■</span> #${i + 1} · ${c.acres.toFixed(1)} ac ${dirTxt} inside <strong>${parentName}</strong> · mean ${Math.round(c.meanFt).toLocaleString()} ft</div>`;
+        });
+        if (seg.nfzCands.length > CAND_CAP) cands.push(`<div style="opacity:0.7;margin:2px 0;">…and ${seg.nfzCands.length - CAND_CAP} more — magenta on the overlay + in the report</div>`);
+        const wrap = document.createElement('div');
+        wrap.id = TER_PANEL_ID;
+        wrap.style.cssText = 'position:fixed;top:70px;right:56px;width:470px;max-height:76vh;z-index:2147483000;'
+            + 'background:rgba(16,22,32,0.96);border:1px solid rgba(201,166,255,0.45);border-radius:10px;'
+            + 'color:#dfe9f0;font:12px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,0.55);'
+            + 'display:flex;flex-direction:column;';
+        wrap.innerHTML = `
+            <div data-ter-drag style="cursor:move;padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid rgba(201,166,255,0.25);">
+                <span style="color:#c9a6ff;font-weight:700;">⛰ Terrain Profiler</span>
+                <span style="opacity:0.7;">${esc(st.siteLabel)}</span>
+                <span style="flex:1"></span>
+                <button data-ter-copy style="background:none;border:1px solid rgba(201,166,255,0.4);color:#c9a6ff;border-radius:5px;padding:2px 8px;cursor:pointer;">Copy report</button>
+                <button data-ter-close style="background:none;border:none;color:#dfe9f0;font-size:15px;cursor:pointer;">✕</button>
+            </div>
+            <div style="padding:8px 12px;display:flex;flex-wrap:wrap;gap:8px 12px;border-bottom:1px solid rgba(201,166,255,0.18);align-items:center;">
+                ${num('minAglFt', 'AGL min', th.minAglFt, 5, 'Target AGL floor — region floor = highest ground + this')}
+                ${num('maxAglFt', 'max', th.maxAglFt, 5, 'Target AGL ceiling — region ceiling = lowest ground + this')}
+                ${num('deltaFt', 'Δ', th.deltaFt, 5, 'Max terrain relief allowed inside one region (ft)')}
+                ${num('cellFt', 'cell', th.cellFt, 1, 'DEM sample size (ft) — 33 ≈ native 3DEP 10 m')}
+                ${num('marginFt', 'margin', th.marginFt, 50, 'Extra ring around the site bbox (ft)')}
+                ${num('absorbAc', 'absorb&lt;', th.absorbAc, 0.5, 'Islands below this acreage absorb silently')}
+                ${num('nfzMaxAc', 'NFZ≤', th.nfzMaxAc, 0.5, 'Absorbed islands up to this acreage become NFZ candidates')}
+                ${chk('median', 'despeckle', terEnabled.median, '3×3 median filter before banding')}
+                ${chk('floorP95', 'P95 floor', terEnabled.floorP95, 'Floor from the 95th-percentile elevation instead of the true max')}
+                <button data-ter-rerun style="background:rgba(201,166,255,0.15);border:1px solid rgba(201,166,255,0.5);color:#c9a6ff;border-radius:5px;padding:2px 10px;cursor:pointer;font-weight:600;">⟳ Re-run</button>
+            </div>
+            <div style="padding:8px 12px;overflow-y:auto;">
+                <div style="margin-bottom:4px;">Relief <strong>${Math.round(seg.mnFt).toLocaleString()}–${Math.round(seg.mxFt).toLocaleString()} ft</strong>
+                    (${Math.round(seg.mxFt - seg.mnFt)} ft) → <strong style="color:#c9a6ff">${seg.order.length} region${seg.order.length === 1 ? '' : 's'}</strong>
+                    · <span style="color:#ff35d0">${seg.nfzCands.length} NFZ candidate${seg.nfzCands.length === 1 ? '' : 's'}</span>
+                    · grid ${st.dem.w}×${st.dem.h} @ ~${Math.round(st.dem.cellXft)} ft</div>
+                ${th.deltaFt > th.maxAglFt - th.minAglFt ? `<div style="color:#ffb020;margin-bottom:4px;">⚠ Δ ${th.deltaFt} ft exceeds the AGL window (${th.maxAglFt - th.minAglFt} ft) — no fixed band can satisfy both bounds.</div>` : ''}
+                <div style="color:#c9a6ff;font-weight:600;margin:8px 0 4px;border-bottom:1px solid rgba(201,166,255,0.25);padding-bottom:2px;">Regions (largest first — proposed FFZ splits)</div>
+                ${rows.join('')}
+                ${cands.length ? `<div style="color:#ff35d0;font-weight:600;margin:10px 0 4px;border-bottom:1px solid rgba(255,53,208,0.3);padding-bottom:2px;">NFZ candidates (outliers to fence off, not split on)</div>${cands.join('')}` : ''}
+            </div>`;
+        wrap.addEventListener('click', (e) => {
+            if (e.target.closest('[data-ter-close]')) { terClosePanel(); return; }
+            if (e.target.closest('[data-ter-copy]')) {
+                navigator.clipboard.writeText(terBuildReport()).then(
+                    () => showToast('Terrain report copied'),
+                    () => showToast('Copy failed', 'rgba(255,96,96,0.55)'));
+                return;
+            }
+            if (e.target.closest('[data-ter-rerun]')) {
+                // pull edited params back into thresholds, persist, re-run
+                let bad = null;
+                wrap.querySelectorAll('[data-ter-p]').forEach(inp => {
+                    const k = inp.getAttribute('data-ter-p');
+                    const v = parseFloat(inp.value);
+                    if (!isFinite(v) || v < 0) { bad = k; return; }
+                    terThresholds[k] = v;
+                });
+                wrap.querySelectorAll('[data-ter-e]').forEach(inp => {
+                    terEnabled[inp.getAttribute('data-ter-e')] = !!inp.checked;
+                });
+                if (bad) { showToast(`Invalid value for ${bad}`, 'rgba(255,96,96,0.55)'); return; }
+                saveTerThresholds(); saveTerEnabled();
+                terrainProfilerRun();
+                return;
+            }
+            const jumpEl = e.target.closest('[data-ter-jump]');
+            if (jumpEl) {
+                const rg = seg.regions[+jumpEl.getAttribute('data-ter-jump')];
+                const map = getLeafletMap();
+                if (!rg || !map) { showToast('Map not available', 'rgba(255,96,96,0.55)'); return; }
+                const ll = terRegionCentroid(rg);
+                try { map.setView([ll.lat, ll.lng], Math.max(map.getZoom(), 14)); } catch (err) {}
+                airPulseAt(ll.lat, ll.lng);
+                return;
+            }
+            const cEl = e.target.closest('[data-ter-cjump]');
+            if (cEl) {
+                const c = seg.nfzCands[+cEl.getAttribute('data-ter-cjump')];
+                const map = getLeafletMap();
+                if (!c || !map) { showToast('Map not available', 'rgba(255,96,96,0.55)'); return; }
+                const ll = terCandCentroid(c);
+                try { map.setView([ll.lat, ll.lng], Math.max(map.getZoom(), 16)); } catch (err) {}
+                airPulseAt(ll.lat, ll.lng);
+            }
+        });
+        const dragEl = wrap.querySelector('[data-ter-drag]');
+        let drag = null;
+        dragEl.addEventListener('mousedown', (e) => {
+            if (e.target.closest('button')) return;
+            const r = wrap.getBoundingClientRect();
+            drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+            e.preventDefault();
+        });
+        document.addEventListener('mousemove', (e) => {
+            if (!drag) return;
+            wrap.style.left = `${e.clientX - drag.dx}px`;
+            wrap.style.top = `${e.clientY - drag.dy}px`;
+            wrap.style.right = 'auto';
+        });
+        document.addEventListener('mouseup', () => { drag = null; });
+        document.body.appendChild(wrap);
+    }
+
+    function terClosePanel() {
+        const el = document.getElementById(TER_PANEL_ID);
+        if (el) { try { el.remove(); } catch (e) {} }
+    }
+
+    async function terrainProfilerRun() {
+        if (terRunning) { showToast('Profiler already running…'); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
+        terRunning = true;
+        const t0 = performance.now();
+        try {
+            showToast('⛰ Profiler: fetching DEM…');
+            await Promise.resolve(fetchMapObjects(sid, false));
+            const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+            const pts = airCollectSitePoints(ents);
+            if (!pts.length) { showToast('No site geometry found — open a site with entities first.', 'rgba(255,96,96,0.55)'); return; }
+            let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+            pts.forEach(p => {
+                if (p.lat < minLat) minLat = p.lat; if (p.lat > maxLat) maxLat = p.lat;
+                if (p.lng < minLng) minLng = p.lng; if (p.lng > maxLng) maxLng = p.lng;
+            });
+            const th = { ...terThresholds };
+            const mLat = th.marginFt / 364000;
+            const mLng = th.marginFt / (364000 * Math.cos(((minLat + maxLat) / 2) * Math.PI / 180));
+            const dem0 = await terFetchDem(minLng - mLng, minLat - mLat, maxLng + mLng, maxLat + mLat);
+            if (terEnabled.median) dem0.vals = terMedianFilter(dem0.vals, dem0.w, dem0.h);
+            const seg = terSegment(dem0, th);
+            terState = { sid, siteLabel: getCurrentSiteName() || `site ${sid}`, dem: dem0, seg, thresholds: th };
+            terRenderOverlay();
+            terRenderPanel();
+            const ms = Math.round(performance.now() - t0);
+            console.log(`${TAG} terrain profile: ${seg.order.length} region(s), ${seg.nfzCands.length} NFZ candidate(s), `
+                + `grid ${dem0.w}×${dem0.h} @ ~${Math.round(dem0.cellXft)} ft, relief ${Math.round(seg.mnFt)}–${Math.round(seg.mxFt)} ft, ${ms} ms`);
+            showToast(`⛰ ${seg.order.length} region(s) · ${seg.nfzCands.length} NFZ candidate(s) — ${(seg.mxFt - seg.mnFt).toFixed(0)} ft relief`);
+        } catch (e) {
+            console.warn(`${TAG} terrain profiler failed:`, e);
+            showToast(`Profiler failed — ${e && e.message ? e.message : e}`, 'rgba(255,96,96,0.55)');
+        } finally {
+            terRunning = false;
+        }
+    }
+
+    function terrainProfilerClear() {
+        terRemoveLayer();
+        terClosePanel();
+        terState = null;
+        showToast('Terrain profiler cleared');
+    }
+
+    // Site nav invalidates the profile — the overlay belongs to one site.
+    window.addEventListener('hashchange', () => {
+        if (terState && terState.sid !== getCurrentSiteID()) {
+            terRemoveLayer();
+            terClosePanel();
+            terState = null;
+            console.log(`${TAG} terrain profile cleared (site changed)`);
+        }
+    });
+
+    // Idempotent (CP echoes from TOP + IFRAME — same contract as
+    // handleSopToggle / handleAirspaceToggle).
+    function handleTerrainToggle(msg) {
+        const id = msg.toggleId;
+        if (id === 'ter-master') {
+            const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            if (v === terMasterEnabled) return;
+            terMasterEnabled = v;
+            if (!v) { terRemoveLayer(); terClosePanel(); terState = null; }
+            return;
+        }
+        if (Object.prototype.hasOwnProperty.call(terEnabled, id)) {
+            const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            if (v === terEnabled[id]) return;
+            terEnabled[id] = v;
+            saveTerEnabled();
+            return;
+        }
+        if (Object.prototype.hasOwnProperty.call(terThresholds, id) && typeof msg.value === 'number') {
+            if (msg.value === terThresholds[id]) return;
+            terThresholds[id] = msg.value;
+            saveTerThresholds();
+            if (id === 'opacity' && terLayer && typeof terLayer.setOpacity === 'function') {
+                try { terLayer.setOpacity(msg.value); } catch (e) {}
+            }
+        }
+    }
+
+    // ============================================================
     // Control Panel integration
     // ============================================================
     function setupControlPanel() {
@@ -5772,6 +6507,18 @@
                     airspaceRun();
                 } else if (msg.actionId === 'air-clear') {
                     airspaceClear();
+                }
+            }
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === TER_SCRIPT_ID) {
+                handleTerrainToggle(msg);
+            }
+            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === TER_SCRIPT_ID && CONTEXT === 'IFRAME') {
+                if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
+                if (msg.actionId === 'ter-run') {
+                    if (!terMasterEnabled) { showToast('Terrain Profiler is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+                    terrainProfilerRun();
+                } else if (msg.actionId === 'ter-clear') {
+                    terrainProfilerClear();
                 }
             }
         };
@@ -5914,6 +6661,30 @@
                 { id: 'stadiumNm', label: 'Stadium TFR radius', type: 'number', min: 1, max: 10, step: 0.5, default: AIR_THRESH_DEFAULTS.stadiumNm, unit: 'NM' },
                 { id: 'air-run', label: '🛩 Run airspace check', type: 'button', action: 'air-run' },
                 { id: 'air-clear', label: 'Clear airspace issues', type: 'button', action: 'air-clear' },
+            ],
+            hotkeys: [],
+        });
+        // v4.200: Terrain Profiler — own card (feature #203 Phase 1).
+        // Splits the site into ≤Δ-relief elevation regions and proposes
+        // per-region fixed floors/ceilings; read-only (Phase 2 builds FFZs).
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: TER_SCRIPT_ID, name: 'Terrain Profiler',
+            description: 'Raw 3DEP elevation profile of the site: splits terrain into regions of ≤Δ ft relief, flags small bumps/pits as NFZ candidates, and proposes a fixed floor/ceiling per region for the target AGL band. Read-only overlay + report.',
+            version: SCRIPT_VERSION, group: 'Terrain Profiler', scope: 'site-setup', priority: 30,
+            toggles: [
+                { id: 'ter-master', label: 'Enable Terrain Profiler', type: 'boolean', default: true, master: true },
+                { id: 'minAglFt', label: 'Target AGL floor', type: 'number', min: 10, max: 400, step: 5, default: TER_THRESH_DEFAULTS.minAglFt, unit: 'ft' },
+                { id: 'maxAglFt', label: 'Target AGL ceiling', type: 'number', min: 50, max: 400, step: 5, default: TER_THRESH_DEFAULTS.maxAglFt, unit: 'ft' },
+                { id: 'deltaFt', label: 'Max relief per region (Δ)', type: 'number', min: 5, max: 150, step: 5, default: TER_THRESH_DEFAULTS.deltaFt, unit: 'ft' },
+                { id: 'cellFt', label: 'DEM cell size (33 ≈ native 10 m)', type: 'number', min: 10, max: 150, step: 1, default: TER_THRESH_DEFAULTS.cellFt, unit: 'ft' },
+                { id: 'marginFt', label: 'Margin around site bbox', type: 'number', min: 0, max: 5280, step: 50, default: TER_THRESH_DEFAULTS.marginFt, unit: 'ft' },
+                { id: 'absorbAc', label: 'Absorb islands below', type: 'number', min: 0, max: 50, step: 0.5, default: TER_THRESH_DEFAULTS.absorbAc, unit: 'ac' },
+                { id: 'nfzMaxAc', label: 'NFZ candidate up to', type: 'number', min: 0, max: 200, step: 0.5, default: TER_THRESH_DEFAULTS.nfzMaxAc, unit: 'ac' },
+                { id: 'median', label: 'Despeckle DEM (3×3 median)', type: 'boolean', default: TER_ENABLE_DEFAULTS.median },
+                { id: 'floorP95', label: 'Floor ref = P95 elevation (ignore top spikes)', type: 'boolean', default: TER_ENABLE_DEFAULTS.floorP95 },
+                { id: 'opacity', label: 'Overlay opacity', type: 'number', min: 0.1, max: 1, step: 0.05, default: TER_THRESH_DEFAULTS.opacity },
+                { id: 'ter-run', label: '⛰ Run profiler', type: 'button', action: 'ter-run' },
+                { id: 'ter-clear', label: 'Clear overlay + panel', type: 'button', action: 'ter-clear' },
             ],
             hotkeys: [],
         });
@@ -15751,6 +16522,21 @@
             openSiteAnalyzer(siteID);
         };
         optsRow.appendChild(analyzerBtn);
+
+        // "⛰ Profiler" button — Terrain Profiler (feature #203 Phase 1):
+        // elevation-band regions + proposed per-region floor/ceiling.
+        // Read-only (no writes) so it is NOT Lite-gated.
+        const terProfBtn = document.createElement('button');
+        terProfBtn.type = 'button';
+        terProfBtn.textContent = '⛰ Profiler';
+        terProfBtn.title = 'Terrain Profiler — split the site into ≤Δ ft elevation regions and propose per-region FFZ floors/ceilings (read-only overlay + report)';
+        terProfBtn.style.cssText = 'background:rgba(201,166,255,0.13);color:#c9a6ff;border:1px solid rgba(201,166,255,0.45);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+        terProfBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            if (!terMasterEnabled) { showToast('Terrain Profiler is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+            terrainProfilerRun();
+        };
+        optsRow.appendChild(terProfBtn);
 
         // "Generate" button — opens the Site Setup Generator modal
         // (auto-build the foundation: A1 = inspection FFZs). Inverse of

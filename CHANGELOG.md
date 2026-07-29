@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-28 — ⛰ Terrain Profiler (Phase 1, read-only) — Asset Inspector v4.200 (dev/latest)
+
+New **⛰ Profiler** button in the SUM panel toolbar (+ its own "Terrain Profiler" Control Panel card, Site Setup scope). Answers "where does a giant fixed-floor FFZ break the AGL band?" on high-relief sites:
+
+- Pulls the **raw 3DEP elevation grid** for the whole site in one request (LERC-compressed real values — new vendored decoder `vendor/lerc-2.0.0.js`, same pattern as polygon-clipping) at ~10 m native resolution.
+- Splits the terrain into **regions of ≤ Δ ft relief** (default 30 ft; greedy banding that provably uses the fewest bands) and draws them as a colored map overlay with dark butt-join borders — hover any region for a live badge with its stats.
+- **Size-tiered outlier handling:** tiny islands (< 0.5 ac) absorb silently; small bumps/pits (≤ 5 ac) stay inside the parent region but are flagged **magenta as NFZ candidates** (bump = floor risk, pit = ceiling risk); bigger terrain features become their own region.
+- Floating stats panel: per-region **proposed fixed floor / ceiling** (default AGL band 80–200 ft, all editable inline + re-run), % in band, AGL range over low/high ground, warnings (thin band, pit busts max AGL), click-to-jump with pulse, NFZ candidate list, **Copy report**.
+- Read-only — nothing is written. Phase 2 (auto-building the FFZs + NFZs from these regions) comes next.
+
 ## 2026-07-28 — 🔗 Merge v2: movable panel, renumber, filter, efficient order, re-editable merges — MBT v2.03 (dev/latest)
 
 Batch of merge-mode upgrades from live use:
