@@ -2,6 +2,8 @@
 
 A set of browser userscripts that streamline the AIM drone-mission workflow on `percepto.app`. Distributed via Tampermonkey + GitHub — install once, get auto-updates.
 
+> 🧪 The scripts also work on the **QA server** (`qa.percepto.app`, including its `/admin` pages) — same install, no extra steps. Each tab talks to its own server, so nothing you do on QA touches production data.
+
 > 📖 **For coworkers installing:** the friendly install guide lives at **[ned-yap.github.io/aim-userscripts](https://ned-yap.github.io/aim-userscripts/)** — styled, click-through, 5 minutes end to end. The README below is the same content in raw form (good if you're already poking around the repo).
 
 ---
@@ -85,7 +87,7 @@ Click each link below. Because the filenames end in `.user.js`, Tampermonkey wil
 
 **If a link doesn't auto-prompt** (rare — usually means your Tampermonkey is configured to skip auto-detection): paste the URL into Tampermonkey Dashboard → Utilities → "Import from URL" section, or copy the page source and paste into a new userscript (Dashboard → **+** tab → delete template → paste → Save).
 
-**Verify:** open `percepto.app` and a site. You should see a gear icon (⚙) added to the map toolbar. Click it — that's the AIM Controls panel.
+**Verify:** open `percepto.app` (or `qa.percepto.app`) and a site. You should see a gear icon (⚙) added to the map toolbar. Click it — that's the AIM Controls panel.
 
 ---
 
