@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.203
+// @version      4.204
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -67,7 +67,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.203';
+    const SCRIPT_VERSION = '4.204';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -5786,6 +5786,7 @@
     let terBadgeEl = null;
     let terRunning = false;
     let terDemCache = null;   // { key, dem } — session-only raster cache (terrain doesn't change between param tweaks)
+    let terLayerUrl = null;   // blob: object URL behind the overlay (revoked on remove)
 
     // Web-mercator helpers — the DEM is requested and displayed in 3857,
     // so row↔latitude conversions must go through mercator Y (linear-lat
@@ -5897,11 +5898,17 @@
         return mask;
     }
 
-    // 3×3 median despeckle (NaN-aware).
-    function terMedianFilter(vals, w, h) {
+    // Cooperative yield — the profiler's number-crunching runs on the main
+    // thread; without these breaks Chrome throws the "page unresponsive"
+    // dialog on big sites (same pattern as the SOP validators' async pass).
+    const terYield = () => new Promise(res => setTimeout(res, 0));
+
+    // 3×3 median despeckle (NaN-aware, yields every 48 rows).
+    async function terMedianFilter(vals, w, h) {
         const out = new Float32Array(vals.length);
         const buf = new Float32Array(9);
         for (let y = 0; y < h; y++) {
+            if ((y & 47) === 47) await terYield();
             for (let x = 0; x < w; x++) {
                 const i = y * w + x;
                 if (isNaN(vals[i])) { out[i] = NaN; continue; }
@@ -5924,7 +5931,8 @@
     }
 
     // Core segmentation: banding → components → tiered absorption → stats.
-    function terSegment(dem, th) {
+    // Async with cooperative yields — each full-grid pass is chunked.
+    async function terSegment(dem, th) {
         const { vals, w, h, cellAcres } = dem;
         const n = w * h;
         let mnFt = Infinity, mxFt = -Infinity;
@@ -5958,8 +5966,11 @@
         const labelBand = [];
         let nextLabel = 0;
         const stack = [];
+        let ccWork = 0;
         for (let seed = 0; seed < n; seed++) {
+            if ((seed & 0xFFFF) === 0xFFFF && ccWork > 200000) { ccWork = 0; await terYield(); }
             if (labels[seed] !== -1 || bandIdx[seed] < 0) continue;
+            ccWork++;
             const bd = bandIdx[seed];
             const lab = nextLabel++;
             labelBand.push(bd);
@@ -5997,6 +6008,7 @@
             const contact = new Map();
             const members = new Map();
             for (let y2 = 0; y2 < h; y2++) {
+                if ((y2 & 63) === 63) await terYield();
                 for (let x2 = 0; x2 < w; x2++) {
                     const i = y2 * w + x2;
                     const la = labels[i];
@@ -6055,6 +6067,7 @@
         const regions = [];
         const regGrid = new Int32Array(n).fill(-1);
         for (let i = 0; i < n; i++) {
+            if ((i & 0x3FFFF) === 0x3FFFF) await terYield();
             const l = labels[i];
             if (l < 0) continue;
             const r = find(l);
@@ -6133,7 +6146,7 @@
         return c;
     }
 
-    function terRenderOverlay() {
+    async function terRenderOverlay() {
         const st = terState;
         if (!st) return;
         const L = getLeafletL();
@@ -6149,6 +6162,7 @@
         const d = img.data;
         const { regGrid, candGrid, regions, mnFt, mxFt } = seg;
         for (let y = 0; y < h; y++) {
+            if ((y & 127) === 127) await terYield();
             for (let x = 0; x < w; x++) {
                 const i = y * w + x;
                 const gi = regGrid[i];
@@ -6167,7 +6181,17 @@
         ctx.putImageData(img, 0, 0);
         const bd = dem.bounds;
         try {
-            terLayer = L.imageOverlay(canvas.toDataURL('image/png'),
+            // toBlob encodes the PNG off the main thread (toDataURL blocks
+            // for hundreds of ms on a 2–4 MP canvas). Object URL is revoked
+            // in terRemoveLayer.
+            const url = await new Promise((resolve) => {
+                try {
+                    if (typeof canvas.toBlob === 'function') canvas.toBlob(b => resolve(b ? URL.createObjectURL(b) : canvas.toDataURL('image/png')), 'image/png');
+                    else resolve(canvas.toDataURL('image/png'));
+                } catch (e2) { resolve(canvas.toDataURL('image/png')); }
+            });
+            terLayerUrl = url && url.indexOf('blob:') === 0 ? url : null;
+            terLayer = L.imageOverlay(url,
                 [[bd.south, bd.west], [bd.north, bd.east]],
                 { opacity: terThresholds.opacity, pane: 'tilePane', zIndex: 9993, interactive: false });
             terLayer.addTo(map);
@@ -6230,6 +6254,7 @@
             try { terLayerMap.off('mousemove', terMoveHandler); } catch (e) {}
         }
         terLayer = null; terLayerMap = null; terMoveHandler = null;
+        if (terLayerUrl) { try { URL.revokeObjectURL(terLayerUrl); } catch (e) {} terLayerUrl = null; }
         if (terBadgeEl) { try { terBadgeEl.remove(); } catch (e) {} terBadgeEl = null; }
     }
 
@@ -6448,7 +6473,7 @@
             }
             // Never mutate the cached raster — derive the working copy.
             const dem0 = Object.assign({}, demRaw, {
-                vals: terEnabled.median ? terMedianFilter(demRaw.vals, demRaw.w, demRaw.h) : demRaw.vals,
+                vals: terEnabled.median ? await terMedianFilter(demRaw.vals, demRaw.w, demRaw.h) : demRaw.vals,
             });
             // Site-footprint mask (clipSite): everything outside the union
             // of existing FFZs becomes no-data before segmentation.
@@ -6465,10 +6490,10 @@
                     maskNote = 'no FFZs on site — full rectangle profiled';
                 }
             }
-            const seg = terSegment(dem0, th);
+            const seg = await terSegment(dem0, th);
             terBClearStage();   // staged Phase-2 geometry belongs to the previous segmentation
             terState = { sid, siteLabel: getCurrentSiteName() || `site ${sid}`, dem: dem0, seg, thresholds: th, maskNote };
-            terRenderOverlay();
+            await terRenderOverlay();
             terRenderPanel();
             const ms = Math.round(performance.now() - t0);
             console.log(`${TAG} terrain profile: ${seg.order.length} region(s), ${seg.nfzCands.length} NFZ candidate(s), `

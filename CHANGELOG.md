@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-28 — ⛰ Profiler: no more "page unresponsive" — Asset Inspector v4.204 (dev/latest)
+
+The remaining stall (Chrome's "wait / exit page" dialog on big sites) is gone: the profiler's heavy passes — median despeckle, segmentation/absorption, overlay painting — now run **cooperatively async**, yielding to the browser every few dozen rows (the same pattern that fixed the SOP validators on large sites). PNG encoding for the overlay also moved from the blocking `toDataURL` to async `toBlob` (encodes off the main thread; object URLs revoked on cleanup). Same results, same total time — the page just stays alive while it works.
+
 ## 2026-07-28 — ⛰ Profiler: tab-freeze fix + small-region rescue — Asset Inspector v4.203 (dev/latest)
 
 **Fixes the page freeze** reported when re-running the profiler / staging on a real site. Root cause: when a simplified region border self-intersected, the repair pass relaxed it all the way to **raw stair-step geometry** — a real site-footprint boundary is tens of thousands of lattice vertices, and the self-intersect check is O(n²), so the tab locked solid. Reproduced offline with a jagged 25-polygon footprint (the repair path triggers there), now resolves in one pass in ~160 ms. Rails added so nothing in the builder can freeze the page again:
