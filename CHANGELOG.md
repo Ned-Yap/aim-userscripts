@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-30 — Mission Bank Tools v2.19 (dev/latest): 🧠 Auto-Group — navs not snapshots, and the off-graph storm
+
+- **Routes anchor to NAVIGATE points now** — the drone flies navs; snapshots are camera positions. Route lines, pad positions, and per-mission internal cost all use nav locations (snapshots only as fallback for nav-less missions). This kills the lines that dove into pad interiors toward snapshot markers.
+- **Fixed the "randomly grabbing things" ordering** — the ⚠ 39,558 off-graph legs were the tell: the shortcut check was *disconnecting* FFZ bridges it couldn't LOS-verify, splitting the graph into islands, so most pad-to-pad distances were straight-line guesses and the optimizer ordered noise. FFZ links now always connect — an unverified shortcut just costs a ×1.4 detour penalty instead of vanishing. Off-graph legs now count unique pairs (a real diagnostic, not a call counter).
+- **Third ordering seed: the perimeter sweep** — the bearing-order walk (your red-numbers instinct) now competes as a starting order alongside far→near and nearest-neighbor; the flight simulator picks whichever ends cheapest.
+
 ## 2026-07-30 — Mission Bank Tools v2.18 (dev/latest): 🧠 Auto-Group — reachable pads were being excluded
 
 "All the ones I circled are fully reachable and built that way" — correct, and the routing model was violating our own engraved rule (*measure to segments, never vertices*):

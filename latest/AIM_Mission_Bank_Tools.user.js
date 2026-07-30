@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.18
+// @version      2.19
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.18';
+    const SCRIPT_VERSION = '2.19';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -4044,12 +4044,16 @@
         agSpliceFfzCrossings(graph, ffzs, entryM);
         const fpVerts = []; graph.verts.forEach((v, k) => fpVerts.push({ key: k, lat: v.lat, lng: v.lng }));
         const link = (ka, kb, w) => { graph.adj.get(ka).push({ to: kb, w }); graph.adj.get(kb).push({ to: ka, w }); };
-        // LOS cliques per FFZ — straight edge only when the segment stays inside.
+        // FFZ cliques (v2.19): ALWAYS link — a rejected LOS just means the
+        // drone hugs the FFZ interior instead of cutting straight, so the pair
+        // gets a ×1.4 detour penalty rather than disconnection. (Strict LOS
+        // cliques split components the router graph kept connected → 39.5k
+        // straight-fallback legs and effectively random ordering — live test.)
         ffzs.forEach(f => {
             const inside = fpVerts.filter(v => mbPointToPolygonMeters(v.lat, v.lng, f.ring) <= entryM);
             for (let i = 0; i < inside.length; i++) for (let j = i + 1; j < inside.length; j++) {
-                if (!agSegInsideRing(inside[i], inside[j], f.ring)) continue;
-                link(inside[i].key, inside[j].key, mbApproxMeters(inside[i].lat, inside[i].lng, inside[j].lat, inside[j].lng));
+                const straight = mbApproxMeters(inside[i].lat, inside[i].lng, inside[j].lat, inside[j].lng);
+                link(inside[i].key, inside[j].key, agSegInsideRing(inside[i], inside[j], f.ring) ? straight : straight * 1.4);
             }
         });
         // Pads as vertices, LOS-linked into their FFZ (or straight to the
@@ -4112,12 +4116,14 @@
         const runs = new Map();
         padKeys.forEach(k => { if (k) runs.set(k, agDijkstra(graph, k)); });
         baseKeys.forEach(k => runs.set(k, agDijkstra(graph, k)));
-        let offGraphPairs = 0;
+        // Off-graph legs tracked as UNIQUE pairs (v2.19) — the old raw call
+        // counter ballooned into the tens of thousands during 2-opt.
+        const offGraph = new Set();
         const straightFt = (a, b) => mbApproxMeters(a.lat, a.lng, b.lat, b.lng) * 3.28084 * 1.25;
         const lookup = (kFrom, kTo) => {
             const run = runs.get(kFrom);
             const m = run ? run.dist.get(kTo) : undefined;
-            if (m == null) { offGraphPairs++; return straightFt(graph.verts.get(kFrom), graph.verts.get(kTo)); }
+            if (m == null) { offGraph.add(kFrom < kTo ? `${kFrom}|${kTo}` : `${kTo}|${kFrom}`); return straightFt(graph.verts.get(kFrom), graph.verts.get(kTo)); }
             return m * 3.28084;
         };
         // Actual vertex path kFrom→kTo (endpoints included) — walks the prev
@@ -4147,12 +4153,12 @@
             // (counted in offGraphPairs) — the panel surfaces it, never Infinity.
             padDistFt(i, j) {
                 if (i === j) return 0;
-                if (!padKeys[i] || !padKeys[j]) { offGraphPairs++; return straightFt(padPt(i), padPt(j)); }
+                if (!padKeys[i] || !padKeys[j]) { offGraph.add(`p${Math.min(i, j)}|p${Math.max(i, j)}`); return straightFt(padPt(i), padPt(j)); }
                 return lookup(padKeys[i], padKeys[j]);
             },
             // pad index → closest base
             baseDistFt(i) {
-                if (!padKeys[i]) { offGraphPairs++; let best = Infinity; bases.forEach(b => { const d = straightFt(b, padPt(i)); if (d < best) best = d; }); return best; }
+                if (!padKeys[i]) { offGraph.add(`b|p${i}`); let best = Infinity; bases.forEach(b => { const d = straightFt(b, padPt(i)); if (d < best) best = d; }); return best; }
                 let best = Infinity;
                 baseKeys.forEach(bk => { const d = lookup(bk, padKeys[i]); if (d < best) best = d; });
                 return best;
@@ -4173,7 +4179,7 @@
                 bases.forEach(b => { const d = straightFt(b, padPt(i)); if (!bb || d < bb.d) bb = { b, d }; });
                 return bb ? [bb.b, padPt(i)] : [padPt(i)];
             },
-            get offGraphPairs() { return offGraphPairs; },
+            get offGraphPairs() { return offGraph.size; },
         };
     }
 
@@ -4183,10 +4189,13 @@
     // plus stepCost × steps for hover/capture overhead.
     function agIntraFt(mission) {
         const ins = (mission && mission.instructions) || [];
+        // NAV hops only (v2.19) — the drone flies nav to nav; snapshots are
+        // camera positions and add no transit.
+        let navs = ins.filter(i => i && i.type === 1 && i.location && typeof i.location.lat === 'number');
+        if (!navs.length) navs = ins.filter(i => i && i.location && typeof i.location.lat === 'number');
         let prev = null, ft = 0;
-        ins.forEach(i => {
-            const L = i && i.location;
-            if (!L || typeof L.lat !== 'number' || typeof L.lng !== 'number') return;
+        navs.forEach(i => {
+            const L = i.location;
             if (prev) ft += mbApproxMeters(prev.lat, prev.lng, L.lat, L.lng) * 3.28084;
             prev = L;
         });
@@ -4247,7 +4256,9 @@
             nn.push(best.j); left.delete(best.j);
         }
         let winner = null;
-        [farNear, nn].forEach(seed => {
+        // Third seed (v2.19): the given order — family sets arrive in bearing-
+        // sweep order, i.e. the human "walk the perimeter" instinct.
+        [farNear, nn, idxs.slice()].forEach(seed => {
             let o = seed.slice(), c = cost(o), improved = true, guard = 0;
             while (improved && guard++ < 40) {
                 improved = false;
@@ -4317,13 +4328,15 @@
         return fams;
     }
 
-    // The asset point(s) a solo inspects = its snapshot (type 6) locations (asset
-    // center). Falls back to navigate (type 1) locations. Used for section + routing.
+    // The point(s) a solo flies = its NAVIGATE (type 1) locations — the drone
+    // flies navs; snapshots (type 6) are camera positions, NOT waypoints
+    // (v2.19 live-test fix: routes were anchoring to snapshot points).
+    // Falls back to snapshot locations for nav-less missions.
     function mbSoloPoints(mission) {
         const ins = (mission && mission.instructions) || [];
-        const snaps = ins.filter(i => i && i.type === 6 && i.location && typeof i.location.lat === 'number').map(i => ({ lat: i.location.lat, lng: i.location.lng }));
-        if (snaps.length) return snaps;
-        return ins.filter(i => i && i.type === 1 && i.location && typeof i.location.lat === 'number').map(i => ({ lat: i.location.lat, lng: i.location.lng }));
+        const navs = ins.filter(i => i && i.type === 1 && i.location && typeof i.location.lat === 'number').map(i => ({ lat: i.location.lat, lng: i.location.lng }));
+        if (navs.length) return navs;
+        return ins.filter(i => i && i.type === 6 && i.location && typeof i.location.lat === 'number').map(i => ({ lat: i.location.lat, lng: i.location.lng }));
     }
     // The mission "body" = everything except the leading takeoff + trailing
     // returnHome (types 0 / 99). These get concatenated in the merge.
@@ -11272,6 +11285,16 @@ ${snapPlacemarks}
                 const msg = ev.data || {};
                 if (msg.type !== 'PREVIEW_ASSET' || !msg.name) return;
                 if (!mpvRouteOk()) return;
+                // Cross-tab gate (same rule as Styler TRIGGER_ACTION):
+                // BroadcastChannel delivers to EVERY open percepto tab, so
+                // clicking 👁 on a Data View tab used to draw the overlay in
+                // a background Mission Bank tab on the same site (which also
+                // ACKed, so no timeout toast anywhere visible). Only the tab
+                // the user actually clicked in — the focused one — answers.
+                if (!document.hasFocus()) {
+                    console.log(`${TAG} [mpv] PREVIEW_ASSET ignored — tab not focused (cross-tab broadcast)`);
+                    return;
+                }
                 try { mpvPreviewByName(String(msg.name)); }
                 catch (e) { console.warn(`${TAG} [mpv] preview-by-name failed:`, e); }
             };
