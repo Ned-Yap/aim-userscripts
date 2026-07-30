@@ -6,6 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-30 — Mission Bank Tools v2.08 + Asset Inspector v4.212 (latest only): 👁 Mission preview in Site Setup
+
+The first piece of the SS↔MB bridge (features [#212]) — see the missions while you edit the site setup:
+
+- **👁 map-tools button (Site Setup route)** — opens a draggable mission picker: checkbox + color swatch per mission, All / None, 🔄 refresh. Checked missions draw on the SS map as a dashed flight-order line + N#/S# nav/snapshot badges and 🚩 flag poles, each with a hover tooltip (mission · step · type · altitude). The line is click-through, so FFZ/FP vertex editing underneath is never blocked. Selection persists per site (QA-aware) and restores when you come back.
+- **👁 button in the M2 inspector popup** (Asset Inspector v4.212, Site Setup only) — one click overlays the mission named after that asset (same name-match ladder as Find in Missions / pad-click merge); click again to hide it. Control Panel toggle under Mission Bank Tools.
+
+Read-only for now — mission *editing* from Site Setup is the planned next phase.
+
 ## 2026-07-30 — Asset Inspector v4.211 (latest only): 🎯 Focus + Find in Missions
 
 - **🎯 Focus** — new button in the right-click inspector popup (features [#210]): pans + zooms the map so the entire entity fits in frame as close as possible (polygons and flight paths use their full extent; single-point markers get a tight zoom). Works on both the Site Setup and Mission Bank maps.

@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.211
+// @version      4.212
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.211';
+    const SCRIPT_VERSION = '4.212';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -269,6 +269,17 @@
             if (MISSION_BANK_ROUTE_RE.test(topHash)) return true;
         } catch (e) { /* cross-origin top */ }
         return MISSION_BANK_ROUTE_RE.test(location.hash || '');
+    }
+
+    // v4.212: Site Setup route — gates the popup's 👁 mission-preview
+    // button (the MBT overlay only draws there).
+    const SITE_SETUP_ROUTE_RE = /#\/site\/\d+\/control-panel\/site-setup/;
+    function isSiteSetupRoute() {
+        try {
+            const topHash = (window.top && window.top.location && window.top.location.hash) || '';
+            if (SITE_SETUP_ROUTE_RE.test(topHash)) return true;
+        } catch (e) { /* cross-origin top */ }
+        return SITE_SETUP_ROUTE_RE.test(location.hash || '');
     }
 
     // Pull the human-readable site name from the page header's site
@@ -4858,6 +4869,21 @@
         };
         footer.appendChild(focusBtn);
 
+        // v4.212: 👁 mission preview (feature #212, Site Setup only) — asks
+        // Mission Bank Tools over AIM_MB_PREVIEW to overlay the mission
+        // named after this asset. Icon-only to keep the footer compact.
+        if (isSiteSetupRoute()) {
+            const prevBtn = document.createElement('button');
+            prevBtn.textContent = '👁';
+            prevBtn.title = 'Preview this asset\'s mission on the map (via Mission Bank Tools)';
+            prevBtn.style.cssText = 'flex:0 0 auto;background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 8px;cursor:pointer;font:inherit;font-size:12px';
+            prevBtn.onclick = (ev) => {
+                ev.stopPropagation();
+                requestMissionPreview(entity);
+            };
+            footer.appendChild(prevBtn);
+        }
+
         // v4.88: 🗺 Maps — opens the GPS point in Google Maps. v4.172: uses the
         // exact right-click point when available, else the entity centroid.
         // Copy-the-coords is the GPS row above; this is the one-click open.
@@ -5118,6 +5144,48 @@
         } catch (e) {
             console.warn(`${TAG} mission open click failed:`, e);
             copyToClipboard(name, `Copied "${name}" — find it in the missions list`);
+        }
+    }
+
+    // ============================================================
+    // v4.212: 👁 mission preview request (feature #212) — Site Setup
+    // side of the SS↔MB bridge. Mission Bank Tools owns the mission
+    // data + overlay rendering; we just send the asset name over the
+    // AIM_MB_PREVIEW BroadcastChannel and MBT toggles the name-matched
+    // mission's overlay (it toasts the outcome itself). The ACK timeout
+    // is the only feedback we own: no ACK = MBT missing/disabled at the
+    // Tampermonkey level, which MBT obviously can't report.
+    // ============================================================
+    const MB_PREVIEW_CHANNEL_NAME = 'AIM_MB_PREVIEW';
+    let mbPreviewChannel = null;
+    let mbPreviewAckTimer = null;
+
+    function requestMissionPreview(entity) {
+        const name = entity && entity.name;
+        if (!name) {
+            showToast('No name on entity to match a mission', 'rgba(255,180,0,0.55)');
+            return;
+        }
+        try {
+            if (!mbPreviewChannel) {
+                mbPreviewChannel = new BroadcastChannel(MB_PREVIEW_CHANNEL_NAME);
+                mbPreviewChannel.onmessage = (ev) => {
+                    const msg = ev.data || {};
+                    if (msg.type === 'PREVIEW_ACK' && mbPreviewAckTimer) {
+                        clearTimeout(mbPreviewAckTimer);
+                        mbPreviewAckTimer = null;
+                    }
+                };
+            }
+            mbPreviewChannel.postMessage({ type: 'PREVIEW_ASSET', name: String(name) });
+            if (mbPreviewAckTimer) clearTimeout(mbPreviewAckTimer);
+            mbPreviewAckTimer = setTimeout(() => {
+                mbPreviewAckTimer = null;
+                showToast('No response — is Mission Bank Tools installed & enabled?', 'rgba(255,180,0,0.55)');
+            }, 1500);
+        } catch (e) {
+            console.warn(`${TAG} mission preview request failed:`, e);
+            showToast('Mission preview unavailable (BroadcastChannel failed)', 'rgba(255,96,96,0.55)');
         }
     }
 

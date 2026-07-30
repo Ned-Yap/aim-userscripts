@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.07
+// @version      2.08
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.07';
+    const SCRIPT_VERSION = '2.08';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -308,8 +308,10 @@
                         hideSumButton();
                         closePanel();
                         closeRightClickPopup();
+                        if (CONTEXT === 'IFRAME') try { mpvTeardown(); } catch (e) {}
                     } else {
                         runSumInjection();
+                        if (CONTEXT === 'IFRAME') try { mpvInjectButton(); } catch (e) {}
                     }
                 } else if (msg.toggleId === 'hide-scan-icons') {
                     const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
@@ -344,6 +346,16 @@
                         hideFlagPoleOverlay = v;
                         gmSet(CACHE_KEY_HIDE_FLAGPOLE, hideFlagPoleOverlay);
                         if (CONTEXT === 'IFRAME') try { applyFlagPoleOverlayHide(); } catch (e) {}
+                    }
+                } else if (msg.toggleId === 'mission-preview') {
+                    const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                    if (v !== mpvEnabled) {
+                        mpvEnabled = v;
+                        gmSet(CACHE_KEY_MPV_ENABLED, mpvEnabled);
+                        if (CONTEXT === 'IFRAME') {
+                            if (mpvEnabled) { try { mpvInjectButton(); } catch (e) {} }
+                            else { try { mpvTeardown(); } catch (e) {} }
+                        }
                     }
                 } else if (msg.toggleId === 'default-snap-agl') {
                     const v = Number(msg.value !== undefined ? msg.value : msg.enabled);
@@ -391,6 +403,7 @@
                 { id: 'collapse-editor-cards', label: 'Collapse scan-block cards in the native editor', type: 'boolean', default: true },
                 { id: 'map-step-badges', label: 'N#/S# map step badges + Click-to-Add (OFF = perf test)', type: 'boolean', default: true },
                 { id: 'hide-flagpole-overlay', label: 'Hide Flag Pole scan overlay (blue cone)', type: 'boolean', default: false },
+                { id: 'mission-preview', label: '👁 Mission preview on Site Setup (map-tools button)', type: 'boolean', default: true },
                 { id: 'default-snap-agl', label: 'Default snapshot AGL (auto-AGL toggle)', type: 'number', min: -50, max: 500, step: 1, default: 10, unit: 'ft' },
                 { id: 'colors-header', label: 'Step colors (editor cards + map badges)', type: 'header' },
                 { id: 'color-nav', label: 'Navigate', type: 'color', default: STEP_COLOR_DEFAULTS.nav },
@@ -1696,12 +1709,13 @@
         const wrapBtn = document.createElement('button');
         wrapBtn.id = WRAP_BTN_ID;
         wrapBtn.type = 'button';
-        wrapBtn.textContent = '🎞 Wrap';
-        wrapBtn.title = 'Wrap templates: apply a saved sequence of your step presets (e.g. Therm on → GEM on → Wait → GEM off → Therm off) after EVERY snapshot that has no trailing steps yet — the Click-to-Add finisher. Build and manage templates inside. Staged only — SAVE when done.';
-        wrapBtn.style.cssText = 'flex:1 0 auto;margin-left:5px;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;' +
-            'background:rgba(255,150,255,0.10);border:1px solid rgba(255,150,255,0.45);color:#f9f;';
+        wrapBtn.style.cssText = 'flex:1 0 auto;margin-left:5px;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
         wrapBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); wrapPopup(wrapBtn); };
+        // Right-click (M2) = toggle AUTO-WRAP for this session (applies the last-used
+        // template on every mission SAVE — see applyWrapToBodyStr).
+        wrapBtn.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); toggleAutoWrap(); };
         row2.appendChild(autoBtn); row2.appendChild(stageBtn); row2.appendChild(caBtn); row2.appendChild(wrapBtn);
+        updateWrapBtn();
         // Row 3: the Click-to-Add "Insert at" bar (shown only while the mode is ON).
         const row3 = document.createElement('div');
         row3.id = CA_BAR_ID;
@@ -3807,9 +3821,17 @@
     // a pick-one chooser instead of guessing (a "Merged - A + B" mission
     // also CONTAINS pad names, so contains can tie).
     function pcmFindMissionCandidates(name) {
+        return rankMatchMissions(name, pcm.missions);
+    }
+
+    // v2.08: the asset-name → mission rank ladder, extracted so pad-click
+    // merge and the Site Setup mission preview (mpv) agree on which mission
+    // a pad name means. The Asset Inspector's "Find in Missions" (v4.211)
+    // mirrors this ladder too — keep all three in sync.
+    function rankMatchMissions(name, missions) {
         const want = String(name || '').trim().toLowerCase();
-        if (!want || !Array.isArray(pcm.missions)) return [];
-        const all = pcm.missions.filter(m => m && typeof m.name === 'string' && m.name.trim());
+        if (!want || !Array.isArray(missions)) return [];
+        const all = missions.filter(m => m && typeof m.name === 'string' && m.name.trim());
         const norm = m => m.name.trim().toLowerCase();
         let c = all.filter(m => norm(m) === want);
         if (c.length) return c;
@@ -9835,6 +9857,329 @@ ${snapPlacemarks}
     // ========================================================
     // Init
     // ========================================================
+    // ============================================================
+    // v2.08: 👁 Mission Preview overlay — Site Setup route (feature #212)
+    //
+    // Bridges the SS↔MB gap in the VIEW direction: while editing Site
+    // Setup entities you can overlay any of the site's missions (steps +
+    // flight order) on the SS map, so FFZ/FP reshaping is judged against
+    // the missions that actually fly there. Read-only — mission editing
+    // from SS is a later phase.
+    //
+    //   - 👁 button in .map-tools (SS route only, IFRAME) → draggable
+    //     picker panel: checkbox + color swatch per mission, All / None /
+    //     🔄 refresh. Selection persisted per env-keyed site.
+    //   - Per checked mission: dashed polyline through located steps in
+    //     instruction order (interactive:false — never blocks SS vertex
+    //     editing) + N#/S# badges and 🚩 flag poles with hover tooltips
+    //     (mission · step · type · altitude). Takeoff/returnHome skipped.
+    //   - AIM_MB_PREVIEW BroadcastChannel: the Asset Inspector popup's 👁
+    //     button sends {type:'PREVIEW_ASSET', name}; we rank-match (same
+    //     ladder as pad-click merge) and toggle that mission's overlay,
+    //     then ACK so the sender can detect MBT missing entirely.
+    // ============================================================
+    const MPV_CHANNEL_NAME = 'AIM_MB_PREVIEW';
+    const MPV_SEL_KEY = 'aim-mb-preview-sel';       // { [envSiteKey(sid)]: [missionId, …] }
+    const CACHE_KEY_MPV_ENABLED = 'aim-mb-preview-enabled';
+    let mpvEnabled = gmGet(CACHE_KEY_MPV_ENABLED, true);
+    const MPV_BTN_ID = 'aim-mb-preview-btn';
+    const MPV_PANEL_ID = 'aim-mb-preview-panel';
+    const MPV_COLORS = ['#7adfe6', '#ffd54f', '#ff8a65', '#aed581', '#ce93d8', '#4fc3f7', '#f48fb1', '#80cbc4', '#ffab91', '#fff176'];
+    const mpv = { channel: null, layers: {}, panelEl: null, onSiteSetup: false };
+
+    function mpvIsSiteSetup() {
+        const top = (() => { try { return window.top; } catch (e) { return window; } })();
+        const hash = (top && top.location && top.location.hash) || location.hash || '';
+        return /#\/site\/\d+\/control-panel\/site-setup/.test(hash);
+    }
+
+    function mpvSelForSite(sid) {
+        const all = gmGet(MPV_SEL_KEY, {}) || {};
+        const arr = all[envSiteKey(sid)];
+        return Array.isArray(arr) ? arr.slice() : [];
+    }
+    function mpvSaveSel(sid, ids) {
+        const all = gmGet(MPV_SEL_KEY, {}) || {};
+        all[envSiteKey(sid)] = ids;
+        gmSet(MPV_SEL_KEY, all);
+    }
+    function mpvMissions(sid) {
+        const b = missionsBySite[sid];
+        return (b && b.missions) || null;
+    }
+    function mpvColor(mid, missions) {
+        const i = (missions || []).findIndex(m => m && m.id === mid);
+        return MPV_COLORS[(i >= 0 ? i : 0) % MPV_COLORS.length];
+    }
+
+    function mpvClearMission(mid) {
+        (mpv.layers[mid] || []).forEach(l => { try { l.remove(); } catch (e) {} });
+        delete mpv.layers[mid];
+    }
+    function mpvClearAll() {
+        Object.keys(mpv.layers).forEach(mpvClearMission);
+    }
+
+    function mpvDrawMission(m, color) {
+        const L = composerGetL(), map = getLeafletMap();
+        if (!L || !map || !m) return;
+        mpvClearMission(m.id);
+        const layers = [];
+        const steps = Array.isArray(m.instructions) ? m.instructions : [];
+        const located = steps.filter(s => s && s.location
+            && typeof s.location.lat === 'number' && typeof s.location.lng === 'number'
+            && s.type_name !== 'takeoff' && s.type_name !== 'returnHome');
+        // Flight-order line. Dashed = "preview, not a real FP";
+        // interactive:false so clicks pass through to the SS editor.
+        if (located.length >= 2) {
+            try {
+                layers.push(L.polyline(located.map(s => [s.location.lat, s.location.lng]),
+                    { color, weight: 3, opacity: 0.8, dashArray: '7,7', interactive: false }).addTo(map));
+            } catch (e) { console.warn(`${TAG} [mpv] polyline failed:`, e); }
+        }
+        let nav = 0, snap = 0;
+        for (let i = 0; i < steps.length; i++) {
+            const s = steps[i];
+            if (!s || !s.location || typeof s.location.lat !== 'number' || typeof s.location.lng !== 'number') continue;
+            const t = s.type_name;
+            let html = null, size = 0;
+            if (t === 'navigate') {
+                nav++;
+                html = `<div style="width:22px;height:22px;border-radius:50%;background:${color};color:#04222a;font:800 10px/19px monospace;text-align:center;border:2px solid rgba(0,0,0,0.6);box-shadow:0 1px 4px rgba(0,0,0,0.5);">N${nav}</div>`;
+                size = 22;
+            } else if (t === 'snapshot') {
+                snap++;
+                html = `<div style="width:17px;height:17px;border-radius:3px;background:${color};color:#04222a;font:800 9px/16px monospace;text-align:center;border:1px solid rgba(0,0,0,0.6);opacity:0.92;">S${snap}</div>`;
+                size = 17;
+            } else if (t === 'flag pole' || s.type === 16) {
+                html = '<div style="font-size:13px;line-height:14px;text-shadow:0 1px 2px #000;">🚩</div>';
+                size = 14;
+            } else {
+                continue;   // takeoff/returnHome/control steps — noise on the SS map
+            }
+            try {
+                const icon = L.divIcon({ className: 'aim-mpv-badge', html, iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
+                const mk = L.marker([s.location.lat, s.location.lng], { icon, interactive: true }).addTo(map);
+                const alt = displayStepValue(s);
+                mk.bindTooltip(
+                    `<b>${escapeHtml(m.name || '(mission)')}</b><br>step ${i + 1}/${steps.length} · ${escapeHtml(t || ('type ' + s.type))}${alt ? ' · ' + escapeHtml(alt) : ''}`,
+                    { direction: 'top', offset: [0, -8], opacity: 0.95 });
+                layers.push(mk);
+            } catch (e) { console.warn(`${TAG} [mpv] marker failed:`, e); }
+        }
+        mpv.layers[m.id] = layers;
+    }
+
+    function mpvRedraw() {
+        const sid = getCurrentSiteID();
+        mpvClearAll();
+        if (!sid || !mpvIsSiteSetup() || !masterEnabled || !mpvEnabled) return;
+        const missions = mpvMissions(sid);
+        if (!missions) return;
+        const map = getLeafletMap();
+        if (!map) return;
+        // Entity-less sites never build the overlay SVG pane — force it
+        // once so our polylines render (see reference_leaflet_lazy_overlay_svg).
+        try {
+            const L = composerGetL();
+            const pane = map.getPane && map.getPane('overlayPane');
+            if (L && L.svg && pane && !pane.querySelector('svg')) L.svg().addTo(map);
+        } catch (e) {}
+        const sel = new Set(mpvSelForSite(sid));
+        for (const m of missions) {
+            if (m && sel.has(m.id)) mpvDrawMission(m, mpvColor(m.id, missions));
+        }
+    }
+
+    function mpvSetMission(sid, mid, on) {
+        const ids = mpvSelForSite(sid).filter(x => x !== mid);
+        if (on) ids.push(mid);
+        mpvSaveSel(sid, ids);
+        mpvRedraw();
+    }
+
+    // ---- picker panel ----
+    function mpvClosePanel() {
+        if (mpv.panelEl) { try { mpv.panelEl.remove(); } catch (e) {} mpv.panelEl = null; }
+    }
+
+    function mpvOpenPanel() {
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded.', '#ff9800', 2500); return; }
+        if (mpv.panelEl) { mpvClosePanel(); return; }   // 👁 button = toggle
+        const btnCss = 'background:#0f1216;border:1px solid #2a3340;color:#e6e6e6;padding:2px 10px;border-radius:3px;cursor:pointer;font:inherit;font-size:11px;';
+        const el = document.createElement('div');
+        el.id = MPV_PANEL_ID;
+        el.style.cssText = 'position:fixed;top:70px;right:60px;z-index:100001;background:#0f1216;border:1px solid #14d2dc;border-radius:6px;box-shadow:0 8px 28px rgba(0,0,0,0.7);color:#e6e6e6;font-family:Lato,\'Segoe UI\',sans-serif;font-size:12px;width:290px;max-height:70vh;display:flex;flex-direction:column;';
+        el.innerHTML = `
+            <div data-mpv-drag style="background:#14d2dc;color:#000;padding:6px 10px;font-weight:700;border-radius:5px 5px 0 0;cursor:move;user-select:none;display:flex;align-items:center;gap:6px;">
+                <span style="flex:1;">👁 Mission preview</span>
+                <button data-mpv-refresh title="Re-fetch missions from the server" style="background:rgba(0,0,0,0.15);border:none;color:#000;cursor:pointer;border-radius:3px;font-size:12px;padding:1px 5px;">🔄</button>
+                <button data-mpv-close style="background:transparent;border:none;color:#000;font-weight:700;font-size:14px;cursor:pointer;padding:0 4px;">×</button>
+            </div>
+            <div style="display:flex;gap:6px;padding:6px 10px;border-bottom:1px solid rgba(255,255,255,0.08);">
+                <button data-mpv-all style="${btnCss}">All</button>
+                <button data-mpv-none style="${btnCss}">None</button>
+                <span style="flex:1;text-align:right;color:#9ad;font-size:10px;align-self:center;">hover a badge for step info</span>
+            </div>
+            <div data-mpv-list style="overflow:auto;padding:4px 0;"></div>`;
+        document.body.appendChild(el);
+        mpv.panelEl = el;
+        try { makeDraggable(el, el.querySelector('[data-mpv-drag]')); } catch (e) {}
+        el.addEventListener('click', mpvPanelClick);
+        el.addEventListener('change', (e) => {
+            const cb = e.target && e.target.closest && e.target.closest('input[data-mpv-mid]');
+            if (!cb) return;
+            const sid2 = getCurrentSiteID();
+            if (sid2) mpvSetMission(sid2, Number(cb.getAttribute('data-mpv-mid')), cb.checked);
+        });
+        mpvRenderList();
+        if (!mpvMissions(sid)) {
+            fetchMissions(sid, () => { mpvRenderList(); mpvRedraw(); },
+                (err) => { mpvRenderList(); showToast('Mission fetch failed: ' + err, '#ff5252', 3500); });
+        }
+    }
+
+    function mpvRenderList() {
+        if (!mpv.panelEl) return;
+        const list = mpv.panelEl.querySelector('[data-mpv-list]');
+        if (!list) return;
+        const sid = getCurrentSiteID();
+        const missions = sid ? mpvMissions(sid) : null;
+        if (!missions) { list.innerHTML = '<div style="padding:10px;color:#9ad;">Loading missions…</div>'; return; }
+        if (!missions.length) { list.innerHTML = '<div style="padding:10px;color:#9ad;">No missions on this site.</div>'; return; }
+        const sel = new Set(mpvSelForSite(sid));
+        list.innerHTML = missions.filter(Boolean).map(m => {
+            const color = mpvColor(m.id, missions);
+            const steps = realSteps(m.instructions).length;
+            return `<label style="display:flex;align-items:center;gap:7px;padding:4px 10px;cursor:pointer;">
+                <input type="checkbox" data-mpv-mid="${m.id}" ${sel.has(m.id) ? 'checked' : ''} style="accent-color:${color};">
+                <span style="width:10px;height:10px;border-radius:2px;background:${color};flex:0 0 auto;"></span>
+                <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(m.name || '')}">${escapeHtml(m.name || '(unnamed)')}</span>
+                <span style="color:#9ad;font-size:10px;flex:0 0 auto;">${steps} steps</span>
+            </label>`;
+        }).join('');
+    }
+
+    function mpvPanelClick(e) {
+        const sid = getCurrentSiteID();
+        if (!sid) return;
+        if (e.target.closest('[data-mpv-close]')) { mpvClosePanel(); return; }
+        if (e.target.closest('[data-mpv-refresh]')) {
+            delete missionsBySite[sid];
+            mpvRenderList();
+            fetchMissions(sid, () => { mpvRenderList(); mpvRedraw(); },
+                (err) => { mpvRenderList(); showToast('Mission fetch failed: ' + err, '#ff5252', 3500); });
+            return;
+        }
+        if (e.target.closest('[data-mpv-all]') || e.target.closest('[data-mpv-none]')) {
+            const missions = mpvMissions(sid) || [];
+            mpvSaveSel(sid, e.target.closest('[data-mpv-all]') ? missions.filter(Boolean).map(m => m.id) : []);
+            mpvRenderList();
+            mpvRedraw();
+        }
+    }
+
+    // ---- map-tools button + route gating ----
+    function mpvTeardown() {
+        const b = document.getElementById(MPV_BTN_ID);
+        if (b) try { b.remove(); } catch (e) {}
+        mpvClosePanel();
+        mpvClearAll();
+    }
+
+    function mpvInjectButton() {
+        if (!masterEnabled || !mpvEnabled || !mpvIsSiteSetup()) {
+            if (mpv.onSiteSetup) { mpv.onSiteSetup = false; mpvTeardown(); }
+            return;
+        }
+        if (!mpv.onSiteSetup) {
+            mpv.onSiteSetup = true;
+            // Entering SS with a persisted selection: restore the overlay,
+            // fetching missions first if the cache is cold.
+            const sid = getCurrentSiteID();
+            if (sid && mpvSelForSite(sid).length && !mpvMissions(sid)) {
+                fetchMissions(sid, () => mpvRedraw(), (err) => console.warn(`${TAG} [mpv] restore fetch failed:`, err));
+            } else {
+                mpvRedraw();
+            }
+        }
+        // The map/Leaflet can lag the route change — if overlays should
+        // exist but don't yet, retry on this same injection tick.
+        const sid = getCurrentSiteID();
+        if (sid && mpvSelForSite(sid).length && !Object.keys(mpv.layers).length
+            && mpvMissions(sid) && getLeafletMap()) mpvRedraw();
+        if (document.getElementById(MPV_BTN_ID)) return;
+        const tools = document.querySelector('.map-tools');
+        if (!tools) return;
+        const btn = document.createElement('div');
+        btn.id = MPV_BTN_ID;
+        btn.className = 'map-tools__button';
+        btn.title = 'AIM Mission preview — overlay this site\'s missions on the Site Setup map';
+        btn.textContent = '👁';
+        btn.style.cssText = 'cursor:pointer;font-size:15px;display:flex;align-items:center;justify-content:center;';
+        btn.addEventListener('click', (e) => { e.stopPropagation(); mpvOpenPanel(); });
+        tools.appendChild(btn);
+    }
+
+    // ---- Asset Inspector bridge (AIM_MB_PREVIEW channel) ----
+    function mpvAck(extra) {
+        try { mpv.channel && mpv.channel.postMessage(Object.assign({ type: 'PREVIEW_ACK' }, extra)); } catch (e) {}
+    }
+
+    function mpvPreviewByName(name) {
+        const sid = getCurrentSiteID();
+        if (!sid || !getLeafletMap()) return;   // not the map iframe — let that instance answer
+        if (!masterEnabled || !mpvEnabled) {
+            mpvAck({ found: false, name, disabled: true });
+            showToast('Mission preview is disabled in the Control Panel.', '#ff9800', 3000);
+            return;
+        }
+        const go = (missions) => {
+            const cands = rankMatchMissions(name, missions);
+            if (!cands.length) {
+                mpvAck({ found: false, name });
+                showToast(`No mission matching "${name}" on this site.`, '#ff9800', 3000);
+                return;
+            }
+            const hit = cands[0];
+            const on = mpvSelForSite(sid).indexOf(hit.id) < 0;
+            mpvSetMission(sid, hit.id, on);
+            if (mpv.panelEl) mpvRenderList();
+            mpvAck({ found: true, name: hit.name, shown: on });
+            showToast(`${on ? '👁 Showing' : 'Hid'} mission "${hit.name}"${cands.length > 1 ? ` (${cands.length} matched — best rank shown)` : ''}`, '#7adfe6', 2500);
+        };
+        const cached = mpvMissions(sid);
+        if (cached) go(cached);
+        else fetchMissions(sid, go, (err) => {
+            mpvAck({ found: false, name, error: String(err) });
+            showToast('Mission fetch failed: ' + err, '#ff5252', 3500);
+        });
+    }
+
+    function mpvInit() {
+        try { mpv.channel = new BroadcastChannel(MPV_CHANNEL_NAME); } catch (e) { mpv.channel = null; }
+        if (mpv.channel) {
+            mpv.channel.onmessage = (ev) => {
+                const msg = ev.data || {};
+                if (msg.type !== 'PREVIEW_ASSET' || !msg.name) return;
+                if (!mpvIsSiteSetup()) return;
+                try { mpvPreviewByName(String(msg.name)); }
+                catch (e) { console.warn(`${TAG} [mpv] preview-by-name failed:`, e); }
+            };
+        }
+        setInterval(mpvInjectButton, 3000);
+        setTimeout(mpvInjectButton, 800);
+        // Route changes: close the panel (site/section may differ) and
+        // re-gate the button + overlays. Top hash is the SPA's router.
+        try {
+            (window.top || window).addEventListener('hashchange', () => {
+                mpvClosePanel();
+                setTimeout(() => { try { mpvInjectButton(); mpvRedraw(); } catch (e) {} }, 400);
+            });
+        } catch (e) {}
+    }
+
     function init() {
         console.log(`${TAG} v${SCRIPT_VERSION} init (${CONTEXT})`);
         setupControlPanel();
@@ -9854,6 +10199,9 @@ ${snapPlacemarks}
             setInterval(runSumInjection, 4000);
             setTimeout(runSumInjection, 1000);
             try { patchLeafletMap(); } catch (e) {}
+            // v2.08: Site Setup mission-preview overlay (👁) — self-gates
+            // to the site-setup route inside its injection tick.
+            try { mpvInit(); } catch (e) { console.warn(`${TAG} [mpv] init failed:`, e); }
             // Live editor bridge: syncs MBT's display to the live mission-editor
             // state + drives armed snapshot auto-AGL on GPS moves (700ms poll,
             // early-returns unless a mission is open in the editor).
