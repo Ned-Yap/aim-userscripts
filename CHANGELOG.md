@@ -6,8 +6,9 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
-## 2026-07-29 — Mission Bank Tools v2.06 (dev/latest): 🎞 Wrap templates
+## 2026-07-29 — Mission Bank Tools v2.06–v2.07 (dev/latest): 🎞 Wrap templates
 
+- **Mission Bank Tools v2.07 — layout fix.** The new 🎞 button was clipped off the right edge of the editor sidebar; the button row now wraps, so **🎞 Wrap** sits full-width on its own line when there's no room.
 - **Mission Bank Tools v2.06 — 🎞 Wrap templates, the Click-to-Add finisher.** New 🎞 button next to ➕ Click-add in the mission editor: build named templates as an ordered sequence of your 📋-captured step presets (e.g. Camera Thermal → GEM On → Wait → GEM Off → Camera RGB), then **▶ Apply** inserts that sequence after **every snapshot that has no trailing steps yet** — before the following nav — so a Ctrl-clicked batch of inspection points gets its full scan wrap in one click. Snapshots that already carry scan steps are skipped (no double-wrap). Everything stays staged (native SAVE commits) and a single Ctrl+Z removes the whole applied batch. Templates reference presets by name, so a preset quick-edit (Wait seconds, RGB↔Thermal) carries into future applies.
 
 ## 2026-07-29 — AIM Issues v1.37 → PROD

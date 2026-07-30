@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.06
+// @version      2.07
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.06';
+    const SCRIPT_VERSION = '2.07';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -1673,7 +1673,9 @@
         // Second row: the safety-gated Auto snapshot-AGL toggle (full width so
         // it's hard to miss). Default OFF; turning it ON warns + shows a banner.
         const row2 = document.createElement('div');
-        row2.style.cssText = 'display:flex;margin:0 0 4px;';
+        // flex-wrap: the 🎞 Wrap button overflowed the sidebar width on the
+        // default layout (clipped) — let it fall to its own full-width line.
+        row2.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px 0;margin:0 0 4px;';
         const autoBtn = document.createElement('button');
         autoBtn.id = AUTO_SNAP_AGL_BTN_ID;
         autoBtn.type = 'button';
@@ -1694,9 +1696,9 @@
         const wrapBtn = document.createElement('button');
         wrapBtn.id = WRAP_BTN_ID;
         wrapBtn.type = 'button';
-        wrapBtn.textContent = '🎞';
+        wrapBtn.textContent = '🎞 Wrap';
         wrapBtn.title = 'Wrap templates: apply a saved sequence of your step presets (e.g. Therm on → GEM on → Wait → GEM off → Therm off) after EVERY snapshot that has no trailing steps yet — the Click-to-Add finisher. Build and manage templates inside. Staged only — SAVE when done.';
-        wrapBtn.style.cssText = 'flex:0 0 auto;margin-left:5px;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;' +
+        wrapBtn.style.cssText = 'flex:1 0 auto;margin-left:5px;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;' +
             'background:rgba(255,150,255,0.10);border:1px solid rgba(255,150,255,0.45);color:#f9f;';
         wrapBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); wrapPopup(wrapBtn); };
         row2.appendChild(autoBtn); row2.appendChild(stageBtn); row2.appendChild(caBtn); row2.appendChild(wrapBtn);
