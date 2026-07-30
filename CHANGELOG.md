@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-30 — Map Nav v0.11 → PROD: 🧭 Go to coordinate
+
+- Promoted to everyone (from v0.10): new 🧭 button in the map toolbar on Site Setup **and** Mission Bank — paste a GPS coordinate like `31.628457, -101.929646` (or `lat lng`, parens, semicolons, a Google-Maps `@lat,lng` URL) and the map jumps straight there with a pulsing cyan pin at the exact spot. Click the pin to remove it; invalid input shakes red. Toggleable in the Control Panel under Map Nav.
+
 ## 2026-07-30 — Map Nav v0.11 (dev/latest): 🧭 Go to coordinate
 
 - New 🧭 button in the map toolbar (Site Setup **and** Mission Bank): paste a GPS coordinate like `31.628457, -101.929646` and the map pans/zooms straight to it, dropping a pulsing cyan pin at the exact spot (click the pin to remove it). Also accepts `lat lng`, parentheses, semicolons, and Google-Maps `@lat,lng` URLs. Toggleable in the Control Panel under Map Nav.

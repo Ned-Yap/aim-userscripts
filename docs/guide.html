@@ -532,8 +532,8 @@
       <details class="card">
         <summary>
           <div class="card-top"><span class="card-emoji">🎮</span><span class="card-name">Map Nav</span><span class="card-chev">▾</span></div>
-          <p class="card-what">Move the map with your keyboard like a game.</p>
-          <div class="card-how"><span class="how-label">Use</span> <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> · <kbd>Q</kbd>/<kbd>E</kbd> zoom</div>
+          <p class="card-what">Move the map with your keyboard like a game — or jump straight to a GPS coordinate.</p>
+          <div class="card-how"><span class="how-label">Use</span> <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> · <kbd>Q</kbd>/<kbd>E</kbd> zoom · 🧭 button</div>
           <div class="tap-hint">Tap for details ▾</div>
         </summary>
         <div class="card-detail">
@@ -542,6 +542,7 @@
             <li><kbd>W A S D</kbd> to pan, <kbd>Q</kbd>/<kbd>E</kbd> to zoom out/in.</li>
             <li>Hold <kbd>Alt</kbd> to move faster (sprint).</li>
             <li>Press <kbd>Space</kbd> to fit the whole site in view.</li>
+            <li>Click the 🧭 button in the map toolbar, paste a GPS coordinate like <code>31.628457, -101.929646</code>, press <kbd>Enter</kbd> — the map jumps there and drops a pulsing pin. Click the pin to remove it.</li>
           </ol>
           <h4>Everything it can do</h4>
           <ul class="everything">
@@ -550,6 +551,7 @@
             <li><b>Sprint</b> — hold <kbd>Alt</kbd> to move across the map faster.</li>
             <li><b>Fit-to-site</b> — <kbd>Space</kbd> zooms out to show the whole site.</li>
             <li><b>Box-zoom still works</b> — <kbd>Shift</kbd>+drag uses Leaflet's native zoom-to-rectangle.</li>
+            <li><b>🧭 Go to coordinate</b> — paste a lat, lng (plain, in parentheses, or a Google-Maps <code>@lat,lng</code> link) and jump the map right to it, on Site Setup and Mission Bank. Pin marks the exact spot; bad input shakes red instead of failing silently.</li>
           </ul>
           <h4>Good for</h4>
           <ul>
