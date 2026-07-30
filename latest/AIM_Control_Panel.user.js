@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.36
+// @version      1.37
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -58,7 +58,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.36';
+    const VERSION = '1.37';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -140,6 +140,10 @@
         // exists here, so the TOP frame injects a floating gear instead
         // (see syncFloatingButton).
         if (/#\/site\/\d+\/live_drone\//.test(hash)) return 'live-drone';
+        // v1.37 — Data View (legacy Angular app, single frame, map in TOP,
+        // no .map-tools). Gets the same floating gear as live-drone so
+        // unscoped scripts (Map Styler etc.) stay reachable there.
+        if (/#\/site\/\d+\/data_view\//.test(hash)) return 'data-view';
         return 'other';
     }
 
@@ -795,12 +799,16 @@
         if (!document.body) return false;
         if (state.buttonEl && document.body.contains(state.buttonEl)) return true;
         ensureGearStyles(document);
+        // v1.37 — Data View's native leaflet-draw control strip hugs the map's
+        // right edge at right:~10px from y≈110 down; sit LEFT of it there so we
+        // never cover a native button. Live drone keeps the original spot.
+        const pos = state.urlScope === 'data-view' ? 'top:130px;right:56px' : 'top:130px;right:12px';
         const wrapper = document.createElement('div');
         wrapper.innerHTML = `
             <div class="aim-control-button aim-control-button--floating"
                  title="AIM Controls"
                  style="cursor:pointer;display:flex;align-items:center;justify-content:center;
-                        position:fixed;top:130px;right:12px;width:34px;height:34px;
+                        position:fixed;${pos};width:34px;height:34px;
                         background:rgba(40,40,40,0.92);border:1px solid rgba(255,255,255,0.18);
                         border-radius:6px;z-index:100000;user-select:none">
                 <span style="font-size:18px;line-height:1;color:#39ff14">⚙</span>
@@ -833,7 +841,7 @@
     // (Angular can rebuild large chunks of the live page under us).
     function syncFloatingButton() {
         if (!IS_TOP) return;
-        if (state.urlScope === 'live-drone') injectFloatingButton();
+        if (state.urlScope === 'live-drone' || state.urlScope === 'data-view') injectFloatingButton();
         else removeFloatingButton();
     }
 

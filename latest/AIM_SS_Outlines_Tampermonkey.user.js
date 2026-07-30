@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.120
+// @version      34.121
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,6 +33,20 @@
     const TRIGGER_KEY_CODE = 'KeyO';
     const CONTEXT = window === window.top ? "TOP" : "IFRAME";
     const CHANNEL_NAME = "AIM_STYLER_CHANNEL";
+
+    // v34.121 — Data View support. The data_view route is Percepto's LEGACY
+    // AngularJS app: single frame (no map iframe), Leaflet map mounted in the
+    // TOP window, map instance on $rootScope.current_map. There the TOP
+    // instance IS the renderer (on Site Setup, rendering stays in the map
+    // IFRAME and TOP is just a channel relay). Route is dynamic (SPA hash),
+    // so this is a function, not a const.
+    function isDataViewRoute() {
+        try { return /#\/site\/\d+\/data_view\//.test((window.top || window).location.hash || ''); }
+        catch (e) { return /#\/site\/\d+\/data_view\//.test(location.hash || ''); }
+    }
+    function rendersInThisFrame() {
+        return CONTEXT === 'IFRAME' || (CONTEXT === 'TOP' && isDataViewRoute());
+    }
     const FRAME_ID = `${CONTEXT}@${location.pathname}${location.search ? '?' + location.search.slice(0, 40) : ''}`;
     const TAG = `[AIM STYLER ${FRAME_ID}]`;
     // SCRIPT_VERSION moved UP here in v34.39 so the init log (which uses
@@ -43,7 +57,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.120';
+    const SCRIPT_VERSION = '34.121';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -3679,6 +3693,23 @@
                 }
             } catch (e) {}
         }
+        // v34.121 — Data View (legacy Angular app): the map is NEVER on the
+        // container's props there; it lives on $rootScope.current_map.
+        // Guarded on a container existing in THIS document so the SS top
+        // frame (Angular shell, but map in iframe → no container here)
+        // can't latch onto a stale reference.
+        try {
+            const ng = window.angular;
+            if (ng && containers.length && typeof ng.element === 'function') {
+                const scope = ng.element(containers[0]).scope();
+                const root = scope && scope.$root;
+                if (root && looksLikeLeafletMap(root.current_map)) {
+                    console.log(`${TAG} captured Leaflet map via angular $rootScope.current_map (Data View)`);
+                    leafletMapRef = root.current_map;
+                    return leafletMapRef;
+                }
+            }
+        } catch (e) { /* not an angular-managed page — fall through */ }
         return null;
     }
 
@@ -7933,8 +7964,9 @@
             // TOP frame caps at 5 attempts (1s) because Percepto's Leaflet
             // map is always in the IFRAME — TOP retrying for 30s is just
             // noise. IFRAME keeps the full 30s budget because its first-load
-            // can take ~7s on some pages.
-            const cap = (CONTEXT === 'TOP') ? 5 : 150;
+            // can take ~7s on some pages. v34.121: EXCEPT on Data View,
+            // where the map genuinely lives in TOP — full budget there.
+            const cap = (CONTEXT === 'TOP' && !isDataViewRoute()) ? 5 : 150;
             if (attempt > cap) {
                 if (CONTEXT === 'TOP') {
                     console.log(`${TAG} no map-pane in TOP frame after ${cap} tries — that's expected; map lives in iframe.`);
@@ -8212,12 +8244,13 @@
                     const sid = getCurrentSiteID();
                     if (sid) fetchKMLForSite(sid, true);
                 }
-            } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID && CONTEXT === 'IFRAME') {
+            } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID && rendersInThisFrame()) {
                 // Button-type controls in the panel broadcast this when clicked.
                 // Two gates here:
-                //   1. CONTEXT === 'IFRAME' — TOP doesn't render anything; running
-                //      actions there at best wastes CPU and at worst (split) fires
-                //      confirm() + GitHub PUT twice.
+                //   1. rendersInThisFrame() — the IFRAME on Site Setup, or TOP on
+                //      Data View (v34.121). A non-rendering frame running actions
+                //      at best wastes CPU and at worst (split) fires confirm() +
+                //      GitHub PUT twice.
                 //   2. document.hasFocus() — BroadcastChannel delivers to EVERY
                 //      open AIM tab in the same origin, not just the one the
                 //      user clicked in. Without this gate, clicking Split on
@@ -8227,6 +8260,24 @@
                 if (!document.hasFocus()) {
                     console.log(`${TAG} TRIGGER_ACTION ${msg.actionId} arrived but tab is not focused — ignoring (cross-tab broadcast).`);
                     return;
+                }
+                // v34.121 — Data View is VIEW-ONLY: overlays, basemaps, and
+                // local view prefs work; anything that edits KML data, draws,
+                // or validates against Site Setup entities stays SS-only.
+                // Blocked loudly (toast), never silently.
+                if (CONTEXT === 'TOP') {
+                    const DV_SAFE_ACTIONS = [
+                        'clear-hides-distro', 'clear-hides-trans',
+                        'unhide-file-distro', 'unhide-file-trans',
+                        'basemap-set-custom',
+                        'parcels-arm', 'parcels-clear',
+                        'rrc-scout-view', 'rrc-scout-clear', 'rrc-recon',
+                    ];
+                    if (!DV_SAFE_ACTIONS.includes(msg.actionId)) {
+                        showKMLToast('That tool is Site-Setup-only — Data View is view-only.', 4000);
+                        console.log(`${TAG} TRIGGER_ACTION ${msg.actionId} blocked on Data View (view-only)`);
+                        return;
+                    }
                 }
                 if (msg.actionId === 'run-validator') runCoverageValidator();
                 else if (msg.actionId === 'clear-validator') clearCoverageValidator();
@@ -8749,9 +8800,27 @@
     // stays loaded across site changes, so we have to spot the hash change
     // ourselves and re-fetch the appropriate KML and reload validator pins).
     let lastSiteID = getCurrentSiteID();
+    let lastWasDataView = CONTEXT === 'TOP' && isDataViewRoute();
     window.addEventListener('hashchange', () => {
         const sid = getCurrentSiteID();
-        if (sid === lastSiteID) return;
+        // v34.121 — also react to route flips between Data View and other
+        // routes on the SAME site: in TOP, the map pane only exists on the
+        // data_view route, so the observer must (re-)attach when we arrive
+        // there (the site-unchanged early-return used to swallow this).
+        const dvNow = CONTEXT === 'TOP' && isDataViewRoute();
+        const dvFlipped = dvNow !== lastWasDataView;
+        lastWasDataView = dvNow;
+        if (sid === lastSiteID && !dvFlipped) return;
+        if (sid === lastSiteID && dvFlipped) {
+            if (isActive && dvNow) {
+                console.log(`${TAG} route changed to data_view — attaching observer to TOP map`);
+                if (observer) { observer.disconnect(); observer = null; }
+                observerTarget = null;
+                attachObserverWhenReady();
+                if (sid) fetchKMLForSite(sid);
+            }
+            return;
+        }
         lastSiteID = sid;
         // Any in-progress vertex edit OR draw mode belongs to the
         // previous site — bail out silently so handles/clicks don't
