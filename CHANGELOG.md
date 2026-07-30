@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-30 — Mission Bank Tools v2.12 + Asset Inspector v4.213 (dev/latest): 👁 preview on the Mission Bank side + Show-ALL mode
+
+- **👁 on Mission Bank too** — the mission-preview overlay (map-tools 👁 button, picker panel, and the M2 inspector popup's 👁 button) now also works on the Mission Bank route, so you can see any mission's steps on the map without opening it in the editor.
+- **👁 Show ALL missions** — new Control Panel toggle (under Mission Bank Tools, default off): overlays every mission on the site as light canvas dots (nav blue / snap pink) — no dashed lines, no N#/S# labels, no tooltips. Canvas dots are one shared paint layer instead of one DOM element per badge, so ALL-on stays light even on mission-heavy sites. Missions you check in the picker (or 👁 from the popup) still render in full detail on top.
+
 ## 2026-07-30 — Mission Bank Tools v2.11 (dev/latest): mission-preview line always pink
 
 - 👁 Mission preview (Site Setup): the dashed flight-order line is now always snapshot-pink too (was per-mission palette color). Mission identity lives in the picker's swatch/checkbox only.

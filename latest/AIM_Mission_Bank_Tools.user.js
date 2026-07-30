@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.11
+// @version      2.12
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.11';
+    const SCRIPT_VERSION = '2.12';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -357,6 +357,13 @@
                             else { try { mpvTeardown(); } catch (e) {} }
                         }
                     }
+                } else if (msg.toggleId === 'preview-all') {
+                    const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                    if (v !== mpvAllOn) {
+                        mpvAllOn = v;
+                        gmSet(CACHE_KEY_MPV_ALL, mpvAllOn);
+                        if (CONTEXT === 'IFRAME') try { mpvAllChanged(); } catch (e) {}
+                    }
                 } else if (msg.toggleId === 'default-snap-agl') {
                     const v = Number(msg.value !== undefined ? msg.value : msg.enabled);
                     if (isFinite(v) && v !== defaultSnapAglFt) {
@@ -403,7 +410,8 @@
                 { id: 'collapse-editor-cards', label: 'Collapse scan-block cards in the native editor', type: 'boolean', default: true },
                 { id: 'map-step-badges', label: 'N#/S# map step badges + Click-to-Add (OFF = perf test)', type: 'boolean', default: true },
                 { id: 'hide-flagpole-overlay', label: 'Hide Flag Pole scan overlay (blue cone)', type: 'boolean', default: false },
-                { id: 'mission-preview', label: '👁 Mission preview on Site Setup (map-tools button)', type: 'boolean', default: true },
+                { id: 'mission-preview', label: '👁 Mission preview (map-tools button, Site Setup + Mission Bank)', type: 'boolean', default: true },
+                { id: 'preview-all', label: '👁 Show ALL missions (light dots — no lines/labels)', type: 'boolean', default: false },
                 { id: 'default-snap-agl', label: 'Default snapshot AGL (auto-AGL toggle)', type: 'number', min: -50, max: 500, step: 1, default: 10, unit: 'ft' },
                 { id: 'colors-header', label: 'Step colors (editor cards + map badges)', type: 'header' },
                 { id: 'color-nav', label: 'Navigate', type: 'color', default: STEP_COLOR_DEFAULTS.nav },
@@ -1715,7 +1723,6 @@
         // template on every mission SAVE — see applyWrapToBodyStr).
         wrapBtn.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); toggleAutoWrap(); };
         row2.appendChild(autoBtn); row2.appendChild(stageBtn); row2.appendChild(caBtn); row2.appendChild(wrapBtn);
-        updateWrapBtn();
         // Row 3: the Click-to-Add "Insert at" bar (shown only while the mode is ON).
         const row3 = document.createElement('div');
         row3.id = CA_BAR_ID;
@@ -1731,6 +1738,7 @@
         updateAutoSnapAglUI();
         updateAglViewBtn();
         updateCaUI();
+        updateWrapBtn(); // AFTER the rows are inserted — getElementById needs the button in the DOM
         composerEnsureMapMode(true);
     }
 
@@ -10101,15 +10109,21 @@ ${snapPlacemarks}
     const MPV_SEL_KEY = 'aim-mb-preview-sel';       // { [envSiteKey(sid)]: [missionId, …] }
     const CACHE_KEY_MPV_ENABLED = 'aim-mb-preview-enabled';
     let mpvEnabled = gmGet(CACHE_KEY_MPV_ENABLED, true);
+    // v2.12: "show ALL missions" mode — unchecked missions render as light
+    // canvas dots (no lines/labels); checked ones keep full badges.
+    const CACHE_KEY_MPV_ALL = 'aim-mb-preview-all';
+    let mpvAllOn = gmGet(CACHE_KEY_MPV_ALL, false);
     const MPV_BTN_ID = 'aim-mb-preview-btn';
     const MPV_PANEL_ID = 'aim-mb-preview-panel';
     const MPV_COLORS = ['#7adfe6', '#ffd54f', '#ff8a65', '#aed581', '#ce93d8', '#4fc3f7', '#f48fb1', '#80cbc4', '#ffab91', '#fff176'];
-    const mpv = { channel: null, layers: {}, panelEl: null, onSiteSetup: false };
+    const mpv = { channel: null, layers: {}, panelEl: null, onSiteSetup: false, canvas: null };
 
-    function mpvIsSiteSetup() {
+    // v2.12: preview works on BOTH sides of the bridge — Site Setup AND
+    // Mission Bank (see missions on the map without opening the editor).
+    function mpvRouteOk() {
         const top = (() => { try { return window.top; } catch (e) { return window; } })();
         const hash = (top && top.location && top.location.hash) || location.hash || '';
-        return /#\/site\/\d+\/control-panel\/site-setup/.test(hash);
+        return /#\/site\/\d+\/control-panel\/(site-setup|mission-bank)/.test(hash);
     }
 
     function mpvSelForSite(sid) {
@@ -10195,10 +10209,42 @@ ${snapPlacemarks}
         mpv.layers[m.id] = layers;
     }
 
+    // v2.12: light-mode rendering for "show ALL missions" — one shared
+    // canvas renderer, plain circles (nav blue / snap pink), no polyline,
+    // no labels, no tooltips. DOM divIcon badges are one element each and
+    // choke at all-missions scale; canvas circles are just paint, so this
+    // IS materially lighter, not merely visually quieter.
+    function mpvGetCanvas(L) {
+        if (!mpv.canvas) { try { mpv.canvas = L.canvas({ padding: 0.3 }); } catch (e) { mpv.canvas = null; } }
+        return mpv.canvas;
+    }
+    function mpvDrawMissionLight(m) {
+        const L = composerGetL(), map = getLeafletMap();
+        if (!L || !map || !m || typeof L.circleMarker !== 'function') return;
+        mpvClearMission(m.id);
+        const layers = [];
+        const renderer = mpvGetCanvas(L);
+        const steps = Array.isArray(m.instructions) ? m.instructions : [];
+        for (const s of steps) {
+            if (!s || !s.location || typeof s.location.lat !== 'number' || typeof s.location.lng !== 'number') continue;
+            const t = s.type_name;
+            let color = null, r = 0;
+            if (t === 'navigate') { color = stepColor('nav'); r = 4; }
+            else if (t === 'snapshot') { color = stepColor('snap'); r = 3; }
+            else continue;
+            try {
+                const opts = { radius: r, color: 'rgba(0,0,0,0.55)', weight: 1, fillColor: color, fillOpacity: 0.85, interactive: false };
+                if (renderer) opts.renderer = renderer;
+                layers.push(L.circleMarker([s.location.lat, s.location.lng], opts).addTo(map));
+            } catch (e) {}
+        }
+        mpv.layers[m.id] = layers;
+    }
+
     function mpvRedraw() {
         const sid = getCurrentSiteID();
         mpvClearAll();
-        if (!sid || !mpvIsSiteSetup() || !masterEnabled || !mpvEnabled) return;
+        if (!sid || !mpvRouteOk() || !masterEnabled || !mpvEnabled) return;
         const missions = mpvMissions(sid);
         if (!missions) return;
         const map = getLeafletMap();
@@ -10212,7 +10258,20 @@ ${snapPlacemarks}
         } catch (e) {}
         const sel = new Set(mpvSelForSite(sid));
         for (const m of missions) {
-            if (m && sel.has(m.id)) mpvDrawMission(m, mpvColor(m.id, missions));
+            if (!m) continue;
+            if (sel.has(m.id)) mpvDrawMission(m, mpvColor(m.id, missions));
+            else if (mpvAllOn) mpvDrawMissionLight(m);   // v2.12: sea-of-dots for the rest
+        }
+    }
+
+    // "Show ALL missions" toggled — fetch if the cache is cold, then redraw.
+    function mpvAllChanged() {
+        const sid = getCurrentSiteID();
+        if (!sid || !mpvRouteOk()) return;
+        if (mpvAllOn && !mpvMissions(sid)) {
+            fetchMissions(sid, () => mpvRedraw(), (err) => showToast('Mission fetch failed: ' + err, '#ff5252', 3500));
+        } else {
+            mpvRedraw();
         }
     }
 
@@ -10314,16 +10373,16 @@ ${snapPlacemarks}
     }
 
     function mpvInjectButton() {
-        if (!masterEnabled || !mpvEnabled || !mpvIsSiteSetup()) {
+        if (!masterEnabled || !mpvEnabled || !mpvRouteOk()) {
             if (mpv.onSiteSetup) { mpv.onSiteSetup = false; mpvTeardown(); }
             return;
         }
         if (!mpv.onSiteSetup) {
             mpv.onSiteSetup = true;
-            // Entering SS with a persisted selection: restore the overlay,
-            // fetching missions first if the cache is cold.
+            // Entering the route with a persisted selection (or ALL mode):
+            // restore the overlay, fetching missions first if cache is cold.
             const sid = getCurrentSiteID();
-            if (sid && mpvSelForSite(sid).length && !mpvMissions(sid)) {
+            if (sid && (mpvSelForSite(sid).length || mpvAllOn) && !mpvMissions(sid)) {
                 fetchMissions(sid, () => mpvRedraw(), (err) => console.warn(`${TAG} [mpv] restore fetch failed:`, err));
             } else {
                 mpvRedraw();
@@ -10332,7 +10391,7 @@ ${snapPlacemarks}
         // The map/Leaflet can lag the route change — if overlays should
         // exist but don't yet, retry on this same injection tick.
         const sid = getCurrentSiteID();
-        if (sid && mpvSelForSite(sid).length && !Object.keys(mpv.layers).length
+        if (sid && (mpvSelForSite(sid).length || mpvAllOn) && !Object.keys(mpv.layers).length
             && mpvMissions(sid) && getLeafletMap()) mpvRedraw();
         if (document.getElementById(MPV_BTN_ID)) return;
         const tools = document.querySelector('.map-tools');
@@ -10388,7 +10447,7 @@ ${snapPlacemarks}
             mpv.channel.onmessage = (ev) => {
                 const msg = ev.data || {};
                 if (msg.type !== 'PREVIEW_ASSET' || !msg.name) return;
-                if (!mpvIsSiteSetup()) return;
+                if (!mpvRouteOk()) return;
                 try { mpvPreviewByName(String(msg.name)); }
                 catch (e) { console.warn(`${TAG} [mpv] preview-by-name failed:`, e); }
             };
