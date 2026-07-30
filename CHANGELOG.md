@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-30 — Mission Bank Tools v2.09 (dev/latest): 🎞 Auto-Wrap on save + 🌐 site-wide wrap
+
+- **Auto-Wrap (right-click the 🎞 button).** Toggles auto-wrap for **this session only**: every mission SAVE automatically inserts your last-used wrap template after each bare snapshot (same save hook as Auto-AGL), shows a toast with what it added, then **verifies** by re-fetching the saved mission — green ✓ when every snapshot has its scan steps, red ⚠ if any are still bare. Button turns orange (🎞 AUTO) while armed; right-click again to turn off.
+- **🌐 Site-wide wrap.** New SITE-WIDE section in the 🎞 popup: applies the selected template to **every mission on the site** that has bare snapshots. Dry-run count → confirm dialog → JSON backup of the affected missions downloads first → sequential saves → fresh-fetch verification with a per-mission report. Double-click armed.
+
 ## 2026-07-30 — Mission Bank Tools v2.08 + Asset Inspector v4.212 (latest only): 👁 Mission preview in Site Setup
 
 The first piece of the SS↔MB bridge (features [#212]) — see the missions while you edit the site setup:

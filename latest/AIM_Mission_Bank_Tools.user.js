@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.08
+// @version      2.09
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.08';
+    const SCRIPT_VERSION = '2.09';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -2183,6 +2183,195 @@
             return true;
         } catch (e) { console.warn(`${TAG} [wrap] setCurrentApp failed`, e); showToast('Apply failed — see console.', '#ff5252', 3500); return false; }
     }
+    // ── Auto-wrap (session-only) + site-wide wrap ────────────────────────────
+    // M2 on the 🎞 button toggles AUTO-WRAP for THIS SESSION (deliberately not
+    // persisted): every mission SAVE gets the last-used template inserted after
+    // each bare snapshot via the outgoing-body interceptor (handleMissionSave),
+    // then a post-save fresh-fetch VERIFIES no snapshot is left bare.
+    // Site-wide: 🌐 in the 🎞 popup wraps EVERY mission on the site with bare
+    // snapshots via ctx.saveApp — dry-run count → confirm → JSON backup download
+    // → sequential saves → fresh-fetch verify. Steps normalized via pcmNormStep
+    // (the LIVE-CONFIRMED merge-save shape; identity is positional, never id).
+    let autoWrapEnabled = false; // session-only ON PURPOSE — never persisted
+    let wrapSiteBusy = false;
+    let wrapVerifyT = null;
+    // Wire-shape bare check (body.instructions / fetched mission.instructions —
+    // plain type numbers): snapshot=6 is bare iff the NEXT step is a takeoff(0)/
+    // nav(1)/snapshot(6)/returnHome(99) or the end of the list.
+    function wrapWireBareIdxs(instrs) {
+        const out = [];
+        for (let i = 0; i < (instrs || []).length; i++) {
+            const s = instrs[i];
+            if (!s || s.type !== 6) continue;
+            const nxt = instrs[i + 1];
+            if (nxt === undefined || nxt.type === 0 || nxt.type === 1 || nxt.type === 6 || nxt.type === 99) out.push(i);
+        }
+        return out;
+    }
+    // Resolve the LAST-USED template to raw preset instructions, or {error}.
+    function wrapResolveLast() {
+        const name = gmGet(CACHE_KEY_WRAP_LAST, null);
+        if (!name) return { error: 'no template used yet — open 🎞 and Apply one once' };
+        const all = wrapTemplatesLoad(); const tpl = all[name];
+        if (!tpl || !Array.isArray(tpl.steps) || !tpl.steps.length) return { error: `template "${name}" no longer exists` };
+        const presets = stagePresetsLoad();
+        const missing = tpl.steps.filter(n => !presets[n] || !presets[n].instr);
+        if (missing.length) return { error: `template "${name}" uses missing preset(s): ${missing.join(', ')}` };
+        return { name, steps: tpl.steps.map(n => presets[n].instr) };
+    }
+    // Insert normalized template clones after every bare snapshot. Existing
+    // entries pass through untouched; located preset types (flag pole) land at
+    // the snapshot's point. Returns {list, applied, skipped}.
+    function wrapInsertWire(instrs, tplSteps) {
+        const bare = new Set(wrapWireBareIdxs(instrs));
+        const out = []; let applied = 0, skipped = 0;
+        (instrs || []).forEach((s, i) => {
+            out.push(s);
+            if (!s || s.type !== 6) return;
+            if (!bare.has(i)) { skipped++; return; }
+            tplSteps.forEach(t => {
+                const c = pcmNormStep(t);
+                if (c.location && c.location.lat != null && s.location && s.location.lat != null) c.location = { lat: s.location.lat, lng: s.location.lng };
+                out.push(c);
+            });
+            applied++;
+        });
+        return { list: out, applied, skipped };
+    }
+    function toggleAutoWrap() {
+        if (!autoWrapEnabled) {
+            const r = wrapResolveLast();
+            if (r.error) { showToast(`Can't arm Auto-wrap: ${r.error}.`, '#ff9800', 5000); return; }
+            autoWrapEnabled = true;
+            showToast(`🎞 AUTO-WRAP ON (this session) — "${r.name}" is applied to bare snapshots on every mission SAVE, then verified. Right-click 🎞 to turn off.`, '#ff7a00', 7000);
+            console.log(`${TAG} [wrap] auto-wrap ON (template "${r.name}")`);
+        } else {
+            autoWrapEnabled = false;
+            showToast('🎞 Auto-wrap OFF.', '#888', 2500);
+            console.log(`${TAG} [wrap] auto-wrap OFF`);
+        }
+        updateWrapBtn();
+    }
+    function updateWrapBtn() {
+        const b = document.getElementById(WRAP_BTN_ID);
+        if (!b) return;
+        if (autoWrapEnabled) {
+            b.textContent = '🎞 AUTO';
+            b.title = `AUTO-WRAP ON (session only): "${gmGet(CACHE_KEY_WRAP_LAST, '?')}" is applied to bare snapshots on every mission SAVE, with post-save verification. Right-click to turn off. Left-click opens templates.`;
+            b.style.background = 'rgba(255,122,0,0.22)'; b.style.border = '1px solid #ff7a00'; b.style.color = '#ff9d3a';
+        } else {
+            b.textContent = '🎞 Wrap';
+            b.title = 'Wrap templates: apply a saved sequence of your step presets (e.g. Therm on → GEM on → Wait → GEM off → Therm off) after EVERY snapshot that has no trailing steps yet. Left-click: open/manage/apply. RIGHT-CLICK: toggle AUTO-WRAP (auto-applies on every SAVE, this session only).';
+            b.style.background = 'rgba(255,150,255,0.10)'; b.style.border = '1px solid rgba(255,150,255,0.45)'; b.style.color = '#f9f';
+        }
+    }
+    // Save-interceptor pass (called from handleMissionSave when armed): rewrite
+    // the outgoing POST /available_app/ body. Fail-open — any problem returns
+    // null and the native save goes through untouched.
+    function applyWrapToBodyStr(bodyStr) {
+        const body = JSON.parse(bodyStr);
+        if (!body || !Array.isArray(body.instructions)) return null;
+        const r = wrapResolveLast();
+        if (r.error) { showToast(`🎞 Auto-wrap SKIPPED this save: ${r.error}.`, '#ff9800', 5000); return null; }
+        const w = wrapInsertWire(body.instructions, r.steps);
+        if (!w.applied) {
+            showToast(`🎞 Auto-wrap: nothing to add — all ${w.skipped} snapshot(s) already wrapped.`, '#9ad', 3500);
+            return null;
+        }
+        body.instructions = w.list;
+        showToast(`🎞 Auto-wrap: added "${r.name}" after ${w.applied} snapshot(s) on save${w.skipped ? ` (${w.skipped} already wrapped)` : ''} — verifying…`, '#5fff5f', 5000);
+        console.log(`${TAG} [wrap] auto-applied "${r.name}" ×${w.applied} to "${body.name}" on save`);
+        scheduleWrapVerify(body.name, body.app_id);
+        return JSON.stringify(body);
+    }
+    // Post-save verification: fresh-fetch the site's missions and confirm the
+    // saved mission has ZERO bare snapshots. Green ✓ / red ⚠ toast either way.
+    function scheduleWrapVerify(name, appId) {
+        if (wrapVerifyT) clearTimeout(wrapVerifyT);
+        wrapVerifyT = setTimeout(() => {
+            wrapVerifyT = null;
+            const sid = getCurrentSiteID();
+            if (!sid) return;
+            mbFetchMissionsFull(sid).then(arr => {
+                const m = arr.find(x => x && ((appId != null && (x.app_id === appId || x.id === appId)) || x.name === name));
+                if (!m) { showToast(`⚠ Auto-wrap verify: couldn't re-fetch "${name}" — check it manually.`, '#ff9800', 5000); return; }
+                const bare = wrapWireBareIdxs(m.instructions || []).length;
+                if (bare === 0) showToast(`✓ Auto-wrap VERIFIED — every snapshot in "${name}" has its scan steps.`, '#5fff5f', 4500);
+                else showToast(`⚠ Auto-wrap verify FAILED — ${bare} snapshot(s) in "${name}" still bare. Open it and check.`, '#ff5252', 8000);
+                console.log(`${TAG} [wrap] verify "${name}": ${bare} bare snapshot(s)`);
+            }).catch(e => { console.warn(`${TAG} [wrap] verify fetch failed`, e); showToast('⚠ Auto-wrap verify fetch failed — see console.', '#ff9800', 4000); });
+        }, 2500);
+    }
+    // Site-wide apply: every mission with bare snapshots gets the template,
+    // saved via ctx.saveApp (update in place, name preserved).
+    async function wrapApplySiteWide(tplName) {
+        if (wrapSiteBusy) { showToast('Site-wide wrap already running…', '#ff9800', 2500); return; }
+        if (document.querySelector('.edit-instruction')) { showToast('Close the open STEP editor first (save or cancel it), then retry.', '#ff9800', 4500); return; }
+        const all = wrapTemplatesLoad(); const tpl = all[tplName];
+        if (!tpl || !Array.isArray(tpl.steps) || !tpl.steps.length) { showToast('Pick a template with steps first.', '#ff9800', 3000); return; }
+        const presets = stagePresetsLoad();
+        const missing = tpl.steps.filter(n => !presets[n] || !presets[n].instr);
+        if (missing.length) { showToast(`Template uses missing preset(s): ${missing.join(', ')}.`, '#ff5252', 6000); return; }
+        const tplSteps = tpl.steps.map(n => presets[n].instr);
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4500); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site detected.', '#ff5252', 3000); return; }
+        wrapSiteBusy = true;
+        try {
+            showToast('🌐 Fetching all missions…', '#9cf', 2500);
+            const missions = await mbFetchMissionsFull(sid);
+            const affected = missions.map(m => ({ m, bare: wrapWireBareIdxs(m.instructions || []).length })).filter(x => x.bare > 0);
+            if (!affected.length) { showToast(`✓ Nothing to do — all ${missions.length} mission(s) already fully wrapped.`, '#5fff5f', 5000); return; }
+            const totalSnaps = affected.reduce((a, x) => a + x.bare, 0);
+            if (!window.confirm(`Apply wrap "${tplName}" (${tpl.steps.length} steps) SITE-WIDE?\n\n` +
+                `${affected.length} of ${missions.length} missions have bare snapshots (${totalSnaps} snapshot(s) total).\n` +
+                `A JSON backup of the affected missions downloads first.\n\nThis SAVES every affected mission. Continue?`)) return;
+            try {
+                const backup = JSON.stringify({ site: sid, savedAt: new Date().toISOString(), template: tplName, missions: affected.map(x => x.m) });
+                const blob = new Blob([backup], { type: 'application/json' });
+                const blobUrl = URL.createObjectURL(blob);
+                let downloaded = false;
+                for (const doc of [(window.top || window).document, document]) {
+                    if (downloaded) break;
+                    try {
+                        const a = doc.createElement('a');
+                        a.href = blobUrl; a.download = `site${sid}_missions_prewrap_backup.json`;
+                        (doc.body || document.body).appendChild(a); a.click(); a.remove();
+                        downloaded = true;
+                    } catch (e) {}
+                }
+                setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 5000);
+                if (!downloaded) throw new Error('no frame allowed the download');
+            } catch (e) {
+                console.warn(`${TAG} [wrap] backup download failed`, e);
+                if (!window.confirm('Backup download FAILED — continue WITHOUT a backup?')) return;
+            }
+            let ok = 0, fail = 0; const failedNames = [];
+            for (let k = 0; k < affected.length; k++) {
+                const { m } = affected[k];
+                try {
+                    const norm = (m.instructions || []).map(pcmNormStep);
+                    const w = wrapInsertWire(norm, tplSteps);
+                    await ctx.saveApp(Object.assign({}, m, { instructions: w.list }), m.name);
+                    ok++;
+                } catch (e) { fail++; failedNames.push(m.name); console.warn(`${TAG} [wrap] site-wide save FAILED for "${m.name}"`, e); }
+                if ((k + 1) % 5 === 0 || k === affected.length - 1) showToast(`🌐 Wrapping… ${k + 1}/${affected.length}`, '#9cf', 1500);
+                await new Promise(r => setTimeout(r, 150));
+            }
+            showToast('🌐 Verifying (fresh fetch)…', '#9cf', 2500);
+            await new Promise(r => setTimeout(r, 1500));
+            const after = await mbFetchMissionsFull(sid);
+            const stillBare = after.filter(m => wrapWireBareIdxs(m.instructions || []).length > 0);
+            const good = fail === 0 && stillBare.length === 0;
+            showToast(`🌐 Site-wide wrap done: ${ok} mission(s) saved${fail ? `, ${fail} FAILED` : ''} · verify: ${good ? 'ALL missions fully wrapped ✓' : `⚠ ${stillBare.length} mission(s) still have bare snapshots — see console`}`, good ? '#5fff5f' : '#ff9800', 10000);
+            console.log(`${TAG} [wrap] site-wide result: ok=${ok} fail=${fail}${failedNames.length ? ` failed=[${failedNames.join(', ')}]` : ''} stillBare=[${stillBare.map(m => m.name).join(', ') || 'none'}]`);
+            try { fetchMissions(sid, () => {}, () => {}); } catch (e) {} // refresh MBT's cache
+        } catch (e) {
+            console.warn(`${TAG} [wrap] site-wide failed`, e);
+            showToast('Site-wide wrap failed — see console.', '#ff5252', 5000);
+        } finally { wrapSiteBusy = false; }
+    }
     function wrapPopup(anchorBtn) {
         if (wrapPopEl) { wrapPopEl.remove(); wrapPopEl = null; return; }
         const selCss = 'background:#0f1216;border:1px solid #9cf;color:#fff;border-radius:3px;padding:3px 4px;font:inherit;font-size:11px;';
@@ -2209,6 +2398,11 @@
                     <button class="aim-mb-tbtn" data-wr-close style="padding:5px 10px;">Close</button>
                     <button data-wr-save style="padding:5px 12px;background:#9cf;border:none;color:#06223a;border-radius:6px;cursor:pointer;font-weight:800;font-size:12px;">💾 Save template</button>
                 </div>
+            </div>
+            <div style="border-top:1px solid #34404e;padding-top:6px;margin-top:8px;">
+                <div style="font-size:10px;font-weight:800;color:#ff9d3a;margin-bottom:4px;">SITE-WIDE</div>
+                <button data-wr-site style="width:100%;padding:5px 8px;font-size:11px;font-weight:700;cursor:pointer;border-radius:6px;background:rgba(255,122,0,0.10);border:1px solid rgba(255,122,0,0.5);color:#ff9d3a;">🌐 Apply selected template to ALL missions…</button>
+                <div style="font-size:10px;color:#789;margin-top:4px;">Saves every mission on this site that has bare snapshots — backup JSON downloads first, then a fresh-fetch verify. Tip: RIGHT-CLICK the 🎞 button = Auto-wrap on every save (this session).</div>
             </div>`;
         document.body.appendChild(pop);
         wrapPopEl = pop;
@@ -2314,7 +2508,25 @@
             const n = selEl.value;
             if (!n) { showToast('No template selected — build one below first.', '#ff9800', 3000); return; }
             gmSet(CACHE_KEY_WRAP_LAST, n);
+            updateWrapBtn(); // AUTO tooltip tracks the last-used template
             if (wrapApplyTemplate(n)) close();
+        };
+        // Site-wide is double-click armed (blast radius: saves every affected mission).
+        let wrSiteArm = null;
+        pop.querySelector('[data-wr-site]').onclick = () => {
+            const n = selEl.value;
+            if (!n) { showToast('No template selected.', '#ff9800', 2500); return; }
+            const btn = pop.querySelector('[data-wr-site]');
+            if (!wrSiteArm) {
+                wrSiteArm = setTimeout(() => { wrSiteArm = null; try { btn.textContent = '🌐 Apply selected template to ALL missions…'; } catch (e) {} }, 4000);
+                btn.textContent = '⚠ Click again to wrap ALL missions on this site';
+                return;
+            }
+            clearTimeout(wrSiteArm); wrSiteArm = null;
+            gmSet(CACHE_KEY_WRAP_LAST, n);
+            updateWrapBtn();
+            close();
+            wrapApplySiteWide(n);
         };
         const r = anchorBtn.getBoundingClientRect();
         pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 316)) + 'px';
@@ -8640,6 +8852,13 @@ ${snapPlacemarks}
         if (autoSnapAglEnabled && renameSuppressAutoAgl === 0) {
             try { const s = applySnapAglToBodyStr(working); if (s) working = s; }
             catch (e) { console.warn(`${TAG} [auto-agl] pass error — leaving snapshots unchanged:`, e); }
+        }
+        // 1.5 Auto-wrap pass (session toggle via M2 on the 🎞 button): insert the
+        //     last-used wrap template after every bare snapshot in the outgoing
+        //     body, then schedule a post-save fresh-fetch verification.
+        if (autoWrapEnabled) {
+            try { const s = applyWrapToBodyStr(working); if (s) working = s; }
+            catch (e) { console.warn(`${TAG} [wrap] auto-wrap pass error — body unchanged:`, e); }
         }
         // 2. Fast bulk-save pass (staged altitude edits), if enabled.
         if (fastBulkSave) {
