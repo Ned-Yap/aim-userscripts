@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.210
+// @version      4.211
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.210';
+    const SCRIPT_VERSION = '4.211';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -256,6 +256,19 @@
             if (m2) return m2[1];
         } catch (e) {}
         return null;
+    }
+
+    // v4.211: are we on the Mission Bank route? Swaps the inspector's
+    // "Find in Map Entities" button (which needs the Site Setup sidebar)
+    // for "Find in Missions". Same top-frame-first hash read as
+    // getCurrentSiteID / MBT's isOnMissionBank.
+    const MISSION_BANK_ROUTE_RE = /#\/site\/\d+\/control-panel\/mission-bank/;
+    function isMissionBankRoute() {
+        try {
+            const topHash = (window.top && window.top.location && window.top.location.hash) || '';
+            if (MISSION_BANK_ROUTE_RE.test(topHash)) return true;
+        } catch (e) { /* cross-origin top */ }
+        return MISSION_BANK_ROUTE_RE.test(location.hash || '');
     }
 
     // Pull the human-readable site name from the page header's site
@@ -4817,15 +4830,33 @@
         const footer = document.createElement('div');
         footer.style.cssText = 'display:flex;gap:6px;padding:7px 12px;border-top:1px solid rgba(255,255,255,0.08);margin-top:2px';
 
+        // v4.211: context-aware Find — the Map Entities sidebar doesn't
+        // exist on the Mission Bank route; search the missions list for a
+        // mission named after this asset instead (feature #211). Site
+        // Setup keeps the original button unchanged.
+        const inMissionBank = isMissionBankRoute();
         const findBtn = document.createElement('button');
-        findBtn.textContent = '🔍 Find in Map Entities';
+        findBtn.textContent = inMissionBank ? '🔍 Find in Missions' : '🔍 Find in Map Entities';
         findBtn.style.cssText = 'flex:1;background:rgba(20,210,220,0.18);color:#7adfe6;border:1px solid rgba(20,210,220,0.45);border-radius:3px;padding:5px 8px;cursor:pointer;font:inherit;font-size:11px';
         findBtn.onclick = (ev) => {
             ev.stopPropagation();
-            findEntityInSidebar(entity);
+            if (inMissionBank) findEntityInMissions(entity);
+            else findEntityInSidebar(entity);
             closeInspector();
         };
         footer.appendChild(findBtn);
+
+        // v4.211: 🎯 Focus — pan + zoom so the whole entity fills the frame
+        // (feature #210). Popup stays open so the details stay readable.
+        const focusBtn = document.createElement('button');
+        focusBtn.textContent = '🎯 Focus';
+        focusBtn.title = 'Pan + zoom the map to fit this entity in frame';
+        focusBtn.style.cssText = 'flex:0 0 auto;background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 8px;cursor:pointer;font:inherit;font-size:11px';
+        focusBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            focusOnEntity(entity);
+        };
+        footer.appendChild(focusBtn);
 
         // v4.88: 🗺 Maps — opens the GPS point in Google Maps. v4.172: uses the
         // exact right-click point when available, else the entity centroid.
@@ -5014,6 +5045,79 @@
         } catch (e) {
             console.warn(`${TAG} sidebar paste failed, falling back to clipboard:`, e);
             copyToClipboard(name, `Copied "${name}" — paste in Map Entities sidebar`);
+        }
+    }
+
+    // ============================================================
+    // v4.211: "Find in Missions" — Mission Bank twin of the sidebar
+    // search above (feature #211). No Map Entities sidebar exists on
+    // that route, but pads usually have a same-named mission: rank-match
+    // the asset name against the native missions list rows and click the
+    // matched row's edit link to open the mission. The rank ladder
+    // (exact → section-prefixed "NNE - <pad>" suffix → contains) mirrors
+    // MBT's pcmFindMissionCandidates so the two features agree on which
+    // mission a pad name means.
+    // ============================================================
+    const MISSION_ROW_SELECTOR = 'li.missions-list__item';
+    const MISSION_LINK_SELECTOR = 'a[data-testid="edit-mission-link"]';
+
+    function collectMissionRows() {
+        // The missions list may live in our own document, the top document,
+        // or a sibling iframe — same frame-walk as findEntityInSidebar.
+        const docs = [document];
+        try {
+            if (window.top.document !== document) docs.push(window.top.document);
+            const frames = Array.from(window.top.document.querySelectorAll('iframe'));
+            for (const f of frames) {
+                try { if (f.contentDocument && f.contentDocument !== document) docs.push(f.contentDocument); }
+                catch (e) { /* cross-origin frame */ }
+            }
+        } catch (e) { /* cross-origin top */ }
+        const rows = [];
+        for (const doc of docs) {
+            for (const row of doc.querySelectorAll(MISSION_ROW_SELECTOR)) {
+                const link = row.querySelector(MISSION_LINK_SELECTOR) || row.querySelector('a[href]');
+                if (!link) continue;
+                const name = (link.textContent || '').trim();
+                if (name) rows.push({ row, link, name, doc });
+            }
+        }
+        return rows;
+    }
+
+    function findEntityInMissions(entity) {
+        const name = entity && entity.name;
+        if (!name) {
+            showToast('No name on entity to search', 'rgba(255,180,0,0.55)');
+            return;
+        }
+        const rows = collectMissionRows();
+        if (!rows.length) {
+            // Legacy-Angular bank sites have no .missions-list at all
+            // (see MBT v1.98) — same symptom as "list not rendered yet".
+            showToast('Missions list not found — is the Mission Bank list visible?', 'rgba(255,96,96,0.55)');
+            console.warn(`${TAG} no "${MISSION_ROW_SELECTOR}" rows found in any frame`);
+            return;
+        }
+        const want = name.trim().toLowerCase();
+        const norm = r => r.name.toLowerCase();
+        let matches = rows.filter(r => norm(r) === want);
+        if (!matches.length) matches = rows.filter(r => norm(r).endsWith('- ' + want) || norm(r).endsWith('– ' + want));
+        if (!matches.length) matches = rows.filter(r => norm(r).indexOf(want) >= 0);
+        if (!matches.length) {
+            showToast(`No mission matching "${name}" in the list`, 'rgba(255,180,0,0.55)');
+            return;
+        }
+        const hit = matches[0];
+        try { hit.row.scrollIntoView({ block: 'center' }); } catch (e) {}
+        try {
+            clickElDispatch(hit.link, hit.doc);
+            showToast(matches.length > 1
+                ? `${matches.length} missions match — opened "${hit.name}"`
+                : `Opened mission "${hit.name}"`);
+        } catch (e) {
+            console.warn(`${TAG} mission open click failed:`, e);
+            copyToClipboard(name, `Copied "${name}" — find it in the missions list`);
         }
     }
 
@@ -21023,6 +21127,44 @@
         }
         try { map.setView([lat, lng], Math.max(18, map.getZoom())); }
         catch (e) { console.warn(`${TAG} setView threw:`, e); }
+    }
+
+    // v4.211: 🎯 Focus (feature #210) — fit the view to the entity's full
+    // extent so the whole thing is in frame as close as possible. Gathers
+    // every point the entity has (polygon/marker `coords` OR flight-path
+    // `arcs` endpoints), then fitBounds — same idiom as panToSegment.
+    // Single-point entities (GMs, base stations, safe zones) have no
+    // extent, so they get a tight setView instead.
+    function focusOnEntity(entity) {
+        const map = getLeafletMap();
+        if (!map) {
+            showToast('Map not found — cannot focus', 'rgba(255,96,96,0.55)');
+            return;
+        }
+        const pts = [];
+        if (Array.isArray(entity && entity.coords)) {
+            for (const c of entity.coords) {
+                if (c && typeof c.lat === 'number' && typeof c.lng === 'number') pts.push([c.lat, c.lng]);
+            }
+        }
+        if (Array.isArray(entity && entity.arcs)) {
+            for (const a of entity.arcs) {
+                for (const p of [a && a.point_a, a && a.point_b]) {
+                    if (p && typeof p.lat === 'number' && typeof p.lng === 'number') pts.push([p.lat, p.lng]);
+                }
+            }
+        }
+        if (!pts.length) {
+            showToast('No coordinates on entity to focus', 'rgba(255,180,0,0.55)');
+            return;
+        }
+        try {
+            if (pts.length === 1) map.setView(pts[0], Math.max(19, map.getZoom()));
+            else map.fitBounds(pts, { padding: [40, 40], maxZoom: 20 });
+        } catch (e) {
+            console.warn(`${TAG} focusOnEntity failed, falling back to pan:`, e);
+            try { panToEntity(entity); } catch (e2) { console.warn(`${TAG} pan fallback failed:`, e2); }
+        }
     }
 
     // Open an inline editor on a Min Alt / Max Alt / AGL cell of an FP

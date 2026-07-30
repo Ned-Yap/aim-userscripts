@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-30 — Asset Inspector v4.211 (latest only): 🎯 Focus + Find in Missions
+
+- **🎯 Focus** — new button in the right-click inspector popup (features [#210]): pans + zooms the map so the entire entity fits in frame as close as possible (polygons and flight paths use their full extent; single-point markers get a tight zoom). Works on both the Site Setup and Mission Bank maps.
+- **🔍 Find in Missions** — on the Mission Bank route the inspector's "Find in Map Entities" button (which needs the Site Setup sidebar) now becomes "Find in Missions" (features [#211]): it matches the asset's name against the missions list (exact → section-prefixed "NNE - pad" → contains, same ladder as pad-click merge) and opens the matched mission. On Site Setup the button is unchanged.
+
 ## 2026-07-29 — Mission Bank Tools v2.07 → PROD (+ Asset Inspector v4.164.7 hotfix)
 
 Coworkers jump MBT v1.98 → v2.07 on the next Tampermonkey update check. Everything from the v1.99–v2.07 dev arc ships:
