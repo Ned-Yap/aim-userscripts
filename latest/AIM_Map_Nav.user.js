@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Map Nav
 // @namespace    http://tampermonkey.net/
-// @version      0.10
+// @version      0.11
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Map_Nav.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Map_Nav.user.js
-// @description  Keyboard nav for the Percepto map. WASD pan / Q-E zoom out-in (always-on). ALT for sprint (3x). SPACE = zoom-to-fit entire site setup. Other Shift/Ctrl + nav keys pass through to existing macros (Shift+D Delete etc.) and browser shortcuts. For zoom-into-area use Leaflet's native Shift+drag box-zoom. Input-guarded so typing is unaffected.
+// @description  Keyboard nav for the Percepto map. WASD pan / Q-E zoom out-in (always-on). ALT for sprint (3x). SPACE = zoom-to-fit entire site setup. 🧭 map-tools button = go to a pasted GPS coordinate (pan/zoom + pulse marker). Other Shift/Ctrl + nav keys pass through to existing macros (Shift+D Delete etc.) and browser shortcuts. For zoom-into-area use Leaflet's native Shift+drag box-zoom. Input-guarded so typing is unaffected.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -24,6 +24,9 @@
 //   E             = zoom in
 //   Alt + WASD/QE = sprint (3x pan, 1.0 zoom-levels)
 //   Space         = zoom-to-fit entire site setup
+//   🧭 button     = go to a pasted GPS coordinate (v0.11) — popup input,
+//                   pan/zoom + pulsing marker at the exact spot. Lives in
+//                   .map-tools; floats over the map when no bar exists.
 //
 // For zoom-into-an-area use Leaflet's native Shift+drag box-zoom.
 // Map Nav used to have a Shift+Space cursor-zoom (v0.4-v0.6) but the
@@ -64,7 +67,7 @@
     'use strict';
 
     const TAG = '[AIM NAV]';
-    const SCRIPT_VERSION = '0.10';
+    const SCRIPT_VERSION = '0.11';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -274,6 +277,200 @@
         } catch (e) { return false; }
     }
 
+    // ------- 🧭 Go to coordinate (v0.11) -------
+    // Button in .map-tools (floating over the map on layouts with no bar)
+    // → popup input → paste "31.628457, -101.929646" → map pans/zooms there
+    // and a pulsing cyan marker drops at the exact spot. Parser tolerates
+    // parens, semicolons, plain-space separators, and Google-Maps @lat,lng
+    // URLs. Click the marker to remove it; a new jump replaces it.
+    // Injection is gated on findMapInDoc(document) so only the frame that
+    // OWNS the map gets the button — that guarantees window.L, the map, and
+    // the marker all live in the same realm (works on Site Setup AND the
+    // Mission Bank map without cross-frame forwarding).
+    const GOTO_ZOOM = 17;                       // min zoom after a jump (keeps current if already deeper)
+    const GOTO_BTN_ID = 'aim-nav-goto-btn';
+    const GOTO_POPUP_ID = 'aim-nav-goto-popup';
+    let gotoEnabled = true;
+    let gotoMarker = null;
+    let gotoMarkerMap = null;
+
+    // Leaflet interprets clicks bubbling off our UI as map pan/zoom — stop
+    // the full mouse event set at the boundary (same trick as Control Panel).
+    function gotoSwallow(el) {
+        ['click', 'dblclick', 'mousedown', 'mouseup', 'pointerdown', 'pointerup',
+         'wheel', 'contextmenu', 'touchstart', 'touchend'].forEach(evt =>
+            el.addEventListener(evt, e => e.stopPropagation(), false));
+    }
+
+    function gotoGetL() {
+        try {
+            const w = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+            if (w.L && typeof w.L.marker === 'function') return w.L;
+        } catch (e) {}
+        return (window.L && typeof window.L.marker === 'function') ? window.L : null;
+    }
+
+    function ensureGotoStyles() {
+        if (document.getElementById('aim-nav-goto-styles')) return;
+        const st = document.createElement('style');
+        st.id = 'aim-nav-goto-styles';
+        st.textContent = `
+            #${GOTO_POPUP_ID} { position:fixed; z-index:100000; background:#1a1f26; border:1px solid #00e5ff55; border-radius:8px; padding:10px 12px; box-shadow:0 4px 18px rgba(0,0,0,.5); min-width:260px; font-family:inherit; }
+            .aim-nav-goto-title { color:#7adfe6; font-size:12px; font-weight:600; margin-bottom:6px; user-select:none; }
+            .aim-nav-goto-row { display:flex; gap:6px; }
+            #aim-nav-goto-input { flex:1; background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:4px; padding:4px 8px; font-size:12px; outline:none; }
+            #aim-nav-goto-input:focus { border-color:#00e5ff88; }
+            #aim-nav-goto-go { background:#0d3a42; color:#7adfe6; border:1px solid #00e5ff55; border-radius:4px; padding:4px 12px; font-size:12px; cursor:pointer; }
+            #aim-nav-goto-go:hover { background:#0f4a54; }
+            .aim-nav-goto-hint { color:#8b949e; font-size:10px; margin-top:6px; user-select:none; }
+            .aim-nav-goto-bad { border-color:#ff5252 !important; animation:aim-nav-goto-shake .3s; }
+            @keyframes aim-nav-goto-shake { 0%,100%{transform:translateX(0)} 25%{transform:translateX(-4px)} 75%{transform:translateX(4px)} }
+            .aim-nav-goto-wrap { pointer-events:auto; }
+            .aim-nav-goto-dot { position:absolute; left:50%; top:50%; width:10px; height:10px; margin:-5px 0 0 -5px; border-radius:50%; background:#00e5ff; border:2px solid #fff; box-shadow:0 0 6px #00e5ff; }
+            .aim-nav-goto-pulse { position:absolute; left:50%; top:50%; width:26px; height:26px; margin:-13px 0 0 -13px; border-radius:50%; border:2px solid #00e5ff; animation:aim-nav-goto-pulse 1.6s ease-out infinite; }
+            @keyframes aim-nav-goto-pulse { 0% { transform:scale(.4); opacity:.9; } 100% { transform:scale(2.2); opacity:0; } }
+            @media (prefers-reduced-motion: reduce) { .aim-nav-goto-pulse { animation:none; opacity:.5; } }
+            .aim-nav-goto-float { position:fixed; top:12px; right:60px; z-index:99999; width:34px; height:34px; display:flex; align-items:center; justify-content:center; background:#1a1f26; border:1px solid #444; border-radius:6px; cursor:pointer; font-size:16px; box-shadow:0 2px 8px rgba(0,0,0,.4); user-select:none; }
+        `;
+        (document.head || document.documentElement).appendChild(st);
+    }
+
+    function parseCoords(text) {
+        if (!text) return null;
+        let s = String(text).trim();
+        // Google-Maps style URL: .../@31.628457,-101.929646,17z
+        const at = s.match(/@\s*(-?\d{1,3}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)/);
+        if (at) s = `${at[1]}, ${at[2]}`;
+        s = s.replace(/[()[\]]/g, ' ');
+        const m = s.match(/(-?\d{1,3}(?:\.\d+)?)\s*[,;\s]\s*(-?\d{1,3}(?:\.\d+)?)/);
+        if (!m) return null;
+        const lat = parseFloat(m[1]);
+        const lng = parseFloat(m[2]);
+        if (!isFinite(lat) || !isFinite(lng)) return null;
+        if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+        return { lat, lng };
+    }
+
+    function removeGotoMarker() {
+        if (gotoMarker && gotoMarkerMap) {
+            try { gotoMarkerMap.removeLayer(gotoMarker); } catch (e) {}
+        }
+        gotoMarker = null;
+        gotoMarkerMap = null;
+    }
+
+    function dropGotoMarker(map, lat, lng) {
+        removeGotoMarker();
+        const L = gotoGetL();
+        if (!L || typeof L.divIcon !== 'function') {
+            console.warn(`${TAG} [goto] Leaflet L not reachable — jumped without a marker`);
+            return;
+        }
+        try {
+            const icon = L.divIcon({
+                className: 'aim-nav-goto-wrap',
+                html: '<div class="aim-nav-goto-pulse"></div><div class="aim-nav-goto-dot"></div>',
+                iconSize: [26, 26], iconAnchor: [13, 13],
+            });
+            gotoMarker = L.marker([lat, lng], { icon, interactive: true, zIndexOffset: 10000 }).addTo(map);
+            gotoMarkerMap = map;
+            try { gotoMarker.bindTooltip(`${lat.toFixed(6)}, ${lng.toFixed(6)} — click to remove`, { direction: 'top', offset: [0, -12] }); } catch (e) {}
+            gotoMarker.on('click', removeGotoMarker);
+        } catch (e) {
+            console.warn(`${TAG} [goto] marker creation failed:`, e);
+        }
+    }
+
+    function goToCoord(text) {
+        const c = parseCoords(text);
+        if (!c) return false;
+        const map = findMapInDoc(document);
+        if (!map) { console.warn(`${TAG} [goto] no Leaflet map in this frame`); return false; }
+        try { map.setView([c.lat, c.lng], Math.max(map.getZoom(), GOTO_ZOOM), { animate: true }); }
+        catch (e) { console.warn(`${TAG} [goto] setView threw:`, e); return false; }
+        dropGotoMarker(map, c.lat, c.lng);
+        console.log(`${TAG} [goto] jumped to ${c.lat}, ${c.lng}`);
+        return true;
+    }
+
+    function closeGotoPopup() {
+        const p = document.getElementById(GOTO_POPUP_ID);
+        if (p) try { p.remove(); } catch (e) {}
+    }
+
+    function openGotoPopup(anchorEl) {
+        if (document.getElementById(GOTO_POPUP_ID)) { closeGotoPopup(); return; }   // second click = toggle off
+        ensureGotoStyles();
+        const pop = document.createElement('div');
+        pop.id = GOTO_POPUP_ID;
+        pop.innerHTML = `
+            <div class="aim-nav-goto-title">🧭 Go to coordinate</div>
+            <div class="aim-nav-goto-row">
+                <input id="aim-nav-goto-input" type="text" placeholder="31.628457, -101.929646" spellcheck="false" autocomplete="off">
+                <button id="aim-nav-goto-go">Go</button>
+            </div>
+            <div class="aim-nav-goto-hint">Paste decimal lat, lng · Enter = jump · Esc = close · click the dropped pin to remove it</div>
+        `;
+        document.body.appendChild(pop);
+        try {
+            const r = anchorEl.getBoundingClientRect();
+            pop.style.top = `${Math.round(r.bottom + 8)}px`;
+            pop.style.left = `${Math.round(Math.max(8, Math.min(r.left, window.innerWidth - pop.offsetWidth - 8)))}px`;
+        } catch (e) { pop.style.top = '60px'; pop.style.right = '12px'; }
+        gotoSwallow(pop);
+        const input = pop.querySelector('#aim-nav-goto-input');
+        const goBtn = pop.querySelector('#aim-nav-goto-go');
+        const fire = () => {
+            if (goToCoord(input.value)) {
+                closeGotoPopup();
+            } else {
+                input.classList.remove('aim-nav-goto-bad');
+                void input.offsetWidth;              // restart the shake animation
+                input.classList.add('aim-nav-goto-bad');
+                console.warn(`${TAG} [goto] could not parse "${input.value}"`);
+            }
+        };
+        goBtn.addEventListener('click', fire);
+        input.addEventListener('keydown', (e) => {
+            e.stopPropagation();                     // keep WASD/macros out of the input
+            if (e.key === 'Enter') { e.preventDefault(); fire(); }
+            else if (e.key === 'Escape') { e.preventDefault(); closeGotoPopup(); }
+        });
+        setTimeout(() => { try { input.focus(); input.select(); } catch (e) {} }, 0);
+    }
+
+    function gotoTeardown() {
+        const b = document.getElementById(GOTO_BTN_ID);
+        if (b) try { b.remove(); } catch (e) {}
+        closeGotoPopup();
+    }
+
+    function injectGotoButton() {
+        if (!masterEnabled || !gotoEnabled) { gotoTeardown(); return; }
+        if (!findMapInDoc(document)) { gotoTeardown(); return; }    // only the frame that owns a map
+        if (document.getElementById(GOTO_BTN_ID)) return;
+        ensureGotoStyles();
+        const tools = document.querySelector('.map-tools');
+        const btn = document.createElement('div');
+        btn.id = GOTO_BTN_ID;
+        btn.title = 'AIM Go to coordinate — paste GPS lat, lng and jump the map there';
+        btn.textContent = '🧭';
+        if (tools) {
+            btn.className = 'map-tools__button';
+            btn.style.cssText = 'cursor:pointer;font-size:15px;display:flex;align-items:center;justify-content:center;';
+            tools.appendChild(btn);
+        } else {
+            // No .map-tools bar in this layout — float over the map instead.
+            btn.className = 'aim-nav-goto-float';
+            document.body.appendChild(btn);
+        }
+        gotoSwallow(btn);
+        btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openGotoPopup(btn); });
+        console.log(`${TAG} [goto] button injected (${tools ? '.map-tools' : 'floating'})`);
+    }
+
+    setInterval(injectGotoButton, 1000);
+
     // v0.7: zoomInCloseAtCursor + cursor tracking removed. Use Leaflet's
     // built-in Shift+drag box-zoom instead (strictly better UX).
 
@@ -384,10 +581,11 @@
                 registerWithControlPanel();
             } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
                 const v = msg.value !== undefined ? msg.value : msg.enabled;
-                if (msg.toggleId === 'master')      masterEnabled = !!v;
+                if (msg.toggleId === 'master')      { masterEnabled = !!v; injectGotoButton(); }
                 else if (msg.toggleId === 'pan')    panEnabled    = !!v;
                 else if (msg.toggleId === 'zoom')   zoomEnabled   = !!v;
                 else if (msg.toggleId === 'space')  spaceEnabled  = !!v;
+                else if (msg.toggleId === 'goto')   { gotoEnabled  = !!v; injectGotoButton(); }
             }
         };
     }
@@ -405,6 +603,7 @@
                     { id: 'pan',    label: 'WASD pan (Alt for sprint)',     type: 'boolean', default: true },
                     { id: 'zoom',   label: 'Q/E zoom (Alt for sprint)',     type: 'boolean', default: true },
                     { id: 'space',  label: 'Space = zoom-to-fit site',     type: 'boolean', default: true },
+                    { id: 'goto',   label: '🧭 Go-to-coordinate button',   type: 'boolean', default: true },
                 ],
                 hotkeys: [],
             });
@@ -433,5 +632,5 @@
         };
     }
 
-    console.log(`${TAG} v${SCRIPT_VERSION} ready (${FRAME}) — WASD pan · Q/E zoom · Alt sprint · Space = fit site · Shift/Ctrl pass through (use Shift+drag for box-zoom)`);
+    console.log(`${TAG} v${SCRIPT_VERSION} ready (${FRAME}) — WASD pan · Q/E zoom · Alt sprint · Space = fit site · 🧭 go-to-coordinate · Shift/Ctrl pass through (use Shift+drag for box-zoom)`);
 })();

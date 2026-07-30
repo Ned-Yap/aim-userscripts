@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-30 — Map Nav v0.11 (dev/latest): 🧭 Go to coordinate
+
+- New 🧭 button in the map toolbar (Site Setup **and** Mission Bank): paste a GPS coordinate like `31.628457, -101.929646` and the map pans/zooms straight to it, dropping a pulsing cyan pin at the exact spot (click the pin to remove it). Also accepts `lat lng`, parentheses, semicolons, and Google-Maps `@lat,lng` URLs. Toggleable in the Control Panel under Map Nav.
+
 ## 2026-07-30 — Mission Bank Tools v2.13 (dev/latest): mission-preview auto-refresh on save
 
 - 👁 Mission preview: saving a mission in the editor now auto-refreshes the overlay (~1 s after the save lands) — dots, badges, and the dashed line track your edit without unchecking/rechecking. The save hook observes only the response status; the save itself is untouched.
