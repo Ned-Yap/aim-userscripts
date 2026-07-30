@@ -6,6 +6,18 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-30 — Mission Bank Tools v2.15 (dev/latest): 🧠 Auto-Group macro-mission optimizer
+
+The ⛟ Merge panel now *optimizes* instead of just sorting (feature #216). It plans the site's macro missions the way a routing engine would:
+
+- **Real route distances** — pad↔pad and base↔pad along the flight-path graph, with straight-shot shortcuts across open FFZs (sampled so a concave FFZ never grants an illegal cut). Off-graph estimates are flagged, never silent.
+- **Multi-flight battery simulator** — a merged mission takes 2–5 flights; every recharge costs the trip home *plus* the commute back out (Percepto resumes at the last completed step). Pad order is 2-opt-optimized against that total, so battery tends to run out **near** the base. Each group card shows est distance, flight count, `— 🔋 return & recharge —` markers in the pad list, and the estimated battery % on each landing (green/amber/red).
+- **Battery-tier families, your naming** — `East 1` (Tattu, ≤13.5k ft radius), `East 2` (Tulip ≤17.5k, superset of East 1), `East 1-2` when one mission serves either battery. A section that blows past ~600 steps splits into finer compass sub-sectors (`ENE`, `ESE`, …).
+- **Everything is a knob** — tier radii, per-battery flight budgets, usable-battery margin, ft-per-step cost, step cap; editable in the panel, persisted.
+- **👁** draws any group's route on the map (numbered stops + 🔋 break markers) · **🔗** hands a group to the pad-click merge editor for tweaking · **💾 Recipes** banks all groups without creating anything · **⛟ Create** builds them all (now id-normalized — fixes a latent 400 on bulk merged creates).
+
+*Validated offline against site 1583's real map objects: optimizer beat naive far→near by ~8k ft and one full flight on the East group; tier-subset and coverage invariants asserted.*
+
 ## 2026-07-30 — Data View support (dev/latest): Map Styler + right-click inspector + 👁 mission preview
 
 AIM tools now work on the **Data View** page (`…/data_view/` — the media/issues browser with the map on the right). Data View is Percepto's older single-frame app, so every script needed taught where its map lives.

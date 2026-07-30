@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.13
+// @version      2.15
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.13';
+    const SCRIPT_VERSION = '2.15';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -3155,7 +3155,7 @@
         const mrg = document.createElement('button');
         mrg.id = 'aim-mb-gen-merge-btn'; mrg.type = 'button';
         mrg.textContent = '⛟ Merge';
-        mrg.title = 'Group this site\'s solo missions into battery-tiered merged missions per section (furthest→closest from base).';
+        mrg.title = 'Auto-Group: battery-tiered merged missions per section — 2-opt route order + multi-flight battery simulator (breaks planned near base).';
         mrg.style.cssText = 'position:absolute;top:8px;left:118px;z-index:1100;padding:6px 11px;border-radius:6px;cursor:pointer;' +
             'font:800 12px "Lato",sans-serif;border:1.5px solid #ffb74d;background:#241a0d;color:#ffce80;box-shadow:0 2px 8px rgba(0,0,0,0.7);';
         mrg.onclick = e => { e.preventDefault(); e.stopPropagation(); mbOpenMergePanel(); };
@@ -3761,7 +3761,36 @@
     // the server computes route_points/app_data (verified vs a real merged mission).
     // Gated behind the generator unlock (it CREATES missions).
     // ════════════════════════════════════════════════════════════════════════
-    const MB_BATTERY = { tattuMaxFt: 14000, tulipMaxFt: 18000 };
+    // ── Auto-Group config (v2.15, feature #216) — GM-persisted knobs for the
+    // grouping optimizer. Tier radii sit deliberately a hair UNDER the Asset
+    // Inspector Battery column's 14k/18k (user rule 2026-07-30: "maybe even a
+    // hair under — 13.5 and 17.5"). Budgets = TOTAL per-flight range in
+    // ft-equivalents, ≈2× the one-way point-of-no-return estimates (15.5k
+    // Tattu / 20k Tulip with zero capture budget).
+    const AG_CFG_KEY = 'aim-mb-autogroup-cfg';
+    const AG_DEFAULTS = {
+        tattuRadiusFt: 13500,   // one-way route ≤ this → Tattu tier
+        tulipRadiusFt: 17500,   // ≤ this → Tulip tier; beyond → excluded (unflyable)
+        tattuBudgetFt: 31000,   // full-battery total flight distance (ft-equiv)
+        tulipBudgetFt: 40000,
+        marginPct: 82,          // usable % of the budget — the rest is landing reserve
+        stepCostFt: 150,        // ft-equivalent burned per mission step (captures/hover)
+        stepMax: 600,           // soft step cap per merged mission → angular sub-split
+    };
+    let agCfgCache = null;
+    function agCfg() {
+        if (!agCfgCache) {
+            const saved = gmGet(AG_CFG_KEY, null);
+            agCfgCache = Object.assign({}, AG_DEFAULTS, (saved && typeof saved === 'object') ? saved : {});
+            Object.keys(AG_DEFAULTS).forEach(k => { const v = Number(agCfgCache[k]); agCfgCache[k] = (isFinite(v) && v > 0) ? v : AG_DEFAULTS[k]; });
+        }
+        return agCfgCache;
+    }
+    function agSetCfg(patch) {
+        const next = Object.assign({}, agCfg(), patch || {});
+        gmSet(AG_CFG_KEY, next);
+        agCfgCache = null;   // rebuild (validated) on next read
+    }
     const MB_REACH_FFZ_FT = 70, MB_ENTRY_FFZ_FT = 25;
     const MB_CENTRAL_FT = 750;   // asset within this straight-line of base → "Central"
     const MB_SECTION_NAMES = { N: 'North', NE: 'Northeast', E: 'East', SE: 'Southeast', S: 'South', SW: 'Southwest', W: 'West', NW: 'Northwest', C: 'Central' };
@@ -3780,7 +3809,7 @@
     }
     function mbDijkstra(graph, startKey) { const dist = new Map(); if (!graph.adj.has(startKey)) return dist; dist.set(startKey, 0); const vis = new Set(); const pq = [{ k: startKey, d: 0 }]; while (pq.length) { let mi = 0; for (let i = 1; i < pq.length; i++) if (pq[i].d < pq[mi].d) mi = i; const { k, d } = pq.splice(mi, 1)[0]; if (vis.has(k)) continue; vis.add(k); (graph.adj.get(k) || []).forEach(({ to, w }) => { const nd = d + w; if (nd < (dist.has(to) ? dist.get(to) : Infinity)) { dist.set(to, nd); pq.push({ k: to, d: nd }); } }); } return dist; }
     function mbNearestVertex(graph, lat, lng) { let best = null; graph.verts.forEach((v, k) => { const d = mbApproxMeters(lat, lng, v.lat, v.lng); if (!best || d < best.dist) best = { key: k, dist: d, vert: v }; }); return best; }
-    function mbBatteryFor(routeM) { if (routeM == null) return null; const ft = routeM * 3.28084; if (ft <= MB_BATTERY.tattuMaxFt) return { label: 'Tattu', color: '#5fff5f', level: 0 }; if (ft <= MB_BATTERY.tulipMaxFt) return { label: 'Tulip', color: '#ffd54f', level: 1 }; return { label: `⚠ over ${MB_BATTERY.tulipMaxFt.toLocaleString()} ft`, color: '#ff5252', level: 2 }; }
+    function mbBatteryFor(routeM) { if (routeM == null) return null; const ft = routeM * 3.28084; const cfg = agCfg(); if (ft <= cfg.tattuRadiusFt) return { label: 'Tattu', color: '#5fff5f', level: 0 }; if (ft <= cfg.tulipRadiusFt) return { label: 'Tulip', color: '#ffd54f', level: 1 }; return { label: `⚠ over ${cfg.tulipRadiusFt.toLocaleString()} ft`, color: '#ff5252', level: 2 }; }
 
     // 8-way + Central section from base. atan2(dLat,dLng): 0=E, 90=N.
     function mbSection(pt, base) {
@@ -3821,6 +3850,263 @@
         };
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    // AUTO-GROUP OPTIMIZER (v2.15, feature #216) — upgrades the merge from
+    // "sort furthest→closest" to a real routing optimization (small-N CVRP):
+    //   1. ORDER GRAPH — FP graph + each pad as a vertex + line-of-sight
+    //      shortcut edges INSIDE FFZ polygons (flight rule: stay inside FFZ/FP;
+    //      giant open FFZs are crossed straight). LOS edges are containment-
+    //      SAMPLED so concave FFZs never grant an illegal shortcut. Pairwise
+    //      pad↔pad + base↔pad distances via Dijkstra from every pad.
+    //   2. BREAK SIMULATOR — a merged mission spans 2–5 flights; Percepto
+    //      resumes at the last completed step after a recharge, so every
+    //      mid-mission break costs ~2× the distance home (return leg + commute
+    //      back out). The simulator walks an ordering, spends legs + per-step
+    //      capture cost against the usable budget (budget × margin), and
+    //      breaks so the drone can ALWAYS still make it home.
+    //   3. OPTIMIZER — far→near + nearest-neighbor seeds, 2-opt polished,
+    //      scored by the SIMULATOR total (transit + RTB overhead). Far→near
+    //      tends to win: the battery runs low when the drone is near base.
+    // The order graph is SEPARATE from mbBuildRouter's so tier assignment
+    // (routeM → Tattu/Tulip) stays in parity with the Asset Inspector's
+    // Battery-column algorithm.
+    // ════════════════════════════════════════════════════════════════════════
+
+    // Does segment a↔b stay inside `ring`? Sampled every ~20 m with a small
+    // edge tolerance — cheap and reliable, no clipping library needed.
+    function agSegInsideRing(a, b, ring) {
+        const total = mbApproxMeters(a.lat, a.lng, b.lat, b.lng);
+        const n = Math.max(2, Math.ceil(total / 20));
+        for (let i = 1; i < n; i++) {
+            const t = i / n;
+            const p = { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t };
+            if (!genPointInPoly(p, ring) && mbPointToPolygonMeters(p.lat, p.lng, ring) > 8) return false;
+        }
+        return true;
+    }
+
+    // Build the pairwise distance model over the ROUTABLE solos. Returns null
+    // when there is nothing to route with. Distances are in FEET. Pairs the
+    // graph can't connect fall back to straight-line ×1.25 (counted in
+    // offGraphPairs and surfaced in the panel — never silently wrong).
+    function agBuildOrderGraph(ent, solos) {
+        const graph = mbBuildGraph(ent.fps);
+        if (!graph.verts.size) return null;
+        const ffzs = (ent.ffzs || []).map(f => ({ ring: mbSimplifyPolygon(f.ring) })).filter(f => f.ring.length >= 3);
+        const fpVerts = []; graph.verts.forEach((v, k) => fpVerts.push({ key: k, lat: v.lat, lng: v.lng }));
+        const entryM = MB_ENTRY_FFZ_FT / 3.28084, reachM = MB_REACH_FFZ_FT / 3.28084;
+        const link = (ka, kb, w) => { graph.adj.get(ka).push({ to: kb, w }); graph.adj.get(kb).push({ to: ka, w }); };
+        // LOS cliques per FFZ — straight edge only when the segment stays inside.
+        ffzs.forEach(f => {
+            const inside = fpVerts.filter(v => mbPointToPolygonMeters(v.lat, v.lng, f.ring) <= entryM);
+            for (let i = 0; i < inside.length; i++) for (let j = i + 1; j < inside.length; j++) {
+                if (!agSegInsideRing(inside[i], inside[j], f.ring)) continue;
+                link(inside[i].key, inside[j].key, mbApproxMeters(inside[i].lat, inside[i].lng, inside[j].lat, inside[j].lng));
+            }
+        });
+        // Pads as vertices, LOS-linked into their FFZ (or straight to the
+        // nearest in-FFZ FP vertex when no sampled segment survives — the pad
+        // sits within REACH of the FFZ so the stub is short + legal-ish).
+        // FFZ selection measures from the pad's RING points (same predicate as
+        // routeFor) — the centroid alone can sit > REACH from the FFZ even
+        // when the pad edge touches it.
+        const padKeys = solos.map((s, si) => {
+            const c = s.pt;
+            if (!c) return null;
+            const probe = (s.routePts && s.routePts.length) ? s.routePts : [c];
+            let ffz = null, ffzD = Infinity;
+            ffzs.forEach(f => { let best = Infinity; probe.forEach(pp => { const d = mbPointToPolygonMeters(pp.lat, pp.lng, f.ring); if (d < best) best = d; }); if (best < ffzD) { ffzD = best; ffz = f; } });
+            if (!ffz || ffzD > reachM) return null;
+            const k = `pad:${si}`;
+            graph.verts.set(k, { lat: c.lat, lng: c.lng });
+            graph.adj.set(k, []);
+            const inside = fpVerts.filter(v => mbPointToPolygonMeters(v.lat, v.lng, ffz.ring) <= entryM);
+            let linked = 0;
+            inside.forEach(v => { if (agSegInsideRing(c, v, ffz.ring)) { link(k, v.key, mbApproxMeters(c.lat, c.lng, v.lat, v.lng)); linked++; } });
+            if (!linked && inside.length) {
+                let best = null;
+                inside.forEach(v => { const d = mbApproxMeters(c.lat, c.lng, v.lat, v.lng); if (!best || d < best.d) best = { v, d }; });
+                link(k, best.v.key, best.d);
+            } else if (!linked) {
+                return null;   // FFZ has no FP vertices at all — pad unreachable on the graph
+            }
+            return k;
+        });
+        // Base vertices (same resolution as mbBuildRouter): own vertex, stub
+        // edge to the nearest FP vertex.
+        const bases = (ent.baseEnts && ent.baseEnts.length) ? ent.baseEnts.map(b => ({ lat: b.coords[0].lat, lng: b.coords[0].lng })) : (ent.base ? [ent.base] : []);
+        const baseKeys = bases.map((b, bi) => {
+            const bv = mbNearestVertex(graph, b.lat, b.lng);
+            if (!bv) return null;
+            const k = `base:${bi}`;
+            graph.verts.set(k, { lat: b.lat, lng: b.lng });
+            graph.adj.set(k, []);
+            link(k, bv.key, bv.dist);
+            return k;
+        }).filter(Boolean);
+        if (!baseKeys.length) return null;
+        // One Dijkstra per pad + per base — N ≤ ~100, verts a few hundred: cheap.
+        const runs = new Map();
+        padKeys.forEach(k => { if (k) runs.set(k, mbDijkstra(graph, k)); });
+        baseKeys.forEach(k => runs.set(k, mbDijkstra(graph, k)));
+        let offGraphPairs = 0;
+        const straightFt = (a, b) => mbApproxMeters(a.lat, a.lng, b.lat, b.lng) * 3.28084 * 1.25;
+        const lookup = (kFrom, kTo) => {
+            const run = runs.get(kFrom);
+            const m = run ? run.get(kTo) : undefined;
+            if (m == null) { offGraphPairs++; return straightFt(graph.verts.get(kFrom), graph.verts.get(kTo)); }
+            return m * 3.28084;
+        };
+        const padPt = i => solos[i].pt;
+        return {
+            padKeys,
+            // pad index ↔ pad index (indexes into the `solos` array passed in).
+            // A pad that never got a graph vertex estimates straight-line ×1.25
+            // (counted in offGraphPairs) — the panel surfaces it, never Infinity.
+            padDistFt(i, j) {
+                if (i === j) return 0;
+                if (!padKeys[i] || !padKeys[j]) { offGraphPairs++; return straightFt(padPt(i), padPt(j)); }
+                return lookup(padKeys[i], padKeys[j]);
+            },
+            // pad index → closest base
+            baseDistFt(i) {
+                if (!padKeys[i]) { offGraphPairs++; let best = Infinity; bases.forEach(b => { const d = straightFt(b, padPt(i)); if (d < best) best = d; }); return best; }
+                let best = Infinity;
+                baseKeys.forEach(bk => { const d = lookup(bk, padKeys[i]); if (d < best) best = d; });
+                return best;
+            },
+            get offGraphPairs() { return offGraphPairs; },
+        };
+    }
+
+    // Walk an ordering through the battery model. `order` = indexes into the
+    // group's solo list; dPad/dBase in ft; stepsOf(i) = step count of solo i.
+    // Rule: before committing to a pad the drone must reach it, shoot it, AND
+    // still get home within the usable budget — else it breaks off first.
+    function agSimulate(order, dPad, dBase, stepsOf, budgetFt) {
+        const cfg = agCfg();
+        const usable = budgetFt * cfg.marginPct / 100;
+        const flights = [], tight = [];
+        let cur = -1, rem = usable, fPads = [], fDist = 0, overheadFt = 0;
+        const endFlight = () => {
+            const home = cur === -1 ? 0 : dBase(cur);
+            fDist += home;
+            let pct = Math.round((budgetFt - ((usable - rem) + home)) / budgetFt * 100);
+            if (!isFinite(pct)) pct = -99;
+            flights.push({ pads: fPads, distFt: fDist, reservePct: Math.max(-99, pct) });
+        };
+        for (let x = 0; x < order.length; x++) {
+            const i = order[x];
+            const stepFt = stepsOf(i) * cfg.stepCostFt;
+            let legFt = cur === -1 ? dBase(i) : dPad(cur, i);
+            if (cur !== -1 && rem < legFt + stepFt + dBase(i)) {
+                // recharge break: RTB from the current pad, resume from base
+                overheadFt += dBase(cur);
+                endFlight();
+                cur = -1; rem = usable; fPads = []; fDist = 0;
+                legFt = dBase(i);
+                overheadFt += legFt;   // the commute back out to the resume point
+            }
+            if (cur === -1 && rem < legFt + stepFt + dBase(i)) tight.push(i);   // doesn't fit even on a fresh battery — flag, keep going
+            rem -= legFt + stepFt;
+            fDist += legFt + stepFt;
+            fPads.push(i); cur = i;
+        }
+        if (fPads.length) endFlight();
+        return { flights, totalFt: flights.reduce((s, f) => s + f.distFt, 0), overheadFt, tight };
+    }
+
+    // Best visiting order for a set of pads: two seeds (furthest→closest and a
+    // nearest-neighbor chain from the furthest pad), each 2-opt polished with
+    // the SIMULATOR total as the objective — transit and RTB overhead both count.
+    function agOptimizeOrder(idxs, dPad, dBase, stepsOf, budgetFt) {
+        if (idxs.length < 2) return idxs.slice();
+        const cost = o => agSimulate(o, dPad, dBase, stepsOf, budgetFt).totalFt;
+        const farNear = idxs.slice().sort((a, b) => dBase(b) - dBase(a));
+        const nn = [farNear[0]];
+        const left = new Set(farNear.slice(1));
+        while (left.size) {
+            const cur = nn[nn.length - 1];
+            let best = null;
+            left.forEach(j => { const d = dPad(cur, j); if (!best || d < best.d) best = { j, d }; });
+            nn.push(best.j); left.delete(best.j);
+        }
+        let winner = null;
+        [farNear, nn].forEach(seed => {
+            let o = seed.slice(), c = cost(o), improved = true, guard = 0;
+            while (improved && guard++ < 40) {
+                improved = false;
+                for (let i = 0; i < o.length - 1; i++) {
+                    for (let j = i + 1; j < o.length; j++) {
+                        const cand = o.slice(0, i).concat(o.slice(i, j + 1).reverse(), o.slice(j + 1));
+                        const cc = cost(cand);
+                        if (cc < c - 1) { o = cand; c = cc; improved = true; }
+                    }
+                }
+            }
+            if (!winner || c < winner.c) winner = { o, c };
+        });
+        return winner.o;
+    }
+
+    // 16-wind compass name for a chunk of solos (circular-mean bearing from
+    // base). Used when a section splits on the step cap — the sub-sectors get
+    // finer compass names (East → ENE + ESE) instead of A/B suffixes, since
+    // the "1"/"2" slots are battery tiers. Collisions get an _2 suffix.
+    const AG_WINDS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+    function agWindName(list, base, usedNames) {
+        let sx = 0, sy = 0;
+        list.forEach(s => {
+            const dLat = s.pt.lat - base.lat, dLng = (s.pt.lng - base.lng) * Math.cos(base.lat * Math.PI / 180);
+            const h = Math.hypot(dLat, dLng) || 1;
+            sy += dLat / h; sx += dLng / h;
+        });
+        let compass = 90 - Math.atan2(sy, sx) * 180 / Math.PI;   // 0=N, clockwise
+        compass = ((compass % 360) + 360) % 360;
+        let name = AG_WINDS[Math.round(compass / 22.5) % 16];
+        let n = 2;
+        while (usedNames.has(name)) name = `${AG_WINDS[Math.round(compass / 22.5) % 16]}_${n++}`;
+        usedNames.add(name);
+        return name;
+    }
+
+    // Split one section's pads into ≤stepMax chunks: sort by bearing around
+    // base, seam at the largest angular gap, cut into contiguous arcs with
+    // roughly equal step totals. Central (no meaningful bearing) chunks by
+    // route distance instead.
+    function agSplitChunks(code, solos, base, usedNames) {
+        const cfg = agCfg();
+        const baseName = MB_SECTION_NAMES[code];
+        const steps = s => pcmStepCount(s.mission);
+        const totalSteps = solos.reduce((t, s) => t + steps(s), 0);
+        if (solos.length < 2 || totalSteps <= cfg.stepMax) return [{ name: baseName, solos }];
+        const k = Math.min(solos.length, Math.ceil(totalSteps / cfg.stepMax));
+        const target = totalSteps / k;
+        const cut = (sorted) => {
+            const chunks = []; let cl = [], cs = 0;
+            sorted.forEach(s => {
+                cl.push(s); cs += steps(s);
+                if (cs >= target && chunks.length < k - 1) { chunks.push(cl); cl = []; cs = 0; }
+            });
+            if (cl.length) chunks.push(cl);
+            return chunks;
+        };
+        if (code === 'C' || !base) {
+            return cut(solos.slice().sort((a, b) => (a.routeM || 0) - (b.routeM || 0)))
+                .map((cl, i) => ({ name: i ? `${baseName}_${i + 1}` : baseName, solos: cl }));
+        }
+        const bearing = s => { const d = 90 - Math.atan2(s.pt.lat - base.lat, (s.pt.lng - base.lng) * Math.cos(base.lat * Math.PI / 180)) * 180 / Math.PI; return ((d % 360) + 360) % 360; };
+        const withB = solos.map(s => ({ s, b: bearing(s) })).sort((a, b) => a.b - b.b);
+        let gapAt = 0, gapMax = -1;
+        for (let i = 0; i < withB.length; i++) {
+            const next = withB[(i + 1) % withB.length].b + ((i + 1) >= withB.length ? 360 : 0);
+            const g = next - withB[i].b;
+            if (g > gapMax) { gapMax = g; gapAt = (i + 1) % withB.length; }
+        }
+        const rot = withB.slice(gapAt).concat(withB.slice(0, gapAt)).map(x => x.s);
+        return cut(rot).map(cl => ({ name: agWindName(cl, base, usedNames), solos: cl }));
+    }
+
     // The asset point(s) a solo inspects = its snapshot (type 6) locations (asset
     // center). Falls back to navigate (type 1) locations. Used for section + routing.
     function mbSoloPoints(mission) {
@@ -3836,11 +4122,14 @@
     }
 
     // Compute the merge plan for a site: per-solo {mission, pts, ring, routeM,
-    // section, battery}, then grouped into battery-tiered, furthest→closest sets.
+    // section, battery}, then grouped into battery-tiered sets — split on the
+    // step cap into finer compass sub-sectors, each ordered by the Auto-Group
+    // optimizer and battery-simulated (v2.15, feature #216).
     // `overrides` = {missionId: sectionCode} manual section reassignments.
     function mbComputeMerge(siteID, missions, ent, overrides) {
         const router = mbBuildRouter(ent);
         const base = ent.base;
+        const cfg = agCfg();
         const solos = missions.map(m => {
             const pts = mbSoloPoints(m);
             if (!pts.length) return { mission: m, routeM: null, reason: 'no-location', section: 'C', battery: null };
@@ -3853,36 +4142,65 @@
             const routeM = router.ready ? router.routeFor(routePts) : null;
             const ov = overrides && overrides[String(m.id)];
             const section = ov || mbSection(c, base);
-            return { mission: m, pt: c, routeM, reason: routeM == null ? (router.ready ? 'unreachable' : 'no-routing-data') : '', section, battery: mbBatteryFor(routeM) };
+            // routePts rides along: the order graph matches pads to FFZs by the
+            // same ring points routeFor used (centroid alone can sit > REACH
+            // from the FFZ even when the pad edge touches it).
+            return { mission: m, pt: c, routePts, routeM, reason: routeM == null ? (router.ready ? 'unreachable' : 'no-routing-data') : '', section, battery: mbBatteryFor(routeM) };
         });
-        // Group by section → battery-tier sets.
+        // Pairwise order graph over the routable solos (pads become vertices).
+        const routableAll = solos.filter(s => s.routeM != null && s.battery && s.battery.level < 2);
+        let ag = null;
+        try { ag = routableAll.length >= 2 ? agBuildOrderGraph(ent, routableAll) : null; }
+        catch (e) { console.warn(`${TAG} [ag] order graph failed — falling back to distance sort`, e); }
+        const agIdx = new Map(); routableAll.forEach((s, i) => agIdx.set(s, i));
+        // Order + simulate one group's solo set against a battery budget.
+        const orderAndSim = (set, budgetFt) => {
+            if (!ag || !set.length) {
+                const sorted = set.slice().sort((a, b) => (b.routeM || 0) - (a.routeM || 0));
+                return { solos: sorted, sim: null };
+            }
+            const idxs = set.map(s => agIdx.get(s));
+            const dPad = (i, j) => ag.padDistFt(i, j);
+            const dBase = i => ag.baseDistFt(i);
+            const stepsOf = i => pcmStepCount(routableAll[i].mission);
+            const order = agOptimizeOrder(idxs, dPad, dBase, stepsOf, budgetFt);
+            return { solos: order.map(i => routableAll[i]), sim: agSimulate(order, dPad, dBase, stepsOf, budgetFt) };
+        };
+        // Group by section → step-cap chunks → battery-tier sets.
         const bySection = {};
         solos.forEach(s => { (bySection[s.section] = bySection[s.section] || []).push(s); });
         const groups = [];
+        const usedNames = new Set(Object.values(MB_SECTION_NAMES));
         MB_SECTION_ORDER.forEach(code => {
             const list = (bySection[code] || []).slice();
             if (!list.length) return;
-            // order furthest→closest by routeM (null routes sink to the bottom).
-            list.sort((a, b) => (b.routeM == null ? -1 : b.routeM) - (a.routeM == null ? -1 : a.routeM));
             const routable = list.filter(s => s.routeM != null);
-            const tattu = routable.filter(s => s.battery && s.battery.level === 0);
-            const tulip = routable.filter(s => s.battery && s.battery.level === 1);
             const over = routable.filter(s => s.battery && s.battery.level === 2);
-            const name = MB_SECTION_NAMES[code];
-            if (tulip.length) {
-                // East 1 = Tattu subset; East 2 = Tattu + Tulip (East 2 ⊇ East 1).
-                if (tattu.length) groups.push({ code, name: `${name} 1`, battery: 'Tattu', solos: tattu.slice() });
-                groups.push({ code, name: `${name} 2`, battery: 'Tulip', solos: tattu.concat(tulip) });
-            } else if (tattu.length) {
-                groups.push({ code, name: `${name} 1-2`, battery: 'Tattu/Tulip', solos: tattu.slice() });
-            }
+            const usable = routable.filter(s => s.battery && s.battery.level < 2);
+            agSplitChunks(code, usable, base, usedNames).forEach(ch => {
+                const tattu = ch.solos.filter(s => s.battery.level === 0);
+                const tulip = ch.solos.filter(s => s.battery.level === 1);
+                const mk = (nm, batLabel, set, budgetFt) => {
+                    const os = orderAndSim(set, budgetFt);
+                    groups.push({ code, name: nm, battery: batLabel, solos: os.solos, sim: os.sim, budgetFt });
+                };
+                if (tulip.length) {
+                    // East 1 = Tattu subset; East 2 = Tattu + Tulip (East 2 ⊇ East 1),
+                    // each ordered independently (tier-2 re-optimizes, per user).
+                    if (tattu.length) mk(`${ch.name} 1`, 'Tattu', tattu.slice(), cfg.tattuBudgetFt);
+                    mk(`${ch.name} 2`, 'Tulip', tattu.concat(tulip), cfg.tulipBudgetFt);
+                } else if (tattu.length) {
+                    // 1-2 flies on EITHER battery → simulate on the weaker (Tattu).
+                    mk(`${ch.name} 1-2`, 'Tattu/Tulip', tattu.slice(), cfg.tattuBudgetFt);
+                }
+            });
             // over-range + unroutable solos are surfaced in the panel but not merged.
             if (over.length || list.some(s => s.routeM == null)) {
                 const excluded = over.concat(list.filter(s => s.routeM == null));
-                groups.push({ code, name: `${name} — excluded`, excluded });
+                groups.push({ code, name: `${MB_SECTION_NAMES[code]} — excluded`, excluded });
             }
         });
-        return { solos, groups, routerReady: router.ready, verts: router.verts };
+        return { solos, groups, routerReady: router.ready, verts: router.verts, agReady: !!ag, offGraphPairs: ag ? ag.offGraphPairs : 0 };
     }
 
     // ── Merge panel + commit ─────────────────────────────────────────────────
@@ -4455,7 +4773,7 @@
 
     const MB_MERGE_PANEL_ID = 'aim-mb-merge-panel';
     let mbMergeBusy = false;
-    function mbCloseMergePanel() { const p = document.getElementById(MB_MERGE_PANEL_ID); if (p) p.remove(); }
+    function mbCloseMergePanel() { const p = document.getElementById(MB_MERGE_PANEL_ID); if (p) p.remove(); try { agClearRoutes(); } catch (e) {} }
     function mbCurrentSiteID() { const m = (location.hash || '').match(/#\/site\/(\d+)\//); return m ? m[1] : null; }
     function mbFetchMissionsFull(siteID) {
         return fetch(`/available_app/?site_id=${encodeURIComponent(siteID)}&type=1`, { credentials: 'include' })
@@ -4476,43 +4794,171 @@
             })
             .catch(e => { console.warn(`${TAG} [merge] load failed`, e); showToast('Merge: failed to load (see console).', '#ff5252', 4000); });
     }
+    // Per-group route-preview overlays (v2.15) — polyline base→pads→base in
+    // group color + numbered dots + 🔋 markers at simulated recharge breaks.
+    let agRouteLayers = [];
+    function agClearRoutes(gi) {
+        agRouteLayers = agRouteLayers.filter(r => {
+            if (gi != null && r.gi !== gi) return true;
+            r.layers.forEach(l => { try { l.remove(); } catch (e) {} });
+            return false;
+        });
+    }
+    function agToggleRoute(g, gi, color, ent) {
+        const had = agRouteLayers.some(r => r.gi === gi);
+        agClearRoutes(gi);
+        if (had) return false;
+        const L = composerGetL(), map = getLeafletMap();
+        if (!L || !map) { showToast('Map not found for the route preview.', '#ff9800', 2500); return false; }
+        const base = ent && ent.base;
+        const layers = [];
+        try {
+            const pts = [];
+            if (base) pts.push([base.lat, base.lng]);
+            g.solos.forEach(s => { if (s.pt) pts.push([s.pt.lat, s.pt.lng]); });
+            if (base) pts.push([base.lat, base.lng]);
+            layers.push(L.polyline(pts, { color, weight: 3, opacity: 0.85, dashArray: '7 5', interactive: false }).addTo(map));
+            const breaks = new Set();
+            if (g.sim && g.sim.flights.length > 1) { let acc = 0; g.sim.flights.slice(0, -1).forEach(f => { acc += f.pads.length; breaks.add(acc - 1); }); }
+            g.solos.forEach((s, i) => {
+                if (!s.pt) return;
+                const icon = L.divIcon({
+                    className: 'aim-mb-ag-badge',
+                    html: `<div style="width:20px;height:20px;border-radius:50%;background:${color};color:#111;font:800 11px/20px monospace;text-align:center;border:2px solid #111;box-shadow:0 1px 5px rgba(0,0,0,0.6);">${i + 1}</div>${breaks.has(i) ? '<div style="position:absolute;top:-13px;left:12px;font-size:13px;">🔋</div>' : ''}`,
+                    iconSize: [20, 20], iconAnchor: [10, 10],
+                });
+                layers.push(L.marker([s.pt.lat, s.pt.lng], { icon, interactive: false }).addTo(map));
+            });
+        } catch (e) { console.warn(`${TAG} [ag] route preview failed`, e); }
+        agRouteLayers.push({ gi, layers });
+        return true;
+    }
+
+    // Hand a proposed group to the pad-click merge editor — full edit UX
+    // (renumber, remove, rename, recipe save, single-group create).
+    function agStageInPcm(g, missions, ent) {
+        pcm.missions = missions || [];
+        pcm.assets = (ent && ent.assets) || [];
+        pcm.base = (ent && ent.base) || null;
+        pcm.picks = g.solos.map(s => ({
+            asset: pcm.assets.find(a => s.pt && Array.isArray(a.ring) && a.ring.length >= 3 && genPointInPoly(s.pt, a.ring)) || { id: null, name: s.mission.name, ring: null },
+            mission: s.mission,
+        }));
+        pcm.customName = g.name; pcm.editingName = null; pcm.pendingChoice = null;
+        if (!pcm.on) {
+            pcm.on = true;
+            try { document.documentElement.setAttribute('data-aim-merge', '1'); } catch (e) {}
+            pcmBind();
+            const btn = document.querySelector('[data-pcm-toggle]');
+            if (btn) btn.classList.add('active');
+        }
+        mbCloseMergePanel();
+        pcmRefresh();
+        showToast(`🔗 "${g.name}" staged in the merge editor (optimized order) — review, then Create.`, '#5fff5f', 5000);
+    }
+
+    // Bank every proposed group as a pcm merge recipe (no missions created).
+    function agSaveGroupRecipes(mergeGroups, siteID, ent) {
+        if (typeof GM_setValue !== 'function') { showToast('GM storage unavailable — can\'t save recipes.', '#ff5252', 3000); return; }
+        const assets = (ent && ent.assets) || [];
+        const all = pcmLoadRecipes();
+        mergeGroups.forEach(g => {
+            all[pcmRecipeKey(siteID, g.name)] = {
+                site: String(siteID), name: g.name, at: Date.now(),
+                picks: g.solos.map(s => {
+                    const a = assets.find(a2 => s.pt && Array.isArray(a2.ring) && a2.ring.length >= 3 && genPointInPoly(s.pt, a2.ring));
+                    return { assetId: a ? a.id : null, assetName: a ? a.name : s.mission.name, missionName: s.mission.name };
+                }),
+            };
+        });
+        try {
+            GM_setValue(PCM_RECIPES_KEY, JSON.stringify(all));
+            showToast(`💾 Saved ${mergeGroups.length} recipe(s) — load them any time from the 🔗 Merge panel's "saved merges".`, '#5fff5f', 5500);
+        } catch (e) { console.warn(`${TAG} [ag] recipe save failed`, e); showToast('Recipe save failed (see console).', '#ff5252', 3500); }
+    }
+
     function mbRenderMergePanel(data, siteID, missions, ent, overrides, rerender) {
         mbCloseMergePanel();
+        const cfg = agCfg();
         const ft = m => m == null ? '—' : `${Math.round(m * 3.28084).toLocaleString()} ft`;
+        const kft = f => f == null ? '—' : `${(Math.round(f / 100) / 10).toLocaleString()}k ft`;
         const secOpts = (cur) => MB_SECTION_ORDER.map(c => `<option value="${c}" ${c === cur ? 'selected' : ''}>${MB_SECTION_NAMES[c]}</option>`).join('');
         const mergeGroups = data.groups.filter(g => g.solos);
         const exclGroups = data.groups.filter(g => g.excluded);
+        const AG_COLORS = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
         const chip = (b) => b ? `<span style="background:${b.color}22;color:${b.color};border:1px solid ${b.color}66;border-radius:4px;padding:0 5px;font-size:10px;font-weight:700;white-space:nowrap;">${b.label}</span>` : '';
-        const soloRow = (s) => `<div style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;">
+        const reserveChip = (pct) => {
+            const target = 100 - cfg.marginPct;
+            const col = pct >= target - 2 ? '#5fff5f' : (pct >= 10 ? '#ffb74d' : '#ff5252');
+            return `<span title="estimated battery on landing" style="color:${col};font-weight:700;">${pct}%</span>`;
+        };
+        const soloRow = (s, i) => `<div style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;">
+            <span style="color:#7adfe6;font-weight:800;font-size:10px;min-width:16px;text-align:right;">${i + 1}</span>
             <span style="flex:1;color:#e6e6e6;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(s.mission.name || ('#' + s.mission.id))}</span>
             <span style="color:#9ad;font-size:10px;white-space:nowrap;">${ft(s.routeM)}</span>
             ${chip(s.battery)}
             <select data-mb-ov="${s.mission.id}" title="Reassign section" style="background:#0e1218;color:#cde;border:1px solid #2a3340;border-radius:4px;font-size:10px;padding:1px 2px;">${secOpts(s.section)}</select>
         </div>`;
-        const groupBlock = (g) => `<div style="margin:6px 0;border:1px solid #2a3a2a;border-radius:6px;overflow:hidden;">
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 8px;background:rgba(95,255,95,0.08);">
-                <span style="font-weight:800;color:#7dff7d;font-size:12px;">⛟ ${escapeHtml(g.name)}</span>
-                <span style="color:#9ad;font-size:10px;">${g.solos.length} stops · ${g.battery}</span>
+        const groupRows = (g) => {
+            const breaks = new Set();
+            if (g.sim && g.sim.flights.length > 1) { let acc = 0; g.sim.flights.slice(0, -1).forEach(f => { acc += f.pads.length; breaks.add(acc - 1); }); }
+            return g.solos.map((s, i) => soloRow(s, i)
+                + (breaks.has(i) ? '<div style="text-align:center;color:#ffb74d;font-size:9px;padding:1px 0;border-bottom:1px dashed #3a3320;">— 🔋 return &amp; recharge —</div>' : '')).join('');
+        };
+        const simLine = (g) => {
+            if (!g.sim) return `<div style="padding:2px 8px 4px;font-size:10px;color:#789;">no optimizer (need FP graph + base) — furthest→closest order</div>`;
+            const s = g.sim;
+            return `<div style="padding:2px 8px 5px;font-size:10px;color:#9ad;">est <b style="color:#cde;">${kft(s.totalFt)}</b> <span style="color:#789;">(${kft(s.overheadFt)} RTB legs)</span> · 🔋 <b style="color:#cde;">${s.flights.length}</b> flight${s.flights.length === 1 ? '' : 's'} · land ${s.flights.map(f => reserveChip(f.reservePct)).join(' / ')}${s.tight.length ? `<span style="color:#ff5252;font-weight:700;"> · ⚠ ${s.tight.length} pad${s.tight.length === 1 ? '' : 's'} won't fit one flight</span>` : ''}</div>`;
+        };
+        const groupBlock = (g, gi) => {
+            const stepsTotal = g.solos.reduce((t, s) => t + pcmStepCount(s.mission), 0);
+            const col = AG_COLORS[gi % AG_COLORS.length];
+            return `<div style="margin:6px 0;border:1px solid #2a3a2a;border-radius:6px;overflow:hidden;">
+            <div style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:rgba(95,255,95,0.08);">
+                <span style="width:9px;height:9px;border-radius:50%;background:${col};flex:none;"></span>
+                <span style="font-weight:800;color:#7dff7d;font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">⛟ ${escapeHtml(g.name)}</span>
+                <span style="color:#9ad;font-size:10px;white-space:nowrap;">${g.solos.length} stops · ${stepsTotal > cfg.stepMax ? `<b style="color:#ffb74d;">${stepsTotal} steps</b>` : `${stepsTotal} steps`} · ${g.battery}</span>
+                <button data-ag-route="${gi}" title="Show/hide this route on the map" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:11px;">👁</button>
+                <button data-ag-edit="${gi}" title="Open this group in the pad-click merge editor (reorder / rename / create just this one)" style="padding:1px 6px;background:rgba(255,213,79,0.12);border:1px solid rgba(255,213,79,0.5);color:#ffd54f;border-radius:4px;cursor:pointer;font-size:11px;">🔗</button>
             </div>
-            <div style="padding:2px 4px;">${g.solos.map(soloRow).join('')}</div>
+            ${simLine(g)}
+            <div style="padding:2px 4px;">${groupRows(g)}</div>
         </div>`;
+        };
+        const knob = (k, label, title, step) => `<label title="${escapeHtml(title)}" style="display:flex;align-items:center;gap:3px;font-size:10px;color:#9ad;white-space:nowrap;">${label}
+            <input data-ag-k="${k}" type="number" step="${step || 1}" min="1" value="${cfg[k]}" style="width:56px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:4px;padding:1px 4px;font-size:10px;"></label>`;
         const exclBlock = (g) => `<div style="margin:5px 0;padding:4px 8px;border:1px solid #3a2a2a;border-radius:6px;">
             <div style="color:#ff8a8a;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:2px;">${escapeHtml(g.name)}</div>
             ${g.excluded.map(s => `<div style="display:flex;align-items:center;gap:6px;padding:2px 2px;font-size:11px;color:#caa;"><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(s.mission.name || ('#' + s.mission.id))}</span><span style="color:#a66;font-size:10px;">${s.reason === 'unreachable' ? 'no route' : (s.reason || (s.battery && s.battery.level === 2 ? 'over range' : ''))}</span><select data-mb-ov="${s.mission.id}" style="background:#0e1218;color:#cde;border:1px solid #2a3340;border-radius:4px;font-size:10px;">${secOpts(s.section)}</select></div>`).join('')}
         </div>`;
         const routable = data.solos.filter(s => s.routeM != null).length;
+        // Full-site estimate = the superset tier per section ("X 2" / "X 1-2") —
+        // you fly ONE tier per section, so summing every group would double-count.
+        const primary = mergeGroups.filter(g => / (2|1-2)$/.test(g.name) && g.sim);
+        const totFt = primary.length ? primary.reduce((t, g) => t + g.sim.totalFt, 0) : null;
+        const totFlights = primary.length ? primary.reduce((t, g) => t + g.sim.flights.length, 0) : null;
         const p = document.createElement('div');
         p.id = MB_MERGE_PANEL_ID;
-        p.style.cssText = 'position:fixed;top:60px;right:24px;width:430px;max-height:84vh;display:flex;flex-direction:column;z-index:2147483600;' +
+        p.style.cssText = 'position:fixed;top:60px;right:24px;width:470px;max-height:84vh;display:flex;flex-direction:column;z-index:2147483600;' +
             'background:#161a20;border:1px solid #5fff5f;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
         p.innerHTML = `
             <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(95,255,95,0.08);border-bottom:1px solid rgba(95,255,95,0.3);">
-                <span style="font-weight:800;color:#7dff7d;font-size:14px;">⛟ Merge by Section + Battery</span>
+                <span style="font-weight:800;color:#7dff7d;font-size:14px;">🧠 Auto-Group — Merge by Section + Battery</span>
                 <button data-mb-merge-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button>
             </div>
             <div style="padding:7px 12px;font-size:11px;color:#bbb;border-bottom:1px solid #2a2f38;">
-                <b style="color:#7dff7d;">${missions.length}</b> solo missions · <b style="color:#9ad;">${routable}</b> routable · <b style="color:#7dff7d;">${mergeGroups.length}</b> merge groups${data.routerReady ? '' : ' · <b style="color:#ff8a8a;">no routing data (no FPs/base)</b>'}
-                <div style="margin-top:3px;color:#789;">Furthest→closest from base. East 1 = Tattu subset, East 2 = + Tulip. Reassign a stop's section with the dropdown.</div>
+                <b style="color:#7dff7d;">${missions.length}</b> solo missions · <b style="color:#9ad;">${routable}</b> routable · <b style="color:#7dff7d;">${mergeGroups.length}</b> merge groups${totFt != null ? ` · full site ≈ <b style="color:#7dff7d;">${kft(totFt)}</b> / ${totFlights} flights` : ''}${data.routerReady ? '' : ' · <b style="color:#ff8a8a;">no routing data (no FPs/base)</b>'}${data.agReady ? '' : ' · <b style="color:#ffb74d;">optimizer off — distance sort</b>'}${data.offGraphPairs ? ` · <b style="color:#ffb74d;">⚠ ${data.offGraphPairs} leg(s) estimated off-graph</b>` : ''}
+                <div style="margin-top:3px;color:#789;">Order = 2-opt + flight simulator (breaks planned near base). East 1 = Tattu subset, East 2 = + Tulip. 👁 route on map · 🔗 edit one group · dropdown reassigns a stop's section.</div>
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:7px;align-items:center;padding:6px 12px;border-bottom:1px solid #2a2f38;">
+                ${knob('tattuRadiusFt', 'Tattu≤', 'Tattu tier radius: pads whose one-way route is within this fly on Tattu', 500)}
+                ${knob('tulipRadiusFt', 'Tulip≤', 'Tulip tier radius: beyond this a pad is excluded as unflyable', 500)}
+                ${knob('tattuBudgetFt', 'T-bud', 'Tattu full-battery TOTAL flight budget (ft-equivalents)', 1000)}
+                ${knob('tulipBudgetFt', 'U-bud', 'Tulip full-battery TOTAL flight budget (ft-equivalents)', 1000)}
+                ${knob('marginPct', 'use%', 'Usable % of the budget — the rest is the landing reserve', 1)}
+                ${knob('stepCostFt', 'ft/step', 'Battery cost per mission step, in ft-equivalents (captures/hover)', 10)}
+                ${knob('stepMax', 'max steps', 'Soft step cap per merged mission — a section over this splits into finer compass sub-sectors (ENE/ESE/…)', 25)}
+                <button data-ag-reset title="Reset all knobs to defaults" style="padding:1px 7px;background:none;border:1px solid #2a3340;color:#789;border-radius:4px;cursor:pointer;font-size:10px;">↺</button>
             </div>
             <div style="overflow:auto;flex:1;padding:4px 10px;">
                 ${mergeGroups.length ? mergeGroups.map(groupBlock).join('') : '<div style="padding:12px;color:#888;">No mergeable groups (need routable solos).</div>'}
@@ -4520,11 +4966,25 @@
             </div>
             <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
                 <span data-mb-merge-status style="flex:1;font-size:11px;color:#9ad;"></span>
+                <button data-ag-recipes title="Save every group's ordered pad list as a merge recipe (creates NO missions)" style="padding:5px 9px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:5px;cursor:pointer;font-size:11px;" ${mergeGroups.length ? '' : 'disabled'}>💾 Recipes</button>
                 <button data-mb-merge-go style="padding:6px 12px;background:#5fff5f;border:none;color:#04220a;border-radius:6px;cursor:pointer;font-weight:800;" ${mergeGroups.length && !mbMergeBusy ? '' : 'disabled'}>⛟ Create ${mergeGroups.length} merged</button>
             </div>`;
         document.body.appendChild(p);
         p.querySelector('[data-mb-merge-close]').onclick = mbCloseMergePanel;
         p.querySelectorAll('[data-mb-ov]').forEach(sel => sel.onchange = () => { overrides[sel.getAttribute('data-mb-ov')] = sel.value; rerender(); });
+        p.querySelectorAll('[data-ag-k]').forEach(inp => inp.onchange = () => {
+            const patch = {}; patch[inp.getAttribute('data-ag-k')] = Number(inp.value);
+            agSetCfg(patch); rerender();
+        });
+        p.querySelector('[data-ag-reset]').onclick = () => { agSetCfg(Object.assign({}, AG_DEFAULTS)); rerender(); };
+        p.querySelectorAll('[data-ag-route]').forEach(b => b.onclick = () => {
+            const gi = Number(b.getAttribute('data-ag-route'));
+            const on = agToggleRoute(mergeGroups[gi], gi, AG_COLORS[gi % AG_COLORS.length], ent);
+            b.style.background = on ? 'rgba(122,223,230,0.45)' : 'rgba(122,223,230,0.14)';
+        });
+        p.querySelectorAll('[data-ag-edit]').forEach(b => b.onclick = () => agStageInPcm(mergeGroups[Number(b.getAttribute('data-ag-edit'))], missions, ent));
+        const rcp = p.querySelector('[data-ag-recipes]');
+        if (rcp) rcp.onclick = () => agSaveGroupRecipes(mergeGroups, siteID, ent);
         p.querySelector('[data-mb-merge-go]').onclick = () => mbCommitAllMerges(mergeGroups, p.querySelector('[data-mb-merge-status]'), p.querySelector('[data-mb-merge-go]'));
     }
     function mbMakeStep(type, value1) { return { type, value1: value1 === undefined ? null : value1, value2: null, location: null, extra_options: {}, polygon_points: null, snapshot_points: null }; }
@@ -4538,9 +4998,11 @@
         for (let i = 0; i < groups.length; i++) {
             const g = groups[i];
             setStatus(`Creating "${g.name}" (${i + 1}/${groups.length})…`);
-            // takeoff + each solo's body (no takeoff/return) furthest→closest + returnHome
+            // takeoff + each solo's body (no takeoff/return) in optimized order + returnHome.
+            // pcmNormStep strips the per-mission server instruction ids — mixed
+            // foreign ids 400 a merged create (v2.02 lesson, applied here v2.15).
             const body = [];
-            g.solos.forEach(s => mbMissionBody(s.mission).forEach(st => body.push(st)));
+            g.solos.forEach(s => mbMissionBody(s.mission).forEach(st => body.push(pcmNormStep(st))));
             const instrs = [mbMakeStep(0, 20)].concat(body, [mbMakeStep(99)]);
             try { await ctx.saveApp({ id: null, type: 1, instructions: instrs, data_report_object_arr: [] }, g.name); ok++; }
             catch (e) { fail++; console.warn(`${TAG} [merge] failed "${g.name}"`, e); }
@@ -5109,6 +5571,22 @@
             try { for (const k of Object.getOwnPropertyNames(c)) { try { const v = c[k]; if (composerLooksLikeMap(v)) { leafletMapRef = v; return v; } } catch (e) {} } } catch (e) {}
             for (const k in c) { try { const v = c[k]; if (composerLooksLikeMap(v)) { leafletMapRef = v; return v; } } catch (e) {} }
         }
+        // v2.14: Data View (legacy Angular app) keeps its map on
+        // $rootScope.current_map — never on the container's props. Guarded on
+        // a container existing in THIS document so the SS/MB top frame
+        // (Angular shell, map in iframe) can't grab a stale reference.
+        try {
+            const ng = window.angular;
+            const containers = document.querySelectorAll('.leaflet-container');
+            if (ng && containers.length && typeof ng.element === 'function') {
+                const scope = ng.element(containers[0]).scope();
+                const root = scope && scope.$root;
+                if (root && composerLooksLikeMap(root.current_map)) {
+                    leafletMapRef = root.current_map;
+                    return leafletMapRef;
+                }
+            }
+        } catch (e) { /* not an angular-managed page */ }
         return null;
     }
 
@@ -10135,10 +10613,16 @@ ${snapPlacemarks}
 
     // v2.12: preview works on BOTH sides of the bridge — Site Setup AND
     // Mission Bank (see missions on the map without opening the editor).
+    // v2.14: and on Data View (legacy Angular app, map in the TOP window) —
+    // the Asset Inspector's 👁 popup button works there too. Frame safety is
+    // unchanged: mpvPreviewByName/mpvRedraw only act in the frame that owns
+    // a Leaflet map, so on SS/MB the iframe instance answers, on DV the TOP
+    // instance does.
     function mpvRouteOk() {
         const top = (() => { try { return window.top; } catch (e) { return window; } })();
         const hash = (top && top.location && top.location.hash) || location.hash || '';
-        return /#\/site\/\d+\/control-panel\/(site-setup|mission-bank)/.test(hash);
+        return /#\/site\/\d+\/control-panel\/(site-setup|mission-bank)/.test(hash)
+            || /#\/site\/\d+\/data_view\//.test(hash);
     }
 
     function mpvSelForSite(sid) {
@@ -10416,6 +10900,11 @@ ${snapPlacemarks}
             if (mpv.onSiteSetup) { mpv.onSiteSetup = false; mpvTeardown(); }
             return;
         }
+        // v2.14: only the frame that owns a Leaflet map participates (SS/MB
+        // iframe, Data View TOP). Keeps the SS TOP instance from duplicate-
+        // fetching missions it can never draw. Map not mounted yet → the 3s
+        // interval retries.
+        if (!getLeafletMap()) return;
         if (!mpv.onSiteSetup) {
             mpv.onSiteSetup = true;
             // Entering the route with a persisted selection (or ALL mode):
@@ -10514,6 +11003,19 @@ ${snapPlacemarks}
         if (CONTEXT === 'IFRAME') {
             injectGlobalEditStyles();
         }
+        // v2.14: 👁 Mission Preview runs in BOTH contexts. On SS/MB the
+        // iframe owns the map and TOP's instance harmlessly no-ops (its
+        // ticks find no .map-tools and no Leaflet map); on Data View the
+        // map lives in TOP, so the TOP instance is the one that draws.
+        // mpvRouteOk + getLeafletMap gate every action either way.
+        try { mpvInit(); } catch (e) { console.warn(`${TAG} [mpv] init failed:`, e); }
+        if (CONTEXT === 'TOP') {
+            // The Angular-scope map grab needs no prototype patch, but
+            // stamping __aim_map__ on the DV container lets the Asset
+            // Inspector's own detector find the map too. No-op when this
+            // realm has no window.L (SS/MB top frame).
+            try { patchLeafletMap(); } catch (e) {}
+        }
         // IFRAME-only — the Mission Bank UI lives in the React iframe
         if (CONTEXT === 'IFRAME') {
             // Bumped 2s → 4s; SUM only needs replacing on URL nav,
@@ -10522,9 +11024,6 @@ ${snapPlacemarks}
             setInterval(runSumInjection, 4000);
             setTimeout(runSumInjection, 1000);
             try { patchLeafletMap(); } catch (e) {}
-            // v2.08: Site Setup mission-preview overlay (👁) — self-gates
-            // to the site-setup route inside its injection tick.
-            try { mpvInit(); } catch (e) { console.warn(`${TAG} [mpv] init failed:`, e); }
             // Live editor bridge: syncs MBT's display to the live mission-editor
             // state + drives armed snapshot auto-AGL on GPS moves (700ms poll,
             // early-returns unless a mission is open in the editor).
