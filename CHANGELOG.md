@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-30 — Mission Bank Tools v2.10 (dev/latest): mission-preview badge colors match step colors
+
+- 👁 Mission preview (Site Setup): N# / S# badges now use the step-type colors (nav blue / snapshot pink — same as the Mission Bank map badges, including any Control Panel color customization). The per-mission color stays on the dashed flight line and the picker swatch so overlapping missions remain distinguishable.
+
 ## 2026-07-30 — Mission Bank Tools v2.09 (dev/latest): 🎞 Auto-Wrap on save + 🌐 site-wide wrap
 
 - **Auto-Wrap (right-click the 🎞 button).** Toggles auto-wrap for **this session only**: every mission SAVE automatically inserts your last-used wrap template after each bare snapshot (same save hook as Auto-AGL), shows a toast with what it added, then **verifies** by re-fetching the saved mission — green ✓ when every snapshot has its scan steps, red ⚠ if any are still bare. Button turns orange (🎞 AUTO) while armed; right-click again to turn off.

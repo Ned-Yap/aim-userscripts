@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.09
+// @version      2.10
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.09';
+    const SCRIPT_VERSION = '2.10';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -10164,11 +10164,15 @@ ${snapPlacemarks}
             let html = null, size = 0;
             if (t === 'navigate') {
                 nav++;
-                html = `<div style="width:22px;height:22px;border-radius:50%;background:${color};color:#04222a;font:800 10px/19px monospace;text-align:center;border:2px solid rgba(0,0,0,0.6);box-shadow:0 1px 4px rgba(0,0,0,0.5);">N${nav}</div>`;
+                // v2.10: badges use the step-type colors (CP-customizable,
+                // same as the Mission Bank N#/S# badges) — nav blue / snap
+                // pink; the per-MISSION color stays on the dashed line +
+                // picker swatch so missions remain tellable-apart.
+                html = `<div style="width:22px;height:22px;border-radius:50%;background:${stepColor('nav')};color:#04222a;font:800 10px/19px monospace;text-align:center;border:2px solid rgba(0,0,0,0.6);box-shadow:0 1px 4px rgba(0,0,0,0.5);">N${nav}</div>`;
                 size = 22;
             } else if (t === 'snapshot') {
                 snap++;
-                html = `<div style="width:17px;height:17px;border-radius:3px;background:${color};color:#04222a;font:800 9px/16px monospace;text-align:center;border:1px solid rgba(0,0,0,0.6);opacity:0.92;">S${snap}</div>`;
+                html = `<div style="width:17px;height:17px;border-radius:3px;background:${stepColor('snap')};color:#04222a;font:800 9px/16px monospace;text-align:center;border:1px solid rgba(0,0,0,0.6);opacity:0.92;">S${snap}</div>`;
                 size = 17;
             } else if (t === 'flag pole' || s.type === 16) {
                 html = '<div style="font-size:13px;line-height:14px;text-shadow:0 1px 2px #000;">🚩</div>';
