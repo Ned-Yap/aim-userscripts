@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.123
+// @version      34.124
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -57,7 +57,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.123';
+    const SCRIPT_VERSION = '34.124';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1128,6 +1128,12 @@
             // --- 40ft buffer (standard) ---
             if (want40) {
                 const buffer = line.cloneNode(true);
+                // v34.124: strip the DV entity class — Percepto's Data View CSS
+                // styles that class (stroke/width/fill), and CSS beats the
+                // presentation ATTRIBUTES we set below, leaving the clone
+                // rendered identical to (and invisible under) the original.
+                // No-op on Site Setup (class doesn't exist there).
+                buffer.classList.remove('app-poi-outside-of-data-map');
                 buffer.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
                 buffer.style.pointerEvents = 'none';
                 buffer.setAttribute('fill', 'none');
@@ -1151,6 +1157,7 @@
             // own configurable knob (fp.65ft-distance).
             if (want65) {
                 const band65 = line.cloneNode(true);
+                band65.classList.remove('app-poi-outside-of-data-map'); // v34.124 — see 40ft block
                 band65.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
                 band65.setAttribute('data-buffer-kind', 'flight-65ft');
                 band65.style.pointerEvents = 'none';
@@ -1186,6 +1193,7 @@
             // so it scales with zoom the same way as the 40/65 bands.
             if (wantShield) {
                 const shielding = line.cloneNode(true);
+                shielding.classList.remove('app-poi-outside-of-data-map'); // v34.124 — see 40ft block
                 shielding.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
                 shielding.setAttribute('data-buffer-kind', 'shielding');
                 shielding.style.pointerEvents = 'none';
