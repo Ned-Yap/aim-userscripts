@@ -2,7 +2,7 @@
 // @name         AIM Copy Asset Name
 // @name:en      AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.164.6
+// @version      4.164.7
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -54,7 +54,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.164.6';
+    const SCRIPT_VERSION = '4.164.7';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -4355,6 +4355,9 @@
             // map-container handler is deeper than this window one).
             try {
                 if (document.documentElement.getAttribute('data-aim-clickadd') === '1') { dbg('bail: MBT click-add mode'); return; }
+                // v4.164.7 (backport of v4.199): MBT's 🔗 pad-click merge mode owns
+                // M2 the same way — same synchronous-DOM-flag protocol as above.
+                if (document.documentElement.getAttribute('data-aim-merge') === '1') { dbg('bail: MBT pad-merge mode'); return; }
                 // Belt-and-suspenders for the hold-Ctrl add path: Ctrl held while a
                 // mission editor is open = a Click-to-Add gesture, regardless of the
                 // flag's key-event timing. Scoped to the editor so Site Setup is unaffected.

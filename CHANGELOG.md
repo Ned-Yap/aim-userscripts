@@ -6,6 +6,18 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-29 — Mission Bank Tools v2.07 → PROD (+ Asset Inspector v4.164.7 hotfix)
+
+Coworkers jump MBT v1.98 → v2.07 on the next Tampermonkey update check. Everything from the v1.99–v2.07 dev arc ships:
+
+- **🎞 Wrap templates** — build named sequences of your 📋-captured step presets (e.g. Thermal On → GEM On → Wait → GEM Off → Thermal Off) and apply them after **every snapshot that has no trailing steps yet** in one click — before the following nav. Already-wrapped snapshots are skipped (safe to re-run after adding new points), consecutive snapshots each get their own wrap, and one Ctrl+Z removes the whole batch. Staged only — SAVE commits.
+- **📥 Cross-site mission copy** — copy missions from another site into the current one via a pick-list (duplicate names skipped, created via the normal save path).
+- **🔗 Pad-click merge** — right-click pads in order to merge their missions into one (first takeoff + last land, editable steps in between), with a movable panel, M2-badge renumber popup, asset-type filter, ⚡ far→near ordering, and **saved merge recipes** (✏ reload + in-place 💾 Update).
+- **Legacy Mission Bank detection** — sites Percepto still serves the old Angular mission bank (no react-pages iframe, e.g. 1465) now warn with a toast instead of silently missing every MBT feature.
+- **Asset Inspector v4.164.7 (prod hotfix, companion)** — right-click inspector now stands down while MBT's 🔗 pad-merge mode is armed (same DOM-flag protocol as Click-to-Add), so merge pad-clicks aren't stolen by the inspector popup. Backport of the dev v4.199 bail only — no other dev features ship.
+
+Mission generator remains locked off in prod (unchanged).
+
 ## 2026-07-29 — Mission Bank Tools v2.06–v2.07 (dev/latest): 🎞 Wrap templates
 
 - **Mission Bank Tools v2.07 — layout fix.** The new 🎞 button was clipped off the right edge of the editor sidebar; the button row now wraps, so **🎞 Wrap** sits full-width on its own line when there's no room.

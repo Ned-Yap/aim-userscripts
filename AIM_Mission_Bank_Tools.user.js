@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.98
+// @version      2.07
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,13 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.98';
+    const SCRIPT_VERSION = '2.07';
+
+    // Server model (v2.05): prod and QA are separate databases — the same
+    // numeric site ID is two different sites. GM storage is shared across
+    // origins, so per-site keys are env-namespaced (QA = qa-<id>).
+    const IS_QA = location.hostname === 'qa.percepto.app' || location.hostname.endsWith('.qa.percepto.app');
+    const envSiteKey = (sid) => IS_QA ? `qa-${sid}` : String(sid);
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1667,7 +1673,9 @@
         // Second row: the safety-gated Auto snapshot-AGL toggle (full width so
         // it's hard to miss). Default OFF; turning it ON warns + shows a banner.
         const row2 = document.createElement('div');
-        row2.style.cssText = 'display:flex;margin:0 0 4px;';
+        // flex-wrap: the 🎞 Wrap button overflowed the sidebar width on the
+        // default layout (clipped) — let it fall to its own full-width line.
+        row2.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px 0;margin:0 0 4px;';
         const autoBtn = document.createElement('button');
         autoBtn.id = AUTO_SNAP_AGL_BTN_ID;
         autoBtn.type = 'button';
@@ -1685,7 +1693,15 @@
         caBtn.type = 'button';
         caBtn.style.cssText = 'flex:0 0 auto;margin-left:5px;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
         caBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); caSetMode(!caModeOn); };
-        row2.appendChild(autoBtn); row2.appendChild(stageBtn); row2.appendChild(caBtn);
+        const wrapBtn = document.createElement('button');
+        wrapBtn.id = WRAP_BTN_ID;
+        wrapBtn.type = 'button';
+        wrapBtn.textContent = '🎞 Wrap';
+        wrapBtn.title = 'Wrap templates: apply a saved sequence of your step presets (e.g. Therm on → GEM on → Wait → GEM off → Therm off) after EVERY snapshot that has no trailing steps yet — the Click-to-Add finisher. Build and manage templates inside. Staged only — SAVE when done.';
+        wrapBtn.style.cssText = 'flex:1 0 auto;margin-left:5px;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;' +
+            'background:rgba(255,150,255,0.10);border:1px solid rgba(255,150,255,0.45);color:#f9f;';
+        wrapBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); wrapPopup(wrapBtn); };
+        row2.appendChild(autoBtn); row2.appendChild(stageBtn); row2.appendChild(caBtn); row2.appendChild(wrapBtn);
         // Row 3: the Click-to-Add "Insert at" bar (shown only while the mode is ON).
         const row3 = document.createElement('div');
         row3.id = CA_BAR_ID;
@@ -2021,7 +2037,12 @@
         caUndoStack.pop();
         const kl = rec.kind === 'nav' ? 'Nav' : rec.kind === 'flag' ? 'Flag Pole' : 'Snapshot';
         let newInstrs, msg;
-        if (rec.op === 'del') {
+        if (rec.op === 'tpl') {
+            // A wrap-template apply is one undo unit: strip every step it added.
+            const ids = new Set((rec.ids || []).map(String));
+            newInstrs = instrs.filter(s => !(s && ids.has(String(s.id)))).map(s => Object.assign({}, s));
+            msg = `↩ Removed "${rec.name}" wrap steps (${instrs.length - newInstrs.length}).`;
+        } else if (rec.op === 'del') {
             const at = Math.max(0, Math.min(rec.index, instrs.length));
             newInstrs = instrs.slice(0, at).concat(rec.steps.map(s => Object.assign({}, s)), instrs.slice(at)).map(s => Object.assign({}, s));
             msg = `↩ Restored ${kl}${rec.steps.length > 1 ? ' + scan' : ''}.`;
@@ -2071,6 +2092,223 @@
             const kl = kind === 'nav' ? 'Nav' : kind === 'flag' ? 'Flag Pole' : 'Snapshot';
             showToast(`🗑 Deleted ${kl}${extra}. Ctrl+Z to restore · SAVE when done.`, '#ff9d3a', 3200);
         } catch (e) { console.warn(`${TAG} [click-add] delete failed`, e); showToast('Delete failed — see console.', '#ff5252', 3000); }
+    }
+
+    // ── 🎞 Wrap templates: the Click-to-Add finisher ─────────────────────────
+    // A wrap template is a NAMED, ORDERED sequence of saved step presets (the
+    // 📋-captured ones from ➕ Stage — Camera Thermal, GEM On, Wait, GEM Off…).
+    // Apply walks the open mission and inserts the sequence after EVERY "bare"
+    // snapshot — one whose next step is a nav / snapshot / returnHome / end —
+    // so freshly Ctrl-clicked inspection points get their scan wrap in one go
+    // while snapshots that already have trailing scan steps are left alone.
+    // Everything stays STAGED (native SAVE commits); one Ctrl+Z removes the
+    // whole batch. Templates store preset NAMES, resolved at apply time, so a
+    // preset quick-edit (Wait seconds, RGB↔Thermal) carries into future applies.
+    const CACHE_KEY_WRAP_TEMPLATES = 'aim-mb-wrap-templates';
+    const CACHE_KEY_WRAP_LAST = 'aim-mb-wrap-last';
+    const WRAP_BTN_ID = 'aim-mb-wrap-btn';
+    let wrapPopEl = null;
+    function wrapTemplatesLoad() { const o = gmGet(CACHE_KEY_WRAP_TEMPLATES, {}); return (o && typeof o === 'object') ? o : {}; }
+    function wrapTemplatesSave(o) { try { gmSet(CACHE_KEY_WRAP_TEMPLATES, o || {}); } catch (e) { console.warn(`${TAG} [wrap] template save failed`, e); } }
+    function wrapOrderCmp(all) {
+        return (a, b) => {
+            const oa = all[a].order != null ? all[a].order : (all[a].savedAt || 0);
+            const ob = all[b].order != null ? all[b].order : (all[b].savedAt || 0);
+            return oa - ob || a.localeCompare(b);
+        };
+    }
+    function wrapApplyTemplate(name) {
+        const all = wrapTemplatesLoad();
+        const tpl = all[name];
+        if (!tpl || !Array.isArray(tpl.steps) || !tpl.steps.length) { showToast('Pick a template with at least one step.', '#ff9800', 3500); return false; }
+        const presets = stagePresetsLoad();
+        const missing = tpl.steps.filter(n => !presets[n] || !presets[n].instr);
+        if (missing.length) { showToast(`Template "${name}" uses missing step preset(s): ${missing.join(', ')} — recapture them (➕ Stage → 📋) or edit the template.`, '#ff5252', 7000); return false; }
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.setCurrentApp !== 'function' || !ctx.currentApp) { showToast('Open a mission in the editor first.', '#ff9800', 3500); return false; }
+        const app = ctx.currentApp;
+        let instrs = app.instructions || [];
+        if (!instrs.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs) && lc.instrs.length) instrs = lc.instrs; } catch (e) {} }
+        if (!instrs.length) { showToast('This mission has no steps yet.', '#ff9800', 3000); return false; }
+        const isNav = s => s && (s.type_name === 'navigate' || s.type === 1);
+        const isSnap = s => s && (s.type_name === 'snapshot' || s.type === 6);
+        const isReturn = s => s && (s.type_name === 'returnHome' || s.type === 99);
+        // Same unique-id scheme as Click-to-Add (shared bump so parallel adds
+        // in the same ms can't collide) — save strips ids, server assigns real ones.
+        const nextId = () => 9000000000 + (((Date.now ? Date.now() : 1) % 1000000) * 100) + (caIdBump++);
+        const newInstrs = [];
+        const addedIds = [];
+        let applied = 0, skipped = 0;
+        for (let i = 0; i < instrs.length; i++) {
+            const s = instrs[i];
+            newInstrs.push(Object.assign({}, s));
+            if (!isSnap(s)) continue;
+            const nxt = instrs[i + 1];
+            const bare = (nxt === undefined) || isNav(nxt) || isSnap(nxt) || isReturn(nxt);
+            if (!bare) { skipped++; continue; } // already has trailing scan steps — don't double-wrap
+            tpl.steps.forEach(pn => {
+                const c = JSON.parse(JSON.stringify(presets[pn].instr));
+                c.id = nextId();
+                addedIds.push(c.id);
+                // Located preset types (e.g. Flag Pole) land AT the snapshot's
+                // point; location-less scan steps (Wait/Camera/GEM) stay bare.
+                if (c.location && c.location.lat != null && s.location && s.location.lat != null) c.location = { lat: s.location.lat, lng: s.location.lng };
+                newInstrs.push(c);
+            });
+            applied++;
+        }
+        if (!applied) { showToast(`No bare snapshots to wrap${skipped ? ` — all ${skipped} already have trailing steps (Ctrl+Z or Alt+R-click to clear first)` : ' — add snapshots first'}.`, '#ff9800', 5000); return false; }
+        newInstrs.forEach((s, k) => { if (s) s.index_in_app = k; });
+        try {
+            ctx.setCurrentApp(Object.assign({}, app, { instructions: newInstrs }));
+            try { composerStyleNativeMarkers(); } catch (e) {}
+            if (caUndoStack.length && caUndoStack[caUndoStack.length - 1].appId !== app.id) caUndoStack = [];
+            caUndoStack.push({ op: 'tpl', ids: addedIds, name, appId: app.id });
+            console.log(`${TAG} [wrap] applied "${name}" (${tpl.steps.length} step seq) after ${applied} snapshot(s), skipped ${skipped}`);
+            showToast(`🎞 "${name}" applied after ${applied} snapshot(s)${skipped ? ` · ${skipped} skipped (already wrapped)` : ''}. Ctrl+Z removes the whole batch · SAVE when done.`, '#5fff5f', 6500);
+            return true;
+        } catch (e) { console.warn(`${TAG} [wrap] setCurrentApp failed`, e); showToast('Apply failed — see console.', '#ff5252', 3500); return false; }
+    }
+    function wrapPopup(anchorBtn) {
+        if (wrapPopEl) { wrapPopEl.remove(); wrapPopEl = null; return; }
+        const selCss = 'background:#0f1216;border:1px solid #9cf;color:#fff;border-radius:3px;padding:3px 4px;font:inherit;font-size:11px;';
+        const pop = document.createElement('div');
+        pop.style.cssText = 'position:fixed;z-index:2147483600;width:300px;background:#1f2228;border:1px solid #f9f;border-radius:6px;' +
+            'box-shadow:0 4px 20px rgba(0,0,0,0.8);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;padding:10px 12px;';
+        pop.innerHTML = `
+            <div style="font-weight:800;color:#f9f;font-size:13px;margin-bottom:6px;">🎞 Wrap templates</div>
+            <div style="font-size:10px;color:#789;margin-bottom:8px;">An ordered sequence of your 📋-captured step presets (➕ Stage), inserted after every snapshot that has no trailing steps yet — before the next nav. Staged only: SAVE commits, one Ctrl+Z removes the batch.</div>
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;">
+                <select data-wr-sel style="flex:1;min-width:0;${selCss}"></select>
+                <button data-wr-apply style="padding:5px 12px;background:#f9f;border:none;color:#3a0636;border-radius:6px;cursor:pointer;font-weight:800;font-size:12px;">▶ Apply</button>
+            </div>
+            <div data-wr-list style="border-top:1px solid #34404e;padding-top:6px;margin-bottom:8px;"></div>
+            <div style="border-top:1px solid #34404e;padding-top:6px;">
+                <div style="font-size:10px;font-weight:800;color:#f9f;margin-bottom:4px;">BUILD / EDIT (✎ loads a template here)</div>
+                <input data-wr-name placeholder="Template name" style="width:100%;box-sizing:border-box;background:#0f1216;border:1px solid #456;color:#fff;padding:3px 6px;border-radius:3px;font:inherit;font-size:11px;margin-bottom:6px;">
+                <div data-wr-steps style="margin-bottom:6px;"></div>
+                <div style="display:flex;gap:6px;margin-bottom:8px;">
+                    <select data-wr-addsel style="flex:1;min-width:0;${selCss}"></select>
+                    <button class="aim-mb-tbtn" data-wr-add style="padding:3px 8px;font-size:11px;">➕ Add</button>
+                </div>
+                <div style="display:flex;gap:6px;justify-content:flex-end;">
+                    <button class="aim-mb-tbtn" data-wr-close style="padding:5px 10px;">Close</button>
+                    <button data-wr-save style="padding:5px 12px;background:#9cf;border:none;color:#06223a;border-radius:6px;cursor:pointer;font-weight:800;font-size:12px;">💾 Save template</button>
+                </div>
+            </div>`;
+        document.body.appendChild(pop);
+        wrapPopEl = pop;
+        const selEl = pop.querySelector('[data-wr-sel]');
+        const listEl = pop.querySelector('[data-wr-list]');
+        const nameEl = pop.querySelector('[data-wr-name]');
+        const stepsEl = pop.querySelector('[data-wr-steps]');
+        const addSelEl = pop.querySelector('[data-wr-addsel]');
+        let bSteps = []; // builder state: ordered preset names
+        const renderSel = () => {
+            const all = wrapTemplatesLoad();
+            const names = Object.keys(all).sort(wrapOrderCmp(all));
+            const last = gmGet(CACHE_KEY_WRAP_LAST, null);
+            selEl.innerHTML = names.length
+                ? names.map(n => `<option value="${escapeHtml(n)}"${n === last ? ' selected' : ''}>${escapeHtml(n)}</option>`).join('')
+                : '<option value="">— no templates yet —</option>';
+        };
+        const renderAddSel = () => {
+            const presets = stagePresetsLoad();
+            const cmp = wrapOrderCmp(presets); // same {order, savedAt} shape as templates
+            const names = Object.keys(presets).sort(cmp);
+            addSelEl.innerHTML = names.length
+                ? names.map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join('')
+                : '<option value="">— no step presets — capture via ➕ Stage → 📋 —</option>';
+        };
+        const renderList = () => {
+            const all = wrapTemplatesLoad();
+            const names = Object.keys(all).sort(wrapOrderCmp(all));
+            if (!names.length) { listEl.innerHTML = '<div style="font-size:10px;color:#789;">No templates yet — build one below.</div>'; return; }
+            listEl.innerHTML = '<div style="font-size:10px;font-weight:800;color:#f9f;margin-bottom:4px;">MY TEMPLATES</div>' + names.map(n => {
+                const chain = (all[n].steps || []).join(' → ');
+                return `<div style="display:flex;align-items:center;gap:5px;margin-bottom:4px;font-size:12px;">
+                    <label style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(chain)}">${escapeHtml(n)} <span style="color:#789;font-size:10px;">(${(all[n].steps || []).length})</span></label>
+                    <span data-wr-edit="${escapeHtml(n)}" title="Load into the builder below" style="cursor:pointer;color:#9cf;font-size:11px;">✎</span>
+                    <span data-wr-ren="${escapeHtml(n)}" title="Rename template" style="cursor:pointer;color:#9ab;font-size:11px;">✏️</span>
+                    <span data-wr-del="${escapeHtml(n)}" title="Delete template" style="cursor:pointer;color:#f66;font-size:12px;">🗑</span></div>`;
+            }).join('');
+            listEl.querySelectorAll('[data-wr-edit]').forEach(el => { el.onclick = () => {
+                const n = el.getAttribute('data-wr-edit');
+                const a2 = wrapTemplatesLoad(); if (!a2[n]) return;
+                nameEl.value = n;
+                bSteps = (a2[n].steps || []).slice();
+                renderBuilder();
+            }; });
+            listEl.querySelectorAll('[data-wr-ren]').forEach(el => { el.onclick = () => {
+                const oldName = el.getAttribute('data-wr-ren');
+                const a2 = wrapTemplatesLoad(); const t = a2[oldName]; if (!t) return;
+                const nn = (window.prompt('Rename template:', oldName) || '').trim();
+                if (!nn || nn === oldName) return;
+                if (a2[nn] && !window.confirm(`"${nn}" already exists — overwrite it?`)) return;
+                delete a2[oldName];
+                t.name = nn;
+                a2[nn] = t;
+                wrapTemplatesSave(a2);
+                if (gmGet(CACHE_KEY_WRAP_LAST, null) === oldName) gmSet(CACHE_KEY_WRAP_LAST, nn);
+                console.log(`${TAG} [wrap] renamed template "${oldName}" → "${nn}"`);
+                renderList(); renderSel();
+            }; });
+            listEl.querySelectorAll('[data-wr-del]').forEach(el => { el.onclick = () => {
+                const n = el.getAttribute('data-wr-del');
+                const a2 = wrapTemplatesLoad(); delete a2[n]; wrapTemplatesSave(a2);
+                console.log(`${TAG} [wrap] deleted template "${n}"`);
+                renderList(); renderSel();
+            }; });
+        };
+        const renderBuilder = () => {
+            if (!bSteps.length) { stepsEl.innerHTML = '<div style="font-size:10px;color:#789;">No steps yet — pick a preset below and ➕ Add. Order top→bottom = order after each snapshot.</div>'; return; }
+            stepsEl.innerHTML = bSteps.map((n, i) => `
+                <div style="display:flex;align-items:center;gap:5px;margin-bottom:3px;font-size:12px;">
+                    <span style="color:#789;font-size:10px;width:14px;text-align:right;">${i + 1}.</span>
+                    <label style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(n)}</label>
+                    <span data-wr-sup="${i}" title="Move up" style="cursor:pointer;color:#9cf;font-size:11px;">▲</span>
+                    <span data-wr-sdn="${i}" title="Move down" style="cursor:pointer;color:#9cf;font-size:11px;">▼</span>
+                    <span data-wr-srm="${i}" title="Remove" style="cursor:pointer;color:#f66;font-size:12px;">✕</span>
+                </div>`).join('');
+            const move = (i, d) => { const j = i + d; if (j < 0 || j >= bSteps.length) return; const t = bSteps[i]; bSteps[i] = bSteps[j]; bSteps[j] = t; renderBuilder(); };
+            stepsEl.querySelectorAll('[data-wr-sup]').forEach(el => { el.onclick = () => move(+el.getAttribute('data-wr-sup'), -1); });
+            stepsEl.querySelectorAll('[data-wr-sdn]').forEach(el => { el.onclick = () => move(+el.getAttribute('data-wr-sdn'), 1); });
+            stepsEl.querySelectorAll('[data-wr-srm]').forEach(el => { el.onclick = () => { bSteps.splice(+el.getAttribute('data-wr-srm'), 1); renderBuilder(); }; });
+        };
+        renderSel(); renderAddSel(); renderList(); renderBuilder();
+        pop.querySelector('[data-wr-add]').onclick = () => {
+            const n = addSelEl.value;
+            if (!n) { showToast('No step presets saved yet — capture one via ➕ Stage → 📋.', '#ff9800', 4500); return; }
+            bSteps.push(n); // duplicates allowed on purpose (e.g. two Waits)
+            renderBuilder();
+        };
+        pop.querySelector('[data-wr-save]').onclick = () => {
+            const n = (nameEl.value || '').trim();
+            if (!n) { showToast('Give the template a name.', '#ff9800', 2500); return; }
+            if (!bSteps.length) { showToast('Add at least one step.', '#ff9800', 2500); return; }
+            const a2 = wrapTemplatesLoad();
+            const existing = a2[n];
+            const maxOrder = Object.values(a2).reduce((m, t) => Math.max(m, t && t.order != null ? t.order : 0), 0);
+            a2[n] = { name: n, savedAt: Date.now(), order: existing && existing.order != null ? existing.order : maxOrder + 10, steps: bSteps.slice() };
+            wrapTemplatesSave(a2);
+            gmSet(CACHE_KEY_WRAP_LAST, n);
+            console.log(`${TAG} [wrap] saved template "${n}" (${bSteps.length} steps)`);
+            showToast(`Saved wrap template "${n}".`, '#5fff5f', 2500);
+            renderList(); renderSel();
+        };
+        pop.querySelector('[data-wr-apply]').onclick = () => {
+            const n = selEl.value;
+            if (!n) { showToast('No template selected — build one below first.', '#ff9800', 3000); return; }
+            gmSet(CACHE_KEY_WRAP_LAST, n);
+            if (wrapApplyTemplate(n)) close();
+        };
+        const r = anchorBtn.getBoundingClientRect();
+        pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 316)) + 'px';
+        pop.style.top = (r.bottom + 4) + 'px';
+        const close = () => { pop.remove(); wrapPopEl = null; document.removeEventListener('mousedown', outside, true); };
+        const outside = e => { if (wrapPopEl && !pop.contains(e.target) && e.target !== anchorBtn) close(); };
+        pop.querySelector('[data-wr-close]').onclick = close;
+        setTimeout(() => document.addEventListener('mousedown', outside, true), 0);
     }
 
     function composerBindMapEvents() {
@@ -3414,6 +3652,565 @@
     }
 
     // ── Merge panel + commit ─────────────────────────────────────────────────
+    // ════════════════════════════════════════════════════════════════════════
+    // v1.99 — PAD-CLICK MERGE + CROSS-SITE MISSION COPY
+    //
+    // Pad-click merge (🔗): right-click (M2) asset pads on the map IN ORDER;
+    // each pad's name resolves to the mission with the SAME name (user rule:
+    // pad name = mission name, snapshots always belong to their pad). The
+    // merged mission = first mission's takeoff + every mission's editable
+    // steps in click order + last mission's returnHome (user rule: all
+    // takeoffs/landings are identical — keep first TO, last LAND). Created
+    // as a NEW mission via the proven ctx.saveApp({id:null}) path; originals
+    // untouched.
+    //
+    // Cross-site copy (📥): fetch another site's missions, pick-list
+    // (default all), create-only onto THIS site via the same saveApp path —
+    // dup names skipped. Coordinates are absolute GPS, so cloned sites line
+    // up. Instruction ids ride along and are ignored on create (same as the
+    // v1.48 Section+Battery merge which passes fetched instructions raw).
+    // ════════════════════════════════════════════════════════════════════════
+    const PCM_PANEL_ID = 'aim-mb-pcm-panel';
+    const pcm = { on: false, picks: [], markers: [], missions: null, assets: null, base: null, bound: null, panelEl: null, customName: null, pendingChoice: null, filterType: null, editingName: null, panelPos: null };
+
+    // Asset base type ("well-cluster", "battery", …) — the poi string minus
+    // any " - <state>" suffix. Used by the merge-mode type filter.
+    function pcmBaseType(a) {
+        const p = String((a && a.poi) || '').trim();
+        if (!p) return '(untyped)';
+        const i = p.indexOf(' - ');
+        return ((i >= 0 ? p.slice(0, i) : p).trim().toLowerCase()) || '(untyped)';
+    }
+
+    // ---- Merge recipes (v2.03) — the ordered pick list is persisted per
+    // merged-mission name so a merge can be RE-EDITED (reordered / re-synced
+    // from its source missions) without re-clicking every pad. Stored in GM;
+    // source missions resolve by NAME at load time so renames surface loudly.
+    const PCM_RECIPES_KEY = 'aim-mb-merge-recipes';
+    // v2.05: recipe keys are env-namespaced — prod and QA are separate
+    // databases, so site 1583 on QA is NOT prod's 1583. GM storage is
+    // shared across origins; bare-ID keys would leak recipes between them.
+    function pcmRecipeKey(siteId, name) { return `${envSiteKey(siteId)}::${name}`; }
+    function pcmLoadRecipes() {
+        try {
+            if (typeof GM_getValue === 'function') {
+                const raw = GM_getValue(PCM_RECIPES_KEY, null);
+                if (raw) { const o = JSON.parse(raw); if (o && typeof o === 'object') return o; }
+            }
+        } catch (e) { console.warn(`${TAG} [pcm] recipe load failed`, e); }
+        return {};
+    }
+    function pcmSaveRecipe(siteId, name) {
+        try {
+            if (typeof GM_setValue !== 'function') return;
+            const all = pcmLoadRecipes();
+            all[pcmRecipeKey(siteId, name)] = {
+                site: String(siteId), name, at: Date.now(),
+                picks: pcm.picks.map(p => ({ assetId: p.asset.id, assetName: p.asset.name, missionName: p.mission.name })),
+            };
+            GM_setValue(PCM_RECIPES_KEY, JSON.stringify(all));
+        } catch (e) { console.warn(`${TAG} [pcm] recipe save failed`, e); }
+    }
+    function pcmDeleteRecipe(siteId, name) {
+        try {
+            if (typeof GM_setValue !== 'function') return;
+            const all = pcmLoadRecipes();
+            delete all[pcmRecipeKey(siteId, name)];
+            GM_setValue(PCM_RECIPES_KEY, JSON.stringify(all));
+        } catch (e) {}
+    }
+    function pcmSiteRecipes(siteId) {
+        const all = pcmLoadRecipes();
+        return Object.keys(all).filter(k => k.indexOf(`${envSiteKey(siteId)}::`) === 0).map(k => all[k]).sort((a, b) => b.at - a.at);
+    }
+    function pcmLoadRecipe(rec) {
+        const missing = [];
+        const picks = [];
+        rec.picks.forEach(rp => {
+            const mission = (pcm.missions || []).find(m => String((m && m.name) || '').trim().toLowerCase() === String(rp.missionName || '').trim().toLowerCase());
+            if (!mission) { missing.push(rp.missionName); return; }
+            const asset = (pcm.assets || []).find(a => a.id === rp.assetId) || { id: rp.assetId, name: rp.assetName, ring: null };
+            picks.push({ asset, mission });
+        });
+        pcm.picks = picks;
+        pcm.editingName = rec.name;
+        pcm.customName = rec.name;
+        pcm.pendingChoice = null;
+        if (missing.length) showToast(`⚠ ${missing.length} source mission(s) not found (renamed/deleted?): ${missing.join(', ')}`, '#ff9800', 6500);
+        pcmRefresh();
+    }
+
+    // ⚡ Efficient order — furthest → closest from the base station (same
+    // convention as the Section+Battery merge: the drone works its way home).
+    function pcmEfficientOrder() {
+        if (pcm.picks.length < 2) return;
+        const b = pcm.base;
+        if (!b) { showToast('No base station found on this site — can\'t compute distance order.', '#ff9800', 3500); return; }
+        const dist = (p) => {
+            if (!p.asset || !Array.isArray(p.asset.ring) || !p.asset.ring.length) return 0;
+            const c = genCentroid(p.asset.ring);
+            const dLat = (c.lat - b.lat) * 111320;
+            const dLng = (c.lng - b.lng) * 111320 * Math.cos(b.lat * Math.PI / 180);
+            return Math.hypot(dLat, dLng);
+        };
+        pcm.picks.sort((a, b2) => dist(b2) - dist(a));
+        showToast('⚡ Reordered furthest → closest from base.', '#5fff5f', 3000);
+        pcmRefresh();
+    }
+
+    // M2 on a numbered badge → move-to-position popup (no need to unwind
+    // picks to fix one slot).
+    let pcmRenumEl = null;
+    function pcmCloseRenumber() {
+        if (pcmRenumEl) { try { pcmRenumEl.remove(); } catch (e) {} pcmRenumEl = null; }
+    }
+    function pcmOpenRenumber(idx, x, y) {
+        pcmCloseRenumber();
+        const p = pcm.picks[idx];
+        if (!p) return;
+        const el = document.createElement('div');
+        el.style.cssText = `position:fixed;left:${Math.min(x, window.innerWidth - 260)}px;top:${Math.min(y, window.innerHeight - 110)}px;z-index:2147483602;`
+            + 'background:#161a20;border:1px solid #7adfe6;border-radius:6px;padding:8px 10px;color:#e6e6e6;font:12px "Lato","Segoe UI",sans-serif;box-shadow:0 6px 20px rgba(0,0,0,0.7);';
+        el.innerHTML = `<div style="color:#7adfe6;font-weight:700;margin-bottom:5px;">#${idx + 1} · ${escapeHtml(String(p.asset.name || ''))}</div>
+            <div style="display:flex;gap:6px;align-items:center;">
+            <label style="color:#9ad;font-size:11px;">Move to</label>
+            <input data-pcm-renum type="number" min="1" max="${pcm.picks.length}" value="${idx + 1}" style="width:52px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:4px;padding:2px 5px;">
+            <button data-pcm-renum-set style="padding:3px 9px;background:#7adfe6;border:none;color:#04222a;border-radius:4px;cursor:pointer;font-weight:800;">Set</button>
+            <button data-pcm-renum-rm style="padding:3px 9px;background:rgba(255,85,85,0.2);border:1px solid #ff5555;color:#ff8a8a;border-radius:4px;cursor:pointer;">Remove</button>
+            <button data-pcm-renum-x style="background:none;border:none;color:#888;cursor:pointer;">✕</button></div>`;
+        document.body.appendChild(el);
+        pcmRenumEl = el;
+        const doSet = () => {
+            const v = Math.max(1, Math.min(pcm.picks.length, Number(el.querySelector('[data-pcm-renum]').value) || (idx + 1)));
+            const moved = pcm.picks.splice(idx, 1)[0];
+            pcm.picks.splice(v - 1, 0, moved);
+            pcmCloseRenumber();
+            pcmRefresh();
+        };
+        el.querySelector('[data-pcm-renum-set]').onclick = doSet;
+        el.querySelector('[data-pcm-renum]').onkeydown = (ev) => { ev.stopPropagation(); if (ev.key === 'Enter') doSet(); };
+        el.querySelector('[data-pcm-renum-rm]').onclick = () => { pcm.picks.splice(idx, 1); pcmCloseRenumber(); pcmRefresh(); };
+        el.querySelector('[data-pcm-renum-x]').onclick = () => pcmCloseRenumber();
+    }
+
+    function pcmStepCount(m) { return mbMissionBody(m).length; }
+
+    function pcmFindMission(name) {
+        const c = pcmFindMissionCandidates(name);
+        return c.length === 1 ? c[0] : null;
+    }
+
+    // v2.01: mission names carry section prefixes ("NNE - SMITH SN 48-37 03
+    // 203H" for pad "SMITH SN 48-37 03 203H" — the generator's
+    // "{section} - {asset}" template). Rank matches: exact → ends with
+    // " - <pad>" → contains. Multiple survivors at a rank → the panel shows
+    // a pick-one chooser instead of guessing (a "Merged - A + B" mission
+    // also CONTAINS pad names, so contains can tie).
+    function pcmFindMissionCandidates(name) {
+        const want = String(name || '').trim().toLowerCase();
+        if (!want || !Array.isArray(pcm.missions)) return [];
+        const all = pcm.missions.filter(m => m && typeof m.name === 'string' && m.name.trim());
+        const norm = m => m.name.trim().toLowerCase();
+        let c = all.filter(m => norm(m) === want);
+        if (c.length) return c;
+        c = all.filter(m => norm(m).endsWith('- ' + want) || norm(m).endsWith('– ' + want));
+        if (c.length) return c;
+        return all.filter(m => norm(m).indexOf(want) >= 0);
+    }
+
+    async function pcmEnter() {
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded.', '#ff5252', 3000); return; }
+        showToast('🔗 Merge mode — loading pads + missions…', '#7adfe6', 2500);
+        try {
+            const [ent, missions] = await Promise.all([
+                genFetchEntities(sid),
+                new Promise((res, rej) => fetchMissions(sid, res, rej)),
+            ]);
+            pcm.assets = (ent && ent.assets) || [];
+            pcm.base = (ent && ent.base) || null;
+            pcm.missions = missions || [];
+        } catch (e) {
+            console.warn(`${TAG} [pcm] load failed`, e);
+            showToast('Merge mode: failed to load pads/missions (see console).', '#ff5252', 4000);
+            return;
+        }
+        if (!pcm.assets.length) { showToast('No asset pads found on this site.', '#ff9800', 3500); return; }
+        pcm.on = true; pcm.picks = []; pcm.customName = null; pcm.editingName = null;
+        // Synchronous DOM flag (same protocol as Click-to-Add's
+        // data-aim-clickadd): the Asset Inspector's window contextmenu
+        // handler bails while this is set (AI v4.199+), so M2 on a pad
+        // reaches OUR handler instead of popping the entity inspector.
+        try { document.documentElement.setAttribute('data-aim-merge', '1'); } catch (e) {}
+        pcmBind();
+        pcmRefresh();
+        showToast('🔗 Merge mode ON — right-click (M2) pads in order. M2 a numbered pad to remove it.', '#5fff5f', 5000);
+    }
+
+    function pcmExit() {
+        pcm.on = false;
+        try { document.documentElement.removeAttribute('data-aim-merge'); } catch (e) {}
+        pcmUnbind();
+        pcmClearMarkers();
+        if (pcm.panelEl) { try { pcm.panelEl.remove(); } catch (e) {} pcm.panelEl = null; }
+        pcm.picks = []; pcm.customName = null; pcm.pendingChoice = null; pcm.editingName = null;
+        pcmCloseRenumber();
+        const btn = document.querySelector('[data-pcm-toggle]');
+        if (btn) btn.classList.remove('active');
+    }
+
+    function pcmBind() {
+        pcmUnbind();
+        const c = document.querySelector('.leaflet-container');
+        if (!c) { showToast('Merge mode: map not found.', '#ff5252', 3000); return; }
+        const h = (e) => pcmOnContextMenu(e);
+        c.addEventListener('contextmenu', h, true);
+        pcm.bound = { c, h };
+    }
+    function pcmUnbind() {
+        if (pcm.bound) { try { pcm.bound.c.removeEventListener('contextmenu', pcm.bound.h, true); } catch (e) {} pcm.bound = null; }
+    }
+
+    function pcmOnContextMenu(e) {
+        if (!pcm.on) return;
+        // M2 directly on a numbered badge = renumber that pick in place
+        const badgeEl = (e.target && e.target.closest) ? e.target.closest('[data-pcm-idx]') : null;
+        if (badgeEl) {
+            e.preventDefault(); e.stopPropagation();
+            pcmOpenRenumber(Number(badgeEl.getAttribute('data-pcm-idx')), e.clientX + 8, e.clientY + 8);
+            return;
+        }
+        const map = getLeafletMap();
+        if (!map || typeof map.mouseEventToLatLng !== 'function') return;
+        let ll;
+        try { ll = map.mouseEventToLatLng(e); } catch (err) { return; }
+        const pt = { lat: ll.lat, lng: ll.lng };
+        const hit = (pcm.assets || []).find(a => a && a.ring && a.ring.length >= 3 && genPointInPoly(pt, a.ring));
+        if (!hit) return;   // not on a pad — let native / other AIM handlers run
+        e.preventDefault(); e.stopPropagation();
+        if (pcm.filterType && pcmBaseType(hit) !== pcm.filterType) {
+            showToast(`Filtered out — "${hit.name}" is "${pcmBaseType(hit)}" (filter: ${pcm.filterType}).`, '#ff9800', 3000);
+            return;
+        }
+        const idx = pcm.picks.findIndex(p => p.asset.id === hit.id);
+        if (idx >= 0) { pcm.picks.splice(idx, 1); pcm.pendingChoice = null; pcmRefresh(); return; }
+        const cands = pcmFindMissionCandidates(hit.name).filter(m => !pcm.picks.some(p => p.mission.id === m.id));
+        if (!cands.length) {
+            const any = pcmFindMissionCandidates(hit.name).length;
+            showToast(any ? `Pad "${hit.name}"'s mission is already in the list.` : `No mission matching "${hit.name}" on this site.`, '#ff9800', 3500);
+            return;
+        }
+        if (cands.length === 1) {
+            pcm.picks.push({ asset: hit, mission: cands[0] });
+            pcm.pendingChoice = null;
+            pcmRefresh();
+            return;
+        }
+        pcm.pendingChoice = { asset: hit, candidates: cands.slice(0, 8) };
+        pcmRenderPanel();
+    }
+
+    function pcmClearMarkers() {
+        pcm.markers.forEach(m => { try { m.remove(); } catch (e) {} });
+        pcm.markers = [];
+    }
+    function pcmDrawMarkers() {
+        pcmClearMarkers();
+        const L = composerGetL(), map = getLeafletMap();
+        if (!L || !map) return;
+        pcm.picks.forEach((p, i) => {
+            if (!p.asset || !Array.isArray(p.asset.ring) || !p.asset.ring.length) return;   // recipe-loaded pick whose asset is gone
+            const c = genCentroid(p.asset.ring);
+            const icon = L.divIcon({
+                className: 'aim-mb-pcm-badge',
+                // interactive marker + data-pcm-idx → M2 on the badge itself opens the renumber popup
+                html: `<div data-pcm-idx="${i}" style="width:26px;height:26px;border-radius:50%;background:#7adfe6;color:#04222a;font:800 14px/26px monospace;text-align:center;border:2px solid #04222a;box-shadow:0 1px 6px rgba(0,0,0,0.6);cursor:context-menu;">${i + 1}</div>`,
+                iconSize: [26, 26], iconAnchor: [13, 13],
+            });
+            try { pcm.markers.push(L.marker([c.lat, c.lng], { icon, interactive: true }).addTo(map)); } catch (e) {}
+        });
+    }
+    function pcmRefresh() { pcmDrawMarkers(); pcmRenderPanel(); }
+
+    function pcmRenderPanel() {
+        if (pcm.panelEl) { try { pcm.panelEl.remove(); } catch (e) {} pcm.panelEl = null; }
+        const total = pcm.picks.reduce((s, pk) => s + pcmStepCount(pk.mission), 0);
+        const defName = pcm.picks.length ? ('Merged - ' + pcm.picks.map(pk => pk.asset.name).join(' + ')) : '';
+        const nameVal = pcm.customName != null ? pcm.customName : defName;
+        const rows = pcm.picks.map((pk, i) => `<div style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;font-size:11px;">
+            <span style="color:#7adfe6;font-weight:800;min-width:14px;">${i + 1}</span>
+            <span style="flex:1;color:#e6e6e6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(String(pk.mission.name || ''))}</span>
+            <span style="color:#9ad;white-space:nowrap;">${pcmStepCount(pk.mission)} steps</span>
+            <button data-pcm-rm="${i}" style="background:none;border:none;color:#ff8a8a;cursor:pointer;font-size:12px;">✕</button>
+        </div>`).join('');
+        const types = {};
+        (pcm.assets || []).forEach(a => { const t = pcmBaseType(a); types[t] = (types[t] || 0) + 1; });
+        const typeOpts = ['<option value="">All asset types</option>']
+            .concat(Object.keys(types).sort().map(t => `<option value="${escapeHtml(t)}" ${pcm.filterType === t ? 'selected' : ''}>${escapeHtml(t)} (${types[t]})</option>`)).join('');
+        const recipes = pcmSiteRecipes(getCurrentSiteID());
+        const recipeOpts = recipes.map((r, i) => `<option value="${i}">${escapeHtml(r.name)} · ${r.picks.length} pads</option>`).join('');
+        const el = document.createElement('div');
+        el.id = PCM_PANEL_ID;
+        const pos = pcm.panelPos ? `left:${pcm.panelPos.left};top:${pcm.panelPos.top};right:auto;` : 'top:60px;right:24px;';
+        el.style.cssText = `position:fixed;${pos}width:360px;max-height:78vh;display:flex;flex-direction:column;z-index:2147483601;`
+            + 'background:#161a20;border:1px solid #7adfe6;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        el.innerHTML = `
+            <div data-pcm-drag style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(122,223,230,0.08);border-bottom:1px solid rgba(122,223,230,0.3);cursor:move;user-select:none;">
+                <span style="font-weight:800;color:#7adfe6;font-size:14px;">${pcm.editingName ? `✏ Editing "${escapeHtml(pcm.editingName)}"` : '🔗 Merge by pad clicks'}</span>
+                <button data-pcm-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button>
+            </div>
+            <div style="padding:7px 12px;font-size:10px;color:#789;border-bottom:1px solid #2a2f38;line-height:1.5;">
+                Right-click (M2) pads in order — pad #1's mission leads. M2 a numbered BADGE to move it to any position; M2 elsewhere on a picked pad removes it.
+                Keeps the FIRST mission's takeoff + the LAST mission's landing; everything between is the missions' editable steps in order.
+            </div>
+            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:6px 10px;border-bottom:1px solid #2a2f38;">
+                <select data-pcm-filter title="Only pads of this asset type respond to M2" style="background:#0e1218;color:#cde;border:1px solid #2a3340;border-radius:4px;font-size:10px;padding:2px 3px;max-width:150px;">${typeOpts}</select>
+                <button data-pcm-eff title="Reorder the current picks furthest → closest from the base station" style="padding:3px 8px;background:rgba(255,213,79,0.15);border:1px solid rgba(255,213,79,0.5);color:#ffd54f;border-radius:4px;cursor:pointer;font-size:10px;">⚡ Far→near</button>
+                ${recipeOpts ? `<select data-pcm-recipe title="Load a saved merge to view its order or re-edit it" style="background:#0e1218;color:#cde;border:1px solid #2a3340;border-radius:4px;font-size:10px;padding:2px 3px;max-width:170px;"><option value="">✏ saved merges…</option>${recipeOpts}</select>` : ''}
+            </div>
+            ${pcm.pendingChoice ? `<div style="padding:6px 10px;border-bottom:1px solid #3a3320;background:rgba(255,213,79,0.07);">
+                <div style="font-size:11px;color:#ffd54f;margin-bottom:4px;">Pad "${escapeHtml(pcm.pendingChoice.asset.name)}" matches ${pcm.pendingChoice.candidates.length} missions — pick one:</div>
+                ${pcm.pendingChoice.candidates.map((m, i) => `<button data-pcm-cand="${i}" style="display:block;width:100%;text-align:left;margin:2px 0;padding:3px 8px;background:#0e1218;border:1px solid #3a4350;border-radius:4px;color:#e6e6e6;cursor:pointer;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(m.name)} <span style="color:#9ad;">· ${pcmStepCount(m)} steps</span></button>`).join('')}
+                <button data-pcm-cand-cancel style="margin-top:3px;padding:2px 8px;background:none;border:none;color:#888;cursor:pointer;font-size:10px;">cancel</button>
+            </div>` : ''}
+            <div style="overflow:auto;flex:1;padding:2px 8px;">${rows || '<div style="padding:10px;color:#888;font-size:11px;">No pads picked yet.</div>'}</div>
+            <div style="display:flex;gap:8px;align-items:center;padding:7px 12px;border-top:1px solid #2a2f38;">
+                <label style="font-size:11px;color:#9ad;">Name</label>
+                <input data-pcm-name type="text" value="${escapeHtml(nameVal)}" style="flex:1;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:4px;padding:3px 6px;font-size:11px;" />
+            </div>
+            <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
+                <span data-pcm-status style="flex:1;font-size:11px;color:#9ad;">${pcm.picks.length} mission(s) · ${total} steps</span>
+                <button data-pcm-clear style="padding:5px 9px;background:rgba(255,255,255,0.12);border:none;color:#ddd;border-radius:5px;cursor:pointer;font-size:11px;">Clear</button>
+                <button data-pcm-go style="padding:6px 12px;background:#5fff5f;border:none;color:#04220a;border-radius:6px;cursor:pointer;font-weight:800;" ${pcm.picks.length >= 2 ? '' : 'disabled'}>${pcm.editingName ? `💾 Update (${total})` : `🔗 Create (${total})`}</button>
+            </div>`;
+        document.body.appendChild(el);
+        pcm.panelEl = el;
+        el.querySelector('[data-pcm-close]').onclick = () => pcmExit();
+        el.querySelector('[data-pcm-clear]').onclick = () => { pcm.picks = []; pcm.customName = null; pcm.pendingChoice = null; pcmRefresh(); };
+        el.querySelectorAll('[data-pcm-cand]').forEach(b => {
+            b.onclick = () => {
+                const ch = pcm.pendingChoice;
+                if (!ch) return;
+                const m = ch.candidates[Number(b.getAttribute('data-pcm-cand'))];
+                if (!m) return;
+                pcm.picks.push({ asset: ch.asset, mission: m });
+                pcm.pendingChoice = null;
+                pcmRefresh();
+            };
+        });
+        const candCancel = el.querySelector('[data-pcm-cand-cancel]');
+        if (candCancel) candCancel.onclick = () => { pcm.pendingChoice = null; pcmRenderPanel(); };
+        // Draggable by the header; the position survives the panel's rebuilds
+        el.querySelector('[data-pcm-drag]').addEventListener('pointerdown', (ev) => {
+            if (ev.target.closest && ev.target.closest('button')) return;
+            ev.preventDefault();
+            const r = el.getBoundingClientRect();
+            const ox = ev.clientX - r.left, oy = ev.clientY - r.top;
+            const mv = (m2) => {
+                el.style.left = `${Math.max(0, m2.clientX - ox)}px`;
+                el.style.top = `${Math.max(0, m2.clientY - oy)}px`;
+                el.style.right = 'auto';
+                pcm.panelPos = { left: el.style.left, top: el.style.top };
+            };
+            const up = () => { document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', up); };
+            document.addEventListener('pointermove', mv);
+            document.addEventListener('pointerup', up);
+        });
+        const filterSel = el.querySelector('[data-pcm-filter]');
+        if (filterSel) filterSel.onchange = () => { pcm.filterType = filterSel.value || null; };
+        const effBtn = el.querySelector('[data-pcm-eff]');
+        if (effBtn) effBtn.onclick = () => pcmEfficientOrder();
+        const recipeSel = el.querySelector('[data-pcm-recipe]');
+        if (recipeSel) recipeSel.onchange = () => {
+            const r = pcmSiteRecipes(getCurrentSiteID())[Number(recipeSel.value)];
+            if (r) pcmLoadRecipe(r);
+        };
+        el.querySelector('[data-pcm-go]').onclick = () => pcmCommit();
+        const nameEl = el.querySelector('[data-pcm-name]');
+        nameEl.oninput = () => { pcm.customName = nameEl.value; };
+        el.querySelectorAll('[data-pcm-rm]').forEach(b => {
+            b.onclick = () => { pcm.picks.splice(Number(b.getAttribute('data-pcm-rm')), 1); pcmRefresh(); };
+        });
+    }
+
+    // v2.02: LIVE 400 FIX — a merged create concatenates instructions from
+    // SEVERAL missions, each carrying its own server-assigned instruction
+    // ids (+ other read-shape fields); the mixed/foreign ids 400 the create.
+    // (A single-mission copy passes raw instructions fine — one mission's
+    // ids are self-consistent.) Normalize every merged step down to the
+    // exact field set the generator's proven creates use: no id, deep-
+    // cloned location/extras.
+    function pcmNormStep(s) {
+        return {
+            type: s.type,
+            value1: s.value1 === undefined ? null : s.value1,
+            value2: s.value2 === undefined ? null : s.value2,
+            location: s.location ? JSON.parse(JSON.stringify(s.location)) : null,
+            extra_options: s.extra_options ? JSON.parse(JSON.stringify(s.extra_options)) : {},
+            polygon_points: s.polygon_points ? JSON.parse(JSON.stringify(s.polygon_points)) : null,
+            snapshot_points: s.snapshot_points ? JSON.parse(JSON.stringify(s.snapshot_points)) : null,
+        };
+    }
+
+    let pcmBusy = false;
+    async function pcmCommit() {
+        if (pcmBusy) return;
+        if (pcm.picks.length < 2) { showToast('Pick at least 2 pads to merge.', '#ff9800', 3000); return; }
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4000); return; }
+        const nameEl = pcm.panelEl && pcm.panelEl.querySelector('[data-pcm-name]');
+        const name = ((nameEl && nameEl.value) || '').trim();
+        if (!name) { showToast('Give the merged mission a name.', '#ff9800', 3000); return; }
+        const exact = (pcm.missions || []).find(m => String((m && m.name) || '').trim().toLowerCase() === name.toLowerCase());
+        const editing = pcm.editingName
+            ? (pcm.missions || []).find(m => String((m && m.name) || '').trim().toLowerCase() === pcm.editingName.trim().toLowerCase())
+            : null;
+        if (pcm.editingName && !editing) { showToast(`Mission "${pcm.editingName}" no longer exists — this will CREATE a new one instead.`, '#ff9800', 5000); }
+        if (!editing && exact) { showToast(`A mission named "${name}" already exists — pick another name.`, '#ff9800', 4500); return; }
+        if (editing && exact && exact.id !== editing.id) { showToast(`Another mission is already named "${name}".`, '#ff9800', 4500); return; }
+        const first = pcm.picks[0].mission, last = pcm.picks[pcm.picks.length - 1].mission;
+        const to = pcmNormStep(((first.instructions || []).find(i => i && i.type === 0)) || mbMakeStep(0, 20));
+        const rh = pcmNormStep((Array.from(last.instructions || []).reverse().find(i => i && i.type === 99)) || mbMakeStep(99));
+        const body = [];
+        pcm.picks.forEach(p => mbMissionBody(p.mission).forEach(st => body.push(pcmNormStep(st))));
+        const instrs = [to].concat(body, [rh]);
+        const statusEl = pcm.panelEl && pcm.panelEl.querySelector('[data-pcm-status]');
+        if (statusEl) statusEl.textContent = `Creating "${name}" (${body.length} steps)…`;
+        pcmBusy = true;
+        try {
+            if (editing) {
+                // Update IN PLACE: full clone of the existing mission with the
+                // rebuilt instruction list — id preserved, everything else kept.
+                const app = JSON.parse(JSON.stringify(editing));
+                app.instructions = instrs;
+                await ctx.saveApp(app, name);
+            } else {
+                await ctx.saveApp({ id: null, type: 1, instructions: instrs, data_report_object_arr: [] }, name);
+            }
+        } catch (e) {
+            pcmBusy = false;
+            console.warn(`${TAG} [pcm] create failed`, e);
+            showToast(`🔗 Merge create FAILED — ${String(e && e.message || e)}`, '#ff5252', 6000);
+            if (statusEl) statusEl.textContent = 'Create failed — see console.';
+            return;
+        }
+        pcmBusy = false;
+        pcmSaveRecipe(getCurrentSiteID(), name);
+        if (pcm.editingName && pcm.editingName !== name) pcmDeleteRecipe(getCurrentSiteID(), pcm.editingName);
+        const verb = editing ? 'Updated' : 'Created';
+        const refreshed = refreshMissionList();
+        showToast(`🔗 ${verb} "${name}" — ${body.length} steps from ${pcm.picks.length} missions. Re-edit any time via ✏ saved merges.${refreshed ? '' : ' Reload the list to see it.'}`, '#5fff5f', 7000);
+        console.log(`${TAG} [pcm] ${verb.toLowerCase()} "${name}" from ${pcm.picks.length} missions (${body.length} steps + takeoff/land)`);
+        pcmExit();
+    }
+
+    // ---------------- Cross-site mission copy ----------------
+    const CPM_PANEL_ID = 'aim-mb-copy-panel';
+    let cpmBusy = false;
+
+    function openCopyMissionsPanel() {
+        const old = document.getElementById(CPM_PANEL_ID);
+        if (old) { old.remove(); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded.', '#ff5252', 3000); return; }
+        let lastSrc = '';
+        try { if (typeof GM_getValue === 'function') lastSrc = GM_getValue(IS_QA ? 'qa-aim-mb-copy-src' : 'aim-mb-copy-src', '') || ''; } catch (e) {}
+        const p = document.createElement('div');
+        p.id = CPM_PANEL_ID;
+        p.style.cssText = 'position:fixed;top:60px;right:24px;width:390px;max-height:80vh;display:flex;flex-direction:column;z-index:2147483601;'
+            + 'background:#161a20;border:1px solid #7adfe6;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        p.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(122,223,230,0.08);border-bottom:1px solid rgba(122,223,230,0.3);">
+                <span style="font-weight:800;color:#7adfe6;font-size:14px;">📥 Copy missions → site ${escapeHtml(String(sid))}</span>
+                <button data-cpm-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;padding:8px 12px;border-bottom:1px solid #2a2f38;">
+                <label style="font-size:11px;color:#9ad;white-space:nowrap;">Source site ID</label>
+                <input data-cpm-src type="text" value="${escapeHtml(lastSrc)}" style="width:90px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:4px;padding:3px 6px;font-size:12px;" />
+                <button data-cpm-load style="padding:4px 10px;background:#7adfe6;border:none;color:#04222a;border-radius:5px;cursor:pointer;font-weight:800;font-size:11px;">Load</button>
+            </div>
+            <div data-cpm-list style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;color:#888;">Enter the source site ID and Load. Copy is create-only — mission names already on this site are skipped.</div>
+            <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
+                <span data-cpm-status style="flex:1;font-size:11px;color:#9ad;"></span>
+                <button data-cpm-go style="padding:6px 12px;background:#5fff5f;border:none;color:#04220a;border-radius:6px;cursor:pointer;font-weight:800;" disabled>📥 Copy 0</button>
+            </div>`;
+        document.body.appendChild(p);
+        p.querySelector('[data-cpm-close]').onclick = () => { if (!cpmBusy) p.remove(); };
+        let loaded = null;
+        const listEl = p.querySelector('[data-cpm-list]');
+        const goBtn = p.querySelector('[data-cpm-go]');
+        const statusEl = p.querySelector('[data-cpm-status]');
+        const updateGo = () => {
+            const n = loaded ? listEl.querySelectorAll('input[data-cpm-pick]:checked').length : 0;
+            goBtn.textContent = `📥 Copy ${n}`;
+            goBtn.disabled = cpmBusy || !n;
+        };
+        p.querySelector('[data-cpm-load]').onclick = async () => {
+            const srcId = String(p.querySelector('[data-cpm-src]').value || '').trim();
+            if (!/^\d+$/.test(srcId)) { showToast('Source site ID must be a number.', '#ff9800', 3000); return; }
+            if (srcId === String(sid)) { showToast('Source IS this site — use 🔗 Merge for same-site work.', '#ff9800', 4000); return; }
+            try { if (typeof GM_setValue === 'function') GM_setValue(IS_QA ? 'qa-aim-mb-copy-src' : 'aim-mb-copy-src', srcId); } catch (e) {}
+            listEl.innerHTML = '<div style="padding:8px;color:#9ad;">Loading…</div>';
+            try {
+                const [srcArr, tgtArr] = await Promise.all([
+                    fetch(`/available_app/?site_id=${encodeURIComponent(srcId)}&type=1`, { credentials: 'include' })
+                        .then(r => { if (!r.ok) throw new Error(`source HTTP ${r.status}`); return r.json(); }),
+                    fetch(`/available_app/?site_id=${encodeURIComponent(sid)}&type=1`, { credentials: 'include' })
+                        .then(r => { if (!r.ok) throw new Error(`target HTTP ${r.status}`); return r.json(); }),
+                ]);
+                if (!Array.isArray(srcArr)) throw new Error('unexpected source response shape');
+                const tgtNames = new Set((Array.isArray(tgtArr) ? tgtArr : []).map(m => String((m && m.name) || '').trim().toLowerCase()));
+                loaded = { src: srcArr };
+                if (!srcArr.length) { listEl.innerHTML = '<div style="padding:8px;color:#ff9800;">Source site has no missions.</div>'; updateGo(); return; }
+                listEl.innerHTML = `<div style="padding:4px 2px;color:#9ad;">${srcArr.length} mission(s) on site ${escapeHtml(srcId)} · <a data-cpm-all href="#" style="color:#7adfe6;">all</a> / <a data-cpm-none href="#" style="color:#7adfe6;">none</a></div>`
+                    + srcArr.map((m, i) => {
+                        const dup = tgtNames.has(String((m && m.name) || '').trim().toLowerCase());
+                        const steps = mbMissionBody(m).length;
+                        return `<label style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;${dup ? 'opacity:0.5;' : 'cursor:pointer;'}">
+                            <input type="checkbox" data-cpm-pick="${i}" ${dup ? 'disabled' : 'checked'} />
+                            <span style="flex:1;color:#e6e6e6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(String(m.name || ('#' + m.id)))}</span>
+                            <span style="color:#9ad;white-space:nowrap;">${steps} steps</span>
+                            ${dup ? '<span style="color:#ff9800;font-size:10px;white-space:nowrap;">exists — skipped</span>' : ''}
+                        </label>`;
+                    }).join('');
+                listEl.querySelectorAll('input[data-cpm-pick]').forEach(cb => { cb.onchange = updateGo; });
+                const allA = listEl.querySelector('[data-cpm-all]'), noneA = listEl.querySelector('[data-cpm-none]');
+                if (allA) allA.onclick = (ev) => { ev.preventDefault(); listEl.querySelectorAll('input[data-cpm-pick]:not(:disabled)').forEach(cb => { cb.checked = true; }); updateGo(); };
+                if (noneA) noneA.onclick = (ev) => { ev.preventDefault(); listEl.querySelectorAll('input[data-cpm-pick]').forEach(cb => { if (!cb.disabled) cb.checked = false; }); updateGo(); };
+                updateGo();
+            } catch (e) {
+                console.warn(`${TAG} [copy] load failed`, e);
+                listEl.innerHTML = `<div style="padding:8px;color:#ff8a8a;">Load failed — ${escapeHtml(String(e && e.message || e))}</div>`;
+                loaded = null;
+                updateGo();
+            }
+        };
+        goBtn.onclick = async () => {
+            if (!loaded || cpmBusy) return;
+            const ctx = findMissionAppCtx();
+            if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4000); return; }
+            const picks = Array.from(listEl.querySelectorAll('input[data-cpm-pick]:checked'))
+                .map(cb => loaded.src[Number(cb.getAttribute('data-cpm-pick'))]).filter(Boolean);
+            if (!picks.length) return;
+            cpmBusy = true; updateGo();
+            let ok = 0, fail = 0;
+            for (let i = 0; i < picks.length; i++) {
+                const m = picks[i];
+                statusEl.textContent = `Copying ${i + 1}/${picks.length} — ${m.name}…`;
+                try {
+                    await ctx.saveApp({ id: null, type: 1, instructions: (m.instructions || []), data_report_object_arr: [] }, m.name);
+                    ok++;
+                } catch (e) { fail++; console.warn(`${TAG} [copy] failed "${m.name}"`, e); }
+            }
+            cpmBusy = false;
+            const refreshed = ok ? refreshMissionList() : false;
+            statusEl.textContent = `Done — copied ${ok}${fail ? `, ${fail} failed` : ''}.`;
+            showToast(`📥 Copied ${ok} mission(s)${fail ? ` · ${fail} failed (see console)` : ''}.${ok && !refreshed ? ' Reload the list to see them.' : ''}`, ok ? '#5fff5f' : '#ff5252', 7000);
+            console.log(`${TAG} [copy] copied ${ok}, failed ${fail} → site ${sid}`);
+            updateGo();
+        };
+    }
+
     const MB_MERGE_PANEL_ID = 'aim-mb-merge-panel';
     let mbMergeBusy = false;
     function mbCloseMergePanel() { const p = document.getElementById(MB_MERGE_PANEL_ID); if (p) p.remove(); }
@@ -5363,6 +6160,8 @@
                 <button class="aim-mb-tbtn" data-cols>Columns ▾</button>
                 <button class="aim-mb-tbtn" data-bulk-rename title="Find & replace text across the SELECTED missions' names (e.g. N - → NNE - )">✎ Rename ▾</button>
                 <button class="aim-mb-tbtn" data-bulk-delete title="Permanently delete the SELECTED missions from the server" style="color:#ff8a8a;">🗑 Delete</button>
+                <button class="aim-mb-tbtn" data-copy-missions title="Copy missions from another site into this one (create-only, dup names skipped)">📥 Copy</button>
+                <button class="aim-mb-tbtn ${pcm.on ? 'active' : ''}" data-pcm-toggle title="Merge missions by right-clicking pads on the map in order (pad name = mission name)">🔗 Merge</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'imperial' ? 'active' : ''}" data-unit="imperial">mi</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'metric' ? 'active' : ''}" data-unit="metric">km</button>
                 <button class="aim-mb-tbtn" data-settings title="Battery → flights thresholds">⚙</button>
@@ -5644,6 +6443,14 @@
         // Bulk delete (selected)
         const bdBtn = panelEl.querySelector('[data-bulk-delete]');
         if (bdBtn) bdBtn.onclick = () => openBulkDeletePopover(bdBtn);
+        // v1.99 — cross-site mission copy + pad-click merge mode
+        const cpBtn = panelEl.querySelector('[data-copy-missions]');
+        if (cpBtn) cpBtn.onclick = () => openCopyMissionsPanel();
+        const pcmBtn = panelEl.querySelector('[data-pcm-toggle]');
+        if (pcmBtn) pcmBtn.onclick = async () => {
+            if (pcm.on) { pcmExit(); }
+            else { await pcmEnter(); if (pcm.on) pcmBtn.classList.add('active'); }
+        };
         // Settings (thresholds)
         const settingsBtn = panelEl.querySelector('[data-settings]');
         if (settingsBtn) settingsBtn.onclick = () => openSettingsPopover(settingsBtn);
@@ -8943,6 +9750,89 @@ ${snapPlacemarks}
     }
 
     // ========================================================
+    // Legacy Mission Bank detection (TOP only) — v1.98
+    // Some sites (first seen: 1465) are served Percepto's LEGACY
+    // Angular Mission Bank on the current app build: the react-pages
+    // iframe never exists, so every iframe-gated MBT feature (SUM,
+    // Stage, badges, inline editing) silently never appears. Fail
+    // loudly instead: a console warning each time the bank is opened
+    // on such a site, plus one dismissible toast per site per session,
+    // so "MBT is broken" reads as "this site is on the legacy path".
+    // ========================================================
+    const LEGACY_TOAST_ID = 'aim-mb-legacy-toast';
+    const LEGACY_WAIT_MS = 8000;     // grace for the iframe to mount on slow loads
+    const LEGACY_WATCH_MAX_MS = 30000; // stop polling after this per navigation
+    const legacyToastShownSites = new Set();
+
+    function hasReactPagesIframe() {
+        try {
+            return [...document.querySelectorAll('iframe')].some(f => (f.src || '').includes('/react-pages/'));
+        } catch (e) { return false; }
+    }
+
+    function removeLegacyToast() {
+        const el = document.getElementById(LEGACY_TOAST_ID);
+        if (el) el.remove();
+    }
+
+    function showLegacyToast() {
+        if (document.getElementById(LEGACY_TOAST_ID)) return;
+        const toast = document.createElement('div');
+        toast.id = LEGACY_TOAST_ID;
+        toast.style.cssText = [
+            'position:fixed', 'bottom:18px', 'right:18px', 'z-index:2147483646',
+            'max-width:340px', 'background:#1f1f28', 'color:#ddd',
+            'border:1px solid #444', 'border-left:3px solid #e6a23c',
+            'border-radius:6px', 'padding:10px 30px 10px 12px',
+            'font:12px/1.5 -apple-system,"Segoe UI",Roboto,sans-serif',
+            'box-shadow:0 4px 14px rgba(0,0,0,.45)',
+        ].join(';');
+        toast.innerHTML = `
+            <div style="font-weight:600;color:#5fd3f3;margin-bottom:3px">AIM Mission Bank Tools</div>
+            This site uses Percepto's <b>legacy Mission Bank</b> — MBT tools (SUM, Stage, badges, inline editing) aren't available here. Other sites are unaffected.
+            <span data-aim-legacy-close style="position:absolute;top:6px;right:9px;cursor:pointer;color:#888;font-size:14px">✕</span>`;
+        toast.querySelector('[data-aim-legacy-close]').addEventListener('click', removeLegacyToast);
+        (document.body || document.documentElement).appendChild(toast);
+    }
+
+    function startLegacyBankWatch() {
+        let timer = null;
+        const stop = () => { if (timer) { clearInterval(timer); timer = null; } };
+        const check = () => {
+            stop();
+            // Scoped to the Mission Bank route only — mission-log and other
+            // pages may legitimately have no react-pages iframe.
+            if (!isOnMissionBank()) { removeLegacyToast(); return; }
+            let waited = 0;
+            let warned = false;
+            timer = setInterval(() => {
+                if (!isOnMissionBank()) { stop(); removeLegacyToast(); return; }
+                if (hasReactPagesIframe()) {
+                    // Iframe showed up (slow load, or Percepto migrated the
+                    // site mid-session) — retract any false alarm.
+                    if (warned) console.log(`${TAG} react-pages iframe appeared after ${waited / 1000}s — legacy warning retracted.`);
+                    stop();
+                    removeLegacyToast();
+                    return;
+                }
+                waited += 2000;
+                if (!warned && waited >= LEGACY_WAIT_MS) {
+                    warned = true;
+                    const siteID = mbCurrentSiteID() || '?';
+                    console.warn(`${TAG} legacy Mission Bank detected on site ${siteID} — no react-pages iframe after ${waited / 1000}s. MBT UI is unavailable on this site (Percepto serves it the legacy Angular bank).`);
+                    if (!legacyToastShownSites.has(siteID)) {
+                        legacyToastShownSites.add(siteID);
+                        showLegacyToast();
+                    }
+                }
+                if (waited >= LEGACY_WATCH_MAX_MS) stop();
+            }, 2000);
+        };
+        check();
+        window.addEventListener('hashchange', check);
+    }
+
+    // ========================================================
     // Init
     // ========================================================
     function init() {
@@ -9009,6 +9899,11 @@ ${snapPlacemarks}
             // path is safe. Harmless to leave on.
             installSaveDiffProbe();
             installSaveHotkey();
+        }
+        // TOP-only: watch for sites served the legacy Angular Mission Bank
+        // (no react-pages iframe) and say so instead of silently missing.
+        if (CONTEXT === 'TOP') {
+            try { startLegacyBankWatch(); } catch (e) { console.warn(`${TAG} legacy-bank watch failed to start:`, e); }
         }
         // Re-evaluate injection on hashchange (URL → Mission Bank)
         try {
