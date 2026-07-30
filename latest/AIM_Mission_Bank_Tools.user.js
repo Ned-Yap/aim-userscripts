@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.05
+// @version      2.06
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.05';
+    const SCRIPT_VERSION = '2.06';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -1691,7 +1691,15 @@
         caBtn.type = 'button';
         caBtn.style.cssText = 'flex:0 0 auto;margin-left:5px;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
         caBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); caSetMode(!caModeOn); };
-        row2.appendChild(autoBtn); row2.appendChild(stageBtn); row2.appendChild(caBtn);
+        const wrapBtn = document.createElement('button');
+        wrapBtn.id = WRAP_BTN_ID;
+        wrapBtn.type = 'button';
+        wrapBtn.textContent = '🎞';
+        wrapBtn.title = 'Wrap templates: apply a saved sequence of your step presets (e.g. Therm on → GEM on → Wait → GEM off → Therm off) after EVERY snapshot that has no trailing steps yet — the Click-to-Add finisher. Build and manage templates inside. Staged only — SAVE when done.';
+        wrapBtn.style.cssText = 'flex:0 0 auto;margin-left:5px;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;' +
+            'background:rgba(255,150,255,0.10);border:1px solid rgba(255,150,255,0.45);color:#f9f;';
+        wrapBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); wrapPopup(wrapBtn); };
+        row2.appendChild(autoBtn); row2.appendChild(stageBtn); row2.appendChild(caBtn); row2.appendChild(wrapBtn);
         // Row 3: the Click-to-Add "Insert at" bar (shown only while the mode is ON).
         const row3 = document.createElement('div');
         row3.id = CA_BAR_ID;
@@ -2027,7 +2035,12 @@
         caUndoStack.pop();
         const kl = rec.kind === 'nav' ? 'Nav' : rec.kind === 'flag' ? 'Flag Pole' : 'Snapshot';
         let newInstrs, msg;
-        if (rec.op === 'del') {
+        if (rec.op === 'tpl') {
+            // A wrap-template apply is one undo unit: strip every step it added.
+            const ids = new Set((rec.ids || []).map(String));
+            newInstrs = instrs.filter(s => !(s && ids.has(String(s.id)))).map(s => Object.assign({}, s));
+            msg = `↩ Removed "${rec.name}" wrap steps (${instrs.length - newInstrs.length}).`;
+        } else if (rec.op === 'del') {
             const at = Math.max(0, Math.min(rec.index, instrs.length));
             newInstrs = instrs.slice(0, at).concat(rec.steps.map(s => Object.assign({}, s)), instrs.slice(at)).map(s => Object.assign({}, s));
             msg = `↩ Restored ${kl}${rec.steps.length > 1 ? ' + scan' : ''}.`;
@@ -2077,6 +2090,223 @@
             const kl = kind === 'nav' ? 'Nav' : kind === 'flag' ? 'Flag Pole' : 'Snapshot';
             showToast(`🗑 Deleted ${kl}${extra}. Ctrl+Z to restore · SAVE when done.`, '#ff9d3a', 3200);
         } catch (e) { console.warn(`${TAG} [click-add] delete failed`, e); showToast('Delete failed — see console.', '#ff5252', 3000); }
+    }
+
+    // ── 🎞 Wrap templates: the Click-to-Add finisher ─────────────────────────
+    // A wrap template is a NAMED, ORDERED sequence of saved step presets (the
+    // 📋-captured ones from ➕ Stage — Camera Thermal, GEM On, Wait, GEM Off…).
+    // Apply walks the open mission and inserts the sequence after EVERY "bare"
+    // snapshot — one whose next step is a nav / snapshot / returnHome / end —
+    // so freshly Ctrl-clicked inspection points get their scan wrap in one go
+    // while snapshots that already have trailing scan steps are left alone.
+    // Everything stays STAGED (native SAVE commits); one Ctrl+Z removes the
+    // whole batch. Templates store preset NAMES, resolved at apply time, so a
+    // preset quick-edit (Wait seconds, RGB↔Thermal) carries into future applies.
+    const CACHE_KEY_WRAP_TEMPLATES = 'aim-mb-wrap-templates';
+    const CACHE_KEY_WRAP_LAST = 'aim-mb-wrap-last';
+    const WRAP_BTN_ID = 'aim-mb-wrap-btn';
+    let wrapPopEl = null;
+    function wrapTemplatesLoad() { const o = gmGet(CACHE_KEY_WRAP_TEMPLATES, {}); return (o && typeof o === 'object') ? o : {}; }
+    function wrapTemplatesSave(o) { try { gmSet(CACHE_KEY_WRAP_TEMPLATES, o || {}); } catch (e) { console.warn(`${TAG} [wrap] template save failed`, e); } }
+    function wrapOrderCmp(all) {
+        return (a, b) => {
+            const oa = all[a].order != null ? all[a].order : (all[a].savedAt || 0);
+            const ob = all[b].order != null ? all[b].order : (all[b].savedAt || 0);
+            return oa - ob || a.localeCompare(b);
+        };
+    }
+    function wrapApplyTemplate(name) {
+        const all = wrapTemplatesLoad();
+        const tpl = all[name];
+        if (!tpl || !Array.isArray(tpl.steps) || !tpl.steps.length) { showToast('Pick a template with at least one step.', '#ff9800', 3500); return false; }
+        const presets = stagePresetsLoad();
+        const missing = tpl.steps.filter(n => !presets[n] || !presets[n].instr);
+        if (missing.length) { showToast(`Template "${name}" uses missing step preset(s): ${missing.join(', ')} — recapture them (➕ Stage → 📋) or edit the template.`, '#ff5252', 7000); return false; }
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.setCurrentApp !== 'function' || !ctx.currentApp) { showToast('Open a mission in the editor first.', '#ff9800', 3500); return false; }
+        const app = ctx.currentApp;
+        let instrs = app.instructions || [];
+        if (!instrs.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs) && lc.instrs.length) instrs = lc.instrs; } catch (e) {} }
+        if (!instrs.length) { showToast('This mission has no steps yet.', '#ff9800', 3000); return false; }
+        const isNav = s => s && (s.type_name === 'navigate' || s.type === 1);
+        const isSnap = s => s && (s.type_name === 'snapshot' || s.type === 6);
+        const isReturn = s => s && (s.type_name === 'returnHome' || s.type === 99);
+        // Same unique-id scheme as Click-to-Add (shared bump so parallel adds
+        // in the same ms can't collide) — save strips ids, server assigns real ones.
+        const nextId = () => 9000000000 + (((Date.now ? Date.now() : 1) % 1000000) * 100) + (caIdBump++);
+        const newInstrs = [];
+        const addedIds = [];
+        let applied = 0, skipped = 0;
+        for (let i = 0; i < instrs.length; i++) {
+            const s = instrs[i];
+            newInstrs.push(Object.assign({}, s));
+            if (!isSnap(s)) continue;
+            const nxt = instrs[i + 1];
+            const bare = (nxt === undefined) || isNav(nxt) || isSnap(nxt) || isReturn(nxt);
+            if (!bare) { skipped++; continue; } // already has trailing scan steps — don't double-wrap
+            tpl.steps.forEach(pn => {
+                const c = JSON.parse(JSON.stringify(presets[pn].instr));
+                c.id = nextId();
+                addedIds.push(c.id);
+                // Located preset types (e.g. Flag Pole) land AT the snapshot's
+                // point; location-less scan steps (Wait/Camera/GEM) stay bare.
+                if (c.location && c.location.lat != null && s.location && s.location.lat != null) c.location = { lat: s.location.lat, lng: s.location.lng };
+                newInstrs.push(c);
+            });
+            applied++;
+        }
+        if (!applied) { showToast(`No bare snapshots to wrap${skipped ? ` — all ${skipped} already have trailing steps (Ctrl+Z or Alt+R-click to clear first)` : ' — add snapshots first'}.`, '#ff9800', 5000); return false; }
+        newInstrs.forEach((s, k) => { if (s) s.index_in_app = k; });
+        try {
+            ctx.setCurrentApp(Object.assign({}, app, { instructions: newInstrs }));
+            try { composerStyleNativeMarkers(); } catch (e) {}
+            if (caUndoStack.length && caUndoStack[caUndoStack.length - 1].appId !== app.id) caUndoStack = [];
+            caUndoStack.push({ op: 'tpl', ids: addedIds, name, appId: app.id });
+            console.log(`${TAG} [wrap] applied "${name}" (${tpl.steps.length} step seq) after ${applied} snapshot(s), skipped ${skipped}`);
+            showToast(`🎞 "${name}" applied after ${applied} snapshot(s)${skipped ? ` · ${skipped} skipped (already wrapped)` : ''}. Ctrl+Z removes the whole batch · SAVE when done.`, '#5fff5f', 6500);
+            return true;
+        } catch (e) { console.warn(`${TAG} [wrap] setCurrentApp failed`, e); showToast('Apply failed — see console.', '#ff5252', 3500); return false; }
+    }
+    function wrapPopup(anchorBtn) {
+        if (wrapPopEl) { wrapPopEl.remove(); wrapPopEl = null; return; }
+        const selCss = 'background:#0f1216;border:1px solid #9cf;color:#fff;border-radius:3px;padding:3px 4px;font:inherit;font-size:11px;';
+        const pop = document.createElement('div');
+        pop.style.cssText = 'position:fixed;z-index:2147483600;width:300px;background:#1f2228;border:1px solid #f9f;border-radius:6px;' +
+            'box-shadow:0 4px 20px rgba(0,0,0,0.8);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;padding:10px 12px;';
+        pop.innerHTML = `
+            <div style="font-weight:800;color:#f9f;font-size:13px;margin-bottom:6px;">🎞 Wrap templates</div>
+            <div style="font-size:10px;color:#789;margin-bottom:8px;">An ordered sequence of your 📋-captured step presets (➕ Stage), inserted after every snapshot that has no trailing steps yet — before the next nav. Staged only: SAVE commits, one Ctrl+Z removes the batch.</div>
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;">
+                <select data-wr-sel style="flex:1;min-width:0;${selCss}"></select>
+                <button data-wr-apply style="padding:5px 12px;background:#f9f;border:none;color:#3a0636;border-radius:6px;cursor:pointer;font-weight:800;font-size:12px;">▶ Apply</button>
+            </div>
+            <div data-wr-list style="border-top:1px solid #34404e;padding-top:6px;margin-bottom:8px;"></div>
+            <div style="border-top:1px solid #34404e;padding-top:6px;">
+                <div style="font-size:10px;font-weight:800;color:#f9f;margin-bottom:4px;">BUILD / EDIT (✎ loads a template here)</div>
+                <input data-wr-name placeholder="Template name" style="width:100%;box-sizing:border-box;background:#0f1216;border:1px solid #456;color:#fff;padding:3px 6px;border-radius:3px;font:inherit;font-size:11px;margin-bottom:6px;">
+                <div data-wr-steps style="margin-bottom:6px;"></div>
+                <div style="display:flex;gap:6px;margin-bottom:8px;">
+                    <select data-wr-addsel style="flex:1;min-width:0;${selCss}"></select>
+                    <button class="aim-mb-tbtn" data-wr-add style="padding:3px 8px;font-size:11px;">➕ Add</button>
+                </div>
+                <div style="display:flex;gap:6px;justify-content:flex-end;">
+                    <button class="aim-mb-tbtn" data-wr-close style="padding:5px 10px;">Close</button>
+                    <button data-wr-save style="padding:5px 12px;background:#9cf;border:none;color:#06223a;border-radius:6px;cursor:pointer;font-weight:800;font-size:12px;">💾 Save template</button>
+                </div>
+            </div>`;
+        document.body.appendChild(pop);
+        wrapPopEl = pop;
+        const selEl = pop.querySelector('[data-wr-sel]');
+        const listEl = pop.querySelector('[data-wr-list]');
+        const nameEl = pop.querySelector('[data-wr-name]');
+        const stepsEl = pop.querySelector('[data-wr-steps]');
+        const addSelEl = pop.querySelector('[data-wr-addsel]');
+        let bSteps = []; // builder state: ordered preset names
+        const renderSel = () => {
+            const all = wrapTemplatesLoad();
+            const names = Object.keys(all).sort(wrapOrderCmp(all));
+            const last = gmGet(CACHE_KEY_WRAP_LAST, null);
+            selEl.innerHTML = names.length
+                ? names.map(n => `<option value="${escapeHtml(n)}"${n === last ? ' selected' : ''}>${escapeHtml(n)}</option>`).join('')
+                : '<option value="">— no templates yet —</option>';
+        };
+        const renderAddSel = () => {
+            const presets = stagePresetsLoad();
+            const cmp = wrapOrderCmp(presets); // same {order, savedAt} shape as templates
+            const names = Object.keys(presets).sort(cmp);
+            addSelEl.innerHTML = names.length
+                ? names.map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join('')
+                : '<option value="">— no step presets — capture via ➕ Stage → 📋 —</option>';
+        };
+        const renderList = () => {
+            const all = wrapTemplatesLoad();
+            const names = Object.keys(all).sort(wrapOrderCmp(all));
+            if (!names.length) { listEl.innerHTML = '<div style="font-size:10px;color:#789;">No templates yet — build one below.</div>'; return; }
+            listEl.innerHTML = '<div style="font-size:10px;font-weight:800;color:#f9f;margin-bottom:4px;">MY TEMPLATES</div>' + names.map(n => {
+                const chain = (all[n].steps || []).join(' → ');
+                return `<div style="display:flex;align-items:center;gap:5px;margin-bottom:4px;font-size:12px;">
+                    <label style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(chain)}">${escapeHtml(n)} <span style="color:#789;font-size:10px;">(${(all[n].steps || []).length})</span></label>
+                    <span data-wr-edit="${escapeHtml(n)}" title="Load into the builder below" style="cursor:pointer;color:#9cf;font-size:11px;">✎</span>
+                    <span data-wr-ren="${escapeHtml(n)}" title="Rename template" style="cursor:pointer;color:#9ab;font-size:11px;">✏️</span>
+                    <span data-wr-del="${escapeHtml(n)}" title="Delete template" style="cursor:pointer;color:#f66;font-size:12px;">🗑</span></div>`;
+            }).join('');
+            listEl.querySelectorAll('[data-wr-edit]').forEach(el => { el.onclick = () => {
+                const n = el.getAttribute('data-wr-edit');
+                const a2 = wrapTemplatesLoad(); if (!a2[n]) return;
+                nameEl.value = n;
+                bSteps = (a2[n].steps || []).slice();
+                renderBuilder();
+            }; });
+            listEl.querySelectorAll('[data-wr-ren]').forEach(el => { el.onclick = () => {
+                const oldName = el.getAttribute('data-wr-ren');
+                const a2 = wrapTemplatesLoad(); const t = a2[oldName]; if (!t) return;
+                const nn = (window.prompt('Rename template:', oldName) || '').trim();
+                if (!nn || nn === oldName) return;
+                if (a2[nn] && !window.confirm(`"${nn}" already exists — overwrite it?`)) return;
+                delete a2[oldName];
+                t.name = nn;
+                a2[nn] = t;
+                wrapTemplatesSave(a2);
+                if (gmGet(CACHE_KEY_WRAP_LAST, null) === oldName) gmSet(CACHE_KEY_WRAP_LAST, nn);
+                console.log(`${TAG} [wrap] renamed template "${oldName}" → "${nn}"`);
+                renderList(); renderSel();
+            }; });
+            listEl.querySelectorAll('[data-wr-del]').forEach(el => { el.onclick = () => {
+                const n = el.getAttribute('data-wr-del');
+                const a2 = wrapTemplatesLoad(); delete a2[n]; wrapTemplatesSave(a2);
+                console.log(`${TAG} [wrap] deleted template "${n}"`);
+                renderList(); renderSel();
+            }; });
+        };
+        const renderBuilder = () => {
+            if (!bSteps.length) { stepsEl.innerHTML = '<div style="font-size:10px;color:#789;">No steps yet — pick a preset below and ➕ Add. Order top→bottom = order after each snapshot.</div>'; return; }
+            stepsEl.innerHTML = bSteps.map((n, i) => `
+                <div style="display:flex;align-items:center;gap:5px;margin-bottom:3px;font-size:12px;">
+                    <span style="color:#789;font-size:10px;width:14px;text-align:right;">${i + 1}.</span>
+                    <label style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(n)}</label>
+                    <span data-wr-sup="${i}" title="Move up" style="cursor:pointer;color:#9cf;font-size:11px;">▲</span>
+                    <span data-wr-sdn="${i}" title="Move down" style="cursor:pointer;color:#9cf;font-size:11px;">▼</span>
+                    <span data-wr-srm="${i}" title="Remove" style="cursor:pointer;color:#f66;font-size:12px;">✕</span>
+                </div>`).join('');
+            const move = (i, d) => { const j = i + d; if (j < 0 || j >= bSteps.length) return; const t = bSteps[i]; bSteps[i] = bSteps[j]; bSteps[j] = t; renderBuilder(); };
+            stepsEl.querySelectorAll('[data-wr-sup]').forEach(el => { el.onclick = () => move(+el.getAttribute('data-wr-sup'), -1); });
+            stepsEl.querySelectorAll('[data-wr-sdn]').forEach(el => { el.onclick = () => move(+el.getAttribute('data-wr-sdn'), 1); });
+            stepsEl.querySelectorAll('[data-wr-srm]').forEach(el => { el.onclick = () => { bSteps.splice(+el.getAttribute('data-wr-srm'), 1); renderBuilder(); }; });
+        };
+        renderSel(); renderAddSel(); renderList(); renderBuilder();
+        pop.querySelector('[data-wr-add]').onclick = () => {
+            const n = addSelEl.value;
+            if (!n) { showToast('No step presets saved yet — capture one via ➕ Stage → 📋.', '#ff9800', 4500); return; }
+            bSteps.push(n); // duplicates allowed on purpose (e.g. two Waits)
+            renderBuilder();
+        };
+        pop.querySelector('[data-wr-save]').onclick = () => {
+            const n = (nameEl.value || '').trim();
+            if (!n) { showToast('Give the template a name.', '#ff9800', 2500); return; }
+            if (!bSteps.length) { showToast('Add at least one step.', '#ff9800', 2500); return; }
+            const a2 = wrapTemplatesLoad();
+            const existing = a2[n];
+            const maxOrder = Object.values(a2).reduce((m, t) => Math.max(m, t && t.order != null ? t.order : 0), 0);
+            a2[n] = { name: n, savedAt: Date.now(), order: existing && existing.order != null ? existing.order : maxOrder + 10, steps: bSteps.slice() };
+            wrapTemplatesSave(a2);
+            gmSet(CACHE_KEY_WRAP_LAST, n);
+            console.log(`${TAG} [wrap] saved template "${n}" (${bSteps.length} steps)`);
+            showToast(`Saved wrap template "${n}".`, '#5fff5f', 2500);
+            renderList(); renderSel();
+        };
+        pop.querySelector('[data-wr-apply]').onclick = () => {
+            const n = selEl.value;
+            if (!n) { showToast('No template selected — build one below first.', '#ff9800', 3000); return; }
+            gmSet(CACHE_KEY_WRAP_LAST, n);
+            if (wrapApplyTemplate(n)) close();
+        };
+        const r = anchorBtn.getBoundingClientRect();
+        pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 316)) + 'px';
+        pop.style.top = (r.bottom + 4) + 'px';
+        const close = () => { pop.remove(); wrapPopEl = null; document.removeEventListener('mousedown', outside, true); };
+        const outside = e => { if (wrapPopEl && !pop.contains(e.target) && e.target !== anchorBtn) close(); };
+        pop.querySelector('[data-wr-close]').onclick = close;
+        setTimeout(() => document.addEventListener('mousedown', outside, true), 0);
     }
 
     function composerBindMapEvents() {
