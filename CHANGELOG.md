@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-30 — Mission Bank Tools v2.16 (dev/latest): 🧠 Auto-Group live-test fixes
+
+First live test feedback, same day:
+
+- **~4–6 groups instead of 14** — the fixed 8-way compass sections are gone; a global bearing sweep now cuts the whole site into at most `groups` families (new knob, default 5), sized by the step target, so adjacent directions merge freely. Family names are still compass words (N, ENE, WNW…), and the per-stop dropdown now moves a stop between *groups* instead of reassigning compass sections.
+- **👁 route preview follows the real route** — the overlay now draws the actual flight-path/FFZ graph route for every leg (one polyline per flight, base → pads → base), not straight pad-to-pad lines.
+- **Realistic battery defaults** — back-derived from actual ops (14k/18k pads are flown with capture and land at 20–30%): budgets now 37k/46k ft-equiv and ~60 ft/step. Multi-flight is treated as normal; the red warning only fires for pads that genuinely can't round-trip on a fresh battery. Hit ↺ in the knobs row if you touched any knob before this update, so the new defaults take effect.
+
 ## 2026-07-30 — Mission Bank Tools v2.15 (dev/latest): 🧠 Auto-Group macro-mission optimizer
 
 The ⛟ Merge panel now *optimizes* instead of just sorting (feature #216). It plans the site's macro missions the way a routing engine would:
