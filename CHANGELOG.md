@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-30 — Mission Bank Tools v2.13 (dev/latest): mission-preview auto-refresh on save
+
+- 👁 Mission preview: saving a mission in the editor now auto-refreshes the overlay (~1 s after the save lands) — dots, badges, and the dashed line track your edit without unchecking/rechecking. The save hook observes only the response status; the save itself is untouched.
+
 ## 2026-07-30 — Mission Bank Tools v2.12 + Asset Inspector v4.213 (dev/latest): 👁 preview on the Mission Bank side + Show-ALL mode
 
 - **👁 on Mission Bank too** — the mission-preview overlay (map-tools 👁 button, picker panel, and the M2 inspector popup's 👁 button) now also works on the Mission Bank route, so you can see any mission's steps on the map without opening it in the editor.

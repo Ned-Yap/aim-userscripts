@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.12
+// @version      2.13
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.12';
+    const SCRIPT_VERSION = '2.13';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -9015,15 +9015,22 @@ ${snapPlacemarks}
             const origFetch = win.fetch;
             if (typeof origFetch === 'function') {
                 win.fetch = function(input, init) {
+                    let isSave = false;
                     try {
                         const url = (typeof input === 'string') ? input : (input && input.url);
                         const method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
-                        if (method === 'POST' && url && SAVE_RE.test(url) && init && typeof init.body === 'string') {
+                        isSave = !!(method === 'POST' && url && SAVE_RE.test(url));
+                        if (isSave && init && typeof init.body === 'string') {
                             const patched = handleMissionSave(init.body);
                             if (patched) init = Object.assign({}, init, { body: patched });
                         }
                     } catch (e) {}
-                    return origFetch.apply(this, arguments);
+                    const p = origFetch.apply(this, arguments);
+                    // v2.13: observe the save RESPONSE (status only, body
+                    // untouched) — a successful save refreshes the mission-
+                    // preview overlay so its dots/badges track the edit.
+                    if (isSave) { try { p.then(r => { if (r && r.ok) mpvOnMissionSaved(); }, () => {}); } catch (e) {} }
+                    return p;
                 };
             }
         } catch (e) {}
@@ -9033,9 +9040,17 @@ ${snapPlacemarks}
             XHR.prototype.open = function(method, url) { this.__aim_mb_m = (method || '').toUpperCase(); this.__aim_mb_u = url; return origOpen.apply(this, arguments); };
             XHR.prototype.send = function(b) {
                 try {
-                    if (this.__aim_mb_m === 'POST' && this.__aim_mb_u && SAVE_RE.test(this.__aim_mb_u) && typeof b === 'string') {
-                        const patched = handleMissionSave(b);
-                        if (patched) return origSend.call(this, patched);
+                    if (this.__aim_mb_m === 'POST' && this.__aim_mb_u && SAVE_RE.test(this.__aim_mb_u)) {
+                        // v2.13: successful save → refresh the preview overlay.
+                        try {
+                            this.addEventListener('load', function() {
+                                try { if (this.status >= 200 && this.status < 300) mpvOnMissionSaved(); } catch (e) {}
+                            });
+                        } catch (e) {}
+                        if (typeof b === 'string') {
+                            const patched = handleMissionSave(b);
+                            if (patched) return origSend.call(this, patched);
+                        }
                     }
                 } catch (e) {}
                 return origSend.apply(this, arguments);
@@ -10262,6 +10277,30 @@ ${snapPlacemarks}
             if (sel.has(m.id)) mpvDrawMission(m, mpvColor(m.id, missions));
             else if (mpvAllOn) mpvDrawMissionLight(m);   // v2.12: sea-of-dots for the rest
         }
+    }
+
+    // v2.13: a mission save landed (observed by the save hook's response
+    // watcher) — the overlay draws from the missionsBySite cache, which a
+    // native editor save leaves stale (user had to uncheck/recheck to see
+    // the new dots). Debounced: Percepto save flows can POST more than
+    // once back-to-back. Only fires when something is actually overlaid.
+    let mpvSaveRefreshTimer = null;
+    function mpvOnMissionSaved() {
+        if (CONTEXT !== 'IFRAME') return;
+        if (!masterEnabled || !mpvEnabled || !mpvRouteOk()) return;
+        const sid = getCurrentSiteID();
+        if (!sid) return;
+        if (!mpvSelForSite(sid).length && !mpvAllOn) return;
+        if (mpvSaveRefreshTimer) clearTimeout(mpvSaveRefreshTimer);
+        mpvSaveRefreshTimer = setTimeout(() => {
+            mpvSaveRefreshTimer = null;
+            delete missionsBySite[sid];
+            fetchMissions(sid, () => {
+                mpvRedraw();
+                if (mpv.panelEl) mpvRenderList();
+                console.log(`${TAG} [mpv] overlay refreshed after mission save`);
+            }, (err) => console.warn(`${TAG} [mpv] post-save refresh failed:`, err));
+        }, 900);
     }
 
     // "Show ALL missions" toggled — fetch if the cache is cold, then redraw.
