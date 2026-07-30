@@ -6,6 +6,13 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-29 — AIM Issues v1.37 → PROD
+
+Coworkers jump v1.35 → v1.37 on the next Tampermonkey update check. What's new:
+
+- **📍 Move icon** — right-click an issue's map icon → status modal → **📍 Move icon** lets you drag the marker (including the purple Unshielded Route shield) to a custom spot when the automatic placement looks off-center. The drop is staged with an Apply / Reset-to-auto / Cancel toolbar; the custom spot syncs to everyone. Reshaping an issue later resets its icon to automatic placement.
+- **QA/prod issue isolation** (from v1.36) — issues flagged on `qa.percepto.app` now live in their own `qa-<id>-issues.json` files (never mixed into prod's), and any Slack message from a QA tab is tagged `[QA]`. Nothing changes for normal prod use.
+
 ## 2026-07-29 — AIM Issues v1.37 (dev/latest): 📍 Move icon
 
 - **AIM Issues v1.37 — movable issue markers.** The map icon (including the purple Unshielded Route shield) sits at an automatically computed interior point, which can look off-center on long thin shapes. New **📍 Move icon** button in the issue's status modal (same permissions as ✏ Reshape): the marker becomes draggable, the drop is staged with an Apply / Reset-to-auto / Cancel toolbar (Esc cancels), and the custom spot syncs to everyone like any other issue change. ✏ Reshaping an issue later resets its icon back to automatic placement.
