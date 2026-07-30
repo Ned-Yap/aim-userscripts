@@ -10,6 +10,24 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 - New 🧭 button in the map toolbar (Site Setup **and** Mission Bank): paste a GPS coordinate like `31.628457, -101.929646` and the map pans/zooms straight to it, dropping a pulsing cyan pin at the exact spot (click the pin to remove it). Also accepts `lat lng`, parentheses, semicolons, and Google-Maps `@lat,lng` URLs. Toggleable in the Control Panel under Map Nav.
 
+## 2026-07-30 — ⭐ PROMOTED TO PROD: Mission Bank Tools v2.13 + Site Setup Tools v4.213
+
+Coworkers jump **Mission Bank Tools 2.07 → 2.13** and **Site Setup Tools (Asset Inspector) 4.164.7 → 4.213** on the next Tampermonkey update check.
+
+**Mission Bank Tools (v2.08–v2.13 arc):**
+- **👁 Mission preview** — overlay any mission's steps on the **Site Setup or Mission Bank** map: 👁 button in the map toolbar opens a per-mission picker; nav points blue, snapshots pink squares, dashed flight-order line; hover a badge for step details. The overlay is click-through — editing entities underneath is never blocked. Selections persist per site.
+- **👁 Show ALL missions** — Control Panel toggle renders every mission as light canvas dots (no lines/labels) so whole-site coverage is visible at once and stays fast; checked missions still draw in full detail.
+- **Auto-refresh on save** — the preview refetches and redraws ~1 s after any mission save.
+- **🎞 Auto-Wrap on save + 🌐 site-wide wrap** (v2.09) — wrap templates can now apply automatically on save and across the whole site.
+
+**Site Setup Tools — everything since the 07-03 promotion (v4.165–v4.213), headline items:**
+- **🎯 Focus** in the right-click popup — pan + zoom to fit the whole entity in frame.
+- **Find in Missions** — in the Mission Bank the popup's Find button opens the mission named after the asset; **👁** overlays it on the map.
+- **⛰ Terrain Profiler (phase 1)** — elevation-band analysis for FFZ planning (DEM banding, region overlay, per-region floor/ceiling stats).
+- **Lite mode upgrade** — pilots (Lite) now get the read-only Site Setup Summary, inspector, exports, and SOP + Airspace validators; every site-write tool remains CSM-only (defense-in-depth guards on all write paths).
+- **QA server isolation** — per-site data is namespaced per environment, so QA experiments can't touch prod-site state.
+- Plus the cumulative fixes already hotfixed into prod (CSRF token capture, pad-merge/right-click interplay) and many smaller improvements — see the dev entries below for the full trail.
+
 ## 2026-07-30 — Mission Bank Tools v2.13 (dev/latest): mission-preview auto-refresh on save
 
 - 👁 Mission preview: saving a mission in the editor now auto-refreshes the overlay (~1 s after the save lands) — dots, badges, and the dashed line track your edit without unchecking/rechecking. The save hook observes only the response status; the save itself is untouched.

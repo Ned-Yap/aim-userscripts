@@ -2,7 +2,7 @@
 // @name         AIM Copy Asset Name
 // @name:en      AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.164.7
+// @version      4.213
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -18,12 +18,15 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_openInTab
 // @require      https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/vendor/polygon-clipping-0.15.7.umd.js
+// @require      https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/vendor/lerc-2.0.0.js
 // @connect      api.github.com
+// @connect      elevation.nationalmap.gov
 // @connect      raw.githubusercontent.com
 // @connect      api.opentopodata.org
 // @connect      services6.arcgis.com
 // @connect      services1.arcgis.com
 // @connect      tfr.faa.gov
+// @connect      energy.usgs.gov
 // @run-at       document-end
 // ==/UserScript==
 
@@ -39,22 +42,42 @@
 (function() {
     'use strict';
 
-    // --- AIM Pilot mode guard: stay fully inert when a pilot/regulator has
-    // turned on Pilot mode in the Control Panel (shared localStorage flag). No
-    // observers/intervals/hotkeys/DOM injection start past this point. Toggling
-    // Pilot mode reloads the page, so this re-evaluates cleanly each load. ---
-    try {
-        if (localStorage.getItem('aim-mode') !== 'full') {
-            console.log('[AIM SITE SETUP] Lite mode — CSM tool inert, init skipped.');
-            return;
-        }
-    } catch (e) {}
+    // --- AIM Lite/Full gate. FULL (CSM) = every tool. LITE (pilots/regs) =
+    // partial init: read-only Site Setup Summary + inspector + exports +
+    // presets + SOP & Airspace validators ONLY. EVERY site-write path
+    // (inline edit, Apply queue, Bulk *, auto-AGL, ⊕ Generate, ✦ Advanced
+    // Draw, Airspace Create-GMs, delete) is gated — see the LITE guards on the
+    // write functions + the write-button hiding in renderSummaryPanel. Was a
+    // full bail; now a partial init so pilots get the read-only details. The
+    // ONLY site-writes pilots keep (Issues + Power Line Editor) live in other
+    // scripts. Toggling mode reloads the page, so this re-evaluates cleanly. ---
+    let LITE = false;
+    try { LITE = (localStorage.getItem('aim-mode') !== 'full'); } catch (e) {}
+    if (LITE) console.log('[AIM SITE SETUP] Lite mode — read-only surfaces + validators only; all site-write tools gated.');
 
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
+    // LITE backstop: called at the top of every site-write function. In Lite
+    // mode it toasts + returns true (caller must early-return). This is the
+    // defense-in-depth guarantee — even if a write UI slips through, the actual
+    // /map_objects/ POST/DELETE never runs for a pilot.
+    function liteBlockedWrite(action) {
+        if (!LITE) return false;
+        console.log(`${TAG} Lite mode — blocked site-write: ${action || 'edit'}`);
+        try { showToast('Read-only in Lite mode — CSM access needed to edit the site.', 'rgba(255,180,0,0.6)'); } catch (e) {}
+        return true;
+    }
+
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.164.7';
+    const SCRIPT_VERSION = '4.213';
+
+    // Server model (v4.210): prod and QA are separate databases — the same
+    // numeric site ID is two different sites. Per-site keys in GM storage
+    // (shared across origins) and in the shared data repo are therefore
+    // env-namespaced: QA = qa-<id>, prod = bare <id> (unchanged).
+    const IS_QA = location.hostname === 'qa.percepto.app' || location.hostname.endsWith('.qa.percepto.app');
+    const envSiteKey = (sid) => IS_QA ? `qa-${sid}` : String(sid);
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -65,7 +88,8 @@
 
     let controlChannel = null;
     let masterEnabled = true;
-    let emptyMapMenuEnabled = true; // right-click empty map → GPS / Google Maps menu (v4.164.2)
+    let aglHoverTipEnabled = true; // add an AGL line to Percepto's native hover ALT tooltip (MSL sites)
+    let emptyMapMenuEnabled = true; // right-click empty map → GPS / Google Maps menu (v4.88)
     // mapObjectsBySite: { [siteID]: { entities: [...], fetchedAt: ms } }
     const mapObjectsBySite = {};
     const fetchingSites = new Set();
@@ -157,8 +181,10 @@
         obstacleShowNm: 1.5,  // hide non-T-L obstacles beyond this (panel + dots)
         translineShowFt: 1000,// hide HIFLD lines AND T-L tower dots beyond this
         tfrShowNm: 3,         // TFRs beyond this are ignored entirely
+        droneWindMph: 28,     // drone max wind/gust rating — wake-estimate comparison in the Profile view
+        airCacheHours: 6,     // FAA response cache TTL (0 = off) — dodges the AIS servers' 429 rate limit on repeat runs
     };
-    const AIR_ENABLE_DEFAULTS = { airspace: true, strips: true, obstacles: true, laanc: true, sua: true, stadiums: true, translines: true, tfr: true, tfrAuto: true };
+    const AIR_ENABLE_DEFAULTS = { airspace: true, strips: true, obstacles: true, laanc: true, sua: true, stadiums: true, translines: true, tfr: true, tfrAuto: true, turbines: true };
     // HIFLD (Homeland Infrastructure Foundation-Level Data) — federal
     // high-voltage transmission-line GEOMETRY. Independent of our KMLs;
     // used to cross-check shielding coverage. Informational only.
@@ -230,6 +256,30 @@
             if (m2) return m2[1];
         } catch (e) {}
         return null;
+    }
+
+    // v4.211: are we on the Mission Bank route? Swaps the inspector's
+    // "Find in Map Entities" button (which needs the Site Setup sidebar)
+    // for "Find in Missions". Same top-frame-first hash read as
+    // getCurrentSiteID / MBT's isOnMissionBank.
+    const MISSION_BANK_ROUTE_RE = /#\/site\/\d+\/control-panel\/mission-bank/;
+    function isMissionBankRoute() {
+        try {
+            const topHash = (window.top && window.top.location && window.top.location.hash) || '';
+            if (MISSION_BANK_ROUTE_RE.test(topHash)) return true;
+        } catch (e) { /* cross-origin top */ }
+        return MISSION_BANK_ROUTE_RE.test(location.hash || '');
+    }
+
+    // v4.212: Site Setup route — gates the popup's 👁 mission-preview
+    // button (the MBT overlay only draws there).
+    const SITE_SETUP_ROUTE_RE = /#\/site\/\d+\/control-panel\/site-setup/;
+    function isSiteSetupRoute() {
+        try {
+            const topHash = (window.top && window.top.location && window.top.location.hash) || '';
+            if (SITE_SETUP_ROUTE_RE.test(topHash)) return true;
+        } catch (e) { /* cross-origin top */ }
+        return SITE_SETUP_ROUTE_RE.test(location.hash || '');
     }
 
     // Pull the human-readable site name from the page header's site
@@ -386,7 +436,7 @@
     // altitude-endpoint memory for the discovery story.
     // ============================================================
     const CACHE_KEY_ELEVATIONS = 'aim-ai-elev-cache'; // LEGACY global blob (v4.66 and earlier) — now READ-ONLY fallback, migrated per-site on access
-    const elevSiteKey = (siteID) => `aim-ai-elev-v2-${siteID}`; // v4.67 — per-site DEM cache (small loads/writes, bounded, aligns with the per-site shared files)
+    const elevSiteKey = (siteID) => `aim-ai-elev-v2-${envSiteKey(siteID)}`; // v4.67 — per-site DEM cache (small loads/writes, bounded, aligns with the per-site shared files); v4.210 env-namespaced (QA ≠ prod)
     const CACHE_KEY_COLUMN_ORDER = 'aim-ai-column-order'; // ordered list of visible column keys
     const CACHE_KEY_COLUMN_WIDTHS = 'aim-ai-column-widths'; // {colKey: px} per-user resized widths
     const CACHE_KEY_BASE_GM = 'aim-ai-base-gm';            // {siteID: gmEntityId} chosen basestation marker (route feature)
@@ -975,7 +1025,7 @@
     const ELEV_REPO_BRANCH = 'main';
     const ELEV_GITHUB_API = 'https://api.github.com';
     const ELEV_RAW_BASE = `https://raw.githubusercontent.com/${ELEV_REPO}/${ELEV_REPO_BRANCH}`;
-    const elevPathFor = (siteID) => `elevations/${siteID}-elevation.json`;
+    const elevPathFor = (siteID) => `elevations/${envSiteKey(siteID)}-elevation.json`;   // QA sites share via qa-<id> files
     let elevSharedToken = '';
     const elevRemoteMerged = new Set();    // sites we've already pulled this session
     const elevRemoteSha = {};              // sha per site for PUT conflict-aware update
@@ -2104,6 +2154,7 @@
     let sopLastIssues = [], sopIssuesSite = null;
     let airLastIssues = [], airIssuesSite = null;
     let tfrLastIssues = [], tfrIssuesSite = null;   // live TFRs — replaced by the auto-sweep independently
+    let diffLastIssues = [], diffIssuesSite = null; // AIM Site Diff — fed over AIM_SITEDIFF_ISSUES (4th union member)
     function postValidatorIssues(sid) {
         const ch = ensureValidatorChannel();
         if (!ch) return false;
@@ -2112,11 +2163,39 @@
         if (sopIssuesSite !== sid) { sopLastIssues = []; sopIssuesSite = sid; }
         if (airIssuesSite !== sid) { airLastIssues = []; airIssuesSite = sid; }
         if (tfrIssuesSite !== sid) { tfrLastIssues = []; tfrIssuesSite = sid; }
-        const all = sopLastIssues.concat(airLastIssues, tfrLastIssues);
+        if (diffIssuesSite !== sid) { diffLastIssues = []; diffIssuesSite = sid; }
+        const all = sopLastIssues.concat(airLastIssues, tfrLastIssues, diffLastIssues);
         if (all.length) ch.postMessage({ type: 'VALIDATOR_ISSUES', siteID: sid, issues: all });
         else ch.postMessage({ type: 'CLEAR_VALIDATOR_ISSUES', siteID: sid });
         return true;
     }
+
+    // ---- AIM Site Diff → validator-issue union bridge ----
+    // Site Diff can't post VALIDATOR_ISSUES itself: AIM Issues replaces ALL
+    // validator issues per message, so an independent sender would clobber the
+    // SOP/Airspace/TFR batches. It posts here instead and we re-post the union.
+    // IFRAME-gated — both AI contexts hear the broadcast; one union post is enough.
+    (function setupSiteDiffIssueBridge() {
+        if (CONTEXT !== 'IFRAME') return;
+        let ch = null;
+        try { ch = new BroadcastChannel('AIM_SITEDIFF_ISSUES'); }
+        catch (e) { console.warn(`${TAG} sitediff bridge channel unavailable:`, e); return; }
+        ch.onmessage = (ev) => {
+            const m = ev.data || {};
+            const sid = getCurrentSiteID();
+            if (!sid || (m.siteID != null && String(m.siteID) !== String(sid))) return;
+            if (m.type === 'DIFF_ISSUES') {
+                diffIssuesSite = sid;
+                diffLastIssues = Array.isArray(m.issues) ? m.issues : [];
+                console.log(`${TAG} Site Diff issues received: ${diffLastIssues.length} — posting union`);
+                postValidatorIssues(sid);
+            } else if (m.type === 'CLEAR_DIFF_ISSUES') {
+                diffIssuesSite = sid;
+                diffLastIssues = [];
+                postValidatorIssues(sid);
+            }
+        };
+    })();
 
     function drawSopIssues() {
         const sid = getCurrentSiteID();
@@ -2200,21 +2279,109 @@
         const deg = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
         return AIR_COMPASS[Math.round(deg / 22.5) % 16];
     }
+    // ---- FAA response cache. The FAA AIS ArcGIS services rate-limit
+    // aggressively (429 "Too many requests") when the check is re-run
+    // repeatedly. Every airQueryFAA response is cached in GM storage
+    // keyed by the full query URL; within the TTL (CP: airCacheHours,
+    // 0 = off) the query is served locally with NO network call, and on
+    // a failed fetch ANY cached copy — even expired — is served instead
+    // of failing the layer (surfaced in the panel with its age). FAA AIS
+    // data changes on 28-day charting cycles, so hours-stale data is
+    // operationally identical. Live TFRs do NOT pass through here.
+    // Pruning: index entry tracks ages; entries beyond 40 or older than
+    // 7 days are tombstoned ('' — GM_deleteValue isn't granted).
+    const AIR_CACHE_PREFIX = 'aim-air-cache-v1::';
+    const AIR_CACHE_INDEX = 'aim-air-cache-v1-index';
+    const AIR_CACHE_MAX_ENTRIES = 40;
+    const AIR_CACHE_MAX_AGE_MS = 7 * 24 * 3600e3;
+    let airCacheHits = [];   // [{label, ageMin, stale}] — reset per check run
+    let airRetryToasted = false;   // one cooloff toast per run, not one per layer
+    function airCacheHash(s) {
+        let h = 5381;
+        for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+        return (h >>> 0).toString(36);
+    }
+    function airCachePut(key, data) {
+        try {
+            elevGmSet(key, JSON.stringify({ t: Date.now(), d: data }));
+            let idx = {};
+            try { idx = JSON.parse(elevGmGet(AIR_CACHE_INDEX, '{}')) || {}; } catch (e) {}
+            idx[key] = Date.now();
+            const keys = Object.keys(idx).sort((a, b) => idx[a] - idx[b]);
+            const cutoff = Date.now() - AIR_CACHE_MAX_AGE_MS;
+            keys.forEach((k, i) => {
+                if (idx[k] < cutoff || i < keys.length - AIR_CACHE_MAX_ENTRIES) {
+                    elevGmSet(k, '');
+                    delete idx[k];
+                }
+            });
+            elevGmSet(AIR_CACHE_INDEX, JSON.stringify(idx));
+        } catch (e) { console.warn(`${TAG} FAA cache write failed:`, e); }
+    }
+    function airCacheGet(key) {
+        try {
+            const raw = elevGmGet(key, null);
+            if (!raw) return null;
+            const o = JSON.parse(raw);
+            return (o && o.d) ? o : null;
+        } catch (e) { return null; }
+    }
     // One FAA layer query via GM_xmlhttpRequest (cross-origin; @connect
     // services6.arcgis.com). Throws on HTTP / ArcGIS-level errors so the
-    // caller can surface the failure — never silently returns partial data.
+    // caller can surface the failure — never silently returns partial
+    // data. Cache-first within the TTL; cache-fallback on failure.
     async function airQueryFAA(service, params) {
         const qs = new URLSearchParams(Object.assign({ f: 'json' }, params)).toString();
         // `service` is an FAA AIS service name, or a full layer URL for
         // non-FAA sources (HIFLD).
         const base = /^https?:/i.test(service) ? service : `${AIR_FAA_BASE}/${service}/FeatureServer/0`;
         const url = `${base}/query?${qs}`;
-        const r = await elevGmRequest({ method: 'GET', url, timeout: 25000 });
-        if (!r.ok) throw new Error(`HTTP ${r.status || 'network error'}`);
-        let d;
-        try { d = JSON.parse(r.responseText); } catch (e) { throw new Error('bad JSON'); }
-        if (d.error) throw new Error(d.error.message || `ArcGIS error ${d.error.code}`);
-        return d;
+        const ttlMs = Math.max(0, (typeof airThresholds.airCacheHours === 'number' ? airThresholds.airCacheHours : 6)) * 3600e3;
+        const key = AIR_CACHE_PREFIX + airCacheHash(url);
+        const label = /^https?:/i.test(service) ? 'HIFLD lines' : service.replace(/_/g, ' ');
+        const cached = ttlMs > 0 ? airCacheGet(key) : null;
+        if (cached && Date.now() - cached.t < ttlMs) {
+            airCacheHits.push({ label, ageMin: Math.round((Date.now() - cached.t) / 60000), stale: false });
+            return cached.d;
+        }
+        const doFetch = async () => {
+            const r = await elevGmRequest({ method: 'GET', url, timeout: 25000 });
+            if (!r.ok) throw new Error(`HTTP ${r.status || 'network error'}`);
+            let d;
+            try { d = JSON.parse(r.responseText); } catch (e) { throw new Error('bad JSON'); }
+            if (d.error) throw new Error(d.error.message || `ArcGIS error ${d.error.code}`);
+            return d;
+        };
+        try {
+            const d = await doFetch();
+            if (ttlMs > 0) airCachePut(key, d);
+            return d;
+        } catch (e) {
+            if (cached) {
+                const ageMin = Math.round((Date.now() - cached.t) / 60000);
+                airCacheHits.push({ label, ageMin, stale: true });
+                console.warn(`${TAG} FAA query failed (${e && e.message || e}) — serving "${label}" from cache, ${ageMin} min old`);
+                return cached.d;
+            }
+            // 429 with nothing cached: Esri's org-level rate limit runs a
+            // ~1-min cooloff, so wait it out ONCE and retry — staggered a
+            // few seconds so parallel layers don't re-burst in the same
+            // instant and re-trip the limit.
+            if (/too many|429/i.test(String(e && e.message || e))) {
+                if (!airRetryToasted) {
+                    airRetryToasted = true;
+                    try { showToast('FAA rate-limited — waiting out the ~1 min cooloff, retrying automatically…', 'rgba(255,176,32,0.6)'); } catch (e2) {}
+                }
+                const waitMs = 70000 + Math.floor(Math.random() * 10000);
+                console.warn(`${TAG} 429 on "${label}" — retrying in ${Math.round(waitMs / 1000)} s`);
+                await new Promise(res => setTimeout(res, waitMs));
+                const d = await doFetch();   // still limited → throws to the caller as before
+                if (ttlMs > 0) airCachePut(key, d);
+                console.log(`${TAG} 429 retry succeeded for "${label}" — cached`);
+                return d;
+            }
+            throw e;
+        }
     }
     function airPointQuery(service, lat, lng, meters, outFields, returnGeometry) {
         return airQueryFAA(service, {
@@ -2223,6 +2390,66 @@
             spatialRel: 'esriSpatialRelIntersects', outFields,
             returnGeometry: returnGeometry ? 'true' : 'false', outSR: '4326',
         });
+    }
+    // ---- USWTDB turbine details (USGS U.S. Wind Turbine Database). ----
+    // energy.usgs.gov/api/uswtdb/v1/turbines is a public PostgREST API
+    // (no auth, quarterly refresh, utility-scale only). Each row carries
+    // faa_ors, which matches the DOF layer's OAS_Number format EXACTLY
+    // ("48-015850") — so a windmill obstacle joins to its real turbine by
+    // ID, with nearest-within-AIR_TB_MATCH_FT as the fallback for rows
+    // missing an ORS. Heights are METERS: t_hh = hub (base) height,
+    // t_rd = rotor diameter (blade = half), t_ttlh = total tip height.
+    // Enrichment only — a failed fetch logs + degrades to plain DOF data,
+    // never blocks the airspace check.
+    const AIR_USWTDB_URL = 'https://energy.usgs.gov/api/uswtdb/v1/turbines';
+    const AIR_TB_MATCH_FT = 500;   // spatial fallback match radius
+    async function airFetchTurbines(clat, clng, meters) {
+        const dLat = meters / 110540;
+        const dLng = meters / (111320 * Math.max(0.2, Math.cos(clat * Math.PI / 180)));
+        const qs = `ylat=gte.${(clat - dLat).toFixed(5)}&ylat=lte.${(clat + dLat).toFixed(5)}`
+            + `&xlong=gte.${(clng - dLng).toFixed(5)}&xlong=lte.${(clng + dLng).toFixed(5)}`
+            + '&select=faa_ors,p_name,t_manu,t_model,t_hh,t_rd,t_ttlh,ylat,xlong&limit=2000';
+        const r = await elevGmRequest({ method: 'GET', url: `${AIR_USWTDB_URL}?${qs}`, timeout: 25000 });
+        if (!r.ok) throw new Error(`HTTP ${r.status || 'network error'}`);
+        let d;
+        try { d = JSON.parse(r.responseText); } catch (e) { throw new Error('bad JSON'); }
+        if (!Array.isArray(d)) throw new Error('unexpected response shape');
+        return d;
+    }
+    function airMatchTurbine(turbines, ors, lat, lng) {
+        if (!turbines || !turbines.length) return null;
+        let row = ors ? turbines.find(t2 => t2.faa_ors === ors) : null;
+        if (!row) {
+            // DOF coords are only accurate to tens of ft, so the spatial
+            // fallback stays generous — but exact-ORS always wins above.
+            let bestD = AIR_TB_MATCH_FT / M_TO_FT;
+            turbines.forEach(t2 => {
+                if (typeof t2.ylat !== 'number' || typeof t2.xlong !== 'number') return;
+                const d = approxMeters(lat, lng, t2.ylat, t2.xlong);
+                if (d < bestD) { bestD = d; row = t2; }
+            });
+        }
+        if (!row) return null;
+        const ft = (m2) => (typeof m2 === 'number' && isFinite(m2)) ? Math.round(m2 * M_TO_FT) : null;
+        return {
+            manu: (row.t_manu || '').trim(), model: (row.t_model || '').trim(),
+            project: (row.p_name || '').trim(),
+            hubFt: ft(row.t_hh), rotorFt: ft(row.t_rd),
+            bladeFt: (typeof row.t_rd === 'number' && isFinite(row.t_rd)) ? Math.round(row.t_rd / 2 * M_TO_FT) : null,
+            tipFt: ft(row.t_ttlh),
+        };
+    }
+    // One-line spec string, e.g. "GE Wind GE1.5-87 (Horse Hollow III) —
+    // hub/base 262 ft · blade 143 ft · rotor Ø 285 ft · tip 405 ft".
+    function airTbText(tb) {
+        if (!tb) return '';
+        const bits = [];
+        if (tb.hubFt != null) bits.push(`hub/base ${tb.hubFt} ft`);
+        if (tb.bladeFt != null) bits.push(`blade ${tb.bladeFt} ft`);
+        if (tb.rotorFt != null) bits.push(`rotor Ø ${tb.rotorFt} ft`);
+        if (tb.tipFt != null) bits.push(`tip ${tb.tipFt} ft`);
+        const name = [tb.manu, tb.model].filter(Boolean).join(' ') || 'turbine';
+        return `${name}${tb.project ? ` (${tb.project})` : ''} — ${bits.join(' · ') || 'no height data'}`;
     }
     // Every vertex of every FLYABLE site entity — the "site" for distance
     // purposes, so a strip 3 NM from the site's far edge flags even when
@@ -2301,17 +2528,19 @@
                 e.arcs.forEach((a, i) => {
                     if (a && a.point_a && a.point_b && typeof a.point_a.lat === 'number' && typeof a.point_b.lat === 'number') {
                         segs.push({ aLat: a.point_a.lat, aLng: a.point_a.lng, bLat: a.point_b.lat, bLng: a.point_b.lng, src: `FP "${nm}" seg #${i + 1}`, t: 15,
-                            floorM: (typeof a.min_alt === 'number') ? a.min_alt : null });
+                            floorM: (typeof a.min_alt === 'number') ? a.min_alt : null,
+                            ceilM: (typeof a.max_alt === 'number') ? a.max_alt : null });
                     }
                 });
             } else if (e.type === 3 || e.type === 16) {
                 const cs = (entityCoords(e) || []).filter(c => c && typeof c.lat === 'number');
                 const src = `${typeReg(e.type).short} "${nm}"`;
                 const floorM = (e.type === 16 && e.restrictions && typeof e.restrictions.minAlt === 'number') ? e.restrictions.minAlt : null;
+                const ceilM = (e.type === 16 && e.restrictions && typeof e.restrictions.maxAlt === 'number') ? e.restrictions.maxAlt : null;
                 for (let i = 0; i < cs.length; i++) {
                     const a = cs[i], b = cs[(i + 1) % cs.length];
                     if (cs.length >= 2 && (i < cs.length - 1 || cs.length >= 3)) {
-                        segs.push({ aLat: a.lat, aLng: a.lng, bLat: b.lat, bLng: b.lng, src, t: e.type, floorM });
+                        segs.push({ aLat: a.lat, aLng: a.lng, bLat: b.lat, bLng: b.lng, src, t: e.type, floorM, ceilM });
                     }
                 }
             }
@@ -2325,7 +2554,7 @@
         let best = Infinity, bestPt = null;
         for (const sg of segs) {
             const c = airClosestOnSeg(lat, lng, [sg.aLat, sg.aLng], [sg.bLat, sg.bLng]);
-            if (c.d < best) { best = c.d; bestPt = { lat: c.lat, lng: c.lng, src: sg.src, floorM: (typeof sg.floorM === 'number') ? sg.floorM : null }; }
+            if (c.d < best) { best = c.d; bestPt = { lat: c.lat, lng: c.lng, src: sg.src, floorM: (typeof sg.floorM === 'number') ? sg.floorM : null, ceilM: (typeof sg.ceilM === 'number') ? sg.ceilM : null }; }
         }
         for (const p of pts) {
             const d = approxMeters(lat, lng, p.lat, p.lng);
@@ -2528,17 +2757,28 @@
         const sitePtOnly = sitePts.filter(p => p.t === 8 || p.t === 98);
         const flightSegs = siteSegs.filter(sg => sg.t === 15 || sg.t === 16);
         const errors = [];
+        airCacheHits = [];   // fresh tally of cache-served layers this run
+        airRetryToasted = false;
         const grab = (label, promise) => promise.catch(e => {
             errors.push(`${label}: ${e && e.message ? e.message : e}`);
             return null;
         });
         const invM = Math.max(th.inventoryMi * MI_TO_M, th.stripNm * NM_TO_M) + siteRadM;
         const obsInvM = Math.max(5 * MI_TO_M, th.obstacleFt / M_TO_FT) + siteRadM;
+        // USWTDB enrichment rides along with the FAA queries but fails
+        // SOFT (own inventory note, not the red "results PARTIAL" path) —
+        // it only decorates windmill obstacles, it can't change a verdict.
+        const tbPromise = (airEnabled.obstacles && airEnabled.turbines)
+            ? airFetchTurbines(clat, clng, obsInvM).catch(e => {
+                console.warn(`${TAG} USWTDB turbine fetch failed:`, e);
+                return { __err: (e && e.message) || String(e) };
+            })
+            : Promise.resolve(null);
         const [apRes, obRes, asRes, laRes] = await Promise.all([
             airEnabled.strips ? grab('Airports', airPointQuery('US_Airport', clat, clng, invM,
                 'IDENT,NAME,ICAO_ID,TYPE_CODE,PRIVATEUSE,ELEVATION', true)) : Promise.resolve(null),
             airEnabled.obstacles ? grab('Obstacles', airPointQuery('Digital_Obstacle_File', clat, clng, obsInvM,
-                'Type_Code,AGL,AMSL,Lighting,Quantity,City,Lat_DD,Long_DD', false)) : Promise.resolve(null),
+                'OAS_Number,Type_Code,AGL,AMSL,Lighting,Quantity,City,Lat_DD,Long_DD', false)) : Promise.resolve(null),
             airEnabled.airspace ? grab('Airspace', airPointQuery('Class_Airspace', clat, clng, invM,
                 'NAME,CLASS,LOWER_VAL,UPPER_VAL,LOWER_UOM,IDENT', true)) : Promise.resolve(null),
             airEnabled.laanc ? grab('LAANC grids', airPointQuery('FAA_UAS_FacilityMap_Data', clat, clng,
@@ -2649,6 +2889,10 @@
         // ---- 3. FAA obstacles near site entities (towers, turbines…). ----
         if (obRes && Array.isArray(obRes.features)) {
             if (obRes.exceededTransferLimit || obRes.features.length >= 2000) inventory.obstacleTruncated = true;
+            const tbRes = await tbPromise;
+            const turbines = Array.isArray(tbRes) ? tbRes : null;
+            if (tbRes && tbRes.__err) inventory.turbineErr = tbRes.__err;
+            let tbWindmills = 0, tbMatched = 0;
             // Display filter is wider than any violation threshold, so the
             // exact-scan prefilter keys off the largest relevant distance.
             const dispTlM = th.translineShowFt / M_TO_FT;
@@ -2668,6 +2912,13 @@
                 const lit = (a.Lighting || '').trim();
                 const isTL = /^T-?L\b/i.test(type) || /UTILITY POLE/i.test(type);
                 const isWindmill = /WINDMILL|WIND TURBINE|WTG|TURBINE/i.test(type);
+                // USWTDB join: exact FAA ORS id first, nearby coords second.
+                let tb = null;
+                if (isWindmill && turbines) {
+                    tb = airMatchTurbine(turbines, (a.OAS_Number || '').trim(), oLat, oLng);
+                    tbWindmills++;
+                    if (tb) tbMatched++;
+                }
                 // Windmills get their own (tighter) standoff per SOP — and
                 // their distance is to the FLIGHT geometry (FFZ/FP), since a
                 // turbine near a non-flyable asset polygon is no hazard.
@@ -2689,10 +2940,20 @@
                 if (useNear.pt && typeof useNear.pt.floorM === 'number' && typeof a.AMSL === 'number') {
                     tlCleared = useNear.pt.floorM * M_TO_FT >= a.AMSL + th.tlClearFt;
                 }
-                const entry = { type, agl, lit, distFt: isFinite(useDistFt) ? useDistFt : distFt, distMi: (isFinite(useNear.d) ? useNear.d : near.d) / MI_TO_M, qty: (a.Quantity || '').trim(), lat: oLat, lng: oLng, src: (useNear.pt && useNear.pt.src) || (near.pt && near.pt.src) || null, hit: false, show: false };
+                const entry = { type, agl, lit, tb, distFt: isFinite(useDistFt) ? useDistFt : distFt, distMi: (isFinite(useNear.d) ? useNear.d : near.d) / MI_TO_M, qty: (a.Quantity || '').trim(), lat: oLat, lng: oLng, src: (useNear.pt && useNear.pt.src) || (near.pt && near.pt.src) || null, hit: false, show: false,
+                    // Profile-view data: obstacle top MSL + the nearest flight
+                    // segment's altitude band (MSL ft) and location (for DEM).
+                    amsl: (typeof a.AMSL === 'number') ? a.AMSL : null,
+                    isWindmill, isTL,
+                    band: (useNear.pt && typeof useNear.pt.floorM === 'number') ? {
+                        floorFt: Math.round(useNear.pt.floorM * M_TO_FT),
+                        ceilFt: (typeof useNear.pt.ceilM === 'number') ? Math.round(useNear.pt.ceilM * M_TO_FT) : null,
+                    } : null,
+                    nearLat: (useNear.pt && typeof useNear.pt.lat === 'number') ? useNear.pt.lat : null,
+                    nearLng: (useNear.pt && typeof useNear.pt.lng === 'number') ? useNear.pt.lng : null };
                 if (couldHit && !tlCleared && isFinite(useDistFt) && useDistFt < vioFt && agl != null && agl >= th.obstacleMinAglFt) {
                     entry.hit = true;
-                    const note = `violation: FAA ${isWindmill ? 'WINDMILL/turbine' : `obstacle ${type}`} (${agl} ft AGL${lit && lit !== 'N' ? ', lit' : ', unlit'}) is ${useDistFt < 100 ? `effectively ON ${entry.src || 'the flight geometry'} (< 100 ft — DOF coords are only accurate to tens of ft)` : `${useDistFt.toLocaleString()} ft from ${entry.src || 'the nearest flight segment'}`} (threshold ${vioFt} ft)${useNear.pt && typeof useNear.pt.floorM === 'number' && typeof a.AMSL === 'number' ? ` — segment floor ${Math.round(useNear.pt.floorM * M_TO_FT).toLocaleString()} ft MSL vs obstacle top ${a.AMSL.toLocaleString()} ft MSL` : ''}`;
+                    const note = `violation: FAA ${isWindmill ? 'WINDMILL/turbine' : `obstacle ${type}`} (${agl} ft AGL${lit && lit !== 'N' ? ', lit' : ', unlit'}) is ${useDistFt < 100 ? `effectively ON ${entry.src || 'the flight geometry'} (< 100 ft — DOF coords are only accurate to tens of ft)` : `${useDistFt.toLocaleString()} ft from ${entry.src || 'the nearest flight segment'}`} (threshold ${vioFt} ft)${useNear.pt && typeof useNear.pt.floorM === 'number' && typeof a.AMSL === 'number' ? ` — segment floor ${Math.round(useNear.pt.floorM * M_TO_FT).toLocaleString()} ft MSL vs obstacle top ${a.AMSL.toLocaleString()} ft MSL` : ''}${tb ? ` — USWTDB: ${airTbText(tb)}` : ''}`;
                     if (useNear.pt) {
                         // Corridor spans the obstacle AND the violated FFZ/FP spot.
                         violations.push({ shape: 'polygon', polygon: airWrapBox(oLat, oLng, useNear.pt.lat, useNear.pt.lng, 15), note, severity: 'high' });
@@ -2706,6 +2967,7 @@
                 inventory.obstacles.push(entry);
             });
             inventory.obstacles.sort((x, y) => x.distFt - y.distFt);
+            inventory.turbineInfo = turbines ? { windmills: tbWindmills, matched: tbMatched } : null;
         }
 
         // ---- 3b. Special Use Airspace + Prohibited Areas. Restricted (R) /
@@ -2860,10 +3122,29 @@
                 });
                 const volt = (a.VOLTAGE != null && Number(a.VOLTAGE) > 0) ? `${Number(a.VOLTAGE)} kV` : (a.VOLT_CLASS || 'unknown kV');
                 const tDistFt = Math.round(best * M_TO_FT);
+                // Profile-view data: nearest FLIGHT segment to the line's
+                // closest point (band + distance measured to where we fly,
+                // matching the obstacle rules — sitePts distance above is
+                // the legacy vs-all-entities number kept for the list).
+                let prof = null;
+                if (bestPt && flightSegs.length) {
+                    const fn = airMinToSiteGeom(bestPt[0], bestPt[1], flightSegs, []);
+                    if (fn.pt) {
+                        prof = {
+                            distFt: Math.round(fn.d * M_TO_FT), src: fn.pt.src,
+                            nearLat: fn.pt.lat, nearLng: fn.pt.lng,
+                            band: (typeof fn.pt.floorM === 'number') ? {
+                                floorFt: Math.round(fn.pt.floorM * M_TO_FT),
+                                ceilFt: (typeof fn.pt.ceilM === 'number') ? Math.round(fn.pt.ceilM * M_TO_FT) : null,
+                            } : null,
+                        };
+                    }
+                }
+                const voltNum = Number(a.VOLTAGE) || 0;
                 inventory.translines.push({
-                    volt, owner: (a.OWNER || '').trim(), status: (a.STATUS || '').trim(),
+                    volt, voltNum, owner: (a.OWNER || '').trim(), status: (a.STATUS || '').trim(),
                     distFt: tDistFt, distMi: best / MI_TO_M,
-                    src: bestSrc, nearPt: bestPt, paths,
+                    src: bestSrc, nearPt: bestPt, paths, prof,
                     show: tDistFt <= th.translineShowFt,   // noise filter
                 });
             });
@@ -2885,6 +3166,7 @@
             }
         }
 
+        inventory.cacheServed = airCacheHits.slice();
         return { violations, inventory, errors, laancGrids, meta: { clat, clng, siteRadM, entCount: ents.length, ptCount: sitePts.length } };
     }
 
@@ -2986,6 +3268,11 @@
         closeAirspacePanel();
         const inv = res.inventory;
         const th = airThresholds;
+        // Profile view needs the raw result + stable indexes after render.
+        airProfRes = res;
+        (inv.obstacles || []).forEach((o, i) => { o._pi = i; });
+        (inv.translines || []).forEach((t, i) => { t._pi = i; });
+        const profBtn = (attr, i) => ` <button ${attr}="${i}" title="Profile view — drone vs obstacle, to scale" style="background:none;border:1px solid rgba(122,223,230,0.35);color:#7adfe6;border-radius:4px;padding:0 5px;margin-left:5px;cursor:pointer;font-size:10px;line-height:1.5;">📐</button>`;
         // DOF horizontal accuracy is tens of feet — a single-digit distance
         // is false precision, so anything under 100 ft reads "on site".
         const obsDist = (o) => o.distFt < 100 ? 'on site (&lt; 100 ft)'
@@ -3011,6 +3298,13 @@
             : '<span style="color:#5fff5f;font-weight:700;">No airspace violations ✓</span>'}</div>`);
         if (res.errors && res.errors.length) {
             res.errors.forEach(e => line('high', `<span style="color:#ff8080">FAA query failed — ${airEsc(e)} (results below are PARTIAL)</span>`));
+        }
+        if (inv.cacheServed && inv.cacheServed.length) {
+            const fmtAge = (m) => m < 90 ? `${m} min` : `${Math.round(m / 60)} h`;
+            const stale = inv.cacheServed.filter(c => c.stale);
+            const fresh = inv.cacheServed.length - stale.length;
+            stale.forEach(c => line('warn', `⚡ FAA rate-limited — "${airEsc(c.label)}" served from local cache (${fmtAge(c.ageMin)} old)`));
+            if (fresh) line('info', `⚡ ${fresh} FAA layer${fresh === 1 ? '' : 's'} served from local cache (within the ${th.airCacheHours} h TTL — no network hit)`);
         }
 
         if (airEnabled.airspace) {
@@ -3060,7 +3354,7 @@
                 // which can be miles out in open country.
                 const rep = t.nearPt || t.paths[0][Math.floor(t.paths[0].length / 2)];
                 line('info',
-                    `<strong>${airEsc(t.volt)}</strong>${t.owner ? ` — ${airEsc(t.owner)}` : ''} · ${t.distFt < 5000 ? `${t.distFt.toLocaleString()} ft` : `${t.distMi.toFixed(1)} mi`} from ${t.src ? airEsc(t.src) : 'site'}`,
+                    `<strong>${airEsc(t.volt)}</strong>${t.owner ? ` — ${airEsc(t.owner)}` : ''} · ${t.distFt < 5000 ? `${t.distFt.toLocaleString()} ft` : `${t.distMi.toFixed(1)} mi`} from ${t.src ? airEsc(t.src) : 'site'}${profBtn('data-air-prof-tl', t._pi)}`,
                     { lat: rep[0], lng: rep[1], zoom: 15 });
             });
             if (tlShown.length > 8) line('info', `…and ${tlShown.length - 8} more within range (drawn on map)`);
@@ -3074,11 +3368,17 @@
             const summary = Object.keys(byType).sort((a, b) => byType[b] - byType[a]).map(t => `${airEsc(t)} ×${byType[t]}`).join(' · ') || 'none in range';
             section(`FAA obstacles (${obsShown.length} shown · T-L within ${th.translineShowFt.toLocaleString()} ft, others within ${th.obstacleShowNm} NM)`);
             line('info', `${summary}${obsHiddenN ? ` · ${obsHiddenN} further out hidden` : ''}${inv.obstacleTruncated ? ' · list truncated at 2000' : ''}`);
+            if (airEnabled.turbines && inv.turbineErr) {
+                line('warn', `USWTDB turbine lookup failed — ${airEsc(inv.turbineErr)} (windmill specs unavailable this run)`);
+            } else if (airEnabled.turbines && inv.turbineInfo && inv.turbineInfo.windmills) {
+                line('info', `USWTDB: turbine specs matched for ${inv.turbineInfo.matched} of ${inv.turbineInfo.windmills} windmill${inv.turbineInfo.windmills === 1 ? '' : 's'}`);
+            }
+            const tbLine = (o) => o.tb ? `<br><span style="opacity:0.78;padding-left:14px;">🌀 ${airEsc(airTbText(o.tb))}</span>` : '';
             obsShown.filter(o => o.hit).forEach(o => line('high',
-                `<strong>${airEsc(o.type)}</strong> ${o.agl != null ? `${o.agl} ft AGL` : ''}${o.lit && o.lit !== 'N' ? ' (lit)' : ' (unlit)'} — ${obsDist(o)} from ${o.src ? airEsc(o.src) : 'site'}`,
+                `<strong>${airEsc(o.type)}</strong> ${o.agl != null ? `${o.agl} ft AGL` : ''}${o.lit && o.lit !== 'N' ? ' (lit)' : ' (unlit)'} — ${obsDist(o)} from ${o.src ? airEsc(o.src) : 'site'}${profBtn('data-air-prof', o._pi)}${tbLine(o)}`,
                 { lat: o.lat, lng: o.lng, zoom: 17 }));
             obsShown.filter(o => !o.hit).slice(0, 10).forEach(o => line('ok',
-                `${airEsc(o.type)} ${o.agl != null ? `${o.agl} ft AGL` : ''} — ${obsDist(o)}`,
+                `${airEsc(o.type)} ${o.agl != null ? `${o.agl} ft AGL` : ''} — ${obsDist(o)}${profBtn('data-air-prof', o._pi)}${tbLine(o)}`,
                 { lat: o.lat, lng: o.lng, zoom: 17 }));
         }
 
@@ -3093,7 +3393,7 @@
                 <span style="color:#7adfe6;font-weight:700;">🛩 Airspace Check</span>
                 <span style="opacity:0.7;">${airEsc(siteName || `site ${sid}`)}</span>
                 <span style="flex:1"></span>
-                ${(inv.obstacles || []).some(o => o.hit) ? '<button data-air-gms title="Create General Markers at the flagged obstacles" style="background:none;border:1px solid rgba(95,255,95,0.5);color:#5fff5f;border-radius:5px;padding:2px 8px;cursor:pointer;">📍 Create GMs</button>' : ''}
+                ${((inv.obstacles || []).some(o => o.hit) && !LITE) ? '<button data-air-gms title="Create General Markers at the flagged obstacles" style="background:none;border:1px solid rgba(95,255,95,0.5);color:#5fff5f;border-radius:5px;padding:2px 8px;cursor:pointer;">📍 Create GMs</button>' : ''}
                 <button data-air-copy style="background:none;border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:5px;padding:2px 8px;cursor:pointer;">Copy report</button>
                 <button data-air-close style="background:none;border:none;color:#dfe9f0;font-size:15px;cursor:pointer;">✕</button>
             </div>
@@ -3102,6 +3402,14 @@
         wrap.addEventListener('click', (e) => {
             if (e.target.closest('[data-air-close]')) { closeAirspacePanel(); return; }
             if (e.target.closest('[data-air-gms]')) { showAirGmModal(res, sid); return; }
+            // 📐 sits inside a jump row — must win over data-air-jump.
+            const profEl = e.target.closest('[data-air-prof],[data-air-prof-tl]');
+            if (profEl) {
+                e.stopPropagation();
+                if (profEl.hasAttribute('data-air-prof')) airProfOpenObstacle(+profEl.getAttribute('data-air-prof'));
+                else airProfOpenTransline(+profEl.getAttribute('data-air-prof-tl'));
+                return;
+            }
             if (e.target.closest('[data-air-copy]')) {
                 const text = airBuildReport(res, sid, siteName);
                 navigator.clipboard.writeText(text).then(
@@ -3171,6 +3479,9 @@
         if (airEnabled.obstacles) {
             const oS = inv.obstacles.filter(o => o.show);
             out.push(`FAA obstacles in range: ${oS.length} (nearest ${oS.length ? `${oS[0].type} at ${oS[0].distFt.toLocaleString()} ft` : '—'})`);
+            if (inv.turbineErr) out.push(`  ⚠ USWTDB turbine lookup failed — ${inv.turbineErr}`);
+            oS.filter(o => o.tb).slice(0, 15).forEach(o =>
+                out.push(`  - ${o.type}${o.agl != null ? ` ${o.agl} ft AGL` : ''} at ${o.distFt.toLocaleString()} ft — ${airTbText(o.tb)} [USWTDB]`));
         }
         return out.join('\n');
     }
@@ -3305,6 +3616,7 @@
         return plan;
     }
     async function airCreateGms(plan, sid) {
+        if (liteBlockedWrite('create GMs')) return { created: 0, failed: 0, errors: [] };
         const out = { created: 0, failed: 0, errors: [] };
         const csrf = getCsrfToken();
         if (!csrf) { out.errors.push('no CSRF token — make one native save/edit anywhere in Percepto (token auto-captures), then retry'); return out; }
@@ -3329,7 +3641,10 @@
             b.marker_height = Math.round(item.heightM * 100) / 100;
             b.validated = false;
             b.arcs = [];
-            b.description = `FAA DOF obstacle${item.o.lit && item.o.lit !== 'N' ? ' (lit)' : ''} — auto-placed by Airspace Checker`;
+            // Windmills matched in USWTDB carry the full turbine spec so
+            // the GM itself documents the hazard (user 2026-07-20).
+            b.description = `FAA DOF obstacle${item.o.lit && item.o.lit !== 'N' ? ' (lit)' : ''} — auto-placed by Airspace Checker`
+                + (item.o.tb ? ` | USWTDB: ${airTbText(item.o.tb)}` : '');
             b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
             try {
                 const r = await fetch('/map_objects/', {
@@ -3354,7 +3669,7 @@
         const plan = airBuildGmPlan(res, sid);
         if (!plan.create.length && !plan.skipped.length) { showToast('No flagged obstacles to mark'); return; }
         const rows = plan.create.map(c =>
-            `<div style="margin:3px 0;"><span style="color:#5fff5f">＋</span> <strong>${airEsc(c.name)}</strong> — ${airEsc(c.markerType)}, height ${c.o.agl != null ? c.o.agl : '?'} ft</div>`).join('')
+            `<div style="margin:3px 0;"><span style="color:#5fff5f">＋</span> <strong>${airEsc(c.name)}</strong> — ${airEsc(c.markerType)}, height ${c.o.agl != null ? c.o.agl : '?'} ft${c.o.tb ? `<br><span style="opacity:0.7;padding-left:16px;">🌀 ${airEsc(airTbText(c.o.tb))} → GM description</span>` : ''}</div>`).join('')
             + plan.skipped.map(s =>
             `<div style="margin:3px 0;opacity:0.65;"><span style="color:#ffb020">－</span> ${airEsc(airGmTitleType(s.o.type))} ${s.o.agl != null ? `${s.o.agl} ft` : ''} — skipped: ${airEsc(s.reason)}</div>`).join('');
         const wrap = document.createElement('div');
@@ -3391,6 +3706,641 @@
             }
         });
         document.body.appendChild(wrap);
+    }
+
+    // ============================================================
+    // 📐 Obstacle Profile view — to-scale side elevation of the drone's
+    // FFZ/FP altitude band vs a windmill (tower + swept rotor disc),
+    // a mast-type obstacle, or a transmission-line conductor. Opens
+    // prefilled from the airspace check's REAL numbers (USWTDB specs,
+    // FAA heights, nearest-flight-segment band + distance); every
+    // number is then editable as a what-if sandbox and the drone is
+    // draggable with the closest-approach line following live. All
+    // geometry shares one ft-MSL frame (terrain offset between the
+    // flight area and the obstacle base is visible) at uniform scale —
+    // 1 ft horizontal = 1 ft vertical, always.
+    // ============================================================
+    const AIR_PROF_MODAL_ID = 'aim-airspace-profile';
+    let airProfRes = null;      // last airspace result (set on panel render)
+    let airProfState = null;    // live model while the modal is open
+    // HIFLD lines carry no height data — assumed conductor height by
+    // voltage class, editable in the modal.
+    function airProfWireDefaultFt(voltNum) {
+        if (voltNum >= 345) return 120;
+        if (voltNum >= 230) return 100;
+        if (voltNum >= 100) return 80;
+        if (voltNum >= 69) return 70;
+        return 50;
+    }
+    // ---- Wake-turbulence screening estimate (windmills only). ----
+    // Industry-standard engineering models, NOT CFD: Jensen wake deficit
+    // (dV/V = (1−√(1−Ct)) / (1+2kx/D)²) + Crespo-Hernández added
+    // turbulence intensity (ΔI = 0.73·a^0.8325·I0^0.0325·(x/D)^−0.32),
+    // k=0.075 onshore, ambient TI 10%. Ct approximated by operating
+    // regime from wind speed (GE-class curve). Distances in rotor
+    // diameters D: <2D severe, 2–5D strong, 5–10D moderate, >10D ~ambient.
+    // Worst-case geometry: drone directly DOWNWIND of the rotor.
+    // Screening aid only — ignores terrain, stability, multi-turbine
+    // stacking, yaw error. Gust estimate = V·(1 + 2.5·TI_total).
+    const AIR_WAKE_K = 0.075;
+    const AIR_WAKE_I0 = 0.10;
+    // Near-field effects the cone alone doesn't capture (all rough,
+    // deliberately conservative):
+    const AIR_WAKE_TIPVORT_FT = 50;      // tip vortices trail at the disc rim — margin band below the lower envelope edge (≤2D)
+    const AIR_WAKE_MEANDER_FT = 60;      // wake meander — envelope edge is fuzzy by about this much
+    const AIR_WAKE_TOWERSHADOW_FT = 300; // bluff-body tower wake extends ~this far downwind (~20 tower diameters), ground → hub
+    function airProfWakeCalc(st) {
+        if (st.kind !== 'windmill' || !st.wakeOn) return null;
+        const D = 2 * st.bladeFt;
+        if (!(D > 0)) return null;
+        const V = Math.max(0, st.windMph || 0);
+        const ct = V < 7 ? 0 : V < 25 ? 0.75 : V < 35 ? 0.5 : 0.3;
+        const out = { D, V, ct, idle: ct === 0, crosswind: !st.downwind, active: false };
+        if (out.idle || out.crosswind) return out;
+        const dx = st.distFt - st.droneX;          // rotor plane → drone, downwind
+        out.upwind = dx <= 0;
+        if (out.upwind) return out;
+        const xD = dx / D;
+        const a2 = (1 - Math.sqrt(1 - ct)) / 2;    // induction factor
+        out.xD = xD;
+        out.deficit = (1 - Math.sqrt(1 - ct)) / Math.pow(1 + 2 * AIR_WAKE_K * xD, 2);
+        // Crespo-Hernández is fit for the 3D–15D far wake; clamp the near
+        // wake at 0.5D so it saturates instead of blowing up.
+        out.addTI = 0.73 * Math.pow(a2, 0.8325) * Math.pow(AIR_WAKE_I0, 0.0325) * Math.pow(Math.max(xD, 0.5), -0.32);
+        out.totalTI = Math.sqrt(AIR_WAKE_I0 * AIR_WAKE_I0 + out.addTI * out.addTI);
+        out.gustMph = V * (1 + 2.5 * out.totalTI);
+        const hubY = st.obsGndFt + st.hubFt;
+        out.coneR = D / 2 + AIR_WAKE_K * dx;       // wake half-width at the drone
+        out.inCone = Math.abs(st.droneY - hubY) <= out.coneR;
+        out.below = st.droneY < hubY - out.coneR;
+        out.zone = xD < 2 ? 'severe' : xD < 5 ? 'strong' : xD < 10 ? 'moderate' : 'negligible';
+        // Honest-uncertainty flags (checked when OUTSIDE the mean cone):
+        out.edgeDist = Math.abs(st.droneY - hubY) - out.coneR;   // + = outside envelope
+        out.nearEdge = !out.inCone && out.edgeDist < AIR_WAKE_MEANDER_FT;
+        out.inTipZone = !out.inCone && st.droneY < hubY && (hubY - out.coneR) - st.droneY <= AIR_WAKE_TIPVORT_FT && xD <= 2;
+        out.inTowerShadow = st.droneY < hubY && dx > 0 && dx <= AIR_WAKE_TOWERSHADOW_FT;
+        out.active = true;
+        return out;
+    }
+    function closeAirProfModal() {
+        if (airProfState && airProfState._ro) { try { airProfState._ro.disconnect(); } catch (e) {} }
+        const el = document.getElementById(AIR_PROF_MODAL_ID);
+        if (el) el.remove();
+        airProfState = null;
+    }
+    function airProfZoomBy(st, f) {
+        const v = st._view;
+        if (!v) return;
+        const s2 = Math.min(Math.max(v.s * f, v.fitS * 0.15), v.fitS * 120);
+        st._userView = { s: s2, cx: v.cx, cy: v.cy };
+        airProfRender();
+    }
+    function airProfOpenObstacle(idx) {
+        const o = airProfRes && airProfRes.inventory.obstacles && airProfRes.inventory.obstacles[idx];
+        if (!o) { showToast('Profile data unavailable — rerun the airspace check', 'rgba(255,96,96,0.55)'); return; }
+        const agl = (typeof o.agl === 'number') ? o.agl : 200;
+        const obsGnd = (typeof o.amsl === 'number' && typeof o.agl === 'number') ? o.amsl - o.agl : 0;
+        const st = {
+            kind: o.isWindmill ? 'windmill' : 'mast',
+            label: `${o.type} ${typeof o.agl === 'number' ? `${o.agl} ft AGL` : ''}`,
+            sub: o.tb ? airTbText(o.tb) : '',
+            srcName: o.src || 'nearest flight segment',
+            estSpecs: o.isWindmill && !o.tb,   // hub/blade guessed from AGL, no USWTDB match
+            distFt: Math.max(10, o.distFt || 10),
+            obsGndFt: obsGnd, droneGndFt: obsGnd, demDrone: 'none',
+            bandMsl: o.band ? { floorFt: o.band.floorFt, ceilFt: o.band.ceilFt } : null,
+            floorAglFt: 100, ceilAglFt: 210,
+            hubFt: (o.tb && o.tb.hubFt != null) ? o.tb.hubFt : Math.round(agl * 0.64),
+            bladeFt: (o.tb && o.tb.bladeFt != null) ? o.tb.bladeFt : Math.round(agl * 0.36),
+            aglFt: agl,
+            demLL: { drone: (o.nearLat != null) ? [o.nearLat, o.nearLng] : null, obs: null },
+        };
+        airProfLaunch(st);
+    }
+    function airProfOpenTransline(idx) {
+        const t = airProfRes && airProfRes.inventory.translines && airProfRes.inventory.translines[idx];
+        if (!t) { showToast('Profile data unavailable — rerun the airspace check', 'rgba(255,96,96,0.55)'); return; }
+        const p = t.prof;
+        const st = {
+            kind: 'wire',
+            label: `${t.volt} transmission line`,
+            sub: `${t.owner || 'unknown owner'} — conductor height ASSUMED by voltage class, edit to match the actual structures`,
+            srcName: (p && p.src) || t.src || 'nearest flight segment',
+            distFt: Math.max(10, (p && p.distFt) || t.distFt || 10),
+            obsGndFt: 0, droneGndFt: 0, demDrone: 'none',
+            bandMsl: (p && p.band) ? { floorFt: p.band.floorFt, ceilFt: p.band.ceilFt } : null,
+            floorAglFt: 100, ceilAglFt: 210,
+            hubFt: 0, bladeFt: 0,
+            aglFt: airProfWireDefaultFt(t.voltNum || 0),
+            demLL: { drone: (p && p.nearLat != null) ? [p.nearLat, p.nearLng] : null, obs: t.nearPt || null },
+        };
+        airProfLaunch(st);
+    }
+    // Re-derive the AGL band inputs from the authoritative MSL band
+    // whenever the drone-side ground estimate changes — unless the user
+    // already edited that field (their number wins).
+    function airProfReband(st) {
+        if (!st.bandMsl || st.bandMsl.floorFt == null) return;
+        if (!st.touched.floorAglFt) st.floorAglFt = Math.max(0, st.bandMsl.floorFt - st.droneGndFt);
+        if (!st.touched.ceilAglFt && st.bandMsl.ceilFt != null) st.ceilAglFt = Math.max(st.floorAglFt, st.bandMsl.ceilFt - st.droneGndFt);
+    }
+    function airProfLaunch(st) {
+        st.touched = {};
+        st.droneDragged = false;
+        st.droneX = 0; st.droneY = null;   // derived each render from droneAglFt
+        airProfReband(st);
+        st.droneAglFt = Math.round((st.floorAglFt + st.ceilAglFt) / 2);   // auto-mid until touched
+        // Wake-estimate controls (used by windmills only).
+        st.wakeOn = true;
+        st.downwind = true;                        // worst case: drone directly downwind
+        st.windMph = 15;
+        st.droneRatingMph = airThresholds.droneWindMph;
+        st.real = { distFt: st.distFt, floorAglFt: st.floorAglFt, ceilAglFt: st.ceilAglFt, hubFt: st.hubFt, bladeFt: st.bladeFt, aglFt: st.aglFt };
+        airProfState = st;
+        airProfBuildModal(st);
+        airProfRender();
+        // DEM refinement (async, cached): drone-side ground always; the
+        // obstacle side only for wires (FAA AMSL−AGL is the surveyed
+        // ground for DOF obstacles — better than DEM at a fuzzy coord).
+        const want = [];
+        if (st.demLL.drone) { st.demDrone = 'pending'; want.push(['drone', st.demLL.drone]); }
+        if (st.kind === 'wire' && st.demLL.obs) want.push(['obs', st.demLL.obs]);
+        want.forEach(([side, ll]) => {
+            fetchElevation(ll[0], ll[1]).then(m => {
+                if (airProfState !== st) return;
+                if (m == null) { if (side === 'drone') st.demDrone = 'none'; airProfRender(); return; }
+                const ftv = Math.round(m * M_TO_FT);
+                if (side === 'drone') {
+                    st.droneGndFt = ftv; st.demDrone = 'ok';
+                    if (st.kind === 'wire' && !st.demLL.obs) st.obsGndFt = ftv;
+                    airProfReband(st);
+                    airProfSyncInputs(st);
+                } else {
+                    st.obsGndFt = ftv;
+                }
+                airProfRender();
+            }).catch(e => console.warn(`${TAG} profile DEM fetch failed:`, e));
+        });
+    }
+    // Shortest 2D distance from the drone to the obstacle, plus the
+    // nearest point on the obstacle (for drawing the approach line).
+    function airProfClosest(st, x, y) {
+        const xO = st.distFt;
+        if (st.kind === 'windmill') {
+            const hubY = st.obsGndFt + st.hubFt;
+            const dc = Math.hypot(xO - x, hubY - y);
+            const dDisc = Math.max(0, dc - st.bladeFt);
+            const discPt = dc > 1e-6 ? [xO + (x - xO) / dc * st.bladeFt, hubY + (y - hubY) / dc * st.bladeFt] : [xO, hubY + st.bladeFt];
+            const ty = Math.min(Math.max(y, st.obsGndFt), hubY);
+            const dTower = Math.hypot(xO - x, ty - y);
+            // Both components kept — at band altitudes the drone is often
+            // far below the disc, and the tower is the thing you'd hit.
+            const disc = { d: dDisc, pt: discPt };
+            const tower = { d: dTower, pt: [xO, ty] };
+            const m = dDisc <= dTower ? disc : tower;
+            return { d: m.d, pt: m.pt, disc, tower };
+        }
+        if (st.kind === 'mast') {
+            const ty = Math.min(Math.max(y, st.obsGndFt), st.obsGndFt + st.aglFt);
+            return { d: Math.hypot(xO - x, ty - y), pt: [xO, ty] };
+        }
+        const wy = st.obsGndFt + st.aglFt;
+        return { d: Math.hypot(xO - x, wy - y), pt: [xO, wy] };
+    }
+    // Closest possible approach from ANYWHERE in the band edge (the
+    // vertical segment at x=0 between floor and ceiling, MSL).
+    function airProfBandClosest(st) {
+        const f = st.droneGndFt + st.floorAglFt, c = st.droneGndFt + st.ceilAglFt;
+        const probe = (y) => airProfClosest(st, 0, y).d;
+        if (st.kind === 'windmill') {
+            const hubY = st.obsGndFt + st.hubFt;
+            return Math.min(probe(Math.min(Math.max(hubY, f), c)), probe(f), probe(c));
+        }
+        if (st.kind === 'mast') {
+            const topY = st.obsGndFt + st.aglFt;
+            const yStar = Math.min(Math.max((f + c) / 2, st.obsGndFt), topY);
+            return Math.min(probe(Math.min(Math.max(yStar, f), c)), probe(f), probe(c));
+        }
+        const wy = st.obsGndFt + st.aglFt;
+        return probe(Math.min(Math.max(wy, f), c));
+    }
+    function airProfSyncInputs(st) {
+        const wrap = document.getElementById(AIR_PROF_MODAL_ID);
+        if (!wrap) return;
+        wrap.querySelectorAll('input[data-prof-k]').forEach(inp => {
+            const k = inp.getAttribute('data-prof-k');
+            if (!st.touched[k] && document.activeElement !== inp) inp.value = Math.round(st[k]);
+        });
+    }
+    function airProfBuildModal(st) {
+        closeAirProfModal();
+        airProfState = st;   // closeAirProfModal nulled it
+        const wrap = document.createElement('div');
+        wrap.id = AIR_PROF_MODAL_ID;
+        // Native CSS resize (corner handle) + a ResizeObserver re-render;
+        // the SVG fills whatever space the user drags out.
+        wrap.style.cssText = 'position:fixed;top:60px;right:40px;width:min(940px,92vw);height:min(660px,86vh);'
+            + 'min-width:540px;min-height:400px;resize:both;overflow:hidden;display:flex;flex-direction:column;z-index:2147483002;'
+            + 'background:rgba(13,18,27,0.98);border:1px solid rgba(122,223,230,0.55);border-radius:10px;'
+            + 'color:#dfe9f0;font:12px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,0.65);';
+        const numIn = (k, label, step) =>
+            `<label style="display:flex;align-items:center;gap:4px;white-space:nowrap;">${label}
+                <input data-prof-k="${k}" type="number" step="${step || 10}" value="${Math.round(st[k])}"
+                    style="width:64px;background:rgba(255,255,255,0.08);border:1px solid rgba(122,223,230,0.35);border-radius:4px;color:#dfe9f0;padding:1px 4px;font-size:12px;"> ft</label>`;
+        const kindIns = st.kind === 'windmill'
+            ? numIn('hubFt', 'Hub/base', 10) + numIn('bladeFt', 'Blade', 5)
+            : st.kind === 'mast' ? numIn('aglFt', 'Height', 10) : numIn('aglFt', 'Wire height', 5);
+        wrap.innerHTML = `
+            <div data-prof-drag style="cursor:move;padding:7px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid rgba(122,223,230,0.25);">
+                <span style="color:#7adfe6;font-weight:700;">📐 Obstacle profile</span>
+                <span style="opacity:0.8;">${airEsc(st.label)}</span>
+                <span style="flex:1"></span>
+                <button data-prof-zout title="Zoom out" style="background:none;border:1px solid rgba(122,223,230,0.35);color:#7adfe6;border-radius:5px;padding:1px 7px;cursor:pointer;">−</button>
+                <button data-prof-zin title="Zoom in" style="background:none;border:1px solid rgba(122,223,230,0.35);color:#7adfe6;border-radius:5px;padding:1px 7px;cursor:pointer;">＋</button>
+                <button data-prof-fit title="Fit everything in view" style="background:none;border:1px solid rgba(122,223,230,0.35);color:#7adfe6;border-radius:5px;padding:1px 8px;cursor:pointer;">⤢ Fit</button>
+                <button data-prof-reset title="Reset all numbers to the real values from the airspace check" style="background:none;border:1px solid rgba(223,233,240,0.35);color:#dfe9f0;border-radius:5px;padding:1px 8px;cursor:pointer;">↺ Real values</button>
+                <button data-prof-close style="background:none;border:none;color:#dfe9f0;font-size:15px;cursor:pointer;">✕</button>
+            </div>
+            ${st.sub ? `<div style="padding:4px 12px 0;opacity:0.75;font-size:11px;">${airEsc(st.sub)}</div>` : ''}
+            <div style="padding:6px 12px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;">
+                ${numIn('distFt', 'Distance', 25)}${numIn('floorAglFt', 'Floor (AGL)', 10)}${numIn('ceilAglFt', 'Ceiling (AGL)', 10)}${numIn('droneAglFt', '🛩 Drone alt', 5)}${kindIns}
+            </div>
+            ${st.kind === 'windmill' ? `<div style="padding:0 12px 6px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;">
+                <label style="display:flex;align-items:center;gap:4px;white-space:nowrap;cursor:pointer;"><input type="checkbox" data-prof-chk="wakeOn"${st.wakeOn ? ' checked' : ''}> 💨 Wake estimate</label>
+                ${numIn('windMph', 'Wind', 5).replace('> ft<', '> mph<')}
+                ${numIn('droneRatingMph', 'Drone max wind', 2).replace('> ft<', '> mph<')}
+                <label style="display:flex;align-items:center;gap:4px;white-space:nowrap;cursor:pointer;" title="Worst case: the drone sits directly downwind of the rotor. Uncheck for crosswind days (wake blows past, not toward the flight area)."><input type="checkbox" data-prof-chk="downwind"${st.downwind ? ' checked' : ''}> drone downwind (worst case)</label>
+            </div>` : ''}
+            <div data-prof-svg style="flex:1;min-height:200px;padding:2px 8px;touch-action:none;cursor:grab;overflow:hidden;"></div>
+            <div data-prof-read style="padding:6px 12px 4px;display:flex;gap:16px;flex-wrap:wrap;font-size:12px;border-top:1px solid rgba(122,223,230,0.2);"></div>
+            <div data-prof-note style="padding:0 12px 8px;opacity:0.55;font-size:10.5px;"></div>`;
+        wrap.addEventListener('click', (e) => {
+            if (e.target.closest('[data-prof-close]')) { closeAirProfModal(); return; }
+            if (e.target.closest('[data-prof-fit]')) { st._userView = null; airProfRender(); return; }
+            if (e.target.closest('[data-prof-zin]')) { airProfZoomBy(st, 1.5); return; }
+            if (e.target.closest('[data-prof-zout]')) { airProfZoomBy(st, 1 / 1.5); return; }
+            if (e.target.closest('[data-prof-reset]')) {
+                Object.assign(st, st.real);
+                st.touched = {}; st.droneDragged = false; st.droneY = null; st.droneX = 0;
+                st.droneAglFt = null;   // re-derives to band midpoint
+                airProfReband(st);
+                wrap.querySelectorAll('input[data-prof-k]').forEach(inp => { inp.value = Math.round(st[inp.getAttribute('data-prof-k')]); });
+                airProfRender();
+            }
+        });
+        wrap.addEventListener('input', (e) => {
+            const ck = e.target.getAttribute && e.target.getAttribute('data-prof-chk');
+            if (ck) { st[ck] = !!e.target.checked; airProfRender(); return; }
+            const k = e.target.getAttribute && e.target.getAttribute('data-prof-k');
+            if (!k) return;
+            const v = Number(e.target.value);
+            if (!isFinite(v)) return;
+            st[k] = Math.max(k === 'distFt' ? 10 : 0, v);
+            st.touched[k] = true;
+            if (k === 'floorAglFt' && st.ceilAglFt < st.floorAglFt && !st.touched.ceilAglFt) st.ceilAglFt = st.floorAglFt;
+            airProfRender();
+        });
+        // Drone drag / pan / wheel-zoom — listeners live on the persistent
+        // SVG host (the SVG itself is rebuilt every render). Grab near the
+        // drone = move it; grab anywhere else = pan; wheel = zoom at cursor.
+        const svgHost = wrap.querySelector('[data-prof-svg]');
+        const toWorld = (ev) => {
+            const svg = svgHost.querySelector('svg');
+            if (!svg || !st._view) return null;
+            const r = svg.getBoundingClientRect();
+            const v = st._view;
+            const px = ev.clientX - r.left, py = ev.clientY - r.top;
+            return { x: v.cx + (px - v.W / 2) / v.s, y: v.cy - (py - v.H / 2) / v.s, px, py };
+        };
+        let dragging = false, panning = null;
+        svgHost.addEventListener('pointerdown', (e) => {
+            const w = toWorld(e);
+            if (!w || st.droneY == null) return;
+            const v = st._view;
+            const dPx = Math.hypot((w.x - st.droneX) * v.s, (w.y - st.droneY) * v.s);
+            e.preventDefault();
+            try { svgHost.setPointerCapture(e.pointerId); } catch (err) {}
+            if (dPx <= 22) dragging = true;
+            else { panning = { px: e.clientX, py: e.clientY, cx: v.cx, cy: v.cy, s: v.s }; svgHost.style.cursor = 'grabbing'; }
+        });
+        svgHost.addEventListener('pointermove', (e) => {
+            if (dragging) {
+                const w = toWorld(e);
+                if (!w) return;
+                st.droneX = Math.min(Math.max(w.x, -2000), st.distFt + 2000);
+                st.droneAglFt = Math.max(w.y, Math.min(st.droneGndFt, st.obsGndFt) + 3) - st.droneGndFt;
+                st.touched.droneAglFt = true;
+                st.droneDragged = true;
+                airProfRender();
+            } else if (panning) {
+                st._userView = { s: panning.s, cx: panning.cx - (e.clientX - panning.px) / panning.s, cy: panning.cy + (e.clientY - panning.py) / panning.s };
+                airProfRender();
+            }
+        });
+        const endPtr = () => { dragging = false; panning = null; svgHost.style.cursor = 'grab'; };
+        svgHost.addEventListener('pointerup', endPtr);
+        svgHost.addEventListener('pointercancel', endPtr);
+        svgHost.addEventListener('wheel', (e) => {
+            const w = toWorld(e);
+            if (!w) return;
+            e.preventDefault();
+            const v = st._view;
+            const s2 = Math.min(Math.max(v.s * Math.exp(-e.deltaY * 0.0018), v.fitS * 0.15), v.fitS * 120);
+            st._userView = { s: s2, cx: w.x - (w.px - v.W / 2) / s2, cy: w.y + (w.py - v.H / 2) / s2 };
+            airProfRender();
+        }, { passive: false });
+        // Re-render when the user drags the corner resize handle.
+        st._ro = new ResizeObserver(() => { if (airProfState === st) airProfRender(); });
+        st._ro.observe(wrap);
+        // Header drag (same minimal pattern as the airspace panel).
+        let hdrDrag = null;
+        wrap.querySelector('[data-prof-drag]').addEventListener('mousedown', (e) => {
+            if (e.target.closest('button')) return;
+            const r = wrap.getBoundingClientRect();
+            hdrDrag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+            e.preventDefault();
+        });
+        document.addEventListener('mousemove', (e) => {
+            if (!hdrDrag) return;
+            wrap.style.left = `${e.clientX - hdrDrag.dx}px`;
+            wrap.style.top = `${e.clientY - hdrDrag.dy}px`;
+            wrap.style.right = 'auto';
+        });
+        document.addEventListener('mouseup', () => { hdrDrag = null; });
+        document.body.appendChild(wrap);
+    }
+    function airProfRender() {
+        const st = airProfState;
+        if (!st) return;
+        const wrap = document.getElementById(AIR_PROF_MODAL_ID);
+        if (!wrap) return;
+        const gD = st.droneGndFt, gO = st.obsGndFt, xO = st.distFt;
+        const floorY = gD + st.floorAglFt, ceilY = gD + st.ceilAglFt;
+        // Drone altitude: auto-tracks the band midpoint until the user
+        // types a value or drags the drone; then their number wins.
+        if (st.droneAglFt == null || !st.touched.droneAglFt) st.droneAglFt = Math.round((st.floorAglFt + st.ceilAglFt) / 2);
+        st.droneY = gD + st.droneAglFt;
+        const dAltInp = wrap.querySelector('input[data-prof-k="droneAglFt"]');
+        if (dAltInp && document.activeElement !== dAltInp) dAltInp.value = Math.round(st.droneAglFt);
+        const wake = airProfWakeCalc(st);
+        const hubY = gO + st.hubFt;
+        const topY = st.kind === 'windmill' ? hubY + st.bladeFt : gO + st.aglFt;
+        const thr = st.kind === 'windmill' ? airThresholds.windmillFt : st.kind === 'wire' ? airThresholds.tlTowerFt : airThresholds.obstacleFt;
+        // World bounds for the FIT view (expand to keep a dragged drone in
+        // frame); the user's wheel-zoom / pan view overrides when set.
+        const host = wrap.querySelector('[data-prof-svg]');
+        const W = Math.max(420, (host.clientWidth || 756) - 16);
+        const H = Math.max(230, (host.clientHeight || 386) - 6);
+        const pad = 36;
+        const yMinW = Math.min(gD, gO) - 30;
+        const yMaxW = Math.max(topY, ceilY, st.droneY) + 50;
+        const xMinW = Math.min(-90, st.droneX - 40);
+        const xMaxW = Math.max(xO + (st.kind === 'windmill' ? st.bladeFt : 30) + 80, st.droneX + 40);
+        const fitS = Math.min((W - 2 * pad) / (xMaxW - xMinW), (H - 2 * pad) / (yMaxW - yMinW));
+        const s = st._userView ? st._userView.s : fitS;
+        const cx = st._userView ? st._userView.cx : (xMinW + xMaxW) / 2;
+        const cy = st._userView ? st._userView.cy : (yMinW + yMaxW) / 2;
+        st._view = { cx, cy, s, fitS, W, H };
+        const X = (x) => (W / 2 + (x - cx) * s).toFixed(1);
+        const Y = (y) => (H / 2 - (y - cy) * s).toFixed(1);
+        const el = [];
+        // Collision-aware label layer: annotations queue here instead of
+        // being drawn inline; after all geometry is placed, labels lay out
+        // by priority (pr 1 = most important, keeps its spot) and anything
+        // overlapping an already-placed label nudges up/down until clear.
+        // Fixes the zoomed-out pile-up where every callout landed on the
+        // same few pixels.
+        const labels = [];
+        const addLbl = (x, y, text, o) => labels.push(Object.assign({ x: Number(x), y: Number(y), text, fill: '#9fb4c0', size: 10, anchor: 'start', weight: '', pr: 5 }, o));
+        const flushLabels = () => {
+            const placed = [];
+            const collide = (ax, ay, aw, ah, p) => ax < p.x + p.w && p.x < ax + aw && ay - ah < p.y && p.y - p.h < ay;
+            labels.sort((a, b) => a.pr - b.pr);
+            labels.forEach(L => {
+                const w2 = L.text.length * L.size * 0.58 + 4;
+                const bx = L.anchor === 'middle' ? L.x - w2 / 2 : L.anchor === 'end' ? L.x - w2 : L.x;
+                const offs = [0, -12, 12, -24, 24, -36, 36, -48, 48];
+                let dy = offs.find(o2 => !placed.some(p => collide(bx, L.y + o2, w2, L.size + 2, p)));
+                if (dy === undefined) dy = 0;
+                placed.push({ x: bx, y: L.y + dy, w: w2, h: L.size + 2 });
+                el.push(`<text x="${L.x}" y="${L.y + dy}" fill="${L.fill}" font-size="${L.size}"${L.weight ? ` font-weight="${L.weight}"` : ''}${L.anchor !== 'start' ? ` text-anchor="${L.anchor}"` : ''}>${L.text}</text>`);
+            });
+        };
+        // Ground (linear between the two known grounds) + earth fill,
+        // extended past the view edges so panning never runs off it.
+        const wL = cx - (W / 2 + 60) / s, wR = cx + (W / 2 + 60) / s;
+        const gAt = (x) => x <= 0 ? gD : x >= xO ? gO : gD + (gO - gD) * (x / xO);
+        const gp = [wL, 0, xO, wR].filter(x => x >= wL && x <= wR).sort((a, b) => a - b);
+        el.push(`<path d="${gp.map((x, i) => `${i ? 'L' : 'M'}${X(x)},${Y(gAt(x))}`).join(' ')} L${X(wR)},${H + 20} L${X(wL)},${H + 20} Z" fill="rgba(90,70,40,0.35)" stroke="#8a6d3b" stroke-width="1.5"/>`);
+        // Faint AGL gridlines (drone-side ground reference) + left labels.
+        const yTopW = cy + (H / 2) / s, yBotW = cy - (H / 2) / s;
+        const gStep = [10, 20, 50, 100, 200, 500, 1000, 2000].find(t => (yTopW - yBotW) / t <= 9) || 5000;
+        for (let aglv = Math.ceil((yBotW - gD) / gStep) * gStep; gD + aglv <= yTopW; aglv += gStep) {
+            const yv = gD + aglv;
+            el.push(`<line x1="0" y1="${Y(yv)}" x2="${W}" y2="${Y(yv)}" stroke="rgba(159,180,192,0.12)"/>`);
+            el.push(`<text x="4" y="${Number(Y(yv)) - 3}" fill="rgba(159,180,192,0.55)" font-size="9">${aglv} ft</text>`);
+        }
+        // Dimension callout helpers (thin line + end ticks + label).
+        const dimV = (x, y1, y2, label) => {
+            const px = Number(X(x)), pa = Number(Y(y1)), pb = Number(Y(y2));
+            addLbl(px + 6, (pa + pb) / 2 + 3, label, { pr: 6 });
+            return `<line x1="${px}" y1="${pa}" x2="${px}" y2="${pb}" stroke="rgba(159,180,192,0.7)" stroke-width="1"/>`
+                + `<line x1="${px - 4}" y1="${pa}" x2="${px + 4}" y2="${pa}" stroke="rgba(159,180,192,0.7)"/>`
+                + `<line x1="${px - 4}" y1="${pb}" x2="${px + 4}" y2="${pb}" stroke="rgba(159,180,192,0.7)"/>`;
+        };
+        const dimH = (y, x1, x2, label, labelX) => {
+            // labelX (world) shifts the label off-center — e.g. clear of a
+            // tower drawn right where the midpoint would put the text.
+            const py = Number(Y(y)), pa = Number(X(x1)), pb = Number(X(x2));
+            addLbl(labelX != null ? Number(X(labelX)) : (pa + pb) / 2, py - 5, label, { anchor: 'middle', pr: 6 });
+            return `<line x1="${pa}" y1="${py}" x2="${pb}" y2="${py}" stroke="rgba(159,180,192,0.7)" stroke-width="1"/>`
+                + `<line x1="${pa}" y1="${py - 4}" x2="${pa}" y2="${py + 4}" stroke="rgba(159,180,192,0.7)"/>`
+                + `<line x1="${pb}" y1="${py - 4}" x2="${pb}" y2="${py + 4}" stroke="rgba(159,180,192,0.7)"/>`;
+        };
+        // Flight band (the FFZ/FP interior is on the drone side).
+        el.push(`<rect x="${X(wL)}" y="${Y(ceilY)}" width="${((0 - wL) * s).toFixed(1)}" height="${Math.max(2, (ceilY - floorY) * s).toFixed(1)}" fill="rgba(95,255,95,0.13)" stroke="rgba(95,255,95,0.5)" stroke-dasharray="5,4" stroke-width="1"/>`);
+        addLbl(6, Number(Y(ceilY)) - 26, `${airEsc(st.srcName)} band ${Math.round(st.floorAglFt)}–${Math.round(st.ceilAglFt)} ft AGL`, { fill: '#5fff5f', pr: 3 });
+        // Standoff bubble (faint) — the CP threshold for this type.
+        if (st.kind === 'windmill') {
+            el.push(`<circle cx="${X(xO)}" cy="${Y(hubY)}" r="${((st.bladeFt + thr) * s).toFixed(1)}" fill="none" stroke="rgba(255,85,85,0.3)" stroke-dasharray="3,5"/>`);
+        } else if (st.kind === 'wire') {
+            el.push(`<circle cx="${X(xO)}" cy="${Y(gO + st.aglFt)}" r="${(thr * s).toFixed(1)}" fill="none" stroke="rgba(255,85,85,0.3)" stroke-dasharray="3,5"/>`);
+        } else {
+            el.push(`<rect x="${X(xO - thr)}" y="${Y(topY + thr)}" width="${(2 * thr * s).toFixed(1)}" height="${((st.aglFt + 2 * thr) * s).toFixed(1)}" rx="${(thr * s).toFixed(1)}" fill="none" stroke="rgba(255,85,85,0.3)" stroke-dasharray="3,5"/>`);
+        }
+        // Obstacle.
+        if (st.kind === 'windmill') {
+            // Wake cone (downwind = toward the flight area, worst case).
+            // Zone bands in rotor diameters: <2D severe / 2–5D strong /
+            // 5–10D moderate; envelope expands at k=0.075 per ft.
+            if (wake && !wake.idle && !wake.crosswind) {
+                const wr = (dx) => wake.D / 2 + AIR_WAKE_K * dx;
+                // Tower shadow — bluff-body wake off the mast itself,
+                // ground → hub, downwind. Weak but real; drawn UNDER the
+                // rotor-wake bands.
+                el.push(`<rect x="${X(xO - AIR_WAKE_TOWERSHADOW_FT)}" y="${Y(hubY)}" width="${(AIR_WAKE_TOWERSHADOW_FT * s).toFixed(1)}" height="${((hubY - gO) * s).toFixed(1)}" fill="rgba(150,165,195,0.08)"/>`);
+                el.push(dimH(gO + (hubY - gO) * 0.08, xO - AIR_WAKE_TOWERSHADOW_FT, xO, `tower shadow ~${AIR_WAKE_TOWERSHADOW_FT} ft`, xO - AIR_WAKE_TOWERSHADOW_FT * 0.5));
+                [[0, 2, 'rgba(255,85,85,0.10)'], [2, 5, 'rgba(255,176,32,0.08)'], [5, 10, 'rgba(255,255,120,0.05)']].forEach(([z0, z1, fill]) => {
+                    const x0 = xO - z0 * wake.D, x1 = xO - z1 * wake.D;
+                    const r0 = wr(z0 * wake.D), r1 = wr(z1 * wake.D);
+                    el.push(`<polygon points="${X(x0)},${Y(hubY + r0)} ${X(x1)},${Y(hubY + r1)} ${X(x1)},${Y(hubY - r1)} ${X(x0)},${Y(hubY - r0)}" fill="${fill}"/>`);
+                });
+                // Meander margin — the envelope edge is fuzzy (~±60 ft):
+                // faint bands OUTSIDE both edges out to 10D.
+                const mFar = 10 * wake.D;
+                const mPoly = (sign) => `<polygon points="${X(xO)},${Y(hubY + sign * wr(0))} ${X(xO - mFar)},${Y(hubY + sign * wr(mFar))} ${X(xO - mFar)},${Y(hubY + sign * (wr(mFar) + AIR_WAKE_MEANDER_FT))} ${X(xO)},${Y(hubY + sign * (wr(0) + AIR_WAKE_MEANDER_FT))}" fill="rgba(255,176,32,0.045)"/>`;
+                el.push(mPoly(1), mPoly(-1));
+                addLbl(Number(X(xO - 4 * wake.D)), Number(Y(hubY - wr(4 * wake.D) - AIR_WAKE_MEANDER_FT)) + 10, `meander ±${AIR_WAKE_MEANDER_FT} ft — edge is fuzzy`, { fill: 'rgba(255,176,32,0.6)', size: 9, anchor: 'middle', pr: 7 });
+                // Tip-vortex zone — strongest coherent turbulence trails at
+                // the disc RIM; hatched strip under the lower edge to 2D.
+                const tvFar = 2 * wake.D;
+                el.push(`<polygon points="${X(xO)},${Y(hubY - wr(0))} ${X(xO - tvFar)},${Y(hubY - wr(tvFar))} ${X(xO - tvFar)},${Y(hubY - wr(tvFar) - AIR_WAKE_TIPVORT_FT)} ${X(xO)},${Y(hubY - wr(0) - AIR_WAKE_TIPVORT_FT)}" fill="url(#aimProfHatch)"/>`);
+                addLbl(Number(X(xO - wake.D)), Number(Y(hubY - wr(wake.D) - AIR_WAKE_TIPVORT_FT)) + 11, 'tip-vortex zone', { fill: '#ffb020', size: 9, anchor: 'middle', pr: 6 });
+                [2, 5, 10].forEach(z => {
+                    const zx = xO - z * wake.D;
+                    addLbl(Number(X(zx)), Number(Y(hubY + wr(z * wake.D))) - 3, `${z}D`, { fill: 'rgba(255,176,32,0.7)', size: 9, anchor: 'middle', pr: 7 });
+                });
+            }
+            el.push(`<path d="M${X(xO - 6)},${Y(gO)} L${X(xO - 2)},${Y(hubY)} L${X(xO + 2)},${Y(hubY)} L${X(xO + 6)},${Y(gO)} Z" fill="#b8c4cc" stroke="#8fa0aa"/>`);
+            el.push(`<circle cx="${X(xO)}" cy="${Y(hubY)}" r="${Math.max(3, 6 * s).toFixed(1)}" fill="#dfe9f0"/>`);
+            [90, 210, 330].forEach(a => {
+                const rad = a * Math.PI / 180;
+                el.push(`<line x1="${X(xO)}" y1="${Y(hubY)}" x2="${X(xO + Math.cos(rad) * st.bladeFt)}" y2="${Y(hubY + Math.sin(rad) * st.bladeFt)}" stroke="#dfe9f0" stroke-width="2.5" stroke-linecap="round"/>`);
+            });
+            el.push(`<circle cx="${X(xO)}" cy="${Y(hubY)}" r="${(st.bladeFt * s).toFixed(1)}" fill="rgba(255,176,32,0.07)" stroke="rgba(255,176,32,0.65)" stroke-dasharray="6,4"/>`);
+            addLbl(Number(X(xO + st.bladeFt * 0.72)), Number(Y(hubY + st.bladeFt * 0.72)) - 4, 'swept disc', { fill: '#ffb020', pr: 7 });
+            // Dimension callouts: hub (left), tip (right), blade (along the
+            // up blade), rotor Ø (through the disc center).
+            el.push(dimV(xO - st.bladeFt - 28, gO, hubY, `hub ${Math.round(st.hubFt)} ft`));
+            el.push(dimV(xO + st.bladeFt + 30, gO, topY, `tip ${Math.round(st.hubFt + st.bladeFt)} ft`));
+            el.push(dimV(xO + 14, hubY, topY, `blade ${Math.round(st.bladeFt)} ft`));
+            // Disc BOTTOM — the lowest point the blades sweep down to; the
+            // number that matters when the band sits under the rotor.
+            // (No rotor-Ø dim on the drawing — floating near the band it
+            // read as a lateral distance; the header + blade dim cover it.)
+            const discBotY = hubY - st.bladeFt;
+            const cgX = (xO - st.bladeFt) * 0.55;   // clearance dim sits mid-air, left of the disc
+            el.push(`<line x1="${X(Math.min(cgX - 15, xO - st.bladeFt - 14))}" y1="${Y(discBotY)}" x2="${X(xO + st.bladeFt + 14)}" y2="${Y(discBotY)}" stroke="rgba(255,176,32,0.8)" stroke-width="1" stroke-dasharray="2,3"/>`);
+            addLbl(Number(X(xO - st.bladeFt * 0.55)), Number(Y(discBotY)) - 6, `disc bottom ${Math.round(st.hubFt - st.bladeFt)} ft AGL`, { fill: '#ffb020', anchor: 'middle', pr: 4 });
+            // ⭐ Band CEILING → disc bottom — the "can we fly under it"
+            // number, drawn BIG between the drone column and the disc.
+            const gapFt = Math.round(discBotY - ceilY);
+            const cgCol = gapFt < 0 ? '#ff5555' : gapFt < airThresholds.tlClearFt ? '#ffb020' : '#5fff5f';
+            const cgA = Number(Y(ceilY)), cgB = Number(Y(discBotY)), cgPx = Number(X(cgX));
+            el.push(`<line x1="${X(0)}" y1="${Y(ceilY)}" x2="${cgPx}" y2="${Y(ceilY)}" stroke="rgba(95,255,95,0.35)" stroke-dasharray="3,4"/>`);
+            el.push(`<line x1="${cgPx}" y1="${cgA}" x2="${cgPx}" y2="${cgB}" stroke="${cgCol}" stroke-width="2"/>`
+                + `<line x1="${cgPx - 6}" y1="${cgA}" x2="${cgPx + 6}" y2="${cgA}" stroke="${cgCol}" stroke-width="2"/>`
+                + `<line x1="${cgPx - 6}" y1="${cgB}" x2="${cgPx + 6}" y2="${cgB}" stroke="${cgCol}" stroke-width="2"/>`);
+            addLbl(cgPx + 9, (cgA + cgB) / 2 + 4, gapFt < 0 ? `ceiling ${Math.abs(gapFt)} ft INTO disc` : `ceiling → disc bottom ${gapFt} ft`, { fill: cgCol, size: 12, weight: '700', pr: 1 });
+        } else if (st.kind === 'mast') {
+            el.push(`<rect x="${X(xO - 4)}" y="${Y(topY)}" width="${Math.max(3, 8 * s).toFixed(1)}" height="${((topY - gO) * s).toFixed(1)}" fill="#c47b7b" stroke="#a05555"/>`);
+            el.push(dimV(xO + 20, gO, topY, `height ${Math.round(st.aglFt)} ft`));
+        } else {
+            const wy = gO + st.aglFt;
+            el.push(`<line x1="${X(xO)}" y1="${Y(gO)}" x2="${X(xO)}" y2="${Y(wy + 12)}" stroke="#9aa8b2" stroke-width="2"/>`);
+            el.push(`<line x1="${X(xO - 25)}" y1="${Y(wy + 8)}" x2="${X(xO + 25)}" y2="${Y(wy + 8)}" stroke="#9aa8b2" stroke-width="2"/>`);
+            el.push(`<circle cx="${X(xO)}" cy="${Y(wy)}" r="4" fill="#ffb020" stroke="#dfe9f0"/>`);
+            el.push(dimV(xO + 32, gO, wy, `conductor ~${Math.round(st.aglFt)} ft (assumed)`));
+        }
+        // Ghost drones at band min / max on the band edge (labels sit to
+        // the LEFT so they don't collide with the live drone / band text).
+        const drone = (x, y, opacity) => {
+            const px = Number(X(x)), py = Number(Y(y));
+            return `<g opacity="${opacity}">
+                <line x1="${px - 8}" y1="${py - 4}" x2="${px + 8}" y2="${py + 4}" stroke="#7adfe6" stroke-width="2.5"/>
+                <line x1="${px - 8}" y1="${py + 4}" x2="${px + 8}" y2="${py - 4}" stroke="#7adfe6" stroke-width="2.5"/>
+                <circle cx="${px - 8}" cy="${py - 4}" r="3.5" fill="none" stroke="#7adfe6" stroke-width="1.5"/>
+                <circle cx="${px + 8}" cy="${py - 4}" r="3.5" fill="none" stroke="#7adfe6" stroke-width="1.5"/>
+                <circle cx="${px - 8}" cy="${py + 4}" r="3.5" fill="none" stroke="#7adfe6" stroke-width="1.5"/>
+                <circle cx="${px + 8}" cy="${py + 4}" r="3.5" fill="none" stroke="#7adfe6" stroke-width="1.5"/>
+            </g>`;
+        };
+        el.push(drone(0, floorY, 0.4));
+        el.push(drone(0, ceilY, 0.4));
+        addLbl(Number(X(0)) - 14, Number(Y(floorY)) + 13, `min ${Math.round(st.floorAglFt)} ft`, { fill: '#7adfe6', anchor: 'end', pr: 4 });
+        addLbl(Number(X(0)) - 14, Number(Y(ceilY)) - 7, `max ${Math.round(st.ceilAglFt)} ft`, { fill: '#7adfe6', anchor: 'end', pr: 4 });
+        // Live (draggable) drone + approach lines. Windmills show BOTH
+        // distances — swept disc AND tower — since at band altitudes the
+        // drone is usually below the disc and the tower is what you'd hit.
+        const near = airProfClosest(st, st.droneX, st.droneY);
+        const bandBest = airProfBandClosest(st);
+        const col = near.d < 100 ? '#ff5555' : near.d < thr ? '#ffb020' : '#5fff5f';
+        const apLine = (tgt, color, w2, big) => {
+            const mx = (st.droneX + tgt.pt[0]) / 2, my = (st.droneY + tgt.pt[1]) / 2;
+            addLbl(Number(X(mx)), Number(Y(my)) - 6, `${Math.round(tgt.d).toLocaleString()} ft`, { fill: color, size: big ? 12 : 10, weight: big ? '700' : '', anchor: 'middle', pr: big ? 2 : 3 });
+            return `<line x1="${X(st.droneX)}" y1="${Y(st.droneY)}" x2="${X(tgt.pt[0])}" y2="${Y(tgt.pt[1])}" stroke="${color}" stroke-width="${w2}" stroke-dasharray="7,4"/>`;
+        };
+        if (st.kind === 'windmill' && near.disc && near.tower) {
+            const sec = near.disc.d <= near.tower.d ? near.tower : near.disc;
+            el.push(apLine(sec, 'rgba(159,180,192,0.6)', 1, false));
+            el.push(apLine(near.disc.d <= near.tower.d ? near.disc : near.tower, col, 1.5, true));
+        } else {
+            el.push(apLine(near, col, 1.5, true));
+        }
+        const outBand = st.droneY < floorY - 0.5 || st.droneY > ceilY + 0.5;
+        el.push(drone(st.droneX, st.droneY, 1));
+        addLbl(Number(X(st.droneX)) + 15, Number(Y(st.droneY)) + 16, `🛩 ${Math.round(st.droneY - gD)} ft AGL${outBand ? ' (OUTSIDE band)' : ''}`, { fill: outBand ? '#ff8080' : '#7adfe6', pr: 2 });
+        // Adaptive scale bar (uniform scale at any zoom).
+        const ref = [5, 10, 25, 50, 100, 250, 500, 1000, 2500].find(r2 => r2 * s >= 60) || 5000;
+        el.push(`<line x1="${pad}" y1="${H - 10}" x2="${pad + ref * s}" y2="${H - 10}" stroke="#9fb4c0" stroke-width="2"/>`);
+        el.push(`<text x="${pad + ref * s + 5}" y="${H - 7}" fill="#9fb4c0" font-size="10">${ref} ft (uniform scale)</text>`);
+        flushLabels();
+        wrap.querySelector('[data-prof-svg]').innerHTML =
+            `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="display:block;background:rgba(20,28,40,0.6);border-radius:6px;">`
+            + '<defs><pattern id="aimProfHatch" width="8" height="8" patternTransform="rotate(45)" patternUnits="userSpaceOnUse"><line x1="0" y1="0" x2="0" y2="8" stroke="rgba(255,176,32,0.4)" stroke-width="1.5"/></pattern></defs>'
+            + `${el.join('')}</svg>`;
+        const bandCol = bandBest < 100 ? '#ff5555' : bandBest < thr ? '#ffb020' : '#5fff5f';
+        const wmReads = (st.kind === 'windmill' && near.disc && near.tower) ? (() => {
+            const discBotAgl = Math.round(st.hubFt - st.bladeFt);
+            const dUnder = Math.round((st.obsGndFt + st.hubFt - st.bladeFt) - st.droneY);
+            const cgap = Math.round((st.obsGndFt + st.hubFt - st.bladeFt) - (st.droneGndFt + st.ceilAglFt));
+            const cgapCol = cgap < 0 ? '#ff5555' : cgap < airThresholds.tlClearFt ? '#ffb020' : '#5fff5f';
+            let wakeSpan = '';
+            if (wake) {
+                if (wake.idle) wakeSpan = `<span>💨 Wake: turbine likely idle at ${Math.round(wake.V)} mph (cut-in ~7 mph) — minimal wake</span>`;
+                else if (wake.crosswind) wakeSpan = '<span>💨 Wake: crosswind — wake blows past the flight area, not into it</span>';
+                else if (wake.upwind) wakeSpan = '<span>💨 Wake: drone is UPWIND of the rotor here — clear of wake</span>';
+                else {
+                    // Verdict ladder, most severe condition wins. Outside
+                    // the mean cone is NOT automatically clear: tip
+                    // vortices, meander, and tower shadow all live there.
+                    const g2 = Math.round(wake.gustMph), rat = Math.round(st.droneRatingMph || 0);
+                    let vd;
+                    if (wake.inCone) {
+                        vd = g2 > rat ? ['OVER DRONE RATING', '#ff5555']
+                            : g2 > rat * 0.85 ? ['MARGINAL', '#ffb020'] : ['within rating', '#5fff5f'];
+                        if (wake.xD < 1.5) vd = [`${vd[0]} — near-wake, estimates saturate here`, vd[1] === '#5fff5f' ? '#ffb020' : vd[1]];
+                    } else if (wake.inTipZone) {
+                        vd = ['UNDER TIP-VORTEX ZONE — treat as turbulent', '#ffb020'];
+                    } else if (wake.nearEdge) {
+                        vd = [`within ${AIR_WAKE_MEANDER_FT} ft of envelope edge (meander) — treat as inside`, '#ffb020'];
+                    } else if (wake.inTowerShadow) {
+                        vd = [`clear of rotor wake · in TOWER SHADOW, ${Math.round(st.distFt - st.droneX).toLocaleString()} ft of its ~${AIR_WAKE_TOWERSHADOW_FT} ft reach (light–moderate chop)`, '#ffb020'];
+                    } else {
+                        vd = ['clear — outside wake, vortex, and shadow zones', '#5fff5f'];
+                    }
+                    wakeSpan = `<span>💨 Wake @ ${wake.xD.toFixed(1)}D (${wake.zone}): ${wake.inCone ? '' : wake.below ? 'drone below envelope · ' : 'drone above envelope · '}TI +${Math.round(wake.addTI * 100)}% → ~${Math.round(wake.totalTI * 100)}% · est gusts ~${g2} mph vs ${rat} mph — <strong style="color:${vd[1]}">${vd[0]}</strong></span>`;
+                }
+            }
+            return `<span>→ swept disc: <strong style="color:${near.disc.d <= near.tower.d ? col : '#dfe9f0'}">${Math.round(near.disc.d).toLocaleString()} ft</strong></span>
+                <span>→ tower: <strong style="color:${near.tower.d < near.disc.d ? col : '#dfe9f0'}">${Math.round(near.tower.d).toLocaleString()} ft</strong></span>
+                <span>Ceiling → disc bottom: <strong style="color:${cgapCol}">${cgap < 0 ? `${Math.abs(cgap).toLocaleString()} ft INTO disc` : `${cgap.toLocaleString()} ft`}</strong></span>
+                <span>Disc bottom: <strong>${discBotAgl} ft AGL</strong> (${dUnder >= 0 ? `${dUnder.toLocaleString()} ft above drone` : `${Math.abs(dUnder).toLocaleString()} ft BELOW drone`})</span>
+                ${wakeSpan}`;
+        })() : `<span>Drone→obstacle: <strong style="color:${col}">${Math.round(near.d).toLocaleString()} ft</strong></span>`;
+        wrap.querySelector('[data-prof-read]').innerHTML = `
+            ${wmReads}
+            <span>Closest possible in band: <strong style="color:${bandCol}">${Math.round(bandBest).toLocaleString()} ft</strong></span>
+            <span>Lateral: <strong>${Math.round(st.distFt - st.droneX).toLocaleString()} ft</strong></span>
+            <span>Standoff: <strong>${thr.toLocaleString()} ft</strong> (red ring)</span>
+            <span>Ground Δ: <strong>${gO - gD >= 0 ? '+' : ''}${Math.round(gO - gD)} ft</strong> at obstacle</span>`;
+        wrap.querySelector('[data-prof-note]').textContent =
+            `Drag drone = move it · drag empty space = pan · wheel = zoom · drag window corner = resize. `
+            + `${st.demDrone === 'ok' ? 'Drone-side ground from DEM' : st.demDrone === 'pending' ? 'Fetching drone-side ground elevation…' : 'Grounds assumed level'}`
+            + `${st.kind !== 'wire' ? ' · obstacle ground from FAA AMSL−AGL' : ''}`
+            + `${st.estSpecs ? ' · ⚠ hub/blade ESTIMATED from FAA height (no USWTDB match) — edit to actuals' : ''}`
+            + `${st.kind === 'windmill' && st.wakeOn ? ' · Wake = Jensen + Crespo-Hernández screening estimate (ignores terrain, stability, neighboring turbines) — planning aid, NOT a clearance' : ''}`
+            + ' · DOF coordinates are accurate to tens of ft.';
     }
 
     function findEntityAtLatLng(lat, lng, siteID) {
@@ -3531,11 +4481,12 @@
         const out = [];
         out.push({ label: 'Name', value: e.name });
         out.push({ label: 'ID', value: e.id });
-        // v4.164.2: universal GPS row for every entity, click to copy "lat, lng"
+        // v4.88: universal GPS row for every entity, click to copy "lat, lng"
         // (paste straight into Google Maps). Replaces the old per-type "Coords"
-        // rows below. Prefer the EXACT right-click point (gpsPoint) so M2 gives
-        // the spot you clicked; fall back to the centroid for programmatic opens
-        // (SUM row-click), labeled "GPS (center)" so the difference is clear.
+        // rows below. v4.172: prefer the EXACT right-click point (gpsPoint) so
+        // M2 gives the spot you clicked; fall back to the centroid for
+        // programmatic opens (SUM row-click). Labeled "GPS (center)" then so
+        // it's clear the value isn't a specific clicked point.
         {
             const exact = gpsPoint && typeof gpsPoint.lat === 'number' ? gpsPoint : null;
             const c = exact || getEntityCentroid(e);
@@ -3662,7 +4613,7 @@
     }
 
     // ============================================================
-    // GPS coordinate helpers (v4.164.2)
+    // GPS coordinate helpers (v4.88)
     // Copy a point's lat/lng (pasteable straight into Google Maps'
     // search box) or a ready-made Google Maps URL. Representative point
     // for an entity = its centroid (getEntityCentroid): the single coord
@@ -3678,11 +4629,11 @@
     function openInGoogleMaps(lat, lng) {
         const url = googleMapsUrl(lat, lng);
         // The Percepto map IFRAME silently swallows window.open — it returns
-        // null WITHOUT throwing, so a try/return "succeeds" but no tab opens.
-        // GM_openInTab opens at the browser level and bypasses the iframe
-        // sandbox — prefer it. Then fall back to top-window / current-window
-        // open, checking the RETURN value (null = blocked). Last resort: copy
-        // the link + tell the user.
+        // null WITHOUT throwing, so a try/return "succeeds" but no tab opens
+        // (this is why the button looked dead). GM_openInTab opens at the
+        // browser level and bypasses the iframe sandbox — prefer it. Then fall
+        // back to top-window / current-window open, checking the RETURN value
+        // (null = blocked). Last resort: copy the link + tell the user.
         try {
             if (typeof GM_openInTab === 'function') {
                 GM_openInTab(url, { active: true, insert: true, setParent: true });
@@ -3890,25 +4841,59 @@
         const footer = document.createElement('div');
         footer.style.cssText = 'display:flex;gap:6px;padding:7px 12px;border-top:1px solid rgba(255,255,255,0.08);margin-top:2px';
 
+        // v4.211: context-aware Find — the Map Entities sidebar doesn't
+        // exist on the Mission Bank route; search the missions list for a
+        // mission named after this asset instead (feature #211). Site
+        // Setup keeps the original button unchanged.
+        const inMissionBank = isMissionBankRoute();
         const findBtn = document.createElement('button');
-        findBtn.textContent = '🔍 Find in Map Entities';
+        findBtn.textContent = inMissionBank ? '🔍 Find in Missions' : '🔍 Find in Map Entities';
         findBtn.style.cssText = 'flex:1;background:rgba(20,210,220,0.18);color:#7adfe6;border:1px solid rgba(20,210,220,0.45);border-radius:3px;padding:5px 8px;cursor:pointer;font:inherit;font-size:11px';
         findBtn.onclick = (ev) => {
             ev.stopPropagation();
-            findEntityInSidebar(entity);
+            if (inMissionBank) findEntityInMissions(entity);
+            else findEntityInSidebar(entity);
             closeInspector();
         };
         footer.appendChild(findBtn);
 
-        // v4.164.2: 🗺 Maps — opens the GPS point in Google Maps. Uses the exact
-        // right-click point when available, else the entity centroid. Copy-the-
-        // coords is the GPS row above; this is the one-click open.
+        // v4.211: 🎯 Focus — pan + zoom so the whole entity fills the frame
+        // (feature #210). Popup stays open so the details stay readable.
+        const focusBtn = document.createElement('button');
+        focusBtn.textContent = '🎯 Focus';
+        focusBtn.title = 'Pan + zoom the map to fit this entity in frame';
+        focusBtn.style.cssText = 'flex:0 0 auto;background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 8px;cursor:pointer;font:inherit;font-size:11px';
+        focusBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            focusOnEntity(entity);
+        };
+        footer.appendChild(focusBtn);
+
+        // v4.212: 👁 mission preview (feature #212) — asks Mission Bank
+        // Tools over AIM_MB_PREVIEW to overlay the mission named after
+        // this asset. Icon-only to keep the footer compact. v4.213: also
+        // on the Mission Bank route (see a mission without opening it).
+        if (isSiteSetupRoute() || isMissionBankRoute()) {
+            const prevBtn = document.createElement('button');
+            prevBtn.textContent = '👁';
+            prevBtn.title = 'Preview this asset\'s mission on the map (via Mission Bank Tools)';
+            prevBtn.style.cssText = 'flex:0 0 auto;background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 8px;cursor:pointer;font:inherit;font-size:12px';
+            prevBtn.onclick = (ev) => {
+                ev.stopPropagation();
+                requestMissionPreview(entity);
+            };
+            footer.appendChild(prevBtn);
+        }
+
+        // v4.88: 🗺 Maps — opens the GPS point in Google Maps. v4.172: uses the
+        // exact right-click point when available, else the entity centroid.
+        // Copy-the-coords is the GPS row above; this is the one-click open.
         const mapsCenter = (clickLatLng && typeof clickLatLng.lat === 'number')
             ? clickLatLng : getEntityCentroid(entity);
         if (mapsCenter) {
             const mapsBtn = document.createElement('button');
             mapsBtn.textContent = '🗺 Maps';
-            mapsBtn.title = 'Open this location in Google Maps (new tab)';
+            mapsBtn.title = 'Open this entity\'s GPS location in Google Maps (new tab)';
             mapsBtn.style.cssText = 'flex:0 0 auto;background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 8px;cursor:pointer;font:inherit;font-size:11px';
             mapsBtn.onclick = (ev) => {
                 ev.stopPropagation();
@@ -4087,6 +5072,121 @@
         } catch (e) {
             console.warn(`${TAG} sidebar paste failed, falling back to clipboard:`, e);
             copyToClipboard(name, `Copied "${name}" — paste in Map Entities sidebar`);
+        }
+    }
+
+    // ============================================================
+    // v4.211: "Find in Missions" — Mission Bank twin of the sidebar
+    // search above (feature #211). No Map Entities sidebar exists on
+    // that route, but pads usually have a same-named mission: rank-match
+    // the asset name against the native missions list rows and click the
+    // matched row's edit link to open the mission. The rank ladder
+    // (exact → section-prefixed "NNE - <pad>" suffix → contains) mirrors
+    // MBT's pcmFindMissionCandidates so the two features agree on which
+    // mission a pad name means.
+    // ============================================================
+    const MISSION_ROW_SELECTOR = 'li.missions-list__item';
+    const MISSION_LINK_SELECTOR = 'a[data-testid="edit-mission-link"]';
+
+    function collectMissionRows() {
+        // The missions list may live in our own document, the top document,
+        // or a sibling iframe — same frame-walk as findEntityInSidebar.
+        const docs = [document];
+        try {
+            if (window.top.document !== document) docs.push(window.top.document);
+            const frames = Array.from(window.top.document.querySelectorAll('iframe'));
+            for (const f of frames) {
+                try { if (f.contentDocument && f.contentDocument !== document) docs.push(f.contentDocument); }
+                catch (e) { /* cross-origin frame */ }
+            }
+        } catch (e) { /* cross-origin top */ }
+        const rows = [];
+        for (const doc of docs) {
+            for (const row of doc.querySelectorAll(MISSION_ROW_SELECTOR)) {
+                const link = row.querySelector(MISSION_LINK_SELECTOR) || row.querySelector('a[href]');
+                if (!link) continue;
+                const name = (link.textContent || '').trim();
+                if (name) rows.push({ row, link, name, doc });
+            }
+        }
+        return rows;
+    }
+
+    function findEntityInMissions(entity) {
+        const name = entity && entity.name;
+        if (!name) {
+            showToast('No name on entity to search', 'rgba(255,180,0,0.55)');
+            return;
+        }
+        const rows = collectMissionRows();
+        if (!rows.length) {
+            // Legacy-Angular bank sites have no .missions-list at all
+            // (see MBT v1.98) — same symptom as "list not rendered yet".
+            showToast('Missions list not found — is the Mission Bank list visible?', 'rgba(255,96,96,0.55)');
+            console.warn(`${TAG} no "${MISSION_ROW_SELECTOR}" rows found in any frame`);
+            return;
+        }
+        const want = name.trim().toLowerCase();
+        const norm = r => r.name.toLowerCase();
+        let matches = rows.filter(r => norm(r) === want);
+        if (!matches.length) matches = rows.filter(r => norm(r).endsWith('- ' + want) || norm(r).endsWith('– ' + want));
+        if (!matches.length) matches = rows.filter(r => norm(r).indexOf(want) >= 0);
+        if (!matches.length) {
+            showToast(`No mission matching "${name}" in the list`, 'rgba(255,180,0,0.55)');
+            return;
+        }
+        const hit = matches[0];
+        try { hit.row.scrollIntoView({ block: 'center' }); } catch (e) {}
+        try {
+            clickElDispatch(hit.link, hit.doc);
+            showToast(matches.length > 1
+                ? `${matches.length} missions match — opened "${hit.name}"`
+                : `Opened mission "${hit.name}"`);
+        } catch (e) {
+            console.warn(`${TAG} mission open click failed:`, e);
+            copyToClipboard(name, `Copied "${name}" — find it in the missions list`);
+        }
+    }
+
+    // ============================================================
+    // v4.212: 👁 mission preview request (feature #212) — Site Setup
+    // side of the SS↔MB bridge. Mission Bank Tools owns the mission
+    // data + overlay rendering; we just send the asset name over the
+    // AIM_MB_PREVIEW BroadcastChannel and MBT toggles the name-matched
+    // mission's overlay (it toasts the outcome itself). The ACK timeout
+    // is the only feedback we own: no ACK = MBT missing/disabled at the
+    // Tampermonkey level, which MBT obviously can't report.
+    // ============================================================
+    const MB_PREVIEW_CHANNEL_NAME = 'AIM_MB_PREVIEW';
+    let mbPreviewChannel = null;
+    let mbPreviewAckTimer = null;
+
+    function requestMissionPreview(entity) {
+        const name = entity && entity.name;
+        if (!name) {
+            showToast('No name on entity to match a mission', 'rgba(255,180,0,0.55)');
+            return;
+        }
+        try {
+            if (!mbPreviewChannel) {
+                mbPreviewChannel = new BroadcastChannel(MB_PREVIEW_CHANNEL_NAME);
+                mbPreviewChannel.onmessage = (ev) => {
+                    const msg = ev.data || {};
+                    if (msg.type === 'PREVIEW_ACK' && mbPreviewAckTimer) {
+                        clearTimeout(mbPreviewAckTimer);
+                        mbPreviewAckTimer = null;
+                    }
+                };
+            }
+            mbPreviewChannel.postMessage({ type: 'PREVIEW_ASSET', name: String(name) });
+            if (mbPreviewAckTimer) clearTimeout(mbPreviewAckTimer);
+            mbPreviewAckTimer = setTimeout(() => {
+                mbPreviewAckTimer = null;
+                showToast('No response — is Mission Bank Tools installed & enabled?', 'rgba(255,180,0,0.55)');
+            }, 1500);
+        } catch (e) {
+            console.warn(`${TAG} mission preview request failed:`, e);
+            showToast('Mission preview unavailable (BroadcastChannel failed)', 'rgba(255,96,96,0.55)');
         }
     }
 
@@ -4323,6 +5423,111 @@
     }
 
     // ============================================================
+    // v4.175: subtype-level asset visibility (👁 Subtypes)
+    //
+    // Batch-drives the sidebar checkboxes to show/hide MAP assets by
+    // subtype. Two plans, cheapest wins (computed by the popover):
+    //   delta      — click only the assets whose state must change
+    //   sectionOff — one click hides the whole Assets section, then
+    //                re-check just the assets that should stay visible
+    //                (state-independent baseline; wins when hiding most)
+    // Same sidebar-driving rails as solo/unsolo — Percepto stays the
+    // source of truth, so the map, sidebar and our eye column agree.
+    // ============================================================
+
+    let assetVisBatchBusy = false;
+
+    // Force the Assets SECTION checkbox to on/off. Handles the
+    // virtualized sidebar (collapse visible sections until the Assets
+    // header is in DOM) and Ant's indeterminate state (indeterminate →
+    // click lands on ALL-ON, so "off" may need two clicks).
+    async function setAssetSectionChecked(doc, on) {
+        for (let pass = 0; pass < 6; pass++) {
+            scrollSidebarToTop(doc);
+            await sleep(40);
+            const sections = getSidebarSections(doc);
+            const sec = sections.find(s => /asset/i.test(s.title));
+            if (sec && sec.checkbox) {
+                const wrap = sec.checkbox.closest('.ant-checkbox');
+                const indet = !!(wrap && wrap.classList.contains('ant-checkbox-indeterminate'));
+                if (on) {
+                    if (indet || !sec.checkbox.checked) { try { sec.checkbox.click(); } catch (e) {} await sleep(120); }
+                } else {
+                    if (indet) { try { sec.checkbox.click(); } catch (e) {} await sleep(150); } // indeterminate → all on
+                    if (sec.checkbox.checked) { try { sec.checkbox.click(); } catch (e) {} await sleep(120); }
+                }
+                return true;
+            }
+            // Assets header not in the virtualized DOM — collapse what IS
+            // visible so the remaining sections scroll into view.
+            let didWork = false;
+            for (const s of sections) {
+                if (s.toggleBtn && s.toggleBtn.getAttribute('aria-label') === 'Collapse') {
+                    try { s.toggleBtn.click(); didWork = true; } catch (e) {}
+                    await sleep(25);
+                }
+            }
+            if (!didWork) break;
+            await sleep(120);
+        }
+        return false;
+    }
+
+    // plan = { sectionOff: bool, check: [entities], uncheck: [entities],
+    //          allAssetIds: [ids] (required when sectionOff) }
+    async function applyAssetVisibilityPlan(plan, onProgress) {
+        if (assetVisBatchBusy) { showToast('A visibility batch is already running — wait for it to finish', 'rgba(255,180,0,0.55)'); return; }
+        assetVisBatchBusy = true;
+        try {
+            const doc = getSidebarDoc();
+            if (!doc) { showToast('Sidebar not found — open the entity panel?', 'rgba(255,96,96,0.55)'); return; }
+            if (plan.sectionOff) {
+                pasteSidebarSearch(doc, '');
+                await sleep(150);
+                const ok = await setAssetSectionChecked(doc, false);
+                if (!ok) { showToast('Assets section not found in sidebar — is the entity panel open?', 'rgba(255,96,96,0.55)'); return; }
+                (plan.allAssetIds || []).forEach(id => setEntityVisible(id, false));
+            }
+            const steps = [
+                ...(plan.uncheck || []).map(en => ({ en, want: false })),
+                ...(plan.check || []).map(en => ({ en, want: true })),
+            ];
+            // Duplicate asset names break the search+first-match click (the
+            // second twin is unreachable) — do what we can, but say so.
+            const nameCounts = {};
+            steps.forEach(s => { const k = (s.en.name || '').trim().toLowerCase(); nameCounts[k] = (nameCounts[k] || 0) + 1; });
+            const dupNames = Object.keys(nameCounts).filter(k => nameCounts[k] > 1);
+            if (dupNames.length) console.warn(`${TAG} subtype visibility: duplicate asset names — only the first sidebar match is clickable:`, dupNames);
+            let done = 0;
+            const missed = [];
+            for (const s of steps) {
+                pasteSidebarSearch(doc, s.en.name);
+                await sleep(200);
+                const item = findSidebarItemByName(doc, s.en.name);
+                const cb = getEntityCheckboxFromItem(item);
+                if (!cb) { missed.push(s.en.name); continue; }
+                if (cb.checked !== s.want) {
+                    try { cb.click(); } catch (e) { missed.push(s.en.name); continue; }
+                    await sleep(60);
+                }
+                setEntityVisible(s.en.id, s.want);
+                done++;
+                if (onProgress) { try { onProgress(done, steps.length); } catch (e) {} }
+            }
+            pasteSidebarSearch(doc, '');
+            if (missed.length) {
+                console.warn(`${TAG} subtype visibility: ${missed.length} asset(s) not found in sidebar:`, missed);
+                showToast(`Visibility updated — ${missed.length} not found in sidebar (see console)`, 'rgba(255,180,0,0.55)');
+            } else {
+                showToast(`Map asset visibility updated (${done + (plan.sectionOff ? 1 : 0)} change${done === 1 && !plan.sectionOff ? '' : 's'})`);
+            }
+            if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+        } finally {
+            assetVisBatchBusy = false;
+        }
+    }
+
+    // ============================================================
     // Right-click handler — capture phase on window, gated to map area
     // ============================================================
     function installRightClickHandler() {
@@ -4347,16 +5552,16 @@
             // Without this guard, dropping an altitude pin near an entity
             // would pop the inspector unexpectedly.
             if (!e.isTrusted) return;
-            // v4.164.4 (backport of v4.168/v4.169): Mission Bank Tools' Click-to-Add
-            // mode owns empty-space right-clicks (M2 = drop a Nav) while editing a
-            // mission. When armed it sets data-aim-clickadd="1" on <html>; bail so
-            // MBT's handler wins instead of popping the inspector over the asset the
-            // click landed inside. Synchronous DOM flag = order-independent (MBT's
-            // map-container handler is deeper than this window one).
+            // v4.168: Mission Bank Tools' Click-to-Add mode owns empty-space
+            // right-clicks (M2 = drop a Nav) while editing a mission. When it's
+            // armed it sets data-aim-clickadd="1" on <html>; bail so MBT's handler
+            // wins instead of popping the inspector over the asset the click landed
+            // inside. Synchronous DOM flag = order-independent (MBT's map-container
+            // handler is deeper than this window one, so it can't otherwise win).
             try {
                 if (document.documentElement.getAttribute('data-aim-clickadd') === '1') { dbg('bail: MBT click-add mode'); return; }
-                // v4.164.7 (backport of v4.199): MBT's 🔗 pad-click merge mode owns
-                // M2 the same way — same synchronous-DOM-flag protocol as above.
+                // v4.199: MBT's 🔗 pad-click merge mode owns M2 the same way —
+                // same synchronous-DOM-flag protocol as click-add above.
                 if (document.documentElement.getAttribute('data-aim-merge') === '1') { dbg('bail: MBT pad-merge mode'); return; }
                 // Belt-and-suspenders for the hold-Ctrl add path: Ctrl held while a
                 // mission editor is open = a Click-to-Add gesture, regardless of the
@@ -4483,7 +5688,7 @@
             }
             if (!entity) entity = findEntityAtLatLng(latlng.lat, latlng.lng, siteID);
             if (!entity) {
-                // v4.164.2: empty map → GPS / Google Maps menu (copy coords,
+                // v4.88: empty map → GPS / Google Maps menu (copy coords,
                 // copy Maps link, open in Maps). Only when enabled; otherwise
                 // fall through to the native context menu as before.
                 if (emptyMapMenuEnabled) {
@@ -4503,13 +5708,1824 @@
             e.preventDefault();
             e.stopPropagation();
             try {
-                // v4.164.2: pass the EXACT click point so the popup's GPS row +
+                // v4.172: pass the EXACT click point so the popup's GPS row +
                 // 🗺 Maps use where the user right-clicked, not the centroid.
                 showInspectorPopup(e.clientX, e.clientY, entity, { lat: latlng.lat, lng: latlng.lng });
             } catch (err) {
                 dbg('showInspectorPopup threw', err);
             }
         }, true);
+    }
+
+    // ============================================================
+    // AGL on the native hover ALT tooltip (ported from AIM Map Editor v0.50).
+    // Percepto shows "ALT(ft) 2799 - 2828" (MSL) when you hover an FFZ/FP
+    // line — its OWN tooltip, not ours, so we match it by CONTENT (regex on
+    // text), not selector, and prepend "X – Y ft AGL" using the DEM ground at
+    // the cursor. MSL (mountain-terrain) sites only — AGL sites already
+    // display AGL. Best-effort + fully guarded: a miss does nothing; a cold
+    // DEM spot warms the cache un-marked so the next hover succeeds.
+    // ============================================================
+    const AGL_TIP_RE = /ALT\s*\(ft\)\s*([\d,]+)\s*[-–]\s*([\d,]+)/i;
+    const AGL_TIP_NEAREST_M = 30; // accept the nearest cached DEM point within this many metres
+    const AGL_TIP_MAX_RETRY = 3;  // deferred-fetch retries per tooltip appearance (guards a dead DEM endpoint looping)
+    let aglTipLastLL = null;      // cursor position in map lat/lng (tooltips carry no coords)
+    let aglTipWatcherActive = false;
+    let aglTipWarned = false;
+    function aglTipWarnOnce(e) {
+        if (aglTipWarned) return;
+        aglTipWarned = true;
+        console.warn(`${TAG} AGL hover tooltip augment failed (further errors muted):`, e);
+    }
+    function refreshAglHoverTip(el, depth) {
+        try {
+            if (!aglHoverTipEnabled || !el || el.nodeType !== 1 || !el.isConnected) return;
+            // Percepto REUSES one tooltip element (show/hide + text swap per
+            // entity), so first route to the already-augmented wrapper if this
+            // node sits inside/above one. Same values → done; changed values →
+            // strip the stale AGL line and rebuild below.
+            let host = null;
+            if (el.hasAttribute && el.hasAttribute('data-aim-agl')) host = el;
+            if (!host && el.closest) host = el.closest('[data-aim-agl]');
+            if (!host && el.querySelector) host = el.querySelector('[data-aim-agl]');
+            if (host) {
+                const cur = ((host.textContent || '').match(AGL_TIP_RE) || [])[0] || '';
+                if (cur === host.getAttribute('data-aim-agl')) return; // already augmented for these values
+                host.querySelectorAll('[data-aim-agl-line]').forEach(d => d.remove());
+                host.removeAttribute('data-aim-agl');
+                el = host;
+            }
+            const txt = el.textContent || '';
+            if (txt.length > 100 || txt.indexOf('ALT') < 0) return;
+            const m = txt.match(AGL_TIP_RE);
+            if (!m) return;
+            const sid = getCurrentSiteID();
+            if (!sid) return;
+            const retry = (depth || 0) < AGL_TIP_MAX_RETRY ? (() => refreshAglHoverTip(el, (depth || 0) + 1)) : (() => {});
+            const am = siteAltModeCache[sid];
+            // Cold caches: warm them, then re-augment this SAME element when the
+            // fetch lands (the tooltip is usually still open; and since Percepto
+            // reuses the element, waiting for the next addedNodes never fires).
+            if (!am) { siteAltMode(sid).then(retry).catch(aglTipWarnOnce); return; }
+            if (am.mode !== 'msl') return; // AGL sites already display AGL
+            if (!aglTipLastLL) return;
+            let g = getElevationFromCache(aglTipLastLL.lat, aglTipLastLL.lng);
+            if (g == null) g = elevNearest(aglTipLastLL.lat, aglTipLastLL.lng, AGL_TIP_NEAREST_M);
+            if (g == null) { fetchElevation(aglTipLastLL.lat, aglTipLastLL.lng).then(retry).catch(aglTipWarnOnce); return; }
+            el.setAttribute('data-aim-agl', m[0]); // record the MSL text we augmented, to detect reuse with new values
+            // v4.198: also record WHERE this line was computed, so cursor
+            // movement along the same entity (same MSL text) can invalidate it
+            el.setAttribute('data-aim-agl-ll', `${aglTipLastLL.lat.toFixed(6)},${aglTipLastLL.lng.toFixed(6)}`);
+            const gFt = g * 3.28084;
+            const lo = Math.round(parseFloat(m[1].replace(/,/g, '')) - gFt);
+            const hi = Math.round(parseFloat(m[2].replace(/,/g, '')) - gFt);
+            // AGL on TOP and bigger (what the user cares about); Percepto's MSL line stays below.
+            const add = document.createElement('div');
+            add.setAttribute('data-aim-agl-line', '1');
+            add.style.cssText = 'color:#7fd1ff;font-size:15px;font-weight:700;margin-bottom:3px';
+            add.innerHTML = `${lo} – ${hi} ft AGL <span style="font-size:10px;color:#9ad;font-weight:400">· ground at cursor</span>`;
+            el.insertBefore(add, el.firstChild);
+        } catch (e) { aglTipWarnOnce(e); }
+    }
+    // v4.198 — LIVE BUG FIX (site 1631): Percepto reuses ONE tooltip element
+    // and the MSL text is constant across a whole FFZ/FP, so the mutation
+    // watchers never re-fire while the cursor slides along one entity — the
+    // FIRST hover's ground froze into the AGL line (a constant "108 ft AGL"
+    // along a border whose centroid-referenced SUM AGL is 100). Recompute on
+    // cursor movement: once the cursor is ≥ ~3 m from where the line was
+    // computed, strip + rebuild against the ground under the new position.
+    let aglTipMoveAt = 0;
+    function aglTipCursorRefresh() {
+        if (!aglHoverTipEnabled || !aglTipLastLL) return;
+        const now = Date.now();
+        if (now - aglTipMoveAt < 120) return;   // throttle — cache lookups are cheap but not free
+        aglTipMoveAt = now;
+        try {
+            const host = document.querySelector('[data-aim-agl]');
+            if (!host || !host.isConnected || host.offsetParent === null) return;   // no visible augmented tooltip
+            const prev = (host.getAttribute('data-aim-agl-ll') || '').split(',');
+            if (prev.length === 2) {
+                const dLat = (aglTipLastLL.lat - parseFloat(prev[0])) * 111320;
+                const dLng = (aglTipLastLL.lng - parseFloat(prev[1])) * 111320 * Math.cos(aglTipLastLL.lat * Math.PI / 180);
+                if (Math.hypot(dLat, dLng) < 3) return;   // hasn't meaningfully moved
+            }
+            host.querySelectorAll('[data-aim-agl-line]').forEach(d => d.remove());
+            host.removeAttribute('data-aim-agl');
+            host.removeAttribute('data-aim-agl-ll');
+            refreshAglHoverTip(host);
+        } catch (e) { aglTipWarnOnce(e); }
+    }
+
+    // Pre-fetch the site's MSL/AGL mode so the very first hover can augment
+    // (one small GET, cached per site).
+    function warmAglTipMode() {
+        try {
+            const sid = getCurrentSiteID();
+            if (sid && !siteAltModeCache[sid]) siteAltMode(sid).catch(aglTipWarnOnce);
+        } catch (e) { aglTipWarnOnce(e); }
+    }
+    function watchAglHoverTips() {
+        try {
+            warmAglTipMode();
+            window.addEventListener('hashchange', warmAglTipMode);
+            document.addEventListener('mousemove', (e) => {
+                try {
+                    const mp = getLeafletMap();
+                    if (mp && mp.mouseEventToLatLng) aglTipLastLL = mp.mouseEventToLatLng(e);
+                    aglTipCursorRefresh();   // v4.198 — un-freeze the AGL line as the cursor moves along one entity
+                } catch (er) { aglTipWarnOnce(er); }
+            }, true);
+            // Observe the whole document: the tooltip may portal OUTSIDE the map
+            // container, and characterData catches the reused-element text swaps
+            // that childList alone misses.
+            const obs = new MutationObserver(muts => {
+                if (!aglHoverTipEnabled) return;
+                for (const mu of muts) {
+                    if (mu.type === 'characterData') {
+                        const hostEl = mu.target && mu.target.parentElement;
+                        if (hostEl) refreshAglHoverTip(hostEl);
+                        continue;
+                    }
+                    for (const n of mu.addedNodes) {
+                        if (!n || n.nodeType !== 1) continue;
+                        refreshAglHoverTip(n);
+                        if (n.children && n.children.length && n.children.length < 12 && n.querySelectorAll) n.querySelectorAll('*').forEach(el => refreshAglHoverTip(el));
+                    }
+                }
+            });
+            obs.observe(document.body, { childList: true, subtree: true, characterData: true });
+            aglTipWatcherActive = true;
+            console.log(`${TAG} AGL hover-tooltip watcher active (MSL sites: native ALT(ft) tooltip gains an AGL line)`);
+        } catch (e) { console.warn(`${TAG} AGL hover-tooltip watcher failed:`, e); }
+    }
+    // One-call remote diagnostic: run __aimAglTipStatus() in the MAP IFRAME
+    // console and read which gate is failing.
+    try {
+        unsafeWindow.__aimAglTipStatus = () => {
+            const sid = getCurrentSiteID();
+            const am = sid ? siteAltModeCache[sid] : null;
+            let ground = null;
+            if (aglTipLastLL) {
+                ground = getElevationFromCache(aglTipLastLL.lat, aglTipLastLL.lng);
+                if (ground == null) ground = elevNearest(aglTipLastLL.lat, aglTipLastLL.lng, AGL_TIP_NEAREST_M);
+            }
+            const st = {
+                version: SCRIPT_VERSION,
+                context: CONTEXT,
+                watcherActive: aglTipWatcherActive,
+                toggleEnabled: aglHoverTipEnabled,
+                siteID: sid,
+                altMode: am ? am.mode : '(not fetched yet)',
+                mapFound: !!getLeafletMap(),
+                cursorLL: aglTipLastLL ? `${aglTipLastLL.lat.toFixed(5)},${aglTipLastLL.lng.toFixed(5)}` : '(no mousemove seen)',
+                groundAtCursorM: ground,
+                markedTooltipsInDom: document.querySelectorAll('[data-aim-agl]').length,
+            };
+            console.log(`${TAG} AGL hover tip status:`, st);
+            return st;
+        };
+    } catch (e) { console.warn(`${TAG} could not expose __aimAglTipStatus:`, e); }
+
+    // ============================================================
+    // ⛰ Terrain Profiler (v4.200 — feature #203 Phase 1, READ-ONLY).
+    // Answers "where does a giant fixed-floor FFZ break the AGL band?"
+    // One LERC exportImage pull of the RAW 3DEP DEM for the site extent
+    // (real elevation values, not a rendered picture), greedy elevation
+    // banding (each band spans ≤ deltaFt of relief — greedy cover
+    // provably minimizes band count), connected-component regions,
+    // size-tiered outlier absorption:
+    //   < absorbAc            → absorbed silently (DEM speckle/berms)
+    //   absorbAc … nfzMaxAc   → absorbed, flagged as NFZ CANDIDATE
+    //                           (bump = floor risk, pit = ceiling risk)
+    //   > nfzMaxAc            → real terrain, its own region
+    // then a colored region overlay + a floating stats panel with a
+    // proposed fixed floor/ceiling per region. NO writes — the FFZ
+    // auto-builder is Phase 2.
+    // ============================================================
+    const TER_SCRIPT_ID = 'aim-terrain-profiler';
+    const TER_PANEL_ID = 'aim-ter-panel';
+    const TER_THRESH_KEY = 'aim-ai-terrain-thresholds';
+    const TER_ENABLE_KEY = 'aim-ai-terrain-enables';
+    const TER_URL = 'https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage';
+    const TER_MAX_PX = 2048;              // per-axis request cap (service limit head-room)
+    const TER_THRESH_DEFAULTS = {
+        minAglFt: 80,     // AGL floor target (client SOP; universal — editable)
+        maxAglFt: 200,    // AGL ceiling target
+        deltaFt: 30,      // max in-band terrain relief per region
+        cellFt: 33,       // DEM sample cell (~10 m = native 3DEP 1/3 arc-sec)
+        marginFt: 500,    // extra ring around the entity bbox
+        absorbAc: 0.5,    // islands below this: silently absorbed
+        nfzMaxAc: 5,      // absorbed islands up to this: NFZ candidates
+        opacity: 0.55,    // overlay opacity
+        simplifyFt: 66,   // Phase 2: boundary simplification tolerance
+        nfzBufFt: 25,     // Phase 2: outward buffer around NFZ hulls
+        namePrefix: 'FFZ ', // Phase 2: created-FFZ name prefix (string)
+    };
+    const TER_ENABLE_DEFAULTS = {
+        median: true,     // 3×3 median despeckle before banding
+        floorP95: false,  // floor ref = P95 elevation instead of true max
+        clipSite: true,   // mask the DEM to the union of existing FFZs —
+                          // outside the site footprint nothing matters
+                          // (and NFZs can't even exist there)
+    };
+    function loadTerThresholds() {
+        const out = { ...TER_THRESH_DEFAULTS };
+        try {
+            const raw = elevGmGet(TER_THRESH_KEY, null);
+            if (raw) {
+                const o = JSON.parse(raw);
+                for (const k in TER_THRESH_DEFAULTS) {
+                    if (typeof o[k] !== typeof TER_THRESH_DEFAULTS[k]) continue;
+                    if (typeof o[k] === 'number' && !isFinite(o[k])) continue;
+                    out[k] = o[k];
+                }
+            }
+        } catch (e) { console.warn(`${TAG} loadTerThresholds threw:`, e); }
+        return out;
+    }
+    function saveTerThresholds() {
+        try { elevGmSet(TER_THRESH_KEY, JSON.stringify(terThresholds)); }
+        catch (e) { console.warn(`${TAG} saveTerThresholds threw:`, e); }
+    }
+    function loadTerEnabled() {
+        const out = { ...TER_ENABLE_DEFAULTS };
+        try {
+            const raw = elevGmGet(TER_ENABLE_KEY, null);
+            if (raw) { const o = JSON.parse(raw); for (const k in TER_ENABLE_DEFAULTS) if (typeof o[k] === 'boolean') out[k] = o[k]; }
+        } catch (e) { console.warn(`${TAG} loadTerEnabled threw:`, e); }
+        return out;
+    }
+    function saveTerEnabled() {
+        try { elevGmSet(TER_ENABLE_KEY, JSON.stringify(terEnabled)); }
+        catch (e) { console.warn(`${TAG} saveTerEnabled threw:`, e); }
+    }
+    let terMasterEnabled = true;
+    let terThresholds = loadTerThresholds();
+    let terEnabled = loadTerEnabled();
+    let terState = null;      // full result of the last run (see terrainProfilerRun)
+    let terLayer = null;      // L.imageOverlay on the map
+    let terLayerMap = null;
+    let terMoveHandler = null;
+    let terBadgeEl = null;
+    let terRunning = false;
+    let terDemCache = null;   // { key, dem } — session-only raster cache (terrain doesn't change between param tweaks)
+    let terLayerUrl = null;   // blob: object URL behind the overlay (revoked on remove)
+
+    // Web-mercator helpers — the DEM is requested and displayed in 3857,
+    // so row↔latitude conversions must go through mercator Y (linear-lat
+    // math would misplace rows on tall sites).
+    const terMercX = (lng) => lng * 20037508.342789244 / 180;
+    const terMercY = (lat) => Math.log(Math.tan((90 + lat) * Math.PI / 360)) / (Math.PI / 180) * 20037508.342789244 / 180;
+    const terInvMercY = (y) => (2 * Math.atan(Math.exp(y * Math.PI / 20037508.342789244)) - Math.PI / 2) * 180 / Math.PI;
+
+    // Binary GM fetch — elevGmRequest is text-only; LERC needs arraybuffer.
+    function terFetchLerc(url) {
+        return new Promise((resolve, reject) => {
+            try {
+                GM_xmlhttpRequest({
+                    method: 'GET', url, responseType: 'arraybuffer', timeout: 45000,
+                    onload: (r) => (r.status >= 200 && r.status < 300 && r.response) ? resolve(r.response) : reject(new Error(`3DEP HTTP ${r.status}`)),
+                    onerror: () => reject(new Error('3DEP network error')),
+                    ontimeout: () => reject(new Error('3DEP timeout (45 s)')),
+                });
+            } catch (e) { reject(e); }
+        });
+    }
+
+    // Fetch the raw DEM grid (feet) for a geographic bbox. Size is derived
+    // FROM the bbox aspect — exportImage silently ADJUSTS the bbox when
+    // size aspect ≠ bbox aspect (engraved terrain-overlay gotcha).
+    async function terFetchDem(west, south, east, north) {
+        const LercLib = (typeof Lerc !== 'undefined' && Lerc) || (typeof unsafeWindow !== 'undefined' && unsafeWindow.Lerc) || null;
+        if (!LercLib || typeof LercLib.decode !== 'function') throw new Error('LERC decoder missing (vendor @require failed — reinstall the script)');
+        const x1 = terMercX(west), x2 = terMercX(east);
+        const y1 = terMercY(south), y2 = terMercY(north);
+        const cosLat = Math.cos(((south + north) / 2) * Math.PI / 180);
+        const cellM = Math.max(3, terThresholds.cellFt / M_TO_FT);
+        const groundWm = (x2 - x1) * cosLat, groundHm = (y2 - y1) * cosLat;
+        let w = Math.round(groundWm / cellM), h = Math.round(groundHm / cellM);
+        if (w > TER_MAX_PX || h > TER_MAX_PX) {
+            const s = TER_MAX_PX / Math.max(w, h);
+            w = Math.round(w * s); h = Math.round(h * s);
+            console.log(`${TAG} profiler: cell size coarsened to ~${Math.round((groundWm / w) * M_TO_FT)} ft to stay under ${TER_MAX_PX}px (site larger than cellFt allows)`);
+        }
+        w = Math.max(32, w); h = Math.max(32, h);
+        const params = new URLSearchParams({
+            bbox: `${x1},${y1},${x2},${y2}`, bboxSR: '3857', imageSR: '3857',
+            size: `${w},${h}`, format: 'lerc', pixelType: 'F32',
+            noDataInterpretation: 'esriNoDataMatchAny',
+            interpolation: 'RSP_BilinearInterpolation', f: 'image',
+        });
+        const buf = await terFetchLerc(`${TER_URL}?${params.toString()}`);
+        let dec;
+        try { dec = LercLib.decode(buf); }
+        catch (e) { throw new Error(`LERC decode failed — ${e && e.message ? e.message : e}`); }
+        if (!dec || !dec.pixels || !dec.pixels[0]) throw new Error('LERC decode returned no pixels');
+        w = dec.width; h = dec.height;
+        const raw = dec.pixels[0];
+        const mask = dec.maskData || null;   // when present: 1 = valid
+        const n = w * h;
+        const vals = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+            const v = raw[i];
+            vals[i] = ((mask ? mask[i] : 1) && isFinite(v) && v > -1000 && v < 9000) ? v * M_TO_FT : NaN;
+        }
+        return {
+            vals, w, h,
+            bounds: { south, west, north, east },
+            mercY1: y1, mercY2: y2, mercX1: x1, mercX2: x2,
+            cellXft: (groundWm / w) * M_TO_FT,
+            cellYft: (groundHm / h) * M_TO_FT,
+            cellAcres: ((groundWm / w) * (groundHm / h)) / 4046.8564224,
+        };
+    }
+
+    // Rasterize the union of the site's existing FFZ rings into a cell
+    // mask (scanline fill per ring, OR'd). With clipSite on, cells
+    // outside the footprint become no-data BEFORE segmentation — so
+    // regions, stats, floors, the overlay, and NFZ candidates simply
+    // don't exist beyond the site perimeter (user rule: outside the
+    // setup nothing matters, and NFZs can't live outside an FFZ).
+    function terSiteMask(dem, ents) {
+        const rings = [];
+        (ents || []).forEach(e => {
+            if (e.type !== 16) return;
+            const cs = (entityCoords(e) || []).filter(c => c && typeof c.lat === 'number');
+            if (cs.length >= 3) rings.push(cs);
+        });
+        if (!rings.length) return null;
+        const w = dem.w, h = dem.h;
+        const toX = (lng) => (terMercX(lng) - dem.mercX1) / (dem.mercX2 - dem.mercX1) * w;
+        const toY = (lat) => (dem.mercY2 - terMercY(lat)) / (dem.mercY2 - dem.mercY1) * h;
+        const mask = new Uint8Array(w * h);
+        rings.forEach(cs => {
+            const px = cs.map(c => [toX(c.lng), toY(c.lat)]);
+            let mnY = Infinity, mxY = -Infinity;
+            px.forEach(p => { if (p[1] < mnY) mnY = p[1]; if (p[1] > mxY) mxY = p[1]; });
+            const y0 = Math.max(0, Math.floor(mnY)), y1 = Math.min(h - 1, Math.ceil(mxY));
+            for (let y = y0; y <= y1; y++) {
+                const cy = y + 0.5;
+                const xs = [];
+                for (let i = 0, j = px.length - 1; i < px.length; j = i++) {
+                    const a = px[j], b = px[i];
+                    if ((a[1] > cy) === (b[1] > cy)) continue;
+                    xs.push(a[0] + (b[0] - a[0]) * (cy - a[1]) / (b[1] - a[1]));
+                }
+                xs.sort((q, r2) => q - r2);
+                for (let k = 0; k + 1 < xs.length; k += 2) {
+                    const xA = Math.max(0, Math.round(xs[k])), xB = Math.min(w - 1, Math.round(xs[k + 1]) - 1);
+                    for (let x = xA; x <= xB; x++) mask[y * w + x] = 1;
+                }
+            }
+        });
+        return mask;
+    }
+
+    // Cooperative yield — the profiler's number-crunching runs on the main
+    // thread; without these breaks Chrome throws the "page unresponsive"
+    // dialog on big sites (same pattern as the SOP validators' async pass).
+    const terYield = () => new Promise(res => setTimeout(res, 0));
+
+    // 3×3 median despeckle (NaN-aware, yields every 48 rows).
+    async function terMedianFilter(vals, w, h) {
+        const out = new Float32Array(vals.length);
+        const buf = new Float32Array(9);
+        for (let y = 0; y < h; y++) {
+            if ((y & 47) === 47) await terYield();
+            for (let x = 0; x < w; x++) {
+                const i = y * w + x;
+                if (isNaN(vals[i])) { out[i] = NaN; continue; }
+                let k = 0;
+                for (let dy = -1; dy <= 1; dy++) {
+                    const yy = y + dy;
+                    if (yy < 0 || yy >= h) continue;
+                    for (let dx = -1; dx <= 1; dx++) {
+                        const xx = x + dx;
+                        if (xx < 0 || xx >= w) continue;
+                        const v = vals[yy * w + xx];
+                        if (!isNaN(v)) buf[k++] = v;
+                    }
+                }
+                for (let a = 1; a < k; a++) { const t = buf[a]; let b = a - 1; while (b >= 0 && buf[b] > t) { buf[b + 1] = buf[b]; b--; } buf[b + 1] = t; }
+                out[i] = buf[k >> 1];
+            }
+        }
+        return out;
+    }
+
+    // Core segmentation: banding → components → tiered absorption → stats.
+    // Async with cooperative yields — each full-grid pass is chunked.
+    async function terSegment(dem, th) {
+        const { vals, w, h, cellAcres } = dem;
+        const n = w * h;
+        let mnFt = Infinity, mxFt = -Infinity;
+        for (let i = 0; i < n; i++) { const v = vals[i]; if (!isNaN(v)) { if (v < mnFt) mnFt = v; if (v > mxFt) mxFt = v; } }
+        if (!isFinite(mnFt)) throw new Error('DEM empty — no valid elevation in the requested area');
+        const base = Math.floor(mnFt);
+        const nb = Math.max(1, Math.ceil(mxFt) - base + 1);       // 1-ft bins
+        const hist = new Float64Array(nb);
+        for (let i = 0; i < n; i++) { const v = vals[i]; if (!isNaN(v)) hist[Math.min(nb - 1, Math.max(0, Math.floor(v) - base))]++; }
+        // Greedy band cover — optimal band COUNT for "every elevation in
+        // some ≤delta window": each band starts at the lowest uncovered
+        // occupied bin and spans deltaFt.
+        const deltaBins = Math.max(1, Math.round(th.deltaFt));
+        const bandLoFt = [];
+        const bandOfBin = new Int16Array(nb).fill(-1);
+        let b = 0;
+        while (b < nb) {
+            if (!hist[b]) { b++; continue; }
+            bandLoFt.push(base + b);
+            const hi = Math.min(nb - 1, b + deltaBins - 1);
+            for (let k = b; k <= hi; k++) bandOfBin[k] = bandLoFt.length - 1;
+            b = hi + 1;
+        }
+        const bandIdx = new Int16Array(n).fill(-1);
+        for (let i = 0; i < n; i++) {
+            const v = vals[i];
+            if (!isNaN(v)) bandIdx[i] = bandOfBin[Math.min(nb - 1, Math.max(0, Math.floor(v) - base))];
+        }
+        // Connected components (4-connectivity, explicit stack).
+        const labels = new Int32Array(n).fill(-1);
+        const labelBand = [];
+        let nextLabel = 0;
+        const stack = [];
+        let ccWork = 0;
+        for (let seed = 0; seed < n; seed++) {
+            if ((seed & 0xFFFF) === 0xFFFF && ccWork > 200000) { ccWork = 0; await terYield(); }
+            if (labels[seed] !== -1 || bandIdx[seed] < 0) continue;
+            ccWork++;
+            const bd = bandIdx[seed];
+            const lab = nextLabel++;
+            labelBand.push(bd);
+            stack.length = 0; stack.push(seed);
+            labels[seed] = lab;
+            while (stack.length) {
+                const i = stack.pop();
+                const x = i % w, y = (i / w) | 0;
+                if (x > 0 && labels[i - 1] === -1 && bandIdx[i - 1] === bd) { labels[i - 1] = lab; stack.push(i - 1); }
+                if (x < w - 1 && labels[i + 1] === -1 && bandIdx[i + 1] === bd) { labels[i + 1] = lab; stack.push(i + 1); }
+                if (y > 0 && labels[i - w] === -1 && bandIdx[i - w] === bd) { labels[i - w] = lab; stack.push(i - w); }
+                if (y < h - 1 && labels[i + w] === -1 && bandIdx[i + w] === bd) { labels[i + w] = lab; stack.push(i + w); }
+            }
+        }
+        // Tiered absorption with union-find. Every root smaller than
+        // nfzMaxAc wants to merge into its dominant (longest shared
+        // boundary) neighbor. Merging INTO A BIG region records an NFZ
+        // candidate when the island was ≥ absorbAc; small→small merges
+        // just coalesce (the combo may grow past the threshold and
+        // survive as a real region). Iterate to a fixed point.
+        const parent = new Int32Array(nextLabel);
+        for (let i = 0; i < nextLabel; i++) parent[i] = i;
+        const find = (a) => { while (parent[a] !== a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; };
+        const cellsOf = new Float64Array(nextLabel);
+        for (let i = 0; i < n; i++) if (labels[i] >= 0) cellsOf[labels[i]]++;
+        const absorbCells = th.absorbAc / cellAcres;
+        const nfzCells = Math.max(absorbCells, th.nfzMaxAc / cellAcres);
+        const candGrid = new Int16Array(n);          // 0 = none, else NFZ-candidate index + 1
+        const nfzCands = [];                          // {cells, acres, meanFt, targetRoot, cx, cy, dir}
+        for (let pass = 0; pass < 12; pass++) {
+            const rootCells = new Float64Array(nextLabel);
+            for (let i = 0; i < nextLabel; i++) rootCells[find(i)] += cellsOf[i];
+            // Boundary-contact tally between distinct roots + member-cell
+            // lists for small roots (needed to stamp candidate cells).
+            const contact = new Map();
+            const members = new Map();
+            for (let y2 = 0; y2 < h; y2++) {
+                if ((y2 & 63) === 63) await terYield();
+                for (let x2 = 0; x2 < w; x2++) {
+                    const i = y2 * w + x2;
+                    const la = labels[i];
+                    if (la < 0) continue;
+                    const ra = find(la);
+                    if (rootCells[ra] < nfzCells) {
+                        let list = members.get(ra);
+                        if (!list) { list = []; members.set(ra, list); }
+                        list.push(i);
+                    }
+                    if (x2 < w - 1) {
+                        const lb = labels[i + 1];
+                        if (lb >= 0) { const rb = find(lb); if (rb !== ra) { const k = ra < rb ? ra * nextLabel + rb : rb * nextLabel + ra; contact.set(k, (contact.get(k) || 0) + 1); } }
+                    }
+                    if (y2 < h - 1) {
+                        const lb = labels[i + w];
+                        if (lb >= 0) { const rb = find(lb); if (rb !== ra) { const k = ra < rb ? ra * nextLabel + rb : rb * nextLabel + ra; contact.set(k, (contact.get(k) || 0) + 1); } }
+                    }
+                }
+            }
+            const bestN = new Map();
+            contact.forEach((cnt, k) => {
+                const a = Math.floor(k / nextLabel), b2 = k % nextLabel;
+                if (rootCells[a] < nfzCells) { const cur = bestN.get(a); if (!cur || cnt > cur.cnt) bestN.set(a, { o: b2, cnt }); }
+                if (rootCells[b2] < nfzCells) { const cur = bestN.get(b2); if (!cur || cnt > cur.cnt) bestN.set(b2, { o: a, cnt }); }
+            });
+            if (!bestN.size) break;
+            let merged = 0;
+            const smalls = [...bestN.keys()].sort((s1, s2) => rootCells[s1] - rootCells[s2]);
+            for (const s of smalls) {
+                if (find(s) !== s) continue;                  // got merged earlier this pass
+                const t = find(bestN.get(s).o);
+                if (t === s) continue;
+                const sCells = rootCells[s];
+                if (rootCells[t] >= nfzCells && sCells >= absorbCells) {
+                    // island absorbed into a real region → NFZ candidate
+                    const list = members.get(s) || [];
+                    const cId = nfzCands.length + 1;   // candGrid carries the candidate id (Phase 2 traces cells per candidate)
+                    let sum = 0, sx = 0, sy = 0;
+                    for (const i of list) { candGrid[i] = cId; sum += vals[i]; sx += i % w; sy += (i / w) | 0; }
+                    nfzCands.push({
+                        cells: sCells, acres: sCells * cellAcres,
+                        meanFt: list.length ? sum / list.length : NaN,
+                        targetRoot: t,
+                        cx: list.length ? sx / list.length : 0,
+                        cy: list.length ? sy / list.length : 0,
+                    });
+                }
+                parent[s] = t;
+                merged++;
+            }
+            if (!merged) break;
+        }
+        // Final relabel to compact region indexes + per-region histograms.
+        const regOf = new Map();
+        const regions = [];
+        const regGrid = new Int32Array(n).fill(-1);
+        for (let i = 0; i < n; i++) {
+            if ((i & 0x3FFFF) === 0x3FFFF) await terYield();
+            const l = labels[i];
+            if (l < 0) continue;
+            const r = find(l);
+            let gi = regOf.get(r);
+            if (gi === undefined) {
+                gi = regions.length;
+                regOf.set(r, gi);
+                regions.push({ root: r, band: labelBand[r], cells: 0, sx: 0, sy: 0, hist: new Uint32Array(nb) });
+            }
+            const rg = regions[gi];
+            regGrid[i] = gi;
+            rg.cells++;
+            rg.sx += i % w;
+            rg.sy += (i / w) | 0;
+            rg.hist[Math.min(nb - 1, Math.max(0, Math.floor(vals[i]) - base))]++;
+        }
+        // Resolve candidate targets to region indexes + bump/pit direction.
+        nfzCands.forEach(c => {
+            const gi = regOf.get(find(c.targetRoot));
+            c.region = (gi === undefined) ? -1 : gi;
+            if (c.region >= 0) {
+                const lo = bandLoFt[regions[c.region].band], hi2 = lo + th.deltaFt;
+                c.dir = c.meanFt > hi2 ? 'bump' : (c.meanFt < lo ? 'pit' : 'mixed');
+            } else c.dir = '?';
+        });
+        // Per-region stats + proposed altitudes.
+        const pct = (histArr, cells, p) => {
+            const target = cells * p;
+            let acc = 0;
+            for (let k = 0; k < histArr.length; k++) { acc += histArr[k]; if (acc >= target) return base + k + 0.5; }
+            return base + histArr.length - 0.5;
+        };
+        regions.forEach((rg, gi) => {
+            let lo = -1, hi2 = -1;
+            for (let k = 0; k < nb; k++) if (rg.hist[k]) { if (lo < 0) lo = k; hi2 = k; }
+            rg.minFt = base + lo; rg.maxFt = base + hi2 + 1;
+            rg.p5 = pct(rg.hist, rg.cells, 0.05);
+            rg.p50 = pct(rg.hist, rg.cells, 0.50);
+            rg.p95 = pct(rg.hist, rg.cells, 0.95);
+            rg.acres = rg.cells * cellAcres;
+            rg.bandLo = bandLoFt[rg.band];
+            rg.bandHi = rg.bandLo + th.deltaFt;
+            let inBand = 0;
+            const bLo = Math.max(0, rg.bandLo - base), bHi = Math.min(nb - 1, rg.bandHi - base - 1);
+            for (let k = bLo; k <= bHi; k++) inBand += rg.hist[k];
+            rg.pctInBand = rg.cells ? (inBand / rg.cells) * 100 : 0;
+            const floorRef = terEnabled.floorP95 ? rg.p95 : rg.maxFt;
+            const ceilRef = terEnabled.floorP95 ? rg.p5 : rg.minFt;
+            rg.floorMSL = Math.ceil(floorRef + th.minAglFt);
+            rg.ceilMSL = Math.floor(ceilRef + th.maxAglFt);
+            rg.bandHeight = rg.ceilMSL - rg.floorMSL;
+            rg.aglAtLow = rg.floorMSL - rg.minFt;    // AGL floor over the LOWEST ground
+            rg.aglAtHigh = rg.floorMSL - rg.maxFt;   // AGL floor over the HIGHEST ground
+            rg.flags = [];
+            if (rg.bandHeight <= 0) rg.flags.push('infeasible: floor ≥ ceiling');
+            else if (rg.bandHeight < 40) rg.flags.push(`thin band (${rg.bandHeight} ft)`);
+            if (rg.aglAtLow > th.maxAglFt) rg.flags.push(`pit busts max AGL (${Math.round(rg.aglAtLow)} ft over low ground)`);
+            if (rg.aglAtHigh < th.minAglFt) rg.flags.push(`spike under min AGL (${Math.round(rg.aglAtHigh)} ft over high ground)`);
+            rg.idx = gi;
+        });
+        const order = regions.map((rg, gi) => gi).sort((a, b2) => regions[b2].acres - regions[a].acres);
+        order.forEach((gi, rank) => { regions[gi].name = `R${rank + 1}`; regions[gi].rank = rank; });
+        return { regions, order, regGrid, candGrid, nfzCands, bandLoFt, mnFt, mxFt, base, nb };
+    }
+
+    // Region color: elevation-band midpoint over the site range mapped
+    // red (low) → cream (mid) → blue (high) — matches the Map Styler
+    // terrain legend so the two overlays read the same way.
+    function terColorFor(elevFt, mnFt, mxFt) {
+        const lerp = (a, b2, t) => Math.round(a + (b2 - a) * t);
+        const t = mxFt > mnFt ? Math.max(0, Math.min(1, (elevFt - mnFt) / (mxFt - mnFt))) : 0.5;
+        const lo2 = [224, 74, 58], mid = [247, 237, 201], hi2 = [90, 143, 224];
+        const c = t < 0.5
+            ? [lerp(lo2[0], mid[0], t * 2), lerp(lo2[1], mid[1], t * 2), lerp(lo2[2], mid[2], t * 2)]
+            : [lerp(mid[0], hi2[0], (t - 0.5) * 2), lerp(mid[1], hi2[1], (t - 0.5) * 2), lerp(mid[2], hi2[2], (t - 0.5) * 2)];
+        return c;
+    }
+
+    async function terRenderOverlay() {
+        const st = terState;
+        if (!st) return;
+        const L = getLeafletL();
+        const map = getLeafletMap();
+        if (!L || !map) { showToast('Map not available for the overlay', 'rgba(255,96,96,0.55)'); return; }
+        terRemoveLayer();
+        const { dem, seg } = st;
+        const { w, h } = dem;
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        const img = ctx.createImageData(w, h);
+        const d = img.data;
+        const { regGrid, candGrid, regions, mnFt, mxFt } = seg;
+        for (let y = 0; y < h; y++) {
+            if ((y & 127) === 127) await terYield();
+            for (let x = 0; x < w; x++) {
+                const i = y * w + x;
+                const gi = regGrid[i];
+                const o = i * 4;
+                if (gi < 0) { d[o + 3] = 0; continue; }
+                let c;
+                if (candGrid[i]) c = [255, 53, 208];   // NFZ candidate — magenta
+                else c = terColorFor((regions[gi].bandLo + regions[gi].bandHi) / 2, mnFt, mxFt);
+                // darken region borders so butt-joins are legible
+                const edge = (x > 0 && regGrid[i - 1] !== gi) || (x < w - 1 && regGrid[i + 1] !== gi)
+                    || (y > 0 && regGrid[i - w] !== gi) || (y < h - 1 && regGrid[i + w] !== gi);
+                const m = edge ? 0.35 : 1;
+                d[o] = c[0] * m; d[o + 1] = c[1] * m; d[o + 2] = c[2] * m; d[o + 3] = edge ? 255 : 210;
+            }
+        }
+        ctx.putImageData(img, 0, 0);
+        const bd = dem.bounds;
+        try {
+            // toBlob encodes the PNG off the main thread (toDataURL blocks
+            // for hundreds of ms on a 2–4 MP canvas). Object URL is revoked
+            // in terRemoveLayer.
+            const url = await new Promise((resolve) => {
+                try {
+                    if (typeof canvas.toBlob === 'function') canvas.toBlob(b => resolve(b ? URL.createObjectURL(b) : canvas.toDataURL('image/png')), 'image/png');
+                    else resolve(canvas.toDataURL('image/png'));
+                } catch (e2) { resolve(canvas.toDataURL('image/png')); }
+            });
+            terLayerUrl = url && url.indexOf('blob:') === 0 ? url : null;
+            terLayer = L.imageOverlay(url,
+                [[bd.south, bd.west], [bd.north, bd.east]],
+                { opacity: terThresholds.opacity, pane: 'tilePane', zIndex: 9993, interactive: false });
+            terLayer.addTo(map);
+            terLayerMap = map;
+        } catch (e) {
+            console.warn(`${TAG} profiler overlay add failed:`, e);
+            showToast('Overlay failed — see console', 'rgba(255,96,96,0.55)');
+            return;
+        }
+        // Hover badge: region under the cursor.
+        terMoveHandler = (ev) => {
+            try { terUpdateBadge(ev.latlng, ev.originalEvent); } catch (e) {}
+        };
+        try { map.on('mousemove', terMoveHandler); } catch (e) { terMoveHandler = null; }
+    }
+
+    function terCellAt(latlng) {
+        const st = terState;
+        if (!st || !latlng) return -1;
+        const { dem } = st;
+        const bd = dem.bounds;
+        if (latlng.lat < bd.south || latlng.lat > bd.north || latlng.lng < bd.west || latlng.lng > bd.east) return -1;
+        const x = Math.floor((terMercX(latlng.lng) - dem.mercX1) / (dem.mercX2 - dem.mercX1) * dem.w);
+        const y = Math.floor((dem.mercY2 - terMercY(latlng.lat)) / (dem.mercY2 - dem.mercY1) * dem.h);
+        if (x < 0 || x >= dem.w || y < 0 || y >= dem.h) return -1;
+        return y * dem.w + x;
+    }
+
+    function terUpdateBadge(latlng, mouseEv) {
+        const st = terState;
+        const i = terCellAt(latlng);
+        const gi = (i >= 0 && st) ? st.seg.regGrid[i] : -1;
+        if (gi < 0) { if (terBadgeEl) terBadgeEl.style.display = 'none'; return; }
+        const rg = st.seg.regions[gi];
+        if (!terBadgeEl) {
+            terBadgeEl = document.createElement('div');
+            terBadgeEl.style.cssText = 'position:fixed;z-index:2147483200;pointer-events:none;background:rgba(16,22,32,0.92);'
+                + 'border:1px solid rgba(201,166,255,0.55);border-radius:6px;padding:4px 8px;color:#dfe9f0;'
+                + 'font:11px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,0.5);white-space:nowrap;';
+            document.body.appendChild(terBadgeEl);
+        }
+        const elevFt = st.dem.vals[i];
+        terBadgeEl.innerHTML = `<strong style="color:#c9a6ff">${rg.name}</strong> · band ${rg.bandLo.toLocaleString()}–${rg.bandHi.toLocaleString()} ft`
+            + ` · ${rg.acres < 10 ? rg.acres.toFixed(1) : Math.round(rg.acres).toLocaleString()} ac`
+            + `<br>floor <strong>${rg.floorMSL.toLocaleString()}</strong> / ceil <strong>${rg.ceilMSL.toLocaleString()}</strong> ft MSL`
+            + (st.seg.candGrid[i] ? ' · <span style="color:#ff35d0">NFZ candidate</span>' : '')
+            + (isNaN(elevFt) ? '' : ` · here ${Math.round(elevFt).toLocaleString()} ft`);
+        if (mouseEv && typeof mouseEv.clientX === 'number') {
+            terBadgeEl.style.left = `${mouseEv.clientX + 14}px`;
+            terBadgeEl.style.top = `${mouseEv.clientY + 14}px`;
+        }
+        terBadgeEl.style.display = 'block';
+    }
+
+    function terRemoveLayer() {
+        if (terLayer) {
+            try { (terLayerMap || getLeafletMap()).removeLayer(terLayer); } catch (e) {}
+        }
+        if (terMoveHandler && terLayerMap) {
+            try { terLayerMap.off('mousemove', terMoveHandler); } catch (e) {}
+        }
+        terLayer = null; terLayerMap = null; terMoveHandler = null;
+        if (terLayerUrl) { try { URL.revokeObjectURL(terLayerUrl); } catch (e) {} terLayerUrl = null; }
+        if (terBadgeEl) { try { terBadgeEl.remove(); } catch (e) {} terBadgeEl = null; }
+    }
+
+    function terRegionCentroid(rg) {
+        const st = terState;
+        const dem = st.dem;
+        const cx = rg.sx / rg.cells, cy = rg.sy / rg.cells;
+        const lng = dem.bounds.west + (cx + 0.5) / dem.w * (dem.bounds.east - dem.bounds.west);
+        const lat = terInvMercY(dem.mercY2 - (cy + 0.5) / dem.h * (dem.mercY2 - dem.mercY1));
+        return { lat, lng };
+    }
+    function terCandCentroid(c) {
+        const st = terState;
+        const dem = st.dem;
+        const lng = dem.bounds.west + (c.cx + 0.5) / dem.w * (dem.bounds.east - dem.bounds.west);
+        const lat = terInvMercY(dem.mercY2 - (c.cy + 0.5) / dem.h * (dem.mercY2 - dem.mercY1));
+        return { lat, lng };
+    }
+
+    function terBuildReport() {
+        const st = terState;
+        if (!st) return '';
+        const th = st.thresholds;
+        const seg = st.seg;
+        const out = [`TERRAIN PROFILE — ${st.siteLabel}`];
+        out.push(`Params: AGL ${th.minAglFt}–${th.maxAglFt} ft · Δ ${th.deltaFt} ft · cell ~${Math.round(st.dem.cellXft)} ft · absorb <${th.absorbAc} ac · NFZ ≤${th.nfzMaxAc} ac · floor ref ${terEnabled.floorP95 ? 'P95' : 'max'}`);
+        out.push(`Site relief: ${Math.round(seg.mnFt).toLocaleString()}–${Math.round(seg.mxFt).toLocaleString()} ft (${Math.round(seg.mxFt - seg.mnFt)} ft) → ${seg.order.length} region(s), ${seg.nfzCands.length} NFZ candidate(s)`);
+        seg.order.forEach(gi => {
+            const rg = seg.regions[gi];
+            out.push(`  ${rg.name}: band ${rg.bandLo}–${rg.bandHi} ft · ${rg.acres.toFixed(1)} ac · elev ${Math.round(rg.minFt)}–${Math.round(rg.maxFt)} ft (${rg.pctInBand.toFixed(1)}% in band)`
+                + ` · floor ${rg.floorMSL} / ceil ${rg.ceilMSL} ft MSL (AGL ${Math.round(rg.aglAtHigh)}–${Math.round(rg.aglAtLow)} ft)`
+                + (rg.flags.length ? ` · ⚠ ${rg.flags.join('; ')}` : ''));
+        });
+        seg.nfzCands.forEach((c, i) => {
+            const parentName = c.region >= 0 ? seg.regions[c.region].name : '?';
+            out.push(`  NFZ cand #${i + 1}: ${c.acres.toFixed(1)} ac ${c.dir} in ${parentName} (mean ${Math.round(c.meanFt)} ft)`);
+        });
+        return out.join('\n');
+    }
+
+    function terRenderPanel() {
+        terClosePanel();
+        const st = terState;
+        if (!st) return;
+        const seg = st.seg;
+        const th = st.thresholds;
+        const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+        const num = (id, label, val, step, title) =>
+            `<label title="${title || ''}" style="display:flex;align-items:center;gap:4px;">${label}`
+            + `<input data-ter-p="${id}" type="number" value="${val}" step="${step}" style="width:62px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(201,166,255,0.35);border-radius:4px;padding:2px 4px;font:inherit;"></label>`;
+        const chk = (id, label, val, title) =>
+            `<label title="${title || ''}" style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input data-ter-e="${id}" type="checkbox" ${val ? 'checked' : ''}>${label}</label>`;
+        const rows = [];
+        const ROW_CAP = 60;   // display cap — the overlay + report still carry everything
+        seg.order.slice(0, ROW_CAP).forEach(gi => {
+            const rg = seg.regions[gi];
+            const c = terColorFor((rg.bandLo + rg.bandHi) / 2, seg.mnFt, seg.mxFt);
+            const chip = `<span style="display:inline-block;width:11px;height:11px;border-radius:2px;background:rgb(${c[0]},${c[1]},${c[2]});border:1px solid rgba(0,0,0,0.6);vertical-align:-1px;"></span>`;
+            const flags = rg.flags.length ? `<br><span style="color:#ffb020;padding-left:18px;">⚠ ${esc(rg.flags.join(' · '))}</span>` : '';
+            rows.push(`<div data-ter-jump="${gi}" title="Click to view on map" style="margin:3px 0;line-height:1.45;cursor:pointer;" onmouseover="this.style.background='rgba(201,166,255,0.10)'" onmouseout="this.style.background=''">`
+                + `${chip} <strong style="color:#c9a6ff">${rg.name}</strong> · band ${rg.bandLo.toLocaleString()}–${rg.bandHi.toLocaleString()} ft`
+                + ` · <strong>${rg.acres < 10 ? rg.acres.toFixed(1) : Math.round(rg.acres).toLocaleString()} ac</strong>`
+                + ` · ${rg.pctInBand.toFixed(rg.pctInBand >= 99.95 ? 0 : 1)}% in band`
+                + `<br><span style="opacity:0.85;padding-left:18px;">floor <strong>${rg.floorMSL.toLocaleString()}</strong> / ceil <strong>${rg.ceilMSL.toLocaleString()}</strong> ft MSL`
+                + ` · AGL ${Math.round(rg.aglAtHigh)}–${Math.round(rg.aglAtLow)} ft over ground ${Math.round(rg.minFt).toLocaleString()}–${Math.round(rg.maxFt).toLocaleString()} ft</span>${flags}</div>`);
+        });
+        if (seg.order.length > ROW_CAP) rows.push(`<div style="opacity:0.7;margin:3px 0;">…and ${seg.order.length - ROW_CAP} smaller region(s) — on the overlay + in the report, hidden here for panel speed</div>`);
+        const CAND_CAP = 40;
+        const cands = seg.nfzCands.slice(0, CAND_CAP).map((c, i) => {
+            const parentName = c.region >= 0 ? seg.regions[c.region].name : '?';
+            const dirTxt = c.dir === 'bump' ? '⛰ bump (floor risk)' : c.dir === 'pit' ? '🕳 pit (ceiling risk)' : c.dir;
+            return `<div data-ter-cjump="${i}" title="Click to view on map" style="margin:2px 0;line-height:1.45;cursor:pointer;" onmouseover="this.style.background='rgba(255,53,208,0.10)'" onmouseout="this.style.background=''">`
+                + `<span style="color:#ff35d0">■</span> #${i + 1} · ${c.acres.toFixed(1)} ac ${dirTxt} inside <strong>${parentName}</strong> · mean ${Math.round(c.meanFt).toLocaleString()} ft</div>`;
+        });
+        if (seg.nfzCands.length > CAND_CAP) cands.push(`<div style="opacity:0.7;margin:2px 0;">…and ${seg.nfzCands.length - CAND_CAP} more — magenta on the overlay + in the report</div>`);
+        const wrap = document.createElement('div');
+        wrap.id = TER_PANEL_ID;
+        wrap.style.cssText = 'position:fixed;top:70px;right:56px;width:470px;max-height:76vh;z-index:2147483000;'
+            + 'background:rgba(16,22,32,0.96);border:1px solid rgba(201,166,255,0.45);border-radius:10px;'
+            + 'color:#dfe9f0;font:12px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,0.55);'
+            + 'display:flex;flex-direction:column;';
+        wrap.innerHTML = `
+            <div data-ter-drag style="cursor:move;padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid rgba(201,166,255,0.25);">
+                <span style="color:#c9a6ff;font-weight:700;">⛰ Terrain Profiler</span>
+                <span style="opacity:0.7;">${esc(st.siteLabel)}</span>
+                <span style="flex:1"></span>
+                <button data-ter-copy style="background:none;border:1px solid rgba(201,166,255,0.4);color:#c9a6ff;border-radius:5px;padding:2px 8px;cursor:pointer;">Copy report</button>
+                <button data-ter-close style="background:none;border:none;color:#dfe9f0;font-size:15px;cursor:pointer;">✕</button>
+            </div>
+            <div style="padding:8px 12px;display:flex;flex-wrap:wrap;gap:8px 12px;border-bottom:1px solid rgba(201,166,255,0.18);align-items:center;">
+                ${num('minAglFt', 'AGL min', th.minAglFt, 5, 'Target AGL floor — region floor = highest ground + this')}
+                ${num('maxAglFt', 'max', th.maxAglFt, 5, 'Target AGL ceiling — region ceiling = lowest ground + this')}
+                ${num('deltaFt', 'Δ', th.deltaFt, 5, 'Max terrain relief allowed inside one region (ft)')}
+                ${num('cellFt', 'cell', th.cellFt, 1, 'DEM sample size (ft) — 33 ≈ native 3DEP 10 m')}
+                ${num('marginFt', 'margin', th.marginFt, 50, 'Extra ring around the site bbox (ft)')}
+                ${num('absorbAc', 'absorb&lt;', th.absorbAc, 0.5, 'Islands below this acreage absorb silently')}
+                ${num('nfzMaxAc', 'NFZ≤', th.nfzMaxAc, 0.5, 'Absorbed islands up to this acreage become NFZ candidates')}
+                ${chk('median', 'despeckle', terEnabled.median, '3×3 median filter before banding')}
+                ${chk('floorP95', 'P95 floor', terEnabled.floorP95, 'Floor from the 95th-percentile elevation instead of the true max')}
+                ${chk('clipSite', 'site only', terEnabled.clipSite, 'Mask the DEM to the union of existing FFZs — ignore terrain outside the site footprint')}
+                <button data-ter-rerun style="background:rgba(201,166,255,0.15);border:1px solid rgba(201,166,255,0.5);color:#c9a6ff;border-radius:5px;padding:2px 10px;cursor:pointer;font-weight:600;">⟳ Re-run</button>
+            </div>
+            <div style="padding:8px 12px;overflow-y:auto;">
+                <div style="margin-bottom:4px;">Relief <strong>${Math.round(seg.mnFt).toLocaleString()}–${Math.round(seg.mxFt).toLocaleString()} ft</strong>
+                    (${Math.round(seg.mxFt - seg.mnFt)} ft) → <strong style="color:#c9a6ff">${seg.order.length} region${seg.order.length === 1 ? '' : 's'}</strong>
+                    · <span style="color:#ff35d0">${seg.nfzCands.length} NFZ candidate${seg.nfzCands.length === 1 ? '' : 's'}</span>
+                    · grid ${st.dem.w}×${st.dem.h} @ ~${Math.round(st.dem.cellXft)} ft${st.maskNote ? ` · ${esc(st.maskNote)}` : ''}</div>
+                ${th.deltaFt > th.maxAglFt - th.minAglFt ? `<div style="color:#ffb020;margin-bottom:4px;">⚠ Δ ${th.deltaFt} ft exceeds the AGL window (${th.maxAglFt - th.minAglFt} ft) — no fixed band can satisfy both bounds.</div>` : ''}
+                <div style="color:#c9a6ff;font-weight:600;margin:8px 0 4px;border-bottom:1px solid rgba(201,166,255,0.25);padding-bottom:2px;">Regions (largest first — proposed FFZ splits)</div>
+                ${rows.join('')}
+                ${cands.length ? `<div style="color:#ff35d0;font-weight:600;margin:10px 0 4px;border-bottom:1px solid rgba(255,53,208,0.3);padding-bottom:2px;">NFZ candidates (outliers to fence off, not split on)</div>${cands.join('')}` : ''}
+                ${terBSectionHtml()}
+            </div>`;
+        wrap.addEventListener('click', (e) => {
+            if (terBHandleClick(e, wrap)) return;
+            if (e.target.closest('[data-ter-close]')) { terClosePanel(); return; }
+            if (e.target.closest('[data-ter-copy]')) {
+                navigator.clipboard.writeText(terBuildReport()).then(
+                    () => showToast('Terrain report copied'),
+                    () => showToast('Copy failed', 'rgba(255,96,96,0.55)'));
+                return;
+            }
+            if (e.target.closest('[data-ter-rerun]')) {
+                // pull edited params back into thresholds, persist, re-run
+                let bad = null;
+                wrap.querySelectorAll('[data-ter-p]').forEach(inp => {
+                    const k = inp.getAttribute('data-ter-p');
+                    const v = parseFloat(inp.value);
+                    if (!isFinite(v) || v < 0) { bad = k; return; }
+                    terThresholds[k] = v;
+                });
+                wrap.querySelectorAll('[data-ter-e]').forEach(inp => {
+                    terEnabled[inp.getAttribute('data-ter-e')] = !!inp.checked;
+                });
+                if (bad) { showToast(`Invalid value for ${bad}`, 'rgba(255,96,96,0.55)'); return; }
+                saveTerThresholds(); saveTerEnabled();
+                terrainProfilerRun();
+                return;
+            }
+            const jumpEl = e.target.closest('[data-ter-jump]');
+            if (jumpEl) {
+                const rg = seg.regions[+jumpEl.getAttribute('data-ter-jump')];
+                const map = getLeafletMap();
+                if (!rg || !map) { showToast('Map not available', 'rgba(255,96,96,0.55)'); return; }
+                const ll = terRegionCentroid(rg);
+                try { map.setView([ll.lat, ll.lng], Math.max(map.getZoom(), 14)); } catch (err) {}
+                airPulseAt(ll.lat, ll.lng);
+                return;
+            }
+            const cEl = e.target.closest('[data-ter-cjump]');
+            if (cEl) {
+                const c = seg.nfzCands[+cEl.getAttribute('data-ter-cjump')];
+                const map = getLeafletMap();
+                if (!c || !map) { showToast('Map not available', 'rgba(255,96,96,0.55)'); return; }
+                const ll = terCandCentroid(c);
+                try { map.setView([ll.lat, ll.lng], Math.max(map.getZoom(), 16)); } catch (err) {}
+                airPulseAt(ll.lat, ll.lng);
+            }
+        });
+        const dragEl = wrap.querySelector('[data-ter-drag]');
+        let drag = null;
+        dragEl.addEventListener('mousedown', (e) => {
+            if (e.target.closest('button')) return;
+            const r = wrap.getBoundingClientRect();
+            drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+            e.preventDefault();
+        });
+        document.addEventListener('mousemove', (e) => {
+            if (!drag) return;
+            wrap.style.left = `${e.clientX - drag.dx}px`;
+            wrap.style.top = `${e.clientY - drag.dy}px`;
+            wrap.style.right = 'auto';
+        });
+        document.addEventListener('mouseup', () => { drag = null; });
+        document.body.appendChild(wrap);
+    }
+
+    function terClosePanel() {
+        const el = document.getElementById(TER_PANEL_ID);
+        if (el) { try { el.remove(); } catch (e) {} }
+    }
+
+    async function terrainProfilerRun() {
+        if (terRunning) { showToast('Profiler already running…'); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
+        terRunning = true;
+        const t0 = performance.now();
+        try {
+            showToast('⛰ Profiler: running…');
+            await Promise.resolve(fetchMapObjects(sid, false));
+            const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+            const pts = airCollectSitePoints(ents);
+            if (!pts.length) { showToast('No site geometry found — open a site with entities first.', 'rgba(255,96,96,0.55)'); return; }
+            let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+            pts.forEach(p => {
+                if (p.lat < minLat) minLat = p.lat; if (p.lat > maxLat) maxLat = p.lat;
+                if (p.lng < minLng) minLng = p.lng; if (p.lng > maxLng) maxLng = p.lng;
+            });
+            const th = { ...terThresholds };
+            const mLat = th.marginFt / 364000;
+            const mLng = th.marginFt / (364000 * Math.cos(((minLat + maxLat) / 2) * Math.PI / 180));
+            const west = minLng - mLng, south = minLat - mLat, east = maxLng + mLng, north = maxLat + mLat;
+            // Session DEM cache — the terrain doesn't change between param
+            // tweaks, so re-runs reuse the raster. Refetch only when the
+            // site, bbox (margin), or cell size changes.
+            const demKey = `${sid}|${west.toFixed(6)},${south.toFixed(6)},${east.toFixed(6)},${north.toFixed(6)}|${th.cellFt}`;
+            let demRaw;
+            if (terDemCache && terDemCache.key === demKey) {
+                demRaw = terDemCache.dem;
+                console.log(`${TAG} profiler: DEM served from session cache (${demRaw.w}×${demRaw.h})`);
+            } else {
+                showToast('⛰ Profiler: fetching DEM…');
+                demRaw = await terFetchDem(west, south, east, north);
+                terDemCache = { key: demKey, dem: demRaw };
+            }
+            // Never mutate the cached raster — derive the working copy.
+            const dem0 = Object.assign({}, demRaw, {
+                vals: terEnabled.median ? await terMedianFilter(demRaw.vals, demRaw.w, demRaw.h) : demRaw.vals,
+            });
+            // Site-footprint mask (clipSite): everything outside the union
+            // of existing FFZs becomes no-data before segmentation.
+            let maskNote = '';
+            if (terEnabled.clipSite) {
+                const mask = terSiteMask(dem0, ents);
+                if (mask) {
+                    const vv = (dem0.vals === demRaw.vals) ? new Float32Array(demRaw.vals) : dem0.vals;
+                    let kept = 0;
+                    for (let i = 0; i < vv.length; i++) { if (!mask[i]) vv[i] = NaN; else kept++; }
+                    dem0.vals = vv;
+                    maskNote = `masked to site footprint (${Math.round(kept / vv.length * 100)}% of grid)`;
+                } else {
+                    maskNote = 'no FFZs on site — full rectangle profiled';
+                }
+            }
+            const seg = await terSegment(dem0, th);
+            terBClearStage();   // staged Phase-2 geometry belongs to the previous segmentation
+            terState = { sid, siteLabel: getCurrentSiteName() || `site ${sid}`, dem: dem0, seg, thresholds: th, maskNote };
+            await terRenderOverlay();
+            terRenderPanel();
+            const ms = Math.round(performance.now() - t0);
+            console.log(`${TAG} terrain profile: ${seg.order.length} region(s), ${seg.nfzCands.length} NFZ candidate(s), `
+                + `grid ${dem0.w}×${dem0.h} @ ~${Math.round(dem0.cellXft)} ft, relief ${Math.round(seg.mnFt)}–${Math.round(seg.mxFt)} ft, ${ms} ms`);
+            showToast(`⛰ ${seg.order.length} region(s) · ${seg.nfzCands.length} NFZ candidate(s) — ${(seg.mxFt - seg.mnFt).toFixed(0)} ft relief`);
+        } catch (e) {
+            console.warn(`${TAG} terrain profiler failed:`, e);
+            showToast(`Profiler failed — ${e && e.message ? e.message : e}`, 'rgba(255,96,96,0.55)');
+        } finally {
+            terRunning = false;
+        }
+    }
+
+    function terrainProfilerClear() {
+        terBClearStage();
+        terRemoveLayer();
+        terClosePanel();
+        terState = null;
+        showToast('Terrain profiler cleared');
+    }
+
+    // Site nav invalidates the profile — the overlay belongs to one site.
+    window.addEventListener('hashchange', () => {
+        if (terState && terState.sid !== getCurrentSiteID()) {
+            terBClearStage();
+            terRemoveLayer();
+            terClosePanel();
+            terState = null;
+            terDemCache = null;   // ~5 MB raster — free it on site switch
+            console.log(`${TAG} terrain profile cleared (site changed)`);
+        }
+    });
+
+    // ============================================================
+    // ⛰ Terrain Profiler — Phase 2: FFZ / NFZ auto-builder (v4.202,
+    // feature #203). Turns the profiled regions into REAL entities:
+    //   • vectorize the label grid into polygons whose shared borders
+    //     are simplified ONCE (arc/topology approach — adjacent FFZs
+    //     butt exactly, no sliver gaps/overlaps to trip the SOP checks)
+    //   • regions that enclose an island (hole) are SLICED into simple
+    //     hole-free pieces with polygon-clipping (Percepto polygons
+    //     can't store holes)
+    //   • NFZ candidates → buffered convex hulls clipped to stay
+    //     entirely inside their parent FFZ piece (containment rule)
+    //   • staged preview (vector layers + checkboxes) → create-only
+    //     commit with the Advanced-Draw-style rails: CSRF, template
+    //     body, unique names, backup stash + download, sequential
+    //     POSTs with 403 abort, fresh-fetch verify, run log, and a
+    //     double-click-armed Undo that deletes exactly what this run
+    //     created. FFZs commit first; NFZs only after FFZs verify.
+    // ============================================================
+    let terBState = null;   // { sid, pieces, nfzs, arcs, rings, createdIds, runLog, committing }
+    let terBLayers = [];    // staged preview vector layers on the map
+    let terBArm = 0;        // double-click arm timestamps (commit / undo)
+    let terBUndoArm = 0;
+
+    function terBClearStage() {
+        const map = getLeafletMap();
+        terBLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        terBLayers = [];
+        terBState = null;
+        terBArm = 0; terBUndoArm = 0;
+    }
+
+    function terBPC() {
+        try { if (typeof polygonClipping !== 'undefined' && polygonClipping) return polygonClipping; } catch (e) {}
+        try { return unsafeWindow && unsafeWindow.polygonClipping; } catch (e) {}
+        return null;
+    }
+
+    // Simplify one arc. CLOSED loops can't be DP'd with both anchors on the
+    // same point (any loop smaller than the tolerance collapses to nothing —
+    // small regions were silently vanishing): split the loop at the point
+    // farthest from pts[0], simplify both halves, and rejoin.
+    function terBSimplifyArc(A, tol) {
+        if (!A.closed || A.pts.length < 5) return terBSimplify(A.pts, tol);
+        const pts = A.pts;
+        let far = 1, farD = -1;
+        for (let i = 1; i < pts.length - 1; i++) {
+            const dx = pts[i][0] - pts[0][0], dy = pts[i][1] - pts[0][1];
+            const d = dx * dx + dy * dy;
+            if (d > farD) { farD = d; far = i; }
+        }
+        const h1 = terBSimplify(pts.slice(0, far + 1), tol);
+        const h2 = terBSimplify(pts.slice(far), tol);
+        const joined = h1.concat(h2.slice(1));
+        if (joined.length >= 5) return joined;   // ≥4 distinct points (closed dup included)
+        // Loop smaller than the tolerance — DP collapses it to a line and
+        // the region silently vanishes. Keep a coarse-but-valid ring instead.
+        if (pts.length <= 9) return pts.slice();
+        const step = Math.ceil((pts.length - 1) / 8);
+        const out = [];
+        for (let i = 0; i < pts.length - 1; i += step) out.push(pts[i]);
+        out.push(pts[pts.length - 1]);
+        return out;
+    }
+
+    // --- Douglas-Peucker on [x,y] lattice points, endpoints pinned ---
+    function terBSimplify(pts, tol) {
+        if (!tol || pts.length <= 2) return pts.slice();
+        const keep = new Uint8Array(pts.length);
+        keep[0] = 1; keep[pts.length - 1] = 1;
+        const st = [[0, pts.length - 1]];
+        const t2 = tol * tol;
+        while (st.length) {
+            const [a, b] = st.pop();
+            if (b - a < 2) continue;
+            const ax = pts[a][0], ay = pts[a][1], bx = pts[b][0], by = pts[b][1];
+            const dx = bx - ax, dy = by - ay;
+            const len2 = dx * dx + dy * dy;
+            let worst = -1, worstD = -1;
+            for (let i = a + 1; i < b; i++) {
+                let d;
+                if (!len2) { const ex = pts[i][0] - ax, ey = pts[i][1] - ay; d = ex * ex + ey * ey; }
+                else {
+                    const t = ((pts[i][0] - ax) * dx + (pts[i][1] - ay) * dy) / len2;
+                    const tc = Math.max(0, Math.min(1, t));
+                    const ex = pts[i][0] - (ax + tc * dx), ey = pts[i][1] - (ay + tc * dy);
+                    d = ex * ex + ey * ey;
+                }
+                if (d > worstD) { worstD = d; worst = i; }
+            }
+            if (worstD > t2) { keep[worst] = 1; st.push([a, worst]); st.push([worst, b]); }
+        }
+        const out = [];
+        for (let i = 0; i < pts.length; i++) if (keep[i]) out.push(pts[i]);
+        return out;
+    }
+
+    // --- Vectorize the label grid into shared-boundary arcs + per-region
+    // ring descriptions (arc sequences). Lattice corners: x∈[0..w], y∈[0..h].
+    function terBVectorize(seg, dem) {
+        const { regGrid } = seg;
+        const w = dem.w, h = dem.h, W1 = w + 1;
+        const Lb = (x, y) => (x < 0 || y < 0 || x >= w || y >= h) ? -1 : regGrid[y * w + x];
+        const vE = (x, y) => Lb(x - 1, y) !== Lb(x, y);      // vertical edge, corners (x,y)-(x,y+1); y∈[0..h-1], x∈[0..w]
+        const hE = (x, y) => Lb(x, y - 1) !== Lb(x, y);      // horizontal edge, corners (x,y)-(x+1,y); x∈[0..w-1], y∈[0..h]
+        const eIdV = (x, y) => (y * W1 + x) * 2;
+        const eIdH = (x, y) => (y * W1 + x) * 2 + 1;
+        const edgeCount = (x, y) => {
+            let c = 0;
+            if (y > 0 && vE(x, y - 1)) c++;
+            if (y < h && vE(x, y)) c++;
+            if (x > 0 && hE(x - 1, y)) c++;
+            if (x < w && hE(x, y)) c++;
+            return c;
+        };
+        const isNode = (x, y) => edgeCount(x, y) > 2;
+        const incident = (x, y) => {
+            const out = [];
+            if (y > 0 && vE(x, y - 1)) out.push({ eid: eIdV(x, y - 1), ox: x, oy: y - 1 });
+            if (y < h && vE(x, y)) out.push({ eid: eIdV(x, y), ox: x, oy: y + 1 });
+            if (x > 0 && hE(x - 1, y)) out.push({ eid: eIdH(x - 1, y), ox: x - 1, oy: y });
+            if (x < w && hE(x, y)) out.push({ eid: eIdH(x, y), ox: x + 1, oy: y });
+            return out;
+        };
+        const nEdgeSlots = (h + 1) * W1 * 2;
+        const edgeArc = new Int32Array(nEdgeSlots).fill(-1);
+        const arcs = [];   // { pts:[[x,y]..], closed }
+        const walkArc = (sx, sy, eid0, nx, ny) => {
+            const pts = [[sx, sy]];
+            let lastEid = eid0, cx = nx, cy = ny;
+            const eids = [eid0];
+            for (;;) {
+                pts.push([cx, cy]);
+                if ((cx === sx && cy === sy) || isNode(cx, cy)) break;
+                const inc = incident(cx, cy);
+                let nxt = null;
+                for (const e2 of inc) if (e2.eid !== lastEid) { nxt = e2; break; }
+                if (!nxt) break;
+                lastEid = nxt.eid; eids.push(nxt.eid);
+                cx = nxt.ox; cy = nxt.oy;
+            }
+            const id = arcs.length;
+            arcs.push({ pts, closed: pts.length > 2 && pts[0][0] === pts[pts.length - 1][0] && pts[0][1] === pts[pts.length - 1][1] });
+            eids.forEach(e2 => { edgeArc[e2] = id; });
+            return id;
+        };
+        // Seed arcs from every node corner, then sweep for pure loops.
+        for (let y = 0; y <= h; y++) {
+            for (let x = 0; x <= w; x++) {
+                if (!isNode(x, y)) continue;
+                for (const e2 of incident(x, y)) if (edgeArc[e2.eid] === -1) walkArc(x, y, e2.eid, e2.ox, e2.oy);
+            }
+        }
+        for (let y = 0; y < h; y++) for (let x = 0; x <= w; x++) if (vE(x, y) && edgeArc[eIdV(x, y)] === -1) walkArc(x, y, eIdV(x, y), x, y + 1);
+        for (let y = 0; y <= h; y++) for (let x = 0; x < w; x++) if (hE(x, y) && edgeArc[eIdH(x, y)] === -1) walkArc(x, y, eIdH(x, y), x + 1, y);
+        // --- Ring reconstruction: stitch DIRECTED ARCS (region on the LEFT
+        // of travel) end-to-end with a left-hand rule at nodes. Arc-level
+        // stitching (not edge-level) so rings are always arc-aligned —
+        // simplification then can't desync neighbors.
+        const DIR_RANK = { '0,-1': 0, '1,0': 1, '0,1': 2, '-1,0': 3 };   // up,right,down,left (CW order)
+        const stepKey = (a, b) => `${Math.sign(b[0] - a[0])},${Math.sign(b[1] - a[1])}`;
+        // Side labels of each arc relative to FORWARD traversal (pts[0]→pts[1]).
+        const arcSide = arcs.map(A => {
+            const p0 = A.pts[0], p1 = A.pts[1];
+            const dx = p1[0] - p0[0], dy = p1[1] - p0[1];
+            let leftCell, rightCell;
+            if (dx === 1) { leftCell = [p0[0], p0[1] - 1]; rightCell = [p0[0], p0[1]]; }
+            else if (dx === -1) { leftCell = [p1[0], p1[1]]; rightCell = [p1[0], p1[1] - 1]; }
+            else if (dy === 1) { leftCell = [p0[0], p0[1]]; rightCell = [p0[0] - 1, p0[1]]; }
+            else { leftCell = [p0[0] - 1, p1[1]]; rightCell = [p0[0], p1[1]]; }
+            return { left: Lb(leftCell[0], leftCell[1]), right: Lb(rightCell[0], rightCell[1]) };
+        });
+        // Directed-arc records per region.
+        const dirArc = (ai, fwd) => {
+            const P = arcs[ai].pts;
+            const n2 = P.length;
+            return fwd
+                ? { arc: ai, fwd, from: P[0], to: P[n2 - 1], outDir: stepKey(P[0], P[1]), inDir: stepKey(P[n2 - 2], P[n2 - 1]) }
+                : { arc: ai, fwd, from: P[n2 - 1], to: P[0], outDir: stepKey(P[n2 - 1], P[n2 - 2]), inDir: stepKey(P[1], P[0]) };
+        };
+        const regionDirArcs = new Map();   // regionIdx → [dirArcRec]
+        arcs.forEach((A, ai) => {
+            const s = arcSide[ai];
+            if (s.left >= 0) { let l = regionDirArcs.get(s.left); if (!l) { l = []; regionDirArcs.set(s.left, l); } l.push(dirArc(ai, true)); }
+            if (s.right >= 0) { let l = regionDirArcs.get(s.right); if (!l) { l = []; regionDirArcs.set(s.right, l); } l.push(dirArc(ai, false)); }
+        });
+        const ringsByRegion = new Map();   // regionIdx → [ { arcSeq:[{arc,fwd}] } ]
+        regionDirArcs.forEach((dlist, r) => {
+            const byStart = new Map();     // "x,y" → [rec]
+            dlist.forEach(rec => {
+                const k = `${rec.from[0]},${rec.from[1]}`;
+                let l = byStart.get(k);
+                if (!l) { l = []; byStart.set(k, l); }
+                l.push(rec);
+            });
+            const usedRec = new Set();
+            const rings = [];
+            for (const seed of dlist) {
+                if (usedRec.has(seed)) continue;
+                const ringArcs = [seed];
+                usedRec.add(seed);
+                let cur = seed;
+                let guard = 0;
+                for (;;) {
+                    if (guard++ > dlist.length + 2) { console.warn(`${TAG} builder: ring guard tripped (region ${r})`); break; }
+                    const cands = byStart.get(`${cur.to[0]},${cur.to[1]}`) || [];
+                    // left-hand rule: rotate CW from the reverse of the
+                    // incoming direction, first candidate wins
+                    const revRank = DIR_RANK[cur.inDir.split(',').map(v => -v).join(',')];
+                    let best = null, bestRot = 9;
+                    for (const c of cands) {
+                        const rot0 = ((DIR_RANK[c.outDir] - revRank) + 4) % 4;
+                        const eff = rot0 === 0 ? 4 : rot0;
+                        if (eff < bestRot) { bestRot = eff; best = c; }
+                    }
+                    if (!best) { console.warn(`${TAG} builder: open boundary chain (region ${r}) — ring dropped`); ringArcs.length = 0; break; }
+                    if (best === ringArcs[0]) break;   // ring closed
+                    if (usedRec.has(best)) { console.warn(`${TAG} builder: ring re-entered a used arc (region ${r}) — ring dropped`); ringArcs.length = 0; break; }
+                    usedRec.add(best);
+                    ringArcs.push(best);
+                    cur = best;
+                }
+                if (ringArcs.length) rings.push({ arcSeq: ringArcs.map(rec => ({ arc: rec.arc, fwd: rec.fwd })) });
+            }
+            ringsByRegion.set(r, rings);
+        });
+        return { arcs, ringsByRegion };
+    }
+
+    // Emit a ring's lattice points from its (simplified) arcs.
+    function terBRingPoints(ring, arcs) {
+        const out = [];
+        for (const s of ring.arcSeq) {
+            const A = arcs[s.arc];
+            const pts = A.simp || A.pts;
+            const seq = s.fwd ? pts : pts.slice().reverse();
+            const start = out.length ? 1 : 0;   // skip the shared junction point
+            for (let i = start; i < seq.length; i++) out.push(seq[i]);
+        }
+        // drop a duplicated closing point
+        while (out.length > 1 && out[0][0] === out[out.length - 1][0] && out[0][1] === out[out.length - 1][1]) out.pop();
+        return out;
+    }
+
+    function terBLatticeToLL(dem, x, y) {
+        const lng = dem.bounds.west + (x / dem.w) * (dem.bounds.east - dem.bounds.west);
+        const lat = terInvMercY(dem.mercY2 - (y / dem.h) * (dem.mercY2 - dem.mercY1));
+        return { lat, lng };
+    }
+
+    function terBSignedArea(pts) {
+        let a = 0;
+        for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) a += (pts[j][0] * pts[i][1] - pts[i][0] * pts[j][1]);
+        return a / 2;
+    }
+
+    // Slice a polygon-with-holes ([outer, hole…] in [lng,lat]) into
+    // hole-free rings via horizontal cuts through each hole's centroid.
+    function terBSliceHoles(poly, depth) {
+        if (poly.length <= 1) return [poly[0]];
+        const PC = terBPC();
+        if (!PC) return [poly[0]];   // no clipping lib → drop holes (logged by caller)
+        if (depth > 12) return [poly[0]];
+        const hole = poly[1];
+        let clat = 0;
+        hole.forEach(p => { clat += p[1]; });
+        clat /= hole.length;
+        let mnLng = Infinity, mxLng = -Infinity, mnLat = Infinity, mxLat = -Infinity;
+        poly[0].forEach(p => {
+            if (p[0] < mnLng) mnLng = p[0]; if (p[0] > mxLng) mxLng = p[0];
+            if (p[1] < mnLat) mnLat = p[1]; if (p[1] > mxLat) mxLat = p[1];
+        });
+        const eps = 1e-7;
+        const rects = [
+            [[[mnLng - eps, clat], [mxLng + eps, clat], [mxLng + eps, mxLat + eps], [mnLng - eps, mxLat + eps], [mnLng - eps, clat]]],
+            [[[mnLng - eps, mnLat - eps], [mxLng + eps, mnLat - eps], [mxLng + eps, clat], [mnLng - eps, clat], [mnLng - eps, mnLat - eps]]],
+        ];
+        const out = [];
+        for (const rect of rects) {
+            let res = null;
+            try { res = PC.intersection([poly], [rect]); } catch (e) { console.warn(`${TAG} builder: hole slice threw:`, e); }
+            (res || []).forEach(p => {
+                terBSliceHoles(p, (depth || 0) + 1).forEach(r2 => { if (r2 && r2.length >= 3) out.push(r2); });
+            });
+        }
+        return out.length ? out : [poly[0]];
+    }
+
+    const terBNormRing = (ring) => {
+        const out = ring.slice();
+        while (out.length > 1 && out[0][0] === out[out.length - 1][0] && out[0][1] === out[out.length - 1][1]) out.pop();
+        return out;
+    };
+
+    // Convex hull (Andrew monotone chain) on [x,y] points.
+    function terBHull(pts) {
+        const P = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+        if (P.length < 3) return P;
+        const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+        const lower = [];
+        for (const p of P) { while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop(); lower.push(p); }
+        const upper = [];
+        for (let i = P.length - 1; i >= 0; i--) { const p = P[i]; while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop(); upper.push(p); }
+        lower.pop(); upper.pop();
+        return lower.concat(upper);
+    }
+
+    // Outward offset of a convex lattice polygon by d cells.
+    function terBOffsetConvex(hull, d) {
+        if (hull.length < 3) {
+            // degenerate — square around the centroid
+            let cx = 0, cy = 0;
+            hull.forEach(p => { cx += p[0]; cy += p[1]; });
+            cx /= hull.length || 1; cy /= hull.length || 1;
+            const s = Math.max(d, 1);
+            return [[cx - s, cy - s], [cx + s, cy - s], [cx + s, cy + s], [cx - s, cy + s]];
+        }
+        let cx = 0, cy = 0;
+        hull.forEach(p => { cx += p[0]; cy += p[1]; });
+        cx /= hull.length; cy /= hull.length;
+        const n = hull.length;
+        // offset each edge outward, then intersect consecutive edge lines
+        const lines = [];
+        for (let i = 0; i < n; i++) {
+            const a = hull[i], b = hull[(i + 1) % n];
+            let nx = b[1] - a[1], ny = -(b[0] - a[0]);
+            const len = Math.hypot(nx, ny) || 1;
+            nx /= len; ny /= len;
+            const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+            if ((mx + nx - cx) * (mx - cx) + (my + ny - cy) * (my - cy) < (mx - cx) * (mx - cx) + (my - cy) * (my - cy)) { nx = -nx; ny = -ny; }
+            lines.push({ px: a[0] + nx * d, py: a[1] + ny * d, dx: b[0] - a[0], dy: b[1] - a[1] });
+        }
+        const out = [];
+        for (let i = 0; i < n; i++) {
+            const l1 = lines[(i + n - 1) % n], l2 = lines[i];
+            const den = l1.dx * l2.dy - l1.dy * l2.dx;
+            if (Math.abs(den) < 1e-12) { out.push([l2.px, l2.py]); continue; }
+            const t = ((l2.px - l1.px) * l2.dy - (l2.py - l1.py) * l2.dx) / den;
+            out.push([l1.px + t * l1.dx, l1.py + t * l1.dy]);
+        }
+        return out;
+    }
+
+    // --- Stage: vectorize + simplify + slice + NFZ hulls → terBState ---
+    function terBStage() {
+        try { terBStageInner(); }
+        catch (e) {
+            console.warn(`${TAG} builder: stage threw:`, e);
+            showToast(`Stage failed — ${e && e.message ? e.message : e}`, 'rgba(255,96,96,0.55)');
+            terBClearStage();
+            terRenderPanel();
+        }
+    }
+    function terBStageInner() {
+        const st = terState;
+        if (!st) { showToast('Run the profiler first', 'rgba(255,96,96,0.55)'); return; }
+        terBClearStage();
+        const t0 = performance.now();
+        const seg = st.seg, dem = st.dem, th = terThresholds;
+        const tolCells = Math.max(0, (th.simplifyFt || 0) / Math.max(1, dem.cellXft));
+        const topo = terBVectorize(seg, dem);
+        topo.arcs.forEach(A => { A.tol = tolCells; A.simp = terBSimplifyArc(A, tolCells); });
+        const log = [];
+        // Self-intersection repair loop: halve the tolerance of the arcs of
+        // any failing region ring and rebuild (shared arcs stay shared).
+        // HARD RAILS (v4.203 — a live run froze the tab without these):
+        //   • tolerance floor = 1 cell, NEVER raw lattice (a site-boundary
+        //     arc can be tens of thousands of stair-step vertices)
+        //   • ringSelfIntersects is O(n²) — skip rings > 1500 pts (log it)
+        //   • whole loop is time-budgeted; on overrun we bail loudly
+        const REPAIR_BUDGET_MS = 5000;
+        const repairT0 = performance.now();
+        for (let iter = 0; iter < 3; iter++) {
+            if (performance.now() - repairT0 > REPAIR_BUDGET_MS) { log.push('⚠ simplify repair: time budget hit — kept current geometry (raise simplify tolerance if a piece looks wrong)'); break; }
+            const badArcs = new Set();
+            let skippedBig = 0;
+            topo.ringsByRegion.forEach((rings, r) => {
+                rings.forEach(ring => {
+                    const pts = terBRingPoints(ring, topo.arcs);
+                    if (pts.length < 3) return;
+                    if (pts.length > 1500) { skippedBig++; return; }   // O(n²) guard
+                    const ll = pts.map(p => terBLatticeToLL(dem, p[0], p[1]));
+                    if (ringSelfIntersects(ll)) ring.arcSeq.forEach(s => badArcs.add(s.arc));
+                });
+            });
+            if (skippedBig && !iter) log.push(`${skippedBig} very large ring(s) skipped the self-intersect check (>1500 verts)`);
+            if (!badArcs.size) break;
+            let changed = 0;
+            badArcs.forEach(aId => {
+                const A = topo.arcs[aId];
+                const nt = Math.max(1, A.tol / 2);   // floor at 1 cell — never raw
+                if (nt !== A.tol) { A.tol = nt; A.simp = terBSimplifyArc(A, nt); changed++; }
+            });
+            if (!changed) break;
+            log.push(`simplify repair: relaxed ${badArcs.size} arc(s) (pass ${iter + 1})`);
+        }
+        // Build pieces per region (slicing holes).
+        const pieces = [];
+        const pieceRegion = [];
+        let droppedRegions = 0;
+        seg.order.forEach(gi => {
+            const rg = seg.regions[gi];
+            const before = pieces.length;
+            const rings = topo.ringsByRegion.get(gi) || [];
+            if (!rings.length) { droppedRegions++; return; }
+            const built = rings.map(ring => {
+                const pts = terBRingPoints(ring, topo.arcs);
+                return { pts, area: Math.abs(terBSignedArea(pts)) };
+            }).filter(r2 => r2.pts.length >= 3);
+            if (!built.length) { droppedRegions++; return; }
+            built.sort((a, b) => b.area - a.area);
+            const outer = built[0], holes = built.slice(1);
+            const toLLPair = (p) => { const q = terBLatticeToLL(dem, p[0], p[1]); return [q.lng, q.lat]; };
+            const polyLL = [outer.pts.map(toLLPair)].concat(holes.map(h2 => h2.pts.map(toLLPair)));
+            // close rings for polygon-clipping
+            polyLL.forEach(r2 => r2.push(r2[0].slice()));
+            let flat;
+            if (holes.length) {
+                flat = terBSliceHoles(polyLL, 0).map(terBNormRing);
+                log.push(`${rg.name}: ${holes.length} enclosed island(s) → sliced into ${flat.length} piece(s)`);
+            } else {
+                flat = [terBNormRing(polyLL[0])];
+            }
+            flat.forEach((ringLL, pi) => {
+                if (ringLL.length < 3) return;
+                const points = ringLL.map(p => ({ lat: p[1], lng: p[0] }));
+                if (points.length <= 1500 && ringSelfIntersects(points)) { log.push(`${rg.name}${flat.length > 1 ? String.fromCharCode(97 + pi) : ''}: self-intersecting after slicing — SKIPPED`); return; }
+                // area in acres (equirectangular)
+                const latRef = points[0].lat * Math.PI / 180;
+                let a2 = 0;
+                for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+                    a2 += (points[j].lng * points[i].lat - points[i].lng * points[j].lat);
+                }
+                const acres = Math.abs(a2 / 2) * 111320 * Math.cos(latRef) * 110540 / 4046.8564224;
+                pieces.push({
+                    region: gi, name: `${rg.name}${flat.length > 1 ? String.fromCharCode(97 + pi) : ''}`,
+                    points, acres,
+                    floorMSL: rg.floorMSL, ceilMSL: rg.ceilMSL,
+                    bandLo: rg.bandLo, bandHi: rg.bandHi,
+                    verts: points.length,
+                    infeasible: rg.bandHeight <= 0,
+                    selected: rg.bandHeight > 0,
+                });
+                pieceRegion.push(gi);
+            });
+            if (pieces.length === before) droppedRegions++;
+        });
+        if (droppedRegions) log.push(`${droppedRegions} region(s) too small to vectorize at this tolerance — dropped (lower simplify ft to keep them)`);
+        // NFZ candidate hulls (candGrid carries candidate index + 1).
+        const nfzs = [];
+        const bufCells = Math.max(0, (th.nfzBufFt || 0) / Math.max(1, dem.cellXft));
+        const candCells = new Map();
+        const cg = seg.candGrid;
+        for (let i = 0; i < cg.length; i++) {
+            const c = cg[i];
+            if (!c) continue;
+            let list = candCells.get(c - 1);
+            if (!list) { list = []; candCells.set(c - 1, list); }
+            list.push(i);
+        }
+        seg.nfzCands.forEach((cand, ci) => {
+            const cells = candCells.get(ci);
+            if (!cells || !cells.length) return;
+            const corners = [];
+            cells.forEach(i => {
+                const x = i % dem.w, y = (i / dem.w) | 0;
+                corners.push([x, y], [x + 1, y], [x, y + 1], [x + 1, y + 1]);
+            });
+            const hull = terBOffsetConvex(terBHull(corners), bufCells);
+            let ringLL = hull.map(p => { const q = terBLatticeToLL(dem, p[0], p[1]); return [q.lng, q.lat]; });
+            // containment: clip to the parent piece that holds the centroid
+            const ctr = terCandCentroid(cand);
+            let parent = -1;
+            for (let pi = 0; pi < pieces.length; pi++) {
+                if (pieces[pi].region === cand.region && pointInPolygon(ctr.lat, ctr.lng, pieces[pi].points)) { parent = pi; break; }
+            }
+            if (parent === -1) { for (let pi = 0; pi < pieces.length; pi++) if (pointInPolygon(ctr.lat, ctr.lng, pieces[pi].points)) { parent = pi; break; } }
+            let clipped = false;
+            if (parent >= 0) {
+                const PC = terBPC();
+                if (PC) {
+                    try {
+                        const pp = pieces[parent].points.map(p => [p.lng, p.lat]);
+                        pp.push(pp[0].slice());
+                        const hh = ringLL.slice(); hh.push(hh[0].slice());
+                        const res = PC.intersection([[hh]], [[pp]]);
+                        let bestR = null, bestA = -1;
+                        (res || []).forEach(p => {
+                            const r2 = terBNormRing(p[0]);
+                            const A2 = Math.abs(terBSignedArea(r2));
+                            if (A2 > bestA) { bestA = A2; bestR = r2; }
+                        });
+                        if (bestR && bestR.length >= 3) {
+                            if (bestR.length !== ringLL.length) clipped = true;
+                            ringLL = bestR;
+                        }
+                    } catch (e) { console.warn(`${TAG} builder: NFZ clip threw:`, e); }
+                }
+            }
+            const points = ringLL.map(p => ({ lat: p[1], lng: p[0] }));
+            if (points.length < 3 || ringSelfIntersects(points)) return;
+            nfzs.push({
+                name: `NFZ ${cand.dir || 'outlier'} ${cand.region >= 0 ? seg.regions[cand.region].name : ''} ${nfzs.length + 1}`.replace(/\s+/g, ' ').trim(),
+                points, acres: cand.acres, dir: cand.dir, parent, clipped,
+                orphan: parent === -1,
+                selected: parent !== -1,
+            });
+        });
+        const ms = Math.round(performance.now() - t0);
+        const totalVerts = pieces.reduce((s2, p) => s2 + p.verts, 0);
+        log.unshift(`staged ${pieces.length} FFZ piece(s) (${totalVerts} vertices) + ${nfzs.length} NFZ(s) in ${ms} ms · simplify ${th.simplifyFt} ft`);
+        terBState = { sid: st.sid, pieces, nfzs, runLog: log, createdIds: [], committing: false };
+        terBDrawPreview();
+        terRenderPanel();
+        console.log(`${TAG} builder: ${log[0]}`);
+    }
+
+    function terBDrawPreview() {
+        const bs = terBState;
+        if (!bs) return;
+        const L = getLeafletL();
+        const map = getLeafletMap();
+        if (!L || !map) return;
+        terBLayers.forEach(l => { try { map.removeLayer(l); } catch (e) {} });
+        terBLayers = [];
+        const seg = terState && terState.seg;
+        bs.pieces.forEach(p => {
+            try {
+                const c = seg ? terColorFor((p.bandLo + p.bandHi) / 2, seg.mnFt, seg.mxFt) : [255, 225, 77];
+                const col = `rgb(${c[0]},${c[1]},${c[2]})`;
+                const pl = L.polygon(p.points.map(q => [q.lat, q.lng]), {
+                    color: p.selected ? '#ffe14d' : '#666666', weight: 2.5, opacity: p.selected ? 0.95 : 0.5,
+                    dashArray: '7,5', fillColor: col, fillOpacity: p.selected ? 0.10 : 0.03, interactive: false,
+                });
+                pl.addTo(map);
+                terBLayers.push(pl);
+            } catch (e) {}
+        });
+        bs.nfzs.forEach(z => {
+            try {
+                const pl = L.polygon(z.points.map(q => [q.lat, q.lng]), {
+                    color: '#ff35d0', weight: 2, opacity: z.selected ? 0.95 : 0.45,
+                    dashArray: '3,4', fillColor: '#ff35d0', fillOpacity: z.selected ? 0.18 : 0.05, interactive: false,
+                });
+                pl.addTo(map);
+                terBLayers.push(pl);
+            } catch (e) {}
+        });
+    }
+
+    // --- Commit: create-only, FFZs then NFZs, full rails ---
+    async function terBCommit() {
+        if (liteBlockedWrite('build terrain FFZs/NFZs')) return;
+        const bs = terBState;
+        const st = terState;
+        if (!bs || !st) { showToast('Nothing staged', 'rgba(255,96,96,0.55)'); return; }
+        if (bs.committing) { showToast('Commit already running…'); return; }
+        const sid = getCurrentSiteID();
+        if (!sid || sid !== bs.sid) { showToast('Site changed since staging — re-run the profiler', 'rgba(255,96,96,0.55)'); return; }
+        const selP = bs.pieces.filter(p => p.selected);
+        const selN = bs.nfzs.filter(z => z.selected);
+        if (!selP.length && !selN.length) { showToast('Nothing selected', 'rgba(255,96,96,0.55)'); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { showToast('No CSRF token — make one native save/edit anywhere in Percepto first, then retry', 'rgba(255,96,96,0.55)'); return; }
+        bs.committing = true;
+        bs.runLog = [];
+        const logL = (m) => { bs.runLog.push(m); console.log(`${TAG} builder: ${m}`); };
+        try {
+            let siteCfg = null;
+            try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
+            if (siteCfg && siteCfg.mountain_terrain) {
+                logL('ABORT: this is a mountain-terrain site — the profiler’s MSL floor math does not apply.');
+                showToast('Aborted — mountain-terrain site (MSL floors invalid)', 'rgba(255,96,96,0.55)');
+                return;
+            }
+            await fetchMapObjects(sid, true);
+            const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+            const tmplFfz = ents.find(e => e.type === 16 && entityCoords(e));
+            const tmplNfz = ents.find(e => e.type === 4 && entityCoords(e));
+            let tmplFfzBody = null, tmplNfzBody = null;
+            if (tmplFfz) { try { tmplFfzBody = buildWriteBody(tmplFfz, siteCfg); } catch (e) {} }
+            if (tmplNfz) { try { tmplNfzBody = buildWriteBody(tmplNfz, siteCfg); } catch (e) {} }
+            const usedF = new Set(ents.filter(e => e.type === 16 && e.name).map(e => e.name));
+            const usedN = new Set(ents.filter(e => e.type === 4 && e.name).map(e => e.name));
+            const uniq = (base, used) => { base = genCleanName(base) || 'FFZ'; if (!used.has(base)) { used.add(base); return base; } let i = 2, n2; do { n2 = `${base}_${i++}`; } while (used.has(n2)); used.add(n2); return n2; };
+            const prefix = (terThresholds.namePrefix !== undefined) ? String(terThresholds.namePrefix) : 'FFZ ';
+            // Build all bodies FIRST (backup covers exactly what we send).
+            const ffzWrites = selP.map(p => {
+                const body = genCreateBody({
+                    name: `${prefix}${p.bandLo}-${p.bandHi} ${p.name}`,
+                    points: p.points,
+                    restrictions: { minAlt: p.floorMSL / M_TO_FT, maxAlt: p.ceilMSL / M_TO_FT },
+                }, sid, siteCfg, tmplFfzBody);
+                body.name = uniq(body.name, usedF);
+                return { piece: p, body };
+            });
+            const nfzWrites = selN.map(z => {
+                let b;
+                if (tmplNfzBody) { b = JSON.parse(JSON.stringify(tmplNfzBody)); delete b.id; }
+                else b = { type: 4, description: '', custom: {}, params: {}, asset_waypoints: null, constantly_present_asset_name: false, general_marker_type: '', marker_height: 0, is_unshielded: false, restrictions: [] };
+                b.type = 4;
+                b.name = uniq(z.name, usedN);
+                b.description = '';
+                b.site_id = sid;
+                b.points = z.points;
+                b.validated = false;
+                b.arcs = [];
+                b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
+                return { zone: z, body: b };
+            });
+            // Backup: stash + download of everything about to be created.
+            const backup = { site: sid, at: new Date().toISOString(), ffzs: ffzWrites.map(w => w.body), nfzs: nfzWrites.map(w => w.body) };
+            try { localStorage.setItem(`aim_ter_build_backup:${sid}`, JSON.stringify(backup)); } catch (e) {}
+            try { downloadJSONFile(`terrain-build-${sid}-${Date.now()}.json`, JSON.stringify(backup, null, 1)); } catch (e) { logL('backup download failed (stash in localStorage still written)'); }
+            // Sequential creates — FFZs first.
+            const created = [];
+            const post = async (body, label) => {
+                const r = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
+                const txt = await r.text();
+                let json = null;
+                try { json = JSON.parse(txt); } catch (e) {}
+                const saved = json && json.map_objects;
+                if (r.status === 403) { throw Object.assign(new Error('403 forbidden — write permission lost, ABORTING run'), { fatal: true }); }
+                if (r.status === 200 && saved && saved.id != null) return saved.id;
+                throw new Error(`server ${r.status} ${(txt || '').slice(0, 120)}`);
+            };
+            let fOk = 0, fFail = 0;
+            for (const w2 of ffzWrites) {
+                try {
+                    const id = await post(w2.body, w2.body.name);
+                    created.push({ id, name: w2.body.name, type: 16 });
+                    fOk++;
+                    logL(`✓ FFZ "${w2.body.name}" → #${id} (floor ${w2.piece.floorMSL} / ceil ${w2.piece.ceilMSL} ft)`);
+                } catch (e) {
+                    fFail++;
+                    logL(`✗ FFZ "${w2.body.name}": ${e.message}`);
+                    if (e.fatal) throw e;
+                }
+            }
+            // Verify FFZs before touching NFZs (containment order rule).
+            await fetchMapObjects(sid, true);
+            const after = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+            const byId = new Set(after.map(e => e.id));
+            const missing = created.filter(c => !byId.has(c.id));
+            if (missing.length) logL(`⚠ verify: ${missing.length} created FFZ(s) NOT found on re-fetch — check the site before trusting this run`);
+            else if (created.length) logL(`verify ✓ all ${created.length} FFZ(s) present on fresh fetch`);
+            let nOk = 0, nFail = 0;
+            if (nfzWrites.length && fFail === 0) {
+                for (const w2 of nfzWrites) {
+                    try {
+                        const id = await post(w2.body, w2.body.name);
+                        created.push({ id, name: w2.body.name, type: 4 });
+                        nOk++;
+                        logL(`✓ NFZ "${w2.body.name}" → #${id}`);
+                    } catch (e) {
+                        nFail++;
+                        logL(`✗ NFZ "${w2.body.name}": ${e.message}`);
+                        if (e.fatal) throw e;
+                    }
+                }
+                await fetchMapObjects(sid, true);
+                const after2 = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+                const byId2 = new Set(after2.map(e => e.id));
+                const missN = created.filter(c => c.type === 4 && !byId2.has(c.id));
+                logL(missN.length ? `⚠ verify: ${missN.length} NFZ(s) missing on re-fetch` : (nOk ? `verify ✓ all ${nOk} NFZ(s) present` : 'no NFZs created'));
+            } else if (nfzWrites.length) {
+                logL(`NFZ creates SKIPPED — ${fFail} FFZ create(s) failed (fix + re-run; NFZs need their parent FFZs)`);
+            }
+            bs.createdIds = created;
+            logL(`DONE: ${fOk}/${ffzWrites.length} FFZ · ${nOk}/${nfzWrites.length} NFZ created${fFail + nFail ? ` · ${fFail + nFail} FAILED` : ''}`);
+            showToast(fFail + nFail ? `Build: ${fOk + nOk} created, ${fFail + nFail} FAILED — see panel log` : `Build ✓ ${fOk} FFZ + ${nOk} NFZ created`, fFail + nFail ? 'rgba(255,96,96,0.55)' : undefined);
+        } catch (e) {
+            logL(`RUN ABORTED: ${e && e.message ? e.message : e}`);
+            showToast('Build aborted — see panel log', 'rgba(255,96,96,0.55)');
+        } finally {
+            bs.committing = false;
+            terRenderPanel();
+        }
+    }
+
+    // Undo THIS RUN: delete exactly the ids we created (NFZs first).
+    async function terBUndo() {
+        const bs = terBState;
+        if (!bs || !bs.createdIds || !bs.createdIds.length) { showToast('Nothing to undo', 'rgba(255,96,96,0.55)'); return; }
+        if (liteBlockedWrite('undo terrain build')) return;
+        const csrf = getCsrfToken();
+        if (!csrf) { showToast('No CSRF token', 'rgba(255,96,96,0.55)'); return; }
+        const sid = getCurrentSiteID();
+        const logL = (m) => { bs.runLog.push(m); console.log(`${TAG} builder: ${m}`); };
+        const order = bs.createdIds.slice().sort((a, b) => (b.type === 4 ? 1 : 0) - (a.type === 4 ? 1 : 0));
+        let ok = 0, fail = 0;
+        for (const c of order) {
+            try {
+                const r = await fetch(`/map_objects/${c.id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
+                if (r.status === 200 || r.status === 204) { ok++; }
+                else { fail++; logL(`undo ✗ ${c.name} (#${c.id}): server ${r.status}`); }
+            } catch (e) { fail++; logL(`undo ✗ ${c.name}: ${e && e.message || e}`); }
+        }
+        logL(`UNDO: deleted ${ok}/${order.length}${fail ? ` · ${fail} failed` : ''}`);
+        bs.createdIds = bs.createdIds.filter(c => false);
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        showToast(fail ? `Undo: ${ok} deleted, ${fail} failed` : `Undo ✓ ${ok} deleted`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+        terRenderPanel();
+    }
+
+    // --- Build section UI (rendered inside the profiler panel) ---
+    function terBSectionHtml() {
+        if (LITE) return '';
+        const th = terThresholds;
+        const bs = terBState;
+        const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+        const h = [];
+        h.push(`<div style="color:#ffe14d;font-weight:600;margin:12px 0 4px;border-bottom:1px solid rgba(255,225,77,0.3);padding-bottom:2px;">🏗 Build (Phase 2 — creates real entities)</div>`);
+        h.push(`<div style="display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;margin:4px 0 6px;">`
+            + `<label title="Boundary simplification tolerance — bigger = fewer vertices, straighter edges" style="display:flex;align-items:center;gap:4px;">simplify<input data-ter-p="simplifyFt" type="number" value="${th.simplifyFt}" step="10" style="width:58px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(255,225,77,0.35);border-radius:4px;padding:2px 4px;font:inherit;">ft</label>`
+            + `<label title="Outward buffer around each NFZ candidate hull" style="display:flex;align-items:center;gap:4px;">NFZ buf<input data-ter-p="nfzBufFt" type="number" value="${th.nfzBufFt}" step="5" style="width:52px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(255,53,208,0.35);border-radius:4px;padding:2px 4px;font:inherit;">ft</label>`
+            + `<label title="Name prefix for created FFZs" style="display:flex;align-items:center;gap:4px;">prefix<input data-ter-prefix type="text" value="${esc(th.namePrefix !== undefined ? th.namePrefix : 'FFZ ')}" style="width:70px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(255,225,77,0.35);border-radius:4px;padding:2px 4px;font:inherit;"></label>`
+            + `<button data-ter-stage style="background:rgba(255,225,77,0.13);border:1px solid rgba(255,225,77,0.5);color:#ffe14d;border-radius:5px;padding:2px 10px;cursor:pointer;font-weight:600;">🏗 Stage</button>`
+            + `</div>`);
+        if (!bs) {
+            h.push(`<div style="opacity:0.75;">Stage to preview the FFZ polygons (dashed) + NFZ hulls (magenta) before anything is written.</div>`);
+            return h.join('');
+        }
+        const selP = bs.pieces.filter(p => p.selected).length;
+        const selN = bs.nfzs.filter(z => z.selected).length;
+        h.push(`<div style="margin:2px 0 4px;">Staged: <strong style="color:#ffe14d">${bs.pieces.length} FFZ piece(s)</strong> (${selP} selected) · <strong style="color:#ff35d0">${bs.nfzs.length} NFZ(s)</strong> (${selN} selected)</div>`);
+        bs.pieces.forEach((p, i) => {
+            h.push(`<div style="margin:1px 0;line-height:1.4;${p.infeasible ? 'opacity:0.55;' : ''}">`
+                + `<label style="cursor:pointer;display:flex;align-items:flex-start;gap:5px;"><input data-ter-selp="${i}" type="checkbox" ${p.selected ? 'checked' : ''} ${p.infeasible ? 'disabled' : ''} style="margin-top:2px;">`
+                + `<span><strong style="color:#ffe14d">${esc(p.name)}</strong> · band ${p.bandLo}–${p.bandHi} · ${p.acres < 10 ? p.acres.toFixed(1) : Math.round(p.acres).toLocaleString()} ac · ${p.verts} verts · floor ${p.floorMSL.toLocaleString()} / ceil ${p.ceilMSL.toLocaleString()} ft${p.infeasible ? ' · <span style="color:#ff5555">infeasible band</span>' : ''}</span></label></div>`);
+        });
+        bs.nfzs.forEach((z, i) => {
+            h.push(`<div style="margin:1px 0;line-height:1.4;${z.orphan ? 'opacity:0.55;' : ''}">`
+                + `<label style="cursor:pointer;display:flex;align-items:flex-start;gap:5px;"><input data-ter-seln="${i}" type="checkbox" ${z.selected ? 'checked' : ''} ${z.orphan ? 'disabled' : ''} style="margin-top:2px;">`
+                + `<span><strong style="color:#ff35d0">${esc(z.name)}</strong> · ${z.acres.toFixed(1)} ac ${esc(z.dir || '')}${z.clipped ? ' · clipped to FFZ' : ''}${z.orphan ? ' · <span style="color:#ff5555">no parent FFZ — skipped</span>' : ''}</span></label></div>`);
+        });
+        h.push(`<div style="display:flex;gap:8px;margin:8px 0 2px;align-items:center;">`
+            + `<button data-ter-commit style="background:rgba(95,255,95,0.13);border:1px solid rgba(95,255,95,0.5);color:#7dffae;border-radius:5px;padding:3px 12px;cursor:pointer;font-weight:700;">⚡ Commit ${selP + selN} (double-click)</button>`
+            + (bs.createdIds && bs.createdIds.length ? `<button data-ter-undo style="background:rgba(255,96,96,0.12);border:1px solid rgba(255,96,96,0.5);color:#ff8080;border-radius:5px;padding:3px 12px;cursor:pointer;">🗑 Undo run (${bs.createdIds.length}) (double-click)</button>` : '')
+            + `</div>`);
+        if (bs.runLog && bs.runLog.length) {
+            h.push(`<div style="margin-top:6px;max-height:140px;overflow-y:auto;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:6px 8px;font-size:11px;">`
+                + bs.runLog.map(l2 => `<div style="margin:1px 0;">${esc(l2)}</div>`).join('') + `</div>`);
+        }
+        return h.join('');
+    }
+
+    // Returns true when the click was handled by the Build section.
+    function terBHandleClick(e, wrap) {
+        const stageBtn = e.target.closest('[data-ter-stage]');
+        if (stageBtn) {
+            // pull the two build params + prefix first
+            const sInp = wrap.querySelector('[data-ter-p="simplifyFt"]');
+            const bInp = wrap.querySelector('[data-ter-p="nfzBufFt"]');
+            const pInp = wrap.querySelector('[data-ter-prefix]');
+            if (sInp) { const v = parseFloat(sInp.value); if (isFinite(v) && v >= 0) terThresholds.simplifyFt = v; }
+            if (bInp) { const v = parseFloat(bInp.value); if (isFinite(v) && v >= 0) terThresholds.nfzBufFt = v; }
+            if (pInp) terThresholds.namePrefix = pInp.value;
+            saveTerThresholds();
+            terBStage();
+            return true;
+        }
+        const selP = e.target.closest('[data-ter-selp]');
+        if (selP && terBState) {
+            const p = terBState.pieces[+selP.getAttribute('data-ter-selp')];
+            if (p) { p.selected = !!selP.checked; terBDrawPreview(); }
+            return true;
+        }
+        const selN = e.target.closest('[data-ter-seln]');
+        if (selN && terBState) {
+            const z = terBState.nfzs[+selN.getAttribute('data-ter-seln')];
+            if (z) { z.selected = !!selN.checked; terBDrawPreview(); }
+            return true;
+        }
+        if (e.target.closest('[data-ter-commit]')) {
+            const now = Date.now();
+            if (now - terBArm > 1600) { terBArm = now; showToast('Click Commit again within 1.5 s to CREATE the entities'); return true; }
+            terBArm = 0;
+            terBCommit();
+            return true;
+        }
+        if (e.target.closest('[data-ter-undo]')) {
+            const now = Date.now();
+            if (now - terBUndoArm > 1600) { terBUndoArm = now; showToast('Click Undo again within 1.5 s to DELETE this run’s entities'); return true; }
+            terBUndoArm = 0;
+            terBUndo();
+            return true;
+        }
+        return false;
+    }
+
+    // Idempotent (CP echoes from TOP + IFRAME — same contract as
+    // handleSopToggle / handleAirspaceToggle).
+    function handleTerrainToggle(msg) {
+        const id = msg.toggleId;
+        if (id === 'ter-master') {
+            const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            if (v === terMasterEnabled) return;
+            terMasterEnabled = v;
+            if (!v) { terBClearStage(); terRemoveLayer(); terClosePanel(); terState = null; }
+            return;
+        }
+        if (Object.prototype.hasOwnProperty.call(terEnabled, id)) {
+            const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            if (v === terEnabled[id]) return;
+            terEnabled[id] = v;
+            saveTerEnabled();
+            return;
+        }
+        if (Object.prototype.hasOwnProperty.call(terThresholds, id) && typeof msg.value === 'number') {
+            if (msg.value === terThresholds[id]) return;
+            terThresholds[id] = msg.value;
+            saveTerThresholds();
+            if (id === 'opacity' && terLayer && typeof terLayer.setOpacity === 'function') {
+                try { terLayer.setOpacity(msg.value); } catch (e) {}
+            }
+        }
     }
 
     // ============================================================
@@ -4540,6 +7556,8 @@
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
                 if (msg.toggleId === 'master') {
                     masterEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                } else if (msg.toggleId === 'agl-hover-tip') {
+                    aglHoverTipEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
                 } else if (msg.toggleId === 'empty-map-menu') {
                     emptyMapMenuEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
                     if (!emptyMapMenuEnabled) closeCoordMenu();
@@ -4581,6 +7599,18 @@
                     airspaceRun();
                 } else if (msg.actionId === 'air-clear') {
                     airspaceClear();
+                }
+            }
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === TER_SCRIPT_ID) {
+                handleTerrainToggle(msg);
+            }
+            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === TER_SCRIPT_ID && CONTEXT === 'IFRAME') {
+                if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
+                if (msg.actionId === 'ter-run') {
+                    if (!terMasterEnabled) { showToast('Terrain Profiler is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+                    terrainProfilerRun();
+                } else if (msg.actionId === 'ter-clear') {
+                    terrainProfilerClear();
                 }
             }
         };
@@ -4643,6 +7673,7 @@
             toggles: [
                 { id: 'master', label: 'Enable (right-click any entity)', type: 'boolean', default: true, master: true },
                 { id: 'empty-map-menu', label: 'Right-click empty map → GPS / Google Maps menu', type: 'boolean', default: true },
+                { id: 'agl-hover-tip', label: 'Hover ALT tooltip: add AGL line (MSL sites)', type: 'boolean', default: true },
                 { id: 'refresh-action', label: 'Refresh entity data for this site', type: 'button', action: 'refresh-entities' },
             ],
             hotkeys: [],
@@ -4704,6 +7735,9 @@
                 { id: 'obstacleFt', label: 'Obstacle proximity', type: 'number', min: 100, max: 26400, step: 100, default: AIR_THRESH_DEFAULTS.obstacleFt, unit: 'ft' },
                 { id: 'obstacleMinAglFt', label: 'Ignore obstacles shorter than', type: 'number', min: 0, max: 500, step: 10, default: AIR_THRESH_DEFAULTS.obstacleMinAglFt, unit: 'ft' },
                 { id: 'windmillFt', label: 'Windmill / turbine standoff', type: 'number', min: 0, max: 5000, step: 50, default: AIR_THRESH_DEFAULTS.windmillFt, unit: 'ft' },
+                { id: 'turbines', label: 'Info · Turbine specs lookup (USGS USWTDB)', type: 'boolean', default: AIR_ENABLE_DEFAULTS.turbines },
+                { id: 'droneWindMph', label: 'Drone max wind rating (wake estimate)', type: 'number', min: 5, max: 60, step: 1, default: AIR_THRESH_DEFAULTS.droneWindMph, unit: 'mph' },
+                { id: 'airCacheHours', label: 'FAA data cache TTL (0 = off)', type: 'number', min: 0, max: 72, step: 1, default: AIR_THRESH_DEFAULTS.airCacheHours, unit: 'h' },
                 { id: 'tlTowerFt', label: 'T-L tower standoff (from FFZ/FP)', type: 'number', min: 0, max: 2000, step: 25, default: AIR_THRESH_DEFAULTS.tlTowerFt, unit: 'ft' },
                 { id: 'tlClearFt', label: 'Fly-over clearance — all obstacles (floor above top)', type: 'number', min: 0, max: 300, step: 10, default: AIR_THRESH_DEFAULTS.tlClearFt, unit: 'ft' },
                 { id: 'obstacleShowNm', label: 'Show obstacles within', type: 'number', min: 0.25, max: 10, step: 0.25, default: AIR_THRESH_DEFAULTS.obstacleShowNm, unit: 'NM' },
@@ -4722,9 +7756,40 @@
             ],
             hotkeys: [],
         });
+        // v4.200: Terrain Profiler — own card (feature #203 Phase 1).
+        // Splits the site into ≤Δ-relief elevation regions and proposes
+        // per-region fixed floors/ceilings; read-only (Phase 2 builds FFZs).
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: TER_SCRIPT_ID, name: 'Terrain Profiler',
+            description: 'Raw 3DEP elevation profile of the site: splits terrain into regions of ≤Δ ft relief, flags small bumps/pits as NFZ candidates, and proposes a fixed floor/ceiling per region for the target AGL band. Read-only overlay + report.',
+            version: SCRIPT_VERSION, group: 'Terrain Profiler', scope: 'site-setup', priority: 30,
+            toggles: [
+                { id: 'ter-master', label: 'Enable Terrain Profiler', type: 'boolean', default: true, master: true },
+                { id: 'minAglFt', label: 'Target AGL floor', type: 'number', min: 10, max: 400, step: 5, default: TER_THRESH_DEFAULTS.minAglFt, unit: 'ft' },
+                { id: 'maxAglFt', label: 'Target AGL ceiling', type: 'number', min: 50, max: 400, step: 5, default: TER_THRESH_DEFAULTS.maxAglFt, unit: 'ft' },
+                { id: 'deltaFt', label: 'Max relief per region (Δ)', type: 'number', min: 5, max: 150, step: 5, default: TER_THRESH_DEFAULTS.deltaFt, unit: 'ft' },
+                { id: 'cellFt', label: 'DEM cell size (33 ≈ native 10 m)', type: 'number', min: 10, max: 150, step: 1, default: TER_THRESH_DEFAULTS.cellFt, unit: 'ft' },
+                { id: 'marginFt', label: 'Margin around site bbox', type: 'number', min: 0, max: 5280, step: 50, default: TER_THRESH_DEFAULTS.marginFt, unit: 'ft' },
+                { id: 'absorbAc', label: 'Absorb islands below', type: 'number', min: 0, max: 50, step: 0.5, default: TER_THRESH_DEFAULTS.absorbAc, unit: 'ac' },
+                { id: 'nfzMaxAc', label: 'NFZ candidate up to', type: 'number', min: 0, max: 200, step: 0.5, default: TER_THRESH_DEFAULTS.nfzMaxAc, unit: 'ac' },
+                { id: 'median', label: 'Despeckle DEM (3×3 median)', type: 'boolean', default: TER_ENABLE_DEFAULTS.median },
+                { id: 'floorP95', label: 'Floor ref = P95 elevation (ignore top spikes)', type: 'boolean', default: TER_ENABLE_DEFAULTS.floorP95 },
+                { id: 'clipSite', label: 'Mask to site footprint (existing FFZ union)', type: 'boolean', default: TER_ENABLE_DEFAULTS.clipSite },
+                { id: 'simplifyFt', label: 'Build · simplify tolerance', type: 'number', min: 0, max: 500, step: 10, default: TER_THRESH_DEFAULTS.simplifyFt, unit: 'ft' },
+                { id: 'nfzBufFt', label: 'Build · NFZ hull buffer', type: 'number', min: 0, max: 200, step: 5, default: TER_THRESH_DEFAULTS.nfzBufFt, unit: 'ft' },
+                { id: 'opacity', label: 'Overlay opacity', type: 'number', min: 0.1, max: 1, step: 0.05, default: TER_THRESH_DEFAULTS.opacity },
+                { id: 'ter-run', label: '⛰ Run profiler', type: 'button', action: 'ter-run' },
+                { id: 'ter-clear', label: 'Clear overlay + panel', type: 'button', action: 'ter-clear' },
+            ],
+            hotkeys: [],
+        });
     }
     setupControlPanel();
     registerWithControlPanel();
+    // AGL hover tooltip: map + native tooltips live in the iframe; give the
+    // map time to mount, then watch. (siteAltModeCache/elev helpers are
+    // consts defined later in the IIFE — fine, the timeout fires long after.)
+    if (CONTEXT === 'IFRAME') setTimeout(watchAglHoverTips, 2500);
     // Ask Control Panel to replay the GitHub PAT — covers the case
     // where we loaded after the panel's initial TOKEN_VALUE broadcast.
     if (controlChannel) controlChannel.postMessage({ type: 'REQUEST_TOKEN' });
@@ -5373,6 +8438,7 @@
     // qualify; assets/NFZs/markers do not (different Percepto editor
     // surface, deferred to a future version).
     function isEditableRow(r) {
+        if (LITE) return false;                 // Lite = read-only: no editable cells
         if (!r || !r.entity) return false;
         if (r._isSegment && r.arc) return true;
         if (r.type === 16) return true;
@@ -5413,10 +8479,15 @@
     }
     function queueSubtypeEdit(entity, newValueRaw) {
         if (!entity || entity.type !== 3) return false;
-        const newValue = String(newValueRaw || '').trim();
+        // v4.177: the server normalizes poi_type_str to LOWERCASE (live-
+        // verified 2026-07-09: sent "H - GAS LIFT", stored "h - gas lift").
+        // Queue the value the server will actually keep, so the pending
+        // chip, verify, and cache all show truth — and case-only
+        // "changes" are correctly treated as no-ops.
+        const newValue = String(newValueRaw || '').trim().toLowerCase();
         if (!newValue) return false;
         const current = (entity.custom && entity.custom.poi_type_str) || '';
-        if (newValue === current) {
+        if (newValue === current.toLowerCase()) {
             // No-op — if there was a pending edit for this entity,
             // clear it (user typed back to original).
             if (getPendingSubtype(entity.id)) {
@@ -5426,7 +8497,7 @@
             return false;
         }
         const siteID = getCurrentSiteID();
-        const observed = new Set(observedSubtypesForSite(siteID));
+        const observed = new Set(observedSubtypesForSite(siteID).map(s => s.toLowerCase()));
         queuePendingEdit({
             entityId: entity.id,
             arcId: null,
@@ -6029,6 +9100,7 @@
     // Run; clicking either invokes opts.onLaunch({dryRun}).
     const APPLY_LAUNCHER_ID = 'aim-ai-apply-launcher';
     function openApplyLauncher(cfg) {
+        if (liteBlockedWrite('apply edits')) return;
         closeApplyLauncher();
         const { editCount, groupCount, fpCount, ffzCount, astCount = 0, warnings, onLaunch } = cfg;
         const m = document.createElement('div');
@@ -6059,7 +9131,7 @@
             <label style="margin-top:12px;display:flex;align-items:flex-start;gap:8px;padding:10px 12px;background:rgba(255,193,71,0.08);border:1px solid rgba(255,193,71,0.35);border-radius:4px;cursor:pointer">
                 <input type="checkbox" id="aim-ai-launch-directapi" style="margin-top:2px">
                 <span style="color:#ffd479;font-size:11px;line-height:1.5">
-                    <strong>⚡ Direct API (fast)</strong> — POST each entity to the server instead of driving the editor. Skips the per-entity dialog <em>and</em> the "Mismatched Altitude Ranges" block, so bulk AGL/DELTA shifts go through. Auto-downloads a rollback file first, verifies every write, and runs a final FP↔FFZ overlap check. FFZs + FPs only (assets still use the editor).
+                    <strong>⚡ Direct API (fast)</strong> — POST each entity to the server instead of driving the editor. Skips the per-entity dialog <em>and</em> the "Mismatched Altitude Ranges" block, so bulk AGL/DELTA shifts go through. Auto-downloads a rollback file first, verifies every write, and runs a final FP↔FFZ overlap check. Covers FFZs, FPs and assets (subtype/name — the first asset write of a run gets an extra fresh-fetch geometry probe).
                 </span>
             </label>
             <div style="margin-top:18px;display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">
@@ -6189,7 +9261,7 @@
             else statsEl.textContent = `Item ${idx} of ${total}${failed ? ` · ${failed} need a look` : ''}`;
         }
         // Quiet secondary line with the raw edit count for the curious.
-        if (subEl) subEl.textContent = st.total ? `(${st.done} of ${st.total} altitude values written)` : '';
+        if (subEl) subEl.textContent = st.total ? `(${st.done} of ${st.total} edits written)` : '';
 
         if (errEl) {
             errEl.innerHTML = '';
@@ -6446,7 +9518,7 @@
     }
 
     // ============================================================
-    // v4.164.5 HOTFIX — Percepto's weekly release (PER-32471,
+    // v4.196 (mirrors prod hotfix v4.164.5) — Percepto's weekly release (PER-32471,
     // 2026-07-27) added HttpOnly to the session + csrftoken cookies,
     // so document.cookie can no longer see them and EVERY direct-API
     // write lost its token. Primary source now = a passive sniffer
@@ -6578,6 +9650,17 @@
         delete b.polygon;
         delete b.asset_waypoints;
         b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
+        // v4.179: the native asset save ALWAYS includes
+        // custom.new_poi_type_str ("" when picking an existing type) —
+        // recon 2026-07-09 on KEMPER 16 1. Without it, the server
+        // second-guesses poi_type_str on some pads (forces base type back
+        // to "well-cluster") or 400s ("Could not create object"). Mirror
+        // it; applyEditsToBody overwrites it with the new value when the
+        // queued subtype is a NEW type (the "Enter new type" path).
+        if (b.type === 3) {
+            if (!b.custom || typeof b.custom !== 'object') b.custom = {};
+            b.custom.new_poi_type_str = '';
+        }
         if (Array.isArray(b.arcs)) {
             b.arcs.forEach(a => {
                 if (a && a.point_a && a.point_b && !Array.isArray(a.points)) {
@@ -6605,6 +9688,19 @@
             // boolean on the entity — set it and the same upsert POST carries
             // it. The verify rail confirms the server actually persisted it.
             if (e.field === 'validated') { body.validated = !!e.newValue; return; }
+            // v4.176: asset subtype rides the same upsert — it's just
+            // custom.poi_type_str. The rest of `custom` (equipment, state,
+            // …) was cloned wholesale by buildWriteBody, so only the
+            // subtype string changes. v4.179: mirror the native editor's
+            // two paths — existing type keeps new_poi_type_str: "" (set by
+            // buildWriteBody), a NEW type carries it in new_poi_type_str
+            // too (the "Enter new type" channel).
+            if (e.field === 'subtype') {
+                if (!body.custom || typeof body.custom !== 'object') body.custom = {};
+                body.custom.poi_type_str = e.newValue;
+                body.custom.new_poi_type_str = e.isNewSubtype ? e.newValue : '';
+                return;
+            }
             if (e.isFfz) {
                 if (!body.restrictions || typeof body.restrictions !== 'object') body.restrictions = {};
                 if (e.field === 'min_alt') body.restrictions.minAlt = e.newValueM;
@@ -6691,7 +9787,7 @@
     // flag — Percepto might recompute/ignore it. Left null for every other
     // run so an altitude-only save isn't failed by a server-side
     // validated side-effect (e.g. an edit clearing pilot sign-off).
-    function verifyDirectSave(saved, sentBody, original, expectValidated) {
+    function verifyDirectSave(saved, sentBody, original, expectValidated, expectSubtype) {
         if (!saved) return { ok: false, reason: 'no saved object in response', structural: true };
         const oc = (original.coords || []).length, sc = (saved.coords || []).length;
         if (oc !== sc) return { ok: false, reason: `coord count changed ${oc}→${sc}`, structural: true };
@@ -6725,12 +9821,23 @@
         if (expectValidated != null && !!saved.validated !== !!expectValidated) {
             return { ok: false, reason: `validated: sent ${!!expectValidated}, got ${!!saved.validated} (server didn't persist the flag)`, structural: false };
         }
+        // v4.176: asset subtype — only when this group queued one.
+        // v4.177: CASE-INSENSITIVE — the server normalizes poi_type_str
+        // to lowercase, so an exact-case compare failed every asset write
+        // that actually persisted fine.
+        if (expectSubtype != null) {
+            const got = (saved.custom && saved.custom.poi_type_str) || '';
+            if (got.trim().toLowerCase() !== String(expectSubtype).trim().toLowerCase()) {
+                return { ok: false, reason: `subtype: sent "${expectSubtype}", got "${got}" (server didn't persist it)`, structural: false };
+            }
+        }
         return { ok: true };
     }
 
     // POST one entity group directly. Returns the same outcome shape as
     // applyOneEntity: { ok, reason, appliedCount, verified, structural }.
     async function applyOneEntityDirect(group, opts) {
+        if (liteBlockedWrite('apply entity')) return { ok: false, blocked: true };
         const { dryRun } = opts || {};
         const label = group.entityName || '(unnamed)';
         const siteID = getCurrentSiteID();
@@ -6819,12 +9926,18 @@
                 };
                 console.warn(`${TAG}   share-vertex? [${n1},${n2}]=${share(n1, n2)} [${n1 - 1},${n2 - 1}]=${share(n1 - 1, n2 - 1)} [${n1},${n2 - 1}]=${share(n1, n2 - 1)} [${n1 - 1},${n2}]=${share(n1 - 1, n2)}`);
             }
+            // v4.179: self-diagnosing failures — dump the exact body we
+            // sent + the full server response so a failing entity can be
+            // diffed against a native-editor capture without a re-run.
+            console.warn(`${TAG} ⚡ ${label} — server ${resp.status}. REQUEST BODY:`, JSON.stringify(body));
+            console.warn(`${TAG} ⚡ ${label} — FULL RESPONSE:`, resp.raw);
             applyState.errors.push({ entityName: label, reason: `server ${resp.status}: ${snippet}` });
             return { ok: false, reason: `server ${resp.status}`, appliedCount: 0 };
         }
         const saved = resp.json && resp.json.map_objects;
         const valEdit = group.edits.find(e => e.field === 'validated');
-        const verify = verifyDirectSave(saved, body, entity, valEdit ? !!valEdit.newValue : null);
+        const subEdit = group.edits.find(e => e.field === 'subtype');
+        const verify = verifyDirectSave(saved, body, entity, valEdit ? !!valEdit.newValue : null, subEdit ? subEdit.newValue : null);
         // Refresh the in-memory bucket with the server's echoed object so
         // downstream reads (and the overlap check) see truth, not stale.
         if (saved && bucket) {
@@ -6844,6 +9957,54 @@
             applyState.errors.push({ entityName: label, reason: `verify ${verify.structural ? 'STRUCTURAL ' : ''}failed: ${verify.reason}` });
             return { ok: false, reason: `verify: ${verify.reason}`, appliedCount: 0, verified: false, structural: !!verify.structural, bridges };
         }
+        // v4.176: FIRST asset write of each run gets a fresh-GET probe.
+        // The POST echo proves the response shape, not what the server
+        // actually stored — and asset (type 3) geometry (polygon WKT +
+        // coords ring) is new to this POST path. One extra GET per run:
+        // refetch the site list, confirm this asset's ring survived and
+        // the subtype landed. A geometry mismatch is STRUCTURAL → the
+        // existing rail halts the whole run before more assets are hit.
+        if (group.isAsset && !applyState.assetProbeDone) {
+            applyState.assetProbeDone = true;
+            try {
+                const r2 = await fetch(MAP_OBJECTS_URL + encodeURIComponent(siteID) + `&_t=${Date.now()}`, { credentials: 'same-origin', cache: 'no-store' });
+                if (!r2.ok) throw new Error(`HTTP ${r2.status}`);
+                const list = await r2.json();
+                const fresh = Array.isArray(list) ? list.find(en => en && en.id === entity.id) : null;
+                if (!fresh) throw new Error('entity missing from fresh site fetch');
+                const oc2 = (entity.coords || []).length;
+                const fc2 = (fresh.coords || fresh.points || []).length;
+                if (oc2 !== fc2) {
+                    applyState.errors.push({ entityName: label, reason: `asset probe: coord count ${oc2}→${fc2} on fresh fetch — geometry damaged` });
+                    return { ok: false, reason: 'asset probe: geometry mismatch', appliedCount: 0, verified: false, structural: true, bridges };
+                }
+                if (entity.polygon && !fresh.polygon) {
+                    applyState.errors.push({ entityName: label, reason: 'asset probe: polygon WKT gone on fresh fetch — geometry damaged' });
+                    return { ok: false, reason: 'asset probe: polygon lost', appliedCount: 0, verified: false, structural: true, bridges };
+                }
+                // asset_waypoints is stripped from the write body (editor
+                // shape) — confirm the server kept the stored ones.
+                const ow = Array.isArray(entity.asset_waypoints) ? entity.asset_waypoints.length : 0;
+                const fw = Array.isArray(fresh.asset_waypoints) ? fresh.asset_waypoints.length : 0;
+                if (ow > 0 && fw === 0) {
+                    applyState.errors.push({ entityName: label, reason: `asset probe: asset_waypoints ${ow}→0 on fresh fetch — server dropped them` });
+                    return { ok: false, reason: 'asset probe: waypoints lost', appliedCount: 0, verified: false, structural: true, bridges };
+                }
+                if (subEdit) {
+                    const freshSub = (fresh.custom && fresh.custom.poi_type_str) || '';
+                    // Case-insensitive — server lowercases poi_type_str.
+                    if (freshSub.trim().toLowerCase() !== String(subEdit.newValue).trim().toLowerCase()) {
+                        applyState.errors.push({ entityName: label, reason: `asset probe: fresh subtype "${freshSub}" ≠ sent "${subEdit.newValue}"` });
+                        return { ok: false, reason: 'asset probe: subtype not persisted', appliedCount: 0, verified: false, structural: false, bridges };
+                    }
+                }
+                console.log(`${TAG} ⚡ ${label} — asset probe ✓ (fresh GET: geometry intact${subEdit ? ', subtype persisted' : ''}) — trusting echo verify for the rest of this run`);
+            } catch (e) {
+                // Probe infrastructure failure (network) ≠ bad write — the
+                // echo verify already passed. Warn loudly and continue.
+                console.warn(`${TAG} ⚡ ${label} — asset probe could not run (${e && e.message || e}); echo verify passed, continuing`);
+            }
+        }
         console.log(`${TAG} ⚡ ${label} — POSTed + verified ✓ (${group.edits.length} edit${group.edits.length === 1 ? '' : 's'}${bridges.length ? `, ${bridges.length} seam(s) bridged` : ''})`);
         return { ok: true, appliedCount: group.edits.length, verified: true, bridges };
     }
@@ -6855,7 +10016,6 @@
         const bucket = siteID ? mapObjectsBySite[siteID] : null;
         const entities = [];
         for (const g of groups) {
-            if (g.isAsset) continue; // asset edits still go the editor path
             const ent = bucket ? (bucket.entities || []).find(en => en.id === g.entityId) : null;
             if (!ent) throw new Error(`snapshot: entity ${g.entityId} (${g.entityName}) not in fetched data`);
             entities.push({ id: ent.id, name: ent.name, type: ent.type, body: buildWriteBody(ent, siteCfg) });
@@ -6884,6 +10044,7 @@
     // One-click restore: re-POST every snapshotted body verbatim. Exposed
     // as window.__aim_ai_rollback() and wired to the report modal button.
     async function rollbackDirectApiRun(snap) {
+        if (liteBlockedWrite('rollback')) return;
         snap = snap || window.__aim_ai_directApiRollback;
         if (!snap || !Array.isArray(snap.entities) || !snap.entities.length) {
             console.warn(`${TAG} ⚡ no rollback snapshot available`);
@@ -6912,6 +10073,379 @@
         return { ok: failed === 0, restored, failed };
     }
     window.__aim_ai_rollback = () => rollbackDirectApiRun();
+
+    // ============================================================
+    // v4.197 — Bulk → 🗑 Delete (FFZ / FP / NFZ mass delete)
+    // Recon 2026-07-27: DELETE /map_objects/<id>/ → 200 (cookie +
+    // X-CSRFToken). Rails:
+    //   · scope hard-limited to NFZ(4) / FP(15) / FFZ(16) — assets,
+    //     GMs, Base, Safe are NEVER deletable from here
+    //   · NFZs live INSIDE FFZs and can't outlive them — companions
+    //     auto-added, executor order NFZ → FP → FFZ
+    //   · mission-reference pre-flight — missions string-scanned for
+    //     doomed entity ids; hits get a red per-row warning (restored
+    //     entities get NEW ids, so a mission ref dangles even after a
+    //     revert)
+    //   · auto-backup BEFORE anything arms: fresh full dump
+    //     downloaded + window-stashed; slider disabled until it lands
+    //   · super-confirm: ack checkbox + slider dragged to 100% and
+    //     HELD 5 s with live countdown; release = instant cancel
+    //   · revert path: the backup re-uploads as a Site Diff shadow →
+    //     create-only 📥 Import restores; optional in-the-moment
+    //     checkbox arms that shadow automatically over
+    //     AIM_SITEDIFF_CTRL (Site Diff v0.61+)
+    // ============================================================
+    const DELETABLE_TYPES = { 4: 'NFZ', 15: 'FP', 16: 'FFZ' };
+    const DELETE_ORDER = [4, 15, 16];
+    const DELETE_GAP_MS = 120;
+    const BULKDEL_MODAL_ID = 'aim-ai-bulkdel-modal';
+
+    function bulkDelResolveSelection(siteID) {
+        const bucket = mapObjectsBySite[siteID];
+        const all = (bucket && Array.isArray(bucket.entities)) ? bucket.entities : [];
+        const ids = new Set();
+        sumPanelState.selectedIds.forEach(k => ids.add(String(k).split(':')[0]));
+        const deletable = [], excluded = [];
+        all.forEach(e => {
+            if (!e || !ids.has(String(e.id))) return;
+            if (DELETABLE_TYPES[e.type]) deletable.push({ ent: e, required: null, missionRefs: [] });
+            else excluded.push(e);
+        });
+        return { siteID, all, deletable, excluded, missionScan: null, abort: false, running: false };
+    }
+
+    // NFZs inside a selected FFZ are REQUIRED companions — the FFZ can't
+    // be removed while they exist (and they can't exist without it).
+    function bulkDelAddNfzCompanions(plan) {
+        const have = new Set(plan.deletable.map(r => String(r.ent.id)));
+        plan.deletable.filter(r => r.ent.type === 16).forEach(r => {
+            const poly = Array.isArray(r.ent.coords) ? r.ent.coords : [];
+            if (poly.length < 3) return;
+            plan.all.forEach(n => {
+                if (!n || n.type !== 4 || have.has(String(n.id))) return;
+                const cs = Array.isArray(n.coords) ? n.coords : [];
+                if (cs.some(c => c && pointInPolygon(c.lat, c.lng, poly))) {
+                    have.add(String(n.id));
+                    plan.deletable.push({ ent: n, required: `inside FFZ "${r.ent.name}" — NFZs can't outlive their FFZ`, missionRefs: [] });
+                }
+            });
+        });
+    }
+
+    async function bulkDelScanMissionRefs(plan) {
+        try {
+            const r = await fetch(`/available_app/?site_id=${encodeURIComponent(plan.siteID)}&type=1`, {
+                credentials: 'same-origin', headers: { 'Accept': 'application/json' },
+            });
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const data = await r.json();
+            const missions = Array.isArray(data) ? data : (Array.isArray(data.results) ? data.results : []);
+            plan.missionScan = { ok: true, count: missions.length };
+            missions.forEach(m => {
+                let s = '';
+                try { s = JSON.stringify(m); } catch (e) { return; }
+                plan.deletable.forEach(row => {
+                    if (new RegExp(`\\b${row.ent.id}\\b`).test(s)) {
+                        row.missionRefs.push(String(m.name || m.id || 'unnamed mission'));
+                    }
+                });
+            });
+        } catch (e) {
+            plan.missionScan = { ok: false, error: String(e && e.message || e) };
+            console.warn(`${TAG} 🗑 mission-reference scan failed:`, e);
+        }
+    }
+
+    function bulkDelDownloadJson(name, data) {
+        const json = JSON.stringify(data, null, 2);
+        const blob = new Blob([json], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const topDoc = (window.top && window.top.document) ? window.top.document : document;
+        const a = topDoc.createElement('a');
+        a.href = url;
+        a.download = name;
+        (topDoc.body || document.body).appendChild(a);
+        a.click();
+        setTimeout(() => { try { a.remove(); URL.revokeObjectURL(url); } catch (e) {} }, 1500);
+    }
+
+    async function bulkDelExecute(plan, ui) {
+        if (liteBlockedWrite('bulk delete')) return;
+        const csrf = getCsrfToken();
+        if (!csrf) {
+            ui.status('no CSRF token — make one native save/edit anywhere in Percepto (token auto-captures), then retry', '#ff5555');
+            return;
+        }
+        plan.running = true;
+        ui.runStarted();
+        const ordered = [];
+        DELETE_ORDER.forEach(t => plan.deletable.forEach(r => { if (r.ent.type === t) ordered.push(r); }));
+        const results = { deleted: [], failed: [], aborted: false, verifyProblems: [] };
+        for (let i = 0; i < ordered.length; i++) {
+            if (plan.abort) { results.aborted = true; break; }
+            const r = ordered[i];
+            const label = `${DELETABLE_TYPES[r.ent.type]} "${r.ent.name || r.ent.id}"`;
+            ui.status(`deleting ${i + 1}/${ordered.length} — ${label}…`);
+            try {
+                const resp = await fetch(`/map_objects/${encodeURIComponent(r.ent.id)}/`, {
+                    method: 'DELETE', credentials: 'same-origin',
+                    headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' },
+                });
+                if (resp.status === 403) {
+                    try { ((typeof unsafeWindow !== 'undefined') ? unsafeWindow : window).localStorage.removeItem(CSRF_LS_KEY); } catch (e2) {}
+                    results.failed.push({ id: r.ent.id, name: r.ent.name, reason: 'server 403 — CSRF rejected; banked token cleared. Make one native edit and re-run.' });
+                    results.aborted = true;
+                    break;   // stale token poisons every remaining DELETE — stop now
+                }
+                if (!resp.ok && resp.status !== 404) {
+                    const t = await resp.text();
+                    throw new Error(`server ${resp.status} — ${(t || '').slice(0, 150)}`);
+                }
+                results.deleted.push({ id: r.ent.id, name: r.ent.name, type: r.ent.type, note: resp.status === 404 ? 'was already gone (404)' : '' });
+            } catch (e) {
+                console.warn(`${TAG} 🗑 delete failed for ${label}:`, e);
+                results.failed.push({ id: r.ent.id, name: r.ent.name, reason: String(e && e.message || e) });
+            }
+            await sleep(DELETE_GAP_MS);
+        }
+        // Verify against a fresh fetch — every deleted id must be GONE
+        ui.status('verifying against a fresh fetch…');
+        try {
+            delete mapObjectsBySite[plan.siteID];
+            await fetchMapObjects(plan.siteID, true);
+            const fresh = (mapObjectsBySite[plan.siteID] && mapObjectsBySite[plan.siteID].entities) || [];
+            results.deleted.forEach(d => {
+                if (fresh.some(e => e && e.id === d.id)) results.verifyProblems.push(`"${d.name}" (id ${d.id}) still present after delete`);
+            });
+        } catch (e) {
+            results.verifyProblems.push('verify fetch failed — check the site manually');
+        }
+        sumPanelState.selectedIds.clear();
+        try { if (document.getElementById(SUM_PANEL_ID)) renderSummaryPanel(plan.siteID); } catch (e) {}
+        // Optional in-the-moment revert-shadow arm (Site Diff v0.61+)
+        let shadowArmed = false;
+        if (ui.armShadow() && window.__aim_ai_preDeleteBackup) {
+            try {
+                const ch = new BroadcastChannel('AIM_SITEDIFF_CTRL');
+                ch.postMessage({
+                    type: 'SET_FILE_SHADOW',
+                    siteId: String(plan.siteID),
+                    name: plan.backupName,
+                    entities: window.__aim_ai_preDeleteBackup.entities,
+                });
+                ch.close();
+                shadowArmed = true;
+            } catch (e) { console.warn(`${TAG} 🗑 revert-shadow arm failed:`, e); }
+        }
+        const report = {
+            ranAt: new Date().toISOString(), siteID: plan.siteID, backupFile: plan.backupName,
+            deleted: results.deleted, failed: results.failed, aborted: results.aborted,
+            verifyProblems: results.verifyProblems, revertShadowArmed: shadowArmed,
+        };
+        window.__aim_ai_lastBulkDelete = report;
+        console.log(`${TAG} 🗑 bulk delete done: ${results.deleted.length} deleted, ${results.failed.length} failed${results.aborted ? ' (ABORTED)' : ''}, ${results.verifyProblems.length} verify problems`, report);
+        plan.running = false;
+        ui.finished(report);
+    }
+
+    function openBulkDeleteModal() {
+        if (liteBlockedWrite('bulk delete')) return;
+        const siteID = getCurrentSiteID();
+        if (!siteID) { showToast('No site loaded', 'rgba(255,85,85,0.7)'); return; }
+        if (!sumPanelState.selectedIds.size) {
+            showToast('Select rows first — ☑ the FFZs / FPs / NFZs to delete', 'rgba(255,85,85,0.7)');
+            return;
+        }
+        const old = document.getElementById(BULKDEL_MODAL_ID);
+        if (old) old.remove();
+
+        const modal = document.createElement('div');
+        modal.id = BULKDEL_MODAL_ID;
+        modal.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2147480060;'
+            + 'width:600px;max-width:94vw;max-height:84vh;overflow-y:auto;background:#1a1214;color:#e6e6e6;'
+            + 'border:2px solid #ff5555;border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,0.75);'
+            + 'font:12px/1.5 monospace;padding:0;';
+        modal.innerHTML = ''
+            + '<div style="padding:9px 14px;border-bottom:1px solid #552;color:#ff5555;font-weight:bold;font-size:14px;">'
+            + '🗑 BULK DELETE — this removes entities from the LIVE site'
+            + '<span id="aim-bd-close" style="float:right;cursor:pointer;color:#888">✕</span></div>'
+            + '<div id="aim-bd-body" style="padding:10px 14px;"><span style="color:#aaa">Fetching fresh site data…</span></div>';
+        document.body.appendChild(modal);
+        modal.querySelector('#aim-bd-close').addEventListener('click', () => {
+            if (planRef && planRef.running) { showToast('Run in progress — use ✋ Abort first', 'rgba(255,85,85,0.7)'); return; }
+            modal.remove();
+        });
+
+        let planRef = null;
+        const body = () => modal.querySelector('#aim-bd-body');
+
+        (async () => {
+            try {
+                // Fresh fetch FIRST — the plan and the backup must both
+                // reflect the server's current state, not a stale cache.
+                delete mapObjectsBySite[siteID];
+                await fetchMapObjects(siteID, true);
+                const plan = bulkDelResolveSelection(siteID);
+                planRef = plan;
+                if (!plan.deletable.length) {
+                    body().innerHTML = '<span style="color:#ffa030">Nothing deletable in the selection — only FFZs, FPs and NFZs can be deleted here'
+                        + (plan.excluded.length ? ` (${plan.excluded.length} selected row(s) are other types)` : '') + '.</span>';
+                    return;
+                }
+                bulkDelAddNfzCompanions(plan);
+                body().innerHTML = '<span style="color:#aaa">Scanning missions for references…</span>';
+                await bulkDelScanMissionRefs(plan);
+                // Auto-backup BEFORE anything arms
+                body().innerHTML = '<span style="color:#aaa">Downloading backup…</span>';
+                const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+                plan.backupName = `aim-predelete-site${siteID}-${stamp}.json`;
+                const snap = { siteID, when: new Date().toISOString(), reason: 'pre-bulk-delete', count: plan.all.length, entities: plan.all };
+                window.__aim_ai_preDeleteBackup = snap;
+                bulkDelDownloadJson(plan.backupName, snap);
+                renderBulkDeletePlan(plan);
+            } catch (e) {
+                console.warn(`${TAG} 🗑 modal prepare failed:`, e);
+                body().innerHTML = `<span style="color:#ff5555">Prepare failed — ${escapeHtmlAI(String(e && e.message || e))}. Nothing was deleted.</span>`;
+            }
+        })();
+
+        function escapeHtmlAI(s) {
+            return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        function renderBulkDeletePlan(plan) {
+            const counts = {};
+            plan.deletable.forEach(r => { counts[r.ent.type] = (counts[r.ent.type] || 0) + 1; });
+            const countLine = DELETE_ORDER.filter(t => counts[t])
+                .map(t => `${counts[t]} ${DELETABLE_TYPES[t]}${counts[t] > 1 ? 's' : ''}`).join(' + ');
+            const refCount = plan.deletable.filter(r => r.missionRefs.length).length;
+            const rows = plan.deletable.map(r => {
+                const chip = r.ent.type === 16 ? '#5fff5f' : (r.ent.type === 15 ? '#7adfe6' : '#ff5252');
+                return `<div style="padding:2px 6px;border-bottom:1px solid #2a1a1a;">`
+                    + `<span style="color:${chip};font-weight:bold">${DELETABLE_TYPES[r.ent.type]}</span> ${escapeHtmlAI(String(r.ent.name || r.ent.id))}`
+                    + (r.required ? `<br><span style="color:#ffa030">↳ auto-added: ${escapeHtmlAI(r.required)}</span>` : '')
+                    + (r.missionRefs.length ? `<br><span style="color:#ff5555;font-weight:bold">⚠ referenced by mission(s): ${escapeHtmlAI(r.missionRefs.join(', '))} — a revert creates NEW ids, mission refs will NOT rebind</span>` : '')
+                    + '</div>';
+            }).join('');
+            const scanNote = plan.missionScan && plan.missionScan.ok
+                ? `mission scan: ${plan.missionScan.count} mission(s) checked${refCount ? `, <span style="color:#ff5555">${refCount} entity(ies) referenced</span>` : ', no references ✓'}`
+                : '<span style="color:#ffa030">⚠ mission scan FAILED — references unknown, proceed with extra caution</span>';
+            body().innerHTML = ''
+                + `<div style="margin-bottom:8px;">Site <b>${escapeHtmlAI(String(plan.siteID))}</b> — deleting <b style="color:#ff5555">${countLine}</b>`
+                + (plan.excluded.length ? ` · <span style="color:#888">${plan.excluded.length} selected row(s) excluded (not FFZ/FP/NFZ)</span>` : '')
+                + `<br><span style="color:#888">${scanNote}</span>`
+                + `<br><span style="color:#5fff5f">💾 backup saved: ${escapeHtmlAI(plan.backupName)}</span> <span style="color:#888">— re-upload it as this site's shadow → 📥 Import to restore</span></div>`
+                + `<div style="max-height:30vh;overflow-y:auto;border:1px solid #2a1a1a;margin-bottom:10px;">${rows}</div>`
+                + '<label style="display:flex;gap:8px;align-items:center;margin-bottom:6px;cursor:pointer;">'
+                + `<input type="checkbox" id="aim-bd-ack"> I understand these ${plan.deletable.length} entities will be DELETED from this site</label>`
+                + '<label style="display:flex;gap:8px;align-items:center;margin-bottom:10px;cursor:pointer;">'
+                + '<input type="checkbox" id="aim-bd-shadow" checked> Arm the revert shadow in Site Diff after the delete (instant 📥 Import restore)</label>'
+                + '<div id="aim-bd-slider-wrap" style="opacity:0.45;pointer-events:none;">'
+                + '<div style="color:#ff5555;font-weight:bold;margin-bottom:4px;">Slide to the end and HOLD for 5 seconds:</div>'
+                + '<div id="aim-bd-track" style="position:relative;height:38px;background:linear-gradient(90deg,#3a1518,#7a1f24);border:1px solid #ff5555;border-radius:19px;user-select:none;touch-action:none;">'
+                + '<div id="aim-bd-knob" style="position:absolute;top:2px;left:2px;width:34px;height:34px;background:#ff5555;border-radius:50%;cursor:grab;display:flex;align-items:center;justify-content:center;font-size:16px;">🗑</div>'
+                + '<div id="aim-bd-track-label" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#ffb3b3;pointer-events:none;">slide ➜</div>'
+                + '</div></div>'
+                + '<div id="aim-bd-countdown" style="display:none;margin-top:10px;padding:10px;background:#7a1f24;border-radius:6px;color:#fff;font-weight:bold;font-size:15px;text-align:center;"></div>'
+                + '<div id="aim-bd-status" style="margin-top:8px;min-height:18px;color:#aaa;"></div>'
+                + '<div id="aim-bd-actions" style="margin-top:8px;display:flex;gap:14px;"></div>';
+
+            const ack = body().querySelector('#aim-bd-ack');
+            const sliderWrap = body().querySelector('#aim-bd-slider-wrap');
+            ack.addEventListener('change', () => {
+                sliderWrap.style.opacity = ack.checked ? '1' : '0.45';
+                sliderWrap.style.pointerEvents = ack.checked ? 'auto' : 'none';
+            });
+
+            const track = body().querySelector('#aim-bd-track');
+            const knob = body().querySelector('#aim-bd-knob');
+            const countdownEl = body().querySelector('#aim-bd-countdown');
+            const statusEl = body().querySelector('#aim-bd-status');
+            const actionsEl = body().querySelector('#aim-bd-actions');
+            let holdTimer = null, holdLeft = 0, dragging = false, fired = false;
+
+            const setKnob = (px) => {
+                const max = track.clientWidth - knob.offsetWidth - 4;
+                const x = Math.max(2, Math.min(max + 2, px));
+                knob.style.left = x + 'px';
+                return (x - 2) / max;
+            };
+            const cancelHold = () => {
+                if (holdTimer) { clearInterval(holdTimer); holdTimer = null; }
+                countdownEl.style.display = 'none';
+            };
+            const resetKnob = () => { cancelHold(); knob.style.left = '2px'; };
+
+            knob.addEventListener('pointerdown', (ev) => {
+                if (fired || (planRef && planRef.running)) return;
+                dragging = true;
+                knob.setPointerCapture(ev.pointerId);
+                ev.preventDefault();
+            });
+            knob.addEventListener('pointermove', (ev) => {
+                if (!dragging || fired) return;
+                const r = track.getBoundingClientRect();
+                const frac = setKnob(ev.clientX - r.left - knob.offsetWidth / 2);
+                if (frac >= 0.95) {
+                    if (!holdTimer) {
+                        holdLeft = 5;
+                        countdownEl.style.display = 'block';
+                        countdownEl.textContent = `⚠ DELETING ${plan.deletable.length} ENTITIES FROM SITE ${plan.siteID} IN ${holdLeft}s — RELEASE TO CANCEL`;
+                        holdTimer = setInterval(() => {
+                            holdLeft--;
+                            if (holdLeft <= 0) {
+                                cancelHold();
+                                fired = true;
+                                dragging = false;
+                                bulkDelExecute(plan, ui);
+                                return;
+                            }
+                            countdownEl.textContent = `⚠ DELETING ${plan.deletable.length} ENTITIES FROM SITE ${plan.siteID} IN ${holdLeft}s — RELEASE TO CANCEL`;
+                        }, 1000);
+                    }
+                } else {
+                    cancelHold();
+                }
+            });
+            const release = () => {
+                if (fired) return;
+                dragging = false;
+                resetKnob();
+            };
+            knob.addEventListener('pointerup', release);
+            knob.addEventListener('pointercancel', release);
+
+            const ui = {
+                status: (msg, color) => { statusEl.innerHTML = `<span style="color:${color || '#aaa'}">${msg}</span>`; },
+                armShadow: () => !!body().querySelector('#aim-bd-shadow') && body().querySelector('#aim-bd-shadow').checked,
+                runStarted: () => {
+                    sliderWrap.style.display = 'none';
+                    ack.disabled = true;
+                    actionsEl.innerHTML = '<span id="aim-bd-abort" style="cursor:pointer;color:#ffa030;font-weight:bold">✋ Abort (finishes current delete, keeps the rest)</span>';
+                    actionsEl.querySelector('#aim-bd-abort').addEventListener('click', () => {
+                        plan.abort = true;
+                        ui.status('aborting after the in-flight delete…', '#ffa030');
+                    });
+                },
+                finished: (report) => {
+                    const ok = !report.failed.length && !report.verifyProblems.length && !report.aborted;
+                    const col = ok ? '#5fff5f' : (report.deleted.length ? '#ffa030' : '#ff5555');
+                    ui.status(
+                        `Done — <b>${report.deleted.length} deleted</b>`
+                        + (report.failed.length ? `, <span style="color:#ff5555">${report.failed.length} FAILED</span>` : '')
+                        + (report.aborted ? ', <span style="color:#ffa030">ABORTED early</span>' : '')
+                        + (report.verifyProblems.length ? `, <span style="color:#ff5555">${report.verifyProblems.length} verify problem(s)</span>` : ', all verified gone ✓')
+                        + (report.revertShadowArmed ? ' · revert shadow armed — open 📥 Import to restore' : ''), col);
+                    actionsEl.innerHTML = ''
+                        + '<span id="aim-bd-log" style="cursor:pointer;color:#7adfe6">📄 Download run log</span>'
+                        + `<span style="color:#888">restore: upload ${escapeHtmlAI(plan.backupName)} as this site's shadow → 📥 Import</span>`;
+                    actionsEl.querySelector('#aim-bd-log').addEventListener('click', () => {
+                        bulkDelDownloadJson(`aim-bulkdelete-log-site${plan.siteID}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.json`, report);
+                    });
+                },
+            };
+        }
+    }
 
     // ---- Overlap self-check geometry (rail 3) ----
     // lat/lng treated as planar x/y — fine at site scale. Ray-cast PIP.
@@ -7014,6 +10548,7 @@
     // time. Calls onProgress(state) on every step so the UI can
     // update. Honors applyState.aborted between groups.
     async function runApplyPipeline(onProgress, opts) {
+        if (liteBlockedWrite('apply pipeline')) return;
         const { dryRun, directApi } = opts || {};
         const groups = groupPendingByEntity();
         // v4.70: the editor path can't toggle the pilot Validation flag —
@@ -7037,6 +10572,7 @@
         applyState.directApi = !!directApi;
         applyState.overlapBroken = undefined;
         applyState.bridges = [];
+        applyState.assetProbeDone = false;
         applyState.entityTotal = groups.length;
         applyState.entityIndex = 0;
         applyState.currentEntity = '';
@@ -7070,13 +10606,19 @@
                     console.error(`${TAG} ⚡ rollback snapshot failed — aborting before writes:`, e);
                 }
             }
-            for (let gi = 0; gi < groups.length && !snapshotFailed; gi++) {
-                if (applyState.aborted) break;
-                const g = groups[gi];
+            // v4.178: process one group end-to-end (write + audit + queue
+            // cleanup + structural halt). Extracted from the old sequential
+            // loop so direct-API runs can execute several groups CONCURRENTLY
+            // — each POST is an independent per-entity upsert, and the old
+            // one-at-a-time loop spent most of its wall clock waiting on
+            // server round-trips (~1s/asset → 17 min editor / 3 min serial).
+            let startedCount = 0;
+            const processOneGroup = async (g) => {
+                startedCount++;
                 applyState.phase = 'writing';
-                applyState.entityIndex = gi + 1;
+                applyState.entityIndex = Math.min(startedCount, groups.length);
                 applyState.currentEntity = g.entityName;
-                applyState.currentLabel = `${gi + 1} of ${groups.length}: ${g.entityName} (${g.edits.length} edit${g.edits.length === 1 ? '' : 's'})${dryRun ? ' [DRY RUN]' : ''}`;
+                applyState.currentLabel = `${applyState.entityIndex} of ${groups.length}: ${g.entityName} (${g.edits.length} edit${g.edits.length === 1 ? '' : 's'})${dryRun ? ' [DRY RUN]' : ''}`;
                 onProgress(applyState);
                 const entityStart = Date.now();
                 let outcome;
@@ -7124,14 +10666,55 @@
                 }
                 // A STRUCTURAL verify failure means we sent a malformed
                 // body (coord/arc count changed) — stop immediately so a
-                // body-shape bug can't damage entity after entity.
+                // body-shape bug can't damage entity after entity. In
+                // pooled mode this stops NEW launches; in-flight writes
+                // finish and report normally.
                 if (outcome.structural) {
                     applyState.aborted = true;
                     applyState.errors.push({ entityName: '(safety abort)', reason: `structural anomaly on ${g.entityName} — run halted; rollback available` });
                     console.error(`${TAG} ⚡ STRUCTURAL anomaly on ${g.entityName} — halting run. Use window.__aim_ai_rollback() or the report button.`);
                 }
                 onProgress(applyState);
-                await sleep(directApi && !dryRun ? 250 : 600);
+            };
+
+            // Direct-API live runs use a small worker pool; the editor path
+            // stays strictly sequential (it drives ONE shared editor UI).
+            // Pool rules: abort/structural-halt stops new launches; the
+            // FIRST asset group runs alone behind a gate so the fresh-GET
+            // geometry probe (in applyOneEntityDirect) can halt the run
+            // before any other asset is written.
+            const POOL = (directApi && !dryRun) ? 5 : 1;
+            if (POOL > 1 && !snapshotFailed) {
+                let nextIdx = 0;
+                let firstAssetGate = null;
+                const worker = async () => {
+                    while (true) {
+                        if (applyState.aborted) return;
+                        const gi = nextIdx++;
+                        if (gi >= groups.length) return;
+                        const g = groups[gi];
+                        if (g.isAsset && !applyState.assetProbeDone) {
+                            if (!firstAssetGate) {
+                                // This worker claims the probe write; others
+                                // queue up behind the gate.
+                                firstAssetGate = processOneGroup(g);
+                                await firstAssetGate;
+                                continue;
+                            }
+                            try { await firstAssetGate; } catch (e) {}
+                            if (applyState.aborted) return;
+                        }
+                        await processOneGroup(g);
+                        await sleep(60); // polite stagger between launches
+                    }
+                };
+                await Promise.all(Array.from({ length: POOL }, () => worker()));
+            } else {
+                for (let gi = 0; gi < groups.length && !snapshotFailed; gi++) {
+                    if (applyState.aborted) break;
+                    await processOneGroup(groups[gi]);
+                    await sleep(directApi && !dryRun ? 250 : 600);
+                }
             }
         } catch (err) {
             console.error(`${TAG} apply pipeline unhandled exception:`, err);
@@ -7517,9 +11100,11 @@
         const { dryRun } = opts || {};
         const label = group.entityName || '(unnamed)';
         // v3.67: ⚡ direct-API path — POST /map_objects/ instead of
-        // driving the editor. FFZ + FP only; assets keep the editor
-        // path (subtype edit is an Ant Select, not an altitude POST).
-        if (opts && opts.directApi && !group.isAsset) {
+        // driving the editor. v4.176: assets included — subtype/name land
+        // in the same full-entity upsert (custom.poi_type_str), with a
+        // fresh-GET probe on the first asset write of each run to confirm
+        // the server round-trips asset geometry (polygon/coords) intact.
+        if (opts && opts.directApi) {
             return applyOneEntityDirect(group, opts);
         }
         // v3.41: branch to the asset path for subtype-only edits. The
@@ -7887,6 +11472,7 @@
         }
     }
     function injectGenMapButton(doc) {
+        if (LITE) return;   // ⊕ Generator / Advanced Draw toolbar entry = write, CSM-only
         try {
             const tools = doc.querySelector('.map-tools');
             if (!tools) return;
@@ -8104,15 +11690,16 @@
             if (e.type === 19) row.subtype = e.general_marker_type || '';
             // v3.82: parse Equipment + State from the asset subtype, and
             // GM Group from the marker name — mirrors computeSiteStats so the
-            // columns read identically to the 📊 Stats popup. Equipment = head
-            // before " - "; State = first modifier after " - " (no modifier =
-            // "Normal", the baseline-good state). GM Group = name with trailing
+            // columns read identically to the 📊 Stats popup. v4.180: uses
+            // the shared taxonomy parser — state = trailing known STATE
+            // word(s) only, equipment = everything before them (so
+            // Diamondback's "v - pumping rod - empty" → Equipment
+            // "V - Pumping Rod", State "Empty"). GM Group = name with trailing
             // numeric tokens stripped ("Elevator 1"/"Elevator 2" → "Elevator").
             if (e.type === 3 && row.subtype) {
-                const parts = row.subtype.split(' - ');
-                row.equipment = prettyKey((parts[0] || '').trim());
-                const mods = parts.slice(1).map(s => prettyKey(s.trim())).filter(Boolean);
-                row.state = mods.length ? mods.join(' + ') : 'Normal';
+                const parsed = parseAssetSubtype(row.subtype);
+                row.equipment = parsed.typeKey;
+                row.state = parsed.state;
             }
             if (e.type === 19) row.gmGroup = gmBaseName(e.name || '');
             // v3.96: Base Station (type 8) — relative_alt + allocated drone.
@@ -8206,8 +11793,8 @@
     }
     function setBaseGmId(siteID, gmId) {
         const m = loadBaseGmMap();
-        if (gmId == null) delete m[String(siteID)];
-        else m[String(siteID)] = gmId;
+        if (gmId == null) delete m[envSiteKey(siteID)];
+        else m[envSiteKey(siteID)] = gmId;
         elevGmSet(CACHE_KEY_BASE_GM, m);
     }
     function gmPoint(e) {
@@ -8218,7 +11805,7 @@
     // (type-8 or GM). Otherwise: all type-8 installed bases, else all GMs named
     // /base/i. Returns { bases: [entity…], auto: boolean }.
     function resolveBases(siteID, entities) {
-        const stored = loadBaseGmMap()[String(siteID)];
+        const stored = loadBaseGmMap()[envSiteKey(siteID)];
         if (stored != null) {
             const e = (entities || []).find(x => (x.type === 8 || x.type === 19) && x.id === stored && gmPoint(x));
             if (e) return { bases: [e], auto: false };
@@ -12145,6 +15732,7 @@
         renderGenMidMarkers();
     }
     function startGenVertEdit(f) {
+        if (liteBlockedWrite('edit points')) return false;
         if (!f || f._committed || !Array.isArray(f.points) || f.points.length < 3) return false;
         if (genVertEdit.active) exitGenVertEdit(false);
         genVertEdit.resumeAdv = !!advDraw.active;
@@ -12449,7 +16037,7 @@
                 const L2 = getLeafletL();
                 if (!L2 || !map) return;
                 const pop = L2.popup({ closeButton: true, autoClose: true, autoPan: false }).setLatLng(e.latlng).setContent(ffzTooltipHtml(poly._ffz)).openOn(map);
-                if (poly._ffz && !poly._ffz._committed) {
+                if (poly._ffz && !poly._ffz._committed && !LITE) {   // Edit points = write, CSM-only
                     const el = pop.getElement && pop.getElement();
                     const host = el && el.querySelector('.leaflet-popup-content');
                     if (host) {
@@ -12590,6 +16178,7 @@
     // POST each draft FFZ to /map_objects/ (cookie + CSRF). dryRun builds +
     // counts without writing. Returns { created, failed, skipped, ids, errors }.
     async function commitGeneratedFfzs(ffzs, opts) {
+        if (liteBlockedWrite('generate/commit FFZs')) return;
         const dryRun = !!(opts && opts.dryRun);
         const siteID = genState.siteID;
         const res = { created: 0, updated: 0, failed: 0, skipped: 0, invalid: 0, ids: [], errors: [], merged: [], dryRun };
@@ -12722,6 +16311,7 @@
     // body (id + every field preserved), overwrites only points + the DEM-
     // recomputed altitude band; per-edit validated prompt; rollback file first.
     async function commitExistingFfzEdits(opts) {
+        if (liteBlockedWrite('commit FFZ edits')) return;
         const dryRun = !!(opts && opts.dryRun);
         const siteID = genState.siteID;
         const res = { updated: 0, failed: 0, errors: [], dryRun, validatedCount: 0, validatedReset: 0, validatedKept: 0 };
@@ -14028,6 +17618,21 @@
         };
         optsRow.appendChild(analyzerBtn);
 
+        // "⛰ Profiler" button — Terrain Profiler (feature #203 Phase 1):
+        // elevation-band regions + proposed per-region floor/ceiling.
+        // Read-only (no writes) so it is NOT Lite-gated.
+        const terProfBtn = document.createElement('button');
+        terProfBtn.type = 'button';
+        terProfBtn.textContent = '⛰ Profiler';
+        terProfBtn.title = 'Terrain Profiler — split the site into ≤Δ ft elevation regions and propose per-region FFZ floors/ceilings (read-only overlay + report)';
+        terProfBtn.style.cssText = 'background:rgba(201,166,255,0.13);color:#c9a6ff;border:1px solid rgba(201,166,255,0.45);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+        terProfBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            if (!terMasterEnabled) { showToast('Terrain Profiler is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+            terrainProfilerRun();
+        };
+        optsRow.appendChild(terProfBtn);
+
         // "Generate" button — opens the Site Setup Generator modal
         // (auto-build the foundation: A1 = inspection FFZs). Inverse of
         // the Analyzer; placed right after it for visual grouping.
@@ -14040,7 +17645,7 @@
             ev.stopPropagation();
             openSiteGenerator(siteID);
         };
-        optsRow.appendChild(generateBtn);
+        if (!LITE) optsRow.appendChild(generateBtn);   // ⊕ Generate — write, CSM-only
 
         // v3.88: 📍 Base picker — choose the basestation GM used by the Route
         // column. Auto-detected (name contains "base") unless overridden per site.
@@ -14083,7 +17688,7 @@
             const ents = bucket ? (bucket.entities || []) : [];
             const type8 = ents.filter(e => e.type === 8 && gmPoint(e));
             const gms = ents.filter(e => e.type === 19 && gmPoint(e));
-            const overrideId = loadBaseGmMap()[String(siteID)];
+            const overrideId = loadBaseGmMap()[envSiteKey(siteID)];
             const mkBaseRow = (label, onPick, opts) => {
                 opts = opts || {};
                 const row = document.createElement('div');
@@ -14889,7 +18494,7 @@
             };
             setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
         };
-        optsRow.appendChild(bulkBtn);
+        if (!LITE) optsRow.appendChild(bulkBtn);        // Bulk → AGL — write, CSM-only
 
         // --- Bulk → Delta button ---
         // Queues a Max Alt = Min Alt + targetDelta edit for every
@@ -14925,7 +18530,7 @@
             };
             setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
         };
-        optsRow.appendChild(deltaBtn);
+        if (!LITE) optsRow.appendChild(deltaBtn);       // Bulk → Delta — write, CSM-only
 
         // --- Bulk → Min / Bulk → Max buttons ---
         // Set an ABSOLUTE Min (or Max) Alt across every eligible FP segment +
@@ -14960,14 +18565,14 @@
         minBtn.title = 'Set an absolute Min Alt across FP segments + FFZs (selected, or all)';
         minBtn.style.cssText = bulkBtnStyle;
         attachBulkPopover(minBtn, (anchor, onClose) => buildBulkMinMaxPopover(anchor, onClose, 'min_alt'));
-        optsRow.appendChild(minBtn);
+        if (!LITE) optsRow.appendChild(minBtn);         // Bulk → Min — write, CSM-only
         const maxBtn = document.createElement('button');
         maxBtn.type = 'button';
         maxBtn.textContent = 'Bulk → Max';
         maxBtn.title = 'Set an absolute Max Alt across FP segments + FFZs (selected, or all)';
         maxBtn.style.cssText = bulkBtnStyle;
         attachBulkPopover(maxBtn, (anchor, onClose) => buildBulkMinMaxPopover(anchor, onClose, 'max_alt'));
-        optsRow.appendChild(maxBtn);
+        if (!LITE) optsRow.appendChild(maxBtn);         // Bulk → Max — write, CSM-only
 
         // --- v3.53: Bulk → Subtype button ---
         // Queues a subtype edit for every selected asset row (or all asset
@@ -15002,7 +18607,33 @@
             };
             setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
         };
-        optsRow.appendChild(subBtn);
+        if (!LITE) optsRow.appendChild(subBtn);         // Bulk → Subtype — write, CSM-only
+
+        // --- v4.174: 📥 Paste Subtypes button ---
+        // Spreadsheet-driven subtype updates: paste two columns
+        // (Name ⇥ Subtype) copied straight out of Sheets/Excel, match
+        // each row to an asset by name, and queue one subtype edit per
+        // match through the same pipeline as Bulk → Subtype. Commits
+        // via the normal Apply flow (new type strings still take the
+        // "Enter new type" path).
+        const pasteSubBtn = document.createElement('button');
+        pasteSubBtn.type = 'button';
+        pasteSubBtn.textContent = '📥 Paste Subtypes';
+        pasteSubBtn.title = 'Paste Name + Subtype columns from a spreadsheet; matches assets by name and queues subtype edits';
+        pasteSubBtn.style.cssText = bulkBtnStyle;
+        attachBulkPopover(pasteSubBtn, (anchor, onClose) => buildBulkSubtypePastePopover(anchor, onClose));
+        if (!LITE) optsRow.appendChild(pasteSubBtn);    // paste subtype — write, CSM-only
+
+        // --- v4.175: 👁 Subtypes button — MAP-level asset visibility by
+        // subtype. Batch-drives Percepto's sidebar checkboxes (the map
+        // visibility source of truth) via applyAssetVisibilityPlan.
+        const subVisBtn = document.createElement('button');
+        subVisBtn.type = 'button';
+        subVisBtn.textContent = '👁 Subtypes';
+        subVisBtn.title = 'Show/hide assets ON THE MAP by subtype (drives the sidebar checkboxes)';
+        subVisBtn.style.cssText = bulkBtnStyle;
+        attachBulkPopover(subVisBtn, (anchor, onClose) => buildSubtypeVisibilityPopover(subVisBtn, onClose));
+        if (!LITE) optsRow.appendChild(subVisBtn);      // 👁 Subtypes — drives Percepto checkboxes; gated in Lite (borderline)
 
         // --- v4.70: Bulk → Valid button ---
         // Bulk-flips the PILOT VALIDATION flag (entity.validated) ON/OFF
@@ -15018,7 +18649,19 @@
         validBtn.title = 'Set the pilot Validation flag ✓/✗ across FFZs + FPs (selected, or all)';
         validBtn.style.cssText = bulkBtnStyle;
         attachBulkPopover(validBtn, (anchor, onClose) => buildBulkValidatePopover(anchor, onClose));
-        optsRow.appendChild(validBtn);
+        if (!LITE) optsRow.appendChild(validBtn);       // Bulk → Valid — write, CSM-only
+
+        // --- v4.197: Bulk → 🗑 Delete button ---
+        // Mass-delete selected FFZs / FPs / NFZs behind the super-confirm
+        // modal (auto-backup + ack + 5s hold-slider). See the bulk-delete
+        // section near the direct-API rails for the full design notes.
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.textContent = 'Bulk → 🗑 Delete';
+        delBtn.title = 'Mass-delete selected FFZs / FPs / NFZs — auto-backup + triple confirmation (5s hold slider)';
+        delBtn.style.cssText = 'background:transparent;color:#ff5555;border:1px solid rgba(255,85,85,0.5);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+        delBtn.onclick = (ev) => { ev.stopPropagation(); openBulkDeleteModal(); };
+        if (!LITE) optsRow.appendChild(delBtn);         // Bulk → Delete — write, CSM-only
 
         // Popover: pick a target (✓ Valid / ✗ Invalid), scope, and entity-
         // type filter, preview the count, then queue one validated edit per
@@ -15229,7 +18872,9 @@
                 });
                 const eligible = candidates.filter(r => {
                     const cur = (r.entity.custom && r.entity.custom.poi_type_str) || '';
-                    return cur !== target;
+                    // Case-insensitive — the server lowercases poi_type_str,
+                    // so "BATTERY" vs stored "battery" is NOT a change.
+                    return cur.toLowerCase() !== target.toLowerCase();
                 });
                 return { eligible, target, candidates };
             };
@@ -15237,8 +18882,8 @@
                 const { eligible, target, candidates } = computeEligible();
                 if (!target) { preview.textContent = '⚠️ Type or pick a target subtype'; return; }
                 if (candidates.length === 0) { preview.textContent = '⚠️ No eligible assets in scope'; return; }
-                const observed = new Set(observedSubtypesForSite(siteIDLocal));
-                const isNew = !observed.has(target);
+                const observed = new Set(observedSubtypesForSite(siteIDLocal).map(s => s.toLowerCase()));
+                const isNew = !observed.has(target.toLowerCase());
                 preview.innerHTML = `Will queue <strong style="color:#ffd54f">${eligible.length}</strong> edit${eligible.length === 1 ? '' : 's'} · skipping ${candidates.length - eligible.length} already at "${target}"${isNew ? ' · <span style="color:#c4b5fd">NEW type</span>' : ''}`;
             };
             refreshPreview();
@@ -15269,6 +18914,335 @@
             };
             btnRow.appendChild(cancelBtn);
             btnRow.appendChild(queueBtn);
+            pop.appendChild(btnRow);
+            return pop;
+        }
+
+        // v4.174: paste-driven bulk subtype updates. Parses tab-separated
+        // (spreadsheet paste) or comma-separated Name/Subtype pairs,
+        // matches each name to an asset (trim + collapse whitespace +
+        // case-insensitive), and queues subtype edits via queueSubtypeEdit.
+        // Loud about everything it can't act on: unparseable lines,
+        // unmatched names (copyable back to the spreadsheet), and names
+        // pasted twice with CONFLICTING types (those are skipped —
+        // ambiguous intent). A name matching multiple assets queues all
+        // of them (same name → same subtype is the sane reading).
+        function buildBulkSubtypePastePopover(anchor, onClose) {
+            const pop = document.createElement('div');
+            pop.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(255,213,79,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:12px 14px;z-index:99999;font-size:12px;color:#e6e6e6;width:440px';
+            const title = document.createElement('div');
+            title.style.cssText = 'color:#ffd54f;font-weight:700;font-size:13px;margin-bottom:8px';
+            title.textContent = '📥 Paste Subtype Data';
+            pop.appendChild(title);
+            const help = document.createElement('div');
+            help.style.cssText = 'color:#888;font-size:10px;margin-bottom:10px;line-height:1.4';
+            help.textContent = 'Paste two columns — asset Name and target Subtype — straight from Sheets/Excel. A "Name / Type" header row is skipped automatically. Matched assets get a queued subtype edit; commit with Apply as usual.';
+            pop.appendChild(help);
+
+            const ta = document.createElement('textarea');
+            ta.rows = 8;
+            ta.placeholder = 'FRYAR 2 BATTERY\tBattery\nELIAS 16-9 1\tBATTERY\nHYDRA 45-4_1\tBATTERY';
+            ta.style.cssText = 'width:100%;box-sizing:border-box;background:#1a1d23;border:1px solid rgba(255,255,255,0.20);color:#fff;padding:6px 8px;border-radius:3px;font-family:monospace;font-size:11px;resize:vertical;margin-bottom:8px';
+            pop.appendChild(ta);
+
+            const preview = document.createElement('div');
+            preview.style.cssText = 'color:#9ad;font-size:11px;margin-bottom:10px;padding:6px 8px;background:rgba(255,213,79,0.08);border-radius:3px;min-height:20px;max-height:160px;overflow-y:auto;line-height:1.5';
+            pop.appendChild(preview);
+
+            const siteIDLocal = getCurrentSiteID();
+            const norm = (s) => String(s || '').trim().replace(/\s+/g, ' ').toUpperCase();
+
+            // Asset lookup by normalized name. Dedupe by entity id — a
+            // name CAN legitimately map to multiple distinct assets.
+            const assetsByName = new Map();
+            allRows.forEach(r => {
+                if (r.type !== 3 || !r.entity || r._isSegment) return;
+                const k = norm(r.entity.name);
+                if (!k) return;
+                if (!assetsByName.has(k)) assetsByName.set(k, []);
+                const arr = assetsByName.get(k);
+                if (!arr.some(en => en.id === r.entity.id)) arr.push(r.entity);
+            });
+
+            const parsePaste = () => {
+                const lines = String(ta.value || '').split(/\r?\n/);
+                const pairs = [];
+                const badLines = [];
+                for (const line of lines) {
+                    if (!line.trim()) continue;
+                    let name, type;
+                    if (line.includes('\t')) {
+                        const cells = line.split('\t');
+                        name = cells[0];
+                        type = cells[1];
+                    } else {
+                        // CSV fallback — split on the LAST comma so asset
+                        // names containing commas survive.
+                        const idx = line.lastIndexOf(',');
+                        if (idx === -1) { badLines.push(line.trim()); continue; }
+                        name = line.slice(0, idx);
+                        type = line.slice(idx + 1);
+                    }
+                    name = String(name || '').trim();
+                    type = String(type || '').trim();
+                    if (!name || !type) { badLines.push(line.trim()); continue; }
+                    pairs.push({ name, type });
+                }
+                // Header row: skip a leading "Name / Type|Subtype" pair.
+                if (pairs.length) {
+                    const h = pairs[0].name.toLowerCase();
+                    const t = pairs[0].type.toLowerCase();
+                    if (h === 'name' && (t === 'type' || t === 'subtype')) pairs.shift();
+                }
+                return { pairs, badLines };
+            };
+
+            const analyze = () => {
+                const { pairs, badLines } = parsePaste();
+                // Detect names pasted more than once with DIFFERENT types.
+                const typeByName = new Map();     // normName -> type
+                const displayByName = new Map();  // normName -> as-pasted name
+                const conflictNames = new Set();
+                pairs.forEach(p => {
+                    const k = norm(p.name);
+                    // Case-insensitive — the server lowercases subtypes, so
+                    // "Battery" vs "BATTERY" is the same value, not a conflict.
+                    if (typeByName.has(k) && typeByName.get(k).toLowerCase() !== p.type.toLowerCase()) conflictNames.add(k);
+                    typeByName.set(k, p.type);
+                    displayByName.set(k, p.name);
+                });
+                const observed = new Set(observedSubtypesForSite(siteIDLocal).map(s => s.toLowerCase()));
+                const toQueue = [];      // { entity, type }
+                const unmatched = [];
+                const newTypes = new Set();
+                let already = 0;
+                let multiMatch = 0;
+                for (const [k, type] of typeByName) {
+                    if (conflictNames.has(k)) continue;
+                    const ents = assetsByName.get(k);
+                    if (!ents) { unmatched.push(displayByName.get(k)); continue; }
+                    if (ents.length > 1) multiMatch++;
+                    ents.forEach(en => {
+                        const cur = (en.custom && en.custom.poi_type_str) || '';
+                        if (cur.toLowerCase() === type.toLowerCase()) { already++; return; }
+                        toQueue.push({ entity: en, type });
+                        if (!observed.has(type.toLowerCase())) newTypes.add(type.toLowerCase());
+                    });
+                }
+                const conflicts = Array.from(conflictNames).map(k => displayByName.get(k));
+                return { rowCount: pairs.length, badLines, toQueue, unmatched, conflicts, newTypes, already, multiMatch };
+            };
+
+            let lastAnalysis = null;
+            const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            const listPreview = (arr, max) => {
+                const shown = arr.slice(0, max).map(esc).join(', ');
+                return arr.length > max ? `${shown} … +${arr.length - max} more` : shown;
+            };
+            const refreshPreview = () => {
+                lastAnalysis = analyze();
+                const a = lastAnalysis;
+                if (!String(ta.value || '').trim()) { preview.textContent = '⚠️ Paste Name + Subtype rows above'; return; }
+                const bits = [];
+                bits.push(`Parsed <strong style="color:#ffd54f">${a.rowCount}</strong> row${a.rowCount === 1 ? '' : 's'} → will queue <strong style="color:#ffd54f">${a.toQueue.length}</strong> edit${a.toQueue.length === 1 ? '' : 's'}${a.already ? ` · ${a.already} already at target` : ''}${a.multiMatch ? ` · ${a.multiMatch} name${a.multiMatch === 1 ? '' : 's'} matched multiple assets (all queued)` : ''}`);
+                if (a.newTypes.size) bits.push(`<span style="color:#c4b5fd">NEW type${a.newTypes.size === 1 ? '' : 's'}:</span> ${listPreview(Array.from(a.newTypes), 8)}`);
+                if (a.unmatched.length) bits.push(`<span style="color:#ff8a80">⚠️ ${a.unmatched.length} unmatched name${a.unmatched.length === 1 ? '' : 's'}:</span> ${listPreview(a.unmatched, 10)}`);
+                if (a.conflicts.length) bits.push(`<span style="color:#ff8a80">⚠️ Skipped — pasted twice with different types:</span> ${listPreview(a.conflicts, 10)}`);
+                if (a.badLines.length) bits.push(`<span style="color:#ff8a80">⚠️ ${a.badLines.length} unparseable line${a.badLines.length === 1 ? '' : 's'}:</span> ${listPreview(a.badLines, 5)}`);
+                preview.innerHTML = bits.join('<br>');
+            };
+            refreshPreview();
+            ta.oninput = refreshPreview;
+
+            const btnRow = document.createElement('div');
+            btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;align-items:center';
+            const copyUnBtn = document.createElement('button');
+            copyUnBtn.type = 'button';
+            copyUnBtn.textContent = '📋 Copy unmatched';
+            copyUnBtn.title = 'Copy the unmatched names back to the clipboard for spreadsheet reconciliation';
+            copyUnBtn.style.cssText = 'margin-right:auto;background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 10px;cursor:pointer;font:inherit;font-size:11px';
+            copyUnBtn.onclick = () => {
+                const un = (lastAnalysis && lastAnalysis.unmatched) || [];
+                if (!un.length) { showToast('No unmatched names'); return; }
+                navigator.clipboard.writeText(un.join('\n')).then(
+                    () => showToast(`Copied ${un.length} unmatched name${un.length === 1 ? '' : 's'}`),
+                    (e) => { console.warn(`${TAG} clipboard write failed`, e); showToast('Clipboard write failed', 'rgba(255,82,82,0.6)'); }
+                );
+            };
+            const cancelBtn = document.createElement('button');
+            cancelBtn.type = 'button';
+            cancelBtn.textContent = 'Cancel';
+            cancelBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px';
+            cancelBtn.onclick = onClose;
+            const queueBtn = document.createElement('button');
+            queueBtn.type = 'button';
+            queueBtn.textContent = 'Queue edits';
+            queueBtn.style.cssText = 'background:rgba(255,213,79,0.18);color:#ffd54f;border:1px solid rgba(255,213,79,0.55);border-radius:3px;padding:5px 14px;cursor:pointer;font:inherit;font-size:11px;font-weight:600';
+            queueBtn.onclick = () => {
+                const a = analyze();
+                if (a.toQueue.length === 0) { showToast('Nothing to queue — check the preview', 'rgba(255,82,82,0.6)'); return; }
+                let queued = 0;
+                a.toQueue.forEach(q => { if (queueSubtypeEdit(q.entity, q.type)) queued++; });
+                console.log(`${TAG} paste-subtypes: queued ${queued}/${a.toQueue.length} · ${a.unmatched.length} unmatched · ${a.conflicts.length} conflicts · ${a.badLines.length} bad lines`);
+                showToast(`Queued ${queued} subtype edit${queued === 1 ? '' : 's'} — hit Apply to commit`, 'rgba(255,213,79,0.7)');
+                onClose();
+                redrawTable();
+            };
+            btnRow.appendChild(copyUnBtn);
+            btnRow.appendChild(cancelBtn);
+            btnRow.appendChild(queueBtn);
+            pop.appendChild(btnRow);
+            return pop;
+        }
+
+        // v4.175: 👁 Subtypes popover — checklist of observed subtypes
+        // (checked = visible on the map). "only" per row for the common
+        // one-subtype workflow. Apply computes the cheapest sidebar plan
+        // (per-asset delta clicks vs hide-Assets-section + re-check the
+        // visible ones) and hands it to applyAssetVisibilityPlan, with
+        // live progress on the button.
+        function buildSubtypeVisibilityPopover(anchorBtn, onClose) {
+            const pop = document.createElement('div');
+            pop.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(255,213,79,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:12px 14px;z-index:99999;font-size:12px;color:#e6e6e6;width:360px';
+            const title = document.createElement('div');
+            title.style.cssText = 'color:#ffd54f;font-weight:700;font-size:13px;margin-bottom:8px';
+            title.textContent = '👁 Asset Visibility by Subtype';
+            pop.appendChild(title);
+            const help = document.createElement('div');
+            help.style.cssText = 'color:#888;font-size:10px;margin-bottom:10px;line-height:1.4';
+            help.textContent = 'Checked subtypes stay visible ON THE MAP; unchecked get hidden. Runs through Percepto\'s sidebar checkboxes (a few per second) so the map, sidebar and eye column stay in sync.';
+            pop.appendChild(help);
+
+            // Subtype → asset entities (dedupe by id). '(no subtype)'
+            // bucket keeps untyped assets controllable too.
+            const buckets = new Map();
+            allRows.forEach(r => {
+                if (r.type !== 3 || !r.entity || r._isSegment) return;
+                const st = ((r.entity.custom && r.entity.custom.poi_type_str) || '').trim() || '(no subtype)';
+                if (!buckets.has(st)) buckets.set(st, []);
+                const arr = buckets.get(st);
+                if (!arr.some(en => en.id === r.entity.id)) arr.push(r.entity);
+            });
+            const subtypeNames = Array.from(buckets.keys()).sort((a, b) => a.localeCompare(b));
+            if (subtypeNames.length === 0) {
+                help.textContent = 'No assets loaded for this site.';
+                return pop;
+            }
+
+            const listWrap = document.createElement('div');
+            listWrap.style.cssText = 'max-height:220px;overflow-y:auto;margin-bottom:10px;display:flex;flex-direction:column;gap:4px';
+            const rowChecks = new Map();  // subtype -> checkbox input
+            subtypeNames.forEach(st => {
+                const ents = buckets.get(st);
+                // Row starts at the CURRENT believed state: checked if any
+                // member is visible (all-hidden subtype starts unchecked).
+                const anyVisible = ents.some(en => isEntityVisible(en.id));
+                const row = document.createElement('label');
+                row.style.cssText = 'display:flex;align-items:center;gap:7px;cursor:pointer;color:#cfd6dc';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.checked = anyVisible;
+                cb.style.cssText = 'accent-color:rgb(255,213,79);cursor:pointer';
+                rowChecks.set(st, cb);
+                row.appendChild(cb);
+                const txt = document.createElement('span');
+                txt.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+                txt.textContent = `${st} (${ents.length})`;
+                txt.title = `${st} — ${ents.length} asset${ents.length === 1 ? '' : 's'}`;
+                row.appendChild(txt);
+                const only = document.createElement('span');
+                only.textContent = 'only';
+                only.title = `Show ONLY ${st}`;
+                only.style.cssText = 'color:#5fb8ff;font-size:10px;cursor:pointer;padding:0 4px';
+                only.onclick = (ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    rowChecks.forEach((c, k) => { c.checked = (k === st); });
+                    refreshPreview();
+                };
+                row.appendChild(only);
+                cb.onchange = () => refreshPreview();
+                listWrap.appendChild(row);
+            });
+            pop.appendChild(listWrap);
+
+            const preview = document.createElement('div');
+            preview.style.cssText = 'color:#9ad;font-size:11px;margin-bottom:10px;padding:6px 8px;background:rgba(255,213,79,0.08);border-radius:3px;min-height:18px;line-height:1.5';
+            pop.appendChild(preview);
+
+            const computePlan = () => {
+                const showEnts = [];
+                const hideEnts = [];
+                subtypeNames.forEach(st => {
+                    (rowChecks.get(st).checked ? showEnts : hideEnts).push(...buckets.get(st));
+                });
+                // Delta plan: only touch assets whose believed state differs.
+                const check = showEnts.filter(en => !isEntityVisible(en.id));
+                const uncheck = hideEnts.filter(en => isEntityVisible(en.id));
+                const deltaSteps = check.length + uncheck.length;
+                // Section plan: 1 section click + re-check every visible
+                // asset. State-independent, so it also self-heals if our
+                // believed state drifted from Percepto (editor closes reset
+                // Percepto's visibility without telling us).
+                const sectionSteps = 1 + showEnts.length;
+                if (deltaSteps <= sectionSteps) {
+                    return { plan: { sectionOff: false, check, uncheck }, steps: deltaSteps, showN: showEnts.length, hideN: hideEnts.length };
+                }
+                const allAssetIds = [];
+                buckets.forEach(arr => arr.forEach(en => allAssetIds.push(en.id)));
+                return { plan: { sectionOff: true, check: showEnts, uncheck: [], allAssetIds }, steps: sectionSteps, showN: showEnts.length, hideN: hideEnts.length };
+            };
+            const refreshPreview = () => {
+                const p = computePlan();
+                if (p.showN + p.hideN === 0) { preview.textContent = '—'; return; }
+                if (p.steps === 0) { preview.textContent = 'Already matches — nothing to do'; return; }
+                const secs = Math.max(1, Math.round(p.steps * 0.28));
+                preview.innerHTML = `Show <strong style="color:#ffd54f">${p.showN}</strong> · hide <strong style="color:#ffd54f">${p.hideN}</strong> assets — ${p.steps} sidebar click${p.steps === 1 ? '' : 's'}, ~${secs}s${p.plan.sectionOff ? ' <span style="color:#888">(via section off + re-check)</span>' : ''}`;
+            };
+            refreshPreview();
+
+            const btnRow = document.createElement('div');
+            btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;align-items:center';
+            const allBtn = document.createElement('button');
+            allBtn.type = 'button';
+            allBtn.textContent = 'Show all';
+            allBtn.title = 'Re-check the whole Assets section (single click) — everything visible';
+            allBtn.style.cssText = 'margin-right:auto;background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 10px;cursor:pointer;font:inherit;font-size:11px';
+            allBtn.onclick = async () => {
+                onClose();
+                const doc = getSidebarDoc();
+                if (!doc) { showToast('Sidebar not found — open the entity panel?', 'rgba(255,96,96,0.55)'); return; }
+                pasteSidebarSearch(doc, '');
+                await sleep(150);
+                const ok = await setAssetSectionChecked(doc, true);
+                if (!ok) { showToast('Assets section not found in sidebar', 'rgba(255,96,96,0.55)'); return; }
+                const bucketsAll = [];
+                buckets.forEach(arr => arr.forEach(en => bucketsAll.push(en.id)));
+                bucketsAll.forEach(id => setEntityVisible(id, true));
+                showToast('All assets visible');
+                redrawTable();
+            };
+            const cancelBtn = document.createElement('button');
+            cancelBtn.type = 'button';
+            cancelBtn.textContent = 'Cancel';
+            cancelBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px';
+            cancelBtn.onclick = onClose;
+            const applyBtn = document.createElement('button');
+            applyBtn.type = 'button';
+            applyBtn.textContent = 'Apply to map';
+            applyBtn.style.cssText = 'background:rgba(255,213,79,0.18);color:#ffd54f;border:1px solid rgba(255,213,79,0.55);border-radius:3px;padding:5px 14px;cursor:pointer;font:inherit;font-size:11px;font-weight:600';
+            applyBtn.onclick = () => {
+                const p = computePlan();
+                if (p.steps === 0) { showToast('Already matches — nothing to do'); onClose(); return; }
+                onClose();
+                const origLabel = anchorBtn.textContent;
+                applyAssetVisibilityPlan(p.plan, (done, total) => {
+                    anchorBtn.textContent = `👁 ${done}/${total}…`;
+                }).finally(() => { anchorBtn.textContent = origLabel; });
+            };
+            btnRow.appendChild(allBtn);
+            btnRow.appendChild(cancelBtn);
+            btnRow.appendChild(applyBtn);
             pop.appendChild(btnRow);
             return pop;
         }
@@ -16907,7 +20881,7 @@
                                 : col.key === 'droneName' ? 'Drone applies to Base Stations only'
                                 : col.key === 'poleFeeder' ? 'Pole feeder (custom.pole_feeder) — assets only'
                                 : col.key === 'poleUsage' ? 'Pole usage (custom.pole_usage) — assets only'
-                                : 'Equipment is parsed from asset subtype (before " - ")';
+                                : 'Equipment = asset subtype minus any trailing state word (empty/unshielded/…)';
                         }
                     } else if (col.key === 'poleIsSimple') {
                         // Asset boolean custom.pole_is_simple → Yes / No / — (N/A).
@@ -17224,6 +21198,44 @@
         catch (e) { console.warn(`${TAG} setView threw:`, e); }
     }
 
+    // v4.211: 🎯 Focus (feature #210) — fit the view to the entity's full
+    // extent so the whole thing is in frame as close as possible. Gathers
+    // every point the entity has (polygon/marker `coords` OR flight-path
+    // `arcs` endpoints), then fitBounds — same idiom as panToSegment.
+    // Single-point entities (GMs, base stations, safe zones) have no
+    // extent, so they get a tight setView instead.
+    function focusOnEntity(entity) {
+        const map = getLeafletMap();
+        if (!map) {
+            showToast('Map not found — cannot focus', 'rgba(255,96,96,0.55)');
+            return;
+        }
+        const pts = [];
+        if (Array.isArray(entity && entity.coords)) {
+            for (const c of entity.coords) {
+                if (c && typeof c.lat === 'number' && typeof c.lng === 'number') pts.push([c.lat, c.lng]);
+            }
+        }
+        if (Array.isArray(entity && entity.arcs)) {
+            for (const a of entity.arcs) {
+                for (const p of [a && a.point_a, a && a.point_b]) {
+                    if (p && typeof p.lat === 'number' && typeof p.lng === 'number') pts.push([p.lat, p.lng]);
+                }
+            }
+        }
+        if (!pts.length) {
+            showToast('No coordinates on entity to focus', 'rgba(255,180,0,0.55)');
+            return;
+        }
+        try {
+            if (pts.length === 1) map.setView(pts[0], Math.max(19, map.getZoom()));
+            else map.fitBounds(pts, { padding: [40, 40], maxZoom: 20 });
+        } catch (e) {
+            console.warn(`${TAG} focusOnEntity failed, falling back to pan:`, e);
+            try { panToEntity(entity); } catch (e2) { console.warn(`${TAG} pan fallback failed:`, e2); }
+        }
+    }
+
     // Open an inline editor on a Min Alt / Max Alt / AGL cell of an FP
     // segment row. Replaces cell content with a text input pre-filled
     // with the current (or pending-derived) value. Accepts plain
@@ -17384,6 +21396,7 @@
     //   for the popup path so it can close itself; the SUM table path
     //   redraws via window.__aim_ai_redrawTable).
     function startInlineSubtypeEdit(td, entity, onCommit) {
+        if (LITE) return;                        // Lite = read-only
         if (!entity || entity.type !== 3) return;
         // v3.43: starting an edit implicitly means "I'm focused on this
         // asset" — pan the map to it so the user can see the entity
@@ -17497,6 +21510,7 @@
     // — names are unique-by-intent, no autocomplete needed). Same click-
     // propagation guards as subtype edit. Auto-pans to entity on edit.
     function startInlineNameEdit(td, entity, onCommit) {
+        if (LITE) return;                        // Lite = read-only
         if (!entity) return;
         try { panToEntity(entity); } catch (e) {}
         const eff = effectiveName(entity);
@@ -17685,46 +21699,31 @@
         // like "TEXAS", "PU", "ARICK" (asset name prefixes, not
         // equipment types). Per user feedback, subtype is the only
         // source of truth here.
-        const SPLIT = ' - ';
+        // v4.180: all three asset breakdowns share parseAssetSubtype —
+        // equipment = the full type (orientation + equipment, e.g.
+        // "V - Pumping Rod"), state = trailing known STATE word(s) only,
+        // plus a V-vs-H orientation rollup for taxonomies (Diamondback)
+        // whose types lead with the wellhead orientation. EXXON's
+        // "battery - empty" style parses identically to before.
         const equipMap = {};
-        byType[3].forEach(r => {
-            const sub = (r.subtype || '').trim();
-            if (!sub) return;
-            const head = sub.split(SPLIT)[0].trim();
-            if (!head) return;
-            const key = prettyKey(head);
-            equipMap[key] = (equipMap[key] || 0) + 1;
-        });
-        const assetEquipment = sortAndCap(equipMap, 12);
-
-        // States = parts AFTER " - " in subtype, plus an implicit
-        // "Normal" bucket for assets that have NO modifier (the
-        // baseline-good state — per Percepto's classification, no
-        // modifier means the asset is healthy). Each asset counts
-        // toward exactly one state so the percentages add to 100%
-        // and the card gives a true distribution.
-        // "battery - empty" → state = "Empty"
-        // "v-well"          → state = "Normal"
-        // Multi-modifier subtypes are rare in practice; if seen, we
-        // bucket on the FIRST modifier to preserve the 100%-sum.
         const stateMap = {};
+        const orientMap = {};
         byType[3].forEach(r => {
             const sub = (r.subtype || '').trim();
             if (!sub) return;
-            const parts = sub.split(SPLIT).slice(1);
-            if (parts.length === 0) {
-                stateMap['Normal'] = (stateMap['Normal'] || 0) + 1;
-                return;
-            }
-            const firstMod = (parts[0] || '').trim();
-            if (!firstMod) {
-                stateMap['Normal'] = (stateMap['Normal'] || 0) + 1;
-                return;
-            }
-            const key = prettyKey(firstMod);
-            stateMap[key] = (stateMap[key] || 0) + 1;
+            const p = parseAssetSubtype(sub);
+            if (p.typeKey) equipMap[p.typeKey] = (equipMap[p.typeKey] || 0) + 1;
+            stateMap[p.state] = (stateMap[p.state] || 0) + 1;
+            // v4.181: non-V/H assets bucket under their own base type
+            // ("Battery", "Well-Cluster") instead of an opaque "Other".
+            const o = p.orientation || ((p.typeKey.split(' - ')[0]) || 'Other');
+            orientMap[o] = (orientMap[o] || 0) + 1;
         });
+        const assetEquipment = sortAndCap(equipMap, 16);
         const assetStates = sortAndCap(stateMap, 10);
+        // Only meaningful when the taxonomy actually has V/H leads —
+        // EXXON sites get no orientation card.
+        const assetOrientation = (orientMap['V'] || orientMap['H']) ? sortAndCap(orientMap, 5) : null;
 
         // Auto-detect GM groups from names. Strategy:
         //   1. tokenize on whitespace / underscore / dash
@@ -17740,25 +21739,27 @@
         });
         const gmGroups = sortAndCap(gmMap, 12);
 
-        // Equipment × State matrix — for each equipment kind, count
-        // how many are in each state. "Normal" means no state suffix
-        // on the subtype = the asset is in good operating condition
-        // (per Percepto's convention: no modifier = baseline-good).
-        // Splits use " - " (with spaces) so "v-well" stays intact.
+        // Equipment × State matrix — for each equipment kind (full type,
+        // via parseAssetSubtype), count how many are in each state.
+        // "Normal" = no trailing state word = good operating condition.
         const equipStateMatrix = {};
         byType[3].forEach(r => {
             const sub = (r.subtype || '').trim();
-            const head = prettyKey((sub.split(SPLIT)[0] || '').trim());
-            if (!head) return;
-            const states = sub.split(SPLIT).slice(1).map(s => prettyKey(s.trim())).filter(Boolean);
-            const stateKey = states.length ? states.join(' + ') : 'Normal';
-            if (!equipStateMatrix[head]) equipStateMatrix[head] = {};
-            equipStateMatrix[head][stateKey] = (equipStateMatrix[head][stateKey] || 0) + 1;
+            if (!sub) return;
+            const p = parseAssetSubtype(sub);
+            if (!p.typeKey) return;
+            if (!equipStateMatrix[p.typeKey]) equipStateMatrix[p.typeKey] = {};
+            equipStateMatrix[p.typeKey][p.state] = (equipStateMatrix[p.typeKey][p.state] || 0) + 1;
         });
         // Other rolled-up stats — useful at a glance.
         const other = {
             'With notes': allRows.filter(r => r.hasNotes).length,
-            'Unshielded (all types)': allRows.filter(r => r.unshielded).length,
+            // v4.181: count BOTH unshielded sources — the is_unshielded
+            // boolean flag (any entity type) AND the parsed asset subtype
+            // state. Diamondback marks unshielded in the subtype string
+            // ("… - unshielded") with the flag left false, so the old
+            // flag-only count read 0 while States showed 101.
+            'Unshielded (all types)': allRows.filter(r => r.unshielded || r.state === 'Unshielded').length,
         };
         return {
             siteID,
@@ -17770,9 +21771,37 @@
             },
             validationByType,
             flightPaths: { entities: byType[15].length, segments: fpSegments, distanceM: fpDistanceM },
-            assetStates, assetEquipment, equipStateMatrix,
+            assetStates, assetEquipment, assetOrientation, equipStateMatrix,
             gmGroups, other,
         };
+    }
+
+    // v4.180: taxonomy-aware subtype parser — shared by the SUM
+    // Equipment/State columns and the 📊 Stats popup so they always
+    // agree. Subtypes are " - "-separated; only TRAILING segments that
+    // are known STATE words count as the health state, everything
+    // before them is the TYPE (which may itself contain " - "):
+    //   EXXON:       "battery - empty"            → type "Battery", state Empty
+    //   Diamondback: "v - pumping rod - empty"    → type "V - Pumping Rod", state Empty, orientation V
+    //   Diamondback: "h - pumping - submersible"  → type "H - Pumping - Submersible", state Normal
+    // Multiple trailing state words resolve by safety-first precedence
+    // (worst wins), mirroring Map Styler's classifyAssetState.
+    const ASSET_STATE_WORDS = ['unreachable', 'unshielded', 'empty', 'inactive', 'hy'];
+    const ASSET_STATE_WORDSET = new Set(ASSET_STATE_WORDS);
+    function parseAssetSubtype(sub) {
+        const parts = String(sub || '').trim().split(' - ').map(s => s.trim()).filter(Boolean);
+        const stateMods = [];
+        while (parts.length > 1 && ASSET_STATE_WORDSET.has(parts[parts.length - 1].toLowerCase())) {
+            stateMods.push(parts.pop().toLowerCase());
+        }
+        let state = 'Normal';
+        for (const w of ASSET_STATE_WORDS) {
+            if (stateMods.indexOf(w) !== -1) { state = (w === 'hy') ? 'HY' : prettyKey(w); break; }
+        }
+        const typeKey = parts.length ? prettyKey(parts.join(' - ')) : '';
+        const first = (parts[0] || '').toLowerCase();
+        const orientation = first === 'v' ? 'V' : (first === 'h' ? 'H' : null);
+        return { typeKey, state, orientation };
     }
 
     // Title-case-ish key normalizer: turn "h-well" → "H-Well",
@@ -17921,6 +21950,10 @@
             return { eq, states, total };
         }).sort((a, b) => b.total - a.total);
         const globalMax = Math.max(0, ...equipTotals.map(x => x.total));
+        // v4.181: same wide-card rule as kwCard — long equipment names
+        // get a two-column card + a narrower stacked bar.
+        const wideMatrix = equipTotals.some(x => x.eq.length > 14);
+        if (wideMatrix) c.style.gridColumn = 'span 2';
         // Legend at top — known states first (in canonical order),
         // any unrecognized states appended alphabetically.
         const legend = document.createElement('div');
@@ -17957,7 +21990,7 @@
         const table = document.createElement('table');
         table.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed';
         const cg = document.createElement('colgroup');
-        cg.innerHTML = '<col><col style="width:50px"><col style="width:55%">';
+        cg.innerHTML = `<col><col style="width:50px"><col style="width:${wideMatrix ? '45%' : '55%'}">`;
         table.appendChild(cg);
         const HEADER_CSS = 'color:#888;font-weight:600;font-size:9px;text-transform:uppercase;letter-spacing:0.4px;padding:0 6px 5px;border-bottom:1px solid rgba(255,255,255,0.08)';
         const thead = document.createElement('thead');
@@ -18256,6 +22289,13 @@
         //   "Type" — but "Subtype" or "Group" reads better in context).
         const kwCard = (titleText, dict, color, denominator, labelHeader) => {
             const c = card(titleText);
+            // v4.181: long type names (Diamondback's "V - Pumping Rod")
+            // were ellipsis-truncated in a single-column card. When any
+            // label runs long, span TWO grid columns and shrink the Share
+            // bar (38% → 28%) so the label column gets the room. Short
+            // taxonomies (EXXON) keep the original one-column layout.
+            const wide = Object.keys(dict).some(k => k.length > 14);
+            if (wide) c.style.gridColumn = 'span 2';
             const maxVal = Math.max(0, ...Object.values(dict));
             const denom = denominator != null ? denominator : Object.values(dict).reduce((a, b) => a + b, 0);
             const table = document.createElement('table');
@@ -18263,7 +22303,7 @@
             // have predictable widths even with mixed label lengths.
             table.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed';
             const cg = document.createElement('colgroup');
-            cg.innerHTML = '<col><col style="width:52px"><col style="width:46px"><col style="width:38%">';
+            cg.innerHTML = `<col><col style="width:52px"><col style="width:46px"><col style="width:${wide ? '28%' : '38%'}">`;
             table.appendChild(cg);
 
             const HEADER_CSS = 'color:#888;font-weight:600;font-size:9px;text-transform:uppercase;letter-spacing:0.4px;padding:0 6px 5px;border-bottom:1px solid rgba(255,255,255,0.08)';
@@ -18319,6 +22359,11 @@
         // both equipment and state cards.
         const totalAssets = stats.counts[3];
         const totalGMs = stats.counts[19];
+        // v4.180: V vs H orientation rollup — only for taxonomies whose
+        // types lead with the wellhead orientation (e.g. Diamondback).
+        if (stats.assetOrientation) {
+            body.appendChild(kwCard('Asset · V vs H (auto)', stats.assetOrientation, '#7adfe6', totalAssets, 'Orientation'));
+        }
         body.appendChild(kwCard('Asset · Equipment (auto)', stats.assetEquipment, typeReg(3).color, totalAssets, 'Subtype'));
         body.appendChild(kwCard('Asset · States (auto)', stats.assetStates, '#ffb74d', totalAssets, 'State'));
         // Equipment Health matrix — stacked horizontal bars per
@@ -18442,6 +22487,11 @@
         lines.push(pad('Total length (m)',  Math.round(stats.flightPaths.distanceM)));
         lines.push(pad('Total length (mi)', distMi.toFixed(2)));
         lines.push('');
+        if (stats.assetOrientation) {
+            lines.push('ASSET · V vs H (auto-detected)');
+            Object.entries(stats.assetOrientation).forEach(([k, v]) => lines.push(pad(k, v)));
+            lines.push('');
+        }
         lines.push('ASSET · EQUIPMENT (auto-detected)');
         Object.entries(stats.assetEquipment).forEach(([k, v]) => lines.push(pad(k, v)));
         lines.push('');
@@ -18519,6 +22569,10 @@
         out.push(dataTr('Total length (mi)', (stats.flightPaths.distanceM / 1609.34).toFixed(2)));
 
         // Asset equipment / states / matrix
+        if (stats.assetOrientation) {
+            out.push(sectionTr('ASSET — V vs H'));
+            Object.entries(stats.assetOrientation).forEach(([k, v]) => out.push(dataTr(k, v)));
+        }
         out.push(sectionTr('ASSET — EQUIPMENT'));
         Object.entries(stats.assetEquipment).forEach(([k, v]) => out.push(dataTr(k, v)));
         out.push(sectionTr('ASSET — STATES'));
