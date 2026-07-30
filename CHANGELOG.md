@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-30 — Mission Bank Tools v2.18 (dev/latest): 🧠 Auto-Group — reachable pads were being excluded
+
+"All the ones I circled are fully reachable and built that way" — correct, and the routing model was violating our own engraved rule (*measure to segments, never vertices*):
+
+- **FPs that cross an FFZ mid-arc now count as entries** — a synthetic vertex is spliced into the arc at the crossing point, so an FFZ whose flight path passes straight through (no FP *vertex* within 25 ft) is no longer "unreachable".
+- **FP-only pads route now** — a pad served straight off a flight path with no FFZ of its own gets routed to the nearest point *on* the arc (segment-projected). On the 1583 reference data this lifted routable pads from 32 → 47.
+- **Excluded rows now say exactly why** — "no FFZ/FP within 70 ft", "pad FFZ has no FP entry within 25 ft", "over 17,500 ft range", etc., instead of a generic "no route". If a built-reachable pad still lands in Excluded, that reason is the thing to send me.
+
 ## 2026-07-30 — Mission Bank Tools v2.17 (dev/latest): 🧠 Auto-Group round 2
 
 - **Fixed the runaway group** (NE 1 showing 407k ft / negative landings for pads 1–9k ft out): the open-FFZ shortcut check was testing against *re-sorted* polygon rings — the same angular-sort that's mangled non-star polygons before — so valid shortcuts got rejected and routes detoured the long way around. Now tests against the raw drawn rings.

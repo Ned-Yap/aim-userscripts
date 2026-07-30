@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.17
+// @version      2.18
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.17';
+    const SCRIPT_VERSION = '2.18';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -3828,31 +3828,142 @@
         return ['E', 'NE', 'N', 'NW', 'W', 'SW', 'S', 'SE'][idx];
     }
 
+    // ── Segment-aware graph helpers (v2.18) ─────────────────────────────────
+    // ENGRAVED RULE: proximity measures to SEGMENTS, never vertices. An FP arc
+    // that CROSSES an FFZ mid-segment is a legal entry even when both of its
+    // endpoints are far away, and a pad served by an FP with no FFZ of its own
+    // is fully reachable — both were being excluded (live-test feedback:
+    // "all the ones I circled are fully reachable and built that way").
+    function agRingBbox(ring, padM) {
+        let s = Infinity, n = -Infinity, w = Infinity, e = -Infinity;
+        ring.forEach(p => { if (p.lat < s) s = p.lat; if (p.lat > n) n = p.lat; if (p.lng < w) w = p.lng; if (p.lng > e) e = p.lng; });
+        const dLat = (padM || 0) / 111320;
+        const dLng = (padM || 0) / (111320 * Math.cos(((s + n) / 2) * Math.PI / 180));
+        return { s: s - dLat, n: n + dLat, w: w - dLng, e: e + dLng };
+    }
+    function agBboxHit(bb, a, b) {
+        return Math.min(a.lat, b.lat) <= bb.n && Math.max(a.lat, b.lat) >= bb.s
+            && Math.min(a.lng, b.lng) <= bb.e && Math.max(a.lng, b.lng) >= bb.w;
+    }
+    // Splice a synthetic vertex into every FP edge that passes within entryM of
+    // an FFZ its endpoints don't touch — the crossing point becomes a real
+    // graph vertex (proportional weights), so entry checks and cliques see it.
+    function agSpliceFfzCrossings(graph, ffzs, entryM) {
+        const edges = [];
+        graph.adj.forEach((list, ka) => list.forEach(ed => { if (ka < ed.to) edges.push({ ka, kb: ed.to, w: ed.w }); }));
+        const boxes = ffzs.map(f => agRingBbox(f.ring, entryM));
+        let added = 0;
+        edges.forEach(({ ka, kb, w }) => {
+            const a = graph.verts.get(ka), b = graph.verts.get(kb);
+            ffzs.forEach((f, fi) => {
+                if (!agBboxHit(boxes[fi], a, b)) return;
+                if (mbPointToPolygonMeters(a.lat, a.lng, f.ring) <= entryM) return;
+                if (mbPointToPolygonMeters(b.lat, b.lng, f.ring) <= entryM) return;
+                const total = mbApproxMeters(a.lat, a.lng, b.lat, b.lng);
+                const nSteps = Math.max(2, Math.ceil(total / 15));
+                let hit = null;
+                for (let i = 1; i < nSteps; i++) {
+                    const t = i / nSteps;
+                    const p = { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t };
+                    const d = mbPointToPolygonMeters(p.lat, p.lng, f.ring);
+                    if (d <= entryM && (!hit || d < hit.d)) hit = { p, t, d };
+                }
+                if (!hit) return;
+                const k = `x:${ka}|${kb}|${fi}`;
+                if (graph.verts.has(k)) return;
+                graph.verts.set(k, hit.p);
+                graph.adj.set(k, [{ to: ka, w: w * hit.t }, { to: kb, w: w * (1 - hit.t) }]);
+                graph.adj.get(ka).push({ to: k, w: w * hit.t });
+                graph.adj.get(kb).push({ to: k, w: w * (1 - hit.t) });
+                added++;
+            });
+        });
+        return added;
+    }
+    // Nearest point ON ANY FP EDGE to a set of pad points (bbox-prefiltered).
+    // Returns {ka, kb, w, t, d, p} in meters, or null when nothing ≤ maxM.
+    function agNearestArcPoint(graph, pts, maxM) {
+        if (!pts || !pts.length) return null;
+        let bs = Infinity, bn = -Infinity, bw = Infinity, be = -Infinity;
+        pts.forEach(p => { if (p.lat < bs) bs = p.lat; if (p.lat > bn) bn = p.lat; if (p.lng < bw) bw = p.lng; if (p.lng > be) be = p.lng; });
+        const dLat = maxM / 111320, dLng = maxM / (111320 * Math.cos(((bs + bn) / 2) * Math.PI / 180));
+        const bb = { s: bs - dLat, n: bn + dLat, w: bw - dLng, e: be + dLng };
+        let best = null;
+        graph.adj.forEach((list, ka) => list.forEach(ed => {
+            if (ka >= ed.to) return;
+            // pad stubs aren't flight paths — never project onto them
+            if (String(ka).indexOf('pad') === 0 || String(ed.to).indexOf('pad') === 0) return;
+            const a = graph.verts.get(ka), b = graph.verts.get(ed.to);
+            if (!agBboxHit(bb, a, b)) return;
+            pts.forEach(c => {
+                const ax = a.lng, ay = a.lat, bx = b.lng, by = b.lat;
+                const dx = bx - ax, dy = by - ay;
+                const l2 = dx * dx + dy * dy;
+                let t = l2 === 0 ? 0 : ((c.lng - ax) * dx + (c.lat - ay) * dy) / l2;
+                t = Math.max(0, Math.min(1, t));
+                const py = ay + t * dy, px = ax + t * dx;
+                const d = mbApproxMeters(c.lat, c.lng, py, px);
+                if (d <= maxM && (!best || d < best.d)) best = { ka, kb: ed.to, w: ed.w, t, d, p: { lat: py, lng: px } };
+            });
+        }));
+        return best;
+    }
+
     // Build a router for the site: bridged FP graph + base Dijkstra maps. routeFor
-    // (a list of asset points) returns one-way routeM (base→FFZ far edge) — the
-    // EXACT Asset-Inspector algorithm. Reusable across all assets on the site.
+    // (a list of asset points) returns one-way routeM — Asset-Inspector algorithm
+    // + v2.18 segment-aware extensions (spliced FFZ crossings, FP-only fallback).
     function mbBuildRouter(ent) {
         const graph = mbBuildGraph(ent.fps);
-        const ffzs = (ent.ffzs || []).map(f => ({ ring: mbSimplifyPolygon(f.ring) }));
-        const fpVerts = []; graph.verts.forEach((v, k) => fpVerts.push({ key: k, lat: v.lat, lng: v.lng }));
+        // RAW rings (v2.18) — mbSimplifyPolygon's angular sort mangles non-star
+        // polygons (engraved bug), corrupting inside/entry tests.
+        const ffzs = (ent.ffzs || []).map(f => ({ ring: f.ring })).filter(f => f.ring && f.ring.length >= 3);
         const entryM = MB_ENTRY_FFZ_FT / 3.28084;
+        agSpliceFfzCrossings(graph, ffzs, entryM);
+        const fpVerts = []; graph.verts.forEach((v, k) => fpVerts.push({ key: k, lat: v.lat, lng: v.lng }));
         ffzs.forEach(f => { const inside = fpVerts.filter(v => mbPointToPolygonMeters(v.lat, v.lng, f.ring) <= entryM); for (let i = 0; i < inside.length; i++) for (let j = i + 1; j < inside.length; j++) { const w = mbApproxMeters(inside[i].lat, inside[i].lng, inside[j].lat, inside[j].lng); graph.adj.get(inside[i].key).push({ to: inside[j].key, w }); graph.adj.get(inside[j].key).push({ to: inside[i].key, w }); } });
         const bases = (ent.baseEnts && ent.baseEnts.length) ? ent.baseEnts.map(b => ({ lat: b.coords[0].lat, lng: b.coords[0].lng })) : (ent.base ? [ent.base] : []);
         const baseRuns = bases.map(b => { const bv = mbNearestVertex(graph, b.lat, b.lng); if (!bv) return null; return { baseConn: bv.dist, dist: mbDijkstra(graph, bv.key) }; }).filter(Boolean);
         const reachM = MB_REACH_FFZ_FT / 3.28084;
+        const ffzFor = (pts) => {
+            let ffz = null, ffzD = Infinity;
+            ffzs.forEach(f => { let best = Infinity; pts.forEach(c => { const d = mbPointToPolygonMeters(c.lat, c.lng, f.ring); if (d < best) best = d; }); if (best < ffzD) { ffzD = best; ffz = f; } });
+            return { ffz, ffzD };
+        };
         return {
             ready: graph.verts.size > 0 && baseRuns.length > 0,
             verts: graph.verts.size,
             routeFor(pts) {
                 if (!pts || !pts.length) return null;
-                let ffz = null, ffzD = Infinity;
-                ffzs.forEach(f => { let best = Infinity; pts.forEach(c => { const d = mbPointToPolygonMeters(c.lat, c.lng, f.ring); if (d < best) best = d; }); if (best < ffzD) { ffzD = best; ffz = f; } });
-                if (!ffz || ffzD > reachM) return null;
+                const { ffz, ffzD } = ffzFor(pts);
+                if (ffz && ffzD <= reachM) {
+                    const entries = fpVerts.filter(v => mbPointToPolygonMeters(v.lat, v.lng, ffz.ring) <= entryM);
+                    let best = null;
+                    baseRuns.forEach(br => { entries.forEach(en => { const net = br.dist.has(en.key) ? br.dist.get(en.key) : null; if (net == null) return; let far = 0; ffz.ring.forEach(p => { const dd = mbApproxMeters(en.lat, en.lng, p.lat, p.lng); if (dd > far) far = dd; }); const total = br.baseConn + net + far; if (best == null || total < best) best = total; }); });
+                    if (best != null) return best;
+                }
+                // FP-only fallback (v2.18): the pad is served straight off a
+                // flight path (no FFZ of its own, or its FFZ has no entries) —
+                // route to the nearest point ON an arc, segment-aware.
+                const arc = agNearestArcPoint(graph, pts, reachM);
+                if (!arc) return null;
+                let bestFp = null;
+                baseRuns.forEach(br => {
+                    const da = br.dist.has(arc.ka) ? br.dist.get(arc.ka) + arc.w * arc.t : null;
+                    const db = br.dist.has(arc.kb) ? br.dist.get(arc.kb) + arc.w * (1 - arc.t) : null;
+                    [da, db].forEach(dd => { if (dd == null) return; const total = br.baseConn + dd + arc.d; if (bestFp == null || total < bestFp) bestFp = total; });
+                });
+                return bestFp;
+            },
+            // Human-readable reason a pad is unroutable — shown in Excluded.
+            explain(pts) {
+                if (!pts || !pts.length) return 'no location';
+                const { ffz, ffzD } = ffzFor(pts);
+                if (!ffz || ffzD > reachM) {
+                    return agNearestArcPoint(graph, pts, reachM) ? 'FP found but no base path' : `no FFZ/FP within ${MB_REACH_FFZ_FT} ft`;
+                }
                 const entries = fpVerts.filter(v => mbPointToPolygonMeters(v.lat, v.lng, ffz.ring) <= entryM);
-                if (!entries.length) return null;
-                let best = null;
-                baseRuns.forEach(br => { entries.forEach(en => { const net = br.dist.has(en.key) ? br.dist.get(en.key) : null; if (net == null) return; let far = 0; ffz.ring.forEach(p => { const dd = mbApproxMeters(en.lat, en.lng, p.lat, p.lng); if (dd > far) far = dd; }); const total = br.baseConn + net + far; if (best == null || total < best) best = total; }); });
-                return best;
+                if (!entries.length) return `pad FFZ has no FP entry within ${MB_ENTRY_FFZ_FT} ft`;
+                return 'no base path to pad FFZ';
             }
         };
     }
@@ -3927,8 +4038,11 @@
         // made agSegInsideRing REJECT legitimate in-FFZ shortcuts — routes
         // then detoured the long way around (18k-ft base legs on 1k-ft pads).
         const ffzs = (ent.ffzs || []).map(f => ({ ring: f.ring })).filter(f => f.ring && f.ring.length >= 3);
-        const fpVerts = []; graph.verts.forEach((v, k) => fpVerts.push({ key: k, lat: v.lat, lng: v.lng }));
         const entryM = MB_ENTRY_FFZ_FT / 3.28084, reachM = MB_REACH_FFZ_FT / 3.28084;
+        // Segment-aware entries (v2.18): arcs crossing an FFZ mid-segment get a
+        // spliced vertex BEFORE the vertex census, so cliques + pad links see them.
+        agSpliceFfzCrossings(graph, ffzs, entryM);
+        const fpVerts = []; graph.verts.forEach((v, k) => fpVerts.push({ key: k, lat: v.lat, lng: v.lng }));
         const link = (ka, kb, w) => { graph.adj.get(ka).push({ to: kb, w }); graph.adj.get(kb).push({ to: ka, w }); };
         // LOS cliques per FFZ — straight edge only when the segment stays inside.
         ffzs.forEach(f => {
@@ -3948,21 +4062,36 @@
             const c = s.pt;
             if (!c) return null;
             const probe = (s.routePts && s.routePts.length) ? s.routePts : [c];
+            const k = `pad:${si}`;
             let ffz = null, ffzD = Infinity;
             ffzs.forEach(f => { let best = Infinity; probe.forEach(pp => { const d = mbPointToPolygonMeters(pp.lat, pp.lng, f.ring); if (d < best) best = d; }); if (best < ffzD) { ffzD = best; ffz = f; } });
-            if (!ffz || ffzD > reachM) return null;
-            const k = `pad:${si}`;
-            graph.verts.set(k, { lat: c.lat, lng: c.lng });
-            graph.adj.set(k, []);
-            const inside = fpVerts.filter(v => mbPointToPolygonMeters(v.lat, v.lng, ffz.ring) <= entryM);
             let linked = 0;
-            inside.forEach(v => { if (agSegInsideRing(c, v, ffz.ring)) { link(k, v.key, mbApproxMeters(c.lat, c.lng, v.lat, v.lng)); linked++; } });
-            if (!linked && inside.length) {
-                let best = null;
-                inside.forEach(v => { const d = mbApproxMeters(c.lat, c.lng, v.lat, v.lng); if (!best || d < best.d) best = { v, d }; });
-                link(k, best.v.key, best.d);
-            } else if (!linked) {
-                return null;   // FFZ has no FP vertices at all — pad unreachable on the graph
+            if (ffz && ffzD <= reachM) {
+                const inside = fpVerts.filter(v => mbPointToPolygonMeters(v.lat, v.lng, ffz.ring) <= entryM);
+                if (inside.length) {
+                    graph.verts.set(k, { lat: c.lat, lng: c.lng });
+                    graph.adj.set(k, []);
+                    inside.forEach(v => { if (agSegInsideRing(c, v, ffz.ring)) { link(k, v.key, mbApproxMeters(c.lat, c.lng, v.lat, v.lng)); linked++; } });
+                    if (!linked) {
+                        let best = null;
+                        inside.forEach(v => { const d = mbApproxMeters(c.lat, c.lng, v.lat, v.lng); if (!best || d < best.d) best = { v, d }; });
+                        link(k, best.v.key, best.d);
+                        linked = 1;
+                    }
+                }
+            }
+            if (!linked) {
+                // FP-only pad (v2.18): no FFZ (or FFZ without entries) — splice a
+                // synthetic vertex at the nearest point ON an arc, segment-aware.
+                const arc = agNearestArcPoint(graph, probe, reachM);
+                if (!arc) { graph.verts.delete(k); graph.adj.delete(k); return null; }
+                if (!graph.verts.has(k)) { graph.verts.set(k, { lat: c.lat, lng: c.lng }); graph.adj.set(k, []); }
+                const xk = `padx:${si}`;
+                graph.verts.set(xk, arc.p);
+                graph.adj.set(xk, []);
+                link(xk, arc.ka, arc.w * arc.t);
+                link(xk, arc.kb, arc.w * (1 - arc.t));
+                link(k, xk, Math.max(1, arc.d));
             }
             return k;
         });
@@ -4227,7 +4356,7 @@
             // routePts rides along: the order graph matches pads to FFZs by the
             // same ring points routeFor used (centroid alone can sit > REACH
             // from the FFZ even when the pad edge touches it).
-            return { mission: m, pt: c, routePts, routeM, reason: routeM == null ? (router.ready ? 'unreachable' : 'no-routing-data') : '', section, battery: mbBatteryFor(routeM) };
+            return { mission: m, pt: c, routePts, routeM, reason: routeM == null ? (router.ready ? router.explain(routePts) : 'no routing data') : '', section, battery: mbBatteryFor(routeM) };
         });
         // Pairwise order graph over the routable solos (pads become vertices).
         const routableAll = solos.filter(s => s.routeM != null && s.battery && s.battery.level < 2);
@@ -5095,7 +5224,7 @@
             <input data-ag-k="${k}" type="number" step="${step || 1}" min="1" value="${cfg[k]}" style="width:56px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:4px;padding:1px 4px;font-size:10px;"></label>`;
         const exclBlock = (g) => `<div style="margin:5px 0;padding:4px 8px;border:1px solid #3a2a2a;border-radius:6px;">
             <div style="color:#ff8a8a;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:2px;">${escapeHtml(g.name)} · ${g.excluded.length}</div>
-            ${g.excluded.map(s => `<div style="display:flex;align-items:center;gap:6px;padding:2px 2px;font-size:11px;color:#caa;"><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(s.mission.name || ('#' + s.mission.id))}</span><span style="color:#a66;font-size:10px;">${s.reason === 'unreachable' ? 'no route' : (s.reason || (s.battery && s.battery.level === 2 ? 'over range' : ''))}</span></div>`).join('')}
+            ${g.excluded.map(s => `<div style="display:flex;align-items:center;gap:6px;padding:2px 2px;font-size:11px;color:#caa;"><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(s.mission.name || ('#' + s.mission.id))}</span><span style="color:#a66;font-size:10px;">${escapeHtml(s.reason || (s.battery && s.battery.level === 2 ? `over ${agCfg().tulipRadiusFt.toLocaleString()} ft range` : ''))}</span></div>`).join('')}
         </div>`;
         const routable = data.solos.filter(s => s.routeM != null).length;
         // Full-site estimate = the superset tier per section ("X 2" / "X 1-2") —
