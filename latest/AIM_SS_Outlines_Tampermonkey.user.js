@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.124
+// @version      34.125
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -57,7 +57,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.124';
+    const SCRIPT_VERSION = '34.125';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -907,12 +907,12 @@
             const sid = getCurrentSiteID();
             const needFetch = sid && (assetStateData.siteID !== sid
                 || (!assetStateData.loading && !assetStateData.polys.length && !assetStateData.failed));
-            // Only the iframe fetches (it owns the map + the cookie-auth'd
-            // same-origin context); it broadcasts the equipment set to TOP.
-            if (needFetch && CONTEXT === 'IFRAME') fetchAssetStates(sid);
+            // Only the rendering frame fetches (SS: the map iframe; Data View:
+            // TOP — v34.125). It broadcasts the equipment set to other frames.
+            if (needFetch && rendersInThisFrame()) fetchAssetStates(sid);
             const stMap = getLeafletMap();
             if (stMap && assetStateData.siteID === sid && assetStateData.polys.length) {
-                document.querySelectorAll(WHITE_ASSET_SELECTOR).forEach(p => {
+                document.querySelectorAll(`${WHITE_ASSET_SELECTOR}, ${DV_ASSET_SELECTOR}`).forEach(p => {
                     if (p.hasAttribute(CUSTOM_BUFFER_ATTR)) return; // never tag our own clones
                     const a = matchPathAsset(p, stMap);
                     if (a) {
@@ -1057,6 +1057,15 @@
                 // Revert anything we previously forced (global thickness OR a
                 // now-disabled per-state width) back to the native width.
                 line.setAttribute('stroke-width', String(originalWidth));
+            }
+            // v34.125: DV entity boxes need width via INLINE style too —
+            // Percepto's Data View CSS sets stroke-width on their class, which
+            // beats the attribute writes above; inline style beats the CSS.
+            // Empty string clears our override so the native CSS look returns.
+            if (line.matches(DV_ASSET_SELECTOR)) {
+                const dvWantWidth = assetStyle ? String(assetStyle.width)
+                    : (wantForce ? String(lineThickness) : '');
+                if (line.style.strokeWidth !== dvWantWidth) line.style.strokeWidth = dvWantWidth;
             }
 
             // --- Asset fill override ---
