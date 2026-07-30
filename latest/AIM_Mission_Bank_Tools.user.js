@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.10
+// @version      2.11
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.10';
+    const SCRIPT_VERSION = '2.11';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -10150,10 +10150,12 @@ ${snapPlacemarks}
             && s.type_name !== 'takeoff' && s.type_name !== 'returnHome');
         // Flight-order line. Dashed = "preview, not a real FP";
         // interactive:false so clicks pass through to the SS editor.
+        // v2.11: always snap-pink (user request) — the per-MISSION palette
+        // color now lives only in the picker swatch/checkbox.
         if (located.length >= 2) {
             try {
                 layers.push(L.polyline(located.map(s => [s.location.lat, s.location.lng]),
-                    { color, weight: 3, opacity: 0.8, dashArray: '7,7', interactive: false }).addTo(map));
+                    { color: stepColor('snap'), weight: 3, opacity: 0.8, dashArray: '7,7', interactive: false }).addTo(map));
             } catch (e) { console.warn(`${TAG} [mpv] polyline failed:`, e); }
         }
         let nav = 0, snap = 0;

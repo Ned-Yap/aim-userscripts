@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-30 — Mission Bank Tools v2.11 (dev/latest): mission-preview line always pink
+
+- 👁 Mission preview (Site Setup): the dashed flight-order line is now always snapshot-pink too (was per-mission palette color). Mission identity lives in the picker's swatch/checkbox only.
+
 ## 2026-07-30 — Mission Bank Tools v2.10 (dev/latest): mission-preview badge colors match step colors
 
 - 👁 Mission preview (Site Setup): N# / S# badges now use the step-type colors (nav blue / snapshot pink — same as the Mission Bank map badges, including any Control Panel color customization). The per-mission color stays on the dashed flight line and the picker swatch so overlapping missions remain distinguishable.
