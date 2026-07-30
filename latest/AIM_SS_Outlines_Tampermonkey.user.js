@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.122
+// @version      34.123
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -57,7 +57,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.122';
+    const SCRIPT_VERSION = '34.123';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -680,7 +680,14 @@
 
     const EDIT_MODE_SELECTOR = 'path.leaflet-interactive[stroke="#000000"][stroke-dasharray]';
 
-    const ALL_TARGETS_SELECTOR = `${SOLID_GREEN_SELECTOR}, ${WHITE_ASSET_SELECTOR}, ${BLUE_FLIGHT_PATH_SELECTOR}, ${EDIT_MODE_SELECTOR}`;
+    // v34.123 — Data View renders its entity boxes as Leaflet vectors in a
+    // custom pane (.leaflet-app-custom-pane-pane) with this class. Their
+    // stroke ATTRIBUTE is Leaflet-default #3388ff (the white look comes from
+    // Percepto CSS), so the SS stroke-signature selectors can never match —
+    // match by class instead. DV-only class → zero matches on Site Setup.
+    const DV_ASSET_SELECTOR = 'path.app-poi-outside-of-data-map.leaflet-interactive';
+
+    const ALL_TARGETS_SELECTOR = `${SOLID_GREEN_SELECTOR}, ${WHITE_ASSET_SELECTOR}, ${BLUE_FLIGHT_PATH_SELECTOR}, ${EDIT_MODE_SELECTOR}, ${DV_ASSET_SELECTOR}`;
     const CUSTOM_BUFFER_ATTR = 'data-custom-buffer-v24';
 
     // --- KML / Shielding ---
@@ -920,7 +927,9 @@
         const lines = document.querySelectorAll(ALL_TARGETS_SELECTOR);
         lines.forEach(line => {
             const isSolidGreen = line.matches(SOLID_GREEN_SELECTOR);
-            const isWhiteAsset = line.matches(WHITE_ASSET_SELECTOR);
+            // v34.123: DV entity boxes count as asset-class lines — all the
+            // asset.* toggles (color, buffer, thickness, fill) capture them.
+            const isWhiteAsset = line.matches(WHITE_ASSET_SELECTOR) || line.matches(DV_ASSET_SELECTOR);
             const isBlueFlight = line.matches(BLUE_FLIGHT_PATH_SELECTOR);
             const isEditMode = line.matches(EDIT_MODE_SELECTOR);
 
