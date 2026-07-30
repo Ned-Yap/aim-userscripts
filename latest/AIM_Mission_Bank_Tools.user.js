@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.16
+// @version      2.17
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.16';
+    const SCRIPT_VERSION = '2.17';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -3777,7 +3777,10 @@
         tattuBudgetFt: 37000,
         tulipBudgetFt: 46000,
         marginPct: 82,          // usable % of the budget — the rest is landing reserve
-        stepCostFt: 60,         // ft-equivalent burned per mission step (captures/hover)
+        // v2.17: a pad's cost = its mission's ACTUAL internal path length
+        // (sum of instruction-location hops — the same data the SUM panel
+        // estimates from) + stepCost × steps for hover/capture overhead.
+        stepCostFt: 40,
         stepMax: 600,           // soft step cap per merged mission (multi-flight is normal)
         targetGroups: 5,        // target direction families per site (user: 4–6 macros total)
     };
@@ -3919,7 +3922,11 @@
     function agBuildOrderGraph(ent, solos) {
         const graph = mbBuildGraph(ent.fps);
         if (!graph.verts.size) return null;
-        const ffzs = (ent.ffzs || []).map(f => ({ ring: mbSimplifyPolygon(f.ring) })).filter(f => f.ring.length >= 3);
+        // RAW rings, NOT mbSimplifyPolygon (v2.17 live-test fix): the angular
+        // sort mangles non-star FFZs (the engraved SOP-validator bug), which
+        // made agSegInsideRing REJECT legitimate in-FFZ shortcuts — routes
+        // then detoured the long way around (18k-ft base legs on 1k-ft pads).
+        const ffzs = (ent.ffzs || []).map(f => ({ ring: f.ring })).filter(f => f.ring && f.ring.length >= 3);
         const fpVerts = []; graph.verts.forEach((v, k) => fpVerts.push({ key: k, lat: v.lat, lng: v.lng }));
         const entryM = MB_ENTRY_FFZ_FT / 3.28084, reachM = MB_REACH_FFZ_FT / 3.28084;
         const link = (ka, kb, w) => { graph.adj.get(ka).push({ to: kb, w }); graph.adj.get(kb).push({ to: ka, w }); };
@@ -4041,11 +4048,28 @@
         };
     }
 
+    // A mission's internal flown distance — the sum of hops between its
+    // instructions' GPS locations (the same data the SUM panel estimates
+    // from). This is the per-pad battery cost the simulator uses (v2.17),
+    // plus stepCost × steps for hover/capture overhead.
+    function agIntraFt(mission) {
+        const ins = (mission && mission.instructions) || [];
+        let prev = null, ft = 0;
+        ins.forEach(i => {
+            const L = i && i.location;
+            if (!L || typeof L.lat !== 'number' || typeof L.lng !== 'number') return;
+            if (prev) ft += mbApproxMeters(prev.lat, prev.lng, L.lat, L.lng) * 3.28084;
+            prev = L;
+        });
+        return ft;
+    }
+
     // Walk an ordering through the battery model. `order` = indexes into the
-    // group's solo list; dPad/dBase in ft; stepsOf(i) = step count of solo i.
+    // group's solo list; dPad/dBase in ft; costOf(i) = solo i's on-pad cost
+    // (intra-mission path + hover overhead) in ft-equivalents.
     // Rule: before committing to a pad the drone must reach it, shoot it, AND
     // still get home within the usable budget — else it breaks off first.
-    function agSimulate(order, dPad, dBase, stepsOf, budgetFt) {
+    function agSimulate(order, dPad, dBase, costOf, budgetFt) {
         const cfg = agCfg();
         const usable = budgetFt * cfg.marginPct / 100;
         const flights = [], tight = [];
@@ -4059,7 +4083,7 @@
         };
         for (let x = 0; x < order.length; x++) {
             const i = order[x];
-            const stepFt = stepsOf(i) * cfg.stepCostFt;
+            const stepFt = costOf(i);
             let legFt = cur === -1 ? dBase(i) : dPad(cur, i);
             if (cur !== -1 && rem < legFt + stepFt + dBase(i)) {
                 // recharge break: RTB from the current pad, resume from base
@@ -4081,9 +4105,9 @@
     // Best visiting order for a set of pads: two seeds (furthest→closest and a
     // nearest-neighbor chain from the furthest pad), each 2-opt polished with
     // the SIMULATOR total as the objective — transit and RTB overhead both count.
-    function agOptimizeOrder(idxs, dPad, dBase, stepsOf, budgetFt) {
+    function agOptimizeOrder(idxs, dPad, dBase, costOf, budgetFt) {
         if (idxs.length < 2) return idxs.slice();
-        const cost = o => agSimulate(o, dPad, dBase, stepsOf, budgetFt).totalFt;
+        const cost = o => agSimulate(o, dPad, dBase, costOf, budgetFt).totalFt;
         const farNear = idxs.slice().sort((a, b) => dBase(b) - dBase(a));
         const nn = [farNear[0]];
         const left = new Set(farNear.slice(1));
@@ -4211,6 +4235,17 @@
         try { ag = routableAll.length >= 2 ? agBuildOrderGraph(ent, routableAll) : null; }
         catch (e) { console.warn(`${TAG} [ag] order graph failed — falling back to distance sort`, e); }
         const agIdx = new Map(); routableAll.forEach((s, i) => agIdx.set(s, i));
+        // Per-pad battery cost (v2.17): the mission's REAL internal path
+        // length (instruction-location hops) + hover overhead per step.
+        const intraCache = new Map();
+        const padCostFt = (s) => {
+            let v = intraCache.get(s.mission.id);
+            if (v == null) { v = agIntraFt(s.mission) + pcmStepCount(s.mission) * cfg.stepCostFt; intraCache.set(s.mission.id, v); }
+            return v;
+        };
+        const agDPad = ag ? (i, j) => ag.padDistFt(i, j) : null;
+        const agDBase = ag ? i => ag.baseDistFt(i) : null;
+        const agCostOf = i => padCostFt(routableAll[i]);
         // Order + simulate one group's solo set against a battery budget.
         const orderAndSim = (set, budgetFt) => {
             if (!ag || !set.length) {
@@ -4218,11 +4253,8 @@
                 return { solos: sorted, sim: null };
             }
             const idxs = set.map(s => agIdx.get(s));
-            const dPad = (i, j) => ag.padDistFt(i, j);
-            const dBase = i => ag.baseDistFt(i);
-            const stepsOf = i => pcmStepCount(routableAll[i].mission);
-            const order = agOptimizeOrder(idxs, dPad, dBase, stepsOf, budgetFt);
-            return { solos: order.map(i => routableAll[i]), idxs: order, sim: agSimulate(order, dPad, dBase, stepsOf, budgetFt) };
+            const order = agOptimizeOrder(idxs, agDPad, agDBase, agCostOf, budgetFt);
+            return { solos: order.map(i => routableAll[i]), idxs: order, sim: agSimulate(order, agDPad, agDBase, agCostOf, budgetFt) };
         };
         // Families: global bearing sweep into ~targetGroups arcs (v2.16 — no
         // fixed 8-way sections; adjacent directions merge freely). `overrides`
@@ -4236,6 +4268,51 @@
             families.forEach(f => { const at = f.solos.indexOf(s); if (at >= 0) f.solos.splice(at, 1); });
             families[fi].solos.push(s);
         });
+        // ── Corridor pickup (v2.17) ──────────────────────────────────────────
+        // The sweep assigns by BEARING only, so a pad sitting right on another
+        // family's flight corridor stays in its angular family ("skips pads it
+        // flies right past" — live-test feedback). Refinement: repeatedly take
+        // the single best pad move between families — evaluated by insertion
+        // deltas on the SIMULATED orders — while it saves > 1,000 ft of total
+        // flown distance. User-pinned pads (overrides) never auto-move.
+        if (ag && families.length > 1) {
+            const pinned = new Set(Object.keys(overrides || {}).map(String));
+            const famBudget = f => f.solos.some(s => s.battery.level === 1) ? cfg.tulipBudgetFt : cfg.tattuBudgetFt;
+            const simTot = (o, b) => o.length ? agSimulate(o, agDPad, agDBase, agCostOf, b).totalFt : 0;
+            const famOrder = new Map();
+            families.forEach(f => famOrder.set(f, agOptimizeOrder(f.solos.map(s => agIdx.get(s)), agDPad, agDBase, agCostOf, famBudget(f))));
+            let guard = 0;
+            while (guard++ < 24) {
+                let best = null;
+                families.forEach(src => {
+                    const so = famOrder.get(src);
+                    const srcCost = simTot(so, famBudget(src));
+                    so.forEach((pi, k) => {
+                        if (pinned.has(String(routableAll[pi].mission.id))) return;
+                        const without = so.slice(0, k).concat(so.slice(k + 1));
+                        const save = srcCost - simTot(without, famBudget(src));
+                        families.forEach(tgt => {
+                            if (tgt === src) return;
+                            const to = famOrder.get(tgt);
+                            const tb = (routableAll[pi].battery.level === 1 || tgt.solos.some(s2 => s2.battery.level === 1)) ? cfg.tulipBudgetFt : cfg.tattuBudgetFt;
+                            const before = simTot(to, tb);
+                            for (let ins = 0; ins <= to.length; ins++) {
+                                const cand = to.slice(0, ins).concat([pi], to.slice(ins));
+                                const gain = save - (simTot(cand, tb) - before);
+                                if (gain > 1000 && (!best || gain > best.gain)) best = { gain, src, tgt, pi, without, cand };
+                            }
+                        });
+                    });
+                });
+                if (!best) break;
+                famOrder.set(best.src, best.without);
+                famOrder.set(best.tgt, best.cand);
+                const s = routableAll[best.pi];
+                best.src.solos.splice(best.src.solos.indexOf(s), 1);
+                best.tgt.solos.push(s);
+                console.log(`${TAG} [ag] corridor pickup: "${s.mission.name}" moved between groups (saves ~${Math.round(best.gain).toLocaleString()} ft)`);
+            }
+        }
         // Names AFTER membership settles (wind name follows the pads).
         const usedNames = new Set();
         families.forEach((f, i) => { f.name = (base && f.solos.length) ? agWindName(f.solos, base, usedNames) : `Group ${i + 1}`; });

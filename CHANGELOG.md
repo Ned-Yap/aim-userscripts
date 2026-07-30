@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-30 — Mission Bank Tools v2.17 (dev/latest): 🧠 Auto-Group round 2
+
+- **Fixed the runaway group** (NE 1 showing 407k ft / negative landings for pads 1–9k ft out): the open-FFZ shortcut check was testing against *re-sorted* polygon rings — the same angular-sort that's mangled non-star polygons before — so valid shortcuts got rejected and routes detoured the long way around. Now tests against the raw drawn rings.
+- **Corridor pickup** — "why does it skip pads it flies right past?" Because grouping was bearing-only. Now a refinement pass moves any pad into another group whenever that lowers the site's total flown distance (logged in console per move; saves of 10k–27k ft per pad in testing). Pads you've pinned via the dropdown never auto-move. Note: pads in the *Excluded* list (no FFZ/FP route) can never be picked up — fix the site setup to include them.
+- **Real per-mission cost** — each pad's battery cost now uses the mission's actual internal path length (sum of its instruction GPS hops — the same data the SUM panel estimates from) instead of a flat per-step guess; the ft/step knob now covers only hover/capture overhead (default 40).
+
 ## 2026-07-30 — Mission Bank Tools v2.16 (dev/latest): 🧠 Auto-Group live-test fixes
 
 First live test feedback, same day:
