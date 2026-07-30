@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.121
+// @version      34.122
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -57,7 +57,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.121';
+    const SCRIPT_VERSION = '34.122';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -3699,7 +3699,10 @@
         // frame (Angular shell, but map in iframe → no container here)
         // can't latch onto a stale reference.
         try {
-            const ng = window.angular;
+            // unsafeWindow, not window — page globals aren't guaranteed to be
+            // visible through the sandbox proxy (same rule as unsafeWindow.L).
+            const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+            const ng = w.angular;
             if (ng && containers.length && typeof ng.element === 'function') {
                 const scope = ng.element(containers[0]).scope();
                 const root = scope && scope.$root;
@@ -7989,6 +7992,30 @@
         observerTarget = container;
         observer = new MutationObserver(debouncedUpdate);
         observer.observe(container, observerConfig);
+        // v34.122 — Data View zoom fix: on DV, Leaflet only rewrites ITS OWN
+        // layers' attributes on zoom/pan — no SS-style mutation storm reaches
+        // our observer, so our injected SVG sat stale in a shifted coordinate
+        // space until the 3s heartbeat. We own the map instance on DV, so bind
+        // its own events as the redraw trigger. Guarded per-map instance so
+        // observer re-attaches never stack duplicate listeners.
+        if (CONTEXT === 'TOP' && isDataViewRoute()) {
+            const dvMap = getLeafletMap();
+            if (dvMap && !dvMap.__aimStylerZoomHook) {
+                dvMap.__aimStylerZoomHook = true;
+                let dvRedrawTimer = null;
+                const dvRedraw = () => {
+                    if (!isActive) return;
+                    if (dvRedrawTimer) clearTimeout(dvRedrawTimer);
+                    dvRedrawTimer = setTimeout(() => { dvRedrawTimer = null; runUpdate(); }, 120);
+                };
+                try {
+                    dvMap.on('zoomend moveend viewreset', dvRedraw);
+                    console.log(`${TAG} DV zoom/move redraw hook bound to map`);
+                } catch (e) { console.warn(`${TAG} DV zoom hook failed:`, e); }
+            } else if (!dvMap) {
+                console.warn(`${TAG} DV: map-pane found but map instance not captured yet — zoom hook deferred to next attach`);
+            }
+        }
         // First-render watchdog: after attach, run runUpdate up to N times
         // unconditionally (bypass hash check) so we recover from the case
         // where the very first runUpdate fires before Leaflet's overlay-pane

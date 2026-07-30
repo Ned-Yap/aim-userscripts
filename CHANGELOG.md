@@ -23,8 +23,8 @@ The ⛟ Merge panel now *optimizes* instead of just sorting (feature #216). It p
 AIM tools now work on the **Data View** page (`…/data_view/` — the media/issues browser with the map on the right). Data View is Percepto's older single-frame app, so every script needed taught where its map lives.
 
 - **Control Panel v1.37** — the ⚙ gear now appears on Data View (floating, left of the native draw buttons), so Map Styler toggles are reachable there.
-- **Map Styler v34.121** — runs on the Data View map, **view-only**: KML shielding outlines, all overlays (FAA charts, ⛰ terrain, Texas RRC, crop cover), basemap switcher / dark map mode, ortho brightness. Editing tools (KML edit/split/commit, draw, validators) stay Site-Setup-only and say so if clicked.
-- **Site Setup Tools v4.214** — **right-click any entity on the Data View map** for the usual inspector popup (read-only: copy fields, 🎯 Focus, 🗺 Maps). The 👁 button overlays that asset's mission steps right on the Data View map.
+- **Map Styler v34.122** — runs on the Data View map, **view-only**: KML shielding outlines, all overlays (FAA charts, ⛰ terrain, Texas RRC, crop cover), basemap switcher / dark map mode, ortho brightness. Editing tools (KML edit/split/commit, draw, validators) stay Site-Setup-only and say so if clicked. (v34.122 fixes buffers going stale on zoom/pan — Data View doesn't produce Site Setup's mutation storm, so the map's own zoom/move events now drive the redraw.)
+- **Site Setup Tools v4.215** — **right-click any entity on the Data View map** for the usual inspector popup (read-only: copy fields, 🎯 Focus, 🗺 Maps). The 👁 button overlays that asset's mission steps right on the Data View map.
 - **Mission Bank Tools v2.14** — the 👁 mission-preview overlay draws on the Data View map (nav/snap badges + dashed flight line), driven from the inspector popup's 👁.
 
 ## 2026-07-30 — Map Nav v0.11 → PROD: 🧭 Go to coordinate
