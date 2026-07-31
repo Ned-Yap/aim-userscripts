@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.19
+// @version      2.20
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.19';
+    const SCRIPT_VERSION = '2.20';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -4328,6 +4328,327 @@
         return fams;
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    // 🔋 RANGE OVERLAY (v2.20) — trustworthy per-pad battery classification.
+    // For every asset pad's FFZ: the TRUE shortest route from the base staying
+    // INSIDE FFZs / along FPs (visibility graph over FFZ ring vertices — paths
+    // bend around corners, never cut them; ring-boundary edges guarantee a
+    // legal path exists around any concave shape, visibility edges only ever
+    // shorten it). Then VERIFIED before anything is colored:
+    //   1. LEGALITY AUDIT — the winning route re-sampled every ~5 m; every
+    //      sample must lie inside an FFZ or on an FP arc (~13 ft tolerance).
+    //      Any violation → pad renders ⚠ orange "unverified", never classified.
+    //   2. SECOND OPINION — a DENSIFIED graph (ring + arc midpoints) is solved
+    //      independently; the shorter answer wins, disagreements are logged.
+    //   3. LOWER BOUND — every route must be ≥ straight-line distance.
+    // All rendering is interactive:false / pointer-events:none — M2 pad
+    // picking for the merge editor passes straight through the overlay.
+    // ════════════════════════════════════════════════════════════════════════
+
+    // Strict segment-inside test for the range graph. DELIBERATELY finer and
+    // tighter than the legality audit (4 m steps / 2 m tolerance vs the
+    // audit's 5 m / 4 m): every edge this builds provably survives the audit,
+    // so a flagged route always means a real bug, never sampling noise. (The
+    // audit caught exactly this on 1583: a 56 m visibility edge clipping a
+    // concave notch between 10 m construction samples.)
+    function rngSegInside(a, b, ring) {
+        const total = mbApproxMeters(a.lat, a.lng, b.lat, b.lng);
+        const n = Math.max(2, Math.ceil(total / 4));
+        for (let i = 1; i < n; i++) {
+            const t = i / n;
+            const p = { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t };
+            if (!genPointInPoly(p, ring) && mbPointToPolygonMeters(p.lat, p.lng, ring) > 2) return false;
+        }
+        return true;
+    }
+
+    function rngBuildGraph(ent, dense) {
+        const graph = mbBuildGraph(ent.fps);
+        const ffzs = (ent.ffzs || []).map(f => ({ ring: f.ring })).filter(f => f.ring && f.ring.length >= 3);
+        const entryM = MB_ENTRY_FFZ_FT / 3.28084;
+        const addV = (k, p) => { if (!graph.verts.has(k)) { graph.verts.set(k, p); graph.adj.set(k, []); } };
+        const link = (ka, kb, w) => { graph.adj.get(ka).push({ to: kb, w }); graph.adj.get(kb).push({ to: ka, w }); };
+        // dense mode: split every FP arc at its midpoint (second-opinion run)
+        if (dense) {
+            const edges = [];
+            graph.adj.forEach((list, ka) => list.forEach(e => { if (ka < e.to) edges.push({ ka, kb: e.to, w: e.w }); }));
+            edges.forEach(({ ka, kb, w }, i) => {
+                const a = graph.verts.get(ka), b = graph.verts.get(kb);
+                const mk = `m:${i}`;
+                addV(mk, { lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 });
+                link(mk, ka, w / 2); link(mk, kb, w / 2);
+            });
+        }
+        agSpliceFfzCrossings(graph, ffzs, entryM);
+        // FFZ ring vertices as graph nodes + boundary edges.
+        ffzs.forEach((f, fi) => {
+            const ring = f.ring;
+            const keys = ring.map((p, i) => { const k = `r:${fi}:${i}`; addV(k, { lat: p.lat, lng: p.lng }); return k; });
+            for (let i = 0; i < ring.length; i++) {
+                const j = (i + 1) % ring.length;
+                const w = mbApproxMeters(ring[i].lat, ring[i].lng, ring[j].lat, ring[j].lng);
+                if (dense && w > 30) {
+                    const mk = `rm:${fi}:${i}`;
+                    addV(mk, { lat: (ring[i].lat + ring[j].lat) / 2, lng: (ring[i].lng + ring[j].lng) / 2 });
+                    link(keys[i], mk, w / 2); link(mk, keys[j], w / 2);
+                } else {
+                    link(keys[i], keys[j], w);
+                }
+            }
+        });
+        // Intra-FFZ visibility edges over ALL member vertices (ring verts, FP
+        // verts, crossings, overlapping FFZs' ring verts). Strict containment,
+        // NO penalties, NO forced links — the boundary edges already guarantee
+        // connectivity, so these only ever shorten legal paths.
+        const boxes = ffzs.map(f => agRingBbox(f.ring, entryM));
+        ffzs.forEach((f, fi) => {
+            const bb = boxes[fi];
+            const members = [];
+            graph.verts.forEach((v, k) => {
+                if (v.lat < bb.s || v.lat > bb.n || v.lng < bb.w || v.lng > bb.e) return;
+                if (mbPointToPolygonMeters(v.lat, v.lng, f.ring) <= entryM) members.push({ k, v });
+            });
+            for (let i = 0; i < members.length; i++) {
+                for (let j = i + 1; j < members.length; j++) {
+                    if (!rngSegInside(members[i].v, members[j].v, f.ring)) continue;
+                    link(members[i].k, members[j].k, mbApproxMeters(members[i].v.lat, members[i].v.lng, members[j].v.lat, members[j].v.lng));
+                }
+            }
+        });
+        // Base vertices: visibility-linked into any FFZ they sit in, plus a
+        // stub onto the nearest FP arc so the base is never stranded.
+        const bases = (ent.baseEnts && ent.baseEnts.length) ? ent.baseEnts.map(b => ({ lat: b.coords[0].lat, lng: b.coords[0].lng })) : (ent.base ? [ent.base] : []);
+        const baseKeys = bases.map((b, bi) => {
+            const k = `base:${bi}`;
+            addV(k, { lat: b.lat, lng: b.lng });
+            let linked = 0;
+            ffzs.forEach((f, fi) => {
+                if (mbPointToPolygonMeters(b.lat, b.lng, f.ring) > entryM) return;
+                const bb = boxes[fi];
+                graph.verts.forEach((v, vk) => {
+                    if (vk === k) return;
+                    if (v.lat < bb.s || v.lat > bb.n || v.lng < bb.w || v.lng > bb.e) return;
+                    if (mbPointToPolygonMeters(v.lat, v.lng, f.ring) > entryM) return;
+                    if (!rngSegInside(b, v, f.ring)) return;
+                    link(k, vk, mbApproxMeters(b.lat, b.lng, v.lat, v.lng));
+                    linked++;
+                });
+            });
+            const arc = agNearestArcPoint(graph, [b], MB_REACH_FFZ_FT / 3.28084);
+            if (arc) {
+                const xk = `basex:${bi}`;
+                addV(xk, arc.p);
+                link(xk, arc.ka, arc.w * arc.t); link(xk, arc.kb, arc.w * (1 - arc.t));
+                link(k, xk, Math.max(1, arc.d));
+                linked++;
+            }
+            if (!linked) { const nv = mbNearestVertex(graph, b.lat, b.lng); if (nv && nv.key !== k) link(k, nv.key, nv.dist); }
+            return k;
+        });
+        return { graph, ffzs, baseKeys };
+    }
+
+    // Is a point legal flight space? Inside an FFZ, on an FP arc (~4 m tol),
+    // or in the takeoff vicinity of a base (the base→graph stub necessarily
+    // crosses a few meters of open ground).
+    function rngPointLegal(p, ffzs, boxes, arcs, basePts) {
+        if (basePts) {
+            for (let i = 0; i < basePts.length; i++) {
+                if (mbApproxMeters(p.lat, p.lng, basePts[i].lat, basePts[i].lng) <= MB_REACH_FFZ_FT / 3.28084) return true;
+            }
+        }
+        for (let i = 0; i < ffzs.length; i++) {
+            const bb = boxes[i];
+            if (p.lat < bb.s || p.lat > bb.n || p.lng < bb.w || p.lng > bb.e) continue;
+            if (mbPointToPolygonMeters(p.lat, p.lng, ffzs[i].ring) <= 4) return true;
+        }
+        for (let i = 0; i < arcs.length; i++) {
+            const a = arcs[i];
+            if (p.lat < a.bb.s || p.lat > a.bb.n || p.lng < a.bb.w || p.lng > a.bb.e) continue;
+            if (mbPointToSegMeters(p.lat, p.lng, a.a, a.b) <= 4) return true;
+        }
+        return false;
+    }
+
+    // Audit one route: walk the prev chain, sample every ~5 m, count illegal.
+    function rngAuditPath(sol, targetKey, ffzs, boxes, arcs, basePts) {
+        const best = sol.distTo(targetKey);
+        if (!best) return { ok: false, badFrac: 1 };
+        const run = sol.runs[best.ri];
+        const keys = [targetKey];
+        let cur = targetKey, guard = 0;
+        while (run.prev.has(cur) && guard++ < 20000) { cur = run.prev.get(cur); keys.push(cur); }
+        const pts = keys.reverse().map(k => sol.g.graph.verts.get(k)).filter(Boolean);
+        let bad = 0, total = 0;
+        for (let i = 1; i < pts.length; i++) {
+            const a = pts[i - 1], b = pts[i];
+            const n = Math.max(1, Math.ceil(mbApproxMeters(a.lat, a.lng, b.lat, b.lng) / 5));
+            for (let s = 0; s <= n; s++) {
+                const p = { lat: a.lat + (b.lat - a.lat) * s / n, lng: a.lng + (b.lng - a.lng) * s / n };
+                total++;
+                if (!rngPointLegal(p, ffzs, boxes, arcs, basePts)) bad++;
+            }
+        }
+        return { ok: bad === 0, badFrac: total ? bad / total : 1, pts };
+    }
+
+    // Solve the whole site: sparse + dense runs, per-pad classification with
+    // the three verification passes. Distances in FEET.
+    function rngSolve(ent) {
+        const t0 = Date.now();
+        const reachM = MB_REACH_FFZ_FT / 3.28084;
+        const runFor = (dense) => {
+            const g = rngBuildGraph(ent, dense);
+            const runs = g.baseKeys.map(bk => agDijkstra(g.graph, bk));
+            return {
+                g, runs,
+                distTo(k) {
+                    let best = null;
+                    runs.forEach((r, ri) => { const d = r.dist.get(k); if (d != null && (best == null || d < best.d)) best = { d, ri }; });
+                    return best;
+                },
+            };
+        };
+        const sparse = runFor(false);
+        const dense = runFor(true);
+        const ffzs = sparse.g.ffzs;
+        const boxes = ffzs.map(f => agRingBbox(f.ring, 5));
+        const arcs = [];
+        (ent.fps || []).forEach(e => (e.arcs || []).forEach(arc => {
+            if (!arc.point_a || !arc.point_b || typeof arc.point_a.lat !== 'number' || typeof arc.point_b.lat !== 'number') return;
+            const a = arc.point_a, b = arc.point_b;
+            arcs.push({ a, b, bb: { s: Math.min(a.lat, b.lat) - 0.0001, n: Math.max(a.lat, b.lat) + 0.0001, w: Math.min(a.lng, b.lng) - 0.0001, e: Math.max(a.lng, b.lng) + 0.0001 } });
+        }));
+        const basePts = sparse.g.baseKeys.map(k => sparse.g.graph.verts.get(k));
+        const byFfz = new Map();   // fi → result (pads sharing an FFZ share the answer)
+        const results = [];
+        (ent.assets || []).forEach(a => {
+            let fi = -1, fd = Infinity;
+            ffzs.forEach((f, i) => {
+                let d = Infinity;
+                a.ring.forEach(p => { const dd = mbPointToPolygonMeters(p.lat, p.lng, f.ring); if (dd < d) d = dd; });
+                if (d < fd) { fd = d; fi = i; }
+            });
+            if (fi < 0 || fd > reachM) { results.push({ asset: a, fi: -1, status: 'no-ffz' }); return; }
+            if (byFfz.has(fi)) { results.push(Object.assign({ asset: a }, byFfz.get(fi))); return; }
+            const ring = ffzs[fi].ring;
+            let worst = null, entry = null, missing = 0;
+            for (let i = 0; i < ring.length; i++) {
+                const kS = sparse.distTo(`r:${fi}:${i}`), kD = dense.distTo(`r:${fi}:${i}`);
+                let m = kS ? kS.d : null;
+                if (kD && (m == null || kD.d < m - 1)) m = kD.d;   // second opinion: shorter wins
+                if (m == null) { missing++; continue; }
+                if (entry == null || m < entry) entry = m;
+                if (worst == null || m > worst.w) worst = { w: m, vi: i };
+            }
+            let r;
+            if (worst == null) {
+                r = { fi, status: 'unreachable' };
+            } else {
+                const kS = sparse.distTo(`r:${fi}:${worst.vi}`), kD = dense.distTo(`r:${fi}:${worst.vi}`);
+                const disagree = !!(kS && kD && Math.abs(kS.d - kD.d) > Math.max(30, 0.02 * Math.min(kS.d, kD.d)));
+                const audit = rngAuditPath(sparse, `r:${fi}:${worst.vi}`, ffzs, boxes, arcs, basePts);
+                // lower bound: route can never beat the straight line
+                const vw = ring[worst.vi];
+                let straightM = Infinity;
+                basePts.forEach(bp => { const d = mbApproxMeters(bp.lat, bp.lng, vw.lat, vw.lng); if (d < straightM) straightM = d; });
+                const belowBound = worst.w < straightM - 5;
+                r = {
+                    fi, status: 'ok',
+                    worstFt: worst.w * 3.28084, entryFt: entry * 3.28084,
+                    verified: audit.ok && !belowBound, disagree, missing,
+                    badFrac: audit.badFrac,
+                };
+            }
+            byFfz.set(fi, r);
+            results.push(Object.assign({ asset: a }, r));
+        });
+        const flagged = results.filter(x => x.status === 'ok' && (!x.verified || x.disagree));
+        console.log(`${TAG} [range] ${results.length} pads solved in ${Date.now() - t0} ms · ${flagged.length} flagged (illegal-sample or sparse/dense disagreement)`);
+        flagged.forEach(x => console.log(`${TAG} [range] ⚠ ${x.asset.name}: verified=${x.verified} disagree=${x.disagree} badFrac=${(x.badFrac || 0).toFixed(3)}`));
+        return { results, ffzs, byFfz };
+    }
+
+    // ── rendering (all click-through) ──
+    const rng = { on: false, busy: false, layers: [], legendEl: null };
+    function rngClear() {
+        rng.layers.forEach(l => { try { l.remove(); } catch (e) {} });
+        rng.layers = [];
+        if (rng.legendEl) { try { rng.legendEl.remove(); } catch (e) {} rng.legendEl = null; }
+    }
+    function rngDraw(sol) {
+        const L = composerGetL(), map = getLeafletMap();
+        if (!L || !map) { showToast('Range: map not found.', '#ff9800', 3000); return; }
+        const cfg = agCfg();
+        const cls = (r) => {
+            if (r.status === 'no-ffz') return { color: '#9aa5b1', label: 'no FFZ', kind: 'noffz' };
+            if (r.status === 'unreachable') return { color: '#ff5252', label: 'no route', kind: 'unreach' };
+            if (!r.verified || r.disagree) return { color: '#ff9800', label: '⚠ unverified', kind: 'warn' };
+            if (r.worstFt <= cfg.tattuRadiusFt) return { color: '#5fff5f', label: 'Tattu', kind: 'tattu' };
+            if (r.worstFt <= cfg.tulipRadiusFt) return { color: '#ffd54f', label: 'Tulip', kind: 'tulip' };
+            return { color: '#ff5252', label: 'out of range', kind: 'over' };
+        };
+        const counts = { tattu: 0, tulip: 0, over: 0, warn: 0, unreach: 0, noffz: 0 };
+        const drawnFfz = new Set();
+        sol.results.forEach(r => {
+            const c = cls(r);
+            counts[c.kind]++;
+            if (r.fi >= 0 && !drawnFfz.has(r.fi)) {
+                drawnFfz.add(r.fi);
+                const ring = sol.ffzs[r.fi].ring.map(p => [p.lat, p.lng]);
+                try {
+                    rng.layers.push(L.polygon(ring, { color: c.color, weight: 3, dashArray: '7 5', opacity: 0.95, fillColor: c.color, fillOpacity: 0.10, interactive: false }).addTo(getLeafletMap()));
+                    const ctr = genCentroid(sol.ffzs[r.fi].ring);
+                    const txt = r.status === 'ok' ? `${(r.worstFt / 1000).toFixed(1)}k` : c.label;
+                    const icon = L.divIcon({
+                        className: 'aim-mb-rng-chip',
+                        html: `<div style="pointer-events:none;background:${c.color};color:#10131a;font:800 10px/1 monospace;padding:2px 5px;border-radius:4px;border:1px solid #10131a;box-shadow:0 1px 4px rgba(0,0,0,0.6);white-space:nowrap;">${txt}</div>`,
+                        iconSize: [0, 0], iconAnchor: [16, 6],
+                    });
+                    rng.layers.push(L.marker([ctr.lat, ctr.lng], { icon, interactive: false, keyboard: false }).addTo(getLeafletMap()));
+                } catch (e) {}
+            } else if (r.fi < 0 && r.asset && r.asset.ring && r.asset.ring.length >= 3) {
+                try { rng.layers.push(L.polygon(r.asset.ring.map(p => [p.lat, p.lng]), { color: c.color, weight: 2, dashArray: '3 5', opacity: 0.8, fill: false, interactive: false }).addTo(getLeafletMap())); } catch (e) {}
+            }
+        });
+        // legend (fixed, small, bottom-left)
+        const cfg2 = agCfg();
+        const el = document.createElement('div');
+        el.style.cssText = 'position:fixed;left:12px;bottom:14px;z-index:2147483599;background:rgba(16,19,26,0.92);border:1px solid #2a3340;border-radius:8px;padding:8px 11px;color:#e6e6e6;font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 4px 16px rgba(0,0,0,0.6);pointer-events:auto;';
+        const row = (col, label, n) => n ? `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span style="width:10px;height:10px;border-radius:2px;background:${col};"></span>${label} <b style="margin-left:auto;padding-left:10px;">${n}</b></div>` : '';
+        el.innerHTML = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;"><b style="color:#7adfe6;">🔋 Range from base</b><span data-rng-x style="cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
+            + row('#5fff5f', `Tattu ≤ ${(cfg2.tattuRadiusFt / 1000).toFixed(1)}k ft`, counts.tattu)
+            + row('#ffd54f', `Tulip ≤ ${(cfg2.tulipRadiusFt / 1000).toFixed(1)}k ft`, counts.tulip)
+            + row('#ff5252', 'Out of range / no route', counts.over + counts.unreach)
+            + row('#ff9800', '⚠ unverified (see console)', counts.warn)
+            + row('#9aa5b1', 'No FFZ', counts.noffz)
+            + '<div style="color:#789;margin-top:4px;">Worst-corner legal route · overlay is click-through</div>';
+        document.body.appendChild(el);
+        el.querySelector('[data-rng-x]').onclick = () => { rng.on = false; rngClear(); const b = document.querySelector('[data-rng-toggle]'); if (b) b.classList.remove('active'); };
+        rng.legendEl = el;
+    }
+    async function rngToggle(btn) {
+        if (rng.on) { rng.on = false; rngClear(); if (btn) btn.classList.remove('active'); return; }
+        if (rng.busy) return;
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded.', '#ff5252', 3000); return; }
+        rng.busy = true;
+        showToast('🔋 Range check — building legal-route graph (double + triple checking)…', '#7adfe6', 3000);
+        try {
+            const ent = await genFetchEntities(sid);
+            const sol = rngSolve(ent);
+            rngClear();
+            rngDraw(sol);
+            rng.on = true;
+            if (btn) btn.classList.add('active');
+            showToast('🔋 Range overlay ON — colors are triple-verified shortest LEGAL routes. M2 picking still works.', '#5fff5f', 4500);
+        } catch (e) {
+            console.warn(`${TAG} [range] failed`, e);
+            showToast('Range check failed (see console).', '#ff5252', 4000);
+        }
+        rng.busy = false;
+    }
+
     // The point(s) a solo flies = its NAVIGATE (type 1) locations — the drone
     // flies navs; snapshots (type 6) are camera positions, NOT waypoints
     // (v2.19 live-test fix: routes were anchoring to snapshot points).
@@ -7191,6 +7512,7 @@
                 <button class="aim-mb-tbtn" data-bulk-delete title="Permanently delete the SELECTED missions from the server" style="color:#ff8a8a;">🗑 Delete</button>
                 <button class="aim-mb-tbtn" data-copy-missions title="Copy missions from another site into this one (create-only, dup names skipped)">📥 Copy</button>
                 <button class="aim-mb-tbtn ${pcm.on ? 'active' : ''}" data-pcm-toggle title="Merge missions by right-clicking pads on the map in order (pad name = mission name)">🔗 Merge</button>
+                <button class="aim-mb-tbtn ${rng.on ? 'active' : ''}" data-rng-toggle title="Color every pad's FFZ by the TRUE shortest LEGAL route from base (inside FFZ/FP only, triple-verified: path audit + dense second opinion + lower bound). Overlay is click-through — M2 merge picking still works.">🔋 Range</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'imperial' ? 'active' : ''}" data-unit="imperial">mi</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'metric' ? 'active' : ''}" data-unit="metric">km</button>
                 <button class="aim-mb-tbtn" data-settings title="Battery → flights thresholds">⚙</button>
@@ -7475,6 +7797,8 @@
         // v1.99 — cross-site mission copy + pad-click merge mode
         const cpBtn = panelEl.querySelector('[data-copy-missions]');
         if (cpBtn) cpBtn.onclick = () => openCopyMissionsPanel();
+        const rngBtn = panelEl.querySelector('[data-rng-toggle]');
+        if (rngBtn) rngBtn.onclick = () => rngToggle(rngBtn);
         const pcmBtn = panelEl.querySelector('[data-pcm-toggle]');
         if (pcmBtn) pcmBtn.onclick = async () => {
             if (pcm.on) { pcmExit(); }

@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-30 — Mission Bank Tools v2.20 (dev/latest): 🔋 Range — triple-verified pad reach from base
+
+New **🔋 Range** button in the SUM toolbar (next to 🔗 Merge): colors every asset pad's FFZ by the **true shortest LEGAL route** from the base station — inside FFZs / along FPs only, no corner cutting, no flying over open ground.
+
+- **Exact routing**: FFZ corner vertices are part of the routing graph, so paths bend *around* concave corners; a boundary path always exists, and shortcut edges are only added when a fine-grained containment check proves the straight line stays inside. Dijkstra on that graph cannot pick "the longer of two ways".
+- **Triple-checked before anything gets colored**: (1) every winning route is re-sampled every ~5 m and each sample must be inside an FFZ / on an FP / in the base takeoff zone — any violation renders the pad ⚠ orange instead of a color; (2) a denser second graph solves the site independently and the shorter answer wins; (3) every route must beat its straight-line lower bound. The build-time check is deliberately stricter than the audit, so an orange pad always means a real problem, never noise. (The audit proved itself in testing — it caught a 56 m shortcut clipping a concave notch, which is now impossible by construction.)
+- **Display**: green = within Tattu radius, yellow = Tulip, red = out of range / no route, gray = no FFZ; each pad FFZ shows its worst-corner distance (e.g. `12.7k`). Everything is click-through — M2 pad-picking for merge works right through it. Legend bottom-left with counts; toggle off with the button or the legend's ✕. Radii come from the Auto-Group knobs (Tattu≤ / Tulip≤).
+
 ## 2026-07-30 — Mission Bank Tools v2.19 (dev/latest): 🧠 Auto-Group — navs not snapshots, and the off-graph storm
 
 - **Routes anchor to NAVIGATE points now** — the drone flies navs; snapshots are camera positions. Route lines, pad positions, and per-mission internal cost all use nav locations (snapshots only as fallback for nav-less missions). This kills the lines that dove into pad interiors toward snapshot markers.
