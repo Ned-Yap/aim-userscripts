@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-31 — Mission Bank Tools v2.45 (dev/latest): 🧩 👁 routes fly navs, not centroids
+
+Live catch: the route-comparison lines anchored each pad at its *centroid* — visible as stubs reaching illegally into pads — which inflated and misrouted the drawn paths. The lines now follow the mission's **actual nav points** (each pad's navs from its own steps, in flight order), with legal legs between them. Note the audit's *numbers* were always nav-anchored — only the drawing was wrong, so no estimates change.
+
 ## 2026-07-31 — Mission Bank Tools v2.44 (dev/latest): 🧩 👁 route comparison — see both orders as lines
 
 New 👁 button on each audited macro in the 🧩 legend: draws the mission's **current order** as a solid line in the macro's color and the **♻ replan order** as a dashed white line — both routed legally (along FPs / through FFZs) on the verified graph, base to base. "How much further is it really" becomes visible line-length instead of guesswork; scattered-looking orders along one corridor often draw nearly the same route, which is why the audit can honestly say near-optimal. Toggle per macro; click-through as always.

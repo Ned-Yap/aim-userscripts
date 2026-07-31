@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.44
+// @version      2.45
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.44';
+    const SCRIPT_VERSION = '2.45';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5521,10 +5521,28 @@
         if (!mc || !built) { showToast('Route compare unavailable (see console).', '#ff9800', 3000); return false; }
         const base = data.ent.base;
         const layers = [];
-        const pathFor = (pads) => {
+        // v2.45: anchor at the mission's ACTUAL NAV POINTS, never centroids —
+        // the drone flies navs; centroid stubs reached illegally into pads and
+        // exaggerated the drawn length (live catch). Per pad we walk its block
+        // steps' navs in order; legs between stops route legally.
+        const stepsByPad = new Map();
+        (mc.blocks || []).forEach(b => {
+            if (b.aId == null) return;
+            if (!stepsByPad.has(b.aId)) stepsByPad.set(b.aId, []);
+            b.steps.forEach(s => stepsByPad.get(b.aId).push(s));
+        });
+        const padById = new Map(mc.pads.map(a => [a.id, a]));
+        const navsOf = (padId) => {
+            const steps = stepsByPad.get(padId) || [];
+            const navs = steps.filter(s => s && s.type === 1 && s.location && typeof s.location.lat === 'number').map(s => s.location);
+            if (navs.length) return navs;
+            const a = padById.get(padId);
+            return a ? [genCentroid(a.ring)] : [];
+        };
+        const pathFor = (padIds) => {
             const stops = [];
             if (base) stops.push(base);
-            pads.forEach(a => stops.push(genCentroid(a.ring)));
+            padIds.forEach(id => navsOf(id).forEach(p => stops.push(p)));
             if (base) stops.push(base);
             let pts = [];
             for (let i = 1; i < stops.length; i++) {
@@ -5534,9 +5552,9 @@
             return pts;
         };
         try {
-            layers.push(L.polyline(pathFor(mc.pads), { color, weight: 4, opacity: 0.9, interactive: false }).addTo(map));
+            layers.push(L.polyline(pathFor(mc.pads.map(a => a.id)), { color, weight: 4, opacity: 0.9, interactive: false }).addTo(map));
             if (au && au.reRows && au.reRows.length) {
-                layers.push(L.polyline(pathFor(au.reRows.map(r => r.asset)), { color: '#ffffff', weight: 2.5, opacity: 0.9, dashArray: '6 6', interactive: false }).addTo(map));
+                layers.push(L.polyline(pathFor(au.reRows.map(r => r.asset.id)), { color: '#ffffff', weight: 2.5, opacity: 0.9, dashArray: '6 6', interactive: false }).addTo(map));
             }
         } catch (e) { console.warn(`${TAG} [mcv] route draw failed`, e); }
         mcvRoutes.set(missionId, layers);
