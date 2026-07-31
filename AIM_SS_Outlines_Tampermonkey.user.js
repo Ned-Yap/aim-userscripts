@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.116
+// @version      34.125
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,6 +33,20 @@
     const TRIGGER_KEY_CODE = 'KeyO';
     const CONTEXT = window === window.top ? "TOP" : "IFRAME";
     const CHANNEL_NAME = "AIM_STYLER_CHANNEL";
+
+    // v34.121 — Data View support. The data_view route is Percepto's LEGACY
+    // AngularJS app: single frame (no map iframe), Leaflet map mounted in the
+    // TOP window, map instance on $rootScope.current_map. There the TOP
+    // instance IS the renderer (on Site Setup, rendering stays in the map
+    // IFRAME and TOP is just a channel relay). Route is dynamic (SPA hash),
+    // so this is a function, not a const.
+    function isDataViewRoute() {
+        try { return /#\/site\/\d+\/data_view\//.test((window.top || window).location.hash || ''); }
+        catch (e) { return /#\/site\/\d+\/data_view\//.test(location.hash || ''); }
+    }
+    function rendersInThisFrame() {
+        return CONTEXT === 'IFRAME' || (CONTEXT === 'TOP' && isDataViewRoute());
+    }
     const FRAME_ID = `${CONTEXT}@${location.pathname}${location.search ? '?' + location.search.slice(0, 40) : ''}`;
     const TAG = `[AIM STYLER ${FRAME_ID}]`;
     // SCRIPT_VERSION moved UP here in v34.39 so the init log (which uses
@@ -43,7 +57,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.116';
+    const SCRIPT_VERSION = '34.125';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -66,6 +80,31 @@
     // works on its own with Shift+O.
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-styler';
+
+    // --- Server model (v34.120). Prod and QA are separate databases: the
+    // same numeric site ID is two different sites, so per-site KML files
+    // and GM-persisted per-site state are env-namespaced (QA = qa-<id>).
+    // GM storage is shared across origins — never key it by bare site ID.
+    const IS_QA = location.hostname === 'qa.percepto.app' || location.hostname.endsWith('.qa.percepto.app');
+    function envSiteKey(sid) { return IS_QA ? `qa-${sid}` : String(sid); }
+    // GM keys that embed a site id get the same env prefix.
+    function gmEnvKey(key) { return IS_QA ? `qa-${key}` : key; }
+    // Data-repo KML base name for a site. On QA the "qa-prod-kmls" toggle
+    // can point reads at the PROD twin's files (same numeric ID) — for
+    // sites cloned from prod where the real-world lines are identical.
+    function kmlSiteBase(siteID) {
+        if (!IS_QA) return String(siteID);
+        return toggleState['qa-prod-kmls'] === true ? String(siteID) : `qa-${siteID}`;
+    }
+    // While QA is viewing PROD's KMLs, every write path (commit / split /
+    // create) is blocked so QA edits can never land in prod's files.
+    function kmlWritesBlocked() {
+        if (IS_QA && toggleState['qa-prod-kmls'] === true) {
+            showKMLToast('QA is viewing PROD\'s KMLs (read-only). Turn off "Use PROD power-line KMLs" to edit QA\'s own files.', 8000);
+            return true;
+        }
+        return false;
+    }
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -162,6 +201,8 @@
     ];
     const TOGGLES = [
         { id: 'master', label: 'Show all overlays', type: 'boolean', default: true, master: true },
+        // QA-only: read the prod twin's KML files (write paths lock while on).
+        ...(IS_QA ? [{ id: 'qa-prod-kmls', label: 'QA: use PROD power-line KMLs (same site #, read-only)', type: 'boolean', default: false }] : []),
         {
             type: 'category',
             id: 'fp-cat',
@@ -639,7 +680,14 @@
 
     const EDIT_MODE_SELECTOR = 'path.leaflet-interactive[stroke="#000000"][stroke-dasharray]';
 
-    const ALL_TARGETS_SELECTOR = `${SOLID_GREEN_SELECTOR}, ${WHITE_ASSET_SELECTOR}, ${BLUE_FLIGHT_PATH_SELECTOR}, ${EDIT_MODE_SELECTOR}`;
+    // v34.123 — Data View renders its entity boxes as Leaflet vectors in a
+    // custom pane (.leaflet-app-custom-pane-pane) with this class. Their
+    // stroke ATTRIBUTE is Leaflet-default #3388ff (the white look comes from
+    // Percepto CSS), so the SS stroke-signature selectors can never match —
+    // match by class instead. DV-only class → zero matches on Site Setup.
+    const DV_ASSET_SELECTOR = 'path.app-poi-outside-of-data-map.leaflet-interactive';
+
+    const ALL_TARGETS_SELECTOR = `${SOLID_GREEN_SELECTOR}, ${WHITE_ASSET_SELECTOR}, ${BLUE_FLIGHT_PATH_SELECTOR}, ${EDIT_MODE_SELECTOR}, ${DV_ASSET_SELECTOR}`;
     const CUSTOM_BUFFER_ATTR = 'data-custom-buffer-v24';
 
     // --- KML / Shielding ---
@@ -859,12 +907,12 @@
             const sid = getCurrentSiteID();
             const needFetch = sid && (assetStateData.siteID !== sid
                 || (!assetStateData.loading && !assetStateData.polys.length && !assetStateData.failed));
-            // Only the iframe fetches (it owns the map + the cookie-auth'd
-            // same-origin context); it broadcasts the equipment set to TOP.
-            if (needFetch && CONTEXT === 'IFRAME') fetchAssetStates(sid);
+            // Only the rendering frame fetches (SS: the map iframe; Data View:
+            // TOP — v34.125). It broadcasts the equipment set to other frames.
+            if (needFetch && rendersInThisFrame()) fetchAssetStates(sid);
             const stMap = getLeafletMap();
             if (stMap && assetStateData.siteID === sid && assetStateData.polys.length) {
-                document.querySelectorAll(WHITE_ASSET_SELECTOR).forEach(p => {
+                document.querySelectorAll(`${WHITE_ASSET_SELECTOR}, ${DV_ASSET_SELECTOR}`).forEach(p => {
                     if (p.hasAttribute(CUSTOM_BUFFER_ATTR)) return; // never tag our own clones
                     const a = matchPathAsset(p, stMap);
                     if (a) {
@@ -879,7 +927,9 @@
         const lines = document.querySelectorAll(ALL_TARGETS_SELECTOR);
         lines.forEach(line => {
             const isSolidGreen = line.matches(SOLID_GREEN_SELECTOR);
-            const isWhiteAsset = line.matches(WHITE_ASSET_SELECTOR);
+            // v34.123: DV entity boxes count as asset-class lines — all the
+            // asset.* toggles (color, buffer, thickness, fill) capture them.
+            const isWhiteAsset = line.matches(WHITE_ASSET_SELECTOR) || line.matches(DV_ASSET_SELECTOR);
             const isBlueFlight = line.matches(BLUE_FLIGHT_PATH_SELECTOR);
             const isEditMode = line.matches(EDIT_MODE_SELECTOR);
 
@@ -1008,6 +1058,15 @@
                 // now-disabled per-state width) back to the native width.
                 line.setAttribute('stroke-width', String(originalWidth));
             }
+            // v34.125: DV entity boxes need width via INLINE style too —
+            // Percepto's Data View CSS sets stroke-width on their class, which
+            // beats the attribute writes above; inline style beats the CSS.
+            // Empty string clears our override so the native CSS look returns.
+            if (line.matches(DV_ASSET_SELECTOR)) {
+                const dvWantWidth = assetStyle ? String(assetStyle.width)
+                    : (wantForce ? String(lineThickness) : '');
+                if (line.style.strokeWidth !== dvWantWidth) line.style.strokeWidth = dvWantWidth;
+            }
 
             // --- Asset fill override ---
             // Only acts when asset.show is on. If the category master is off,
@@ -1078,6 +1137,12 @@
             // --- 40ft buffer (standard) ---
             if (want40) {
                 const buffer = line.cloneNode(true);
+                // v34.124: strip the DV entity class — Percepto's Data View CSS
+                // styles that class (stroke/width/fill), and CSS beats the
+                // presentation ATTRIBUTES we set below, leaving the clone
+                // rendered identical to (and invisible under) the original.
+                // No-op on Site Setup (class doesn't exist there).
+                buffer.classList.remove('app-poi-outside-of-data-map');
                 buffer.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
                 buffer.style.pointerEvents = 'none';
                 buffer.setAttribute('fill', 'none');
@@ -1101,6 +1166,7 @@
             // own configurable knob (fp.65ft-distance).
             if (want65) {
                 const band65 = line.cloneNode(true);
+                band65.classList.remove('app-poi-outside-of-data-map'); // v34.124 — see 40ft block
                 band65.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
                 band65.setAttribute('data-buffer-kind', 'flight-65ft');
                 band65.style.pointerEvents = 'none';
@@ -1136,6 +1202,7 @@
             // so it scales with zoom the same way as the 40/65 bands.
             if (wantShield) {
                 const shielding = line.cloneNode(true);
+                shielding.classList.remove('app-poi-outside-of-data-map'); // v34.124 — see 40ft block
                 shielding.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
                 shielding.setAttribute('data-buffer-kind', 'shielding');
                 shielding.style.pointerEvents = 'none';
@@ -3317,32 +3384,49 @@
         return inside;
     }
 
+    // v34.116: shared taxonomy split — only TRAILING " - " segments that
+    // are known STATE words count as the health state; everything before
+    // them is the equipment/type. Handles BOTH taxonomies:
+    //   EXXON:       "battery - empty"           → equip "battery",         state Empty
+    //   Diamondback: "v - pumping rod - empty"   → equip "v - pumping rod", state Empty
+    // Before this, Diamondback's "v - pumping rod" classified as unknown
+    // state "Pumping rod" → gray fallback instead of Normal-pink.
+    const ASSET_STATE_WORDS = ['unreachable', 'unshielded', 'empty', 'inactive', 'hy'];
+    function splitSubtypeTaxonomy(sub) {
+        const parts = String(sub || '').trim().split(' - ').map(s => s.trim()).filter(Boolean);
+        const mods = [];
+        while (parts.length > 1 && ASSET_STATE_WORDS.indexOf(parts[parts.length - 1].toLowerCase()) !== -1) {
+            mods.push(parts.pop().toLowerCase());
+        }
+        return { equipParts: parts, mods };
+    }
+
     // Derive a single state for a type-3 asset. Precedence is safety-first so
     // a glance surfaces the worst problem: Unreachable > Unshielded > Empty >
-    // Inactive > HY > Normal. State text lives in custom.poi_type_str as
-    // " - "-separated modifiers ("battery - empty"); is_unshielded is also an
-    // independent boolean flag, honored even when the subtype omits it.
+    // Inactive > HY > Normal. State = trailing known STATE word(s) in
+    // custom.poi_type_str; is_unshielded is also an independent boolean
+    // flag, honored even when the subtype omits it.
     function classifyAssetState(e) {
         const sub = (e && e.custom && e.custom.poi_type_str) ? String(e.custom.poi_type_str) : '';
-        const mods = sub.split(' - ').slice(1).map(s => s.trim().toLowerCase()).filter(Boolean);
+        const { mods } = splitSubtypeTaxonomy(sub);
         const has = (k) => mods.indexOf(k) !== -1;
         if (has('unreachable')) return 'Unreachable';
         if ((e && e.is_unshielded) || has('unshielded')) return 'Unshielded';
         if (has('empty')) return 'Empty';
         if (has('inactive')) return 'Inactive';
         if (has('hy')) return 'HY';
-        if (mods.length) return prettyState(mods[0]); // unknown modifier — best effort
         return 'Normal';
     }
 
-    // Equipment type = the HEAD of the subtype before " - " (e.g.
-    // "battery - empty" → "battery", "v-well" → "v-well"). Hyphens inside the
-    // equipment name are preserved because we split on " - " (space-dash-space)
-    // only. Assets with no subtype bucket as "Other". Returns { name, slug }.
+    // Equipment type = the subtype minus any trailing state word(s):
+    // "battery - empty" → "battery", "v - pumping rod - empty" →
+    // "v - pumping rod". Hyphens inside names are preserved (split on
+    // " - " only). Assets with no subtype bucket as "Other".
+    // Returns { name, slug }.
     function classifyAssetEquipment(e) {
         const sub = (e && e.custom && e.custom.poi_type_str) ? String(e.custom.poi_type_str) : '';
-        const head = sub.split(' - ')[0].trim();
-        const name = head ? prettyState(head) : 'Other';
+        const { equipParts } = splitSubtypeTaxonomy(sub);
+        const name = equipParts.length ? equipParts.map(prettyState).join(' - ') : 'Other';
         return { name, slug: stateSlug(name) };
     }
 
@@ -3635,6 +3719,26 @@
                 }
             } catch (e) {}
         }
+        // v34.121 — Data View (legacy Angular app): the map is NEVER on the
+        // container's props there; it lives on $rootScope.current_map.
+        // Guarded on a container existing in THIS document so the SS top
+        // frame (Angular shell, but map in iframe → no container here)
+        // can't latch onto a stale reference.
+        try {
+            // unsafeWindow, not window — page globals aren't guaranteed to be
+            // visible through the sandbox proxy (same rule as unsafeWindow.L).
+            const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+            const ng = w.angular;
+            if (ng && containers.length && typeof ng.element === 'function') {
+                const scope = ng.element(containers[0]).scope();
+                const root = scope && scope.$root;
+                if (root && looksLikeLeafletMap(root.current_map)) {
+                    console.log(`${TAG} captured Leaflet map via angular $rootScope.current_map (Data View)`);
+                    leafletMapRef = root.current_map;
+                    return leafletMapRef;
+                }
+            }
+        } catch (e) { /* not an angular-managed page — fall through */ }
         return null;
     }
 
@@ -3666,7 +3770,7 @@
         // not cached at the GitHub CDN). Always do the network fetch
         // so coworkers' changes propagate as soon as they happen.
         if (!kmlFeatures[key]) {
-            const cached = gmGet(KML_CACHE_PREFIX + key, null);
+            const cached = gmGet(KML_CACHE_PREFIX + gmEnvKey(key), null);
             if (cached && Array.isArray(cached.features)) {
                 kmlFeatures[key] = cached.features;
                 if (cached.path) kmlResolvedPath[key] = cached.path;
@@ -3701,11 +3805,12 @@
         // tracked in kmlResolvedPath[key] so commits/splits hit the same
         // file the fetch resolved.
         const cap = type.charAt(0).toUpperCase() + type.slice(1);
+        const base = kmlSiteBase(siteID);   // env-aware: QA = qa-<id> unless qa-prod-kmls
         const candidates = [
-            { name: `${siteID}-${type}.kml`, ext: 'kml' },
-            { name: `${siteID}-${cap}.kml`, ext: 'kml' },
-            { name: `${siteID}-${type}.kmz`, ext: 'kmz' },
-            { name: `${siteID}-${cap}.kmz`, ext: 'kmz' },
+            { name: `${base}-${type}.kml`, ext: 'kml' },
+            { name: `${base}-${cap}.kml`, ext: 'kml' },
+            { name: `${base}-${type}.kmz`, ext: 'kmz' },
+            { name: `${base}-${cap}.kmz`, ext: 'kmz' },
         ];
 
         // v34.53: fetch via api.github.com Contents endpoint instead of
@@ -3780,7 +3885,7 @@
                             try {
                                 const features = parseKML(xmlText);
                                 kmlFeatures[key] = features;
-                                gmSet(KML_CACHE_PREFIX + key, { features, at: Date.now(), path: c.name });
+                                gmSet(KML_CACHE_PREFIX + gmEnvKey(key), { features, at: Date.now(), path: c.name });
                                 console.log(`${TAG} ${type} KML for site ${siteID} loaded (${features.length} features, source: ${c.name})`);
                                 // v34.54: drop any stale commitOps entries from GM
                                 // storage whose pmIdx no longer references a real
@@ -3850,7 +3955,7 @@
             return doc.async('string').then(text => {
                 const features = parseKML(text);
                 kmlFeatures[key] = features;
-                gmSet(KML_CACHE_PREFIX + key, { features, at: Date.now(), path: sourceName });
+                gmSet(KML_CACHE_PREFIX + gmEnvKey(key), { features, at: Date.now(), path: sourceName });
                 console.log(`${TAG} ${type} KMZ for site ${siteID} loaded (${features.length} features, source: ${sourceName}, entry: ${doc.name})`);
                 kmlFetching.delete(key);
                 if (isActive) runUpdate();
@@ -3936,7 +4041,7 @@
     // ============================================================
 
     function pendingKey(siteID, type) {
-        return `${KML_PENDING_PREFIX}${siteID}-${type}`;
+        return `${KML_PENDING_PREFIX}${envSiteKey(siteID)}-${type}`;
     }
 
     function getPending(siteID, type) {
@@ -4055,7 +4160,7 @@
     // see what they're about to commit.
     // ============================================================
     function commitOpsKey(siteID, type) {
-        return `${KML_COMMIT_OPS_PREFIX}${siteID}-${type}`;
+        return `${KML_COMMIT_OPS_PREFIX}${envSiteKey(siteID)}-${type}`;
     }
 
     function emptyCommitOps() { return { ops: {}, added: [] }; }
@@ -4521,7 +4626,7 @@
             const features = parseKML(xmlText);
             kmlFeatures[k] = features;
             const path = kmlResolvedPath[k] || `${siteID}-${type}.kml`;
-            gmSet(KML_CACHE_PREFIX + k, { features, at: Date.now(), path });
+            gmSet(KML_CACHE_PREFIX + gmEnvKey(k), { features, at: Date.now(), path });
             kmlMissing.delete(k);
             console.log(`${TAG} applyCommittedXmlToLocalState[${k}]: features ${beforeCount} → ${features.length}`);
             return true;
@@ -4531,7 +4636,7 @@
             // render at least gets SOMETHING.
             console.warn(`${TAG} post-commit local parse failed; falling back to refetch:`, e);
             delete kmlFeatures[k];
-            gmSet(KML_CACHE_PREFIX + k, null);
+            gmSet(KML_CACHE_PREFIX + gmEnvKey(k), null);
             kmlMissing.delete(k);
             fetchKMLForSite(siteID, true);
             return false;
@@ -4986,6 +5091,7 @@
     function splitMultiSegmentPlacemarks(type) {
         const siteID = getCurrentSiteID();
         if (!siteID) { showKMLToast('No site loaded — open a site first.', 3000); return; }
+        if (kmlWritesBlocked()) return;
         const pCount = pendingCount(siteID, type);
         if (pCount > 0) {
             showKMLToast(`Refusing to split: ${pCount} pending ${type} hide${pCount === 1 ? '' : 's'}. Clear them first (the split would shift placemark indices).`, 9000);
@@ -5337,6 +5443,7 @@
     function commitPendingOps(type) {
         const siteID = getCurrentSiteID();
         if (!siteID) { showKMLToast('No site loaded — open a site first.', 3000); return; }
+        if (kmlWritesBlocked()) return;
 
         // v34.54: prune stale ops first.
         const pruned = pruneStaleOps(siteID, type);
@@ -7886,8 +7993,9 @@
             // TOP frame caps at 5 attempts (1s) because Percepto's Leaflet
             // map is always in the IFRAME — TOP retrying for 30s is just
             // noise. IFRAME keeps the full 30s budget because its first-load
-            // can take ~7s on some pages.
-            const cap = (CONTEXT === 'TOP') ? 5 : 150;
+            // can take ~7s on some pages. v34.121: EXCEPT on Data View,
+            // where the map genuinely lives in TOP — full budget there.
+            const cap = (CONTEXT === 'TOP' && !isDataViewRoute()) ? 5 : 150;
             if (attempt > cap) {
                 if (CONTEXT === 'TOP') {
                     console.log(`${TAG} no map-pane in TOP frame after ${cap} tries — that's expected; map lives in iframe.`);
@@ -7910,6 +8018,30 @@
         observerTarget = container;
         observer = new MutationObserver(debouncedUpdate);
         observer.observe(container, observerConfig);
+        // v34.122 — Data View zoom fix: on DV, Leaflet only rewrites ITS OWN
+        // layers' attributes on zoom/pan — no SS-style mutation storm reaches
+        // our observer, so our injected SVG sat stale in a shifted coordinate
+        // space until the 3s heartbeat. We own the map instance on DV, so bind
+        // its own events as the redraw trigger. Guarded per-map instance so
+        // observer re-attaches never stack duplicate listeners.
+        if (CONTEXT === 'TOP' && isDataViewRoute()) {
+            const dvMap = getLeafletMap();
+            if (dvMap && !dvMap.__aimStylerZoomHook) {
+                dvMap.__aimStylerZoomHook = true;
+                let dvRedrawTimer = null;
+                const dvRedraw = () => {
+                    if (!isActive) return;
+                    if (dvRedrawTimer) clearTimeout(dvRedrawTimer);
+                    dvRedrawTimer = setTimeout(() => { dvRedrawTimer = null; runUpdate(); }, 120);
+                };
+                try {
+                    dvMap.on('zoomend moveend viewreset', dvRedraw);
+                    console.log(`${TAG} DV zoom/move redraw hook bound to map`);
+                } catch (e) { console.warn(`${TAG} DV zoom hook failed:`, e); }
+            } else if (!dvMap) {
+                console.warn(`${TAG} DV: map-pane found but map instance not captured yet — zoom hook deferred to next attach`);
+            }
+        }
         // First-render watchdog: after attach, run runUpdate up to N times
         // unconditionally (bypass hash check) so we recover from the case
         // where the very first runUpdate fires before Leaflet's overlay-pane
@@ -8110,6 +8242,19 @@
                 if (msg.toggleId === 'asset.locked') {
                     applyAssetLockClass();
                 }
+                // QA prod-KML source flipped — the filename base changed, so
+                // drop everything loaded and refetch under the new names.
+                if (msg.toggleId === 'qa-prod-kmls') {
+                    kmlMissing.clear();
+                    const sid = getCurrentSiteID();
+                    if (sid) {
+                        KML_TYPES.forEach(t => { delete kmlFeatures[kmlKey(sid, t)]; });
+                        fetchKMLForSite(sid, true);
+                    }
+                    showKMLToast(newVal
+                        ? 'QA now reads PROD\'s power-line KMLs (write paths locked).'
+                        : 'QA back on its own qa-* KML files.', 5000);
+                }
                 // Color-by-state flipped on → kick off the entity fetch now so
                 // the styling appears without waiting for another interaction.
                 // (Tags are re-matched every runUpdate, so no clearing needed on
@@ -8152,12 +8297,13 @@
                     const sid = getCurrentSiteID();
                     if (sid) fetchKMLForSite(sid, true);
                 }
-            } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID && CONTEXT === 'IFRAME') {
+            } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID && rendersInThisFrame()) {
                 // Button-type controls in the panel broadcast this when clicked.
                 // Two gates here:
-                //   1. CONTEXT === 'IFRAME' — TOP doesn't render anything; running
-                //      actions there at best wastes CPU and at worst (split) fires
-                //      confirm() + GitHub PUT twice.
+                //   1. rendersInThisFrame() — the IFRAME on Site Setup, or TOP on
+                //      Data View (v34.121). A non-rendering frame running actions
+                //      at best wastes CPU and at worst (split) fires confirm() +
+                //      GitHub PUT twice.
                 //   2. document.hasFocus() — BroadcastChannel delivers to EVERY
                 //      open AIM tab in the same origin, not just the one the
                 //      user clicked in. Without this gate, clicking Split on
@@ -8167,6 +8313,24 @@
                 if (!document.hasFocus()) {
                     console.log(`${TAG} TRIGGER_ACTION ${msg.actionId} arrived but tab is not focused — ignoring (cross-tab broadcast).`);
                     return;
+                }
+                // v34.121 — Data View is VIEW-ONLY: overlays, basemaps, and
+                // local view prefs work; anything that edits KML data, draws,
+                // or validates against Site Setup entities stays SS-only.
+                // Blocked loudly (toast), never silently.
+                if (CONTEXT === 'TOP') {
+                    const DV_SAFE_ACTIONS = [
+                        'clear-hides-distro', 'clear-hides-trans',
+                        'unhide-file-distro', 'unhide-file-trans',
+                        'basemap-set-custom',
+                        'parcels-arm', 'parcels-clear',
+                        'rrc-scout-view', 'rrc-scout-clear', 'rrc-recon',
+                    ];
+                    if (!DV_SAFE_ACTIONS.includes(msg.actionId)) {
+                        showKMLToast('That tool is Site-Setup-only — Data View is view-only.', 4000);
+                        console.log(`${TAG} TRIGGER_ACTION ${msg.actionId} blocked on Data View (view-only)`);
+                        return;
+                    }
                 }
                 if (msg.actionId === 'run-validator') runCoverageValidator();
                 else if (msg.actionId === 'clear-validator') clearCoverageValidator();
@@ -8414,7 +8578,8 @@
             showKMLToast('Tampermonkey grants need re-approval — open the script in Tampermonkey.', 6000);
             return;
         }
-        const path = `${siteID}-${type}.kml`;
+        if (kmlWritesBlocked()) return;
+        const path = `${kmlSiteBase(siteID)}-${type}.kml`;
         const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}`;
         const xmlText = buildEmptyKML(siteID, type);
         let contentB64;
@@ -8450,7 +8615,7 @@
                         kmlFeatures[key] = [];
                         kmlResolvedPath[key] = path;
                         kmlMissing.delete(key);
-                        gmSet(KML_CACHE_PREFIX + key, { features: [], at: Date.now(), path });
+                        gmSet(KML_CACHE_PREFIX + gmEnvKey(key), { features: [], at: Date.now(), path });
                         // Cache the new SHA so the first real commit can skip
                         // the GET (same fast-path the commit code uses).
                         try {
@@ -8688,9 +8853,27 @@
     // stays loaded across site changes, so we have to spot the hash change
     // ourselves and re-fetch the appropriate KML and reload validator pins).
     let lastSiteID = getCurrentSiteID();
+    let lastWasDataView = CONTEXT === 'TOP' && isDataViewRoute();
     window.addEventListener('hashchange', () => {
         const sid = getCurrentSiteID();
-        if (sid === lastSiteID) return;
+        // v34.121 — also react to route flips between Data View and other
+        // routes on the SAME site: in TOP, the map pane only exists on the
+        // data_view route, so the observer must (re-)attach when we arrive
+        // there (the site-unchanged early-return used to swallow this).
+        const dvNow = CONTEXT === 'TOP' && isDataViewRoute();
+        const dvFlipped = dvNow !== lastWasDataView;
+        lastWasDataView = dvNow;
+        if (sid === lastSiteID && !dvFlipped) return;
+        if (sid === lastSiteID && dvFlipped) {
+            if (isActive && dvNow) {
+                console.log(`${TAG} route changed to data_view — attaching observer to TOP map`);
+                if (observer) { observer.disconnect(); observer = null; }
+                observerTarget = null;
+                attachObserverWhenReady();
+                if (sid) fetchKMLForSite(sid);
+            }
+            return;
+        }
         lastSiteID = sid;
         // Any in-progress vertex edit OR draw mode belongs to the
         // previous site — bail out silently so handles/clicks don't

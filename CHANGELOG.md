@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-31 — ⭐ PROMOTED TO PROD: Data View support — Control Panel v1.38 + Map Styler v34.125 + Site Setup Tools v4.216
+
+Coworkers jump **Control Panel 1.35 → 1.38**, **Map Styler 34.116 → 34.125**, **Site Setup Tools 4.213 → 4.216** on the next Tampermonkey update check. Together with Mission Bank Tools v2.39 (already in prod), AIM tools now work on the **Data View** page (the media/issues browser with the map):
+
+- **⚙ gear on Data View** (floating, left of the native draw buttons) — Map Styler + Missions toggles reachable there.
+- **Map Styler on the Data View map, view-only** — KML shielding outlines, FAA charts / ⛰ terrain / Texas RRC / crop overlays, basemap switcher + dark map mode, ortho brightness, and **assets colored by state** (Normal / Unshielded / Unreachable, same palette as Site Setup). Editing tools stay Site-Setup-only and say so if clicked.
+- **Right-click any entity on the Data View map** → the usual inspector popup (read-only: copy fields, 🎯 Focus, 🗺 Maps) — entity data pre-loads so the first right-click is instant.
+- **👁 in the popup previews that pad's mission** right on the Data View map — nav badges connected by the *actual* legal flight route, snapshot sightlines, and hover-to-identify on every preview dot/badge.
+- Also riding along: QA-server environment isolation for Map Styler (qa-keyed KMLs + read-only prod-KML toggle).
+
 ## 2026-07-31 — Mission Bank Tools v2.46 (dev/latest): route legs fly nav→nav direct when legal
 
 Live catch on the 👁 lines: a leg between two navs in the same FFZ doglegged through an interior vertex instead of flying straight. The leg router temp-attaches both endpoints into the graph but never linked them to *each other* — so even a fully-legal straight segment had no direct edge. Fixed: when both endpoints sit in the same FFZ and the straight segment stays inside it, the direct edge exists and wins. Applies to the 🧩 👁 comparison **and** the mission preview's routed nav lines (shared router).

@@ -2,7 +2,7 @@
 // @name         AIM Copy Asset Name
 // @name:en      AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.213
+// @version      4.216
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.213';
+    const SCRIPT_VERSION = '4.216';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -244,6 +244,21 @@
                 if (looksLikeLeafletMap(v)) return v;
             }
         }
+        // v4.214: Data View (legacy Angular app) keeps its map on
+        // $rootScope.current_map — never on the container's props. Guarded
+        // on a container existing in THIS document so the SS top frame
+        // (Angular shell, map in iframe) can't grab a stale reference.
+        try {
+            // unsafeWindow, not window — page globals aren't guaranteed to be
+            // visible through the sandbox proxy (same rule as unsafeWindow.L).
+            const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+            const ng = w.angular;
+            if (ng && containers.length && typeof ng.element === 'function') {
+                const scope = ng.element(containers[0]).scope();
+                const root = scope && scope.$root;
+                if (root && looksLikeLeafletMap(root.current_map)) return root.current_map;
+            }
+        } catch (e) { /* not an angular-managed page */ }
         return null;
     }
 
@@ -280,6 +295,19 @@
             if (SITE_SETUP_ROUTE_RE.test(topHash)) return true;
         } catch (e) { /* cross-origin top */ }
         return SITE_SETUP_ROUTE_RE.test(location.hash || '');
+    }
+
+    // v4.214: Data View route — Percepto's LEGACY Angular app (single frame,
+    // Leaflet map in the TOP window on $rootScope.current_map). The inspector
+    // is READ-ONLY there: right-click popup + Focus + Maps + 👁 preview work;
+    // the sidebar Find and every write path stay Site-Setup-only.
+    const DATA_VIEW_ROUTE_RE = /#\/site\/\d+\/data_view\//;
+    function isDataViewRoute() {
+        try {
+            const topHash = (window.top && window.top.location && window.top.location.hash) || '';
+            if (DATA_VIEW_ROUTE_RE.test(topHash)) return true;
+        } catch (e) { /* cross-origin top */ }
+        return DATA_VIEW_ROUTE_RE.test(location.hash || '');
     }
 
     // Pull the human-readable site name from the page header's site
@@ -4846,16 +4874,20 @@
         // mission named after this asset instead (feature #211). Site
         // Setup keeps the original button unchanged.
         const inMissionBank = isMissionBankRoute();
-        const findBtn = document.createElement('button');
-        findBtn.textContent = inMissionBank ? '🔍 Find in Missions' : '🔍 Find in Map Entities';
-        findBtn.style.cssText = 'flex:1;background:rgba(20,210,220,0.18);color:#7adfe6;border:1px solid rgba(20,210,220,0.45);border-radius:3px;padding:5px 8px;cursor:pointer;font:inherit;font-size:11px';
-        findBtn.onclick = (ev) => {
-            ev.stopPropagation();
-            if (inMissionBank) findEntityInMissions(entity);
-            else findEntityInSidebar(entity);
-            closeInspector();
-        };
-        footer.appendChild(findBtn);
+        // v4.214: Data View has neither the Map Entities sidebar nor the
+        // missions list — no Find target exists, so skip the button there.
+        if (!isDataViewRoute()) {
+            const findBtn = document.createElement('button');
+            findBtn.textContent = inMissionBank ? '🔍 Find in Missions' : '🔍 Find in Map Entities';
+            findBtn.style.cssText = 'flex:1;background:rgba(20,210,220,0.18);color:#7adfe6;border:1px solid rgba(20,210,220,0.45);border-radius:3px;padding:5px 8px;cursor:pointer;font:inherit;font-size:11px';
+            findBtn.onclick = (ev) => {
+                ev.stopPropagation();
+                if (inMissionBank) findEntityInMissions(entity);
+                else findEntityInSidebar(entity);
+                closeInspector();
+            };
+            footer.appendChild(findBtn);
+        }
 
         // v4.211: 🎯 Focus — pan + zoom so the whole entity fills the frame
         // (feature #210). Popup stays open so the details stay readable.
@@ -4873,7 +4905,8 @@
         // Tools over AIM_MB_PREVIEW to overlay the mission named after
         // this asset. Icon-only to keep the footer compact. v4.213: also
         // on the Mission Bank route (see a mission without opening it).
-        if (isSiteSetupRoute() || isMissionBankRoute()) {
+        // v4.214: and on Data View (MBT's overlay renders there too now).
+        if (isSiteSetupRoute() || isMissionBankRoute() || isDataViewRoute()) {
             const prevBtn = document.createElement('button');
             prevBtn.textContent = '👁';
             prevBtn.title = 'Preview this asset\'s mission on the map (via Mission Bank Tools)';
@@ -7795,6 +7828,23 @@
     if (controlChannel) controlChannel.postMessage({ type: 'REQUEST_TOKEN' });
     installRightClickHandler();
     installSaveInvalidator();
+    // v4.216: Data View entity prefetch — the right-click hit-test needs the
+    // /map_objects cache, and DV has no SUM/sidebar activity to warm it, so
+    // the FIRST M2 always bailed with "Loading site entities — try again".
+    // Warm the cache on arrival and on SPA site/route nav. TOP-only: DV is
+    // the only route where TOP owns a map, and SS/MB warm it elsewhere.
+    function dvPrefetchEntities() {
+        if (!isDataViewRoute()) return;
+        const sid = getCurrentSiteID();
+        if (sid && !mapObjectsBySite[sid] && !fetchingSites.has(sid)) {
+            console.log(`${TAG} DV prefetch: warming entity cache for site ${sid}`);
+            fetchMapObjects(sid);
+        }
+    }
+    if (CONTEXT === 'TOP') {
+        setTimeout(dvPrefetchEntities, 1500);
+        window.addEventListener('hashchange', () => setTimeout(dvPrefetchEntities, 800));
+    }
 
     // ============================================================
     // SUMMARY VIEW — floating panel listing every entity on the site.
