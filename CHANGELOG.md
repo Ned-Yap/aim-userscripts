@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-30 — Mission Bank Tools v2.27 (dev/latest): 🖊 Lasso — draw a loop, get a merge
+
+New **🖊 Lasso** button in the SUM toolbar: press it, then freehand-draw a loop on the map around the pads you want in one macro mission (Esc cancels).
+
+- Everything inside the loop is matched to its mission (same pad-name ladder as M2 picking) and ordered **furthest → closest** using the 🔋 Range solver's triple-verified legal-route distances.
+- **Tulip pads auto-split the result**: you get `X 1` (Tattu pads only) and `X 2` (everything, Tulips included) — Tulips removed from 1, kept in 2, exactly per the naming convention. No Tulips → a single `X 1-2`.
+- A results popup lists each variant with its numbered pad order and per-pad distances, plus everything that was skipped and why (no mission / ambiguous name / no legal route / over range). **🔗 Stage** loads a variant into the pad-click merge editor — numbered badges on the map for inspection, reorder/remove as usual, then Create. The popup stays open so you can stage the other tier right after.
+
 ## 2026-07-30 — Mission Bank Tools v2.24 (dev/latest): 🔋 close-to-cutoff outlines
 
 - Batteries within **500 ft of a class cutoff** (13.5–14k Tattu, 17.5–18k Tulip at default radii) keep their color but get a **red outline**, and the hover tooltip appends "⚠ close to cutoff". Legend gains a red-outline row with the count.

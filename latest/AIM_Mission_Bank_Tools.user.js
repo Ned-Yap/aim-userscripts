@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.26
+// @version      2.27
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.26';
+    const SCRIPT_VERSION = '2.27';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -4744,6 +4744,170 @@
         rng.busy = false;
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    // 🖊 LASSO (v2.27) — freehand-draw a loop around pads to build a merge.
+    // Everything inside the loop is matched to its mission (pad name = mission
+    // name, same ladder as M2 picking), ordered FURTHEST→CLOSEST using the
+    // 🔋 Range solver's triple-verified legal-route distances, and — when the
+    // loop contains Tulip pads — auto-split into "X 1" (Tattu pads only) and
+    // "X 2" (everything), Tulips removed from 1 and kept in 2. Each variant
+    // stages into the pad-click merge editor (numbered badges) for inspection
+    // before Create. Drawing is a one-shot pen: press 🖊, drag a loop, done.
+    // ════════════════════════════════════════════════════════════════════════
+    const lasso = { armed: false, drawing: false, pts: [], line: null, data: null, handlers: null, resultEl: null };
+    function lassoCleanupDraw() {
+        const map = getLeafletMap();
+        try { if (map && map.dragging && lasso.dragWasEnabled) map.dragging.enable(); } catch (e) {}
+        if (lasso.handlers) {
+            const { c, down, move, up, key } = lasso.handlers;
+            try { c.removeEventListener('pointerdown', down, true); c.removeEventListener('pointermove', move, true); c.removeEventListener('pointerup', up, true); } catch (e) {}
+            try { document.removeEventListener('keydown', key, true); } catch (e) {}
+            try { c.style.cursor = ''; } catch (e) {}
+            lasso.handlers = null;
+        }
+        if (lasso.line) { try { lasso.line.remove(); } catch (e) {} lasso.line = null; }
+        lasso.armed = false; lasso.drawing = false; lasso.pts = [];
+        const b = document.querySelector('[data-lasso-toggle]');
+        if (b) b.classList.remove('active');
+    }
+    function lassoCloseResults() {
+        if (lasso.resultEl) { try { lasso.resultEl.remove(); } catch (e) {} lasso.resultEl = null; }
+    }
+    async function lassoToggle(btn) {
+        if (lasso.armed) { lassoCleanupDraw(); showToast('🖊 Lasso cancelled.', '#888', 2000); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded.', '#ff5252', 3000); return; }
+        const map = getLeafletMap();
+        const L = composerGetL();
+        if (!map || !L || typeof map.mouseEventToLatLng !== 'function') { showToast('Lasso: map not found.', '#ff5252', 3000); return; }
+        showToast('🖊 Lasso — loading pads, missions + verified ranges…', '#7adfe6', 2500);
+        let ent, missions, sol;
+        try {
+            [ent, missions] = await Promise.all([genFetchEntities(sid), new Promise((res, rej) => fetchMissions(sid, res, rej))]);
+            sol = rngSolve(ent);   // the trusted router — same engine as 🔋
+        } catch (e) {
+            console.warn(`${TAG} [lasso] load failed`, e);
+            showToast('Lasso: failed to load site data (see console).', '#ff5252', 4000);
+            return;
+        }
+        lasso.data = { ent, missions, byAsset: new Map(sol.results.map(r => [r.asset.id, r])) };
+        const c = map.getContainer();
+        lasso.dragWasEnabled = !!(map.dragging && map.dragging.enabled && map.dragging.enabled());
+        try { if (map.dragging) map.dragging.disable(); } catch (e) {}
+        c.style.cursor = 'crosshair';
+        const down = (ev) => {
+            if (ev.button !== 0) return;
+            ev.preventDefault(); ev.stopPropagation();
+            lasso.drawing = true;
+            lasso.pts = [map.mouseEventToLatLng(ev)];
+            try { lasso.line = L.polyline(lasso.pts, { color: '#7adfe6', weight: 3, dashArray: '4 6', opacity: 0.95, interactive: false }).addTo(map); } catch (e) {}
+        };
+        const move = (ev) => {
+            if (!lasso.drawing) return;
+            ev.preventDefault(); ev.stopPropagation();
+            let ll;
+            try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            const prev = lasso.pts[lasso.pts.length - 1];
+            if (prev && mbApproxMeters(prev.lat, prev.lng, ll.lat, ll.lng) < 3) return;
+            lasso.pts.push(ll);
+            if (lasso.line) lasso.line.setLatLngs(lasso.pts);
+        };
+        const up = (ev) => {
+            if (!lasso.drawing) return;
+            ev.preventDefault(); ev.stopPropagation();
+            const ring = lasso.pts.map(p => ({ lat: p.lat, lng: p.lng }));
+            lassoCleanupDraw();
+            if (ring.length < 8) { showToast('🖊 Loop too small — draw a bigger circle around the pads.', '#ff9800', 3500); return; }
+            lassoProcess(ring);
+        };
+        const key = (ev) => { if (ev.key === 'Escape') { lassoCleanupDraw(); showToast('🖊 Lasso cancelled.', '#888', 2000); } };
+        c.addEventListener('pointerdown', down, true);
+        c.addEventListener('pointermove', move, true);
+        c.addEventListener('pointerup', up, true);
+        document.addEventListener('keydown', key, true);
+        lasso.handlers = { c, down, move, up, key };
+        lasso.armed = true;
+        if (btn) btn.classList.add('active');
+        showToast('🖊 Draw a loop around the pads you want merged (Esc cancels).', '#5fff5f', 5000);
+    }
+    function lassoWindName(rows, base) {
+        if (!base || !rows.length) return 'Lasso';
+        let sx = 0, sy = 0;
+        rows.forEach(r => {
+            const ctr = genCentroid(r.asset.ring);
+            const dLat = ctr.lat - base.lat, dLng = (ctr.lng - base.lng) * Math.cos(base.lat * Math.PI / 180);
+            const h = Math.hypot(dLat, dLng) || 1;
+            sy += dLat / h; sx += dLng / h;
+        });
+        let compass = 90 - Math.atan2(sy, sx) * 180 / Math.PI;
+        compass = ((compass % 360) + 360) % 360;
+        return AG_WINDS[Math.round(compass / 22.5) % 16];
+    }
+    function lassoProcess(ring) {
+        const { ent, missions, byAsset } = lasso.data || {};
+        if (!ent) return;
+        const cfg = agCfg();
+        const inside = (ent.assets || []).filter(a => a.ring && a.ring.length >= 3 && genPointInPoly(genCentroid(a.ring), ring));
+        if (!inside.length) { showToast('🖊 No pads inside the loop.', '#ff9800', 3500); return; }
+        const rows = [], skipped = [];
+        inside.forEach(a => {
+            const cands = rankMatchMissions(a.name, missions);
+            if (!cands.length) { skipped.push(`${a.name} — no mission with this name`); return; }
+            if (cands.length > 1) { skipped.push(`${a.name} — ${cands.length} mission matches (add it via M2)`); return; }
+            const r = byAsset.get(a.id);
+            if (!r || r.status !== 'ok') { skipped.push(`${a.name} — ${r ? (r.status === 'no-ffz' ? 'no FFZ' : 'no legal route') : 'no range data'}`); return; }
+            if (!r.verified || r.disagree) { skipped.push(`${a.name} — range unverified (see console)`); return; }
+            if (r.worstFt > cfg.tulipRadiusFt) { skipped.push(`${a.name} — over ${(cfg.tulipRadiusFt / 1000).toFixed(0)}k ft`); return; }
+            rows.push({ asset: a, mission: cands[0], ft: r.worstFt, tulip: r.worstFt > cfg.tattuRadiusFt });
+        });
+        rows.sort((x, y) => y.ft - x.ft);   // FURTHEST → CLOSEST
+        const wind = lassoWindName(rows, ent.base);
+        const tattu = rows.filter(r => !r.tulip);
+        const tulips = rows.filter(r => r.tulip);
+        const variants = [];
+        // Tulip pads present → auto-split: "1" = Tattu only, "2" = everything.
+        if (tulips.length && tattu.length) {
+            variants.push({ name: `${wind} 1`, sub: `Tattu only · ${tattu.length} pads`, rows: tattu });
+            variants.push({ name: `${wind} 2`, sub: `Tattu + Tulip · ${rows.length} pads`, rows });
+        } else if (tulips.length) {
+            variants.push({ name: `${wind} 2`, sub: `Tulip · ${rows.length} pads`, rows });
+        } else if (rows.length) {
+            variants.push({ name: `${wind} 1-2`, sub: `either battery · ${rows.length} pads`, rows });
+        }
+        if (!variants.length) { showToast(`🖊 ${inside.length} pads in loop, none usable — ${skipped.length} skipped (see the popup).`, '#ff9800', 4500); }
+        lassoShowResults(variants, skipped, missions, ent);
+        console.log(`${TAG} [lasso] ${inside.length} pads in loop → ${rows.length} usable (${tulips.length} Tulip) · ${skipped.length} skipped`);
+    }
+    function lassoShowResults(variants, skipped, missions, ent) {
+        lassoCloseResults();
+        const el = document.createElement('div');
+        el.style.cssText = 'position:fixed;right:24px;bottom:20px;width:330px;max-height:60vh;overflow:auto;z-index:2147483601;'
+            + 'background:#161a20;border:1px solid #7adfe6;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;padding:10px 12px;';
+        const vBtn = (v, i) => `<div style="margin:5px 0;padding:6px 8px;border:1px solid #2a3a2a;border-radius:6px;">
+            <div style="display:flex;align-items:center;gap:8px;">
+                <span style="flex:1;font-weight:800;color:#7dff7d;">⛟ ${escapeHtml(v.name)}</span>
+                <button data-lasso-stage="${i}" style="padding:3px 10px;background:#5fff5f;border:none;color:#04220a;border-radius:5px;cursor:pointer;font-weight:800;font-size:11px;">🔗 Stage</button>
+            </div>
+            <div style="color:#9ad;font-size:10px;margin-top:2px;">${escapeHtml(v.sub)} · furthest→closest</div>
+            <div style="color:#789;font-size:10px;margin-top:3px;max-height:110px;overflow:auto;">${v.rows.map((r, n) => `<div>${n + 1}. ${escapeHtml(r.mission.name)} <span style="color:#567;">${(r.ft / 1000).toFixed(1)}k${r.tulip ? ' · Tulip' : ''}</span></div>`).join('')}</div>
+        </div>`;
+        el.innerHTML = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:5px;">
+                <b style="color:#7adfe6;">🖊 Lasso result</b>
+                <span data-lasso-close style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span>
+            </div>
+            ${variants.map(vBtn).join('') || '<div style="color:#888;font-size:11px;">No stageable missions.</div>'}
+            ${skipped.length ? `<div style="margin-top:6px;color:#ff9800;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Skipped (${skipped.length})</div>${skipped.map(s => `<div style="color:#caa;font-size:10px;">${escapeHtml(s)}</div>`).join('')}` : ''}
+            <div style="color:#789;font-size:10px;margin-top:6px;">Stage a variant → inspect the numbered badges → 🔗 Create. Panel stays open so you can stage the other one after.</div>`;
+        document.body.appendChild(el);
+        el.querySelector('[data-lasso-close]').onclick = lassoCloseResults;
+        el.querySelectorAll('[data-lasso-stage]').forEach(b => b.onclick = () => {
+            const v = variants[Number(b.getAttribute('data-lasso-stage'))];
+            if (!v) return;
+            agStageInPcm({ name: v.name, solos: v.rows.map(r => ({ mission: r.mission, pt: genCentroid(r.asset.ring) })) }, missions, ent);
+        });
+        lasso.resultEl = el;
+    }
+
     // The point(s) a solo flies = its NAVIGATE (type 1) locations — the drone
     // flies navs; snapshots (type 6) are camera positions, NOT waypoints
     // (v2.19 live-test fix: routes were anchoring to snapshot points).
@@ -7612,6 +7776,7 @@
                 <button class="aim-mb-tbtn" data-copy-missions title="Copy missions from another site into this one (create-only, dup names skipped)">📥 Copy</button>
                 <button class="aim-mb-tbtn ${pcm.on ? 'active' : ''}" data-pcm-toggle title="Merge missions by right-clicking pads on the map in order (pad name = mission name)">🔗 Merge</button>
                 <button class="aim-mb-tbtn ${rng.on ? 'active' : ''}" data-rng-toggle title="Color every pad's FFZ by the TRUE shortest LEGAL route from base (inside FFZ/FP only, triple-verified: path audit + dense second opinion + lower bound). Overlay is click-through — M2 merge picking still works.">🔋 Range</button>
+                <button class="aim-mb-tbtn ${lasso.armed ? 'active' : ''}" data-lasso-toggle title="Draw a freehand loop around pads → auto-build a furthest→closest merge list (Tulip pads auto-split into a separate '2' mission) and stage it in the merge editor for inspection.">🖊 Lasso</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'imperial' ? 'active' : ''}" data-unit="imperial">mi</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'metric' ? 'active' : ''}" data-unit="metric">km</button>
                 <button class="aim-mb-tbtn" data-settings title="Battery → flights thresholds">⚙</button>
@@ -7898,6 +8063,8 @@
         if (cpBtn) cpBtn.onclick = () => openCopyMissionsPanel();
         const rngBtn = panelEl.querySelector('[data-rng-toggle]');
         if (rngBtn) rngBtn.onclick = () => rngToggle(rngBtn);
+        const lassoBtn = panelEl.querySelector('[data-lasso-toggle]');
+        if (lassoBtn) lassoBtn.onclick = () => lassoToggle(lassoBtn);
         const pcmBtn = panelEl.querySelector('[data-pcm-toggle]');
         if (pcmBtn) pcmBtn.onclick = async () => {
             if (pcm.on) { pcmExit(); }
