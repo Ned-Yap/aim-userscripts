@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.40
+// @version      2.41
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.40';
+    const SCRIPT_VERSION = '2.41';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5227,13 +5227,18 @@
                     let auditLine = '';
                     let reBtn = '';
                     if (au && au.cur && au.re) {
-                        const dFl = au.cur.flights.length - au.re.flights.length;
+                        const c = au.calib;
+                        const curFl = c ? c.curFl : au.cur.flights.length;
+                        const reFl = c ? c.reFl : au.re.flights.length;
+                        const curFt = c && c.curDistM ? c.curDistM * 3.28084 : au.cur.totalFt;
+                        const reFt = c && c.reDistM ? c.reDistM * 3.28084 : au.re.totalFt;
+                        const dFl = curFl - reFl;
                         const dPct = au.cur.totalFt > 0 ? Math.round((au.cur.totalFt - au.re.totalFt) / au.cur.totalFt * 100) : 0;
-                        const days = mcvDays(au.cur.flights.length).days;
+                        const days = mcvDays(curFl).days;
                         const worth = dFl >= 1 || dPct >= 10;
-                        auditLine = `<div style="margin:0 0 3px 16px;font-size:10px;color:${worth ? '#ffb74d' : '#789'};">`
-                            + `${(au.cur.totalFt / 1000).toFixed(0)}k ft · ${au.cur.flights.length} fl · ~${days.toFixed(1)}d`
-                            + (worth ? ` → ♻ ${(au.re.totalFt / 1000).toFixed(0)}k · ${au.re.flights.length} fl (−${dFl} fl, −${dPct}%)` : ' · ✓ near-optimal')
+                        auditLine = `<div title="${c ? 'Percepto-calibrated: absolutes from the mission\'s own battery/distance estimate; only the current↔replan ratio comes from the route simulator' : 'Simulator estimate (no Percepto battery data on this mission)'}" style="margin:0 0 3px 16px;font-size:10px;color:${worth ? '#ffb74d' : '#789'};">`
+                            + `${(curFt / 1000).toFixed(0)}k ft · ${curFl} fl · ~${days.toFixed(1)}d${c ? '' : ' <span style="color:#567;">(sim)</span>'}`
+                            + (worth ? ` → ♻ ${(reFt / 1000).toFixed(0)}k · ${reFl} fl (−${dFl} fl, −${dPct}%)` : ' · ✓ near-optimal')
                             + `${au.unknown ? ` · ⚠${au.unknown} unranged` : ''}</div>`;
                         if (worth) reBtn = `<button data-mcv-reorder="${mc.mission.id}" title="Re-order this mission's pad blocks in place (backup + verify; steps untouched)" style="padding:0 5px;background:rgba(255,183,77,0.15);border:1px solid rgba(255,183,77,0.5);color:#ffb74d;border-radius:4px;cursor:pointer;font-size:10px;">♻</button>`;
                     }
@@ -5317,7 +5322,28 @@
                 if (!pw || !pw.ok) { audits.set(mc.mission.id, null); return; }
                 const cur = agSimulate(rows.map((_, i) => i), pw.dPad, pw.dBase, pw.costOf, budget);
                 const re = lassoOrderRows(rows, budget, pw);
-                audits.set(mc.mission.id, { cur, re: re.sim, reRows: re.rows, unknown, budget });
+                // Percepto calibration (v2.41): our sim runs ~2× hot in absolute
+                // terms (energy-ft conflation + conservative budgets + RTB legs)
+                // — live cross-check vs the SUM table. So absolutes anchor to
+                // PERCEPTO's own per-mission estimates (battery_consumption %,
+                // flight_distance) and our sim provides only the RATIO, where
+                // systematic model error cancels. Flights via the SUM panel's
+                // own estimateFlights thresholds (the ⚙ knob).
+                let calib = null;
+                const bPct = Number(mc.mission.battery_consumption) || null;
+                const distM = Number(mc.mission.flight_distance) || null;
+                if (bPct && re.sim && cur.totalFt > 0) {
+                    const ratio = re.sim.totalFt / cur.totalFt;
+                    const reB = bPct * ratio;
+                    calib = {
+                        ratio,
+                        curB: bPct, reB,
+                        curFl: estimateFlights(bPct) || cur.flights.length,
+                        reFl: estimateFlights(reB) || re.sim.flights.length,
+                        curDistM: distM, reDistM: distM ? distM * ratio : null,
+                    };
+                }
+                audits.set(mc.mission.id, { cur, re: re.sim, reRows: re.rows, unknown, budget, calib });
             } catch (e) {
                 console.warn(`${TAG} [mcv] audit failed for "${mc.mission.name}"`, e);
                 audits.set(mc.mission.id, null);
@@ -5360,10 +5386,14 @@
             showToast('♻ Aborted: rebuilt step count does not match the original (see console). Nothing saved.', '#ff5252', 6000);
             return;
         }
-        const dCur = mcvDays(audit.cur.flights.length), dRe = mcvDays(audit.re.flights.length);
+        const cFl = audit.calib ? audit.calib.curFl : audit.cur.flights.length;
+        const rFl = audit.calib ? audit.calib.reFl : audit.re.flights.length;
+        const cFt = (audit.calib && audit.calib.curDistM) ? audit.calib.curDistM * 3.28084 : audit.cur.totalFt;
+        const rFt = (audit.calib && audit.calib.reDistM) ? audit.calib.reDistM * 3.28084 : audit.re.totalFt;
+        const dCur = mcvDays(cFl), dRe = mcvDays(rFl);
         if (!window.confirm(`♻ Re-order "${m.name}" IN PLACE?\n\n`
-            + `${audit.cur.flights.length} flights (~${dCur.days.toFixed(1)} day(s)) → ${audit.re.flights.length} flights (~${dRe.days.toFixed(1)} day(s))\n`
-            + `est ${(audit.cur.totalFt / 1000).toFixed(0)}k ft → ${(audit.re.totalFt / 1000).toFixed(0)}k ft\n\n`
+            + `${cFl} flights (~${dCur.days.toFixed(1)} day(s)) → ${rFl} flights (~${dRe.days.toFixed(1)} day(s))\n`
+            + `est ${(cFt / 1000).toFixed(0)}k ft → ${(rFt / 1000).toFixed(0)}k ft${audit.calib ? ' (Percepto-calibrated)' : ''}\n\n`
             + `Each pad's steps stay intact — only the pad ORDER changes. Mission id + name unchanged.\nA JSON backup downloads first.`)) return;
         mcvReorderBusy = true;
         try {
@@ -5405,7 +5435,7 @@
                 if (!good) console.warn(`${TAG} [mcv] verify mismatch — order got [${gotOrder}] want [${wantOrder}] · steps ${steps2}/${steps1}`);
             }
             showToast(good
-                ? `♻ "${m.name}" re-ordered ✓ verified — ${audit.cur.flights.length} → ${audit.re.flights.length} flights. Re-check its schedule if one is active.`
+                ? `♻ "${m.name}" re-ordered ✓ verified — ${cFl} → ${rFl} flights. Re-check its schedule if one is active.`
                 : `⚠ "${m.name}" saved but verify mismatched — check the mission + console (backup downloaded).`, good ? '#5fff5f' : '#ff9800', 9000);
             // refresh overlay data
             mcv.data.missions = after;
@@ -5489,12 +5519,17 @@
             const au = audits.get(mc.mission.id);
             const steps = (mc.mission.instructions || []).filter(i => i && i.type !== 0 && i.type !== 99).length;
             if (!au || !au.cur || !au.re) return { name: mc.mission.name, pads: mc.pads.length, steps, cur: '', curFl: '', re: '', reFl: '', dFl: '', days: '' };
+            const c = au.calib;
+            const curFl = c ? c.curFl : au.cur.flights.length;
+            const reFl = c ? c.reFl : au.re.flights.length;
+            const curFt = c && c.curDistM ? c.curDistM * 3.28084 : au.cur.totalFt;
+            const reFt = c && c.reDistM ? c.reDistM * 3.28084 : au.re.totalFt;
             return {
                 name: mc.mission.name, pads: mc.pads.length, steps,
-                cur: Math.round(au.cur.totalFt / 1000) + 'k', curFl: au.cur.flights.length,
-                re: Math.round(au.re.totalFt / 1000) + 'k', reFl: au.re.flights.length,
-                dFl: au.cur.flights.length - au.re.flights.length,
-                days: mcvDays(au.cur.flights.length).days.toFixed(1),
+                cur: Math.round(curFt / 1000) + 'k', curFl,
+                re: Math.round(reFt / 1000) + 'k', reFl,
+                dFl: curFl - reFl,
+                days: mcvDays(curFl).days.toFixed(1),
             };
         }).sort((a, b) => (Number(b.dFl) || 0) - (Number(a.dFl) || 0));
         const auHtml = auRows.length

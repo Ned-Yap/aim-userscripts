@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-31 — Mission Bank Tools v2.41 (dev/latest): ♻ audit is now Percepto-calibrated
+
+Live cross-check against the SUM table showed the audit's absolute numbers running ~2× hot (the simulator's ft-equivalents mix distance with capture energy and model conservatively). Fixed by anchoring:
+
+- **Absolutes come from Percepto's own per-mission estimates** (`battery %` and `flight distance` — the same numbers the SUM table shows), with flights via your ⚙ battery-thresholds knob.
+- **The simulator contributes only the current↔replan ratio**, where systematic model error cancels. Replan battery = current battery × ratio; replan flights from the thresholds.
+- Verified against West Side - Assets: current 404% / 18.3 mi / 5 flights → replan 280% / 12.6 mi / 4 flights. Legend, ♻ dialog, and 📋 report all use calibrated numbers (hover the audit line to see the source; missions without Percepto battery data fall back to raw sim, marked "(sim)").
+
 ## 2026-07-31 — Mission Bank Tools v2.40 (dev/latest): ♻ old-mission efficiency audit + in-place reorder
 
 The SLA tool: flight-hours are the bottleneck (~20 min flight + ~80 min recharge ≈ 1¾ h of wall clock per flight), so the 🧩 legend now audits every macro:
