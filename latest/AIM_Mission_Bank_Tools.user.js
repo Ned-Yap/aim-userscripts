@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.27
+// @version      2.28
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.27';
+    const SCRIPT_VERSION = '2.28';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -11551,6 +11551,23 @@ ${snapPlacemarks}
         Object.keys(mpv.layers).forEach(mpvClearMission);
     }
 
+    // v2.28 (extracted from v2.25): dedicated, PRIMED svg renderer. Letting
+    // a vector layer lazily create map._renderer crashes on Data View's
+    // older Leaflet — a fresh renderer's _bounds stays undefined until the
+    // next moveend, the first add throws ("reading 'x'"), and the half-
+    // registered layer then throws on EVERY pan/zoom → map freezes until
+    // refresh. Explicit add + _update() sets _bounds immediately.
+    function mpvEnsureSvg(L, map) {
+        if (!mpv.svg || mpv.svg._map !== map) {
+            try {
+                mpv.svg = L.svg();
+                mpv.svg.addTo(map);
+                if (typeof mpv.svg._update === 'function') mpv.svg._update();
+            } catch (e) { console.warn(`${TAG} [mpv] svg renderer setup failed:`, e); mpv.svg = null; }
+        }
+        return mpv.svg;
+    }
+
     function mpvDrawMission(m, color) {
         const L = composerGetL(), map = getLeafletMap();
         if (!L || !map || !m) return;
@@ -11560,38 +11577,39 @@ ${snapPlacemarks}
         const located = steps.filter(s => s && s.location
             && typeof s.location.lat === 'number' && typeof s.location.lng === 'number'
             && s.type_name !== 'takeoff' && s.type_name !== 'returnHome');
-        // Flight-order line. Dashed = "preview, not a real FP";
-        // interactive:false so clicks pass through to the SS editor.
-        // v2.11: always snap-pink (user request) — the per-MISSION palette
-        // color now lives only in the picker swatch/checkbox.
-        if (located.length >= 2) {
-            // v2.25: dedicated, PRIMED svg renderer. Letting the polyline
-            // lazily create map._renderer crashes on Data View's older
-            // Leaflet — a fresh renderer's _bounds stays undefined until the
-            // next moveend, the first add throws ("reading 'x'"), and the
-            // half-registered layer then throws on EVERY pan/zoom → map
-            // freezes until refresh. _update() after add sets _bounds now.
-            if (!mpv.svg || mpv.svg._map !== map) {
-                try {
-                    mpv.svg = L.svg();
-                    mpv.svg.addTo(map);
-                    if (typeof mpv.svg._update === 'function') mpv.svg._update();
-                } catch (e) { console.warn(`${TAG} [mpv] svg renderer setup failed:`, e); mpv.svg = null; }
-            }
+        // v2.28: lines match the mission's real structure (a single
+        // step-order polyline read as a meaningless Z on multi-snap
+        // missions): BLUE dashed nav→nav flight line in flight order, plus
+        // PINK dashed sightlines from each nav to its own snapshots.
+        // interactive:false so clicks pass through to the editor beneath.
+        const svgR = mpvEnsureSvg(L, map);
+        const addLine = (pts, opts) => {
             let pl = null;
             try {
-                const opts = { color: stepColor('snap'), weight: 3, opacity: 0.8, dashArray: '7,7', interactive: false };
-                if (mpv.svg) opts.renderer = mpv.svg;
-                pl = L.polyline(located.map(s => [s.location.lat, s.location.lng]), opts);
+                if (svgR) opts.renderer = svgR;
+                pl = L.polyline(pts, opts);
                 pl.addTo(map);
                 layers.push(pl);
             } catch (e) {
-                console.warn(`${TAG} [mpv] polyline failed:`, e);
+                console.warn(`${TAG} [mpv] line failed:`, e);
                 // Leaflet registers a layer BEFORE onAdd runs — a layer that
                 // threw mid-add stays attached and poisons every later map
                 // move. Detach it so a failed line can never freeze the map.
                 if (pl) { try { map.removeLayer(pl); } catch (e2) {} }
             }
+        };
+        const navPts = [];
+        const sightlines = [];
+        let curNav = null;
+        for (const s of located) {
+            if (s.type_name === 'navigate') { curNav = [s.location.lat, s.location.lng]; navPts.push(curNav); }
+            else if (s.type_name === 'snapshot' && curNav) sightlines.push([curNav, [s.location.lat, s.location.lng]]);
+        }
+        if (navPts.length >= 2) {
+            addLine(navPts, { color: stepColor('nav'), weight: 3, opacity: 0.85, dashArray: '7,7', interactive: false });
+        }
+        for (const sl of sightlines) {
+            addLine(sl, { color: stepColor('snap'), weight: 2, opacity: 0.75, dashArray: '4,6', interactive: false });
         }
         let nav = 0, snap = 0;
         for (let i = 0; i < steps.length; i++) {
@@ -11644,7 +11662,13 @@ ${snapPlacemarks}
         if (!L || !map || !m || typeof L.circleMarker !== 'function') return;
         mpvClearMission(m.id);
         const layers = [];
-        const renderer = mpvGetCanvas(L);
+        // v2.28: on Data View (TOP renders) the lazily-added canvas renderer
+        // is broken on the page's older Leaflet — dots painted at stale
+        // offsets after pan/zoom, and removals never repaint (ghost dots).
+        // Use the explicitly-added + primed svg renderer there (proven by
+        // the 👁 lines); canvas stays for SS/MB where all-missions scale
+        // genuinely needs it and it works.
+        const renderer = (CONTEXT === 'TOP') ? mpvEnsureSvg(L, map) : mpvGetCanvas(L);
         const steps = Array.isArray(m.instructions) ? m.instructions : [];
         for (const s of steps) {
             if (!s || !s.location || typeof s.location.lat !== 'number' || typeof s.location.lng !== 'number') continue;
