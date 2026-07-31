@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-31 — Mission Bank Tools v2.46 (dev/latest): route legs fly nav→nav direct when legal
+
+Live catch on the 👁 lines: a leg between two navs in the same FFZ doglegged through an interior vertex instead of flying straight. The leg router temp-attaches both endpoints into the graph but never linked them to *each other* — so even a fully-legal straight segment had no direct edge. Fixed: when both endpoints sit in the same FFZ and the straight segment stays inside it, the direct edge exists and wins. Applies to the 🧩 👁 comparison **and** the mission preview's routed nav lines (shared router).
+
 ## 2026-07-31 — Mission Bank Tools v2.45 (dev/latest): 🧩 👁 routes fly navs, not centroids
 
 Live catch: the route-comparison lines anchored each pad at its *centroid* — visible as stubs reaching illegally into pads — which inflated and misrouted the drawn paths. The lines now follow the mission's **actual nav points** (each pad's navs from its own steps, in flight order), with legal legs between them. Note the audit's *numbers* were always nav-anchored — only the drawing was wrong, so no estimates change.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.45
+// @version      2.46
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.45';
+    const SCRIPT_VERSION = '2.46';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -12505,6 +12505,23 @@ ${snapPlacemarks}
         try {
             const ka = mpvAttachPoint(built, a, 'a', temp);
             const kb = mpvAttachPoint(built, b, 'b', temp);
+            // v2.46: two points in the SAME FFZ connect DIRECTLY when the
+            // straight segment stays inside it. mpvAttachPoint deliberately
+            // never links temp points to each other, so without this every
+            // same-FFZ leg doglegged via a ring/FP vertex (live catch: a
+            // nav→nav leg retraced through an interior vertex instead of
+            // flying straight).
+            const entryM2 = MB_ENTRY_FFZ_FT / 3.28084;
+            for (let fi = 0; fi < built.ffzs.length; fi++) {
+                const f = built.ffzs[fi];
+                if (mbPointToPolygonMeters(a.lat, a.lng, f.ring) > entryM2) continue;
+                if (mbPointToPolygonMeters(b.lat, b.lng, f.ring) > entryM2) continue;
+                if (!rngSegInside(a, b, f.ring)) continue;
+                const w = mbApproxMeters(a.lat, a.lng, b.lat, b.lng);
+                graph.adj.get(ka).push({ to: kb, w });
+                graph.adj.get(kb).push({ to: ka, w });
+                break;
+            }
             const { dist, prev } = agDijkstra(graph, ka);
             if (!dist.has(kb)) return null;
             const path = [];
