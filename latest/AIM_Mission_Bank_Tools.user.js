@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.30
+// @version      2.31
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.30';
+    const SCRIPT_VERSION = '2.31';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -11894,6 +11894,13 @@ ${snapPlacemarks}
         // the 👁 lines); canvas stays for SS/MB where all-missions scale
         // genuinely needs it and it works.
         const renderer = (CONTEXT === 'TOP') ? mpvEnsureSvg(L, map) : mpvGetCanvas(L);
+        // v2.31: on Data View the dots are svg (cheap pointer events), so make
+        // them self-identifying — hover shows WHOSE mission a dot belongs to.
+        // Root of the "whose dots are these?!" confusion: dense lease families
+        // (e.g. 18A) put several missions' steps on/next to one pad, and
+        // anonymous dots read as wrong data. SS/MB keeps interactive:false —
+        // canvas at all-missions scale is exactly where hit-testing hurts.
+        const dvTips = CONTEXT === 'TOP';
         const steps = Array.isArray(m.instructions) ? m.instructions : [];
         for (const s of steps) {
             if (!s || !s.location || typeof s.location.lat !== 'number' || typeof s.location.lng !== 'number') continue;
@@ -11903,9 +11910,16 @@ ${snapPlacemarks}
             else if (t === 'snapshot') { color = stepColor('snap'); r = 3; }
             else continue;
             try {
-                const opts = { radius: r, color: 'rgba(0,0,0,0.55)', weight: 1, fillColor: color, fillOpacity: 0.85, interactive: false };
+                const opts = { radius: r, color: 'rgba(0,0,0,0.55)', weight: 1, fillColor: color, fillOpacity: 0.85, interactive: dvTips };
                 if (renderer) opts.renderer = renderer;
-                layers.push(L.circleMarker([s.location.lat, s.location.lng], opts).addTo(map));
+                const cm = L.circleMarker([s.location.lat, s.location.lng], opts).addTo(map);
+                if (dvTips) {
+                    try {
+                        cm.bindTooltip(`<b>${escapeHtml(m.name || '(mission)')}</b><br>${escapeHtml(t)}`,
+                            { direction: 'top', offset: [0, -6], opacity: 0.95 });
+                    } catch (e) {}
+                }
+                layers.push(cm);
             } catch (e) {}
         }
         mpv.layers[m.id] = layers;
