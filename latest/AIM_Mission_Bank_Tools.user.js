@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.24
+// @version      2.25
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.24';
+    const SCRIPT_VERSION = '2.25';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -11330,7 +11330,7 @@ ${snapPlacemarks}
     const MPV_BTN_ID = 'aim-mb-preview-btn';
     const MPV_PANEL_ID = 'aim-mb-preview-panel';
     const MPV_COLORS = ['#7adfe6', '#ffd54f', '#ff8a65', '#aed581', '#ce93d8', '#4fc3f7', '#f48fb1', '#80cbc4', '#ffab91', '#fff176'];
-    const mpv = { channel: null, layers: {}, panelEl: null, onSiteSetup: false, canvas: null };
+    const mpv = { channel: null, layers: {}, panelEl: null, onSiteSetup: false, canvas: null, svg: null };
 
     // v2.12: preview works on BOTH sides of the bridge — Site Setup AND
     // Mission Bank (see missions on the map without opening the editor).
@@ -11387,10 +11387,33 @@ ${snapPlacemarks}
         // v2.11: always snap-pink (user request) — the per-MISSION palette
         // color now lives only in the picker swatch/checkbox.
         if (located.length >= 2) {
+            // v2.25: dedicated, PRIMED svg renderer. Letting the polyline
+            // lazily create map._renderer crashes on Data View's older
+            // Leaflet — a fresh renderer's _bounds stays undefined until the
+            // next moveend, the first add throws ("reading 'x'"), and the
+            // half-registered layer then throws on EVERY pan/zoom → map
+            // freezes until refresh. _update() after add sets _bounds now.
+            if (!mpv.svg || mpv.svg._map !== map) {
+                try {
+                    mpv.svg = L.svg();
+                    mpv.svg.addTo(map);
+                    if (typeof mpv.svg._update === 'function') mpv.svg._update();
+                } catch (e) { console.warn(`${TAG} [mpv] svg renderer setup failed:`, e); mpv.svg = null; }
+            }
+            let pl = null;
             try {
-                layers.push(L.polyline(located.map(s => [s.location.lat, s.location.lng]),
-                    { color: stepColor('snap'), weight: 3, opacity: 0.8, dashArray: '7,7', interactive: false }).addTo(map));
-            } catch (e) { console.warn(`${TAG} [mpv] polyline failed:`, e); }
+                const opts = { color: stepColor('snap'), weight: 3, opacity: 0.8, dashArray: '7,7', interactive: false };
+                if (mpv.svg) opts.renderer = mpv.svg;
+                pl = L.polyline(located.map(s => [s.location.lat, s.location.lng]), opts);
+                pl.addTo(map);
+                layers.push(pl);
+            } catch (e) {
+                console.warn(`${TAG} [mpv] polyline failed:`, e);
+                // Leaflet registers a layer BEFORE onAdd runs — a layer that
+                // threw mid-add stays attached and poisons every later map
+                // move. Detach it so a failed line can never freeze the map.
+                if (pl) { try { map.removeLayer(pl); } catch (e2) {} }
+            }
         }
         let nav = 0, snap = 0;
         for (let i = 0; i < steps.length; i++) {
