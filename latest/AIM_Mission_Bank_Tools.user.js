@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.23
+// @version      2.24
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.23';
+    const SCRIPT_VERSION = '2.24';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -4584,11 +4584,14 @@
     }
     // Big tintable battery icon (v2.21 — the text chip was too small to spot).
     // pointer-events:none throughout: nothing about it is pressable.
-    function rngBatteryHtml(color, mark) {
+    function rngBatteryHtml(color, mark, near) {
+        // near = within RNG_NEAR_FT of the class cutoff → red outline (v2.24)
+        const stroke = near ? '#ff2222' : '#10131a';
+        const sw = near ? 2.6 : 1.8;
         return `<div style="pointer-events:none;position:relative;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.85));">
             <svg width="34" height="18" viewBox="0 0 34 18">
-                <rect x="1" y="2" width="28" height="14" rx="3.5" fill="${color}" stroke="#10131a" stroke-width="1.8"></rect>
-                <rect x="30" y="5.5" width="3.5" height="7" rx="1.5" fill="#10131a"></rect>
+                <rect x="1.5" y="2" width="27" height="14" rx="3.5" fill="${color}" stroke="${stroke}" stroke-width="${sw}"></rect>
+                <rect x="30" y="5.5" width="3.5" height="7" rx="1.5" fill="${stroke}"></rect>
             </svg>
             ${mark ? `<div style="position:absolute;top:0;left:0;width:29px;text-align:center;font:800 12px/18px sans-serif;color:#10131a;">${mark}</div>` : ''}
         </div>`;
@@ -4650,19 +4653,23 @@
             document.head.appendChild(st);
         }
         const cfg = agCfg();
+        // Within this many ft below a class cutoff → red-outlined battery +
+        // "close to cutoff" in the tooltip (13.5–14k / 17.5–18k at defaults).
+        const RNG_NEAR_FT = 500;
         const cls = (r) => {
             if (r.status === 'no-ffz') return { color: '#9aa5b1', label: 'no FFZ', kind: 'noffz', mark: '–' };
             if (r.status === 'unreachable') return { color: '#ff5252', label: 'no legal route from base', kind: 'unreach', mark: '✕' };
             if (!r.verified || r.disagree) return { color: '#c39dff', label: '⚠ unverified — see console', kind: 'warn', mark: '!' };
-            if (r.worstFt <= cfg.tattuRadiusFt) return { color: '#5fff5f', label: 'Tattu', kind: 'tattu', mark: '' };
-            if (r.worstFt <= cfg.tulipRadiusFt) return { color: '#ffa726', label: 'Tulip', kind: 'tulip', mark: '' };
+            if (r.worstFt <= cfg.tattuRadiusFt) return { color: '#5fff5f', label: 'Tattu', kind: 'tattu', mark: '', near: r.worstFt > cfg.tattuRadiusFt - RNG_NEAR_FT };
+            if (r.worstFt <= cfg.tulipRadiusFt) return { color: '#ffa726', label: 'Tulip', kind: 'tulip', mark: '', near: r.worstFt > cfg.tulipRadiusFt - RNG_NEAR_FT };
             return { color: '#ff5252', label: 'out of range', kind: 'over', mark: '✕' };
         };
-        const counts = { tattu: 0, tulip: 0, over: 0, warn: 0, unreach: 0, noffz: 0 };
+        const counts = { tattu: 0, tulip: 0, over: 0, warn: 0, unreach: 0, noffz: 0, near: 0 };
         const drawnFfz = new Set();
         sol.results.forEach(r => {
             const c = cls(r);
             counts[c.kind]++;
+            if (c.near) counts.near++;
             if (r.fi >= 0 && !drawnFfz.has(r.fi)) {
                 drawnFfz.add(r.fi);
                 const ring = sol.ffzs[r.fi].ring.map(p => [p.lat, p.lng]);
@@ -4671,14 +4678,14 @@
                     const ctr = genCentroid(sol.ffzs[r.fi].ring);
                     const icon = L.divIcon({
                         className: 'aim-mb-rng-chip',
-                        html: rngBatteryHtml(c.color, c.mark),
+                        html: rngBatteryHtml(c.color, c.mark, c.near),
                         iconSize: [34, 18], iconAnchor: [17, 9],
                     });
                     rng.layers.push(L.marker([ctr.lat, ctr.lng], { icon, interactive: false, keyboard: false }).addTo(getLeafletMap()));
                     rng.chips.push({
                         lat: ctr.lat, lng: ctr.lng,
                         text: r.status === 'ok'
-                            ? `${(r.worstFt / 1000).toFixed(1)}k ft (worst corner) · ${c.label}`
+                            ? `${(r.worstFt / 1000).toFixed(1)}k ft · ${c.label}${c.near ? ' — ⚠ close to cutoff' : ''}`
                             : c.label,
                     });
                 } catch (e) {}
@@ -4698,6 +4705,7 @@
             + row('#ff5252', 'Out of range / no route', counts.over + counts.unreach)
             + row('#c39dff', '⚠ unverified (see console)', counts.warn)
             + row('#9aa5b1', 'No FFZ', counts.noffz)
+            + (counts.near ? `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span style="width:10px;height:10px;border-radius:2px;background:#333;border:2px solid #ff2222;"></span>Red outline = close to cutoff <b style="margin-left:auto;padding-left:10px;">${counts.near}</b></div>` : '')
             + '<div style="color:#789;margin-top:4px;">Hover a battery for the distance · everything is click-through</div>';
         document.body.appendChild(el);
         el.querySelector('[data-rng-x]').onclick = () => { rng.on = false; rngClear(); const b = document.querySelector('[data-rng-toggle]'); if (b) b.classList.remove('active'); };

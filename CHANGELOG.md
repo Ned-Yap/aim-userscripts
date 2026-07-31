@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-30 — Mission Bank Tools v2.24 (dev/latest): 🔋 close-to-cutoff outlines
+
+- Batteries within **500 ft of a class cutoff** (13.5–14k Tattu, 17.5–18k Tulip at default radii) keep their color but get a **red outline**, and the hover tooltip appends "⚠ close to cutoff". Legend gains a red-outline row with the count.
+- Tooltip wording simplified: `13.7k ft · Tattu` (the "(worst corner)" jargon is gone).
+
 ## 2026-07-30 — Mission Bank Tools v2.23 (dev/latest): 🔋 radii defaults back to 14k / 18k
 
 - The Tattu/Tulip cutoffs now default to the operational **14,000 / 18,000 ft** (the earlier "hair-under" 13.5k/17.5k defaults kept mislabeling pads like a 13.7k as Tulip-orange). The margin knob already carries the safety slack.
