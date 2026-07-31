@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-31 — Mission Bank Tools v2.43 (dev/latest): 🧩 order numbers + calibration actually reads Percepto
+
+- **Fixed: every macro was showing "(sim)"** — the battery/consumption fields live under the mission's `app_data`, and the audit was reading the wrong level, silently falling back to simulator absolutes. Percepto-calibrated numbers now actually appear (the "(sim)" tag now only shows on missions truly lacking battery data).
+- **Visit-order numbers on every covered pad** — each filled pad now carries its position number in the macro's color, so you can read a macro's current flight order straight off the map (and compare it against what a lasso proposes). Pads shared by two macros show side-by-side badges. Click-through as always.
+
 ## 2026-07-31 — Mission Bank Tools v2.42 (dev/latest): ♻ audit respects the consumption phases
 
 The SUM breakdown showed most battery isn't reorderable — West Side's 404% is 293% Nav + 111% Wait/takeoff/landing. The replan estimate now scales **only the Nav share** by the route ratio and carries the fixed phases over unchanged (per-step hover energy is excluded from the ratio on both sides so it can't distort it). Missions without phase data fall back to the whole-battery ratio.

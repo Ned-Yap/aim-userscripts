@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.42
+// @version      2.43
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.42';
+    const SCRIPT_VERSION = '2.43';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5194,11 +5194,23 @@
         det.macros.forEach((mc, i) => {
             const col = COLORS[i % COLORS.length];
             let deepest = null;
-            mc.pads.forEach(a => {
+            mc.pads.forEach((a, pi) => {
                 try {
                     // SOLID fill (v2.38) — covered pads read as painted, so the
                     // eye only hunts for UNfilled pads (the remaining work)
                     mcv.layers.push(L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: col, weight: 3, opacity: 0.95, fill: true, fillColor: col, fillOpacity: 0.55, interactive: false }).addTo(map));
+                    // v2.43: visit-order number on every covered pad, in the
+                    // macro's color. Pads shared by two macros get side-by-side
+                    // badges (x-offset per macro index). Click-through.
+                    const c2 = genCentroid(a.ring);
+                    mcv.layers.push(L.marker([c2.lat, c2.lng], {
+                        icon: L.divIcon({
+                            className: 'aim-mb-rng-chip',
+                            html: `<div style="pointer-events:none;width:19px;height:19px;border-radius:50%;background:${col};color:#10131a;font:800 11px/19px monospace;text-align:center;border:1.5px solid #10131a;box-shadow:0 1px 4px rgba(0,0,0,0.7);">${pi + 1}</div>`,
+                            iconSize: [19, 19], iconAnchor: [10 - (i % 3) * 14, 10],
+                        }),
+                        interactive: false, keyboard: false, zIndexOffset: -300,
+                    }).addTo(map));
                 } catch (e) {}
                 if (!deepest) deepest = a;   // first pad = mission's first stop
             });
@@ -5330,8 +5342,12 @@
                 // systematic model error cancels. Flights via the SUM panel's
                 // own estimateFlights thresholds (the ⚙ knob).
                 let calib = null;
-                const bPct = Number(mc.mission.battery_consumption) || null;
-                const distM = Number(mc.mission.flight_distance) || null;
+                // v2.43: the consumption/distance fields live under app_data
+                // (same source buildMissionRow uses) — reading the mission root
+                // made EVERY macro silently fall back to "(sim)".
+                const app = mc.mission.app_data || {};
+                const bPct = Number(app.battery_consumption) || null;
+                const distM = Number(app.flight_distance) || null;
                 if (bPct && re.sim && cur.totalFt > 0) {
                     // v2.42: reorder only shrinks the NAV phase — Wait /
                     // takeoff / landing / extra burn is order-invariant (live
@@ -5344,7 +5360,7 @@
                     const navCurFt = Math.max(1, cur.totalFt - stepOnly);
                     const navReFt = Math.max(1, re.sim.totalFt - stepOnly);
                     const navRatio = Math.min(2, Math.max(0.1, navReFt / navCurFt));
-                    const navB = Number(mc.mission.nav_consumption) || null;
+                    const navB = Number(app.nav_consumption) || null;
                     const fixedB = navB != null ? Math.max(0, bPct - navB) : null;
                     const reB = (navB != null && fixedB != null)
                         ? navB * navRatio + fixedB
