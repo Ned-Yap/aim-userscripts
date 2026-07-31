@@ -6,6 +6,13 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-31 — Mission Bank Tools v2.35 (dev/latest): 🖊 Lasso order reads like a flight plan
+
+That "crazy" NNW 2 order was mostly invisible recharge boundaries — a jump between consecutive numbers is usually the drone returning to base between flights. Two changes:
+
+- **Deepest flight first** — each flight is an independent base→…→base loop, so their sequence is free; they're now sorted furthest-out first, and the whole list reads far→near flight by flight.
+- **The popup shows the flight structure** — `— 🔋 return & recharge —` dividers between flights, plus an estimate line per variant (total ft, flight count, landing % per flight). What you stage is what you saw.
+
 ## 2026-07-30 — Mission Bank Tools v2.34 (dev/latest): 🖊 pads with edge-hugging FFZs + deepest-first order
 
 - **"No FFZ" on pads that clearly have one** (ATKINS 14 4213H): the pad→FFZ match only measured from the pad's *corners* — an FFZ hugging the middle of a pad edge was invisible to it. It now samples the whole pad perimeter (the segments rule, again). On the reference site this recovered 5 previously-skipped pads. Applies to 🔋 Range, 🖊 Lasso, and the merge panel alike since they share the matcher.

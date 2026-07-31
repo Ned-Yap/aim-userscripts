@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.34
+// @version      2.35
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.34';
+    const SCRIPT_VERSION = '2.35';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -4961,11 +4961,25 @@
         try {
             if (pw && pw.ok && subset.length > 1) {
                 const idxs = subset.map(r => pw.idxOf.get(r));
-                const order = agOptimizeOrder(idxs, pw.dPad, pw.dBase, pw.costOf, budgetFt);
-                return order.map(i => pw.rows[i]);
+                let order = agOptimizeOrder(idxs, pw.dPad, pw.dBase, pw.costOf, budgetFt);
+                let sim = agSimulate(order, pw.dPad, pw.dBase, pw.costOf, budgetFt);
+                // Flight canonicalization (v2.35): flights are independent
+                // base→…→base round trips, so their SEQUENCE is free — sort
+                // them deepest-first so the list reads far→near by flight.
+                // The optimizer's raw flight sequence looked "CRAZY" on the
+                // map even when each flight was individually optimal, because
+                // recharge boundaries were invisible (live test).
+                if (sim && sim.flights.length > 1) {
+                    const depth = f => { let m = 0; f.pads.forEach(p => { const d = pw.dBase(p); if (d > m) m = d; }); return m; };
+                    const fl = sim.flights.slice().sort((a, b) => depth(b) - depth(a));
+                    order = [];
+                    fl.forEach(f => f.pads.forEach(p => order.push(p)));
+                    sim = agSimulate(order, pw.dPad, pw.dBase, pw.costOf, budgetFt);
+                }
+                return { rows: order.map(i => pw.rows[i]), sim };
             }
         } catch (e) { console.warn(`${TAG} [lasso] optimized order failed — furthest→closest fallback`, e); }
-        return subset.slice().sort((x, y) => y.ft - x.ft);
+        return { rows: subset.slice().sort((x, y) => y.ft - x.ft), sim: null };
     }
     function lassoProcess(ring) {
         const { ent, missions, byAsset } = lasso.data || {};
@@ -5010,13 +5024,17 @@
         const variants = [];
         // Tulip pads present → auto-split: "1" = Tattu only, "2" = everything.
         // Each variant's order = 2-opt + flight simulator on trusted distances.
+        const mkVariant = (name, subPrefix, set, budgetFt) => {
+            const o = lassoOrderRows(set, budgetFt, pw);
+            variants.push({ name, sub: `${subPrefix} · ${set.length} pads · optimized, deepest flight first`, rows: o.rows, sim: o.sim });
+        };
         if (tulips.length && tattu.length) {
-            variants.push({ name: `${wind} 1`, sub: `Tattu only · ${tattu.length} pads · optimized route`, rows: lassoOrderRows(tattu, cfg.tattuBudgetFt, pw) });
-            variants.push({ name: `${wind} 2`, sub: `Tattu + Tulip · ${rows.length} pads · optimized route`, rows: lassoOrderRows(rows, cfg.tulipBudgetFt, pw) });
+            mkVariant(`${wind} 1`, 'Tattu only', tattu, cfg.tattuBudgetFt);
+            mkVariant(`${wind} 2`, 'Tattu + Tulip', rows, cfg.tulipBudgetFt);
         } else if (tulips.length) {
-            variants.push({ name: `${wind} 2`, sub: `Tulip · ${rows.length} pads · optimized route`, rows: lassoOrderRows(rows, cfg.tulipBudgetFt, pw) });
+            mkVariant(`${wind} 2`, 'Tulip', rows, cfg.tulipBudgetFt);
         } else if (rows.length) {
-            variants.push({ name: `${wind} 1-2`, sub: `either battery · ${rows.length} pads · optimized route`, rows: lassoOrderRows(rows, cfg.tattuBudgetFt, pw) });
+            mkVariant(`${wind} 1-2`, 'either battery', rows, cfg.tattuBudgetFt);
         }
         const offN = (pw && pw.ok) ? pw.offCount() : 0;
         if (offN) console.warn(`${TAG} [lasso] ${offN} pad-pair legs estimated off-graph (straight ×1.25)`);
@@ -5043,14 +5061,25 @@
         const el = document.createElement('div');
         el.style.cssText = 'position:fixed;right:24px;bottom:20px;width:330px;max-height:60vh;overflow:auto;z-index:2147483601;'
             + 'background:#161a20;border:1px solid #7adfe6;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;padding:10px 12px;';
-        const vBtn = (v, i) => `<div style="margin:5px 0;padding:6px 8px;border:1px solid #2a3a2a;border-radius:6px;">
+        const vBtn = (v, i) => {
+            // 🔋 dividers between flights — a jump on the map between
+            // consecutive numbers usually IS a recharge boundary; make it
+            // visible so the order stops looking "crazy" (v2.35).
+            const breaks = new Set();
+            if (v.sim && v.sim.flights.length > 1) { let acc = 0; v.sim.flights.slice(0, -1).forEach(f => { acc += f.pads.length; breaks.add(acc - 1); }); }
+            const simLine = v.sim
+                ? `<div style="color:#9ad;font-size:10px;margin-top:2px;">est <b style="color:#cde;">${(v.sim.totalFt / 1000).toFixed(1)}k ft</b> · 🔋 ${v.sim.flights.length} flight${v.sim.flights.length === 1 ? '' : 's'} · land ${v.sim.flights.map(f => f.reservePct + '%').join(' / ')}</div>`
+                : '';
+            return `<div style="margin:5px 0;padding:6px 8px;border:1px solid #2a3a2a;border-radius:6px;">
             <div style="display:flex;align-items:center;gap:8px;">
                 <span style="flex:1;font-weight:800;color:#7dff7d;">⛟ ${escapeHtml(v.name)}</span>
                 <button data-lasso-stage="${i}" style="padding:3px 10px;background:#5fff5f;border:none;color:#04220a;border-radius:5px;cursor:pointer;font-weight:800;font-size:11px;">🔗 Stage</button>
             </div>
-            <div style="color:#9ad;font-size:10px;margin-top:2px;">${escapeHtml(v.sub)} · furthest→closest</div>
-            <div style="color:#789;font-size:10px;margin-top:3px;max-height:110px;overflow:auto;">${v.rows.map((r, n) => `<div>${n + 1}. ${escapeHtml(r.mission.name)} <span style="color:#567;">${(r.ft / 1000).toFixed(1)}k${r.tulip ? ' · Tulip' : ''}</span></div>`).join('')}</div>
+            <div style="color:#9ad;font-size:10px;margin-top:2px;">${escapeHtml(v.sub)}</div>
+            ${simLine}
+            <div style="color:#789;font-size:10px;margin-top:3px;max-height:130px;overflow:auto;">${v.rows.map((r, n) => `<div>${n + 1}. ${escapeHtml(r.mission.name)} <span style="color:#567;">${(r.ft / 1000).toFixed(1)}k${r.tulip ? ' · Tulip' : ''}</span></div>` + (breaks.has(n) ? '<div style="text-align:center;color:#ffb74d;font-size:9px;">— 🔋 return &amp; recharge —</div>' : '')).join('')}</div>
         </div>`;
+        };
         el.innerHTML = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:5px;">
                 <b style="color:#7adfe6;">🖊 Lasso result</b>
                 <span data-lasso-close style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span>
