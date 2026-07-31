@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.31
+// @version      2.32
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.31';
+    const SCRIPT_VERSION = '2.32';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -11636,6 +11636,7 @@ ${snapPlacemarks}
     }
     function mpvClearAll() {
         Object.keys(mpv.layers).forEach(mpvClearMission);
+        try { mpvHideTip(); } catch (e) {}   // v2.32: don't strand a hover label over removed dots
     }
 
     // v2.28 (extracted from v2.25): dedicated, PRIMED svg renderer. Letting
@@ -11864,9 +11865,17 @@ ${snapPlacemarks}
                 const icon = L.divIcon({ className: 'aim-mpv-badge', html, iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
                 const mk = L.marker([s.location.lat, s.location.lng], { icon, interactive: true }).addTo(map);
                 const alt = displayStepValue(s);
-                mk.bindTooltip(
-                    `<b>${escapeHtml(m.name || '(mission)')}</b><br>step ${i + 1}/${steps.length} · ${escapeHtml(t || ('type ' + s.type))}${alt ? ' · ' + escapeHtml(alt) : ''}`,
-                    { direction: 'top', offset: [0, -8], opacity: 0.95 });
+                const badgeHtml = `<b>${escapeHtml(m.name || '(mission)')}</b> · step ${i + 1}/${steps.length} · ${escapeHtml(t || ('type ' + s.type))}${alt ? ' · ' + escapeHtml(alt) : ''}`;
+                if (CONTEXT === 'TOP') {
+                    // v2.32: own hover label on DV — Percepto's tooltip
+                    // subclass there crashes on bound tooltips.
+                    mk.on('mouseover', () => mpvShowTip(map, mk.getLatLng(), badgeHtml));
+                    mk.on('mouseout', mpvHideTip);
+                } else {
+                    mk.bindTooltip(
+                        `<b>${escapeHtml(m.name || '(mission)')}</b><br>step ${i + 1}/${steps.length} · ${escapeHtml(t || ('type ' + s.type))}${alt ? ' · ' + escapeHtml(alt) : ''}`,
+                        { direction: 'top', offset: [0, -8], opacity: 0.95 });
+                }
                 layers.push(mk);
             } catch (e) { console.warn(`${TAG} [mpv] marker failed:`, e); }
         }
@@ -11882,6 +11891,34 @@ ${snapPlacemarks}
         if (!mpv.canvas) { try { mpv.canvas = L.canvas({ padding: 0.3 }); } catch (e) { mpv.canvas = null; } }
         return mpv.canvas;
     }
+    // v2.32: Data View's app SUBCLASSES Leaflet's tooltip pipeline
+    // (openTooltip override in app-bundle) and it crashes on tooltips WE
+    // bind ("appendChild … not of type 'Node'") — so on DV, hover labels
+    // are our own floating div pinned to the map container. pointer-events
+    // none, one shared element, hidden on mouseout/clear.
+    let mpvTipEl = null;
+    function mpvShowTip(map, latlng, html) {
+        try {
+            const c = map.getContainer();
+            if (!mpvTipEl || !c.contains(mpvTipEl)) {
+                mpvTipEl = document.createElement('div');
+                mpvTipEl.style.cssText = 'position:absolute;z-index:10000;pointer-events:none;'
+                    + 'background:rgba(18,20,26,0.92);color:#e6e6e6;border:1px solid rgba(255,255,255,0.25);'
+                    + 'border-radius:4px;padding:4px 7px;font:11px/1.35 monospace;display:none;'
+                    + 'white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.5)';
+                c.appendChild(mpvTipEl);
+            }
+            mpvTipEl.innerHTML = html;
+            const p = map.latLngToContainerPoint(latlng);
+            mpvTipEl.style.left = Math.round(p.x + 12) + 'px';
+            mpvTipEl.style.top = Math.round(p.y - 26) + 'px';
+            mpvTipEl.style.display = 'block';
+        } catch (e) {}
+    }
+    function mpvHideTip() {
+        if (mpvTipEl) mpvTipEl.style.display = 'none';
+    }
+
     function mpvDrawMissionLight(m) {
         const L = composerGetL(), map = getLeafletMap();
         if (!L || !map || !m || typeof L.circleMarker !== 'function') return;
@@ -11914,10 +11951,11 @@ ${snapPlacemarks}
                 if (renderer) opts.renderer = renderer;
                 const cm = L.circleMarker([s.location.lat, s.location.lng], opts).addTo(map);
                 if (dvTips) {
-                    try {
-                        cm.bindTooltip(`<b>${escapeHtml(m.name || '(mission)')}</b><br>${escapeHtml(t)}`,
-                            { direction: 'top', offset: [0, -6], opacity: 0.95 });
-                    } catch (e) {}
+                    // v2.32: own hover label, NOT bindTooltip — Percepto's
+                    // tooltip subclass on DV crashes on bound tooltips.
+                    const tipHtml = `<b>${escapeHtml(m.name || '(mission)')}</b> · ${escapeHtml(t)}`;
+                    cm.on('mouseover', () => mpvShowTip(map, cm.getLatLng(), tipHtml));
+                    cm.on('mouseout', mpvHideTip);
                 }
                 layers.push(cm);
             } catch (e) {}
