@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.35
+// @version      2.36
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.35';
+    const SCRIPT_VERSION = '2.36';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -4957,29 +4957,54 @@
     // Order a subset: 2-opt scored by the flight simulator on trusted
     // distances (a pad that forces an RTB shouldn't drag the route back over
     // ground it already covered — pure furthest→closest zigzagged, live test).
+    // SPUR-WALK ORDER (v2.36) — decoded from the user's hand-corrected order
+    // ("this is how I updated, but I'm just eyeballing it"): fly to the
+    // DEEPEST pad of an area first, peel back toward base along its corridor
+    // (never stepping to a deeper pad), and when the nearest continuation
+    // would cost more than a fresh out-leg from base, JUMP to the deepest
+    // remaining pad — the next area. Deterministic, auditable, and matches
+    // the far→near SOP per area. The simulator then adds the part eyeballing
+    // can't: battery breaks, landing reserves, real route distances.
+    // (2-opt was rejected live twice: transit-cheaper LOOP shapes read as
+    // chaos and give deep pads a half-drained battery.)
     function lassoOrderRows(subset, budgetFt, pw) {
+        const rowsD = subset.slice().sort((x, y) => y.ft - x.ft);
         try {
-            if (pw && pw.ok && subset.length > 1) {
-                const idxs = subset.map(r => pw.idxOf.get(r));
-                let order = agOptimizeOrder(idxs, pw.dPad, pw.dBase, pw.costOf, budgetFt);
-                let sim = agSimulate(order, pw.dPad, pw.dBase, pw.costOf, budgetFt);
-                // Flight canonicalization (v2.35): flights are independent
-                // base→…→base round trips, so their SEQUENCE is free — sort
-                // them deepest-first so the list reads far→near by flight.
-                // The optimizer's raw flight sequence looked "CRAZY" on the
-                // map even when each flight was individually optimal, because
-                // recharge boundaries were invisible (live test).
-                if (sim && sim.flights.length > 1) {
-                    const depth = f => { let m = 0; f.pads.forEach(p => { const d = pw.dBase(p); if (d > m) m = d; }); return m; };
-                    const fl = sim.flights.slice().sort((a, b) => depth(b) - depth(a));
-                    order = [];
-                    fl.forEach(f => f.pads.forEach(p => order.push(p)));
-                    sim = agSimulate(order, pw.dPad, pw.dBase, pw.costOf, budgetFt);
+            if (!(pw && pw.ok) || rowsD.length < 2) return { rows: rowsD, sim: null };
+            const remaining = new Set(rowsD.map(r => pw.idxOf.get(r)));
+            const ftOf = i => pw.rows[i].ft;
+            const order = [];
+            let cur = null, guard = 0;
+            while (remaining.size && guard++ < 5000) {
+                if (cur == null) {
+                    // new area → deepest remaining pad
+                    let deep = null;
+                    remaining.forEach(i => { if (deep == null || ftOf(i) > ftOf(deep)) deep = i; });
+                    cur = deep;
+                } else {
+                    // continue the area: nearest remaining pad that is NOT
+                    // deeper than where we are (±500 ft tolerance)
+                    let best = null;
+                    remaining.forEach(i => {
+                        if (ftOf(i) > ftOf(cur) + 500) return;
+                        const d = pw.dPad(cur, i);
+                        if (!best || d < best.d) best = { i, d };
+                    });
+                    // area exhausted (or continuing costs more than a fresh
+                    // out-leg from base) → jump to the next area's deepest
+                    if (!best || best.d > pw.dBase(best.i)) { cur = null; continue; }
+                    cur = best.i;
                 }
-                return { rows: order.map(i => pw.rows[i]), sim };
+                order.push(cur);
+                remaining.delete(cur);
             }
-        } catch (e) { console.warn(`${TAG} [lasso] optimized order failed — furthest→closest fallback`, e); }
-        return { rows: subset.slice().sort((x, y) => y.ft - x.ft), sim: null };
+            remaining.forEach(i => order.push(i));   // guard-overflow safety
+            const sim = agSimulate(order, pw.dPad, pw.dBase, pw.costOf, budgetFt);
+            return { rows: order.map(i => pw.rows[i]), sim };
+        } catch (e) {
+            console.warn(`${TAG} [lasso] spur-walk failed — plain furthest→closest`, e);
+            return { rows: rowsD, sim: null };
+        }
     }
     function lassoProcess(ring) {
         const { ent, missions, byAsset } = lasso.data || {};
@@ -5026,7 +5051,7 @@
         // Each variant's order = 2-opt + flight simulator on trusted distances.
         const mkVariant = (name, subPrefix, set, budgetFt) => {
             const o = lassoOrderRows(set, budgetFt, pw);
-            variants.push({ name, sub: `${subPrefix} · ${set.length} pads · optimized, deepest flight first`, rows: o.rows, sim: o.sim });
+            variants.push({ name, sub: `${subPrefix} · ${set.length} pads · deep-first spur walk, verified routes`, rows: o.rows, sim: o.sim });
         };
         if (tulips.length && tattu.length) {
             mkVariant(`${wind} 1`, 'Tattu only', tattu, cfg.tattuBudgetFt);

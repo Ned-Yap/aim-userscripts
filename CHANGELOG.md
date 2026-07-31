@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-31 — Mission Bank Tools v2.36 (dev/latest): 🖊 Lasso orders the way YOU order
+
+The 2-opt optimizer is out of the lasso — it kept producing transit-cheapest *loop* shapes that read as chaos and put deep pads mid-battery. The ordering rule is now exactly the hand pattern from the live session: **go to the deepest pad of an area, peel back toward base along its corridor (never stepping deeper), and when the area's done, jump to the deepest remaining pad — the next area.** Deterministic and auditable: every ascent in the ft column is an area jump, and it always jumps to the furthest of what's left.
+
+What the tool still adds over eyeballing: verified legal-route distances, battery/recharge breaks (🔋 dividers), and landing-reserve estimates per flight. Measured cost of the doctrine vs the unconstrained optimum: ~17% more flying on a worst-case sprawl — the price of flying deep pads on fresh batteries in an order a human can check.
+
 ## 2026-07-31 — Mission Bank Tools v2.35 (dev/latest): 🖊 Lasso order reads like a flight plan
 
 That "crazy" NNW 2 order was mostly invisible recharge boundaries — a jump between consecutive numbers is usually the drone returning to base between flights. Two changes:
