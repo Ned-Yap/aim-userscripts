@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-30 — Mission Bank Tools v2.21 (dev/latest): 🔋 Range — battery icons + hover distances
+
+- The tiny text chip is gone: each pad FFZ now gets a **big battery icon** tinted by class (green = Tattu, orange = Tulip, red = out of range/no route, purple `!` = unverified, gray `–` = no FFZ).
+- **Distance shows on hover only** — hold the cursor near a battery and a tooltip shows the worst-corner distance and class.
+- **Guaranteed un-pressable**: the icons never receive pointer events at all — hover detection is done by a cursor-proximity tracker on the map itself, and a CSS hard-block covers the marker elements. M2 on a pad under a battery goes straight to the pad.
+
 ## 2026-07-30 — Mission Bank Tools v2.20 (dev/latest): 🔋 Range — triple-verified pad reach from base
 
 New **🔋 Range** button in the SUM toolbar (next to 🔗 Merge): colors every asset pad's FFZ by the **true shortest LEGAL route** from the base station — inside FFZs / along FPs only, no corner cutting, no flying over open ground.

@@ -4570,23 +4570,89 @@
     }
 
     // ── rendering (all click-through) ──
-    const rng = { on: false, busy: false, layers: [], legendEl: null };
+    const rng = { on: false, busy: false, layers: [], legendEl: null, chips: [], hover: null };
     function rngClear() {
         rng.layers.forEach(l => { try { l.remove(); } catch (e) {} });
         rng.layers = [];
+        rng.chips = [];
+        rngUnbindHover();
         if (rng.legendEl) { try { rng.legendEl.remove(); } catch (e) {} rng.legendEl = null; }
+    }
+    // Big tintable battery icon (v2.21 — the text chip was too small to spot).
+    // pointer-events:none throughout: nothing about it is pressable.
+    function rngBatteryHtml(color, mark) {
+        return `<div style="pointer-events:none;position:relative;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.85));">
+            <svg width="34" height="18" viewBox="0 0 34 18">
+                <rect x="1" y="2" width="28" height="14" rx="3.5" fill="${color}" stroke="#10131a" stroke-width="1.8"></rect>
+                <rect x="30" y="5.5" width="3.5" height="7" rx="1.5" fill="#10131a"></rect>
+            </svg>
+            ${mark ? `<div style="position:absolute;top:0;left:0;width:29px;text-align:center;font:800 12px/18px sans-serif;color:#10131a;">${mark}</div>` : ''}
+        </div>`;
+    }
+    // Hover distances WITHOUT pointer events: a throttled mousemove tracker on
+    // the map container measures cursor proximity to each battery icon and
+    // shows a floating tooltip. The icons never receive events, so M2 pad
+    // picking cannot conflict with them by construction.
+    function rngBindHover() {
+        rngUnbindHover();
+        const map = getLeafletMap();
+        const c = map && typeof map.getContainer === 'function' ? map.getContainer() : null;
+        if (!c) return;
+        const tip = document.createElement('div');
+        tip.style.cssText = 'position:fixed;z-index:2147483601;pointer-events:none;display:none;background:rgba(16,19,26,0.95);border:1px solid #7adfe6;border-radius:6px;padding:4px 10px;color:#e6e6e6;font:700 12px "Lato","Segoe UI",sans-serif;box-shadow:0 3px 10px rgba(0,0,0,0.6);white-space:nowrap;';
+        document.body.appendChild(tip);
+        let last = 0;
+        const onMove = (ev) => {
+            const now = Date.now();
+            if (now - last < 60) return;
+            last = now;
+            const m2 = getLeafletMap();
+            if (!m2) { tip.style.display = 'none'; return; }
+            const rect = c.getBoundingClientRect();
+            let best = null;
+            rng.chips.forEach(ch => {
+                let p;
+                try { p = m2.latLngToContainerPoint([ch.lat, ch.lng]); } catch (e) { return; }
+                const d = Math.hypot(ev.clientX - (rect.left + p.x), ev.clientY - (rect.top + p.y));
+                if (d <= 26 && (!best || d < best.d)) best = { d, ch };
+            });
+            if (!best) { tip.style.display = 'none'; return; }
+            tip.textContent = best.ch.text;
+            tip.style.left = `${ev.clientX + 14}px`;
+            tip.style.top = `${ev.clientY - 32}px`;
+            tip.style.display = 'block';
+        };
+        const onLeave = () => { tip.style.display = 'none'; };
+        c.addEventListener('mousemove', onMove);
+        c.addEventListener('mouseleave', onLeave);
+        rng.hover = { c, onMove, onLeave, tip };
+    }
+    function rngUnbindHover() {
+        if (!rng.hover) return;
+        try { rng.hover.c.removeEventListener('mousemove', rng.hover.onMove); rng.hover.c.removeEventListener('mouseleave', rng.hover.onLeave); } catch (e) {}
+        try { rng.hover.tip.remove(); } catch (e) {}
+        rng.hover = null;
     }
     function rngDraw(sol) {
         const L = composerGetL(), map = getLeafletMap();
         if (!L || !map) { showToast('Range: map not found.', '#ff9800', 3000); return; }
+        // Belt-and-braces: the marker ELEMENT itself must never take events
+        // (divIcon default styling varies) — M2 on a pad under a battery icon
+        // has to reach the pad.
+        if (!document.getElementById('aim-mb-rng-style')) {
+            const st = document.createElement('style');
+            st.id = 'aim-mb-rng-style';
+            st.textContent = '.aim-mb-rng-chip, .aim-mb-rng-chip * { pointer-events: none !important; }';
+            document.head.appendChild(st);
+        }
         const cfg = agCfg();
         const cls = (r) => {
-            if (r.status === 'no-ffz') return { color: '#9aa5b1', label: 'no FFZ', kind: 'noffz' };
-            if (r.status === 'unreachable') return { color: '#ff5252', label: 'no route', kind: 'unreach' };
-            if (!r.verified || r.disagree) return { color: '#ff9800', label: '⚠ unverified', kind: 'warn' };
-            if (r.worstFt <= cfg.tattuRadiusFt) return { color: '#5fff5f', label: 'Tattu', kind: 'tattu' };
-            if (r.worstFt <= cfg.tulipRadiusFt) return { color: '#ffd54f', label: 'Tulip', kind: 'tulip' };
-            return { color: '#ff5252', label: 'out of range', kind: 'over' };
+            if (r.status === 'no-ffz') return { color: '#9aa5b1', label: 'no FFZ', kind: 'noffz', mark: '–' };
+            if (r.status === 'unreachable') return { color: '#ff5252', label: 'no legal route from base', kind: 'unreach', mark: '✕' };
+            if (!r.verified || r.disagree) return { color: '#c39dff', label: '⚠ unverified — see console', kind: 'warn', mark: '!' };
+            if (r.worstFt <= cfg.tattuRadiusFt) return { color: '#5fff5f', label: 'Tattu', kind: 'tattu', mark: '' };
+            if (r.worstFt <= cfg.tulipRadiusFt) return { color: '#ffa726', label: 'Tulip', kind: 'tulip', mark: '' };
+            return { color: '#ff5252', label: 'out of range', kind: 'over', mark: '✕' };
         };
         const counts = { tattu: 0, tulip: 0, over: 0, warn: 0, unreach: 0, noffz: 0 };
         const drawnFfz = new Set();
@@ -4599,18 +4665,24 @@
                 try {
                     rng.layers.push(L.polygon(ring, { color: c.color, weight: 3, dashArray: '7 5', opacity: 0.95, fillColor: c.color, fillOpacity: 0.10, interactive: false }).addTo(getLeafletMap()));
                     const ctr = genCentroid(sol.ffzs[r.fi].ring);
-                    const txt = r.status === 'ok' ? `${(r.worstFt / 1000).toFixed(1)}k` : c.label;
                     const icon = L.divIcon({
                         className: 'aim-mb-rng-chip',
-                        html: `<div style="pointer-events:none;background:${c.color};color:#10131a;font:800 10px/1 monospace;padding:2px 5px;border-radius:4px;border:1px solid #10131a;box-shadow:0 1px 4px rgba(0,0,0,0.6);white-space:nowrap;">${txt}</div>`,
-                        iconSize: [0, 0], iconAnchor: [16, 6],
+                        html: rngBatteryHtml(c.color, c.mark),
+                        iconSize: [34, 18], iconAnchor: [17, 9],
                     });
                     rng.layers.push(L.marker([ctr.lat, ctr.lng], { icon, interactive: false, keyboard: false }).addTo(getLeafletMap()));
+                    rng.chips.push({
+                        lat: ctr.lat, lng: ctr.lng,
+                        text: r.status === 'ok'
+                            ? `${(r.worstFt / 1000).toFixed(1)}k ft (worst corner) · ${c.label}`
+                            : c.label,
+                    });
                 } catch (e) {}
             } else if (r.fi < 0 && r.asset && r.asset.ring && r.asset.ring.length >= 3) {
                 try { rng.layers.push(L.polygon(r.asset.ring.map(p => [p.lat, p.lng]), { color: c.color, weight: 2, dashArray: '3 5', opacity: 0.8, fill: false, interactive: false }).addTo(getLeafletMap())); } catch (e) {}
             }
         });
+        rngBindHover();
         // legend (fixed, small, bottom-left)
         const cfg2 = agCfg();
         const el = document.createElement('div');
@@ -4618,11 +4690,11 @@
         const row = (col, label, n) => n ? `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span style="width:10px;height:10px;border-radius:2px;background:${col};"></span>${label} <b style="margin-left:auto;padding-left:10px;">${n}</b></div>` : '';
         el.innerHTML = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;"><b style="color:#7adfe6;">🔋 Range from base</b><span data-rng-x style="cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
             + row('#5fff5f', `Tattu ≤ ${(cfg2.tattuRadiusFt / 1000).toFixed(1)}k ft`, counts.tattu)
-            + row('#ffd54f', `Tulip ≤ ${(cfg2.tulipRadiusFt / 1000).toFixed(1)}k ft`, counts.tulip)
+            + row('#ffa726', `Tulip ≤ ${(cfg2.tulipRadiusFt / 1000).toFixed(1)}k ft`, counts.tulip)
             + row('#ff5252', 'Out of range / no route', counts.over + counts.unreach)
-            + row('#ff9800', '⚠ unverified (see console)', counts.warn)
+            + row('#c39dff', '⚠ unverified (see console)', counts.warn)
             + row('#9aa5b1', 'No FFZ', counts.noffz)
-            + '<div style="color:#789;margin-top:4px;">Worst-corner legal route · overlay is click-through</div>';
+            + '<div style="color:#789;margin-top:4px;">Hover a battery for the distance · everything is click-through</div>';
         document.body.appendChild(el);
         el.querySelector('[data-rng-x]').onclick = () => { rng.on = false; rngClear(); const b = document.querySelector('[data-rng-toggle]'); if (b) b.classList.remove('active'); };
         rng.legendEl = el;
