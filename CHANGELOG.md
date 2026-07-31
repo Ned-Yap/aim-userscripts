@@ -6,6 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-30 — 👁 Mission preview upgrades (dev/latest, MBT v2.25–v2.32): real routes, real structure, hover IDs
+
+Works on Site Setup, Mission Bank, **and Data View**:
+
+- **Nav lines follow the actual flyable route** — the blue dashed line between navs traces the real legal path along flight paths / through FFZs (powered by the 🔋 Range solver's route graph) instead of cutting straight across. Falls back to a straight line only when no legal route exists.
+- **Lines match the mission's structure** — blue dashed nav→nav flight line + pink dashed sightlines from each nav to its snapshots (previously one confusing step-order line).
+- **Hover any preview dot or badge** to see which mission it belongs to (+ step type/number/altitude). Ends the "whose dots are these?" guessing on pads where several missions overlap.
+- Data View stability: preview drawing can no longer freeze the map, dots track pan/zoom correctly, and preview toggles work from Data View's own ⚙ panel (Control Panel v1.38).
+
 ## 2026-07-30 — Mission Bank Tools v2.30 (dev/latest): merge drag-and-drop + Lasso route-aware ordering
 
 - **Drag-and-drop reordering in the 🔗 merge panel** — grab any row (⠿ handle) and drop it where it belongs; inserts before the row you drop on. M2-on-badge renumbering still works.
