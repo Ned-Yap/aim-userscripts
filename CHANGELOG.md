@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-30 — Mission Bank Tools v2.34 (dev/latest): 🖊 pads with edge-hugging FFZs + deepest-first order
+
+- **"No FFZ" on pads that clearly have one** (ATKINS 14 4213H): the pad→FFZ match only measured from the pad's *corners* — an FFZ hugging the middle of a pad edge was invisible to it. It now samples the whole pad perimeter (the segments rule, again). On the reference site this recovered 5 previously-skipped pads. Applies to 🔋 Range, 🖊 Lasso, and the merge panel alike since they share the matcher.
+- **Deepest pad first when the route enters a new area** — your 10→8 rule. A dead-end spur costs the same distance in either direction, so the optimizer used to pick arbitrarily; ties now break toward visiting the furthest-out pad of a cluster first and peeling back toward base. Real distance savings still always win — this only settles ties.
+
 ## 2026-07-30 — Mission Bank Tools v2.33 (dev/latest): 🖊 Lasso — the three live-test fixes
 
 - **Missing pad inside the loop**: pads count as inside when their centroid *or any corner* is in the loop, and every skipped pad now gets a **red ✕ right on the map** (the popup lists the reason) — a missing number explains itself.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.33
+// @version      2.34
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.33';
+    const SCRIPT_VERSION = '2.34';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -4260,7 +4260,16 @@
     // the SIMULATOR total as the objective — transit and RTB overhead both count.
     function agOptimizeOrder(idxs, dPad, dBase, costOf, budgetFt) {
         if (idxs.length < 2) return idxs.slice();
-        const cost = o => agSimulate(o, dPad, dBase, costOf, budgetFt).totalFt;
+        // Depth tie-break (v2.34, user rule): a dead-end spur costs the SAME
+        // transit in either direction, so the simulator ties — and the user
+        // always wants the DEEPEST pad of a newly-entered area first, peeling
+        // back toward base. tieFt sums position×depth scaled to < 1 ft, so it
+        // settles ties without ever trading away real distance.
+        const nIdx = idxs.length;
+        let maxD = 1;
+        idxs.forEach(i => { const d = dBase(i); if (isFinite(d) && d > maxD) maxD = d; });
+        const tieFt = (o) => { let t = 0; for (let x = 0; x < o.length; x++) t += (x / nIdx) * (dBase(o[x]) / maxD); return (t / nIdx) * 0.9; };
+        const cost = o => agSimulate(o, dPad, dBase, costOf, budgetFt).totalFt + tieFt(o);
         const farNear = idxs.slice().sort((a, b) => dBase(b) - dBase(a));
         const nn = [farNear[0]];
         const left = new Set(farNear.slice(1));
@@ -4285,7 +4294,9 @@
                     for (let j = i + 1; j < o.length; j++) {
                         const cand = o.slice(0, i).concat(o.slice(i, j + 1).reverse(), o.slice(j + 1));
                         const cc = cost(cand);
-                        if (cc < c - 1) { o = cand; c = cc; improved = true; }
+                        // 0.01 threshold: sub-1-ft tie-break improvements
+                        // (deepest-first) must be able to win too
+                        if (cc < c - 0.01) { o = cand; c = cc; improved = true; }
                     }
                 }
             }
@@ -4511,6 +4522,25 @@
         return { ok: bad === 0, badFrac: total ? bad / total : 1, pts };
     }
 
+    // Asset↔FFZ distance measured RING-PERIMETER to polygon (sampled ~10 m) —
+    // corners alone miss an FFZ hugging the middle of a pad edge (engraved
+    // segments-not-vertices rule; live case v2.34: "ATKINS 14 4213H — no FFZ"
+    // with its FFZ visibly touching the pad edge).
+    function rngRingToPolyM(ringA, ringB) {
+        let best = Infinity;
+        for (let i = 0; i < ringA.length; i++) {
+            const a = ringA[i], b = ringA[(i + 1) % ringA.length];
+            const n = Math.max(1, Math.ceil(mbApproxMeters(a.lat, a.lng, b.lat, b.lng) / 10));
+            for (let s = 0; s <= n; s++) {
+                const p = { lat: a.lat + (b.lat - a.lat) * s / n, lng: a.lng + (b.lng - a.lng) * s / n };
+                const d = mbPointToPolygonMeters(p.lat, p.lng, ringB);
+                if (d < best) best = d;
+                if (best === 0) return 0;
+            }
+        }
+        return best;
+    }
+
     // Solve the whole site: sparse + dense runs, per-pad classification with
     // the three verification passes. Distances in FEET.
     function rngSolve(ent) {
@@ -4541,11 +4571,16 @@
         const basePts = sparse.g.baseKeys.map(k => sparse.g.graph.verts.get(k));
         const byFfz = new Map();   // fi → result (pads sharing an FFZ share the answer)
         const results = [];
+        // v2.34: pad→FFZ match samples the pad PERIMETER (segments, not just
+        // corners), bbox-prefiltered so the extra sampling stays cheap.
+        const ffzReachBoxes = ffzs.map(f => agRingBbox(f.ring, reachM + 5));
         (ent.assets || []).forEach(a => {
+            const ab = agRingBbox(a.ring, 0);
             let fi = -1, fd = Infinity;
             ffzs.forEach((f, i) => {
-                let d = Infinity;
-                a.ring.forEach(p => { const dd = mbPointToPolygonMeters(p.lat, p.lng, f.ring); if (dd < d) d = dd; });
+                const bb = ffzReachBoxes[i];
+                if (!(ab.s <= bb.n && ab.n >= bb.s && ab.w <= bb.e && ab.e >= bb.w)) return;
+                const d = rngRingToPolyM(a.ring, f.ring);
                 if (d < fd) { fd = d; fi = i; }
             });
             if (fi < 0 || fd > reachM) { results.push({ asset: a, fi: -1, status: 'no-ffz' }); return; }
