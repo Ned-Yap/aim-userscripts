@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.25
+// @version      2.26
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.25';
+    const SCRIPT_VERSION = '2.26';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -292,6 +292,14 @@
     // ========================================================
     // Control Panel integration
     // ========================================================
+    // v2.26: which frame owns the 👁 overlay — the SS/MB map iframe, or any
+    // frame that actually has a Leaflet map (Data View TOP). Used by the
+    // SET_TOGGLE handlers so preview toggles act in whichever frame renders.
+    function mpvFrameOk() {
+        if (CONTEXT === 'IFRAME') return true;
+        try { return !!getLeafletMap(); } catch (e) { return false; }
+    }
+
     function setupControlPanel() {
         try { controlChannel = new BroadcastChannel(CONTROL_CHANNEL_NAME); }
         catch (e) { return; }
@@ -308,10 +316,10 @@
                         hideSumButton();
                         closePanel();
                         closeRightClickPopup();
-                        if (CONTEXT === 'IFRAME') try { mpvTeardown(); } catch (e) {}
+                        if (mpvFrameOk()) try { mpvTeardown(); } catch (e) {}
                     } else {
                         runSumInjection();
-                        if (CONTEXT === 'IFRAME') try { mpvInjectButton(); } catch (e) {}
+                        if (mpvFrameOk()) try { mpvInjectButton(); } catch (e) {}
                     }
                 } else if (msg.toggleId === 'hide-scan-icons') {
                     const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
@@ -352,7 +360,10 @@
                     if (v !== mpvEnabled) {
                         mpvEnabled = v;
                         gmSet(CACHE_KEY_MPV_ENABLED, mpvEnabled);
-                        if (CONTEXT === 'IFRAME') {
+                        // v2.26: mpvFrameOk, not IFRAME — on Data View the TOP
+                        // instance owns the overlay; the IFRAME gate meant a
+                        // DV uncheck stored the value but never tore down.
+                        if (mpvFrameOk()) {
                             if (mpvEnabled) { try { mpvInjectButton(); } catch (e) {} }
                             else { try { mpvTeardown(); } catch (e) {} }
                         }
@@ -362,7 +373,7 @@
                     if (v !== mpvAllOn) {
                         mpvAllOn = v;
                         gmSet(CACHE_KEY_MPV_ALL, mpvAllOn);
-                        if (CONTEXT === 'IFRAME') try { mpvAllChanged(); } catch (e) {}
+                        if (mpvFrameOk()) try { mpvAllChanged(); } catch (e) {}
                     }
                 } else if (msg.toggleId === 'default-snap-agl') {
                     const v = Number(msg.value !== undefined ? msg.value : msg.enabled);
@@ -11665,6 +11676,17 @@ ${snapPlacemarks}
         const sid = getCurrentSiteID();
         if (sid && (mpvSelForSite(sid).length || mpvAllOn) && !Object.keys(mpv.layers).length
             && mpvMissions(sid) && getLeafletMap()) mpvRedraw();
+        // v2.26: cross-tab drift self-heal. The picker selection is GM-stored
+        // with no broadcast, so un/checking a mission in ANOTHER tab (e.g. the
+        // Mission Bank tab) left this tab's overlay stale — most visible on
+        // Data View, which has no picker of its own. Every tick, compare the
+        // drawn mission set against the stored one and redraw on mismatch.
+        if (sid && mpvMissions(sid) && getLeafletMap()) {
+            const want = new Set(mpvSelForSite(sid));
+            if (mpvAllOn) (mpvMissions(sid) || []).forEach(m2 => { if (m2) want.add(m2.id); });
+            const have = Object.keys(mpv.layers).map(Number);
+            if (have.length !== want.size || have.some(id => !want.has(id))) mpvRedraw();
+        }
         if (document.getElementById(MPV_BTN_ID)) return;
         const tools = document.querySelector('.map-tools');
         if (!tools) return;

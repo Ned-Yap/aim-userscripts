@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.37
+// @version      1.38
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -58,7 +58,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.37';
+    const VERSION = '1.38';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -156,6 +156,9 @@
         const current = state.urlScope || getUrlScope();
         if (scriptScope === current) return true;
         if (scriptScope === 'site-setup' && current === 'admin-merge') return true;
+        // v1.38 — Data View draws the 👁 mission-preview overlay, so the
+        // Mission Bank cards (which own its toggles) must be reachable there.
+        if (scriptScope === 'mission-bank' && current === 'data-view') return true;
         return false;
     }
 
