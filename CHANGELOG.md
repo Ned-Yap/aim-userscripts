@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-30 — Mission Bank Tools v2.30 (dev/latest): merge drag-and-drop + Lasso route-aware ordering
+
+- **Drag-and-drop reordering in the 🔗 merge panel** — grab any row (⠿ handle) and drop it where it belongs; inserts before the row you drop on. M2-on-badge renumbering still works.
+- **Lasso orders like a pilot now** — the list was a pure furthest→closest sort, which zigzagged (fly out to 1, off to 2, back past where 1 was). Each variant's order now comes from 2-opt + the flight simulator running on the trusted Range-solver distances (pads attach to the legal-route graph at their first nav), so backtracks get optimized away and a pad that forces a recharge doesn't drag the route backwards. On the reference site this cut a 32-pad loop from 410k ft / 13 flights (naive) to 157k ft / 5 flights.
+
 ## 2026-07-30 — Mission Bank Tools v2.27 (dev/latest): 🖊 Lasso — draw a loop, get a merge
 
 New **🖊 Lasso** button in the SUM toolbar: press it, then freehand-draw a loop on the map around the pads you want in one macro mission (Esc cancels).

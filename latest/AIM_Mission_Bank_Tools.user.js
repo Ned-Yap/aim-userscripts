@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.29
+// @version      2.30
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.29';
+    const SCRIPT_VERSION = '2.30';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -4843,6 +4843,58 @@
         compass = ((compass % 360) + 360) % 360;
         return AG_WINDS[Math.round(compass / 22.5) % 16];
     }
+    // Trusted pairwise distances for the lassoed pads (v2.30): every pad
+    // attaches to the Range legal-route graph at its first NAV point (reusing
+    // the 👁 preview's mpvAttachPoint), then one Dijkstra per pad gives
+    // pad↔pad and pad↔base along REAL legal routes. Off-graph pairs fall back
+    // straight-line ×1.25 and are counted + logged.
+    function lassoBuildPairwise(rows, ent) {
+        try {
+            const built = rngBuildGraph(ent, false);
+            built.boxes = built.ffzs.map(f => agRingBbox(f.ring, MB_ENTRY_FFZ_FT / 3.28084));
+            const temp = [];
+            const padKeys = rows.map((r, i) => {
+                const navs = mbSoloPoints(r.mission);
+                const p = navs.length ? navs[0] : genCentroid(r.asset.ring);
+                return mpvAttachPoint(built, p, `lasso${i}`, temp);
+            });
+            const runs = padKeys.map(k => agDijkstra(built.graph, k));
+            let off = 0;
+            const straightPts = rows.map(r => genCentroid(r.asset.ring));
+            const dPad = (i, j) => {
+                if (i === j) return 0;
+                const d = runs[i].dist.get(padKeys[j]);
+                if (d == null) { off++; return mbApproxMeters(straightPts[i].lat, straightPts[i].lng, straightPts[j].lat, straightPts[j].lng) * 3.28084 * 1.25; }
+                return d * 3.28084;
+            };
+            const dBase = (i) => {
+                let best = null;
+                built.baseKeys.forEach(bk => { const d = runs[i].dist.get(bk); if (d != null && (best == null || d < best)) best = d; });
+                if (best == null) { off++; return rows[i].ft; }   // solver's verified worst-corner as fallback
+                return best * 3.28084;
+            };
+            const cfg = agCfg();
+            const costOf = (i) => agIntraFt(rows[i].mission) + pcmStepCount(rows[i].mission) * cfg.stepCostFt;
+            const idxOf = new Map(rows.map((r, i) => [r, i]));
+            return { ok: true, rows, idxOf, dPad, dBase, costOf, offCount: () => off };
+        } catch (e) {
+            console.warn(`${TAG} [lasso] pairwise graph failed — furthest→closest fallback`, e);
+            return { ok: false };
+        }
+    }
+    // Order a subset: 2-opt scored by the flight simulator on trusted
+    // distances (a pad that forces an RTB shouldn't drag the route back over
+    // ground it already covered — pure furthest→closest zigzagged, live test).
+    function lassoOrderRows(subset, budgetFt, pw) {
+        try {
+            if (pw && pw.ok && subset.length > 1) {
+                const idxs = subset.map(r => pw.idxOf.get(r));
+                const order = agOptimizeOrder(idxs, pw.dPad, pw.dBase, pw.costOf, budgetFt);
+                return order.map(i => pw.rows[i]);
+            }
+        } catch (e) { console.warn(`${TAG} [lasso] optimized order failed — furthest→closest fallback`, e); }
+        return subset.slice().sort((x, y) => y.ft - x.ft);
+    }
     function lassoProcess(ring) {
         const { ent, missions, byAsset } = lasso.data || {};
         if (!ent) return;
@@ -4860,20 +4912,23 @@
             if (r.worstFt > cfg.tulipRadiusFt) { skipped.push(`${a.name} — over ${(cfg.tulipRadiusFt / 1000).toFixed(0)}k ft`); return; }
             rows.push({ asset: a, mission: cands[0], ft: r.worstFt, tulip: r.worstFt > cfg.tattuRadiusFt });
         });
-        rows.sort((x, y) => y.ft - x.ft);   // FURTHEST → CLOSEST
+        rows.sort((x, y) => y.ft - x.ft);   // stable pre-order; optimizer refines below
         const wind = lassoWindName(rows, ent.base);
         const tattu = rows.filter(r => !r.tulip);
         const tulips = rows.filter(r => r.tulip);
+        const pw = rows.length > 1 ? lassoBuildPairwise(rows, ent) : null;
         const variants = [];
         // Tulip pads present → auto-split: "1" = Tattu only, "2" = everything.
+        // Each variant's order = 2-opt + flight simulator on trusted distances.
         if (tulips.length && tattu.length) {
-            variants.push({ name: `${wind} 1`, sub: `Tattu only · ${tattu.length} pads`, rows: tattu });
-            variants.push({ name: `${wind} 2`, sub: `Tattu + Tulip · ${rows.length} pads`, rows });
+            variants.push({ name: `${wind} 1`, sub: `Tattu only · ${tattu.length} pads · optimized route`, rows: lassoOrderRows(tattu, cfg.tattuBudgetFt, pw) });
+            variants.push({ name: `${wind} 2`, sub: `Tattu + Tulip · ${rows.length} pads · optimized route`, rows: lassoOrderRows(rows, cfg.tulipBudgetFt, pw) });
         } else if (tulips.length) {
-            variants.push({ name: `${wind} 2`, sub: `Tulip · ${rows.length} pads`, rows });
+            variants.push({ name: `${wind} 2`, sub: `Tulip · ${rows.length} pads · optimized route`, rows: lassoOrderRows(rows, cfg.tulipBudgetFt, pw) });
         } else if (rows.length) {
-            variants.push({ name: `${wind} 1-2`, sub: `either battery · ${rows.length} pads`, rows });
+            variants.push({ name: `${wind} 1-2`, sub: `either battery · ${rows.length} pads · optimized route`, rows: lassoOrderRows(rows, cfg.tattuBudgetFt, pw) });
         }
+        if (pw && pw.ok && pw.offCount()) console.warn(`${TAG} [lasso] ${pw.offCount()} pad-pair legs estimated off-graph (straight ×1.25)`);
         if (!variants.length) { showToast(`🖊 ${inside.length} pads in loop, none usable — ${skipped.length} skipped (see the popup).`, '#ff9800', 4500); }
         lassoShowResults(variants, skipped, missions, ent);
         console.log(`${TAG} [lasso] ${inside.length} pads in loop → ${rows.length} usable (${tulips.length} Tulip) · ${skipped.length} skipped`);
@@ -5357,7 +5412,11 @@
         const total = pcm.picks.reduce((s, pk) => s + pcmStepCount(pk.mission), 0);
         const defName = pcm.picks.length ? ('Merged - ' + pcm.picks.map(pk => pk.asset.name).join(' + ')) : '';
         const nameVal = pcm.customName != null ? pcm.customName : defName;
-        const rows = pcm.picks.map((pk, i) => `<div style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;font-size:11px;">
+        // v2.30: rows are draggable — grab anywhere on a row (the ⠿ handle
+        // telegraphs it) and drop onto another row to insert BEFORE it.
+        // M2-on-badge renumbering still works as before.
+        const rows = pcm.picks.map((pk, i) => `<div data-pcm-row="${i}" draggable="true" style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;font-size:11px;cursor:grab;">
+            <span style="color:#556;font-size:12px;">⠿</span>
             <span style="color:#7adfe6;font-weight:800;min-width:14px;">${i + 1}</span>
             <span style="flex:1;color:#e6e6e6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(String(pk.mission.name || ''))}</span>
             <span style="color:#9ad;white-space:nowrap;">${pcmStepCount(pk.mission)} steps</span>
@@ -5450,6 +5509,34 @@
         nameEl.oninput = () => { pcm.customName = nameEl.value; };
         el.querySelectorAll('[data-pcm-rm]').forEach(b => {
             b.onclick = () => { pcm.picks.splice(Number(b.getAttribute('data-pcm-rm')), 1); pcmRefresh(); };
+        });
+        // drag-and-drop reorder (v2.30) — drop inserts BEFORE the hovered row;
+        // drop on the footer area appends to the end.
+        let pcmDragIdx = null;
+        const rowEls = el.querySelectorAll('[data-pcm-row]');
+        rowEls.forEach(rowEl => {
+            rowEl.addEventListener('dragstart', (ev) => {
+                pcmDragIdx = Number(rowEl.getAttribute('data-pcm-row'));
+                rowEl.style.opacity = '0.45';
+                try { ev.dataTransfer.setData('text/plain', String(pcmDragIdx)); ev.dataTransfer.effectAllowed = 'move'; } catch (e2) {}
+            });
+            rowEl.addEventListener('dragover', (ev) => { ev.preventDefault(); if (Number(rowEl.getAttribute('data-pcm-row')) !== pcmDragIdx) rowEl.style.boxShadow = 'inset 0 2px 0 #7adfe6'; });
+            rowEl.addEventListener('dragleave', () => { rowEl.style.boxShadow = ''; });
+            rowEl.addEventListener('drop', (ev) => {
+                ev.preventDefault();
+                rowEl.style.boxShadow = '';
+                const to = Number(rowEl.getAttribute('data-pcm-row'));
+                if (pcmDragIdx == null || pcmDragIdx === to) return;
+                const moved = pcm.picks.splice(pcmDragIdx, 1)[0];
+                pcm.picks.splice(to > pcmDragIdx ? to - 1 : to, 0, moved);
+                pcmDragIdx = null;
+                pcmRefresh();
+            });
+            rowEl.addEventListener('dragend', () => {
+                rowEl.style.opacity = '';
+                rowEls.forEach(r2 => { r2.style.boxShadow = ''; });
+                pcmDragIdx = null;
+            });
         });
     }
 
