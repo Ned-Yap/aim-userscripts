@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-31 — Mission Bank Tools v2.44 (dev/latest): 🧩 👁 route comparison — see both orders as lines
+
+New 👁 button on each audited macro in the 🧩 legend: draws the mission's **current order** as a solid line in the macro's color and the **♻ replan order** as a dashed white line — both routed legally (along FPs / through FFZs) on the verified graph, base to base. "How much further is it really" becomes visible line-length instead of guesswork; scattered-looking orders along one corridor often draw nearly the same route, which is why the audit can honestly say near-optimal. Toggle per macro; click-through as always.
+
 ## 2026-07-31 — Mission Bank Tools v2.43 (dev/latest): 🧩 order numbers + calibration actually reads Percepto
 
 - **Fixed: every macro was showing "(sim)"** — the battery/consumption fields live under the mission's `app_data`, and the audit was reading the wrong level, silently falling back to simulator absolutes. Percepto-calibrated numbers now actually appear (the "(sim)" tag now only shows on missions truly lacking battery data).

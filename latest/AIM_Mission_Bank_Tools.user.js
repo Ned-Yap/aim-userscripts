@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.43
+// @version      2.44
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.43';
+    const SCRIPT_VERSION = '2.44';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5135,6 +5135,7 @@
     function mcvClear() {
         mcv.layers.forEach(l => { try { l.remove(); } catch (e) {} });
         mcv.layers = [];
+        try { mcvClearRoutes(); } catch (e) {}
         if (mcv.legendEl) { try { mcv.legendEl.remove(); } catch (e) {} mcv.legendEl = null; }
     }
     // mission → distinct pads its located steps touch (inside or ≤150 ft of
@@ -5253,6 +5254,7 @@
                             + (worth ? ` → ♻ ${(reFt / 1000).toFixed(0)}k · ${reFl} fl (−${dFl} fl, −${dPct}%)` : ' · ✓ near-optimal')
                             + `${au.unknown ? ` · ⚠${au.unknown} unranged` : ''}</div>`;
                         if (worth) reBtn = `<button data-mcv-reorder="${mc.mission.id}" title="Re-order this mission's pad blocks in place (backup + verify; steps untouched)" style="padding:0 5px;background:rgba(255,183,77,0.15);border:1px solid rgba(255,183,77,0.5);color:#ffb74d;border-radius:4px;cursor:pointer;font-size:10px;">♻</button>`;
+                        reBtn += `<button data-mcv-route="${mc.mission.id}" data-mcv-route-col="${COLORS2[i % COLORS2.length]}" title="Draw this macro's CURRENT route (solid) vs the ♻ replan route (dashed white) on the map" style="padding:0 5px;background:rgba(122,223,230,0.12);border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">👁</button>`;
                     }
                     return `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${reBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine}`;
                 }).join('')
@@ -5268,6 +5270,11 @@
         el.querySelector('[data-mcv-x]').onclick = () => { mcv.on = false; mcvClear(); const b = document.querySelector('[data-mcv-toggle]'); if (b) b.classList.remove('active'); };
         el.querySelector('[data-mcv-report]').onclick = () => mcvReport();
         el.querySelectorAll('[data-mcv-reorder]').forEach(b => b.onclick = () => mcvReorder(Number(b.getAttribute('data-mcv-reorder')) || b.getAttribute('data-mcv-reorder')));
+        el.querySelectorAll('[data-mcv-route]').forEach(b => b.onclick = () => {
+            const id = Number(b.getAttribute('data-mcv-route')) || b.getAttribute('data-mcv-route');
+            const on = mcvToggleRoute(id, b.getAttribute('data-mcv-route-col'));
+            b.style.background = on ? 'rgba(122,223,230,0.4)' : 'rgba(122,223,230,0.12)';
+        });
         el.querySelectorAll('[data-mcv-t]').forEach(inp => inp.onchange = () => {
             const patch = {}; patch[inp.getAttribute('data-mcv-t')] = Number(inp.value);
             gmSet(MCV_TIME_KEY, Object.assign({}, mcvTimeCfg(), patch));
@@ -5479,6 +5486,61 @@
             showToast('♻ Reorder FAILED — nothing verified, backup downloaded (see console).', '#ff5252', 6000);
         }
         mcvReorderBusy = false;
+    }
+
+    // 👁 route comparison (v2.44) — draw a macro's CURRENT order (solid, the
+    // macro's color) and the ♻ replan order (dashed white) as legal routes on
+    // the verified graph, base to base. Answers "how is it so much further"
+    // with feet of line instead of vibes. Click-through; per-macro toggle.
+    const mcvRoutes = new Map();   // missionId -> layers[]
+    function mcvClearRoutes(missionId) {
+        const clear = (id) => { (mcvRoutes.get(id) || []).forEach(l => { try { l.remove(); } catch (e) {} }); mcvRoutes.delete(id); };
+        if (missionId != null) clear(missionId);
+        else Array.from(mcvRoutes.keys()).forEach(clear);
+    }
+    function mcvRouteBuilt() {
+        const data = mcv.data;
+        if (!data) return null;
+        if (!data.routeBuilt) {
+            try {
+                const built = rngBuildGraph(data.ent, false);
+                built.boxes = built.ffzs.map(f => agRingBbox(f.ring, MB_ENTRY_FFZ_FT / 3.28084));
+                data.routeBuilt = built;
+            } catch (e) { console.warn(`${TAG} [mcv] route graph build failed`, e); return null; }
+        }
+        return data.routeBuilt;
+    }
+    function mcvToggleRoute(missionId, color) {
+        if (mcvRoutes.has(missionId)) { mcvClearRoutes(missionId); return false; }
+        const L = composerGetL(), map = getLeafletMap();
+        const data = mcv.data;
+        if (!L || !map || !data) return false;
+        const mc = data.det.macros.find(x => x.mission.id === missionId);
+        const au = data.audits ? data.audits.get(missionId) : null;
+        const built = mcvRouteBuilt();
+        if (!mc || !built) { showToast('Route compare unavailable (see console).', '#ff9800', 3000); return false; }
+        const base = data.ent.base;
+        const layers = [];
+        const pathFor = (pads) => {
+            const stops = [];
+            if (base) stops.push(base);
+            pads.forEach(a => stops.push(genCentroid(a.ring)));
+            if (base) stops.push(base);
+            let pts = [];
+            for (let i = 1; i < stops.length; i++) {
+                const leg = mpvLegalPath(built, stops[i - 1], stops[i]) || [[stops[i - 1].lat, stops[i - 1].lng], [stops[i].lat, stops[i].lng]];
+                pts = pts.length ? pts.concat(leg.slice(1)) : leg.slice();
+            }
+            return pts;
+        };
+        try {
+            layers.push(L.polyline(pathFor(mc.pads), { color, weight: 4, opacity: 0.9, interactive: false }).addTo(map));
+            if (au && au.reRows && au.reRows.length) {
+                layers.push(L.polyline(pathFor(au.reRows.map(r => r.asset)), { color: '#ffffff', weight: 2.5, opacity: 0.9, dashArray: '6 6', interactive: false }).addTo(map));
+            }
+        } catch (e) { console.warn(`${TAG} [mcv] route draw failed`, e); }
+        mcvRoutes.set(missionId, layers);
+        return true;
     }
 
     // 📋 Report (v2.39) — the user's planning spreadsheet, generated: one row
