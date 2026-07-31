@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.37
+// @version      2.38
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.37';
+    const SCRIPT_VERSION = '2.38';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5181,7 +5181,9 @@
             let deepest = null;
             mc.pads.forEach(a => {
                 try {
-                    mcv.layers.push(L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: col, weight: 4, opacity: 0.9, fill: true, fillColor: col, fillOpacity: 0.07, interactive: false }).addTo(map));
+                    // SOLID fill (v2.38) — covered pads read as painted, so the
+                    // eye only hunts for UNfilled pads (the remaining work)
+                    mcv.layers.push(L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: col, weight: 3, opacity: 0.95, fill: true, fillColor: col, fillOpacity: 0.55, interactive: false }).addTo(map));
                 } catch (e) {}
                 if (!deepest) deepest = a;   // first pad = mission's first stop
             });
@@ -5208,7 +5210,7 @@
                 ? det.macros.map((mc, i) => `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px;">${escapeHtml(String(mc.mission.name || ''))}</span><b style="margin-left:auto;padding-left:10px;">${mc.pads.length}</b></div>`).join('')
                 : '<div style="color:#888;">No macro missions yet (≥2 pads in one mission).</div>')
             + `<div style="color:#ffb74d;margin-top:5px;">⬜ ${det.todo.length} pad(s) with missions, not in any macro</div>`
-            + '<div style="color:#789;margin-top:3px;">Overlay is click-through — lasso right over it</div>';
+            + '<div style="color:#789;margin-top:3px;">Filled = covered · UNfilled = still to do · click-through</div>';
         document.body.appendChild(el);
         el.querySelector('[data-mcv-x]').onclick = () => { mcv.on = false; mcvClear(); const b = document.querySelector('[data-mcv-toggle]'); if (b) b.classList.remove('active'); };
         mcv.legendEl = el;

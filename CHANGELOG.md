@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-31 — Mission Bank Tools v2.38 (dev/latest): 🧩 covered pads are solid-filled
+
+Covered pads now render with a solid color fill (55%) instead of a faint tint — scan for the *unfilled* pads and that's your remaining work. Legend hint updated to match.
+
 ## 2026-07-31 — Mission Bank Tools v2.37 (dev/latest): 🧩 Macros — see what's already covered
 
 New **🧩 Macros** toggle in the SUM toolbar: shows which pads are already claimed by macro (merged) missions.
