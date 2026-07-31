@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.41
+// @version      2.42
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.41';
+    const SCRIPT_VERSION = '2.42';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5333,14 +5333,28 @@
                 const bPct = Number(mc.mission.battery_consumption) || null;
                 const distM = Number(mc.mission.flight_distance) || null;
                 if (bPct && re.sim && cur.totalFt > 0) {
-                    const ratio = re.sim.totalFt / cur.totalFt;
-                    const reB = bPct * ratio;
+                    // v2.42: reorder only shrinks the NAV phase — Wait /
+                    // takeoff / landing / extra burn is order-invariant (live
+                    // SUM breakdown: West Side 404% = 293% nav + 111% fixed).
+                    // The ratio is therefore computed on the sim's NAV-like
+                    // energy (legs + intra-pad flying; per-step hover cost
+                    // excluded from both sides) and applied to Percepto's
+                    // nav_consumption only; the fixed phases carry over.
+                    const stepOnly = rows.reduce((t2, r2) => t2 + pcmStepCount(r2.mission) * cfg.stepCostFt, 0);
+                    const navCurFt = Math.max(1, cur.totalFt - stepOnly);
+                    const navReFt = Math.max(1, re.sim.totalFt - stepOnly);
+                    const navRatio = Math.min(2, Math.max(0.1, navReFt / navCurFt));
+                    const navB = Number(mc.mission.nav_consumption) || null;
+                    const fixedB = navB != null ? Math.max(0, bPct - navB) : null;
+                    const reB = (navB != null && fixedB != null)
+                        ? navB * navRatio + fixedB
+                        : bPct * (re.sim.totalFt / cur.totalFt);   // no phase data → whole-ratio fallback
                     calib = {
-                        ratio,
+                        ratio: navRatio,
                         curB: bPct, reB,
                         curFl: estimateFlights(bPct) || cur.flights.length,
                         reFl: estimateFlights(reB) || re.sim.flights.length,
-                        curDistM: distM, reDistM: distM ? distM * ratio : null,
+                        curDistM: distM, reDistM: distM ? distM * navRatio : null,
                     };
                 }
                 audits.set(mc.mission.id, { cur, re: re.sim, reRows: re.rows, unknown, budget, calib });

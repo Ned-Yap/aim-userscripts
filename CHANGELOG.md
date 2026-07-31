@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-31 — Mission Bank Tools v2.42 (dev/latest): ♻ audit respects the consumption phases
+
+The SUM breakdown showed most battery isn't reorderable — West Side's 404% is 293% Nav + 111% Wait/takeoff/landing. The replan estimate now scales **only the Nav share** by the route ratio and carries the fixed phases over unchanged (per-step hover energy is excluded from the ratio on both sides so it can't distort it). Missions without phase data fall back to the whole-battery ratio.
+
+Net effect: replan estimates got a bit less optimistic and a lot more honest — a mission whose battery mostly goes to Waits won't be promised big savings from reordering, because reordering can't touch that burn.
+
 ## 2026-07-31 — Mission Bank Tools v2.41 (dev/latest): ♻ audit is now Percepto-calibrated
 
 Live cross-check against the SUM table showed the audit's absolute numbers running ~2× hot (the simulator's ft-equivalents mix distance with capture energy and model conservatively). Fixed by anchoring:
