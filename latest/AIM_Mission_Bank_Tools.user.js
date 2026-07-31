@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.22
+// @version      2.23
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.22';
+    const SCRIPT_VERSION = '2.23';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -3769,8 +3769,12 @@
     // Tattu / 20k Tulip with zero capture budget).
     const AG_CFG_KEY = 'aim-mb-autogroup-cfg';
     const AG_DEFAULTS = {
-        tattuRadiusFt: 13500,   // one-way route ≤ this → Tattu tier
-        tulipRadiusFt: 17500,   // ≤ this → Tulip tier; beyond → excluded (unflyable)
+        // v2.23: back to the operational 14k/18k — the "hair under" 13.5k/17.5k
+        // defaults kept surprising the user (a 13.7k pad reading Tulip-orange
+        // when they think of it as a 14k Tattu pad). The margin knob already
+        // provides the safety slack; radii should match how they talk.
+        tattuRadiusFt: 14000,   // one-way route ≤ this → Tattu tier
+        tulipRadiusFt: 18000,   // ≤ this → Tulip tier; beyond → excluded (unflyable)
         // Budgets back-derived from real ops (live test 2026-07-30): 14k/18k
         // pads ARE flown with capture + a 20–30% landing reserve, so total
         // range ≈ 2×radius ÷ 0.75 → ~37k Tattu / ~46k Tulip ft-equiv.

@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-30 — Mission Bank Tools v2.23 (dev/latest): 🔋 radii defaults back to 14k / 18k
+
+- The Tattu/Tulip cutoffs now default to the operational **14,000 / 18,000 ft** (the earlier "hair-under" 13.5k/17.5k defaults kept mislabeling pads like a 13.7k as Tulip-orange). The margin knob already carries the safety slack.
+- **If you ever touched the knobs (including ↺), press ↺ once after updating** — saved knob values stick, and one reset pulls in the new defaults.
+
 ## 2026-07-30 — Mission Bank Tools v2.21 (dev/latest): 🔋 Range — battery icons + hover distances
 
 - The tiny text chip is gone: each pad FFZ now gets a **big battery icon** tinted by class (green = Tattu, orange = Tulip, red = out of range/no route, purple `!` = unverified, gray `–` = no FFZ).
