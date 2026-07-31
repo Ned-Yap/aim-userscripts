@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-31 — Mission Bank Tools v2.40 (dev/latest): ♻ old-mission efficiency audit + in-place reorder
+
+The SLA tool: flight-hours are the bottleneck (~20 min flight + ~80 min recharge ≈ 1¾ h of wall clock per flight), so the 🧩 legend now audits every macro:
+
+- **Audit (automatic when you toggle 🧩)**: each macro's *current* step order is simulated against the spur-walk replan of the same pads — `48k ft · 6 fl · ~1.2d → ♻ 100k · 4 fl (−2 fl, −31%)`. Near-optimal macros say so; wasteful ones get flagged orange. Time knobs (flight min / charge min / ops h per day) sit in the legend so "days" matches each site's reality until we calibrate from flight records.
+- **♻ Reorder in place**: one click on a flagged macro resequences its per-pad step *blocks* into the replan order — every pad's own steps stay untouched and contiguous, takeoff/landing preserved, same mission id and name. Rails: JSON backup downloads first, hard abort if the rebuilt step count doesn't match, fresh-fetch verify after, reminder to re-check the schedule.
+- **📋 Report** grows a second table: per-mission current vs replan ft/flights, flights saved, est days — sorted by savings so the SLA offenders are on top.
+
 ## 2026-07-31 — ⭐ PROMOTED TO PROD: Mission Bank Tools v2.39 (coworkers jump from v2.13)
 
 The entire two-day macro-mission arc reaches everyone:

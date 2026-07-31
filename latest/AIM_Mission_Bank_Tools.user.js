@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.39
+// @version      2.40
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.39';
+    const SCRIPT_VERSION = '2.40';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5147,22 +5147,37 @@
         const covered = new Set();
         const missionPads = new Map();
         (missions || []).forEach(m => {
-            const ins = (m.instructions || []).filter(i => i && i.location && typeof i.location.lat === 'number' && i.type !== 0 && i.type !== 99);
             const padIds = new Set(), pads = [];
-            ins.forEach(i => {
-                const p = i.location;
-                let best = null;
-                for (let ai = 0; ai < assets.length; ai++) {
-                    const bb = boxes[ai];
-                    if (p.lat < bb.s || p.lat > bb.n || p.lng < bb.w || p.lng > bb.e) continue;
-                    const d = mbPointToPolygonMeters(p.lat, p.lng, assets[ai].ring);
-                    if (d <= tolM && (!best || d < best.d)) best = { a: assets[ai], d };
+            // v2.40: also build the mission's BLOCK structure — contiguous runs
+            // of steps per pad, in flight order. Unlocated steps (waits/camera)
+            // and off-pad transit navs travel with the pad they follow; steps
+            // before the first pad go in a leading null-block. Blocks are what
+            // ♻ reorder resequences (each pad's own steps stay intact).
+            const blocks = [];
+            let curPad;   // undefined until the first pad assignment
+            (m.instructions || []).forEach(i => {
+                if (!i || i.type === 0 || i.type === 99) return;
+                if (i.location && typeof i.location.lat === 'number') {
+                    const p = i.location;
+                    let best = null;
+                    for (let ai = 0; ai < assets.length; ai++) {
+                        const bb = boxes[ai];
+                        if (p.lat < bb.s || p.lat > bb.n || p.lng < bb.w || p.lng > bb.e) continue;
+                        const d = mbPointToPolygonMeters(p.lat, p.lng, assets[ai].ring);
+                        if (d <= tolM && (!best || d < best.d)) best = { a: assets[ai], d };
+                    }
+                    if (best) {
+                        curPad = best.a.id;
+                        if (!padIds.has(best.a.id)) { padIds.add(best.a.id); pads.push(best.a); }
+                    }
                 }
-                if (best && !padIds.has(best.a.id)) { padIds.add(best.a.id); pads.push(best.a); }
+                const aId = (curPad === undefined) ? null : curPad;
+                if (!blocks.length || blocks[blocks.length - 1].aId !== aId) blocks.push({ aId, steps: [] });
+                blocks[blocks.length - 1].steps.push(i);
             });
             if (pads.length) missionPads.set(m.id, pads);
             if (pads.length >= 2) {
-                macros.push({ mission: m, pads });
+                macros.push({ mission: m, pads, blocks });
                 pads.forEach(a => covered.add(a.id));
             }
         });
@@ -5207,19 +5222,205 @@
         const COLORS2 = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
         el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><b style="color:#7adfe6;">🧩 Macro coverage</b><button data-mcv-report title="Copy the coverage report (Name / Classification / Captured / Battery / Section / Mission / Order) — colored cells, paste into Google Sheets" style="padding:1px 7px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">📋 Report</button><span data-mcv-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
             + (det.macros.length
-                ? det.macros.map((mc, i) => `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px;">${escapeHtml(String(mc.mission.name || ''))}</span><b style="margin-left:auto;padding-left:10px;">${mc.pads.length}</b></div>`).join('')
+                ? det.macros.map((mc, i) => {
+                    const au = (mcv.data && mcv.data.audits) ? mcv.data.audits.get(mc.mission.id) : null;
+                    let auditLine = '';
+                    let reBtn = '';
+                    if (au && au.cur && au.re) {
+                        const dFl = au.cur.flights.length - au.re.flights.length;
+                        const dPct = au.cur.totalFt > 0 ? Math.round((au.cur.totalFt - au.re.totalFt) / au.cur.totalFt * 100) : 0;
+                        const days = mcvDays(au.cur.flights.length).days;
+                        const worth = dFl >= 1 || dPct >= 10;
+                        auditLine = `<div style="margin:0 0 3px 16px;font-size:10px;color:${worth ? '#ffb74d' : '#789'};">`
+                            + `${(au.cur.totalFt / 1000).toFixed(0)}k ft · ${au.cur.flights.length} fl · ~${days.toFixed(1)}d`
+                            + (worth ? ` → ♻ ${(au.re.totalFt / 1000).toFixed(0)}k · ${au.re.flights.length} fl (−${dFl} fl, −${dPct}%)` : ' · ✓ near-optimal')
+                            + `${au.unknown ? ` · ⚠${au.unknown} unranged` : ''}</div>`;
+                        if (worth) reBtn = `<button data-mcv-reorder="${mc.mission.id}" title="Re-order this mission's pad blocks in place (backup + verify; steps untouched)" style="padding:0 5px;background:rgba(255,183,77,0.15);border:1px solid rgba(255,183,77,0.5);color:#ffb74d;border-radius:4px;cursor:pointer;font-size:10px;">♻</button>`;
+                    }
+                    return `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${reBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine}`;
+                }).join('')
                 : '<div style="color:#888;">No macro missions yet (≥2 pads in one mission).</div>')
             + `<div style="color:#ffb74d;margin-top:5px;">⬜ ${det.todo.length} pad(s) with missions, not in any macro</div>`
+            + (() => { const t = mcvTimeCfg(); const perDay = mcvDays(1).perDay; return `<div style="display:flex;gap:5px;align-items:center;margin-top:5px;font-size:10px;color:#9ad;flex-wrap:wrap;">`
+                + `flight <input data-mcv-t="flightMin" type="number" value="${t.flightMin}" style="width:34px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">m`
+                + ` charge <input data-mcv-t="chargeMin" type="number" value="${t.chargeMin}" style="width:38px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">m`
+                + ` ops <input data-mcv-t="opsHrs" type="number" value="${t.opsHrs}" style="width:30px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">h/d`
+                + ` <span style="color:#789;">≈${perDay} fl/day</span></div>`; })()
             + '<div style="color:#789;margin-top:3px;">Filled = covered · UNfilled = still to do · click-through</div>';
         document.body.appendChild(el);
         el.querySelector('[data-mcv-x]').onclick = () => { mcv.on = false; mcvClear(); const b = document.querySelector('[data-mcv-toggle]'); if (b) b.classList.remove('active'); };
         el.querySelector('[data-mcv-report]').onclick = () => mcvReport();
+        el.querySelectorAll('[data-mcv-reorder]').forEach(b => b.onclick = () => mcvReorder(Number(b.getAttribute('data-mcv-reorder')) || b.getAttribute('data-mcv-reorder')));
+        el.querySelectorAll('[data-mcv-t]').forEach(inp => inp.onchange = () => {
+            const patch = {}; patch[inp.getAttribute('data-mcv-t')] = Number(inp.value);
+            gmSet(MCV_TIME_KEY, Object.assign({}, mcvTimeCfg(), patch));
+            // redraw with the new day math
+            if (mcv.data && mcv.data.det) { mcvClear(); mcvDraw(mcv.data.det); }
+        });
         mcv.legendEl = el;
         // subtle dashed white outline on not-yet-covered pads — the TODO list
         det.todo.forEach(a => {
             try { mcv.layers.push(L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: '#ffffff', weight: 2, dashArray: '2 6', opacity: 0.65, fill: false, interactive: false }).addTo(map)); } catch (e) {}
         });
     }
+    // ── ♻ EFFICIENCY AUDIT + REORDER (v2.40) ────────────────────────────────
+    // Flight-hours are the SLA currency: ~20-25 min flight + ~80 min recharge
+    // means EVERY flight costs ~1¾ h of wall clock, so a 6-flight macro eats
+    // an ops day. The audit simulates each macro's CURRENT step order vs the
+    // spur-walk replan of the same pads, and converts flights → days via
+    // editable time knobs. ♻ then resequences the macro's per-pad step
+    // blocks in place (same id + name, backup first, verify after).
+    const MCV_TIME_KEY = 'aim-mb-mcv-time';
+    function mcvTimeCfg() {
+        const d = { flightMin: 22, chargeMin: 80, opsHrs: 8 };
+        const s = gmGet(MCV_TIME_KEY, null);
+        const o = Object.assign({}, d, (s && typeof s === 'object') ? s : {});
+        Object.keys(d).forEach(k => { const v = Number(o[k]); o[k] = (isFinite(v) && v > 0) ? v : d[k]; });
+        return o;
+    }
+    function mcvDays(flights) {
+        const t = mcvTimeCfg();
+        // last flight of the day needs no recharge after it
+        const perDay = Math.max(1, Math.floor((t.opsHrs * 60 + t.chargeMin) / (t.flightMin + t.chargeMin)));
+        return { days: flights / perDay, perDay };
+    }
+    function mcvAudit(det, ent) {
+        const t0 = Date.now();
+        let sol;
+        try { sol = rngSolve(ent); } catch (e) { console.warn(`${TAG} [mcv] audit range solve failed`, e); return new Map(); }
+        const byAsset = new Map(sol.results.map(r => [r.asset.id, r]));
+        const cfg = agCfg();
+        const audits = new Map();
+        det.macros.forEach(mc => {
+            try {
+                const stepsByPad = new Map();
+                (mc.blocks || []).forEach(b => {
+                    if (b.aId == null) return;
+                    if (!stepsByPad.has(b.aId)) stepsByPad.set(b.aId, []);
+                    b.steps.forEach(s => stepsByPad.get(b.aId).push(s));
+                });
+                const rows = [];
+                let unknown = 0;
+                mc.pads.forEach(a => {
+                    const r = byAsset.get(a.id);
+                    if (!r || r.status !== 'ok') { unknown++; return; }
+                    rows.push({
+                        asset: a,
+                        mission: { id: `blk:${a.id}`, name: a.name, instructions: stepsByPad.get(a.id) || [] },
+                        ft: r.worstFt,
+                        tulip: r.worstFt > cfg.tattuRadiusFt,
+                    });
+                });
+                if (rows.length < 2) { audits.set(mc.mission.id, null); return; }
+                const budget = rows.some(r => r.tulip) ? cfg.tulipBudgetFt : cfg.tattuBudgetFt;
+                const pw = lassoBuildPairwise(rows, ent, byAsset);
+                if (!pw || !pw.ok) { audits.set(mc.mission.id, null); return; }
+                const cur = agSimulate(rows.map((_, i) => i), pw.dPad, pw.dBase, pw.costOf, budget);
+                const re = lassoOrderRows(rows, budget, pw);
+                audits.set(mc.mission.id, { cur, re: re.sim, reRows: re.rows, unknown, budget });
+            } catch (e) {
+                console.warn(`${TAG} [mcv] audit failed for "${mc.mission.name}"`, e);
+                audits.set(mc.mission.id, null);
+            }
+        });
+        console.log(`${TAG} [mcv] audit: ${det.macros.length} macro(s) in ${Date.now() - t0} ms`);
+        return audits;
+    }
+    // ♻ resequence a macro's per-pad blocks into the replan order, in place.
+    let mcvReorderBusy = false;
+    async function mcvReorder(missionId) {
+        if (mcvReorderBusy) return;
+        const data = mcv.data;
+        const mc = data && data.det.macros.find(x => x.mission.id === missionId);
+        const audit = data && data.audits ? data.audits.get(missionId) : null;
+        if (!mc || !audit || !audit.re) { showToast('No replan available for this mission.', '#ff9800', 3000); return; }
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4500); return; }
+        const m = mc.mission;
+        const ins = m.instructions || [];
+        const to = ins.filter(i => i && i.type === 0).slice(0, 1);
+        const rh = ins.filter(i => i && i.type === 99).slice(-1);
+        const lead = (mc.blocks[0] && mc.blocks[0].aId == null) ? mc.blocks[0].steps : [];
+        const byPad = new Map();
+        mc.blocks.forEach(b => {
+            if (b.aId == null) return;
+            if (!byPad.has(b.aId)) byPad.set(b.aId, []);
+            b.steps.forEach(s => byPad.get(b.aId).push(s));
+        });
+        const orderIds = audit.reRows.map(r => r.asset.id);
+        const seen = new Set(orderIds);
+        mc.pads.forEach(a => { if (!seen.has(a.id) && byPad.has(a.id)) { orderIds.push(a.id); seen.add(a.id); } });
+        const body = lead.slice();
+        orderIds.forEach(id => (byPad.get(id) || []).forEach(s => body.push(s)));
+        const instrs = to.map(pcmNormStep).concat(body.map(pcmNormStep), rh.map(pcmNormStep));
+        // hard sanity: exactly the same steps, only re-sequenced
+        const expected = to.length + rh.length + ins.filter(i => i && i.type !== 0 && i.type !== 99).length;
+        if (instrs.length !== expected) {
+            console.warn(`${TAG} [mcv] reorder ABORT — step count mismatch (${instrs.length} vs ${expected})`, m.name);
+            showToast('♻ Aborted: rebuilt step count does not match the original (see console). Nothing saved.', '#ff5252', 6000);
+            return;
+        }
+        const dCur = mcvDays(audit.cur.flights.length), dRe = mcvDays(audit.re.flights.length);
+        if (!window.confirm(`♻ Re-order "${m.name}" IN PLACE?\n\n`
+            + `${audit.cur.flights.length} flights (~${dCur.days.toFixed(1)} day(s)) → ${audit.re.flights.length} flights (~${dRe.days.toFixed(1)} day(s))\n`
+            + `est ${(audit.cur.totalFt / 1000).toFixed(0)}k ft → ${(audit.re.totalFt / 1000).toFixed(0)}k ft\n\n`
+            + `Each pad's steps stay intact — only the pad ORDER changes. Mission id + name unchanged.\nA JSON backup downloads first.`)) return;
+        mcvReorderBusy = true;
+        try {
+            // backup (same frame-walking download as the wrap tools)
+            try {
+                const blob = new Blob([JSON.stringify({ site: getCurrentSiteID(), savedAt: new Date().toISOString(), reason: 'pre-reorder', mission: m })], { type: 'application/json' });
+                const blobUrl = URL.createObjectURL(blob);
+                let downloaded = false;
+                for (const doc of [(window.top || window).document, document]) {
+                    if (downloaded) break;
+                    try {
+                        const a = doc.createElement('a');
+                        a.href = blobUrl; a.download = `mission${m.id}_prereorder_backup.json`;
+                        (doc.body || document.body).appendChild(a); a.click(); a.remove();
+                        downloaded = true;
+                    } catch (e) {}
+                }
+                setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 5000);
+                if (!downloaded) throw new Error('no frame allowed the download');
+            } catch (e) {
+                console.warn(`${TAG} [mcv] backup download failed`, e);
+                if (!window.confirm('Backup download FAILED — continue WITHOUT a backup?')) { mcvReorderBusy = false; return; }
+            }
+            showToast(`♻ Saving re-ordered "${m.name}"…`, '#9cf', 3000);
+            await ctx.saveApp(Object.assign({}, m, { instructions: instrs }), m.name);
+            // verify: fresh fetch → same pad set, new order, same step count
+            await new Promise(r => setTimeout(r, 1200));
+            const after = await mbFetchMissionsFull(getCurrentSiteID());
+            const m2 = after.find(x => x.id === m.id);
+            let good = false;
+            if (m2) {
+                const det2 = mcvDetect(data.ent, [m2]);
+                const mc2 = det2.macros[0];
+                const gotOrder = mc2 ? mc2.pads.map(a => a.id).join(',') : '';
+                const wantOrder = orderIds.join(',');
+                const steps2 = (m2.instructions || []).filter(i => i && i.type !== 0 && i.type !== 99).length;
+                const steps1 = ins.filter(i => i && i.type !== 0 && i.type !== 99).length;
+                good = gotOrder === wantOrder && steps2 === steps1;
+                if (!good) console.warn(`${TAG} [mcv] verify mismatch — order got [${gotOrder}] want [${wantOrder}] · steps ${steps2}/${steps1}`);
+            }
+            showToast(good
+                ? `♻ "${m.name}" re-ordered ✓ verified — ${audit.cur.flights.length} → ${audit.re.flights.length} flights. Re-check its schedule if one is active.`
+                : `⚠ "${m.name}" saved but verify mismatched — check the mission + console (backup downloaded).`, good ? '#5fff5f' : '#ff9800', 9000);
+            // refresh overlay data
+            mcv.data.missions = after;
+            mcv.data.det = mcvDetect(data.ent, after);
+            mcv.data.audits = mcvAudit(mcv.data.det, data.ent);
+            mcvClear();
+            mcvDraw(mcv.data.det);
+            mcv.on = true;
+        } catch (e) {
+            console.warn(`${TAG} [mcv] reorder failed`, e);
+            showToast('♻ Reorder FAILED — nothing verified, backup downloaded (see console).', '#ff5252', 6000);
+        }
+        mcvReorderBusy = false;
+    }
+
     // 📋 Report (v2.39) — the user's planning spreadsheet, generated: one row
     // per pad with Name / Asset Classification / Captured? / Battery /
     // Section / Mission Name / Order, grouped by mission (uncovered pads at
@@ -5282,11 +5483,36 @@
                     + '</tr>';
             }).join('')
             + '</table>';
+        // ♻ mission-level audit table (v2.40) — appended below the pad table
+        const audits = data.audits || new Map();
+        const auRows = det.macros.map(mc => {
+            const au = audits.get(mc.mission.id);
+            const steps = (mc.mission.instructions || []).filter(i => i && i.type !== 0 && i.type !== 99).length;
+            if (!au || !au.cur || !au.re) return { name: mc.mission.name, pads: mc.pads.length, steps, cur: '', curFl: '', re: '', reFl: '', dFl: '', days: '' };
+            return {
+                name: mc.mission.name, pads: mc.pads.length, steps,
+                cur: Math.round(au.cur.totalFt / 1000) + 'k', curFl: au.cur.flights.length,
+                re: Math.round(au.re.totalFt / 1000) + 'k', reFl: au.re.flights.length,
+                dFl: au.cur.flights.length - au.re.flights.length,
+                days: mcvDays(au.cur.flights.length).days.toFixed(1),
+            };
+        }).sort((a, b) => (Number(b.dFl) || 0) - (Number(a.dFl) || 0));
+        const auHtml = auRows.length
+            ? '<br><table style="border-collapse:collapse;font-family:Arial;font-size:12px;"><tr>'
+                + ['Mission', 'Pads', 'Steps', 'Current est ft', 'Current flights', 'Replan est ft', 'Replan flights', 'Flights saved', 'Est days (current)'].map(h => `<td style="border:1px solid #999;padding:2px 8px;background:#efefef;font-weight:bold;">${h}</td>`).join('')
+                + '</tr>'
+                + auRows.map(r3 => '<tr>' + [r3.name, r3.pads, r3.steps, r3.cur, r3.curFl, r3.re, r3.reFl, r3.dFl, r3.days].map((v, ci) => td(v, ci === 7 && Number(v) >= 1 ? '#ffe0b2' : '', '#333')).join('') + '</tr>').join('')
+                + '</table>'
+            : '';
+        const html2 = html + auHtml;
         const tsv = ['Name\tAsset Classification\tCaptured?\tBattery\tSection\tMission Name\tOrder']
-            .concat(rows.map(r2 => [r2.name, r2.cls, r2.captured ? 'TRUE' : 'FALSE', r2.bat, r2.sec, r2.mission, r2.order].join('\t'))).join('\n');
+            .concat(rows.map(r2 => [r2.name, r2.cls, r2.captured ? 'TRUE' : 'FALSE', r2.bat, r2.sec, r2.mission, r2.order].join('\t')))
+            .concat(auRows.length ? ['', 'Mission\tPads\tSteps\tCurrent est ft\tCurrent flights\tReplan est ft\tReplan flights\tFlights saved\tEst days (current)']
+                .concat(auRows.map(r3 => [r3.name, r3.pads, r3.steps, r3.cur, r3.curFl, r3.re, r3.reFl, r3.dFl, r3.days].join('\t'))) : [])
+            .join('\n');
         try {
             await navigator.clipboard.write([new ClipboardItem({
-                'text/html': new Blob([html], { type: 'text/html' }),
+                'text/html': new Blob([html2], { type: 'text/html' }),
                 'text/plain': new Blob([tsv], { type: 'text/plain' }),
             })]);
             showToast(`📋 Report copied (${rows.length} pads) — paste into Google Sheets.`, '#5fff5f', 5000);
@@ -5311,6 +5537,8 @@
             const [ent, missions] = await Promise.all([genFetchEntities(sid), new Promise((res, rej) => fetchMissions(sid, res, rej))]);
             const det = mcvDetect(ent, missions);
             mcv.data = { ent, missions, det };
+            showToast('♻ Auditing macro efficiency (current order vs replan)…', '#7adfe6', 2500);
+            mcv.data.audits = mcvAudit(det, ent);
             mcvClear();
             mcvDraw(det);
             mcv.on = true;
