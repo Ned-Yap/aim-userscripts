@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-30 — Mission Bank Tools v2.33 (dev/latest): 🖊 Lasso — the three live-test fixes
+
+- **Missing pad inside the loop**: pads count as inside when their centroid *or any corner* is in the loop, and every skipped pad now gets a **red ✕ right on the map** (the popup lists the reason) — a missing number explains itself.
+- **Numbers hidden behind batteries**: pick-number badges now render above the 🔋 battery icons.
+- **"Why is 1, 2, 3 all over the place"**: two causes fixed. (1) The pad-to-route attachment could silently fail (a stranded-vertex bug in the graph attach — also fixed for the 👁 preview lines), which quietly degraded distances to straight-line guesses. Pads now anchor to their own FFZ's ring vertices, so the pairwise distances are the real legal routes (verified: 0 estimated legs on the reference site). (2) When most pads each need their own flight, all orders cost about the same — ties now break toward geographically coherent orders (nearest-neighbor chain, then a bearing sweep around the base) instead of the scrambled-looking furthest-first sort.
+
 ## 2026-07-30 — 👁 Mission preview upgrades (dev/latest, MBT v2.25–v2.32): real routes, real structure, hover IDs
 
 Works on Site Setup, Mission Bank, **and Data View**:

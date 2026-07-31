@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.32
+// @version      2.33
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.32';
+    const SCRIPT_VERSION = '2.33';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -4271,9 +4271,13 @@
             nn.push(best.j); left.delete(best.j);
         }
         let winner = null;
-        // Third seed (v2.19): the given order — family sets arrive in bearing-
-        // sweep order, i.e. the human "walk the perimeter" instinct.
-        [farNear, nn, idxs.slice()].forEach(seed => {
+        // Seed ORDER is the tie-break (strict <): when most pads each need
+        // their own flight, every order simulates ~equal and the first seed
+        // wins — NN chains read geographically coherent, far→near reads
+        // scrambled ("why is 1, 2, 3 all over the place" — live test v2.33).
+        // So: NN chain first, caller's order (bearing sweep) second,
+        // far→near last.
+        [nn, idxs.slice(), farNear].forEach(seed => {
             let o = seed.slice(), c = cost(o), improved = true, guard = 0;
             while (improved && guard++ < 40) {
                 improved = false;
@@ -4692,7 +4696,8 @@
                         html: rngBatteryHtml(c.color, c.mark, c.near),
                         iconSize: [34, 18], iconAnchor: [17, 9],
                     });
-                    rng.layers.push(L.marker([ctr.lat, ctr.lng], { icon, interactive: false, keyboard: false }).addTo(getLeafletMap()));
+                    // sits BELOW pick-number badges (their zIndexOffset is +1000)
+                    rng.layers.push(L.marker([ctr.lat, ctr.lng], { icon, interactive: false, keyboard: false, zIndexOffset: -600 }).addTo(getLeafletMap()));
                     rng.chips.push({
                         lat: ctr.lat, lng: ctr.lng,
                         text: r.status === 'ok'
@@ -4754,7 +4759,7 @@
     // stages into the pad-click merge editor (numbered badges) for inspection
     // before Create. Drawing is a one-shot pen: press 🖊, drag a loop, done.
     // ════════════════════════════════════════════════════════════════════════
-    const lasso = { armed: false, drawing: false, pts: [], line: null, data: null, handlers: null, resultEl: null };
+    const lasso = { armed: false, drawing: false, pts: [], line: null, data: null, handlers: null, resultEl: null, resultLayers: [] };
     function lassoCleanupDraw() {
         const map = getLeafletMap();
         try { if (map && map.dragging && lasso.dragWasEnabled) map.dragging.enable(); } catch (e) {}
@@ -4772,6 +4777,8 @@
     }
     function lassoCloseResults() {
         if (lasso.resultEl) { try { lasso.resultEl.remove(); } catch (e) {} lasso.resultEl = null; }
+        lasso.resultLayers.forEach(l => { try { l.remove(); } catch (e) {} });
+        lasso.resultLayers = [];
     }
     async function lassoToggle(btn) {
         if (lasso.armed) { lassoCleanupDraw(); showToast('🖊 Lasso cancelled.', '#888', 2000); return; }
@@ -4848,15 +4855,45 @@
     // the 👁 preview's mpvAttachPoint), then one Dijkstra per pad gives
     // pad↔pad and pad↔base along REAL legal routes. Off-graph pairs fall back
     // straight-line ×1.25 and are counted + logged.
-    function lassoBuildPairwise(rows, ent) {
+    function lassoBuildPairwise(rows, ent, byAsset) {
         try {
             const built = rngBuildGraph(ent, false);
-            built.boxes = built.ffzs.map(f => agRingBbox(f.ring, MB_ENTRY_FFZ_FT / 3.28084));
-            const temp = [];
+            const link = (ka, kb, w) => { built.graph.adj.get(ka).push({ to: kb, w }); built.graph.adj.get(kb).push({ to: ka, w }); };
+            // v2.33: anchor each pad to its OWN FFZ's ring vertices (the fi the
+            // verified solver assigned it) — real missions put navs inside the
+            // FFZ, but this stays connected regardless of nav placement (nav-
+            // at-centroid pads attached to NOTHING and every distance fell
+            // back to straight-line, which is what scrambled the ordering).
             const padKeys = rows.map((r, i) => {
                 const navs = mbSoloPoints(r.mission);
                 const p = navs.length ? navs[0] : genCentroid(r.asset.ring);
-                return mpvAttachPoint(built, p, `lasso${i}`, temp);
+                const k = `lp:${i}`;
+                built.graph.verts.set(k, { lat: p.lat, lng: p.lng });
+                built.graph.adj.set(k, []);
+                let linked = 0;
+                const res = byAsset ? byAsset.get(r.asset.id) : null;
+                if (res && res.fi >= 0 && built.ffzs[res.fi]) {
+                    built.ffzs[res.fi].ring.forEach((rp, ri) => {
+                        const rk = `r:${res.fi}:${ri}`;
+                        if (!built.graph.adj.has(rk)) return;
+                        link(k, rk, mbApproxMeters(p.lat, p.lng, rp.lat, rp.lng));
+                        linked++;
+                    });
+                }
+                if (!linked) {
+                    const arc = agNearestArcPoint(built.graph, r.asset.ring || [p], MB_REACH_FFZ_FT / 3.28084);
+                    if (arc) {
+                        const xk = `lpx:${i}`;
+                        built.graph.verts.set(xk, arc.p);
+                        built.graph.adj.set(xk, []);
+                        link(xk, arc.ka, arc.w * arc.t);
+                        link(xk, arc.kb, arc.w * (1 - arc.t));
+                        link(k, xk, Math.max(1, arc.d));
+                        linked++;
+                    }
+                }
+                if (!linked) console.warn(`${TAG} [lasso] pad "${r.asset.name}" could not attach to the route graph — its legs estimate straight-line`);
+                return k;
             });
             const runs = padKeys.map(k => agDijkstra(built.graph, k));
             let off = 0;
@@ -4899,24 +4936,42 @@
         const { ent, missions, byAsset } = lasso.data || {};
         if (!ent) return;
         const cfg = agCfg();
-        const inside = (ent.assets || []).filter(a => a.ring && a.ring.length >= 3 && genPointInPoly(genCentroid(a.ring), ring));
+        // v2.33: a pad counts as inside when its centroid OR any corner is in
+        // the loop (edge pads were dropping out of tight lassos).
+        const inLoop = (a) => genPointInPoly(genCentroid(a.ring), ring) || a.ring.some(p => genPointInPoly(p, ring));
+        const inside = (ent.assets || []).filter(a => a.ring && a.ring.length >= 3 && inLoop(a));
         if (!inside.length) { showToast('🖊 No pads inside the loop.', '#ff9800', 3500); return; }
         const rows = [], skipped = [];
+        const skip = (a, reason) => skipped.push({ name: a.name, reason, pt: genCentroid(a.ring) });
         inside.forEach(a => {
             const cands = rankMatchMissions(a.name, missions);
-            if (!cands.length) { skipped.push(`${a.name} — no mission with this name`); return; }
-            if (cands.length > 1) { skipped.push(`${a.name} — ${cands.length} mission matches (add it via M2)`); return; }
+            if (!cands.length) { skip(a, 'no mission with this name'); return; }
+            if (cands.length > 1) { skip(a, `${cands.length} mission matches (add it via M2)`); return; }
             const r = byAsset.get(a.id);
-            if (!r || r.status !== 'ok') { skipped.push(`${a.name} — ${r ? (r.status === 'no-ffz' ? 'no FFZ' : 'no legal route') : 'no range data'}`); return; }
-            if (!r.verified || r.disagree) { skipped.push(`${a.name} — range unverified (see console)`); return; }
-            if (r.worstFt > cfg.tulipRadiusFt) { skipped.push(`${a.name} — over ${(cfg.tulipRadiusFt / 1000).toFixed(0)}k ft`); return; }
+            if (!r || r.status !== 'ok') { skip(a, r ? (r.status === 'no-ffz' ? 'no FFZ' : 'no legal route') : 'no range data'); return; }
+            if (!r.verified || r.disagree) { skip(a, 'range unverified (see console)'); return; }
+            if (r.worstFt > cfg.tulipRadiusFt) { skip(a, `over ${(cfg.tulipRadiusFt / 1000).toFixed(0)}k ft`); return; }
             rows.push({ asset: a, mission: cands[0], ft: r.worstFt, tulip: r.worstFt > cfg.tattuRadiusFt });
         });
-        rows.sort((x, y) => y.ft - x.ft);   // stable pre-order; optimizer refines below
+        // Pre-order = bearing sweep around base with the seam at the largest
+        // angular gap — the human "walk the loop" order. It feeds the
+        // optimizer as a seed AND is the tie-break when the simulator sees
+        // every order as ~equal (v2.33).
+        if (ent.base && rows.length > 2) {
+            const bear = r => { const c = genCentroid(r.asset.ring); const d = 90 - Math.atan2(c.lat - ent.base.lat, (c.lng - ent.base.lng) * Math.cos(ent.base.lat * Math.PI / 180)) * 180 / Math.PI; return ((d % 360) + 360) % 360; };
+            const wb = rows.map(r => ({ r, b: bear(r) })).sort((a, b) => a.b - b.b);
+            let gapAt = 0, gapMax = -1;
+            for (let i = 0; i < wb.length; i++) { const nb = wb[(i + 1) % wb.length].b + ((i + 1) >= wb.length ? 360 : 0); const g = nb - wb[i].b; if (g > gapMax) { gapMax = g; gapAt = (i + 1) % wb.length; } }
+            const swept = wb.slice(gapAt).concat(wb.slice(0, gapAt)).map(x => x.r);
+            rows.length = 0;
+            swept.forEach(r => rows.push(r));
+        } else {
+            rows.sort((x, y) => y.ft - x.ft);
+        }
         const wind = lassoWindName(rows, ent.base);
         const tattu = rows.filter(r => !r.tulip);
         const tulips = rows.filter(r => r.tulip);
-        const pw = rows.length > 1 ? lassoBuildPairwise(rows, ent) : null;
+        const pw = rows.length > 1 ? lassoBuildPairwise(rows, ent, byAsset) : null;
         const variants = [];
         // Tulip pads present → auto-split: "1" = Tattu only, "2" = everything.
         // Each variant's order = 2-opt + flight simulator on trusted distances.
@@ -4928,13 +4983,28 @@
         } else if (rows.length) {
             variants.push({ name: `${wind} 1-2`, sub: `either battery · ${rows.length} pads · optimized route`, rows: lassoOrderRows(rows, cfg.tattuBudgetFt, pw) });
         }
-        if (pw && pw.ok && pw.offCount()) console.warn(`${TAG} [lasso] ${pw.offCount()} pad-pair legs estimated off-graph (straight ×1.25)`);
+        const offN = (pw && pw.ok) ? pw.offCount() : 0;
+        if (offN) console.warn(`${TAG} [lasso] ${offN} pad-pair legs estimated off-graph (straight ×1.25)`);
         if (!variants.length) { showToast(`🖊 ${inside.length} pads in loop, none usable — ${skipped.length} skipped (see the popup).`, '#ff9800', 4500); }
-        lassoShowResults(variants, skipped, missions, ent);
+        lassoShowResults(variants, skipped, missions, ent, offN);
         console.log(`${TAG} [lasso] ${inside.length} pads in loop → ${rows.length} usable (${tulips.length} Tulip) · ${skipped.length} skipped`);
     }
-    function lassoShowResults(variants, skipped, missions, ent) {
+    function lassoShowResults(variants, skipped, missions, ent, offN) {
         lassoCloseResults();
+        // Red ✕ on every skipped pad — a pad inside the loop with no number
+        // must explain itself on the map, not just in the list (v2.33).
+        const Lx = composerGetL(), mapx = getLeafletMap();
+        if (Lx && mapx) {
+            skipped.forEach(s => {
+                if (!s || !s.pt) return;
+                try {
+                    lasso.resultLayers.push(Lx.marker([s.pt.lat, s.pt.lng], {
+                        icon: Lx.divIcon({ className: 'aim-mb-rng-chip', html: '<div style="pointer-events:none;font:800 17px sans-serif;color:#ff5252;text-shadow:0 1px 3px #000,0 0 6px #000;">✕</div>', iconSize: [0, 0], iconAnchor: [6, 9] }),
+                        interactive: false, keyboard: false, zIndexOffset: 900,
+                    }).addTo(mapx));
+                } catch (e) {}
+            });
+        }
         const el = document.createElement('div');
         el.style.cssText = 'position:fixed;right:24px;bottom:20px;width:330px;max-height:60vh;overflow:auto;z-index:2147483601;'
             + 'background:#161a20;border:1px solid #7adfe6;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;padding:10px 12px;';
@@ -4951,7 +5021,8 @@
                 <span data-lasso-close style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span>
             </div>
             ${variants.map(vBtn).join('') || '<div style="color:#888;font-size:11px;">No stageable missions.</div>'}
-            ${skipped.length ? `<div style="margin-top:6px;color:#ff9800;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Skipped (${skipped.length})</div>${skipped.map(s => `<div style="color:#caa;font-size:10px;">${escapeHtml(s)}</div>`).join('')}` : ''}
+            ${offN ? `<div style="margin-top:5px;color:#ffb74d;font-size:10px;">⚠ ${offN} pad-pair leg(s) estimated off-graph — order may be imperfect (see console)</div>` : ''}
+            ${skipped.length ? `<div style="margin-top:6px;color:#ff9800;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Skipped (${skipped.length}) — marked ✕ on the map</div>${skipped.map(s => `<div style="color:#caa;font-size:10px;">${escapeHtml(s.name)} — ${escapeHtml(s.reason)}</div>`).join('')}` : ''}
             <div style="color:#789;font-size:10px;margin-top:6px;">Stage a variant → inspect the numbered badges → 🔗 Create. Panel stays open so you can stage the other one after.</div>`;
         document.body.appendChild(el);
         el.querySelector('[data-lasso-close]').onclick = lassoCloseResults;
@@ -5402,7 +5473,8 @@
                 html: `<div data-pcm-idx="${i}" style="width:26px;height:26px;border-radius:50%;background:#7adfe6;color:#04222a;font:800 14px/26px monospace;text-align:center;border:2px solid #04222a;box-shadow:0 1px 6px rgba(0,0,0,0.6);cursor:context-menu;">${i + 1}</div>`,
                 iconSize: [26, 26], iconAnchor: [13, 13],
             });
-            try { pcm.markers.push(L.marker([c.lat, c.lng], { icon, interactive: true }).addTo(map)); } catch (e) {}
+            // zIndexOffset: pick numbers must sit ABOVE the 🔋 Range batteries
+            try { pcm.markers.push(L.marker([c.lat, c.lng], { icon, interactive: true, zIndexOffset: 1000 }).addTo(map)); } catch (e) {}
         });
     }
     function pcmRefresh() { pcmDrawMarkers(); pcmRenderPanel(); }
@@ -11736,8 +11808,17 @@ ${snapPlacemarks}
             linked++;
         }
         if (!linked) {
-            const nv = mbNearestVertex(graph, p.lat, p.lng);
-            if (nv && nv.key !== k) link(k, nv.key, nv.dist);
+            // v2.33 fix: mbNearestVertex scans ALL verts including the vertex
+            // just added for p itself (distance 0) — it always won, the
+            // key!==k guard rejected it, and the point ended up STRANDED
+            // (degree 0). Scan excluding k instead.
+            let best = null;
+            graph.verts.forEach((v, vk) => {
+                if (vk === k) return;
+                const d = mbApproxMeters(p.lat, p.lng, v.lat, v.lng);
+                if (!best || d < best.d) best = { vk, d };
+            });
+            if (best) link(k, best.vk, best.d);
         }
         return k;
     }
@@ -11938,6 +12019,13 @@ ${snapPlacemarks}
         // anonymous dots read as wrong data. SS/MB keeps interactive:false —
         // canvas at all-missions scale is exactly where hit-testing hurts.
         const dvTips = CONTEXT === 'TOP';
+        // FOCUS MODE: while ANY mission is checked (full badges), everyone
+        // else's dots dim way down so the previewed mission pops. Hover
+        // labels still work on dimmed dots. No toggle — strictly-better UX;
+        // clears automatically when nothing is checked.
+        const focusDim = mpvSelForSite(getCurrentSiteID() || '').length > 0;
+        const dotFill = focusDim ? 0.22 : 0.85;
+        const dotStroke = focusDim ? 'rgba(0,0,0,0.18)' : 'rgba(0,0,0,0.55)';
         const steps = Array.isArray(m.instructions) ? m.instructions : [];
         for (const s of steps) {
             if (!s || !s.location || typeof s.location.lat !== 'number' || typeof s.location.lng !== 'number') continue;
@@ -11947,7 +12035,7 @@ ${snapPlacemarks}
             else if (t === 'snapshot') { color = stepColor('snap'); r = 3; }
             else continue;
             try {
-                const opts = { radius: r, color: 'rgba(0,0,0,0.55)', weight: 1, fillColor: color, fillOpacity: 0.85, interactive: dvTips };
+                const opts = { radius: r, color: dotStroke, weight: 1, fillColor: color, fillOpacity: dotFill, interactive: dvTips };
                 if (renderer) opts.renderer = renderer;
                 const cm = L.circleMarker([s.location.lat, s.location.lng], opts).addTo(map);
                 if (dvTips) {
