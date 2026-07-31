@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.38
+// @version      2.39
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.38';
+    const SCRIPT_VERSION = '2.39';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5170,7 +5170,7 @@
         const touched = new Set();
         missionPads.forEach(pads => pads.forEach(a => touched.add(a.id)));
         const todo = assets.filter(a => touched.has(a.id) && !covered.has(a.id));
-        return { macros, covered, todo, padCount: assets.length };
+        return { macros, covered, todo, touched, assets, padCount: assets.length };
     }
     function mcvDraw(det) {
         const L = composerGetL(), map = getLeafletMap();
@@ -5205,7 +5205,7 @@
         const el = document.createElement('div');
         el.style.cssText = 'position:fixed;left:12px;top:70px;z-index:2147483599;max-height:50vh;overflow:auto;background:rgba(16,19,26,0.92);border:1px solid #2a3340;border-radius:8px;padding:8px 11px;color:#e6e6e6;font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 4px 16px rgba(0,0,0,0.6);';
         const COLORS2 = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
-        el.innerHTML = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;"><b style="color:#7adfe6;">🧩 Macro coverage</b><span data-mcv-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
+        el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><b style="color:#7adfe6;">🧩 Macro coverage</b><button data-mcv-report title="Copy the coverage report (Name / Classification / Captured / Battery / Section / Mission / Order) — colored cells, paste into Google Sheets" style="padding:1px 7px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">📋 Report</button><span data-mcv-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
             + (det.macros.length
                 ? det.macros.map((mc, i) => `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px;">${escapeHtml(String(mc.mission.name || ''))}</span><b style="margin-left:auto;padding-left:10px;">${mc.pads.length}</b></div>`).join('')
                 : '<div style="color:#888;">No macro missions yet (≥2 pads in one mission).</div>')
@@ -5213,12 +5213,93 @@
             + '<div style="color:#789;margin-top:3px;">Filled = covered · UNfilled = still to do · click-through</div>';
         document.body.appendChild(el);
         el.querySelector('[data-mcv-x]').onclick = () => { mcv.on = false; mcvClear(); const b = document.querySelector('[data-mcv-toggle]'); if (b) b.classList.remove('active'); };
+        el.querySelector('[data-mcv-report]').onclick = () => mcvReport();
         mcv.legendEl = el;
         // subtle dashed white outline on not-yet-covered pads — the TODO list
         det.todo.forEach(a => {
             try { mcv.layers.push(L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: '#ffffff', weight: 2, dashArray: '2 6', opacity: 0.65, fill: false, interactive: false }).addTo(map)); } catch (e) {}
         });
     }
+    // 📋 Report (v2.39) — the user's planning spreadsheet, generated: one row
+    // per pad with Name / Asset Classification / Captured? / Battery /
+    // Section / Mission Name / Order, grouped by mission (uncovered pads at
+    // the bottom). Copies rich HTML (colored cells for Sheets) + TSV fallback.
+    function mcvSubtypeOf(a) {
+        const p = String(a.poi || '').trim();
+        const i = p.indexOf(' - ');
+        return ((i >= 0 ? p.slice(0, i) : p) || '').trim();
+    }
+    async function mcvReport() {
+        const data = mcv.data;
+        if (!data) { showToast('Toggle 🧩 Macros on first.', '#ff9800', 3000); return; }
+        const { ent, missions, det } = data;
+        showToast('📋 Building coverage report…', '#7adfe6', 2000);
+        let bat = new Map();
+        try { const sol = rngSolve(ent); bat = new Map(sol.results.map(r => [r.asset.id, r])); } catch (e) { console.warn(`${TAG} [mcv] report range solve failed`, e); }
+        const secName = { N: 'North', E: 'East', S: 'South', W: 'West', NE: 'NE', SE: 'SE', SW: 'SW', NW: 'NW', C: 'Central' };
+        const macrosOf = new Map();
+        det.macros.forEach(mc => mc.pads.forEach((a, i) => {
+            if (!macrosOf.has(a.id)) macrosOf.set(a.id, []);
+            macrosOf.get(a.id).push({ name: String(mc.mission.name || ''), order: i + 1 });
+        }));
+        const rows = det.assets.map(a => {
+            const r = bat.get(a.id);
+            const tulip = !!(r && r.status === 'ok' && r.worstFt > agCfg().tattuRadiusFt && r.worstFt <= agCfg().tulipRadiusFt);
+            const batLabel = r && r.status === 'ok'
+                ? (r.worstFt <= agCfg().tattuRadiusFt ? 'Tattu' : (tulip ? 'Tulip' : 'Over range'))
+                : (r && r.status === 'no-ffz' ? 'No FFZ' : 'No route');
+            const list = macrosOf.get(a.id) || [];
+            const pref = (tulip ? list.find(x => / 2$/.test(x.name)) : (list.find(x => / 1$/.test(x.name)) || list.find(x => / 1-2$/.test(x.name)))) || list[0] || null;
+            return {
+                name: a.name || String(a.id),
+                cls: mcvSubtypeOf(a),
+                captured: det.touched.has(a.id),
+                bat: batLabel,
+                sec: secName[mbSection(genCentroid(a.ring), ent.base)] || '',
+                mission: pref ? pref.name : '',
+                order: pref ? pref.order : '',
+            };
+        });
+        rows.sort((x, y) => (x.mission || '~').localeCompare(y.mission || '~') || (Number(x.order) || 9999) - (Number(y.order) || 9999) || x.name.localeCompare(y.name));
+        const CLS_BG = { 'h-well': '#1c64b8', 'v-well': '#8b4a16', 'battery': '#1e7d46', 'compressor': '#e8d18a', 'well-cluster': '#455a64' };
+        const SEC_BG = { East: '#1e7d46', North: '#c62828', South: '#5d4037', West: '#1c64b8', NE: '#7cb342', SE: '#e8d18a', SW: '#6a3ab2', NW: '#00838f', Central: '#616161' };
+        const dark = bg => ['#e8d18a'].indexOf(bg) >= 0;
+        const td = (txt, bg, fg) => `<td style="border:1px solid #bbb;padding:2px 8px;${bg ? `background:${bg};color:${fg || '#fff'};` : ''}">${escapeHtml(String(txt))}</td>`;
+        const html = '<table style="border-collapse:collapse;font-family:Arial;font-size:12px;"><tr>'
+            + ['Name', 'Asset Classification', 'Captured?', 'Battery', 'Section', 'Mission Name', 'Order'].map(h => `<td style="border:1px solid #999;padding:2px 8px;background:#efefef;font-weight:bold;">${h}</td>`).join('')
+            + '</tr>'
+            + rows.map(r2 => {
+                const clsBg = CLS_BG[r2.cls.toLowerCase()] || '#607d8b';
+                const secBg = SEC_BG[r2.sec] || '';
+                return '<tr>'
+                    + td(r2.name)
+                    + td(r2.cls, clsBg, dark(clsBg) ? '#333' : '#fff')
+                    + td(r2.captured ? '✓' : '', r2.captured ? '#00d050' : '#ffcdd2', '#0a3018')
+                    + td(r2.bat, r2.bat === 'Tattu' ? '#cfe8ff' : (r2.bat === 'Tulip' ? '#ecd6f7' : '#eee'), '#333')
+                    + td(r2.sec, secBg, dark(secBg) ? '#333' : '#fff')
+                    + td(r2.mission)
+                    + td(r2.order)
+                    + '</tr>';
+            }).join('')
+            + '</table>';
+        const tsv = ['Name\tAsset Classification\tCaptured?\tBattery\tSection\tMission Name\tOrder']
+            .concat(rows.map(r2 => [r2.name, r2.cls, r2.captured ? 'TRUE' : 'FALSE', r2.bat, r2.sec, r2.mission, r2.order].join('\t'))).join('\n');
+        try {
+            await navigator.clipboard.write([new ClipboardItem({
+                'text/html': new Blob([html], { type: 'text/html' }),
+                'text/plain': new Blob([tsv], { type: 'text/plain' }),
+            })]);
+            showToast(`📋 Report copied (${rows.length} pads) — paste into Google Sheets.`, '#5fff5f', 5000);
+        } catch (e) {
+            try {
+                const ta = document.createElement('textarea');
+                ta.value = tsv; document.body.appendChild(ta); ta.select();
+                document.execCommand('copy'); ta.remove();
+                showToast(`📋 Report copied as TSV (${rows.length} pads).`, '#5fff5f', 4500);
+            } catch (e2) { console.warn(`${TAG} [mcv] report copy failed`, e2); showToast('Report copy failed (see console).', '#ff5252', 4000); }
+        }
+    }
+
     async function mcvToggle(btn) {
         if (mcv.on) { mcv.on = false; mcvClear(); if (btn) btn.classList.remove('active'); return; }
         if (mcv.busy) return;
@@ -5229,6 +5310,7 @@
         try {
             const [ent, missions] = await Promise.all([genFetchEntities(sid), new Promise((res, rej) => fetchMissions(sid, res, rej))]);
             const det = mcvDetect(ent, missions);
+            mcv.data = { ent, missions, det };
             mcvClear();
             mcvDraw(det);
             mcv.on = true;

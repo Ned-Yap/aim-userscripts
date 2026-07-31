@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-31 — Mission Bank Tools v2.39 (dev/latest): 🧩 📋 Report — your planning sheet, generated
+
+New **📋 Report** button in the 🧩 Macros legend: copies the coverage report straight to the clipboard — paste into Google Sheets and you get colored cells, one row per pad:
+
+**Name · Asset Classification · Captured? · Battery · Section · Mission Name · Order**
+
+- Grouped by mission with the pad's order inside it; pads not in any macro sort to the bottom with an empty Mission column (and a red Captured cell if they have no mission at all).
+- Battery comes from the triple-verified Range solver; tier-family pads report their battery-matched mission (Tattu pads → the `1`, Tulip pads → the `2`), matching how the hand-built sheet was kept.
+- Plain-TSV fallback if the rich clipboard is blocked.
+
 ## 2026-07-31 — Mission Bank Tools v2.38 (dev/latest): 🧩 covered pads are solid-filled
 
 Covered pads now render with a solid color fill (55%) instead of a faint tint — scan for the *unfilled* pads and that's your remaining work. Legend hint updated to match.
