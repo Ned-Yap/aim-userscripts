@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-31 — Mission Bank Tools v2.37 (dev/latest): 🧩 Macros — see what's already covered
+
+New **🧩 Macros** toggle in the SUM toolbar: shows which pads are already claimed by macro (merged) missions.
+
+- Detection reads the *data*, not bookkeeping: any mission whose steps touch 2+ pads counts as a macro — so it finds merges made by anyone, any way, any time.
+- Each macro gets its own color: member pads are outlined + lightly tinted in it, with the macro's name chipped at its first pad. Pads that have missions but **aren't in any macro yet** get a subtle white dashed outline — that's your remaining to-do, and the legend (top-left) counts it.
+- Everything is click-through — leave it on while you 🖊 Lasso the uncovered areas.
+
 ## 2026-07-31 — Mission Bank Tools v2.36 (dev/latest): 🖊 Lasso orders the way YOU order
 
 The 2-opt optimizer is out of the lasso — it kept producing transit-cheapest *loop* shapes that read as chaos and put deep pads mid-battery. The ordering rule is now exactly the hand pattern from the live session: **go to the deepest pad of an area, peel back toward base along its corridor (never stepping deeper), and when the area's done, jump to the deepest remaining pad — the next area.** Deterministic and auditable: every ascent in the ft column is an area jump, and it always jumps to the furthest of what's left.

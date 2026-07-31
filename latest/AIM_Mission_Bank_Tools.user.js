@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.36
+// @version      2.37
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.36';
+    const SCRIPT_VERSION = '2.37';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5123,6 +5123,122 @@
         lasso.resultEl = el;
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    // 🧩 MACRO COVERAGE (v2.37) — visually see which pads are already claimed
+    // by macro (merged) missions. Detection is DATA-DERIVED, not recipe-based:
+    // any mission whose located steps touch ≥ 2 distinct pads is a macro, so
+    // it works no matter who created the merge or how. Each macro gets a
+    // color; member pads get that outline + a name chip; the legend counts
+    // pads that still aren't in any macro. All click-through.
+    // ════════════════════════════════════════════════════════════════════════
+    const mcv = { on: false, busy: false, layers: [], legendEl: null };
+    function mcvClear() {
+        mcv.layers.forEach(l => { try { l.remove(); } catch (e) {} });
+        mcv.layers = [];
+        if (mcv.legendEl) { try { mcv.legendEl.remove(); } catch (e) {} mcv.legendEl = null; }
+    }
+    // mission → distinct pads its located steps touch (inside or ≤150 ft of
+    // an asset ring; bbox-prefiltered)
+    function mcvDetect(ent, missions) {
+        const assets = (ent.assets || []).filter(a => a.ring && a.ring.length >= 3);
+        const tolM = 46;   // 150 ft
+        const boxes = assets.map(a => agRingBbox(a.ring, tolM + 5));
+        const macros = [];
+        const covered = new Set();
+        const missionPads = new Map();
+        (missions || []).forEach(m => {
+            const ins = (m.instructions || []).filter(i => i && i.location && typeof i.location.lat === 'number' && i.type !== 0 && i.type !== 99);
+            const padIds = new Set(), pads = [];
+            ins.forEach(i => {
+                const p = i.location;
+                let best = null;
+                for (let ai = 0; ai < assets.length; ai++) {
+                    const bb = boxes[ai];
+                    if (p.lat < bb.s || p.lat > bb.n || p.lng < bb.w || p.lng > bb.e) continue;
+                    const d = mbPointToPolygonMeters(p.lat, p.lng, assets[ai].ring);
+                    if (d <= tolM && (!best || d < best.d)) best = { a: assets[ai], d };
+                }
+                if (best && !padIds.has(best.a.id)) { padIds.add(best.a.id); pads.push(best.a); }
+            });
+            if (pads.length) missionPads.set(m.id, pads);
+            if (pads.length >= 2) {
+                macros.push({ mission: m, pads });
+                pads.forEach(a => covered.add(a.id));
+            }
+        });
+        // pads that have SOME mission on them but no macro yet
+        const touched = new Set();
+        missionPads.forEach(pads => pads.forEach(a => touched.add(a.id)));
+        const todo = assets.filter(a => touched.has(a.id) && !covered.has(a.id));
+        return { macros, covered, todo, padCount: assets.length };
+    }
+    function mcvDraw(det) {
+        const L = composerGetL(), map = getLeafletMap();
+        if (!L || !map) { showToast('Macros: map not found.', '#ff9800', 3000); return; }
+        const COLORS = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
+        det.macros.forEach((mc, i) => {
+            const col = COLORS[i % COLORS.length];
+            let deepest = null;
+            mc.pads.forEach(a => {
+                try {
+                    mcv.layers.push(L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: col, weight: 4, opacity: 0.9, fill: true, fillColor: col, fillOpacity: 0.07, interactive: false }).addTo(map));
+                } catch (e) {}
+                if (!deepest) deepest = a;   // first pad = mission's first stop
+            });
+            if (deepest) {
+                const c = genCentroid(deepest.ring);
+                try {
+                    mcv.layers.push(L.marker([c.lat, c.lng], {
+                        icon: L.divIcon({
+                            className: 'aim-mb-rng-chip',
+                            html: `<div style="pointer-events:none;background:${col};color:#10131a;font:800 11px/1 'Lato',sans-serif;padding:3px 7px;border-radius:4px;border:1.5px solid #10131a;box-shadow:0 1px 5px rgba(0,0,0,0.7);white-space:nowrap;">${escapeHtml(String(mc.mission.name || '').slice(0, 24))}</div>`,
+                            iconSize: [0, 0], iconAnchor: [0, 22],
+                        }),
+                        interactive: false, keyboard: false, zIndexOffset: -400,
+                    }).addTo(map));
+                } catch (e) {}
+            }
+        });
+        // legend (top-left, under the toolbar)
+        const el = document.createElement('div');
+        el.style.cssText = 'position:fixed;left:12px;top:70px;z-index:2147483599;max-height:50vh;overflow:auto;background:rgba(16,19,26,0.92);border:1px solid #2a3340;border-radius:8px;padding:8px 11px;color:#e6e6e6;font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 4px 16px rgba(0,0,0,0.6);';
+        const COLORS2 = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
+        el.innerHTML = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;"><b style="color:#7adfe6;">🧩 Macro coverage</b><span data-mcv-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
+            + (det.macros.length
+                ? det.macros.map((mc, i) => `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px;">${escapeHtml(String(mc.mission.name || ''))}</span><b style="margin-left:auto;padding-left:10px;">${mc.pads.length}</b></div>`).join('')
+                : '<div style="color:#888;">No macro missions yet (≥2 pads in one mission).</div>')
+            + `<div style="color:#ffb74d;margin-top:5px;">⬜ ${det.todo.length} pad(s) with missions, not in any macro</div>`
+            + '<div style="color:#789;margin-top:3px;">Overlay is click-through — lasso right over it</div>';
+        document.body.appendChild(el);
+        el.querySelector('[data-mcv-x]').onclick = () => { mcv.on = false; mcvClear(); const b = document.querySelector('[data-mcv-toggle]'); if (b) b.classList.remove('active'); };
+        mcv.legendEl = el;
+        // subtle dashed white outline on not-yet-covered pads — the TODO list
+        det.todo.forEach(a => {
+            try { mcv.layers.push(L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: '#ffffff', weight: 2, dashArray: '2 6', opacity: 0.65, fill: false, interactive: false }).addTo(map)); } catch (e) {}
+        });
+    }
+    async function mcvToggle(btn) {
+        if (mcv.on) { mcv.on = false; mcvClear(); if (btn) btn.classList.remove('active'); return; }
+        if (mcv.busy) return;
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded.', '#ff5252', 3000); return; }
+        mcv.busy = true;
+        showToast('🧩 Scanning missions for macro coverage…', '#7adfe6', 2500);
+        try {
+            const [ent, missions] = await Promise.all([genFetchEntities(sid), new Promise((res, rej) => fetchMissions(sid, res, rej))]);
+            const det = mcvDetect(ent, missions);
+            mcvClear();
+            mcvDraw(det);
+            mcv.on = true;
+            if (btn) btn.classList.add('active');
+            console.log(`${TAG} [mcv] ${det.macros.length} macro(s) · ${det.covered.size} pads covered · ${det.todo.length} pads with missions still uncovered`);
+        } catch (e) {
+            console.warn(`${TAG} [mcv] failed`, e);
+            showToast('Macro coverage failed (see console).', '#ff5252', 4000);
+        }
+        mcv.busy = false;
+    }
+
     // The point(s) a solo flies = its NAVIGATE (type 1) locations — the drone
     // flies navs; snapshots (type 6) are camera positions, NOT waypoints
     // (v2.19 live-test fix: routes were anchoring to snapshot points).
@@ -8025,6 +8141,7 @@
                 <button class="aim-mb-tbtn ${pcm.on ? 'active' : ''}" data-pcm-toggle title="Merge missions by right-clicking pads on the map in order (pad name = mission name)">🔗 Merge</button>
                 <button class="aim-mb-tbtn ${rng.on ? 'active' : ''}" data-rng-toggle title="Color every pad's FFZ by the TRUE shortest LEGAL route from base (inside FFZ/FP only, triple-verified: path audit + dense second opinion + lower bound). Overlay is click-through — M2 merge picking still works.">🔋 Range</button>
                 <button class="aim-mb-tbtn ${lasso.armed ? 'active' : ''}" data-lasso-toggle title="Draw a freehand loop around pads → auto-build a furthest→closest merge list (Tulip pads auto-split into a separate '2' mission) and stage it in the merge editor for inspection.">🖊 Lasso</button>
+                <button class="aim-mb-tbtn ${mcv.on ? 'active' : ''}" data-mcv-toggle title="Show which pads are already claimed by macro (merged) missions — each macro gets a color + name chip; white dashed pads have missions but no macro yet. Click-through.">🧩 Macros</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'imperial' ? 'active' : ''}" data-unit="imperial">mi</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'metric' ? 'active' : ''}" data-unit="metric">km</button>
                 <button class="aim-mb-tbtn" data-settings title="Battery → flights thresholds">⚙</button>
@@ -8313,6 +8430,8 @@
         if (rngBtn) rngBtn.onclick = () => rngToggle(rngBtn);
         const lassoBtn = panelEl.querySelector('[data-lasso-toggle]');
         if (lassoBtn) lassoBtn.onclick = () => lassoToggle(lassoBtn);
+        const mcvBtn = panelEl.querySelector('[data-mcv-toggle]');
+        if (mcvBtn) mcvBtn.onclick = () => mcvToggle(mcvBtn);
         const pcmBtn = panelEl.querySelector('[data-pcm-toggle]');
         if (pcmBtn) pcmBtn.onclick = async () => {
             if (pcm.on) { pcmExit(); }
