@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.20
+// @version      2.21
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.20';
+    const SCRIPT_VERSION = '2.21';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -6206,7 +6206,11 @@
         // a container existing in THIS document so the SS/MB top frame
         // (Angular shell, map in iframe) can't grab a stale reference.
         try {
-            const ng = window.angular;
+            // v2.21: unsafeWindow, not window — page globals aren't guaranteed
+            // to be visible through the sandbox proxy (same rule as the
+            // Styler/AI angular grabs and unsafeWindow.L).
+            const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+            const ng = w.angular;
             const containers = document.querySelectorAll('.leaflet-container');
             if (ng && containers.length && typeof ng.element === 'function') {
                 const scope = ng.element(containers[0]).scope();
@@ -6216,7 +6220,7 @@
                     return leafletMapRef;
                 }
             }
-        } catch (e) { /* not an angular-managed page */ }
+        } catch (e) { console.log(`${TAG} angular map fallback threw (${e.message}) — no map in this frame`); }
         return null;
     }
 
@@ -11574,7 +11578,12 @@ ${snapPlacemarks}
 
     function mpvPreviewByName(name) {
         const sid = getCurrentSiteID();
-        if (!sid || !getLeafletMap()) return;   // not the map iframe — let that instance answer
+        // Multi-frame protocol: instances without a map stay quiet so the
+        // frame that HAS one answers. v2.21: quiet ≠ silent — log which gate
+        // stopped us, so a no-ACK timeout is diagnosable from the console
+        // (this exact silence cost a debugging round on Data View).
+        if (!sid) { console.log(`${TAG} [mpv] PREVIEW_ASSET "${name}": no site id in hash — not answering (${CONTEXT})`); return; }
+        if (!getLeafletMap()) { console.log(`${TAG} [mpv] PREVIEW_ASSET "${name}": no Leaflet map in this frame (${CONTEXT}) — leaving it to the frame that owns one`); return; }
         if (!masterEnabled || !mpvEnabled) {
             mpvAck({ found: false, name, disabled: true });
             showToast('Mission preview is disabled in the Control Panel.', '#ff9800', 3000);
