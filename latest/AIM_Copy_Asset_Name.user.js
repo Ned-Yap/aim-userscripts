@@ -5953,13 +5953,19 @@
         simplifyFt: 66,   // Phase 2: boundary simplification tolerance
         nfzBufFt: 25,     // Phase 2: outward buffer around NFZ hulls
         namePrefix: 'FFZ ', // Phase 2: created-FFZ name prefix (string)
+        // Profile area (v4.205 — FP-heavy sites have almost no FFZ footprint,
+        // so an FFZ-union mask kept ~nothing there):
+        //   'hull'   — convex hull of ALL site entities + margin (default;
+        //              "roughly the site bounds")
+        //   'ffz-fp' — FFZ polygons + buffered FP corridors + asset pads
+        //   'ffz'    — union of existing FFZs only (the old behavior)
+        //   'rect'   — no mask (full fetched rectangle)
+        maskMode: 'hull',
+        fpCorridorFt: 400, // corridor half-width around FP segments ('ffz-fp')
     };
     const TER_ENABLE_DEFAULTS = {
         median: true,     // 3×3 median despeckle before banding
         floorP95: false,  // floor ref = P95 elevation instead of true max
-        clipSite: true,   // mask the DEM to the union of existing FFZs —
-                          // outside the site footprint nothing matters
-                          // (and NFZs can't even exist there)
     };
     function loadTerThresholds() {
         const out = { ...TER_THRESH_DEFAULTS };
@@ -6073,26 +6079,21 @@
         };
     }
 
-    // Rasterize the union of the site's existing FFZ rings into a cell
-    // mask (scanline fill per ring, OR'd). With clipSite on, cells
-    // outside the footprint become no-data BEFORE segmentation — so
-    // regions, stats, floors, the overlay, and NFZ candidates simply
-    // don't exist beyond the site perimeter (user rule: outside the
-    // setup nothing matters, and NFZs can't live outside an FFZ).
+    // Rasterize the profile-area footprint into a cell mask (see maskMode
+    // in TER_THRESH_DEFAULTS). Cells outside the footprint become no-data
+    // BEFORE segmentation — so regions, stats, floors, the overlay, and
+    // NFZ candidates simply don't exist beyond the area that matters.
+    // Returns null for 'rect' / when the mode has nothing to mask to.
     function terSiteMask(dem, ents) {
-        const rings = [];
-        (ents || []).forEach(e => {
-            if (e.type !== 16) return;
-            const cs = (entityCoords(e) || []).filter(c => c && typeof c.lat === 'number');
-            if (cs.length >= 3) rings.push(cs);
-        });
-        if (!rings.length) return null;
+        const mode = terThresholds.maskMode || 'hull';
+        if (mode === 'rect') return null;
         const w = dem.w, h = dem.h;
         const toX = (lng) => (terMercX(lng) - dem.mercX1) / (dem.mercX2 - dem.mercX1) * w;
         const toY = (lat) => (dem.mercY2 - terMercY(lat)) / (dem.mercY2 - dem.mercY1) * h;
         const mask = new Uint8Array(w * h);
-        rings.forEach(cs => {
-            const px = cs.map(c => [toX(c.lng), toY(c.lat)]);
+        let filled = false;
+        const fillRing = (px) => {
+            if (!px || px.length < 3) return;
             let mnY = Infinity, mxY = -Infinity;
             px.forEach(p => { if (p[1] < mnY) mnY = p[1]; if (p[1] > mxY) mxY = p[1]; });
             const y0 = Math.max(0, Math.floor(mnY)), y1 = Math.min(h - 1, Math.ceil(mxY));
@@ -6107,11 +6108,63 @@
                 xs.sort((q, r2) => q - r2);
                 for (let k = 0; k + 1 < xs.length; k += 2) {
                     const xA = Math.max(0, Math.round(xs[k])), xB = Math.min(w - 1, Math.round(xs[k + 1]) - 1);
-                    for (let x = xA; x <= xB; x++) mask[y * w + x] = 1;
+                    for (let x = xA; x <= xB; x++) { mask[y * w + x] = 1; filled = true; }
+                }
+            }
+        };
+        // Collect geometry in lattice coords. GMs (type 19) deliberately
+        // excluded from the hull — validator-created tower markers can sit
+        // MILES off-site and would balloon it.
+        const ffzRings = [], assetRings = [], fpSegs = [], allPts = [];
+        (ents || []).forEach(e => {
+            if (e.type === 15 && Array.isArray(e.arcs)) {
+                e.arcs.forEach(a => {
+                    if (a && a.point_a && a.point_b && typeof a.point_a.lat === 'number' && typeof a.point_b.lat === 'number') {
+                        const p1 = [toX(a.point_a.lng), toY(a.point_a.lat)], p2 = [toX(a.point_b.lng), toY(a.point_b.lat)];
+                        fpSegs.push([p1, p2]);
+                        allPts.push(p1, p2);
+                    }
+                });
+                return;
+            }
+            if (e.type !== 16 && e.type !== 3 && e.type !== 8 && e.type !== 98) return;
+            const cs = (entityCoords(e) || []).filter(c => c && typeof c.lat === 'number');
+            if (!cs.length) return;
+            const px = cs.map(c => [toX(c.lng), toY(c.lat)]);
+            px.forEach(p => allPts.push(p));
+            if (e.type === 16 && px.length >= 3) ffzRings.push(px);
+            if (e.type === 3 && px.length >= 3) assetRings.push(px);
+        });
+        const cellFt = Math.max(1, dem.cellXft);
+        if (mode === 'hull') {
+            if (allPts.length < 3) return null;
+            const marginCells = Math.max(1, (terThresholds.marginFt || 0) / cellFt);
+            const hull = terBOffsetConvex(terBHull(allPts), marginCells);
+            fillRing(hull);
+            return filled ? mask : null;
+        }
+        ffzRings.forEach(fillRing);
+        if (mode === 'ffz') return filled ? mask : null;
+        // 'ffz-fp' — FFZs + asset pads + buffered FP corridors
+        assetRings.forEach(fillRing);
+        const rCells = Math.max(1, (terThresholds.fpCorridorFt || 400) / cellFt);
+        const r = Math.ceil(rCells);
+        const disc = [];
+        for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) if (dx * dx + dy * dy <= rCells * rCells) disc.push([dx, dy]);
+        const step = Math.max(1, rCells / 2);
+        fpSegs.forEach(([a, b]) => {
+            const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+            const nSteps = Math.max(1, Math.ceil(len / step));
+            for (let i = 0; i <= nSteps; i++) {
+                const cx = Math.round(a[0] + (b[0] - a[0]) * i / nSteps);
+                const cy = Math.round(a[1] + (b[1] - a[1]) * i / nSteps);
+                for (const dq of disc) {
+                    const x = cx + dq[0], y = cy + dq[1];
+                    if (x >= 0 && x < w && y >= 0 && y < h) { mask[y * w + x] = 1; filled = true; }
                 }
             }
         });
-        return mask;
+        return filled ? mask : null;
     }
 
     // Cooperative yield — the profiler's number-crunching runs on the main
@@ -6570,7 +6623,11 @@
                 ${num('nfzMaxAc', 'NFZ≤', th.nfzMaxAc, 0.5, 'Absorbed islands up to this acreage become NFZ candidates')}
                 ${chk('median', 'despeckle', terEnabled.median, '3×3 median filter before banding')}
                 ${chk('floorP95', 'P95 floor', terEnabled.floorP95, 'Floor from the 95th-percentile elevation instead of the true max')}
-                ${chk('clipSite', 'site only', terEnabled.clipSite, 'Mask the DEM to the union of existing FFZs — ignore terrain outside the site footprint')}
+                <label title="Profiled area — what part of the map gets analyzed" style="display:flex;align-items:center;gap:4px;">area
+                    <select data-ter-mask style="background:#0d131d;color:#dfe9f0;border:1px solid rgba(201,166,255,0.35);border-radius:4px;padding:2px 4px;font:inherit;">
+                        ${[['hull', 'Site hull'], ['ffz-fp', 'FFZ + FP corridors'], ['ffz', 'FFZs only'], ['rect', 'Rectangle']].map(o =>
+                            `<option value="${o[0]}" ${(th.maskMode || 'hull') === o[0] ? 'selected' : ''}>${o[1]}</option>`).join('')}
+                    </select></label>
                 <button data-ter-rerun style="background:rgba(201,166,255,0.15);border:1px solid rgba(201,166,255,0.5);color:#c9a6ff;border-radius:5px;padding:2px 10px;cursor:pointer;font-weight:600;">⟳ Re-run</button>
             </div>
             <div style="padding:8px 12px;overflow-y:auto;">
@@ -6605,6 +6662,8 @@
                 wrap.querySelectorAll('[data-ter-e]').forEach(inp => {
                     terEnabled[inp.getAttribute('data-ter-e')] = !!inp.checked;
                 });
+                const mSel = wrap.querySelector('[data-ter-mask]');
+                if (mSel && mSel.value) terThresholds.maskMode = mSel.value;
                 if (bad) { showToast(`Invalid value for ${bad}`, 'rgba(255,96,96,0.55)'); return; }
                 saveTerThresholds(); saveTerEnabled();
                 terrainProfilerRun();
@@ -6691,19 +6750,21 @@
             const dem0 = Object.assign({}, demRaw, {
                 vals: terEnabled.median ? await terMedianFilter(demRaw.vals, demRaw.w, demRaw.h) : demRaw.vals,
             });
-            // Site-footprint mask (clipSite): everything outside the union
-            // of existing FFZs becomes no-data before segmentation.
+            // Profile-area mask: everything outside the chosen footprint
+            // becomes no-data before segmentation.
             let maskNote = '';
-            if (terEnabled.clipSite) {
+            const maskMode = terThresholds.maskMode || 'hull';
+            if (maskMode !== 'rect') {
+                const modeLabel = { hull: 'site hull', 'ffz-fp': 'FFZs + FP corridors', ffz: 'FFZ union' }[maskMode] || maskMode;
                 const mask = terSiteMask(dem0, ents);
                 if (mask) {
                     const vv = (dem0.vals === demRaw.vals) ? new Float32Array(demRaw.vals) : dem0.vals;
                     let kept = 0;
                     for (let i = 0; i < vv.length; i++) { if (!mask[i]) vv[i] = NaN; else kept++; }
                     dem0.vals = vv;
-                    maskNote = `masked to site footprint (${Math.round(kept / vv.length * 100)}% of grid)`;
+                    maskNote = `masked to ${modeLabel} (${Math.round(kept / vv.length * 100)}% of grid)`;
                 } else {
-                    maskNote = 'no FFZs on site — full rectangle profiled';
+                    maskNote = `nothing to mask to (${modeLabel}) — full rectangle profiled`;
                 }
             }
             const seg = await terSegment(dem0, th);
@@ -7551,7 +7612,8 @@
             saveTerEnabled();
             return;
         }
-        if (Object.prototype.hasOwnProperty.call(terThresholds, id) && typeof msg.value === 'number') {
+        // Type-matched (numbers AND strings — maskMode/namePrefix are strings).
+        if (Object.prototype.hasOwnProperty.call(terThresholds, id) && typeof msg.value === typeof terThresholds[id]) {
             if (msg.value === terThresholds[id]) return;
             terThresholds[id] = msg.value;
             saveTerThresholds();
@@ -7807,7 +7869,13 @@
                 { id: 'nfzMaxAc', label: 'NFZ candidate up to', type: 'number', min: 0, max: 200, step: 0.5, default: TER_THRESH_DEFAULTS.nfzMaxAc, unit: 'ac' },
                 { id: 'median', label: 'Despeckle DEM (3×3 median)', type: 'boolean', default: TER_ENABLE_DEFAULTS.median },
                 { id: 'floorP95', label: 'Floor ref = P95 elevation (ignore top spikes)', type: 'boolean', default: TER_ENABLE_DEFAULTS.floorP95 },
-                { id: 'clipSite', label: 'Mask to site footprint (existing FFZ union)', type: 'boolean', default: TER_ENABLE_DEFAULTS.clipSite },
+                { id: 'maskMode', label: 'Profile area', type: 'select', options: [
+                    { value: 'hull', label: 'Site hull (all entities + margin)' },
+                    { value: 'ffz-fp', label: 'FFZs + FP corridors + pads' },
+                    { value: 'ffz', label: 'Existing FFZs only' },
+                    { value: 'rect', label: 'Full rectangle (no mask)' },
+                ], default: TER_THRESH_DEFAULTS.maskMode },
+                { id: 'fpCorridorFt', label: 'FP corridor width (FFZ+FP mode)', type: 'number', min: 50, max: 5000, step: 50, default: TER_THRESH_DEFAULTS.fpCorridorFt, unit: 'ft' },
                 { id: 'simplifyFt', label: 'Build · simplify tolerance', type: 'number', min: 0, max: 500, step: 10, default: TER_THRESH_DEFAULTS.simplifyFt, unit: 'ft' },
                 { id: 'nfzBufFt', label: 'Build · NFZ hull buffer', type: 'number', min: 0, max: 200, step: 5, default: TER_THRESH_DEFAULTS.nfzBufFt, unit: 'ft' },
                 { id: 'opacity', label: 'Overlay opacity', type: 'number', min: 0.1, max: 1, step: 0.05, default: TER_THRESH_DEFAULTS.opacity },

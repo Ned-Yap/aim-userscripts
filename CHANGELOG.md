@@ -322,6 +322,17 @@ All 41 files bumped one patch each (prod: Control Panel v1.35, Asset Inspector v
 
 Note: Tampermonkey applies the new `@match` list automatically with the version update — no reinstall needed.
 
+## 2026-07-28 — ⛰ Profiler: selectable profile area (FP-heavy sites) — Asset Inspector v4.205 (dev/latest)
+
+The FFZ-union mask kept almost nothing on FP-heavy sites (corridor-style sites are mostly flight paths, not big freezones). The mask is now a selectable **Profile area** — panel dropdown + Control Panel:
+
+- **Site hull** (new default) — convex hull of all site entities (FFZs, FPs, assets, base/safe) plus the margin: "roughly the site bounds", works on any site shape. GMs excluded on purpose (validator-created tower markers can sit miles out and would balloon the hull).
+- **FFZs + FP corridors** — FFZ polygons + a buffered corridor along every flight-path segment (width configurable, default 400 ft) + asset pads. The tight option for linear sites.
+- **Existing FFZs only** — the previous behavior.
+- **Full rectangle** — no mask.
+
+Verified against a real FP-heavy site: hull profiles 70% of the grid where the old FFZ mask kept ~0%.
+
 ## 2026-07-28 — ⛰ Profiler: no more "page unresponsive" — Asset Inspector v4.204 (dev/latest)
 
 The remaining stall (Chrome's "wait / exit page" dialog on big sites) is gone: the profiler's heavy passes — median despeckle, segmentation/absorption, overlay painting — now run **cooperatively async**, yielding to the browser every few dozen rows (the same pattern that fixed the SOP validators on large sites). PNG encoding for the overlay also moved from the blocking `toDataURL` to async `toBlob` (encodes off the main thread; object URLs revoked on cleanup). Same results, same total time — the page just stays alive while it works.
