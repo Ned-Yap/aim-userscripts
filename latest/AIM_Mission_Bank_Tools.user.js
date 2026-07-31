@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.28
+// @version      2.29
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.28';
+    const SCRIPT_VERSION = '2.29';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -11568,6 +11568,130 @@ ${snapPlacemarks}
         return mpv.svg;
     }
 
+    // ════════════════════════════════════════════════════════════════
+    // v2.29: 👁 legal-route nav lines — the blue nav→nav line follows the
+    // ACTUAL flyable path (along FPs / through FFZs) instead of a straight
+    // segment. Strictly READ-ONLY reuse of the 🔋 Range solver
+    // (rngBuildGraph/agDijkstra + helpers): if any of it is missing or
+    // throws, every leg falls back to the straight dashed line — routing
+    // can never break the preview.
+    // Graph is built ONCE per site (async: entities fetch + build), cached;
+    // the first draw renders straight lines and re-renders routed when the
+    // graph lands.
+    // ════════════════════════════════════════════════════════════════
+    const mpvRoute = { sid: null, built: null, building: false, failedSid: null };
+
+    function mpvRouteReady(sid) {
+        if (!sid) return null;
+        if (mpvRoute.sid === sid && mpvRoute.built) return mpvRoute.built;
+        if (mpvRoute.failedSid === sid) return null;   // build failed once — straight lines, no retry storm
+        if (mpvRoute.building) return null;
+        if (typeof genFetchEntities !== 'function' || typeof rngBuildGraph !== 'function'
+            || typeof agDijkstra !== 'function' || typeof agRingBbox !== 'function') {
+            if (mpvRoute.failedSid !== 'api') {
+                mpvRoute.failedSid = 'api';
+                console.warn(`${TAG} [mpv] Range solver API not found — nav lines stay straight`);
+            }
+            return null;
+        }
+        mpvRoute.building = true;
+        Promise.resolve(genFetchEntities(sid)).then(ent => {
+            const built = rngBuildGraph(ent);
+            built.boxes = built.ffzs.map(f => agRingBbox(f.ring, MB_ENTRY_FFZ_FT / 3.28084));
+            mpvRoute.sid = sid;
+            mpvRoute.built = built;
+            mpvRoute.building = false;
+            console.log(`${TAG} [mpv] legal-route graph ready (${built.graph.verts.size} verts) — re-rendering routed nav lines`);
+            mpvRedraw();
+        }).catch(e => {
+            mpvRoute.building = false;
+            mpvRoute.failedSid = sid;
+            console.warn(`${TAG} [mpv] legal-route graph build failed — nav lines stay straight:`, e);
+        });
+        return null;
+    }
+
+    // Temp-attach a point into the graph the same way the solver attaches
+    // bases: visibility edges inside every FFZ that contains it, a stub onto
+    // the nearest FP arc, and a nearest-vertex fallback so it's never
+    // stranded. Every added key is recorded in tempOut for detachment.
+    function mpvAttachPoint(built, p, tag, tempOut) {
+        const { graph, ffzs, boxes } = built;
+        const entryM = MB_ENTRY_FFZ_FT / 3.28084;
+        const k = `mpv:${tag}`;
+        graph.verts.set(k, { lat: p.lat, lng: p.lng });
+        graph.adj.set(k, []);
+        tempOut.push(k);
+        const link = (ka, kb, w) => { graph.adj.get(ka).push({ to: kb, w }); graph.adj.get(kb).push({ to: ka, w }); };
+        let linked = 0;
+        ffzs.forEach((f, fi) => {
+            if (mbPointToPolygonMeters(p.lat, p.lng, f.ring) > entryM) return;
+            const bb = boxes[fi];
+            graph.verts.forEach((v, vk) => {
+                if (vk === k || vk.indexOf('mpv') === 0) return;
+                if (v.lat < bb.s || v.lat > bb.n || v.lng < bb.w || v.lng > bb.e) return;
+                if (mbPointToPolygonMeters(v.lat, v.lng, f.ring) > entryM) return;
+                if (!rngSegInside(p, v, f.ring)) return;
+                link(k, vk, mbApproxMeters(p.lat, p.lng, v.lat, v.lng));
+                linked++;
+            });
+        });
+        const arc = agNearestArcPoint(graph, [p], MB_REACH_FFZ_FT / 3.28084);
+        if (arc) {
+            const xk = `mpvx:${tag}`;
+            graph.verts.set(xk, arc.p);
+            graph.adj.set(xk, []);
+            tempOut.push(xk);
+            link(xk, arc.ka, arc.w * arc.t);
+            link(xk, arc.kb, arc.w * (1 - arc.t));
+            link(k, xk, Math.max(1, arc.d));
+            linked++;
+        }
+        if (!linked) {
+            const nv = mbNearestVertex(graph, p.lat, p.lng);
+            if (nv && nv.key !== k) link(k, nv.key, nv.dist);
+        }
+        return k;
+    }
+
+    function mpvDetachTemp(graph, tempKeys) {
+        if (!tempKeys.length) return;
+        const tset = new Set(tempKeys);
+        tempKeys.forEach(k => { graph.verts.delete(k); graph.adj.delete(k); });
+        graph.adj.forEach(list => {
+            for (let i = list.length - 1; i >= 0; i--) if (tset.has(list[i].to)) list.splice(i, 1);
+        });
+    }
+
+    // Legal path a→b as [[lat,lng],…], or null (no route / solver hiccup)
+    // → caller draws the straight fallback.
+    function mpvLegalPath(built, a, b) {
+        const graph = built.graph;
+        const temp = [];
+        try {
+            const ka = mpvAttachPoint(built, a, 'a', temp);
+            const kb = mpvAttachPoint(built, b, 'b', temp);
+            const { dist, prev } = agDijkstra(graph, ka);
+            if (!dist.has(kb)) return null;
+            const path = [];
+            let cur = kb, guard = 0;
+            while (cur !== undefined && guard++ < 20000) {
+                const v = graph.verts.get(cur);
+                if (v) path.push([v.lat, v.lng]);
+                if (cur === ka) break;
+                cur = prev.get(cur);
+            }
+            if (cur !== ka) return null;
+            path.reverse();
+            return path.length >= 2 ? path : null;
+        } catch (e) {
+            console.warn(`${TAG} [mpv] legal-route leg failed — straight fallback:`, e);
+            return null;
+        } finally {
+            try { mpvDetachTemp(graph, temp); } catch (e) {}
+        }
+    }
+
     function mpvDrawMission(m, color) {
         const L = composerGetL(), map = getLeafletMap();
         if (!L || !map || !m) return;
@@ -11606,7 +11730,21 @@ ${snapPlacemarks}
             else if (s.type_name === 'snapshot' && curNav) sightlines.push([curNav, [s.location.lat, s.location.lng]]);
         }
         if (navPts.length >= 2) {
-            addLine(navPts, { color: stepColor('nav'), weight: 3, opacity: 0.85, dashArray: '7,7', interactive: false });
+            const navOpts = { color: stepColor('nav'), weight: 3, opacity: 0.85, dashArray: '7,7', interactive: false };
+            // v2.29: route each leg along the actual flyable path (Range
+            // solver graph). Graph not ready/failed → straight line now;
+            // a routed re-render fires when the async build lands.
+            const built = mpvRouteReady(getCurrentSiteID());
+            if (built) {
+                for (let i = 0; i + 1 < navPts.length; i++) {
+                    const seg = mpvLegalPath(built,
+                        { lat: navPts[i][0], lng: navPts[i][1] },
+                        { lat: navPts[i + 1][0], lng: navPts[i + 1][1] });
+                    addLine(seg || [navPts[i], navPts[i + 1]], Object.assign({}, navOpts));
+                }
+            } else {
+                addLine(navPts, navOpts);
+            }
         }
         for (const sl of sightlines) {
             addLine(sl, { color: stepColor('snap'), weight: 2, opacity: 0.75, dashArray: '4,6', interactive: false });
