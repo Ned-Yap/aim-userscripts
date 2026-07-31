@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.38
+// @version      1.39
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -58,7 +58,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.38';
+    const VERSION = '1.39';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -830,22 +830,75 @@
     }
 
     function removeFloatingButton() {
-        if (state.buttonEl && state.buttonEl.classList.contains('aim-control-button--floating')) {
+        if (state.buttonEl && (state.buttonEl.classList.contains('aim-control-button--floating')
+                || state.buttonEl.classList.contains('aim-control-button--docked'))) {
             try { state.buttonEl.remove(); } catch (e) { /* already detached */ }
-            // The panel lives inside the button — reset both so a later
-            // page gets a fresh build.
+            // v1.39: the docked variant keeps its panel in document.body —
+            // remove it explicitly, then reset so a later page rebuilds fresh.
+            if (state.panelEl) { try { state.panelEl.remove(); } catch (e) {} }
             state.buttonEl = null;
             state.panelEl = null;
             state.panelOpen = false;
         }
     }
 
+    // ------------------------------------------------------------
+    // v1.39 — Data View: DOCK the gear inside the native map-group header,
+    // right of the layers toggle (.map-group-buttons-container), so it reads
+    // as part of Percepto's own button row instead of floating over the
+    // draw-control strip (user report: the floating box sat between other
+    // buttons). Angular re-renders that header freely — detachment is
+    // normal; the 2s sync interval re-docks after every wipe.
+    // ------------------------------------------------------------
+    function injectDockedButton() {
+        const host = document.querySelector('.map-group-buttons-container');
+        if (!host) return false;
+        ensureGearStyles(document);
+        const wrapper = document.createElement('div');
+        wrapper.innerHTML = `
+            <div class="aim-control-button aim-control-button--docked"
+                 title="AIM Controls"
+                 style="cursor:pointer;display:inline-flex;align-items:center;justify-content:center;
+                        width:22px;height:22px;margin-left:6px;border-radius:5px;user-select:none">
+                <span style="font-size:15px;line-height:1;color:#39ff14">⚙</span>
+            </div>
+        `;
+        const btn = wrapper.firstElementChild;
+        host.appendChild(btn);
+        state.buttonEl = btn;
+        swallowMouseEvents(btn);
+        btn.addEventListener('click', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            togglePanel();
+        });
+        console.log(`${TAG} gear docked into .map-group-buttons-container (Data View)`);
+        return true;
+    }
+
     // Called at start, on every scope change, and on a slow interval
     // (Angular can rebuild large chunks of the live page under us).
     function syncFloatingButton() {
         if (!IS_TOP) return;
-        if (state.urlScope === 'live-drone' || state.urlScope === 'data-view') injectFloatingButton();
-        else removeFloatingButton();
+        if (state.urlScope === 'live-drone') { injectFloatingButton(); return; }
+        if (state.urlScope === 'data-view') {
+            // Angular wiped our button? Reset so we rebuild below.
+            if (state.buttonEl && !document.body.contains(state.buttonEl)) {
+                state.buttonEl = null;
+                if (state.panelEl) { try { state.panelEl.remove(); } catch (e) {} }
+                state.panelEl = null;
+                state.panelOpen = false;
+            }
+            // Upgrade a floating gear to docked the moment the header exists.
+            if (state.buttonEl && state.buttonEl.classList.contains('aim-control-button--floating')
+                && document.querySelector('.map-group-buttons-container')) {
+                removeFloatingButton();
+            }
+            if (state.buttonEl) return;
+            if (injectDockedButton()) return;
+            injectFloatingButton();   // fallback — header not rendered (yet)
+            return;
+        }
+        removeFloatingButton();
     }
 
     function watchToolsBar() {
@@ -906,11 +959,21 @@
             'cursor:default',
         ].join(';');
         swallowMouseEvents(panel); // prevent clicks inside the panel from reaching the map
-        if (state.buttonEl) state.buttonEl.appendChild(panel);
+        // v1.39: a DOCKED gear lives inside Percepto's Angular header, whose
+        // ancestors can clip/transform an absolutely-positioned child — so
+        // its panel goes in document.body with position:fixed (coords set on
+        // every open in setPanelOpen). Other modes keep the in-button panel.
+        if (state.buttonEl && state.buttonEl.classList.contains('aim-control-button--docked')) {
+            panel.style.position = 'fixed';
+            document.body.appendChild(panel);
+        } else if (state.buttonEl) {
+            state.buttonEl.appendChild(panel);
+        }
         state.panelEl = panel;
-        // Click outside closes
+        // Click outside closes (panel may be OUTSIDE the button now — check both)
         document.addEventListener('click', (e) => {
-            if (state.panelOpen && state.buttonEl && !state.buttonEl.contains(e.target)) {
+            if (state.panelOpen && state.buttonEl && !state.buttonEl.contains(e.target)
+                && !(state.panelEl && state.panelEl.contains(e.target))) {
                 setPanelOpen(false);
             }
         }, true);
@@ -1125,6 +1188,16 @@
         if (!state.panelEl) createPanel();
         state.panelOpen = open;
         state.panelEl.style.display = open ? 'block' : 'none';
+        // v1.39: docked mode — pin the fixed panel under the gear on every
+        // open (the header can move between opens; recompute each time).
+        if (open && state.buttonEl && state.buttonEl.classList.contains('aim-control-button--docked')) {
+            try {
+                const r = state.buttonEl.getBoundingClientRect();
+                state.panelEl.style.position = 'fixed';
+                state.panelEl.style.top = Math.round(r.bottom + 6) + 'px';
+                state.panelEl.style.right = Math.max(8, Math.round(window.innerWidth - r.right)) + 'px';
+            } catch (e) { /* keep last position */ }
+        }
         if (open) {
             // Reset section open state so the panel always starts tidy.
             // Per-session behavior; not persisted across page loads.
