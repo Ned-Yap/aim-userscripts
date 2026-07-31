@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.13
+// @version      2.39
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.13';
+    const SCRIPT_VERSION = '2.39';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -292,6 +292,14 @@
     // ========================================================
     // Control Panel integration
     // ========================================================
+    // v2.26: which frame owns the 👁 overlay — the SS/MB map iframe, or any
+    // frame that actually has a Leaflet map (Data View TOP). Used by the
+    // SET_TOGGLE handlers so preview toggles act in whichever frame renders.
+    function mpvFrameOk() {
+        if (CONTEXT === 'IFRAME') return true;
+        try { return !!getLeafletMap(); } catch (e) { return false; }
+    }
+
     function setupControlPanel() {
         try { controlChannel = new BroadcastChannel(CONTROL_CHANNEL_NAME); }
         catch (e) { return; }
@@ -308,10 +316,10 @@
                         hideSumButton();
                         closePanel();
                         closeRightClickPopup();
-                        if (CONTEXT === 'IFRAME') try { mpvTeardown(); } catch (e) {}
+                        if (mpvFrameOk()) try { mpvTeardown(); } catch (e) {}
                     } else {
                         runSumInjection();
-                        if (CONTEXT === 'IFRAME') try { mpvInjectButton(); } catch (e) {}
+                        if (mpvFrameOk()) try { mpvInjectButton(); } catch (e) {}
                     }
                 } else if (msg.toggleId === 'hide-scan-icons') {
                     const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
@@ -352,7 +360,10 @@
                     if (v !== mpvEnabled) {
                         mpvEnabled = v;
                         gmSet(CACHE_KEY_MPV_ENABLED, mpvEnabled);
-                        if (CONTEXT === 'IFRAME') {
+                        // v2.26: mpvFrameOk, not IFRAME — on Data View the TOP
+                        // instance owns the overlay; the IFRAME gate meant a
+                        // DV uncheck stored the value but never tore down.
+                        if (mpvFrameOk()) {
                             if (mpvEnabled) { try { mpvInjectButton(); } catch (e) {} }
                             else { try { mpvTeardown(); } catch (e) {} }
                         }
@@ -362,7 +373,7 @@
                     if (v !== mpvAllOn) {
                         mpvAllOn = v;
                         gmSet(CACHE_KEY_MPV_ALL, mpvAllOn);
-                        if (CONTEXT === 'IFRAME') try { mpvAllChanged(); } catch (e) {}
+                        if (mpvFrameOk()) try { mpvAllChanged(); } catch (e) {}
                     }
                 } else if (msg.toggleId === 'default-snap-agl') {
                     const v = Number(msg.value !== undefined ? msg.value : msg.enabled);
@@ -3155,7 +3166,7 @@
         const mrg = document.createElement('button');
         mrg.id = 'aim-mb-gen-merge-btn'; mrg.type = 'button';
         mrg.textContent = '⛟ Merge';
-        mrg.title = 'Group this site\'s solo missions into battery-tiered merged missions per section (furthest→closest from base).';
+        mrg.title = 'Auto-Group: battery-tiered merged missions per section — 2-opt route order + multi-flight battery simulator (breaks planned near base).';
         mrg.style.cssText = 'position:absolute;top:8px;left:118px;z-index:1100;padding:6px 11px;border-radius:6px;cursor:pointer;' +
             'font:800 12px "Lato",sans-serif;border:1.5px solid #ffb74d;background:#241a0d;color:#ffce80;box-shadow:0 2px 8px rgba(0,0,0,0.7);';
         mrg.onclick = e => { e.preventDefault(); e.stopPropagation(); mbOpenMergePanel(); };
@@ -3761,7 +3772,47 @@
     // the server computes route_points/app_data (verified vs a real merged mission).
     // Gated behind the generator unlock (it CREATES missions).
     // ════════════════════════════════════════════════════════════════════════
-    const MB_BATTERY = { tattuMaxFt: 14000, tulipMaxFt: 18000 };
+    // ── Auto-Group config (v2.15, feature #216) — GM-persisted knobs for the
+    // grouping optimizer. Tier radii sit deliberately a hair UNDER the Asset
+    // Inspector Battery column's 14k/18k (user rule 2026-07-30: "maybe even a
+    // hair under — 13.5 and 17.5"). Budgets = TOTAL per-flight range in
+    // ft-equivalents, ≈2× the one-way point-of-no-return estimates (15.5k
+    // Tattu / 20k Tulip with zero capture budget).
+    const AG_CFG_KEY = 'aim-mb-autogroup-cfg';
+    const AG_DEFAULTS = {
+        // v2.23: back to the operational 14k/18k — the "hair under" 13.5k/17.5k
+        // defaults kept surprising the user (a 13.7k pad reading Tulip-orange
+        // when they think of it as a 14k Tattu pad). The margin knob already
+        // provides the safety slack; radii should match how they talk.
+        tattuRadiusFt: 14000,   // one-way route ≤ this → Tattu tier
+        tulipRadiusFt: 18000,   // ≤ this → Tulip tier; beyond → excluded (unflyable)
+        // Budgets back-derived from real ops (live test 2026-07-30): 14k/18k
+        // pads ARE flown with capture + a 20–30% landing reserve, so total
+        // range ≈ 2×radius ÷ 0.75 → ~37k Tattu / ~46k Tulip ft-equiv.
+        tattuBudgetFt: 37000,
+        tulipBudgetFt: 46000,
+        marginPct: 82,          // usable % of the budget — the rest is landing reserve
+        // v2.17: a pad's cost = its mission's ACTUAL internal path length
+        // (sum of instruction-location hops — the same data the SUM panel
+        // estimates from) + stepCost × steps for hover/capture overhead.
+        stepCostFt: 40,
+        stepMax: 600,           // soft step cap per merged mission (multi-flight is normal)
+        targetGroups: 5,        // target direction families per site (user: 4–6 macros total)
+    };
+    let agCfgCache = null;
+    function agCfg() {
+        if (!agCfgCache) {
+            const saved = gmGet(AG_CFG_KEY, null);
+            agCfgCache = Object.assign({}, AG_DEFAULTS, (saved && typeof saved === 'object') ? saved : {});
+            Object.keys(AG_DEFAULTS).forEach(k => { const v = Number(agCfgCache[k]); agCfgCache[k] = (isFinite(v) && v > 0) ? v : AG_DEFAULTS[k]; });
+        }
+        return agCfgCache;
+    }
+    function agSetCfg(patch) {
+        const next = Object.assign({}, agCfg(), patch || {});
+        gmSet(AG_CFG_KEY, next);
+        agCfgCache = null;   // rebuild (validated) on next read
+    }
     const MB_REACH_FFZ_FT = 70, MB_ENTRY_FFZ_FT = 25;
     const MB_CENTRAL_FT = 750;   // asset within this straight-line of base → "Central"
     const MB_SECTION_NAMES = { N: 'North', NE: 'Northeast', E: 'East', SE: 'Southeast', S: 'South', SW: 'Southwest', W: 'West', NW: 'Northwest', C: 'Central' };
@@ -3780,7 +3831,7 @@
     }
     function mbDijkstra(graph, startKey) { const dist = new Map(); if (!graph.adj.has(startKey)) return dist; dist.set(startKey, 0); const vis = new Set(); const pq = [{ k: startKey, d: 0 }]; while (pq.length) { let mi = 0; for (let i = 1; i < pq.length; i++) if (pq[i].d < pq[mi].d) mi = i; const { k, d } = pq.splice(mi, 1)[0]; if (vis.has(k)) continue; vis.add(k); (graph.adj.get(k) || []).forEach(({ to, w }) => { const nd = d + w; if (nd < (dist.has(to) ? dist.get(to) : Infinity)) { dist.set(to, nd); pq.push({ k: to, d: nd }); } }); } return dist; }
     function mbNearestVertex(graph, lat, lng) { let best = null; graph.verts.forEach((v, k) => { const d = mbApproxMeters(lat, lng, v.lat, v.lng); if (!best || d < best.dist) best = { key: k, dist: d, vert: v }; }); return best; }
-    function mbBatteryFor(routeM) { if (routeM == null) return null; const ft = routeM * 3.28084; if (ft <= MB_BATTERY.tattuMaxFt) return { label: 'Tattu', color: '#5fff5f', level: 0 }; if (ft <= MB_BATTERY.tulipMaxFt) return { label: 'Tulip', color: '#ffd54f', level: 1 }; return { label: `⚠ over ${MB_BATTERY.tulipMaxFt.toLocaleString()} ft`, color: '#ff5252', level: 2 }; }
+    function mbBatteryFor(routeM) { if (routeM == null) return null; const ft = routeM * 3.28084; const cfg = agCfg(); if (ft <= cfg.tattuRadiusFt) return { label: 'Tattu', color: '#5fff5f', level: 0 }; if (ft <= cfg.tulipRadiusFt) return { label: 'Tulip', color: '#ffd54f', level: 1 }; return { label: `⚠ over ${cfg.tulipRadiusFt.toLocaleString()} ft`, color: '#ff5252', level: 2 }; }
 
     // 8-way + Central section from base. atan2(dLat,dLng): 0=E, 90=N.
     function mbSection(pt, base) {
@@ -3792,42 +3843,1495 @@
         return ['E', 'NE', 'N', 'NW', 'W', 'SW', 'S', 'SE'][idx];
     }
 
+    // ── Segment-aware graph helpers (v2.18) ─────────────────────────────────
+    // ENGRAVED RULE: proximity measures to SEGMENTS, never vertices. An FP arc
+    // that CROSSES an FFZ mid-segment is a legal entry even when both of its
+    // endpoints are far away, and a pad served by an FP with no FFZ of its own
+    // is fully reachable — both were being excluded (live-test feedback:
+    // "all the ones I circled are fully reachable and built that way").
+    function agRingBbox(ring, padM) {
+        let s = Infinity, n = -Infinity, w = Infinity, e = -Infinity;
+        ring.forEach(p => { if (p.lat < s) s = p.lat; if (p.lat > n) n = p.lat; if (p.lng < w) w = p.lng; if (p.lng > e) e = p.lng; });
+        const dLat = (padM || 0) / 111320;
+        const dLng = (padM || 0) / (111320 * Math.cos(((s + n) / 2) * Math.PI / 180));
+        return { s: s - dLat, n: n + dLat, w: w - dLng, e: e + dLng };
+    }
+    function agBboxHit(bb, a, b) {
+        return Math.min(a.lat, b.lat) <= bb.n && Math.max(a.lat, b.lat) >= bb.s
+            && Math.min(a.lng, b.lng) <= bb.e && Math.max(a.lng, b.lng) >= bb.w;
+    }
+    // Splice a synthetic vertex into every FP edge that passes within entryM of
+    // an FFZ its endpoints don't touch — the crossing point becomes a real
+    // graph vertex (proportional weights), so entry checks and cliques see it.
+    function agSpliceFfzCrossings(graph, ffzs, entryM) {
+        const edges = [];
+        graph.adj.forEach((list, ka) => list.forEach(ed => { if (ka < ed.to) edges.push({ ka, kb: ed.to, w: ed.w }); }));
+        const boxes = ffzs.map(f => agRingBbox(f.ring, entryM));
+        let added = 0;
+        edges.forEach(({ ka, kb, w }) => {
+            const a = graph.verts.get(ka), b = graph.verts.get(kb);
+            ffzs.forEach((f, fi) => {
+                if (!agBboxHit(boxes[fi], a, b)) return;
+                if (mbPointToPolygonMeters(a.lat, a.lng, f.ring) <= entryM) return;
+                if (mbPointToPolygonMeters(b.lat, b.lng, f.ring) <= entryM) return;
+                const total = mbApproxMeters(a.lat, a.lng, b.lat, b.lng);
+                const nSteps = Math.max(2, Math.ceil(total / 15));
+                let hit = null;
+                for (let i = 1; i < nSteps; i++) {
+                    const t = i / nSteps;
+                    const p = { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t };
+                    const d = mbPointToPolygonMeters(p.lat, p.lng, f.ring);
+                    if (d <= entryM && (!hit || d < hit.d)) hit = { p, t, d };
+                }
+                if (!hit) return;
+                const k = `x:${ka}|${kb}|${fi}`;
+                if (graph.verts.has(k)) return;
+                graph.verts.set(k, hit.p);
+                graph.adj.set(k, [{ to: ka, w: w * hit.t }, { to: kb, w: w * (1 - hit.t) }]);
+                graph.adj.get(ka).push({ to: k, w: w * hit.t });
+                graph.adj.get(kb).push({ to: k, w: w * (1 - hit.t) });
+                added++;
+            });
+        });
+        return added;
+    }
+    // Nearest point ON ANY FP EDGE to a set of pad points (bbox-prefiltered).
+    // Returns {ka, kb, w, t, d, p} in meters, or null when nothing ≤ maxM.
+    function agNearestArcPoint(graph, pts, maxM) {
+        if (!pts || !pts.length) return null;
+        let bs = Infinity, bn = -Infinity, bw = Infinity, be = -Infinity;
+        pts.forEach(p => { if (p.lat < bs) bs = p.lat; if (p.lat > bn) bn = p.lat; if (p.lng < bw) bw = p.lng; if (p.lng > be) be = p.lng; });
+        const dLat = maxM / 111320, dLng = maxM / (111320 * Math.cos(((bs + bn) / 2) * Math.PI / 180));
+        const bb = { s: bs - dLat, n: bn + dLat, w: bw - dLng, e: be + dLng };
+        let best = null;
+        graph.adj.forEach((list, ka) => list.forEach(ed => {
+            if (ka >= ed.to) return;
+            // pad stubs aren't flight paths — never project onto them
+            if (String(ka).indexOf('pad') === 0 || String(ed.to).indexOf('pad') === 0) return;
+            const a = graph.verts.get(ka), b = graph.verts.get(ed.to);
+            if (!agBboxHit(bb, a, b)) return;
+            pts.forEach(c => {
+                const ax = a.lng, ay = a.lat, bx = b.lng, by = b.lat;
+                const dx = bx - ax, dy = by - ay;
+                const l2 = dx * dx + dy * dy;
+                let t = l2 === 0 ? 0 : ((c.lng - ax) * dx + (c.lat - ay) * dy) / l2;
+                t = Math.max(0, Math.min(1, t));
+                const py = ay + t * dy, px = ax + t * dx;
+                const d = mbApproxMeters(c.lat, c.lng, py, px);
+                if (d <= maxM && (!best || d < best.d)) best = { ka, kb: ed.to, w: ed.w, t, d, p: { lat: py, lng: px } };
+            });
+        }));
+        return best;
+    }
+
     // Build a router for the site: bridged FP graph + base Dijkstra maps. routeFor
-    // (a list of asset points) returns one-way routeM (base→FFZ far edge) — the
-    // EXACT Asset-Inspector algorithm. Reusable across all assets on the site.
+    // (a list of asset points) returns one-way routeM — Asset-Inspector algorithm
+    // + v2.18 segment-aware extensions (spliced FFZ crossings, FP-only fallback).
     function mbBuildRouter(ent) {
         const graph = mbBuildGraph(ent.fps);
-        const ffzs = (ent.ffzs || []).map(f => ({ ring: mbSimplifyPolygon(f.ring) }));
-        const fpVerts = []; graph.verts.forEach((v, k) => fpVerts.push({ key: k, lat: v.lat, lng: v.lng }));
+        // RAW rings (v2.18) — mbSimplifyPolygon's angular sort mangles non-star
+        // polygons (engraved bug), corrupting inside/entry tests.
+        const ffzs = (ent.ffzs || []).map(f => ({ ring: f.ring })).filter(f => f.ring && f.ring.length >= 3);
         const entryM = MB_ENTRY_FFZ_FT / 3.28084;
+        agSpliceFfzCrossings(graph, ffzs, entryM);
+        const fpVerts = []; graph.verts.forEach((v, k) => fpVerts.push({ key: k, lat: v.lat, lng: v.lng }));
         ffzs.forEach(f => { const inside = fpVerts.filter(v => mbPointToPolygonMeters(v.lat, v.lng, f.ring) <= entryM); for (let i = 0; i < inside.length; i++) for (let j = i + 1; j < inside.length; j++) { const w = mbApproxMeters(inside[i].lat, inside[i].lng, inside[j].lat, inside[j].lng); graph.adj.get(inside[i].key).push({ to: inside[j].key, w }); graph.adj.get(inside[j].key).push({ to: inside[i].key, w }); } });
         const bases = (ent.baseEnts && ent.baseEnts.length) ? ent.baseEnts.map(b => ({ lat: b.coords[0].lat, lng: b.coords[0].lng })) : (ent.base ? [ent.base] : []);
         const baseRuns = bases.map(b => { const bv = mbNearestVertex(graph, b.lat, b.lng); if (!bv) return null; return { baseConn: bv.dist, dist: mbDijkstra(graph, bv.key) }; }).filter(Boolean);
         const reachM = MB_REACH_FFZ_FT / 3.28084;
+        const ffzFor = (pts) => {
+            let ffz = null, ffzD = Infinity;
+            ffzs.forEach(f => { let best = Infinity; pts.forEach(c => { const d = mbPointToPolygonMeters(c.lat, c.lng, f.ring); if (d < best) best = d; }); if (best < ffzD) { ffzD = best; ffz = f; } });
+            return { ffz, ffzD };
+        };
         return {
             ready: graph.verts.size > 0 && baseRuns.length > 0,
             verts: graph.verts.size,
             routeFor(pts) {
                 if (!pts || !pts.length) return null;
-                let ffz = null, ffzD = Infinity;
-                ffzs.forEach(f => { let best = Infinity; pts.forEach(c => { const d = mbPointToPolygonMeters(c.lat, c.lng, f.ring); if (d < best) best = d; }); if (best < ffzD) { ffzD = best; ffz = f; } });
-                if (!ffz || ffzD > reachM) return null;
+                const { ffz, ffzD } = ffzFor(pts);
+                if (ffz && ffzD <= reachM) {
+                    const entries = fpVerts.filter(v => mbPointToPolygonMeters(v.lat, v.lng, ffz.ring) <= entryM);
+                    let best = null;
+                    baseRuns.forEach(br => { entries.forEach(en => { const net = br.dist.has(en.key) ? br.dist.get(en.key) : null; if (net == null) return; let far = 0; ffz.ring.forEach(p => { const dd = mbApproxMeters(en.lat, en.lng, p.lat, p.lng); if (dd > far) far = dd; }); const total = br.baseConn + net + far; if (best == null || total < best) best = total; }); });
+                    if (best != null) return best;
+                }
+                // FP-only fallback (v2.18): the pad is served straight off a
+                // flight path (no FFZ of its own, or its FFZ has no entries) —
+                // route to the nearest point ON an arc, segment-aware.
+                const arc = agNearestArcPoint(graph, pts, reachM);
+                if (!arc) return null;
+                let bestFp = null;
+                baseRuns.forEach(br => {
+                    const da = br.dist.has(arc.ka) ? br.dist.get(arc.ka) + arc.w * arc.t : null;
+                    const db = br.dist.has(arc.kb) ? br.dist.get(arc.kb) + arc.w * (1 - arc.t) : null;
+                    [da, db].forEach(dd => { if (dd == null) return; const total = br.baseConn + dd + arc.d; if (bestFp == null || total < bestFp) bestFp = total; });
+                });
+                return bestFp;
+            },
+            // Human-readable reason a pad is unroutable — shown in Excluded.
+            explain(pts) {
+                if (!pts || !pts.length) return 'no location';
+                const { ffz, ffzD } = ffzFor(pts);
+                if (!ffz || ffzD > reachM) {
+                    return agNearestArcPoint(graph, pts, reachM) ? 'FP found but no base path' : `no FFZ/FP within ${MB_REACH_FFZ_FT} ft`;
+                }
                 const entries = fpVerts.filter(v => mbPointToPolygonMeters(v.lat, v.lng, ffz.ring) <= entryM);
-                if (!entries.length) return null;
-                let best = null;
-                baseRuns.forEach(br => { entries.forEach(en => { const net = br.dist.has(en.key) ? br.dist.get(en.key) : null; if (net == null) return; let far = 0; ffz.ring.forEach(p => { const dd = mbApproxMeters(en.lat, en.lng, p.lat, p.lng); if (dd > far) far = dd; }); const total = br.baseConn + net + far; if (best == null || total < best) best = total; }); });
-                return best;
+                if (!entries.length) return `pad FFZ has no FP entry within ${MB_ENTRY_FFZ_FT} ft`;
+                return 'no base path to pad FFZ';
             }
         };
     }
 
-    // The asset point(s) a solo inspects = its snapshot (type 6) locations (asset
-    // center). Falls back to navigate (type 1) locations. Used for section + routing.
+    // ════════════════════════════════════════════════════════════════════════
+    // AUTO-GROUP OPTIMIZER (v2.15, feature #216) — upgrades the merge from
+    // "sort furthest→closest" to a real routing optimization (small-N CVRP):
+    //   1. ORDER GRAPH — FP graph + each pad as a vertex + line-of-sight
+    //      shortcut edges INSIDE FFZ polygons (flight rule: stay inside FFZ/FP;
+    //      giant open FFZs are crossed straight). LOS edges are containment-
+    //      SAMPLED so concave FFZs never grant an illegal shortcut. Pairwise
+    //      pad↔pad + base↔pad distances via Dijkstra from every pad.
+    //   2. BREAK SIMULATOR — a merged mission spans 2–5 flights; Percepto
+    //      resumes at the last completed step after a recharge, so every
+    //      mid-mission break costs ~2× the distance home (return leg + commute
+    //      back out). The simulator walks an ordering, spends legs + per-step
+    //      capture cost against the usable budget (budget × margin), and
+    //      breaks so the drone can ALWAYS still make it home.
+    //   3. OPTIMIZER — far→near + nearest-neighbor seeds, 2-opt polished,
+    //      scored by the SIMULATOR total (transit + RTB overhead). Far→near
+    //      tends to win: the battery runs low when the drone is near base.
+    // The order graph is SEPARATE from mbBuildRouter's so tier assignment
+    // (routeM → Tattu/Tulip) stays in parity with the Asset Inspector's
+    // Battery-column algorithm.
+    // ════════════════════════════════════════════════════════════════════════
+
+    // Dijkstra with predecessor tracking (mbDijkstra only returns distances) —
+    // the route overlay needs the actual vertex path along FPs/FFZs, not a
+    // straight line between stops (live-test fix, v2.16).
+    function agDijkstra(graph, startKey) {
+        const dist = new Map(), prev = new Map();
+        if (!graph.adj.has(startKey)) return { dist, prev };
+        dist.set(startKey, 0);
+        const vis = new Set();
+        const pq = [{ k: startKey, d: 0 }];
+        while (pq.length) {
+            let mi = 0;
+            for (let i = 1; i < pq.length; i++) if (pq[i].d < pq[mi].d) mi = i;
+            const { k, d } = pq.splice(mi, 1)[0];
+            if (vis.has(k)) continue;
+            vis.add(k);
+            (graph.adj.get(k) || []).forEach(({ to, w }) => {
+                const nd = d + w;
+                if (nd < (dist.has(to) ? dist.get(to) : Infinity)) { dist.set(to, nd); prev.set(to, k); pq.push({ k: to, d: nd }); }
+            });
+        }
+        return { dist, prev };
+    }
+
+    // Does segment a↔b stay inside `ring`? Sampled every ~20 m with a small
+    // edge tolerance — cheap and reliable, no clipping library needed.
+    function agSegInsideRing(a, b, ring) {
+        const total = mbApproxMeters(a.lat, a.lng, b.lat, b.lng);
+        const n = Math.max(2, Math.ceil(total / 20));
+        for (let i = 1; i < n; i++) {
+            const t = i / n;
+            const p = { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t };
+            if (!genPointInPoly(p, ring) && mbPointToPolygonMeters(p.lat, p.lng, ring) > 8) return false;
+        }
+        return true;
+    }
+
+    // Build the pairwise distance model over the ROUTABLE solos. Returns null
+    // when there is nothing to route with. Distances are in FEET. Pairs the
+    // graph can't connect fall back to straight-line ×1.25 (counted in
+    // offGraphPairs and surfaced in the panel — never silently wrong).
+    function agBuildOrderGraph(ent, solos) {
+        const graph = mbBuildGraph(ent.fps);
+        if (!graph.verts.size) return null;
+        // RAW rings, NOT mbSimplifyPolygon (v2.17 live-test fix): the angular
+        // sort mangles non-star FFZs (the engraved SOP-validator bug), which
+        // made agSegInsideRing REJECT legitimate in-FFZ shortcuts — routes
+        // then detoured the long way around (18k-ft base legs on 1k-ft pads).
+        const ffzs = (ent.ffzs || []).map(f => ({ ring: f.ring })).filter(f => f.ring && f.ring.length >= 3);
+        const entryM = MB_ENTRY_FFZ_FT / 3.28084, reachM = MB_REACH_FFZ_FT / 3.28084;
+        // Segment-aware entries (v2.18): arcs crossing an FFZ mid-segment get a
+        // spliced vertex BEFORE the vertex census, so cliques + pad links see them.
+        agSpliceFfzCrossings(graph, ffzs, entryM);
+        const fpVerts = []; graph.verts.forEach((v, k) => fpVerts.push({ key: k, lat: v.lat, lng: v.lng }));
+        const link = (ka, kb, w) => { graph.adj.get(ka).push({ to: kb, w }); graph.adj.get(kb).push({ to: ka, w }); };
+        // FFZ cliques (v2.19): ALWAYS link — a rejected LOS just means the
+        // drone hugs the FFZ interior instead of cutting straight, so the pair
+        // gets a ×1.4 detour penalty rather than disconnection. (Strict LOS
+        // cliques split components the router graph kept connected → 39.5k
+        // straight-fallback legs and effectively random ordering — live test.)
+        ffzs.forEach(f => {
+            const inside = fpVerts.filter(v => mbPointToPolygonMeters(v.lat, v.lng, f.ring) <= entryM);
+            for (let i = 0; i < inside.length; i++) for (let j = i + 1; j < inside.length; j++) {
+                const straight = mbApproxMeters(inside[i].lat, inside[i].lng, inside[j].lat, inside[j].lng);
+                link(inside[i].key, inside[j].key, agSegInsideRing(inside[i], inside[j], f.ring) ? straight : straight * 1.4);
+            }
+        });
+        // Pads as vertices, LOS-linked into their FFZ (or straight to the
+        // nearest in-FFZ FP vertex when no sampled segment survives — the pad
+        // sits within REACH of the FFZ so the stub is short + legal-ish).
+        // FFZ selection measures from the pad's RING points (same predicate as
+        // routeFor) — the centroid alone can sit > REACH from the FFZ even
+        // when the pad edge touches it.
+        const padKeys = solos.map((s, si) => {
+            const c = s.pt;
+            if (!c) return null;
+            const probe = (s.routePts && s.routePts.length) ? s.routePts : [c];
+            const k = `pad:${si}`;
+            let ffz = null, ffzD = Infinity;
+            ffzs.forEach(f => { let best = Infinity; probe.forEach(pp => { const d = mbPointToPolygonMeters(pp.lat, pp.lng, f.ring); if (d < best) best = d; }); if (best < ffzD) { ffzD = best; ffz = f; } });
+            let linked = 0;
+            if (ffz && ffzD <= reachM) {
+                const inside = fpVerts.filter(v => mbPointToPolygonMeters(v.lat, v.lng, ffz.ring) <= entryM);
+                if (inside.length) {
+                    graph.verts.set(k, { lat: c.lat, lng: c.lng });
+                    graph.adj.set(k, []);
+                    inside.forEach(v => { if (agSegInsideRing(c, v, ffz.ring)) { link(k, v.key, mbApproxMeters(c.lat, c.lng, v.lat, v.lng)); linked++; } });
+                    if (!linked) {
+                        let best = null;
+                        inside.forEach(v => { const d = mbApproxMeters(c.lat, c.lng, v.lat, v.lng); if (!best || d < best.d) best = { v, d }; });
+                        link(k, best.v.key, best.d);
+                        linked = 1;
+                    }
+                }
+            }
+            if (!linked) {
+                // FP-only pad (v2.18): no FFZ (or FFZ without entries) — splice a
+                // synthetic vertex at the nearest point ON an arc, segment-aware.
+                const arc = agNearestArcPoint(graph, probe, reachM);
+                if (!arc) { graph.verts.delete(k); graph.adj.delete(k); return null; }
+                if (!graph.verts.has(k)) { graph.verts.set(k, { lat: c.lat, lng: c.lng }); graph.adj.set(k, []); }
+                const xk = `padx:${si}`;
+                graph.verts.set(xk, arc.p);
+                graph.adj.set(xk, []);
+                link(xk, arc.ka, arc.w * arc.t);
+                link(xk, arc.kb, arc.w * (1 - arc.t));
+                link(k, xk, Math.max(1, arc.d));
+            }
+            return k;
+        });
+        // Base vertices (same resolution as mbBuildRouter): own vertex, stub
+        // edge to the nearest FP vertex.
+        const bases = (ent.baseEnts && ent.baseEnts.length) ? ent.baseEnts.map(b => ({ lat: b.coords[0].lat, lng: b.coords[0].lng })) : (ent.base ? [ent.base] : []);
+        const baseKeys = bases.map((b, bi) => {
+            const bv = mbNearestVertex(graph, b.lat, b.lng);
+            if (!bv) return null;
+            const k = `base:${bi}`;
+            graph.verts.set(k, { lat: b.lat, lng: b.lng });
+            graph.adj.set(k, []);
+            link(k, bv.key, bv.dist);
+            return k;
+        }).filter(Boolean);
+        if (!baseKeys.length) return null;
+        // One Dijkstra per pad + per base — N ≤ ~100, verts a few hundred: cheap.
+        const runs = new Map();
+        padKeys.forEach(k => { if (k) runs.set(k, agDijkstra(graph, k)); });
+        baseKeys.forEach(k => runs.set(k, agDijkstra(graph, k)));
+        // Off-graph legs tracked as UNIQUE pairs (v2.19) — the old raw call
+        // counter ballooned into the tens of thousands during 2-opt.
+        const offGraph = new Set();
+        const straightFt = (a, b) => mbApproxMeters(a.lat, a.lng, b.lat, b.lng) * 3.28084 * 1.25;
+        const lookup = (kFrom, kTo) => {
+            const run = runs.get(kFrom);
+            const m = run ? run.dist.get(kTo) : undefined;
+            if (m == null) { offGraph.add(kFrom < kTo ? `${kFrom}|${kTo}` : `${kTo}|${kFrom}`); return straightFt(graph.verts.get(kFrom), graph.verts.get(kTo)); }
+            return m * 3.28084;
+        };
+        // Actual vertex path kFrom→kTo (endpoints included) — walks the prev
+        // chain. null when the graph can't connect them.
+        const pathPts = (kFrom, kTo) => {
+            const run = runs.get(kFrom);
+            if (!run || !run.dist.has(kTo)) return null;
+            const keys = [kTo];
+            let cur = kTo, guard = 0;
+            while (cur !== kFrom && guard++ < 20000) {
+                cur = run.prev.get(cur);
+                if (cur == null) return null;
+                keys.push(cur);
+            }
+            return keys.reverse().map(k => { const v = graph.verts.get(k); return { lat: v.lat, lng: v.lng }; });
+        };
+        const padPt = i => solos[i].pt;
+        const bestBaseKeyFor = (padKey) => {
+            let best = null;
+            baseKeys.forEach(bk => { const d = lookup(bk, padKey); if (!best || d < best.d) best = { bk, d }; });
+            return best ? best.bk : null;
+        };
+        return {
+            padKeys,
+            // pad index ↔ pad index (indexes into the `solos` array passed in).
+            // A pad that never got a graph vertex estimates straight-line ×1.25
+            // (counted in offGraphPairs) — the panel surfaces it, never Infinity.
+            padDistFt(i, j) {
+                if (i === j) return 0;
+                if (!padKeys[i] || !padKeys[j]) { offGraph.add(`p${Math.min(i, j)}|p${Math.max(i, j)}`); return straightFt(padPt(i), padPt(j)); }
+                return lookup(padKeys[i], padKeys[j]);
+            },
+            // pad index → closest base
+            baseDistFt(i) {
+                if (!padKeys[i]) { offGraph.add(`b|p${i}`); let best = Infinity; bases.forEach(b => { const d = straightFt(b, padPt(i)); if (d < best) best = d; }); return best; }
+                let best = Infinity;
+                baseKeys.forEach(bk => { const d = lookup(bk, padKeys[i]); if (d < best) best = d; });
+                return best;
+            },
+            // Route-overlay paths (v2.16): actual FP/FFZ vertex chains, with a
+            // straight 2-point fallback when the graph can't connect.
+            padPath(i, j) {
+                const p = (padKeys[i] && padKeys[j]) ? pathPts(padKeys[i], padKeys[j]) : null;
+                return p || [padPt(i), padPt(j)];
+            },
+            basePath(i) {
+                if (padKeys[i]) {
+                    const bk = bestBaseKeyFor(padKeys[i]);
+                    const p = bk ? pathPts(bk, padKeys[i]) : null;
+                    if (p) return p;
+                }
+                let bb = null;
+                bases.forEach(b => { const d = straightFt(b, padPt(i)); if (!bb || d < bb.d) bb = { b, d }; });
+                return bb ? [bb.b, padPt(i)] : [padPt(i)];
+            },
+            get offGraphPairs() { return offGraph.size; },
+        };
+    }
+
+    // A mission's internal flown distance — the sum of hops between its
+    // instructions' GPS locations (the same data the SUM panel estimates
+    // from). This is the per-pad battery cost the simulator uses (v2.17),
+    // plus stepCost × steps for hover/capture overhead.
+    function agIntraFt(mission) {
+        const ins = (mission && mission.instructions) || [];
+        // NAV hops only (v2.19) — the drone flies nav to nav; snapshots are
+        // camera positions and add no transit.
+        let navs = ins.filter(i => i && i.type === 1 && i.location && typeof i.location.lat === 'number');
+        if (!navs.length) navs = ins.filter(i => i && i.location && typeof i.location.lat === 'number');
+        let prev = null, ft = 0;
+        navs.forEach(i => {
+            const L = i.location;
+            if (prev) ft += mbApproxMeters(prev.lat, prev.lng, L.lat, L.lng) * 3.28084;
+            prev = L;
+        });
+        return ft;
+    }
+
+    // Walk an ordering through the battery model. `order` = indexes into the
+    // group's solo list; dPad/dBase in ft; costOf(i) = solo i's on-pad cost
+    // (intra-mission path + hover overhead) in ft-equivalents.
+    // Rule: before committing to a pad the drone must reach it, shoot it, AND
+    // still get home within the usable budget — else it breaks off first.
+    function agSimulate(order, dPad, dBase, costOf, budgetFt) {
+        const cfg = agCfg();
+        const usable = budgetFt * cfg.marginPct / 100;
+        const flights = [], tight = [];
+        let cur = -1, rem = usable, fPads = [], fDist = 0, overheadFt = 0;
+        const endFlight = () => {
+            const home = cur === -1 ? 0 : dBase(cur);
+            fDist += home;
+            let pct = Math.round((budgetFt - ((usable - rem) + home)) / budgetFt * 100);
+            if (!isFinite(pct)) pct = -99;
+            flights.push({ pads: fPads, distFt: fDist, reservePct: Math.max(-99, pct) });
+        };
+        for (let x = 0; x < order.length; x++) {
+            const i = order[x];
+            const stepFt = costOf(i);
+            let legFt = cur === -1 ? dBase(i) : dPad(cur, i);
+            if (cur !== -1 && rem < legFt + stepFt + dBase(i)) {
+                // recharge break: RTB from the current pad, resume from base
+                overheadFt += dBase(cur);
+                endFlight();
+                cur = -1; rem = usable; fPads = []; fDist = 0;
+                legFt = dBase(i);
+                overheadFt += legFt;   // the commute back out to the resume point
+            }
+            if (cur === -1 && rem < legFt + stepFt + dBase(i)) tight.push(i);   // doesn't fit even on a fresh battery — flag, keep going
+            rem -= legFt + stepFt;
+            fDist += legFt + stepFt;
+            fPads.push(i); cur = i;
+        }
+        if (fPads.length) endFlight();
+        return { flights, totalFt: flights.reduce((s, f) => s + f.distFt, 0), overheadFt, tight };
+    }
+
+    // Best visiting order for a set of pads: two seeds (furthest→closest and a
+    // nearest-neighbor chain from the furthest pad), each 2-opt polished with
+    // the SIMULATOR total as the objective — transit and RTB overhead both count.
+    function agOptimizeOrder(idxs, dPad, dBase, costOf, budgetFt) {
+        if (idxs.length < 2) return idxs.slice();
+        // Depth tie-break (v2.34, user rule): a dead-end spur costs the SAME
+        // transit in either direction, so the simulator ties — and the user
+        // always wants the DEEPEST pad of a newly-entered area first, peeling
+        // back toward base. tieFt sums position×depth scaled to < 1 ft, so it
+        // settles ties without ever trading away real distance.
+        const nIdx = idxs.length;
+        let maxD = 1;
+        idxs.forEach(i => { const d = dBase(i); if (isFinite(d) && d > maxD) maxD = d; });
+        const tieFt = (o) => { let t = 0; for (let x = 0; x < o.length; x++) t += (x / nIdx) * (dBase(o[x]) / maxD); return (t / nIdx) * 0.9; };
+        const cost = o => agSimulate(o, dPad, dBase, costOf, budgetFt).totalFt + tieFt(o);
+        const farNear = idxs.slice().sort((a, b) => dBase(b) - dBase(a));
+        const nn = [farNear[0]];
+        const left = new Set(farNear.slice(1));
+        while (left.size) {
+            const cur = nn[nn.length - 1];
+            let best = null;
+            left.forEach(j => { const d = dPad(cur, j); if (!best || d < best.d) best = { j, d }; });
+            nn.push(best.j); left.delete(best.j);
+        }
+        let winner = null;
+        // Seed ORDER is the tie-break (strict <): when most pads each need
+        // their own flight, every order simulates ~equal and the first seed
+        // wins — NN chains read geographically coherent, far→near reads
+        // scrambled ("why is 1, 2, 3 all over the place" — live test v2.33).
+        // So: NN chain first, caller's order (bearing sweep) second,
+        // far→near last.
+        [nn, idxs.slice(), farNear].forEach(seed => {
+            let o = seed.slice(), c = cost(o), improved = true, guard = 0;
+            while (improved && guard++ < 40) {
+                improved = false;
+                for (let i = 0; i < o.length - 1; i++) {
+                    for (let j = i + 1; j < o.length; j++) {
+                        const cand = o.slice(0, i).concat(o.slice(i, j + 1).reverse(), o.slice(j + 1));
+                        const cc = cost(cand);
+                        // 0.01 threshold: sub-1-ft tie-break improvements
+                        // (deepest-first) must be able to win too
+                        if (cc < c - 0.01) { o = cand; c = cc; improved = true; }
+                    }
+                }
+            }
+            if (!winner || c < winner.c) winner = { o, c };
+        });
+        return winner.o;
+    }
+
+    // 16-wind compass name for a chunk of solos (circular-mean bearing from
+    // base). Used when a section splits on the step cap — the sub-sectors get
+    // finer compass names (East → ENE + ESE) instead of A/B suffixes, since
+    // the "1"/"2" slots are battery tiers. Collisions get an _2 suffix.
+    const AG_WINDS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+    function agWindName(list, base, usedNames) {
+        let sx = 0, sy = 0;
+        list.forEach(s => {
+            const dLat = s.pt.lat - base.lat, dLng = (s.pt.lng - base.lng) * Math.cos(base.lat * Math.PI / 180);
+            const h = Math.hypot(dLat, dLng) || 1;
+            sy += dLat / h; sx += dLng / h;
+        });
+        let compass = 90 - Math.atan2(sy, sx) * 180 / Math.PI;   // 0=N, clockwise
+        compass = ((compass % 360) + 360) % 360;
+        let name = AG_WINDS[Math.round(compass / 22.5) % 16];
+        let n = 2;
+        while (usedNames.has(name)) name = `${AG_WINDS[Math.round(compass / 22.5) % 16]}_${n++}`;
+        usedNames.add(name);
+        return name;
+    }
+
+    // Global sweep partition (v2.16 — replaces fixed 8-way sections, which
+    // produced 14 tiny groups on a 57-pad site; the user wants ~4–6 macros).
+    // ALL routable pads sorted by bearing around base, seam at the largest
+    // angular gap, cut into K contiguous arcs with roughly equal step totals.
+    // K = ceil(totalSteps / stepMax) capped at the targetGroups knob — so
+    // adjacent directions merge freely (user rule: efficiency over looks) and
+    // multi-flight missions are expected, not avoided.
+    function agSweepFamilies(solos, base) {
+        const cfg = agCfg();
+        const steps = s => pcmStepCount(s.mission);
+        const totalSteps = solos.reduce((t, s) => t + steps(s), 0);
+        const K = Math.max(1, Math.min(solos.length, Math.min(cfg.targetGroups, Math.max(1, Math.ceil(totalSteps / cfg.stepMax)))));
+        if (K <= 1 || !base) return [{ solos: solos.slice() }];
+        const bearing = s => { const d = 90 - Math.atan2(s.pt.lat - base.lat, (s.pt.lng - base.lng) * Math.cos(base.lat * Math.PI / 180)) * 180 / Math.PI; return ((d % 360) + 360) % 360; };
+        const withB = solos.map(s => ({ s, b: bearing(s) })).sort((a, b) => a.b - b.b);
+        let gapAt = 0, gapMax = -1;
+        for (let i = 0; i < withB.length; i++) {
+            const next = withB[(i + 1) % withB.length].b + ((i + 1) >= withB.length ? 360 : 0);
+            const g = next - withB[i].b;
+            if (g > gapMax) { gapMax = g; gapAt = (i + 1) % withB.length; }
+        }
+        const rot = withB.slice(gapAt).concat(withB.slice(0, gapAt)).map(x => x.s);
+        const target = totalSteps / K;
+        const fams = []; let cl = [], cs = 0;
+        rot.forEach(s => {
+            cl.push(s); cs += steps(s);
+            if (cs >= target && fams.length < K - 1) { fams.push({ solos: cl }); cl = []; cs = 0; }
+        });
+        if (cl.length) fams.push({ solos: cl });
+        return fams;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 🔋 RANGE OVERLAY (v2.20) — trustworthy per-pad battery classification.
+    // For every asset pad's FFZ: the TRUE shortest route from the base staying
+    // INSIDE FFZs / along FPs (visibility graph over FFZ ring vertices — paths
+    // bend around corners, never cut them; ring-boundary edges guarantee a
+    // legal path exists around any concave shape, visibility edges only ever
+    // shorten it). Then VERIFIED before anything is colored:
+    //   1. LEGALITY AUDIT — the winning route re-sampled every ~5 m; every
+    //      sample must lie inside an FFZ or on an FP arc (~13 ft tolerance).
+    //      Any violation → pad renders ⚠ orange "unverified", never classified.
+    //   2. SECOND OPINION — a DENSIFIED graph (ring + arc midpoints) is solved
+    //      independently; the shorter answer wins, disagreements are logged.
+    //   3. LOWER BOUND — every route must be ≥ straight-line distance.
+    // All rendering is interactive:false / pointer-events:none — M2 pad
+    // picking for the merge editor passes straight through the overlay.
+    // ════════════════════════════════════════════════════════════════════════
+
+    // Strict segment-inside test for the range graph. DELIBERATELY finer and
+    // tighter than the legality audit (4 m steps / 2 m tolerance vs the
+    // audit's 5 m / 4 m): every edge this builds provably survives the audit,
+    // so a flagged route always means a real bug, never sampling noise. (The
+    // audit caught exactly this on 1583: a 56 m visibility edge clipping a
+    // concave notch between 10 m construction samples.)
+    function rngSegInside(a, b, ring) {
+        const total = mbApproxMeters(a.lat, a.lng, b.lat, b.lng);
+        const n = Math.max(2, Math.ceil(total / 4));
+        for (let i = 1; i < n; i++) {
+            const t = i / n;
+            const p = { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t };
+            if (!genPointInPoly(p, ring) && mbPointToPolygonMeters(p.lat, p.lng, ring) > 2) return false;
+        }
+        return true;
+    }
+
+    function rngBuildGraph(ent, dense) {
+        const graph = mbBuildGraph(ent.fps);
+        const ffzs = (ent.ffzs || []).map(f => ({ ring: f.ring })).filter(f => f.ring && f.ring.length >= 3);
+        const entryM = MB_ENTRY_FFZ_FT / 3.28084;
+        const addV = (k, p) => { if (!graph.verts.has(k)) { graph.verts.set(k, p); graph.adj.set(k, []); } };
+        const link = (ka, kb, w) => { graph.adj.get(ka).push({ to: kb, w }); graph.adj.get(kb).push({ to: ka, w }); };
+        // dense mode: split every FP arc at its midpoint (second-opinion run)
+        if (dense) {
+            const edges = [];
+            graph.adj.forEach((list, ka) => list.forEach(e => { if (ka < e.to) edges.push({ ka, kb: e.to, w: e.w }); }));
+            edges.forEach(({ ka, kb, w }, i) => {
+                const a = graph.verts.get(ka), b = graph.verts.get(kb);
+                const mk = `m:${i}`;
+                addV(mk, { lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 });
+                link(mk, ka, w / 2); link(mk, kb, w / 2);
+            });
+        }
+        agSpliceFfzCrossings(graph, ffzs, entryM);
+        // FFZ ring vertices as graph nodes + boundary edges.
+        ffzs.forEach((f, fi) => {
+            const ring = f.ring;
+            const keys = ring.map((p, i) => { const k = `r:${fi}:${i}`; addV(k, { lat: p.lat, lng: p.lng }); return k; });
+            for (let i = 0; i < ring.length; i++) {
+                const j = (i + 1) % ring.length;
+                const w = mbApproxMeters(ring[i].lat, ring[i].lng, ring[j].lat, ring[j].lng);
+                if (dense && w > 30) {
+                    const mk = `rm:${fi}:${i}`;
+                    addV(mk, { lat: (ring[i].lat + ring[j].lat) / 2, lng: (ring[i].lng + ring[j].lng) / 2 });
+                    link(keys[i], mk, w / 2); link(mk, keys[j], w / 2);
+                } else {
+                    link(keys[i], keys[j], w);
+                }
+            }
+        });
+        // Intra-FFZ visibility edges over ALL member vertices (ring verts, FP
+        // verts, crossings, overlapping FFZs' ring verts). Strict containment,
+        // NO penalties, NO forced links — the boundary edges already guarantee
+        // connectivity, so these only ever shorten legal paths.
+        const boxes = ffzs.map(f => agRingBbox(f.ring, entryM));
+        ffzs.forEach((f, fi) => {
+            const bb = boxes[fi];
+            const members = [];
+            graph.verts.forEach((v, k) => {
+                if (v.lat < bb.s || v.lat > bb.n || v.lng < bb.w || v.lng > bb.e) return;
+                if (mbPointToPolygonMeters(v.lat, v.lng, f.ring) <= entryM) members.push({ k, v });
+            });
+            for (let i = 0; i < members.length; i++) {
+                for (let j = i + 1; j < members.length; j++) {
+                    if (!rngSegInside(members[i].v, members[j].v, f.ring)) continue;
+                    link(members[i].k, members[j].k, mbApproxMeters(members[i].v.lat, members[i].v.lng, members[j].v.lat, members[j].v.lng));
+                }
+            }
+        });
+        // Base vertices: visibility-linked into any FFZ they sit in, plus a
+        // stub onto the nearest FP arc so the base is never stranded.
+        const bases = (ent.baseEnts && ent.baseEnts.length) ? ent.baseEnts.map(b => ({ lat: b.coords[0].lat, lng: b.coords[0].lng })) : (ent.base ? [ent.base] : []);
+        const baseKeys = bases.map((b, bi) => {
+            const k = `base:${bi}`;
+            addV(k, { lat: b.lat, lng: b.lng });
+            let linked = 0;
+            ffzs.forEach((f, fi) => {
+                if (mbPointToPolygonMeters(b.lat, b.lng, f.ring) > entryM) return;
+                const bb = boxes[fi];
+                graph.verts.forEach((v, vk) => {
+                    if (vk === k) return;
+                    if (v.lat < bb.s || v.lat > bb.n || v.lng < bb.w || v.lng > bb.e) return;
+                    if (mbPointToPolygonMeters(v.lat, v.lng, f.ring) > entryM) return;
+                    if (!rngSegInside(b, v, f.ring)) return;
+                    link(k, vk, mbApproxMeters(b.lat, b.lng, v.lat, v.lng));
+                    linked++;
+                });
+            });
+            const arc = agNearestArcPoint(graph, [b], MB_REACH_FFZ_FT / 3.28084);
+            if (arc) {
+                const xk = `basex:${bi}`;
+                addV(xk, arc.p);
+                link(xk, arc.ka, arc.w * arc.t); link(xk, arc.kb, arc.w * (1 - arc.t));
+                link(k, xk, Math.max(1, arc.d));
+                linked++;
+            }
+            if (!linked) { const nv = mbNearestVertex(graph, b.lat, b.lng); if (nv && nv.key !== k) link(k, nv.key, nv.dist); }
+            return k;
+        });
+        return { graph, ffzs, baseKeys };
+    }
+
+    // Is a point legal flight space? Inside an FFZ, on an FP arc (~4 m tol),
+    // or in the takeoff vicinity of a base (the base→graph stub necessarily
+    // crosses a few meters of open ground).
+    function rngPointLegal(p, ffzs, boxes, arcs, basePts) {
+        if (basePts) {
+            for (let i = 0; i < basePts.length; i++) {
+                if (mbApproxMeters(p.lat, p.lng, basePts[i].lat, basePts[i].lng) <= MB_REACH_FFZ_FT / 3.28084) return true;
+            }
+        }
+        for (let i = 0; i < ffzs.length; i++) {
+            const bb = boxes[i];
+            if (p.lat < bb.s || p.lat > bb.n || p.lng < bb.w || p.lng > bb.e) continue;
+            if (mbPointToPolygonMeters(p.lat, p.lng, ffzs[i].ring) <= 4) return true;
+        }
+        for (let i = 0; i < arcs.length; i++) {
+            const a = arcs[i];
+            if (p.lat < a.bb.s || p.lat > a.bb.n || p.lng < a.bb.w || p.lng > a.bb.e) continue;
+            if (mbPointToSegMeters(p.lat, p.lng, a.a, a.b) <= 4) return true;
+        }
+        return false;
+    }
+
+    // Audit one route: walk the prev chain, sample every ~5 m, count illegal.
+    function rngAuditPath(sol, targetKey, ffzs, boxes, arcs, basePts) {
+        const best = sol.distTo(targetKey);
+        if (!best) return { ok: false, badFrac: 1 };
+        const run = sol.runs[best.ri];
+        const keys = [targetKey];
+        let cur = targetKey, guard = 0;
+        while (run.prev.has(cur) && guard++ < 20000) { cur = run.prev.get(cur); keys.push(cur); }
+        const pts = keys.reverse().map(k => sol.g.graph.verts.get(k)).filter(Boolean);
+        let bad = 0, total = 0;
+        for (let i = 1; i < pts.length; i++) {
+            const a = pts[i - 1], b = pts[i];
+            const n = Math.max(1, Math.ceil(mbApproxMeters(a.lat, a.lng, b.lat, b.lng) / 5));
+            for (let s = 0; s <= n; s++) {
+                const p = { lat: a.lat + (b.lat - a.lat) * s / n, lng: a.lng + (b.lng - a.lng) * s / n };
+                total++;
+                if (!rngPointLegal(p, ffzs, boxes, arcs, basePts)) bad++;
+            }
+        }
+        return { ok: bad === 0, badFrac: total ? bad / total : 1, pts };
+    }
+
+    // Asset↔FFZ distance measured RING-PERIMETER to polygon (sampled ~10 m) —
+    // corners alone miss an FFZ hugging the middle of a pad edge (engraved
+    // segments-not-vertices rule; live case v2.34: "ATKINS 14 4213H — no FFZ"
+    // with its FFZ visibly touching the pad edge).
+    function rngRingToPolyM(ringA, ringB) {
+        let best = Infinity;
+        for (let i = 0; i < ringA.length; i++) {
+            const a = ringA[i], b = ringA[(i + 1) % ringA.length];
+            const n = Math.max(1, Math.ceil(mbApproxMeters(a.lat, a.lng, b.lat, b.lng) / 10));
+            for (let s = 0; s <= n; s++) {
+                const p = { lat: a.lat + (b.lat - a.lat) * s / n, lng: a.lng + (b.lng - a.lng) * s / n };
+                const d = mbPointToPolygonMeters(p.lat, p.lng, ringB);
+                if (d < best) best = d;
+                if (best === 0) return 0;
+            }
+        }
+        return best;
+    }
+
+    // Solve the whole site: sparse + dense runs, per-pad classification with
+    // the three verification passes. Distances in FEET.
+    function rngSolve(ent) {
+        const t0 = Date.now();
+        const reachM = MB_REACH_FFZ_FT / 3.28084;
+        const runFor = (dense) => {
+            const g = rngBuildGraph(ent, dense);
+            const runs = g.baseKeys.map(bk => agDijkstra(g.graph, bk));
+            return {
+                g, runs,
+                distTo(k) {
+                    let best = null;
+                    runs.forEach((r, ri) => { const d = r.dist.get(k); if (d != null && (best == null || d < best.d)) best = { d, ri }; });
+                    return best;
+                },
+            };
+        };
+        const sparse = runFor(false);
+        const dense = runFor(true);
+        const ffzs = sparse.g.ffzs;
+        const boxes = ffzs.map(f => agRingBbox(f.ring, 5));
+        const arcs = [];
+        (ent.fps || []).forEach(e => (e.arcs || []).forEach(arc => {
+            if (!arc.point_a || !arc.point_b || typeof arc.point_a.lat !== 'number' || typeof arc.point_b.lat !== 'number') return;
+            const a = arc.point_a, b = arc.point_b;
+            arcs.push({ a, b, bb: { s: Math.min(a.lat, b.lat) - 0.0001, n: Math.max(a.lat, b.lat) + 0.0001, w: Math.min(a.lng, b.lng) - 0.0001, e: Math.max(a.lng, b.lng) + 0.0001 } });
+        }));
+        const basePts = sparse.g.baseKeys.map(k => sparse.g.graph.verts.get(k));
+        const byFfz = new Map();   // fi → result (pads sharing an FFZ share the answer)
+        const results = [];
+        // v2.34: pad→FFZ match samples the pad PERIMETER (segments, not just
+        // corners), bbox-prefiltered so the extra sampling stays cheap.
+        const ffzReachBoxes = ffzs.map(f => agRingBbox(f.ring, reachM + 5));
+        (ent.assets || []).forEach(a => {
+            const ab = agRingBbox(a.ring, 0);
+            let fi = -1, fd = Infinity;
+            ffzs.forEach((f, i) => {
+                const bb = ffzReachBoxes[i];
+                if (!(ab.s <= bb.n && ab.n >= bb.s && ab.w <= bb.e && ab.e >= bb.w)) return;
+                const d = rngRingToPolyM(a.ring, f.ring);
+                if (d < fd) { fd = d; fi = i; }
+            });
+            if (fi < 0 || fd > reachM) { results.push({ asset: a, fi: -1, status: 'no-ffz' }); return; }
+            if (byFfz.has(fi)) { results.push(Object.assign({ asset: a }, byFfz.get(fi))); return; }
+            const ring = ffzs[fi].ring;
+            let worst = null, entry = null, missing = 0;
+            for (let i = 0; i < ring.length; i++) {
+                const kS = sparse.distTo(`r:${fi}:${i}`), kD = dense.distTo(`r:${fi}:${i}`);
+                let m = kS ? kS.d : null;
+                if (kD && (m == null || kD.d < m - 1)) m = kD.d;   // second opinion: shorter wins
+                if (m == null) { missing++; continue; }
+                if (entry == null || m < entry) entry = m;
+                if (worst == null || m > worst.w) worst = { w: m, vi: i };
+            }
+            let r;
+            if (worst == null) {
+                r = { fi, status: 'unreachable' };
+            } else {
+                const kS = sparse.distTo(`r:${fi}:${worst.vi}`), kD = dense.distTo(`r:${fi}:${worst.vi}`);
+                const disagree = !!(kS && kD && Math.abs(kS.d - kD.d) > Math.max(30, 0.02 * Math.min(kS.d, kD.d)));
+                const audit = rngAuditPath(sparse, `r:${fi}:${worst.vi}`, ffzs, boxes, arcs, basePts);
+                // lower bound: route can never beat the straight line
+                const vw = ring[worst.vi];
+                let straightM = Infinity;
+                basePts.forEach(bp => { const d = mbApproxMeters(bp.lat, bp.lng, vw.lat, vw.lng); if (d < straightM) straightM = d; });
+                const belowBound = worst.w < straightM - 5;
+                r = {
+                    fi, status: 'ok',
+                    worstFt: worst.w * 3.28084, entryFt: entry * 3.28084,
+                    verified: audit.ok && !belowBound, disagree, missing,
+                    badFrac: audit.badFrac,
+                };
+            }
+            byFfz.set(fi, r);
+            results.push(Object.assign({ asset: a }, r));
+        });
+        const flagged = results.filter(x => x.status === 'ok' && (!x.verified || x.disagree));
+        console.log(`${TAG} [range] ${results.length} pads solved in ${Date.now() - t0} ms · ${flagged.length} flagged (illegal-sample or sparse/dense disagreement)`);
+        flagged.forEach(x => console.log(`${TAG} [range] ⚠ ${x.asset.name}: verified=${x.verified} disagree=${x.disagree} badFrac=${(x.badFrac || 0).toFixed(3)}`));
+        return { results, ffzs, byFfz };
+    }
+
+    // ── rendering (all click-through) ──
+    const rng = { on: false, busy: false, layers: [], legendEl: null, chips: [], hover: null };
+    function rngClear() {
+        rng.layers.forEach(l => { try { l.remove(); } catch (e) {} });
+        rng.layers = [];
+        rng.chips = [];
+        rngUnbindHover();
+        if (rng.legendEl) { try { rng.legendEl.remove(); } catch (e) {} rng.legendEl = null; }
+    }
+    // Big tintable battery icon (v2.21 — the text chip was too small to spot).
+    // pointer-events:none throughout: nothing about it is pressable.
+    function rngBatteryHtml(color, mark, near) {
+        // near = within RNG_NEAR_FT of the class cutoff → red outline (v2.24)
+        const stroke = near ? '#ff2222' : '#10131a';
+        const sw = near ? 2.6 : 1.8;
+        return `<div style="pointer-events:none;position:relative;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.85));">
+            <svg width="34" height="18" viewBox="0 0 34 18">
+                <rect x="1.5" y="2" width="27" height="14" rx="3.5" fill="${color}" stroke="${stroke}" stroke-width="${sw}"></rect>
+                <rect x="30" y="5.5" width="3.5" height="7" rx="1.5" fill="${stroke}"></rect>
+            </svg>
+            ${mark ? `<div style="position:absolute;top:0;left:0;width:29px;text-align:center;font:800 12px/18px sans-serif;color:#10131a;">${mark}</div>` : ''}
+        </div>`;
+    }
+    // Hover distances WITHOUT pointer events: a throttled mousemove tracker on
+    // the map container measures cursor proximity to each battery icon and
+    // shows a floating tooltip. The icons never receive events, so M2 pad
+    // picking cannot conflict with them by construction.
+    function rngBindHover() {
+        rngUnbindHover();
+        const map = getLeafletMap();
+        const c = map && typeof map.getContainer === 'function' ? map.getContainer() : null;
+        if (!c) return;
+        const tip = document.createElement('div');
+        tip.style.cssText = 'position:fixed;z-index:2147483601;pointer-events:none;display:none;background:rgba(16,19,26,0.95);border:1px solid #7adfe6;border-radius:6px;padding:4px 10px;color:#e6e6e6;font:700 12px "Lato","Segoe UI",sans-serif;box-shadow:0 3px 10px rgba(0,0,0,0.6);white-space:nowrap;';
+        document.body.appendChild(tip);
+        let last = 0;
+        const onMove = (ev) => {
+            const now = Date.now();
+            if (now - last < 60) return;
+            last = now;
+            const m2 = getLeafletMap();
+            if (!m2) { tip.style.display = 'none'; return; }
+            const rect = c.getBoundingClientRect();
+            let best = null;
+            rng.chips.forEach(ch => {
+                let p;
+                try { p = m2.latLngToContainerPoint([ch.lat, ch.lng]); } catch (e) { return; }
+                const d = Math.hypot(ev.clientX - (rect.left + p.x), ev.clientY - (rect.top + p.y));
+                if (d <= 26 && (!best || d < best.d)) best = { d, ch };
+            });
+            if (!best) { tip.style.display = 'none'; return; }
+            tip.textContent = best.ch.text;
+            tip.style.left = `${ev.clientX + 14}px`;
+            tip.style.top = `${ev.clientY - 32}px`;
+            tip.style.display = 'block';
+        };
+        const onLeave = () => { tip.style.display = 'none'; };
+        c.addEventListener('mousemove', onMove);
+        c.addEventListener('mouseleave', onLeave);
+        rng.hover = { c, onMove, onLeave, tip };
+    }
+    function rngUnbindHover() {
+        if (!rng.hover) return;
+        try { rng.hover.c.removeEventListener('mousemove', rng.hover.onMove); rng.hover.c.removeEventListener('mouseleave', rng.hover.onLeave); } catch (e) {}
+        try { rng.hover.tip.remove(); } catch (e) {}
+        rng.hover = null;
+    }
+    function rngDraw(sol) {
+        const L = composerGetL(), map = getLeafletMap();
+        if (!L || !map) { showToast('Range: map not found.', '#ff9800', 3000); return; }
+        // Belt-and-braces: the marker ELEMENT itself must never take events
+        // (divIcon default styling varies) — M2 on a pad under a battery icon
+        // has to reach the pad.
+        if (!document.getElementById('aim-mb-rng-style')) {
+            const st = document.createElement('style');
+            st.id = 'aim-mb-rng-style';
+            st.textContent = '.aim-mb-rng-chip, .aim-mb-rng-chip * { pointer-events: none !important; }';
+            document.head.appendChild(st);
+        }
+        const cfg = agCfg();
+        // Within this many ft below a class cutoff → red-outlined battery +
+        // "close to cutoff" in the tooltip (13.5–14k / 17.5–18k at defaults).
+        const RNG_NEAR_FT = 500;
+        const cls = (r) => {
+            if (r.status === 'no-ffz') return { color: '#9aa5b1', label: 'no FFZ', kind: 'noffz', mark: '–' };
+            if (r.status === 'unreachable') return { color: '#ff5252', label: 'no legal route from base', kind: 'unreach', mark: '✕' };
+            if (!r.verified || r.disagree) return { color: '#c39dff', label: '⚠ unverified — see console', kind: 'warn', mark: '!' };
+            if (r.worstFt <= cfg.tattuRadiusFt) return { color: '#5fff5f', label: 'Tattu', kind: 'tattu', mark: '', near: r.worstFt > cfg.tattuRadiusFt - RNG_NEAR_FT };
+            if (r.worstFt <= cfg.tulipRadiusFt) return { color: '#ffa726', label: 'Tulip', kind: 'tulip', mark: '', near: r.worstFt > cfg.tulipRadiusFt - RNG_NEAR_FT };
+            return { color: '#ff5252', label: 'out of range', kind: 'over', mark: '✕' };
+        };
+        const counts = { tattu: 0, tulip: 0, over: 0, warn: 0, unreach: 0, noffz: 0, near: 0 };
+        const drawnFfz = new Set();
+        sol.results.forEach(r => {
+            const c = cls(r);
+            counts[c.kind]++;
+            if (c.near) counts.near++;
+            if (r.fi >= 0 && !drawnFfz.has(r.fi)) {
+                drawnFfz.add(r.fi);
+                const ring = sol.ffzs[r.fi].ring.map(p => [p.lat, p.lng]);
+                try {
+                    rng.layers.push(L.polygon(ring, { color: c.color, weight: 3, dashArray: '7 5', opacity: 0.95, fillColor: c.color, fillOpacity: 0.10, interactive: false }).addTo(getLeafletMap()));
+                    const ctr = genCentroid(sol.ffzs[r.fi].ring);
+                    const icon = L.divIcon({
+                        className: 'aim-mb-rng-chip',
+                        html: rngBatteryHtml(c.color, c.mark, c.near),
+                        iconSize: [34, 18], iconAnchor: [17, 9],
+                    });
+                    // sits BELOW pick-number badges (their zIndexOffset is +1000)
+                    rng.layers.push(L.marker([ctr.lat, ctr.lng], { icon, interactive: false, keyboard: false, zIndexOffset: -600 }).addTo(getLeafletMap()));
+                    rng.chips.push({
+                        lat: ctr.lat, lng: ctr.lng,
+                        text: r.status === 'ok'
+                            ? `${(r.worstFt / 1000).toFixed(1)}k ft · ${c.label}${c.near ? ' — ⚠ close to cutoff' : ''}`
+                            : c.label,
+                    });
+                } catch (e) {}
+            } else if (r.fi < 0 && r.asset && r.asset.ring && r.asset.ring.length >= 3) {
+                try { rng.layers.push(L.polygon(r.asset.ring.map(p => [p.lat, p.lng]), { color: c.color, weight: 2, dashArray: '3 5', opacity: 0.8, fill: false, interactive: false }).addTo(getLeafletMap())); } catch (e) {}
+            }
+        });
+        rngBindHover();
+        // legend (fixed, small, bottom-left)
+        const cfg2 = agCfg();
+        const el = document.createElement('div');
+        el.style.cssText = 'position:fixed;left:12px;bottom:14px;z-index:2147483599;background:rgba(16,19,26,0.92);border:1px solid #2a3340;border-radius:8px;padding:8px 11px;color:#e6e6e6;font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 4px 16px rgba(0,0,0,0.6);pointer-events:auto;';
+        const row = (col, label, n) => n ? `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span style="width:10px;height:10px;border-radius:2px;background:${col};"></span>${label} <b style="margin-left:auto;padding-left:10px;">${n}</b></div>` : '';
+        el.innerHTML = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;"><b style="color:#7adfe6;">🔋 Range from base</b><span data-rng-x style="cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
+            + row('#5fff5f', `Tattu ≤ ${(cfg2.tattuRadiusFt / 1000).toFixed(1)}k ft`, counts.tattu)
+            + row('#ffa726', `Tulip ≤ ${(cfg2.tulipRadiusFt / 1000).toFixed(1)}k ft`, counts.tulip)
+            + row('#ff5252', 'Out of range / no route', counts.over + counts.unreach)
+            + row('#c39dff', '⚠ unverified (see console)', counts.warn)
+            + row('#9aa5b1', 'No FFZ', counts.noffz)
+            + (counts.near ? `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span style="width:10px;height:10px;border-radius:2px;background:#333;border:2px solid #ff2222;"></span>Red outline = close to cutoff <b style="margin-left:auto;padding-left:10px;">${counts.near}</b></div>` : '')
+            + '<div style="color:#789;margin-top:4px;">Hover a battery for the distance · everything is click-through</div>';
+        document.body.appendChild(el);
+        el.querySelector('[data-rng-x]').onclick = () => { rng.on = false; rngClear(); const b = document.querySelector('[data-rng-toggle]'); if (b) b.classList.remove('active'); };
+        rng.legendEl = el;
+    }
+    async function rngToggle(btn) {
+        if (rng.on) { rng.on = false; rngClear(); if (btn) btn.classList.remove('active'); return; }
+        if (rng.busy) return;
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded.', '#ff5252', 3000); return; }
+        rng.busy = true;
+        showToast('🔋 Range check — building legal-route graph (double + triple checking)…', '#7adfe6', 3000);
+        try {
+            const ent = await genFetchEntities(sid);
+            const sol = rngSolve(ent);
+            rngClear();
+            rngDraw(sol);
+            rng.on = true;
+            if (btn) btn.classList.add('active');
+            showToast('🔋 Range overlay ON — colors are triple-verified shortest LEGAL routes. M2 picking still works.', '#5fff5f', 4500);
+        } catch (e) {
+            console.warn(`${TAG} [range] failed`, e);
+            showToast('Range check failed (see console).', '#ff5252', 4000);
+        }
+        rng.busy = false;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 🖊 LASSO (v2.27) — freehand-draw a loop around pads to build a merge.
+    // Everything inside the loop is matched to its mission (pad name = mission
+    // name, same ladder as M2 picking), ordered FURTHEST→CLOSEST using the
+    // 🔋 Range solver's triple-verified legal-route distances, and — when the
+    // loop contains Tulip pads — auto-split into "X 1" (Tattu pads only) and
+    // "X 2" (everything), Tulips removed from 1 and kept in 2. Each variant
+    // stages into the pad-click merge editor (numbered badges) for inspection
+    // before Create. Drawing is a one-shot pen: press 🖊, drag a loop, done.
+    // ════════════════════════════════════════════════════════════════════════
+    const lasso = { armed: false, drawing: false, pts: [], line: null, data: null, handlers: null, resultEl: null, resultLayers: [] };
+    function lassoCleanupDraw() {
+        const map = getLeafletMap();
+        try { if (map && map.dragging && lasso.dragWasEnabled) map.dragging.enable(); } catch (e) {}
+        if (lasso.handlers) {
+            const { c, down, move, up, key } = lasso.handlers;
+            try { c.removeEventListener('pointerdown', down, true); c.removeEventListener('pointermove', move, true); c.removeEventListener('pointerup', up, true); } catch (e) {}
+            try { document.removeEventListener('keydown', key, true); } catch (e) {}
+            try { c.style.cursor = ''; } catch (e) {}
+            lasso.handlers = null;
+        }
+        if (lasso.line) { try { lasso.line.remove(); } catch (e) {} lasso.line = null; }
+        lasso.armed = false; lasso.drawing = false; lasso.pts = [];
+        const b = document.querySelector('[data-lasso-toggle]');
+        if (b) b.classList.remove('active');
+    }
+    function lassoCloseResults() {
+        if (lasso.resultEl) { try { lasso.resultEl.remove(); } catch (e) {} lasso.resultEl = null; }
+        lasso.resultLayers.forEach(l => { try { l.remove(); } catch (e) {} });
+        lasso.resultLayers = [];
+    }
+    async function lassoToggle(btn) {
+        if (lasso.armed) { lassoCleanupDraw(); showToast('🖊 Lasso cancelled.', '#888', 2000); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded.', '#ff5252', 3000); return; }
+        const map = getLeafletMap();
+        const L = composerGetL();
+        if (!map || !L || typeof map.mouseEventToLatLng !== 'function') { showToast('Lasso: map not found.', '#ff5252', 3000); return; }
+        showToast('🖊 Lasso — loading pads, missions + verified ranges…', '#7adfe6', 2500);
+        let ent, missions, sol;
+        try {
+            [ent, missions] = await Promise.all([genFetchEntities(sid), new Promise((res, rej) => fetchMissions(sid, res, rej))]);
+            sol = rngSolve(ent);   // the trusted router — same engine as 🔋
+        } catch (e) {
+            console.warn(`${TAG} [lasso] load failed`, e);
+            showToast('Lasso: failed to load site data (see console).', '#ff5252', 4000);
+            return;
+        }
+        lasso.data = { ent, missions, byAsset: new Map(sol.results.map(r => [r.asset.id, r])) };
+        const c = map.getContainer();
+        lasso.dragWasEnabled = !!(map.dragging && map.dragging.enabled && map.dragging.enabled());
+        try { if (map.dragging) map.dragging.disable(); } catch (e) {}
+        c.style.cursor = 'crosshair';
+        const down = (ev) => {
+            if (ev.button !== 0) return;
+            ev.preventDefault(); ev.stopPropagation();
+            lasso.drawing = true;
+            lasso.pts = [map.mouseEventToLatLng(ev)];
+            try { lasso.line = L.polyline(lasso.pts, { color: '#7adfe6', weight: 3, dashArray: '4 6', opacity: 0.95, interactive: false }).addTo(map); } catch (e) {}
+        };
+        const move = (ev) => {
+            if (!lasso.drawing) return;
+            ev.preventDefault(); ev.stopPropagation();
+            let ll;
+            try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            const prev = lasso.pts[lasso.pts.length - 1];
+            if (prev && mbApproxMeters(prev.lat, prev.lng, ll.lat, ll.lng) < 3) return;
+            lasso.pts.push(ll);
+            if (lasso.line) lasso.line.setLatLngs(lasso.pts);
+        };
+        const up = (ev) => {
+            if (!lasso.drawing) return;
+            ev.preventDefault(); ev.stopPropagation();
+            const ring = lasso.pts.map(p => ({ lat: p.lat, lng: p.lng }));
+            lassoCleanupDraw();
+            if (ring.length < 8) { showToast('🖊 Loop too small — draw a bigger circle around the pads.', '#ff9800', 3500); return; }
+            lassoProcess(ring);
+        };
+        const key = (ev) => { if (ev.key === 'Escape') { lassoCleanupDraw(); showToast('🖊 Lasso cancelled.', '#888', 2000); } };
+        c.addEventListener('pointerdown', down, true);
+        c.addEventListener('pointermove', move, true);
+        c.addEventListener('pointerup', up, true);
+        document.addEventListener('keydown', key, true);
+        lasso.handlers = { c, down, move, up, key };
+        lasso.armed = true;
+        if (btn) btn.classList.add('active');
+        showToast('🖊 Draw a loop around the pads you want merged (Esc cancels).', '#5fff5f', 5000);
+    }
+    function lassoWindName(rows, base) {
+        if (!base || !rows.length) return 'Lasso';
+        let sx = 0, sy = 0;
+        rows.forEach(r => {
+            const ctr = genCentroid(r.asset.ring);
+            const dLat = ctr.lat - base.lat, dLng = (ctr.lng - base.lng) * Math.cos(base.lat * Math.PI / 180);
+            const h = Math.hypot(dLat, dLng) || 1;
+            sy += dLat / h; sx += dLng / h;
+        });
+        let compass = 90 - Math.atan2(sy, sx) * 180 / Math.PI;
+        compass = ((compass % 360) + 360) % 360;
+        return AG_WINDS[Math.round(compass / 22.5) % 16];
+    }
+    // Trusted pairwise distances for the lassoed pads (v2.30): every pad
+    // attaches to the Range legal-route graph at its first NAV point (reusing
+    // the 👁 preview's mpvAttachPoint), then one Dijkstra per pad gives
+    // pad↔pad and pad↔base along REAL legal routes. Off-graph pairs fall back
+    // straight-line ×1.25 and are counted + logged.
+    function lassoBuildPairwise(rows, ent, byAsset) {
+        try {
+            const built = rngBuildGraph(ent, false);
+            const link = (ka, kb, w) => { built.graph.adj.get(ka).push({ to: kb, w }); built.graph.adj.get(kb).push({ to: ka, w }); };
+            // v2.33: anchor each pad to its OWN FFZ's ring vertices (the fi the
+            // verified solver assigned it) — real missions put navs inside the
+            // FFZ, but this stays connected regardless of nav placement (nav-
+            // at-centroid pads attached to NOTHING and every distance fell
+            // back to straight-line, which is what scrambled the ordering).
+            const padKeys = rows.map((r, i) => {
+                const navs = mbSoloPoints(r.mission);
+                const p = navs.length ? navs[0] : genCentroid(r.asset.ring);
+                const k = `lp:${i}`;
+                built.graph.verts.set(k, { lat: p.lat, lng: p.lng });
+                built.graph.adj.set(k, []);
+                let linked = 0;
+                const res = byAsset ? byAsset.get(r.asset.id) : null;
+                if (res && res.fi >= 0 && built.ffzs[res.fi]) {
+                    built.ffzs[res.fi].ring.forEach((rp, ri) => {
+                        const rk = `r:${res.fi}:${ri}`;
+                        if (!built.graph.adj.has(rk)) return;
+                        link(k, rk, mbApproxMeters(p.lat, p.lng, rp.lat, rp.lng));
+                        linked++;
+                    });
+                }
+                if (!linked) {
+                    const arc = agNearestArcPoint(built.graph, r.asset.ring || [p], MB_REACH_FFZ_FT / 3.28084);
+                    if (arc) {
+                        const xk = `lpx:${i}`;
+                        built.graph.verts.set(xk, arc.p);
+                        built.graph.adj.set(xk, []);
+                        link(xk, arc.ka, arc.w * arc.t);
+                        link(xk, arc.kb, arc.w * (1 - arc.t));
+                        link(k, xk, Math.max(1, arc.d));
+                        linked++;
+                    }
+                }
+                if (!linked) console.warn(`${TAG} [lasso] pad "${r.asset.name}" could not attach to the route graph — its legs estimate straight-line`);
+                return k;
+            });
+            const runs = padKeys.map(k => agDijkstra(built.graph, k));
+            let off = 0;
+            const straightPts = rows.map(r => genCentroid(r.asset.ring));
+            const dPad = (i, j) => {
+                if (i === j) return 0;
+                const d = runs[i].dist.get(padKeys[j]);
+                if (d == null) { off++; return mbApproxMeters(straightPts[i].lat, straightPts[i].lng, straightPts[j].lat, straightPts[j].lng) * 3.28084 * 1.25; }
+                return d * 3.28084;
+            };
+            const dBase = (i) => {
+                let best = null;
+                built.baseKeys.forEach(bk => { const d = runs[i].dist.get(bk); if (d != null && (best == null || d < best)) best = d; });
+                if (best == null) { off++; return rows[i].ft; }   // solver's verified worst-corner as fallback
+                return best * 3.28084;
+            };
+            const cfg = agCfg();
+            const costOf = (i) => agIntraFt(rows[i].mission) + pcmStepCount(rows[i].mission) * cfg.stepCostFt;
+            const idxOf = new Map(rows.map((r, i) => [r, i]));
+            return { ok: true, rows, idxOf, dPad, dBase, costOf, offCount: () => off };
+        } catch (e) {
+            console.warn(`${TAG} [lasso] pairwise graph failed — furthest→closest fallback`, e);
+            return { ok: false };
+        }
+    }
+    // Order a subset: 2-opt scored by the flight simulator on trusted
+    // distances (a pad that forces an RTB shouldn't drag the route back over
+    // ground it already covered — pure furthest→closest zigzagged, live test).
+    // SPUR-WALK ORDER (v2.36) — decoded from the user's hand-corrected order
+    // ("this is how I updated, but I'm just eyeballing it"): fly to the
+    // DEEPEST pad of an area first, peel back toward base along its corridor
+    // (never stepping to a deeper pad), and when the nearest continuation
+    // would cost more than a fresh out-leg from base, JUMP to the deepest
+    // remaining pad — the next area. Deterministic, auditable, and matches
+    // the far→near SOP per area. The simulator then adds the part eyeballing
+    // can't: battery breaks, landing reserves, real route distances.
+    // (2-opt was rejected live twice: transit-cheaper LOOP shapes read as
+    // chaos and give deep pads a half-drained battery.)
+    function lassoOrderRows(subset, budgetFt, pw) {
+        const rowsD = subset.slice().sort((x, y) => y.ft - x.ft);
+        try {
+            if (!(pw && pw.ok) || rowsD.length < 2) return { rows: rowsD, sim: null };
+            const remaining = new Set(rowsD.map(r => pw.idxOf.get(r)));
+            const ftOf = i => pw.rows[i].ft;
+            const order = [];
+            let cur = null, guard = 0;
+            while (remaining.size && guard++ < 5000) {
+                if (cur == null) {
+                    // new area → deepest remaining pad
+                    let deep = null;
+                    remaining.forEach(i => { if (deep == null || ftOf(i) > ftOf(deep)) deep = i; });
+                    cur = deep;
+                } else {
+                    // continue the area: nearest remaining pad that is NOT
+                    // deeper than where we are (±500 ft tolerance)
+                    let best = null;
+                    remaining.forEach(i => {
+                        if (ftOf(i) > ftOf(cur) + 500) return;
+                        const d = pw.dPad(cur, i);
+                        if (!best || d < best.d) best = { i, d };
+                    });
+                    // area exhausted (or continuing costs more than a fresh
+                    // out-leg from base) → jump to the next area's deepest
+                    if (!best || best.d > pw.dBase(best.i)) { cur = null; continue; }
+                    cur = best.i;
+                }
+                order.push(cur);
+                remaining.delete(cur);
+            }
+            remaining.forEach(i => order.push(i));   // guard-overflow safety
+            const sim = agSimulate(order, pw.dPad, pw.dBase, pw.costOf, budgetFt);
+            return { rows: order.map(i => pw.rows[i]), sim };
+        } catch (e) {
+            console.warn(`${TAG} [lasso] spur-walk failed — plain furthest→closest`, e);
+            return { rows: rowsD, sim: null };
+        }
+    }
+    function lassoProcess(ring) {
+        const { ent, missions, byAsset } = lasso.data || {};
+        if (!ent) return;
+        const cfg = agCfg();
+        // v2.33: a pad counts as inside when its centroid OR any corner is in
+        // the loop (edge pads were dropping out of tight lassos).
+        const inLoop = (a) => genPointInPoly(genCentroid(a.ring), ring) || a.ring.some(p => genPointInPoly(p, ring));
+        const inside = (ent.assets || []).filter(a => a.ring && a.ring.length >= 3 && inLoop(a));
+        if (!inside.length) { showToast('🖊 No pads inside the loop.', '#ff9800', 3500); return; }
+        const rows = [], skipped = [];
+        const skip = (a, reason) => skipped.push({ name: a.name, reason, pt: genCentroid(a.ring) });
+        inside.forEach(a => {
+            const cands = rankMatchMissions(a.name, missions);
+            if (!cands.length) { skip(a, 'no mission with this name'); return; }
+            if (cands.length > 1) { skip(a, `${cands.length} mission matches (add it via M2)`); return; }
+            const r = byAsset.get(a.id);
+            if (!r || r.status !== 'ok') { skip(a, r ? (r.status === 'no-ffz' ? 'no FFZ' : 'no legal route') : 'no range data'); return; }
+            if (!r.verified || r.disagree) { skip(a, 'range unverified (see console)'); return; }
+            if (r.worstFt > cfg.tulipRadiusFt) { skip(a, `over ${(cfg.tulipRadiusFt / 1000).toFixed(0)}k ft`); return; }
+            rows.push({ asset: a, mission: cands[0], ft: r.worstFt, tulip: r.worstFt > cfg.tattuRadiusFt });
+        });
+        // Pre-order = bearing sweep around base with the seam at the largest
+        // angular gap — the human "walk the loop" order. It feeds the
+        // optimizer as a seed AND is the tie-break when the simulator sees
+        // every order as ~equal (v2.33).
+        if (ent.base && rows.length > 2) {
+            const bear = r => { const c = genCentroid(r.asset.ring); const d = 90 - Math.atan2(c.lat - ent.base.lat, (c.lng - ent.base.lng) * Math.cos(ent.base.lat * Math.PI / 180)) * 180 / Math.PI; return ((d % 360) + 360) % 360; };
+            const wb = rows.map(r => ({ r, b: bear(r) })).sort((a, b) => a.b - b.b);
+            let gapAt = 0, gapMax = -1;
+            for (let i = 0; i < wb.length; i++) { const nb = wb[(i + 1) % wb.length].b + ((i + 1) >= wb.length ? 360 : 0); const g = nb - wb[i].b; if (g > gapMax) { gapMax = g; gapAt = (i + 1) % wb.length; } }
+            const swept = wb.slice(gapAt).concat(wb.slice(0, gapAt)).map(x => x.r);
+            rows.length = 0;
+            swept.forEach(r => rows.push(r));
+        } else {
+            rows.sort((x, y) => y.ft - x.ft);
+        }
+        const wind = lassoWindName(rows, ent.base);
+        const tattu = rows.filter(r => !r.tulip);
+        const tulips = rows.filter(r => r.tulip);
+        const pw = rows.length > 1 ? lassoBuildPairwise(rows, ent, byAsset) : null;
+        const variants = [];
+        // Tulip pads present → auto-split: "1" = Tattu only, "2" = everything.
+        // Each variant's order = 2-opt + flight simulator on trusted distances.
+        const mkVariant = (name, subPrefix, set, budgetFt) => {
+            const o = lassoOrderRows(set, budgetFt, pw);
+            variants.push({ name, sub: `${subPrefix} · ${set.length} pads · deep-first spur walk, verified routes`, rows: o.rows, sim: o.sim });
+        };
+        if (tulips.length && tattu.length) {
+            mkVariant(`${wind} 1`, 'Tattu only', tattu, cfg.tattuBudgetFt);
+            mkVariant(`${wind} 2`, 'Tattu + Tulip', rows, cfg.tulipBudgetFt);
+        } else if (tulips.length) {
+            mkVariant(`${wind} 2`, 'Tulip', rows, cfg.tulipBudgetFt);
+        } else if (rows.length) {
+            mkVariant(`${wind} 1-2`, 'either battery', rows, cfg.tattuBudgetFt);
+        }
+        const offN = (pw && pw.ok) ? pw.offCount() : 0;
+        if (offN) console.warn(`${TAG} [lasso] ${offN} pad-pair legs estimated off-graph (straight ×1.25)`);
+        if (!variants.length) { showToast(`🖊 ${inside.length} pads in loop, none usable — ${skipped.length} skipped (see the popup).`, '#ff9800', 4500); }
+        lassoShowResults(variants, skipped, missions, ent, offN);
+        console.log(`${TAG} [lasso] ${inside.length} pads in loop → ${rows.length} usable (${tulips.length} Tulip) · ${skipped.length} skipped`);
+    }
+    function lassoShowResults(variants, skipped, missions, ent, offN) {
+        lassoCloseResults();
+        // Red ✕ on every skipped pad — a pad inside the loop with no number
+        // must explain itself on the map, not just in the list (v2.33).
+        const Lx = composerGetL(), mapx = getLeafletMap();
+        if (Lx && mapx) {
+            skipped.forEach(s => {
+                if (!s || !s.pt) return;
+                try {
+                    lasso.resultLayers.push(Lx.marker([s.pt.lat, s.pt.lng], {
+                        icon: Lx.divIcon({ className: 'aim-mb-rng-chip', html: '<div style="pointer-events:none;font:800 17px sans-serif;color:#ff5252;text-shadow:0 1px 3px #000,0 0 6px #000;">✕</div>', iconSize: [0, 0], iconAnchor: [6, 9] }),
+                        interactive: false, keyboard: false, zIndexOffset: 900,
+                    }).addTo(mapx));
+                } catch (e) {}
+            });
+        }
+        const el = document.createElement('div');
+        el.style.cssText = 'position:fixed;right:24px;bottom:20px;width:330px;max-height:60vh;overflow:auto;z-index:2147483601;'
+            + 'background:#161a20;border:1px solid #7adfe6;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;padding:10px 12px;';
+        const vBtn = (v, i) => {
+            // 🔋 dividers between flights — a jump on the map between
+            // consecutive numbers usually IS a recharge boundary; make it
+            // visible so the order stops looking "crazy" (v2.35).
+            const breaks = new Set();
+            if (v.sim && v.sim.flights.length > 1) { let acc = 0; v.sim.flights.slice(0, -1).forEach(f => { acc += f.pads.length; breaks.add(acc - 1); }); }
+            const simLine = v.sim
+                ? `<div style="color:#9ad;font-size:10px;margin-top:2px;">est <b style="color:#cde;">${(v.sim.totalFt / 1000).toFixed(1)}k ft</b> · 🔋 ${v.sim.flights.length} flight${v.sim.flights.length === 1 ? '' : 's'} · land ${v.sim.flights.map(f => f.reservePct + '%').join(' / ')}</div>`
+                : '';
+            return `<div style="margin:5px 0;padding:6px 8px;border:1px solid #2a3a2a;border-radius:6px;">
+            <div style="display:flex;align-items:center;gap:8px;">
+                <span style="flex:1;font-weight:800;color:#7dff7d;">⛟ ${escapeHtml(v.name)}</span>
+                <button data-lasso-stage="${i}" style="padding:3px 10px;background:#5fff5f;border:none;color:#04220a;border-radius:5px;cursor:pointer;font-weight:800;font-size:11px;">🔗 Stage</button>
+            </div>
+            <div style="color:#9ad;font-size:10px;margin-top:2px;">${escapeHtml(v.sub)}</div>
+            ${simLine}
+            <div style="color:#789;font-size:10px;margin-top:3px;max-height:130px;overflow:auto;">${v.rows.map((r, n) => `<div>${n + 1}. ${escapeHtml(r.mission.name)} <span style="color:#567;">${(r.ft / 1000).toFixed(1)}k${r.tulip ? ' · Tulip' : ''}</span></div>` + (breaks.has(n) ? '<div style="text-align:center;color:#ffb74d;font-size:9px;">— 🔋 return &amp; recharge —</div>' : '')).join('')}</div>
+        </div>`;
+        };
+        el.innerHTML = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:5px;">
+                <b style="color:#7adfe6;">🖊 Lasso result</b>
+                <span data-lasso-close style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span>
+            </div>
+            ${variants.map(vBtn).join('') || '<div style="color:#888;font-size:11px;">No stageable missions.</div>'}
+            ${offN ? `<div style="margin-top:5px;color:#ffb74d;font-size:10px;">⚠ ${offN} pad-pair leg(s) estimated off-graph — order may be imperfect (see console)</div>` : ''}
+            ${skipped.length ? `<div style="margin-top:6px;color:#ff9800;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Skipped (${skipped.length}) — marked ✕ on the map</div>${skipped.map(s => `<div style="color:#caa;font-size:10px;">${escapeHtml(s.name)} — ${escapeHtml(s.reason)}</div>`).join('')}` : ''}
+            <div style="color:#789;font-size:10px;margin-top:6px;">Stage a variant → inspect the numbered badges → 🔗 Create. Panel stays open so you can stage the other one after.</div>`;
+        document.body.appendChild(el);
+        el.querySelector('[data-lasso-close]').onclick = lassoCloseResults;
+        el.querySelectorAll('[data-lasso-stage]').forEach(b => b.onclick = () => {
+            const v = variants[Number(b.getAttribute('data-lasso-stage'))];
+            if (!v) return;
+            agStageInPcm({ name: v.name, solos: v.rows.map(r => ({ mission: r.mission, pt: genCentroid(r.asset.ring) })) }, missions, ent);
+        });
+        lasso.resultEl = el;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 🧩 MACRO COVERAGE (v2.37) — visually see which pads are already claimed
+    // by macro (merged) missions. Detection is DATA-DERIVED, not recipe-based:
+    // any mission whose located steps touch ≥ 2 distinct pads is a macro, so
+    // it works no matter who created the merge or how. Each macro gets a
+    // color; member pads get that outline + a name chip; the legend counts
+    // pads that still aren't in any macro. All click-through.
+    // ════════════════════════════════════════════════════════════════════════
+    const mcv = { on: false, busy: false, layers: [], legendEl: null };
+    function mcvClear() {
+        mcv.layers.forEach(l => { try { l.remove(); } catch (e) {} });
+        mcv.layers = [];
+        if (mcv.legendEl) { try { mcv.legendEl.remove(); } catch (e) {} mcv.legendEl = null; }
+    }
+    // mission → distinct pads its located steps touch (inside or ≤150 ft of
+    // an asset ring; bbox-prefiltered)
+    function mcvDetect(ent, missions) {
+        const assets = (ent.assets || []).filter(a => a.ring && a.ring.length >= 3);
+        const tolM = 46;   // 150 ft
+        const boxes = assets.map(a => agRingBbox(a.ring, tolM + 5));
+        const macros = [];
+        const covered = new Set();
+        const missionPads = new Map();
+        (missions || []).forEach(m => {
+            const ins = (m.instructions || []).filter(i => i && i.location && typeof i.location.lat === 'number' && i.type !== 0 && i.type !== 99);
+            const padIds = new Set(), pads = [];
+            ins.forEach(i => {
+                const p = i.location;
+                let best = null;
+                for (let ai = 0; ai < assets.length; ai++) {
+                    const bb = boxes[ai];
+                    if (p.lat < bb.s || p.lat > bb.n || p.lng < bb.w || p.lng > bb.e) continue;
+                    const d = mbPointToPolygonMeters(p.lat, p.lng, assets[ai].ring);
+                    if (d <= tolM && (!best || d < best.d)) best = { a: assets[ai], d };
+                }
+                if (best && !padIds.has(best.a.id)) { padIds.add(best.a.id); pads.push(best.a); }
+            });
+            if (pads.length) missionPads.set(m.id, pads);
+            if (pads.length >= 2) {
+                macros.push({ mission: m, pads });
+                pads.forEach(a => covered.add(a.id));
+            }
+        });
+        // pads that have SOME mission on them but no macro yet
+        const touched = new Set();
+        missionPads.forEach(pads => pads.forEach(a => touched.add(a.id)));
+        const todo = assets.filter(a => touched.has(a.id) && !covered.has(a.id));
+        return { macros, covered, todo, touched, assets, padCount: assets.length };
+    }
+    function mcvDraw(det) {
+        const L = composerGetL(), map = getLeafletMap();
+        if (!L || !map) { showToast('Macros: map not found.', '#ff9800', 3000); return; }
+        const COLORS = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
+        det.macros.forEach((mc, i) => {
+            const col = COLORS[i % COLORS.length];
+            let deepest = null;
+            mc.pads.forEach(a => {
+                try {
+                    // SOLID fill (v2.38) — covered pads read as painted, so the
+                    // eye only hunts for UNfilled pads (the remaining work)
+                    mcv.layers.push(L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: col, weight: 3, opacity: 0.95, fill: true, fillColor: col, fillOpacity: 0.55, interactive: false }).addTo(map));
+                } catch (e) {}
+                if (!deepest) deepest = a;   // first pad = mission's first stop
+            });
+            if (deepest) {
+                const c = genCentroid(deepest.ring);
+                try {
+                    mcv.layers.push(L.marker([c.lat, c.lng], {
+                        icon: L.divIcon({
+                            className: 'aim-mb-rng-chip',
+                            html: `<div style="pointer-events:none;background:${col};color:#10131a;font:800 11px/1 'Lato',sans-serif;padding:3px 7px;border-radius:4px;border:1.5px solid #10131a;box-shadow:0 1px 5px rgba(0,0,0,0.7);white-space:nowrap;">${escapeHtml(String(mc.mission.name || '').slice(0, 24))}</div>`,
+                            iconSize: [0, 0], iconAnchor: [0, 22],
+                        }),
+                        interactive: false, keyboard: false, zIndexOffset: -400,
+                    }).addTo(map));
+                } catch (e) {}
+            }
+        });
+        // legend (top-left, under the toolbar)
+        const el = document.createElement('div');
+        el.style.cssText = 'position:fixed;left:12px;top:70px;z-index:2147483599;max-height:50vh;overflow:auto;background:rgba(16,19,26,0.92);border:1px solid #2a3340;border-radius:8px;padding:8px 11px;color:#e6e6e6;font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 4px 16px rgba(0,0,0,0.6);';
+        const COLORS2 = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
+        el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><b style="color:#7adfe6;">🧩 Macro coverage</b><button data-mcv-report title="Copy the coverage report (Name / Classification / Captured / Battery / Section / Mission / Order) — colored cells, paste into Google Sheets" style="padding:1px 7px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">📋 Report</button><span data-mcv-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
+            + (det.macros.length
+                ? det.macros.map((mc, i) => `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px;">${escapeHtml(String(mc.mission.name || ''))}</span><b style="margin-left:auto;padding-left:10px;">${mc.pads.length}</b></div>`).join('')
+                : '<div style="color:#888;">No macro missions yet (≥2 pads in one mission).</div>')
+            + `<div style="color:#ffb74d;margin-top:5px;">⬜ ${det.todo.length} pad(s) with missions, not in any macro</div>`
+            + '<div style="color:#789;margin-top:3px;">Filled = covered · UNfilled = still to do · click-through</div>';
+        document.body.appendChild(el);
+        el.querySelector('[data-mcv-x]').onclick = () => { mcv.on = false; mcvClear(); const b = document.querySelector('[data-mcv-toggle]'); if (b) b.classList.remove('active'); };
+        el.querySelector('[data-mcv-report]').onclick = () => mcvReport();
+        mcv.legendEl = el;
+        // subtle dashed white outline on not-yet-covered pads — the TODO list
+        det.todo.forEach(a => {
+            try { mcv.layers.push(L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: '#ffffff', weight: 2, dashArray: '2 6', opacity: 0.65, fill: false, interactive: false }).addTo(map)); } catch (e) {}
+        });
+    }
+    // 📋 Report (v2.39) — the user's planning spreadsheet, generated: one row
+    // per pad with Name / Asset Classification / Captured? / Battery /
+    // Section / Mission Name / Order, grouped by mission (uncovered pads at
+    // the bottom). Copies rich HTML (colored cells for Sheets) + TSV fallback.
+    function mcvSubtypeOf(a) {
+        const p = String(a.poi || '').trim();
+        const i = p.indexOf(' - ');
+        return ((i >= 0 ? p.slice(0, i) : p) || '').trim();
+    }
+    async function mcvReport() {
+        const data = mcv.data;
+        if (!data) { showToast('Toggle 🧩 Macros on first.', '#ff9800', 3000); return; }
+        const { ent, missions, det } = data;
+        showToast('📋 Building coverage report…', '#7adfe6', 2000);
+        let bat = new Map();
+        try { const sol = rngSolve(ent); bat = new Map(sol.results.map(r => [r.asset.id, r])); } catch (e) { console.warn(`${TAG} [mcv] report range solve failed`, e); }
+        const secName = { N: 'North', E: 'East', S: 'South', W: 'West', NE: 'NE', SE: 'SE', SW: 'SW', NW: 'NW', C: 'Central' };
+        const macrosOf = new Map();
+        det.macros.forEach(mc => mc.pads.forEach((a, i) => {
+            if (!macrosOf.has(a.id)) macrosOf.set(a.id, []);
+            macrosOf.get(a.id).push({ name: String(mc.mission.name || ''), order: i + 1 });
+        }));
+        const rows = det.assets.map(a => {
+            const r = bat.get(a.id);
+            const tulip = !!(r && r.status === 'ok' && r.worstFt > agCfg().tattuRadiusFt && r.worstFt <= agCfg().tulipRadiusFt);
+            const batLabel = r && r.status === 'ok'
+                ? (r.worstFt <= agCfg().tattuRadiusFt ? 'Tattu' : (tulip ? 'Tulip' : 'Over range'))
+                : (r && r.status === 'no-ffz' ? 'No FFZ' : 'No route');
+            const list = macrosOf.get(a.id) || [];
+            const pref = (tulip ? list.find(x => / 2$/.test(x.name)) : (list.find(x => / 1$/.test(x.name)) || list.find(x => / 1-2$/.test(x.name)))) || list[0] || null;
+            return {
+                name: a.name || String(a.id),
+                cls: mcvSubtypeOf(a),
+                captured: det.touched.has(a.id),
+                bat: batLabel,
+                sec: secName[mbSection(genCentroid(a.ring), ent.base)] || '',
+                mission: pref ? pref.name : '',
+                order: pref ? pref.order : '',
+            };
+        });
+        rows.sort((x, y) => (x.mission || '~').localeCompare(y.mission || '~') || (Number(x.order) || 9999) - (Number(y.order) || 9999) || x.name.localeCompare(y.name));
+        const CLS_BG = { 'h-well': '#1c64b8', 'v-well': '#8b4a16', 'battery': '#1e7d46', 'compressor': '#e8d18a', 'well-cluster': '#455a64' };
+        const SEC_BG = { East: '#1e7d46', North: '#c62828', South: '#5d4037', West: '#1c64b8', NE: '#7cb342', SE: '#e8d18a', SW: '#6a3ab2', NW: '#00838f', Central: '#616161' };
+        const dark = bg => ['#e8d18a'].indexOf(bg) >= 0;
+        const td = (txt, bg, fg) => `<td style="border:1px solid #bbb;padding:2px 8px;${bg ? `background:${bg};color:${fg || '#fff'};` : ''}">${escapeHtml(String(txt))}</td>`;
+        const html = '<table style="border-collapse:collapse;font-family:Arial;font-size:12px;"><tr>'
+            + ['Name', 'Asset Classification', 'Captured?', 'Battery', 'Section', 'Mission Name', 'Order'].map(h => `<td style="border:1px solid #999;padding:2px 8px;background:#efefef;font-weight:bold;">${h}</td>`).join('')
+            + '</tr>'
+            + rows.map(r2 => {
+                const clsBg = CLS_BG[r2.cls.toLowerCase()] || '#607d8b';
+                const secBg = SEC_BG[r2.sec] || '';
+                return '<tr>'
+                    + td(r2.name)
+                    + td(r2.cls, clsBg, dark(clsBg) ? '#333' : '#fff')
+                    + td(r2.captured ? '✓' : '', r2.captured ? '#00d050' : '#ffcdd2', '#0a3018')
+                    + td(r2.bat, r2.bat === 'Tattu' ? '#cfe8ff' : (r2.bat === 'Tulip' ? '#ecd6f7' : '#eee'), '#333')
+                    + td(r2.sec, secBg, dark(secBg) ? '#333' : '#fff')
+                    + td(r2.mission)
+                    + td(r2.order)
+                    + '</tr>';
+            }).join('')
+            + '</table>';
+        const tsv = ['Name\tAsset Classification\tCaptured?\tBattery\tSection\tMission Name\tOrder']
+            .concat(rows.map(r2 => [r2.name, r2.cls, r2.captured ? 'TRUE' : 'FALSE', r2.bat, r2.sec, r2.mission, r2.order].join('\t'))).join('\n');
+        try {
+            await navigator.clipboard.write([new ClipboardItem({
+                'text/html': new Blob([html], { type: 'text/html' }),
+                'text/plain': new Blob([tsv], { type: 'text/plain' }),
+            })]);
+            showToast(`📋 Report copied (${rows.length} pads) — paste into Google Sheets.`, '#5fff5f', 5000);
+        } catch (e) {
+            try {
+                const ta = document.createElement('textarea');
+                ta.value = tsv; document.body.appendChild(ta); ta.select();
+                document.execCommand('copy'); ta.remove();
+                showToast(`📋 Report copied as TSV (${rows.length} pads).`, '#5fff5f', 4500);
+            } catch (e2) { console.warn(`${TAG} [mcv] report copy failed`, e2); showToast('Report copy failed (see console).', '#ff5252', 4000); }
+        }
+    }
+
+    async function mcvToggle(btn) {
+        if (mcv.on) { mcv.on = false; mcvClear(); if (btn) btn.classList.remove('active'); return; }
+        if (mcv.busy) return;
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded.', '#ff5252', 3000); return; }
+        mcv.busy = true;
+        showToast('🧩 Scanning missions for macro coverage…', '#7adfe6', 2500);
+        try {
+            const [ent, missions] = await Promise.all([genFetchEntities(sid), new Promise((res, rej) => fetchMissions(sid, res, rej))]);
+            const det = mcvDetect(ent, missions);
+            mcv.data = { ent, missions, det };
+            mcvClear();
+            mcvDraw(det);
+            mcv.on = true;
+            if (btn) btn.classList.add('active');
+            console.log(`${TAG} [mcv] ${det.macros.length} macro(s) · ${det.covered.size} pads covered · ${det.todo.length} pads with missions still uncovered`);
+        } catch (e) {
+            console.warn(`${TAG} [mcv] failed`, e);
+            showToast('Macro coverage failed (see console).', '#ff5252', 4000);
+        }
+        mcv.busy = false;
+    }
+
+    // The point(s) a solo flies = its NAVIGATE (type 1) locations — the drone
+    // flies navs; snapshots (type 6) are camera positions, NOT waypoints
+    // (v2.19 live-test fix: routes were anchoring to snapshot points).
+    // Falls back to snapshot locations for nav-less missions.
     function mbSoloPoints(mission) {
         const ins = (mission && mission.instructions) || [];
-        const snaps = ins.filter(i => i && i.type === 6 && i.location && typeof i.location.lat === 'number').map(i => ({ lat: i.location.lat, lng: i.location.lng }));
-        if (snaps.length) return snaps;
-        return ins.filter(i => i && i.type === 1 && i.location && typeof i.location.lat === 'number').map(i => ({ lat: i.location.lat, lng: i.location.lng }));
+        const navs = ins.filter(i => i && i.type === 1 && i.location && typeof i.location.lat === 'number').map(i => ({ lat: i.location.lat, lng: i.location.lng }));
+        if (navs.length) return navs;
+        return ins.filter(i => i && i.type === 6 && i.location && typeof i.location.lat === 'number').map(i => ({ lat: i.location.lat, lng: i.location.lng }));
     }
     // The mission "body" = everything except the leading takeoff + trailing
     // returnHome (types 0 / 99). These get concatenated in the merge.
@@ -3836,11 +5340,14 @@
     }
 
     // Compute the merge plan for a site: per-solo {mission, pts, ring, routeM,
-    // section, battery}, then grouped into battery-tiered, furthest→closest sets.
+    // section, battery}, then grouped into battery-tiered sets — split on the
+    // step cap into finer compass sub-sectors, each ordered by the Auto-Group
+    // optimizer and battery-simulated (v2.15, feature #216).
     // `overrides` = {missionId: sectionCode} manual section reassignments.
     function mbComputeMerge(siteID, missions, ent, overrides) {
         const router = mbBuildRouter(ent);
         const base = ent.base;
+        const cfg = agCfg();
         const solos = missions.map(m => {
             const pts = mbSoloPoints(m);
             if (!pts.length) return { mission: m, routeM: null, reason: 'no-location', section: 'C', battery: null };
@@ -3851,38 +5358,124 @@
             for (const a of (ent.assets || [])) { if (genPointInPoly(c, a.ring)) { ring = a.ring; break; } }
             const routePts = ring || pts;
             const routeM = router.ready ? router.routeFor(routePts) : null;
-            const ov = overrides && overrides[String(m.id)];
-            const section = ov || mbSection(c, base);
-            return { mission: m, pt: c, routeM, reason: routeM == null ? (router.ready ? 'unreachable' : 'no-routing-data') : '', section, battery: mbBatteryFor(routeM) };
+            // v2.16: overrides are FAMILY indexes (applied after the sweep),
+            // not section codes — section is informational only now.
+            const section = mbSection(c, base);
+            // routePts rides along: the order graph matches pads to FFZs by the
+            // same ring points routeFor used (centroid alone can sit > REACH
+            // from the FFZ even when the pad edge touches it).
+            return { mission: m, pt: c, routePts, routeM, reason: routeM == null ? (router.ready ? router.explain(routePts) : 'no routing data') : '', section, battery: mbBatteryFor(routeM) };
         });
-        // Group by section → battery-tier sets.
-        const bySection = {};
-        solos.forEach(s => { (bySection[s.section] = bySection[s.section] || []).push(s); });
+        // Pairwise order graph over the routable solos (pads become vertices).
+        const routableAll = solos.filter(s => s.routeM != null && s.battery && s.battery.level < 2);
+        let ag = null;
+        try { ag = routableAll.length >= 2 ? agBuildOrderGraph(ent, routableAll) : null; }
+        catch (e) { console.warn(`${TAG} [ag] order graph failed — falling back to distance sort`, e); }
+        const agIdx = new Map(); routableAll.forEach((s, i) => agIdx.set(s, i));
+        // Per-pad battery cost (v2.17): the mission's REAL internal path
+        // length (instruction-location hops) + hover overhead per step.
+        const intraCache = new Map();
+        const padCostFt = (s) => {
+            let v = intraCache.get(s.mission.id);
+            if (v == null) { v = agIntraFt(s.mission) + pcmStepCount(s.mission) * cfg.stepCostFt; intraCache.set(s.mission.id, v); }
+            return v;
+        };
+        const agDPad = ag ? (i, j) => ag.padDistFt(i, j) : null;
+        const agDBase = ag ? i => ag.baseDistFt(i) : null;
+        const agCostOf = i => padCostFt(routableAll[i]);
+        // Order + simulate one group's solo set against a battery budget.
+        const orderAndSim = (set, budgetFt) => {
+            if (!ag || !set.length) {
+                const sorted = set.slice().sort((a, b) => (b.routeM || 0) - (a.routeM || 0));
+                return { solos: sorted, sim: null };
+            }
+            const idxs = set.map(s => agIdx.get(s));
+            const order = agOptimizeOrder(idxs, agDPad, agDBase, agCostOf, budgetFt);
+            return { solos: order.map(i => routableAll[i]), idxs: order, sim: agSimulate(order, agDPad, agDBase, agCostOf, budgetFt) };
+        };
+        // Families: global bearing sweep into ~targetGroups arcs (v2.16 — no
+        // fixed 8-way sections; adjacent directions merge freely). `overrides`
+        // = {missionId: familyIndexString} pins a pad into a specific family.
+        const families = agSweepFamilies(routableAll, base);
+        Object.keys(overrides || {}).forEach(mid => {
+            const fi = Number(overrides[mid]);
+            if (!isFinite(fi) || fi < 0 || fi >= families.length) return;
+            const s = routableAll.find(x => String(x.mission.id) === String(mid));
+            if (!s || families[fi].solos.includes(s)) return;
+            families.forEach(f => { const at = f.solos.indexOf(s); if (at >= 0) f.solos.splice(at, 1); });
+            families[fi].solos.push(s);
+        });
+        // ── Corridor pickup (v2.17) ──────────────────────────────────────────
+        // The sweep assigns by BEARING only, so a pad sitting right on another
+        // family's flight corridor stays in its angular family ("skips pads it
+        // flies right past" — live-test feedback). Refinement: repeatedly take
+        // the single best pad move between families — evaluated by insertion
+        // deltas on the SIMULATED orders — while it saves > 1,000 ft of total
+        // flown distance. User-pinned pads (overrides) never auto-move.
+        if (ag && families.length > 1) {
+            const pinned = new Set(Object.keys(overrides || {}).map(String));
+            const famBudget = f => f.solos.some(s => s.battery.level === 1) ? cfg.tulipBudgetFt : cfg.tattuBudgetFt;
+            const simTot = (o, b) => o.length ? agSimulate(o, agDPad, agDBase, agCostOf, b).totalFt : 0;
+            const famOrder = new Map();
+            families.forEach(f => famOrder.set(f, agOptimizeOrder(f.solos.map(s => agIdx.get(s)), agDPad, agDBase, agCostOf, famBudget(f))));
+            let guard = 0;
+            while (guard++ < 24) {
+                let best = null;
+                families.forEach(src => {
+                    const so = famOrder.get(src);
+                    const srcCost = simTot(so, famBudget(src));
+                    so.forEach((pi, k) => {
+                        if (pinned.has(String(routableAll[pi].mission.id))) return;
+                        const without = so.slice(0, k).concat(so.slice(k + 1));
+                        const save = srcCost - simTot(without, famBudget(src));
+                        families.forEach(tgt => {
+                            if (tgt === src) return;
+                            const to = famOrder.get(tgt);
+                            const tb = (routableAll[pi].battery.level === 1 || tgt.solos.some(s2 => s2.battery.level === 1)) ? cfg.tulipBudgetFt : cfg.tattuBudgetFt;
+                            const before = simTot(to, tb);
+                            for (let ins = 0; ins <= to.length; ins++) {
+                                const cand = to.slice(0, ins).concat([pi], to.slice(ins));
+                                const gain = save - (simTot(cand, tb) - before);
+                                if (gain > 1000 && (!best || gain > best.gain)) best = { gain, src, tgt, pi, without, cand };
+                            }
+                        });
+                    });
+                });
+                if (!best) break;
+                famOrder.set(best.src, best.without);
+                famOrder.set(best.tgt, best.cand);
+                const s = routableAll[best.pi];
+                best.src.solos.splice(best.src.solos.indexOf(s), 1);
+                best.tgt.solos.push(s);
+                console.log(`${TAG} [ag] corridor pickup: "${s.mission.name}" moved between groups (saves ~${Math.round(best.gain).toLocaleString()} ft)`);
+            }
+        }
+        // Names AFTER membership settles (wind name follows the pads).
+        const usedNames = new Set();
+        families.forEach((f, i) => { f.name = (base && f.solos.length) ? agWindName(f.solos, base, usedNames) : `Group ${i + 1}`; });
         const groups = [];
-        MB_SECTION_ORDER.forEach(code => {
-            const list = (bySection[code] || []).slice();
-            if (!list.length) return;
-            // order furthest→closest by routeM (null routes sink to the bottom).
-            list.sort((a, b) => (b.routeM == null ? -1 : b.routeM) - (a.routeM == null ? -1 : a.routeM));
-            const routable = list.filter(s => s.routeM != null);
-            const tattu = routable.filter(s => s.battery && s.battery.level === 0);
-            const tulip = routable.filter(s => s.battery && s.battery.level === 1);
-            const over = routable.filter(s => s.battery && s.battery.level === 2);
-            const name = MB_SECTION_NAMES[code];
+        families.forEach((f, fi) => {
+            if (!f.solos.length) return;
+            const tattu = f.solos.filter(s => s.battery.level === 0);
+            const tulip = f.solos.filter(s => s.battery.level === 1);
+            const mk = (nm, batLabel, set, budgetFt) => {
+                const os = orderAndSim(set, budgetFt);
+                groups.push({ fam: fi, name: nm, battery: batLabel, solos: os.solos, idxs: os.idxs || null, sim: os.sim, budgetFt });
+            };
             if (tulip.length) {
-                // East 1 = Tattu subset; East 2 = Tattu + Tulip (East 2 ⊇ East 1).
-                if (tattu.length) groups.push({ code, name: `${name} 1`, battery: 'Tattu', solos: tattu.slice() });
-                groups.push({ code, name: `${name} 2`, battery: 'Tulip', solos: tattu.concat(tulip) });
+                // X 1 = Tattu subset; X 2 = Tattu + Tulip (X 2 ⊇ X 1), each
+                // ordered independently (tier-2 re-optimizes, per user).
+                if (tattu.length) mk(`${f.name} 1`, 'Tattu', tattu.slice(), cfg.tattuBudgetFt);
+                mk(`${f.name} 2`, 'Tulip', tattu.concat(tulip), cfg.tulipBudgetFt);
             } else if (tattu.length) {
-                groups.push({ code, name: `${name} 1-2`, battery: 'Tattu/Tulip', solos: tattu.slice() });
-            }
-            // over-range + unroutable solos are surfaced in the panel but not merged.
-            if (over.length || list.some(s => s.routeM == null)) {
-                const excluded = over.concat(list.filter(s => s.routeM == null));
-                groups.push({ code, name: `${name} — excluded`, excluded });
+                // 1-2 flies on EITHER battery → simulate on the weaker (Tattu).
+                mk(`${f.name} 1-2`, 'Tattu/Tulip', tattu.slice(), cfg.tattuBudgetFt);
             }
         });
-        return { solos, groups, routerReady: router.ready, verts: router.verts };
+        // Over-range + unroutable solos surfaced in one block, never merged.
+        const excluded = solos.filter(s => !(s.routeM != null && s.battery && s.battery.level < 2));
+        if (excluded.length) groups.push({ name: 'Excluded', excluded });
+        return { solos, groups, families, ag, agSolos: routableAll, routerReady: router.ready, verts: router.verts, agReady: !!ag, offGraphPairs: ag ? ag.offGraphPairs : 0 };
     }
 
     // ── Merge panel + commit ─────────────────────────────────────────────────
@@ -4169,7 +5762,8 @@
                 html: `<div data-pcm-idx="${i}" style="width:26px;height:26px;border-radius:50%;background:#7adfe6;color:#04222a;font:800 14px/26px monospace;text-align:center;border:2px solid #04222a;box-shadow:0 1px 6px rgba(0,0,0,0.6);cursor:context-menu;">${i + 1}</div>`,
                 iconSize: [26, 26], iconAnchor: [13, 13],
             });
-            try { pcm.markers.push(L.marker([c.lat, c.lng], { icon, interactive: true }).addTo(map)); } catch (e) {}
+            // zIndexOffset: pick numbers must sit ABOVE the 🔋 Range batteries
+            try { pcm.markers.push(L.marker([c.lat, c.lng], { icon, interactive: true, zIndexOffset: 1000 }).addTo(map)); } catch (e) {}
         });
     }
     function pcmRefresh() { pcmDrawMarkers(); pcmRenderPanel(); }
@@ -4179,7 +5773,11 @@
         const total = pcm.picks.reduce((s, pk) => s + pcmStepCount(pk.mission), 0);
         const defName = pcm.picks.length ? ('Merged - ' + pcm.picks.map(pk => pk.asset.name).join(' + ')) : '';
         const nameVal = pcm.customName != null ? pcm.customName : defName;
-        const rows = pcm.picks.map((pk, i) => `<div style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;font-size:11px;">
+        // v2.30: rows are draggable — grab anywhere on a row (the ⠿ handle
+        // telegraphs it) and drop onto another row to insert BEFORE it.
+        // M2-on-badge renumbering still works as before.
+        const rows = pcm.picks.map((pk, i) => `<div data-pcm-row="${i}" draggable="true" style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;font-size:11px;cursor:grab;">
+            <span style="color:#556;font-size:12px;">⠿</span>
             <span style="color:#7adfe6;font-weight:800;min-width:14px;">${i + 1}</span>
             <span style="flex:1;color:#e6e6e6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(String(pk.mission.name || ''))}</span>
             <span style="color:#9ad;white-space:nowrap;">${pcmStepCount(pk.mission)} steps</span>
@@ -4272,6 +5870,34 @@
         nameEl.oninput = () => { pcm.customName = nameEl.value; };
         el.querySelectorAll('[data-pcm-rm]').forEach(b => {
             b.onclick = () => { pcm.picks.splice(Number(b.getAttribute('data-pcm-rm')), 1); pcmRefresh(); };
+        });
+        // drag-and-drop reorder (v2.30) — drop inserts BEFORE the hovered row;
+        // drop on the footer area appends to the end.
+        let pcmDragIdx = null;
+        const rowEls = el.querySelectorAll('[data-pcm-row]');
+        rowEls.forEach(rowEl => {
+            rowEl.addEventListener('dragstart', (ev) => {
+                pcmDragIdx = Number(rowEl.getAttribute('data-pcm-row'));
+                rowEl.style.opacity = '0.45';
+                try { ev.dataTransfer.setData('text/plain', String(pcmDragIdx)); ev.dataTransfer.effectAllowed = 'move'; } catch (e2) {}
+            });
+            rowEl.addEventListener('dragover', (ev) => { ev.preventDefault(); if (Number(rowEl.getAttribute('data-pcm-row')) !== pcmDragIdx) rowEl.style.boxShadow = 'inset 0 2px 0 #7adfe6'; });
+            rowEl.addEventListener('dragleave', () => { rowEl.style.boxShadow = ''; });
+            rowEl.addEventListener('drop', (ev) => {
+                ev.preventDefault();
+                rowEl.style.boxShadow = '';
+                const to = Number(rowEl.getAttribute('data-pcm-row'));
+                if (pcmDragIdx == null || pcmDragIdx === to) return;
+                const moved = pcm.picks.splice(pcmDragIdx, 1)[0];
+                pcm.picks.splice(to > pcmDragIdx ? to - 1 : to, 0, moved);
+                pcmDragIdx = null;
+                pcmRefresh();
+            });
+            rowEl.addEventListener('dragend', () => {
+                rowEl.style.opacity = '';
+                rowEls.forEach(r2 => { r2.style.boxShadow = ''; });
+                pcmDragIdx = null;
+            });
         });
     }
 
@@ -4455,7 +6081,7 @@
 
     const MB_MERGE_PANEL_ID = 'aim-mb-merge-panel';
     let mbMergeBusy = false;
-    function mbCloseMergePanel() { const p = document.getElementById(MB_MERGE_PANEL_ID); if (p) p.remove(); }
+    function mbCloseMergePanel() { const p = document.getElementById(MB_MERGE_PANEL_ID); if (p) p.remove(); try { agClearRoutes(); } catch (e) {} }
     function mbCurrentSiteID() { const m = (location.hash || '').match(/#\/site\/(\d+)\//); return m ? m[1] : null; }
     function mbFetchMissionsFull(siteID) {
         return fetch(`/available_app/?site_id=${encodeURIComponent(siteID)}&type=1`, { credentials: 'include' })
@@ -4476,43 +6102,200 @@
             })
             .catch(e => { console.warn(`${TAG} [merge] load failed`, e); showToast('Merge: failed to load (see console).', '#ff5252', 4000); });
     }
+    // Per-group route-preview overlays (v2.15) — polyline base→pads→base in
+    // group color + numbered dots + 🔋 markers at simulated recharge breaks.
+    let agRouteLayers = [];
+    function agClearRoutes(gi) {
+        agRouteLayers = agRouteLayers.filter(r => {
+            if (gi != null && r.gi !== gi) return true;
+            r.layers.forEach(l => { try { l.remove(); } catch (e) {} });
+            return false;
+        });
+    }
+    function agToggleRoute(g, gi, color, ent, data) {
+        const had = agRouteLayers.some(r => r.gi === gi);
+        agClearRoutes(gi);
+        if (had) return false;
+        const L = composerGetL(), map = getLeafletMap();
+        if (!L || !map) { showToast('Map not found for the route preview.', '#ff9800', 2500); return false; }
+        const base = ent && ent.base;
+        const ag = data && data.ag;
+        const layers = [];
+        try {
+            // Draw the ACTUAL flown route along FPs/FFZ shortcuts (v2.16 —
+            // straight pad-to-pad lines were wrong). One polyline per flight:
+            // base → pads → base, legs reconstructed from the order graph.
+            const ll = p => [p.lat, p.lng];
+            const drawSeq = (idxSeq) => {
+                if (!idxSeq.length) return;
+                let pts = [];
+                if (ag) {
+                    pts = ag.basePath(idxSeq[0]).map(ll);
+                    for (let x = 1; x < idxSeq.length; x++) pts = pts.concat(ag.padPath(idxSeq[x - 1], idxSeq[x]).slice(1).map(ll));
+                    const home = ag.basePath(idxSeq[idxSeq.length - 1]).map(ll).reverse();
+                    pts = pts.concat(home.slice(1));
+                } else {
+                    if (base) pts.push(ll(base));
+                    idxSeq.forEach(i => pts.push(ll(data.agSolos[i].pt)));
+                    if (base) pts.push(ll(base));
+                }
+                layers.push(L.polyline(pts, { color, weight: 3, opacity: 0.85, dashArray: '7 5', interactive: false }).addTo(map));
+            };
+            if (g.sim && g.idxs) g.sim.flights.forEach(f => drawSeq(f.pads));
+            else if (g.idxs) drawSeq(g.idxs);
+            else {
+                const pts = [];
+                if (base) pts.push([base.lat, base.lng]);
+                g.solos.forEach(s => { if (s.pt) pts.push([s.pt.lat, s.pt.lng]); });
+                if (base) pts.push([base.lat, base.lng]);
+                layers.push(L.polyline(pts, { color, weight: 3, opacity: 0.85, dashArray: '7 5', interactive: false }).addTo(map));
+            }
+            const breaks = new Set();
+            if (g.sim && g.sim.flights.length > 1) { let acc = 0; g.sim.flights.slice(0, -1).forEach(f => { acc += f.pads.length; breaks.add(acc - 1); }); }
+            g.solos.forEach((s, i) => {
+                if (!s.pt) return;
+                const icon = L.divIcon({
+                    className: 'aim-mb-ag-badge',
+                    html: `<div style="width:20px;height:20px;border-radius:50%;background:${color};color:#111;font:800 11px/20px monospace;text-align:center;border:2px solid #111;box-shadow:0 1px 5px rgba(0,0,0,0.6);">${i + 1}</div>${breaks.has(i) ? '<div style="position:absolute;top:-13px;left:12px;font-size:13px;">🔋</div>' : ''}`,
+                    iconSize: [20, 20], iconAnchor: [10, 10],
+                });
+                layers.push(L.marker([s.pt.lat, s.pt.lng], { icon, interactive: false }).addTo(map));
+            });
+        } catch (e) { console.warn(`${TAG} [ag] route preview failed`, e); }
+        agRouteLayers.push({ gi, layers });
+        return true;
+    }
+
+    // Hand a proposed group to the pad-click merge editor — full edit UX
+    // (renumber, remove, rename, recipe save, single-group create).
+    function agStageInPcm(g, missions, ent) {
+        pcm.missions = missions || [];
+        pcm.assets = (ent && ent.assets) || [];
+        pcm.base = (ent && ent.base) || null;
+        pcm.picks = g.solos.map(s => ({
+            asset: pcm.assets.find(a => s.pt && Array.isArray(a.ring) && a.ring.length >= 3 && genPointInPoly(s.pt, a.ring)) || { id: null, name: s.mission.name, ring: null },
+            mission: s.mission,
+        }));
+        pcm.customName = g.name; pcm.editingName = null; pcm.pendingChoice = null;
+        if (!pcm.on) {
+            pcm.on = true;
+            try { document.documentElement.setAttribute('data-aim-merge', '1'); } catch (e) {}
+            pcmBind();
+            const btn = document.querySelector('[data-pcm-toggle]');
+            if (btn) btn.classList.add('active');
+        }
+        mbCloseMergePanel();
+        pcmRefresh();
+        showToast(`🔗 "${g.name}" staged in the merge editor (optimized order) — review, then Create.`, '#5fff5f', 5000);
+    }
+
+    // Bank every proposed group as a pcm merge recipe (no missions created).
+    function agSaveGroupRecipes(mergeGroups, siteID, ent) {
+        if (typeof GM_setValue !== 'function') { showToast('GM storage unavailable — can\'t save recipes.', '#ff5252', 3000); return; }
+        const assets = (ent && ent.assets) || [];
+        const all = pcmLoadRecipes();
+        mergeGroups.forEach(g => {
+            all[pcmRecipeKey(siteID, g.name)] = {
+                site: String(siteID), name: g.name, at: Date.now(),
+                picks: g.solos.map(s => {
+                    const a = assets.find(a2 => s.pt && Array.isArray(a2.ring) && a2.ring.length >= 3 && genPointInPoly(s.pt, a2.ring));
+                    return { assetId: a ? a.id : null, assetName: a ? a.name : s.mission.name, missionName: s.mission.name };
+                }),
+            };
+        });
+        try {
+            GM_setValue(PCM_RECIPES_KEY, JSON.stringify(all));
+            showToast(`💾 Saved ${mergeGroups.length} recipe(s) — load them any time from the 🔗 Merge panel's "saved merges".`, '#5fff5f', 5500);
+        } catch (e) { console.warn(`${TAG} [ag] recipe save failed`, e); showToast('Recipe save failed (see console).', '#ff5252', 3500); }
+    }
+
     function mbRenderMergePanel(data, siteID, missions, ent, overrides, rerender) {
         mbCloseMergePanel();
+        const cfg = agCfg();
         const ft = m => m == null ? '—' : `${Math.round(m * 3.28084).toLocaleString()} ft`;
-        const secOpts = (cur) => MB_SECTION_ORDER.map(c => `<option value="${c}" ${c === cur ? 'selected' : ''}>${MB_SECTION_NAMES[c]}</option>`).join('');
+        const kft = f => f == null ? '—' : `${(Math.round(f / 100) / 10).toLocaleString()}k ft`;
+        // Family picker (v2.16): each stop can be pinned into any of the sweep
+        // families by INDEX (names are emergent, indexes are stable per render).
+        const famOf = new Map();
+        (data.families || []).forEach((f, fi) => f.solos.forEach(s => famOf.set(s.mission.id, fi)));
+        const famOpts = (cur) => (data.families || []).map((f, fi) => `<option value="${fi}" ${fi === cur ? 'selected' : ''}>${escapeHtml(f.name || `Group ${fi + 1}`)}</option>`).join('');
         const mergeGroups = data.groups.filter(g => g.solos);
         const exclGroups = data.groups.filter(g => g.excluded);
+        const AG_COLORS = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
         const chip = (b) => b ? `<span style="background:${b.color}22;color:${b.color};border:1px solid ${b.color}66;border-radius:4px;padding:0 5px;font-size:10px;font-weight:700;white-space:nowrap;">${b.label}</span>` : '';
-        const soloRow = (s) => `<div style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;">
+        const reserveChip = (pct) => {
+            const target = 100 - cfg.marginPct;
+            const col = pct >= target - 2 ? '#5fff5f' : (pct >= 10 ? '#ffb74d' : '#ff5252');
+            return `<span title="estimated battery on landing" style="color:${col};font-weight:700;">${pct}%</span>`;
+        };
+        const soloRow = (s, i) => `<div style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;">
+            <span style="color:#7adfe6;font-weight:800;font-size:10px;min-width:16px;text-align:right;">${i + 1}</span>
             <span style="flex:1;color:#e6e6e6;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(s.mission.name || ('#' + s.mission.id))}</span>
             <span style="color:#9ad;font-size:10px;white-space:nowrap;">${ft(s.routeM)}</span>
             ${chip(s.battery)}
-            <select data-mb-ov="${s.mission.id}" title="Reassign section" style="background:#0e1218;color:#cde;border:1px solid #2a3340;border-radius:4px;font-size:10px;padding:1px 2px;">${secOpts(s.section)}</select>
+            <select data-mb-ov="${s.mission.id}" title="Move this stop to another group" style="background:#0e1218;color:#cde;border:1px solid #2a3340;border-radius:4px;font-size:10px;padding:1px 2px;">${famOpts(famOf.get(s.mission.id))}</select>
         </div>`;
-        const groupBlock = (g) => `<div style="margin:6px 0;border:1px solid #2a3a2a;border-radius:6px;overflow:hidden;">
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 8px;background:rgba(95,255,95,0.08);">
-                <span style="font-weight:800;color:#7dff7d;font-size:12px;">⛟ ${escapeHtml(g.name)}</span>
-                <span style="color:#9ad;font-size:10px;">${g.solos.length} stops · ${g.battery}</span>
+        const groupRows = (g) => {
+            const breaks = new Set();
+            if (g.sim && g.sim.flights.length > 1) { let acc = 0; g.sim.flights.slice(0, -1).forEach(f => { acc += f.pads.length; breaks.add(acc - 1); }); }
+            return g.solos.map((s, i) => soloRow(s, i)
+                + (breaks.has(i) ? '<div style="text-align:center;color:#ffb74d;font-size:9px;padding:1px 0;border-bottom:1px dashed #3a3320;">— 🔋 return &amp; recharge —</div>' : '')).join('');
+        };
+        const simLine = (g) => {
+            if (!g.sim) return `<div style="padding:2px 8px 4px;font-size:10px;color:#789;">no optimizer (need FP graph + base) — furthest→closest order</div>`;
+            const s = g.sim;
+            return `<div style="padding:2px 8px 5px;font-size:10px;color:#9ad;">est <b style="color:#cde;">${kft(s.totalFt)}</b> <span style="color:#789;">(${kft(s.overheadFt)} RTB legs)</span> · 🔋 <b style="color:#cde;">${s.flights.length}</b> flight${s.flights.length === 1 ? '' : 's'} · land ${s.flights.map(f => reserveChip(f.reservePct)).join(' / ')}${s.tight.length ? `<span style="color:#ff5252;font-weight:700;"> · ⚠ ${s.tight.length} pad${s.tight.length === 1 ? '' : 's'} won't fit one flight</span>` : ''}</div>`;
+        };
+        const groupBlock = (g, gi) => {
+            const stepsTotal = g.solos.reduce((t, s) => t + pcmStepCount(s.mission), 0);
+            const col = AG_COLORS[gi % AG_COLORS.length];
+            return `<div style="margin:6px 0;border:1px solid #2a3a2a;border-radius:6px;overflow:hidden;">
+            <div style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:rgba(95,255,95,0.08);">
+                <span style="width:9px;height:9px;border-radius:50%;background:${col};flex:none;"></span>
+                <span style="font-weight:800;color:#7dff7d;font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">⛟ ${escapeHtml(g.name)}</span>
+                <span style="color:#9ad;font-size:10px;white-space:nowrap;">${g.solos.length} stops · ${stepsTotal > cfg.stepMax ? `<b style="color:#ffb74d;">${stepsTotal} steps</b>` : `${stepsTotal} steps`} · ${g.battery}</span>
+                <button data-ag-route="${gi}" title="Show/hide this route on the map" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:11px;">👁</button>
+                <button data-ag-edit="${gi}" title="Open this group in the pad-click merge editor (reorder / rename / create just this one)" style="padding:1px 6px;background:rgba(255,213,79,0.12);border:1px solid rgba(255,213,79,0.5);color:#ffd54f;border-radius:4px;cursor:pointer;font-size:11px;">🔗</button>
             </div>
-            <div style="padding:2px 4px;">${g.solos.map(soloRow).join('')}</div>
+            ${simLine(g)}
+            <div style="padding:2px 4px;">${groupRows(g)}</div>
         </div>`;
+        };
+        const knob = (k, label, title, step) => `<label title="${escapeHtml(title)}" style="display:flex;align-items:center;gap:3px;font-size:10px;color:#9ad;white-space:nowrap;">${label}
+            <input data-ag-k="${k}" type="number" step="${step || 1}" min="1" value="${cfg[k]}" style="width:56px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:4px;padding:1px 4px;font-size:10px;"></label>`;
         const exclBlock = (g) => `<div style="margin:5px 0;padding:4px 8px;border:1px solid #3a2a2a;border-radius:6px;">
-            <div style="color:#ff8a8a;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:2px;">${escapeHtml(g.name)}</div>
-            ${g.excluded.map(s => `<div style="display:flex;align-items:center;gap:6px;padding:2px 2px;font-size:11px;color:#caa;"><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(s.mission.name || ('#' + s.mission.id))}</span><span style="color:#a66;font-size:10px;">${s.reason === 'unreachable' ? 'no route' : (s.reason || (s.battery && s.battery.level === 2 ? 'over range' : ''))}</span><select data-mb-ov="${s.mission.id}" style="background:#0e1218;color:#cde;border:1px solid #2a3340;border-radius:4px;font-size:10px;">${secOpts(s.section)}</select></div>`).join('')}
+            <div style="color:#ff8a8a;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:2px;">${escapeHtml(g.name)} · ${g.excluded.length}</div>
+            ${g.excluded.map(s => `<div style="display:flex;align-items:center;gap:6px;padding:2px 2px;font-size:11px;color:#caa;"><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(s.mission.name || ('#' + s.mission.id))}</span><span style="color:#a66;font-size:10px;">${escapeHtml(s.reason || (s.battery && s.battery.level === 2 ? `over ${agCfg().tulipRadiusFt.toLocaleString()} ft range` : ''))}</span></div>`).join('')}
         </div>`;
         const routable = data.solos.filter(s => s.routeM != null).length;
+        // Full-site estimate = the superset tier per section ("X 2" / "X 1-2") —
+        // you fly ONE tier per section, so summing every group would double-count.
+        const primary = mergeGroups.filter(g => / (2|1-2)$/.test(g.name) && g.sim);
+        const totFt = primary.length ? primary.reduce((t, g) => t + g.sim.totalFt, 0) : null;
+        const totFlights = primary.length ? primary.reduce((t, g) => t + g.sim.flights.length, 0) : null;
         const p = document.createElement('div');
         p.id = MB_MERGE_PANEL_ID;
-        p.style.cssText = 'position:fixed;top:60px;right:24px;width:430px;max-height:84vh;display:flex;flex-direction:column;z-index:2147483600;' +
+        p.style.cssText = 'position:fixed;top:60px;right:24px;width:470px;max-height:84vh;display:flex;flex-direction:column;z-index:2147483600;' +
             'background:#161a20;border:1px solid #5fff5f;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
         p.innerHTML = `
             <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(95,255,95,0.08);border-bottom:1px solid rgba(95,255,95,0.3);">
-                <span style="font-weight:800;color:#7dff7d;font-size:14px;">⛟ Merge by Section + Battery</span>
+                <span style="font-weight:800;color:#7dff7d;font-size:14px;">🧠 Auto-Group — Merge by Section + Battery</span>
                 <button data-mb-merge-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button>
             </div>
             <div style="padding:7px 12px;font-size:11px;color:#bbb;border-bottom:1px solid #2a2f38;">
-                <b style="color:#7dff7d;">${missions.length}</b> solo missions · <b style="color:#9ad;">${routable}</b> routable · <b style="color:#7dff7d;">${mergeGroups.length}</b> merge groups${data.routerReady ? '' : ' · <b style="color:#ff8a8a;">no routing data (no FPs/base)</b>'}
-                <div style="margin-top:3px;color:#789;">Furthest→closest from base. East 1 = Tattu subset, East 2 = + Tulip. Reassign a stop's section with the dropdown.</div>
+                <b style="color:#7dff7d;">${missions.length}</b> solo missions · <b style="color:#9ad;">${routable}</b> routable · <b style="color:#7dff7d;">${mergeGroups.length}</b> merge groups${totFt != null ? ` · full site ≈ <b style="color:#7dff7d;">${kft(totFt)}</b> / ${totFlights} flights` : ''}${data.routerReady ? '' : ' · <b style="color:#ff8a8a;">no routing data (no FPs/base)</b>'}${data.agReady ? '' : ' · <b style="color:#ffb74d;">optimizer off — distance sort</b>'}${data.offGraphPairs ? ` · <b style="color:#ffb74d;">⚠ ${data.offGraphPairs} leg(s) estimated off-graph</b>` : ''}
+                <div style="margin-top:3px;color:#789;">Order = 2-opt + flight simulator (breaks planned near base; multi-flight is normal). X 1 = Tattu subset, X 2 = + Tulip. 👁 route on map · 🔗 edit one group · dropdown moves a stop to another group.</div>
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:7px;align-items:center;padding:6px 12px;border-bottom:1px solid #2a2f38;">
+                ${knob('tattuRadiusFt', 'Tattu≤', 'Tattu tier radius: pads whose one-way route is within this fly on Tattu', 500)}
+                ${knob('tulipRadiusFt', 'Tulip≤', 'Tulip tier radius: beyond this a pad is excluded as unflyable', 500)}
+                ${knob('tattuBudgetFt', 'T-bud', 'Tattu full-battery TOTAL flight budget (ft-equivalents)', 1000)}
+                ${knob('tulipBudgetFt', 'U-bud', 'Tulip full-battery TOTAL flight budget (ft-equivalents)', 1000)}
+                ${knob('marginPct', 'use%', 'Usable % of the budget — the rest is the landing reserve', 1)}
+                ${knob('stepCostFt', 'ft/step', 'Battery cost per mission step, in ft-equivalents (captures/hover)', 10)}
+                ${knob('stepMax', 'max steps', 'Soft step target per merged mission — drives how many groups the sweep cuts (multi-flight is fine)', 25)}
+                ${knob('targetGroups', 'groups', 'Max direction groups (families) for the whole site — battery tiers can double the mission count', 1)}
+                <button data-ag-reset title="Reset all knobs to defaults" style="padding:1px 7px;background:none;border:1px solid #2a3340;color:#789;border-radius:4px;cursor:pointer;font-size:10px;">↺</button>
             </div>
             <div style="overflow:auto;flex:1;padding:4px 10px;">
                 ${mergeGroups.length ? mergeGroups.map(groupBlock).join('') : '<div style="padding:12px;color:#888;">No mergeable groups (need routable solos).</div>'}
@@ -4520,11 +6303,25 @@
             </div>
             <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
                 <span data-mb-merge-status style="flex:1;font-size:11px;color:#9ad;"></span>
+                <button data-ag-recipes title="Save every group's ordered pad list as a merge recipe (creates NO missions)" style="padding:5px 9px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:5px;cursor:pointer;font-size:11px;" ${mergeGroups.length ? '' : 'disabled'}>💾 Recipes</button>
                 <button data-mb-merge-go style="padding:6px 12px;background:#5fff5f;border:none;color:#04220a;border-radius:6px;cursor:pointer;font-weight:800;" ${mergeGroups.length && !mbMergeBusy ? '' : 'disabled'}>⛟ Create ${mergeGroups.length} merged</button>
             </div>`;
         document.body.appendChild(p);
         p.querySelector('[data-mb-merge-close]').onclick = mbCloseMergePanel;
         p.querySelectorAll('[data-mb-ov]').forEach(sel => sel.onchange = () => { overrides[sel.getAttribute('data-mb-ov')] = sel.value; rerender(); });
+        p.querySelectorAll('[data-ag-k]').forEach(inp => inp.onchange = () => {
+            const patch = {}; patch[inp.getAttribute('data-ag-k')] = Number(inp.value);
+            agSetCfg(patch); rerender();
+        });
+        p.querySelector('[data-ag-reset]').onclick = () => { agSetCfg(Object.assign({}, AG_DEFAULTS)); rerender(); };
+        p.querySelectorAll('[data-ag-route]').forEach(b => b.onclick = () => {
+            const gi = Number(b.getAttribute('data-ag-route'));
+            const on = agToggleRoute(mergeGroups[gi], gi, AG_COLORS[gi % AG_COLORS.length], ent, data);
+            b.style.background = on ? 'rgba(122,223,230,0.45)' : 'rgba(122,223,230,0.14)';
+        });
+        p.querySelectorAll('[data-ag-edit]').forEach(b => b.onclick = () => agStageInPcm(mergeGroups[Number(b.getAttribute('data-ag-edit'))], missions, ent));
+        const rcp = p.querySelector('[data-ag-recipes]');
+        if (rcp) rcp.onclick = () => agSaveGroupRecipes(mergeGroups, siteID, ent);
         p.querySelector('[data-mb-merge-go]').onclick = () => mbCommitAllMerges(mergeGroups, p.querySelector('[data-mb-merge-status]'), p.querySelector('[data-mb-merge-go]'));
     }
     function mbMakeStep(type, value1) { return { type, value1: value1 === undefined ? null : value1, value2: null, location: null, extra_options: {}, polygon_points: null, snapshot_points: null }; }
@@ -4538,9 +6335,11 @@
         for (let i = 0; i < groups.length; i++) {
             const g = groups[i];
             setStatus(`Creating "${g.name}" (${i + 1}/${groups.length})…`);
-            // takeoff + each solo's body (no takeoff/return) furthest→closest + returnHome
+            // takeoff + each solo's body (no takeoff/return) in optimized order + returnHome.
+            // pcmNormStep strips the per-mission server instruction ids — mixed
+            // foreign ids 400 a merged create (v2.02 lesson, applied here v2.15).
             const body = [];
-            g.solos.forEach(s => mbMissionBody(s.mission).forEach(st => body.push(st)));
+            g.solos.forEach(s => mbMissionBody(s.mission).forEach(st => body.push(pcmNormStep(st))));
             const instrs = [mbMakeStep(0, 20)].concat(body, [mbMakeStep(99)]);
             try { await ctx.saveApp({ id: null, type: 1, instructions: instrs, data_report_object_arr: [] }, g.name); ok++; }
             catch (e) { fail++; console.warn(`${TAG} [merge] failed "${g.name}"`, e); }
@@ -5109,6 +6908,26 @@
             try { for (const k of Object.getOwnPropertyNames(c)) { try { const v = c[k]; if (composerLooksLikeMap(v)) { leafletMapRef = v; return v; } } catch (e) {} } } catch (e) {}
             for (const k in c) { try { const v = c[k]; if (composerLooksLikeMap(v)) { leafletMapRef = v; return v; } } catch (e) {} }
         }
+        // v2.14: Data View (legacy Angular app) keeps its map on
+        // $rootScope.current_map — never on the container's props. Guarded on
+        // a container existing in THIS document so the SS/MB top frame
+        // (Angular shell, map in iframe) can't grab a stale reference.
+        try {
+            // v2.21: unsafeWindow, not window — page globals aren't guaranteed
+            // to be visible through the sandbox proxy (same rule as the
+            // Styler/AI angular grabs and unsafeWindow.L).
+            const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+            const ng = w.angular;
+            const containers = document.querySelectorAll('.leaflet-container');
+            if (ng && containers.length && typeof ng.element === 'function') {
+                const scope = ng.element(containers[0]).scope();
+                const root = scope && scope.$root;
+                if (root && composerLooksLikeMap(root.current_map)) {
+                    leafletMapRef = root.current_map;
+                    return leafletMapRef;
+                }
+            }
+        } catch (e) { console.log(`${TAG} angular map fallback threw (${e.message}) — no map in this frame`); }
         return null;
     }
 
@@ -6404,6 +8223,9 @@
                 <button class="aim-mb-tbtn" data-bulk-delete title="Permanently delete the SELECTED missions from the server" style="color:#ff8a8a;">🗑 Delete</button>
                 <button class="aim-mb-tbtn" data-copy-missions title="Copy missions from another site into this one (create-only, dup names skipped)">📥 Copy</button>
                 <button class="aim-mb-tbtn ${pcm.on ? 'active' : ''}" data-pcm-toggle title="Merge missions by right-clicking pads on the map in order (pad name = mission name)">🔗 Merge</button>
+                <button class="aim-mb-tbtn ${rng.on ? 'active' : ''}" data-rng-toggle title="Color every pad's FFZ by the TRUE shortest LEGAL route from base (inside FFZ/FP only, triple-verified: path audit + dense second opinion + lower bound). Overlay is click-through — M2 merge picking still works.">🔋 Range</button>
+                <button class="aim-mb-tbtn ${lasso.armed ? 'active' : ''}" data-lasso-toggle title="Draw a freehand loop around pads → auto-build a furthest→closest merge list (Tulip pads auto-split into a separate '2' mission) and stage it in the merge editor for inspection.">🖊 Lasso</button>
+                <button class="aim-mb-tbtn ${mcv.on ? 'active' : ''}" data-mcv-toggle title="Show which pads are already claimed by macro (merged) missions — each macro gets a color + name chip; white dashed pads have missions but no macro yet. Click-through.">🧩 Macros</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'imperial' ? 'active' : ''}" data-unit="imperial">mi</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'metric' ? 'active' : ''}" data-unit="metric">km</button>
                 <button class="aim-mb-tbtn" data-settings title="Battery → flights thresholds">⚙</button>
@@ -6688,6 +8510,12 @@
         // v1.99 — cross-site mission copy + pad-click merge mode
         const cpBtn = panelEl.querySelector('[data-copy-missions]');
         if (cpBtn) cpBtn.onclick = () => openCopyMissionsPanel();
+        const rngBtn = panelEl.querySelector('[data-rng-toggle]');
+        if (rngBtn) rngBtn.onclick = () => rngToggle(rngBtn);
+        const lassoBtn = panelEl.querySelector('[data-lasso-toggle]');
+        if (lassoBtn) lassoBtn.onclick = () => lassoToggle(lassoBtn);
+        const mcvBtn = panelEl.querySelector('[data-mcv-toggle]');
+        if (mcvBtn) mcvBtn.onclick = () => mcvToggle(mcvBtn);
         const pcmBtn = panelEl.querySelector('[data-pcm-toggle]');
         if (pcmBtn) pcmBtn.onclick = async () => {
             if (pcm.on) { pcmExit(); }
@@ -10131,14 +11959,20 @@ ${snapPlacemarks}
     const MPV_BTN_ID = 'aim-mb-preview-btn';
     const MPV_PANEL_ID = 'aim-mb-preview-panel';
     const MPV_COLORS = ['#7adfe6', '#ffd54f', '#ff8a65', '#aed581', '#ce93d8', '#4fc3f7', '#f48fb1', '#80cbc4', '#ffab91', '#fff176'];
-    const mpv = { channel: null, layers: {}, panelEl: null, onSiteSetup: false, canvas: null };
+    const mpv = { channel: null, layers: {}, panelEl: null, onSiteSetup: false, canvas: null, svg: null };
 
     // v2.12: preview works on BOTH sides of the bridge — Site Setup AND
     // Mission Bank (see missions on the map without opening the editor).
+    // v2.14: and on Data View (legacy Angular app, map in the TOP window) —
+    // the Asset Inspector's 👁 popup button works there too. Frame safety is
+    // unchanged: mpvPreviewByName/mpvRedraw only act in the frame that owns
+    // a Leaflet map, so on SS/MB the iframe instance answers, on DV the TOP
+    // instance does.
     function mpvRouteOk() {
         const top = (() => { try { return window.top; } catch (e) { return window; } })();
         const hash = (top && top.location && top.location.hash) || location.hash || '';
-        return /#\/site\/\d+\/control-panel\/(site-setup|mission-bank)/.test(hash);
+        return /#\/site\/\d+\/control-panel\/(site-setup|mission-bank)/.test(hash)
+            || /#\/site\/\d+\/data_view\//.test(hash);
     }
 
     function mpvSelForSite(sid) {
@@ -10166,6 +12000,157 @@ ${snapPlacemarks}
     }
     function mpvClearAll() {
         Object.keys(mpv.layers).forEach(mpvClearMission);
+        try { mpvHideTip(); } catch (e) {}   // v2.32: don't strand a hover label over removed dots
+    }
+
+    // v2.28 (extracted from v2.25): dedicated, PRIMED svg renderer. Letting
+    // a vector layer lazily create map._renderer crashes on Data View's
+    // older Leaflet — a fresh renderer's _bounds stays undefined until the
+    // next moveend, the first add throws ("reading 'x'"), and the half-
+    // registered layer then throws on EVERY pan/zoom → map freezes until
+    // refresh. Explicit add + _update() sets _bounds immediately.
+    function mpvEnsureSvg(L, map) {
+        if (!mpv.svg || mpv.svg._map !== map) {
+            try {
+                mpv.svg = L.svg();
+                mpv.svg.addTo(map);
+                if (typeof mpv.svg._update === 'function') mpv.svg._update();
+            } catch (e) { console.warn(`${TAG} [mpv] svg renderer setup failed:`, e); mpv.svg = null; }
+        }
+        return mpv.svg;
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // v2.29: 👁 legal-route nav lines — the blue nav→nav line follows the
+    // ACTUAL flyable path (along FPs / through FFZs) instead of a straight
+    // segment. Strictly READ-ONLY reuse of the 🔋 Range solver
+    // (rngBuildGraph/agDijkstra + helpers): if any of it is missing or
+    // throws, every leg falls back to the straight dashed line — routing
+    // can never break the preview.
+    // Graph is built ONCE per site (async: entities fetch + build), cached;
+    // the first draw renders straight lines and re-renders routed when the
+    // graph lands.
+    // ════════════════════════════════════════════════════════════════
+    const mpvRoute = { sid: null, built: null, building: false, failedSid: null };
+
+    function mpvRouteReady(sid) {
+        if (!sid) return null;
+        if (mpvRoute.sid === sid && mpvRoute.built) return mpvRoute.built;
+        if (mpvRoute.failedSid === sid) return null;   // build failed once — straight lines, no retry storm
+        if (mpvRoute.building) return null;
+        if (typeof genFetchEntities !== 'function' || typeof rngBuildGraph !== 'function'
+            || typeof agDijkstra !== 'function' || typeof agRingBbox !== 'function') {
+            if (mpvRoute.failedSid !== 'api') {
+                mpvRoute.failedSid = 'api';
+                console.warn(`${TAG} [mpv] Range solver API not found — nav lines stay straight`);
+            }
+            return null;
+        }
+        mpvRoute.building = true;
+        Promise.resolve(genFetchEntities(sid)).then(ent => {
+            const built = rngBuildGraph(ent);
+            built.boxes = built.ffzs.map(f => agRingBbox(f.ring, MB_ENTRY_FFZ_FT / 3.28084));
+            mpvRoute.sid = sid;
+            mpvRoute.built = built;
+            mpvRoute.building = false;
+            console.log(`${TAG} [mpv] legal-route graph ready (${built.graph.verts.size} verts) — re-rendering routed nav lines`);
+            mpvRedraw();
+        }).catch(e => {
+            mpvRoute.building = false;
+            mpvRoute.failedSid = sid;
+            console.warn(`${TAG} [mpv] legal-route graph build failed — nav lines stay straight:`, e);
+        });
+        return null;
+    }
+
+    // Temp-attach a point into the graph the same way the solver attaches
+    // bases: visibility edges inside every FFZ that contains it, a stub onto
+    // the nearest FP arc, and a nearest-vertex fallback so it's never
+    // stranded. Every added key is recorded in tempOut for detachment.
+    function mpvAttachPoint(built, p, tag, tempOut) {
+        const { graph, ffzs, boxes } = built;
+        const entryM = MB_ENTRY_FFZ_FT / 3.28084;
+        const k = `mpv:${tag}`;
+        graph.verts.set(k, { lat: p.lat, lng: p.lng });
+        graph.adj.set(k, []);
+        tempOut.push(k);
+        const link = (ka, kb, w) => { graph.adj.get(ka).push({ to: kb, w }); graph.adj.get(kb).push({ to: ka, w }); };
+        let linked = 0;
+        ffzs.forEach((f, fi) => {
+            if (mbPointToPolygonMeters(p.lat, p.lng, f.ring) > entryM) return;
+            const bb = boxes[fi];
+            graph.verts.forEach((v, vk) => {
+                if (vk === k || vk.indexOf('mpv') === 0) return;
+                if (v.lat < bb.s || v.lat > bb.n || v.lng < bb.w || v.lng > bb.e) return;
+                if (mbPointToPolygonMeters(v.lat, v.lng, f.ring) > entryM) return;
+                if (!rngSegInside(p, v, f.ring)) return;
+                link(k, vk, mbApproxMeters(p.lat, p.lng, v.lat, v.lng));
+                linked++;
+            });
+        });
+        const arc = agNearestArcPoint(graph, [p], MB_REACH_FFZ_FT / 3.28084);
+        if (arc) {
+            const xk = `mpvx:${tag}`;
+            graph.verts.set(xk, arc.p);
+            graph.adj.set(xk, []);
+            tempOut.push(xk);
+            link(xk, arc.ka, arc.w * arc.t);
+            link(xk, arc.kb, arc.w * (1 - arc.t));
+            link(k, xk, Math.max(1, arc.d));
+            linked++;
+        }
+        if (!linked) {
+            // v2.33 fix: mbNearestVertex scans ALL verts including the vertex
+            // just added for p itself (distance 0) — it always won, the
+            // key!==k guard rejected it, and the point ended up STRANDED
+            // (degree 0). Scan excluding k instead.
+            let best = null;
+            graph.verts.forEach((v, vk) => {
+                if (vk === k) return;
+                const d = mbApproxMeters(p.lat, p.lng, v.lat, v.lng);
+                if (!best || d < best.d) best = { vk, d };
+            });
+            if (best) link(k, best.vk, best.d);
+        }
+        return k;
+    }
+
+    function mpvDetachTemp(graph, tempKeys) {
+        if (!tempKeys.length) return;
+        const tset = new Set(tempKeys);
+        tempKeys.forEach(k => { graph.verts.delete(k); graph.adj.delete(k); });
+        graph.adj.forEach(list => {
+            for (let i = list.length - 1; i >= 0; i--) if (tset.has(list[i].to)) list.splice(i, 1);
+        });
+    }
+
+    // Legal path a→b as [[lat,lng],…], or null (no route / solver hiccup)
+    // → caller draws the straight fallback.
+    function mpvLegalPath(built, a, b) {
+        const graph = built.graph;
+        const temp = [];
+        try {
+            const ka = mpvAttachPoint(built, a, 'a', temp);
+            const kb = mpvAttachPoint(built, b, 'b', temp);
+            const { dist, prev } = agDijkstra(graph, ka);
+            if (!dist.has(kb)) return null;
+            const path = [];
+            let cur = kb, guard = 0;
+            while (cur !== undefined && guard++ < 20000) {
+                const v = graph.verts.get(cur);
+                if (v) path.push([v.lat, v.lng]);
+                if (cur === ka) break;
+                cur = prev.get(cur);
+            }
+            if (cur !== ka) return null;
+            path.reverse();
+            return path.length >= 2 ? path : null;
+        } catch (e) {
+            console.warn(`${TAG} [mpv] legal-route leg failed — straight fallback:`, e);
+            return null;
+        } finally {
+            try { mpvDetachTemp(graph, temp); } catch (e) {}
+        }
     }
 
     function mpvDrawMission(m, color) {
@@ -10177,15 +12162,53 @@ ${snapPlacemarks}
         const located = steps.filter(s => s && s.location
             && typeof s.location.lat === 'number' && typeof s.location.lng === 'number'
             && s.type_name !== 'takeoff' && s.type_name !== 'returnHome');
-        // Flight-order line. Dashed = "preview, not a real FP";
-        // interactive:false so clicks pass through to the SS editor.
-        // v2.11: always snap-pink (user request) — the per-MISSION palette
-        // color now lives only in the picker swatch/checkbox.
-        if (located.length >= 2) {
+        // v2.28: lines match the mission's real structure (a single
+        // step-order polyline read as a meaningless Z on multi-snap
+        // missions): BLUE dashed nav→nav flight line in flight order, plus
+        // PINK dashed sightlines from each nav to its own snapshots.
+        // interactive:false so clicks pass through to the editor beneath.
+        const svgR = mpvEnsureSvg(L, map);
+        const addLine = (pts, opts) => {
+            let pl = null;
             try {
-                layers.push(L.polyline(located.map(s => [s.location.lat, s.location.lng]),
-                    { color: stepColor('snap'), weight: 3, opacity: 0.8, dashArray: '7,7', interactive: false }).addTo(map));
-            } catch (e) { console.warn(`${TAG} [mpv] polyline failed:`, e); }
+                if (svgR) opts.renderer = svgR;
+                pl = L.polyline(pts, opts);
+                pl.addTo(map);
+                layers.push(pl);
+            } catch (e) {
+                console.warn(`${TAG} [mpv] line failed:`, e);
+                // Leaflet registers a layer BEFORE onAdd runs — a layer that
+                // threw mid-add stays attached and poisons every later map
+                // move. Detach it so a failed line can never freeze the map.
+                if (pl) { try { map.removeLayer(pl); } catch (e2) {} }
+            }
+        };
+        const navPts = [];
+        const sightlines = [];
+        let curNav = null;
+        for (const s of located) {
+            if (s.type_name === 'navigate') { curNav = [s.location.lat, s.location.lng]; navPts.push(curNav); }
+            else if (s.type_name === 'snapshot' && curNav) sightlines.push([curNav, [s.location.lat, s.location.lng]]);
+        }
+        if (navPts.length >= 2) {
+            const navOpts = { color: stepColor('nav'), weight: 3, opacity: 0.85, dashArray: '7,7', interactive: false };
+            // v2.29: route each leg along the actual flyable path (Range
+            // solver graph). Graph not ready/failed → straight line now;
+            // a routed re-render fires when the async build lands.
+            const built = mpvRouteReady(getCurrentSiteID());
+            if (built) {
+                for (let i = 0; i + 1 < navPts.length; i++) {
+                    const seg = mpvLegalPath(built,
+                        { lat: navPts[i][0], lng: navPts[i][1] },
+                        { lat: navPts[i + 1][0], lng: navPts[i + 1][1] });
+                    addLine(seg || [navPts[i], navPts[i + 1]], Object.assign({}, navOpts));
+                }
+            } else {
+                addLine(navPts, navOpts);
+            }
+        }
+        for (const sl of sightlines) {
+            addLine(sl, { color: stepColor('snap'), weight: 2, opacity: 0.75, dashArray: '4,6', interactive: false });
         }
         let nav = 0, snap = 0;
         for (let i = 0; i < steps.length; i++) {
@@ -10215,9 +12238,17 @@ ${snapPlacemarks}
                 const icon = L.divIcon({ className: 'aim-mpv-badge', html, iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
                 const mk = L.marker([s.location.lat, s.location.lng], { icon, interactive: true }).addTo(map);
                 const alt = displayStepValue(s);
-                mk.bindTooltip(
-                    `<b>${escapeHtml(m.name || '(mission)')}</b><br>step ${i + 1}/${steps.length} · ${escapeHtml(t || ('type ' + s.type))}${alt ? ' · ' + escapeHtml(alt) : ''}`,
-                    { direction: 'top', offset: [0, -8], opacity: 0.95 });
+                const badgeHtml = `<b>${escapeHtml(m.name || '(mission)')}</b> · step ${i + 1}/${steps.length} · ${escapeHtml(t || ('type ' + s.type))}${alt ? ' · ' + escapeHtml(alt) : ''}`;
+                if (CONTEXT === 'TOP') {
+                    // v2.32: own hover label on DV — Percepto's tooltip
+                    // subclass there crashes on bound tooltips.
+                    mk.on('mouseover', () => mpvShowTip(map, mk.getLatLng(), badgeHtml));
+                    mk.on('mouseout', mpvHideTip);
+                } else {
+                    mk.bindTooltip(
+                        `<b>${escapeHtml(m.name || '(mission)')}</b><br>step ${i + 1}/${steps.length} · ${escapeHtml(t || ('type ' + s.type))}${alt ? ' · ' + escapeHtml(alt) : ''}`,
+                        { direction: 'top', offset: [0, -8], opacity: 0.95 });
+                }
                 layers.push(mk);
             } catch (e) { console.warn(`${TAG} [mpv] marker failed:`, e); }
         }
@@ -10233,12 +12264,60 @@ ${snapPlacemarks}
         if (!mpv.canvas) { try { mpv.canvas = L.canvas({ padding: 0.3 }); } catch (e) { mpv.canvas = null; } }
         return mpv.canvas;
     }
+    // v2.32: Data View's app SUBCLASSES Leaflet's tooltip pipeline
+    // (openTooltip override in app-bundle) and it crashes on tooltips WE
+    // bind ("appendChild … not of type 'Node'") — so on DV, hover labels
+    // are our own floating div pinned to the map container. pointer-events
+    // none, one shared element, hidden on mouseout/clear.
+    let mpvTipEl = null;
+    function mpvShowTip(map, latlng, html) {
+        try {
+            const c = map.getContainer();
+            if (!mpvTipEl || !c.contains(mpvTipEl)) {
+                mpvTipEl = document.createElement('div');
+                mpvTipEl.style.cssText = 'position:absolute;z-index:10000;pointer-events:none;'
+                    + 'background:rgba(18,20,26,0.92);color:#e6e6e6;border:1px solid rgba(255,255,255,0.25);'
+                    + 'border-radius:4px;padding:4px 7px;font:11px/1.35 monospace;display:none;'
+                    + 'white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.5)';
+                c.appendChild(mpvTipEl);
+            }
+            mpvTipEl.innerHTML = html;
+            const p = map.latLngToContainerPoint(latlng);
+            mpvTipEl.style.left = Math.round(p.x + 12) + 'px';
+            mpvTipEl.style.top = Math.round(p.y - 26) + 'px';
+            mpvTipEl.style.display = 'block';
+        } catch (e) {}
+    }
+    function mpvHideTip() {
+        if (mpvTipEl) mpvTipEl.style.display = 'none';
+    }
+
     function mpvDrawMissionLight(m) {
         const L = composerGetL(), map = getLeafletMap();
         if (!L || !map || !m || typeof L.circleMarker !== 'function') return;
         mpvClearMission(m.id);
         const layers = [];
-        const renderer = mpvGetCanvas(L);
+        // v2.28: on Data View (TOP renders) the lazily-added canvas renderer
+        // is broken on the page's older Leaflet — dots painted at stale
+        // offsets after pan/zoom, and removals never repaint (ghost dots).
+        // Use the explicitly-added + primed svg renderer there (proven by
+        // the 👁 lines); canvas stays for SS/MB where all-missions scale
+        // genuinely needs it and it works.
+        const renderer = (CONTEXT === 'TOP') ? mpvEnsureSvg(L, map) : mpvGetCanvas(L);
+        // v2.31: on Data View the dots are svg (cheap pointer events), so make
+        // them self-identifying — hover shows WHOSE mission a dot belongs to.
+        // Root of the "whose dots are these?!" confusion: dense lease families
+        // (e.g. 18A) put several missions' steps on/next to one pad, and
+        // anonymous dots read as wrong data. SS/MB keeps interactive:false —
+        // canvas at all-missions scale is exactly where hit-testing hurts.
+        const dvTips = CONTEXT === 'TOP';
+        // FOCUS MODE: while ANY mission is checked (full badges), everyone
+        // else's dots dim way down so the previewed mission pops. Hover
+        // labels still work on dimmed dots. No toggle — strictly-better UX;
+        // clears automatically when nothing is checked.
+        const focusDim = mpvSelForSite(getCurrentSiteID() || '').length > 0;
+        const dotFill = focusDim ? 0.22 : 0.85;
+        const dotStroke = focusDim ? 'rgba(0,0,0,0.18)' : 'rgba(0,0,0,0.55)';
         const steps = Array.isArray(m.instructions) ? m.instructions : [];
         for (const s of steps) {
             if (!s || !s.location || typeof s.location.lat !== 'number' || typeof s.location.lng !== 'number') continue;
@@ -10248,9 +12327,17 @@ ${snapPlacemarks}
             else if (t === 'snapshot') { color = stepColor('snap'); r = 3; }
             else continue;
             try {
-                const opts = { radius: r, color: 'rgba(0,0,0,0.55)', weight: 1, fillColor: color, fillOpacity: 0.85, interactive: false };
+                const opts = { radius: r, color: dotStroke, weight: 1, fillColor: color, fillOpacity: dotFill, interactive: dvTips };
                 if (renderer) opts.renderer = renderer;
-                layers.push(L.circleMarker([s.location.lat, s.location.lng], opts).addTo(map));
+                const cm = L.circleMarker([s.location.lat, s.location.lng], opts).addTo(map);
+                if (dvTips) {
+                    // v2.32: own hover label, NOT bindTooltip — Percepto's
+                    // tooltip subclass on DV crashes on bound tooltips.
+                    const tipHtml = `<b>${escapeHtml(m.name || '(mission)')}</b> · ${escapeHtml(t)}`;
+                    cm.on('mouseover', () => mpvShowTip(map, cm.getLatLng(), tipHtml));
+                    cm.on('mouseout', mpvHideTip);
+                }
+                layers.push(cm);
             } catch (e) {}
         }
         mpv.layers[m.id] = layers;
@@ -10416,6 +12503,11 @@ ${snapPlacemarks}
             if (mpv.onSiteSetup) { mpv.onSiteSetup = false; mpvTeardown(); }
             return;
         }
+        // v2.14: only the frame that owns a Leaflet map participates (SS/MB
+        // iframe, Data View TOP). Keeps the SS TOP instance from duplicate-
+        // fetching missions it can never draw. Map not mounted yet → the 3s
+        // interval retries.
+        if (!getLeafletMap()) return;
         if (!mpv.onSiteSetup) {
             mpv.onSiteSetup = true;
             // Entering the route with a persisted selection (or ALL mode):
@@ -10432,6 +12524,17 @@ ${snapPlacemarks}
         const sid = getCurrentSiteID();
         if (sid && (mpvSelForSite(sid).length || mpvAllOn) && !Object.keys(mpv.layers).length
             && mpvMissions(sid) && getLeafletMap()) mpvRedraw();
+        // v2.26: cross-tab drift self-heal. The picker selection is GM-stored
+        // with no broadcast, so un/checking a mission in ANOTHER tab (e.g. the
+        // Mission Bank tab) left this tab's overlay stale — most visible on
+        // Data View, which has no picker of its own. Every tick, compare the
+        // drawn mission set against the stored one and redraw on mismatch.
+        if (sid && mpvMissions(sid) && getLeafletMap()) {
+            const want = new Set(mpvSelForSite(sid));
+            if (mpvAllOn) (mpvMissions(sid) || []).forEach(m2 => { if (m2) want.add(m2.id); });
+            const have = Object.keys(mpv.layers).map(Number);
+            if (have.length !== want.size || have.some(id => !want.has(id))) mpvRedraw();
+        }
         if (document.getElementById(MPV_BTN_ID)) return;
         const tools = document.querySelector('.map-tools');
         if (!tools) return;
@@ -10452,7 +12555,12 @@ ${snapPlacemarks}
 
     function mpvPreviewByName(name) {
         const sid = getCurrentSiteID();
-        if (!sid || !getLeafletMap()) return;   // not the map iframe — let that instance answer
+        // Multi-frame protocol: instances without a map stay quiet so the
+        // frame that HAS one answers. v2.21: quiet ≠ silent — log which gate
+        // stopped us, so a no-ACK timeout is diagnosable from the console
+        // (this exact silence cost a debugging round on Data View).
+        if (!sid) { console.log(`${TAG} [mpv] PREVIEW_ASSET "${name}": no site id in hash — not answering (${CONTEXT})`); return; }
+        if (!getLeafletMap()) { console.log(`${TAG} [mpv] PREVIEW_ASSET "${name}": no Leaflet map in this frame (${CONTEXT}) — leaving it to the frame that owns one`); return; }
         if (!masterEnabled || !mpvEnabled) {
             mpvAck({ found: false, name, disabled: true });
             showToast('Mission preview is disabled in the Control Panel.', '#ff9800', 3000);
@@ -10487,6 +12595,16 @@ ${snapPlacemarks}
                 const msg = ev.data || {};
                 if (msg.type !== 'PREVIEW_ASSET' || !msg.name) return;
                 if (!mpvRouteOk()) return;
+                // Cross-tab gate (same rule as Styler TRIGGER_ACTION):
+                // BroadcastChannel delivers to EVERY open percepto tab, so
+                // clicking 👁 on a Data View tab used to draw the overlay in
+                // a background Mission Bank tab on the same site (which also
+                // ACKed, so no timeout toast anywhere visible). Only the tab
+                // the user actually clicked in — the focused one — answers.
+                if (!document.hasFocus()) {
+                    console.log(`${TAG} [mpv] PREVIEW_ASSET ignored — tab not focused (cross-tab broadcast)`);
+                    return;
+                }
                 try { mpvPreviewByName(String(msg.name)); }
                 catch (e) { console.warn(`${TAG} [mpv] preview-by-name failed:`, e); }
             };
@@ -10514,6 +12632,19 @@ ${snapPlacemarks}
         if (CONTEXT === 'IFRAME') {
             injectGlobalEditStyles();
         }
+        // v2.14: 👁 Mission Preview runs in BOTH contexts. On SS/MB the
+        // iframe owns the map and TOP's instance harmlessly no-ops (its
+        // ticks find no .map-tools and no Leaflet map); on Data View the
+        // map lives in TOP, so the TOP instance is the one that draws.
+        // mpvRouteOk + getLeafletMap gate every action either way.
+        try { mpvInit(); } catch (e) { console.warn(`${TAG} [mpv] init failed:`, e); }
+        if (CONTEXT === 'TOP') {
+            // The Angular-scope map grab needs no prototype patch, but
+            // stamping __aim_map__ on the DV container lets the Asset
+            // Inspector's own detector find the map too. No-op when this
+            // realm has no window.L (SS/MB top frame).
+            try { patchLeafletMap(); } catch (e) {}
+        }
         // IFRAME-only — the Mission Bank UI lives in the React iframe
         if (CONTEXT === 'IFRAME') {
             // Bumped 2s → 4s; SUM only needs replacing on URL nav,
@@ -10522,9 +12653,6 @@ ${snapPlacemarks}
             setInterval(runSumInjection, 4000);
             setTimeout(runSumInjection, 1000);
             try { patchLeafletMap(); } catch (e) {}
-            // v2.08: Site Setup mission-preview overlay (👁) — self-gates
-            // to the site-setup route inside its injection tick.
-            try { mpvInit(); } catch (e) { console.warn(`${TAG} [mpv] init failed:`, e); }
             // Live editor bridge: syncs MBT's display to the live mission-editor
             // state + drives armed snapshot auto-AGL on GPS moves (700ms poll,
             // early-returns unless a mission is open in the editor).

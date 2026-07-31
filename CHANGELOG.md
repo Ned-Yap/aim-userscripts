@@ -6,6 +6,17 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-31 — ⭐ PROMOTED TO PROD: Mission Bank Tools v2.39 (coworkers jump from v2.13)
+
+The entire two-day macro-mission arc reaches everyone:
+
+- **🔋 Range** — every pad's FFZ colored by the TRUE shortest legal route from base (triple-verified: route audit + independent second solve + lower bound). Battery icons, hover for distance, red outline = close to the 14k/18k cutoff. Click-through.
+- **🖊 Lasso** — draw a loop around pads → furthest→closest spur-walk merge list, Tulip pads auto-split into `X 1` / `X 2`, 🔋 recharge breaks + landing estimates shown, staged into the merge editor for inspection before Create. Skipped pads marked ✕ with reasons.
+- **🧩 Macros + 📋 Report** — solid-filled coverage overlay (unfilled = still to do) and the one-click Sheets report (Name / Classification / Captured / Battery / Section / Mission / Order).
+- **Merge editor** — drag-and-drop reordering.
+- **👁 Mission preview arc** (v2.25–v2.32): real line topology, legal-route nav lines, Data View support.
+- Plus the v2.14–v2.24 foundation: Data View preview, Auto-Group panel upgrades, bulk-merge 400 fix.
+
 ## 2026-07-31 — Mission Bank Tools v2.39 (dev/latest): 🧩 📋 Report — your planning sheet, generated
 
 New **📋 Report** button in the 🧩 Macros legend: copies the coverage report straight to the clipboard — paste into Google Sheets and you get colored cells, one row per pad:
