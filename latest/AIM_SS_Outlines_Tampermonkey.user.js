@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.130
+// @version      34.131
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -57,7 +57,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.130';
+    const SCRIPT_VERSION = '34.131';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -4411,6 +4411,14 @@
         let best = null;
         let bestDist = SNAP_TOLERANCE_PX + 0.0001;
 
+        // v34.131: while drawing/editing a ROUTE, snap to VERTICES ONLY —
+        // no mid-segment feet. A route is a future FP, and FP connections
+        // happen at exact shared waypoints; a mid-segment snap looks
+        // connected but isn't.
+        const activeType = drawingState ? drawingState.type
+            : (vertexEditState ? vertexEditState.type : null);
+        const segSnapAllowed = activeType !== 'route';
+
         const testVertex = (lat, lng) => {
             if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
             try {
@@ -4425,6 +4433,7 @@
         // they're vertices and testVertex already covers them — keeps
         // vertex snaps winning over segment snaps near endpoints.
         const testSegment = (lat1, lng1, lat2, lng2) => {
+            if (!segSnapAllowed) return;
             if (!Number.isFinite(lat1) || !Number.isFinite(lng1)) return;
             if (!Number.isFinite(lat2) || !Number.isFinite(lng2)) return;
             try {
@@ -4494,9 +4503,7 @@
         // a ROUTE (a route path is a future FP; landing exactly on an
         // existing FP vertex lets the Route Converter connect/extend that
         // FP). Vertices ONLY, never segments — matches the converter's
-        // FP-vertex-only snapping.
-        const activeType = drawingState ? drawingState.type
-            : (vertexEditState ? vertexEditState.type : null);
+        // FP-vertex-only snapping. (activeType computed at the top.)
         if (activeType === 'route' && realFpVerts.siteID === siteID) {
             realFpVerts.verts.forEach(v => testVertex(v.lat, v.lng));
         }
@@ -6305,85 +6312,67 @@
     // CUSTOM_BUFFER_ATTR so the normal wipe/rebuild removes them; the
     // next mousemove repaints.
     // ============================================================
-    const DRAW_LIVE_ATTR = 'data-aim-draw-live';
-    function projectLatLngsToSvgPts(coordsArr) {
-        const map = getLeafletMap();
-        if (!map || typeof map.latLngToContainerPoint !== 'function') return null;
-        const container = map.getContainer ? map.getContainer() : document.querySelector('.leaflet-container');
-        const svg = document.querySelector('.leaflet-overlay-pane svg');
-        if (!container || !svg) return null;
-        let ctm;
-        try { ctm = svg.getScreenCTM(); } catch (e) { return null; }
-        if (!ctm) return null;
-        const inv = ctm.inverse();
-        const cRect = container.getBoundingClientRect();
-        const pts = [];
-        for (const c of coordsArr) {
-            let cp;
-            try { cp = map.latLngToContainerPoint([c.lat, c.lng]); } catch (e) { continue; }
-            if (!cp) continue;
-            const svgPt = svg.createSVGPoint();
-            svgPt.x = cRect.left + cp.x;
-            svgPt.y = cRect.top + cp.y;
-            const p = svgPt.matrixTransform(inv);
-            pts.push({ x: p.x, y: p.y });
-        }
-        return pts;
-    }
+    // v34.131 REWRITE: the live preview now lives in its OWN SVG overlay
+    // appended to `.leaflet-container` — a SIBLING of `.leaflet-map-pane`,
+    // which is what the MutationObserver watches. v34.130 inserted the
+    // preview into the observed overlay-pane SVG, so every mousemove fired
+    // the observer → debounced wipe/rebuild every 300 ms → the whole
+    // drawing blinked in and out. Container-pixel coordinates, no CTM math.
+    const DRAW_LIVE_SVG_ID = 'aim-draw-live-svg';
     function clearDrawLivePreview() {
-        document.querySelectorAll(`[${DRAW_LIVE_ATTR}="true"]`).forEach(el => { try { el.remove(); } catch (e) {} });
+        const el = document.getElementById(DRAW_LIVE_SVG_ID);
+        if (el) { try { el.remove(); } catch (e) {} }
     }
     function updateDrawLivePreview() {
-        clearDrawLivePreview();
-        if (!drawingState || !drawingState.cursor || !drawingState.coords.length) return;
-        const svg = document.querySelector('.leaflet-overlay-pane svg');
-        const g = svg && svg.querySelector('g');
-        if (!g) return;
-        const last = drawingState.coords[drawingState.coords.length - 1];
-        const pts = projectLatLngsToSvgPts([{ lat: last[1], lng: last[0] }, drawingState.cursor]);
-        if (!pts || pts.length < 2) return;
-        const d = `M ${pts[0].x} ${pts[0].y} L ${pts[1].x} ${pts[1].y}`;
+        if (!drawingState || !drawingState.cursor || !drawingState.coords.length) { clearDrawLivePreview(); return; }
         const map = getLeafletMap();
+        if (!map || typeof map.latLngToContainerPoint !== 'function') return;
+        const container = map.getContainer ? map.getContainer() : document.querySelector('.leaflet-container');
+        if (!container) return;
+        let svg = document.getElementById(DRAW_LIVE_SVG_ID);
+        if (!svg || svg.parentNode !== container) {
+            clearDrawLivePreview();
+            svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.id = DRAW_LIVE_SVG_ID;
+            // z-index 640: above the overlay pane (400) and markers (600),
+            // below tooltips (650) / popups (700).
+            svg.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:640';
+            container.appendChild(svg);
+        }
+        const last = drawingState.coords[drawingState.coords.length - 1];
+        let pA, pB;
+        try {
+            pA = map.latLngToContainerPoint([last[1], last[0]]);
+            pB = map.latLngToContainerPoint([drawingState.cursor.lat, drawingState.cursor.lng]);
+        } catch (e) { return; }
+        if (!pA || !pB) return;
+        const d = `M ${pA.x} ${pA.y} L ${pB.x} ${pB.y}`;
         let pxPerFt = 0;
-        try { pxPerFt = map ? ftToPx(map, 1) : 0; } catch (e) {}
+        // /1000 baseline: latLngToLayerPoint rounds, ftToPx(map,1) is 0.
+        try { pxPerFt = ftToPx(map, 1000) / 1000; } catch (e) {}
         const numTog = (key, fb) => { const v = Number(toggleState[key]); return isNaN(v) ? fb : v; };
+        const parts = [];
         const mk = (stroke, opacity, width, dash) => {
-            const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-            p.setAttribute(DRAW_LIVE_ATTR, 'true');
-            p.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
-            p.setAttribute('d', d);
-            p.setAttribute('fill', 'none');
-            p.setAttribute('stroke', stroke);
-            p.setAttribute('stroke-opacity', String(opacity));
-            p.setAttribute('stroke-width', String(width));
-            if (dash) p.setAttribute('stroke-dasharray', dash);
-            p.setAttribute('stroke-linejoin', 'round');
-            p.setAttribute('stroke-linecap', 'round');
-            p.setAttribute('pointer-events', 'none');
-            // insertBefore(firstChild): last-inserted paints bottom-most,
-            // so insert line → inner band → outer band for FP stacking.
-            if (g.firstChild) g.insertBefore(p, g.firstChild);
-            else g.appendChild(p);
+            parts.push(`<path d="${d}" fill="none" stroke="${stroke}" stroke-opacity="${opacity}" stroke-width="${width}"${dash ? ` stroke-dasharray="${dash}"` : ''} stroke-linejoin="round" stroke-linecap="round"/>`);
         };
         const type = drawingState.type;
-        mk('#5fff5f', 0.85, Number(toggleState[`${type}.thickness`]) || 4, '6 4');
-        // Piggybacked buffers, same rules as addBufferHalo: route paths
-        // wear the FP 40/65 bands, route polygons the FFZ buffer. Other
-        // KML types have no `.buffer` toggle → dashed line only.
+        // Build bottom-up: outer band, inner band, then the dashed line.
         if (toggleState[`${type}.buffer`] === true && pxPerFt > 0) {
             if (drawingState.shape === 'polygon') {
                 if (toggleState['ffz.buffer'] !== false) {
                     mk(toggleState['ffz.color'] || '#5fff5f', numTog('ffz.opacity', 0.4), 2 * numTog('ffz.distance', 15) * pxPerFt);
                 }
             } else {
-                if (toggleState['fp.buffer'] !== false) {
-                    mk(toggleState['fp.color'] || '#1ca0de', numTog('fp.opacity', 0.5), 2 * numTog('fp.distance', 40) * pxPerFt);
-                }
                 if (toggleState['fp.65ft-band'] !== false) {
                     mk(toggleState['fp.65ft-color'] || toggleState['fp.color'] || '#1ca0de', numTog('fp.65ft-opacity', 0.225), 2 * numTog('fp.65ft-distance', 65) * pxPerFt);
                 }
+                if (toggleState['fp.buffer'] !== false) {
+                    mk(toggleState['fp.color'] || '#1ca0de', numTog('fp.opacity', 0.5), 2 * numTog('fp.distance', 40) * pxPerFt);
+                }
             }
         }
+        mk('#5fff5f', 0.85, Number(toggleState[`${type}.thickness`]) || 4, '6 4');
+        svg.innerHTML = parts.join('');
     }
 
     // v34.126: optional `shape` param — 'polygon' draws a closed ring
@@ -6408,10 +6397,8 @@
             drawingState.coords.push([seedCoord.lng, seedCoord.lat]);
             drawingState.seeded = true;
         }
-        const onClick = (e) => {
-            if (!drawingState) return;
-            const ll = e.latlng;
-            if (!ll) return;
+        const addDrawVertex = (ll) => {
+            if (!drawingState || !ll) return;
             let lat = ll.lat, lng = ll.lng;
             // v34.63 Phase 3b: snap click placement to nearby vertex.
             // Excludes our own in-progress draw line.
@@ -6422,8 +6409,54 @@
             updateDrawToolbar();
             if (isActive) runUpdate();
         };
-        try { map.on('click', onClick); } catch (e) {}
-        drawingState.clickHandler = onClick;
+        // v34.131 REWRITE: clicks are captured at the DOM level (capture
+        // phase on the map container), NOT via map.on('click'). Percepto's
+        // interactive layers (native FPs, entity polygons) swallow map
+        // clicks — which made it impossible to place a vertex ON an
+        // existing FP vertex: the purple snap ring showed, but the click
+        // never reached Leaflet's map handler. Capture-phase beats them
+        // all; we stopPropagation so Percepto doesn't ALSO react (e.g.
+        // select the FP you're snapping to) while drawing.
+        const drawContainer = map.getContainer ? map.getContainer() : null;
+        const onDomDown = (ev) => {
+            if (!drawingState || ev.button !== 0) return;
+            drawingState._downPt = { x: ev.clientX, y: ev.clientY };
+        };
+        const onDomClick = (ev) => {
+            if (!drawingState || ev.button !== 0) return;
+            if (ev.target && typeof ev.target.closest === 'function'
+                && ev.target.closest('.leaflet-control-container')) return; // zoom buttons etc.
+            // A click that ended a drag-pan isn't a vertex placement.
+            const dp = drawingState._downPt;
+            if (dp && (Math.abs(ev.clientX - dp.x) > 5 || Math.abs(ev.clientY - dp.y) > 5)) return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            let ll = null;
+            try { ll = map.mouseEventToLatLng(ev); } catch (e) {}
+            if (!ll) {
+                try {
+                    const cp = map.mouseEventToContainerPoint(ev);
+                    ll = map.containerPointToLatLng(cp);
+                } catch (e) {}
+            }
+            addDrawVertex(ll);
+        };
+        // Also eat dblclick so Leaflet's double-click zoom can't fire from
+        // rapid vertex placement.
+        const onDomDbl = (ev) => {
+            if (!drawingState) return;
+            ev.preventDefault();
+            ev.stopPropagation();
+        };
+        if (drawContainer) {
+            drawContainer.addEventListener('mousedown', onDomDown, true);
+            drawContainer.addEventListener('click', onDomClick, true);
+            drawContainer.addEventListener('dblclick', onDomDbl, true);
+        }
+        drawingState.domDownHandler = onDomDown;
+        drawingState.domClickHandler = onDomClick;
+        drawingState.domDblHandler = onDomDbl;
+        drawingState.domContainer = drawContainer;
         // v34.63 Phase 3b: live snap-preview during draw — show the
         // yellow ring under the cursor when within tolerance so the
         // user knows their next click will snap.
@@ -6551,9 +6584,13 @@
     function exitDrawMode(opts) {
         if (!drawingState) return;
         const silent = !!(opts && opts.silent);
-        const { clickHandler, moveHandler, escHandler, toolbarEl } = drawingState;
+        const { moveHandler, escHandler, toolbarEl, domContainer, domDownHandler, domClickHandler, domDblHandler } = drawingState;
         const map = getLeafletMap();
-        if (map && clickHandler) { try { map.off('click', clickHandler); } catch (e) {} }
+        if (domContainer) {
+            try { domContainer.removeEventListener('mousedown', domDownHandler, true); } catch (e) {}
+            try { domContainer.removeEventListener('click', domClickHandler, true); } catch (e) {}
+            try { domContainer.removeEventListener('dblclick', domDblHandler, true); } catch (e) {}
+        }
         if (map && moveHandler) { try { map.off('mousemove', moveHandler); } catch (e) {} }
         if (escHandler) { try { window.removeEventListener('keydown', escHandler, true); } catch (e) {} }
         if (toolbarEl) { try { toolbarEl.remove(); } catch (e) {} }
@@ -6648,6 +6685,21 @@
         nameLine.style.cssText = 'padding:4px 12px;color:#9ad;font-size:11px;border-bottom:1px solid rgba(255,255,255,0.08);margin-bottom:2px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
         nameLine.textContent = item.name || '(no name)';
         menu.appendChild(nameLine);
+        // v34.131: vertex edit for pending-add lines straight from this
+        // menu. It existed (enterAddedVertexEdit, v34.47) but was only
+        // reachable through the Power Line Editor's M1 flow — which
+        // ignores routes entirely, leaving green route lines uneditable.
+        const editAction = document.createElement('button');
+        editAction.style.cssText = 'display:block;width:100%;text-align:left;padding:7px 12px;background:transparent;border:none;color:#ffd96b;cursor:pointer;font:inherit';
+        editAction.onmouseenter = () => { editAction.style.background = 'rgba(255,217,107,0.18)'; };
+        editAction.onmouseleave = () => { editAction.style.background = 'transparent'; };
+        editAction.textContent = '✏️  Edit vertices (drag ends · click midpoints to add)';
+        editAction.onclick = (e) => {
+            e.stopPropagation();
+            closeKMLContextMenu();
+            enterAddedVertexEdit(type, addedIdx);
+        };
+        menu.appendChild(editAction);
         const discardAction = document.createElement('button');
         discardAction.style.cssText = 'display:block;width:100%;text-align:left;padding:7px 12px;background:transparent;border:none;color:#ff8585;cursor:pointer;font:inherit';
         discardAction.onmouseenter = () => { discardAction.style.background = 'rgba(255,80,80,0.18)'; };
@@ -6849,7 +6901,11 @@
         let pxPerFt = 0;
         if (bufferOn) {
             const bmap = getLeafletMap();
-            if (bmap) { try { pxPerFt = ftToPx(bmap, 1); } catch (e) { pxPerFt = 0; } }
+            // v34.131 FIX: Leaflet's latLngToLayerPoint ROUNDS to integer
+            // pixels, so ftToPx(map, 1) returned 0 at normal zooms and every
+            // band width computed to 0 (invisible buffers). Measure a big
+            // baseline and divide instead.
+            if (bmap) { try { pxPerFt = ftToPx(bmap, 1000) / 1000; } catch (e) { pxPerFt = 0; } }
         }
         const numTog = (key, fb) => { const v = Number(toggleState[key]); return isNaN(v) ? fb : v; };
         const mkBand = (d, ft, color, opacity) => {

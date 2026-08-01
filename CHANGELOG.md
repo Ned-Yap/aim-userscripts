@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-01 — Map Styler v34.131 (dev/latest): 🟠 route draw fixes — clicks land on FP vertices, buffers actually visible, no more blinking, green lines editable
+
+Five fixes from live testing of v34.130:
+
+- **Clicks ON an FP vertex now place a vertex.** Percepto's interactive layers were swallowing map clicks — the purple snap ring showed but the click never registered (couldn't start a route on a vertex, couldn't end on one). Draw mode now captures clicks at the DOM level before Percepto sees them; clicking a native FP while drawing places your snapped vertex instead of selecting the FP. Double-click zoom is also suppressed while drawing.
+- **Route snapping is vertex-ONLY now** — no more mid-segment snap feet while drawing/editing routes (a mid-segment connection looks attached but isn't). Distro/trans keep segment snapping.
+- **Buffers actually render.** Leaflet rounds layer-point projections to whole pixels, so the v34.129 per-foot scale computed 0 at normal zooms — every band width was 0. Fixed; the 40/65 bands (and FFZ buffer on polygons) now show on committed, pending, and in-draw routes.
+- **No more blinking while drawing.** The live cursor preview was mutating the SVG the styler's own MutationObserver watches → constant 300 ms wipe/rebuild. The preview now lives in its own overlay layer the observer can't see.
+- **Green (pending) lines are editable.** Right-click a pending line → **✏️ Edit vertices** — drag any vertex including the ends, click the dim midpoints to add vertices, right-click a handle to delete. (This existed but was only reachable via the Power Line Editor, which doesn't know about routes.)
+
 ## 2026-08-01 — Map Styler v34.130 (dev/latest): 🟠 draw routes like an unpublished FP — snap to real FP vertices + live buffers at the cursor
 
 Route paths now behave like a Flight Path that just isn't published yet:
