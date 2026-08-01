@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-31 — Site Setup Tools v4.219 (dev/latest): backup filename → SiteName_SiteID_MM-DD-YYYY.json
+
+The 💾 backup file is now named `<Site Name>_<Site ID>_<MM-DD-YYYY>.json` (e.g. `Houston_1597_07-31-2026.json`), with a `_QA` suffix on the QA server so dumps from the two databases stay distinguishable.
+
 ## 2026-07-31 — Site Setup Tools v4.218 (dev/latest): 💾 Backup site (raw JSON) in the Export menu
 
 New row at the bottom of the SUM panel's 📤 Export ▾ menu: **💾 Backup site (raw JSON)** downloads every entity of the current site as the raw server payload (`prod-site<id>_mapobjects_<date>.json`, `qa-` prefix on the QA server). Unlike the table exports above it, this is a **restore-grade** backup — the exact shape `POST /map_objects/` and Site Diff's 📥 Import accept. Always fetches fresh from the server (never the panel's cache), and refuses to save an empty or non-JSON response.

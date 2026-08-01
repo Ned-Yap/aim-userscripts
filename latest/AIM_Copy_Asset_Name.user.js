@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.218
+// @version      4.219
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.218';
+    const SCRIPT_VERSION = '4.219';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -19947,8 +19947,16 @@
                     const ents = await r2.json();
                     if (!Array.isArray(ents)) throw new Error('response not an array');
                     if (!ents.length) throw new Error('server returned 0 entities — nothing saved');
-                    const stamp = new Date().toISOString().slice(0, 10);
-                    const fname = `${IS_QA ? 'qa' : 'prod'}-site${siteID}_mapobjects_${stamp}.json`;
+                    // v4.219: SiteName_SiteID_MM-DD-YYYY.json (user-specified
+                    // format; local date). Illegal filename chars stripped from
+                    // the site name; _QA suffix keeps QA dumps distinguishable
+                    // (same site ID ≠ same site across the two DBs).
+                    const d = new Date();
+                    const pad2 = (n) => String(n).padStart(2, '0');
+                    const stamp = `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}-${d.getFullYear()}`;
+                    const safeName = (getCurrentSiteName() || `Site ${siteID}`)
+                        .replace(/[/\\:*?"<>|]/g, '-').replace(/\s+/g, ' ').trim();
+                    const fname = `${safeName}_${siteID}_${stamp}${IS_QA ? '_QA' : ''}.json`;
                     if (!downloadJSONFile(fname, JSON.stringify(ents, null, 2))) throw new Error('download blocked by browser');
                     showToast(`Backup saved: ${fname} (${ents.length} entities)`);
                 } catch (e) {
