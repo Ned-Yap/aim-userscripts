@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.217
+// @version      4.218
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.217';
+    const SCRIPT_VERSION = '4.218';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -19933,6 +19933,29 @@
                     showToast('Export ALL failed', 'rgba(255,96,96,0.55)');
                 }
             }, '#ffd54f'));
+            // v4.218: 💾 Backup — download the full raw /map_objects/ payload
+            // (restore-grade: the same shape POST /map_objects/ and Site Diff
+            // 📥 Import consume, unlike the lossy table exports above). Always
+            // fetches FRESH from the server — a backup of a stale cache isn't
+            // a backup.
+            exportMenuEl.appendChild(mkRow('💾 Backup site (raw JSON)', 'Download every entity as raw server JSON — restore-grade backup of this Site Setup', async () => {
+                closeExportMenu();
+                try {
+                    showToast('Backing up — fetching fresh site data…');
+                    const r2 = await fetch(MAP_OBJECTS_URL + encodeURIComponent(siteID) + `&_t=${Date.now()}`, { credentials: 'same-origin', cache: 'no-store' });
+                    if (!r2.ok) throw new Error(`HTTP ${r2.status}`);
+                    const ents = await r2.json();
+                    if (!Array.isArray(ents)) throw new Error('response not an array');
+                    if (!ents.length) throw new Error('server returned 0 entities — nothing saved');
+                    const stamp = new Date().toISOString().slice(0, 10);
+                    const fname = `${IS_QA ? 'qa' : 'prod'}-site${siteID}_mapobjects_${stamp}.json`;
+                    if (!downloadJSONFile(fname, JSON.stringify(ents, null, 2))) throw new Error('download blocked by browser');
+                    showToast(`Backup saved: ${fname} (${ents.length} entities)`);
+                } catch (e) {
+                    console.error(`${TAG} site backup failed:`, e);
+                    showToast(`Backup failed: ${e && e.message}`, 'rgba(255,96,96,0.55)');
+                }
+            }, '#5fff5f'));
             const r = exportBtn.getBoundingClientRect();
             exportMenuEl.style.left = r.left + 'px';
             exportMenuEl.style.top = (r.bottom + 4) + 'px';

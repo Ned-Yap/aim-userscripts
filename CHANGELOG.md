@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-31 — Site Setup Tools v4.218 (dev/latest): 💾 Backup site (raw JSON) in the Export menu
+
+New row at the bottom of the SUM panel's 📤 Export ▾ menu: **💾 Backup site (raw JSON)** downloads every entity of the current site as the raw server payload (`prod-site<id>_mapobjects_<date>.json`, `qa-` prefix on the QA server). Unlike the table exports above it, this is a **restore-grade** backup — the exact shape `POST /map_objects/` and Site Diff's 📥 Import accept. Always fetches fresh from the server (never the panel's cache), and refuses to save an empty or non-JSON response.
+
 ## 2026-07-31 — ⭐ PROMOTED TO PROD: Data View support — Control Panel v1.38 + Map Styler v34.125 + Site Setup Tools v4.216
 
 Coworkers jump **Control Panel 1.35 → 1.38**, **Map Styler 34.116 → 34.125**, **Site Setup Tools 4.213 → 4.216** on the next Tampermonkey update check. Together with Mission Bank Tools v2.39 (already in prod), AIM tools now work on the **Data View** page (the media/issues browser with the map):
