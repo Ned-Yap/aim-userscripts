@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-01 — Map Styler v34.132 (dev/latest): 🟠 route draw polish — no power-line snapping, right-click green lines works, rubber band tracks WASD pans
+
+- **Routes no longer snap to power-line vertices.** While drawing/editing a route, distribution/transmission KMLs are excluded as snap sources entirely — routes connect to real FP vertices and other routes only. (Power-line editing keeps its own snapping unchanged.)
+- **Right-click on a green pending line always works now** — it was still gated on the category's edit-mode toggle even though green lines are always clickable, so the right-click fell through to Chrome's native menu. The menu (✏️ Edit vertices / 🗑 Discard) now opens regardless of the toggle.
+- **Rubber band stays anchored during WASD / drag pans** — the preview now repaints on map movement, not just mousemove.
+
 ## 2026-08-01 — Map Styler v34.131 (dev/latest): 🟠 route draw fixes — clicks land on FP vertices, buffers actually visible, no more blinking, green lines editable
 
 Five fixes from live testing of v34.130:

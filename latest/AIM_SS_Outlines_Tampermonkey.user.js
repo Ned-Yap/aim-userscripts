@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.131
+// @version      34.132
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -57,7 +57,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.131';
+    const SCRIPT_VERSION = '34.132';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -4472,6 +4472,11 @@
         };
 
         KML_TYPES.forEach((type) => {
+            // v34.132: while drawing/editing a ROUTE, power-line KMLs
+            // (distro/trans) are NOT snap sources — a route is a future
+            // FP and should connect to FP vertices / other routes, not
+            // latch onto power-line geometry it merely runs alongside.
+            if (activeType === 'route' && type !== 'route') return;
             // File lines — use effective (post-modify) coords so snap
             // matches what's actually rendered.
             const features = kmlFeatures[kmlKey(siteID, type)] || [];
@@ -4994,13 +4999,14 @@
             if (!path) return;
             const type = path.getAttribute('data-kml-type');
             if (!type) return;
-            if (toggleState[`${type}.edit-mode`] !== true) return;
+            // v34.132: pending-add (green) lines bypass the edit-mode gate —
+            // they've been ALWAYS-clickable since v34.59 precisely because
+            // they're transient user-drawn lines, but the gate here still
+            // dropped the right-click and let Chrome's native menu appear.
+            const addedIdxStr = path.getAttribute('data-kml-added-idx');
+            if (addedIdxStr === null && toggleState[`${type}.edit-mode`] !== true) return;
             const siteID = getCurrentSiteID();
             if (!siteID) return;
-            // E4: pending-add lines have data-kml-added-idx instead of pmIdx.
-            // Route to their own menu (only Discard, since the line doesn't
-            // exist in the file yet).
-            const addedIdxStr = path.getAttribute('data-kml-added-idx');
             if (addedIdxStr !== null) {
                 const addedIdx = parseInt(addedIdxStr, 10);
                 if (isNaN(addedIdx)) return;
@@ -6475,6 +6481,13 @@
         };
         try { map.on('mousemove', onMove); } catch (e) {}
         drawingState.moveHandler = onMove;
+        // v34.132: repaint the rubber band while the MAP moves (WASD nav /
+        // drag-pan) — container-pixel anchors go stale during a pan until
+        // the next mousemove, so the preview looked unanchored from the
+        // last vertex mid-pan.
+        const onMapMove = () => { if (drawingState) updateDrawLivePreview(); };
+        try { map.on('move', onMapMove); } catch (e) {}
+        drawingState.mapMoveHandler = onMapMove;
         const onEsc = (e) => { if (e.key === 'Escape') exitDrawMode({ silent: false }); };
         window.addEventListener('keydown', onEsc, true);
         drawingState.escHandler = onEsc;
@@ -6584,7 +6597,7 @@
     function exitDrawMode(opts) {
         if (!drawingState) return;
         const silent = !!(opts && opts.silent);
-        const { moveHandler, escHandler, toolbarEl, domContainer, domDownHandler, domClickHandler, domDblHandler } = drawingState;
+        const { moveHandler, mapMoveHandler, escHandler, toolbarEl, domContainer, domDownHandler, domClickHandler, domDblHandler } = drawingState;
         const map = getLeafletMap();
         if (domContainer) {
             try { domContainer.removeEventListener('mousedown', domDownHandler, true); } catch (e) {}
@@ -6592,6 +6605,7 @@
             try { domContainer.removeEventListener('dblclick', domDblHandler, true); } catch (e) {}
         }
         if (map && moveHandler) { try { map.off('mousemove', moveHandler); } catch (e) {} }
+        if (map && mapMoveHandler) { try { map.off('move', mapMoveHandler); } catch (e) {} }
         if (escHandler) { try { window.removeEventListener('keydown', escHandler, true); } catch (e) {} }
         if (toolbarEl) { try { toolbarEl.remove(); } catch (e) {} }
         const container = map && map.getContainer ? map.getContainer() : null;
