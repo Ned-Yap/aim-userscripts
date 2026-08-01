@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.223
+// @version      4.224
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.223';
+    const SCRIPT_VERSION = '4.224';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -16532,6 +16532,9 @@
                             distFt: gv.dist * M_TO_FT,
                             targetName: (touch && touch.fp.name) || 'flight path',
                             arc: (touch && touch.arc) || null,
+                            // v4.224: extend-mode needs the owning entity.
+                            fpId: (touch && touch.fp.id != null) ? touch.fp.id : null,
+                            fpValidated: !!(touch && touch.fp.validated),
                         });
                     }
                 });
@@ -16582,6 +16585,23 @@
         const RC_TOUCH_M = 0.5;
         const polyItems = items.filter(i => i.kind === 'ffz' && !i.err);
         items.filter(i => i.kind === 'fp' && !i.err).forEach(it => {
+            // v4.224: a path snapped onto an existing FP vertex is an
+            // EXTEND — its arcs merge into that FP entity (one upsert,
+            // arcs appended; the same operation AIM_Insert_Vertex proved
+            // the server accepts). The host FP already satisfies the
+            // FFZ-connection rule, so no contact check applies. This is
+            // the one deliberate exception to create-only; a pre-write
+            // snapshot makes Undo restore the FP verbatim.
+            const extSnap = (it.snaps || []).find(s => s.applied && s.kind === 'fp-vertex' && s.fpId != null);
+            if (extSnap) {
+                it.mode = 'extend';
+                it.extendFpId = extSnap.fpId;
+                it.extendFpName = extSnap.targetName;
+                it.extendFpValidated = !!extSnap.fpValidated;
+                it.ffzTouch = null;
+                return;
+            }
+            it.mode = 'create';
             const eff = rcEffectiveVerts(it);
             let touch = null;
             for (const v of eff) {
@@ -16605,13 +16625,7 @@
             }
             it.ffzTouch = touch;
             if (!touch) {
-                const hasFpSnap = (it.snaps || []).some(s => s.applied && s.kind === 'fp-vertex');
-                const base = 'no waypoint lands on/in a Free Fly Zone — Percepto requires every flight path to connect to an FFZ';
-                if (hasFpSnap) {
-                    it.warnings.push(`${base}. The shared FP vertex MAY not satisfy the server — if it rejects with "not connected to any free zone", edit the route so an endpoint lands inside an FFZ (or convert a route polygon in the same run and land in it).`);
-                } else {
-                    it.err = `${base}. End (or start) the route inside an FFZ — or draw a route polygon over the pad, convert it in the same run, and land the path inside it.`;
-                }
+                it.err = 'no waypoint lands on/in a Free Fly Zone — Percepto requires every flight path to connect to an FFZ. Snap an endpoint to an existing FP vertex (merges into that FP), end the route inside an FFZ, or convert a route polygon in the same run and land the path inside it.';
             }
         });
         // DEM fallback for items with no copyable neighbor.
@@ -16643,7 +16657,7 @@
 
     async function rcCommit(siteID, dryRun) {
         if (liteBlockedWrite('convert proposed routes to FFZs/FPs')) return null;
-        const res = { created: 0, failed: 0, skipped: 0, errors: [], ids: [], convertedPmIdxs: [], dryRun };
+        const res = { created: 0, extended: 0, failed: 0, skipped: 0, errors: [], ids: [], convertedPmIdxs: [], dryRun };
         const items = ((rcPlan && rcPlan.items) || []).filter(i => i.selected && !i.err);
         if (!items.length) { res.errors.push('nothing selected'); return res; }
         const csrf = getCsrfToken();
@@ -16665,7 +16679,7 @@
         if (!dryRun) {
             try {
                 downloadJSONFile(`aim-route-convert-site${siteID}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
-                    JSON.stringify({ siteID, when: new Date().toISOString(), items: items.map(i => ({ kind: i.kind, pmIdx: i.pmIdx, name: i.name, altSource: i.altSource, restrictions: i.restrictions || null, band: i.band || null, verts: i.kind === 'fp' ? rcEffectiveVerts(i) : i.ring, snaps: (i.snaps || []).map(s => ({ kind: s.kind, applied: s.applied, target: s.targetName, distFt: Math.round(s.distFt) })) })) }, null, 2));
+                    JSON.stringify({ siteID, when: new Date().toISOString(), items: items.map(i => ({ kind: i.kind, mode: i.mode || 'create', extendFp: i.mode === 'extend' ? { id: i.extendFpId, name: i.extendFpName } : null, pmIdx: i.pmIdx, name: i.name, altSource: i.altSource, restrictions: i.restrictions || null, band: i.band || null, verts: i.kind === 'fp' ? rcEffectiveVerts(i) : i.ring, snaps: (i.snaps || []).map(s => ({ kind: s.kind, applied: s.applied, target: s.targetName, distFt: Math.round(s.distFt) })) })) }, null, 2));
             } catch (e) { console.warn(`${GEN_TAG} route-convert manifest download failed:`, e); }
         }
         const createdIds = [];
@@ -16702,8 +16716,96 @@
         // (same copy-from-nearest doctrine as the band).
         const tmplArc = (tmplFpBody && Array.isArray(tmplFpBody.arcs) && tmplFpBody.arcs.length)
             ? tmplFpBody.arcs[0] : null;
+        // Helper: build the new-arc chain for a route item over its
+        // effective (snapped) verts, cloning `baseArc` for field
+        // completeness (server rule #6 — distance / min_emergency_alt /
+        // wait_until_approved are REQUIRED).
+        const buildArcChain = (it, verts, baseArc) => {
+            const snapEm = (it.snaps || []).find(s => s.applied && s.kind === 'fp-vertex' && s.arc && Number.isFinite(s.arc.min_emergency_alt));
+            const emergM = snapEm ? snapEm.arc.min_emergency_alt
+                : ((baseArc && Number.isFinite(baseArc.min_emergency_alt)) ? baseArc.min_emergency_alt : 12);
+            const arcs = [];
+            for (let i = 0; i < verts.length - 1; i++) {
+                const a = { lat: verts[i].lat, lng: verts[i].lng };
+                const b = { lat: verts[i + 1].lat, lng: verts[i + 1].lng };
+                let arc = {};
+                if (baseArc) {
+                    arc = JSON.parse(JSON.stringify(baseArc));
+                    delete arc.id;
+                    delete arc.mapobject;
+                }
+                arc.point_a = a;
+                arc.point_b = b;
+                arc.points = [a, b];
+                arc.min_alt = it.band.minM;
+                arc.max_alt = it.band.maxM;
+                arc.min_emergency_alt = emergM;
+                arc.distance = approxMeters(a.lat, a.lng, b.lat, b.lng);
+                if (typeof arc.wait_until_approved !== 'boolean') arc.wait_until_approved = false;
+                arcs.push(arc);
+            }
+            return arcs;
+        };
+        // v4.224: EXTEND mode — group snapped paths by their host FP and
+        // send ONE upsert per FP with all chains appended (two chains
+        // into the same FP must share one body, or the second write
+        // would clobber the first — arcs are the geometry source of
+        // truth and a POST replaces them wholesale).
+        const extendGroups = new Map();
+        const fpCreateItems = [];
         for (const it of items.filter(i => i.kind === 'fp')) {
             if (!it.band) { res.skipped++; res.errors.push(`${it.name}: no altitude band — skipped`); continue; }
+            if (it.mode === 'extend' && it.extendFpId != null) {
+                const arr = extendGroups.get(it.extendFpId) || [];
+                arr.push(it);
+                extendGroups.set(it.extendFpId, arr);
+            } else {
+                fpCreateItems.push(it);
+            }
+        }
+        const undoUpserts = [];
+        for (const [fpId, group] of extendGroups) {
+            const fpEnt = ents.find(e => e.id === fpId && e.type === 15);
+            const gLabel = group.map(g => g.name).join(', ');
+            if (!fpEnt) { res.failed += group.length; res.errors.push(`${gLabel}: host FP #${fpId} not found in cache — rebuild the plan`); continue; }
+            let body;
+            try { body = buildWriteBody(fpEnt, siteCfg); } catch (e) { res.failed += group.length; res.errors.push(`${gLabel}: build body threw ${e && e.message || e}`); continue; }
+            const originalBody = JSON.parse(JSON.stringify(body));
+            const wasValidated = !!body.validated;
+            const baseArc = (Array.isArray(body.arcs) && body.arcs.length) ? JSON.parse(JSON.stringify(body.arcs[0])) : tmplArc;
+            if (!Array.isArray(body.points)) body.points = [];
+            group.forEach(it => {
+                const verts = rcEffectiveVerts(it);
+                body.arcs = body.arcs.concat(buildArcChain(it, verts, baseArc));
+                // Appending the full chain (shared vertex included) to
+                // `points` mirrors the editor's duplicate-vertex branch
+                // encoding; the server rebuilds coords from arcs anyway.
+                body.points = body.points.concat(verts.map(v => ({ lat: v.lat, lng: v.lng })));
+            });
+            body.validated = false;
+            try { bridgeArcContinuity(body.arcs); } catch (e) {}
+            if (dryRun) {
+                res.extended += group.length;
+                group.forEach(it => res.convertedPmIdxs.push(it.pmIdx));
+                continue;
+            }
+            try {
+                const r = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
+                const txt = await r.text(); let json = null; try { json = JSON.parse(txt); } catch (e) {}
+                const saved = json && json.map_objects;
+                if (r.status === 200 && saved) {
+                    res.extended += group.length;
+                    undoUpserts.push({ id: fpId, name: fpEnt.name || `#${fpId}`, body: originalBody });
+                    group.forEach(it => res.convertedPmIdxs.push(it.pmIdx));
+                    if (wasValidated) res.errors.push(`note: "${fpEnt.name}" was validated — extending it reset validation (re-validate after review)`);
+                } else {
+                    res.failed += group.length;
+                    res.errors.push(`extend "${fpEnt.name}": server ${r.status} ${(txt || '').slice(0, 160)}`);
+                }
+            } catch (e) { res.failed += group.length; res.errors.push(`extend "${fpEnt.name}": POST threw ${e && e.message || e}`); }
+            await new Promise(rr => setTimeout(rr, 150));
+        }
+        for (const it of fpCreateItems) {
             const verts = rcEffectiveVerts(it);
             let body;
             if (tmplFpBody) body = JSON.parse(JSON.stringify(tmplFpBody));
@@ -16721,36 +16823,14 @@
             body.description = '';
             body.validated = false;
             body.points = verts.map(v => ({ lat: v.lat, lng: v.lng }));
-            const snapEm = (it.snaps || []).find(s => s.applied && s.kind === 'fp-vertex' && s.arc && Number.isFinite(s.arc.min_emergency_alt));
-            const emergM = snapEm ? snapEm.arc.min_emergency_alt
-                : ((tmplArc && Number.isFinite(tmplArc.min_emergency_alt)) ? tmplArc.min_emergency_alt : 12);
-            body.arcs = [];
-            for (let i = 0; i < verts.length - 1; i++) {
-                const a = { lat: verts[i].lat, lng: verts[i].lng };
-                const b = { lat: verts[i + 1].lat, lng: verts[i + 1].lng };
-                let arc = {};
-                if (tmplArc) {
-                    arc = JSON.parse(JSON.stringify(tmplArc));
-                    delete arc.id;
-                    delete arc.mapobject;
-                }
-                arc.point_a = a;
-                arc.point_b = b;
-                arc.points = [a, b];
-                arc.min_alt = it.band.minM;
-                arc.max_alt = it.band.maxM;
-                arc.min_emergency_alt = emergM;
-                arc.distance = approxMeters(a.lat, a.lng, b.lat, b.lng);
-                if (typeof arc.wait_until_approved !== 'boolean') arc.wait_until_approved = false;
-                body.arcs.push(arc);
-            }
+            body.arcs = buildArcChain(it, verts, tmplArc);
             body.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
             // Uniform band ⇒ no-op, but keeps us safe if bands ever vary.
             try { bridgeArcContinuity(body.arcs); } catch (e) {}
             await post(body, `FP ${body.name}`, it.pmIdx);
         }
         // Verify: fresh fetch, confirm every created id landed.
-        if (!dryRun && createdIds.length) {
+        if (!dryRun && (createdIds.length || undoUpserts.length)) {
             try {
                 await fetchMapObjects(siteID, true);
                 const fresh = ((mapObjectsBySite[siteID] || {}).entities) || [];
@@ -16758,7 +16838,9 @@
                 res.verified = createdIds.length - missing.length;
                 if (missing.length) res.errors.push(`verify: ${missing.length} created id(s) not found on re-fetch: ${missing.join(', ')}`);
             } catch (e) { res.errors.push(`verify fetch failed: ${e && e.message || e}`); }
-            try { localStorage.setItem(RC_UNDO_LS + siteID, JSON.stringify({ when: Date.now(), ids: createdIds })); } catch (e) {}
+            // Undo record: creates get DELETEd, extended FPs get their
+            // pre-convert body re-POSTed verbatim.
+            try { localStorage.setItem(RC_UNDO_LS + siteID, JSON.stringify({ when: Date.now(), ids: createdIds, upserts: undoUpserts })); } catch (e) {}
             // Tell Map Styler which route placemarks became real — it marks
             // them for delete in the route KML + runs its commit prompt.
             if (res.convertedPmIdxs.length && powerLinesChannel) {
@@ -16773,17 +16855,30 @@
         let stash = null;
         try { stash = JSON.parse(localStorage.getItem(RC_UNDO_LS + siteID) || 'null'); } catch (e) {}
         const ids = (stash && Array.isArray(stash.ids)) ? stash.ids : [];
-        if (!ids.length) { showToast('No route-conversion run to undo on this site.', 'rgba(255,180,0,0.6)'); return null; }
-        if (!confirm(`Delete the ${ids.length} entit${ids.length === 1 ? 'y' : 'ies'} created by the last route conversion?`)) return null;
+        const ups = (stash && Array.isArray(stash.upserts)) ? stash.upserts : [];
+        if (!ids.length && !ups.length) { showToast('No route-conversion run to undo on this site.', 'rgba(255,180,0,0.6)'); return null; }
+        const bits = [];
+        if (ids.length) bits.push(`delete ${ids.length} created entit${ids.length === 1 ? 'y' : 'ies'}`);
+        if (ups.length) bits.push(`restore ${ups.length} extended flight path${ups.length === 1 ? '' : 's'} (${ups.map(u => u.name).join(', ')}) to pre-convert geometry`);
+        if (!confirm(`Undo the last route conversion?\n\nThis will ${bits.join(' and ')}.`)) return null;
         const csrf = getCsrfToken();
         if (!csrf) { showToast('No CSRF token — make one native save first.', 'rgba(255,120,120,0.6)'); return null; }
-        const out = { deleted: 0, failed: 0, errors: [] };
+        const out = { deleted: 0, restored: 0, failed: 0, errors: [] };
         for (const id of ids) {
             try {
                 const r = await fetch(`/map_objects/${id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
                 if (r.status === 200 || r.status === 204) out.deleted++;
                 else { out.failed++; out.errors.push(`#${id}: server ${r.status}`); }
             } catch (e) { out.failed++; out.errors.push(`#${id}: ${e && e.message || e}`); }
+        }
+        for (const u of ups) {
+            try {
+                const r = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(u.body) });
+                const txt = await r.text(); let json = null; try { json = JSON.parse(txt); } catch (e) {}
+                if (r.status === 200 && json && json.map_objects) out.restored++;
+                else { out.failed++; out.errors.push(`restore "${u.name}": server ${r.status} ${(txt || '').slice(0, 120)}`); }
+            } catch (e) { out.failed++; out.errors.push(`restore "${u.name}": ${e && e.message || e}`); }
+            await new Promise(rr => setTimeout(rr, 150));
         }
         try { localStorage.removeItem(RC_UNDO_LS + siteID); } catch (e) {}
         try { await fetchMapObjects(siteID, true); } catch (e) {}
@@ -16814,9 +16909,11 @@
                     ? `<span style="display:inline-block;margin:2px 4px 0 0;padding:1px 6px;border:1px solid rgba(95,255,95,0.5);border-radius:3px;color:#5fff5f;font-size:10px">⚡ ${which} → ${what} <button data-rc-unsnap="${ii}:${si}" style="background:transparent;border:none;color:#ffb347;cursor:pointer;font-size:10px;padding:0 0 0 3px" title="Undo this snap (keep the drawn position)">↩</button></span>`
                     : `<span style="display:inline-block;margin:2px 4px 0 0;padding:1px 6px;border:1px dashed rgba(255,179,71,0.5);border-radius:3px;color:#ffb347;font-size:10px">unsnapped ${which} <button data-rc-resnap="${ii}:${si}" style="background:transparent;border:none;color:#5fff5f;cursor:pointer;font-size:10px;padding:0 0 0 3px" title="Re-apply this snap">⚡</button></span>`;
             }).join('');
-            const ffzChip = (it.kind === 'fp' && it.ffzTouch)
-                ? `<div style="color:#5fff5f;font-size:10px;margin-top:2px">✓ connects to FFZ: ${it.ffzTouch.name}${it.ffzTouch.sameRun ? ' <span style="color:#ffb347">(created this run — keep it checked)</span>' : ''}</div>`
-                : '';
+            const ffzChip = (it.kind === 'fp' && it.mode === 'extend')
+                ? `<div style="color:#7adfe6;font-size:10px;margin-top:2px">⟳ merges into FP “${it.extendFpName}” as new segments (no new entity)${it.extendFpValidated ? ' <span style="color:#ffb347">— resets that FP’s validation</span>' : ''}</div>`
+                : ((it.kind === 'fp' && it.ffzTouch)
+                    ? `<div style="color:#5fff5f;font-size:10px;margin-top:2px">✓ connects to FFZ: ${it.ffzTouch.name}${it.ffzTouch.sameRun ? ' <span style="color:#ffb347">(created this run — keep it checked)</span>' : ''}</div>`
+                    : '');
             const warns = (it.warnings || []).map(w => `<div style="color:#ff9a3d;font-size:10px;margin-top:2px">⚠ ${w}</div>`).join('');
             const err = it.err ? `<div style="color:#ff8a80;font-size:10px;margin-top:2px">✗ ${it.err}</div>` : '';
             return `<div style="padding:7px 8px;border-bottom:1px solid rgba(255,255,255,0.07);${it.err ? 'opacity:0.65;' : ''}">
@@ -16901,7 +16998,7 @@
             resultEl.innerHTML = '<span style="color:#9ad">Undoing…</span>';
             const out = await rcUndoLast(siteID);
             resultEl.innerHTML = out
-                ? `<b style="color:${out.failed ? '#ffb347' : '#5fff5f'}">Deleted ${out.deleted}${out.failed ? ` · ${out.failed} failed` : ''}.</b>${out.errors.length ? `<br><span style="color:#ff8a80">${out.errors.join('<br>')}</span>` : ''} Refresh Percepto to update the native map.`
+                ? `<b style="color:${out.failed ? '#ffb347' : '#5fff5f'}">Deleted ${out.deleted} · restored ${out.restored}${out.failed ? ` · ${out.failed} failed` : ''}.</b>${out.errors.length ? `<br><span style="color:#ff8a80">${out.errors.join('<br>')}</span>` : ''} Refresh Percepto to update the native map.`
                 : 'Nothing undone.';
         };
         const convBtn2 = box.querySelector('#aim-rc-convert');
@@ -16913,8 +17010,8 @@
                 if (!r) { resultEl.innerHTML = '<span style="color:#ffb347">Blocked.</span>'; return; }
                 const errHtml = r.errors.length ? `<br><span style="color:#ff8a80">${r.errors.map(x => `• ${x}`).join('<br>')}</span>` : '';
                 resultEl.innerHTML = dryRun
-                    ? `<b style="color:#7adfe6">DRY RUN:</b> would create <b>${r.created}</b> entit${r.created === 1 ? 'y' : 'ies'}${r.skipped ? ` · ${r.skipped} skipped` : ''}.${errHtml}<br><span style="color:#888">Uncheck Dry run to write for real.</span>`
-                    : `<b style="color:${r.failed ? '#ffb347' : '#5fff5f'}">Created ${r.created}</b>${r.verified != null ? ` (verified ${r.verified})` : ''}${r.failed ? ` · <b style="color:#ff8a80">${r.failed} failed</b>` : ''}${r.skipped ? ` · ${r.skipped} skipped` : ''}.${errHtml}<br><span style="color:#888">A backup manifest downloaded. The Map Styler is prompting to remove converted routes from the route KML. <b style="color:#fff">Refresh Percepto</b> to see the new entities natively.</span>`;
+                    ? `<b style="color:#7adfe6">DRY RUN:</b> would create <b>${r.created}</b> · extend <b>${r.extended}</b>${r.skipped ? ` · ${r.skipped} skipped` : ''}.${errHtml}<br><span style="color:#888">Uncheck Dry run to write for real.</span>`
+                    : `<b style="color:${r.failed ? '#ffb347' : '#5fff5f'}">Created ${r.created} · extended ${r.extended}</b>${r.verified != null ? ` (verified ${r.verified})` : ''}${r.failed ? ` · <b style="color:#ff8a80">${r.failed} failed</b>` : ''}${r.skipped ? ` · ${r.skipped} skipped` : ''}.${errHtml}<br><span style="color:#888">A backup manifest downloaded. The Map Styler is prompting to remove converted routes from the route KML. <b style="color:#fff">Refresh Percepto</b> to see the changes natively.</span>`;
             } catch (e2) {
                 console.error(`${GEN_TAG} route convert commit failed:`, e2);
                 resultEl.innerHTML = `<span style="color:#ff8a80">Convert error: ${String(e2.message || e2)}</span>`;

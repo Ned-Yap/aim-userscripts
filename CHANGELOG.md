@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-01 — Site Setup Tools v4.224 (dev/latest): 🟠 Route Converter — snapped paths now EXTEND the host flight path (new segments, no new entity)
+
+A route path snapped onto an existing FP vertex no longer creates a separate flight path — it **merges into that FP as new segments** (one update, arcs appended), exactly like drawing a branch in Percepto's editor. Because the host FP already connects to an FFZ, the "not connected to any free zone" rule is satisfied automatically. The preview shows **⟳ merges into FP "flight_path_1" as new segments**; multiple routes extending the same FP are batched into one save.
+
+- This is the one deliberate exception to create-only: the host FP is modified. A verbatim pre-convert snapshot is taken first — **↩ Undo last convert** restores the FP exactly (and still deletes any created entities).
+- Extending a **validated** FP resets its validation (flagged in the preview and the result).
+- Un-snapped paths still create standalone FPs and still require FFZ contact (blocked with guidance otherwise).
+
 ## 2026-08-01 — Site Setup Tools v4.223 (dev/latest): 🟠 Route Converter — fix the FP create 400 (full arc data + FFZ-connection rule)
 
 The first live convert taught us two server rules, both now handled:
