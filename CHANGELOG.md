@@ -6,7 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
-## 2026-07-31 — Site Setup Tools v4.220 (dev/latest): 📍 Create GMs offers ALL listed obstacles
+## 2026-08-01 — Map Styler v34.126 (dev/latest): 🟠 Proposed Routes — third KML layer (paths + polygons)
+
+New **"Proposed routes"** category in the panel alongside Distribution and Transmission — for planned infrastructure that doesn't exist yet. Files are `<siteID>-route.kml` in the data repo (created automatically on first commit).
+
+- **Paths AND polygons** — "Add new path" and "Add new polygon" draw buttons (polygon needs ≥3 vertices, closes automatically, commits as a real KML `<Polygon>`).
+- **Bright orange by default** (`#ff9100`), with the full styling kit: color picker, line opacity, line thickness, **polygon fill on/off + fill opacity**.
+- Renders on top of distro/trans; full edit-mode support (hide/unhide, delete, vertex edit on paths, split, commit/discard) same as the other two layers.
+- **Deliberately NOT shielding**: proposed routes are excluded from the Coverage Validator and Asset Shielding Check — a planned route can never satisfy a shielding requirement.
+- Fix: first-ever KML commits on the QA server now create `qa-<siteID>-…` files instead of prod-named ones (env-aware filename fallback).
 
 The Airspace Check's **📍 Create GMs** button now appears whenever the report lists any obstacles — not only when one is flagged as a violation. The preview modal shows every listed obstacle with a checkbox (⚑ flagged ones pre-checked, clear ones opt-in, "All" toggle at the bottom), so you can pin a clear-but-notable turbine field or tower without a violation. Create-only as before — existing entities are never touched.
 

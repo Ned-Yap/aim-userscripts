@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.125
+// @version      34.126
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -57,7 +57,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.125';
+    const SCRIPT_VERSION = '34.126';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -356,6 +356,42 @@
                 { type: 'header', label: 'KML data tools' },
                 { id: 'trans-split', label: 'Split multi-segment lines (one-time)', type: 'button', action: 'split-trans' },
                 { id: 'trans-seed-hifld', label: 'Seed lines from HIFLD (federal data)', type: 'button', action: 'seed-hifld-trans' },
+            ],
+        },
+        {
+            // v34.126: third KML layer — PROPOSED routes (planned, not yet
+            // built). Supports both paths (LineString) and polygons
+            // (Polygon w/ fill). Deliberately EXCLUDED from shielding math
+            // (Coverage Validator / Asset Shielding Check) — a proposed
+            // route is not real infrastructure. See SHIELDING_TYPES.
+            type: 'category',
+            id: 'route-cat',
+            label: 'Proposed routes',
+            meta: '(orange — KML · planned, NOT shielding)',
+            master: { id: 'route.show', default: true },
+            children: [
+                { id: 'route.outline', label: 'Show routes', type: 'boolean', default: true },
+                { id: 'route.color', label: 'Color', type: 'color', default: '#ff9100' },
+                { id: 'route.opacity', label: 'Line opacity', type: 'number',
+                  min: 0.05, max: 1, step: 0.05, default: 0.9, unit: 'fill' },
+                { id: 'route.thickness', label: 'Line thickness', type: 'number',
+                  min: 1, max: 12, step: 1, default: 4, unit: 'px' },
+                { id: 'route.fill', label: 'Fill polygons', type: 'boolean', default: true },
+                { id: 'route.fill-opacity', label: 'Fill opacity', type: 'number',
+                  min: 0.05, max: 1, step: 0.05, default: 0.25, unit: 'fill' },
+                { type: 'header', label: 'Edit mode' },
+                { id: 'route.edit-mode', label: 'Enable right-click actions', type: 'boolean', default: false },
+                { id: 'route.show-hidden', label: 'Show my hidden routes (dashed)', type: 'boolean', default: false },
+                { id: 'route.hidden-color', label: 'Hidden color', type: 'color', default: '#888888' },
+                { id: 'route-clear-hides', label: 'Clear all my local hides', type: 'button', action: 'clear-hides-route' },
+                { id: 'route-unhide-file', label: 'Unhide all file-hidden routes', type: 'button', action: 'unhide-file-route' },
+                { type: 'header', label: 'Pending commits to GitHub' },
+                { id: 'route-add-new', label: 'Add new path (draw on map)', type: 'button', action: 'add-new-route' },
+                { id: 'route-add-new-polygon', label: 'Add new polygon (draw on map)', type: 'button', action: 'add-new-route-polygon' },
+                { id: 'route-commit', label: 'Commit pending changes', type: 'button', action: 'commit-route' },
+                { id: 'route-discard-commits', label: 'Discard pending commits', type: 'button', action: 'discard-commits-route' },
+                { type: 'header', label: 'KML data tools' },
+                { id: 'route-split', label: 'Split multi-segment lines (one-time)', type: 'button', action: 'split-route' },
             ],
         },
         {
@@ -729,7 +765,7 @@
     let lastUpdateHash = null;
 
     // KML / shielding state — keyed by `${siteID}|${type}` where type is
-    // 'distro' or 'trans'. Each entry holds an array of parsed features.
+    // 'distro', 'trans', or 'route'. Each entry holds an array of parsed features.
     //
     // kmlFeatures: { [`${siteID}|${type}`]: [{ type: 'line'|'polygon', coords: [{lat,lng}, ...] }] }
     // kmlFetching: Set of `${siteID}|${type}` keys currently in flight
@@ -742,7 +778,16 @@
     // commit/split so writes target the same file that was read. Filled
     // from cache on load and from a successful 200 on fetch.
     const kmlResolvedPath = {};
-    const KML_TYPES = ['distro', 'trans'];
+    // Render order = array order (later paints on top): distro under trans
+    // under route. 'route' (v34.126) = PROPOSED routes — planned paths and
+    // polygons, files named `<siteID>-route.kml`.
+    const KML_TYPES = ['distro', 'trans', 'route'];
+    // Types that count as REAL shielding for the Coverage Validator and
+    // Asset Shielding Check. 'route' is deliberately excluded — a proposed
+    // route isn't built yet, so it must never satisfy a shielding check.
+    const SHIELDING_TYPES = ['distro', 'trans'];
+    const KML_TYPE_LABELS = { distro: 'Distribution', trans: 'Transmission', route: 'Proposed route' };
+    const kmlTypeLabel = (type) => KML_TYPE_LABELS[type] || type;
     const kmlKey = (siteID, type) => `${siteID}|${type}`;
     // Asset-state cache for "Color assets by state". Holds the type-3 asset
     // polygons (lat/lng) + derived state for the CURRENT site only. Fetched
@@ -3329,6 +3374,7 @@
             const sid   = getCurrentSiteID() || '';
             const distroN = (kmlFeatures[kmlKey(sid, 'distro')] || []).length;
             const transN  = (kmlFeatures[kmlKey(sid, 'trans')]  || []).length;
+            const routeN  = (kmlFeatures[kmlKey(sid, 'route')]  || []).length;
             const valN    = validatorState.results.length;
             const dismN   = validatorState.results.filter(r => r.dismissed).length;
             const map = getLeafletMap();
@@ -3343,7 +3389,7 @@
             // toggleState is small (~50 keys × ~30 chars) so JSON.stringify
             // costs ~0.5ms — still vastly cheaper than rebuilding overlays.
             const tHash = JSON.stringify(toggleState);
-            return `${ffzN}|${asN}|${fpN}|${editN}|${distroN}|${transN}|${valN}|${dismN}|${ourN}|${zoom}|${tHash}`;
+            return `${ffzN}|${asN}|${fpN}|${editN}|${distroN}|${transN}|${routeN}|${valN}|${dismN}|${ourN}|${zoom}|${tHash}`;
         } catch (e) {
             return null; // any error → force run (safe default)
         }
@@ -3750,7 +3796,7 @@
     // Caching: parsed features are persisted via GM storage so subsequent
     // page loads start from cache. The network fetch still runs in the
     // background and refreshes the cache on success.
-    // Fetches BOTH distro and trans KMLs for a site (parallel requests).
+    // Fetches every KML type (distro/trans/route) for a site (parallel requests).
     // No-op for any type already loaded, in flight, or known-missing — unless
     // `force` is true (used after a token change or manual refresh).
     function fetchKMLForSite(siteID, force) {
@@ -4366,7 +4412,7 @@
             }
         };
 
-        ['distro', 'trans'].forEach((type) => {
+        KML_TYPES.forEach((type) => {
             // File lines — use effective (post-modify) coords so snap
             // matches what's actually rendered.
             const features = kmlFeatures[kmlKey(siteID, type)] || [];
@@ -4425,6 +4471,9 @@
     // 2D [[lng,lat],…] lines — consistent with how draw mode + modify ops
     // already store coords.
     // ============================================================
+    // NOTE: convert is a distro↔trans concept (PLE's ⇄ flow only ever sends
+    // those two). 'route' has no convert target — if route conversion is
+    // ever wanted, convertLine needs an explicit toType, not this helper.
     function otherType(type) { return type === 'distro' ? 'trans' : 'distro'; }
 
     // Effective (post-modify) coords for a FILE line as KML-order
@@ -4625,7 +4674,7 @@
         try {
             const features = parseKML(xmlText);
             kmlFeatures[k] = features;
-            const path = kmlResolvedPath[k] || `${siteID}-${type}.kml`;
+            const path = kmlResolvedPath[k] || `${kmlSiteBase(siteID)}-${type}.kml`;
             gmSet(KML_CACHE_PREFIX + gmEnvKey(k), { features, at: Date.now(), path });
             kmlMissing.delete(k);
             console.log(`${TAG} applyCommittedXmlToLocalState[${k}]: features ${beforeCount} → ${features.length}`);
@@ -4703,7 +4752,7 @@
         `;
         const header = document.createElement('div');
         header.style.cssText = 'padding:4px 12px;color:#7adfe6;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid rgba(255,255,255,0.08);margin-bottom:2px';
-        header.textContent = `${type === 'distro' ? 'Distribution' : 'Transmission'} · line #${pmIdx}`;
+        header.textContent = `${kmlTypeLabel(type)} · line #${pmIdx}`;
         menu.appendChild(header);
 
         const action = document.createElement('button');
@@ -4932,7 +4981,7 @@
             return;
         }
         showKMLToast(`Committing ${count} ${type} change${count === 1 ? '' : 's'}…`, 8000);
-        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${siteID}-${type}.kml`;
+        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${kmlSiteBase(siteID)}-${type}.kml`;
         const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}?ref=${KMLS_BRANCH}`;
         try {
             GM_xmlhttpRequest({
@@ -5017,7 +5066,7 @@
     }
 
     function putKMLToGitHub(siteID, type, xmlText, sha, count, pendingSnapshot, token) {
-        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${siteID}-${type}.kml`;
+        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${kmlSiteBase(siteID)}-${type}.kml`;
         const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}`;
         // btoa needs binary string; encode UTF-8 first so non-ASCII names
         // (rare in current KMLs but legal in the spec) round-trip cleanly.
@@ -5112,7 +5161,7 @@
         // we hit the same file the user is currently viewing. Fall back to
         // lowercase .kml (the convention) if nothing's been resolved yet
         // (rare: user clicked Split before KML loaded).
-        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${siteID}-${type}.kml`;
+        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${kmlSiteBase(siteID)}-${type}.kml`;
         if (/\.kmz$/i.test(path)) {
             showKMLToast(`Split doesn't support .kmz yet (current file is ${path}). Convert to .kml first via Google Earth, push the .kml, then retry.`, 9000);
             return;
@@ -5246,7 +5295,7 @@
     }
 
     function putSplitToGitHub(siteID, type, xmlText, sha, message, token, result) {
-        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${siteID}-${type}.kml`;
+        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${kmlSiteBase(siteID)}-${type}.kml`;
         const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}`;
         let contentB64;
         try {
@@ -5490,7 +5539,7 @@
         }
 
         // Slow path: GET fresh from GitHub.
-        const path = kmlResolvedPath[k] || `${siteID}-${type}.kml`;
+        const path = kmlResolvedPath[k] || `${kmlSiteBase(siteID)}-${type}.kml`;
         const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}?ref=${KMLS_BRANCH}`;
         try {
             GM_xmlhttpRequest({
@@ -5651,21 +5700,45 @@
             const container = doc.querySelector('Document') || doc.querySelector('Folder') || doc.documentElement;
             co.added.forEach(item => {
                 if (!item || !Array.isArray(item.coords) || item.coords.length < 2) return;
+                const isPoly = item.shape === 'polygon';
+                if (isPoly && item.coords.length < 3) {
+                    console.warn(`${TAG} added polygon "${item.name || '(unnamed)'}" has <3 vertices — skipping`);
+                    return;
+                }
                 const pm = doc.createElementNS(NS, 'Placemark');
                 if (item.name) {
                     const nameEl = doc.createElementNS(NS, 'name');
                     nameEl.textContent = String(item.name);
                     pm.appendChild(nameEl);
                 }
-                const ls = doc.createElementNS(NS, 'LineString');
+                // KML LinearRings must close (first coord repeated last);
+                // draw mode stores the open ring, so close it here.
+                const coordList = item.coords.slice();
+                if (isPoly) {
+                    const first = coordList[0], last = coordList[coordList.length - 1];
+                    if (Number(first[0]) !== Number(last[0]) || Number(first[1]) !== Number(last[1])) {
+                        coordList.push(first);
+                    }
+                }
                 const coordsEl = doc.createElementNS(NS, 'coordinates');
-                coordsEl.textContent = item.coords.map(c => {
+                coordsEl.textContent = coordList.map(c => {
                     const lng = Number(c[0]), lat = Number(c[1]);
                     const alt = (c[2] !== undefined && c[2] !== null) ? Number(c[2]) : null;
                     return alt !== null ? `${lng},${lat},${alt}` : `${lng},${lat}`;
                 }).join(' ');
-                ls.appendChild(coordsEl);
-                pm.appendChild(ls);
+                if (isPoly) {
+                    const poly = doc.createElementNS(NS, 'Polygon');
+                    const outer = doc.createElementNS(NS, 'outerBoundaryIs');
+                    const ring = doc.createElementNS(NS, 'LinearRing');
+                    ring.appendChild(coordsEl);
+                    outer.appendChild(ring);
+                    poly.appendChild(outer);
+                    pm.appendChild(poly);
+                } else {
+                    const ls = doc.createElementNS(NS, 'LineString');
+                    ls.appendChild(coordsEl);
+                    pm.appendChild(ls);
+                }
                 container.appendChild(pm);
             });
         }
@@ -5677,7 +5750,7 @@
     }
 
     function putCommitOpsToGitHub(siteID, type, xmlText, sha, token, summaryText) {
-        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${siteID}-${type}.kml`;
+        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${kmlSiteBase(siteID)}-${type}.kml`;
         const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}`;
         let contentB64;
         try {
@@ -6157,14 +6230,17 @@
     // Saved-but-pending added lines render solid green.
     // Only one drawing session at a time across both types.
     // ============================================================
-    function enterDrawMode(type, seedCoord) {
+    // v34.126: optional `shape` param — 'polygon' draws a closed ring
+    // (needs ≥3 vertices, commits as a KML Polygon); anything else draws
+    // a line as before.
+    function enterDrawMode(type, seedCoord, shape) {
         if (drawingState) exitDrawMode({ silent: true });
         if (vertexEditState) exitVertexEdit({ save: false, silent: true });
         const siteID = getCurrentSiteID();
         if (!siteID) { showKMLToast('No site loaded.', 3000); return; }
         const map = getLeafletMap();
         if (!map || typeof map.on !== 'function') { showKMLToast('Map not ready.', 3000); return; }
-        drawingState = { type, coords: [], clickHandler: null, escHandler: null, toolbarEl: null, seeded: false };
+        drawingState = { type, shape: shape === 'polygon' ? 'polygon' : 'line', coords: [], clickHandler: null, escHandler: null, toolbarEl: null, seeded: false };
         // v34.61 Phase 3a: branch-from-vertex. If a seedCoord is provided,
         // push it as the first vertex of the new line so the line starts
         // attached to the source vertex. drawingState.seeded marks the
@@ -6233,9 +6309,11 @@
         const label = document.createElement('span');
         label.id = 'aim-draw-label';
         const initN = drawingState.coords.length;
+        const shapeWord = drawingState.shape === 'polygon' ? 'polygon' : 'line';
+        const minV = drawingState.shape === 'polygon' ? 3 : 2;
         label.textContent = drawingState.seeded
-            ? `Branching new ${drawingState.type} line · ${initN} vertex${initN === 1 ? '' : 'es'}${initN < 2 ? ' (need ≥2 — click to add)' : ''}`
-            : `Drawing ${drawingState.type} line · 0 vertices (need ≥2)`;
+            ? `Branching new ${drawingState.type} ${shapeWord} · ${initN} vertex${initN === 1 ? '' : 'es'}${initN < minV ? ` (need ≥${minV} — click to add)` : ''}`
+            : `Drawing ${drawingState.type} ${shapeWord} · 0 vertices (need ≥${minV})`;
         label.style.cssText = 'color:#5fff5f;font-weight:600';
         tb.appendChild(label);
         const saveBtn = document.createElement('button');
@@ -6267,35 +6345,44 @@
     function updateDrawToolbar() {
         if (!drawingState || !drawingState.toolbarEl) return;
         const n = drawingState.coords.length;
+        const shapeWord = drawingState.shape === 'polygon' ? 'polygon' : 'line';
+        const minV = drawingState.shape === 'polygon' ? 3 : 2;
         const label = drawingState.toolbarEl.querySelector('#aim-draw-label');
         if (label) {
             const verb = drawingState.seeded ? 'Branching new' : 'Drawing';
-            label.textContent = `${verb} ${drawingState.type} line · ${n} vertex${n === 1 ? '' : 'es'}${n < 2 ? ' (need ≥2)' : ''}`;
+            label.textContent = `${verb} ${drawingState.type} ${shapeWord} · ${n} vertex${n === 1 ? '' : 'es'}${n < minV ? ` (need ≥${minV})` : ''}`;
         }
         const saveBtn = drawingState.toolbarEl.querySelector('button[data-role="save"]');
         if (saveBtn) {
-            saveBtn.disabled = n < 2;
+            saveBtn.disabled = n < minV;
             saveBtn.style.opacity = saveBtn.disabled ? '0.4' : '1';
             saveBtn.style.cursor = saveBtn.disabled ? 'not-allowed' : 'pointer';
         }
     }
 
     function finishDrawing() {
-        if (!drawingState || drawingState.coords.length < 2) return;
+        if (!drawingState) return;
+        const isPoly = drawingState.shape === 'polygon';
+        if (drawingState.coords.length < (isPoly ? 3 : 2)) return;
         const type = drawingState.type;
         const coords = drawingState.coords.slice();
+        const shapeWord = isPoly ? 'polygon' : 'line';
         showNameInputModal(type, (name) => {
             if (name === null) return; // user cancelled the name modal
             const siteID = getCurrentSiteID();
             if (!siteID) { showKMLToast('No site loaded — drawing discarded.', 4000); exitDrawMode({ silent: true }); return; }
             const co = getCommitOps(siteID, type);
-            const finalName = (name && name.trim()) || `New ${type} line (added ${new Date().toISOString().substring(0, 10)})`;
-            co.added.push({ name: finalName, coords });
+            const finalName = (name && name.trim()) || `New ${type} ${shapeWord} (added ${new Date().toISOString().substring(0, 10)})`;
+            // `shape` only stored for polygons — line items keep the legacy
+            // shape-less form so older pending entries stay compatible.
+            const item = { name: finalName, coords };
+            if (isPoly) item.shape = 'polygon';
+            co.added.push(item);
             setCommitOps(siteID, type, co);
             const count = commitOpsCount(siteID, type);
-            showKMLToast(`Added new ${type} line "${finalName}". ${count} pending commit${count === 1 ? '' : 's'} — commit from the panel.`, 6000);
+            showKMLToast(`Added new ${type} ${shapeWord} "${finalName}". ${count} pending commit${count === 1 ? '' : 's'} — commit from the panel.`, 6000);
             exitDrawMode({ silent: true });
-        });
+        }, shapeWord);
     }
 
     function exitDrawMode(opts) {
@@ -6319,7 +6406,7 @@
     // Small modal for naming a newly-drawn line. Optional input;
     // callback receives the entered string (possibly empty, never
     // trimmed) on Save, or null on Cancel. Enter saves, Esc cancels.
-    function showNameInputModal(type, callback) {
+    function showNameInputModal(type, callback, shapeWord) {
         const existing = document.getElementById('aim-name-modal');
         if (existing) existing.remove();
         const backdrop = document.createElement('div');
@@ -6336,7 +6423,7 @@
             box-shadow:0 8px 28px rgba(0,0,0,0.6);
         `;
         const title = document.createElement('div');
-        title.textContent = `Name for the new ${type} line (optional):`;
+        title.textContent = `Name for the new ${type} ${shapeWord || 'line'} (optional):`;
         title.style.cssText = 'margin-bottom:10px;color:#7adfe6;font-size:13px;text-transform:uppercase;letter-spacing:0.5px';
         box.appendChild(title);
         const input = document.createElement('input');
@@ -6356,7 +6443,7 @@
         cancelBtn.onclick = () => { try { backdrop.remove(); } catch (e) {} callback(null); };
         btns.appendChild(cancelBtn);
         const saveBtn = document.createElement('button');
-        saveBtn.textContent = 'Save line';
+        saveBtn.textContent = `Save ${shapeWord || 'line'}`;
         saveBtn.style.cssText = 'padding:8px 16px;background:#5fff5f;color:#000;border:none;border-radius:4px;cursor:pointer;font:inherit;font-weight:700';
         saveBtn.onclick = () => { const v = input.value; try { backdrop.remove(); } catch (e) {} callback(v); };
         btns.appendChild(saveBtn);
@@ -6391,7 +6478,7 @@
         `;
         const header = document.createElement('div');
         header.style.cssText = 'padding:4px 12px;color:#5fff5f;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid rgba(255,255,255,0.08);margin-bottom:2px';
-        header.textContent = `NEW ${type === 'distro' ? 'Distribution' : 'Transmission'} line (pending)`;
+        header.textContent = `NEW ${kmlTypeLabel(type)} (pending)`;
         menu.appendChild(header);
         const nameLine = document.createElement('div');
         nameLine.style.cssText = 'padding:4px 12px;color:#9ad;font-size:11px;border-bottom:1px solid rgba(255,255,255,0.08);margin-bottom:2px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
@@ -6494,6 +6581,7 @@
             if (pts.length >= 2) out.push({
                 type: 'line', points: pts,
                 addedIdx, visible: true,
+                shape: added.shape === 'polygon' ? 'polygon' : 'line',
             });
         });
         // 3. Drawing in progress (preview)
@@ -6503,6 +6591,7 @@
             if (pts.length >= 2) out.push({
                 type: 'line', points: pts,
                 drawing: true, visible: true,
+                shape: drawingState.shape === 'polygon' ? 'polygon' : 'line',
             });
         }
         return out;
@@ -6554,8 +6643,9 @@
         if (!svg) return;
         const g = svg.querySelector('g');
         if (!g) return;
-        // Render distro first then trans, so trans paints on top — matches
-        // its higher-priority/more-dangerous status.
+        // Render in KML_TYPES order — distro, then trans (paints on top,
+        // matching its more-dangerous status), then proposed routes on top
+        // of both (they're what the user is actively planning).
         KML_TYPES.forEach(type => renderShieldingType(type, g));
     }
 
@@ -6565,11 +6655,21 @@
         if (!feats.length) return;
         const defaults = type === 'trans'
             ? { color: '#ff3030', opacity: 0.9, thickness: 4 }
-            : { color: '#ffd700', opacity: 0.9, thickness: 3 };
+            : (type === 'route'
+                ? { color: '#ff9100', opacity: 0.9, thickness: 4 }
+                : { color: '#ffd700', opacity: 0.9, thickness: 3 });
         const stroke = toggleState[`${type}.color`] || defaults.color;
         const opacity = Number(toggleState[`${type}.opacity`]);
         const opStr = String(isNaN(opacity) ? defaults.opacity : opacity);
         const thickness = Number(toggleState[`${type}.thickness`]) || defaults.thickness;
+        // v34.126: polygon fill (route category exposes the controls; the
+        // logic is type-generic so other categories inherit it if their
+        // KMLs ever ship polygons). Fill only paints on polygon features
+        // in their normal visible state — hidden ghosts and delete-marked
+        // shapes stay outline-only so their dash state reads clearly.
+        const fillOn = toggleState[`${type}.fill`] === true;
+        const fillOpN = Number(toggleState[`${type}.fill-opacity`]);
+        const fillOpacity = isNaN(fillOpN) ? 0.25 : fillOpN;
         // E1 editing state — only relevant when at least one of edit-mode
         // or show-hidden is on. pointer-events stays 'none' otherwise so
         // Leaflet's own interaction (drag-pan over an empty area) isn't
@@ -6582,14 +6682,23 @@
             // ahead of all the file-feature visual logic (no pmIdx, no hide
             // check). Always visible.
             if (f.addedIdx !== undefined || f.drawing) {
-                const d = pointsToPathD(f.points, false);
+                // v34.126: pending/preview polygons render closed, with a
+                // translucent green fill so the drawn area reads as an area.
+                const isPendingPoly = f.shape === 'polygon';
+                const d = pointsToPathD(f.points, isPendingPoly);
                 if (!d) return;
                 const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
                 p.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
                 p.setAttribute('data-buffer-kind', `kml-${type}`);
                 p.setAttribute('data-kml-type', type);
                 p.setAttribute('d', d);
-                p.setAttribute('fill', 'none');
+                if (isPendingPoly && f.points.length >= 3) {
+                    p.setAttribute('fill', '#5fff5f');
+                    p.setAttribute('fill-opacity', '0.15');
+                    p.setAttribute('fill-rule', 'evenodd');
+                } else {
+                    p.setAttribute('fill', 'none');
+                }
                 p.setAttribute('stroke', '#5fff5f');
                 p.setAttribute('stroke-linejoin', 'round');
                 p.setAttribute('stroke-linecap', 'round');
@@ -6662,6 +6771,11 @@
                 p.setAttribute('stroke', stroke);
                 p.setAttribute('stroke-opacity', opStr);
                 p.setAttribute('stroke-width', String(thickness));
+                if (f.type === 'polygon' && fillOn) {
+                    p.setAttribute('fill', stroke);
+                    p.setAttribute('fill-opacity', String(fillOpacity));
+                    p.setAttribute('fill-rule', 'evenodd');
+                }
             }
             // Merge selection wins over every other state — bright magenta,
             // thick, solid — so the user can see exactly which lines will be
@@ -7053,7 +7167,9 @@
     // flagging points near the MIDDLE of a long two-vertex segment (v32.2 bug).
     function buildShieldingSegments(siteID, map) {
         const segments = []; // [{ ax, ay, bx, by }] — layer-point coords
-        KML_TYPES.forEach(t => {
+        // SHIELDING_TYPES, not KML_TYPES: proposed routes must never count
+        // as shielding — they don't exist in the real world yet.
+        SHIELDING_TYPES.forEach(t => {
             const feats = kmlFeatures[kmlKey(siteID, t)] || [];
             feats.forEach(f => {
                 const lps = [];
@@ -8223,7 +8339,7 @@
                 // and have nothing to right-click for "Unhide"). We don't
                 // auto-flip OFF when edit-mode leaves — the user might want
                 // to keep ghosting on while not actively editing.
-                if ((msg.toggleId === 'distro.edit-mode' || msg.toggleId === 'trans.edit-mode')
+                if ((msg.toggleId === 'distro.edit-mode' || msg.toggleId === 'trans.edit-mode' || msg.toggleId === 'route.edit-mode')
                     && newVal === true && prev !== true) {
                     const type = msg.toggleId.split('.')[0];
                     const hiddenKey = `${type}.show-hidden`;
@@ -8320,8 +8436,8 @@
                 // Blocked loudly (toast), never silently.
                 if (CONTEXT === 'TOP') {
                     const DV_SAFE_ACTIONS = [
-                        'clear-hides-distro', 'clear-hides-trans',
-                        'unhide-file-distro', 'unhide-file-trans',
+                        'clear-hides-distro', 'clear-hides-trans', 'clear-hides-route',
+                        'unhide-file-distro', 'unhide-file-trans', 'unhide-file-route',
                         'basemap-set-custom',
                         'parcels-arm', 'parcels-clear',
                         'rrc-scout-view', 'rrc-scout-clear', 'rrc-recon',
@@ -8338,16 +8454,23 @@
                 else if (msg.actionId === 'clear-asset-validator') clearAssetCoverageValidator();
                 else if (msg.actionId === 'clear-hides-distro') clearLocalHides('distro');
                 else if (msg.actionId === 'clear-hides-trans') clearLocalHides('trans');
+                else if (msg.actionId === 'clear-hides-route') clearLocalHides('route');
                 else if (msg.actionId === 'unhide-file-distro') unhideAllFileHidden('distro');
                 else if (msg.actionId === 'unhide-file-trans') unhideAllFileHidden('trans');
+                else if (msg.actionId === 'unhide-file-route') unhideAllFileHidden('route');
                 else if (msg.actionId === 'split-distro') splitMultiSegmentPlacemarks('distro');
                 else if (msg.actionId === 'split-trans') splitMultiSegmentPlacemarks('trans');
+                else if (msg.actionId === 'split-route') splitMultiSegmentPlacemarks('route');
                 else if (msg.actionId === 'commit-distro') commitPendingOps('distro');
                 else if (msg.actionId === 'commit-trans') commitPendingOps('trans');
+                else if (msg.actionId === 'commit-route') commitPendingOps('route');
                 else if (msg.actionId === 'discard-commits-distro') discardCommitOps('distro');
                 else if (msg.actionId === 'discard-commits-trans') discardCommitOps('trans');
+                else if (msg.actionId === 'discard-commits-route') discardCommitOps('route');
                 else if (msg.actionId === 'add-new-distro') enterDrawMode('distro');
                 else if (msg.actionId === 'add-new-trans') enterDrawMode('trans');
+                else if (msg.actionId === 'add-new-route') enterDrawMode('route');
+                else if (msg.actionId === 'add-new-route-polygon') enterDrawMode('route', null, 'polygon');
                 else if (msg.actionId === 'seed-hifld-trans') seedTransLinesFromHIFLD();
                 else if (msg.actionId === 'rrc-recon') runRrcRecon();
                 else if (msg.actionId === 'rrc-scout-view') {
@@ -8516,6 +8639,8 @@
             siteID,
             distroCount: siteID ? commitOpsCount(siteID, 'distro') : 0,
             transCount: siteID ? commitOpsCount(siteID, 'trans') : 0,
+            // v34.126: PLE (v0.18) ignores this — informational for now.
+            routeCount: siteID ? commitOpsCount(siteID, 'route') : 0,
             vertexEditActive: !!vertexEditState,
             vertexEditType: vertexEditState ? vertexEditState.type : null,
             vertexEditPmIdx: vertexEditState ? vertexEditState.pmIdx : null,
@@ -8546,13 +8671,15 @@
     // cosmetic (only seen if the file is opened in Google Earth; our render
     // uses the per-category toggle colors and ignores styleUrl).
     function buildEmptyKML(siteID, type) {
-        const label = type === 'trans' ? 'Transmission' : 'Distribution';
-        const styleId = type === 'trans' ? 'rline' : 'yline';
-        const color = type === 'trans' ? 'ff3030ff' : 'ff00ffff'; // KML is aabbggrr
+        const label = type === 'route' ? 'Proposed Routes'
+            : `${kmlTypeLabel(type)} Power Lines`;
+        const styleId = type === 'trans' ? 'rline' : (type === 'route' ? 'oline' : 'yline');
+        // KML colors are aabbggrr: trans red, route bright orange (#ff9100), distro yellow.
+        const color = type === 'trans' ? 'ff3030ff' : (type === 'route' ? 'ff0091ff' : 'ff00ffff');
         return `<?xml version='1.0' encoding='utf-8'?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>
-    <name>Site ${siteID} - ${label} Power Lines</name>
+    <name>Site ${siteID} - ${label}</name>
     <Style id="${styleId}">
       <LineStyle>
         <color>${color}</color>
