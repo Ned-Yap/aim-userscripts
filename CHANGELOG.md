@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-01 — Map Styler v34.127 (dev/latest): 🟠 Proposed Routes get buffer halos
+
+Proposed routes now render with a translucent **buffer halo** mimicking the FP/FFZ buffer look, so you can position a planned route against real-world clearances. The halo is **metric** — default 200 ft per side, scaling with zoom like native buffers (the route line itself stays fixed-px). On by default; the route card gets **Show buffer halo**, **Buffer distance (ft/side)**, and **Buffer opacity** controls. Halos also draw on pending (green) routes and the live drawing preview — positioning before commit is the point. Hidden ghosts and delete-marked routes stay halo-free.
+
 ## 2026-08-01 — Map Styler v34.126 (dev/latest): 🟠 Proposed Routes — third KML layer (paths + polygons)
 
 New **"Proposed routes"** category in the panel alongside Distribution and Transmission — for planned infrastructure that doesn't exist yet. Files are `<siteID>-route.kml` in the data repo (created automatically on first commit).

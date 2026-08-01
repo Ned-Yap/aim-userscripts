@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.126
+// @version      34.127
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -57,7 +57,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.126';
+    const SCRIPT_VERSION = '34.127';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -379,6 +379,11 @@
                 { id: 'route.fill', label: 'Fill polygons', type: 'boolean', default: true },
                 { id: 'route.fill-opacity', label: 'Fill opacity', type: 'number',
                   min: 0.05, max: 1, step: 0.05, default: 0.25, unit: 'fill' },
+                { id: 'route.buffer', label: 'Show buffer halo', type: 'boolean', default: true },
+                { id: 'route.buffer-width', label: 'Buffer distance', type: 'number',
+                  min: 25, max: 500, step: 25, default: 200, unit: 'ft/side' },
+                { id: 'route.buffer-opacity', label: 'Buffer opacity', type: 'number',
+                  min: 0.05, max: 0.6, step: 0.05, default: 0.15, unit: 'fill' },
                 { type: 'header', label: 'Edit mode' },
                 { id: 'route.edit-mode', label: 'Enable right-click actions', type: 'boolean', default: false },
                 { id: 'route.show-hidden', label: 'Show my hidden routes (dashed)', type: 'boolean', default: false },
@@ -6670,6 +6675,44 @@
         const fillOn = toggleState[`${type}.fill`] === true;
         const fillOpN = Number(toggleState[`${type}.fill-opacity`]);
         const fillOpacity = isNaN(fillOpN) ? 0.25 : fillOpN;
+        // v34.127: buffer halo — wide translucent under-stroke showing the
+        // real-world corridor around the feature (default 200 ft each side),
+        // mimicking the FP/FFZ buffer look so proposed routes can be
+        // positioned precisely. Width is METRIC (ft → px at current zoom,
+        // via ftToPx) so it scales with zoom like native buffers — unlike
+        // the fixed-px line thickness. Controls exposed on the route card;
+        // logic type-generic like fill.
+        const bufferOn = toggleState[`${type}.buffer`] === true;
+        let bufferPx = 0;
+        if (bufferOn) {
+            const bw = Number(toggleState[`${type}.buffer-width`]);
+            const widthFt = (isFinite(bw) && bw > 0) ? bw : 200;
+            const bmap = getLeafletMap();
+            if (bmap) {
+                // ×2: the control is distance per SIDE; stroke-width spans both.
+                try { bufferPx = ftToPx(bmap, widthFt * 2); } catch (e) { bufferPx = 0; }
+            }
+        }
+        const bufOpN = Number(toggleState[`${type}.buffer-opacity`]);
+        const bufferOpacity = isNaN(bufOpN) ? 0.15 : bufOpN;
+        // Inserted at g.firstChild AFTER the feature path is inserted there,
+        // so the halo lands under its own line (and everything else).
+        const addBufferHalo = (d, color) => {
+            if (!(bufferPx > 0)) return;
+            const b = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            b.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
+            b.setAttribute('data-buffer-kind', `kml-${type}-halo`);
+            b.setAttribute('d', d);
+            b.setAttribute('fill', 'none');
+            b.setAttribute('stroke', color);
+            b.setAttribute('stroke-opacity', String(bufferOpacity));
+            b.setAttribute('stroke-width', String(bufferPx));
+            b.setAttribute('stroke-linejoin', 'round');
+            b.setAttribute('stroke-linecap', 'round');
+            b.setAttribute('pointer-events', 'none');
+            if (g.firstChild) g.insertBefore(b, g.firstChild);
+            else g.appendChild(b);
+        };
         // E1 editing state — only relevant when at least one of edit-mode
         // or show-hidden is on. pointer-events stays 'none' otherwise so
         // Leaflet's own interaction (drag-pan over an empty area) isn't
@@ -6726,6 +6769,9 @@
                 }
                 if (g.firstChild) g.insertBefore(p, g.firstChild);
                 else g.appendChild(p);
+                // Halo on pending/preview too — positioning against the
+                // corridor BEFORE committing is the whole point.
+                addBufferHalo(d, '#5fff5f');
                 return;
             }
             const isVis = effectiveVisible(siteID, type, f.pmIdx, f.visible);
@@ -6805,6 +6851,12 @@
             // the FFZ/FP/asset outlines.
             if (g.firstChild) g.insertBefore(p, g.firstChild);
             else g.appendChild(p);
+            // Halo for visible features (incl. modify-marked — the user is
+            // actively positioning those). Hidden ghosts and delete-marked
+            // stay halo-free so their dash state reads clearly.
+            if (isVis && !(commitOp && commitOp.op === 'delete')) {
+                addBufferHalo(d, stroke);
+            }
         });
     }
 
