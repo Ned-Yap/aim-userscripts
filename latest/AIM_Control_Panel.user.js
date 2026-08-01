@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.39
+// @version      1.40
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -58,12 +58,14 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.39';
+    const VERSION = '1.40';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const PREFS_KEY = 'aim-control-prefs';
     const HOTKEYS_KEY = 'aim-control-hotkeys';
+    // v1.40 — persisted panel geometry: { locked, pos:{left,top}|null, size:{w,h}|null }
+    const PANEL_UI_KEY = 'aim-control-panel-ui';
     // v1.31 — LITE / FULL MODE (CSM whitelist). A shared localStorage value
     // (readable by ALL userscripts on percepto.app, unlike per-script GM
     // storage) that gates the destructive/building tools. DEFAULT = LITE: every
@@ -178,6 +180,11 @@
         hotkeys: {},
         buttonEl: null,
         panelEl: null,
+        scrollEl: null,     // v1.40 — inner scroll container (renderPanel writes here)
+        // v1.40 — user panel geometry. locked = click-outside won't close.
+        // pos/size = viewport px once the user drags/resizes; null = default
+        // (anchored under the gear, content-sized). Persisted in PANEL_UI_KEY.
+        panelUi: { locked: false, pos: null, size: null },
         panelOpen: false,
         rebindingFor: null, // { scriptId, hotkeyId } while capturing a new key combo
         injectTries: 0,
@@ -208,10 +215,17 @@
     function loadPrefs() {
         try { state.prefs = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}'); } catch (e) { state.prefs = {}; }
         try { state.hotkeys = JSON.parse(localStorage.getItem(HOTKEYS_KEY) || '{}'); } catch (e) { state.hotkeys = {}; }
+        try {
+            const ui = JSON.parse(localStorage.getItem(PANEL_UI_KEY) || '{}');
+            state.panelUi = { locked: !!ui.locked, pos: ui.pos || null, size: ui.size || null };
+        } catch (e) { state.panelUi = { locked: false, pos: null, size: null }; }
     }
     function savePrefs() {
         try { localStorage.setItem(PREFS_KEY, JSON.stringify(state.prefs)); } catch (e) {}
         try { localStorage.setItem(HOTKEYS_KEY, JSON.stringify(state.hotkeys)); } catch (e) {}
+    }
+    function savePanelUi() {
+        try { localStorage.setItem(PANEL_UI_KEY, JSON.stringify(state.panelUi)); } catch (e) {}
     }
     // v1.31 — Lite/Full mode (shared localStorage, see MODE_KEY note above).
     // Anything other than the literal 'full' is treated as LITE (the safe
@@ -833,11 +847,12 @@
         if (state.buttonEl && (state.buttonEl.classList.contains('aim-control-button--floating')
                 || state.buttonEl.classList.contains('aim-control-button--docked'))) {
             try { state.buttonEl.remove(); } catch (e) { /* already detached */ }
-            // v1.39: the docked variant keeps its panel in document.body —
-            // remove it explicitly, then reset so a later page rebuilds fresh.
+            // v1.40: the panel always lives in document.body — remove it
+            // explicitly, then reset so a later page rebuilds fresh.
             if (state.panelEl) { try { state.panelEl.remove(); } catch (e) {} }
             state.buttonEl = null;
             state.panelEl = null;
+            state.scrollEl = null;
             state.panelOpen = false;
         }
     }
@@ -886,6 +901,7 @@
                 state.buttonEl = null;
                 if (state.panelEl) { try { state.panelEl.remove(); } catch (e) {} }
                 state.panelEl = null;
+                state.scrollEl = null;
                 state.panelOpen = false;
             }
             // Upgrade a floating gear to docked the moment the header exists.
@@ -938,40 +954,111 @@
         // Dark theme: matches the host app's dark grey, ~85% opacity so the map
         // shows through faintly without losing text contrast.
         panel.style.cssText = [
-            // v1.25: right:35px (was 0) shifts the dropdown ~35px LEFT of
-            // the gear's right edge so it doesn't get covered by the Power
-            // Line Editor's icon strip (⚡ + [+D] + [+T] + …) hanging
-            // below the ⚡ button at right:0 of the same .map-tools strip.
-            'position:absolute', 'top:calc(100% + 6px)', 'right:35px',
+            // v1.40: the panel ALWAYS lives in document.body as position:fixed —
+            // one positioning path for all three gear variants (map-tools /
+            // floating / docked). Anchored under the gear on every open
+            // (anchorPanelToButton) until the user drags it somewhere.
+            'position:fixed',
             'min-width:280px', 'max-width:360px',
             // Cap height aggressively so the panel stays compact and scrolls
             // internally instead of stretching down past where the user wants
-            // to interact with the map.
-            'max-height:55vh', 'overflow-y:auto',
+            // to interact with the map. Lifted when the user resizes.
+            'max-height:55vh',
+            // Flex column: inner scroller scrolls, so the corner resize grip
+            // can sit absolutely at the panel's true bottom-right corner.
+            'display:none', 'flex-direction:column', 'overflow:hidden',
             'background:rgba(40,40,40,0.86)', 'color:#e6e6e6',
             'backdrop-filter:blur(4px)', '-webkit-backdrop-filter:blur(4px)',
             'border:1px solid rgba(255,255,255,0.12)', 'border-radius:6px',
             'box-shadow:0 6px 22px rgba(0,0,0,0.55)',
             // High z-index so we layer above the host app's own overlays
             // (e.g. .map-coordinates-tool is z-index:1000).
-            'z-index:100000', 'padding:0', 'display:none',
+            'z-index:100000', 'padding:0',
             'font:12px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
             'cursor:default',
         ].join(';');
         swallowMouseEvents(panel); // prevent clicks inside the panel from reaching the map
-        // v1.39: a DOCKED gear lives inside Percepto's Angular header, whose
-        // ancestors can clip/transform an absolutely-positioned child — so
-        // its panel goes in document.body with position:fixed (coords set on
-        // every open in setPanelOpen). Other modes keep the in-button panel.
-        if (state.buttonEl && state.buttonEl.classList.contains('aim-control-button--docked')) {
-            panel.style.position = 'fixed';
-            document.body.appendChild(panel);
-        } else if (state.buttonEl) {
-            state.buttonEl.appendChild(panel);
-        }
+        const scroller = document.createElement('div');
+        scroller.style.cssText = 'flex:1 1 auto;min-height:0;overflow-y:auto';
+        panel.appendChild(scroller);
+        const grip = document.createElement('div');
+        grip.setAttribute('data-cp-resize', '');
+        grip.title = 'Drag to resize';
+        grip.style.cssText = 'position:absolute;right:0;bottom:0;width:15px;height:15px;cursor:nwse-resize;'
+            + 'z-index:5;touch-action:none;border-radius:0 0 6px 0;opacity:0.6;'
+            + 'background:linear-gradient(135deg,transparent 55%,rgba(255,255,255,0.45) 55%)';
+        panel.appendChild(grip);
+        document.body.appendChild(panel);
         state.panelEl = panel;
-        // Click outside closes (panel may be OUTSIDE the button now — check both)
+        state.scrollEl = scroller;
+        applyPanelUi();
+
+        // v1.40 — drag (header title row) + resize (corner grip). During a
+        // gesture we listen on document in the CAPTURE phase so the move/up
+        // events survive both the panel's stopPropagation swallowers and a
+        // mid-drag innerHTML re-render wiping the original target; pointer
+        // capture (best effort) keeps events flowing when the cursor briefly
+        // leaves the panel.
+        const beginGesture = (e, applyFn) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const startX = e.clientX, startY = e.clientY;
+            try { if (e.target.setPointerCapture) e.target.setPointerCapture(e.pointerId); } catch (err) {}
+            const move = (ev) => {
+                if (ev.pointerId !== e.pointerId) return;
+                applyFn(ev.clientX - startX, ev.clientY - startY);
+            };
+            const up = (ev) => {
+                if (ev.pointerId !== e.pointerId) return;
+                document.removeEventListener('pointermove', move, true);
+                document.removeEventListener('pointerup', up, true);
+                document.removeEventListener('pointercancel', up, true);
+                savePanelUi();
+            };
+            document.addEventListener('pointermove', move, true);
+            document.addEventListener('pointerup', up, true);
+            document.addEventListener('pointercancel', up, true);
+        };
+        panel.addEventListener('pointerdown', (e) => {
+            if (e.button !== 0) return;
+            const t = e.target;
+            if (!t || !t.closest) return;
+            if (t.closest('[data-cp-resize]')) {
+                const r = panel.getBoundingClientRect();
+                // Resizing needs a pinned top-left corner — freeze the current
+                // spot so growing width extends rightward instead of fighting
+                // the right-edge anchor.
+                if (!state.panelUi.pos) {
+                    state.panelUi.pos = { left: Math.round(r.left), top: Math.round(r.top) };
+                }
+                const startW = r.width, startH = r.height;
+                beginGesture(e, (dx, dy) => {
+                    state.panelUi.size = {
+                        w: Math.round(Math.min(Math.max(240, startW + dx), window.innerWidth - 16)),
+                        h: Math.round(Math.min(Math.max(160, startH + dy), window.innerHeight - 16)),
+                    };
+                    applyPanelUi();
+                });
+                return;
+            }
+            const dragBar = t.closest('[data-cp-drag]');
+            if (dragBar && !t.closest('button,input,select')) {
+                const r = panel.getBoundingClientRect();
+                const baseLeft = r.left, baseTop = r.top;
+                beginGesture(e, (dx, dy) => {
+                    state.panelUi.pos = {
+                        left: Math.round(Math.min(Math.max(0, baseLeft + dx), window.innerWidth - 60)),
+                        top: Math.round(Math.min(Math.max(0, baseTop + dy), window.innerHeight - 40)),
+                    };
+                    applyPanelUi();
+                });
+            }
+        }, true);
+
+        // Click outside closes (panel lives in body — check button AND panel).
+        // v1.40: suppressed while locked — that's the whole point of the lock.
         document.addEventListener('click', (e) => {
+            if (state.panelUi.locked) return;
             if (state.panelOpen && state.buttonEl && !state.buttonEl.contains(e.target)
                 && !(state.panelEl && state.panelEl.contains(e.target))) {
                 setPanelOpen(false);
@@ -1026,6 +1113,33 @@
                         actionId: t.dataset.action,
                     });
                 }
+                return;
+            }
+            // v1.40 — 🔒 lock toggle + ↺ geometry reset in the header.
+            const lockBtn = t.closest && t.closest('[data-panel-lock]');
+            if (lockBtn) {
+                const now = Date.now();
+                if (now - lastHandled < 250) return;
+                lastHandled = now;
+                e.stopPropagation();
+                state.panelUi.locked = !state.panelUi.locked;
+                savePanelUi();
+                applyPanelUi();
+                renderPanel();
+                console.log(`${TAG} panel ${state.panelUi.locked ? 'LOCKED open' : 'unlocked'}`);
+                return;
+            }
+            const panelResetBtn = t.closest && t.closest('[data-panel-reset]');
+            if (panelResetBtn) {
+                const now = Date.now();
+                if (now - lastHandled < 250) return;
+                lastHandled = now;
+                e.stopPropagation();
+                state.panelUi.pos = null;
+                state.panelUi.size = null;
+                savePanelUi();
+                anchorPanelToButton();
+                renderPanel();
                 return;
             }
             // Walk up to find any clickable ancestor.
@@ -1184,20 +1298,66 @@
         }, false);
     }
 
+    // v1.40 — apply the user's saved geometry (drag pos / resize size / lock
+    // z-boost) to the panel. pos/size are viewport px; both are clamped so a
+    // stale save (window shrank since) can never strand the panel off-screen.
+    function applyPanelUi() {
+        const p = state.panelEl;
+        if (!p) return;
+        const ui = state.panelUi;
+        if (ui.size) {
+            p.style.width = Math.round(Math.min(Math.max(240, ui.size.w), Math.max(240, window.innerWidth - 16))) + 'px';
+            p.style.height = Math.round(Math.min(Math.max(160, ui.size.h), Math.max(160, window.innerHeight - 16))) + 'px';
+            p.style.minWidth = '0';
+            p.style.maxWidth = 'none';
+            p.style.maxHeight = 'none';
+        } else {
+            p.style.width = '';
+            p.style.height = '';
+            p.style.minWidth = '280px';
+            p.style.maxWidth = '360px';
+            p.style.maxHeight = '55vh';
+        }
+        if (ui.pos) {
+            p.style.left = Math.round(Math.min(Math.max(0, ui.pos.left), Math.max(0, window.innerWidth - 60))) + 'px';
+            p.style.top = Math.round(Math.min(Math.max(0, ui.pos.top), Math.max(0, window.innerHeight - 40))) + 'px';
+            p.style.right = 'auto';
+        }
+        // Locked = "keep me on top": boost above the other AIM floating panels
+        // (which sit around 100000) without touching browser-UI territory.
+        p.style.zIndex = ui.locked ? '1000000' : '100000';
+    }
+
+    // v1.40 — default anchor: pin the fixed panel just under the gear, every
+    // open (the button can move/rebuild between opens; recompute each time).
+    // A user-dragged position wins — then we only re-clamp it to the viewport.
+    function anchorPanelToButton() {
+        if (!state.panelEl) return;
+        applyPanelUi();
+        if (state.panelUi.pos) return;
+        try {
+            const r = state.buttonEl ? state.buttonEl.getBoundingClientRect() : null;
+            if (r && (r.width || r.height)) {
+                // The 35px shift (non-docked gears) keeps the dropdown clear of
+                // the Power Line Editor's icon strip hanging below .map-tools
+                // (the old in-button right:35px — see v1.25 note in git history).
+                const shift = state.buttonEl.classList.contains('aim-control-button--docked') ? 0 : 35;
+                state.panelEl.style.top = Math.round(r.bottom + 6) + 'px';
+                state.panelEl.style.right = Math.max(8, Math.round(window.innerWidth - r.right + shift)) + 'px';
+                state.panelEl.style.left = 'auto';
+            } else {
+                state.panelEl.style.top = '90px';
+                state.panelEl.style.right = '46px';
+                state.panelEl.style.left = 'auto';
+            }
+        } catch (e) { /* keep last position */ }
+    }
+
     function setPanelOpen(open) {
         if (!state.panelEl) createPanel();
         state.panelOpen = open;
-        state.panelEl.style.display = open ? 'block' : 'none';
-        // v1.39: docked mode — pin the fixed panel under the gear on every
-        // open (the header can move between opens; recompute each time).
-        if (open && state.buttonEl && state.buttonEl.classList.contains('aim-control-button--docked')) {
-            try {
-                const r = state.buttonEl.getBoundingClientRect();
-                state.panelEl.style.position = 'fixed';
-                state.panelEl.style.top = Math.round(r.bottom + 6) + 'px';
-                state.panelEl.style.right = Math.max(8, Math.round(window.innerWidth - r.right)) + 'px';
-            } catch (e) { /* keep last position */ }
-        }
+        state.panelEl.style.display = open ? 'flex' : 'none';
+        if (open) anchorPanelToButton();
         if (open) {
             // Reset section open state so the panel always starts tidy.
             // Per-session behavior; not persisted across page loads.
@@ -1578,7 +1738,7 @@
     }
 
     function renderPanel() {
-        if (!state.panelEl || !state.panelOpen) return;
+        if (!state.panelEl || !state.scrollEl || !state.panelOpen) return;
         const scripts = Array.from(state.registry.values()).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 
         // v1.27 — search filter. When non-empty, only matching sections render
@@ -1586,11 +1746,24 @@
         const q = (state.search || '').trim().toLowerCase();
         const searching = q.length > 0;
 
+        // v1.40 — title row is the drag handle; 🔒 keeps the panel open (and
+        // z-boosted) through outside clicks; ↺ appears once dragged/resized.
+        const ui = state.panelUi;
+        const lockBtnHtml = `<button data-panel-lock
+                title="${ui.locked ? 'Locked open — click to unlock' : 'Lock panel open (clicks outside won’t close it)'}"
+                style="cursor:pointer;background:${ui.locked ? 'rgba(20,210,220,0.16)' : 'transparent'};border:1px solid ${ui.locked ? 'rgb(20,210,220)' : 'rgba(255,255,255,0.18)'};border-radius:4px;font-size:12px;line-height:1;padding:2px 5px">${ui.locked ? '🔒' : '🔓'}</button>`;
+        const resetBtnHtml = (ui.pos || ui.size) ? `<button data-panel-reset
+                title="Reset panel position &amp; size"
+                style="cursor:pointer;background:transparent;border:none;color:#888;font-size:14px;line-height:1;padding:2px 3px">↺</button>` : '';
         const headerHtml = `
             <div style="border-bottom:1px solid rgba(255,255,255,0.10);background:rgb(28,28,28);border-radius:6px 6px 0 0;position:sticky;top:0;z-index:2">
-                <div style="padding:6px 10px;display:flex;align-items:center;justify-content:space-between">
+                <div data-cp-drag title="Drag to move" style="padding:6px 10px;display:flex;align-items:center;justify-content:space-between;gap:6px;cursor:move;user-select:none;touch-action:none">
                     <strong style="color:rgb(20,210,220)">AIM Controls</strong>
-                    <span style="font-size:11px;color:#888">${scripts.length} script${scripts.length === 1 ? '' : 's'}</span>
+                    <span style="display:flex;align-items:center;gap:6px">
+                        <span style="font-size:11px;color:#888">${scripts.length} script${scripts.length === 1 ? '' : 's'}</span>
+                        ${resetBtnHtml}
+                        ${lockBtnHtml}
+                    </span>
                 </div>
                 <div style="padding:0 10px 7px;display:flex;align-items:center;gap:6px">
                     <input data-search type="text" placeholder="Search settings…" value="${escapeAttr(state.search || '')}"
@@ -1997,7 +2170,9 @@
         // Layout order: header, mode banner, error, sections, then PAT at the
         // bottom. PAT is a config item that the user only touches occasionally —
         // putting it at the bottom keeps active controls front-and-center.
-        state.panelEl.innerHTML = headerHtml + pilotHtml + errorHtml + emptyHtml + sectionsHtml + tokenHtml;
+        // v1.40 — content renders into the inner scroller so the panel's own
+        // box (and the corner resize grip) stay fixed while content scrolls.
+        state.scrollEl.innerHTML = headerHtml + pilotHtml + errorHtml + emptyHtml + sectionsHtml + tokenHtml;
         wireTokenSection();
         // NOTE: per-element click/change listeners moved to delegated
         // handlers in createPanel() — see panel.addEventListener calls

@@ -6,6 +6,17 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-01 — Control Panel v1.40 (dev/latest): 🔒 lock open + draggable + resizable panel
+
+The AIM Controls dropdown is now a real floating panel:
+
+- **🔒 Lock button** (top-right of the header) — while locked, clicking out on the map no longer closes the panel, and it layers above the other AIM panels so it stays visible while you work. Click again to unlock. Persists across reloads.
+- **Drag to move** — grab the "AIM Controls" title bar and drop the panel anywhere. It remembers the spot (per browser) and reopens there.
+- **Resize** — drag the grip in the bottom-right corner. Custom sizes lift the default width/height caps so you can make it as tall as your screen.
+- **↺ Reset** — appears in the header once you've moved/resized; snaps the panel back to its default spot under the gear at default size.
+
+Works in all three gear modes (Site Setup map-tools bar, live-drone floating gear, Data View docked gear).
+
 ## 2026-08-01 — Map Styler v34.128 + Site Setup Tools v4.221 (dev/latest): 🟠 Convert Proposed Routes → REAL FFZs & Flight Paths
 
 New **🟠 Convert routes** button in the ⊕ Generate modal (Site Setup Tools, Full mode). Reads the site's committed Proposed Routes from the Map Styler and converts them into real Percepto entities — **create-only, existing entities are never touched**:
