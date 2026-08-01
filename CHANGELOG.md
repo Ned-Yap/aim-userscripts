@@ -6,6 +6,18 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-01 — Map Styler v34.128 + Site Setup Tools v4.221 (dev/latest): 🟠 Convert Proposed Routes → REAL FFZs & Flight Paths
+
+New **🟠 Convert routes** button in the ⊕ Generate modal (Site Setup Tools, Full mode). Reads the site's committed Proposed Routes from the Map Styler and converts them into real Percepto entities — **create-only, existing entities are never touched**:
+
+- **Route polygons → FFZs**, **route paths → Flight Paths** (arcs built from the drawn waypoints).
+- **Auto-snap ≤50 ft**: FP endpoints snap to existing FP vertices — a shared waypoint *connects/extends* that flight path — or onto FFZ edges (mid-edge connection, with the SOP angle check: warns under 15°, ideal 45°). Every snap shows in the preview with a per-snap ↩ undo.
+- **Altitudes copied from the nearest existing entity** (connected arc → nearest arc → nearest FFZ band), falling back to SOP defaults (90 ft AGL floor, +30 ft FP band / 210 ft FFZ ceiling) from DEM ground; respects the site's MSL/AGL mode and blocks when the mode is unknown.
+- **Rails**: preview modal with per-route checkboxes, dry-run default ON, backup manifest download before writing, post-write verify (fresh re-fetch), and **↩ Undo last convert** (deletes the created ids).
+- After a real convert, the **Map Styler marks the converted routes for deletion in the route KML** and runs the normal commit prompt, so proposals don't double-render under the real entities. (Styler side also now serves route features + placemark names over the KML data channel — shielding consumers still get distro/trans only.)
+
+Requires both scripts on this version (Styler 34.128 + Site Setup Tools 4.221). Routes must be **committed** to the route KML — pending green ones don't convert.
+
 ## 2026-08-01 — Map Styler v34.127 (dev/latest): 🟠 Proposed Routes get buffer halos
 
 Proposed routes now render with a translucent **buffer halo** mimicking the FP/FFZ buffer look, so you can position a planned route against real-world clearances. The halo is **metric** — default 200 ft per side, scaling with zoom like native buffers (the route line itself stays fixed-px). On by default; the route card gets **Show buffer halo**, **Buffer distance (ft/side)**, and **Buffer opacity** controls. Halos also draw on pending (green) routes and the live drawing preview — positioning before commit is the point. Hidden ghosts and delete-marked routes stay halo-free.

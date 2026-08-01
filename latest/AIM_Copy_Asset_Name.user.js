@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.220
+// @version      4.221
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.220';
+    const SCRIPT_VERSION = '4.221';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -12172,7 +12172,7 @@
     // transmission lines. We request them on demand via a dedicated
     // BroadcastChannel so the Site Setup Analyzer can include them as
     // folders in the exported KML without re-fetching from GitHub.
-    let powerLinesKml = { siteID: null, distro: [], trans: [], receivedAt: 0 };
+    let powerLinesKml = { siteID: null, distro: [], trans: [], route: [], receivedAt: 0 };
     let powerLinesChannel = null;
     function setupPowerLinesChannel() {
         if (powerLinesChannel) return;
@@ -12185,9 +12185,12 @@
                 siteID: m.siteID,
                 distro: Array.isArray(m.distro) ? m.distro : [],
                 trans: Array.isArray(m.trans) ? m.trans : [],
+                // v4.221: Proposed Route features (Map Styler 34.128+) —
+                // consumed by the 🟠 Route Converter, never by shielding.
+                route: Array.isArray(m.route) ? m.route : [],
                 receivedAt: Date.now(),
             };
-            console.log(`${TAG} got KML features from Map Styler v${m.fromVersion || '?'} for site ${m.siteID}: ${powerLinesKml.distro.length} distro + ${powerLinesKml.trans.length} trans`);
+            console.log(`${TAG} got KML features from Map Styler v${m.fromVersion || '?'} for site ${m.siteID}: ${powerLinesKml.distro.length} distro + ${powerLinesKml.trans.length} trans + ${powerLinesKml.route.length} route`);
         };
     }
     function requestPowerLinesKml(siteID) {
@@ -16403,6 +16406,498 @@
         return res;
     }
 
+    // ============================================================
+    // 🟠 ROUTE CONVERTER (v4.221, feature #226) — turns Map Styler
+    // "Proposed Route" KML features into REAL entities:
+    //   route polygon → FFZ (type 16), route path → Flight Path (type 15)
+    // FP endpoints auto-snap (≤ RC_SNAP_FT) to existing FP vertices or
+    // FFZ edges (per-snap undo in the preview). Snapping onto an existing
+    // FP VERTEX is what "extends" that FP — Percepto treats separate FP
+    // entities sharing an exact waypoint as one connected graph (proven
+    // by Map Editor split-save parity), so no existing entity is ever
+    // mutated: everything here is CREATE-ONLY. Altitudes are COPIED from
+    // the nearest existing entity (connected arc → nearest arc → nearest
+    // FFZ), falling back to SOP defaults (90 ft AGL floor; +30 ft FP
+    // band / 210 ft FFZ ceiling) from DEM ground when the site has no
+    // neighbors. Dry-run default; undo deletes the created ids.
+    // ============================================================
+    const RC_SNAP_FT = 50;
+    const RC_SNAP_M = RC_SNAP_FT * GEN_FT_TO_M;
+    const RC_UNDO_LS = 'aim_rc_undo:';
+    const RC_MODAL_ID = 'aim-rc-modal';
+    let rcPlan = null;
+
+    // Project p onto segment a→b (equirectangular local plane), clamped.
+    function rcProjOnSeg(p, a, b) {
+        const kx = Math.cos(((a.lat + b.lat) / 2) * Math.PI / 180);
+        const ax = a.lng * kx, ay = a.lat, bx = b.lng * kx, by = b.lat;
+        const px = p.lng * kx, py = p.lat;
+        const abx = bx - ax, aby = by - ay;
+        const len2 = abx * abx + aby * aby;
+        let t = len2 ? ((px - ax) * abx + (py - ay) * aby) / len2 : 0;
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+        return { lat: ay + t * aby, lng: (ax + t * abx) / kx, t };
+    }
+    // Angle (0–90°) between segment p1→p2 and the LINE through a→b.
+    // 0° = running along the edge (bad), 90° = perpendicular. SOP wants
+    // ≥15°, ideal 45°, for an FP landing on an FFZ edge.
+    function rcSegEdgeAngleDeg(p1, p2, a, b) {
+        const kx = Math.cos(((p1.lat + p2.lat) / 2) * Math.PI / 180);
+        const v1x = (p2.lng - p1.lng) * kx, v1y = p2.lat - p1.lat;
+        const v2x = (b.lng - a.lng) * kx, v2y = b.lat - a.lat;
+        const m1 = Math.hypot(v1x, v1y), m2 = Math.hypot(v2x, v2y);
+        if (!m1 || !m2) return null;
+        const cos = Math.abs((v1x * v2x + v1y * v2y) / (m1 * m2));
+        return Math.acos(Math.min(1, cos)) * 180 / Math.PI;
+    }
+    // The arc (and owning FP entity) touching a graph vertex key, if any.
+    function rcArcAtVertex(fps, key) {
+        for (const fp of fps) {
+            for (const a of (fp.arcs || [])) {
+                if (!a || !a.point_a || !a.point_b) continue;
+                if (vkey(a.point_a) === key || vkey(a.point_b) === key) return { fp, arc: a };
+            }
+        }
+        return null;
+    }
+    // Nearest existing arc to ANY vertex of the route (routes are short —
+    // the double loop is fine).
+    function rcNearestArc(fps, verts) {
+        let best = null;
+        fps.forEach(fp => (fp.arcs || []).forEach(a => {
+            if (!a || !a.point_a || !a.point_b) return;
+            verts.forEach(v => {
+                const d = pointToSegMeters(v.lat, v.lng, a.point_a, a.point_b);
+                if (!best || d < best.d) best = { d, fp, arc: a };
+            });
+        }));
+        return best;
+    }
+    function rcNearestFfz(ffzs, pt) {
+        let best = null;
+        ffzs.forEach(ent => {
+            const ring = entityCoords(ent);
+            if (!ring || ring.length < 3) return;
+            const d = pointToPolygonMeters(pt.lat, pt.lng, ring);
+            if (best === null || d < best.d) best = { d, ent };
+        });
+        return best;
+    }
+    function rcArcBand(arc) {
+        const lo = Number(arc && arc.min_alt), hi = Number(arc && arc.max_alt);
+        if (!isFinite(lo) || !isFinite(hi) || hi <= lo) return null;
+        return { minM: fpArcAltMeters(lo), maxM: fpArcAltMeters(hi) };
+    }
+    // Route verts with applied snaps substituted in.
+    function rcEffectiveVerts(item) {
+        const out = item.verts.map(v => ({ lat: v.lat, lng: v.lng }));
+        (item.snaps || []).forEach(s => { if (s.applied) out[s.vertIdx] = { lat: s.to.lat, lng: s.to.lng }; });
+        return out;
+    }
+
+    async function rcBuildPlan(siteID) {
+        try { await fetchMapObjects(siteID, true); } catch (e) {}
+        let siteCfg = null;
+        try { siteCfg = await fetchSiteConfig(siteID); } catch (e) {}
+        const am = await siteAltMode(siteID);
+        const bucket = mapObjectsBySite[siteID];
+        const ents = (bucket && bucket.entities) || [];
+        const ffzs = ents.filter(e => e.type === 16 && entityCoords(e));
+        const fps = ents.filter(e => e.type === 15 && Array.isArray(e.arcs) && e.arcs.length);
+        let fpGraph = null;
+        try { fpGraph = buildFlightPathGraph(ents); } catch (e) {}
+        const feats = (powerLinesKml.siteID === siteID ? powerLinesKml.route : []) || [];
+        const items = [];
+        let areaN = 0, pathN = 0;
+        feats.forEach(feat => {
+            if (!feat || feat.visible === false || !Array.isArray(feat.coords)) return;
+            if (feat.type === 'polygon') {
+                areaN++;
+                const item = { kind: 'ffz', pmIdx: feat.pmIdx, selected: true, warnings: [], snaps: [] };
+                item.name = (feat.name || '').trim() || `Route Area ${areaN}`;
+                let ring = feat.coords.map(c => ({ lat: c.lat, lng: c.lng }));
+                if (ring.length >= 2 && vkey(ring[0]) === vkey(ring[ring.length - 1])) ring.pop();
+                item.ring = ring;
+                if (ring.length < 3) { item.err = 'fewer than 3 distinct vertices'; items.push(item); return; }
+                if (ringSelfIntersects(ring)) { item.err = 'self-intersecting ring (bowtie) — fix the route polygon first'; items.push(item); return; }
+                const near = rcNearestFfz(ffzs, ringCentroid(ring));
+                const r = near && near.ent.restrictions;
+                if (r && typeof r.minAlt === 'number' && typeof r.maxAlt === 'number') {
+                    item.restrictions = { minAlt: r.minAlt, maxAlt: r.maxAlt };
+                    item.altSource = `copied from FFZ "${near.ent.name || '#' + near.ent.id}" (${Math.round(near.d * M_TO_FT)} ft away)`;
+                } else {
+                    item.needsDem = true; // resolved below
+                }
+                items.push(item);
+            } else if (feat.type === 'line') {
+                pathN++;
+                const item = { kind: 'fp', pmIdx: feat.pmIdx, selected: true, warnings: [], snaps: [] };
+                item.name = (feat.name || '').trim() || `Route Path ${pathN}`;
+                const verts = [];
+                feat.coords.forEach(c => {
+                    const v = { lat: c.lat, lng: c.lng };
+                    if (!verts.length || vkey(verts[verts.length - 1]) !== vkey(v)) verts.push(v);
+                });
+                item.verts = verts;
+                if (verts.length < 2) { item.err = 'fewer than 2 distinct vertices'; items.push(item); return; }
+                // Endpoint snap analysis: FP vertex first (connection =
+                // extension), else FFZ edge (mid-edge connection).
+                [0, verts.length - 1].forEach(vi => {
+                    const p = verts[vi];
+                    const gv = fpGraph ? nearestGraphVertex(fpGraph, p.lat, p.lng) : null;
+                    if (gv && gv.dist <= RC_SNAP_M) {
+                        const touch = rcArcAtVertex(fps, gv.key);
+                        item.snaps.push({
+                            vertIdx: vi, kind: 'fp-vertex', applied: true,
+                            from: { lat: p.lat, lng: p.lng }, to: { lat: gv.vert.lat, lng: gv.vert.lng },
+                            distFt: gv.dist * M_TO_FT,
+                            targetName: (touch && touch.fp.name) || 'flight path',
+                            arc: (touch && touch.arc) || null,
+                        });
+                        return;
+                    }
+                    let best = null;
+                    ffzs.forEach(ent => {
+                        const ring = entityCoords(ent);
+                        if (!ring || ring.length < 3) return;
+                        for (let i = 0; i < ring.length; i++) {
+                            const a = ring[i], b = ring[(i + 1) % ring.length];
+                            const d = pointToSegMeters(p.lat, p.lng, a, b);
+                            if (!best || d < best.d) best = { d, ent, a, b };
+                        }
+                    });
+                    if (best && best.d <= RC_SNAP_M) {
+                        const proj = rcProjOnSeg(p, best.a, best.b);
+                        const prev = verts[vi === 0 ? 1 : verts.length - 2];
+                        const ang = rcSegEdgeAngleDeg(prev, proj, best.a, best.b);
+                        const tName = best.ent.name || `FFZ #${best.ent.id}`;
+                        item.snaps.push({
+                            vertIdx: vi, kind: 'ffz-edge', applied: true,
+                            from: { lat: p.lat, lng: p.lng }, to: { lat: proj.lat, lng: proj.lng },
+                            distFt: best.d * M_TO_FT, targetName: tName, angleDeg: ang,
+                        });
+                        if (ang != null && ang < 15) item.warnings.push(`lands on "${tName}" at ${Math.round(ang)}° to the edge (SOP wants ≥15°, ideal 45°)`);
+                    }
+                });
+                // Altitude band: connected arc → nearest arc → nearest FFZ → DEM.
+                const snapArcS = item.snaps.find(s => s.applied && s.kind === 'fp-vertex' && s.arc && rcArcBand(s.arc));
+                if (snapArcS) {
+                    item.band = rcArcBand(snapArcS.arc);
+                    item.altSource = `copied from connected FP "${snapArcS.targetName}"`;
+                } else {
+                    const na = rcNearestArc(fps, verts);
+                    if (na && rcArcBand(na.arc)) {
+                        item.band = rcArcBand(na.arc);
+                        item.altSource = `copied from nearest FP "${na.fp.name || '#' + na.fp.id}" (${Math.round(na.d * M_TO_FT)} ft away)`;
+                    } else {
+                        const nf = rcNearestFfz(ffzs, verts[0]);
+                        const r = nf && nf.ent.restrictions;
+                        if (r && typeof r.minAlt === 'number' && typeof r.maxAlt === 'number' && r.maxAlt > r.minAlt) {
+                            const lo = fpArcAltMeters(r.minAlt), hi = fpArcAltMeters(r.maxAlt);
+                            item.band = { minM: lo, maxM: Math.max(hi, lo + 1) };
+                            item.altSource = `copied from FFZ "${nf.ent.name || '#' + nf.ent.id}" band (${Math.round(nf.d * M_TO_FT)} ft away)`;
+                        } else {
+                            item.needsDem = true;
+                        }
+                    }
+                }
+                // Junction sanity: every connected arc must STRICTLY overlap
+                // our band or the server 400s ("no overlapping altitude range").
+                if (item.band) {
+                    item.snaps.forEach(s => {
+                        if (!s.applied || s.kind !== 'fp-vertex' || !s.arc) return;
+                        const b = rcArcBand(s.arc);
+                        if (b && !(item.band.minM < b.maxM && b.minM < item.band.maxM)) {
+                            item.warnings.push(`band ${item.band.minM}–${item.band.maxM} m does not overlap "${s.targetName}" (${b.minM}–${b.maxM} m) at the junction — the server will reject; unsnap or fix altitudes`);
+                        }
+                    });
+                }
+                items.push(item);
+            }
+        });
+        // DEM fallback for items with no copyable neighbor.
+        const demItems = items.filter(i => i.needsDem && !i.err);
+        if (demItems.length) {
+            if (am.mode === 'unknown') {
+                demItems.forEach(i => { i.err = 'no nearby entity to copy altitudes from AND site altitude mode is unknown — set MSL/AGL in the ⊕ modal banner first'; });
+            } else {
+                const pts = [];
+                demItems.forEach(i => pts.push(...(i.kind === 'ffz' ? i.ring : i.verts)));
+                try { await bulkFetchElevations(pts); } catch (e) {}
+                demItems.forEach(i => {
+                    const groundM = maxCachedElevation(i.kind === 'ffz' ? i.ring : i.verts);
+                    if (groundM == null && am.mode === 'msl') { i.err = 'DEM ground unavailable (needed for MSL fallback altitudes)'; return; }
+                    if (i.kind === 'ffz') {
+                        i.restrictions = { minAlt: aglFtToStoredM(90, groundM, am.mode), maxAlt: aglFtToStoredM(210, groundM, am.mode) };
+                        i.altSource = `SOP fallback 90–210 ft AGL (no FFZ nearby to copy; ${am.mode.toUpperCase()})`;
+                    } else {
+                        i.band = { minM: fpArcAltMeters(aglFtToStoredM(90, groundM, am.mode)), maxM: fpArcAltMeters(aglFtToStoredM(120, groundM, am.mode)) };
+                        i.altSource = `SOP fallback 90–120 ft AGL (no FP/FFZ nearby to copy; ${am.mode.toUpperCase()})`;
+                    }
+                });
+            }
+        }
+        rcPlan = { siteID, items, builtAt: Date.now(), altMode: am.mode };
+        try { uwin().__aimRcPlan = rcPlan; } catch (e) {}
+        return rcPlan;
+    }
+
+    async function rcCommit(siteID, dryRun) {
+        if (liteBlockedWrite('convert proposed routes to FFZs/FPs')) return null;
+        const res = { created: 0, failed: 0, skipped: 0, errors: [], ids: [], convertedPmIdxs: [], dryRun };
+        const items = ((rcPlan && rcPlan.items) || []).filter(i => i.selected && !i.err);
+        if (!items.length) { res.errors.push('nothing selected'); return res; }
+        const csrf = getCsrfToken();
+        if (!csrf && !dryRun) { res.errors.push('no CSRF token — make one native save/edit anywhere in Percepto first, then retry'); return res; }
+        let siteCfg = null;
+        try { siteCfg = await fetchSiteConfig(siteID); } catch (e) {}
+        const bucket = mapObjectsBySite[siteID];
+        const ents = (bucket && bucket.entities) || [];
+        // Unique names across ALL entities (server 400s on duplicates).
+        const usedNames = new Set(ents.filter(e => e.name).map(e => e.name));
+        const uniqueName = (base) => { if (!base) base = 'Route'; if (!usedNames.has(base)) { usedNames.add(base); return base; } let i = 2, n; do { n = base + '_' + (i++); } while (usedNames.has(n)); usedNames.add(n); return n; };
+        const tmplFfzEnt = ents.find(e => e.type === 16 && entityCoords(e));
+        const tmplFpEnt = ents.find(e => e.type === 15 && Array.isArray(e.arcs) && e.arcs.length);
+        let tmplFfzBody = null, tmplFpBody = null;
+        if (tmplFfzEnt) { try { tmplFfzBody = buildWriteBody(tmplFfzEnt, siteCfg); } catch (e) {} }
+        if (tmplFpEnt) { try { tmplFpBody = buildWriteBody(tmplFpEnt, siteCfg); } catch (e) {} }
+        // Backup manifest BEFORE the first write (create-only, so this is
+        // the undo shopping list + an audit trail of what was sent).
+        if (!dryRun) {
+            try {
+                downloadJSONFile(`aim-route-convert-site${siteID}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
+                    JSON.stringify({ siteID, when: new Date().toISOString(), items: items.map(i => ({ kind: i.kind, pmIdx: i.pmIdx, name: i.name, altSource: i.altSource, restrictions: i.restrictions || null, band: i.band || null, verts: i.kind === 'fp' ? rcEffectiveVerts(i) : i.ring, snaps: (i.snaps || []).map(s => ({ kind: s.kind, applied: s.applied, target: s.targetName, distFt: Math.round(s.distFt) })) })) }, null, 2));
+            } catch (e) { console.warn(`${GEN_TAG} route-convert manifest download failed:`, e); }
+        }
+        const createdIds = [];
+        const post = async (body, label, pmIdx) => {
+            if (dryRun) { res.created++; res.convertedPmIdxs.push(pmIdx); return; }
+            try {
+                const r = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
+                const txt = await r.text(); let json = null; try { json = JSON.parse(txt); } catch (e) {}
+                const saved = json && json.map_objects;
+                if (r.status === 200 && saved) {
+                    res.created++;
+                    if (saved.id != null) { createdIds.push(saved.id); res.ids.push({ id: saved.id, name: label }); }
+                    res.convertedPmIdxs.push(pmIdx);
+                } else {
+                    res.failed++;
+                    res.errors.push(`${label}: server ${r.status} ${(txt || '').slice(0, 160)}`);
+                }
+            } catch (e) { res.failed++; res.errors.push(`${label}: POST threw ${e && e.message || e}`); }
+            await new Promise(rr => setTimeout(rr, 150));
+        };
+        // FFZs first, then FPs.
+        for (const it of items.filter(i => i.kind === 'ffz')) {
+            if (!it.restrictions || typeof it.restrictions.minAlt !== 'number') { res.skipped++; res.errors.push(`${it.name}: no altitude — skipped`); continue; }
+            const body = genCreateBody({ name: it.name, points: it.ring, restrictions: it.restrictions }, siteID, siteCfg, tmplFfzBody);
+            body.name = uniqueName(body.name);
+            await post(body, `FFZ ${body.name}`, it.pmIdx);
+        }
+        for (const it of items.filter(i => i.kind === 'fp')) {
+            if (!it.band) { res.skipped++; res.errors.push(`${it.name}: no altitude band — skipped`); continue; }
+            const verts = rcEffectiveVerts(it);
+            let body;
+            if (tmplFpBody) body = JSON.parse(JSON.stringify(tmplFpBody));
+            else {
+                // No FP on the site to clone — minimal body mirrors
+                // genCreateBody's base fields. Flag it so a server 400
+                // is understandable.
+                body = { type: 15, description: '', custom: {}, params: {}, asset_waypoints: null, constantly_present_asset_name: false, general_marker_type: '', marker_height: 0, is_unshielded: false, restrictions: null };
+                res.errors.push(`${it.name}: site has no existing FP to use as a template — using a minimal body (if the server rejects it, draw one FP natively first)`);
+            }
+            delete body.id;
+            body.type = 15;
+            body.name = uniqueName(genCleanName(it.name));
+            body.site_id = siteID;
+            body.description = '';
+            body.validated = false;
+            body.points = verts.map(v => ({ lat: v.lat, lng: v.lng }));
+            body.arcs = [];
+            for (let i = 0; i < verts.length - 1; i++) {
+                const a = { lat: verts[i].lat, lng: verts[i].lng };
+                const b = { lat: verts[i + 1].lat, lng: verts[i + 1].lng };
+                body.arcs.push({ point_a: a, point_b: b, points: [a, b], min_alt: it.band.minM, max_alt: it.band.maxM, min_emergency_alt: null });
+            }
+            body.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
+            // Uniform band ⇒ no-op, but keeps us safe if bands ever vary.
+            try { bridgeArcContinuity(body.arcs); } catch (e) {}
+            await post(body, `FP ${body.name}`, it.pmIdx);
+        }
+        // Verify: fresh fetch, confirm every created id landed.
+        if (!dryRun && createdIds.length) {
+            try {
+                await fetchMapObjects(siteID, true);
+                const fresh = ((mapObjectsBySite[siteID] || {}).entities) || [];
+                const missing = createdIds.filter(id => !fresh.some(e => e.id === id));
+                res.verified = createdIds.length - missing.length;
+                if (missing.length) res.errors.push(`verify: ${missing.length} created id(s) not found on re-fetch: ${missing.join(', ')}`);
+            } catch (e) { res.errors.push(`verify fetch failed: ${e && e.message || e}`); }
+            try { localStorage.setItem(RC_UNDO_LS + siteID, JSON.stringify({ when: Date.now(), ids: createdIds })); } catch (e) {}
+            // Tell Map Styler which route placemarks became real — it marks
+            // them for delete in the route KML + runs its commit prompt.
+            if (res.convertedPmIdxs.length && powerLinesChannel) {
+                try { powerLinesChannel.postMessage({ type: 'MARK_ROUTES_CONVERTED', siteID, pmIdxs: res.convertedPmIdxs }); } catch (e) {}
+            }
+        }
+        return res;
+    }
+
+    async function rcUndoLast(siteID) {
+        if (liteBlockedWrite('undo route conversion')) return null;
+        let stash = null;
+        try { stash = JSON.parse(localStorage.getItem(RC_UNDO_LS + siteID) || 'null'); } catch (e) {}
+        const ids = (stash && Array.isArray(stash.ids)) ? stash.ids : [];
+        if (!ids.length) { showToast('No route-conversion run to undo on this site.', 'rgba(255,180,0,0.6)'); return null; }
+        if (!confirm(`Delete the ${ids.length} entit${ids.length === 1 ? 'y' : 'ies'} created by the last route conversion?`)) return null;
+        const csrf = getCsrfToken();
+        if (!csrf) { showToast('No CSRF token — make one native save first.', 'rgba(255,120,120,0.6)'); return null; }
+        const out = { deleted: 0, failed: 0, errors: [] };
+        for (const id of ids) {
+            try {
+                const r = await fetch(`/map_objects/${id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
+                if (r.status === 200 || r.status === 204) out.deleted++;
+                else { out.failed++; out.errors.push(`#${id}: server ${r.status}`); }
+            } catch (e) { out.failed++; out.errors.push(`#${id}: ${e && e.message || e}`); }
+        }
+        try { localStorage.removeItem(RC_UNDO_LS + siteID); } catch (e) {}
+        try { await fetchMapObjects(siteID, true); } catch (e) {}
+        return out;
+    }
+
+    function rcCloseModal() {
+        const m = document.getElementById(RC_MODAL_ID);
+        if (m) m.remove();
+    }
+
+    function rcRenderRows(listEl) {
+        const items = (rcPlan && rcPlan.items) || [];
+        const ftM = (v) => `${v.toFixed(1)} m / ${Math.round(v * M_TO_FT)} ft`;
+        listEl.innerHTML = items.map((it, ii) => {
+            const icon = it.kind === 'ffz' ? '🟧' : '🛩';
+            const kindLbl = it.kind === 'ffz' ? 'FFZ' : 'Flight Path';
+            const geom = it.kind === 'ffz'
+                ? `${it.ring.length} vertices`
+                : `${it.verts.length} waypoints → ${it.verts.length - 1} arc${it.verts.length === 2 ? '' : 's'}`;
+            const alt = it.err ? '' : (it.kind === 'ffz'
+                ? (it.restrictions ? `alt ${ftM(it.restrictions.minAlt)} – ${ftM(it.restrictions.maxAlt)}` : 'alt: —')
+                : (it.band ? `band ${it.band.minM}–${it.band.maxM} m (${Math.round(it.band.minM * M_TO_FT)}–${Math.round(it.band.maxM * M_TO_FT)} ft)` : 'band: —'));
+            const snapChips = (it.snaps || []).map((s, si) => {
+                const which = s.vertIdx === 0 ? 'start' : 'end';
+                const what = s.kind === 'fp-vertex'
+                    ? `FP "${s.targetName}" vertex (${Math.round(s.distFt)} ft)`
+                    : `FFZ "${s.targetName}" edge (${Math.round(s.distFt)} ft${s.angleDeg != null ? ` · ${Math.round(s.angleDeg)}°` : ''})`;
+                return s.applied
+                    ? `<span style="display:inline-block;margin:2px 4px 0 0;padding:1px 6px;border:1px solid rgba(95,255,95,0.5);border-radius:3px;color:#5fff5f;font-size:10px">⚡ ${which} → ${what} <button data-rc-unsnap="${ii}:${si}" style="background:transparent;border:none;color:#ffb347;cursor:pointer;font-size:10px;padding:0 0 0 3px" title="Undo this snap (keep the drawn position)">↩</button></span>`
+                    : `<span style="display:inline-block;margin:2px 4px 0 0;padding:1px 6px;border:1px dashed rgba(255,179,71,0.5);border-radius:3px;color:#ffb347;font-size:10px">unsnapped ${which} <button data-rc-resnap="${ii}:${si}" style="background:transparent;border:none;color:#5fff5f;cursor:pointer;font-size:10px;padding:0 0 0 3px" title="Re-apply this snap">⚡</button></span>`;
+            }).join('');
+            const warns = (it.warnings || []).map(w => `<div style="color:#ff9a3d;font-size:10px;margin-top:2px">⚠ ${w}</div>`).join('');
+            const err = it.err ? `<div style="color:#ff8a80;font-size:10px;margin-top:2px">✗ ${it.err}</div>` : '';
+            return `<div style="padding:7px 8px;border-bottom:1px solid rgba(255,255,255,0.07);${it.err ? 'opacity:0.65;' : ''}">
+                <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer">
+                    <input type="checkbox" data-rc-sel="${ii}" ${it.selected && !it.err ? 'checked' : ''} ${it.err ? 'disabled' : ''} style="accent-color:#ff9100;margin-top:2px">
+                    <div style="flex:1;min-width:0">
+                        <div style="font-size:12px;color:#fff">${icon} <b style="color:#ff9100">${kindLbl}</b> “${it.name}” <span style="color:#888;font-size:10px">· route #${it.pmIdx}</span></div>
+                        <div style="font-size:10px;color:#9ad;margin-top:2px">${geom}${alt ? ` · ${alt}` : ''}${it.altSource ? ` <span style="color:#888">(${it.altSource})</span>` : ''}</div>
+                        ${snapChips ? `<div style="margin-top:2px">${snapChips}</div>` : ''}
+                        ${warns}${err}
+                    </div>
+                </label>
+            </div>`;
+        }).join('') || '<div style="padding:10px;color:#888;font-size:11px">No convertible routes.</div>';
+    }
+
+    async function rcOpenPreview(siteID, statsEl) {
+        // Ask the Map Styler for route features and give it a moment.
+        try { requestPowerLinesKml(siteID); } catch (e) {}
+        const t0 = Date.now();
+        while (Date.now() - t0 < 3000) {
+            if (powerLinesKml.siteID === siteID && powerLinesKml.route.length) break;
+            await new Promise(r => setTimeout(r, 250));
+        }
+        if (!(powerLinesKml.siteID === siteID && powerLinesKml.route.length)) {
+            if (statsEl) statsEl.innerHTML = `<span style="color:#ffb347">No Proposed Routes received for this site — draw + COMMIT routes in the Map Styler's "Proposed routes" card first (needs Map Styler v34.128+; pending/uncommitted routes don't count).</span>`;
+            return;
+        }
+        if (statsEl) statsEl.innerHTML = `<span style="color:#9ad">Building conversion plan (${powerLinesKml.route.length} route feature${powerLinesKml.route.length === 1 ? '' : 's'})…</span>`;
+        await rcBuildPlan(siteID);
+        rcCloseModal();
+        const m = document.createElement('div');
+        m.id = RC_MODAL_ID;
+        m.style.cssText = 'position:fixed;inset:0;z-index:2147483600;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
+        const box = document.createElement('div');
+        box.style.cssText = 'background:#15181d;border:2px solid #ff9100;border-radius:8px;width:640px;max-width:92vw;max-height:84vh;display:flex;flex-direction:column;box-shadow:0 8px 30px rgba(0,0,0,0.6)';
+        box.innerHTML = `
+            <div style="padding:12px 16px;border-bottom:1px solid rgba(255,145,0,0.3)">
+                <div style="color:#ff9100;font-size:14px;font-weight:700">🟠 Convert Proposed Routes → real entities</div>
+                <div style="color:#888;font-size:10px;margin-top:3px">Create-only — existing entities are never modified. Snapping an endpoint onto an existing FP vertex CONNECTS (extends) that flight path. Altitude mode: <b style="color:#9ad">${(rcPlan.altMode || 'unknown').toUpperCase()}</b>.</div>
+            </div>
+            <div id="aim-rc-list" style="flex:1;overflow-y:auto;min-height:80px"></div>
+            <div style="padding:10px 16px;border-top:1px solid rgba(255,145,0,0.3)">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc;margin-bottom:8px"><input type="checkbox" id="aim-rc-dryrun" checked style="accent-color:#ff9100"> Dry run <span style="color:#888;font-size:10px">(build + count, don't write)</span></label>
+                <div style="display:flex;gap:8px;flex-wrap:wrap">
+                    <button id="aim-rc-convert" style="background:rgba(255,145,0,0.18);color:#ff9100;border:1px solid rgba(255,145,0,0.6);border-radius:3px;padding:7px 16px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">✓ Convert</button>
+                    <button id="aim-rc-rebuild" style="background:transparent;color:#9ad;border:1px solid rgba(122,223,230,0.4);border-radius:3px;padding:7px 12px;cursor:pointer;font:inherit;font-size:12px">🔁 Rebuild plan</button>
+                    <button id="aim-rc-undo" style="background:transparent;color:#ff8a80;border:1px solid rgba(255,90,90,0.4);border-radius:3px;padding:7px 12px;cursor:pointer;font:inherit;font-size:12px">↩ Undo last convert</button>
+                    <button id="aim-rc-close" style="background:transparent;color:#888;border:1px solid rgba(255,255,255,0.2);border-radius:3px;padding:7px 12px;cursor:pointer;font:inherit;font-size:12px;margin-left:auto">Close</button>
+                </div>
+                <div id="aim-rc-result" style="margin-top:8px;font-size:11px;color:#9ad;line-height:1.5">Review snaps + altitudes above, dry-run first, then uncheck Dry run and Convert.</div>
+            </div>`;
+        m.appendChild(box);
+        document.body.appendChild(m);
+        const listEl = box.querySelector('#aim-rc-list');
+        const resultEl = box.querySelector('#aim-rc-result');
+        rcRenderRows(listEl);
+        // Delegated clicks: per-snap undo/redo + selection checkboxes.
+        listEl.addEventListener('click', (e) => {
+            const un = e.target.closest && e.target.closest('[data-rc-unsnap]');
+            const re = e.target.closest && e.target.closest('[data-rc-resnap]');
+            const tag = un || re;
+            if (!tag) return;
+            e.preventDefault(); e.stopPropagation();
+            const [ii, si] = tag.getAttribute(un ? 'data-rc-unsnap' : 'data-rc-resnap').split(':').map(Number);
+            const it = rcPlan.items[ii];
+            if (it && it.snaps && it.snaps[si]) { it.snaps[si].applied = !!re; rcRenderRows(listEl); }
+        });
+        listEl.addEventListener('change', (e) => {
+            const cb = e.target.closest && e.target.closest('[data-rc-sel]');
+            if (!cb) return;
+            const it = rcPlan.items[Number(cb.getAttribute('data-rc-sel'))];
+            if (it) it.selected = !!cb.checked;
+        });
+        box.querySelector('#aim-rc-close').onclick = () => rcCloseModal();
+        box.querySelector('#aim-rc-rebuild').onclick = async () => {
+            resultEl.innerHTML = '<span style="color:#9ad">Rebuilding…</span>';
+            try { requestPowerLinesKml(siteID); await new Promise(r => setTimeout(r, 600)); await rcBuildPlan(siteID); rcRenderRows(listEl); resultEl.innerHTML = 'Plan rebuilt.'; }
+            catch (e2) { resultEl.innerHTML = `<span style="color:#ff8a80">Rebuild failed: ${String(e2.message || e2)}</span>`; }
+        };
+        box.querySelector('#aim-rc-undo').onclick = async () => {
+            resultEl.innerHTML = '<span style="color:#9ad">Undoing…</span>';
+            const out = await rcUndoLast(siteID);
+            resultEl.innerHTML = out
+                ? `<b style="color:${out.failed ? '#ffb347' : '#5fff5f'}">Deleted ${out.deleted}${out.failed ? ` · ${out.failed} failed` : ''}.</b>${out.errors.length ? `<br><span style="color:#ff8a80">${out.errors.join('<br>')}</span>` : ''} Refresh Percepto to update the native map.`
+                : 'Nothing undone.';
+        };
+        const convBtn2 = box.querySelector('#aim-rc-convert');
+        convBtn2.onclick = async () => {
+            const dryRun = !!box.querySelector('#aim-rc-dryrun').checked;
+            convBtn2.disabled = true; const keep = convBtn2.textContent; convBtn2.textContent = dryRun ? 'Simulating…' : 'Converting…';
+            try {
+                const r = await rcCommit(siteID, dryRun);
+                if (!r) { resultEl.innerHTML = '<span style="color:#ffb347">Blocked.</span>'; return; }
+                const errHtml = r.errors.length ? `<br><span style="color:#ff8a80">${r.errors.map(x => `• ${x}`).join('<br>')}</span>` : '';
+                resultEl.innerHTML = dryRun
+                    ? `<b style="color:#7adfe6">DRY RUN:</b> would create <b>${r.created}</b> entit${r.created === 1 ? 'y' : 'ies'}${r.skipped ? ` · ${r.skipped} skipped` : ''}.${errHtml}<br><span style="color:#888">Uncheck Dry run to write for real.</span>`
+                    : `<b style="color:${r.failed ? '#ffb347' : '#5fff5f'}">Created ${r.created}</b>${r.verified != null ? ` (verified ${r.verified})` : ''}${r.failed ? ` · <b style="color:#ff8a80">${r.failed} failed</b>` : ''}${r.skipped ? ` · ${r.skipped} skipped` : ''}.${errHtml}<br><span style="color:#888">A backup manifest downloaded. The Map Styler is prompting to remove converted routes from the route KML. <b style="color:#fff">Refresh Percepto</b> to see the new entities natively.</span>`;
+            } catch (e2) {
+                console.error(`${GEN_TAG} route convert commit failed:`, e2);
+                resultEl.innerHTML = `<span style="color:#ff8a80">Convert error: ${String(e2.message || e2)}</span>`;
+            } finally {
+                convBtn2.disabled = false; convBtn2.textContent = keep;
+            }
+        };
+    }
+
     // ===== Edit EXISTING FFZs — load committed type-16 entities into the SAME
     // editable preview layer (drag / Q-E rotate / Alt-snap auto-size / resize),
     // then save back as an UPSERT (id preserved) instead of a new DRAFT create.
@@ -16620,6 +17115,7 @@
                 <button id="aim-gen-snapclean" title="Snap the whole loaded network ~50ft parallel to the power lines + clean up the vertices." style="background:rgba(186,140,255,0.14);color:#ba8cff;border:1px solid rgba(186,140,255,0.55);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✨ Snap &amp; Clean</button>
                 <button id="aim-gen-routes" style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🛩 Routes</button>
                 <button id="aim-gen-routes-json" title="Copy the last route result as JSON to the clipboard (to share for debugging)" style="background:rgba(0,229,255,0.08);color:#00e5ff;border:1px solid rgba(0,229,255,0.4);border-radius:3px;padding:8px 10px;cursor:pointer;font:inherit;font-size:12px">⧉ Copy JSON</button>
+                <button id="aim-gen-convroutes" title="Convert 🟠 Proposed Routes (drawn + committed in the Map Styler's route KML) into REAL entities: route paths → Flight Paths, route polygons → FFZs. FP endpoints auto-snap ≤50 ft to existing FP vertices (= extends that FP) or FFZ edges. Altitudes copied from the nearest existing entity. Preview + dry-run + undo; create-only." style="background:rgba(255,145,0,0.14);color:#ff9100;border:1px solid rgba(255,145,0,0.55);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🟠 Convert routes</button>
                 <button id="aim-gen-preview" style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:8px 18px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">👁 Preview on map</button>
             </div>
             <div id="aim-adv-controls" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(95,184,255,0.06);border:1px dashed rgba(95,184,255,0.35);border-radius:3px">
@@ -16848,6 +17344,21 @@
                 : (downloadJSONFile(`aim-route-site${siteID}.json`, json)
                     ? `<span style="color:#5fff5f">Downloaded aim-route-site${siteID}.json</span> <span style="color:#888">(clipboard blocked)</span>`
                     : `<span style="color:#ffb347">Copy from console: window.__aimRoute</span>`);
+        };
+        const convRoutesBtn = box.querySelector('#aim-gen-convroutes');
+        convRoutesBtn.onclick = async () => {
+            convRoutesBtn.disabled = true;
+            const restoreCr = convRoutesBtn.textContent;
+            convRoutesBtn.textContent = 'Loading routes…';
+            try {
+                await rcOpenPreview(siteID, statsEl);
+            } catch (e) {
+                console.error(`${GEN_TAG} route converter failed:`, e);
+                statsEl.innerHTML = `<span style="color:#ff8a80">Route converter error: ${String(e.message || e)}</span>`;
+            } finally {
+                convRoutesBtn.disabled = false;
+                convRoutesBtn.textContent = restoreCr;
+            }
         };
         const previewBtn = box.querySelector('#aim-gen-preview');
         previewBtn.onclick = async () => {

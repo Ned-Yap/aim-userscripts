@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.127
+// @version      34.128
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -57,7 +57,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.127';
+    const SCRIPT_VERSION = '34.128';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -735,12 +735,14 @@
     const TOKEN_KEY = 'aim-github-token';
     const KMLS_REPO = 'Ned-Yap/aim-userscripts-data';
     const KMLS_BRANCH = 'main';
+    // v4 (34.128): features carry the placemark <name> (Route Converter
+    // needs it to name created FFZs/FPs).
     // v3 (Map Styler 34.29+): cache entries now carry the resolved
     // filename (e.g. "1596-distro.kml" vs "1596-Distro.kml" vs ".kmz")
     // so subsequent commits/splits hit the same file the fetch resolved.
     // v2 (34.21): features carry pmIdx + visible.
     // Bumping skips old cache entries; small refetch cost on first load.
-    const KML_CACHE_PREFIX = 'aim-kml-cache-v3-';
+    const KML_CACHE_PREFIX = 'aim-kml-cache-v4-';
     const KML_PENDING_PREFIX = 'aim-kml-pending-'; // suffixed with `${siteID}-${type}` — LOCAL HIDES ONLY, never commits
     const KML_COMMIT_OPS_PREFIX = 'aim-kml-commit-ops-'; // suffixed with `${siteID}-${type}` — commit-bound ops (delete/modify/add)
     const GITHUB_API_BASE = 'https://api.github.com';
@@ -4054,13 +4056,18 @@
             let visible = true;
             const visEl = pm.querySelector(':scope > visibility');
             if (visEl && visEl.textContent.trim() === '0') visible = false;
+            // v34.128: carry the placemark <name> so consumers (Route
+            // Converter) can name created entities after the route.
+            let name = '';
+            const nameEl = pm.querySelector(':scope > name');
+            if (nameEl) name = (nameEl.textContent || '').trim();
             pm.querySelectorAll('LineString > coordinates').forEach(c => {
                 const coords = parseCoords(c.textContent);
-                if (coords.length >= 2) out.push({ type: 'line', coords, pmIdx, visible });
+                if (coords.length >= 2) out.push({ type: 'line', coords, pmIdx, visible, name });
             });
             pm.querySelectorAll('Polygon > outerBoundaryIs > LinearRing > coordinates').forEach(c => {
                 const coords = parseCoords(c.textContent);
-                if (coords.length >= 3) out.push({ type: 'polygon', coords, pmIdx, visible });
+                if (coords.length >= 3) out.push({ type: 'polygon', coords, pmIdx, visible, name });
             });
         });
         return out;
@@ -8995,6 +9002,24 @@
         catch (e) { console.warn(`${TAG} KML data channel unavailable:`, e); return; }
         chan.onmessage = (ev) => {
             const m = ev.data || {};
+            // v34.128: the Asset Inspector's Route Converter reports which
+            // route placemarks became real FFZs/FPs — mark them for delete
+            // in the route KML and run the normal commit prompt. Same
+            // frame/focus gating as TRIGGER_ACTION (BroadcastChannel
+            // reaches every tab; only the focused rendering frame acts).
+            if (m.type === 'MARK_ROUTES_CONVERTED') {
+                if (!rendersInThisFrame() || !document.hasFocus()) return;
+                const sid = getCurrentSiteID();
+                if (!sid || String(sid) !== String(m.siteID)) return;
+                const idxs = Array.isArray(m.pmIdxs) ? m.pmIdxs.filter(n => Number.isFinite(n)) : [];
+                if (!idxs.length) return;
+                idxs.forEach(i => markPlacemarkForDelete(sid, 'route', i));
+                showKMLToast(`${idxs.length} converted route${idxs.length === 1 ? '' : 's'} marked for deletion from the route KML — confirm the commit to finish.`, 6000);
+                if (isActive) runUpdate();
+                // Slight delay so the toast paints before the confirm() blocks.
+                setTimeout(() => { try { commitPendingOps('route'); } catch (e) { console.error(`${TAG} route-converted commit failed:`, e); } }, 400);
+                return;
+            }
             if (m.type !== 'REQUEST_KML_FEATURES') return;
             const reqSite = m.siteID;
             if (!reqSite) return;
@@ -9003,12 +9028,14 @@
             // a different site.
             const distro = kmlFeatures[`${reqSite}|distro`] || [];
             const trans = kmlFeatures[`${reqSite}|trans`] || [];
-            if (distro.length === 0 && trans.length === 0) return;
+            const route = kmlFeatures[`${reqSite}|route`] || [];
+            if (distro.length === 0 && trans.length === 0 && route.length === 0) return;
             chan.postMessage({
                 type: 'KML_FEATURES_RESPONSE',
                 siteID: reqSite,
                 distro,
                 trans,
+                route,
                 fromVersion: SCRIPT_VERSION,
             });
         };
