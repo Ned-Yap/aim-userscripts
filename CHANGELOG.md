@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-01 — Site Setup Tools v4.225 (dev/latest): 🟠 Route Converter — one-click "🔄 Reload Percepto now" after a real convert
+
+Percepto only reads entities at page load, so converted/extended flight paths don't appear (and aren't safely editable) until a full reload — and a native Save from the stale page could overwrite an extension. The convert result now ends with a **🔄 Reload Percepto now** button (reloads the whole app from the top window) plus an explicit warning. Answer the Map Styler's route-KML cleanup prompt first, then hit reload. (Shift+K can't help here — Kick redraws AIM's overlays, not Percepto's own entity state.)
+
 ## 2026-08-01 — Site Setup Tools v4.224 (dev/latest): 🟠 Route Converter — snapped paths now EXTEND the host flight path (new segments, no new entity)
 
 A route path snapped onto an existing FP vertex no longer creates a separate flight path — it **merges into that FP as new segments** (one update, arcs appended), exactly like drawing a branch in Percepto's editor. Because the host FP already connects to an FFZ, the "not connected to any free zone" rule is satisfied automatically. The preview shows **⟳ merges into FP "flight_path_1" as new segments**; multiple routes extending the same FP are batched into one save.

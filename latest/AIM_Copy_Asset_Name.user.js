@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.224
+// @version      4.225
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.224';
+    const SCRIPT_VERSION = '4.225';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -17011,7 +17011,16 @@
                 const errHtml = r.errors.length ? `<br><span style="color:#ff8a80">${r.errors.map(x => `• ${x}`).join('<br>')}</span>` : '';
                 resultEl.innerHTML = dryRun
                     ? `<b style="color:#7adfe6">DRY RUN:</b> would create <b>${r.created}</b> · extend <b>${r.extended}</b>${r.skipped ? ` · ${r.skipped} skipped` : ''}.${errHtml}<br><span style="color:#888">Uncheck Dry run to write for real.</span>`
-                    : `<b style="color:${r.failed ? '#ffb347' : '#5fff5f'}">Created ${r.created} · extended ${r.extended}</b>${r.verified != null ? ` (verified ${r.verified})` : ''}${r.failed ? ` · <b style="color:#ff8a80">${r.failed} failed</b>` : ''}${r.skipped ? ` · ${r.skipped} skipped` : ''}.${errHtml}<br><span style="color:#888">A backup manifest downloaded. The Map Styler is prompting to remove converted routes from the route KML. <b style="color:#fff">Refresh Percepto</b> to see the changes natively.</span>`;
+                    : `<b style="color:${r.failed ? '#ffb347' : '#5fff5f'}">Created ${r.created} · extended ${r.extended}</b>${r.verified != null ? ` (verified ${r.verified})` : ''}${r.failed ? ` · <b style="color:#ff8a80">${r.failed} failed</b>` : ''}${r.skipped ? ` · ${r.skipped} skipped` : ''}.${errHtml}<br><span style="color:#888">A backup manifest downloaded. Answer the Map Styler's route-KML cleanup prompt, then reload — <b style="color:#ffb347">Percepto only reads entities at page load</b>, and a native Save from this stale page could overwrite the extension.</span>` +
+                      ((r.created + r.extended) > 0
+                        ? `<div style="margin-top:8px"><button id="aim-rc-reload" style="background:rgba(95,255,95,0.18);color:#5fff5f;border:1px solid rgba(95,255,95,0.6);border-radius:3px;padding:7px 16px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">🔄 Reload Percepto now</button></div>`
+                        : '');
+                const reloadBtn = resultEl.querySelector('#aim-rc-reload');
+                if (reloadBtn) reloadBtn.onclick = () => {
+                    // We run in the map IFRAME — reload the whole app from TOP
+                    // (same origin). Fallback: reload this frame.
+                    try { window.top.location.reload(); } catch (e) { location.reload(); }
+                };
             } catch (e2) {
                 console.error(`${GEN_TAG} route convert commit failed:`, e2);
                 resultEl.innerHTML = `<span style="color:#ff8a80">Convert error: ${String(e2.message || e2)}</span>`;
