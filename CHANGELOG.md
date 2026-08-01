@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-01 — Map Styler v34.129 + Site Setup Tools v4.222 (dev/latest): 🟠 route buffers piggyback the FP 40/65 ft settings · converter snaps to FP vertices ONLY
+
+- **Route buffers = the real FP/FFZ buffers now.** The v34.127 standalone 200 ft halo is gone. Route **paths** wear the Flight Path card's **40 ft inner + 65 ft outer bands** — same distances, colors, and opacities as whatever `fp.distance` / `fp.65ft-*` are set to (honors the FP card's Show-buffer / 65ft-band toggles). Route **polygons** wear the FFZ card's buffer the same way. One toggle on the route card turns the whole treatment on/off; change the FP card and routes follow. Proposed routes now preview exactly like the entities they'll become.
+- **Route Converter: FP-vertex snapping ONLY.** The FFZ-edge snap tier is removed — endpoints snap ≤50 ft to existing FP vertices (shared waypoint = extends that FP), nothing else. FFZs still contribute to the altitude-copy ladder; they're just never snap targets.
+
 ## 2026-08-01 — Control Panel v1.40 (dev/latest): 🔒 lock open + draggable + resizable panel
 
 The AIM Controls dropdown is now a real floating panel:

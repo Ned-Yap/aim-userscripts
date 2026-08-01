@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.128
+// @version      34.129
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -57,7 +57,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.128';
+    const SCRIPT_VERSION = '34.129';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -379,11 +379,7 @@
                 { id: 'route.fill', label: 'Fill polygons', type: 'boolean', default: true },
                 { id: 'route.fill-opacity', label: 'Fill opacity', type: 'number',
                   min: 0.05, max: 1, step: 0.05, default: 0.25, unit: 'fill' },
-                { id: 'route.buffer', label: 'Show buffer halo', type: 'boolean', default: true },
-                { id: 'route.buffer-width', label: 'Buffer distance', type: 'number',
-                  min: 25, max: 500, step: 25, default: 200, unit: 'ft/side' },
-                { id: 'route.buffer-opacity', label: 'Buffer opacity', type: 'number',
-                  min: 0.05, max: 0.6, step: 0.05, default: 0.15, unit: 'fill' },
+                { id: 'route.buffer', label: 'FP/FFZ-style buffers (uses those cards’ settings)', type: 'boolean', default: true },
                 { type: 'header', label: 'Edit mode' },
                 { id: 'route.edit-mode', label: 'Enable right-click actions', type: 'boolean', default: false },
                 { id: 'route.show-hidden', label: 'Show my hidden routes (dashed)', type: 'boolean', default: false },
@@ -6682,43 +6678,59 @@
         const fillOn = toggleState[`${type}.fill`] === true;
         const fillOpN = Number(toggleState[`${type}.fill-opacity`]);
         const fillOpacity = isNaN(fillOpN) ? 0.25 : fillOpN;
-        // v34.127: buffer halo — wide translucent under-stroke showing the
-        // real-world corridor around the feature (default 200 ft each side),
-        // mimicking the FP/FFZ buffer look so proposed routes can be
-        // positioned precisely. Width is METRIC (ft → px at current zoom,
-        // via ftToPx) so it scales with zoom like native buffers — unlike
-        // the fixed-px line thickness. Controls exposed on the route card;
-        // logic type-generic like fill.
+        // v34.129 (was a standalone 200 ft halo in v34.127): buffers now
+        // PIGGYBACK the real categories' settings — a route PATH is a
+        // future Flight Path, so it wears the FP 40 ft + 65 ft bands
+        // (fp.distance/color/opacity + fp.65ft-*, honoring fp.buffer and
+        // fp.65ft-band); a route POLYGON is a future FFZ, so it wears the
+        // FFZ buffer (ffz.distance/color/opacity, honoring ffz.buffer).
+        // One route toggle enables the treatment; every size/color/opacity
+        // follows the FP/FFZ cards so a proposed route previews exactly
+        // like the real entity it becomes. Widths are METRIC (ft → px at
+        // current zoom via ftToPx) so they scale with zoom like native
+        // buffers.
         const bufferOn = toggleState[`${type}.buffer`] === true;
-        let bufferPx = 0;
+        let pxPerFt = 0;
         if (bufferOn) {
-            const bw = Number(toggleState[`${type}.buffer-width`]);
-            const widthFt = (isFinite(bw) && bw > 0) ? bw : 200;
             const bmap = getLeafletMap();
-            if (bmap) {
-                // ×2: the control is distance per SIDE; stroke-width spans both.
-                try { bufferPx = ftToPx(bmap, widthFt * 2); } catch (e) { bufferPx = 0; }
-            }
+            if (bmap) { try { pxPerFt = ftToPx(bmap, 1); } catch (e) { pxPerFt = 0; } }
         }
-        const bufOpN = Number(toggleState[`${type}.buffer-opacity`]);
-        const bufferOpacity = isNaN(bufOpN) ? 0.15 : bufOpN;
-        // Inserted at g.firstChild AFTER the feature path is inserted there,
-        // so the halo lands under its own line (and everything else).
-        const addBufferHalo = (d, color) => {
-            if (!(bufferPx > 0)) return;
+        const numTog = (key, fb) => { const v = Number(toggleState[key]); return isNaN(v) ? fb : v; };
+        const mkBand = (d, ft, color, opacity) => {
+            if (!(pxPerFt > 0) || !(ft > 0)) return;
             const b = document.createElementNS('http://www.w3.org/2000/svg', 'path');
             b.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
             b.setAttribute('data-buffer-kind', `kml-${type}-halo`);
             b.setAttribute('d', d);
             b.setAttribute('fill', 'none');
             b.setAttribute('stroke', color);
-            b.setAttribute('stroke-opacity', String(bufferOpacity));
-            b.setAttribute('stroke-width', String(bufferPx));
+            b.setAttribute('stroke-opacity', String(opacity));
+            // ×2: distance is per SIDE, stroke-width spans both sides.
+            b.setAttribute('stroke-width', String(2 * ft * pxPerFt));
             b.setAttribute('stroke-linejoin', 'round');
             b.setAttribute('stroke-linecap', 'round');
             b.setAttribute('pointer-events', 'none');
+            // Inserted at g.firstChild AFTER the feature path (and after any
+            // previous band), so stacking ends up outer-band < inner-band
+            // < line — same darker-inner / lighter-outer read as real FPs.
             if (g.firstChild) g.insertBefore(b, g.firstChild);
             else g.appendChild(b);
+        };
+        const addBufferHalo = (d, isPolygonFeature) => {
+            if (!bufferOn) return;
+            if (isPolygonFeature) {
+                if (toggleState['ffz.buffer'] === false) return;
+                mkBand(d, numTog('ffz.distance', 15), toggleState['ffz.color'] || '#5fff5f', numTog('ffz.opacity', 0.4));
+            } else {
+                if (toggleState['fp.buffer'] !== false) {
+                    mkBand(d, numTog('fp.distance', 40), toggleState['fp.color'] || '#1ca0de', numTog('fp.opacity', 0.5));
+                }
+                if (toggleState['fp.65ft-band'] !== false) {
+                    mkBand(d, numTog('fp.65ft-distance', 65),
+                        toggleState['fp.65ft-color'] || toggleState['fp.color'] || '#1ca0de',
+                        numTog('fp.65ft-opacity', 0.225));
+                }
+            }
         };
         // E1 editing state — only relevant when at least one of edit-mode
         // or show-hidden is on. pointer-events stays 'none' otherwise so
@@ -6776,9 +6788,10 @@
                 }
                 if (g.firstChild) g.insertBefore(p, g.firstChild);
                 else g.appendChild(p);
-                // Halo on pending/preview too — positioning against the
-                // corridor BEFORE committing is the whole point.
-                addBufferHalo(d, '#5fff5f');
+                // Buffers on pending/preview too — positioning against the
+                // real FP/FFZ corridor BEFORE committing is the whole point
+                // (the line itself stays green to read as pending).
+                addBufferHalo(d, isPendingPoly);
                 return;
             }
             const isVis = effectiveVisible(siteID, type, f.pmIdx, f.visible);
@@ -6858,11 +6871,11 @@
             // the FFZ/FP/asset outlines.
             if (g.firstChild) g.insertBefore(p, g.firstChild);
             else g.appendChild(p);
-            // Halo for visible features (incl. modify-marked — the user is
-            // actively positioning those). Hidden ghosts and delete-marked
-            // stay halo-free so their dash state reads clearly.
+            // Buffers for visible features (incl. modify-marked — the user
+            // is actively positioning those). Hidden ghosts and delete-
+            // marked stay bare so their dash state reads clearly.
             if (isVis && !(commitOp && commitOp.op === 'delete')) {
-                addBufferHalo(d, stroke);
+                addBufferHalo(d, f.type === 'polygon');
             }
         });
     }
