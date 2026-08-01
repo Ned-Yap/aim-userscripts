@@ -6,6 +6,13 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-31 — ⭐ PROMOTED TO PROD: Site Setup Tools v4.219
+
+Coworkers jump **4.216 → 4.219** on the next Tampermonkey update check. What's new:
+
+- **💾 Backup site (raw JSON)** — bottom of the SUM panel's 📤 Export ▾ menu. Downloads every entity of the current site as the raw server payload, named `<Site Name>_<Site ID>_<MM-DD-YYYY>.json` (`_QA` suffix on the QA server). This is a **restore-grade** backup (the exact shape the save endpoint accepts), always fetched fresh from the server. Grab one before any risky bulk edit.
+- **⛰ Terrain profiler: selectable profile area** — the analysis footprint now defaults to a convex hull of all site entities (FP-heavy sites with little FFZ footprint used to get almost nothing); FFZ+FP-corridor, FFZ-only, and full-rectangle modes selectable.
+
 ## 2026-07-31 — Site Setup Tools v4.219 (dev/latest): backup filename → SiteName_SiteID_MM-DD-YYYY.json
 
 The 💾 backup file is now named `<Site Name>_<Site ID>_<MM-DD-YYYY>.json` (e.g. `Houston_1597_07-31-2026.json`), with a `_QA` suffix on the QA server so dumps from the two databases stay distinguishable.
