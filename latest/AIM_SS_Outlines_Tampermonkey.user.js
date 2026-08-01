@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.129
+// @version      34.130
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -57,7 +57,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.129';
+    const SCRIPT_VERSION = '34.130';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -4316,6 +4316,48 @@
     const SNAP_TOLERANCE_PX = 10;
     let snapIndicator = null;
 
+    // ============================================================
+    // REAL flight-path vertices (v34.130) — snap targets for ROUTE
+    // draw/edit. A route path is a future FP: starting or ending it
+    // EXACTLY on an existing FP vertex is what lets the Route
+    // Converter connect/extend that flight path. Fetched from
+    // Percepto's own /map_objects/ endpoint (cookie auth, origin-
+    // relative so QA stays on QA), cached per site with a 60 s TTL
+    // so freshly saved FPs show up on the next draw session.
+    // ============================================================
+    let realFpVerts = { siteID: null, verts: [], fetchedAt: 0, loading: false };
+    function ensureRealFpVerts(siteID) {
+        if (!siteID) return;
+        if (realFpVerts.siteID === siteID
+            && (realFpVerts.loading || (Date.now() - realFpVerts.fetchedAt) < 60000)) return;
+        realFpVerts = { siteID, verts: realFpVerts.siteID === siteID ? realFpVerts.verts : [], fetchedAt: 0, loading: true };
+        fetch(`/map_objects/?getPoiMapObjectsAsList=true&site_id=${encodeURIComponent(siteID)}`, { credentials: 'same-origin' })
+            .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+            .then(data => {
+                if (!Array.isArray(data)) throw new Error('response not an array');
+                const verts = [];
+                const seen = new Set();
+                data.forEach(e => {
+                    if (!e || e.type !== 15 || !Array.isArray(e.arcs)) return;
+                    e.arcs.forEach(a => {
+                        [a && a.point_a, a && a.point_b].forEach(p => {
+                            if (!p || !Number.isFinite(p.lat) || !Number.isFinite(p.lng)) return;
+                            const k = `${p.lat.toFixed(6)},${p.lng.toFixed(6)}`;
+                            if (seen.has(k)) return;
+                            seen.add(k);
+                            verts.push({ lat: p.lat, lng: p.lng });
+                        });
+                    });
+                });
+                realFpVerts = { siteID, verts, fetchedAt: Date.now(), loading: false };
+                console.log(`${TAG} loaded ${verts.length} real FP vertices for route snapping (site ${siteID})`);
+            })
+            .catch(e => {
+                realFpVerts.loading = false;
+                console.warn(`${TAG} real FP vertex fetch failed (route snap will use KML lines only):`, e);
+            });
+    }
+
     function clearSnapIndicator() {
         if (!snapIndicator) return;
         try { snapIndicator.remove(); } catch (e) {}
@@ -4446,6 +4488,17 @@
         // the one drawing (excludeKey === 'draw').
         if (drawingState && excludeKey !== 'draw') {
             testLine(drawingState.coords);
+        }
+
+        // v34.130: REAL Percepto FP vertices — only while drawing/editing
+        // a ROUTE (a route path is a future FP; landing exactly on an
+        // existing FP vertex lets the Route Converter connect/extend that
+        // FP). Vertices ONLY, never segments — matches the converter's
+        // FP-vertex-only snapping.
+        const activeType = drawingState ? drawingState.type
+            : (vertexEditState ? vertexEditState.type : null);
+        if (activeType === 'route' && realFpVerts.siteID === siteID) {
+            realFpVerts.verts.forEach(v => testVertex(v.lat, v.lng));
         }
 
         return best;
@@ -6054,6 +6107,8 @@
             showKMLToast('Leaflet not available — cannot add drag handles.', 4000);
             return;
         }
+        // v34.130: route edits snap to REAL FP vertices — warm the cache.
+        if (type === 'route') ensureRealFpVerts(siteID);
         // Use already-modified coords as the starting point if a modify op
         // exists, so re-edit picks up where the user left off (not a reset
         // to original).
@@ -6104,6 +6159,8 @@
             showKMLToast('Leaflet not available — cannot add drag handles.', 4000);
             return;
         }
+        // v34.130: route edits snap to REAL FP vertices — warm the cache.
+        if (type === 'route') ensureRealFpVerts(siteID);
         // co.added stores [[lng,lat],...] (KML order). Convert to {lat,lng}
         // for the handle math (same shape file lines use).
         const startCoords = added.coords.map(c => ({ lat: c[1], lng: c[0] }));
@@ -6238,6 +6295,97 @@
     // Saved-but-pending added lines render solid green.
     // Only one drawing session at a time across both types.
     // ============================================================
+    // ============================================================
+    // Live draw preview (v34.130) — a rubber-band segment from the last
+    // placed vertex to the cursor, wearing the same piggybacked FP/FFZ
+    // buffers as the committed geometry, so the corridor is visible
+    // BEFORE the click lands. Updated straight from mousemove (a handful
+    // of tiny paths — no full runUpdate, which costs 50–150 ms on dense
+    // sites and would turn the draw cursor to sludge). The paths carry
+    // CUSTOM_BUFFER_ATTR so the normal wipe/rebuild removes them; the
+    // next mousemove repaints.
+    // ============================================================
+    const DRAW_LIVE_ATTR = 'data-aim-draw-live';
+    function projectLatLngsToSvgPts(coordsArr) {
+        const map = getLeafletMap();
+        if (!map || typeof map.latLngToContainerPoint !== 'function') return null;
+        const container = map.getContainer ? map.getContainer() : document.querySelector('.leaflet-container');
+        const svg = document.querySelector('.leaflet-overlay-pane svg');
+        if (!container || !svg) return null;
+        let ctm;
+        try { ctm = svg.getScreenCTM(); } catch (e) { return null; }
+        if (!ctm) return null;
+        const inv = ctm.inverse();
+        const cRect = container.getBoundingClientRect();
+        const pts = [];
+        for (const c of coordsArr) {
+            let cp;
+            try { cp = map.latLngToContainerPoint([c.lat, c.lng]); } catch (e) { continue; }
+            if (!cp) continue;
+            const svgPt = svg.createSVGPoint();
+            svgPt.x = cRect.left + cp.x;
+            svgPt.y = cRect.top + cp.y;
+            const p = svgPt.matrixTransform(inv);
+            pts.push({ x: p.x, y: p.y });
+        }
+        return pts;
+    }
+    function clearDrawLivePreview() {
+        document.querySelectorAll(`[${DRAW_LIVE_ATTR}="true"]`).forEach(el => { try { el.remove(); } catch (e) {} });
+    }
+    function updateDrawLivePreview() {
+        clearDrawLivePreview();
+        if (!drawingState || !drawingState.cursor || !drawingState.coords.length) return;
+        const svg = document.querySelector('.leaflet-overlay-pane svg');
+        const g = svg && svg.querySelector('g');
+        if (!g) return;
+        const last = drawingState.coords[drawingState.coords.length - 1];
+        const pts = projectLatLngsToSvgPts([{ lat: last[1], lng: last[0] }, drawingState.cursor]);
+        if (!pts || pts.length < 2) return;
+        const d = `M ${pts[0].x} ${pts[0].y} L ${pts[1].x} ${pts[1].y}`;
+        const map = getLeafletMap();
+        let pxPerFt = 0;
+        try { pxPerFt = map ? ftToPx(map, 1) : 0; } catch (e) {}
+        const numTog = (key, fb) => { const v = Number(toggleState[key]); return isNaN(v) ? fb : v; };
+        const mk = (stroke, opacity, width, dash) => {
+            const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            p.setAttribute(DRAW_LIVE_ATTR, 'true');
+            p.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
+            p.setAttribute('d', d);
+            p.setAttribute('fill', 'none');
+            p.setAttribute('stroke', stroke);
+            p.setAttribute('stroke-opacity', String(opacity));
+            p.setAttribute('stroke-width', String(width));
+            if (dash) p.setAttribute('stroke-dasharray', dash);
+            p.setAttribute('stroke-linejoin', 'round');
+            p.setAttribute('stroke-linecap', 'round');
+            p.setAttribute('pointer-events', 'none');
+            // insertBefore(firstChild): last-inserted paints bottom-most,
+            // so insert line → inner band → outer band for FP stacking.
+            if (g.firstChild) g.insertBefore(p, g.firstChild);
+            else g.appendChild(p);
+        };
+        const type = drawingState.type;
+        mk('#5fff5f', 0.85, Number(toggleState[`${type}.thickness`]) || 4, '6 4');
+        // Piggybacked buffers, same rules as addBufferHalo: route paths
+        // wear the FP 40/65 bands, route polygons the FFZ buffer. Other
+        // KML types have no `.buffer` toggle → dashed line only.
+        if (toggleState[`${type}.buffer`] === true && pxPerFt > 0) {
+            if (drawingState.shape === 'polygon') {
+                if (toggleState['ffz.buffer'] !== false) {
+                    mk(toggleState['ffz.color'] || '#5fff5f', numTog('ffz.opacity', 0.4), 2 * numTog('ffz.distance', 15) * pxPerFt);
+                }
+            } else {
+                if (toggleState['fp.buffer'] !== false) {
+                    mk(toggleState['fp.color'] || '#1ca0de', numTog('fp.opacity', 0.5), 2 * numTog('fp.distance', 40) * pxPerFt);
+                }
+                if (toggleState['fp.65ft-band'] !== false) {
+                    mk(toggleState['fp.65ft-color'] || toggleState['fp.color'] || '#1ca0de', numTog('fp.65ft-opacity', 0.225), 2 * numTog('fp.65ft-distance', 65) * pxPerFt);
+                }
+            }
+        }
+    }
+
     // v34.126: optional `shape` param — 'polygon' draws a closed ring
     // (needs ≥3 vertices, commits as a KML Polygon); anything else draws
     // a line as before.
@@ -6248,7 +6396,10 @@
         if (!siteID) { showKMLToast('No site loaded.', 3000); return; }
         const map = getLeafletMap();
         if (!map || typeof map.on !== 'function') { showKMLToast('Map not ready.', 3000); return; }
-        drawingState = { type, shape: shape === 'polygon' ? 'polygon' : 'line', coords: [], clickHandler: null, escHandler: null, toolbarEl: null, seeded: false };
+        drawingState = { type, shape: shape === 'polygon' ? 'polygon' : 'line', coords: [], cursor: null, clickHandler: null, escHandler: null, toolbarEl: null, seeded: false };
+        // v34.130: route draws snap to REAL FP vertices — warm the cache
+        // now so the first hover already shows the purple snap ring.
+        if (type === 'route') ensureRealFpVerts(siteID);
         // v34.61 Phase 3a: branch-from-vertex. If a seedCoord is provided,
         // push it as the first vertex of the new line so the line starts
         // attached to the source vertex. drawingState.seeded marks the
@@ -6284,6 +6435,10 @@
             const m = getLeafletMap();
             if (snap && m) showSnapIndicator(m, snap);
             else clearSnapIndicator();
+            // v34.130: rubber-band preview with live buffers — track the
+            // (post-snap) cursor and repaint the preview segment.
+            drawingState.cursor = snap ? { lat: snap.lat, lng: snap.lng } : { lat: ll.lat, lng: ll.lng };
+            updateDrawLivePreview();
         };
         try { map.on('mousemove', onMove); } catch (e) {}
         drawingState.moveHandler = onMove;
@@ -6407,6 +6562,7 @@
         if (!silent) showKMLToast('Drawing cancelled.', 2500);
         drawingState = null;
         clearSnapIndicator();
+        clearDrawLivePreview();
         if (isActive) runUpdate();
         try { broadcastPowerLineStatus(); } catch (e) {}
     }

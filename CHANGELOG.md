@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-01 — Map Styler v34.130 (dev/latest): 🟠 draw routes like an unpublished FP — snap to real FP vertices + live buffers at the cursor
+
+Route paths now behave like a Flight Path that just isn't published yet:
+
+- **Start (or end) a route on a REAL FP vertex.** While drawing or vertex-editing a route, the snap engine now includes every vertex of the site's actual flight paths (fetched from Percepto directly, refreshed every 60 s). Hover near one → purple snap ring → your click/drop lands EXACTLY on it, which is precisely what the Route Converter needs to connect/extend that FP. Vertices only, never segments — same rule as the converter.
+- **Live buffers while drawing.** A rubber-band segment follows the cursor from the last placed vertex, wearing the full FP 40/65 ft bands (or the FFZ buffer in polygon draw) before you click. Placed segments keep their bands (since v34.129), and vertex-edit drags already re-render bands live every frame.
+- Reminder of what was already there: right-click a route (edit mode on) → **✏️ Edit vertices** gives drag handles on every vertex including the ends, dim midpoint dots to click-add vertices (exactly like the power-line editor), and right-click-a-handle to delete.
+
 ## 2026-08-01 — Map Styler v34.129 + Site Setup Tools v4.222 (dev/latest): 🟠 route buffers piggyback the FP 40/65 ft settings · converter snaps to FP vertices ONLY
 
 - **Route buffers = the real FP/FFZ buffers now.** The v34.127 standalone 200 ft halo is gone. Route **paths** wear the Flight Path card's **40 ft inner + 65 ft outer bands** — same distances, colors, and opacities as whatever `fp.distance` / `fp.65ft-*` are set to (honors the FP card's Show-buffer / 65ft-band toggles). Route **polygons** wear the FFZ card's buffer the same way. One toggle on the route card turns the whole treatment on/off; change the FP card and routes follow. Proposed routes now preview exactly like the entities they'll become.
