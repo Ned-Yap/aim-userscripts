@@ -6,6 +6,13 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-01 — Site Setup Tools v4.223 (dev/latest): 🟠 Route Converter — fix the FP create 400 (full arc data + FFZ-connection rule)
+
+The first live convert taught us two server rules, both now handled:
+
+- **"Not enough data for arc number 1"** — created arcs were missing fields the server requires. Arcs are now cloned from an existing FP's arc shape and carry `distance`, a real `min_emergency_alt` (copied from the connected arc, else the template, else 12 m), and `wait_until_approved` — verified against the site-1583 ground-truth dump.
+- **"Flight path is not connected to any free zone"** — every FP *entity* must have at least one waypoint **on or in an FFZ** (confirmed: 1583's `flight_path_4` shares no vertices with any other FP but its endpoints sit exactly on FFZ edges). The plan now checks this: paths that touch an FFZ show a green **"✓ connects to FFZ"** chip; paths whose only connection is a shared FP vertex get an orange warning (may still be rejected — unconfirmed); paths touching nothing are blocked with guidance (end the route inside an FFZ, or convert a route polygon over the pad in the same run and land the path inside it — polygons commit first, so that works in one pass).
+
 ## 2026-08-01 — Map Styler v34.132 (dev/latest): 🟠 route draw polish — no power-line snapping, right-click green lines works, rubber band tracks WASD pans
 
 - **Routes no longer snap to power-line vertices.** While drawing/editing a route, distribution/transmission KMLs are excluded as snap sources entirely — routes connect to real FP vertices and other routes only. (Power-line editing keeps its own snapping unchanged.)

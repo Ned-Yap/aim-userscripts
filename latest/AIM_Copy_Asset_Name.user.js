@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.222
+// @version      4.223
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.222';
+    const SCRIPT_VERSION = '4.223';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -16571,6 +16571,49 @@
                 items.push(item);
             }
         });
+        // v4.223 SERVER RULE (learned from a live 400 + verified against the
+        // site-1583 ground truth): every FP ENTITY must have ≥1 waypoint
+        // ON or IN a Free Fly Zone — "Flight path is not connected to any
+        // free zone" otherwise. flight_path_4 on 1583 shares NO vertices
+        // with other FPs but its endpoints sit exactly on FFZ edges, so
+        // FFZ contact is the requirement (a shared FP vertex alone is
+        // unconfirmed — warned, not blocked). Same-run route polygons
+        // count: they commit as FFZs BEFORE the FPs.
+        const RC_TOUCH_M = 0.5;
+        const polyItems = items.filter(i => i.kind === 'ffz' && !i.err);
+        items.filter(i => i.kind === 'fp' && !i.err).forEach(it => {
+            const eff = rcEffectiveVerts(it);
+            let touch = null;
+            for (const v of eff) {
+                for (const ent of ffzs) {
+                    const ring = entityCoords(ent);
+                    if (!ring || ring.length < 3) continue;
+                    if (pointToPolygonMeters(v.lat, v.lng, ring) <= RC_TOUCH_M) {
+                        touch = { name: ent.name || `#${ent.id}` };
+                        break;
+                    }
+                }
+                if (!touch) {
+                    for (const pi of polyItems) {
+                        if (pointToPolygonMeters(v.lat, v.lng, pi.ring) <= RC_TOUCH_M) {
+                            touch = { name: `route polygon "${pi.name}"`, sameRun: true };
+                            break;
+                        }
+                    }
+                }
+                if (touch) break;
+            }
+            it.ffzTouch = touch;
+            if (!touch) {
+                const hasFpSnap = (it.snaps || []).some(s => s.applied && s.kind === 'fp-vertex');
+                const base = 'no waypoint lands on/in a Free Fly Zone — Percepto requires every flight path to connect to an FFZ';
+                if (hasFpSnap) {
+                    it.warnings.push(`${base}. The shared FP vertex MAY not satisfy the server — if it rejects with "not connected to any free zone", edit the route so an endpoint lands inside an FFZ (or convert a route polygon in the same run and land in it).`);
+                } else {
+                    it.err = `${base}. End (or start) the route inside an FFZ — or draw a route polygon over the pad, convert it in the same run, and land the path inside it.`;
+                }
+            }
+        });
         // DEM fallback for items with no copyable neighbor.
         const demItems = items.filter(i => i.needsDem && !i.err);
         if (demItems.length) {
@@ -16650,6 +16693,15 @@
             body.name = uniqueName(body.name);
             await post(body, `FFZ ${body.name}`, it.pmIdx);
         }
+        // v4.223: arcs must carry the FULL native field set — a live 400
+        // ("Not enough data for arc number 1") taught us the server
+        // requires distance, a real min_emergency_alt, and
+        // wait_until_approved, not just endpoints + band. Clone the
+        // template FP's first arc as the base so unknown fields ride
+        // along too; emergency alt copies from the connected arc first
+        // (same copy-from-nearest doctrine as the band).
+        const tmplArc = (tmplFpBody && Array.isArray(tmplFpBody.arcs) && tmplFpBody.arcs.length)
+            ? tmplFpBody.arcs[0] : null;
         for (const it of items.filter(i => i.kind === 'fp')) {
             if (!it.band) { res.skipped++; res.errors.push(`${it.name}: no altitude band — skipped`); continue; }
             const verts = rcEffectiveVerts(it);
@@ -16669,11 +16721,28 @@
             body.description = '';
             body.validated = false;
             body.points = verts.map(v => ({ lat: v.lat, lng: v.lng }));
+            const snapEm = (it.snaps || []).find(s => s.applied && s.kind === 'fp-vertex' && s.arc && Number.isFinite(s.arc.min_emergency_alt));
+            const emergM = snapEm ? snapEm.arc.min_emergency_alt
+                : ((tmplArc && Number.isFinite(tmplArc.min_emergency_alt)) ? tmplArc.min_emergency_alt : 12);
             body.arcs = [];
             for (let i = 0; i < verts.length - 1; i++) {
                 const a = { lat: verts[i].lat, lng: verts[i].lng };
                 const b = { lat: verts[i + 1].lat, lng: verts[i + 1].lng };
-                body.arcs.push({ point_a: a, point_b: b, points: [a, b], min_alt: it.band.minM, max_alt: it.band.maxM, min_emergency_alt: null });
+                let arc = {};
+                if (tmplArc) {
+                    arc = JSON.parse(JSON.stringify(tmplArc));
+                    delete arc.id;
+                    delete arc.mapobject;
+                }
+                arc.point_a = a;
+                arc.point_b = b;
+                arc.points = [a, b];
+                arc.min_alt = it.band.minM;
+                arc.max_alt = it.band.maxM;
+                arc.min_emergency_alt = emergM;
+                arc.distance = approxMeters(a.lat, a.lng, b.lat, b.lng);
+                if (typeof arc.wait_until_approved !== 'boolean') arc.wait_until_approved = false;
+                body.arcs.push(arc);
             }
             body.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
             // Uniform band ⇒ no-op, but keeps us safe if bands ever vary.
@@ -16745,6 +16814,9 @@
                     ? `<span style="display:inline-block;margin:2px 4px 0 0;padding:1px 6px;border:1px solid rgba(95,255,95,0.5);border-radius:3px;color:#5fff5f;font-size:10px">⚡ ${which} → ${what} <button data-rc-unsnap="${ii}:${si}" style="background:transparent;border:none;color:#ffb347;cursor:pointer;font-size:10px;padding:0 0 0 3px" title="Undo this snap (keep the drawn position)">↩</button></span>`
                     : `<span style="display:inline-block;margin:2px 4px 0 0;padding:1px 6px;border:1px dashed rgba(255,179,71,0.5);border-radius:3px;color:#ffb347;font-size:10px">unsnapped ${which} <button data-rc-resnap="${ii}:${si}" style="background:transparent;border:none;color:#5fff5f;cursor:pointer;font-size:10px;padding:0 0 0 3px" title="Re-apply this snap">⚡</button></span>`;
             }).join('');
+            const ffzChip = (it.kind === 'fp' && it.ffzTouch)
+                ? `<div style="color:#5fff5f;font-size:10px;margin-top:2px">✓ connects to FFZ: ${it.ffzTouch.name}${it.ffzTouch.sameRun ? ' <span style="color:#ffb347">(created this run — keep it checked)</span>' : ''}</div>`
+                : '';
             const warns = (it.warnings || []).map(w => `<div style="color:#ff9a3d;font-size:10px;margin-top:2px">⚠ ${w}</div>`).join('');
             const err = it.err ? `<div style="color:#ff8a80;font-size:10px;margin-top:2px">✗ ${it.err}</div>` : '';
             return `<div style="padding:7px 8px;border-bottom:1px solid rgba(255,255,255,0.07);${it.err ? 'opacity:0.65;' : ''}">
@@ -16754,7 +16826,7 @@
                         <div style="font-size:12px;color:#fff">${icon} <b style="color:#ff9100">${kindLbl}</b> “${it.name}” <span style="color:#888;font-size:10px">· route #${it.pmIdx}</span></div>
                         <div style="font-size:10px;color:#9ad;margin-top:2px">${geom}${alt ? ` · ${alt}` : ''}${it.altSource ? ` <span style="color:#888">(${it.altSource})</span>` : ''}</div>
                         ${snapChips ? `<div style="margin-top:2px">${snapChips}</div>` : ''}
-                        ${warns}${err}
+                        ${ffzChip}${warns}${err}
                     </div>
                 </label>
             </div>`;
@@ -16784,7 +16856,7 @@
         box.innerHTML = `
             <div style="padding:12px 16px;border-bottom:1px solid rgba(255,145,0,0.3)">
                 <div style="color:#ff9100;font-size:14px;font-weight:700">🟠 Convert Proposed Routes → real entities</div>
-                <div style="color:#888;font-size:10px;margin-top:3px">Create-only — existing entities are never modified. Snapping an endpoint onto an existing FP vertex CONNECTS (extends) that flight path. Altitude mode: <b style="color:#9ad">${(rcPlan.altMode || 'unknown').toUpperCase()}</b>.</div>
+                <div style="color:#888;font-size:10px;margin-top:3px">Create-only — existing entities are never modified. Snapping an endpoint onto an existing FP vertex CONNECTS (extends) that flight path. <b style="color:#ffb347">Server rule:</b> every flight path must have a waypoint on/in an FFZ. Altitude mode: <b style="color:#9ad">${(rcPlan.altMode || 'unknown').toUpperCase()}</b>.</div>
             </div>
             <div id="aim-rc-list" style="flex:1;overflow-y:auto;min-height:80px"></div>
             <div style="padding:10px 16px;border-top:1px solid rgba(255,145,0,0.3)">
