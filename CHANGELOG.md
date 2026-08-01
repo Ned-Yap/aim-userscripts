@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-31 — Site Setup Tools v4.220 (dev/latest): 📍 Create GMs offers ALL listed obstacles
+
+The Airspace Check's **📍 Create GMs** button now appears whenever the report lists any obstacles — not only when one is flagged as a violation. The preview modal shows every listed obstacle with a checkbox (⚑ flagged ones pre-checked, clear ones opt-in, "All" toggle at the bottom), so you can pin a clear-but-notable turbine field or tower without a violation. Create-only as before — existing entities are never touched.
+
 ## 2026-07-31 — ⭐ PROMOTED TO PROD: Site Setup Tools v4.219
 
 Coworkers jump **4.216 → 4.219** on the next Tampermonkey update check. What's new:

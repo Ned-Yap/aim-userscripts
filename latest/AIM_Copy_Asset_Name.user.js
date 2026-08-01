@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.219
+// @version      4.220
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.219';
+    const SCRIPT_VERSION = '4.220';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -3421,7 +3421,7 @@
                 <span style="color:#7adfe6;font-weight:700;">🛩 Airspace Check</span>
                 <span style="opacity:0.7;">${airEsc(siteName || `site ${sid}`)}</span>
                 <span style="flex:1"></span>
-                ${((inv.obstacles || []).some(o => o.hit) && !LITE) ? '<button data-air-gms title="Create General Markers at the flagged obstacles" style="background:none;border:1px solid rgba(95,255,95,0.5);color:#5fff5f;border-radius:5px;padding:2px 8px;cursor:pointer;">📍 Create GMs</button>' : ''}
+                ${((inv.obstacles || []).some(o => o.show) && !LITE) ? '<button data-air-gms title="Create General Markers at listed obstacles (flagged ones pre-checked)" style="background:none;border:1px solid rgba(95,255,95,0.5);color:#5fff5f;border-radius:5px;padding:2px 8px;cursor:pointer;">📍 Create GMs</button>' : ''}
                 <button data-air-copy style="background:none;border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:5px;padding:2px 8px;cursor:pointer;">Copy report</button>
                 <button data-air-close style="background:none;border:none;color:#dfe9f0;font-size:15px;cursor:pointer;">✕</button>
             </div>
@@ -3594,8 +3594,12 @@
         });
     }
 
-    // ---- 📍 Create GMs at flagged obstacles (preview → confirm → create).
-    // Turns each FLAGGED FAA obstacle into a real General Marker via the
+    // ---- 📍 Create GMs at obstacles (preview → select → confirm → create).
+    // v4.220: the modal offers ALL obstacles shown in the inventory (o.show),
+    // each with a checkbox — flagged (o.hit) ones pre-checked, the rest
+    // unchecked — so clear-but-notable obstacles (e.g. a turbine field a mile
+    // out) can be pinned too. Turns each selected obstacle into a real
+    // General Marker via the
     // POST /map_objects/ create rails (create-only — never edits existing
     // entities). Tower-family obstacles get general_marker_type 'tower' so
     // they feed the SOP Tower-standoff check; everything else 'hazard'.
@@ -3628,7 +3632,7 @@
             return n;
         };
         const plan = { create: [], skipped: [] };
-        (res.inventory.obstacles || []).filter(o => o.hit).forEach(o => {
+        (res.inventory.obstacles || []).filter(o => o.show).forEach(o => {
             const nearGm = existingGms.find(g => approxMeters(o.lat, o.lng, g.coords[0].lat, g.coords[0].lng) * M_TO_FT < AIR_GM_DEDUP_FT);
             if (nearGm) {
                 plan.skipped.push({ o, reason: `existing GM "${nearGm.name}" within ${AIR_GM_DEDUP_FT} ft` });
@@ -3637,6 +3641,7 @@
             const name = uniqueName(genCleanName(`FAA ${airGmTitleType(o.type)} ${o.agl != null ? o.agl : '?'}ft`));
             plan.create.push({
                 o, name,
+                flagged: !!o.hit,
                 markerType: AIR_TOWER_TYPES.test(o.type) ? 'tower' : 'hazard',
                 heightM: o.agl != null ? o.agl / M_TO_FT : 0,
             });
@@ -3695,11 +3700,14 @@
     function showAirGmModal(res, sid) {
         closeAirGmModal();
         const plan = airBuildGmPlan(res, sid);
-        if (!plan.create.length && !plan.skipped.length) { showToast('No flagged obstacles to mark'); return; }
-        const rows = plan.create.map(c =>
-            `<div style="margin:3px 0;"><span style="color:#5fff5f">＋</span> <strong>${airEsc(c.name)}</strong> — ${airEsc(c.markerType)}, height ${c.o.agl != null ? c.o.agl : '?'} ft${c.o.tb ? `<br><span style="opacity:0.7;padding-left:16px;">🌀 ${airEsc(airTbText(c.o.tb))} → GM description</span>` : ''}</div>`).join('')
+        if (!plan.create.length && !plan.skipped.length) { showToast('No obstacles to mark'); return; }
+        // Flagged obstacles pre-checked; everything else opt-in. Distance
+        // order preserved from the inventory (nearest first).
+        const rows = plan.create.map((c, i) =>
+            `<label style="display:flex;gap:6px;align-items:baseline;margin:3px 0;cursor:pointer;"><input type="checkbox" data-air-gm-chk="${i}" ${c.flagged ? 'checked' : ''} style="cursor:pointer;flex:none;position:relative;top:2px;"><span>${c.flagged ? '<span style="color:#ff6060;font-weight:700;">⚑</span> ' : ''}<strong>${airEsc(c.name)}</strong> — ${airEsc(c.markerType)}, height ${c.o.agl != null ? c.o.agl : '?'} ft · ${c.o.distFt != null ? `${c.o.distFt.toLocaleString()} ft away` : '?'}${c.o.tb ? `<br><span style="opacity:0.7;">🌀 ${airEsc(airTbText(c.o.tb))} → GM description</span>` : ''}</span></label>`).join('')
             + plan.skipped.map(s =>
             `<div style="margin:3px 0;opacity:0.65;"><span style="color:#ffb020">－</span> ${airEsc(airGmTitleType(s.o.type))} ${s.o.agl != null ? `${s.o.agl} ft` : ''} — skipped: ${airEsc(s.reason)}</div>`).join('');
+        const flaggedN = plan.create.filter(c => c.flagged).length;
         const wrap = document.createElement('div');
         wrap.id = AIR_GM_MODAL_ID;
         wrap.style.cssText = 'position:fixed;top:120px;right:80px;width:430px;max-height:60vh;z-index:2147483001;'
@@ -3707,22 +3715,40 @@
             + 'color:#dfe9f0;font:12px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,0.6);'
             + 'display:flex;flex-direction:column;';
         wrap.innerHTML = `
-            <div style="padding:8px 12px;border-bottom:1px solid rgba(122,223,230,0.25);color:#7adfe6;font-weight:700;">📍 Create GMs at flagged obstacles</div>
+            <div style="padding:8px 12px;border-bottom:1px solid rgba(122,223,230,0.25);color:#7adfe6;font-weight:700;">📍 Create GMs at obstacles</div>
             <div style="padding:8px 12px;overflow-y:auto;">
-                <div style="margin-bottom:6px;">This creates <strong>${plan.create.length}</strong> new General Marker${plan.create.length === 1 ? '' : 's'} on site ${airEsc(sid)} via the site-setup API (create-only — existing entities are never touched).</div>
+                <div style="margin-bottom:6px;">Select the obstacles to mark on site ${airEsc(sid)} — ${flaggedN ? `the <strong>${flaggedN}</strong> <span style="color:#ff6060;font-weight:700;">⚑ flagged</span> one${flaggedN === 1 ? ' is' : 's are'} pre-checked` : 'none are flagged, so all start unchecked'}. Creates new General Markers via the site-setup API (create-only — existing entities are never touched).</div>
                 ${rows}
             </div>
-            <div style="padding:8px 12px;border-top:1px solid rgba(122,223,230,0.25);display:flex;gap:8px;justify-content:flex-end;">
+            <div style="padding:8px 12px;border-top:1px solid rgba(122,223,230,0.25);display:flex;gap:8px;justify-content:flex-end;align-items:center;">
+                <label style="margin-right:auto;display:flex;gap:5px;align-items:center;cursor:pointer;opacity:0.85;"><input type="checkbox" data-air-gm-all ${plan.create.length && flaggedN === plan.create.length ? 'checked' : ''} style="cursor:pointer;">All</label>
                 <button data-air-gm-cancel style="background:none;border:1px solid rgba(223,233,240,0.4);color:#dfe9f0;border-radius:5px;padding:3px 12px;cursor:pointer;">Cancel</button>
-                <button data-air-gm-go ${plan.create.length ? '' : 'disabled'} style="background:rgba(95,255,95,0.15);border:1px solid #5fff5f;color:#5fff5f;border-radius:5px;padding:3px 12px;cursor:pointer;">Create ${plan.create.length}</button>
+                <button data-air-gm-go ${flaggedN ? '' : 'disabled'} style="background:rgba(95,255,95,0.15);border:1px solid #5fff5f;color:#5fff5f;border-radius:5px;padding:3px 12px;cursor:pointer;">Create ${flaggedN}</button>
             </div>`;
+        const syncGoBtn = () => {
+            const n = wrap.querySelectorAll('[data-air-gm-chk]:checked').length;
+            const go = wrap.querySelector('[data-air-gm-go]');
+            go.disabled = !n;
+            go.textContent = `Create ${n}`;
+            const all = wrap.querySelector('[data-air-gm-all]');
+            if (all) all.checked = n === plan.create.length && n > 0;
+        };
+        wrap.addEventListener('change', (e) => {
+            const allBox = e.target.closest('[data-air-gm-all]');
+            if (allBox) wrap.querySelectorAll('[data-air-gm-chk]').forEach(cb => { cb.checked = allBox.checked; });
+            syncGoBtn();
+        });
         wrap.addEventListener('click', async (e) => {
             if (e.target.closest('[data-air-gm-cancel]')) { closeAirGmModal(); return; }
             const goBtn = e.target.closest('[data-air-gm-go]');
-            if (goBtn && plan.create.length) {
+            const selected = plan.create.filter((c, i) => {
+                const cb = wrap.querySelector(`[data-air-gm-chk="${i}"]`);
+                return cb && cb.checked;
+            });
+            if (goBtn && selected.length) {
                 goBtn.disabled = true;
                 goBtn.textContent = 'Creating…';
-                const out = await airCreateGms(plan, sid);
+                const out = await airCreateGms({ create: selected, skipped: plan.skipped }, sid);
                 closeAirGmModal();
                 if (out.errors.length) console.warn(`${TAG} create GMs errors:`, out.errors);
                 console.log(`${TAG} create GMs: ${out.created} created, ${out.failed} failed`);
