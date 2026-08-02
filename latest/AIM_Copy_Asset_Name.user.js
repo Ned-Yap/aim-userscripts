@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.225
+// @version      4.226
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.225';
+    const SCRIPT_VERSION = '4.226';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -16428,6 +16428,32 @@
     const RC_MODAL_ID = 'aim-rc-modal';
     let rcPlan = null;
 
+    // v4.226: edge-projection helpers (removed in v4.222, restored now
+    // that the FP↔FFZ relationship is modeled properly — an endpoint
+    // landing mid-edge on an FFZ ring).
+    // Project p onto segment a→b (equirectangular local plane), clamped.
+    function rcProjOnSeg(p, a, b) {
+        const kx = Math.cos(((a.lat + b.lat) / 2) * Math.PI / 180);
+        const ax = a.lng * kx, ay = a.lat, bx = b.lng * kx, by = b.lat;
+        const px = p.lng * kx, py = p.lat;
+        const abx = bx - ax, aby = by - ay;
+        const len2 = abx * abx + aby * aby;
+        let t = len2 ? ((px - ax) * abx + (py - ay) * aby) / len2 : 0;
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+        return { lat: ay + t * aby, lng: (ax + t * abx) / kx, t };
+    }
+    // Angle (0–90°) between segment p1→p2 and the LINE through a→b.
+    // 0° = running along the edge (bad), 90° = perpendicular. SOP wants
+    // ≥15°, ideal 45°, for an FP landing on an FFZ edge.
+    function rcSegEdgeAngleDeg(p1, p2, a, b) {
+        const kx = Math.cos(((p1.lat + p2.lat) / 2) * Math.PI / 180);
+        const v1x = (p2.lng - p1.lng) * kx, v1y = p2.lat - p1.lat;
+        const v2x = (b.lng - a.lng) * kx, v2y = b.lat - a.lat;
+        const m1 = Math.hypot(v1x, v1y), m2 = Math.hypot(v2x, v2y);
+        if (!m1 || !m2) return null;
+        const cos = Math.abs((v1x * v2x + v1y * v2y) / (m1 * m2));
+        return Math.acos(Math.min(1, cos)) * 180 / Math.PI;
+    }
     // The arc (and owning FP entity) touching a graph vertex key, if any.
     function rcArcAtVertex(fps, key) {
         for (const fp of fps) {
@@ -16602,6 +16628,50 @@
                 return;
             }
             it.mode = 'create';
+            // v4.226: FFZ-EDGE snapping (the real FP↔FFZ relationship —
+            // an endpoint landing mid-edge on the ring). Targets: existing
+            // FFZs AND same-run route polygons (they commit as FFZs
+            // first). Runs only for endpoints not already FP-vertex
+            // snapped. The band copies the landing FFZ so the FP-in-FFZ
+            // altitude overlap is guaranteed.
+            [0, it.verts.length - 1].forEach(vi => {
+                if ((it.snaps || []).some(s => s.vertIdx === vi && s.applied)) return;
+                const p = it.verts[vi];
+                let bestE = null;
+                ffzs.forEach(ent => {
+                    const ring = entityCoords(ent);
+                    if (!ring || ring.length < 3) return;
+                    for (let i2 = 0; i2 < ring.length; i2++) {
+                        const a = ring[i2], b = ring[(i2 + 1) % ring.length];
+                        const d = pointToSegMeters(p.lat, p.lng, a, b);
+                        if (!bestE || d < bestE.d) bestE = { d, a, b, name: `FFZ "${ent.name || '#' + ent.id}"`, restrictions: ent.restrictions, sameRun: false };
+                    }
+                });
+                polyItems.forEach(pi => {
+                    for (let i2 = 0; i2 < pi.ring.length; i2++) {
+                        const a = pi.ring[i2], b = pi.ring[(i2 + 1) % pi.ring.length];
+                        const d = pointToSegMeters(p.lat, p.lng, a, b);
+                        if (!bestE || d < bestE.d) bestE = { d, a, b, name: `route polygon "${pi.name}"`, restrictions: pi.restrictions, sameRun: true };
+                    }
+                });
+                if (!bestE || bestE.d > RC_SNAP_M) return;
+                const proj = rcProjOnSeg(p, bestE.a, bestE.b);
+                const prev = it.verts[vi === 0 ? 1 : it.verts.length - 2];
+                const ang = rcSegEdgeAngleDeg(prev, proj, bestE.a, bestE.b);
+                it.snaps.push({
+                    vertIdx: vi, kind: 'ffz-edge', applied: true,
+                    from: { lat: p.lat, lng: p.lng }, to: { lat: proj.lat, lng: proj.lng },
+                    distFt: bestE.d * M_TO_FT, targetName: bestE.name, angleDeg: ang, sameRun: bestE.sameRun,
+                });
+                if (ang != null && ang < 15) it.warnings.push(`lands on ${bestE.name} at ${Math.round(ang)}° to the edge (SOP wants ≥15°, ideal 45°)`);
+                const rr = bestE.restrictions;
+                if (rr && typeof rr.minAlt === 'number' && typeof rr.maxAlt === 'number' && rr.maxAlt > rr.minAlt) {
+                    const lo = fpArcAltMeters(rr.minAlt);
+                    it.band = { minM: lo, maxM: Math.max(fpArcAltMeters(rr.maxAlt), lo + 1) };
+                    it.altSource = `copied from landing ${bestE.name}`;
+                    it.needsDem = false;
+                }
+            });
             const eff = rcEffectiveVerts(it);
             let touch = null;
             for (const v of eff) {
@@ -16904,7 +16974,9 @@
                 : (it.band ? `band ${it.band.minM}–${it.band.maxM} m (${Math.round(it.band.minM * M_TO_FT)}–${Math.round(it.band.maxM * M_TO_FT)} ft)` : 'band: —'));
             const snapChips = (it.snaps || []).map((s, si) => {
                 const which = s.vertIdx === 0 ? 'start' : 'end';
-                const what = `FP "${s.targetName}" vertex (${Math.round(s.distFt)} ft)`;
+                const what = s.kind === 'fp-vertex'
+                    ? `FP "${s.targetName}" vertex (${Math.round(s.distFt)} ft)`
+                    : `${s.targetName} edge (${Math.round(s.distFt)} ft${s.angleDeg != null ? ` · ${Math.round(s.angleDeg)}°` : ''})`;
                 return s.applied
                     ? `<span style="display:inline-block;margin:2px 4px 0 0;padding:1px 6px;border:1px solid rgba(95,255,95,0.5);border-radius:3px;color:#5fff5f;font-size:10px">⚡ ${which} → ${what} <button data-rc-unsnap="${ii}:${si}" style="background:transparent;border:none;color:#ffb347;cursor:pointer;font-size:10px;padding:0 0 0 3px" title="Undo this snap (keep the drawn position)">↩</button></span>`
                     : `<span style="display:inline-block;margin:2px 4px 0 0;padding:1px 6px;border:1px dashed rgba(255,179,71,0.5);border-radius:3px;color:#ffb347;font-size:10px">unsnapped ${which} <button data-rc-resnap="${ii}:${si}" style="background:transparent;border:none;color:#5fff5f;cursor:pointer;font-size:10px;padding:0 0 0 3px" title="Re-apply this snap">⚡</button></span>`;

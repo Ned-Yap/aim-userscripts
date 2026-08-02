@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.132
+// @version      34.133
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -57,7 +57,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.132';
+    const SCRIPT_VERSION = '34.133';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -4325,36 +4325,51 @@
     // relative so QA stays on QA), cached per site with a 60 s TTL
     // so freshly saved FPs show up on the next draw session.
     // ============================================================
-    let realFpVerts = { siteID: null, verts: [], fetchedAt: 0, loading: false };
+    let realFpVerts = { siteID: null, verts: [], ffzRings: [], fetchedAt: 0, loading: false };
     function ensureRealFpVerts(siteID) {
         if (!siteID) return;
         if (realFpVerts.siteID === siteID
             && (realFpVerts.loading || (Date.now() - realFpVerts.fetchedAt) < 60000)) return;
-        realFpVerts = { siteID, verts: realFpVerts.siteID === siteID ? realFpVerts.verts : [], fetchedAt: 0, loading: true };
+        realFpVerts = {
+            siteID,
+            verts: realFpVerts.siteID === siteID ? realFpVerts.verts : [],
+            ffzRings: realFpVerts.siteID === siteID ? realFpVerts.ffzRings : [],
+            fetchedAt: 0, loading: true,
+        };
         fetch(`/map_objects/?getPoiMapObjectsAsList=true&site_id=${encodeURIComponent(siteID)}`, { credentials: 'same-origin' })
             .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
             .then(data => {
                 if (!Array.isArray(data)) throw new Error('response not an array');
                 const verts = [];
                 const seen = new Set();
+                // v34.133: also collect real FFZ rings — the true FP↔FFZ
+                // relationship is an FP endpoint ON an FFZ EDGE, so route
+                // drawing snaps to those edges too.
+                const ffzRings = [];
                 data.forEach(e => {
-                    if (!e || e.type !== 15 || !Array.isArray(e.arcs)) return;
-                    e.arcs.forEach(a => {
-                        [a && a.point_a, a && a.point_b].forEach(p => {
-                            if (!p || !Number.isFinite(p.lat) || !Number.isFinite(p.lng)) return;
-                            const k = `${p.lat.toFixed(6)},${p.lng.toFixed(6)}`;
-                            if (seen.has(k)) return;
-                            seen.add(k);
-                            verts.push({ lat: p.lat, lng: p.lng });
+                    if (!e) return;
+                    if (e.type === 15 && Array.isArray(e.arcs)) {
+                        e.arcs.forEach(a => {
+                            [a && a.point_a, a && a.point_b].forEach(p => {
+                                if (!p || !Number.isFinite(p.lat) || !Number.isFinite(p.lng)) return;
+                                const k = `${p.lat.toFixed(6)},${p.lng.toFixed(6)}`;
+                                if (seen.has(k)) return;
+                                seen.add(k);
+                                verts.push({ lat: p.lat, lng: p.lng });
+                            });
                         });
-                    });
+                    } else if (e.type === 16 && Array.isArray(e.coords) && e.coords.length >= 3) {
+                        ffzRings.push(e.coords
+                            .filter(c => c && Number.isFinite(c.lat) && Number.isFinite(c.lng))
+                            .map(c => ({ lat: c.lat, lng: c.lng })));
+                    }
                 });
-                realFpVerts = { siteID, verts, fetchedAt: Date.now(), loading: false };
-                console.log(`${TAG} loaded ${verts.length} real FP vertices for route snapping (site ${siteID})`);
+                realFpVerts = { siteID, verts, ffzRings, fetchedAt: Date.now(), loading: false };
+                console.log(`${TAG} loaded ${verts.length} real FP vertices + ${ffzRings.length} FFZ rings for route snapping (site ${siteID})`);
             })
             .catch(e => {
                 realFpVerts.loading = false;
-                console.warn(`${TAG} real FP vertex fetch failed (route snap will use KML lines only):`, e);
+                console.warn(`${TAG} real FP/FFZ fetch failed (route snap will use KML lines only):`, e);
             });
     }
 
@@ -4432,8 +4447,12 @@
         // clamped to (0,1)). Endpoints (t=0 / t=1) excluded because
         // they're vertices and testVertex already covers them — keeps
         // vertex snaps winning over segment snaps near endpoints.
-        const testSegment = (lat1, lng1, lat2, lng2) => {
-            if (!segSnapAllowed) return;
+        // v34.133: `force` bypasses the route vertex-only rule — used for
+        // POLYGON edges (FFZ rings + route polygons), where a mid-edge
+        // landing IS the real FP↔FFZ connection. Lines stay vertex-only
+        // in route context.
+        const testSegment = (lat1, lng1, lat2, lng2, force) => {
+            if (!segSnapAllowed && !force) return;
             if (!Number.isFinite(lat1) || !Number.isFinite(lng1)) return;
             if (!Number.isFinite(lat2) || !Number.isFinite(lng2)) return;
             try {
@@ -4481,19 +4500,42 @@
             // matches what's actually rendered.
             const features = kmlFeatures[kmlKey(siteID, type)] || [];
             features.forEach((f) => {
-                if (!f || f.type !== 'line') return;
+                if (!f) return;
                 if (excludeKey === `file:${type}:${f.pmIdx}`) return;
-                // Skip file lines marked for deletion — they're being
+                // Skip features marked for deletion — they're being
                 // removed; snapping to them creates orphaned references.
                 const co0 = getCommitOps(siteID, type);
                 const op0 = co0.ops && co0.ops[String(f.pmIdx)];
                 if (op0 && op0.op === 'delete') return;
+                // v34.133: POLYGON edges are snap targets in route context —
+                // a proposed FFZ's edge is a legit FP landing site.
+                if (f.type === 'polygon') {
+                    if (activeType !== 'route') return;
+                    const ring = effectiveCoordsForFeature(siteID, type, f.pmIdx, f.coords);
+                    for (let ri = 0; ri < ring.length; ri++) {
+                        const a = ring[ri], b = ring[(ri + 1) % ring.length];
+                        if (!a || !b) continue;
+                        testSegment(a.lat, a.lng, b.lat, b.lng, true);
+                    }
+                    return;
+                }
+                if (f.type !== 'line') return;
                 testLine(effectiveCoordsForFeature(siteID, type, f.pmIdx, f.coords));
             });
-            // Pending-add (green) lines.
+            // Pending-add (green) features.
             const co = getCommitOps(siteID, type);
             (co.added || []).forEach((added, i) => {
                 if (excludeKey === `added:${type}:${i}`) return;
+                if (!added || !Array.isArray(added.coords)) return;
+                if (added.shape === 'polygon') {
+                    if (activeType !== 'route') return;
+                    const ring = added.coords.map(c => ({ lat: c[1], lng: c[0] }));
+                    for (let ri = 0; ri < ring.length; ri++) {
+                        const a = ring[ri], b = ring[(ri + 1) % ring.length];
+                        testSegment(a.lat, a.lng, b.lat, b.lng, true);
+                    }
+                    return;
+                }
                 testLine(added.coords);
             });
         });
@@ -4507,10 +4549,17 @@
         // v34.130: REAL Percepto FP vertices — only while drawing/editing
         // a ROUTE (a route path is a future FP; landing exactly on an
         // existing FP vertex lets the Route Converter connect/extend that
-        // FP). Vertices ONLY, never segments — matches the converter's
-        // FP-vertex-only snapping. (activeType computed at the top.)
+        // FP). (activeType computed at the top.)
+        // v34.133: plus real FFZ EDGES — mid-edge is the true FP↔FFZ
+        // connection (corners are technically legal but not used).
         if (activeType === 'route' && realFpVerts.siteID === siteID) {
             realFpVerts.verts.forEach(v => testVertex(v.lat, v.lng));
+            (realFpVerts.ffzRings || []).forEach(ring => {
+                for (let ri = 0; ri < ring.length; ri++) {
+                    const a = ring[ri], b = ring[(ri + 1) % ring.length];
+                    testSegment(a.lat, a.lng, b.lat, b.lng, true);
+                }
+            });
         }
 
         return best;

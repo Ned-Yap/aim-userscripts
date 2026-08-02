@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-01 — Map Styler v34.133 + Site Setup Tools v4.226 (dev/latest): 🟠 FP↔FFZ relationship — routes snap to FFZ EDGES (existing or proposed)
+
+Route paths can now connect to Free Fly Zones the way real FPs do — an endpoint landing **on an FFZ edge** (mid-edge, not corners):
+
+- **While drawing/editing a route** (Styler): the snap engine now targets real FFZ edges *and* proposed route-polygon edges (committed orange or pending green) alongside real FP vertices. Purple ring shows the landing point; lines stay vertex-only.
+- **In the converter** (Site Setup Tools): endpoints within 50 ft of an FFZ edge — existing FFZ **or a route polygon converting in the same run** — snap onto the edge with the SOP connection-angle check (warns under 15°, ideal 45°). The new FP's **altitude band copies the landing FFZ**, so the FP-in-FFZ overlap is guaranteed, and the free-zone connection rule passes. Per-snap ↩ undo as always.
+- Priority per endpoint: existing FP vertex (→ extends that FP) beats FFZ edge (→ standalone FP landing in the zone).
+
+So the full pattern works in one run: draw the pad polygon + a path from an existing FP vertex to that polygon's edge → convert → FFZ created, then the path extends the FP and lands on the new zone.
+
 ## 2026-08-01 — Site Setup Tools v4.225 (dev/latest): 🟠 Route Converter — one-click "🔄 Reload Percepto now" after a real convert
 
 Percepto only reads entities at page load, so converted/extended flight paths don't appear (and aren't safely editable) until a full reload — and a native Save from the stale page could overwrite an extension. The convert result now ends with a **🔄 Reload Percepto now** button (reloads the whole app from the top window) plus an explicit warning. Answer the Map Styler's route-KML cleanup prompt first, then hit reload. (Shift+K can't help here — Kick redraws AIM's overlays, not Percepto's own entity state.)
