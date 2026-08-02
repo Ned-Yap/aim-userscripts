@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.227
+// @version      4.228
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.227';
+    const SCRIPT_VERSION = '4.228';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -5138,6 +5138,25 @@
                 openInGoogleMaps(mapsCenter.lat, mapsCenter.lng);
             };
             footer.appendChild(mapsBtn);
+        }
+
+        // v4.228: ➕ create asset at the exact right-click point. The coord-
+        // menu version (v4.227) only appears on EMPTY map — but new pads
+        // usually go INSIDE an existing FFZ, where the entity hit-test wins
+        // and this inspector pops instead. Same dialog + create rails, seeded
+        // with the same clickLatLng the GPS row uses. Icon-only for footer
+        // compactness; absent on programmatic opens (no exact point).
+        if (assetCreateEnabled && !LITE && clickLatLng && typeof clickLatLng.lat === 'number') {
+            const addBtn = document.createElement('button');
+            addBtn.textContent = '➕';
+            addBtn.title = `Create a ${assetCreateSizeFt}×${assetCreateSizeFt} ft asset centered on your right-click point`;
+            addBtn.style.cssText = 'flex:0 0 auto;background:transparent;color:#5fff5f;border:1px solid rgba(95,255,95,0.35);border-radius:3px;padding:5px 8px;cursor:pointer;font:inherit;font-size:12px';
+            addBtn.onclick = (ev) => {
+                ev.stopPropagation();
+                closeInspector();
+                showAssetCreateModal(clickLatLng.lat, clickLatLng.lng);
+            };
+            footer.appendChild(addBtn);
         }
 
         const jsonBtn = document.createElement('button');

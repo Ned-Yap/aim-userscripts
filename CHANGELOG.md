@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-02 — Site Setup Tools v4.228 (dev/latest): ➕ Create asset works INSIDE existing FFZs (inspector footer button)
+
+Follow-up to v4.227: right-clicking inside an FFZ (or on any entity) opens the inspector, so the empty-map ➕ menu item never appeared exactly where new pads usually go. The inspector popup footer now has a green **➕** button that opens the same create dialog, centered on the exact point you right-clicked — no mode toggle needed, and the empty-map menu item still works as before. Same Control Panel toggles govern both.
+
 ## 2026-08-02 — Site Setup Tools v4.227 (dev/latest): ➕ Right-click empty map → Create asset here
 
 The empty-map right-click menu (the GPS / Google Maps one) gains a **➕ Create asset here** item: it opens a compact dialog — Name (auto-unique), Size (square side in ft, default 30, editable per create), Subtype (defaults to the site's most common asset type; picking a new string creates a new type) — and creates a real square asset centered exactly on the click via the site-setup API. Create-only: existing entities are never touched. The default size is editable in the Control Panel ("New-asset square size"), and the whole item can be toggled off there too. Hidden in Lite mode. Reload Percepto afterward to see/edit the new asset natively (one-click 🔄 Reload button in the dialog).
