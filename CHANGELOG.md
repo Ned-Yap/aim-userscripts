@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-02 — ⭐ PROMOTED TO PROD: Control Panel v1.40 (coworkers jump from v1.38)
+
+The 🔒 lock / drag / resize panel (see the 2026-08-01 v1.40 entry below) is now live for everyone. This update also carries **v1.39 — Data View gear docking** (the gear sits inside Percepto's own map-group button row on Data View instead of floating over the draw controls), which hadn't reached prod yet. Update via Tampermonkey dashboard → Check for userscript updates.
+
 ## 2026-08-01 — Map Styler v34.133 + Site Setup Tools v4.226 (dev/latest): 🟠 FP↔FFZ relationship — routes snap to FFZ EDGES (existing or proposed)
 
 Route paths can now connect to Free Fly Zones the way real FPs do — an endpoint landing **on an FFZ edge** (mid-edge, not corners):
