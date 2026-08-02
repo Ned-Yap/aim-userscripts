@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-02 — Site Setup Tools v4.227 (dev/latest): ➕ Right-click empty map → Create asset here
+
+The empty-map right-click menu (the GPS / Google Maps one) gains a **➕ Create asset here** item: it opens a compact dialog — Name (auto-unique), Size (square side in ft, default 30, editable per create), Subtype (defaults to the site's most common asset type; picking a new string creates a new type) — and creates a real square asset centered exactly on the click via the site-setup API. Create-only: existing entities are never touched. The default size is editable in the Control Panel ("New-asset square size"), and the whole item can be toggled off there too. Hidden in Lite mode. Reload Percepto afterward to see/edit the new asset natively (one-click 🔄 Reload button in the dialog).
+
 ## 2026-08-02 — ⭐ PROMOTED TO PROD: Control Panel v1.40 (coworkers jump from v1.38)
 
 The 🔒 lock / drag / resize panel (see the 2026-08-01 v1.40 entry below) is now live for everyone. This update also carries **v1.39 — Data View gear docking** (the gear sits inside Percepto's own map-group button row on Data View instead of floating over the draw controls), which hadn't reached prod yet. Update via Tampermonkey dashboard → Check for userscript updates.

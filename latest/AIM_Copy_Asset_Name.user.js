@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.226
+// @version      4.227
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.226';
+    const SCRIPT_VERSION = '4.227';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -90,6 +90,8 @@
     let masterEnabled = true;
     let aglHoverTipEnabled = true; // add an AGL line to Percepto's native hover ALT tooltip (MSL sites)
     let emptyMapMenuEnabled = true; // right-click empty map → GPS / Google Maps menu (v4.88)
+    let assetCreateEnabled = true;  // empty-map menu → ➕ Create asset here (v4.227)
+    let assetCreateSizeFt = 30;     // default square side in ft, CP-editable (v4.227)
     // mapObjectsBySite: { [siteID]: { entities: [...], fetchedAt: ms } }
     const mapObjectsBySite = {};
     const fetchingSites = new Set();
@@ -4747,6 +4749,13 @@
         addItem('📋 Copy coordinates', () => copyToClipboard(coords, 'Copied coordinates'));
         addItem('🔗 Copy Google Maps link', () => copyToClipboard(url, 'Copied Google Maps link'));
         addItem('↗ Open in Google Maps', () => openInGoogleMaps(lat, lng));
+        // v4.227: ➕ square asset centered on the click. The coord menu only
+        // appears on EMPTY map (an entity hit opens the inspector instead),
+        // so this is the natural "make a pad here" gesture. Hidden in Lite
+        // mode (write tool); the POST is liteBlockedWrite-gated too.
+        if (assetCreateEnabled && !LITE) {
+            addItem(`➕ Create asset here (${assetCreateSizeFt}×${assetCreateSizeFt} ft)`, () => showAssetCreateModal(lat, lng));
+        }
         document.body.appendChild(menu);
         // Keep on-screen.
         const r = menu.getBoundingClientRect();
@@ -4756,6 +4765,176 @@
             document.addEventListener('mousedown', coordMenuOutside, true);
             document.addEventListener('keydown', coordMenuEsc, true);
         }, 0);
+    }
+
+    // ============================================================
+    // ➕ Right-click asset create (v4.227) — square asset (type 3) centered
+    // on an empty-map right-click, via the POST /map_objects/ create rails
+    // (create-only — never edits existing entities). Size editable per
+    // create (default from the CP "New-asset square size" setting), name
+    // server-unique, subtype picked from the site's existing types — a
+    // novel entry rides the custom.new_poi_type_str channel, same as the
+    // SUM subtype editor (v4.179 recon).
+    // ============================================================
+    const ASSET_CREATE_MODAL_ID = 'aim-asset-create-modal';
+    function closeAssetCreateModal() {
+        const el = document.getElementById(ASSET_CREATE_MODAL_ID);
+        if (el) el.remove();
+    }
+    // Axis-aligned square centered on the click point. Equirectangular
+    // local approximation — at pad scale (tens–hundreds of ft) the error
+    // is sub-inch. 4 corners, no closing duplicate — matches how Percepto
+    // stores polygon rings (coords list open, WKT closes it server-side).
+    function assetSquarePoints(lat, lng, sizeFt) {
+        const halfM = (sizeFt / 2) / M_TO_FT;
+        const dLat = halfM / 111320;
+        const dLng = halfM / (111320 * Math.cos(lat * Math.PI / 180));
+        return [
+            { lat: lat + dLat, lng: lng - dLng },   // NW
+            { lat: lat + dLat, lng: lng + dLng },   // NE
+            { lat: lat - dLat, lng: lng + dLng },   // SE
+            { lat: lat - dLat, lng: lng - dLng },   // SW
+        ];
+    }
+    function showAssetCreateModal(lat, lng) {
+        closeAssetCreateModal();
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
+        const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        // Subtypes ranked by how often they appear on THIS site — the top
+        // one is the default (a new pad on a battery site is probably a
+        // battery). Raw poi_type_str strings, state suffixes and all, so
+        // the created asset matches the site's existing naming exactly.
+        const subCounts = new Map();
+        ents.filter(e => e.type === 3 && e.custom && e.custom.poi_type_str).forEach(e => {
+            const s = String(e.custom.poi_type_str).trim();
+            if (s) subCounts.set(s, (subCounts.get(s) || 0) + 1);
+        });
+        const subtypes = [...subCounts.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0]);
+        const defSubtype = subtypes[0] || 'well-cluster';
+        // Server-unique default name ("New Asset", "New Asset-2", …).
+        const usedNames = new Set(ents.filter(e => e.name).map(e => e.name));
+        let defName = 'New Asset';
+        if (usedNames.has(defName)) { let i = 2; while (usedNames.has(`New Asset-${i}`)) i++; defName = `New Asset-${i}`; }
+        const wrap = document.createElement('div');
+        wrap.id = ASSET_CREATE_MODAL_ID;
+        wrap.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:340px;z-index:2147483001;'
+            + 'background:rgba(16,22,32,0.98);border:1px solid rgba(122,223,230,0.55);border-radius:10px;'
+            + 'color:#dfe9f0;font:12px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,0.6);';
+        const inputCss = 'width:100%;box-sizing:border-box;background:#141a24;color:#dfe9f0;border:1px solid rgba(122,223,230,0.35);border-radius:4px;padding:5px 8px;font:inherit;';
+        wrap.innerHTML = `
+            <div style="padding:8px 12px;border-bottom:1px solid rgba(122,223,230,0.25);color:#7adfe6;font-weight:700;">➕ Create asset here</div>
+            <div style="padding:10px 12px;display:flex;flex-direction:column;gap:8px;">
+                <div style="color:#888;font-size:11px;">${fmtLatLng(lat, lng)} · square centered on your click</div>
+                <label style="display:block;">Name<input id="aim-ac-name" type="text" value="${defName.replace(/"/g, '&quot;')}" style="${inputCss}margin-top:3px;"></label>
+                <label style="display:block;">Size — square side (ft)<input id="aim-ac-size" type="number" min="5" max="2000" step="5" value="${assetCreateSizeFt}" style="${inputCss}margin-top:3px;"></label>
+                <label style="display:block;">Subtype<input id="aim-ac-subtype" type="text" list="aim-ac-subtype-list" value="${defSubtype.replace(/"/g, '&quot;')}" style="${inputCss}margin-top:3px;">
+                    <datalist id="aim-ac-subtype-list">${subtypes.map(s => `<option value="${s.replace(/"/g, '&quot;')}"></option>`).join('')}</datalist>
+                </label>
+                <div style="color:#888;font-size:11px;">Creates via the site-setup API — <b>create-only</b>, existing entities are never touched. Reload after to edit it natively.</div>
+                <div id="aim-ac-result" style="display:none;font-size:11px;"></div>
+            </div>
+            <div style="padding:8px 12px;border-top:1px solid rgba(122,223,230,0.25);display:flex;gap:8px;justify-content:flex-end;">
+                <button id="aim-ac-cancel" style="background:transparent;color:#aaa;border:1px solid rgba(255,255,255,0.25);border-radius:4px;padding:5px 14px;cursor:pointer;font:inherit;">Cancel</button>
+                <button id="aim-ac-create" style="background:rgba(95,255,95,0.18);color:#5fff5f;border:1px solid rgba(95,255,95,0.6);border-radius:4px;padding:5px 14px;cursor:pointer;font:inherit;font-weight:700;">Create</button>
+            </div>`;
+        document.body.appendChild(wrap);
+        const nameEl = wrap.querySelector('#aim-ac-name');
+        const sizeEl = wrap.querySelector('#aim-ac-size');
+        const subEl = wrap.querySelector('#aim-ac-subtype');
+        const resEl = wrap.querySelector('#aim-ac-result');
+        const createBtn = wrap.querySelector('#aim-ac-create');
+        wrap.querySelector('#aim-ac-cancel').onclick = closeAssetCreateModal;
+        nameEl.focus();
+        nameEl.select();
+        createBtn.onclick = async () => {
+            const name = genCleanName((nameEl.value || '').trim());
+            const sizeFt = Number(sizeEl.value);
+            const subtype = (subEl.value || '').trim();
+            const fail = (m) => { resEl.style.display = 'block'; resEl.style.color = '#ff6060'; resEl.textContent = m; };
+            if (!name) { fail('Name is required.'); return; }
+            if (usedNames.has(name)) { fail(`"${name}" already exists on this site — pick another name.`); return; }
+            if (!Number.isFinite(sizeFt) || sizeFt < 5 || sizeFt > 2000) { fail('Size must be 5–2000 ft.'); return; }
+            if (!subtype) { fail('Subtype is required.'); return; }
+            createBtn.disabled = true;
+            createBtn.textContent = 'Creating…';
+            resEl.style.display = 'block';
+            resEl.style.color = '#888';
+            resEl.textContent = 'Posting to /map_objects/…';
+            const r = await createAssetSquare(sid, lat, lng, sizeFt, name, subtype, !subCounts.has(subtype));
+            if (r.ok) {
+                resEl.style.color = '#5fff5f';
+                resEl.textContent = `✓ Created "${name}" (${sizeFt}×${sizeFt} ft). Reload Percepto to see & edit it.`;
+                createBtn.style.display = 'none';
+                wrap.querySelector('#aim-ac-cancel').textContent = 'Close';
+                appendReloadBtn(resEl);
+                showToast(`Created asset "${name}"`);
+            } else {
+                createBtn.disabled = false;
+                createBtn.textContent = 'Create';
+                fail(r.error || 'Create failed — see console.');
+            }
+        };
+    }
+    async function createAssetSquare(sid, lat, lng, sizeFt, name, subtype, subtypeIsNew) {
+        if (liteBlockedWrite('create asset')) return { ok: false, error: 'Read-only in Lite mode.' };
+        try {
+            const csrf = getCsrfToken();
+            if (!csrf) return { ok: false, error: 'No CSRF token — make one native save/edit anywhere in Percepto (token auto-captures), then retry.' };
+            let siteCfg = null;
+            try { siteCfg = await fetchSiteConfig(sid); } catch (e) { console.warn(`${TAG} site cfg fetch failed:`, e); }
+            // Ground elevation at the click, best-effort — populates
+            // custom.elevation_asl like a natively-drawn asset; null is fine.
+            let elevM = null;
+            try { elevM = await fetchElevation(lat, lng); } catch (e) {}
+            // Clone an existing asset's write body as the template when one
+            // exists (unknown outer fields ride along); else minimal body.
+            const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+            const tmplEnt = ents.find(e => e.type === 3 && entityCoords(e));
+            let b = null;
+            if (tmplEnt) { try { b = buildWriteBody(tmplEnt, siteCfg); } catch (e) {} }
+            if (!b) b = { type: 3, description: '', params: {}, constantly_present_asset_name: false, general_marker_type: 'general', marker_height: 0, is_unshielded: false };
+            delete b.id;
+            b.type = 3;
+            b.name = name;
+            b.site_id = sid;
+            b.points = assetSquarePoints(lat, lng, sizeFt);
+            b.description = '';
+            b.restrictions = {};
+            b.arcs = [];
+            b.validated = false;
+            b.is_unshielded = false;
+            // Fresh `custom` — NEVER carry the template's (its poi_id links
+            // the template's POI record; equipment/state don't apply here).
+            b.custom = {
+                poi_type_str: subtype,
+                new_poi_type_str: subtypeIsNew ? subtype : '',
+                altitude: 0,
+                height_agl: null,
+                elevation_asl: (typeof elevM === 'number') ? elevM : null,
+                poi_volume_method: null,
+                pole_feeder: null,
+                pole_usage: null,
+                pole_is_simple: true,
+            };
+            b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
+            const r = await fetch('/map_objects/', {
+                method: 'POST', credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf },
+                body: JSON.stringify(b),
+            });
+            const txt = await r.text();
+            let json = null; try { json = JSON.parse(txt); } catch (e) {}
+            if (r.status === 200 && json && json.map_objects) {
+                console.log(`${TAG} created asset "${name}" (${sizeFt}×${sizeFt} ft) id ${json.map_objects.id} at ${lat.toFixed(6)}, ${lng.toFixed(6)}`);
+                return { ok: true, id: json.map_objects.id };
+            }
+            console.warn(`${TAG} asset create failed: server ${r.status}`, txt && txt.slice(0, 300));
+            return { ok: false, error: `Server ${r.status}: ${(txt || '').slice(0, 160)}` };
+        } catch (e) {
+            console.error(`${TAG} asset create threw:`, e);
+            return { ok: false, error: `POST threw: ${e && e.message || e}` };
+        }
     }
 
     // clickLatLng (optional {lat,lng}): the EXACT point the user right-clicked.
@@ -7682,6 +7861,11 @@
                 } else if (msg.toggleId === 'empty-map-menu') {
                     emptyMapMenuEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
                     if (!emptyMapMenuEnabled) closeCoordMenu();
+                } else if (msg.toggleId === 'asset-create') {
+                    assetCreateEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                } else if (msg.toggleId === 'asset-create-size') {
+                    const v = Number(msg.value);
+                    if (Number.isFinite(v) && v >= 5 && v <= 2000 && v !== assetCreateSizeFt) assetCreateSizeFt = v;
                 }
             }
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SOP_SCRIPT_ID) {
@@ -7794,6 +7978,8 @@
             toggles: [
                 { id: 'master', label: 'Enable (right-click any entity)', type: 'boolean', default: true, master: true },
                 { id: 'empty-map-menu', label: 'Right-click empty map → GPS / Google Maps menu', type: 'boolean', default: true },
+                { id: 'asset-create', label: 'Empty-map menu: ➕ Create asset here', type: 'boolean', default: true },
+                { id: 'asset-create-size', label: 'New-asset square size', type: 'number', min: 5, max: 2000, step: 5, default: 30, unit: 'ft' },
                 { id: 'agl-hover-tip', label: 'Hover ALT tooltip: add AGL line (MSL sites)', type: 'boolean', default: true },
                 { id: 'refresh-action', label: 'Refresh entity data for this site', type: 'button', action: 'refresh-entities' },
             ],
