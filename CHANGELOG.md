@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-02 — Site Setup Tools v4.230 (dev/latest): ➕ default name advances past ghosts (no more "name already exists" 400)
+
+Creating pads back-to-back could default the next dialog to the SAME "New Asset-N" (the entity refetch lags the server for a second), which the server rejected with "Entity name already exists". Names created this session are now remembered locally, so the default advances to the next free number — and typing a duplicate is caught before posting — no reload needed.
+
 ## 2026-08-02 — Site Setup Tools v4.229 (dev/latest): ➕ Created assets show as GHOSTS until reload
 
 Percepto only renders entities read at page load, so freshly created assets were invisible until a reload — placing several in a row meant working blind. Now each successful create immediately draws a **dashed green ghost square with the asset's name** right where it landed, and the dialog auto-closes so the next right-click → ➕ is one gesture away. Place the whole batch, then reload once — the reload swaps the ghosts for the real, natively-editable assets.

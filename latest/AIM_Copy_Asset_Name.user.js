@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.229
+// @version      4.230
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.229';
+    const SCRIPT_VERSION = '4.230';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -4813,7 +4813,10 @@
         const subtypes = [...subCounts.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0]);
         const defSubtype = subtypes[0] || 'well-cluster';
         // Server-unique default name ("New Asset", "New Asset-2", …).
+        // Session-created names merged in — the cache refetch lags the
+        // server right after a create (v4.230).
         const usedNames = new Set(ents.filter(e => e.name).map(e => e.name));
+        (assetSessionNames.get(String(sid)) || []).forEach(n => usedNames.add(n));
         let defName = 'New Asset';
         if (usedNames.has(defName)) { let i = 2; while (usedNames.has(`New Asset-${i}`)) i++; defName = `New Asset-${i}`; }
         const wrap = document.createElement('div');
@@ -4894,6 +4897,13 @@
     // overlay-SVG gotcha); name label is a divIcon marker, NOT bindTooltip
     // (Percepto's tooltip subclass crashes bindTooltip on Data View).
     const assetGhostLayers = [];
+    // v4.230: names created this session, per site. The entity cache refetch
+    // after a create lags the server (300 ms delay + fetch), so a rapid next
+    // create defaulted to the SAME "New Asset-N" and 400'd ("Entity name
+    // already exists"). This set is merged into the dialog's used-name list
+    // so the default advances and pre-validation catches dupes without a
+    // reload, whatever the cache says.
+    const assetSessionNames = new Map(); // String(siteID) -> Set of names
     function drawAssetGhost(points, lat, lng, name) {
         try {
             const L = getLeafletL();
@@ -4978,6 +4988,9 @@
             let json = null; try { json = JSON.parse(txt); } catch (e) {}
             if (r.status === 200 && json && json.map_objects) {
                 console.log(`${TAG} created asset "${name}" (${sizeFt}×${sizeFt} ft) id ${json.map_objects.id} at ${lat.toFixed(6)}, ${lng.toFixed(6)}`);
+                let sessNames = assetSessionNames.get(String(sid));
+                if (!sessNames) assetSessionNames.set(String(sid), sessNames = new Set());
+                sessNames.add(name);
                 const ghost = drawAssetGhost(b.points, lat, lng, name);
                 return { ok: true, id: json.map_objects.id, ghost };
             }
