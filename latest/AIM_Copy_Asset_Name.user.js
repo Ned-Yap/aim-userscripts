@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.228
+// @version      4.229
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.228';
+    const SCRIPT_VERSION = '4.229';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -4863,6 +4863,15 @@
             resEl.textContent = 'Posting to /map_objects/…';
             const r = await createAssetSquare(sid, lat, lng, sizeFt, name, subtype, !subCounts.has(subtype));
             if (r.ok) {
+                // v4.229: ghost drawn = on-map confirmation exists, so close
+                // the dialog immediately — placing a batch of pads shouldn't
+                // cost a Close click each. No ghost (Leaflet unreachable) →
+                // keep the dialog up with the reload hint as before.
+                if (r.ghost) {
+                    showToast(`Created asset "${name}" — ghost drawn (reload when done placing)`);
+                    closeAssetCreateModal();
+                    return;
+                }
                 resEl.style.color = '#5fff5f';
                 resEl.textContent = `✓ Created "${name}" (${sizeFt}×${sizeFt} ft). Reload Percepto to see & edit it.`;
                 createBtn.style.display = 'none';
@@ -4875,6 +4884,48 @@
                 fail(r.error || 'Create failed — see console.');
             }
         };
+    }
+    // v4.229: ghost overlay for assets created this session. Percepto only
+    // renders entities read at page load, so a fresh create is invisible
+    // until reload — when placing several pads in a row you'd be working
+    // blind. Draw a dashed green square + name label where each one landed;
+    // the reload that pulls in the real assets clears the ghosts naturally.
+    // Same L.svg renderer pattern as renderGenPreview (dodges the lazy
+    // overlay-SVG gotcha); name label is a divIcon marker, NOT bindTooltip
+    // (Percepto's tooltip subclass crashes bindTooltip on Data View).
+    const assetGhostLayers = [];
+    function drawAssetGhost(points, lat, lng, name) {
+        try {
+            const L = getLeafletL();
+            const map = getLeafletMap();
+            if (!L || !map) return false;
+            let renderer = null;
+            try { renderer = L.svg({ padding: 0.5 }); } catch (e) { renderer = null; }
+            const opts = {
+                color: '#5fff5f', weight: 2, opacity: 0.9, dashArray: '6,5',
+                fillColor: '#5fff5f', fillOpacity: 0.12, interactive: false,
+            };
+            if (renderer) opts.renderer = renderer;
+            const poly = L.polygon(points.map(p => [p.lat, p.lng]), opts);
+            poly.addTo(map);
+            assetGhostLayers.push(poly);
+            // Name label centered on the square. genCleanName already limits
+            // names to letters/numbers/space/_/- so the html is injection-safe.
+            try {
+                const icon = L.divIcon({
+                    className: '',
+                    html: `<div style="transform:translate(-50%,-50%);color:#5fff5f;font:600 11px -apple-system,Segoe UI,Roboto,sans-serif;text-shadow:0 1px 3px #000,0 0 6px #000;white-space:nowrap;pointer-events:none;">${name} <span style="opacity:0.7;">(ghost)</span></div>`,
+                    iconSize: [0, 0],
+                });
+                const mk = L.marker([lat, lng], { icon, interactive: false });
+                mk.addTo(map);
+                assetGhostLayers.push(mk);
+            } catch (e) { /* label is decoration — square alone is fine */ }
+            return true;
+        } catch (e) {
+            console.warn(`${TAG} ghost draw failed (asset is still created):`, e);
+            return false;
+        }
     }
     async function createAssetSquare(sid, lat, lng, sizeFt, name, subtype, subtypeIsNew) {
         if (liteBlockedWrite('create asset')) return { ok: false, error: 'Read-only in Lite mode.' };
@@ -4927,7 +4978,8 @@
             let json = null; try { json = JSON.parse(txt); } catch (e) {}
             if (r.status === 200 && json && json.map_objects) {
                 console.log(`${TAG} created asset "${name}" (${sizeFt}×${sizeFt} ft) id ${json.map_objects.id} at ${lat.toFixed(6)}, ${lng.toFixed(6)}`);
-                return { ok: true, id: json.map_objects.id };
+                const ghost = drawAssetGhost(b.points, lat, lng, name);
+                return { ok: true, id: json.map_objects.id, ghost };
             }
             console.warn(`${TAG} asset create failed: server ${r.status}`, txt && txt.slice(0, 300));
             return { ok: false, error: `Server ${r.status}: ${(txt || '').slice(0, 160)}` };

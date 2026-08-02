@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-02 — Site Setup Tools v4.229 (dev/latest): ➕ Created assets show as GHOSTS until reload
+
+Percepto only renders entities read at page load, so freshly created assets were invisible until a reload — placing several in a row meant working blind. Now each successful create immediately draws a **dashed green ghost square with the asset's name** right where it landed, and the dialog auto-closes so the next right-click → ➕ is one gesture away. Place the whole batch, then reload once — the reload swaps the ghosts for the real, natively-editable assets.
+
 ## 2026-08-02 — Site Setup Tools v4.228 (dev/latest): ➕ Create asset works INSIDE existing FFZs (inspector footer button)
 
 Follow-up to v4.227: right-clicking inside an FFZ (or on any entity) opens the inspector, so the empty-map ➕ menu item never appeared exactly where new pads usually go. The inspector popup footer now has a green **➕** button that opens the same create dialog, centered on the exact point you right-clicked — no mode toggle needed, and the empty-map menu item still works as before. Same Control Panel toggles govern both.
