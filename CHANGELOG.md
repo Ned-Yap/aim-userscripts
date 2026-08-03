@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-03 — Fast FP Draw: branching (Site Setup Tools latest v4.234 — dev only)
+
+The drawn path is now a real branching graph, like native flight paths. **Click any waypoint you've already placed to make it the branch anchor** (cyan ring) — the next clicks grow a new branch from there. The tentative segment, shielding buffers, per-arc altitudes, junction checks and the landing-angle check all follow the graph (angle is checked at branch tips). Right-click/Esc undo steps back through both waypoint-adds and anchor switches.
+
+---
+
 ## 2026-08-03 — Fast FP Draw buffers now match your real FP settings (Site Setup Tools latest v4.233 + Map Styler latest v34.134 — dev only)
 
 The draw-time buffer bands now use your **actual Map Styler FP card settings** — color, opacity, and distances for both the 40 ft and 65 ft bands, honoring their enable toggles. The Styler answers a settings request over its state channel and re-broadcasts whenever you tweak an fp.\* control, so the preview live-updates mid-draw. Hardcoded defaults remain only as a fallback when the Styler isn't running.

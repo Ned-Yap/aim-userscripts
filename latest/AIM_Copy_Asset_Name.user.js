@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.233
+// @version      4.234
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.233';
+    const SCRIPT_VERSION = '4.234';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22825,6 +22825,9 @@
         active: false, stage: 'draw',   // 'draw' | 'review' | 'busy'
         verts: [],                       // [{lat,lng}] — snapped positions
         snaps: [],                       // per-vertex: null | {kind:'fp-vertex',...} | {kind:'ffz-edge',...}
+        segs: [],                        // [{a,b}] vert indices — a GRAPH, not a chain (v4.234 branching)
+        anchor: null,                    // vert index the next click extends from (click an existing vert to branch)
+        hist: [],                        // undo stack: {t:'add',vi,seg} | {t:'anchor',prev}
         tentative: null, tentSnap: null, // live cursor (snapped) + its snap info
         floorFt: FFD_DEFAULTS.floorFt, deltaFt: FFD_DEFAULTS.deltaFt,
         name: '', createdCount: 0, showBuffers: true, bufCfg: null,
@@ -22918,19 +22921,23 @@
         const L = getLeafletL(), map = getLeafletMap();
         if (!L || !map) return;
         ffdClearLayers();
-        const pts = ffd.verts.map(v => [v.lat, v.lng]);
+        // Graph model: one 2-point part per segment (Leaflet polylines accept
+        // nested latlng arrays → one layer renders the whole branching tree).
+        const segLL = ffd.segs.map(s => [[ffd.verts[s.a].lat, ffd.verts[s.a].lng], [ffd.verts[s.b].lat, ffd.verts[s.b].lng]]);
+        const tentPart = (ffd.stage === 'draw' && ffd.tentative && ffd.anchor != null)
+            ? [[ffd.verts[ffd.anchor].lat, ffd.verts[ffd.anchor].lng], [ffd.tentative.lat, ffd.tentative.lng]] : null;
         try {
             // Shielding buffers first (outer → inner) so they stack UNDER the
-            // line — drawn over verts + the tentative cursor segment so the
+            // lines — including the tentative anchor→cursor segment so the
             // band previews where the next click will land.
             if (ffd.showBuffers) {
-                const bufPts = pts.slice();
-                if (ffd.stage === 'draw' && ffd.tentative && pts.length >= 1) bufPts.push([ffd.tentative.lat, ffd.tentative.lng]);
-                const pxPerFt = bufPts.length >= 2 ? ffdPxPerFt(map) : 0;
+                const bufParts = segLL.slice();
+                if (tentPart) bufParts.push(tentPart);
+                const pxPerFt = bufParts.length ? ffdPxPerFt(map) : 0;
                 if (pxPerFt > 0) {
                     ffdBufferBands().forEach(bf => {
                         if (!(bf.ft > 0)) return;
-                        const bl = L.polyline(bufPts, {
+                        const bl = L.polyline(bufParts, {
                             color: bf.color, opacity: bf.opacity, weight: 2 * bf.ft * pxPerFt,
                             lineJoin: 'round', lineCap: 'round', interactive: false,
                         });
@@ -22938,20 +22945,22 @@
                     });
                 }
             }
-            if (pts.length >= 2) {
-                const pl = L.polyline(pts, { color: '#00e5ff', weight: 3, opacity: 0.95, interactive: false });
+            if (segLL.length) {
+                const pl = L.polyline(segLL, { color: '#00e5ff', weight: 3, opacity: 0.95, interactive: false });
                 pl.addTo(map); ffd.layers.push(pl);
             }
-            if (ffd.stage === 'draw' && ffd.tentative && pts.length >= 1) {
-                const tl = L.polyline([pts[pts.length - 1], [ffd.tentative.lat, ffd.tentative.lng]],
+            if (tentPart) {
+                const tl = L.polyline(tentPart,
                     { color: ffd.tentSnap ? '#5fff5f' : '#00e5ff', weight: 2, opacity: 0.7, dashArray: '6,6', interactive: false });
                 tl.addTo(map); ffd.layers.push(tl);
             }
             ffd.verts.forEach((v, i) => {
                 const sn = ffd.snaps[i];
+                const isAnchor = ffd.stage === 'draw' && ffd.anchor === i;
                 const m = L.circleMarker([v.lat, v.lng], {
-                    radius: 5, weight: 2, fillOpacity: 0.95, interactive: false,
-                    color: sn ? '#5fff5f' : '#ffffff', fillColor: sn ? '#0a3d0a' : '#0a2730',
+                    radius: isAnchor ? 7 : 5, weight: isAnchor ? 3 : 2, fillOpacity: 0.95, interactive: false,
+                    color: isAnchor ? '#00e5ff' : (sn ? '#5fff5f' : '#ffffff'),
+                    fillColor: sn ? '#0a3d0a' : '#0a2730',
                 });
                 m.addTo(map); ffd.layers.push(m);
             });
@@ -22960,13 +22969,32 @@
     }
     function ffdTotalFt() {
         let m = 0;
-        for (let i = 0; i < ffd.verts.length - 1; i++) m += approxMeters(ffd.verts[i].lat, ffd.verts[i].lng, ffd.verts[i + 1].lat, ffd.verts[i + 1].lng);
+        for (const s of ffd.segs) m += approxMeters(ffd.verts[s.a].lat, ffd.verts[s.a].lng, ffd.verts[s.b].lat, ffd.verts[s.b].lng);
         return Math.round(m * M_TO_FT);
     }
-    function ffdPopVertex() {
-        if (!ffd.verts.length) { ffdSetActive(false); return; }
-        ffd.verts.pop(); ffd.snaps.pop();
+    // One step back: un-add the last waypoint (and its segment) or un-switch
+    // the last branch anchor — whichever happened most recently.
+    function ffdUndoStep() {
+        const h = ffd.hist.pop();
+        if (!h) { ffdSetActive(false); return; }
+        if (h.t === 'add') {
+            if (h.seg) ffd.segs.pop();
+            ffd.verts.pop(); ffd.snaps.pop();
+            ffd.anchor = h.seg ? h.seg.a : null;
+        } else if (h.t === 'anchor') {
+            ffd.anchor = h.prev;
+        }
         ffdRender();
+    }
+    // Hit-test the cursor against OUR drawn waypoints (screen px) → index or -1.
+    function ffdHitOwnVert(ll) {
+        const map = getLeafletMap(); if (!map) return -1;
+        let cp; try { cp = map.latLngToContainerPoint(ll); } catch (e) { return -1; }
+        let best = -1, bestD = FFD_SNAP_PX;
+        ffd.verts.forEach((v, i) => {
+            try { const p = map.latLngToContainerPoint(v); const d = Math.hypot(p.x - cp.x, p.y - cp.y); if (d < bestD) { bestD = d; best = i; } } catch (e) {}
+        });
+        return best;
     }
     // ---- panel ----
     function ffdSyncPanelStats() {
@@ -22977,7 +23005,7 @@
             const n = ffd.verts.length;
             const snapN = ffd.snaps.filter(Boolean).length;
             s.innerHTML = n
-                ? `<b style="color:#00e5ff">${n}</b> waypoint${n === 1 ? '' : 's'} · <b>${ffdTotalFt().toLocaleString()}</b> ft${snapN ? ` · <span style="color:#5fff5f">${snapN} snapped</span>` : ''}`
+                ? `<b style="color:#00e5ff">${n}</b> waypoint${n === 1 ? '' : 's'} · <b>${ffd.segs.length}</b> seg${ffd.segs.length === 1 ? '' : 's'} · <b>${ffdTotalFt().toLocaleString()}</b> ft${snapN ? ` · <span style="color:#5fff5f">${snapN} snapped</span>` : ''}`
                 : '<span style="color:#888">click the map to start</span>';
         }
     }
@@ -23027,7 +23055,7 @@
                 </div>
                 <label style="display:flex;gap:6px;align-items:center;margin-bottom:6px;color:#888;cursor:pointer"><input data-ffd-buf type="checkbox" ${ffd.showBuffers ? 'checked' : ''} style="accent-color:#1ca0de"> FP 40/65 ft shielding buffers</label>
                 <div data-ffd-stats style="margin-bottom:6px"></div>
-                <div style="color:#7a8a94;font-size:10px;line-height:1.5;margin-bottom:8px">click = waypoint (<span style="color:#5fff5f">green</span> = snapped to FP vertex / FFZ edge) · drag = pan · right-click = undo · <b>Enter</b> / dbl-click = finish · Esc = undo/exit</div>
+                <div style="color:#7a8a94;font-size:10px;line-height:1.5;margin-bottom:8px">click = waypoint (<span style="color:#5fff5f">green</span> = snapped to FP vertex / FFZ edge) · <b style="color:#00e5ff">click an existing waypoint = branch from it</b> (cyan ring = current anchor) · drag = pan · right-click = undo · <b>Enter</b> / dbl-click = finish · Esc = undo/exit</div>
                 <button data-ffd-finish style="width:100%;background:rgba(0,229,255,0.15);border:1px solid rgba(0,229,255,0.6);border-radius:5px;color:#00e5ff;padding:6px 0;cursor:pointer;font-size:12px;font-weight:600">✔ Finish &amp; review</button>
                 <button data-ffd-undo style="width:100%;margin-top:6px;background:transparent;border:1px solid rgba(255,179,71,0.4);border-radius:5px;color:#ffb347;padding:4px 0;cursor:pointer;font-size:11px">↺ Undo last commit (this site)</button>
                 ${refreshNote}`;
@@ -23062,7 +23090,7 @@
     // ---- finish → review plan ----
     async function ffdFinish() {
         if (ffd.stage !== 'draw') return;
-        if (ffd.verts.length < 2) { showToast('Need at least 2 waypoints', 'rgba(255,179,71,0.6)'); return; }
+        if (!ffd.segs.length) { showToast('Need at least 2 connected waypoints', 'rgba(255,179,71,0.6)'); return; }
         const siteID = getCurrentSiteID();
         if (!siteID) { showToast('No site open', 'rgba(255,120,120,0.6)'); return; }
         ffd.stage = 'busy'; ffd._busyMsg = 'Resolving altitude mode + elevations…'; ffdRenderPanel(); ffdRender();
@@ -23096,9 +23124,12 @@
                 ffd._busyMsg = 'Fetching DEM ground elevations…'; ffdRenderPanel();
                 try { await bulkFetchElevations(plan.verts); } catch (e) {}
             }
-            for (let i = 0; i < plan.verts.length - 1; i++) {
-                const a = plan.verts[i], b = plan.verts[i + 1];
-                const arc = { a, b, lenM: approxMeters(a.lat, a.lng, b.lat, b.lng), groundM: null, minM: null, maxM: null };
+            // Arcs come from the segment GRAPH (v4.234 branching), not a chain —
+            // sa/sb keep the vert indices so junction checks can find adjacency.
+            for (let i = 0; i < ffd.segs.length; i++) {
+                const sg = ffd.segs[i];
+                const a = plan.verts[sg.a], b = plan.verts[sg.b];
+                const arc = { a, b, sa: sg.a, sb: sg.b, lenM: approxMeters(a.lat, a.lng, b.lat, b.lng), groundM: null, minM: null, maxM: null };
                 if (mode === 'agl') {
                     arc.minM = fpArcAltMeters(aglFtToStoredM(ffd.floorFt, 0, 'agl'));
                     arc.maxM = Math.max(fpArcAltMeters(aglFtToStoredM(ffd.floorFt + ffd.deltaFt, 0, 'agl')), arc.minM + 1);
@@ -23121,7 +23152,7 @@
                 if (!s || s.kind !== 'fp-vertex' || !s.arc) return;
                 const b = rcArcBand(s.arc);
                 if (!b) return;
-                const adj = [plan.arcs[vi - 1], plan.arcs[vi]].filter(x => x && x.minM != null);
+                const adj = plan.arcs.filter(x => (x.sa === vi || x.sb === vi) && x.minM != null);
                 if (adj.length && !adj.some(x => x.minM < b.maxM && b.minM < x.maxM)) {
                     plan.warnings.push(`band at waypoint ${vi + 1} (${adj.map(x => `${x.minM}–${x.maxM} m`).join(', ')}) does not strictly overlap "${s.targetName}" (${b.minM}–${b.maxM} m) — the server may reject the junction`);
                 }
@@ -23129,13 +23160,16 @@
             // FFZ landing checks: angle (SOP ≥15°) + band overlap with the landing zone.
             ffd.snaps.forEach((s, vi) => {
                 if (!s || s.kind !== 'ffz-edge') return;
-                const nb = vi === 0 ? plan.verts[1] : plan.verts[vi - 1];
-                if (nb && (vi === 0 || vi === plan.verts.length - 1)) {
-                    const ang = rcSegEdgeAngleDeg(nb, plan.verts[vi], s.edgeA, s.edgeB);
+                // Landing-angle only makes sense for a branch TIP (degree 1) —
+                // its one neighbor defines the approach direction.
+                const touching = plan.arcs.filter(x => x.sa === vi || x.sb === vi);
+                if (touching.length === 1) {
+                    const other = touching[0].sa === vi ? touching[0].sb : touching[0].sa;
+                    const ang = rcSegEdgeAngleDeg(plan.verts[other], plan.verts[vi], s.edgeA, s.edgeB);
                     if (ang != null && ang < 15) plan.warnings.push(`lands on ${s.targetName} at ${Math.round(ang)}° to the edge (SOP wants ≥15°, ideal 45°)`);
                 }
                 const r = s.restrictions;
-                const adj = [plan.arcs[vi - 1], plan.arcs[vi]].filter(x => x && x.minM != null);
+                const adj = touching.filter(x => x.minM != null);
                 if (r && typeof r.minAlt === 'number' && typeof r.maxAlt === 'number' && adj.length &&
                     !adj.some(x => x.minM < r.maxAlt && r.minAlt < x.maxM)) {
                     plan.warnings.push(`band does not overlap landing ${s.targetName} (${fpArcAltMeters(r.minAlt)}–${fpArcAltMeters(r.maxAlt)} m) — FP-in-FFZ overlap is required`);
@@ -23252,7 +23286,7 @@
             console.log(`${TAG} fast-FP commit OK:`, doneMsg);
             showToast(`${doneMsg} — refresh before editing natively`, 'rgba(95,255,95,0.6)');
             ffd.createdCount++;
-            ffd.verts = []; ffd.snaps = []; ffd.tentative = null; ffd.tentSnap = null; ffd.plan = null; ffd.name = '';
+            ffd.verts = []; ffd.snaps = []; ffd.segs = []; ffd.anchor = null; ffd.hist = []; ffd.tentative = null; ffd.tentSnap = null; ffd.plan = null; ffd.name = '';
             ffd.stage = 'draw';
         } catch (e) {
             console.warn(`${TAG} fast-FP commit failed:`, e);
@@ -23315,9 +23349,22 @@
             // click-vs-pan: a real pan moved the pointer — let Leaflet have it.
             if (Math.hypot(ev.clientX - d.x, ev.clientY - d.y) > 5 || Date.now() - d.t > 600) return;
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            // Clicking one of OUR waypoints doesn't add — it moves the branch
+            // ANCHOR there, so the next click grows a branch off that vertex.
+            const own = ffdHitOwnVert(ll);
+            if (own >= 0) {
+                if (ffd.anchor !== own) { ffd.hist.push({ t: 'anchor', prev: ffd.anchor }); ffd.anchor = own; }
+                ffdRender();
+                return;
+            }
             const s = ffdSnapPoint(ll);
+            const vi = ffd.verts.length;
             ffd.verts.push(s.pt);
             ffd.snaps.push(s.snap);
+            let seg = null;
+            if (ffd.anchor != null) { seg = { a: ffd.anchor, b: vi }; ffd.segs.push(seg); }
+            ffd.hist.push({ t: 'add', vi, seg });
+            ffd.anchor = vi;
             ffd.tentative = null; ffd.tentSnap = null;
             ffdRender();
         };
@@ -23334,7 +23381,7 @@
         ffd._onCtx = (ev) => {
             if (!ffd.active || isUiTarget(ev.target)) return;
             ev.preventDefault(); ev.stopPropagation();
-            if (ffd.stage === 'draw') ffdPopVertex();
+            if (ffd.stage === 'draw') ffdUndoStep();
         };
         ffd._onKey = (ev) => {
             if (!ffd.active) return;
@@ -23345,7 +23392,7 @@
                 ev.preventDefault(); ev.stopImmediatePropagation();
                 if (t && t.blur) { try { t.blur(); } catch (e) {} }
                 if (ffd.stage === 'review' || ffd.stage === 'busy') { ffd.stage = 'draw'; ffd.plan = null; ffdRenderPanel(); ffdRender(); }
-                else ffdPopVertex();
+                else ffdUndoStep();
                 return;
             }
             if (inField) return;
@@ -23398,7 +23445,7 @@
             ffd.ffzs = ents.filter(e => e.type === 16 && entityCoords(e));
             try { ffd.fpGraph = buildFlightPathGraph(ents); } catch (e) { ffd.fpGraph = null; }
             ffd.active = true; ffd.stage = 'draw';
-            ffd.verts = []; ffd.snaps = []; ffd.tentative = null; ffd.tentSnap = null; ffd.plan = null;
+            ffd.verts = []; ffd.snaps = []; ffd.segs = []; ffd.anchor = null; ffd.hist = []; ffd.tentative = null; ffd.tentSnap = null; ffd.plan = null;
             // Ask the Map Styler for its live fp.* buffer settings (answer
             // arrives async and re-renders; defaults cover the gap).
             if (ffdStylerChannel) { try { ffdStylerChannel.postMessage({ action: 'FP_BUFFER_REQUEST' }); } catch (e) {} }
@@ -23407,7 +23454,7 @@
         } else {
             ffd.active = false;
             ffdUnwire(); ffdClearLayers(); ffdRenderPanel();
-            ffd.verts = []; ffd.snaps = []; ffd.tentative = null; ffd.tentSnap = null; ffd.plan = null; ffd.stage = 'draw';
+            ffd.verts = []; ffd.snaps = []; ffd.segs = []; ffd.anchor = null; ffd.hist = []; ffd.tentative = null; ffd.tentSnap = null; ffd.plan = null; ffd.stage = 'draw';
             console.log(`${TAG} fast-FP draw OFF`);
         }
         const b = document.getElementById(FFD_BTN_ID);
