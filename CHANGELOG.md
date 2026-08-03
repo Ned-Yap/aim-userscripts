@@ -6,6 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-03 — 🕘 NEW: Delete Guard (v1.0) + Delete hotkey refuses big flight paths (New Entity Macro v1.12)
+
+Two layers of delete protection, born from today's incident:
+
+- **AIM Delete Guard v1.0 (NEW script — install it!)** — banks a full JSON copy of **every** entity delete (hotkey, ⋮ menu, bulk tools — it intercepts the actual network call) *before* the delete goes through, into a rolling **24-hour history with one-click Restore** (Control Panel → Delete Guard → 🕘 Show delete history). If the backup can't be taken, **the delete itself is blocked**. Nothing dies without a copy existing first.
+- **AIM New Entity Macro v1.12** — the Shift+D D delete hotkey now **refuses to run** when the selected entity is a flight path with **more than 5 segments** — you'll get an on-screen explanation and must delete manually via the ⋮ menu. It also refuses when it can't verify what's selected (fails closed).
+
+---
+
 ## 2026-08-03 — 🚨 CRITICAL FIX: hotkeys can no longer cross tabs (Control Panel v1.43 + New Entity Macro v1.11 + Clear All v1.7)
 
 **A hotkey pressed in one Percepto tab could execute in EVERY other open Percepto tab.** The Control Panel routes hotkeys over a `BroadcastChannel`, which the browser delivers to all tabs on the domain — so Shift+D D (Delete entity) pressed in one tab deleted the selected entity in another tab. This destroyed a finished flight path today. **Please update immediately — and skip v1.42/v1.10/v1.6 if Tampermonkey offers them (superseded within the hour).**

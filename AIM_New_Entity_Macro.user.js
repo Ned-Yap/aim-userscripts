@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM New Entity Macro
 // @namespace    http://tampermonkey.net/
-// @version      1.11
+// @version      1.12
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.user.js
 // @description  Hotkeys 1-6 create color-coded entities; Shift+S Save, Shift+D D (double-press) Delete, Shift+Z Cancel, Shift+X Finish. Each hotkey individually enable/rebindable via the AIM Control Panel.
@@ -137,7 +137,100 @@
         }
     }
 
+    // --- Delete hotkey guard (2026-08-03) ---
+    // A flight path with more than MAX_HOTKEY_DELETE_SEGMENTS segments must be
+    // deleted MANUALLY via the ⋮ kebab menu — the hotkey refuses outright.
+    // Fails CLOSED: if the selected entity can't be verified from Percepto's
+    // React state, the hotkey also refuses. Born from the 2026-08-03 incident
+    // where a cross-tab Delete destroyed a 2-hour flight path build.
+    const MAX_HOTKEY_DELETE_SEGMENTS = 5;
+
+    function collectEditorEntities() {
+        // Walks the react-leaflet fiber tree in every frame and returns the
+        // per-entity editor working copies currently held in React state
+        // (objects with a numeric type + arcs/coords). See the AIM editor
+        // React-state notes: read from FiberRoot.current, never the mount fiber.
+        const out = [];
+        const docs = [document];
+        document.querySelectorAll('iframe').forEach(f => {
+            try { if (f.contentDocument) docs.push(f.contentDocument); } catch (e) {}
+        });
+        for (const doc of docs) {
+            for (const el of doc.querySelectorAll('.leaflet-container')) {
+                try {
+                    const key = Object.keys(el).find(k => k.startsWith('__reactFiber$'));
+                    if (!key) continue;
+                    let fiber = el[key];
+                    while (fiber.return) fiber = fiber.return;
+                    const root = (fiber.stateNode && fiber.stateNode.current) ? fiber.stateNode.current : fiber;
+                    const seen = new Set(); const stack = [root];
+                    while (stack.length) {
+                        const f = stack.pop();
+                        if (!f || seen.has(f)) continue;
+                        seen.add(f);
+                        if (f.child) stack.push(f.child);
+                        if (f.sibling) stack.push(f.sibling);
+                        if (typeof f.type !== 'function') continue;
+                        let h = f.memoizedState, i = 0;
+                        while (h && i < 50) {
+                            const ms = h.memoizedState;
+                            if (ms && typeof ms === 'object' && !Array.isArray(ms) &&
+                                typeof ms.type === 'number' &&
+                                (Array.isArray(ms.arcs) || Array.isArray(ms.coords)) &&
+                                out.indexOf(ms) === -1) out.push(ms);
+                            h = h.next; i++;
+                        }
+                    }
+                } catch (e) { /* empty result → guard fails closed */ }
+            }
+        }
+        return out;
+    }
+
+    function deleteHotkeyGuard() {
+        try {
+            const cands = collectEditorEntities();
+            if (!cands.length) return { refuse: true, reason: 'could not verify which entity is selected — delete manually via the ⋮ menu' };
+            const big = cands.find(c => c.type === 15 && Array.isArray(c.arcs) && c.arcs.length > MAX_HOTKEY_DELETE_SEGMENTS);
+            if (big) return { refuse: true, reason: 'flight path "' + (big.name || 'unnamed') + '" has ' + big.arcs.length + ' segments (hotkey limit ' + MAX_HOTKEY_DELETE_SEGMENTS + ') — delete manually via the ⋮ menu' };
+            return { refuse: false };
+        } catch (e) {
+            return { refuse: true, reason: 'selection check failed (' + e.message + ') — delete manually via the ⋮ menu' };
+        }
+    }
+
+    function showDeleteRefusalToast(reason) {
+        const docs = [document];
+        document.querySelectorAll('iframe').forEach(f => {
+            try { if (f.contentDocument) docs.push(f.contentDocument); } catch (e) {}
+        });
+        for (const doc of docs) {
+            try {
+                if (!doc.body || !doc.querySelector('.leaflet-container')) continue;
+                const t = doc.createElement('div');
+                t.textContent = '🛑 Delete hotkey refused: ' + reason;
+                t.style.cssText = 'position:fixed;top:70px;left:50%;transform:translateX(-50%);z-index:2147483647;background:#2b0d0d;color:#ff6b6b;border:2px solid #ff4d4d;border-radius:8px;padding:12px 18px;font:14px/1.4 sans-serif;max-width:560px;box-shadow:0 4px 18px rgba(0,0,0,.6);pointer-events:none';
+                doc.body.appendChild(t);
+                setTimeout(() => t.remove(), 8000);
+                return;
+            } catch (e) {}
+        }
+        try {
+            const t = document.createElement('div');
+            t.textContent = '🛑 Delete hotkey refused: ' + reason;
+            t.style.cssText = 'position:fixed;top:70px;left:50%;transform:translateX(-50%);z-index:2147483647;background:#2b0d0d;color:#ff6b6b;border:2px solid #ff4d4d;border-radius:8px;padding:12px 18px;font:14px/1.4 sans-serif;max-width:560px;box-shadow:0 4px 18px rgba(0,0,0,.6);pointer-events:none';
+            document.body.appendChild(t);
+            setTimeout(() => t.remove(), 8000);
+        } catch (e) { console.warn('[AIM MACRO] toast failed: ' + e.message); }
+    }
+
     function performGlobalDelete() {
+        const guard = deleteHotkeyGuard();
+        if (guard.refuse) {
+            console.warn('[AIM MACRO] 🛑 Delete REFUSED: ' + guard.reason);
+            showDeleteRefusalToast(guard.reason);
+            return;
+        }
         var doDelete = (doc) => {
             var kebabBtn = doc.querySelector(SEL_KEBAB_BTN);
             if (kebabBtn && kebabBtn.offsetParent !== null) {
@@ -196,7 +289,7 @@
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-new-entity-macro';
-    const SCRIPT_VERSION = '1.11';
+    const SCRIPT_VERSION = '1.12';
     const DELETE_WINDOW_MS = 500; // second press must arrive within this
     let controlChannel = null;
     let controlPanelDetected = false;
@@ -230,6 +323,15 @@
         'create-marker': () => performGlobalAction('Digit6'),
         'save':          () => performGlobalSave(),
         'delete':        () => {
+            // Segment guard runs BEFORE priming so a refused delete never
+            // even arms the double-press window.
+            const guard = deleteHotkeyGuard();
+            if (guard.refuse) {
+                lastDeletePressAt = 0;
+                console.warn('[AIM MACRO] 🛑 Delete hotkey REFUSED: ' + guard.reason);
+                showDeleteRefusalToast(guard.reason);
+                return;
+            }
             // Double-press safety: first press records timestamp; the second
             // within DELETE_WINDOW_MS triggers the actual delete. Otherwise
             // the press is a no-op and resets the window.
