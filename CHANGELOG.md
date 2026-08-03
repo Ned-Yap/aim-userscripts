@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-03 — Fast FP Draw: ghosts after save + real Smart-Fill terrain bands (Site Setup Tools latest v4.237 — dev only)
+
+Two big ones from live testing:
+
+- **Committed FPs no longer vanish** — every save leaves a dashed cyan **ghost** with a "(saved — refresh to edit)" label, so you can chain many draws in one session and see everything you've made. Ghosts persist per site across crashes and are self-healing (re-render if wiped); after a page reload the real FP renders natively and the ghost retires itself. Undo-last-commit removes its ghost.
+- **Smart-Fill terrain logic** (ported from the Map Editor's ⛰ Smart Altitude): on MSL sites each drawn segment is DEM-sampled every ~100 ft, and wherever the ground varies more than 30 ft the tool inserts the fewest **step vertices** needed, banding each piece off its own max ground (floor/delta yours). Endpoint-only ground on a long segment missed interior high ground — that's fixed. AGL sites stay flat-band by design (stored values are already height-above-ground). The review panel shows "+N terrain steps".
+- Attaching to a real FP vertex (EXTEND) now announces itself in the panel — snap a waypoint onto an existing FP vertex and the stats line shows "⟳ will EXTEND <name>".
+
+---
+
 ## 2026-08-03 — Fast FP Draw: your draw can no longer vanish (Site Setup Tools latest v4.236 — dev only)
 
 Response to a report of an in-progress path disappearing after an accidental Shift press. Three protections:

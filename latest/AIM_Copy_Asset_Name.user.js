@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.236
+// @version      4.237
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.236';
+    const SCRIPT_VERSION = '4.237';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -11927,6 +11927,7 @@
     function runSumInjection() {
         if (!masterEnabled) return;
         recursiveSumInject(window);
+        ffdGhostTick();   // keep committed-FP ghosts alive (site nav / external wipes)
     }
     if (CONTEXT === 'IFRAME') {
         setInterval(runSumInjection, 2000);
@@ -22789,6 +22790,12 @@
     const FFD_PANEL_ID = 'aim-ffd-panel';
     const FFD_UNDO_LS = 'aim_ffd_undo:';
     const FFD_DRAFT_LS = 'aim_ffd_draft:';   // v4.236 in-progress draw autosave (survives crash/reload/mystery wipes)
+    const FFD_GHOST_LS = 'aim_ffd_ghosts:';  // v4.237 committed-FP ghosts (visible until a reload makes them native)
+    // Smart-Fill terrain constants — Map Editor planArc parity.
+    const FFD_SMART_SPACING_FT = 100;  // DEM sample spacing along a segment
+    const FFD_SMART_MAX_SAMPLES = 60;  // sample cap per segment
+    const FFD_SMART_VAR_FT = 30;       // ground range (ft) that forces a terrain step vertex
+    const FFD_SMART_MIN_STEP_FT = 60;  // never place auto-steps closer than this
     const FFD_SNAP_PX = 12;          // screen-px snap radius (FP verts + FFZ edges)
     const FFD_TOUCH_M = 0.5;         // rule #7 FFZ-contact tolerance (matches RC_TOUCH_M)
     const FFD_DEFAULTS = { floorFt: 90, deltaFt: 30 };
@@ -23062,6 +23069,74 @@
         });
         return best;
     }
+    // ---- committed-FP ghosts (v4.237) ----
+    // Percepto won't render a created/extended FP until a page reload (the
+    // site is cached at load), so every commit leaves a persistent dashed
+    // GHOST polyline + name label. Ghosts live in localStorage per site and
+    // auto-prune once a page load postdates them — by then the native render
+    // has taken over (same lifecycle as the ➕ create-asset ghost squares).
+    let ffdGhostLayers = [];
+    let ffdGhostSite = null;
+    const FFD_PAGE_LOADED_AT = Date.now() - Math.round(performance.now());
+    function ffdLoadGhosts(sid) {
+        try {
+            const arr = JSON.parse(localStorage.getItem(FFD_GHOST_LS + sid) || '[]');
+            if (!Array.isArray(arr)) return [];
+            const fresh = arr.filter(g => g && Array.isArray(g.segs) && typeof g.when === 'number' && g.when >= FFD_PAGE_LOADED_AT);
+            if (fresh.length !== arr.length) localStorage.setItem(FFD_GHOST_LS + sid, JSON.stringify(fresh));
+            return fresh;
+        } catch (e) { return []; }
+    }
+    function ffdAddGhost(sid, ghost) {
+        try {
+            const arr = ffdLoadGhosts(sid);
+            arr.push(ghost);
+            localStorage.setItem(FFD_GHOST_LS + sid, JSON.stringify(arr));
+        } catch (e) {}
+        ffdRenderGhosts(true);
+    }
+    function ffdRemoveGhost(sid, id) {
+        try {
+            const arr = ffdLoadGhosts(sid).filter(g => g.id !== id);
+            localStorage.setItem(FFD_GHOST_LS + sid, JSON.stringify(arr));
+        } catch (e) {}
+        ffdRenderGhosts(true);
+    }
+    function ffdClearGhostLayers() {
+        const map = getLeafletMap();
+        ffdGhostLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        ffdGhostLayers = [];
+    }
+    function ffdRenderGhosts(force) {
+        const L = getLeafletL(), map = getLeafletMap();
+        const sid = getCurrentSiteID();
+        if (!L || !map || !sid) return;
+        const ghosts = ffdLoadGhosts(sid);
+        // Steady state (called every 2 s from the injection tick): same site,
+        // layers still on the map → nothing to do. Site change, external wipe,
+        // or force → rebuild.
+        if (!force && sid === ffdGhostSite) {
+            if (!ghosts.length && !ffdGhostLayers.length) return;
+            if (ghosts.length && ffdGhostLayers.length && map.hasLayer(ffdGhostLayers[0])) return;
+        }
+        ffdGhostSite = sid;
+        ffdClearGhostLayers();
+        ghosts.forEach(g => {
+            try {
+                const parts = g.segs.map(sp => sp.map(p => [p.lat, p.lng]));
+                const pl = L.polyline(parts, { color: '#00e5ff', weight: 3, opacity: 0.85, dashArray: '8,8', interactive: false });
+                pl.addTo(map); ffdGhostLayers.push(pl);
+                const at = g.segs[0] && g.segs[0][0];
+                if (at && g.name) {
+                    // divIcon label, NOT bindTooltip (Data View crash gotcha).
+                    const mk = L.marker([at.lat, at.lng], { interactive: false, icon: L.divIcon({ className: '', html: `<div style="color:#00e5ff;font-size:11px;font-weight:600;text-shadow:0 0 3px #000;white-space:nowrap">${g.name} <span style="opacity:0.65">(saved — refresh to edit)</span></div>`, iconAnchor: [0, -6] }) });
+                    mk.addTo(map); ffdGhostLayers.push(mk);
+                }
+            } catch (e) {}
+        });
+    }
+    function ffdGhostTick() { try { ffdRenderGhosts(false); } catch (e) {} }
+
     // ---- panel ----
     function ffdSyncPanelStats() {
         const el = document.getElementById(FFD_PANEL_ID);
@@ -23070,8 +23145,9 @@
         if (s) {
             const n = ffd.verts.length;
             const snapN = ffd.snaps.filter(Boolean).length;
+            const ext = ffd.snaps.find(sn => sn && sn.kind === 'fp-vertex' && sn.fpId != null);
             s.innerHTML = n
-                ? `<b style="color:#00e5ff">${n}</b> waypoint${n === 1 ? '' : 's'} · <b>${ffd.segs.length}</b> seg${ffd.segs.length === 1 ? '' : 's'} · <b>${ffdTotalFt().toLocaleString()}</b> ft${snapN ? ` · <span style="color:#5fff5f">${snapN} snapped</span>` : ''}`
+                ? `<b style="color:#00e5ff">${n}</b> waypoint${n === 1 ? '' : 's'} · <b>${ffd.segs.length}</b> seg${ffd.segs.length === 1 ? '' : 's'} · <b>${ffdTotalFt().toLocaleString()}</b> ft${snapN ? ` · <span style="color:#5fff5f">${snapN} snapped</span>` : ''}${ext ? `<br><span style="color:#7adfe6">⟳ will EXTEND ${ext.targetName}</span>` : ''}`
                 : '<span style="color:#888">click the map to start</span>';
         }
     }
@@ -23137,12 +23213,12 @@
                 <td style="padding:1px 6px;color:#00e5ff">${a.minM}–${a.maxM} m</td></tr>`).join('');
             const warns = p.warnings.map(w => `<div style="color:#ff9a3d;font-size:10px;margin-top:3px">⚠ ${w}</div>`).join('');
             const errs = p.errors.map(w => `<div style="color:#ff8a80;font-size:10px;margin-top:3px">✗ ${w}</div>`).join('');
-            const modeLbl = p.mode === 'agl' ? 'AGL site — stored values are height above ground (terrain-following is implicit)' : `MSL site — bands follow DEM ground per segment (floor ${ffd.floorFt} ft + ${ffd.deltaFt} ft)`;
+            const modeLbl = p.mode === 'agl' ? 'AGL site — stored values are height above ground (terrain-following is implicit)' : `MSL site — Smart-Fill terrain bands (ground max per piece + ${ffd.floorFt}/${ffd.floorFt + ffd.deltaFt} ft; step vertices where ground varies >${FFD_SMART_VAR_FT} ft)`;
             const extend = p.extendFpId != null
                 ? `<div style="color:#7adfe6;font-size:11px;margin-top:4px">⟳ merges into FP “${p.extendFpName}” as new segments (no new entity)${p.extendFpValidated ? ' <span style="color:#ffb347">— resets its validation</span>' : ''}</div>`
                 : (p.ffzTouch ? `<div style="color:#5fff5f;font-size:11px;margin-top:4px">✓ connects to ${p.ffzTouch}</div>` : '');
             el.innerHTML = `${header}
-                <div style="color:#888;font-size:11px;margin-bottom:4px">${p.verts.length} waypoints → ${p.arcs.length} arcs · ${ffdTotalFt().toLocaleString()} ft<br>${modeLbl}</div>
+                <div style="color:#888;font-size:11px;margin-bottom:4px">${p.verts.length} waypoints → ${p.arcs.length} arcs${(p.stepVerts && p.stepVerts.length) ? ` <span style="color:#ffd24d">(+${p.stepVerts.length} terrain step${p.stepVerts.length === 1 ? '' : 's'})</span>` : ''} · ${ffdTotalFt().toLocaleString()} ft<br>${modeLbl}</div>
                 <div style="max-height:180px;overflow-y:auto;border:1px solid #1e3a4a;border-radius:4px;margin-bottom:4px">
                 <table style="width:100%;border-collapse:collapse;font-size:11px">
                 <tr style="color:#7a8a94"><th style="padding:1px 6px;text-align:left">#</th><th style="padding:1px 6px;text-align:left">len</th><th style="padding:1px 6px;text-align:left">ground</th><th style="padding:1px 6px;text-align:left">band</th></tr>
@@ -23184,32 +23260,71 @@
                 plan.ffzTouch = touch;
                 if (!touch) plan.errors.push('no waypoint lands on/in a Free Fly Zone — Percepto requires every flight path to connect to an FFZ. Snap a waypoint onto an FFZ edge (green) or end inside one.');
             }
+            plan.stepVerts = [];
             if (mode === 'unknown') {
                 plan.errors.push('site altitude mode unknown — set MSL/AGL in the ⊕ Generate modal banner first');
-            } else if (mode === 'msl') {
-                ffd._busyMsg = 'Fetching DEM ground elevations…'; ffdRenderPanel();
-                try { await bulkFetchElevations(plan.verts); } catch (e) {}
-            }
-            // Arcs come from the segment GRAPH (v4.234 branching), not a chain —
-            // sa/sb keep the vert indices so junction checks can find adjacency.
-            for (let i = 0; i < ffd.segs.length; i++) {
-                const sg = ffd.segs[i];
-                const a = plan.verts[sg.a], b = plan.verts[sg.b];
-                const arc = { a, b, sa: sg.a, sb: sg.b, lenM: approxMeters(a.lat, a.lng, b.lat, b.lng), groundM: null, minM: null, maxM: null };
-                if (mode === 'agl') {
-                    arc.minM = fpArcAltMeters(aglFtToStoredM(ffd.floorFt, 0, 'agl'));
-                    arc.maxM = Math.max(fpArcAltMeters(aglFtToStoredM(ffd.floorFt + ffd.deltaFt, 0, 'agl')), arc.minM + 1);
-                } else if (mode === 'msl') {
-                    const ga = getElevationFromCache(a.lat, a.lng), gb = getElevationFromCache(b.lat, b.lng);
-                    if (ga == null && gb == null) {
-                        plan.errors.push(`arc ${i + 1}: DEM ground unavailable (needed for MSL altitudes) — try again in a moment`);
-                    } else {
-                        arc.groundM = Math.max(ga != null ? ga : -Infinity, gb != null ? gb : -Infinity);
-                        arc.minM = fpArcAltMeters(aglFtToStoredM(ffd.floorFt, arc.groundM, 'msl'));
-                        arc.maxM = Math.max(fpArcAltMeters(aglFtToStoredM(ffd.floorFt + ffd.deltaFt, arc.groundM, 'msl')), arc.minM + 1);
-                    }
+            } else if (mode === 'agl') {
+                // AGL site: stored values ARE height-above-ground — terrain-
+                // independent, no sampling, no steps (Map Editor planArc parity).
+                for (const sg of ffd.segs) {
+                    const a = plan.verts[sg.a], b = plan.verts[sg.b];
+                    const minM = fpArcAltMeters(aglFtToStoredM(ffd.floorFt, 0, 'agl'));
+                    plan.arcs.push({ a, b, sa: sg.a, sb: sg.b, lenM: approxMeters(a.lat, a.lng, b.lat, b.lng), groundM: null,
+                        minM, maxM: Math.max(fpArcAltMeters(aglFtToStoredM(ffd.floorFt + ffd.deltaFt, 0, 'agl')), minM + 1) });
                 }
-                plan.arcs.push(arc);
+            } else if (mode === 'msl') {
+                // SMART-FILL (ported from the Map Editor's planArc): sample DEM
+                // along each segment, greedy-partition wherever the ground range
+                // exceeds FFD_SMART_VAR_FT (respecting the min step length),
+                // insert the fewest step vertices, and band each piece off its
+                // own max ground. Endpoint-only ground on a long segment misses
+                // interior high ground — that's the bug this exists to prevent.
+                ffd._busyMsg = 'Smart-Fill: sampling terrain along segments…'; ffdRenderPanel();
+                const segSamples = ffd.segs.map(sg => {
+                    const a = plan.verts[sg.a], b = plan.verts[sg.b];
+                    const distM = approxMeters(a.lat, a.lng, b.lat, b.lng);
+                    const n = Math.max(3, Math.min(FFD_SMART_MAX_SAMPLES, Math.ceil(distM / (FFD_SMART_SPACING_FT * GEN_FT_TO_M)) + 1));
+                    const pts = [];
+                    for (let i = 0; i < n; i++) { const t = i / (n - 1); pts.push({ lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t, t }); }
+                    return { sg, a, b, distM, pts };
+                });
+                try { await bulkFetchElevations(segSamples.flatMap(ss => ss.pts)); } catch (e) {}
+                segSamples.forEach((ss, si) => {
+                    const valid = ss.pts.map(p => ({ t: p.t, e: getElevationFromCache(p.lat, p.lng) })).filter(x => typeof x.e === 'number');
+                    if (valid.length < 2) {
+                        plan.errors.push(`segment ${si + 1}: DEM ground unavailable (needed for MSL altitudes) — try again in a moment, elevations may still be fetching`);
+                        return;
+                    }
+                    const maxVarM = FFD_SMART_VAR_FT * GEN_FT_TO_M, minStepM = FFD_SMART_MIN_STEP_FT * GEN_FT_TO_M;
+                    const subs = []; let s0 = 0, cmin = valid[0].e, cmax = valid[0].e;
+                    for (let i = 1; i < valid.length; i++) {
+                        const nmin = Math.min(cmin, valid[i].e), nmax = Math.max(cmax, valid[i].e);
+                        const lenFromS = ss.distM * (valid[i - 1].t - valid[s0].t);
+                        if ((nmax - nmin) > maxVarM && lenFromS >= minStepM && (i - 1) > s0) {
+                            subs.push({ i0: s0, i1: i - 1 }); s0 = i - 1;
+                            cmin = Math.min(valid[i - 1].e, valid[i].e); cmax = Math.max(valid[i - 1].e, valid[i].e);
+                        } else { cmin = nmin; cmax = nmax; }
+                    }
+                    subs.push({ i0: s0, i1: valid.length - 1 });
+                    const lerp = (t) => ({ lat: ss.a.lat + (ss.b.lat - ss.a.lat) * t, lng: ss.a.lng + (ss.b.lng - ss.a.lng) * t });
+                    const cutVerts = [ss.a];
+                    for (let k = 0; k < subs.length - 1; k++) { const v = lerp(valid[subs[k].i1].t); cutVerts.push(v); plan.stepVerts.push(v); }
+                    cutVerts.push(ss.b);
+                    for (let k = 0; k < subs.length; k++) {
+                        let g = -Infinity;
+                        for (let j = subs[k].i0; j <= subs[k].i1; j++) g = Math.max(g, valid[j].e);
+                        const minM = fpArcAltMeters(aglFtToStoredM(ffd.floorFt, g, 'msl'));
+                        plan.arcs.push({
+                            a: cutVerts[k], b: cutVerts[k + 1],
+                            // Only the outer sub-arcs touch original waypoints —
+                            // junction checks key off sa/sb, steps stay null.
+                            sa: k === 0 ? ss.sg.a : null, sb: k === subs.length - 1 ? ss.sg.b : null,
+                            lenM: approxMeters(cutVerts[k].lat, cutVerts[k].lng, cutVerts[k + 1].lat, cutVerts[k + 1].lng),
+                            groundM: g, minM,
+                            maxM: Math.max(fpArcAltMeters(aglFtToStoredM(ffd.floorFt + ffd.deltaFt, g, 'msl')), minM + 1),
+                        });
+                    }
+                });
             }
             // Junction sanity vs snapped arcs (server enforces strictly-positive
             // overlap between connected arcs; bridgeArcContinuity only covers arcs
@@ -23308,7 +23423,7 @@
                 const baseArc = (Array.isArray(body.arcs) && body.arcs.length) ? JSON.parse(JSON.stringify(body.arcs[0])) : tmplArc;
                 if (!Array.isArray(body.points)) body.points = [];
                 body.arcs = body.arcs.concat(ffdArcChain(plan, baseArc));
-                body.points = body.points.concat(plan.verts.map(v => ({ lat: v.lat, lng: v.lng })));
+                body.points = body.points.concat(plan.verts.concat(plan.stepVerts || []).map(v => ({ lat: v.lat, lng: v.lng })));
                 body.validated = false;
                 try { bridgeArcContinuity(body.arcs); } catch (e) {}
                 const r = await postBody(body);
@@ -23328,7 +23443,7 @@
                 body.site_id = siteID;
                 body.description = '';
                 body.validated = false;
-                body.points = plan.verts.map(v => ({ lat: v.lat, lng: v.lng }));
+                body.points = plan.verts.concat(plan.stepVerts || []).map(v => ({ lat: v.lat, lng: v.lng }));
                 body.arcs = ffdArcChain(plan, tmplArc);
                 body.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
                 try { bridgeArcContinuity(body.arcs); } catch (e) {}
@@ -23349,6 +23464,16 @@
                 try { ffd.fpGraph = buildFlightPathGraph(fresh); } catch (e) {}
             } catch (e) {}
             try { localStorage.setItem(FFD_UNDO_LS + siteID, JSON.stringify(undoRec)); } catch (e) {}
+            // Persistent ghost placeholder — the real FP won't render natively
+            // until a reload, and the user chains many draws per session.
+            try {
+                ffdAddGhost(siteID, {
+                    id: undoRec.kind === 'create' ? undoRec.id : plan.extendFpId,
+                    name: undoRec.kind === 'extend' ? `⟳ ${undoRec.name}` : undoRec.name,
+                    when: Date.now(),
+                    segs: plan.arcs.map(x => [{ lat: x.a.lat, lng: x.a.lng }, { lat: x.b.lat, lng: x.b.lng }]),
+                });
+            } catch (e) {}
             console.log(`${TAG} fast-FP commit OK:`, doneMsg);
             showToast(`${doneMsg} — refresh before editing natively`, 'rgba(95,255,95,0.6)');
             ffd.createdCount++;
@@ -23382,6 +23507,7 @@
                 if (!(r.status === 200 && json && json.map_objects)) throw new Error(`server ${r.status} ${(txt || '').slice(0, 120)}`);
             } else throw new Error('undo record incomplete');
             try { localStorage.removeItem(FFD_UNDO_LS + siteID); } catch (e) {}
+            try { ffdRemoveGhost(siteID, rec.id); } catch (e) {}
             try { await fetchMapObjects(siteID, true); } catch (e) {}
             ffd.createdCount = Math.max(0, ffd.createdCount - 1);
             showToast('Undone — refresh to see the map catch up.', 'rgba(95,255,95,0.6)');
