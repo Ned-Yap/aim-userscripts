@@ -6,6 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-02 — ⭐ PROMOTED TO PROD: Site Setup Tools v4.220 + Control Panel v1.41
+
+Coworkers jump **Site Setup Tools 4.219 → 4.220** and **Control Panel 1.40 → 1.41** on the next Tampermonkey update check:
+
+- **📍 Create GMs offers ALL listed obstacles** (Site Setup Tools v4.220) — the Airspace Check's GM button now appears whenever the report lists any obstacles, not only on violations. The preview modal shows every listed obstacle with a checkbox (⚑ flagged pre-checked, clear ones opt-in, "All" toggle), so you can pin a clear-but-notable turbine field or tower. Create-only as always.
+- **Airspace Validator now visible in Lite mode** (Control Panel v1.41) — pilots/regs get the full Airspace Validator card and can run site checks; it's read-only safety info. The 📍 Create GMs write stays Full-only.
+
+Note: this is a scoped promotion — the 🟠 Proposed Routes / Route Converter and ➕ create-asset work (dev v4.221–v4.230) stays dev-only for now.
+
 ## 2026-08-02 — Site Setup Tools v4.230 (dev/latest): ➕ default name advances past ghosts (no more "name already exists" 400)
 
 Creating pads back-to-back could default the next dialog to the SAME "New Asset-N" (the entity refetch lags the server for a second), which the server rejected with "Entity name already exists". Names created this session are now remembered locally, so the default advances to the next free number — and typing a duplicate is caught before posting — no reload needed.

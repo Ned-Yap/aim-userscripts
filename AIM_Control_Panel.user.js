@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.40
+// @version      1.41
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -58,7 +58,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.40';
+    const VERSION = '1.41';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -89,6 +89,10 @@
         'aim-defaults', 'aim-styler', 'aim-styler-powerlines',
         'aim-perf-shield', 'aim-map-nav', 'aim-issues',
         'aim-ruler', 'aim-clear-all', 'aim-altitude', 'aim-power-line-editor',
+        // v1.41: Airspace Validator is read-only external-safety info —
+        // pilots should see it. Its one write (📍 Create GMs) stays gated
+        // inside the Asset Inspector via its own LITE guard.
+        'aim-airspace-checker',
     ]);
     const REBIND_ERROR_TIMEOUT_MS = 6000;
     const TOKEN_KEY = 'aim-github-token';
