@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.232
+// @version      4.233
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.232';
+    const SCRIPT_VERSION = '4.233';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22792,20 +22792,42 @@
     const FFD_TOUCH_M = 0.5;         // rule #7 FFZ-contact tolerance (matches RC_TOUCH_M)
     const FFD_DEFAULTS = { floorFt: 90, deltaFt: 30 };
     // FP-piggyback shielding buffers around the drawn path — same treatment the
-    // Map Styler gives proposed-route paths ("a route path is a future FP"):
-    // 40 ft band (FP blue, darker) + 65 ft band (lighter), each 2×ft wide in px
-    // at the current zoom. Defaults mirror the Styler's fp.* card defaults.
+    // Map Styler gives proposed-route paths ("a route path is a future FP").
+    // v4.233: the REAL settings come from the Map Styler over its state channel
+    // (FP_BUFFER_REQUEST → FP_BUFFER_SETTINGS; Styler re-broadcasts on every
+    // fp.* toggle change, so the preview live-tracks the card). These are only
+    // the fallback for when the Styler isn't installed / hasn't answered yet.
     const FFD_BUFFERS = [
         { ft: 65, color: '#1ca0de', opacity: 0.225 },   // outer first → stacks under
         { ft: 40, color: '#1ca0de', opacity: 0.5 },
     ];
+    let ffdStylerChannel = null;
+    try {
+        ffdStylerChannel = new BroadcastChannel('AIM_STYLER_CHANNEL');
+        ffdStylerChannel.onmessage = (ev) => {
+            const d = ev.data || {};
+            if (d.action === 'FP_BUFFER_SETTINGS' && d.settings) {
+                ffd.bufCfg = d.settings;
+                if (ffd.active) ffdRender();
+            }
+        };
+    } catch (e) { /* no BroadcastChannel → fallback defaults stay */ }
+    // Bands to render, outer→inner, honoring the Styler's per-band enables.
+    function ffdBufferBands() {
+        const c = ffd.bufCfg;
+        if (!c) return FFD_BUFFERS;
+        const bands = [];
+        if (c.band65 !== false) bands.push({ ft: c.distance65, color: c.color65, opacity: c.opacity65 });
+        if (c.buffer40 !== false) bands.push({ ft: c.distance40, color: c.color40, opacity: c.opacity40 });
+        return bands;
+    }
     let ffd = {
         active: false, stage: 'draw',   // 'draw' | 'review' | 'busy'
         verts: [],                       // [{lat,lng}] — snapped positions
         snaps: [],                       // per-vertex: null | {kind:'fp-vertex',...} | {kind:'ffz-edge',...}
         tentative: null, tentSnap: null, // live cursor (snapped) + its snap info
         floorFt: FFD_DEFAULTS.floorFt, deltaFt: FFD_DEFAULTS.deltaFt,
-        name: '', createdCount: 0, showBuffers: true,
+        name: '', createdCount: 0, showBuffers: true, bufCfg: null,
         plan: null,                      // review-stage computed plan
         fpGraph: null, fps: [], ffzs: [],
         layers: [], _container: null,
@@ -22906,7 +22928,8 @@
                 if (ffd.stage === 'draw' && ffd.tentative && pts.length >= 1) bufPts.push([ffd.tentative.lat, ffd.tentative.lng]);
                 const pxPerFt = bufPts.length >= 2 ? ffdPxPerFt(map) : 0;
                 if (pxPerFt > 0) {
-                    FFD_BUFFERS.forEach(bf => {
+                    ffdBufferBands().forEach(bf => {
+                        if (!(bf.ft > 0)) return;
                         const bl = L.polyline(bufPts, {
                             color: bf.color, opacity: bf.opacity, weight: 2 * bf.ft * pxPerFt,
                             lineJoin: 'round', lineCap: 'round', interactive: false,
@@ -23376,6 +23399,9 @@
             try { ffd.fpGraph = buildFlightPathGraph(ents); } catch (e) { ffd.fpGraph = null; }
             ffd.active = true; ffd.stage = 'draw';
             ffd.verts = []; ffd.snaps = []; ffd.tentative = null; ffd.tentSnap = null; ffd.plan = null;
+            // Ask the Map Styler for its live fp.* buffer settings (answer
+            // arrives async and re-renders; defaults cover the gap).
+            if (ffdStylerChannel) { try { ffdStylerChannel.postMessage({ action: 'FP_BUFFER_REQUEST' }); } catch (e) {} }
             ffdWire(); ffdRenderPanel(); ffdRender();
             console.log(`${TAG} fast-FP draw ON (site ${siteID}: ${ffd.fps.length} FPs, ${ffd.ffzs.length} FFZs to snap to)`);
         } else {

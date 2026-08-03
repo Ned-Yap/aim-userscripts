@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.133
+// @version      34.134
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -57,7 +57,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.133';
+    const SCRIPT_VERSION = '34.134';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -72,7 +72,31 @@
         // applyEquipFromBroadcast.
         else if (d.action === "ASSET_EQUIP") applyEquipFromBroadcast(d);
         else if (d.action === "RRC_OPERATORS") applyRrcOperatorsFromBroadcast(d);
+        // v34.134: Site Setup Tools' ✏ Fast FP Draw asks for the live fp.*
+        // buffer settings so its draw-time preview bands match the real FP
+        // treatment exactly (GM storage is per-script — this is the bridge).
+        else if (d.action === "FP_BUFFER_REQUEST") broadcastFpBufferSettings();
     };
+    // Answer FP_BUFFER_REQUEST + re-broadcast whenever an fp.* toggle changes,
+    // so a consumer's cached copy stays live while the user tweaks the card.
+    function broadcastFpBufferSettings() {
+        try {
+            const num = (k, fb) => { const v = Number(toggleState[k]); return isNaN(v) ? fb : v; };
+            stateChannel.postMessage({
+                action: 'FP_BUFFER_SETTINGS',
+                settings: {
+                    buffer40: toggleState['fp.buffer'] !== false,
+                    distance40: num('fp.distance', 40),
+                    color40: toggleState['fp.color'] || '#1ca0de',
+                    opacity40: num('fp.opacity', 0.5),
+                    band65: toggleState['fp.65ft-band'] !== false,
+                    distance65: num('fp.65ft-distance', 65),
+                    color65: toggleState['fp.65ft-color'] || toggleState['fp.color'] || '#1ca0de',
+                    opacity65: num('fp.65ft-opacity', 0.225),
+                },
+            });
+        } catch (e) { console.warn(`${TAG} FP buffer settings broadcast failed:`, e); }
+    }
 
     // --- AIM Control Panel integration ---
     // Registers with AIM_Control_Panel.js for centralized toggle/hotkey UI.
@@ -8680,6 +8704,8 @@
                 // See [[feedback-set-toggle-handlers-must-be-idempotent]].
                 if (newVal === prev) return;
                 toggleState[msg.toggleId] = newVal;
+                // Keep Fast FP Draw's piggybacked preview bands live-synced.
+                if (msg.toggleId.indexOf('fp.') === 0) broadcastFpBufferSettings();
                 // E1 auto-on coupling: when edit-mode for a KML type flips
                 // ON, auto-flip show-hidden ON too so the user can see what
                 // they've hidden (otherwise they'd flip a line invisible
