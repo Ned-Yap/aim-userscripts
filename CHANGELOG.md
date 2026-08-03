@@ -6,6 +6,17 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-03 — ✏ NEW: Fast FP Draw (Site Setup Tools latest v4.231 — dev only)
+
+Draw a flight path as fast as you can click, completely outside Percepto's draw editor — built because Percepto's auto-AGL races fast input and undoes vertices it can't resolve (recon proved the lookup is 100% client-local, so there was nothing to intercept — we bypass it instead).
+
+- New ✏ button in the map toolbar (next to ⊕). Click = waypoint (instant, no validation lag), drag = pan, right-click = undo a vertex, Enter / double-click = finish, Esc = undo/exit.
+- Waypoints snap (green) to existing FP vertices and FFZ edges. Landing on an FP vertex **extends that FP** (same merge rails as the Route Converter); otherwise it's a new FP and at least one waypoint must touch an FFZ (server rule — checked before commit).
+- Finish → review panel: per-arc altitude bands from **our** elevation pipeline (AGL sites: stored floor/ceiling directly; MSL sites: DEM ground per segment), editable Floor AGL (default 90 ft) + Delta (default 30 ft), junction/landing-angle warnings, then one-click create via the direct API. Terrain seams auto-bridged so connected arcs always overlap.
+- ↺ Undo last commit per site (deletes the created FP / restores the extended one verbatim). **Refresh before editing new FPs natively** — Percepto caches the site at page load.
+
+---
+
 ## 2026-08-03 — New Entity Macro v1.13: delete no longer fires twice ("already deleted" alert fixed)
 
 The delete confirm click was triggering Percepto's handler twice (DOM click + React handler — our click-reliability pattern), so the server got two DELETEs and alerted "Map entity already deleted or not exists" on the second. The confirm button now uses a single-fire click; every other click keeps the reliable dual-fire.
