@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.125
+// @version      34.133
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -57,7 +57,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.125';
+    const SCRIPT_VERSION = '34.133';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -356,6 +356,43 @@
                 { type: 'header', label: 'KML data tools' },
                 { id: 'trans-split', label: 'Split multi-segment lines (one-time)', type: 'button', action: 'split-trans' },
                 { id: 'trans-seed-hifld', label: 'Seed lines from HIFLD (federal data)', type: 'button', action: 'seed-hifld-trans' },
+            ],
+        },
+        {
+            // v34.126: third KML layer — PROPOSED routes (planned, not yet
+            // built). Supports both paths (LineString) and polygons
+            // (Polygon w/ fill). Deliberately EXCLUDED from shielding math
+            // (Coverage Validator / Asset Shielding Check) — a proposed
+            // route is not real infrastructure. See SHIELDING_TYPES.
+            type: 'category',
+            id: 'route-cat',
+            label: 'Proposed routes',
+            meta: '(orange — KML · planned, NOT shielding)',
+            master: { id: 'route.show', default: true },
+            children: [
+                { id: 'route.outline', label: 'Show routes', type: 'boolean', default: true },
+                { id: 'route.color', label: 'Color', type: 'color', default: '#ff9100' },
+                { id: 'route.opacity', label: 'Line opacity', type: 'number',
+                  min: 0.05, max: 1, step: 0.05, default: 0.9, unit: 'fill' },
+                { id: 'route.thickness', label: 'Line thickness', type: 'number',
+                  min: 1, max: 12, step: 1, default: 4, unit: 'px' },
+                { id: 'route.fill', label: 'Fill polygons', type: 'boolean', default: true },
+                { id: 'route.fill-opacity', label: 'Fill opacity', type: 'number',
+                  min: 0.05, max: 1, step: 0.05, default: 0.25, unit: 'fill' },
+                { id: 'route.buffer', label: 'FP/FFZ-style buffers (uses those cards’ settings)', type: 'boolean', default: true },
+                { type: 'header', label: 'Edit mode' },
+                { id: 'route.edit-mode', label: 'Enable right-click actions', type: 'boolean', default: false },
+                { id: 'route.show-hidden', label: 'Show my hidden routes (dashed)', type: 'boolean', default: false },
+                { id: 'route.hidden-color', label: 'Hidden color', type: 'color', default: '#888888' },
+                { id: 'route-clear-hides', label: 'Clear all my local hides', type: 'button', action: 'clear-hides-route' },
+                { id: 'route-unhide-file', label: 'Unhide all file-hidden routes', type: 'button', action: 'unhide-file-route' },
+                { type: 'header', label: 'Pending commits to GitHub' },
+                { id: 'route-add-new', label: 'Add new path (draw on map)', type: 'button', action: 'add-new-route' },
+                { id: 'route-add-new-polygon', label: 'Add new polygon (draw on map)', type: 'button', action: 'add-new-route-polygon' },
+                { id: 'route-commit', label: 'Commit pending changes', type: 'button', action: 'commit-route' },
+                { id: 'route-discard-commits', label: 'Discard pending commits', type: 'button', action: 'discard-commits-route' },
+                { type: 'header', label: 'KML data tools' },
+                { id: 'route-split', label: 'Split multi-segment lines (one-time)', type: 'button', action: 'split-route' },
             ],
         },
         {
@@ -694,12 +731,14 @@
     const TOKEN_KEY = 'aim-github-token';
     const KMLS_REPO = 'Ned-Yap/aim-userscripts-data';
     const KMLS_BRANCH = 'main';
+    // v4 (34.128): features carry the placemark <name> (Route Converter
+    // needs it to name created FFZs/FPs).
     // v3 (Map Styler 34.29+): cache entries now carry the resolved
     // filename (e.g. "1596-distro.kml" vs "1596-Distro.kml" vs ".kmz")
     // so subsequent commits/splits hit the same file the fetch resolved.
     // v2 (34.21): features carry pmIdx + visible.
     // Bumping skips old cache entries; small refetch cost on first load.
-    const KML_CACHE_PREFIX = 'aim-kml-cache-v3-';
+    const KML_CACHE_PREFIX = 'aim-kml-cache-v4-';
     const KML_PENDING_PREFIX = 'aim-kml-pending-'; // suffixed with `${siteID}-${type}` — LOCAL HIDES ONLY, never commits
     const KML_COMMIT_OPS_PREFIX = 'aim-kml-commit-ops-'; // suffixed with `${siteID}-${type}` — commit-bound ops (delete/modify/add)
     const GITHUB_API_BASE = 'https://api.github.com';
@@ -729,7 +768,7 @@
     let lastUpdateHash = null;
 
     // KML / shielding state — keyed by `${siteID}|${type}` where type is
-    // 'distro' or 'trans'. Each entry holds an array of parsed features.
+    // 'distro', 'trans', or 'route'. Each entry holds an array of parsed features.
     //
     // kmlFeatures: { [`${siteID}|${type}`]: [{ type: 'line'|'polygon', coords: [{lat,lng}, ...] }] }
     // kmlFetching: Set of `${siteID}|${type}` keys currently in flight
@@ -742,7 +781,16 @@
     // commit/split so writes target the same file that was read. Filled
     // from cache on load and from a successful 200 on fetch.
     const kmlResolvedPath = {};
-    const KML_TYPES = ['distro', 'trans'];
+    // Render order = array order (later paints on top): distro under trans
+    // under route. 'route' (v34.126) = PROPOSED routes — planned paths and
+    // polygons, files named `<siteID>-route.kml`.
+    const KML_TYPES = ['distro', 'trans', 'route'];
+    // Types that count as REAL shielding for the Coverage Validator and
+    // Asset Shielding Check. 'route' is deliberately excluded — a proposed
+    // route isn't built yet, so it must never satisfy a shielding check.
+    const SHIELDING_TYPES = ['distro', 'trans'];
+    const KML_TYPE_LABELS = { distro: 'Distribution', trans: 'Transmission', route: 'Proposed route' };
+    const kmlTypeLabel = (type) => KML_TYPE_LABELS[type] || type;
     const kmlKey = (siteID, type) => `${siteID}|${type}`;
     // Asset-state cache for "Color assets by state". Holds the type-3 asset
     // polygons (lat/lng) + derived state for the CURRENT site only. Fetched
@@ -3329,6 +3377,7 @@
             const sid   = getCurrentSiteID() || '';
             const distroN = (kmlFeatures[kmlKey(sid, 'distro')] || []).length;
             const transN  = (kmlFeatures[kmlKey(sid, 'trans')]  || []).length;
+            const routeN  = (kmlFeatures[kmlKey(sid, 'route')]  || []).length;
             const valN    = validatorState.results.length;
             const dismN   = validatorState.results.filter(r => r.dismissed).length;
             const map = getLeafletMap();
@@ -3343,7 +3392,7 @@
             // toggleState is small (~50 keys × ~30 chars) so JSON.stringify
             // costs ~0.5ms — still vastly cheaper than rebuilding overlays.
             const tHash = JSON.stringify(toggleState);
-            return `${ffzN}|${asN}|${fpN}|${editN}|${distroN}|${transN}|${valN}|${dismN}|${ourN}|${zoom}|${tHash}`;
+            return `${ffzN}|${asN}|${fpN}|${editN}|${distroN}|${transN}|${routeN}|${valN}|${dismN}|${ourN}|${zoom}|${tHash}`;
         } catch (e) {
             return null; // any error → force run (safe default)
         }
@@ -3750,7 +3799,7 @@
     // Caching: parsed features are persisted via GM storage so subsequent
     // page loads start from cache. The network fetch still runs in the
     // background and refreshes the cache on success.
-    // Fetches BOTH distro and trans KMLs for a site (parallel requests).
+    // Fetches every KML type (distro/trans/route) for a site (parallel requests).
     // No-op for any type already loaded, in flight, or known-missing — unless
     // `force` is true (used after a token change or manual refresh).
     function fetchKMLForSite(siteID, force) {
@@ -4003,13 +4052,18 @@
             let visible = true;
             const visEl = pm.querySelector(':scope > visibility');
             if (visEl && visEl.textContent.trim() === '0') visible = false;
+            // v34.128: carry the placemark <name> so consumers (Route
+            // Converter) can name created entities after the route.
+            let name = '';
+            const nameEl = pm.querySelector(':scope > name');
+            if (nameEl) name = (nameEl.textContent || '').trim();
             pm.querySelectorAll('LineString > coordinates').forEach(c => {
                 const coords = parseCoords(c.textContent);
-                if (coords.length >= 2) out.push({ type: 'line', coords, pmIdx, visible });
+                if (coords.length >= 2) out.push({ type: 'line', coords, pmIdx, visible, name });
             });
             pm.querySelectorAll('Polygon > outerBoundaryIs > LinearRing > coordinates').forEach(c => {
                 const coords = parseCoords(c.textContent);
-                if (coords.length >= 3) out.push({ type: 'polygon', coords, pmIdx, visible });
+                if (coords.length >= 3) out.push({ type: 'polygon', coords, pmIdx, visible, name });
             });
         });
         return out;
@@ -4262,6 +4316,63 @@
     const SNAP_TOLERANCE_PX = 10;
     let snapIndicator = null;
 
+    // ============================================================
+    // REAL flight-path vertices (v34.130) — snap targets for ROUTE
+    // draw/edit. A route path is a future FP: starting or ending it
+    // EXACTLY on an existing FP vertex is what lets the Route
+    // Converter connect/extend that flight path. Fetched from
+    // Percepto's own /map_objects/ endpoint (cookie auth, origin-
+    // relative so QA stays on QA), cached per site with a 60 s TTL
+    // so freshly saved FPs show up on the next draw session.
+    // ============================================================
+    let realFpVerts = { siteID: null, verts: [], ffzRings: [], fetchedAt: 0, loading: false };
+    function ensureRealFpVerts(siteID) {
+        if (!siteID) return;
+        if (realFpVerts.siteID === siteID
+            && (realFpVerts.loading || (Date.now() - realFpVerts.fetchedAt) < 60000)) return;
+        realFpVerts = {
+            siteID,
+            verts: realFpVerts.siteID === siteID ? realFpVerts.verts : [],
+            ffzRings: realFpVerts.siteID === siteID ? realFpVerts.ffzRings : [],
+            fetchedAt: 0, loading: true,
+        };
+        fetch(`/map_objects/?getPoiMapObjectsAsList=true&site_id=${encodeURIComponent(siteID)}`, { credentials: 'same-origin' })
+            .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+            .then(data => {
+                if (!Array.isArray(data)) throw new Error('response not an array');
+                const verts = [];
+                const seen = new Set();
+                // v34.133: also collect real FFZ rings — the true FP↔FFZ
+                // relationship is an FP endpoint ON an FFZ EDGE, so route
+                // drawing snaps to those edges too.
+                const ffzRings = [];
+                data.forEach(e => {
+                    if (!e) return;
+                    if (e.type === 15 && Array.isArray(e.arcs)) {
+                        e.arcs.forEach(a => {
+                            [a && a.point_a, a && a.point_b].forEach(p => {
+                                if (!p || !Number.isFinite(p.lat) || !Number.isFinite(p.lng)) return;
+                                const k = `${p.lat.toFixed(6)},${p.lng.toFixed(6)}`;
+                                if (seen.has(k)) return;
+                                seen.add(k);
+                                verts.push({ lat: p.lat, lng: p.lng });
+                            });
+                        });
+                    } else if (e.type === 16 && Array.isArray(e.coords) && e.coords.length >= 3) {
+                        ffzRings.push(e.coords
+                            .filter(c => c && Number.isFinite(c.lat) && Number.isFinite(c.lng))
+                            .map(c => ({ lat: c.lat, lng: c.lng })));
+                    }
+                });
+                realFpVerts = { siteID, verts, ffzRings, fetchedAt: Date.now(), loading: false };
+                console.log(`${TAG} loaded ${verts.length} real FP vertices + ${ffzRings.length} FFZ rings for route snapping (site ${siteID})`);
+            })
+            .catch(e => {
+                realFpVerts.loading = false;
+                console.warn(`${TAG} real FP/FFZ fetch failed (route snap will use KML lines only):`, e);
+            });
+    }
+
     function clearSnapIndicator() {
         if (!snapIndicator) return;
         try { snapIndicator.remove(); } catch (e) {}
@@ -4315,6 +4426,14 @@
         let best = null;
         let bestDist = SNAP_TOLERANCE_PX + 0.0001;
 
+        // v34.131: while drawing/editing a ROUTE, snap to VERTICES ONLY —
+        // no mid-segment feet. A route is a future FP, and FP connections
+        // happen at exact shared waypoints; a mid-segment snap looks
+        // connected but isn't.
+        const activeType = drawingState ? drawingState.type
+            : (vertexEditState ? vertexEditState.type : null);
+        const segSnapAllowed = activeType !== 'route';
+
         const testVertex = (lat, lng) => {
             if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
             try {
@@ -4328,7 +4447,12 @@
         // clamped to (0,1)). Endpoints (t=0 / t=1) excluded because
         // they're vertices and testVertex already covers them — keeps
         // vertex snaps winning over segment snaps near endpoints.
-        const testSegment = (lat1, lng1, lat2, lng2) => {
+        // v34.133: `force` bypasses the route vertex-only rule — used for
+        // POLYGON edges (FFZ rings + route polygons), where a mid-edge
+        // landing IS the real FP↔FFZ connection. Lines stay vertex-only
+        // in route context.
+        const testSegment = (lat1, lng1, lat2, lng2, force) => {
+            if (!segSnapAllowed && !force) return;
             if (!Number.isFinite(lat1) || !Number.isFinite(lng1)) return;
             if (!Number.isFinite(lat2) || !Number.isFinite(lng2)) return;
             try {
@@ -4366,24 +4490,52 @@
             }
         };
 
-        ['distro', 'trans'].forEach((type) => {
+        KML_TYPES.forEach((type) => {
+            // v34.132: while drawing/editing a ROUTE, power-line KMLs
+            // (distro/trans) are NOT snap sources — a route is a future
+            // FP and should connect to FP vertices / other routes, not
+            // latch onto power-line geometry it merely runs alongside.
+            if (activeType === 'route' && type !== 'route') return;
             // File lines — use effective (post-modify) coords so snap
             // matches what's actually rendered.
             const features = kmlFeatures[kmlKey(siteID, type)] || [];
             features.forEach((f) => {
-                if (!f || f.type !== 'line') return;
+                if (!f) return;
                 if (excludeKey === `file:${type}:${f.pmIdx}`) return;
-                // Skip file lines marked for deletion — they're being
+                // Skip features marked for deletion — they're being
                 // removed; snapping to them creates orphaned references.
                 const co0 = getCommitOps(siteID, type);
                 const op0 = co0.ops && co0.ops[String(f.pmIdx)];
                 if (op0 && op0.op === 'delete') return;
+                // v34.133: POLYGON edges are snap targets in route context —
+                // a proposed FFZ's edge is a legit FP landing site.
+                if (f.type === 'polygon') {
+                    if (activeType !== 'route') return;
+                    const ring = effectiveCoordsForFeature(siteID, type, f.pmIdx, f.coords);
+                    for (let ri = 0; ri < ring.length; ri++) {
+                        const a = ring[ri], b = ring[(ri + 1) % ring.length];
+                        if (!a || !b) continue;
+                        testSegment(a.lat, a.lng, b.lat, b.lng, true);
+                    }
+                    return;
+                }
+                if (f.type !== 'line') return;
                 testLine(effectiveCoordsForFeature(siteID, type, f.pmIdx, f.coords));
             });
-            // Pending-add (green) lines.
+            // Pending-add (green) features.
             const co = getCommitOps(siteID, type);
             (co.added || []).forEach((added, i) => {
                 if (excludeKey === `added:${type}:${i}`) return;
+                if (!added || !Array.isArray(added.coords)) return;
+                if (added.shape === 'polygon') {
+                    if (activeType !== 'route') return;
+                    const ring = added.coords.map(c => ({ lat: c[1], lng: c[0] }));
+                    for (let ri = 0; ri < ring.length; ri++) {
+                        const a = ring[ri], b = ring[(ri + 1) % ring.length];
+                        testSegment(a.lat, a.lng, b.lat, b.lng, true);
+                    }
+                    return;
+                }
                 testLine(added.coords);
             });
         });
@@ -4392,6 +4544,22 @@
         // the one drawing (excludeKey === 'draw').
         if (drawingState && excludeKey !== 'draw') {
             testLine(drawingState.coords);
+        }
+
+        // v34.130: REAL Percepto FP vertices — only while drawing/editing
+        // a ROUTE (a route path is a future FP; landing exactly on an
+        // existing FP vertex lets the Route Converter connect/extend that
+        // FP). (activeType computed at the top.)
+        // v34.133: plus real FFZ EDGES — mid-edge is the true FP↔FFZ
+        // connection (corners are technically legal but not used).
+        if (activeType === 'route' && realFpVerts.siteID === siteID) {
+            realFpVerts.verts.forEach(v => testVertex(v.lat, v.lng));
+            (realFpVerts.ffzRings || []).forEach(ring => {
+                for (let ri = 0; ri < ring.length; ri++) {
+                    const a = ring[ri], b = ring[(ri + 1) % ring.length];
+                    testSegment(a.lat, a.lng, b.lat, b.lng, true);
+                }
+            });
         }
 
         return best;
@@ -4425,6 +4593,9 @@
     // 2D [[lng,lat],…] lines — consistent with how draw mode + modify ops
     // already store coords.
     // ============================================================
+    // NOTE: convert is a distro↔trans concept (PLE's ⇄ flow only ever sends
+    // those two). 'route' has no convert target — if route conversion is
+    // ever wanted, convertLine needs an explicit toType, not this helper.
     function otherType(type) { return type === 'distro' ? 'trans' : 'distro'; }
 
     // Effective (post-modify) coords for a FILE line as KML-order
@@ -4625,7 +4796,7 @@
         try {
             const features = parseKML(xmlText);
             kmlFeatures[k] = features;
-            const path = kmlResolvedPath[k] || `${siteID}-${type}.kml`;
+            const path = kmlResolvedPath[k] || `${kmlSiteBase(siteID)}-${type}.kml`;
             gmSet(KML_CACHE_PREFIX + gmEnvKey(k), { features, at: Date.now(), path });
             kmlMissing.delete(k);
             console.log(`${TAG} applyCommittedXmlToLocalState[${k}]: features ${beforeCount} → ${features.length}`);
@@ -4703,7 +4874,7 @@
         `;
         const header = document.createElement('div');
         header.style.cssText = 'padding:4px 12px;color:#7adfe6;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid rgba(255,255,255,0.08);margin-bottom:2px';
-        header.textContent = `${type === 'distro' ? 'Distribution' : 'Transmission'} · line #${pmIdx}`;
+        header.textContent = `${kmlTypeLabel(type)} · line #${pmIdx}`;
         menu.appendChild(header);
 
         const action = document.createElement('button');
@@ -4877,13 +5048,14 @@
             if (!path) return;
             const type = path.getAttribute('data-kml-type');
             if (!type) return;
-            if (toggleState[`${type}.edit-mode`] !== true) return;
+            // v34.132: pending-add (green) lines bypass the edit-mode gate —
+            // they've been ALWAYS-clickable since v34.59 precisely because
+            // they're transient user-drawn lines, but the gate here still
+            // dropped the right-click and let Chrome's native menu appear.
+            const addedIdxStr = path.getAttribute('data-kml-added-idx');
+            if (addedIdxStr === null && toggleState[`${type}.edit-mode`] !== true) return;
             const siteID = getCurrentSiteID();
             if (!siteID) return;
-            // E4: pending-add lines have data-kml-added-idx instead of pmIdx.
-            // Route to their own menu (only Discard, since the line doesn't
-            // exist in the file yet).
-            const addedIdxStr = path.getAttribute('data-kml-added-idx');
             if (addedIdxStr !== null) {
                 const addedIdx = parseInt(addedIdxStr, 10);
                 if (isNaN(addedIdx)) return;
@@ -4932,7 +5104,7 @@
             return;
         }
         showKMLToast(`Committing ${count} ${type} change${count === 1 ? '' : 's'}…`, 8000);
-        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${siteID}-${type}.kml`;
+        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${kmlSiteBase(siteID)}-${type}.kml`;
         const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}?ref=${KMLS_BRANCH}`;
         try {
             GM_xmlhttpRequest({
@@ -5017,7 +5189,7 @@
     }
 
     function putKMLToGitHub(siteID, type, xmlText, sha, count, pendingSnapshot, token) {
-        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${siteID}-${type}.kml`;
+        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${kmlSiteBase(siteID)}-${type}.kml`;
         const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}`;
         // btoa needs binary string; encode UTF-8 first so non-ASCII names
         // (rare in current KMLs but legal in the spec) round-trip cleanly.
@@ -5112,7 +5284,7 @@
         // we hit the same file the user is currently viewing. Fall back to
         // lowercase .kml (the convention) if nothing's been resolved yet
         // (rare: user clicked Split before KML loaded).
-        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${siteID}-${type}.kml`;
+        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${kmlSiteBase(siteID)}-${type}.kml`;
         if (/\.kmz$/i.test(path)) {
             showKMLToast(`Split doesn't support .kmz yet (current file is ${path}). Convert to .kml first via Google Earth, push the .kml, then retry.`, 9000);
             return;
@@ -5246,7 +5418,7 @@
     }
 
     function putSplitToGitHub(siteID, type, xmlText, sha, message, token, result) {
-        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${siteID}-${type}.kml`;
+        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${kmlSiteBase(siteID)}-${type}.kml`;
         const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}`;
         let contentB64;
         try {
@@ -5490,7 +5662,7 @@
         }
 
         // Slow path: GET fresh from GitHub.
-        const path = kmlResolvedPath[k] || `${siteID}-${type}.kml`;
+        const path = kmlResolvedPath[k] || `${kmlSiteBase(siteID)}-${type}.kml`;
         const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}?ref=${KMLS_BRANCH}`;
         try {
             GM_xmlhttpRequest({
@@ -5651,21 +5823,45 @@
             const container = doc.querySelector('Document') || doc.querySelector('Folder') || doc.documentElement;
             co.added.forEach(item => {
                 if (!item || !Array.isArray(item.coords) || item.coords.length < 2) return;
+                const isPoly = item.shape === 'polygon';
+                if (isPoly && item.coords.length < 3) {
+                    console.warn(`${TAG} added polygon "${item.name || '(unnamed)'}" has <3 vertices — skipping`);
+                    return;
+                }
                 const pm = doc.createElementNS(NS, 'Placemark');
                 if (item.name) {
                     const nameEl = doc.createElementNS(NS, 'name');
                     nameEl.textContent = String(item.name);
                     pm.appendChild(nameEl);
                 }
-                const ls = doc.createElementNS(NS, 'LineString');
+                // KML LinearRings must close (first coord repeated last);
+                // draw mode stores the open ring, so close it here.
+                const coordList = item.coords.slice();
+                if (isPoly) {
+                    const first = coordList[0], last = coordList[coordList.length - 1];
+                    if (Number(first[0]) !== Number(last[0]) || Number(first[1]) !== Number(last[1])) {
+                        coordList.push(first);
+                    }
+                }
                 const coordsEl = doc.createElementNS(NS, 'coordinates');
-                coordsEl.textContent = item.coords.map(c => {
+                coordsEl.textContent = coordList.map(c => {
                     const lng = Number(c[0]), lat = Number(c[1]);
                     const alt = (c[2] !== undefined && c[2] !== null) ? Number(c[2]) : null;
                     return alt !== null ? `${lng},${lat},${alt}` : `${lng},${lat}`;
                 }).join(' ');
-                ls.appendChild(coordsEl);
-                pm.appendChild(ls);
+                if (isPoly) {
+                    const poly = doc.createElementNS(NS, 'Polygon');
+                    const outer = doc.createElementNS(NS, 'outerBoundaryIs');
+                    const ring = doc.createElementNS(NS, 'LinearRing');
+                    ring.appendChild(coordsEl);
+                    outer.appendChild(ring);
+                    poly.appendChild(outer);
+                    pm.appendChild(poly);
+                } else {
+                    const ls = doc.createElementNS(NS, 'LineString');
+                    ls.appendChild(coordsEl);
+                    pm.appendChild(ls);
+                }
                 container.appendChild(pm);
             });
         }
@@ -5677,7 +5873,7 @@
     }
 
     function putCommitOpsToGitHub(siteID, type, xmlText, sha, token, summaryText) {
-        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${siteID}-${type}.kml`;
+        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${kmlSiteBase(siteID)}-${type}.kml`;
         const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}`;
         let contentB64;
         try {
@@ -5973,6 +6169,8 @@
             showKMLToast('Leaflet not available — cannot add drag handles.', 4000);
             return;
         }
+        // v34.130: route edits snap to REAL FP vertices — warm the cache.
+        if (type === 'route') ensureRealFpVerts(siteID);
         // Use already-modified coords as the starting point if a modify op
         // exists, so re-edit picks up where the user left off (not a reset
         // to original).
@@ -6023,6 +6221,8 @@
             showKMLToast('Leaflet not available — cannot add drag handles.', 4000);
             return;
         }
+        // v34.130: route edits snap to REAL FP vertices — warm the cache.
+        if (type === 'route') ensureRealFpVerts(siteID);
         // co.added stores [[lng,lat],...] (KML order). Convert to {lat,lng}
         // for the handle math (same shape file lines use).
         const startCoords = added.coords.map(c => ({ lat: c[1], lng: c[0] }));
@@ -6157,14 +6357,93 @@
     // Saved-but-pending added lines render solid green.
     // Only one drawing session at a time across both types.
     // ============================================================
-    function enterDrawMode(type, seedCoord) {
+    // ============================================================
+    // Live draw preview (v34.130) — a rubber-band segment from the last
+    // placed vertex to the cursor, wearing the same piggybacked FP/FFZ
+    // buffers as the committed geometry, so the corridor is visible
+    // BEFORE the click lands. Updated straight from mousemove (a handful
+    // of tiny paths — no full runUpdate, which costs 50–150 ms on dense
+    // sites and would turn the draw cursor to sludge). The paths carry
+    // CUSTOM_BUFFER_ATTR so the normal wipe/rebuild removes them; the
+    // next mousemove repaints.
+    // ============================================================
+    // v34.131 REWRITE: the live preview now lives in its OWN SVG overlay
+    // appended to `.leaflet-container` — a SIBLING of `.leaflet-map-pane`,
+    // which is what the MutationObserver watches. v34.130 inserted the
+    // preview into the observed overlay-pane SVG, so every mousemove fired
+    // the observer → debounced wipe/rebuild every 300 ms → the whole
+    // drawing blinked in and out. Container-pixel coordinates, no CTM math.
+    const DRAW_LIVE_SVG_ID = 'aim-draw-live-svg';
+    function clearDrawLivePreview() {
+        const el = document.getElementById(DRAW_LIVE_SVG_ID);
+        if (el) { try { el.remove(); } catch (e) {} }
+    }
+    function updateDrawLivePreview() {
+        if (!drawingState || !drawingState.cursor || !drawingState.coords.length) { clearDrawLivePreview(); return; }
+        const map = getLeafletMap();
+        if (!map || typeof map.latLngToContainerPoint !== 'function') return;
+        const container = map.getContainer ? map.getContainer() : document.querySelector('.leaflet-container');
+        if (!container) return;
+        let svg = document.getElementById(DRAW_LIVE_SVG_ID);
+        if (!svg || svg.parentNode !== container) {
+            clearDrawLivePreview();
+            svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.id = DRAW_LIVE_SVG_ID;
+            // z-index 640: above the overlay pane (400) and markers (600),
+            // below tooltips (650) / popups (700).
+            svg.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:640';
+            container.appendChild(svg);
+        }
+        const last = drawingState.coords[drawingState.coords.length - 1];
+        let pA, pB;
+        try {
+            pA = map.latLngToContainerPoint([last[1], last[0]]);
+            pB = map.latLngToContainerPoint([drawingState.cursor.lat, drawingState.cursor.lng]);
+        } catch (e) { return; }
+        if (!pA || !pB) return;
+        const d = `M ${pA.x} ${pA.y} L ${pB.x} ${pB.y}`;
+        let pxPerFt = 0;
+        // /1000 baseline: latLngToLayerPoint rounds, ftToPx(map,1) is 0.
+        try { pxPerFt = ftToPx(map, 1000) / 1000; } catch (e) {}
+        const numTog = (key, fb) => { const v = Number(toggleState[key]); return isNaN(v) ? fb : v; };
+        const parts = [];
+        const mk = (stroke, opacity, width, dash) => {
+            parts.push(`<path d="${d}" fill="none" stroke="${stroke}" stroke-opacity="${opacity}" stroke-width="${width}"${dash ? ` stroke-dasharray="${dash}"` : ''} stroke-linejoin="round" stroke-linecap="round"/>`);
+        };
+        const type = drawingState.type;
+        // Build bottom-up: outer band, inner band, then the dashed line.
+        if (toggleState[`${type}.buffer`] === true && pxPerFt > 0) {
+            if (drawingState.shape === 'polygon') {
+                if (toggleState['ffz.buffer'] !== false) {
+                    mk(toggleState['ffz.color'] || '#5fff5f', numTog('ffz.opacity', 0.4), 2 * numTog('ffz.distance', 15) * pxPerFt);
+                }
+            } else {
+                if (toggleState['fp.65ft-band'] !== false) {
+                    mk(toggleState['fp.65ft-color'] || toggleState['fp.color'] || '#1ca0de', numTog('fp.65ft-opacity', 0.225), 2 * numTog('fp.65ft-distance', 65) * pxPerFt);
+                }
+                if (toggleState['fp.buffer'] !== false) {
+                    mk(toggleState['fp.color'] || '#1ca0de', numTog('fp.opacity', 0.5), 2 * numTog('fp.distance', 40) * pxPerFt);
+                }
+            }
+        }
+        mk('#5fff5f', 0.85, Number(toggleState[`${type}.thickness`]) || 4, '6 4');
+        svg.innerHTML = parts.join('');
+    }
+
+    // v34.126: optional `shape` param — 'polygon' draws a closed ring
+    // (needs ≥3 vertices, commits as a KML Polygon); anything else draws
+    // a line as before.
+    function enterDrawMode(type, seedCoord, shape) {
         if (drawingState) exitDrawMode({ silent: true });
         if (vertexEditState) exitVertexEdit({ save: false, silent: true });
         const siteID = getCurrentSiteID();
         if (!siteID) { showKMLToast('No site loaded.', 3000); return; }
         const map = getLeafletMap();
         if (!map || typeof map.on !== 'function') { showKMLToast('Map not ready.', 3000); return; }
-        drawingState = { type, coords: [], clickHandler: null, escHandler: null, toolbarEl: null, seeded: false };
+        drawingState = { type, shape: shape === 'polygon' ? 'polygon' : 'line', coords: [], cursor: null, clickHandler: null, escHandler: null, toolbarEl: null, seeded: false };
+        // v34.130: route draws snap to REAL FP vertices — warm the cache
+        // now so the first hover already shows the purple snap ring.
+        if (type === 'route') ensureRealFpVerts(siteID);
         // v34.61 Phase 3a: branch-from-vertex. If a seedCoord is provided,
         // push it as the first vertex of the new line so the line starts
         // attached to the source vertex. drawingState.seeded marks the
@@ -6173,10 +6452,8 @@
             drawingState.coords.push([seedCoord.lng, seedCoord.lat]);
             drawingState.seeded = true;
         }
-        const onClick = (e) => {
-            if (!drawingState) return;
-            const ll = e.latlng;
-            if (!ll) return;
+        const addDrawVertex = (ll) => {
+            if (!drawingState || !ll) return;
             let lat = ll.lat, lng = ll.lng;
             // v34.63 Phase 3b: snap click placement to nearby vertex.
             // Excludes our own in-progress draw line.
@@ -6187,8 +6464,54 @@
             updateDrawToolbar();
             if (isActive) runUpdate();
         };
-        try { map.on('click', onClick); } catch (e) {}
-        drawingState.clickHandler = onClick;
+        // v34.131 REWRITE: clicks are captured at the DOM level (capture
+        // phase on the map container), NOT via map.on('click'). Percepto's
+        // interactive layers (native FPs, entity polygons) swallow map
+        // clicks — which made it impossible to place a vertex ON an
+        // existing FP vertex: the purple snap ring showed, but the click
+        // never reached Leaflet's map handler. Capture-phase beats them
+        // all; we stopPropagation so Percepto doesn't ALSO react (e.g.
+        // select the FP you're snapping to) while drawing.
+        const drawContainer = map.getContainer ? map.getContainer() : null;
+        const onDomDown = (ev) => {
+            if (!drawingState || ev.button !== 0) return;
+            drawingState._downPt = { x: ev.clientX, y: ev.clientY };
+        };
+        const onDomClick = (ev) => {
+            if (!drawingState || ev.button !== 0) return;
+            if (ev.target && typeof ev.target.closest === 'function'
+                && ev.target.closest('.leaflet-control-container')) return; // zoom buttons etc.
+            // A click that ended a drag-pan isn't a vertex placement.
+            const dp = drawingState._downPt;
+            if (dp && (Math.abs(ev.clientX - dp.x) > 5 || Math.abs(ev.clientY - dp.y) > 5)) return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            let ll = null;
+            try { ll = map.mouseEventToLatLng(ev); } catch (e) {}
+            if (!ll) {
+                try {
+                    const cp = map.mouseEventToContainerPoint(ev);
+                    ll = map.containerPointToLatLng(cp);
+                } catch (e) {}
+            }
+            addDrawVertex(ll);
+        };
+        // Also eat dblclick so Leaflet's double-click zoom can't fire from
+        // rapid vertex placement.
+        const onDomDbl = (ev) => {
+            if (!drawingState) return;
+            ev.preventDefault();
+            ev.stopPropagation();
+        };
+        if (drawContainer) {
+            drawContainer.addEventListener('mousedown', onDomDown, true);
+            drawContainer.addEventListener('click', onDomClick, true);
+            drawContainer.addEventListener('dblclick', onDomDbl, true);
+        }
+        drawingState.domDownHandler = onDomDown;
+        drawingState.domClickHandler = onDomClick;
+        drawingState.domDblHandler = onDomDbl;
+        drawingState.domContainer = drawContainer;
         // v34.63 Phase 3b: live snap-preview during draw — show the
         // yellow ring under the cursor when within tolerance so the
         // user knows their next click will snap.
@@ -6200,9 +6523,20 @@
             const m = getLeafletMap();
             if (snap && m) showSnapIndicator(m, snap);
             else clearSnapIndicator();
+            // v34.130: rubber-band preview with live buffers — track the
+            // (post-snap) cursor and repaint the preview segment.
+            drawingState.cursor = snap ? { lat: snap.lat, lng: snap.lng } : { lat: ll.lat, lng: ll.lng };
+            updateDrawLivePreview();
         };
         try { map.on('mousemove', onMove); } catch (e) {}
         drawingState.moveHandler = onMove;
+        // v34.132: repaint the rubber band while the MAP moves (WASD nav /
+        // drag-pan) — container-pixel anchors go stale during a pan until
+        // the next mousemove, so the preview looked unanchored from the
+        // last vertex mid-pan.
+        const onMapMove = () => { if (drawingState) updateDrawLivePreview(); };
+        try { map.on('move', onMapMove); } catch (e) {}
+        drawingState.mapMoveHandler = onMapMove;
         const onEsc = (e) => { if (e.key === 'Escape') exitDrawMode({ silent: false }); };
         window.addEventListener('keydown', onEsc, true);
         drawingState.escHandler = onEsc;
@@ -6233,9 +6567,11 @@
         const label = document.createElement('span');
         label.id = 'aim-draw-label';
         const initN = drawingState.coords.length;
+        const shapeWord = drawingState.shape === 'polygon' ? 'polygon' : 'line';
+        const minV = drawingState.shape === 'polygon' ? 3 : 2;
         label.textContent = drawingState.seeded
-            ? `Branching new ${drawingState.type} line · ${initN} vertex${initN === 1 ? '' : 'es'}${initN < 2 ? ' (need ≥2 — click to add)' : ''}`
-            : `Drawing ${drawingState.type} line · 0 vertices (need ≥2)`;
+            ? `Branching new ${drawingState.type} ${shapeWord} · ${initN} vertex${initN === 1 ? '' : 'es'}${initN < minV ? ` (need ≥${minV} — click to add)` : ''}`
+            : `Drawing ${drawingState.type} ${shapeWord} · 0 vertices (need ≥${minV})`;
         label.style.cssText = 'color:#5fff5f;font-weight:600';
         tb.appendChild(label);
         const saveBtn = document.createElement('button');
@@ -6267,44 +6603,58 @@
     function updateDrawToolbar() {
         if (!drawingState || !drawingState.toolbarEl) return;
         const n = drawingState.coords.length;
+        const shapeWord = drawingState.shape === 'polygon' ? 'polygon' : 'line';
+        const minV = drawingState.shape === 'polygon' ? 3 : 2;
         const label = drawingState.toolbarEl.querySelector('#aim-draw-label');
         if (label) {
             const verb = drawingState.seeded ? 'Branching new' : 'Drawing';
-            label.textContent = `${verb} ${drawingState.type} line · ${n} vertex${n === 1 ? '' : 'es'}${n < 2 ? ' (need ≥2)' : ''}`;
+            label.textContent = `${verb} ${drawingState.type} ${shapeWord} · ${n} vertex${n === 1 ? '' : 'es'}${n < minV ? ` (need ≥${minV})` : ''}`;
         }
         const saveBtn = drawingState.toolbarEl.querySelector('button[data-role="save"]');
         if (saveBtn) {
-            saveBtn.disabled = n < 2;
+            saveBtn.disabled = n < minV;
             saveBtn.style.opacity = saveBtn.disabled ? '0.4' : '1';
             saveBtn.style.cursor = saveBtn.disabled ? 'not-allowed' : 'pointer';
         }
     }
 
     function finishDrawing() {
-        if (!drawingState || drawingState.coords.length < 2) return;
+        if (!drawingState) return;
+        const isPoly = drawingState.shape === 'polygon';
+        if (drawingState.coords.length < (isPoly ? 3 : 2)) return;
         const type = drawingState.type;
         const coords = drawingState.coords.slice();
+        const shapeWord = isPoly ? 'polygon' : 'line';
         showNameInputModal(type, (name) => {
             if (name === null) return; // user cancelled the name modal
             const siteID = getCurrentSiteID();
             if (!siteID) { showKMLToast('No site loaded — drawing discarded.', 4000); exitDrawMode({ silent: true }); return; }
             const co = getCommitOps(siteID, type);
-            const finalName = (name && name.trim()) || `New ${type} line (added ${new Date().toISOString().substring(0, 10)})`;
-            co.added.push({ name: finalName, coords });
+            const finalName = (name && name.trim()) || `New ${type} ${shapeWord} (added ${new Date().toISOString().substring(0, 10)})`;
+            // `shape` only stored for polygons — line items keep the legacy
+            // shape-less form so older pending entries stay compatible.
+            const item = { name: finalName, coords };
+            if (isPoly) item.shape = 'polygon';
+            co.added.push(item);
             setCommitOps(siteID, type, co);
             const count = commitOpsCount(siteID, type);
-            showKMLToast(`Added new ${type} line "${finalName}". ${count} pending commit${count === 1 ? '' : 's'} — commit from the panel.`, 6000);
+            showKMLToast(`Added new ${type} ${shapeWord} "${finalName}". ${count} pending commit${count === 1 ? '' : 's'} — commit from the panel.`, 6000);
             exitDrawMode({ silent: true });
-        });
+        }, shapeWord);
     }
 
     function exitDrawMode(opts) {
         if (!drawingState) return;
         const silent = !!(opts && opts.silent);
-        const { clickHandler, moveHandler, escHandler, toolbarEl } = drawingState;
+        const { moveHandler, mapMoveHandler, escHandler, toolbarEl, domContainer, domDownHandler, domClickHandler, domDblHandler } = drawingState;
         const map = getLeafletMap();
-        if (map && clickHandler) { try { map.off('click', clickHandler); } catch (e) {} }
+        if (domContainer) {
+            try { domContainer.removeEventListener('mousedown', domDownHandler, true); } catch (e) {}
+            try { domContainer.removeEventListener('click', domClickHandler, true); } catch (e) {}
+            try { domContainer.removeEventListener('dblclick', domDblHandler, true); } catch (e) {}
+        }
         if (map && moveHandler) { try { map.off('mousemove', moveHandler); } catch (e) {} }
+        if (map && mapMoveHandler) { try { map.off('move', mapMoveHandler); } catch (e) {} }
         if (escHandler) { try { window.removeEventListener('keydown', escHandler, true); } catch (e) {} }
         if (toolbarEl) { try { toolbarEl.remove(); } catch (e) {} }
         const container = map && map.getContainer ? map.getContainer() : null;
@@ -6312,6 +6662,7 @@
         if (!silent) showKMLToast('Drawing cancelled.', 2500);
         drawingState = null;
         clearSnapIndicator();
+        clearDrawLivePreview();
         if (isActive) runUpdate();
         try { broadcastPowerLineStatus(); } catch (e) {}
     }
@@ -6319,7 +6670,7 @@
     // Small modal for naming a newly-drawn line. Optional input;
     // callback receives the entered string (possibly empty, never
     // trimmed) on Save, or null on Cancel. Enter saves, Esc cancels.
-    function showNameInputModal(type, callback) {
+    function showNameInputModal(type, callback, shapeWord) {
         const existing = document.getElementById('aim-name-modal');
         if (existing) existing.remove();
         const backdrop = document.createElement('div');
@@ -6336,7 +6687,7 @@
             box-shadow:0 8px 28px rgba(0,0,0,0.6);
         `;
         const title = document.createElement('div');
-        title.textContent = `Name for the new ${type} line (optional):`;
+        title.textContent = `Name for the new ${type} ${shapeWord || 'line'} (optional):`;
         title.style.cssText = 'margin-bottom:10px;color:#7adfe6;font-size:13px;text-transform:uppercase;letter-spacing:0.5px';
         box.appendChild(title);
         const input = document.createElement('input');
@@ -6356,7 +6707,7 @@
         cancelBtn.onclick = () => { try { backdrop.remove(); } catch (e) {} callback(null); };
         btns.appendChild(cancelBtn);
         const saveBtn = document.createElement('button');
-        saveBtn.textContent = 'Save line';
+        saveBtn.textContent = `Save ${shapeWord || 'line'}`;
         saveBtn.style.cssText = 'padding:8px 16px;background:#5fff5f;color:#000;border:none;border-radius:4px;cursor:pointer;font:inherit;font-weight:700';
         saveBtn.onclick = () => { const v = input.value; try { backdrop.remove(); } catch (e) {} callback(v); };
         btns.appendChild(saveBtn);
@@ -6391,12 +6742,27 @@
         `;
         const header = document.createElement('div');
         header.style.cssText = 'padding:4px 12px;color:#5fff5f;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid rgba(255,255,255,0.08);margin-bottom:2px';
-        header.textContent = `NEW ${type === 'distro' ? 'Distribution' : 'Transmission'} line (pending)`;
+        header.textContent = `NEW ${kmlTypeLabel(type)} (pending)`;
         menu.appendChild(header);
         const nameLine = document.createElement('div');
         nameLine.style.cssText = 'padding:4px 12px;color:#9ad;font-size:11px;border-bottom:1px solid rgba(255,255,255,0.08);margin-bottom:2px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
         nameLine.textContent = item.name || '(no name)';
         menu.appendChild(nameLine);
+        // v34.131: vertex edit for pending-add lines straight from this
+        // menu. It existed (enterAddedVertexEdit, v34.47) but was only
+        // reachable through the Power Line Editor's M1 flow — which
+        // ignores routes entirely, leaving green route lines uneditable.
+        const editAction = document.createElement('button');
+        editAction.style.cssText = 'display:block;width:100%;text-align:left;padding:7px 12px;background:transparent;border:none;color:#ffd96b;cursor:pointer;font:inherit';
+        editAction.onmouseenter = () => { editAction.style.background = 'rgba(255,217,107,0.18)'; };
+        editAction.onmouseleave = () => { editAction.style.background = 'transparent'; };
+        editAction.textContent = '✏️  Edit vertices (drag ends · click midpoints to add)';
+        editAction.onclick = (e) => {
+            e.stopPropagation();
+            closeKMLContextMenu();
+            enterAddedVertexEdit(type, addedIdx);
+        };
+        menu.appendChild(editAction);
         const discardAction = document.createElement('button');
         discardAction.style.cssText = 'display:block;width:100%;text-align:left;padding:7px 12px;background:transparent;border:none;color:#ff8585;cursor:pointer;font:inherit';
         discardAction.onmouseenter = () => { discardAction.style.background = 'rgba(255,80,80,0.18)'; };
@@ -6494,6 +6860,7 @@
             if (pts.length >= 2) out.push({
                 type: 'line', points: pts,
                 addedIdx, visible: true,
+                shape: added.shape === 'polygon' ? 'polygon' : 'line',
             });
         });
         // 3. Drawing in progress (preview)
@@ -6503,6 +6870,7 @@
             if (pts.length >= 2) out.push({
                 type: 'line', points: pts,
                 drawing: true, visible: true,
+                shape: drawingState.shape === 'polygon' ? 'polygon' : 'line',
             });
         }
         return out;
@@ -6554,8 +6922,9 @@
         if (!svg) return;
         const g = svg.querySelector('g');
         if (!g) return;
-        // Render distro first then trans, so trans paints on top — matches
-        // its higher-priority/more-dangerous status.
+        // Render in KML_TYPES order — distro, then trans (paints on top,
+        // matching its more-dangerous status), then proposed routes on top
+        // of both (they're what the user is actively planning).
         KML_TYPES.forEach(type => renderShieldingType(type, g));
     }
 
@@ -6565,11 +6934,79 @@
         if (!feats.length) return;
         const defaults = type === 'trans'
             ? { color: '#ff3030', opacity: 0.9, thickness: 4 }
-            : { color: '#ffd700', opacity: 0.9, thickness: 3 };
+            : (type === 'route'
+                ? { color: '#ff9100', opacity: 0.9, thickness: 4 }
+                : { color: '#ffd700', opacity: 0.9, thickness: 3 });
         const stroke = toggleState[`${type}.color`] || defaults.color;
         const opacity = Number(toggleState[`${type}.opacity`]);
         const opStr = String(isNaN(opacity) ? defaults.opacity : opacity);
         const thickness = Number(toggleState[`${type}.thickness`]) || defaults.thickness;
+        // v34.126: polygon fill (route category exposes the controls; the
+        // logic is type-generic so other categories inherit it if their
+        // KMLs ever ship polygons). Fill only paints on polygon features
+        // in their normal visible state — hidden ghosts and delete-marked
+        // shapes stay outline-only so their dash state reads clearly.
+        const fillOn = toggleState[`${type}.fill`] === true;
+        const fillOpN = Number(toggleState[`${type}.fill-opacity`]);
+        const fillOpacity = isNaN(fillOpN) ? 0.25 : fillOpN;
+        // v34.129 (was a standalone 200 ft halo in v34.127): buffers now
+        // PIGGYBACK the real categories' settings — a route PATH is a
+        // future Flight Path, so it wears the FP 40 ft + 65 ft bands
+        // (fp.distance/color/opacity + fp.65ft-*, honoring fp.buffer and
+        // fp.65ft-band); a route POLYGON is a future FFZ, so it wears the
+        // FFZ buffer (ffz.distance/color/opacity, honoring ffz.buffer).
+        // One route toggle enables the treatment; every size/color/opacity
+        // follows the FP/FFZ cards so a proposed route previews exactly
+        // like the real entity it becomes. Widths are METRIC (ft → px at
+        // current zoom via ftToPx) so they scale with zoom like native
+        // buffers.
+        const bufferOn = toggleState[`${type}.buffer`] === true;
+        let pxPerFt = 0;
+        if (bufferOn) {
+            const bmap = getLeafletMap();
+            // v34.131 FIX: Leaflet's latLngToLayerPoint ROUNDS to integer
+            // pixels, so ftToPx(map, 1) returned 0 at normal zooms and every
+            // band width computed to 0 (invisible buffers). Measure a big
+            // baseline and divide instead.
+            if (bmap) { try { pxPerFt = ftToPx(bmap, 1000) / 1000; } catch (e) { pxPerFt = 0; } }
+        }
+        const numTog = (key, fb) => { const v = Number(toggleState[key]); return isNaN(v) ? fb : v; };
+        const mkBand = (d, ft, color, opacity) => {
+            if (!(pxPerFt > 0) || !(ft > 0)) return;
+            const b = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            b.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
+            b.setAttribute('data-buffer-kind', `kml-${type}-halo`);
+            b.setAttribute('d', d);
+            b.setAttribute('fill', 'none');
+            b.setAttribute('stroke', color);
+            b.setAttribute('stroke-opacity', String(opacity));
+            // ×2: distance is per SIDE, stroke-width spans both sides.
+            b.setAttribute('stroke-width', String(2 * ft * pxPerFt));
+            b.setAttribute('stroke-linejoin', 'round');
+            b.setAttribute('stroke-linecap', 'round');
+            b.setAttribute('pointer-events', 'none');
+            // Inserted at g.firstChild AFTER the feature path (and after any
+            // previous band), so stacking ends up outer-band < inner-band
+            // < line — same darker-inner / lighter-outer read as real FPs.
+            if (g.firstChild) g.insertBefore(b, g.firstChild);
+            else g.appendChild(b);
+        };
+        const addBufferHalo = (d, isPolygonFeature) => {
+            if (!bufferOn) return;
+            if (isPolygonFeature) {
+                if (toggleState['ffz.buffer'] === false) return;
+                mkBand(d, numTog('ffz.distance', 15), toggleState['ffz.color'] || '#5fff5f', numTog('ffz.opacity', 0.4));
+            } else {
+                if (toggleState['fp.buffer'] !== false) {
+                    mkBand(d, numTog('fp.distance', 40), toggleState['fp.color'] || '#1ca0de', numTog('fp.opacity', 0.5));
+                }
+                if (toggleState['fp.65ft-band'] !== false) {
+                    mkBand(d, numTog('fp.65ft-distance', 65),
+                        toggleState['fp.65ft-color'] || toggleState['fp.color'] || '#1ca0de',
+                        numTog('fp.65ft-opacity', 0.225));
+                }
+            }
+        };
         // E1 editing state — only relevant when at least one of edit-mode
         // or show-hidden is on. pointer-events stays 'none' otherwise so
         // Leaflet's own interaction (drag-pan over an empty area) isn't
@@ -6582,14 +7019,23 @@
             // ahead of all the file-feature visual logic (no pmIdx, no hide
             // check). Always visible.
             if (f.addedIdx !== undefined || f.drawing) {
-                const d = pointsToPathD(f.points, false);
+                // v34.126: pending/preview polygons render closed, with a
+                // translucent green fill so the drawn area reads as an area.
+                const isPendingPoly = f.shape === 'polygon';
+                const d = pointsToPathD(f.points, isPendingPoly);
                 if (!d) return;
                 const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
                 p.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
                 p.setAttribute('data-buffer-kind', `kml-${type}`);
                 p.setAttribute('data-kml-type', type);
                 p.setAttribute('d', d);
-                p.setAttribute('fill', 'none');
+                if (isPendingPoly && f.points.length >= 3) {
+                    p.setAttribute('fill', '#5fff5f');
+                    p.setAttribute('fill-opacity', '0.15');
+                    p.setAttribute('fill-rule', 'evenodd');
+                } else {
+                    p.setAttribute('fill', 'none');
+                }
                 p.setAttribute('stroke', '#5fff5f');
                 p.setAttribute('stroke-linejoin', 'round');
                 p.setAttribute('stroke-linecap', 'round');
@@ -6617,6 +7063,10 @@
                 }
                 if (g.firstChild) g.insertBefore(p, g.firstChild);
                 else g.appendChild(p);
+                // Buffers on pending/preview too — positioning against the
+                // real FP/FFZ corridor BEFORE committing is the whole point
+                // (the line itself stays green to read as pending).
+                addBufferHalo(d, isPendingPoly);
                 return;
             }
             const isVis = effectiveVisible(siteID, type, f.pmIdx, f.visible);
@@ -6662,6 +7112,11 @@
                 p.setAttribute('stroke', stroke);
                 p.setAttribute('stroke-opacity', opStr);
                 p.setAttribute('stroke-width', String(thickness));
+                if (f.type === 'polygon' && fillOn) {
+                    p.setAttribute('fill', stroke);
+                    p.setAttribute('fill-opacity', String(fillOpacity));
+                    p.setAttribute('fill-rule', 'evenodd');
+                }
             }
             // Merge selection wins over every other state — bright magenta,
             // thick, solid — so the user can see exactly which lines will be
@@ -6691,6 +7146,12 @@
             // the FFZ/FP/asset outlines.
             if (g.firstChild) g.insertBefore(p, g.firstChild);
             else g.appendChild(p);
+            // Buffers for visible features (incl. modify-marked — the user
+            // is actively positioning those). Hidden ghosts and delete-
+            // marked stay bare so their dash state reads clearly.
+            if (isVis && !(commitOp && commitOp.op === 'delete')) {
+                addBufferHalo(d, f.type === 'polygon');
+            }
         });
     }
 
@@ -7053,7 +7514,9 @@
     // flagging points near the MIDDLE of a long two-vertex segment (v32.2 bug).
     function buildShieldingSegments(siteID, map) {
         const segments = []; // [{ ax, ay, bx, by }] — layer-point coords
-        KML_TYPES.forEach(t => {
+        // SHIELDING_TYPES, not KML_TYPES: proposed routes must never count
+        // as shielding — they don't exist in the real world yet.
+        SHIELDING_TYPES.forEach(t => {
             const feats = kmlFeatures[kmlKey(siteID, t)] || [];
             feats.forEach(f => {
                 const lps = [];
@@ -8223,7 +8686,7 @@
                 // and have nothing to right-click for "Unhide"). We don't
                 // auto-flip OFF when edit-mode leaves — the user might want
                 // to keep ghosting on while not actively editing.
-                if ((msg.toggleId === 'distro.edit-mode' || msg.toggleId === 'trans.edit-mode')
+                if ((msg.toggleId === 'distro.edit-mode' || msg.toggleId === 'trans.edit-mode' || msg.toggleId === 'route.edit-mode')
                     && newVal === true && prev !== true) {
                     const type = msg.toggleId.split('.')[0];
                     const hiddenKey = `${type}.show-hidden`;
@@ -8320,8 +8783,8 @@
                 // Blocked loudly (toast), never silently.
                 if (CONTEXT === 'TOP') {
                     const DV_SAFE_ACTIONS = [
-                        'clear-hides-distro', 'clear-hides-trans',
-                        'unhide-file-distro', 'unhide-file-trans',
+                        'clear-hides-distro', 'clear-hides-trans', 'clear-hides-route',
+                        'unhide-file-distro', 'unhide-file-trans', 'unhide-file-route',
                         'basemap-set-custom',
                         'parcels-arm', 'parcels-clear',
                         'rrc-scout-view', 'rrc-scout-clear', 'rrc-recon',
@@ -8338,16 +8801,23 @@
                 else if (msg.actionId === 'clear-asset-validator') clearAssetCoverageValidator();
                 else if (msg.actionId === 'clear-hides-distro') clearLocalHides('distro');
                 else if (msg.actionId === 'clear-hides-trans') clearLocalHides('trans');
+                else if (msg.actionId === 'clear-hides-route') clearLocalHides('route');
                 else if (msg.actionId === 'unhide-file-distro') unhideAllFileHidden('distro');
                 else if (msg.actionId === 'unhide-file-trans') unhideAllFileHidden('trans');
+                else if (msg.actionId === 'unhide-file-route') unhideAllFileHidden('route');
                 else if (msg.actionId === 'split-distro') splitMultiSegmentPlacemarks('distro');
                 else if (msg.actionId === 'split-trans') splitMultiSegmentPlacemarks('trans');
+                else if (msg.actionId === 'split-route') splitMultiSegmentPlacemarks('route');
                 else if (msg.actionId === 'commit-distro') commitPendingOps('distro');
                 else if (msg.actionId === 'commit-trans') commitPendingOps('trans');
+                else if (msg.actionId === 'commit-route') commitPendingOps('route');
                 else if (msg.actionId === 'discard-commits-distro') discardCommitOps('distro');
                 else if (msg.actionId === 'discard-commits-trans') discardCommitOps('trans');
+                else if (msg.actionId === 'discard-commits-route') discardCommitOps('route');
                 else if (msg.actionId === 'add-new-distro') enterDrawMode('distro');
                 else if (msg.actionId === 'add-new-trans') enterDrawMode('trans');
+                else if (msg.actionId === 'add-new-route') enterDrawMode('route');
+                else if (msg.actionId === 'add-new-route-polygon') enterDrawMode('route', null, 'polygon');
                 else if (msg.actionId === 'seed-hifld-trans') seedTransLinesFromHIFLD();
                 else if (msg.actionId === 'rrc-recon') runRrcRecon();
                 else if (msg.actionId === 'rrc-scout-view') {
@@ -8516,6 +8986,8 @@
             siteID,
             distroCount: siteID ? commitOpsCount(siteID, 'distro') : 0,
             transCount: siteID ? commitOpsCount(siteID, 'trans') : 0,
+            // v34.126: PLE (v0.18) ignores this — informational for now.
+            routeCount: siteID ? commitOpsCount(siteID, 'route') : 0,
             vertexEditActive: !!vertexEditState,
             vertexEditType: vertexEditState ? vertexEditState.type : null,
             vertexEditPmIdx: vertexEditState ? vertexEditState.pmIdx : null,
@@ -8546,13 +9018,15 @@
     // cosmetic (only seen if the file is opened in Google Earth; our render
     // uses the per-category toggle colors and ignores styleUrl).
     function buildEmptyKML(siteID, type) {
-        const label = type === 'trans' ? 'Transmission' : 'Distribution';
-        const styleId = type === 'trans' ? 'rline' : 'yline';
-        const color = type === 'trans' ? 'ff3030ff' : 'ff00ffff'; // KML is aabbggrr
+        const label = type === 'route' ? 'Proposed Routes'
+            : `${kmlTypeLabel(type)} Power Lines`;
+        const styleId = type === 'trans' ? 'rline' : (type === 'route' ? 'oline' : 'yline');
+        // KML colors are aabbggrr: trans red, route bright orange (#ff9100), distro yellow.
+        const color = type === 'trans' ? 'ff3030ff' : (type === 'route' ? 'ff0091ff' : 'ff00ffff');
         return `<?xml version='1.0' encoding='utf-8'?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>
-    <name>Site ${siteID} - ${label} Power Lines</name>
+    <name>Site ${siteID} - ${label}</name>
     <Style id="${styleId}">
       <LineStyle>
         <color>${color}</color>
@@ -8816,6 +9290,24 @@
         catch (e) { console.warn(`${TAG} KML data channel unavailable:`, e); return; }
         chan.onmessage = (ev) => {
             const m = ev.data || {};
+            // v34.128: the Asset Inspector's Route Converter reports which
+            // route placemarks became real FFZs/FPs — mark them for delete
+            // in the route KML and run the normal commit prompt. Same
+            // frame/focus gating as TRIGGER_ACTION (BroadcastChannel
+            // reaches every tab; only the focused rendering frame acts).
+            if (m.type === 'MARK_ROUTES_CONVERTED') {
+                if (!rendersInThisFrame() || !document.hasFocus()) return;
+                const sid = getCurrentSiteID();
+                if (!sid || String(sid) !== String(m.siteID)) return;
+                const idxs = Array.isArray(m.pmIdxs) ? m.pmIdxs.filter(n => Number.isFinite(n)) : [];
+                if (!idxs.length) return;
+                idxs.forEach(i => markPlacemarkForDelete(sid, 'route', i));
+                showKMLToast(`${idxs.length} converted route${idxs.length === 1 ? '' : 's'} marked for deletion from the route KML — confirm the commit to finish.`, 6000);
+                if (isActive) runUpdate();
+                // Slight delay so the toast paints before the confirm() blocks.
+                setTimeout(() => { try { commitPendingOps('route'); } catch (e) { console.error(`${TAG} route-converted commit failed:`, e); } }, 400);
+                return;
+            }
             if (m.type !== 'REQUEST_KML_FEATURES') return;
             const reqSite = m.siteID;
             if (!reqSite) return;
@@ -8824,12 +9316,14 @@
             // a different site.
             const distro = kmlFeatures[`${reqSite}|distro`] || [];
             const trans = kmlFeatures[`${reqSite}|trans`] || [];
-            if (distro.length === 0 && trans.length === 0) return;
+            const route = kmlFeatures[`${reqSite}|route`] || [];
+            if (distro.length === 0 && trans.length === 0 && route.length === 0) return;
             chan.postMessage({
                 type: 'KML_FEATURES_RESPONSE',
                 siteID: reqSite,
                 distro,
                 trans,
+                route,
                 fromVersion: SCRIPT_VERSION,
             });
         };

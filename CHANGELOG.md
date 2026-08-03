@@ -6,6 +6,23 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-03 — ⭐ PROMOTED TO PROD: Map Styler v34.133 + Site Setup Tools v4.230 — the 🟠 Proposed Routes suite
+
+Coworkers jump **Map Styler 34.125 → 34.133** and **Site Setup Tools 4.220 → 4.230** on the next Tampermonkey update check.
+
+**🟠 Proposed Routes (Map Styler)** — a third KML layer next to Distribution/Transmission for planning infrastructure that doesn't exist yet:
+- New **"Proposed routes"** panel card: paths AND polygons, bright orange by default, with color / line opacity / thickness / polygon fill + fill-opacity controls. Files are `<siteID>-route.kml`, created automatically on first commit.
+- Routes wear the **real FP 40/65 ft buffers** (paths) and the FFZ buffer (polygons) — piggybacking whatever your FP/FFZ cards are set to — including live at the cursor while drawing.
+- Drawing acts like an unpublished flight path: snap to **real FP vertices** and **FFZ edges** (existing zones or other proposed polygons, mid-edge like a real FP↔FFZ connection), rubber-band preview, full right-click editing on pending and committed routes (drag ends, click midpoints to add vertices).
+
+**🟠 Route Converter (Site Setup Tools, Full mode / CSM only)** — ⊕ Generate modal → **🟠 Convert routes** turns committed proposed routes into REAL entities:
+- Route **polygons → FFZs**, route **paths → Flight Paths**. A path snapped to an existing FP vertex **merges into that FP as new segments** (no new entity — like drawing a branch natively); a path landing on an FFZ edge becomes a standalone FP wearing **that zone's altitude band**.
+- Altitudes copy from the nearest existing entity (connected FP arc → landing FFZ → nearest FP/FFZ → DEM+SOP fallback). Preview with per-snap undo, connection-angle checks, dry run, backup manifest, post-write verify, **↩ Undo last convert**, and a **🔄 Reload Percepto** button (entities only appear after reload).
+- After converting, the Map Styler prompts to clean the converted routes out of the route KML.
+- Proposed routes are deliberately **excluded from all shielding math** — a planned route never satisfies the Coverage Validator or Asset Shielding Check.
+
+**➕ Create square asset (Site Setup Tools, Full mode)** — right-click the map (or an FFZ) → create a square asset on the spot; also a ➕ button in the inspector footer. Ghost squares mark created assets until reload; default names auto-advance.
+
 ## 2026-08-02 — ⭐ PROMOTED TO PROD: Site Setup Tools v4.220 + Control Panel v1.41
 
 Coworkers jump **Site Setup Tools 4.219 → 4.220** and **Control Panel 1.40 → 1.41** on the next Tampermonkey update check:
