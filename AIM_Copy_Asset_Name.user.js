@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
-// @name:en      Latest - AIM Site Setup Tools
+// @name:en      AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
 // @version      4.230
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
