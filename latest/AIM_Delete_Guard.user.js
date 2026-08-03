@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Delete Guard
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Delete_Guard.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Delete_Guard.user.js
 // @description  Banks a full JSON copy of every map_objects entity BEFORE it is deleted (any source: hotkey, kebab menu, bulk tools). Keeps a rolling 24h history with one-click restore. A delete that cannot be backed up is BLOCKED. No hotkeys; panel opens from the AIM Control Panel.
@@ -17,7 +17,7 @@
 // Log tag: [AIM UNDO]
 (function() {
     const SCRIPT_ID = 'aim-delete-guard';
-    const SCRIPT_VERSION = '1.0';
+    const SCRIPT_VERSION = '1.1';
     const IS_TOP = window === window.top;
     const LS_KEY = 'aim-delete-history-v1';       // per-origin, so QA and prod stay separate
     const MAX_AGE_MS = 24 * 60 * 60 * 1000;       // 24h rolling window
@@ -74,6 +74,14 @@
 
     function bankEntity(entity) {
         const hist = loadHistory();
+        // Dedupe: Percepto's delete flow can fire the DELETE twice back-to-back
+        // (the synthetic-click paths dispatch both a DOM click and the React
+        // handler) — don't bank the same entity twice within 10s.
+        const dup = hist.find(e => e.entity && e.entity.id === entity.id && (Date.now() - e.ts) < 10000);
+        if (dup) {
+            console.log('[AIM UNDO] duplicate delete of id ' + entity.id + ' within 10s — already banked, skipping');
+            return true;
+        }
         hist.unshift({ ts: Date.now(), iso: new Date().toISOString(), siteId: entity.site, entity });
         const ok = saveHistory(hist);
         const label = (TYPE_LABELS[entity.type] || ('type ' + entity.type)) + ' "' + (entity.name || 'unnamed') + '"';
@@ -178,8 +186,10 @@
         // custom.new_poi_type_str, mountain_terrain_site from /sites/<id>/.
         const b = JSON.parse(JSON.stringify(entity));
         delete b.id;
-        b.site_id = entity.site;
-        b.points = entity.coords || [];
+        b.site_id = Number(entity.site);
+        // GET responses use `coords`; POST echoes use `points`. Handle both.
+        b.points = (Array.isArray(entity.coords) && entity.coords.length) ? entity.coords
+                 : (Array.isArray(entity.points) ? entity.points : []);
         delete b.site; delete b.coords; delete b.polygon; delete b.asset_waypoints;
         if (Array.isArray(b.arcs)) {
             b.arcs = entity.arcs.map(a => {
@@ -190,7 +200,11 @@
             });
         }
         if (b.type === 3) { b.custom = b.custom || {}; b.custom.new_poi_type_str = ''; }
-        if (siteCfg && siteCfg.mountain_terrain_site !== undefined) b.mountain_terrain_site = siteCfg.mountain_terrain_site;
+        // Site cfg field is `mountain_terrain`; the WRITE body field is
+        // `mountain_terrain_site`. Getting this wrong makes the server read
+        // arc altitudes in the wrong mode → "Alt out of bounds" 400s
+        // (v1.0 shipped with this exact bug — live-caught on site 1502).
+        b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
         return b;
     }
 
@@ -206,7 +220,10 @@
         const label = (TYPE_LABELS[entry.entity.type] || ('type ' + entry.entity.type)) + ' "' + (entry.entity.name || 'unnamed') + '"';
         try {
             const siteR = await ORIG_FETCH('/sites/' + entry.siteId + '/', { credentials: 'include' });
-            const siteCfg = siteR.ok ? await siteR.json() : null;
+            // Fail closed: without the site cfg we can't set mountain_terrain_site
+            // correctly, and a wrong value corrupts the altitude interpretation.
+            if (!siteR.ok) throw new Error('/sites/' + entry.siteId + '/ returned HTTP ' + siteR.status);
+            const siteCfg = await siteR.json();
             const body = buildWriteBody(entry.entity, siteCfg);
             const r = await ORIG_FETCH('/map_objects/', {
                 method: 'POST', credentials: 'include',
@@ -216,6 +233,7 @@
             if (!r.ok) {
                 const txt = await r.text().catch(() => '');
                 console.error('[AIM UNDO] restore POST HTTP ' + r.status + ': ' + txt.slice(0, 400));
+                console.error('[AIM UNDO] failing write body (for diagnosis):', body);
                 showToast('🛑 Restore of ' + label + ' failed (HTTP ' + r.status + ') — see console. If it is a flight path, restore its FFZs first.', true);
                 return;
             }
