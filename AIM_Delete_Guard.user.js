@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         AIM Delete Guard
 // @namespace    http://tampermonkey.net/
-// @version      1.1
+// @version      1.2
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Delete_Guard.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Delete_Guard.user.js
-// @description  Banks a full JSON copy of every map_objects entity BEFORE it is deleted (any source: hotkey, kebab menu, bulk tools). Keeps a rolling 24h history with one-click restore. A delete that cannot be backed up is BLOCKED. No hotkeys; panel opens from the AIM Control Panel.
+// @description  Banks a full JSON copy of every map_objects entity BEFORE it is deleted (any source: hotkey, kebab menu, bulk tools). Keeps a rolling 72h history with one-click restore. A delete that cannot be backed up is BLOCKED. No hotkeys; panel opens from the AIM Control Panel.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -17,10 +17,10 @@
 // Log tag: [AIM UNDO]
 (function() {
     const SCRIPT_ID = 'aim-delete-guard';
-    const SCRIPT_VERSION = '1.1';
+    const SCRIPT_VERSION = '1.2';
     const IS_TOP = window === window.top;
     const LS_KEY = 'aim-delete-history-v1';       // per-origin, so QA and prod stay separate
-    const MAX_AGE_MS = 24 * 60 * 60 * 1000;       // 24h rolling window
+    const MAX_AGE_MS = 72 * 60 * 60 * 1000;       // 72h rolling window (was 24h — user request 2026-08-03)
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const TYPE_LABELS = { 3: 'Asset', 4: 'NFZ', 8: 'Base', 15: 'FP', 16: 'FFZ', 19: 'GM', 98: 'Safe' };
 
@@ -86,7 +86,7 @@
         const ok = saveHistory(hist);
         const label = (TYPE_LABELS[entity.type] || ('type ' + entity.type)) + ' "' + (entity.name || 'unnamed') + '"';
         console.log('[AIM UNDO] 🕘 banked ' + label + ' (id ' + entity.id + ', site ' + entity.site + ') before delete');
-        showToast('🕘 Backed up ' + label + ' — restorable for 24h via Control Panel → Delete Guard', false);
+        showToast('🕘 Backed up ' + label + ' — restorable for 72h via Control Panel → Delete Guard', false);
         return ok;
     }
 
@@ -301,14 +301,14 @@
         }).join('');
         panelEl.innerHTML =
             '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid #1ca0de;cursor:default">' +
-            '<strong style="color:#1ca0de;flex:1">🕘 Delete history (24h)</strong>' +
+            '<strong style="color:#1ca0de;flex:1">🕘 Delete history (72h)</strong>' +
             '<button data-undo-clear style="background:#311;border:1px solid #633;color:#f88;border-radius:4px;padding:2px 8px;cursor:pointer">Clear</button>' +
             '<button data-undo-close style="background:none;border:none;color:#ccc;font-size:16px;cursor:pointer">✕</button></div>' +
             (hist.length
                 ? '<div style="max-height:50vh;overflow:auto"><table style="border-collapse:collapse;font:12px/1.4 sans-serif;color:#ddd;width:100%">' +
                   '<tr style="color:#8ab;text-align:left"><th style="padding:4px 6px">Time</th><th style="padding:4px 6px">Type</th><th style="padding:4px 6px">Name</th><th style="padding:4px 6px">Detail</th><th style="padding:4px 6px">Site</th><th style="padding:4px 6px"></th></tr>' +
                   rows + '</table></div>'
-                : '<div style="padding:16px;color:#889;font:13px sans-serif">No deletes in the last 24 hours.</div>');
+                : '<div style="padding:16px;color:#889;font:13px sans-serif">No deletes in the last 72 hours.</div>');
     }
 
     function togglePanel() {
@@ -322,7 +322,7 @@
             const r = e.target.closest('[data-undo-restore]');
             if (r) { restoreEntry(Number(r.getAttribute('data-undo-restore'))); return; }
             if (e.target.closest('[data-undo-clear]')) {
-                if (window.confirm('Clear the entire 24h delete history? Backups will be unrecoverable.')) {
+                if (window.confirm('Clear the entire 72h delete history? Backups will be unrecoverable.')) {
                     saveHistory([]); renderPanel();
                 }
                 return;
@@ -364,7 +364,7 @@
             version: SCRIPT_VERSION, group: 'Site Setup', priority: 95,
             toggles: [
                 { id: 'master', label: 'Back up every delete (block un-backed deletes)', type: 'boolean', default: true, master: true },
-                { id: 'show-history', label: '🕘 Show delete history (24h)', type: 'button', action: 'show-history' },
+                { id: 'show-history', label: '🕘 Show delete history (72h)', type: 'button', action: 'show-history' },
             ],
             hotkeys: [],
         });
