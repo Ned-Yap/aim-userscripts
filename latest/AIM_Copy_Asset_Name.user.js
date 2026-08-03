@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.235
+// @version      4.236
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.235';
+    const SCRIPT_VERSION = '4.236';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22788,6 +22788,7 @@
     const FFD_BTN_ID = 'aim-ffd-btn';
     const FFD_PANEL_ID = 'aim-ffd-panel';
     const FFD_UNDO_LS = 'aim_ffd_undo:';
+    const FFD_DRAFT_LS = 'aim_ffd_draft:';   // v4.236 in-progress draw autosave (survives crash/reload/mystery wipes)
     const FFD_SNAP_PX = 12;          // screen-px snap radius (FP verts + FFZ edges)
     const FFD_TOUCH_M = 0.5;         // rule #7 FFZ-contact tolerance (matches RC_TOUCH_M)
     const FFD_DEFAULTS = { floorFt: 90, deltaFt: 30 };
@@ -22829,6 +22830,7 @@
         anchor: null,                    // vert index the next click extends from (click an existing vert to branch)
         hist: [],                        // undo stack: full-state JSON snapshots (v4.235 — covers add/move/insert/delete/anchor)
         dragVert: null, dragMoved: false, _dragStart: null,   // v4.235 vertex editing (genRoute-style)
+        _persistSig: null, _watchdog: null,                   // v4.236 draft autosave + layer watchdog
         tentative: null, tentSnap: null, // live cursor (snapped) + its snap info
         floorFt: FFD_DEFAULTS.floorFt, deltaFt: FFD_DEFAULTS.deltaFt,
         name: '', createdCount: 0, showBuffers: true, bufCfg: null,
@@ -22967,6 +22969,21 @@
             });
         } catch (e) {}
         ffdSyncPanelStats();
+        ffdPersistMaybe();
+    }
+    // Autosave the in-progress draw per site (advDraw's crash-resume pattern).
+    // Signature check keeps mousemove renders write-free; the draft clears
+    // itself when the graph empties (commit reset / full undo).
+    function ffdPersistMaybe() {
+        const sid = getCurrentSiteID(); if (!sid) return;
+        try {
+            const sig = JSON.stringify({ v: ffd.verts, s: ffd.segs, n: ffd.snaps, a: ffd.anchor });
+            if (sig === ffd._persistSig) return;
+            ffd._persistSig = sig;
+            const key = FFD_DRAFT_LS + sid;
+            if (!ffd.verts.length) localStorage.removeItem(key);
+            else localStorage.setItem(key, JSON.stringify({ when: Date.now(), verts: ffd.verts, segs: ffd.segs, snaps: ffd.snaps, anchor: ffd.anchor }));
+        } catch (e) {}
     }
     function ffdTotalFt() {
         let m = 0;
@@ -23514,6 +23531,22 @@
         ffd._onZoom = () => { if (ffd.active) ffdRender(); };
         try { map.on('zoomend', ffd._onZoom); } catch (e) {}
         try { map.doubleClickZoom.disable(); } catch (e) {}
+        // Shift+drag is Leaflet BOX ZOOM — a stray Shift while drawing jolts
+        // the view (suspected in the "path disappeared" report). Off while drawing.
+        try { map.boxZoom.disable(); } catch (e) {}
+        // Watchdog: if something external wipes our overlay layers (pane
+        // rebuild, another script's cleanup), re-render from state — the draw
+        // data itself is never in the layers. Logs so we learn the culprit.
+        ffd._watchdog = setInterval(() => {
+            if (!ffd.active) return;
+            try {
+                const m = getLeafletMap(); if (!m) return;
+                if (ffd.verts.length && (!ffd.layers.length || !m.hasLayer(ffd.layers[0]))) {
+                    console.warn(`${TAG} fast-FP overlay vanished externally — re-rendering ${ffd.verts.length} waypoint(s)`);
+                    ffdRender();
+                }
+            } catch (e) {}
+        }, 800);
         try { ffd._container.style.cursor = 'crosshair'; } catch (e) {}
     }
     function ffdUnwire() {
@@ -23531,9 +23564,11 @@
         const map = getLeafletMap();
         if (map) {
             try { map.doubleClickZoom.enable(); } catch (e) {}
+            try { map.boxZoom.enable(); } catch (e) {}
             if (ffd.dragVert != null) { try { map.dragging.enable(); } catch (e) {} }
             if (ffd._onZoom) { try { map.off('zoomend', ffd._onZoom); } catch (e) {} }
         }
+        if (ffd._watchdog) { try { clearInterval(ffd._watchdog); } catch (e) {} ffd._watchdog = null; }
         ffd.dragVert = null; ffd.dragMoved = false; ffd._dragStart = null;
         ffd._container = null;
     }
@@ -23553,6 +23588,17 @@
             try { ffd.fpGraph = buildFlightPathGraph(ents); } catch (e) { ffd.fpGraph = null; }
             ffd.active = true; ffd.stage = 'draw';
             ffd.verts = []; ffd.snaps = []; ffd.segs = []; ffd.anchor = null; ffd.hist = []; ffd.dragVert = null; ffd.dragMoved = false; ffd._dragStart = null; ffd.tentative = null; ffd.tentSnap = null; ffd.plan = null;
+            // Resume an autosaved in-progress draw (crash / reload / exit-with-✕).
+            try {
+                const d = JSON.parse(localStorage.getItem(FFD_DRAFT_LS + siteID) || 'null');
+                if (d && Array.isArray(d.verts) && d.verts.length) {
+                    ffd.verts = d.verts;
+                    ffd.segs = Array.isArray(d.segs) ? d.segs : [];
+                    ffd.snaps = (Array.isArray(d.snaps) && d.snaps.length === d.verts.length) ? d.snaps : d.verts.map(() => null);
+                    ffd.anchor = (typeof d.anchor === 'number' && d.anchor >= 0 && d.anchor < d.verts.length) ? d.anchor : d.verts.length - 1;
+                    showToast(`Restored your in-progress draw (${ffd.verts.length} waypoints) — right-click waypoints to delete, or keep going`, 'rgba(122,223,230,0.6)');
+                }
+            } catch (e) {}
             // Ask the Map Styler for its live fp.* buffer settings (answer
             // arrives async and re-renders; defaults cover the gap).
             if (ffdStylerChannel) { try { ffdStylerChannel.postMessage({ action: 'FP_BUFFER_REQUEST' }); } catch (e) {} }

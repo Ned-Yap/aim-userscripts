@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-03 — Fast FP Draw: your draw can no longer vanish (Site Setup Tools latest v4.236 — dev only)
+
+Response to a report of an in-progress path disappearing after an accidental Shift press. Three protections:
+
+- **Shift+drag box-zoom is disabled while drawing** (Leaflet's built-in — the prime suspect for the jolt).
+- **Watchdog**: if anything external wipes the drawn overlay, it re-renders from state within a second and logs `fast-FP overlay vanished externally` to the console — if you see the path blink back, tell me and copy that line.
+- **Autosave**: the in-progress draw is persisted per site on every change. Reopen ✏ after a crash, reload, or accidental exit and it restores exactly where you were. The draft clears itself on commit or full undo.
+
+---
+
 ## 2026-08-03 — Fast FP Draw: full vertex editing, routes-editor style (Site Setup Tools latest v4.235 — dev only)
 
 The same editing gestures the route editor already had, now on the Fast FP graph: **drag a waypoint to move it** (it re-snaps to FP vertices / FFZ edges while dragging), **click a line to insert a waypoint** there (and immediately drag it), **right-click a waypoint to delete it** (a mid-line waypoint heals the line by bridging its neighbors). A plain click on a waypoint still switches the branch anchor; right-click on empty map is still undo. Undo now restores full snapshots, so any edit — add, move, insert, delete, anchor switch — is exactly one step back.
