@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.237
+// @version      4.238
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.237';
+    const SCRIPT_VERSION = '4.238';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22792,13 +22792,17 @@
     const FFD_DRAFT_LS = 'aim_ffd_draft:';   // v4.236 in-progress draw autosave (survives crash/reload/mystery wipes)
     const FFD_GHOST_LS = 'aim_ffd_ghosts:';  // v4.237 committed-FP ghosts (visible until a reload makes them native)
     // Smart-Fill terrain constants — Map Editor planArc parity.
-    const FFD_SMART_SPACING_FT = 100;  // DEM sample spacing along a segment
-    const FFD_SMART_MAX_SAMPLES = 60;  // sample cap per segment
-    const FFD_SMART_VAR_FT = 30;       // ground range (ft) that forces a terrain step vertex
-    const FFD_SMART_MIN_STEP_FT = 60;  // never place auto-steps closer than this
+    // v4.238 HARD-FLOOR DOCTRINE — the floor is a MINIMUM, never a target;
+    // every rounding and ambiguity errs UP. (A live band came out AGL 72 under
+    // a 90 ft floor: sampling source read ~17 ft low → denser sampling, ceil
+    // floors, and a Percepto DEM cross-check that only ever raises bands.)
+    const FFD_SMART_SPACING_FT = 50;    // DEM sample spacing along a segment (was 100)
+    const FFD_SMART_MAX_SAMPLES = 120;  // sample cap per segment (was 60)
+    const FFD_SMART_VAR_FT = 30;        // ground range (ft) that forces a terrain step vertex
+    const FFD_SMART_MIN_STEP_FT = 60;   // never place auto-steps closer than this
     const FFD_SNAP_PX = 12;          // screen-px snap radius (FP verts + FFZ edges)
     const FFD_TOUCH_M = 0.5;         // rule #7 FFZ-contact tolerance (matches RC_TOUCH_M)
-    const FFD_DEFAULTS = { floorFt: 90, deltaFt: 30 };
+    const FFD_DEFAULTS = { floorFt: 100, deltaFt: 30 };   // goal floor 100 ft AGL (SOP hard min 90 — never dip below floor)
     // FP-piggyback shielding buffers around the drawn path — same treatment the
     // Map Styler gives proposed-route paths ("a route path is a future FP").
     // v4.233: the REAL settings come from the Map Styler over its state channel
@@ -23268,7 +23272,7 @@
                 // independent, no sampling, no steps (Map Editor planArc parity).
                 for (const sg of ffd.segs) {
                     const a = plan.verts[sg.a], b = plan.verts[sg.b];
-                    const minM = fpArcAltMeters(aglFtToStoredM(ffd.floorFt, 0, 'agl'));
+                    const minM = Math.ceil(aglFtToStoredM(ffd.floorFt, 0, 'agl'));
                     plan.arcs.push({ a, b, sa: sg.a, sb: sg.b, lenM: approxMeters(a.lat, a.lng, b.lat, b.lng), groundM: null,
                         minM, maxM: Math.max(fpArcAltMeters(aglFtToStoredM(ffd.floorFt + ffd.deltaFt, 0, 'agl')), minM + 1) });
                 }
@@ -23311,9 +23315,12 @@
                     for (let k = 0; k < subs.length - 1; k++) { const v = lerp(valid[subs[k].i1].t); cutVerts.push(v); plan.stepVerts.push(v); }
                     cutVerts.push(ss.b);
                     for (let k = 0; k < subs.length; k++) {
-                        let g = -Infinity;
-                        for (let j = subs[k].i0; j <= subs[k].i1; j++) g = Math.max(g, valid[j].e);
-                        const minM = fpArcAltMeters(aglFtToStoredM(ffd.floorFt, g, 'msl'));
+                        let g = -Infinity, gAt = null;
+                        for (let j = subs[k].i0; j <= subs[k].i1; j++) {
+                            if (valid[j].e > g) { g = valid[j].e; gAt = lerp(valid[j].t); }
+                        }
+                        // HARD FLOOR: ceil, never round — the floor may only err UP.
+                        const minM = Math.ceil(aglFtToStoredM(ffd.floorFt, g, 'msl'));
                         plan.arcs.push({
                             a: cutVerts[k], b: cutVerts[k + 1],
                             // Only the outer sub-arcs touch original waypoints —
@@ -23322,9 +23329,38 @@
                             lenM: approxMeters(cutVerts[k].lat, cutVerts[k].lng, cutVerts[k + 1].lat, cutVerts[k + 1].lng),
                             groundM: g, minM,
                             maxM: Math.max(fpArcAltMeters(aglFtToStoredM(ffd.floorFt + ffd.deltaFt, g, 'msl')), minM + 1),
+                            _maxPt: gAt ? { lat: gAt.lat, lng: gAt.lng, e: g } : null,
                         });
                     }
                 });
+                // DEM CROSS-CHECK (v4.238): the sampling source (Open-Topo-Data
+                // ned10m) can read low versus Percepto's own DEM — the one the
+                // editor displays and the drone flies against. Probe the highest
+                // sampled points via /location_altitude/ and raise ALL bands by
+                // any positive difference. One-directional by doctrine: bands
+                // only ever go UP from this check, never down.
+                const mslArcs = plan.arcs.filter(x => x.groundM != null && x._maxPt);
+                if (mslArcs.length && !plan.errors.length) {
+                    ffd._busyMsg = 'Cross-checking ground against Percepto DEM…'; ffdRenderPanel();
+                    const tops = mslArcs.slice().sort((x, y) => y.groundM - x.groundM).slice(0, 3);
+                    let maxDeltaM = 0, probed = 0;
+                    for (const t of tops) {
+                        try {
+                            const pm = await perceptoFetchPoint(t._maxPt.lat, t._maxPt.lng);
+                            if (typeof pm === 'number') { probed++; maxDeltaM = Math.max(maxDeltaM, pm - t._maxPt.e); }
+                        } catch (e) {}
+                    }
+                    if (maxDeltaM > 0.5) {
+                        mslArcs.forEach(x => {
+                            x.groundM += maxDeltaM;
+                            x.minM = Math.ceil(aglFtToStoredM(ffd.floorFt, x.groundM, 'msl'));
+                            x.maxM = Math.max(fpArcAltMeters(aglFtToStoredM(ffd.floorFt + ffd.deltaFt, x.groundM, 'msl')), x.minM + 1);
+                        });
+                        plan.warnings.push(`DEM cross-check: Percepto reads up to ${Math.round(maxDeltaM * M_TO_FT)} ft higher than the sampling source — ALL bands raised by that amount (floor ${ffd.floorFt} ft AGL is a hard minimum)`);
+                    } else if (!probed) {
+                        plan.warnings.push('DEM cross-check unavailable (Percepto elevation endpoint did not answer — likely rate-limited); bands rest on the sampling source alone');
+                    }
+                }
             }
             // Junction sanity vs snapped arcs (server enforces strictly-positive
             // overlap between connected arcs; bridgeArcContinuity only covers arcs

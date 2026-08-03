@@ -6,6 +6,19 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-03 — Fast FP Draw: HARD floor — bands can only err UP (Site Setup Tools latest v4.238 — dev only)
+
+A live band came out at AGL 72 under a 90 ft floor: the elevation sampling source read ~17 ft lower than Percepto's own DEM at that spot. New doctrine baked in — **the floor is a minimum, never a target; every ambiguity errs upward**:
+
+- **Percepto DEM cross-check**: after Smart-Fill, the highest sampled points are probed against Percepto's `/location_altitude/` (the DEM the editor displays); if it reads higher, **all bands are raised** by the difference and the review panel says so. The check can only raise bands, never lower them.
+- **2× denser sampling** (every ~50 ft, cap 120/segment) so local high ground between samples can't slip through.
+- **Floors round UP** (ceil, not nearest) at every step.
+- Default goal floor is now **100 ft** (+30 delta) to match the SOP goal — 90 ft is the hard minimum the band must never dip under.
+
+Note: FPs committed before this version should be re-banded (Map Editor ⛰ Smart-fill) or redrawn.
+
+---
+
 ## 2026-08-03 — Fast FP Draw: ghosts after save + real Smart-Fill terrain bands (Site Setup Tools latest v4.237 — dev only)
 
 Two big ones from live testing:
