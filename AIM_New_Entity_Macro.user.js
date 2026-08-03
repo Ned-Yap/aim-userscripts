@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM New Entity Macro
 // @namespace    http://tampermonkey.net/
-// @version      1.12
+// @version      1.13
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.user.js
 // @description  Hotkeys 1-6 create color-coded entities; Shift+S Save, Shift+D D (double-press) Delete, Shift+Z Cancel, Shift+X Finish. Each hotkey individually enable/rebindable via the AIM Control Panel.
@@ -51,6 +51,25 @@
                 el[k].memoizedProps.onClick({ stopPropagation:()=>{}, preventDefault:()=>{}, nativeEvent: new MouseEvent('click', cOpts) });
             }
         } catch(e) {}
+        return true;
+    }
+
+    function clickElementOnce(el, doc) {
+        // Single-fire click for buttons whose handler must run EXACTLY once.
+        // clickElement fires BOTH the DOM events AND the React onClick (the
+        // reliability pattern) — on the delete confirm that issues the server
+        // DELETE twice and Percepto alerts "already deleted" on the second.
+        // Prefer the React handler alone; fall back to DOM events without it.
+        if (!el) return false;
+        var cOpts = { bubbles: true, cancelable: true, view: doc.defaultView || window, buttons: 1 };
+        try {
+            var k = Object.keys(el).find(key => key.startsWith('__reactFiber') || key.startsWith('__reactProps'));
+            if (k && el[k].memoizedProps && el[k].memoizedProps.onClick) {
+                el[k].memoizedProps.onClick({ stopPropagation:()=>{}, preventDefault:()=>{}, nativeEvent: new MouseEvent('click', cOpts) });
+                return true;
+            }
+        } catch(e) {}
+        ['mousedown', 'mouseup', 'click'].forEach(t => el.dispatchEvent(new MouseEvent(t, cOpts)));
         return true;
     }
 
@@ -248,7 +267,7 @@
                             cAttempts++;
                             var confirm = Array.from(doc.querySelectorAll('button span')).find(s => s.textContent.trim() === "Delete entity");
                             if (confirm && confirm.offsetParent !== null) {
-                                clickElement(confirm.closest('button'), doc);
+                                clickElementOnce(confirm.closest('button'), doc);
                                 clearInterval(cPoller);
                             } else if (cAttempts > 20) clearInterval(cPoller);
                         }, 100);
@@ -289,7 +308,7 @@
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-new-entity-macro';
-    const SCRIPT_VERSION = '1.12';
+    const SCRIPT_VERSION = '1.13';
     const DELETE_WINDOW_MS = 500; // second press must arrive within this
     let controlChannel = null;
     let controlPanelDetected = false;
