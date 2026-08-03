@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.41
+// @version      1.42
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -587,9 +587,21 @@
         }
     }
 
+    // v1.42 — per-tab identity, shared across frames via window.top (same-origin).
+    // BroadcastChannel delivers to EVERY open tab on the origin; hotkey/action
+    // messages must only execute in the tab that physically received the
+    // keypress/click (a delete hotkey once crossed tabs and destroyed work).
+    function aimTabId() {
+        try {
+            const t = window.top;
+            if (!t.__AIM_TAB_ID) t.__AIM_TAB_ID = 'tab-' + Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
+            return t.__AIM_TAB_ID;
+        } catch (e) { return null; }
+    }
+
     function broadcastHotkeyFired(scriptId, hotkeyId) {
         if (state.channel) {
-            state.channel.postMessage({ type: 'HOTKEY_FIRED', scriptId, hotkeyId });
+            state.channel.postMessage({ type: 'HOTKEY_FIRED', scriptId, hotkeyId, tabId: aimTabId() });
         }
     }
 
@@ -1115,6 +1127,7 @@
                         type: 'TRIGGER_ACTION',
                         scriptId: t.dataset.script,
                         actionId: t.dataset.action,
+                        tabId: aimTabId(),
                     });
                 }
                 return;

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Clear All
 // @namespace    http://tampermonkey.net/
-// @version      1.7
+// @version      1.8
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Clear_All_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Clear_All_Tampermonkey.user.js
 // @description  Adds Shift+C hotkey for the Clear All button. Registers with the AIM Control Panel for master toggle + hotkey rebinding.
@@ -83,10 +83,20 @@
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-clear-all';
-    const SCRIPT_VERSION = '1.7';
+    const SCRIPT_VERSION = '1.8';
     let controlChannel = null;
     let controlPanelDetected = false;
     let masterEnabled = true;
+
+    // Per-tab identity shared across frames via window.top (same-origin).
+    // Must match the Control Panel's aimTabId so hotkeys stay tab-local.
+    function aimTabId() {
+        try {
+            const t = window.top;
+            if (!t.__AIM_TAB_ID) t.__AIM_TAB_ID = 'tab-' + Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
+            return t.__AIM_TAB_ID;
+        } catch (e) { return null; }
+    }
 
     function setupControlPanel() {
         try { controlChannel = new BroadcastChannel(CONTROL_CHANNEL_NAME); }
@@ -98,6 +108,11 @@
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
                 if (msg.toggleId === 'master') masterEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
             } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID && IS_TOP) {
+                // Cross-tab guard: BroadcastChannel delivers to EVERY open tab.
+                // New CP stamps tabId (exact tab match); old CP doesn't — then
+                // require this tab to be visible so a background tab can never
+                // execute a hotkey pressed elsewhere.
+                if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;
                 if (msg.hotkeyId === 'invoke' && masterEnabled) performAction();
             }
         };

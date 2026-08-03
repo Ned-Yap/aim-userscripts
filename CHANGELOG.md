@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-03 — 🚨 CRITICAL FIX: hotkeys can no longer cross tabs (Control Panel v1.42 + New Entity Macro v1.10 + Clear All v1.6)
+
+**A hotkey pressed in one Percepto tab could execute in EVERY other open Percepto tab.** The Control Panel routes hotkeys over a `BroadcastChannel`, which the browser delivers to all tabs on the domain — so Shift+D D (Delete entity) pressed in one tab deleted the selected entity in another tab. This destroyed a finished flight path today. **Please update immediately.**
+
+- **AIM Control Panel v1.42** — every `HOTKEY_FIRED` / `TRIGGER_ACTION` message now carries the identity of the tab that physically received the keypress/click.
+- **AIM New Entity Macro v1.10** (latest v1.12) + **AIM Clear All v1.6** (latest v1.8) — receivers ignore any hotkey message from a different tab. Fallback for a not-yet-updated Control Panel: a background (hidden) tab never executes a hotkey. Fails closed — if tab identity can't be resolved, destructive actions don't fire.
+- Remaining hotkey scripts (Altitude, Ruler, Bulk Mission Adder, etc.) get the same guard in their next update; their actions are non-destructive.
+
+---
+
 ## 2026-08-03 — ⭐ PROMOTED TO PROD: Map Styler v34.133 + Site Setup Tools v4.230 — the 🟠 Proposed Routes suite
 
 Coworkers jump **Map Styler 34.125 → 34.133** and **Site Setup Tools 4.220 → 4.230** on the next Tampermonkey update check.
