@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-03 — Fast FP Draw: full vertex editing, routes-editor style (Site Setup Tools latest v4.235 — dev only)
+
+The same editing gestures the route editor already had, now on the Fast FP graph: **drag a waypoint to move it** (it re-snaps to FP vertices / FFZ edges while dragging), **click a line to insert a waypoint** there (and immediately drag it), **right-click a waypoint to delete it** (a mid-line waypoint heals the line by bridging its neighbors). A plain click on a waypoint still switches the branch anchor; right-click on empty map is still undo. Undo now restores full snapshots, so any edit — add, move, insert, delete, anchor switch — is exactly one step back.
+
+---
+
 ## 2026-08-03 — Fast FP Draw: branching (Site Setup Tools latest v4.234 — dev only)
 
 The drawn path is now a real branching graph, like native flight paths. **Click any waypoint you've already placed to make it the branch anchor** (cyan ring) — the next clicks grow a new branch from there. The tentative segment, shielding buffers, per-arc altitudes, junction checks and the landing-angle check all follow the graph (angle is checked at branch tips). Right-click/Esc undo steps back through both waypoint-adds and anchor switches.

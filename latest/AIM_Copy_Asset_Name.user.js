@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.234
+// @version      4.235
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.234';
+    const SCRIPT_VERSION = '4.235';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22827,7 +22827,8 @@
         snaps: [],                       // per-vertex: null | {kind:'fp-vertex',...} | {kind:'ffz-edge',...}
         segs: [],                        // [{a,b}] vert indices — a GRAPH, not a chain (v4.234 branching)
         anchor: null,                    // vert index the next click extends from (click an existing vert to branch)
-        hist: [],                        // undo stack: {t:'add',vi,seg} | {t:'anchor',prev}
+        hist: [],                        // undo stack: full-state JSON snapshots (v4.235 — covers add/move/insert/delete/anchor)
+        dragVert: null, dragMoved: false, _dragStart: null,   // v4.235 vertex editing (genRoute-style)
         tentative: null, tentSnap: null, // live cursor (snapped) + its snap info
         floorFt: FFD_DEFAULTS.floorFt, deltaFt: FFD_DEFAULTS.deltaFt,
         name: '', createdCount: 0, showBuffers: true, bufCfg: null,
@@ -22972,19 +22973,67 @@
         for (const s of ffd.segs) m += approxMeters(ffd.verts[s.a].lat, ffd.verts[s.a].lng, ffd.verts[s.b].lat, ffd.verts[s.b].lng);
         return Math.round(m * M_TO_FT);
     }
-    // One step back: un-add the last waypoint (and its segment) or un-switch
-    // the last branch anchor — whichever happened most recently.
+    // Undo = full-state snapshots (v4.235): push BEFORE every mutation (add /
+    // move / insert / delete / anchor switch), pop restores it verbatim. Small
+    // graphs → cloning is cheap, and every edit kind is one undo step.
+    function ffdSnapshot() {
+        try {
+            ffd.hist.push(JSON.stringify({ verts: ffd.verts, segs: ffd.segs, snaps: ffd.snaps, anchor: ffd.anchor }));
+            if (ffd.hist.length > 100) ffd.hist.shift();
+        } catch (e) {}
+    }
     function ffdUndoStep() {
         const h = ffd.hist.pop();
         if (!h) { ffdSetActive(false); return; }
-        if (h.t === 'add') {
-            if (h.seg) ffd.segs.pop();
-            ffd.verts.pop(); ffd.snaps.pop();
-            ffd.anchor = h.seg ? h.seg.a : null;
-        } else if (h.t === 'anchor') {
-            ffd.anchor = h.prev;
-        }
+        try {
+            const st = JSON.parse(h);
+            ffd.verts = st.verts; ffd.segs = st.segs; ffd.snaps = st.snaps; ffd.anchor = st.anchor;
+        } catch (e) {}
         ffdRender();
+    }
+    // Delete a waypoint (genRoute-style right-click-a-dot): its segments go
+    // too; a degree-2 vertex bridges its two neighbors so the line heals.
+    function ffdDeleteVert(vi) {
+        ffdSnapshot();
+        const touching = ffd.segs.filter(s => s.a === vi || s.b === vi);
+        const nbs = [...new Set(touching.map(s => (s.a === vi ? s.b : s.a)))];
+        ffd.segs = ffd.segs.filter(s => s.a !== vi && s.b !== vi);
+        if (nbs.length === 2 && nbs[0] !== nbs[1] && !ffd.segs.some(s => (s.a === nbs[0] && s.b === nbs[1]) || (s.a === nbs[1] && s.b === nbs[0]))) {
+            ffd.segs.push({ a: nbs[0], b: nbs[1] });
+        }
+        ffd.verts.splice(vi, 1); ffd.snaps.splice(vi, 1);
+        const fix = (i) => (i > vi ? i - 1 : i);
+        ffd.segs.forEach(s => { s.a = fix(s.a); s.b = fix(s.b); });
+        if (ffd.anchor === vi) ffd.anchor = nbs.length ? fix(nbs[0]) : (ffd.verts.length ? ffd.verts.length - 1 : null);
+        else if (ffd.anchor != null) ffd.anchor = fix(ffd.anchor);
+        ffdRender();
+    }
+    // Split a segment at the projected click point and return the new vert's
+    // index (genRoute-style click-a-line-to-insert; caller starts a drag).
+    function ffdInsertOnSeg(si, ll) {
+        ffdSnapshot();
+        const s = ffd.segs[si];
+        const vi = ffd.verts.length;
+        ffd.verts.push({ lat: ll.lat, lng: ll.lng });
+        ffd.snaps.push(null);
+        ffd.segs.splice(si, 1, { a: s.a, b: vi }, { a: vi, b: s.b });
+        return vi;
+    }
+    // Hit-test the cursor against OUR segments (screen px) → {i, ll} or null.
+    function ffdHitOwnSeg(ll) {
+        const map = getLeafletMap(); if (!map) return null;
+        let cp; try { cp = map.latLngToContainerPoint(ll); } catch (e) { return null; }
+        let best = null, bestD = 8;
+        ffd.segs.forEach((s, i) => {
+            try {
+                const A = map.latLngToContainerPoint(ffd.verts[s.a]), B = map.latLngToContainerPoint(ffd.verts[s.b]);
+                const r = ffdSegFootPx(cp, A, B);
+                if (r.dist < bestD) { bestD = r.dist; best = { i, foot: r.foot }; }
+            } catch (e) {}
+        });
+        if (!best) return null;
+        let fll; try { fll = map.containerPointToLatLng([best.foot.x, best.foot.y]); } catch (e) { return null; }
+        return { i: best.i, ll: fll };
     }
     // Hit-test the cursor against OUR drawn waypoints (screen px) → index or -1.
     function ffdHitOwnVert(ll) {
@@ -23055,7 +23104,7 @@
                 </div>
                 <label style="display:flex;gap:6px;align-items:center;margin-bottom:6px;color:#888;cursor:pointer"><input data-ffd-buf type="checkbox" ${ffd.showBuffers ? 'checked' : ''} style="accent-color:#1ca0de"> FP 40/65 ft shielding buffers</label>
                 <div data-ffd-stats style="margin-bottom:6px"></div>
-                <div style="color:#7a8a94;font-size:10px;line-height:1.5;margin-bottom:8px">click = waypoint (<span style="color:#5fff5f">green</span> = snapped to FP vertex / FFZ edge) · <b style="color:#00e5ff">click an existing waypoint = branch from it</b> (cyan ring = current anchor) · drag = pan · right-click = undo · <b>Enter</b> / dbl-click = finish · Esc = undo/exit</div>
+                <div style="color:#7a8a94;font-size:10px;line-height:1.5;margin-bottom:8px">click = waypoint (<span style="color:#5fff5f">green</span> = snapped to FP vertex / FFZ edge) · <b style="color:#00e5ff">click a waypoint = branch from it</b> (cyan ring = anchor) · <b>drag a waypoint = move it</b> · <b>click a line = insert a waypoint</b> · right-click a waypoint = delete it · right-click elsewhere = undo · drag empty map = pan · <b>Enter</b> / dbl-click = finish · Esc = undo/exit</div>
                 <button data-ffd-finish style="width:100%;background:rgba(0,229,255,0.15);border:1px solid rgba(0,229,255,0.6);border-radius:5px;color:#00e5ff;padding:6px 0;cursor:pointer;font-size:12px;font-weight:600">✔ Finish &amp; review</button>
                 <button data-ffd-undo style="width:100%;margin-top:6px;background:transparent;border:1px solid rgba(255,179,71,0.4);border-radius:5px;color:#ffb347;padding:4px 0;cursor:pointer;font-size:11px">↺ Undo last commit (this site)</button>
                 ${refreshNote}`;
@@ -23286,7 +23335,7 @@
             console.log(`${TAG} fast-FP commit OK:`, doneMsg);
             showToast(`${doneMsg} — refresh before editing natively`, 'rgba(95,255,95,0.6)');
             ffd.createdCount++;
-            ffd.verts = []; ffd.snaps = []; ffd.segs = []; ffd.anchor = null; ffd.hist = []; ffd.tentative = null; ffd.tentSnap = null; ffd.plan = null; ffd.name = '';
+            ffd.verts = []; ffd.snaps = []; ffd.segs = []; ffd.anchor = null; ffd.hist = []; ffd.dragVert = null; ffd.dragMoved = false; ffd._dragStart = null; ffd.tentative = null; ffd.tentSnap = null; ffd.plan = null; ffd.name = '';
             ffd.stage = 'draw';
         } catch (e) {
             console.warn(`${TAG} fast-FP commit failed:`, e);
@@ -23334,36 +23383,88 @@
         ffd._onMove = (ev) => {
             if (!ffd.active || ffd.stage !== 'draw') return;
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            // Vertex drag in progress (genRoute-style move).
+            if (ffd.dragVert != null) {
+                if (ev.buttons === 0) { // release happened off-map — end the drag
+                    ffd.dragVert = null; ffd.dragMoved = false;
+                    try { map.dragging.enable(); } catch (e) {}
+                    ffdRender(); return;
+                }
+                const ds = ffd._dragStart;
+                if (!ffd.dragMoved) {
+                    if (ds && Math.hypot(ev.clientX - ds.x, ev.clientY - ds.y) < 4) return; // jitter, not a drag yet
+                    ffdSnapshot();          // pre-move state, once per drag
+                    ffd.dragMoved = true;
+                }
+                const s = ffdSnapPoint(ll);
+                ffd.verts[ffd.dragVert] = s.pt;
+                ffd.snaps[ffd.dragVert] = s.snap;
+                ffd.tentative = null; ffd.tentSnap = null;
+                ffdRender();
+                return;
+            }
             const s = ffdSnapPoint(ll);
             ffd.tentative = s.pt; ffd.tentSnap = s.snap;
             ffdRender();
         };
         ffd._onDown = (ev) => {
             if (!ffd.active || ev.button !== 0 || isUiTarget(ev.target)) { ffd._downAt = null; return; }
+            if (ffd.stage === 'draw') {
+                let ll = null; try { ll = map.mouseEventToLatLng(ev); } catch (e) {}
+                if (ll) {
+                    // Grab one of OUR waypoints → drag to move (a no-move click
+                    // becomes an anchor switch on mouseup).
+                    const own = ffdHitOwnVert(ll);
+                    if (own >= 0) {
+                        ev.preventDefault(); ev.stopPropagation();
+                        ffd.dragVert = own; ffd.dragMoved = false;
+                        ffd._dragStart = { x: ev.clientX, y: ev.clientY };
+                        try { map.dragging.disable(); } catch (e) {}
+                        ffd._downAt = null;
+                        return;
+                    }
+                    // Grab one of OUR lines → insert a waypoint there + drag it.
+                    const hs = ffdHitOwnSeg(ll);
+                    if (hs) {
+                        ev.preventDefault(); ev.stopPropagation();
+                        const vi = ffdInsertOnSeg(hs.i, hs.ll);
+                        ffd.dragVert = vi; ffd.dragMoved = true; // insert IS a change (snapshot already taken)
+                        ffd._dragStart = { x: ev.clientX, y: ev.clientY };
+                        try { map.dragging.disable(); } catch (e) {}
+                        ffd._downAt = null;
+                        ffdRender();
+                        return;
+                    }
+                }
+            }
             ffd._downAt = { x: ev.clientX, y: ev.clientY, t: Date.now() };
         };
         ffd._onUp = (ev) => {
             if (!ffd.active || ffd.stage !== 'draw' || ev.button !== 0) return;
+            if (ffd.dragVert != null) {
+                const vi = ffd.dragVert;
+                ffd.dragVert = null; ffd._dragStart = null;
+                try { map.dragging.enable(); } catch (e) {}
+                if (!ffd.dragMoved && ffd.anchor !== vi) {
+                    // plain click on a waypoint → make it the branch anchor
+                    ffdSnapshot();
+                    ffd.anchor = vi;
+                }
+                ffd.dragMoved = false;
+                ffdRender();
+                return;
+            }
             const d = ffd._downAt; ffd._downAt = null;
             if (!d || isUiTarget(ev.target)) return;
             // click-vs-pan: a real pan moved the pointer — let Leaflet have it.
             if (Math.hypot(ev.clientX - d.x, ev.clientY - d.y) > 5 || Date.now() - d.t > 600) return;
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
-            // Clicking one of OUR waypoints doesn't add — it moves the branch
-            // ANCHOR there, so the next click grows a branch off that vertex.
-            const own = ffdHitOwnVert(ll);
-            if (own >= 0) {
-                if (ffd.anchor !== own) { ffd.hist.push({ t: 'anchor', prev: ffd.anchor }); ffd.anchor = own; }
-                ffdRender();
-                return;
-            }
+            ffdSnapshot();
             const s = ffdSnapPoint(ll);
             const vi = ffd.verts.length;
             ffd.verts.push(s.pt);
             ffd.snaps.push(s.snap);
-            let seg = null;
-            if (ffd.anchor != null) { seg = { a: ffd.anchor, b: vi }; ffd.segs.push(seg); }
-            ffd.hist.push({ t: 'add', vi, seg });
+            if (ffd.anchor != null) ffd.segs.push({ a: ffd.anchor, b: vi });
             ffd.anchor = vi;
             ffd.tentative = null; ffd.tentSnap = null;
             ffdRender();
@@ -23381,7 +23482,11 @@
         ffd._onCtx = (ev) => {
             if (!ffd.active || isUiTarget(ev.target)) return;
             ev.preventDefault(); ev.stopPropagation();
-            if (ffd.stage === 'draw') ffdUndoStep();
+            if (ffd.stage !== 'draw') return;
+            // Right-click a waypoint = delete it (genRoute-style); elsewhere = undo.
+            let ll = null; try { ll = map.mouseEventToLatLng(ev); } catch (e) {}
+            const own = ll ? ffdHitOwnVert(ll) : -1;
+            if (own >= 0) ffdDeleteVert(own); else ffdUndoStep();
         };
         ffd._onKey = (ev) => {
             if (!ffd.active) return;
@@ -23426,8 +23531,10 @@
         const map = getLeafletMap();
         if (map) {
             try { map.doubleClickZoom.enable(); } catch (e) {}
+            if (ffd.dragVert != null) { try { map.dragging.enable(); } catch (e) {} }
             if (ffd._onZoom) { try { map.off('zoomend', ffd._onZoom); } catch (e) {} }
         }
+        ffd.dragVert = null; ffd.dragMoved = false; ffd._dragStart = null;
         ffd._container = null;
     }
     async function ffdSetActive(on) {
@@ -23445,7 +23552,7 @@
             ffd.ffzs = ents.filter(e => e.type === 16 && entityCoords(e));
             try { ffd.fpGraph = buildFlightPathGraph(ents); } catch (e) { ffd.fpGraph = null; }
             ffd.active = true; ffd.stage = 'draw';
-            ffd.verts = []; ffd.snaps = []; ffd.segs = []; ffd.anchor = null; ffd.hist = []; ffd.tentative = null; ffd.tentSnap = null; ffd.plan = null;
+            ffd.verts = []; ffd.snaps = []; ffd.segs = []; ffd.anchor = null; ffd.hist = []; ffd.dragVert = null; ffd.dragMoved = false; ffd._dragStart = null; ffd.tentative = null; ffd.tentSnap = null; ffd.plan = null;
             // Ask the Map Styler for its live fp.* buffer settings (answer
             // arrives async and re-renders; defaults cover the gap).
             if (ffdStylerChannel) { try { ffdStylerChannel.postMessage({ action: 'FP_BUFFER_REQUEST' }); } catch (e) {} }
@@ -23454,7 +23561,7 @@
         } else {
             ffd.active = false;
             ffdUnwire(); ffdClearLayers(); ffdRenderPanel();
-            ffd.verts = []; ffd.snaps = []; ffd.segs = []; ffd.anchor = null; ffd.hist = []; ffd.tentative = null; ffd.tentSnap = null; ffd.plan = null; ffd.stage = 'draw';
+            ffd.verts = []; ffd.snaps = []; ffd.segs = []; ffd.anchor = null; ffd.hist = []; ffd.dragVert = null; ffd.dragMoved = false; ffd._dragStart = null; ffd.tentative = null; ffd.tentSnap = null; ffd.plan = null; ffd.stage = 'draw';
             console.log(`${TAG} fast-FP draw OFF`);
         }
         const b = document.getElementById(FFD_BTN_ID);
