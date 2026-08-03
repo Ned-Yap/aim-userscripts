@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.42
+// @version      1.43
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -593,7 +593,11 @@
     // keypress/click (a delete hotkey once crossed tabs and destroyed work).
     function aimTabId() {
         try {
-            const t = window.top;
+            // @grant sandbox trap: a granted script's window.top is a sandbox
+            // wrapper — writes there are invisible to page-context scripts.
+            // Always stamp the REAL page top via unsafeWindow when it exists.
+            const pw = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+            const t = pw.top;
             if (!t.__AIM_TAB_ID) t.__AIM_TAB_ID = 'tab-' + Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
             return t.__AIM_TAB_ID;
         } catch (e) { return null; }

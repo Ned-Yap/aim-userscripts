@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Clear All
 // @namespace    http://tampermonkey.net/
-// @version      1.8
+// @version      1.9
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Clear_All_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Clear_All_Tampermonkey.user.js
 // @description  Adds Shift+C hotkey for the Clear All button. Registers with the AIM Control Panel for master toggle + hotkey rebinding.
@@ -83,7 +83,7 @@
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-clear-all';
-    const SCRIPT_VERSION = '1.8';
+    const SCRIPT_VERSION = '1.9';
     let controlChannel = null;
     let controlPanelDetected = false;
     let masterEnabled = true;
@@ -92,7 +92,11 @@
     // Must match the Control Panel's aimTabId so hotkeys stay tab-local.
     function aimTabId() {
         try {
-            const t = window.top;
+            // @grant sandbox trap: a granted script's window.top is a sandbox
+            // wrapper — writes there are invisible to page-context scripts.
+            // Always stamp the REAL page top via unsafeWindow when it exists.
+            const pw = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+            const t = pw.top;
             if (!t.__AIM_TAB_ID) t.__AIM_TAB_ID = 'tab-' + Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
             return t.__AIM_TAB_ID;
         } catch (e) { return null; }

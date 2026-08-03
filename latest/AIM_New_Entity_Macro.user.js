@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM New Entity Macro
 // @namespace    http://tampermonkey.net/
-// @version      1.12
+// @version      1.13
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_New_Entity_Macro.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_New_Entity_Macro.user.js
 // @description  Hotkeys 1-6 create color-coded entities; Shift+S Save, Shift+D D (double-press) Delete, Shift+Z Cancel, Shift+X Finish. Each hotkey individually enable/rebindable via the AIM Control Panel.
@@ -207,7 +207,7 @@
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-new-entity-macro';
-    const SCRIPT_VERSION = '1.12';
+    const SCRIPT_VERSION = '1.13';
     const DELETE_WINDOW_MS = 500; // second press must arrive within this
     let controlChannel = null;
     let controlPanelDetected = false;
@@ -262,7 +262,11 @@
     // Must match the Control Panel's aimTabId so hotkeys stay tab-local.
     function aimTabId() {
         try {
-            const t = window.top;
+            // @grant sandbox trap: a granted script's window.top is a sandbox
+            // wrapper — writes there are invisible to page-context scripts.
+            // Always stamp the REAL page top via unsafeWindow when it exists.
+            const pw = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+            const t = pw.top;
             if (!t.__AIM_TAB_ID) t.__AIM_TAB_ID = 'tab-' + Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
             return t.__AIM_TAB_ID;
         } catch (e) { return null; }

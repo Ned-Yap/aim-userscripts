@@ -6,12 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
-## 2026-08-03 — 🚨 CRITICAL FIX: hotkeys can no longer cross tabs (Control Panel v1.42 + New Entity Macro v1.10 + Clear All v1.6)
+## 2026-08-03 — 🚨 CRITICAL FIX: hotkeys can no longer cross tabs (Control Panel v1.43 + New Entity Macro v1.11 + Clear All v1.7)
 
-**A hotkey pressed in one Percepto tab could execute in EVERY other open Percepto tab.** The Control Panel routes hotkeys over a `BroadcastChannel`, which the browser delivers to all tabs on the domain — so Shift+D D (Delete entity) pressed in one tab deleted the selected entity in another tab. This destroyed a finished flight path today. **Please update immediately.**
+**A hotkey pressed in one Percepto tab could execute in EVERY other open Percepto tab.** The Control Panel routes hotkeys over a `BroadcastChannel`, which the browser delivers to all tabs on the domain — so Shift+D D (Delete entity) pressed in one tab deleted the selected entity in another tab. This destroyed a finished flight path today. **Please update immediately — and skip v1.42/v1.10/v1.6 if Tampermonkey offers them (superseded within the hour).**
 
-- **AIM Control Panel v1.42** — every `HOTKEY_FIRED` / `TRIGGER_ACTION` message now carries the identity of the tab that physically received the keypress/click.
-- **AIM New Entity Macro v1.10** (latest v1.12) + **AIM Clear All v1.6** (latest v1.8) — receivers ignore any hotkey message from a different tab. Fallback for a not-yet-updated Control Panel: a background (hidden) tab never executes a hotkey. Fails closed — if tab identity can't be resolved, destructive actions don't fire.
+- **AIM Control Panel v1.43** — every `HOTKEY_FIRED` / `TRIGGER_ACTION` message now carries the identity of the tab that physically received the keypress/click. (v1.42 stamped the id onto the Tampermonkey sandbox wrapper instead of the real page window, which would have blocked ALL hotkeys — caught in review, fixed via `unsafeWindow` in v1.43.)
+- **AIM New Entity Macro v1.11** (latest v1.13) + **AIM Clear All v1.7** (latest v1.9) — receivers ignore any hotkey message from a different tab. Fallback for a not-yet-updated Control Panel: a background (hidden) tab never executes a hotkey. Fails closed — if tab identity can't be resolved, destructive actions don't fire.
 - Remaining hotkey scripts (Altitude, Ruler, Bulk Mission Adder, etc.) get the same guard in their next update; their actions are non-destructive.
 
 ---
