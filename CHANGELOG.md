@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-03 — Fast FP Draw wears the FP shielding buffers (Site Setup Tools latest v4.232 — dev only)
+
+The drawn path now renders the **40 ft + 65 ft FP shielding bands** live while you draw — same piggyback treatment the Map Styler gives proposed-route paths ("a route path is a future FP"). The bands cover the tentative cursor segment too, so you see the shielding footprint *before* you click, they rescale on zoom, and a "FP 40/65 ft shielding buffers" checkbox in the panel turns them off (default on).
+
+---
+
 ## 2026-08-03 — ✏ NEW: Fast FP Draw (Site Setup Tools latest v4.231 — dev only)
 
 Draw a flight path as fast as you can click, completely outside Percepto's draw editor — built because Percepto's auto-AGL races fast input and undoes vertices it can't resolve (recon proved the lookup is 100% client-local, so there was nothing to intercept — we bypass it instead).

@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.231
+// @version      4.232
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.231';
+    const SCRIPT_VERSION = '4.232';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22791,19 +22791,38 @@
     const FFD_SNAP_PX = 12;          // screen-px snap radius (FP verts + FFZ edges)
     const FFD_TOUCH_M = 0.5;         // rule #7 FFZ-contact tolerance (matches RC_TOUCH_M)
     const FFD_DEFAULTS = { floorFt: 90, deltaFt: 30 };
+    // FP-piggyback shielding buffers around the drawn path — same treatment the
+    // Map Styler gives proposed-route paths ("a route path is a future FP"):
+    // 40 ft band (FP blue, darker) + 65 ft band (lighter), each 2×ft wide in px
+    // at the current zoom. Defaults mirror the Styler's fp.* card defaults.
+    const FFD_BUFFERS = [
+        { ft: 65, color: '#1ca0de', opacity: 0.225 },   // outer first → stacks under
+        { ft: 40, color: '#1ca0de', opacity: 0.5 },
+    ];
     let ffd = {
         active: false, stage: 'draw',   // 'draw' | 'review' | 'busy'
         verts: [],                       // [{lat,lng}] — snapped positions
         snaps: [],                       // per-vertex: null | {kind:'fp-vertex',...} | {kind:'ffz-edge',...}
         tentative: null, tentSnap: null, // live cursor (snapped) + its snap info
         floorFt: FFD_DEFAULTS.floorFt, deltaFt: FFD_DEFAULTS.deltaFt,
-        name: '', createdCount: 0,
+        name: '', createdCount: 0, showBuffers: true,
         plan: null,                      // review-stage computed plan
         fpGraph: null, fps: [], ffzs: [],
         layers: [], _container: null,
-        _onMove: null, _onDown: null, _onUp: null, _onClick: null, _onDbl: null, _onCtx: null, _onKey: null,
+        _onMove: null, _onDown: null, _onUp: null, _onClick: null, _onDbl: null, _onCtx: null, _onKey: null, _onZoom: null,
         _downAt: null,                   // {x,y,t} for click-vs-pan discrimination
     };
+    // px per foot at the current zoom (Leaflet polyline weight is in px, so
+    // buffer widths must be recomputed on zoom — ffdRender re-runs on zoomend).
+    function ffdPxPerFt(map) {
+        try {
+            const c = map.getCenter();
+            const p = map.latLngToContainerPoint(c);
+            const off = map.containerPointToLatLng([p.x + 100, p.y]);
+            const m = approxMeters(c.lat, c.lng, off.lat, off.lng);
+            return m > 0 ? (100 / m) * GEN_FT_TO_M : 0;
+        } catch (e) { return 0; }
+    }
     function ffdSegFootPx(p, A, B) {
         const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
         let t = l2 ? ((p.x - A.x) * dx + (p.y - A.y) * dy) / l2 : 0;
@@ -22879,6 +22898,23 @@
         ffdClearLayers();
         const pts = ffd.verts.map(v => [v.lat, v.lng]);
         try {
+            // Shielding buffers first (outer → inner) so they stack UNDER the
+            // line — drawn over verts + the tentative cursor segment so the
+            // band previews where the next click will land.
+            if (ffd.showBuffers) {
+                const bufPts = pts.slice();
+                if (ffd.stage === 'draw' && ffd.tentative && pts.length >= 1) bufPts.push([ffd.tentative.lat, ffd.tentative.lng]);
+                const pxPerFt = bufPts.length >= 2 ? ffdPxPerFt(map) : 0;
+                if (pxPerFt > 0) {
+                    FFD_BUFFERS.forEach(bf => {
+                        const bl = L.polyline(bufPts, {
+                            color: bf.color, opacity: bf.opacity, weight: 2 * bf.ft * pxPerFt,
+                            lineJoin: 'round', lineCap: 'round', interactive: false,
+                        });
+                        bl.addTo(map); ffd.layers.push(bl);
+                    });
+                }
+            }
             if (pts.length >= 2) {
                 const pl = L.polyline(pts, { color: '#00e5ff', weight: 3, opacity: 0.95, interactive: false });
                 pl.addTo(map); ffd.layers.push(pl);
@@ -22945,6 +22981,7 @@
                 if (t.dataset.ffdName != null) ffd.name = t.value;
                 if (t.dataset.ffdFloor != null) { const v = parseFloat(t.value); if (Number.isFinite(v)) ffd.floorFt = v; }
                 if (t.dataset.ffdDelta != null) { const v = parseFloat(t.value); if (Number.isFinite(v)) ffd.deltaFt = v; }
+                if (t.dataset.ffdBuf != null) { ffd.showBuffers = !!t.checked; ffdRender(); }
             });
         }
         const refreshNote = ffd.createdCount
@@ -22965,6 +23002,7 @@
                     <span style="color:#888">Delta</span>
                     <input data-ffd-delta type="number" value="${ffd.deltaFt}" style="width:46px;background:#0a1a24;border:1px solid #2a4a5a;border-radius:4px;color:#ddd;padding:3px 6px;font-size:12px"> ft
                 </div>
+                <label style="display:flex;gap:6px;align-items:center;margin-bottom:6px;color:#888;cursor:pointer"><input data-ffd-buf type="checkbox" ${ffd.showBuffers ? 'checked' : ''} style="accent-color:#1ca0de"> FP 40/65 ft shielding buffers</label>
                 <div data-ffd-stats style="margin-bottom:6px"></div>
                 <div style="color:#7a8a94;font-size:10px;line-height:1.5;margin-bottom:8px">click = waypoint (<span style="color:#5fff5f">green</span> = snapped to FP vertex / FFZ edge) · drag = pan · right-click = undo · <b>Enter</b> / dbl-click = finish · Esc = undo/exit</div>
                 <button data-ffd-finish style="width:100%;background:rgba(0,229,255,0.15);border:1px solid rgba(0,229,255,0.6);border-radius:5px;color:#00e5ff;padding:6px 0;cursor:pointer;font-size:12px;font-weight:600">✔ Finish &amp; review</button>
@@ -23297,6 +23335,9 @@
         ffd._container.addEventListener('dblclick', ffd._onDbl, true);
         ffd._container.addEventListener('contextmenu', ffd._onCtx, true);
         try { uwin().addEventListener('keydown', ffd._onKey, true); } catch (e) {}
+        // Buffer widths are px at current zoom — rebuild them when zoom settles.
+        ffd._onZoom = () => { if (ffd.active) ffdRender(); };
+        try { map.on('zoomend', ffd._onZoom); } catch (e) {}
         try { map.doubleClickZoom.disable(); } catch (e) {}
         try { ffd._container.style.cursor = 'crosshair'; } catch (e) {}
     }
@@ -23313,7 +23354,10 @@
         }
         try { uwin().removeEventListener('keydown', ffd._onKey, true); } catch (e) {}
         const map = getLeafletMap();
-        if (map) { try { map.doubleClickZoom.enable(); } catch (e) {} }
+        if (map) {
+            try { map.doubleClickZoom.enable(); } catch (e) {}
+            if (ffd._onZoom) { try { map.off('zoomend', ffd._onZoom); } catch (e) {} }
+        }
         ffd._container = null;
     }
     async function ffdSetActive(on) {
