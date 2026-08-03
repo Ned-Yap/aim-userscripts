@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-03 — New Entity Macro v1.13: delete no longer fires twice ("already deleted" alert fixed)
+
+The delete confirm click was triggering Percepto's handler twice (DOM click + React handler — our click-reliability pattern), so the server got two DELETEs and alerted "Map entity already deleted or not exists" on the second. The confirm button now uses a single-fire click; every other click keeps the reliable dual-fire.
+
+---
+
 ## 2026-08-03 — 🕘 NEW: Delete Guard (v1.0) + Delete hotkey refuses big flight paths (New Entity Macro v1.12)
 
 Two layers of delete protection, born from today's incident:
