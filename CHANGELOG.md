@@ -6,6 +6,18 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-03 — Fast FP Draw: every band verified against Percepto's DEM + cache purge (Site Setup Tools latest v4.239 — dev only)
+
+Follow-up on the AGL-72 band. Bands are no longer allowed to rest on a third-party elevation sample:
+
+- **Every piece is verified against Percepto's own DEM** (`/location_altitude/` — the value the editor tooltip shows and the drone flies against), not just a 3-point spot check. Percepto wins whenever it reads higher, per piece. Pieces the endpoint can't answer for (rate-limited) get the worst offset seen elsewhere, so nothing is left optimistically low.
+- **Hard-floor assertion**: if any piece would still sit below the floor over its own verified ground, the commit is **refused** with an explicit error rather than shipping an unsafe path.
+- **`__aimAIElevPurgeSite()`** console command clears the current site's cached ground (and mutes the legacy blob for the session) so everything refetches fresh. This also un-poisons the Map Editor's ⛰ Smart-fill, which reads the same cache — and which accepts a cached point from up to 30 m away, a likely source of low ground.
+
+If Smart-fill "changes nothing", the cache is feeding it the same low ground: run `__aimAIElevPurgeSite()`, then re-run Smart-fill.
+
+---
+
 ## 2026-08-03 — Fast FP Draw: HARD floor — bands can only err UP (Site Setup Tools latest v4.238 — dev only)
 
 A live band came out at AGL 72 under a 90 ft floor: the elevation sampling source read ~17 ft lower than Percepto's own DEM at that spot. New doctrine baked in — **the floor is a minimum, never a target; every ambiguity errs upward**:

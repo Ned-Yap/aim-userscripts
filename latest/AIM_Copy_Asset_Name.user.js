@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.238
+// @version      4.239
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.238';
+    const SCRIPT_VERSION = '4.239';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -799,6 +799,28 @@
         };
         // One-shot reclaim: once the per-site caches are warm, drop the old global
         // blob to free ~1.5 MB of GM storage. Safe — per-site + shared files cover it.
+        // v4.239: purge THIS SITE's DEM cache. Use when cached values are
+        // suspect (e.g. a flight-path band came out below its floor because the
+        // cache held low ground): everything refetches fresh on next use, which
+        // also un-poisons the Map Editor's ⛰ Smart-fill (it reads this cache,
+        // and even substitutes the nearest point within 30 m).
+        unsafeWindow.__aimAIElevPurgeSite = (siteID) => {
+            try {
+                const sid = siteID || getCurrentSiteID();
+                if (!sid) { console.warn(`${TAG} no site — pass an id: __aimAIElevPurgeSite(1604)`); return 0; }
+                const before = Object.keys(loadElevationCache()).length;
+                elevGmSet(elevSiteKey(sid), {});
+                elevationCache = {}; elevCacheSiteID = sid;
+                // Also drop the legacy blob IN MEMORY for this session, so its
+                // (possibly equally stale) points can't re-supply the values we
+                // just purged. Still on disk — a reload brings it back.
+                legacyElevCache = {};
+                _nnSiteArr = null; _nnSiteSize = -1; _nnSiteId = null;
+                _nnLegArr = null; _nnLegSize = -1;
+                console.log(`${TAG} purged site ${sid} DEM cache (${before.toLocaleString()} points) + muted the legacy blob for this session. Re-run your altitude tool — ground refetches fresh.`);
+                return before;
+            } catch (e) { console.warn(`${TAG} site purge failed`, e); return 0; }
+        };
         unsafeWindow.__aimAIElevPurgeLegacy = () => {
             try {
                 const n = Object.keys(loadLegacyElevCache()).length;
@@ -23339,28 +23361,52 @@
                 // sampled points via /location_altitude/ and raise ALL bands by
                 // any positive difference. One-directional by doctrine: bands
                 // only ever go UP from this check, never down.
+                // v4.239: verify EVERY piece against Percepto's own DEM (not a
+                // top-3 sample). Percepto's value is the one the editor shows and
+                // the drone flies against, so it WINS whenever it reads higher —
+                // per-piece, so one high spot can't be averaged away. A global
+                // offset from the worst piece is also applied to pieces Percepto
+                // couldn't answer for, so a rate-limited probe still errs UP.
                 const mslArcs = plan.arcs.filter(x => x.groundM != null && x._maxPt);
                 if (mslArcs.length && !plan.errors.length) {
-                    ffd._busyMsg = 'Cross-checking ground against Percepto DEM…'; ffdRenderPanel();
-                    const tops = mslArcs.slice().sort((x, y) => y.groundM - x.groundM).slice(0, 3);
-                    let maxDeltaM = 0, probed = 0;
-                    for (const t of tops) {
-                        try {
-                            const pm = await perceptoFetchPoint(t._maxPt.lat, t._maxPt.lng);
-                            if (typeof pm === 'number') { probed++; maxDeltaM = Math.max(maxDeltaM, pm - t._maxPt.e); }
-                        } catch (e) {}
+                    let done = 0, probed = 0, worstDeltaM = 0;
+                    const results = [];
+                    for (const x of mslArcs) {
+                        ffd._busyMsg = `Verifying ground against Percepto DEM (${++done}/${mslArcs.length})…`; ffdRenderPanel();
+                        let pm = null;
+                        try { pm = await perceptoFetchPoint(x._maxPt.lat, x._maxPt.lng); } catch (e) {}
+                        if (typeof pm === 'number') {
+                            probed++;
+                            const d = pm - x.groundM;
+                            if (d > worstDeltaM) worstDeltaM = d;
+                            results.push({ x, pm });
+                        } else results.push({ x, pm: null });
                     }
-                    if (maxDeltaM > 0.5) {
-                        mslArcs.forEach(x => {
-                            x.groundM += maxDeltaM;
+                    let raised = 0;
+                    results.forEach(({ x, pm }) => {
+                        // Percepto higher → adopt it. Unanswered → apply the worst
+                        // observed offset so no piece is left optimistically low.
+                        const target = (pm != null) ? Math.max(x.groundM, pm) : (x.groundM + worstDeltaM);
+                        if (target > x.groundM + 0.01) {
+                            x.groundM = target;
                             x.minM = Math.ceil(aglFtToStoredM(ffd.floorFt, x.groundM, 'msl'));
                             x.maxM = Math.max(fpArcAltMeters(aglFtToStoredM(ffd.floorFt + ffd.deltaFt, x.groundM, 'msl')), x.minM + 1);
-                        });
-                        plan.warnings.push(`DEM cross-check: Percepto reads up to ${Math.round(maxDeltaM * M_TO_FT)} ft higher than the sampling source — ALL bands raised by that amount (floor ${ffd.floorFt} ft AGL is a hard minimum)`);
-                    } else if (!probed) {
-                        plan.warnings.push('DEM cross-check unavailable (Percepto elevation endpoint did not answer — likely rate-limited); bands rest on the sampling source alone');
-                    }
+                            raised++;
+                        }
+                        x.verified = pm != null;
+                    });
+                    if (raised) plan.warnings.push(`Percepto DEM verification raised ${raised} of ${mslArcs.length} band(s) by up to ${Math.round(worstDeltaM * M_TO_FT)} ft — the sampling source was reading low (floor ${ffd.floorFt} ft AGL is a hard minimum, never a target)`);
+                    if (probed < mslArcs.length) plan.warnings.push(`${mslArcs.length - probed} piece(s) could not be verified against Percepto (endpoint rate-limited) — the worst observed offset was applied to them instead`);
+                    console.log(`${TAG} fast-FP DEM verification: ${probed}/${mslArcs.length} pieces probed, ${raised} raised, worst offset ${(worstDeltaM * M_TO_FT).toFixed(0)} ft`);
                 }
+                // Final hard-floor assertion — belt and braces. Any piece whose
+                // band would sit under the floor over its OWN verified ground is
+                // a bug; refuse to commit rather than ship an unsafe path.
+                plan.arcs.forEach((x, i) => {
+                    if (x.groundM == null) return;
+                    const aglFt = (x.minM - x.groundM) / GEN_FT_TO_M;
+                    if (aglFt < ffd.floorFt - 0.5) plan.errors.push(`piece ${i + 1} floor is ${Math.round(aglFt)} ft AGL — below the ${ffd.floorFt} ft hard floor. Refusing to commit (report this).`);
+                });
             }
             // Junction sanity vs snapped arcs (server enforces strictly-positive
             // overlap between connected arcs; bridgeArcContinuity only covers arcs
