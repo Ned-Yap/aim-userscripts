@@ -22,6 +22,17 @@ Isolate the macro you're working on. In the 🧩 Macro coverage legend:
 - **All / None buttons** in the legend header — None then tick just the ones you want.
 - Everything defaults to visible on each fresh 🧩 open. Hiding a macro also clears its 👁 route-comparison lines.
 
+## 2026-08-03 — Fast FP Draw: terrain from one 3DEP raster + draw export/import (Site Setup Tools latest v4.240 — dev only)
+
+An 88,000 ft path came back with **zero terrain steps** and 107 of 117 pieces unverified — both symptoms of per-point elevation sampling under-resolving and rate-limiting. Reworked:
+
+- **Ground now comes from the 3DEP LERC raster** (the same source as the ⛰ terrain overlay) in **one request** covering the whole path. Full coverage, no rate limit, no per-point queue — so long segments actually get their terrain steps. Falls back to point fetches if 3DEP is down.
+- **Percepto DEM check is now a bounded spot-check** (up to 10 probes: highest-ground pieces plus a spread along the path) that measures the *offset* and applies it to **every** band. Same one-directional safety, no endpoint hammering, no "107 unverified" noise.
+- **Sample coverage is reported** in the review panel and warns below 90%, so thin terrain data can never pass silently.
+- **⤓ Save draw / ⤒ Load draw** — export the in-progress draw to a file and load it back (on top of the automatic localStorage autosave). Insurance for large paths and a way to move a draw between browsers.
+
+---
+
 ## 2026-08-03 — Fast FP Draw: every band verified against Percepto's DEM + cache purge (Site Setup Tools latest v4.239 — dev only)
 
 Follow-up on the AGL-72 band. Bands are no longer allowed to rest on a third-party elevation sample:

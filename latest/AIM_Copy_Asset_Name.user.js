@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.239
+// @version      4.240
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.239';
+    const SCRIPT_VERSION = '4.240';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22884,6 +22884,34 @@
             return m > 0 ? (100 / m) * GEN_FT_TO_M : 0;
         } catch (e) { return 0; }
     }
+    // v4.240 — GROUND SAMPLER FROM THE 3DEP LERC RASTER (the ⛰ terrain
+    // overlay's source). One request covers the whole path: complete coverage,
+    // no per-point queue, no rate limit. This replaced per-point elevation
+    // fetches for Smart-Fill because those silently under-resolved — a 4,679 ft
+    // segment ended up with ONE ground value and zero terrain steps, which is
+    // exactly how high ground hides. Returns a sampler fn (meters) or null.
+    async function ffdFetchGroundGrid(verts) {
+        if (!verts || !verts.length) return null;
+        let mnLat = Infinity, mxLat = -Infinity, mnLng = Infinity, mxLng = -Infinity;
+        verts.forEach(v => {
+            if (v.lat < mnLat) mnLat = v.lat; if (v.lat > mxLat) mxLat = v.lat;
+            if (v.lng < mnLng) mnLng = v.lng; if (v.lng > mxLng) mxLng = v.lng;
+        });
+        const padLat = Math.max(0.0008, (mxLat - mnLat) * 0.05);
+        const padLng = Math.max(0.0008, (mxLng - mnLng) * 0.05);
+        const dem = await terFetchDem(mnLng - padLng, mnLat - padLat, mxLng + padLng, mxLat + padLat);
+        if (!dem || !dem.vals || !dem.w || !dem.h) return null;
+        const sampler = (lat, lng) => {
+            const x = (terMercX(lng) - dem.mercX1) / (dem.mercX2 - dem.mercX1) * dem.w;
+            const y = (dem.mercY2 - terMercY(lat)) / (dem.mercY2 - dem.mercY1) * dem.h;
+            const xi = Math.min(dem.w - 1, Math.max(0, Math.round(x - 0.5)));
+            const yi = Math.min(dem.h - 1, Math.max(0, Math.round(y - 0.5)));
+            const ft = dem.vals[yi * dem.w + xi];
+            return isFinite(ft) ? ft / M_TO_FT : null;   // raster is FEET, we band in metres
+        };
+        sampler._cellFt = Math.max(dem.cellXft || 0, dem.cellYft || 0);
+        return sampler;
+    }
     function ffdSegFootPx(p, A, B) {
         const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
         let t = l2 ? ((p.x - A.x) * dx + (p.y - A.y) * dy) / l2 : 0;
@@ -23193,6 +23221,8 @@
                 if (t.closest('[data-ffd-back]')) { ffd.stage = 'draw'; ffd.plan = null; ffdRenderPanel(); ffdRender(); return; }
                 if (t.closest('[data-ffd-commit]')) { ffdCommit(); return; }
                 if (t.closest('[data-ffd-undo]')) { ffdUndoLast(); return; }
+                if (t.closest('[data-ffd-export]')) { ffdExportDraw(); return; }
+                if (t.closest('[data-ffd-import]')) { ffdImportDraw(); return; }
             });
             el.addEventListener('input', (e) => {
                 const t = e.target;
@@ -23225,6 +23255,10 @@
                 <div data-ffd-stats style="margin-bottom:6px"></div>
                 <div style="color:#7a8a94;font-size:10px;line-height:1.5;margin-bottom:8px">click = waypoint (<span style="color:#5fff5f">green</span> = snapped to FP vertex / FFZ edge) · <b style="color:#00e5ff">click a waypoint = branch from it</b> (cyan ring = anchor) · <b>drag a waypoint = move it</b> · <b>click a line = insert a waypoint</b> · right-click a waypoint = delete it · right-click elsewhere = undo · drag empty map = pan · <b>Enter</b> / dbl-click = finish · Esc = undo/exit</div>
                 <button data-ffd-finish style="width:100%;background:rgba(0,229,255,0.15);border:1px solid rgba(0,229,255,0.6);border-radius:5px;color:#00e5ff;padding:6px 0;cursor:pointer;font-size:12px;font-weight:600">✔ Finish &amp; review</button>
+                <div style="display:flex;gap:6px;margin-top:6px">
+                    <button data-ffd-export style="flex:1;background:transparent;border:1px solid #2a4a5a;border-radius:5px;color:#7adfe6;padding:4px 0;cursor:pointer;font-size:11px" title="Download this draw as a file (insurance for big paths)">⤓ Save draw</button>
+                    <button data-ffd-import style="flex:1;background:transparent;border:1px solid #2a4a5a;border-radius:5px;color:#7adfe6;padding:4px 0;cursor:pointer;font-size:11px" title="Load a draw file back in (replaces the current draw)">⤒ Load draw</button>
+                </div>
                 <button data-ffd-undo style="width:100%;margin-top:6px;background:transparent;border:1px solid rgba(255,179,71,0.4);border-radius:5px;color:#ffb347;padding:4px 0;cursor:pointer;font-size:11px">↺ Undo last commit (this site)</button>
                 ${refreshNote}`;
             ffdSyncPanelStats();
@@ -23239,7 +23273,11 @@
                 <td style="padding:1px 6px;color:#00e5ff">${a.minM}–${a.maxM} m</td></tr>`).join('');
             const warns = p.warnings.map(w => `<div style="color:#ff9a3d;font-size:10px;margin-top:3px">⚠ ${w}</div>`).join('');
             const errs = p.errors.map(w => `<div style="color:#ff8a80;font-size:10px;margin-top:3px">✗ ${w}</div>`).join('');
-            const modeLbl = p.mode === 'agl' ? 'AGL site — stored values are height above ground (terrain-following is implicit)' : `MSL site — Smart-Fill terrain bands (ground max per piece + ${ffd.floorFt}/${ffd.floorFt + ffd.deltaFt} ft; step vertices where ground varies >${FFD_SMART_VAR_FT} ft)`;
+            const modeLbl = p.mode === 'agl'
+                ? 'AGL site — stored values are height above ground (terrain-following is implicit)'
+                : `MSL site — Smart-Fill terrain bands (ground max per piece + ${ffd.floorFt}/${ffd.floorFt + ffd.deltaFt} ft; step vertices where ground varies >${FFD_SMART_VAR_FT} ft)`
+                  + (p.groundSource ? `<br><span style="color:#7adfe6">ground: ${p.groundSource}</span>` : '')
+                  + (p.coverage ? ` <span style="color:${p.coverage.pct >= 90 ? '#5fff5f' : '#ff9a3d'}">· ${p.coverage.pct}% sample coverage (${p.coverage.got}/${p.coverage.total})</span>` : '');
             const extend = p.extendFpId != null
                 ? `<div style="color:#7adfe6;font-size:11px;margin-top:4px">⟳ merges into FP “${p.extendFpName}” as new segments (no new entity)${p.extendFpValidated ? ' <span style="color:#ffb347">— resets its validation</span>' : ''}</div>`
                 : (p.ffzTouch ? `<div style="color:#5fff5f;font-size:11px;margin-top:4px">✓ connects to ${p.ffzTouch}</div>` : '');
@@ -23255,6 +23293,57 @@
                 ${refreshNote}`;
         }
     }
+    // ---- draw export / import (v4.240) ----
+    // Insurance for big paths: localStorage autosave already survives reloads,
+    // but a file can be moved between browsers/profiles and can't be cleared by
+    // a cache wipe. Same shape as the autosave draft.
+    function ffdExportDraw() {
+        if (!ffd.verts.length) { showToast('Nothing drawn to save', 'rgba(255,179,71,0.6)'); return; }
+        const sid = getCurrentSiteID() || 'nosite';
+        try {
+            downloadJSONFile(`aim-fastfp-draw-site${sid}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
+                JSON.stringify({ aimFastFpDraw: 1, siteID: sid, when: new Date().toISOString(), name: ffd.name, floorFt: ffd.floorFt, deltaFt: ffd.deltaFt, verts: ffd.verts, segs: ffd.segs, snaps: ffd.snaps, anchor: ffd.anchor }, null, 2));
+            showToast(`Saved ${ffd.verts.length} waypoints to a file`, 'rgba(95,255,95,0.6)');
+        } catch (e) {
+            console.warn(`${TAG} fast-FP draw export failed:`, e);
+            showToast(`Export failed: ${e && e.message || e}`, 'rgba(255,120,120,0.6)');
+        }
+    }
+    function ffdImportDraw() {
+        try {
+            const inp = document.createElement('input');
+            inp.type = 'file'; inp.accept = '.json,application/json';
+            inp.onchange = () => {
+                const f = inp.files && inp.files[0];
+                if (!f) return;
+                const rd = new FileReader();
+                rd.onload = () => {
+                    try {
+                        const d = JSON.parse(String(rd.result || 'null'));
+                        if (!d || !Array.isArray(d.verts) || !d.verts.length) throw new Error('not a Fast FP draw file');
+                        if (ffd.verts.length && !confirm(`Replace the current draw (${ffd.verts.length} waypoints) with the file's ${d.verts.length}?`)) return;
+                        ffdSnapshot();
+                        ffd.verts = d.verts;
+                        ffd.segs = Array.isArray(d.segs) ? d.segs : [];
+                        ffd.snaps = (Array.isArray(d.snaps) && d.snaps.length === d.verts.length) ? d.snaps : d.verts.map(() => null);
+                        ffd.anchor = (typeof d.anchor === 'number' && d.anchor < d.verts.length) ? d.anchor : d.verts.length - 1;
+                        if (d.name) ffd.name = d.name;
+                        if (Number.isFinite(d.floorFt)) ffd.floorFt = d.floorFt;
+                        if (Number.isFinite(d.deltaFt)) ffd.deltaFt = d.deltaFt;
+                        ffd.stage = 'draw'; ffd.plan = null;
+                        ffdRenderPanel(); ffdRender();
+                        showToast(`Loaded ${ffd.verts.length} waypoints${d.siteID && String(d.siteID) !== String(getCurrentSiteID()) ? ` — NOTE: file is from site ${d.siteID}` : ''}`, 'rgba(95,255,95,0.6)');
+                    } catch (e) {
+                        console.warn(`${TAG} fast-FP draw import failed:`, e);
+                        showToast(`Import failed: ${e && e.message || e}`, 'rgba(255,120,120,0.6)');
+                    }
+                };
+                rd.readAsText(f);
+            };
+            inp.click();
+        } catch (e) { console.warn(`${TAG} fast-FP import picker failed:`, e); }
+    }
+
     // ---- finish → review plan ----
     async function ffdFinish() {
         if (ffd.stage !== 'draw') return;
@@ -23305,7 +23394,7 @@
                 // insert the fewest step vertices, and band each piece off its
                 // own max ground. Endpoint-only ground on a long segment misses
                 // interior high ground — that's the bug this exists to prevent.
-                ffd._busyMsg = 'Smart-Fill: sampling terrain along segments…'; ffdRenderPanel();
+                ffd._busyMsg = 'Smart-Fill: fetching the 3DEP terrain raster…'; ffdRenderPanel();
                 const segSamples = ffd.segs.map(sg => {
                     const a = plan.verts[sg.a], b = plan.verts[sg.b];
                     const distM = approxMeters(a.lat, a.lng, b.lat, b.lng);
@@ -23314,9 +23403,21 @@
                     for (let i = 0; i < n; i++) { const t = i / (n - 1); pts.push({ lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t, t }); }
                     return { sg, a, b, distM, pts };
                 });
-                try { await bulkFetchElevations(segSamples.flatMap(ss => ss.pts)); } catch (e) {}
+                // One raster request for the whole path (full coverage). Falls
+                // back to the per-point elevation queue only if 3DEP fails.
+                let grid = null;
+                try { grid = await ffdFetchGroundGrid(plan.verts); } catch (e) { console.warn(`${TAG} fast-FP 3DEP raster failed, falling back to point fetches:`, e); }
+                if (grid) {
+                    plan.groundSource = `3DEP raster (~${Math.round(grid._cellFt || 0)} ft cells, full coverage)`;
+                } else {
+                    plan.groundSource = 'per-point elevation queue (3DEP raster unavailable)';
+                    ffd._busyMsg = 'Smart-Fill: sampling terrain point-by-point…'; ffdRenderPanel();
+                    try { await bulkFetchElevations(segSamples.flatMap(ss => ss.pts)); } catch (e) {}
+                }
+                let sampTotal = 0, sampGot = 0;
                 segSamples.forEach((ss, si) => {
-                    const valid = ss.pts.map(p => ({ t: p.t, e: getElevationFromCache(p.lat, p.lng) })).filter(x => typeof x.e === 'number');
+                    const valid = ss.pts.map(p => ({ t: p.t, e: grid ? grid(p.lat, p.lng) : getElevationFromCache(p.lat, p.lng) })).filter(x => typeof x.e === 'number');
+                    sampTotal += ss.pts.length; sampGot += valid.length;
                     if (valid.length < 2) {
                         plan.errors.push(`segment ${si + 1}: DEM ground unavailable (needed for MSL altitudes) — try again in a moment, elevations may still be fetching`);
                         return;
@@ -23355,49 +23456,52 @@
                         });
                     }
                 });
-                // DEM CROSS-CHECK (v4.238): the sampling source (Open-Topo-Data
-                // ned10m) can read low versus Percepto's own DEM — the one the
-                // editor displays and the drone flies against. Probe the highest
-                // sampled points via /location_altitude/ and raise ALL bands by
-                // any positive difference. One-directional by doctrine: bands
-                // only ever go UP from this check, never down.
-                // v4.239: verify EVERY piece against Percepto's own DEM (not a
-                // top-3 sample). Percepto's value is the one the editor shows and
-                // the drone flies against, so it WINS whenever it reads higher —
-                // per-piece, so one high spot can't be averaged away. A global
-                // offset from the worst piece is also applied to pieces Percepto
-                // couldn't answer for, so a rate-limited probe still errs UP.
+                plan.coverage = { got: sampGot, total: sampTotal, pct: sampTotal ? Math.round(sampGot / sampTotal * 100) : 0 };
+                if (plan.coverage.pct < 90) {
+                    plan.warnings.push(`only ${plan.coverage.pct}% of terrain samples resolved (${sampGot}/${sampTotal}) — segments with gaps may hide high ground, so their bands are less trustworthy. Re-run Finish to retry the raster.`);
+                }
+                console.log(`${TAG} fast-FP Smart-Fill: ${plan.arcs.length} pieces from ${ffd.segs.length} segments (+${plan.stepVerts.length} terrain steps) · sample coverage ${plan.coverage.pct}% · ground via ${plan.groundSource}`);
+                // Percepto DEM datum check — BOUNDED (v4.240). Probing every
+                // piece rate-limited the endpoint (107/117 unverified on an 88k ft
+                // path). We only need the OFFSET between our raster and Percepto's
+                // DEM, so probe a spread sample and apply the worst offset to
+                // EVERY piece. One-directional by doctrine: raises only.
                 const mslArcs = plan.arcs.filter(x => x.groundM != null && x._maxPt);
                 if (mslArcs.length && !plan.errors.length) {
-                    let done = 0, probed = 0, worstDeltaM = 0;
-                    const results = [];
-                    for (const x of mslArcs) {
-                        ffd._busyMsg = `Verifying ground against Percepto DEM (${++done}/${mslArcs.length})…`; ffdRenderPanel();
+                    const FFD_VERIFY_MAX = 10;
+                    // Highest-ground pieces first (they govern safety), then spread
+                    // across the path so a local offset can't hide.
+                    const byGround = mslArcs.slice().sort((x, y) => y.groundM - x.groundM);
+                    const picks = byGround.slice(0, Math.min(5, byGround.length));
+                    const step = Math.max(1, Math.floor(mslArcs.length / (FFD_VERIFY_MAX - picks.length || 1)));
+                    for (let i = 0; i < mslArcs.length && picks.length < FFD_VERIFY_MAX; i += step) {
+                        if (!picks.includes(mslArcs[i])) picks.push(mslArcs[i]);
+                    }
+                    let probed = 0, worstDeltaM = 0, done = 0;
+                    for (const x of picks) {
+                        ffd._busyMsg = `Checking our terrain raster against Percepto's DEM (${++done}/${picks.length})…`; ffdRenderPanel();
                         let pm = null;
                         try { pm = await perceptoFetchPoint(x._maxPt.lat, x._maxPt.lng); } catch (e) {}
                         if (typeof pm === 'number') {
                             probed++;
                             const d = pm - x.groundM;
                             if (d > worstDeltaM) worstDeltaM = d;
-                            results.push({ x, pm });
-                        } else results.push({ x, pm: null });
+                        }
+                        await new Promise(r => setTimeout(r, 200));   // stay under the endpoint's limit
                     }
-                    let raised = 0;
-                    results.forEach(({ x, pm }) => {
-                        // Percepto higher → adopt it. Unanswered → apply the worst
-                        // observed offset so no piece is left optimistically low.
-                        const target = (pm != null) ? Math.max(x.groundM, pm) : (x.groundM + worstDeltaM);
-                        if (target > x.groundM + 0.01) {
-                            x.groundM = target;
+                    plan.demOffsetFt = worstDeltaM * M_TO_FT;
+                    plan.demProbes = probed;
+                    if (worstDeltaM > 0.01) {
+                        mslArcs.forEach(x => {
+                            x.groundM += worstDeltaM;
                             x.minM = Math.ceil(aglFtToStoredM(ffd.floorFt, x.groundM, 'msl'));
                             x.maxM = Math.max(fpArcAltMeters(aglFtToStoredM(ffd.floorFt + ffd.deltaFt, x.groundM, 'msl')), x.minM + 1);
-                            raised++;
-                        }
-                        x.verified = pm != null;
-                    });
-                    if (raised) plan.warnings.push(`Percepto DEM verification raised ${raised} of ${mslArcs.length} band(s) by up to ${Math.round(worstDeltaM * M_TO_FT)} ft — the sampling source was reading low (floor ${ffd.floorFt} ft AGL is a hard minimum, never a target)`);
-                    if (probed < mslArcs.length) plan.warnings.push(`${mslArcs.length - probed} piece(s) could not be verified against Percepto (endpoint rate-limited) — the worst observed offset was applied to them instead`);
-                    console.log(`${TAG} fast-FP DEM verification: ${probed}/${mslArcs.length} pieces probed, ${raised} raised, worst offset ${(worstDeltaM * M_TO_FT).toFixed(0)} ft`);
+                        });
+                        plan.warnings.push(`Percepto's DEM reads up to ${Math.round(plan.demOffsetFt)} ft higher than our terrain raster (${probed} of ${picks.length} spot-checks answered) — EVERY band raised by that offset, so the ${ffd.floorFt} ft floor holds everywhere`);
+                    } else if (!probed) {
+                        plan.warnings.push(`Percepto DEM spot-check got no answer (endpoint rate-limited) — bands rest on the 3DEP raster alone. Floors are ceil-rounded and terrain-stepped, but re-check one segment's AGL in the editor after saving.`);
+                    }
+                    console.log(`${TAG} fast-FP DEM datum check: ${probed}/${picks.length} probes answered, offset ${plan.demOffsetFt.toFixed(0)} ft applied to all ${mslArcs.length} pieces`);
                 }
                 // Final hard-floor assertion — belt and braces. Any piece whose
                 // band would sit under the floor over its OWN verified ground is
