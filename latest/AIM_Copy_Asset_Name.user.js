@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.242
+// @version      4.243
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.242';
+    const SCRIPT_VERSION = '4.243';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -129,6 +129,7 @@
         fpOverlap: true, aglFloor: true, nfzSize: true, nfzProx: true,
         bandHeight: true, altInverted: true, fpDegenerate: true, gmTower: true,
         fpFfzAngle: true,
+        gmTowerRings: true,   // ⭕ live standoff circles on Tower GMs (radius = gmTowerFt)
     };
     let sopValidatorChannel = null;
     let sopMasterEnabled = true;
@@ -8126,6 +8127,7 @@
                 { id: 'fpDegenerate', label: 'Check · Zero-length / duplicate FP arc', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpDegenerate },
                 { id: 'gmTower', label: 'Check · Tower GM standoff (FFZ + FP)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.gmTower },
                 { id: 'gmTowerFt', label: 'Tower GM min standoff', type: 'number', min: 0, max: 500, step: 1, default: SOP_THRESH_DEFAULTS.gmTowerFt, unit: 'ft' },
+                { id: 'gmTowerRings', label: '⭕ Tower GM standoff rings on map', type: 'boolean', default: SOP_ENABLE_DEFAULTS.gmTowerRings },
                 { id: 'fpFfzAngle', label: 'Check · FP→FFZ connection angle', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpFfzAngle },
                 { id: 'fpFfzAngleDeg', label: 'FP→FFZ min angle to the edge (ideal 45°)', type: 'number', min: 0, max: 90, step: 1, default: SOP_THRESH_DEFAULTS.fpFfzAngleDeg, unit: '°' },
                 { id: 'sop-draw', label: '🚩 Draw issues (run validators)', type: 'button', action: 'sop-draw' },
@@ -25052,6 +25054,72 @@
             copyToClipboard(text, 'Copied as plain text (HTML copy unavailable)');
         }
     }
+
+    // ============================================================
+    // v4.243: ⭕ Tower GM standoff rings. Every General Marker of type
+    // 'tower' gets a live circle at the SOP "Tower GM min standoff"
+    // radius (sopThresholds.gmTowerFt) — the SAME number the GM Tower
+    // standoff validator flags against, so the ring on the map and the
+    // check can never disagree. Editable in the SOP Validators card;
+    // the ring resizes within a tick of the change.
+    //
+    // Wipe & rebuild on a signature change (site / threshold / entity
+    // refresh / map instance) — Leaflet scales L.circle (radius in
+    // meters) with zoom on its own, so pan/zoom needs no work here.
+    // Site Setup route only: Data View's CSS overrides SVG presentation
+    // attrs (see reference_data_view_recon), and towers only constrain
+    // site-setup geometry anyway.
+    // ============================================================
+    const towerRings = { layers: [], sig: '', map: null };
+    function towerRingsWipe() {
+        for (const l of towerRings.layers) { try { l.remove(); } catch (e) {} }
+        towerRings.layers = [];
+        towerRings.sig = '';
+        towerRings.map = null;
+    }
+    function towerRingsTick() {
+        try {
+            const on = sopMasterEnabled && sopEnabled.gmTowerRings && isSiteSetupRoute();
+            const map = on ? getLeafletMap() : null;
+            const L = on ? getLeafletL() : null;
+            if (!on || !map || !L || typeof L.circle !== 'function') {
+                if (towerRings.layers.length) towerRingsWipe();
+                return;
+            }
+            const sid = getCurrentSiteID();
+            const rec = sid ? mapObjectsBySite[sid] : null;
+            // Same tower filter as the SOP GM Tower standoff check (#11).
+            const towers = rec ? rec.entities.filter(e => e.type === 19 && e.general_marker_type === 'tower'
+                && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number') : [];
+            const radiusM = sopThresholds.gmTowerFt / M_TO_FT;
+            const sig = `${sid}|${sopThresholds.gmTowerFt}|${rec ? rec.fetchedAt : 0}|`
+                + towers.map(e => `${e.id}:${e.coords[0].lat},${e.coords[0].lng}`).join(';');
+            if (sig === towerRings.sig && map === towerRings.map) return;
+            towerRingsWipe();
+            towerRings.sig = sig;
+            towerRings.map = map;
+            if (!towers.length || !(radiusM > 0)) return;
+            for (const gm of towers) {
+                try {
+                    const c = L.circle([gm.coords[0].lat, gm.coords[0].lng], {
+                        radius: radiusM, color: '#ffb020', weight: 2, opacity: 0.85,
+                        dashArray: '6 5', fillColor: '#ffb020', fillOpacity: 0.07,
+                        interactive: false,
+                    });
+                    c.addTo(map);
+                    towerRings.layers.push(c);
+                } catch (e) {
+                    console.warn(`${TAG} tower ring draw failed for GM ${gm.id}:`, e);
+                }
+            }
+            if (towerRings.layers.length) {
+                console.log(`${TAG} drew ${towerRings.layers.length} Tower GM standoff ring(s) @ ${sopThresholds.gmTowerFt} ft`);
+            }
+        } catch (e) {
+            console.warn(`${TAG} towerRingsTick threw:`, e);
+        }
+    }
+    if (CONTEXT === 'IFRAME') setInterval(towerRingsTick, 1500);
 
     // ============================================================
     // Initial fetch + site-change refetch (IFRAME only — TOP has no

@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-04 — ⭕ Tower GM standoff rings on the map (Site Setup Tools latest v4.243 — dev only)
+
+Every General Marker of type **Tower** now draws a live dashed orange circle on the Site Setup map at the SOP standoff radius. The radius is the existing **"Tower GM min standoff"** box on the SOP Validators card (default 60 ft) — the exact number the GM Tower standoff validator flags against, so what you see is what the check enforces. Edit the box and the rings resize in place; toggle them with the new **"⭕ Tower GM standoff rings on map"** switch (on by default). Rings track entity edits/refreshes automatically and never block map clicks.
+
 ## 2026-08-04 — KML export: mission path + routed base path combined (Mission Bank Tools latest v2.48 — dev only)
 
 Both KML exports (editor ⬇ KML and SUM mission-card Export KML) previously showed only half the flight: the editor export captured the map's routed base→mission→base line but dropped the nav→nav step order, while the SUM export drew the correct N1→N2→N3… zigzag but had no base path. Now every export includes **both**:
