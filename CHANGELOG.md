@@ -6,6 +6,13 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-04 — KML export: mission path + routed base path combined (Mission Bank Tools latest v2.48 — dev only)
+
+Both KML exports (editor ⬇ KML and SUM mission-card Export KML) previously showed only half the flight: the editor export captured the map's routed base→mission→base line but dropped the nav→nav step order, while the SUM export drew the correct N1→N2→N3… zigzag but had no base path. Now every export includes **both**:
+
+- **White line** — the mission path in true step order (nav→nav zigzag), always present.
+- **Cyan line** — the routed base→mission→base path captured off the map (follows the FPs/FFZs). Present in the editor export, and in the SUM export whenever that same mission is open on the map.
+
 ## 2026-08-04 — 🧩 Macros: per-macro show/hide, solo, All/None (Mission Bank Tools latest v2.47 — dev only)
 
 Isolate the macro you're working on. In the 🧩 Macro coverage legend:

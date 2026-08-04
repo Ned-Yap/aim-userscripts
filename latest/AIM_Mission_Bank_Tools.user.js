@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.47
+// @version      2.48
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.47';
+    const SCRIPT_VERSION = '2.48';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -1692,7 +1692,7 @@
         const kml = document.createElement('button');
         kml.type = 'button';
         kml.textContent = '⬇ KML';
-        kml.title = 'Export this mission to a Google-Earth KML — flight path + N#/S# pins, each pin showing its step details';
+        kml.title = 'Export this mission to a Google-Earth KML — white nav→nav mission path + cyan routed base path + N#/S# pins, each pin showing its step details';
         kml.style.cssText = 'flex:0 0 auto;padding:5px 8px;background:rgba(150,180,255,0.12);border:1px solid rgba(150,180,255,0.5);' +
             'color:#9cf;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
         kml.onclick = (e) => { e.preventDefault(); e.stopPropagation(); exportOpenMissionKml(); };
@@ -9411,7 +9411,7 @@
                             <input type="checkbox" data-collapse-blocks ${collapseScanBlocks ? 'checked' : ''}> Collapse scan blocks
                         </label>
                         <button class="aim-mb-tbtn" data-detail-export="sheets" title="Copy visible rows → Sheets">Copy → Sheets</button>
-                        <button class="aim-mb-tbtn" data-detail-export="kml" title="Export as KML — flight-path line + N#/S# 3D pins, each pin showing its step details (bundled Thermal/GEM/Wait)">Export KML</button>
+                        <button class="aim-mb-tbtn" data-detail-export="kml" title="Export as KML — nav→nav mission path (+ routed base path if this mission is open on the map) + N#/S# 3D pins, each pin showing its step details (bundled Thermal/GEM/Wait)">Export KML</button>
                     </div>
                     ${(() => {
                         const n = countPending(missionId);
@@ -10094,7 +10094,9 @@
     }
 
     // Build a Google-Earth KML for an ordered list of mission steps:
-    //   • a WHITE Flight Path line nav→nav (the real drone route),
+    //   • a WHITE Mission Path line nav→nav (the step order N1→N2→…),
+    //   • a CYAN Routed Path line when opts.routes is supplied (the map's
+    //     dashed base→mission→base transit, following the FPs/FFZs),
     //   • PURPLE sightlines nav→each of its snapshots (what it's looking at),
     //     labeled with the nav↔snapshot standoff distance (ideal ~100 ft),
     //   • N# pins (blue) whose description is the WHOLE stop — nav params + its
@@ -10135,11 +10137,22 @@
         const anySnap = snapBlocks.some(sb => sb.snap.location && sb.snap.location.lat != null);
         if (!navsLoc.length && !anySnap) return null;
 
-        // Flight path: prefer the REAL routed path captured from AIM's map (the
-        // white dashed line that follows the FPs/FFZs, base→steps→back). Fall
-        // back to a straight nav→nav line when it isn't readable (e.g. the SUM
-        // export, where the open map may be a different mission).
+        // Flight path: emit BOTH lines when we can —
+        //   • the straight nav→nav zigzag (WHITE) = the mission's step order,
+        //     always present so N1→N2→N3… is visible in every export;
+        //   • the REAL routed path captured off AIM's map (CYAN, the dashed
+        //     line that follows the FPs/FFZs, base→steps→back) when readable.
+        // Previously routes REPLACED the zigzag, so the editor export lost the
+        // step order and the SUM export lost the base transit — now combined.
         let pathPlacemark = '';
+        if (navsLoc.length >= 2) {
+            const pathCoords = navsLoc.map(n => `${Number(n.location.lng)},${Number(n.location.lat)},${kmlAltM(n)}`).join(' ');
+            pathPlacemark = `    <Placemark>
+      <name>Mission Path (nav→nav)</name>
+      <styleUrl>#style-path</styleUrl>
+      <LineString><tessellate>1</tessellate><altitudeMode>absolute</altitudeMode><coordinates>${pathCoords}</coordinates></LineString>
+    </Placemark>`;
+        }
         if (opts.routes && opts.routes.length) {
             // The captured route is 2D (lat/lng only). Raise each vertex to the
             // altitude of the NEAREST navigate so the line rides up with the nav
@@ -10151,21 +10164,15 @@
                 return best;
             };
             const mode = navAlts.length ? 'absolute' : 'clampToGround';
-            pathPlacemark = opts.routes.map((route, i) => {
+            const routed = opts.routes.map((route, i) => {
                 const coords = route.map(p => `${p.lng},${p.lat},${altForPoint(p)}`).join(' ');
                 return `    <Placemark>
-      <name>Flight Path${opts.routes.length > 1 ? ' ' + (i + 1) : ''}</name>
-      <styleUrl>#style-path</styleUrl>
+      <name>Routed Path (base→mission→base)${opts.routes.length > 1 ? ' ' + (i + 1) : ''}</name>
+      <styleUrl>#style-route</styleUrl>
       <LineString><tessellate>1</tessellate><altitudeMode>${mode}</altitudeMode><coordinates>${coords}</coordinates></LineString>
     </Placemark>`;
             }).join('\n');
-        } else if (navsLoc.length >= 2) {
-            const pathCoords = navsLoc.map(n => `${Number(n.location.lng)},${Number(n.location.lat)},${kmlAltM(n)}`).join(' ');
-            pathPlacemark = `    <Placemark>
-      <name>Flight Path (straight nav→nav)</name>
-      <styleUrl>#style-path</styleUrl>
-      <LineString><tessellate>1</tessellate><altitudeMode>absolute</altitudeMode><coordinates>${pathCoords}</coordinates></LineString>
-    </Placemark>`;
+            pathPlacemark = pathPlacemark ? `${pathPlacemark}\n${routed}` : routed;
         }
 
         // PURPLE sightlines: nav → each of its snapshots, named with distance.
@@ -10238,10 +10245,11 @@
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>
     <name>${escapeXml(docName)}</name>
-    <description>White line = flight path (nav→nav). Purple lines = nav→snapshot sightlines (labeled with distance). Blue/pink pins carry per-stop step detail. Exported by AIM Mission Bank Tools v${SCRIPT_VERSION}.</description>
+    <description>White line = mission path in step order (nav→nav). Cyan line = the routed path off the map (base→mission→base, follows the FPs/FFZs — only present when the mission was open on the map at export). Purple lines = nav→snapshot sightlines (labeled with distance). Blue/pink pins carry per-stop step detail. Exported by AIM Mission Bank Tools v${SCRIPT_VERSION}.</description>
     <Style id="style-nav"><IconStyle><color>${navColor}</color><scale>1.1</scale><Icon><href>${PIN}</href></Icon></IconStyle><LabelStyle><color>${navColor}</color></LabelStyle></Style>
     <Style id="style-snap"><IconStyle><color>${snapColor}</color><scale>1.1</scale><Icon><href>${PIN}</href></Icon></IconStyle><LabelStyle><color>${snapColor}</color></LabelStyle></Style>
     <Style id="style-path"><LineStyle><color>ffffffff</color><width>3</width></LineStyle></Style>
+    <Style id="style-route"><LineStyle><color>d0ffd966</color><width>2.4</width></LineStyle></Style>
     <Style id="style-look"><LineStyle><color>ffe24db0</color><width>1.6</width></LineStyle></Style>
     <Folder><name>Flight Path</name>
 ${pathPlacemark}
@@ -10282,9 +10290,18 @@ ${snapPlacemarks}
     }
 
     function exportDetailToKML(row, allSteps) {
-        const built = buildMissionKml(row && row.name, allSteps || []);
+        // If THIS mission is the one open on the map, grab its routed line too
+        // (a different open mission's route would be wrong — skip it then).
+        let routes = null;
+        try {
+            if (composerMission && row && row.id != null && String(composerMission.id) === String(row.id)) routes = captureFlightRoutes();
+        } catch (e) { console.warn(`${TAG} [kml] route capture skipped`, e); }
+        const built = buildMissionKml(row && row.name, allSteps || [], { routes });
         if (!built) { showToast('No GPS steps (navigate/snapshot) to export.', '#ff9800'); return; }
-        if (downloadKmlFile(row && row.name, built.kml)) showToast(`Exported KML — ${built.navCount} stops · ${built.snapCount} snapshots`, '#5fff5f');
+        if (downloadKmlFile(row && row.name, built.kml)) {
+            const path = built.usedRoute ? ' · nav path + routed base path' : '';
+            showToast(`Exported KML — ${built.navCount} stops · ${built.snapCount} snapshots${path}`, '#5fff5f');
+        }
     }
 
     // Map-edit row: export the mission currently open in the native editor,
@@ -10297,7 +10314,7 @@ ${snapPlacemarks}
         const built = buildMissionKml(composerMission.name, ordered, { routes });
         if (!built) { showToast('No GPS steps (navigate/snapshot) to export.', '#ff9800'); return; }
         if (downloadKmlFile(composerMission.name, built.kml)) {
-            const path = built.usedRoute ? 'real routed path' : 'straight nav→nav path (couldn\'t read the routed line)';
+            const path = built.usedRoute ? 'nav path + routed base path' : 'nav path only (couldn\'t read the routed line)';
             showToast(`Exported KML — ${built.navCount} stops · ${built.snapCount} snapshots · ${path}`, '#5fff5f', 4500);
         }
     }
