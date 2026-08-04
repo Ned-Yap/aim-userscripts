@@ -6,6 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-04 — 🧩 Macros: per-macro show/hide, solo, All/None (Mission Bank Tools latest v2.47 — dev only)
+
+Isolate the macro you're working on. In the 🧩 Macro coverage legend:
+
+- **Checkbox per macro** — untick to hide that macro's pad fills, visit-order badges, and name chip from the map. Ticking brings them back instantly (no re-scan).
+- **Click a macro's color swatch to SOLO it** — hides every other macro in one click; click the swatch again to bring them all back.
+- **All / None buttons** in the legend header — None then tick just the ones you want.
+- Everything defaults to visible on each fresh 🧩 open. Hiding a macro also clears its 👁 route-comparison lines.
+
 ## 2026-08-03 — Fast FP Draw: every band verified against Percepto's DEM + cache purge (Site Setup Tools latest v4.239 — dev only)
 
 Follow-up on the AGL-72 band. Bands are no longer allowed to rest on a third-party elevation sample:

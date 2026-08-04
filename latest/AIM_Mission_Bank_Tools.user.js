@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.46
+// @version      2.47
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.46';
+    const SCRIPT_VERSION = '2.47';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5131,10 +5131,15 @@
     // color; member pads get that outline + a name chip; the legend counts
     // pads that still aren't in any macro. All click-through.
     // ════════════════════════════════════════════════════════════════════════
-    const mcv = { on: false, busy: false, layers: [], legendEl: null };
+    // hidden = per-session visibility filter (v2.47) — mission ids whose map
+    // layers are currently switched off in the legend; resets to all-visible
+    // every fresh 🧩 toggle-on. macroLayers groups layers per mission id so a
+    // single macro can be hidden/shown without a full redraw.
+    const mcv = { on: false, busy: false, layers: [], legendEl: null, hidden: new Set(), macroLayers: new Map() };
     function mcvClear() {
         mcv.layers.forEach(l => { try { l.remove(); } catch (e) {} });
         mcv.layers = [];
+        mcv.macroLayers = new Map();
         try { mcvClearRoutes(); } catch (e) {}
         if (mcv.legendEl) { try { mcv.legendEl.remove(); } catch (e) {} mcv.legendEl = null; }
     }
@@ -5194,46 +5199,53 @@
         const COLORS = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
         det.macros.forEach((mc, i) => {
             const col = COLORS[i % COLORS.length];
+            // v2.47: layers grouped per macro so the legend can hide/show one
+            // macro without a redraw. Hidden macros' layers are built but NOT
+            // added to the map (mcvSetVis adds them on unhide).
+            const vis = !mcv.hidden.has(mc.mission.id);
+            const lys = [];
+            const keep = (l) => { mcv.layers.push(l); lys.push(l); if (vis) l.addTo(map); return l; };
             let deepest = null;
             mc.pads.forEach((a, pi) => {
                 try {
                     // SOLID fill (v2.38) — covered pads read as painted, so the
                     // eye only hunts for UNfilled pads (the remaining work)
-                    mcv.layers.push(L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: col, weight: 3, opacity: 0.95, fill: true, fillColor: col, fillOpacity: 0.55, interactive: false }).addTo(map));
+                    keep(L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: col, weight: 3, opacity: 0.95, fill: true, fillColor: col, fillOpacity: 0.55, interactive: false }));
                     // v2.43: visit-order number on every covered pad, in the
                     // macro's color. Pads shared by two macros get side-by-side
                     // badges (x-offset per macro index). Click-through.
                     const c2 = genCentroid(a.ring);
-                    mcv.layers.push(L.marker([c2.lat, c2.lng], {
+                    keep(L.marker([c2.lat, c2.lng], {
                         icon: L.divIcon({
                             className: 'aim-mb-rng-chip',
                             html: `<div style="pointer-events:none;width:19px;height:19px;border-radius:50%;background:${col};color:#10131a;font:800 11px/19px monospace;text-align:center;border:1.5px solid #10131a;box-shadow:0 1px 4px rgba(0,0,0,0.7);">${pi + 1}</div>`,
                             iconSize: [19, 19], iconAnchor: [10 - (i % 3) * 14, 10],
                         }),
                         interactive: false, keyboard: false, zIndexOffset: -300,
-                    }).addTo(map));
+                    }));
                 } catch (e) {}
                 if (!deepest) deepest = a;   // first pad = mission's first stop
             });
             if (deepest) {
                 const c = genCentroid(deepest.ring);
                 try {
-                    mcv.layers.push(L.marker([c.lat, c.lng], {
+                    keep(L.marker([c.lat, c.lng], {
                         icon: L.divIcon({
                             className: 'aim-mb-rng-chip',
                             html: `<div style="pointer-events:none;background:${col};color:#10131a;font:800 11px/1 'Lato',sans-serif;padding:3px 7px;border-radius:4px;border:1.5px solid #10131a;box-shadow:0 1px 5px rgba(0,0,0,0.7);white-space:nowrap;">${escapeHtml(String(mc.mission.name || '').slice(0, 24))}</div>`,
                             iconSize: [0, 0], iconAnchor: [0, 22],
                         }),
                         interactive: false, keyboard: false, zIndexOffset: -400,
-                    }).addTo(map));
+                    }));
                 } catch (e) {}
             }
+            mcv.macroLayers.set(mc.mission.id, lys);
         });
         // legend (top-left, under the toolbar)
         const el = document.createElement('div');
         el.style.cssText = 'position:fixed;left:12px;top:70px;z-index:2147483599;max-height:50vh;overflow:auto;background:rgba(16,19,26,0.92);border:1px solid #2a3340;border-radius:8px;padding:8px 11px;color:#e6e6e6;font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 4px 16px rgba(0,0,0,0.6);';
         const COLORS2 = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
-        el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><b style="color:#7adfe6;">🧩 Macro coverage</b><button data-mcv-report title="Copy the coverage report (Name / Classification / Captured / Battery / Section / Mission / Order) — colored cells, paste into Google Sheets" style="padding:1px 7px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">📋 Report</button><span data-mcv-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
+        el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><b style="color:#7adfe6;">🧩 Macro coverage</b><button data-mcv-report title="Copy the coverage report (Name / Classification / Captured / Battery / Section / Mission / Order) — colored cells, paste into Google Sheets" style="padding:1px 7px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">📋 Report</button><button data-mcv-vis-all title="Show every macro on the map" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">All</button><button data-mcv-vis-none title="Hide every macro — then re-check just the ones you want" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">None</button><span data-mcv-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
             + (det.macros.length
                 ? det.macros.map((mc, i) => {
                     const au = (mcv.data && mcv.data.audits) ? mcv.data.audits.get(mc.mission.id) : null;
@@ -5256,7 +5268,12 @@
                         if (worth) reBtn = `<button data-mcv-reorder="${mc.mission.id}" title="Re-order this mission's pad blocks in place (backup + verify; steps untouched)" style="padding:0 5px;background:rgba(255,183,77,0.15);border:1px solid rgba(255,183,77,0.5);color:#ffb74d;border-radius:4px;cursor:pointer;font-size:10px;">♻</button>`;
                         reBtn += `<button data-mcv-route="${mc.mission.id}" data-mcv-route-col="${COLORS2[i % COLORS2.length]}" title="Draw this macro's CURRENT route (solid) vs the ♻ replan route (dashed white) on the map" style="padding:0 5px;background:rgba(122,223,230,0.12);border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">👁</button>`;
                     }
-                    return `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${reBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine}`;
+                    // v2.47: per-macro visibility — checkbox toggles this macro's
+                    // map layers; clicking the color swatch SOLOs it (hide all
+                    // others; click again to bring everything back).
+                    const vis = !mcv.hidden.has(mc.mission.id);
+                    if (auditLine) auditLine = auditLine.replace('<div ', `<div data-mcv-au="${mc.mission.id}" `);
+                    return `<div data-mcv-row="${mc.mission.id}" style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:${vis ? 1 : 0.38};"><input type="checkbox" data-mcv-vis="${mc.mission.id}" ${vis ? 'checked' : ''} title="Show/hide this macro on the map" style="margin:0;cursor:pointer;accent-color:${COLORS2[i % COLORS2.length]};"><span data-mcv-solo="${mc.mission.id}" title="Solo — show ONLY this macro (click again to show all)" style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;cursor:pointer;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${reBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine ? auditLine.replace('style="', `style="opacity:${vis ? 1 : 0.38};`) : ''}`;
                 }).join('')
                 : '<div style="color:#888;">No macro missions yet (≥2 pads in one mission).</div>')
             + `<div style="color:#ffb74d;margin-top:5px;">⬜ ${det.todo.length} pad(s) with missions, not in any macro</div>`
@@ -5275,6 +5292,17 @@
             const on = mcvToggleRoute(id, b.getAttribute('data-mcv-route-col'));
             b.style.background = on ? 'rgba(122,223,230,0.4)' : 'rgba(122,223,230,0.12)';
         });
+        // v2.47: per-macro show/hide + solo + All/None
+        el.querySelectorAll('input[data-mcv-vis]').forEach(cb => cb.onchange = () => {
+            const id = Number(cb.getAttribute('data-mcv-vis')) || cb.getAttribute('data-mcv-vis');
+            mcvSetVis(id, cb.checked);
+        });
+        el.querySelectorAll('[data-mcv-solo]').forEach(sw => sw.onclick = () => {
+            const id = Number(sw.getAttribute('data-mcv-solo')) || sw.getAttribute('data-mcv-solo');
+            mcvSolo(id);
+        });
+        el.querySelector('[data-mcv-vis-all]').onclick = () => mcvAllVis(true);
+        el.querySelector('[data-mcv-vis-none]').onclick = () => mcvAllVis(false);
         el.querySelectorAll('[data-mcv-t]').forEach(inp => inp.onchange = () => {
             const patch = {}; patch[inp.getAttribute('data-mcv-t')] = Number(inp.value);
             gmSet(MCV_TIME_KEY, Object.assign({}, mcvTimeCfg(), patch));
@@ -5286,6 +5314,47 @@
         det.todo.forEach(a => {
             try { mcv.layers.push(L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: '#ffffff', weight: 2, dashArray: '2 6', opacity: 0.65, fill: false, interactive: false }).addTo(map)); } catch (e) {}
         });
+    }
+    // ── per-macro visibility (v2.47) ────────────────────────────────────────
+    // Isolate the macro being worked on: checkbox per legend row, click the
+    // color swatch to SOLO, All/None in the header. Session-only — resets to
+    // all-visible on every fresh 🧩 toggle-on. Hiding a macro also clears its
+    // 👁 route-comparison lines (they'd float context-free otherwise).
+    function mcvSetVis(id, visible) {
+        const lys = mcv.macroLayers.get(id) || [];
+        if (visible) {
+            mcv.hidden.delete(id);
+            const map = getLeafletMap();
+            if (map) lys.forEach(l => { try { l.addTo(map); } catch (e) {} });
+        } else {
+            mcv.hidden.add(id);
+            lys.forEach(l => { try { l.remove(); } catch (e) {} });
+            if (mcvRoutes.has(id)) {
+                mcvClearRoutes(id);
+                const rb = mcv.legendEl && mcv.legendEl.querySelector(`[data-mcv-route="${id}"]`);
+                if (rb) rb.style.background = 'rgba(122,223,230,0.12)';
+            }
+        }
+        if (mcv.legendEl) {
+            const row = mcv.legendEl.querySelector(`[data-mcv-row="${id}"]`);
+            if (row) row.style.opacity = visible ? '1' : '0.38';
+            const au = mcv.legendEl.querySelector(`[data-mcv-au="${id}"]`);
+            if (au) au.style.opacity = visible ? '1' : '0.38';
+            const cb = mcv.legendEl.querySelector(`input[data-mcv-vis="${id}"]`);
+            if (cb) cb.checked = visible;
+        }
+    }
+    function mcvAllVis(visible) {
+        const det = mcv.data && mcv.data.det;
+        if (det) det.macros.forEach(mc => mcvSetVis(mc.mission.id, visible));
+    }
+    function mcvSolo(id) {
+        const det = mcv.data && mcv.data.det;
+        if (!det) return;
+        const others = det.macros.map(mc => mc.mission.id).filter(x => x !== id);
+        const alreadySolo = !mcv.hidden.has(id) && others.length > 0 && others.every(x => mcv.hidden.has(x));
+        if (alreadySolo) mcvAllVis(true);
+        else det.macros.forEach(mc => mcvSetVis(mc.mission.id, mc.mission.id === id));
     }
     // ── ♻ EFFICIENCY AUDIT + REORDER (v2.40) ────────────────────────────────
     // Flight-hours are the SLA currency: ~20-25 min flight + ~80 min recharge
@@ -5685,6 +5754,7 @@
             showToast('♻ Auditing macro efficiency (current order vs replan)…', '#7adfe6', 2500);
             mcv.data.audits = mcvAudit(det, ent);
             mcvClear();
+            mcv.hidden = new Set();   // default: every macro visible on a fresh open
             mcvDraw(det);
             mcv.on = true;
             if (btn) btn.classList.add('active');
