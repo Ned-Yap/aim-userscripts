@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.241
+// @version      4.242
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.241';
+    const SCRIPT_VERSION = '4.242';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23601,7 +23601,40 @@
         try {
             let siteCfg = null;
             try { siteCfg = await fetchSiteConfig(siteID); } catch (e) {}
-            const ents = ((mapObjectsBySite[siteID] || {}).entities) || [];
+            let ents = ((mapObjectsBySite[siteID] || {}).entities) || [];
+            // v4.242: EXTEND host resolution must survive a stale cache. The
+            // snap's fpId is captured at draw time and the draw can outlive a
+            // page reload (draft autosave), another tab's edit, or an undone
+            // commit — so re-fetch before believing the host is gone, and if it
+            // really is gone, DEGRADE to creating a standalone FP rather than
+            // throwing the whole draw away (which is what "refresh and redraw"
+            // used to mean, and it cost the user a huge path's worth of trust).
+            const findHost = (list) => list.find(e => String(e.id) === String(plan.extendFpId) && e.type === 15);
+            if (plan.extendFpId != null && !findHost(ents)) {
+                ffd._busyMsg = 'Host flight path not in cache — re-fetching site…'; ffdRenderPanel();
+                try { await fetchMapObjects(siteID, true); } catch (e) {}
+                ents = ((mapObjectsBySite[siteID] || {}).entities) || [];
+                if (!findHost(ents)) {
+                    // Genuinely absent (deleted / undone / different site). Can we
+                    // still create it standalone? Rule #7 needs FFZ contact.
+                    const ffzs2 = ents.filter(e => e.type === 16 && entityCoords(e));
+                    let touch = null;
+                    for (const v of plan.verts) {
+                        for (const ent of ffzs2) {
+                            const ring = entityCoords(ent);
+                            if (ring && ring.length >= 3 && pointToPolygonMeters(v.lat, v.lng, ring) <= FFD_TOUCH_M) { touch = ent.name || `#${ent.id}`; break; }
+                        }
+                        if (touch) break;
+                    }
+                    if (!touch) throw new Error(`the flight path you snapped onto (#${plan.extendFpId}) no longer exists on the server, and no waypoint touches a Free Fly Zone, so it can't be saved standalone either. Your draw is still here — drag an end waypoint onto an FFZ edge or an existing FP vertex, then Commit again.`);
+                    if (!confirm(`The flight path you snapped onto (#${plan.extendFpId}) is no longer on the server — it was probably deleted or undone.\n\nSave your ${plan.arcs.length} segments as a NEW standalone flight path instead?\n\n(It connects to FFZ "${touch}", so the server will accept it. Your draw is not lost either way.)`)) {
+                        ffd.stage = 'review'; ffdRenderPanel();
+                        return;
+                    }
+                    console.warn(`${TAG} fast-FP extend host #${plan.extendFpId} missing — degrading to standalone create (FFZ contact: ${touch})`);
+                    plan.extendFpId = null; plan.extendFpName = null; plan.ffzTouch = `FFZ "${touch}"`;
+                }
+            }
             const usedNames = new Set(ents.filter(e => e.name).map(e => e.name));
             const uniqueName = (base) => { if (!base) base = 'Fast FP'; if (!usedNames.has(base)) return base; let i = 2, n; do { n = base + '_' + (i++); } while (usedNames.has(n)); return n; };
             const tmplFpEnt = ents.find(e => e.type === 15 && Array.isArray(e.arcs) && e.arcs.length);
@@ -23615,8 +23648,8 @@
             };
             let undoRec = null, doneMsg = null;
             if (plan.extendFpId != null) {
-                const fpEnt = ents.find(e => e.id === plan.extendFpId && e.type === 15);
-                if (!fpEnt) throw new Error(`host FP #${plan.extendFpId} not found in cache — refresh and redraw`);
+                const fpEnt = findHost(ents);
+                if (!fpEnt) throw new Error(`host flight path #${plan.extendFpId} vanished mid-commit — nothing was written; your draw is intact, press Commit again`);
                 const body = buildWriteBody(fpEnt, siteCfg);
                 const originalBody = JSON.parse(JSON.stringify(body));
                 const wasValidated = !!body.validated;
@@ -23922,7 +23955,30 @@
                     ffd.segs = Array.isArray(d.segs) ? d.segs : [];
                     ffd.snaps = (Array.isArray(d.snaps) && d.snaps.length === d.verts.length) ? d.snaps : d.verts.map(() => null);
                     ffd.anchor = (typeof d.anchor === 'number' && d.anchor >= 0 && d.anchor < d.verts.length) ? d.anchor : d.verts.length - 1;
-                    showToast(`Restored your in-progress draw (${ffd.verts.length} waypoints) — right-click waypoints to delete, or keep going`, 'rgba(122,223,230,0.6)');
+                    // v4.242: snap targets were captured BEFORE this page load, so
+                    // their entity ids can be stale (FP recreated, deleted, undone).
+                    // Re-resolve every fp-vertex snap against the live graph; drop
+                    // the ones that no longer land on anything. Otherwise the first
+                    // Commit fails with a confusing "host FP not found".
+                    let reSnapped = 0, dropped = 0;
+                    ffd.snaps = ffd.snaps.map((sn, i) => {
+                        if (!sn || sn.kind !== 'fp-vertex') return sn;
+                        const v = ffd.verts[i];
+                        const gv = ffd.fpGraph ? nearestGraphVertex(ffd.fpGraph, v.lat, v.lng) : null;
+                        if (gv && gv.dist <= 2) {   // metres — a restored snap sits ON the vertex
+                            const touch = rcArcAtVertex(ffd.fps, gv.key);
+                            if (touch && touch.fp.id != null) {
+                                if (String(touch.fp.id) !== String(sn.fpId)) reSnapped++;
+                                return { kind: 'fp-vertex', targetName: touch.fp.name || 'flight path', arc: touch.arc || null, fpId: touch.fp.id, fpValidated: !!touch.fp.validated };
+                            }
+                        }
+                        dropped++;
+                        return null;
+                    });
+                    const note = reSnapped ? ` · ${reSnapped} snap${reSnapped === 1 ? '' : 's'} re-linked` : '';
+                    const note2 = dropped ? ` · ${dropped} stale snap${dropped === 1 ? '' : 's'} cleared (that flight path is gone)` : '';
+                    if (reSnapped || dropped) console.log(`${TAG} fast-FP draft restore: ${reSnapped} snap(s) re-linked, ${dropped} cleared`);
+                    showToast(`Restored your in-progress draw (${ffd.verts.length} waypoints)${note}${note2}`, 'rgba(122,223,230,0.6)');
                 }
             } catch (e) {}
             // Ask the Map Styler for its live fp.* buffer settings (answer

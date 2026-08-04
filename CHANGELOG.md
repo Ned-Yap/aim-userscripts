@@ -22,6 +22,16 @@ Isolate the macro you're working on. In the 🧩 Macro coverage legend:
 - **All / None buttons** in the legend header — None then tick just the ones you want.
 - Everything defaults to visible on each fresh 🧩 open. Hiding a macro also clears its 👁 route-comparison lines.
 
+## 2026-08-03 — Fast FP Draw: "host FP not found" can no longer cost you a draw (Site Setup Tools latest v4.242 — dev only)
+
+Committing an EXTEND failed with *"host FP #… not found in cache — refresh and redraw"* — a refusal that threatened a 118-waypoint path over a stale cache entry. Never again:
+
+- Commit now **re-fetches the site** before believing the host flight path is missing.
+- If it genuinely is gone (deleted, undone, another tab), you're offered **"save as a new standalone flight path instead"** — with the FFZ-connection rule checked first — rather than being told to redraw. Declining just returns you to the review panel; nothing is written and nothing is lost.
+- Restoring an autosaved draw now **re-links its snap targets** to the live site (they were captured before the reload, so their ids can be stale) and clears any that no longer land on a flight path. This is what caused the error in the first place.
+
+---
+
 ## 2026-08-03 — Fast FP Draw: AGL + terrain-spread columns in the review table (Site Setup Tools latest v4.241 — dev only)
 
 The review table now shows the two numbers that actually answer "is this safe and did Smart-Fill work?":
