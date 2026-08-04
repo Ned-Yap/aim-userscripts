@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.240
+// @version      4.241
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -70,7 +70,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.240';
+    const SCRIPT_VERSION = '4.241';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23266,11 +23266,20 @@
             el.innerHTML = `${header}<div style="color:#7adfe6">${ffd._busyMsg || 'Working…'}</div>${refreshNote}`;
         } else if (ffd.stage === 'review' && ffd.plan) {
             const p = ffd.plan;
-            const rows = p.arcs.map((a, i) => `<tr>
+            // AGL is the column that matters (the floor is a hard minimum) —
+            // green when it clears the floor, red if anything ever slips under.
+            const rows = p.arcs.map((a, i) => {
+                const aglLo = a.groundM != null ? (a.minM - a.groundM) / GEN_FT_TO_M : ffd.floorFt;
+                const aglHi = a.groundM != null ? (a.maxM - a.groundM) / GEN_FT_TO_M : ffd.floorFt + ffd.deltaFt;
+                const ok = aglLo >= ffd.floorFt - 0.5;
+                return `<tr>
                 <td style="padding:1px 6px;color:#888">${i + 1}</td>
                 <td style="padding:1px 6px">${Math.round(a.lenM * M_TO_FT)} ft</td>
                 <td style="padding:1px 6px">${a.groundM != null ? Math.round(a.groundM * M_TO_FT) + ' ft' : (p.mode === 'agl' ? '—' : '<span style="color:#ff8a80">?</span>')}</td>
-                <td style="padding:1px 6px;color:#00e5ff">${a.minM}–${a.maxM} m</td></tr>`).join('');
+                <td style="padding:1px 6px;color:#7a8a94" title="ground spread over this piece — under ${FFD_SMART_VAR_FT} ft means no terrain step was needed">${a.spreadFt != null ? '±' + Math.round(a.spreadFt) : '—'}</td>
+                <td style="padding:1px 6px;font-weight:600;color:${ok ? '#5fff5f' : '#ff8a80'}">${Math.round(aglLo)}–${Math.round(aglHi)}</td>
+                <td style="padding:1px 6px;color:#00e5ff">${a.minM}–${a.maxM} m</td></tr>`;
+            }).join('');
             const warns = p.warnings.map(w => `<div style="color:#ff9a3d;font-size:10px;margin-top:3px">⚠ ${w}</div>`).join('');
             const errs = p.errors.map(w => `<div style="color:#ff8a80;font-size:10px;margin-top:3px">✗ ${w}</div>`).join('');
             const modeLbl = p.mode === 'agl'
@@ -23285,7 +23294,7 @@
                 <div style="color:#888;font-size:11px;margin-bottom:4px">${p.verts.length} waypoints → ${p.arcs.length} arcs${(p.stepVerts && p.stepVerts.length) ? ` <span style="color:#ffd24d">(+${p.stepVerts.length} terrain step${p.stepVerts.length === 1 ? '' : 's'})</span>` : ''} · ${ffdTotalFt().toLocaleString()} ft<br>${modeLbl}</div>
                 <div style="max-height:180px;overflow-y:auto;border:1px solid #1e3a4a;border-radius:4px;margin-bottom:4px">
                 <table style="width:100%;border-collapse:collapse;font-size:11px">
-                <tr style="color:#7a8a94"><th style="padding:1px 6px;text-align:left">#</th><th style="padding:1px 6px;text-align:left">len</th><th style="padding:1px 6px;text-align:left">ground</th><th style="padding:1px 6px;text-align:left">band</th></tr>
+                <tr style="color:#7a8a94"><th style="padding:1px 6px;text-align:left">#</th><th style="padding:1px 6px;text-align:left">len</th><th style="padding:1px 6px;text-align:left">ground</th><th style="padding:1px 6px;text-align:left" title="ground spread over the piece">Δ</th><th style="padding:1px 6px;text-align:left">AGL ft</th><th style="padding:1px 6px;text-align:left">band</th></tr>
                 ${rows}</table></div>
                 ${extend}${warns}${errs}
                 <button data-ffd-commit ${p.errors.length ? 'disabled' : ''} style="width:100%;margin-top:8px;background:${p.errors.length ? 'rgba(120,120,120,0.15)' : 'rgba(95,255,95,0.15)'};border:1px solid ${p.errors.length ? '#555' : 'rgba(95,255,95,0.6)'};border-radius:5px;color:${p.errors.length ? '#777' : '#5fff5f'};padding:6px 0;cursor:${p.errors.length ? 'not-allowed' : 'pointer'};font-size:12px;font-weight:600">${p.extendFpId != null ? '⟳ Extend flight path' : '⬆ Create flight path'}</button>
@@ -23438,10 +23447,15 @@
                     for (let k = 0; k < subs.length - 1; k++) { const v = lerp(valid[subs[k].i1].t); cutVerts.push(v); plan.stepVerts.push(v); }
                     cutVerts.push(ss.b);
                     for (let k = 0; k < subs.length; k++) {
-                        let g = -Infinity, gAt = null;
+                        let g = -Infinity, gAt = null, gLo = Infinity;
                         for (let j = subs[k].i0; j <= subs[k].i1; j++) {
                             if (valid[j].e > g) { g = valid[j].e; gAt = lerp(valid[j].t); }
+                            if (valid[j].e < gLo) gLo = valid[j].e;
                         }
+                        // Ground SPREAD over this piece — the number that proves
+                        // whether "0 steps" means genuinely flat (Δ under the
+                        // threshold) or under-sampled terrain. Shown per row.
+                        const spreadFt = (isFinite(gLo) && isFinite(g)) ? (g - gLo) * M_TO_FT : null;
                         // HARD FLOOR: ceil, never round — the floor may only err UP.
                         const minM = Math.ceil(aglFtToStoredM(ffd.floorFt, g, 'msl'));
                         plan.arcs.push({
@@ -23450,7 +23464,7 @@
                             // junction checks key off sa/sb, steps stay null.
                             sa: k === 0 ? ss.sg.a : null, sb: k === subs.length - 1 ? ss.sg.b : null,
                             lenM: approxMeters(cutVerts[k].lat, cutVerts[k].lng, cutVerts[k + 1].lat, cutVerts[k + 1].lng),
-                            groundM: g, minM,
+                            groundM: g, minM, spreadFt,
                             maxM: Math.max(fpArcAltMeters(aglFtToStoredM(ffd.floorFt + ffd.deltaFt, g, 'msl')), minM + 1),
                             _maxPt: gAt ? { lat: gAt.lat, lng: gAt.lng, e: g } : null,
                         });

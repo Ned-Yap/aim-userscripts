@@ -22,6 +22,15 @@ Isolate the macro you're working on. In the 🧩 Macro coverage legend:
 - **All / None buttons** in the legend header — None then tick just the ones you want.
 - Everything defaults to visible on each fresh 🧩 open. Hiding a macro also clears its 👁 route-comparison lines.
 
+## 2026-08-03 — Fast FP Draw: AGL + terrain-spread columns in the review table (Site Setup Tools latest v4.241 — dev only)
+
+The review table now shows the two numbers that actually answer "is this safe and did Smart-Fill work?":
+
+- **AGL ft** per piece (floor–ceiling above that piece's own ground), colored **green** when it clears your floor and **red** if anything ever slips under. No more converting metres in your head.
+- **Δ** — the ground spread over each piece. This is what proves "0 terrain steps" is correct: a Δ under the 30 ft threshold means the terrain genuinely is flat there, not under-sampled.
+
+---
+
 ## 2026-08-03 — Fast FP Draw: terrain from one 3DEP raster + draw export/import (Site Setup Tools latest v4.240 — dev only)
 
 An 88,000 ft path came back with **zero terrain steps** and 107 of 117 pieces unverified — both symptoms of per-point elevation sampling under-resolving and rate-limiting. Reworked:
