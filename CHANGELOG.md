@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-05 — 🧮 Math in mission-step number fields (Mission Bank Tools latest v2.50 — dev only)
+
+Type an arithmetic expression straight into any native step number field (e.g. Snapshot **Target altitude**) and press **Enter** — MBT evaluates it and commits the result to the form. `2630+15` becomes `2645`; a **leading** `+`, `*` or `/` works relative to the current value, so typing just `+15` after clicking into a field holding 2630 also gives 2645. Supports `+ - * / ( )` and decimals; clicking away (blur) evaluates too. Plain numbers and anything that isn't pure math are left completely untouched. Toggle: Control Panel → Mission Bank Tools → "🧮 Math in step number fields" (on by default).
+
 ## 2026-08-04 — ⭕ Tower GM standoff rings on the map (Site Setup Tools latest v4.243 — dev only)
 
 Every General Marker of type **Tower** now draws a live dashed orange circle on the Site Setup map at the SOP standoff radius. The radius is the existing **"Tower GM min standoff"** box on the SOP Validators card (default 60 ft) — the exact number the GM Tower standoff validator flags against, so what you see is what the check enforces. Edit the box and the rings resize in place; toggle them with the new **"⭕ Tower GM standoff rings on map"** switch (on by default). Rings track entity edits/refreshes automatically and never block map clicks.

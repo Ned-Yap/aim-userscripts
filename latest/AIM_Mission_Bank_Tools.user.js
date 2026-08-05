@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.49
+// @version      2.50
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.49';
+    const SCRIPT_VERSION = '2.50';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -254,6 +254,14 @@
     let showAglInEditor = gmGet(CACHE_KEY_AGL_VIEW, true);
     const CACHE_KEY_HIDE_FLAGPOLE = 'aim-mb-hide-flagpole';
     let hideFlagPoleOverlay = gmGet(CACHE_KEY_HIDE_FLAGPOLE, false);
+    // 🧮 Math in native step number fields (#236): type an arithmetic
+    // expression ("2630+15") into any Ant InputNumber in the step edit form
+    // and press Enter (or click away) — MBT evaluates it and commits the
+    // result through the InputNumber component's onChange (the same commit
+    // path the Apply queue uses). A LEADING +, * or / is relative to the
+    // field's committed value: "+15" on a field holding 2630 → 2645.
+    const CACHE_KEY_MATH_FIELDS = 'aim-mb-math-fields';
+    let mathFieldsEnabled = gmGet(CACHE_KEY_MATH_FIELDS, true);
 
     // Battery → flights mapping. User's IFS formula:
     //   > 560 → 7, > 480 → 6, > 360 → 5, > 270 → 4, > 180 → 3, >= 90 → 2, else 1
@@ -392,6 +400,12 @@
                         gmSet(CACHE_KEY_DEFAULT_SNAP_AGL, defaultSnapAglFt);
                         if (CONTEXT === 'IFRAME') { try { updateAutoSnapAglUI(); } catch (e) {} }
                     }
+                } else if (msg.toggleId === 'math-fields') {
+                    const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                    if (v !== mathFieldsEnabled) {
+                        mathFieldsEnabled = v;
+                        gmSet(CACHE_KEY_MATH_FIELDS, mathFieldsEnabled);
+                    }
                 } else if (typeof msg.toggleId === 'string' && msg.toggleId.indexOf('color-') === 0) {
                     const key = msg.toggleId.slice(6);
                     if (Object.prototype.hasOwnProperty.call(STEP_COLOR_DEFAULTS, key)) {
@@ -442,6 +456,7 @@
                 { id: 'mission-preview', label: '👁 Mission preview (map-tools button, Site Setup + Mission Bank)', type: 'boolean', default: true },
                 { id: 'preview-all', label: '👁 Show ALL missions (light dots — no lines/labels)', type: 'boolean', default: false },
                 { id: 'default-snap-agl', label: 'Default snapshot AGL (auto-AGL toggle)', type: 'number', min: -50, max: 500, step: 1, default: 10, unit: 'ft' },
+                { id: 'math-fields', label: '🧮 Math in step number fields (type 2630+15 or +15, then Enter)', type: 'boolean', default: true },
                 { id: 'colors-header', label: 'Step colors (editor cards + map badges)', type: 'header' },
                 { id: 'color-nav', label: 'Navigate', type: 'color', default: STEP_COLOR_DEFAULTS.nav },
                 { id: 'color-snap', label: 'Snapshot', type: 'color', default: STEP_COLOR_DEFAULTS.snap },
@@ -10861,6 +10876,120 @@ ${snapPlacemarks}
         return false;
     }
 
+    // ── 🧮 Math in native step number fields (#236) ──────────────────────────
+    // Ant InputNumber lets you TYPE "2630+15" but reverts it on blur (invalid
+    // number). We catch Enter/blur in the capture phase first, evaluate the
+    // expression ourselves, rewrite the display via setReactInputValue and
+    // commit through commitInputNumberViaFiber — so the form model gets the
+    // computed number exactly like the Apply queue writes one.
+    //
+    // Safe evaluator: + - * / ( ) and decimals only, recursive descent, no
+    // eval(). Returns null unless the WHOLE string parses to a finite number.
+    function mathEvalExpr(str) {
+        const s = str.replace(/\s+/g, '');
+        let i = 0;
+        function num() {
+            const m = /^\d*\.?\d+/.exec(s.slice(i));
+            if (!m) return null;
+            i += m[0].length;
+            return parseFloat(m[0]);
+        }
+        function factor() {
+            if (s[i] === '(') {
+                i++;
+                const v = expr();
+                if (v == null || s[i] !== ')') return null;
+                i++;
+                return v;
+            }
+            if (s[i] === '-') { i++; const v = factor(); return v == null ? null : -v; }
+            if (s[i] === '+') { i++; return factor(); }
+            return num();
+        }
+        function term() {
+            let v = factor();
+            while (v != null && (s[i] === '*' || s[i] === '/')) {
+                const op = s[i++];
+                const r = factor();
+                if (r == null) return null;
+                v = op === '*' ? v * r : v / r;
+            }
+            return v;
+        }
+        function expr() {
+            let v = term();
+            while (v != null && (s[i] === '+' || s[i] === '-')) {
+                const op = s[i++];
+                const r = term();
+                if (r == null) return null;
+                v = op === '+' ? v + r : v - r;
+            }
+            return v;
+        }
+        const v = expr();
+        return (v != null && i === s.length && isFinite(v)) ? v : null;
+    }
+
+    // Evaluate the field if (and only if) it holds an expression. Plain
+    // numbers and foreign text pass through untouched. Returns true when a
+    // value was computed AND committed via the component onChange.
+    function mathFieldMaybeEval(input, why) {
+        const raw = String(input.value || '').trim();
+        if (!raw) return false;
+        if (/^-?\d*\.?\d+$/.test(raw)) return false;            // plain number — not ours
+        if (!/^[\d.\s()+*/x×-]+$/i.test(raw)) return false;     // foreign chars — not ours
+        let exprStr = raw.replace(/[x×]/gi, '*');
+        // Leading +, * or / = relative to the committed value (aria-valuenow).
+        // Leading '-' stays absolute — it's indistinguishable from a negative.
+        if (/^[+*/]/.test(exprStr)) {
+            const cur = parseFloat(input.getAttribute('aria-valuenow'));
+            if (!isFinite(cur)) {
+                console.warn(`${TAG} [math] relative "${raw}" but no committed value to base it on — ignoring`);
+                return false;
+            }
+            exprStr = `(${cur})${exprStr}`;
+        }
+        const v = mathEvalExpr(exprStr);
+        if (v == null) {
+            console.warn(`${TAG} [math] could not evaluate "${raw}" — leaving field alone (Ant will revert it on blur)`);
+            return false;
+        }
+        const out = Math.round(v * 100) / 100;
+        setReactInputValue(input, out);
+        const committed = commitInputNumberViaFiber(input, out);
+        if (committed) console.log(`${TAG} [math] (${why}) "${raw}" → ${out} (committed)`);
+        else console.warn(`${TAG} [math] (${why}) "${raw}" → ${out} — component onChange NOT found; display updated, letting Ant's own ${why} commit it`);
+        return committed;
+    }
+
+    function mathFieldTarget(e) {
+        const t = e.target;
+        if (!t || t.tagName !== 'INPUT' || !t.classList || !t.classList.contains('ant-input-number-input')) return null;
+        return t.closest('.edit-instruction') ? t : null;
+    }
+    function installMathFields() {
+        // Enter — evaluate + commit, and swallow the key so nothing else
+        // (Percepto's form, the Quick Mission Editor's Enter listener) reacts
+        // to an Enter that was "just math". A second Enter on the now-plain
+        // number behaves natively. If the fiber commit failed we let the key
+        // through so Ant's own Enter handling commits the rewritten display.
+        window.addEventListener('keydown', (e) => {
+            if (!masterEnabled || !mathFieldsEnabled || e.key !== 'Enter') return;
+            const t = mathFieldTarget(e);
+            if (t && mathFieldMaybeEval(t, 'enter')) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+        }, true);
+        // Click-away — evaluate + commit BEFORE Ant's blur handler reverts the
+        // "invalid" expression text.
+        window.addEventListener('focusout', (e) => {
+            if (!masterEnabled || !mathFieldsEnabled) return;
+            const t = mathFieldTarget(e);
+            if (t) mathFieldMaybeEval(t, 'blur');
+        }, true);
+    }
+
     function findEditDialogInputByLabel(...labelTexts) {
         const labels = document.querySelectorAll('.edit-instruction__input-label');
         for (const label of labels) {
@@ -13187,6 +13316,9 @@ ${snapPlacemarks}
                 Object.keys(p).forEach(k => { p[k] = 0; });
             }, 5000);
             installRightClickHandler();
+            // 🧮 Math in native step number fields (#236) — capture-phase
+            // Enter/blur on Ant InputNumbers inside the step edit form.
+            installMathFields();
             // READ-ONLY probe: logs + diffs each mission save vs the cached
             // original (never modifies the save). Tells us whether the form
             // recomputes dependent fields, which decides if a fast body-patch
