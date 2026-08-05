@@ -2,7 +2,7 @@
 // @name         AIM Copy Asset Name
 // @name:en      AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.231
+// @version      4.244
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.231';
+    const SCRIPT_VERSION = '4.244';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -148,6 +148,7 @@
         fpOverlap: true, aglFloor: true, nfzSize: true, nfzProx: true,
         bandHeight: true, altInverted: true, fpDegenerate: true, gmTower: true,
         fpFfzAngle: true,
+        gmTowerRings: true,   // ⭕ live standoff circles on Tower GMs (radius = gmTowerFt)
     };
     let sopValidatorChannel = null;
     let sopMasterEnabled = true;
@@ -818,6 +819,28 @@
         };
         // One-shot reclaim: once the per-site caches are warm, drop the old global
         // blob to free ~1.5 MB of GM storage. Safe — per-site + shared files cover it.
+        // v4.239: purge THIS SITE's DEM cache. Use when cached values are
+        // suspect (e.g. a flight-path band came out below its floor because the
+        // cache held low ground): everything refetches fresh on next use, which
+        // also un-poisons the Map Editor's ⛰ Smart-fill (it reads this cache,
+        // and even substitutes the nearest point within 30 m).
+        unsafeWindow.__aimAIElevPurgeSite = (siteID) => {
+            try {
+                const sid = siteID || getCurrentSiteID();
+                if (!sid) { console.warn(`${TAG} no site — pass an id: __aimAIElevPurgeSite(1604)`); return 0; }
+                const before = Object.keys(loadElevationCache()).length;
+                elevGmSet(elevSiteKey(sid), {});
+                elevationCache = {}; elevCacheSiteID = sid;
+                // Also drop the legacy blob IN MEMORY for this session, so its
+                // (possibly equally stale) points can't re-supply the values we
+                // just purged. Still on disk — a reload brings it back.
+                legacyElevCache = {};
+                _nnSiteArr = null; _nnSiteSize = -1; _nnSiteId = null;
+                _nnLegArr = null; _nnLegSize = -1;
+                console.log(`${TAG} purged site ${sid} DEM cache (${before.toLocaleString()} points) + muted the legacy blob for this session. Re-run your altitude tool — ground refetches fresh.`);
+                return before;
+            } catch (e) { console.warn(`${TAG} site purge failed`, e); return 0; }
+        };
         unsafeWindow.__aimAIElevPurgeLegacy = () => {
             try {
                 const n = Object.keys(loadLegacyElevCache()).length;
@@ -5893,6 +5916,8 @@
             // Without this guard, dropping an altitude pin near an entity
             // would pop the inspector unexpectedly.
             if (!e.isTrusted) return;
+            // ✏ Fast FP Draw owns right-click (undo last vertex) while active.
+            if (ffd.active) { dbg('bail: fast FP draw active'); return; }
             // v4.168: Mission Bank Tools' Click-to-Add mode owns empty-space
             // right-clicks (M2 = drop a Nav) while editing a mission. When it's
             // armed it sets data-aim-clickadd="1" on <html>; bail so MBT's handler
@@ -8137,6 +8162,7 @@
                 { id: 'fpDegenerate', label: 'Check · Zero-length / duplicate FP arc', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpDegenerate },
                 { id: 'gmTower', label: 'Check · Tower GM standoff (FFZ + FP)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.gmTower },
                 { id: 'gmTowerFt', label: 'Tower GM min standoff', type: 'number', min: 0, max: 500, step: 1, default: SOP_THRESH_DEFAULTS.gmTowerFt, unit: 'ft' },
+                { id: 'gmTowerRings', label: '⭕ Tower GM standoff rings on map', type: 'boolean', default: SOP_ENABLE_DEFAULTS.gmTowerRings },
                 { id: 'fpFfzAngle', label: 'Check · FP→FFZ connection angle', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpFfzAngle },
                 { id: 'fpFfzAngleDeg', label: 'FP→FFZ min angle to the edge (ideal 45°)', type: 'number', min: 0, max: 90, step: 1, default: SOP_THRESH_DEFAULTS.fpFfzAngleDeg, unit: '°' },
                 { id: 'sop-draw', label: '🚩 Draw issues (run validators)', type: 'button', action: 'sop-draw' },
@@ -11952,6 +11978,7 @@
         try {
             injectSumButton(win.document);
             injectGenMapButton(win.document);
+            injectFfdMapButton(win.document);
             const frames = win.document.querySelectorAll('iframe');
             frames.forEach(f => { if (f.contentWindow) recursiveSumInject(f.contentWindow); });
         } catch (e) {}
@@ -11959,6 +11986,7 @@
     function runSumInjection() {
         if (!masterEnabled) return;
         recursiveSumInject(window);
+        ffdGhostTick();   // keep committed-FP ghosts alive (site nav / external wipes)
     }
     if (CONTEXT === 'IFRAME') {
         setInterval(runSumInjection, 2000);
@@ -22803,6 +22831,1229 @@
     }
 
     // ============================================================
+    // ✏ FAST FP DRAW (v4.231, feature #233) — click-click-click → flight
+    // path, entirely outside Percepto's draw editor. Born from the auto-AGL
+    // pain: Percepto's per-vertex DEM lookup is client-local, races rapid
+    // input, and UNDOES vertices it can't resolve. Here every click lands
+    // instantly; altitudes come from OUR elevation pipeline at finish, and
+    // the FP is created via the same POST /map_objects/ rails as the Route
+    // Converter (template-clone body, full arc fields per server rule #6,
+    // FFZ-contact check per rule #7, bridgeArcContinuity seam guarantee).
+    //   · click = vertex (snaps to FP vertices + FFZ edges) · drag = pan
+    //   · right-click = undo vertex · Enter / dbl-click = finish · Esc = undo/exit
+    //   · endpoint on an existing FP vertex → EXTEND-merges into that FP
+    //   · floor AGL + delta editable (SOP defaults 90 / +30 ft)
+    //   · commit is create-only (extend keeps a verbatim undo body)
+    // ============================================================
+    const FFD_BTN_ID = 'aim-ffd-btn';
+    const FFD_PANEL_ID = 'aim-ffd-panel';
+    const FFD_UNDO_LS = 'aim_ffd_undo:';
+    const FFD_DRAFT_LS = 'aim_ffd_draft:';   // v4.236 in-progress draw autosave (survives crash/reload/mystery wipes)
+    const FFD_GHOST_LS = 'aim_ffd_ghosts:';  // v4.237 committed-FP ghosts (visible until a reload makes them native)
+    // Smart-Fill terrain constants — Map Editor planArc parity.
+    // v4.238 HARD-FLOOR DOCTRINE — the floor is a MINIMUM, never a target;
+    // every rounding and ambiguity errs UP. (A live band came out AGL 72 under
+    // a 90 ft floor: sampling source read ~17 ft low → denser sampling, ceil
+    // floors, and a Percepto DEM cross-check that only ever raises bands.)
+    const FFD_SMART_SPACING_FT = 50;    // DEM sample spacing along a segment (was 100)
+    const FFD_SMART_MAX_SAMPLES = 120;  // sample cap per segment (was 60)
+    const FFD_SMART_VAR_FT = 30;        // ground range (ft) that forces a terrain step vertex
+    const FFD_SMART_MIN_STEP_FT = 60;   // never place auto-steps closer than this
+    const FFD_SNAP_PX = 12;          // screen-px snap radius (FP verts + FFZ edges)
+    const FFD_TOUCH_M = 0.5;         // rule #7 FFZ-contact tolerance (matches RC_TOUCH_M)
+    const FFD_DEFAULTS = { floorFt: 100, deltaFt: 30 };   // goal floor 100 ft AGL (SOP hard min 90 — never dip below floor)
+    // FP-piggyback shielding buffers around the drawn path — same treatment the
+    // Map Styler gives proposed-route paths ("a route path is a future FP").
+    // v4.233: the REAL settings come from the Map Styler over its state channel
+    // (FP_BUFFER_REQUEST → FP_BUFFER_SETTINGS; Styler re-broadcasts on every
+    // fp.* toggle change, so the preview live-tracks the card). These are only
+    // the fallback for when the Styler isn't installed / hasn't answered yet.
+    const FFD_BUFFERS = [
+        { ft: 65, color: '#1ca0de', opacity: 0.225 },   // outer first → stacks under
+        { ft: 40, color: '#1ca0de', opacity: 0.5 },
+    ];
+    let ffdStylerChannel = null;
+    try {
+        ffdStylerChannel = new BroadcastChannel('AIM_STYLER_CHANNEL');
+        ffdStylerChannel.onmessage = (ev) => {
+            const d = ev.data || {};
+            if (d.action === 'FP_BUFFER_SETTINGS' && d.settings) {
+                ffd.bufCfg = d.settings;
+                if (ffd.active) ffdRender();
+            }
+        };
+    } catch (e) { /* no BroadcastChannel → fallback defaults stay */ }
+    // Bands to render, outer→inner, honoring the Styler's per-band enables.
+    function ffdBufferBands() {
+        const c = ffd.bufCfg;
+        if (!c) return FFD_BUFFERS;
+        const bands = [];
+        if (c.band65 !== false) bands.push({ ft: c.distance65, color: c.color65, opacity: c.opacity65 });
+        if (c.buffer40 !== false) bands.push({ ft: c.distance40, color: c.color40, opacity: c.opacity40 });
+        return bands;
+    }
+    let ffd = {
+        active: false, stage: 'draw',   // 'draw' | 'review' | 'busy'
+        verts: [],                       // [{lat,lng}] — snapped positions
+        snaps: [],                       // per-vertex: null | {kind:'fp-vertex',...} | {kind:'ffz-edge',...}
+        segs: [],                        // [{a,b}] vert indices — a GRAPH, not a chain (v4.234 branching)
+        anchor: null,                    // vert index the next click extends from (click an existing vert to branch)
+        hist: [],                        // undo stack: full-state JSON snapshots (v4.235 — covers add/move/insert/delete/anchor)
+        dragVert: null, dragMoved: false, _dragStart: null,   // v4.235 vertex editing (genRoute-style)
+        _persistSig: null, _watchdog: null,                   // v4.236 draft autosave + layer watchdog
+        tentative: null, tentSnap: null, // live cursor (snapped) + its snap info
+        floorFt: FFD_DEFAULTS.floorFt, deltaFt: FFD_DEFAULTS.deltaFt,
+        name: '', createdCount: 0, showBuffers: true, bufCfg: null,
+        plan: null,                      // review-stage computed plan
+        fpGraph: null, fps: [], ffzs: [],
+        layers: [], _container: null,
+        _onMove: null, _onDown: null, _onUp: null, _onClick: null, _onDbl: null, _onCtx: null, _onKey: null, _onZoom: null,
+        _downAt: null,                   // {x,y,t} for click-vs-pan discrimination
+    };
+    // px per foot at the current zoom (Leaflet polyline weight is in px, so
+    // buffer widths must be recomputed on zoom — ffdRender re-runs on zoomend).
+    function ffdPxPerFt(map) {
+        try {
+            const c = map.getCenter();
+            const p = map.latLngToContainerPoint(c);
+            const off = map.containerPointToLatLng([p.x + 100, p.y]);
+            const m = approxMeters(c.lat, c.lng, off.lat, off.lng);
+            return m > 0 ? (100 / m) * GEN_FT_TO_M : 0;
+        } catch (e) { return 0; }
+    }
+    // v4.240 — GROUND SAMPLER FROM THE 3DEP LERC RASTER (the ⛰ terrain
+    // overlay's source). One request covers the whole path: complete coverage,
+    // no per-point queue, no rate limit. This replaced per-point elevation
+    // fetches for Smart-Fill because those silently under-resolved — a 4,679 ft
+    // segment ended up with ONE ground value and zero terrain steps, which is
+    // exactly how high ground hides. Returns a sampler fn (meters) or null.
+    async function ffdFetchGroundGrid(verts) {
+        if (!verts || !verts.length) return null;
+        let mnLat = Infinity, mxLat = -Infinity, mnLng = Infinity, mxLng = -Infinity;
+        verts.forEach(v => {
+            if (v.lat < mnLat) mnLat = v.lat; if (v.lat > mxLat) mxLat = v.lat;
+            if (v.lng < mnLng) mnLng = v.lng; if (v.lng > mxLng) mxLng = v.lng;
+        });
+        const padLat = Math.max(0.0008, (mxLat - mnLat) * 0.05);
+        const padLng = Math.max(0.0008, (mxLng - mnLng) * 0.05);
+        const dem = await terFetchDem(mnLng - padLng, mnLat - padLat, mxLng + padLng, mxLat + padLat);
+        if (!dem || !dem.vals || !dem.w || !dem.h) return null;
+        const sampler = (lat, lng) => {
+            const x = (terMercX(lng) - dem.mercX1) / (dem.mercX2 - dem.mercX1) * dem.w;
+            const y = (dem.mercY2 - terMercY(lat)) / (dem.mercY2 - dem.mercY1) * dem.h;
+            const xi = Math.min(dem.w - 1, Math.max(0, Math.round(x - 0.5)));
+            const yi = Math.min(dem.h - 1, Math.max(0, Math.round(y - 0.5)));
+            const ft = dem.vals[yi * dem.w + xi];
+            return isFinite(ft) ? ft / M_TO_FT : null;   // raster is FEET, we band in metres
+        };
+        sampler._cellFt = Math.max(dem.cellXft || 0, dem.cellYft || 0);
+        return sampler;
+    }
+    function ffdSegFootPx(p, A, B) {
+        const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
+        let t = l2 ? ((p.x - A.x) * dx + (p.y - A.y) * dy) / l2 : 0;
+        t = Math.max(0, Math.min(1, t));
+        const foot = { x: A.x + t * dx, y: A.y + t * dy };
+        return { dist: Math.hypot(p.x - foot.x, p.y - foot.y), foot };
+    }
+    // Snap a cursor latlng: FP graph vertices first (real connection), then FFZ
+    // edges (real landing). Returns { pt, snap } — pt unchanged when nothing is
+    // within FFD_SNAP_PX.
+    function ffdSnapPoint(ll) {
+        const map = getLeafletMap();
+        if (!map) return { pt: { lat: ll.lat, lng: ll.lng }, snap: null };
+        let cp; try { cp = map.latLngToContainerPoint(ll); } catch (e) { return { pt: { lat: ll.lat, lng: ll.lng }, snap: null }; }
+        if (ffd.fpGraph) {
+            const gv = nearestGraphVertex(ffd.fpGraph, ll.lat, ll.lng);
+            if (gv) {
+                try {
+                    const vp = map.latLngToContainerPoint(gv.vert);
+                    if (Math.hypot(vp.x - cp.x, vp.y - cp.y) <= FFD_SNAP_PX) {
+                        const touch = rcArcAtVertex(ffd.fps, gv.key);
+                        return {
+                            pt: { lat: gv.vert.lat, lng: gv.vert.lng },
+                            snap: {
+                                kind: 'fp-vertex',
+                                targetName: (touch && touch.fp.name) || 'flight path',
+                                arc: (touch && touch.arc) || null,
+                                fpId: (touch && touch.fp.id != null) ? touch.fp.id : null,
+                                fpValidated: !!(touch && touch.fp.validated),
+                            },
+                        };
+                    }
+                } catch (e) {}
+            }
+        }
+        let bestE = null;
+        for (const ent of ffd.ffzs) {
+            const ring = entityCoords(ent);
+            if (!ring || ring.length < 3) continue;
+            for (let i = 0; i < ring.length; i++) {
+                const a = ring[i], b = ring[(i + 1) % ring.length];
+                let pa, pb;
+                try { pa = map.latLngToContainerPoint(a); pb = map.latLngToContainerPoint(b); } catch (e) { continue; }
+                const r = ffdSegFootPx(cp, pa, pb);
+                if (r.dist <= FFD_SNAP_PX && (!bestE || r.dist < bestE.dist)) {
+                    bestE = { dist: r.dist, a, b, ent };
+                }
+            }
+        }
+        if (bestE) {
+            const proj = rcProjOnSeg(ll, bestE.a, bestE.b);
+            return {
+                pt: { lat: proj.lat, lng: proj.lng },
+                snap: {
+                    kind: 'ffz-edge',
+                    targetName: `FFZ "${bestE.ent.name || '#' + bestE.ent.id}"`,
+                    restrictions: bestE.ent.restrictions || null,
+                    edgeA: { lat: bestE.a.lat, lng: bestE.a.lng },
+                    edgeB: { lat: bestE.b.lat, lng: bestE.b.lng },
+                },
+            };
+        }
+        return { pt: { lat: ll.lat, lng: ll.lng }, snap: null };
+    }
+    function ffdClearLayers() {
+        const map = getLeafletMap();
+        ffd.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        ffd.layers = [];
+    }
+    function ffdRender() {
+        const L = getLeafletL(), map = getLeafletMap();
+        if (!L || !map) return;
+        ffdClearLayers();
+        // Graph model: one 2-point part per segment (Leaflet polylines accept
+        // nested latlng arrays → one layer renders the whole branching tree).
+        const segLL = ffd.segs.map(s => [[ffd.verts[s.a].lat, ffd.verts[s.a].lng], [ffd.verts[s.b].lat, ffd.verts[s.b].lng]]);
+        const tentPart = (ffd.stage === 'draw' && ffd.tentative && ffd.anchor != null)
+            ? [[ffd.verts[ffd.anchor].lat, ffd.verts[ffd.anchor].lng], [ffd.tentative.lat, ffd.tentative.lng]] : null;
+        try {
+            // Shielding buffers first (outer → inner) so they stack UNDER the
+            // lines — including the tentative anchor→cursor segment so the
+            // band previews where the next click will land.
+            if (ffd.showBuffers) {
+                const bufParts = segLL.slice();
+                if (tentPart) bufParts.push(tentPart);
+                const pxPerFt = bufParts.length ? ffdPxPerFt(map) : 0;
+                if (pxPerFt > 0) {
+                    ffdBufferBands().forEach(bf => {
+                        if (!(bf.ft > 0)) return;
+                        const bl = L.polyline(bufParts, {
+                            color: bf.color, opacity: bf.opacity, weight: 2 * bf.ft * pxPerFt,
+                            lineJoin: 'round', lineCap: 'round', interactive: false,
+                        });
+                        bl.addTo(map); ffd.layers.push(bl);
+                    });
+                }
+            }
+            if (segLL.length) {
+                const pl = L.polyline(segLL, { color: '#00e5ff', weight: 3, opacity: 0.95, interactive: false });
+                pl.addTo(map); ffd.layers.push(pl);
+            }
+            if (tentPart) {
+                const tl = L.polyline(tentPart,
+                    { color: ffd.tentSnap ? '#5fff5f' : '#00e5ff', weight: 2, opacity: 0.7, dashArray: '6,6', interactive: false });
+                tl.addTo(map); ffd.layers.push(tl);
+            }
+            ffd.verts.forEach((v, i) => {
+                const sn = ffd.snaps[i];
+                const isAnchor = ffd.stage === 'draw' && ffd.anchor === i;
+                const m = L.circleMarker([v.lat, v.lng], {
+                    radius: isAnchor ? 7 : 5, weight: isAnchor ? 3 : 2, fillOpacity: 0.95, interactive: false,
+                    color: isAnchor ? '#00e5ff' : (sn ? '#5fff5f' : '#ffffff'),
+                    fillColor: sn ? '#0a3d0a' : '#0a2730',
+                });
+                m.addTo(map); ffd.layers.push(m);
+            });
+        } catch (e) {}
+        ffdSyncPanelStats();
+        ffdPersistMaybe();
+    }
+    // Autosave the in-progress draw per site (advDraw's crash-resume pattern).
+    // Signature check keeps mousemove renders write-free; the draft clears
+    // itself when the graph empties (commit reset / full undo).
+    function ffdPersistMaybe() {
+        const sid = getCurrentSiteID(); if (!sid) return;
+        try {
+            const sig = JSON.stringify({ v: ffd.verts, s: ffd.segs, n: ffd.snaps, a: ffd.anchor });
+            if (sig === ffd._persistSig) return;
+            ffd._persistSig = sig;
+            const key = FFD_DRAFT_LS + sid;
+            if (!ffd.verts.length) localStorage.removeItem(key);
+            else localStorage.setItem(key, JSON.stringify({ when: Date.now(), verts: ffd.verts, segs: ffd.segs, snaps: ffd.snaps, anchor: ffd.anchor }));
+        } catch (e) {}
+    }
+    function ffdTotalFt() {
+        let m = 0;
+        for (const s of ffd.segs) m += approxMeters(ffd.verts[s.a].lat, ffd.verts[s.a].lng, ffd.verts[s.b].lat, ffd.verts[s.b].lng);
+        return Math.round(m * M_TO_FT);
+    }
+    // Undo = full-state snapshots (v4.235): push BEFORE every mutation (add /
+    // move / insert / delete / anchor switch), pop restores it verbatim. Small
+    // graphs → cloning is cheap, and every edit kind is one undo step.
+    function ffdSnapshot() {
+        try {
+            ffd.hist.push(JSON.stringify({ verts: ffd.verts, segs: ffd.segs, snaps: ffd.snaps, anchor: ffd.anchor }));
+            if (ffd.hist.length > 100) ffd.hist.shift();
+        } catch (e) {}
+    }
+    function ffdUndoStep() {
+        const h = ffd.hist.pop();
+        if (!h) { ffdSetActive(false); return; }
+        try {
+            const st = JSON.parse(h);
+            ffd.verts = st.verts; ffd.segs = st.segs; ffd.snaps = st.snaps; ffd.anchor = st.anchor;
+        } catch (e) {}
+        ffdRender();
+    }
+    // Delete a waypoint (genRoute-style right-click-a-dot): its segments go
+    // too; a degree-2 vertex bridges its two neighbors so the line heals.
+    function ffdDeleteVert(vi) {
+        ffdSnapshot();
+        const touching = ffd.segs.filter(s => s.a === vi || s.b === vi);
+        const nbs = [...new Set(touching.map(s => (s.a === vi ? s.b : s.a)))];
+        ffd.segs = ffd.segs.filter(s => s.a !== vi && s.b !== vi);
+        if (nbs.length === 2 && nbs[0] !== nbs[1] && !ffd.segs.some(s => (s.a === nbs[0] && s.b === nbs[1]) || (s.a === nbs[1] && s.b === nbs[0]))) {
+            ffd.segs.push({ a: nbs[0], b: nbs[1] });
+        }
+        ffd.verts.splice(vi, 1); ffd.snaps.splice(vi, 1);
+        const fix = (i) => (i > vi ? i - 1 : i);
+        ffd.segs.forEach(s => { s.a = fix(s.a); s.b = fix(s.b); });
+        if (ffd.anchor === vi) ffd.anchor = nbs.length ? fix(nbs[0]) : (ffd.verts.length ? ffd.verts.length - 1 : null);
+        else if (ffd.anchor != null) ffd.anchor = fix(ffd.anchor);
+        ffdRender();
+    }
+    // Split a segment at the projected click point and return the new vert's
+    // index (genRoute-style click-a-line-to-insert; caller starts a drag).
+    function ffdInsertOnSeg(si, ll) {
+        ffdSnapshot();
+        const s = ffd.segs[si];
+        const vi = ffd.verts.length;
+        ffd.verts.push({ lat: ll.lat, lng: ll.lng });
+        ffd.snaps.push(null);
+        ffd.segs.splice(si, 1, { a: s.a, b: vi }, { a: vi, b: s.b });
+        return vi;
+    }
+    // Hit-test the cursor against OUR segments (screen px) → {i, ll} or null.
+    function ffdHitOwnSeg(ll) {
+        const map = getLeafletMap(); if (!map) return null;
+        let cp; try { cp = map.latLngToContainerPoint(ll); } catch (e) { return null; }
+        let best = null, bestD = 8;
+        ffd.segs.forEach((s, i) => {
+            try {
+                const A = map.latLngToContainerPoint(ffd.verts[s.a]), B = map.latLngToContainerPoint(ffd.verts[s.b]);
+                const r = ffdSegFootPx(cp, A, B);
+                if (r.dist < bestD) { bestD = r.dist; best = { i, foot: r.foot }; }
+            } catch (e) {}
+        });
+        if (!best) return null;
+        let fll; try { fll = map.containerPointToLatLng([best.foot.x, best.foot.y]); } catch (e) { return null; }
+        return { i: best.i, ll: fll };
+    }
+    // Hit-test the cursor against OUR drawn waypoints (screen px) → index or -1.
+    function ffdHitOwnVert(ll) {
+        const map = getLeafletMap(); if (!map) return -1;
+        let cp; try { cp = map.latLngToContainerPoint(ll); } catch (e) { return -1; }
+        let best = -1, bestD = FFD_SNAP_PX;
+        ffd.verts.forEach((v, i) => {
+            try { const p = map.latLngToContainerPoint(v); const d = Math.hypot(p.x - cp.x, p.y - cp.y); if (d < bestD) { bestD = d; best = i; } } catch (e) {}
+        });
+        return best;
+    }
+    // ---- committed-FP ghosts (v4.237) ----
+    // Percepto won't render a created/extended FP until a page reload (the
+    // site is cached at load), so every commit leaves a persistent dashed
+    // GHOST polyline + name label. Ghosts live in localStorage per site and
+    // auto-prune once a page load postdates them — by then the native render
+    // has taken over (same lifecycle as the ➕ create-asset ghost squares).
+    let ffdGhostLayers = [];
+    let ffdGhostSite = null;
+    const FFD_PAGE_LOADED_AT = Date.now() - Math.round(performance.now());
+    function ffdLoadGhosts(sid) {
+        try {
+            const arr = JSON.parse(localStorage.getItem(FFD_GHOST_LS + sid) || '[]');
+            if (!Array.isArray(arr)) return [];
+            const fresh = arr.filter(g => g && Array.isArray(g.segs) && typeof g.when === 'number' && g.when >= FFD_PAGE_LOADED_AT);
+            if (fresh.length !== arr.length) localStorage.setItem(FFD_GHOST_LS + sid, JSON.stringify(fresh));
+            return fresh;
+        } catch (e) { return []; }
+    }
+    function ffdAddGhost(sid, ghost) {
+        try {
+            const arr = ffdLoadGhosts(sid);
+            arr.push(ghost);
+            localStorage.setItem(FFD_GHOST_LS + sid, JSON.stringify(arr));
+        } catch (e) {}
+        ffdRenderGhosts(true);
+    }
+    function ffdRemoveGhost(sid, id) {
+        try {
+            const arr = ffdLoadGhosts(sid).filter(g => g.id !== id);
+            localStorage.setItem(FFD_GHOST_LS + sid, JSON.stringify(arr));
+        } catch (e) {}
+        ffdRenderGhosts(true);
+    }
+    function ffdClearGhostLayers() {
+        const map = getLeafletMap();
+        ffdGhostLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        ffdGhostLayers = [];
+    }
+    function ffdRenderGhosts(force) {
+        const L = getLeafletL(), map = getLeafletMap();
+        const sid = getCurrentSiteID();
+        if (!L || !map || !sid) return;
+        const ghosts = ffdLoadGhosts(sid);
+        // Steady state (called every 2 s from the injection tick): same site,
+        // layers still on the map → nothing to do. Site change, external wipe,
+        // or force → rebuild.
+        if (!force && sid === ffdGhostSite) {
+            if (!ghosts.length && !ffdGhostLayers.length) return;
+            if (ghosts.length && ffdGhostLayers.length && map.hasLayer(ffdGhostLayers[0])) return;
+        }
+        ffdGhostSite = sid;
+        ffdClearGhostLayers();
+        ghosts.forEach(g => {
+            try {
+                const parts = g.segs.map(sp => sp.map(p => [p.lat, p.lng]));
+                const pl = L.polyline(parts, { color: '#00e5ff', weight: 3, opacity: 0.85, dashArray: '8,8', interactive: false });
+                pl.addTo(map); ffdGhostLayers.push(pl);
+                const at = g.segs[0] && g.segs[0][0];
+                if (at && g.name) {
+                    // divIcon label, NOT bindTooltip (Data View crash gotcha).
+                    const mk = L.marker([at.lat, at.lng], { interactive: false, icon: L.divIcon({ className: '', html: `<div style="color:#00e5ff;font-size:11px;font-weight:600;text-shadow:0 0 3px #000;white-space:nowrap">${g.name} <span style="opacity:0.65">(saved — refresh to edit)</span></div>`, iconAnchor: [0, -6] }) });
+                    mk.addTo(map); ffdGhostLayers.push(mk);
+                }
+            } catch (e) {}
+        });
+    }
+    function ffdGhostTick() { try { ffdRenderGhosts(false); } catch (e) {} }
+
+    // ---- panel ----
+    function ffdSyncPanelStats() {
+        const el = document.getElementById(FFD_PANEL_ID);
+        if (!el) return;
+        const s = el.querySelector('[data-ffd-stats]');
+        if (s) {
+            const n = ffd.verts.length;
+            const snapN = ffd.snaps.filter(Boolean).length;
+            const ext = ffd.snaps.find(sn => sn && sn.kind === 'fp-vertex' && sn.fpId != null);
+            s.innerHTML = n
+                ? `<b style="color:#00e5ff">${n}</b> waypoint${n === 1 ? '' : 's'} · <b>${ffd.segs.length}</b> seg${ffd.segs.length === 1 ? '' : 's'} · <b>${ffdTotalFt().toLocaleString()}</b> ft${snapN ? ` · <span style="color:#5fff5f">${snapN} snapped</span>` : ''}${ext ? `<br><span style="color:#7adfe6">⟳ will EXTEND ${ext.targetName}</span>` : ''}`
+                : '<span style="color:#888">click the map to start</span>';
+        }
+    }
+    function ffdRenderPanel() {
+        let el = document.getElementById(FFD_PANEL_ID);
+        if (!ffd.active) { if (el) el.remove(); return; }
+        if (!el) {
+            el = document.createElement('div');
+            el.id = FFD_PANEL_ID;
+            el.style.cssText = 'position:fixed;top:70px;right:12px;z-index:2147483600;background:rgba(10,22,30,0.96);border:1px solid rgba(0,229,255,0.5);border-radius:8px;padding:10px 12px;width:300px;font-family:system-ui,sans-serif;font-size:12px;color:#ddd;box-shadow:0 4px 18px rgba(0,0,0,0.55)';
+            document.body.appendChild(el);
+            el.addEventListener('click', (e) => {
+                const t = e.target;
+                if (!t || !t.closest) return;
+                if (t.closest('[data-ffd-close]')) { ffdSetActive(false); return; }
+                if (t.closest('[data-ffd-finish]')) { ffdFinish(); return; }
+                if (t.closest('[data-ffd-back]')) { ffd.stage = 'draw'; ffd.plan = null; ffdRenderPanel(); ffdRender(); return; }
+                if (t.closest('[data-ffd-commit]')) { ffdCommit(); return; }
+                if (t.closest('[data-ffd-undo]')) { ffdUndoLast(); return; }
+                if (t.closest('[data-ffd-export]')) { ffdExportDraw(); return; }
+                if (t.closest('[data-ffd-import]')) { ffdImportDraw(); return; }
+            });
+            el.addEventListener('input', (e) => {
+                const t = e.target;
+                if (!t || !t.dataset) return;
+                if (t.dataset.ffdName != null) ffd.name = t.value;
+                if (t.dataset.ffdFloor != null) { const v = parseFloat(t.value); if (Number.isFinite(v)) ffd.floorFt = v; }
+                if (t.dataset.ffdDelta != null) { const v = parseFloat(t.value); if (Number.isFinite(v)) ffd.deltaFt = v; }
+                if (t.dataset.ffdBuf != null) { ffd.showBuffers = !!t.checked; ffdRender(); }
+            });
+        }
+        const refreshNote = ffd.createdCount
+            ? `<div style="margin-top:8px;padding:6px 8px;border:1px solid rgba(255,179,71,0.6);border-radius:5px;color:#ffb347;font-size:11px"><b>${ffd.createdCount}</b> flight path${ffd.createdCount === 1 ? '' : 's'} created this session — <b>refresh the page before editing them natively</b> (Percepto caches the site at load; a native save would overwrite them).</div>`
+            : '';
+        const header = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+            <b style="color:#00e5ff;font-size:13px">✏ Fast FP Draw</b>
+            <button data-ffd-close style="background:transparent;border:none;color:#888;cursor:pointer;font-size:14px" title="Exit draw mode (Esc)">✕</button></div>`;
+        if (ffd.stage === 'draw') {
+            el.innerHTML = `${header}
+                <div style="display:flex;gap:6px;margin-bottom:6px;align-items:center">
+                    <span style="color:#888">Name</span>
+                    <input data-ffd-name value="${(ffd.name || '').replace(/"/g, '&quot;')}" placeholder="Fast FP" style="flex:1;background:#0a1a24;border:1px solid #2a4a5a;border-radius:4px;color:#ddd;padding:3px 6px;font-size:12px">
+                </div>
+                <div style="display:flex;gap:10px;margin-bottom:6px;align-items:center">
+                    <span style="color:#888">Floor AGL</span>
+                    <input data-ffd-floor type="number" value="${ffd.floorFt}" style="width:52px;background:#0a1a24;border:1px solid #2a4a5a;border-radius:4px;color:#ddd;padding:3px 6px;font-size:12px"> ft
+                    <span style="color:#888">Delta</span>
+                    <input data-ffd-delta type="number" value="${ffd.deltaFt}" style="width:46px;background:#0a1a24;border:1px solid #2a4a5a;border-radius:4px;color:#ddd;padding:3px 6px;font-size:12px"> ft
+                </div>
+                <label style="display:flex;gap:6px;align-items:center;margin-bottom:6px;color:#888;cursor:pointer"><input data-ffd-buf type="checkbox" ${ffd.showBuffers ? 'checked' : ''} style="accent-color:#1ca0de"> FP 40/65 ft shielding buffers</label>
+                <div data-ffd-stats style="margin-bottom:6px"></div>
+                <div style="color:#7a8a94;font-size:10px;line-height:1.5;margin-bottom:8px">click = waypoint (<span style="color:#5fff5f">green</span> = snapped to FP vertex / FFZ edge) · <b style="color:#00e5ff">click a waypoint = branch from it</b> (cyan ring = anchor) · <b>drag a waypoint = move it</b> · <b>click a line = insert a waypoint</b> · right-click a waypoint = delete it · right-click elsewhere = undo · drag empty map = pan · <b>Enter</b> / dbl-click = finish · Esc = undo/exit</div>
+                <button data-ffd-finish style="width:100%;background:rgba(0,229,255,0.15);border:1px solid rgba(0,229,255,0.6);border-radius:5px;color:#00e5ff;padding:6px 0;cursor:pointer;font-size:12px;font-weight:600">✔ Finish &amp; review</button>
+                <div style="display:flex;gap:6px;margin-top:6px">
+                    <button data-ffd-export style="flex:1;background:transparent;border:1px solid #2a4a5a;border-radius:5px;color:#7adfe6;padding:4px 0;cursor:pointer;font-size:11px" title="Download this draw as a file (insurance for big paths)">⤓ Save draw</button>
+                    <button data-ffd-import style="flex:1;background:transparent;border:1px solid #2a4a5a;border-radius:5px;color:#7adfe6;padding:4px 0;cursor:pointer;font-size:11px" title="Load a draw file back in (replaces the current draw)">⤒ Load draw</button>
+                </div>
+                <button data-ffd-undo style="width:100%;margin-top:6px;background:transparent;border:1px solid rgba(255,179,71,0.4);border-radius:5px;color:#ffb347;padding:4px 0;cursor:pointer;font-size:11px">↺ Undo last commit (this site)</button>
+                ${refreshNote}`;
+            ffdSyncPanelStats();
+        } else if (ffd.stage === 'busy') {
+            el.innerHTML = `${header}<div style="color:#7adfe6">${ffd._busyMsg || 'Working…'}</div>${refreshNote}`;
+        } else if (ffd.stage === 'review' && ffd.plan) {
+            const p = ffd.plan;
+            // AGL is the column that matters (the floor is a hard minimum) —
+            // green when it clears the floor, red if anything ever slips under.
+            const rows = p.arcs.map((a, i) => {
+                const aglLo = a.groundM != null ? (a.minM - a.groundM) / GEN_FT_TO_M : ffd.floorFt;
+                const aglHi = a.groundM != null ? (a.maxM - a.groundM) / GEN_FT_TO_M : ffd.floorFt + ffd.deltaFt;
+                const ok = aglLo >= ffd.floorFt - 0.5;
+                return `<tr>
+                <td style="padding:1px 6px;color:#888">${i + 1}</td>
+                <td style="padding:1px 6px">${Math.round(a.lenM * M_TO_FT)} ft</td>
+                <td style="padding:1px 6px">${a.groundM != null ? Math.round(a.groundM * M_TO_FT) + ' ft' : (p.mode === 'agl' ? '—' : '<span style="color:#ff8a80">?</span>')}</td>
+                <td style="padding:1px 6px;color:#7a8a94" title="ground spread over this piece — under ${FFD_SMART_VAR_FT} ft means no terrain step was needed">${a.spreadFt != null ? '±' + Math.round(a.spreadFt) : '—'}</td>
+                <td style="padding:1px 6px;font-weight:600;color:${ok ? '#5fff5f' : '#ff8a80'}">${Math.round(aglLo)}–${Math.round(aglHi)}</td>
+                <td style="padding:1px 6px;color:#00e5ff">${a.minM}–${a.maxM} m</td></tr>`;
+            }).join('');
+            const warns = p.warnings.map(w => `<div style="color:#ff9a3d;font-size:10px;margin-top:3px">⚠ ${w}</div>`).join('');
+            const errs = p.errors.map(w => `<div style="color:#ff8a80;font-size:10px;margin-top:3px">✗ ${w}</div>`).join('');
+            const modeLbl = p.mode === 'agl'
+                ? 'AGL site — stored values are height above ground (terrain-following is implicit)'
+                : `MSL site — Smart-Fill terrain bands (ground max per piece + ${ffd.floorFt}/${ffd.floorFt + ffd.deltaFt} ft; step vertices where ground varies >${FFD_SMART_VAR_FT} ft)`
+                  + (p.groundSource ? `<br><span style="color:#7adfe6">ground: ${p.groundSource}</span>` : '')
+                  + (p.coverage ? ` <span style="color:${p.coverage.pct >= 90 ? '#5fff5f' : '#ff9a3d'}">· ${p.coverage.pct}% sample coverage (${p.coverage.got}/${p.coverage.total})</span>` : '');
+            const extend = p.extendFpId != null
+                ? `<div style="color:#7adfe6;font-size:11px;margin-top:4px">⟳ merges into FP “${p.extendFpName}” as new segments (no new entity)${p.extendFpValidated ? ' <span style="color:#ffb347">— resets its validation</span>' : ''}</div>`
+                : (p.ffzTouch ? `<div style="color:#5fff5f;font-size:11px;margin-top:4px">✓ connects to ${p.ffzTouch}</div>` : '');
+            el.innerHTML = `${header}
+                <div style="color:#888;font-size:11px;margin-bottom:4px">${p.verts.length} waypoints → ${p.arcs.length} arcs${(p.stepVerts && p.stepVerts.length) ? ` <span style="color:#ffd24d">(+${p.stepVerts.length} terrain step${p.stepVerts.length === 1 ? '' : 's'})</span>` : ''} · ${ffdTotalFt().toLocaleString()} ft<br>${modeLbl}</div>
+                <div style="max-height:180px;overflow-y:auto;border:1px solid #1e3a4a;border-radius:4px;margin-bottom:4px">
+                <table style="width:100%;border-collapse:collapse;font-size:11px">
+                <tr style="color:#7a8a94"><th style="padding:1px 6px;text-align:left">#</th><th style="padding:1px 6px;text-align:left">len</th><th style="padding:1px 6px;text-align:left">ground</th><th style="padding:1px 6px;text-align:left" title="ground spread over the piece">Δ</th><th style="padding:1px 6px;text-align:left">AGL ft</th><th style="padding:1px 6px;text-align:left">band</th></tr>
+                ${rows}</table></div>
+                ${extend}${warns}${errs}
+                <button data-ffd-commit ${p.errors.length ? 'disabled' : ''} style="width:100%;margin-top:8px;background:${p.errors.length ? 'rgba(120,120,120,0.15)' : 'rgba(95,255,95,0.15)'};border:1px solid ${p.errors.length ? '#555' : 'rgba(95,255,95,0.6)'};border-radius:5px;color:${p.errors.length ? '#777' : '#5fff5f'};padding:6px 0;cursor:${p.errors.length ? 'not-allowed' : 'pointer'};font-size:12px;font-weight:600">${p.extendFpId != null ? '⟳ Extend flight path' : '⬆ Create flight path'}</button>
+                <button data-ffd-back style="width:100%;margin-top:6px;background:transparent;border:1px solid #2a4a5a;border-radius:5px;color:#888;padding:4px 0;cursor:pointer;font-size:11px">← Back to drawing</button>
+                ${refreshNote}`;
+        }
+    }
+    // ---- draw export / import (v4.240) ----
+    // Insurance for big paths: localStorage autosave already survives reloads,
+    // but a file can be moved between browsers/profiles and can't be cleared by
+    // a cache wipe. Same shape as the autosave draft.
+    function ffdExportDraw() {
+        if (!ffd.verts.length) { showToast('Nothing drawn to save', 'rgba(255,179,71,0.6)'); return; }
+        const sid = getCurrentSiteID() || 'nosite';
+        try {
+            downloadJSONFile(`aim-fastfp-draw-site${sid}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
+                JSON.stringify({ aimFastFpDraw: 1, siteID: sid, when: new Date().toISOString(), name: ffd.name, floorFt: ffd.floorFt, deltaFt: ffd.deltaFt, verts: ffd.verts, segs: ffd.segs, snaps: ffd.snaps, anchor: ffd.anchor }, null, 2));
+            showToast(`Saved ${ffd.verts.length} waypoints to a file`, 'rgba(95,255,95,0.6)');
+        } catch (e) {
+            console.warn(`${TAG} fast-FP draw export failed:`, e);
+            showToast(`Export failed: ${e && e.message || e}`, 'rgba(255,120,120,0.6)');
+        }
+    }
+    function ffdImportDraw() {
+        try {
+            const inp = document.createElement('input');
+            inp.type = 'file'; inp.accept = '.json,application/json';
+            inp.onchange = () => {
+                const f = inp.files && inp.files[0];
+                if (!f) return;
+                const rd = new FileReader();
+                rd.onload = () => {
+                    try {
+                        const d = JSON.parse(String(rd.result || 'null'));
+                        if (!d || !Array.isArray(d.verts) || !d.verts.length) throw new Error('not a Fast FP draw file');
+                        if (ffd.verts.length && !confirm(`Replace the current draw (${ffd.verts.length} waypoints) with the file's ${d.verts.length}?`)) return;
+                        ffdSnapshot();
+                        ffd.verts = d.verts;
+                        ffd.segs = Array.isArray(d.segs) ? d.segs : [];
+                        ffd.snaps = (Array.isArray(d.snaps) && d.snaps.length === d.verts.length) ? d.snaps : d.verts.map(() => null);
+                        ffd.anchor = (typeof d.anchor === 'number' && d.anchor < d.verts.length) ? d.anchor : d.verts.length - 1;
+                        if (d.name) ffd.name = d.name;
+                        if (Number.isFinite(d.floorFt)) ffd.floorFt = d.floorFt;
+                        if (Number.isFinite(d.deltaFt)) ffd.deltaFt = d.deltaFt;
+                        ffd.stage = 'draw'; ffd.plan = null;
+                        ffdRenderPanel(); ffdRender();
+                        showToast(`Loaded ${ffd.verts.length} waypoints${d.siteID && String(d.siteID) !== String(getCurrentSiteID()) ? ` — NOTE: file is from site ${d.siteID}` : ''}`, 'rgba(95,255,95,0.6)');
+                    } catch (e) {
+                        console.warn(`${TAG} fast-FP draw import failed:`, e);
+                        showToast(`Import failed: ${e && e.message || e}`, 'rgba(255,120,120,0.6)');
+                    }
+                };
+                rd.readAsText(f);
+            };
+            inp.click();
+        } catch (e) { console.warn(`${TAG} fast-FP import picker failed:`, e); }
+    }
+
+    // ---- finish → review plan ----
+    async function ffdFinish() {
+        if (ffd.stage !== 'draw') return;
+        if (!ffd.segs.length) { showToast('Need at least 2 connected waypoints', 'rgba(255,179,71,0.6)'); return; }
+        const siteID = getCurrentSiteID();
+        if (!siteID) { showToast('No site open', 'rgba(255,120,120,0.6)'); return; }
+        ffd.stage = 'busy'; ffd._busyMsg = 'Resolving altitude mode + elevations…'; ffdRenderPanel(); ffdRender();
+        try {
+            const am = await siteAltMode(siteID);
+            // CSM's ⊕-modal MSL/AGL override wins over the detected flag.
+            const mode = (genAltModeOverride === 'msl' || genAltModeOverride === 'agl') ? genAltModeOverride : am.mode;
+            const plan = { verts: ffd.verts.map(v => ({ lat: v.lat, lng: v.lng })), arcs: [], warnings: [], errors: [], mode, extendFpId: null, extendFpName: null, extendFpValidated: false, ffzTouch: null };
+            // EXTEND: first fp-vertex snap wins (same doctrine as the Route Converter).
+            const ext = ffd.snaps.find(s => s && s.kind === 'fp-vertex' && s.fpId != null);
+            if (ext) { plan.extendFpId = ext.fpId; plan.extendFpName = ext.targetName; plan.extendFpValidated = ext.fpValidated; }
+            // Rule #7 — FFZ contact (extend inherits it from the host FP).
+            if (!ext) {
+                let touch = null;
+                for (let i = 0; i < plan.verts.length && !touch; i++) {
+                    const s = ffd.snaps[i];
+                    if (s && s.kind === 'ffz-edge') { touch = s.targetName; break; }
+                    for (const ent of ffd.ffzs) {
+                        const ring = entityCoords(ent);
+                        if (ring && ring.length >= 3 && pointToPolygonMeters(plan.verts[i].lat, plan.verts[i].lng, ring) <= FFD_TOUCH_M) {
+                            touch = `FFZ "${ent.name || '#' + ent.id}"`; break;
+                        }
+                    }
+                }
+                plan.ffzTouch = touch;
+                if (!touch) plan.errors.push('no waypoint lands on/in a Free Fly Zone — Percepto requires every flight path to connect to an FFZ. Snap a waypoint onto an FFZ edge (green) or end inside one.');
+            }
+            plan.stepVerts = [];
+            if (mode === 'unknown') {
+                plan.errors.push('site altitude mode unknown — set MSL/AGL in the ⊕ Generate modal banner first');
+            } else if (mode === 'agl') {
+                // AGL site: stored values ARE height-above-ground — terrain-
+                // independent, no sampling, no steps (Map Editor planArc parity).
+                for (const sg of ffd.segs) {
+                    const a = plan.verts[sg.a], b = plan.verts[sg.b];
+                    const minM = Math.ceil(aglFtToStoredM(ffd.floorFt, 0, 'agl'));
+                    plan.arcs.push({ a, b, sa: sg.a, sb: sg.b, lenM: approxMeters(a.lat, a.lng, b.lat, b.lng), groundM: null,
+                        minM, maxM: Math.max(fpArcAltMeters(aglFtToStoredM(ffd.floorFt + ffd.deltaFt, 0, 'agl')), minM + 1) });
+                }
+            } else if (mode === 'msl') {
+                // SMART-FILL (ported from the Map Editor's planArc): sample DEM
+                // along each segment, greedy-partition wherever the ground range
+                // exceeds FFD_SMART_VAR_FT (respecting the min step length),
+                // insert the fewest step vertices, and band each piece off its
+                // own max ground. Endpoint-only ground on a long segment misses
+                // interior high ground — that's the bug this exists to prevent.
+                ffd._busyMsg = 'Smart-Fill: fetching the 3DEP terrain raster…'; ffdRenderPanel();
+                const segSamples = ffd.segs.map(sg => {
+                    const a = plan.verts[sg.a], b = plan.verts[sg.b];
+                    const distM = approxMeters(a.lat, a.lng, b.lat, b.lng);
+                    const n = Math.max(3, Math.min(FFD_SMART_MAX_SAMPLES, Math.ceil(distM / (FFD_SMART_SPACING_FT * GEN_FT_TO_M)) + 1));
+                    const pts = [];
+                    for (let i = 0; i < n; i++) { const t = i / (n - 1); pts.push({ lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t, t }); }
+                    return { sg, a, b, distM, pts };
+                });
+                // One raster request for the whole path (full coverage). Falls
+                // back to the per-point elevation queue only if 3DEP fails.
+                let grid = null;
+                try { grid = await ffdFetchGroundGrid(plan.verts); } catch (e) { console.warn(`${TAG} fast-FP 3DEP raster failed, falling back to point fetches:`, e); }
+                if (grid) {
+                    plan.groundSource = `3DEP raster (~${Math.round(grid._cellFt || 0)} ft cells, full coverage)`;
+                } else {
+                    plan.groundSource = 'per-point elevation queue (3DEP raster unavailable)';
+                    ffd._busyMsg = 'Smart-Fill: sampling terrain point-by-point…'; ffdRenderPanel();
+                    try { await bulkFetchElevations(segSamples.flatMap(ss => ss.pts)); } catch (e) {}
+                }
+                let sampTotal = 0, sampGot = 0;
+                segSamples.forEach((ss, si) => {
+                    const valid = ss.pts.map(p => ({ t: p.t, e: grid ? grid(p.lat, p.lng) : getElevationFromCache(p.lat, p.lng) })).filter(x => typeof x.e === 'number');
+                    sampTotal += ss.pts.length; sampGot += valid.length;
+                    if (valid.length < 2) {
+                        plan.errors.push(`segment ${si + 1}: DEM ground unavailable (needed for MSL altitudes) — try again in a moment, elevations may still be fetching`);
+                        return;
+                    }
+                    const maxVarM = FFD_SMART_VAR_FT * GEN_FT_TO_M, minStepM = FFD_SMART_MIN_STEP_FT * GEN_FT_TO_M;
+                    const subs = []; let s0 = 0, cmin = valid[0].e, cmax = valid[0].e;
+                    for (let i = 1; i < valid.length; i++) {
+                        const nmin = Math.min(cmin, valid[i].e), nmax = Math.max(cmax, valid[i].e);
+                        const lenFromS = ss.distM * (valid[i - 1].t - valid[s0].t);
+                        if ((nmax - nmin) > maxVarM && lenFromS >= minStepM && (i - 1) > s0) {
+                            subs.push({ i0: s0, i1: i - 1 }); s0 = i - 1;
+                            cmin = Math.min(valid[i - 1].e, valid[i].e); cmax = Math.max(valid[i - 1].e, valid[i].e);
+                        } else { cmin = nmin; cmax = nmax; }
+                    }
+                    subs.push({ i0: s0, i1: valid.length - 1 });
+                    const lerp = (t) => ({ lat: ss.a.lat + (ss.b.lat - ss.a.lat) * t, lng: ss.a.lng + (ss.b.lng - ss.a.lng) * t });
+                    const cutVerts = [ss.a];
+                    for (let k = 0; k < subs.length - 1; k++) { const v = lerp(valid[subs[k].i1].t); cutVerts.push(v); plan.stepVerts.push(v); }
+                    cutVerts.push(ss.b);
+                    for (let k = 0; k < subs.length; k++) {
+                        let g = -Infinity, gAt = null, gLo = Infinity;
+                        for (let j = subs[k].i0; j <= subs[k].i1; j++) {
+                            if (valid[j].e > g) { g = valid[j].e; gAt = lerp(valid[j].t); }
+                            if (valid[j].e < gLo) gLo = valid[j].e;
+                        }
+                        // Ground SPREAD over this piece — the number that proves
+                        // whether "0 steps" means genuinely flat (Δ under the
+                        // threshold) or under-sampled terrain. Shown per row.
+                        const spreadFt = (isFinite(gLo) && isFinite(g)) ? (g - gLo) * M_TO_FT : null;
+                        // HARD FLOOR: ceil, never round — the floor may only err UP.
+                        const minM = Math.ceil(aglFtToStoredM(ffd.floorFt, g, 'msl'));
+                        plan.arcs.push({
+                            a: cutVerts[k], b: cutVerts[k + 1],
+                            // Only the outer sub-arcs touch original waypoints —
+                            // junction checks key off sa/sb, steps stay null.
+                            sa: k === 0 ? ss.sg.a : null, sb: k === subs.length - 1 ? ss.sg.b : null,
+                            lenM: approxMeters(cutVerts[k].lat, cutVerts[k].lng, cutVerts[k + 1].lat, cutVerts[k + 1].lng),
+                            groundM: g, minM, spreadFt,
+                            maxM: Math.max(fpArcAltMeters(aglFtToStoredM(ffd.floorFt + ffd.deltaFt, g, 'msl')), minM + 1),
+                            _maxPt: gAt ? { lat: gAt.lat, lng: gAt.lng, e: g } : null,
+                        });
+                    }
+                });
+                plan.coverage = { got: sampGot, total: sampTotal, pct: sampTotal ? Math.round(sampGot / sampTotal * 100) : 0 };
+                if (plan.coverage.pct < 90) {
+                    plan.warnings.push(`only ${plan.coverage.pct}% of terrain samples resolved (${sampGot}/${sampTotal}) — segments with gaps may hide high ground, so their bands are less trustworthy. Re-run Finish to retry the raster.`);
+                }
+                console.log(`${TAG} fast-FP Smart-Fill: ${plan.arcs.length} pieces from ${ffd.segs.length} segments (+${plan.stepVerts.length} terrain steps) · sample coverage ${plan.coverage.pct}% · ground via ${plan.groundSource}`);
+                // Percepto DEM datum check — BOUNDED (v4.240). Probing every
+                // piece rate-limited the endpoint (107/117 unverified on an 88k ft
+                // path). We only need the OFFSET between our raster and Percepto's
+                // DEM, so probe a spread sample and apply the worst offset to
+                // EVERY piece. One-directional by doctrine: raises only.
+                const mslArcs = plan.arcs.filter(x => x.groundM != null && x._maxPt);
+                if (mslArcs.length && !plan.errors.length) {
+                    const FFD_VERIFY_MAX = 10;
+                    // Highest-ground pieces first (they govern safety), then spread
+                    // across the path so a local offset can't hide.
+                    const byGround = mslArcs.slice().sort((x, y) => y.groundM - x.groundM);
+                    const picks = byGround.slice(0, Math.min(5, byGround.length));
+                    const step = Math.max(1, Math.floor(mslArcs.length / (FFD_VERIFY_MAX - picks.length || 1)));
+                    for (let i = 0; i < mslArcs.length && picks.length < FFD_VERIFY_MAX; i += step) {
+                        if (!picks.includes(mslArcs[i])) picks.push(mslArcs[i]);
+                    }
+                    let probed = 0, worstDeltaM = 0, done = 0;
+                    for (const x of picks) {
+                        ffd._busyMsg = `Checking our terrain raster against Percepto's DEM (${++done}/${picks.length})…`; ffdRenderPanel();
+                        let pm = null;
+                        try { pm = await perceptoFetchPoint(x._maxPt.lat, x._maxPt.lng); } catch (e) {}
+                        if (typeof pm === 'number') {
+                            probed++;
+                            const d = pm - x.groundM;
+                            if (d > worstDeltaM) worstDeltaM = d;
+                        }
+                        await new Promise(r => setTimeout(r, 200));   // stay under the endpoint's limit
+                    }
+                    plan.demOffsetFt = worstDeltaM * M_TO_FT;
+                    plan.demProbes = probed;
+                    if (worstDeltaM > 0.01) {
+                        mslArcs.forEach(x => {
+                            x.groundM += worstDeltaM;
+                            x.minM = Math.ceil(aglFtToStoredM(ffd.floorFt, x.groundM, 'msl'));
+                            x.maxM = Math.max(fpArcAltMeters(aglFtToStoredM(ffd.floorFt + ffd.deltaFt, x.groundM, 'msl')), x.minM + 1);
+                        });
+                        plan.warnings.push(`Percepto's DEM reads up to ${Math.round(plan.demOffsetFt)} ft higher than our terrain raster (${probed} of ${picks.length} spot-checks answered) — EVERY band raised by that offset, so the ${ffd.floorFt} ft floor holds everywhere`);
+                    } else if (!probed) {
+                        plan.warnings.push(`Percepto DEM spot-check got no answer (endpoint rate-limited) — bands rest on the 3DEP raster alone. Floors are ceil-rounded and terrain-stepped, but re-check one segment's AGL in the editor after saving.`);
+                    }
+                    console.log(`${TAG} fast-FP DEM datum check: ${probed}/${picks.length} probes answered, offset ${plan.demOffsetFt.toFixed(0)} ft applied to all ${mslArcs.length} pieces`);
+                }
+                // Final hard-floor assertion — belt and braces. Any piece whose
+                // band would sit under the floor over its OWN verified ground is
+                // a bug; refuse to commit rather than ship an unsafe path.
+                plan.arcs.forEach((x, i) => {
+                    if (x.groundM == null) return;
+                    const aglFt = (x.minM - x.groundM) / GEN_FT_TO_M;
+                    if (aglFt < ffd.floorFt - 0.5) plan.errors.push(`piece ${i + 1} floor is ${Math.round(aglFt)} ft AGL — below the ${ffd.floorFt} ft hard floor. Refusing to commit (report this).`);
+                });
+            }
+            // Junction sanity vs snapped arcs (server enforces strictly-positive
+            // overlap between connected arcs; bridgeArcContinuity only covers arcs
+            // in OUR body, so cross-entity junctions get a warning instead).
+            ffd.snaps.forEach((s, vi) => {
+                if (!s || s.kind !== 'fp-vertex' || !s.arc) return;
+                const b = rcArcBand(s.arc);
+                if (!b) return;
+                const adj = plan.arcs.filter(x => (x.sa === vi || x.sb === vi) && x.minM != null);
+                if (adj.length && !adj.some(x => x.minM < b.maxM && b.minM < x.maxM)) {
+                    plan.warnings.push(`band at waypoint ${vi + 1} (${adj.map(x => `${x.minM}–${x.maxM} m`).join(', ')}) does not strictly overlap "${s.targetName}" (${b.minM}–${b.maxM} m) — the server may reject the junction`);
+                }
+            });
+            // FFZ landing checks: angle (SOP ≥15°) + band overlap with the landing zone.
+            ffd.snaps.forEach((s, vi) => {
+                if (!s || s.kind !== 'ffz-edge') return;
+                // Landing-angle only makes sense for a branch TIP (degree 1) —
+                // its one neighbor defines the approach direction.
+                const touching = plan.arcs.filter(x => x.sa === vi || x.sb === vi);
+                if (touching.length === 1) {
+                    const other = touching[0].sa === vi ? touching[0].sb : touching[0].sa;
+                    const ang = rcSegEdgeAngleDeg(plan.verts[other], plan.verts[vi], s.edgeA, s.edgeB);
+                    if (ang != null && ang < 15) plan.warnings.push(`lands on ${s.targetName} at ${Math.round(ang)}° to the edge (SOP wants ≥15°, ideal 45°)`);
+                }
+                const r = s.restrictions;
+                const adj = touching.filter(x => x.minM != null);
+                if (r && typeof r.minAlt === 'number' && typeof r.maxAlt === 'number' && adj.length &&
+                    !adj.some(x => x.minM < r.maxAlt && r.minAlt < x.maxM)) {
+                    plan.warnings.push(`band does not overlap landing ${s.targetName} (${fpArcAltMeters(r.minAlt)}–${fpArcAltMeters(r.maxAlt)} m) — FP-in-FFZ overlap is required`);
+                }
+            });
+            ffd.plan = plan;
+            ffd.stage = 'review';
+        } catch (e) {
+            console.warn(`${TAG} fast-FP finish threw:`, e);
+            showToast(`Finish failed: ${e && e.message || e}`, 'rgba(255,120,120,0.6)');
+            ffd.stage = 'draw';
+        }
+        ffdRenderPanel(); ffdRender();
+    }
+    // ---- commit ----
+    function ffdArcChain(plan, baseArc) {
+        const snapEm = ffd.snaps.find(s => s && s.kind === 'fp-vertex' && s.arc && Number.isFinite(s.arc.min_emergency_alt));
+        const emergM = snapEm ? snapEm.arc.min_emergency_alt
+            : ((baseArc && Number.isFinite(baseArc.min_emergency_alt)) ? baseArc.min_emergency_alt : 12);
+        return plan.arcs.map(pa => {
+            let arc = {};
+            if (baseArc) {
+                arc = JSON.parse(JSON.stringify(baseArc));
+                delete arc.id;
+                delete arc.mapobject;
+            }
+            const a = { lat: pa.a.lat, lng: pa.a.lng }, b = { lat: pa.b.lat, lng: pa.b.lng };
+            arc.point_a = a;
+            arc.point_b = b;
+            arc.points = [a, b];
+            arc.min_alt = pa.minM;
+            arc.max_alt = pa.maxM;
+            arc.min_emergency_alt = emergM;
+            arc.distance = pa.lenM;
+            if (typeof arc.wait_until_approved !== 'boolean') arc.wait_until_approved = false;
+            return arc;
+        });
+    }
+    async function ffdCommit() {
+        if (ffd.stage !== 'review' || !ffd.plan || ffd.plan.errors.length) return;
+        if (liteBlockedWrite('create flight path')) return;
+        const siteID = getCurrentSiteID();
+        if (!siteID) { showToast('No site open', 'rgba(255,120,120,0.6)'); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { showToast('No CSRF token — make one native save/edit anywhere in Percepto first, then retry.', 'rgba(255,120,120,0.6)'); return; }
+        const plan = ffd.plan;
+        ffd.stage = 'busy'; ffd._busyMsg = plan.extendFpId != null ? 'Extending flight path…' : 'Creating flight path…'; ffdRenderPanel();
+        try {
+            let siteCfg = null;
+            try { siteCfg = await fetchSiteConfig(siteID); } catch (e) {}
+            let ents = ((mapObjectsBySite[siteID] || {}).entities) || [];
+            // v4.242: EXTEND host resolution must survive a stale cache. The
+            // snap's fpId is captured at draw time and the draw can outlive a
+            // page reload (draft autosave), another tab's edit, or an undone
+            // commit — so re-fetch before believing the host is gone, and if it
+            // really is gone, DEGRADE to creating a standalone FP rather than
+            // throwing the whole draw away (which is what "refresh and redraw"
+            // used to mean, and it cost the user a huge path's worth of trust).
+            const findHost = (list) => list.find(e => String(e.id) === String(plan.extendFpId) && e.type === 15);
+            if (plan.extendFpId != null && !findHost(ents)) {
+                ffd._busyMsg = 'Host flight path not in cache — re-fetching site…'; ffdRenderPanel();
+                try { await fetchMapObjects(siteID, true); } catch (e) {}
+                ents = ((mapObjectsBySite[siteID] || {}).entities) || [];
+                if (!findHost(ents)) {
+                    // Genuinely absent (deleted / undone / different site). Can we
+                    // still create it standalone? Rule #7 needs FFZ contact.
+                    const ffzs2 = ents.filter(e => e.type === 16 && entityCoords(e));
+                    let touch = null;
+                    for (const v of plan.verts) {
+                        for (const ent of ffzs2) {
+                            const ring = entityCoords(ent);
+                            if (ring && ring.length >= 3 && pointToPolygonMeters(v.lat, v.lng, ring) <= FFD_TOUCH_M) { touch = ent.name || `#${ent.id}`; break; }
+                        }
+                        if (touch) break;
+                    }
+                    if (!touch) throw new Error(`the flight path you snapped onto (#${plan.extendFpId}) no longer exists on the server, and no waypoint touches a Free Fly Zone, so it can't be saved standalone either. Your draw is still here — drag an end waypoint onto an FFZ edge or an existing FP vertex, then Commit again.`);
+                    if (!confirm(`The flight path you snapped onto (#${plan.extendFpId}) is no longer on the server — it was probably deleted or undone.\n\nSave your ${plan.arcs.length} segments as a NEW standalone flight path instead?\n\n(It connects to FFZ "${touch}", so the server will accept it. Your draw is not lost either way.)`)) {
+                        ffd.stage = 'review'; ffdRenderPanel();
+                        return;
+                    }
+                    console.warn(`${TAG} fast-FP extend host #${plan.extendFpId} missing — degrading to standalone create (FFZ contact: ${touch})`);
+                    plan.extendFpId = null; plan.extendFpName = null; plan.ffzTouch = `FFZ "${touch}"`;
+                }
+            }
+            const usedNames = new Set(ents.filter(e => e.name).map(e => e.name));
+            const uniqueName = (base) => { if (!base) base = 'Fast FP'; if (!usedNames.has(base)) return base; let i = 2, n; do { n = base + '_' + (i++); } while (usedNames.has(n)); return n; };
+            const tmplFpEnt = ents.find(e => e.type === 15 && Array.isArray(e.arcs) && e.arcs.length);
+            let tmplFpBody = null;
+            if (tmplFpEnt) { try { tmplFpBody = buildWriteBody(tmplFpEnt, siteCfg); } catch (e) {} }
+            const tmplArc = (tmplFpBody && Array.isArray(tmplFpBody.arcs) && tmplFpBody.arcs.length) ? JSON.parse(JSON.stringify(tmplFpBody.arcs[0])) : null;
+            const postBody = async (body) => {
+                const r = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
+                const txt = await r.text(); let json = null; try { json = JSON.parse(txt); } catch (e) {}
+                return { status: r.status, saved: json && json.map_objects, txt };
+            };
+            let undoRec = null, doneMsg = null;
+            if (plan.extendFpId != null) {
+                const fpEnt = findHost(ents);
+                if (!fpEnt) throw new Error(`host flight path #${plan.extendFpId} vanished mid-commit — nothing was written; your draw is intact, press Commit again`);
+                const body = buildWriteBody(fpEnt, siteCfg);
+                const originalBody = JSON.parse(JSON.stringify(body));
+                const wasValidated = !!body.validated;
+                const baseArc = (Array.isArray(body.arcs) && body.arcs.length) ? JSON.parse(JSON.stringify(body.arcs[0])) : tmplArc;
+                if (!Array.isArray(body.points)) body.points = [];
+                body.arcs = body.arcs.concat(ffdArcChain(plan, baseArc));
+                body.points = body.points.concat(plan.verts.concat(plan.stepVerts || []).map(v => ({ lat: v.lat, lng: v.lng })));
+                body.validated = false;
+                try { bridgeArcContinuity(body.arcs); } catch (e) {}
+                const r = await postBody(body);
+                if (!(r.status === 200 && r.saved)) throw new Error(`server ${r.status} ${(r.txt || '').slice(0, 160)}`);
+                undoRec = { when: Date.now(), kind: 'extend', id: plan.extendFpId, name: fpEnt.name || `#${plan.extendFpId}`, body: originalBody };
+                doneMsg = `Extended FP "${fpEnt.name}" (+${plan.arcs.length} arcs)${wasValidated ? ' — its validation was reset' : ''}`;
+            } else {
+                let body;
+                if (tmplFpBody) body = JSON.parse(JSON.stringify(tmplFpBody));
+                else {
+                    body = { type: 15, description: '', custom: {}, params: {}, asset_waypoints: null, constantly_present_asset_name: false, general_marker_type: '', marker_height: 0, is_unshielded: false, restrictions: null };
+                    plan.warnings.push('site has no existing FP to use as a template — used a minimal body');
+                }
+                delete body.id;
+                body.type = 15;
+                body.name = uniqueName(genCleanName(ffd.name || 'Fast FP'));
+                body.site_id = siteID;
+                body.description = '';
+                body.validated = false;
+                body.points = plan.verts.concat(plan.stepVerts || []).map(v => ({ lat: v.lat, lng: v.lng }));
+                body.arcs = ffdArcChain(plan, tmplArc);
+                body.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
+                try { bridgeArcContinuity(body.arcs); } catch (e) {}
+                const r = await postBody(body);
+                if (!(r.status === 200 && r.saved)) throw new Error(`server ${r.status} ${(r.txt || '').slice(0, 160)}`);
+                undoRec = { when: Date.now(), kind: 'create', id: r.saved.id != null ? r.saved.id : null, name: body.name };
+                doneMsg = `Created FP "${body.name}" (${plan.arcs.length} arcs)`;
+            }
+            // Verify against a fresh fetch (same rail as the Route Converter).
+            try {
+                await fetchMapObjects(siteID, true);
+                const fresh = ((mapObjectsBySite[siteID] || {}).entities) || [];
+                if (undoRec.kind === 'create' && undoRec.id != null && !fresh.some(e => e.id === undoRec.id)) {
+                    showToast('⚠ Created FP not found on re-fetch — verify manually', 'rgba(255,179,71,0.7)');
+                }
+                ffd.fps = fresh.filter(e => e.type === 15 && Array.isArray(e.arcs) && e.arcs.length);
+                ffd.ffzs = fresh.filter(e => e.type === 16 && entityCoords(e));
+                try { ffd.fpGraph = buildFlightPathGraph(fresh); } catch (e) {}
+            } catch (e) {}
+            try { localStorage.setItem(FFD_UNDO_LS + siteID, JSON.stringify(undoRec)); } catch (e) {}
+            // Persistent ghost placeholder — the real FP won't render natively
+            // until a reload, and the user chains many draws per session.
+            try {
+                ffdAddGhost(siteID, {
+                    id: undoRec.kind === 'create' ? undoRec.id : plan.extendFpId,
+                    name: undoRec.kind === 'extend' ? `⟳ ${undoRec.name}` : undoRec.name,
+                    when: Date.now(),
+                    segs: plan.arcs.map(x => [{ lat: x.a.lat, lng: x.a.lng }, { lat: x.b.lat, lng: x.b.lng }]),
+                });
+            } catch (e) {}
+            console.log(`${TAG} fast-FP commit OK:`, doneMsg);
+            showToast(`${doneMsg} — refresh before editing natively`, 'rgba(95,255,95,0.6)');
+            ffd.createdCount++;
+            ffd.verts = []; ffd.snaps = []; ffd.segs = []; ffd.anchor = null; ffd.hist = []; ffd.dragVert = null; ffd.dragMoved = false; ffd._dragStart = null; ffd.tentative = null; ffd.tentSnap = null; ffd.plan = null; ffd.name = '';
+            ffd.stage = 'draw';
+        } catch (e) {
+            console.warn(`${TAG} fast-FP commit failed:`, e);
+            showToast(`Commit failed: ${e && e.message || e}`, 'rgba(255,120,120,0.6)');
+            ffd.stage = 'review';
+        }
+        ffdRenderPanel(); ffdRender();
+    }
+    async function ffdUndoLast() {
+        if (liteBlockedWrite('undo fast FP')) return;
+        const siteID = getCurrentSiteID();
+        if (!siteID) return;
+        let rec = null;
+        try { rec = JSON.parse(localStorage.getItem(FFD_UNDO_LS + siteID) || 'null'); } catch (e) {}
+        if (!rec) { showToast('No Fast FP commit to undo on this site.', 'rgba(255,180,0,0.6)'); return; }
+        const what = rec.kind === 'create' ? `delete created FP "${rec.name}" (#${rec.id})` : `restore "${rec.name}" to its pre-extend geometry`;
+        if (!confirm(`Undo the last Fast FP commit?\n\nThis will ${what}.`)) return;
+        const csrf = getCsrfToken();
+        if (!csrf) { showToast('No CSRF token — make one native save first.', 'rgba(255,120,120,0.6)'); return; }
+        try {
+            if (rec.kind === 'create' && rec.id != null) {
+                const r = await fetch(`/map_objects/${rec.id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
+                if (!(r.status === 200 || r.status === 204)) throw new Error(`server ${r.status}`);
+            } else if (rec.kind === 'extend' && rec.body) {
+                const r = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(rec.body) });
+                const txt = await r.text(); let json = null; try { json = JSON.parse(txt); } catch (e) {}
+                if (!(r.status === 200 && json && json.map_objects)) throw new Error(`server ${r.status} ${(txt || '').slice(0, 120)}`);
+            } else throw new Error('undo record incomplete');
+            try { localStorage.removeItem(FFD_UNDO_LS + siteID); } catch (e) {}
+            try { ffdRemoveGhost(siteID, rec.id); } catch (e) {}
+            try { await fetchMapObjects(siteID, true); } catch (e) {}
+            ffd.createdCount = Math.max(0, ffd.createdCount - 1);
+            showToast('Undone — refresh to see the map catch up.', 'rgba(95,255,95,0.6)');
+            ffdRenderPanel();
+        } catch (e) {
+            console.warn(`${TAG} fast-FP undo failed:`, e);
+            showToast(`Undo failed: ${e && e.message || e}`, 'rgba(255,120,120,0.6)');
+        }
+    }
+    // ---- wiring ----
+    function ffdWire() {
+        const map = getLeafletMap(); if (!map) return;
+        ffdUnwire();
+        ffd._container = map.getContainer();
+        const isUiTarget = (t) => !!(t && t.closest && t.closest(`.map-tools, .leaflet-control, button, .ant-btn, #${FFD_PANEL_ID}`));
+        ffd._onMove = (ev) => {
+            if (!ffd.active || ffd.stage !== 'draw') return;
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            // Vertex drag in progress (genRoute-style move).
+            if (ffd.dragVert != null) {
+                if (ev.buttons === 0) { // release happened off-map — end the drag
+                    ffd.dragVert = null; ffd.dragMoved = false;
+                    try { map.dragging.enable(); } catch (e) {}
+                    ffdRender(); return;
+                }
+                const ds = ffd._dragStart;
+                if (!ffd.dragMoved) {
+                    if (ds && Math.hypot(ev.clientX - ds.x, ev.clientY - ds.y) < 4) return; // jitter, not a drag yet
+                    ffdSnapshot();          // pre-move state, once per drag
+                    ffd.dragMoved = true;
+                }
+                const s = ffdSnapPoint(ll);
+                ffd.verts[ffd.dragVert] = s.pt;
+                ffd.snaps[ffd.dragVert] = s.snap;
+                ffd.tentative = null; ffd.tentSnap = null;
+                ffdRender();
+                return;
+            }
+            const s = ffdSnapPoint(ll);
+            ffd.tentative = s.pt; ffd.tentSnap = s.snap;
+            ffdRender();
+        };
+        ffd._onDown = (ev) => {
+            if (!ffd.active || ev.button !== 0 || isUiTarget(ev.target)) { ffd._downAt = null; return; }
+            if (ffd.stage === 'draw') {
+                let ll = null; try { ll = map.mouseEventToLatLng(ev); } catch (e) {}
+                if (ll) {
+                    // Grab one of OUR waypoints → drag to move (a no-move click
+                    // becomes an anchor switch on mouseup).
+                    const own = ffdHitOwnVert(ll);
+                    if (own >= 0) {
+                        ev.preventDefault(); ev.stopPropagation();
+                        ffd.dragVert = own; ffd.dragMoved = false;
+                        ffd._dragStart = { x: ev.clientX, y: ev.clientY };
+                        try { map.dragging.disable(); } catch (e) {}
+                        ffd._downAt = null;
+                        return;
+                    }
+                    // Grab one of OUR lines → insert a waypoint there + drag it.
+                    const hs = ffdHitOwnSeg(ll);
+                    if (hs) {
+                        ev.preventDefault(); ev.stopPropagation();
+                        const vi = ffdInsertOnSeg(hs.i, hs.ll);
+                        ffd.dragVert = vi; ffd.dragMoved = true; // insert IS a change (snapshot already taken)
+                        ffd._dragStart = { x: ev.clientX, y: ev.clientY };
+                        try { map.dragging.disable(); } catch (e) {}
+                        ffd._downAt = null;
+                        ffdRender();
+                        return;
+                    }
+                }
+            }
+            ffd._downAt = { x: ev.clientX, y: ev.clientY, t: Date.now() };
+        };
+        ffd._onUp = (ev) => {
+            if (!ffd.active || ffd.stage !== 'draw' || ev.button !== 0) return;
+            if (ffd.dragVert != null) {
+                const vi = ffd.dragVert;
+                ffd.dragVert = null; ffd._dragStart = null;
+                try { map.dragging.enable(); } catch (e) {}
+                if (!ffd.dragMoved && ffd.anchor !== vi) {
+                    // plain click on a waypoint → make it the branch anchor
+                    ffdSnapshot();
+                    ffd.anchor = vi;
+                }
+                ffd.dragMoved = false;
+                ffdRender();
+                return;
+            }
+            const d = ffd._downAt; ffd._downAt = null;
+            if (!d || isUiTarget(ev.target)) return;
+            // click-vs-pan: a real pan moved the pointer — let Leaflet have it.
+            if (Math.hypot(ev.clientX - d.x, ev.clientY - d.y) > 5 || Date.now() - d.t > 600) return;
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            ffdSnapshot();
+            const s = ffdSnapPoint(ll);
+            const vi = ffd.verts.length;
+            ffd.verts.push(s.pt);
+            ffd.snaps.push(s.snap);
+            if (ffd.anchor != null) ffd.segs.push({ a: ffd.anchor, b: vi });
+            ffd.anchor = vi;
+            ffd.tentative = null; ffd.tentSnap = null;
+            ffdRender();
+        };
+        // Swallow clicks so Percepto doesn't select/open entities under the pen.
+        ffd._onClick = (ev) => {
+            if (!ffd.active || isUiTarget(ev.target)) return;
+            ev.preventDefault(); ev.stopPropagation();
+        };
+        ffd._onDbl = (ev) => {
+            if (!ffd.active || isUiTarget(ev.target)) return;
+            ev.preventDefault(); ev.stopPropagation();
+            if (ffd.stage === 'draw') ffdFinish();
+        };
+        ffd._onCtx = (ev) => {
+            if (!ffd.active || isUiTarget(ev.target)) return;
+            ev.preventDefault(); ev.stopPropagation();
+            if (ffd.stage !== 'draw') return;
+            // Right-click a waypoint = delete it (genRoute-style); elsewhere = undo.
+            let ll = null; try { ll = map.mouseEventToLatLng(ev); } catch (e) {}
+            const own = ll ? ffdHitOwnVert(ll) : -1;
+            if (own >= 0) ffdDeleteVert(own); else ffdUndoStep();
+        };
+        ffd._onKey = (ev) => {
+            if (!ffd.active) return;
+            const k = (ev.key || '').toLowerCase();
+            const t = ev.target;
+            const inField = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+            if (k === 'escape') {
+                ev.preventDefault(); ev.stopImmediatePropagation();
+                if (t && t.blur) { try { t.blur(); } catch (e) {} }
+                if (ffd.stage === 'review' || ffd.stage === 'busy') { ffd.stage = 'draw'; ffd.plan = null; ffdRenderPanel(); ffdRender(); }
+                else ffdUndoStep();
+                return;
+            }
+            if (inField) return;
+            if (k === 'enter' && ffd.stage === 'draw') { ev.preventDefault(); ev.stopImmediatePropagation(); ffdFinish(); }
+        };
+        ffd._container.addEventListener('mousedown', ffd._onDown, true);
+        ffd._container.addEventListener('mousemove', ffd._onMove, true);
+        ffd._container.addEventListener('mouseup', ffd._onUp, true);
+        ffd._container.addEventListener('click', ffd._onClick, true);
+        ffd._container.addEventListener('dblclick', ffd._onDbl, true);
+        ffd._container.addEventListener('contextmenu', ffd._onCtx, true);
+        try { uwin().addEventListener('keydown', ffd._onKey, true); } catch (e) {}
+        // Buffer widths are px at current zoom — rebuild them when zoom settles.
+        ffd._onZoom = () => { if (ffd.active) ffdRender(); };
+        try { map.on('zoomend', ffd._onZoom); } catch (e) {}
+        try { map.doubleClickZoom.disable(); } catch (e) {}
+        // Shift+drag is Leaflet BOX ZOOM — a stray Shift while drawing jolts
+        // the view (suspected in the "path disappeared" report). Off while drawing.
+        try { map.boxZoom.disable(); } catch (e) {}
+        // Watchdog: if something external wipes our overlay layers (pane
+        // rebuild, another script's cleanup), re-render from state — the draw
+        // data itself is never in the layers. Logs so we learn the culprit.
+        ffd._watchdog = setInterval(() => {
+            if (!ffd.active) return;
+            try {
+                const m = getLeafletMap(); if (!m) return;
+                if (ffd.verts.length && (!ffd.layers.length || !m.hasLayer(ffd.layers[0]))) {
+                    console.warn(`${TAG} fast-FP overlay vanished externally — re-rendering ${ffd.verts.length} waypoint(s)`);
+                    ffdRender();
+                }
+            } catch (e) {}
+        }, 800);
+        try { ffd._container.style.cursor = 'crosshair'; } catch (e) {}
+    }
+    function ffdUnwire() {
+        const c = ffd._container;
+        if (c) {
+            try { c.removeEventListener('mousedown', ffd._onDown, true); } catch (e) {}
+            try { c.removeEventListener('mousemove', ffd._onMove, true); } catch (e) {}
+            try { c.removeEventListener('mouseup', ffd._onUp, true); } catch (e) {}
+            try { c.removeEventListener('click', ffd._onClick, true); } catch (e) {}
+            try { c.removeEventListener('dblclick', ffd._onDbl, true); } catch (e) {}
+            try { c.removeEventListener('contextmenu', ffd._onCtx, true); } catch (e) {}
+            try { c.style.cursor = ''; } catch (e) {}
+        }
+        try { uwin().removeEventListener('keydown', ffd._onKey, true); } catch (e) {}
+        const map = getLeafletMap();
+        if (map) {
+            try { map.doubleClickZoom.enable(); } catch (e) {}
+            try { map.boxZoom.enable(); } catch (e) {}
+            if (ffd.dragVert != null) { try { map.dragging.enable(); } catch (e) {} }
+            if (ffd._onZoom) { try { map.off('zoomend', ffd._onZoom); } catch (e) {} }
+        }
+        if (ffd._watchdog) { try { clearInterval(ffd._watchdog); } catch (e) {} ffd._watchdog = null; }
+        ffd.dragVert = null; ffd.dragMoved = false; ffd._dragStart = null;
+        ffd._container = null;
+    }
+    async function ffdSetActive(on) {
+        if (!!on === ffd.active) return;
+        if (on) {
+            const siteID = getCurrentSiteID();
+            if (!siteID) { showToast('Open a site first', 'rgba(255,179,71,0.6)'); return; }
+            try { if (advDraw.active) setAdvDraw(false); } catch (e) {}
+            if (!mapObjectsBySite[siteID] || !mapObjectsBySite[siteID].entities) {
+                showToast('Loading site data…', 'rgba(122,223,230,0.5)');
+                try { await fetchMapObjects(siteID, true); } catch (e) { console.warn(`${TAG} fast-FP data fetch failed:`, e); }
+            }
+            const ents = ((mapObjectsBySite[siteID] || {}).entities) || [];
+            ffd.fps = ents.filter(e => e.type === 15 && Array.isArray(e.arcs) && e.arcs.length);
+            ffd.ffzs = ents.filter(e => e.type === 16 && entityCoords(e));
+            try { ffd.fpGraph = buildFlightPathGraph(ents); } catch (e) { ffd.fpGraph = null; }
+            ffd.active = true; ffd.stage = 'draw';
+            ffd.verts = []; ffd.snaps = []; ffd.segs = []; ffd.anchor = null; ffd.hist = []; ffd.dragVert = null; ffd.dragMoved = false; ffd._dragStart = null; ffd.tentative = null; ffd.tentSnap = null; ffd.plan = null;
+            // Resume an autosaved in-progress draw (crash / reload / exit-with-✕).
+            try {
+                const d = JSON.parse(localStorage.getItem(FFD_DRAFT_LS + siteID) || 'null');
+                if (d && Array.isArray(d.verts) && d.verts.length) {
+                    ffd.verts = d.verts;
+                    ffd.segs = Array.isArray(d.segs) ? d.segs : [];
+                    ffd.snaps = (Array.isArray(d.snaps) && d.snaps.length === d.verts.length) ? d.snaps : d.verts.map(() => null);
+                    ffd.anchor = (typeof d.anchor === 'number' && d.anchor >= 0 && d.anchor < d.verts.length) ? d.anchor : d.verts.length - 1;
+                    // v4.242: snap targets were captured BEFORE this page load, so
+                    // their entity ids can be stale (FP recreated, deleted, undone).
+                    // Re-resolve every fp-vertex snap against the live graph; drop
+                    // the ones that no longer land on anything. Otherwise the first
+                    // Commit fails with a confusing "host FP not found".
+                    let reSnapped = 0, dropped = 0;
+                    ffd.snaps = ffd.snaps.map((sn, i) => {
+                        if (!sn || sn.kind !== 'fp-vertex') return sn;
+                        const v = ffd.verts[i];
+                        const gv = ffd.fpGraph ? nearestGraphVertex(ffd.fpGraph, v.lat, v.lng) : null;
+                        if (gv && gv.dist <= 2) {   // metres — a restored snap sits ON the vertex
+                            const touch = rcArcAtVertex(ffd.fps, gv.key);
+                            if (touch && touch.fp.id != null) {
+                                if (String(touch.fp.id) !== String(sn.fpId)) reSnapped++;
+                                return { kind: 'fp-vertex', targetName: touch.fp.name || 'flight path', arc: touch.arc || null, fpId: touch.fp.id, fpValidated: !!touch.fp.validated };
+                            }
+                        }
+                        dropped++;
+                        return null;
+                    });
+                    const note = reSnapped ? ` · ${reSnapped} snap${reSnapped === 1 ? '' : 's'} re-linked` : '';
+                    const note2 = dropped ? ` · ${dropped} stale snap${dropped === 1 ? '' : 's'} cleared (that flight path is gone)` : '';
+                    if (reSnapped || dropped) console.log(`${TAG} fast-FP draft restore: ${reSnapped} snap(s) re-linked, ${dropped} cleared`);
+                    showToast(`Restored your in-progress draw (${ffd.verts.length} waypoints)${note}${note2}`, 'rgba(122,223,230,0.6)');
+                }
+            } catch (e) {}
+            // Ask the Map Styler for its live fp.* buffer settings (answer
+            // arrives async and re-renders; defaults cover the gap).
+            if (ffdStylerChannel) { try { ffdStylerChannel.postMessage({ action: 'FP_BUFFER_REQUEST' }); } catch (e) {} }
+            ffdWire(); ffdRenderPanel(); ffdRender();
+            console.log(`${TAG} fast-FP draw ON (site ${siteID}: ${ffd.fps.length} FPs, ${ffd.ffzs.length} FFZs to snap to)`);
+        } else {
+            ffd.active = false;
+            ffdUnwire(); ffdClearLayers(); ffdRenderPanel();
+            ffd.verts = []; ffd.snaps = []; ffd.segs = []; ffd.anchor = null; ffd.hist = []; ffd.dragVert = null; ffd.dragMoved = false; ffd._dragStart = null; ffd.tentative = null; ffd.tentSnap = null; ffd.plan = null; ffd.stage = 'draw';
+            console.log(`${TAG} fast-FP draw OFF`);
+        }
+        const b = document.getElementById(FFD_BTN_ID);
+        if (b) b.style.background = ffd.active ? 'rgba(0,229,255,0.3)' : '';
+    }
+    function injectFfdMapButton(doc) {
+        if (LITE) return;   // write tool — CSM-only, same gate as the ⊕ Generator
+        try {
+            const tools = doc.querySelector('.map-tools');
+            if (!tools) return;
+            const existing = doc.getElementById(FFD_BTN_ID);
+            if (existing) { if (!tools.contains(existing)) tools.appendChild(existing); return; }
+            const ref = tools.querySelector('.map-tools__button, button');
+            const btn = doc.createElement('button');
+            btn.id = FFD_BTN_ID;
+            btn.type = 'button';
+            btn.className = ref ? ref.className : 'map-tools__button';
+            btn.title = 'Fast FP Draw (AIM) — click waypoints, altitudes at finish, no auto-AGL fighting';
+            btn.style.setProperty('color', '#00e5ff', 'important');
+            btn.innerHTML = '<span style="font-size:15px;font-weight:800;line-height:1">✏</span>';
+            btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); ffdSetActive(!ffd.active); };
+            const gen = doc.getElementById(GEN_MAP_BTN_ID);
+            if (gen && gen.parentElement === tools) gen.after(btn); else tools.appendChild(btn);
+        } catch (e) {}
+    }
+
+    // ============================================================
     // SITE STATS POPUP — opened by the "Summary" button on the SUM
     // panel toolbar. Shows counts/breakdowns + a donut chart + a
     // "Copy as Text" export. Always reflects the full site dataset
@@ -23838,6 +25089,72 @@
             copyToClipboard(text, 'Copied as plain text (HTML copy unavailable)');
         }
     }
+
+    // ============================================================
+    // v4.243: ⭕ Tower GM standoff rings. Every General Marker of type
+    // 'tower' gets a live circle at the SOP "Tower GM min standoff"
+    // radius (sopThresholds.gmTowerFt) — the SAME number the GM Tower
+    // standoff validator flags against, so the ring on the map and the
+    // check can never disagree. Editable in the SOP Validators card;
+    // the ring resizes within a tick of the change.
+    //
+    // Wipe & rebuild on a signature change (site / threshold / entity
+    // refresh / map instance) — Leaflet scales L.circle (radius in
+    // meters) with zoom on its own, so pan/zoom needs no work here.
+    // Site Setup route only: Data View's CSS overrides SVG presentation
+    // attrs (see reference_data_view_recon), and towers only constrain
+    // site-setup geometry anyway.
+    // ============================================================
+    const towerRings = { layers: [], sig: '', map: null };
+    function towerRingsWipe() {
+        for (const l of towerRings.layers) { try { l.remove(); } catch (e) {} }
+        towerRings.layers = [];
+        towerRings.sig = '';
+        towerRings.map = null;
+    }
+    function towerRingsTick() {
+        try {
+            const on = sopMasterEnabled && sopEnabled.gmTowerRings && isSiteSetupRoute();
+            const map = on ? getLeafletMap() : null;
+            const L = on ? getLeafletL() : null;
+            if (!on || !map || !L || typeof L.circle !== 'function') {
+                if (towerRings.layers.length) towerRingsWipe();
+                return;
+            }
+            const sid = getCurrentSiteID();
+            const rec = sid ? mapObjectsBySite[sid] : null;
+            // Same tower filter as the SOP GM Tower standoff check (#11).
+            const towers = rec ? rec.entities.filter(e => e.type === 19 && e.general_marker_type === 'tower'
+                && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number') : [];
+            const radiusM = sopThresholds.gmTowerFt / M_TO_FT;
+            const sig = `${sid}|${sopThresholds.gmTowerFt}|${rec ? rec.fetchedAt : 0}|`
+                + towers.map(e => `${e.id}:${e.coords[0].lat},${e.coords[0].lng}`).join(';');
+            if (sig === towerRings.sig && map === towerRings.map) return;
+            towerRingsWipe();
+            towerRings.sig = sig;
+            towerRings.map = map;
+            if (!towers.length || !(radiusM > 0)) return;
+            for (const gm of towers) {
+                try {
+                    const c = L.circle([gm.coords[0].lat, gm.coords[0].lng], {
+                        radius: radiusM, color: '#ffb020', weight: 2, opacity: 0.85,
+                        dashArray: '6 5', fillColor: '#ffb020', fillOpacity: 0.07,
+                        interactive: false,
+                    });
+                    c.addTo(map);
+                    towerRings.layers.push(c);
+                } catch (e) {
+                    console.warn(`${TAG} tower ring draw failed for GM ${gm.id}:`, e);
+                }
+            }
+            if (towerRings.layers.length) {
+                console.log(`${TAG} drew ${towerRings.layers.length} Tower GM standoff ring(s) @ ${sopThresholds.gmTowerFt} ft`);
+            }
+        } catch (e) {
+            console.warn(`${TAG} towerRingsTick threw:`, e);
+        }
+    }
+    if (CONTEXT === 'IFRAME') setInterval(towerRingsTick, 1500);
 
     // ============================================================
     // Initial fetch + site-change refetch (IFRAME only — TOP has no

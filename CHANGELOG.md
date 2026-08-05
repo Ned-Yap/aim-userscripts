@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-05 — ⭐ PROMOTED: Site Setup Tools v4.244 + Map Styler v34.135 + 6 more → PROD
+
+Big batch. What's new for everyone:
+
+- **✏ Fast FP Draw (Site Setup Tools v4.244, from v4.231; [#233](https://github.com/Ned-Yap/aim-userscripts-issues/issues/233))** — the map-toolbar ✏ button: click waypoints as fast as you like to draw a flight path outside Percepto's editor (no auto-AGL fighting). Snaps to existing FP vertices (extends that path) and FFZ edges; branching; drag/insert/delete vertex editing; Smart-Fill terrain-following altitude bands verified against Percepto's own DEM with a hard floor that only errs UP; draw autosave + saved-path ghosts so work can't vanish; per-site undo. CSM-only — hidden and inert in Lite mode. Map Styler v34.135 rides along so the draw preview wears your real FP 40/65 ft buffer settings.
+- **⭕ Tower GM standoff rings (same promote; [#235](https://github.com/Ned-Yap/aim-userscripts-issues/issues/235))** — every Tower marker shows a live dashed orange circle at the SOP standoff radius (the exact number the validator flags against). Toggle on the SOP Validators card.
+- **Lite-mode guards (Bulk Mission Adder v1.17, Inspector v1.11, New Entity Macro v1.15, Quick Mission Editor v0.7)** — these CSM tools now go fully inert for pilots/regulators in Lite mode, closing the gap left when Lite shipped. QME also repositions its launcher label and hardens its typing guards.
+- **Altitude tool placement shield (v1.13)** — the Shift+A pin now drops reliably even when you click directly on a flight-path line or other overlay (interactive layers are click-through while the tool is armed, 20 s safety auto-clear).
+- **Perf Shield v1.19 — full orthomosaic hide** — new Performance toggle that fully REMOVES ortho COG layers (not just low-res), stopping the tile storms that freeze heavy sites.
+
 ## 2026-08-05 — ⭐ PROMOTED: Mission Bank Tools v2.50 → PROD (coworkers jump from v2.40)
 
 The whole v2.41–v2.50 dev arc reaches everyone. Highlights:

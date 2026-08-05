@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM New Entity Macro
 // @namespace    http://tampermonkey.net/
-// @version      1.13
+// @version      1.15
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.user.js
 // @description  Hotkeys 1-6 create color-coded entities; Shift+S Save, Shift+D D (double-press) Delete, Shift+Z Cancel, Shift+X Finish. Each hotkey individually enable/rebindable via the AIM Control Panel.
@@ -17,6 +17,17 @@
 // ==/UserScript==
 
 (function() {
+    // --- AIM Pilot mode guard: stay fully inert when a pilot/regulator has
+    // turned on Pilot mode in the Control Panel (shared localStorage flag). No
+    // observers/intervals/hotkeys/DOM injection start past this point. Toggling
+    // Pilot mode reloads the page, so this re-evaluates cleanly each load. ---
+    try {
+        if (localStorage.getItem('aim-mode') !== 'full') {
+            console.log('[AIM MACRO] Lite mode — CSM tool inert, init skipped.');
+            return;
+        }
+    } catch (e) {}
+
     console.log("[AIM MACRO] 🏗️ Entity Creator Loaded");
 
     // --- Configuration ---
@@ -308,7 +319,7 @@
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-new-entity-macro';
-    const SCRIPT_VERSION = '1.13';
+    const SCRIPT_VERSION = '1.15';
     const DELETE_WINDOW_MS = 500; // second press must arrive within this
     let controlChannel = null;
     let controlPanelDetected = false;

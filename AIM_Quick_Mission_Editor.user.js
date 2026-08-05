@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Quick Mission Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.3
+// @version      0.7
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Quick_Mission_Editor.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Quick_Mission_Editor.user.js
 // @description  Bulk-reorder mission instructions via React fiber walk. Ctrl+Click handles to select, Enter to open the move dialog.
@@ -46,8 +46,19 @@
 (function () {
     'use strict';
 
+    // --- AIM Pilot mode guard: stay fully inert when a pilot/regulator has
+    // turned on Pilot mode in the Control Panel (shared localStorage flag). No
+    // observers/intervals/hotkeys/DOM injection start past this point. Toggling
+    // Pilot mode reloads the page, so this re-evaluates cleanly each load. ---
+    try {
+        if (localStorage.getItem('aim-mode') !== 'full') {
+            console.log('[AIM MB EDITOR] Lite mode — CSM tool inert, init skipped.');
+            return;
+        }
+    } catch (e) {}
+
     const SCRIPT_ID = 'aim-quick-mission-editor';
-    const SCRIPT_VERSION = '0.3';
+    const SCRIPT_VERSION = '0.7';
     const LARGE_MOVE_THRESHOLD = 20; // moves of this many or more get a confirm() prompt
     const TAG = '[AIM MB EDITOR]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -516,6 +527,9 @@
         const bolt = document.createElement('div');
         bolt.innerHTML = `<svg width="12" height="18" viewBox="0 0 12 20" fill="none"><path d="M7 0L0 11H5.5L4.5 20L12 8.5H6.5L7 0Z" fill="#00bcd4"/></svg>`;
         Object.assign(bolt.style, { display: 'flex', alignItems: 'center', cursor: 'pointer' });
+        const launcherLabel = document.createElement('div');
+        Object.assign(launcherLabel.style, { fontSize: '11px', fontWeight: '700', color: '#fff', letterSpacing: '0.07em', textTransform: 'uppercase', whiteSpace: 'nowrap' });
+        launcherLabel.textContent = 'Quick Mission Editor';
         launcherLabel.style.cursor = 'pointer';
         // v0.2 — launcher click opens the modal directly (alternative
         // to Enter). Discoverable for users who don't know about the
@@ -545,9 +559,6 @@
         }
         bolt.addEventListener('click', (e) => { e.stopPropagation(); openModalFromLauncher(); });
         launcherLabel.addEventListener('click', (e) => { e.stopPropagation(); openModalFromLauncher(); });
-        const launcherLabel = document.createElement('div');
-        Object.assign(launcherLabel.style, { fontSize: '11px', fontWeight: '700', color: '#fff', letterSpacing: '0.07em', textTransform: 'uppercase', whiteSpace: 'nowrap' });
-        launcherLabel.textContent = 'Quick Mission Editor';
         const launcherDivider = document.createElement('div');
         Object.assign(launcherDivider.style, { width: '1px', height: '14px', background: '#333' });
         const infoBtn = document.createElement('div');
@@ -1081,7 +1092,11 @@
             // Ant-aware input guard — blocks Enter while typing in Ant inputs,
             // selects, content-editables, role="textbox" divs, etc. Without
             // this, Enter in a Percepto search/dropdown opens the move modal.
-            if (isTypingTarget(document.activeElement)) return;
+            // v0.4: check e.target too, not just activeElement — another script's
+            // input may blur itself synchronously on Enter (e.g. Mission Bank
+            // Tools' inline altitude editor), moving activeElement off the input
+            // before this bubble-phase handler runs. e.target stays the input.
+            if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return;
             const total = getAllDraggables().length;
             const pendingGroups = selectedGroups.map(g => ({ ids: [...g.ids], label: g.label }));
             selectedGroups = []; clearHighlights(); refreshBubbleBar();
@@ -1103,7 +1118,7 @@
             if (e.key !== 'Escape') return;
             if (!masterEnabled) return;
             if (isBusy || document.getElementById('aqme-input-overlay')) return;
-            if (isTypingTarget(document.activeElement)) return;
+            if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return;
             selectedGroups = []; clearHighlights(); removeDropMarker(); refreshBubbleBar();
             hud.style.display = 'none';
             showToast('Cancelled', '#888', 1500);
