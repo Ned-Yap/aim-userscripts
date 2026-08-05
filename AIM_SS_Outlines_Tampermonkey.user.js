@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.133
+// @version      34.134
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -32,6 +32,16 @@
 (function() {
     const TRIGGER_KEY_CODE = 'KeyO';
     const CONTEXT = window === window.top ? "TOP" : "IFRAME";
+    // Per-tab identity shared across frames via window.top (same-origin).
+    // Must match the Control Panel's aimTabId so hotkeys/actions stay tab-local.
+    function aimTabId() {
+        try {
+            const pw = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+            const t = pw.top;
+            if (!t.__AIM_TAB_ID) t.__AIM_TAB_ID = 'tab-' + Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
+            return t.__AIM_TAB_ID;
+        } catch (e) { return null; }
+    }
     const CHANNEL_NAME = "AIM_STYLER_CHANNEL";
 
     // v34.121 — Data View support. The data_view route is Percepto's LEGACY
@@ -57,7 +67,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.133';
+    const SCRIPT_VERSION = '34.134';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -8761,6 +8771,10 @@
                     if (sid) fetchKMLForSite(sid, true);
                 }
             } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID && rendersInThisFrame()) {
+                // Cross-tab guard: BroadcastChannel delivers to EVERY open tab — only
+                // the tab that pressed/clicked may act (tabId from CP v1.43+; visibility
+                // fallback under an older CP).
+                if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;
                 // Button-type controls in the panel broadcast this when clicked.
                 // Two gates here:
                 //   1. rendersInThisFrame() — the IFRAME on Site Setup, or TOP on
@@ -8868,6 +8882,10 @@
                     if (next !== perfHideOrtho) { perfHideOrtho = next; applyPerfMapSettings(); }
                 }
             } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID) {
+                // Cross-tab guard: BroadcastChannel delivers to EVERY open tab — only
+                // the tab that pressed/clicked may act (tabId from CP v1.43+; visibility
+                // fallback under an older CP).
+                if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;
                 // Same cross-tab gate as TRIGGER_ACTION: hotkeys pressed in
                 // one AIM tab shouldn't toggle styler / kick / etc. in every
                 // other open AIM tab. Only the focused tab handles the key.

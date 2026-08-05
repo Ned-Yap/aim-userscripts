@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Measure / Ruler
 // @namespace    http://tampermonkey.net/
-// @version      2.8
+// @version      2.9
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Ruler_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Ruler_Tampermonkey.user.js
 // @description  Adds Shift+R hotkey for the Measure tool, with segment cleanup. Registers with the AIM Control Panel for master toggle + hotkey rebinding.
@@ -84,9 +84,19 @@
 
     // --- AIM Control Panel integration (see comment block in Altitude script) ---
     const IS_TOP = window === window.top;
+    // Per-tab identity shared across frames via window.top (same-origin).
+    // Must match the Control Panel's aimTabId so hotkeys/actions stay tab-local.
+    function aimTabId() {
+        try {
+            const pw = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+            const t = pw.top;
+            if (!t.__AIM_TAB_ID) t.__AIM_TAB_ID = 'tab-' + Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
+            return t.__AIM_TAB_ID;
+        } catch (e) { return null; }
+    }
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-ruler';
-    const SCRIPT_VERSION = '2.8';
+    const SCRIPT_VERSION = '2.9';
     let controlChannel = null;
     let controlPanelDetected = false;
     let masterEnabled = true;
@@ -101,6 +111,10 @@
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
                 if (msg.toggleId === 'master') masterEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
             } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID && IS_TOP) {
+                // Cross-tab guard: BroadcastChannel delivers to EVERY open tab — only
+                // the tab that pressed/clicked may act (tabId from CP v1.43+; visibility
+                // fallback under an older CP).
+                if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;
                 if (msg.hotkeyId === 'invoke' && masterEnabled) performAction();
             }
         };

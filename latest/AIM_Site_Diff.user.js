@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Diff
 // @namespace    http://tampermonkey.net/
-// @version      0.70
+// @version      0.71
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @description  Site comparison suite: shadow-site ghost overlay (per-type show/color/opacity), swipe divider, significant-change diff (→ AIM Issues), and Phase 3a Import — create-only copy of shadow entities (assets etc.) onto the current site with dry-run preview + verify. v0.70: cross-SERVER shadows — a QA site can shadow/import from a prod site and vice versa (picker server tabs; needs a login on both servers). Full migration executor later.
@@ -41,6 +41,25 @@
     'use strict';
 
     const TAG = '[AIM DIFF]';
+    // Per-tab identity shared across frames via window.top (same-origin).
+
+    // Must match the Control Panel's aimTabId so hotkeys/actions stay tab-local.
+
+    function aimTabId() {
+
+        try {
+
+            const pw = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+
+            const t = pw.top;
+
+            if (!t.__AIM_TAB_ID) t.__AIM_TAB_ID = 'tab-' + Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
+
+            return t.__AIM_TAB_ID;
+
+        } catch (e) { return null; }
+
+    }
     const IS_IFRAME = window !== window.top;
 
     // --------------------------------------------------------------
@@ -120,7 +139,7 @@
     }
 
     const SCRIPT_ID = 'aim-site-diff';
-    const SCRIPT_VERSION = '0.70';
+    const SCRIPT_VERSION = '0.71';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const PANE_NAME = 'aim-site-diff-pane';
     const HL_PANE_NAME = 'aim-site-diff-hl';
@@ -2771,7 +2790,7 @@
             const msg = ev.data || {};
             if (msg.type === 'REQUEST_REGISTRATIONS') registerWithControlPanel();
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) handleSetToggle(msg);
-            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID) handleAction(msg.actionId);
+            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID) { if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return; /* cross-tab guard */ handleAction(msg.actionId); }
             else if (msg.type === 'TOKEN_VALUE') {
                 cachedToken = String(msg.token || '');
                 // The import panel shows a "needs token" hint — refresh it

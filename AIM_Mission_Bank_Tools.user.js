@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.39
+// @version      2.40
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.39';
+    const SCRIPT_VERSION = '2.40';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -159,6 +159,16 @@
     let liveTickN = 0;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
+    // Per-tab identity shared across frames via window.top (same-origin).
+    // Must match the Control Panel's aimTabId so hotkeys/actions stay tab-local.
+    function aimTabId() {
+        try {
+            const pw = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+            const t = pw.top;
+            if (!t.__AIM_TAB_ID) t.__AIM_TAB_ID = 'tab-' + Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
+            return t.__AIM_TAB_ID;
+        } catch (e) { return null; }
+    }
     const SUM_BTN_ID = 'aim-mb-sum-btn';
     const PANEL_ID = 'aim-mb-panel';
     const RCLICK_POPUP_ID = 'aim-mb-rclick-popup';
@@ -394,11 +404,19 @@
                     }
                 }
             } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID) {
+                // Cross-tab guard: BroadcastChannel delivers to EVERY open tab — only
+                // the tab that pressed/clicked may act (tabId from CP v1.43+; visibility
+                // fallback under an older CP).
+                if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;
                 // Editor lives in the IFRAME — toggle Click-to-Add there only.
                 if (CONTEXT === 'IFRAME' && msg.hotkeyId === 'toggle-click-add') { try { caSetMode(!caModeOn); } catch (e) {} }
             } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === MISSION_SOP_SCRIPT_ID) {
                 handleMissionSopToggle(msg);
             } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === MISSION_SOP_SCRIPT_ID) {
+                // Cross-tab guard: BroadcastChannel delivers to EVERY open tab — only
+                // the tab that pressed/clicked may act (tabId from CP v1.43+; visibility
+                // fallback under an older CP).
+                if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;
                 // The Mission Bank UI (and its map) live in the IFRAME — run +
                 // render the report there only, so the action fires exactly once.
                 if (CONTEXT !== 'IFRAME') return;

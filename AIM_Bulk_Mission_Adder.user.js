@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Bulk Mission Adder
 // @namespace    http://tampermonkey.net/
-// @version      1.14
+// @version      1.15
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Mission_Adder.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Mission_Adder.user.js
 // @description  Bulk add missions via Shift+B or Green Button. Turbo speed + Auto-Clone + High Contrast List.
@@ -30,9 +30,19 @@
         // panel routes hotkeys via HOTKEY_FIRED. IS_TOP gates the action so
         // it only runs once even though BroadcastChannel delivers to all frames.
         const IS_TOP = window === window.top;
+        // Per-tab identity shared across frames via window.top (same-origin).
+        // Must match the Control Panel's aimTabId so hotkeys/actions stay tab-local.
+        function aimTabId() {
+            try {
+                const pw = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+                const t = pw.top;
+                if (!t.__AIM_TAB_ID) t.__AIM_TAB_ID = 'tab-' + Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
+                return t.__AIM_TAB_ID;
+            } catch (e) { return null; }
+        }
         const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
         const SCRIPT_ID = 'aim-bulk-mission-adder';
-        const SCRIPT_VERSION = '1.14';
+        const SCRIPT_VERSION = '1.15';
         let controlChannel = null;
         let controlPanelDetected = false;
         let masterEnabled = true;
@@ -46,6 +56,10 @@
                 else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
                     if (msg.toggleId === 'master') masterEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
                 } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID && IS_TOP) {
+                    // Cross-tab guard: BroadcastChannel delivers to EVERY open tab — only
+                    // the tab that pressed/clicked may act (tabId from CP v1.43+; visibility
+                    // fallback under an older CP).
+                    if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;
                     if (msg.hotkeyId === 'invoke' && masterEnabled && isTargetPage()) createUI();
                 }
             };

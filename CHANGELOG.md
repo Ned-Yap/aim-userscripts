@@ -136,6 +136,14 @@ Draw a flight path as fast as you can click, completely outside Percepto's draw 
 
 ---
 
+## 2026-08-03 — 🚨 Tab-local hotkeys: FULL SWEEP — every remaining script gated
+
+The morning's fix covered the destructive scripts (Delete, Clear All); the Altitude tool then proved the rest were still listening cross-tab (Shift+A in one tab dropped stray altitude pins in another). Now **every** hotkey/button receiver checks the tab identity and ignores keypresses/clicks from other tabs:
+
+**Altitude v1.10 · Ruler v2.9 · Bulk Mission Adder v1.15 · Mission Bank Tools v2.40 · Map Styler v34.134 · Site Setup Tools v4.231** (+ latest twins, incl. Map Editor / Site Diff / Site Watch). Quick Mission Editor needed no change (its keys are already tab-local). Update everything in one "Check for userscript updates" pass.
+
+---
+
 ## 2026-08-03 — New Entity Macro v1.13: delete no longer fires twice ("already deleted" alert fixed)
 
 The delete confirm click was triggering Percepto's handler twice (DOM click + React handler — our click-reliability pattern), so the server got two DELETEs and alerted "Map entity already deleted or not exists" on the second. The confirm button now uses a single-fire click; every other click keeps the reliable dual-fire.

@@ -2,7 +2,7 @@
 // @name         AIM Copy Asset Name
 // @name:en      AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.230
+// @version      4.231
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -56,6 +56,25 @@
     if (LITE) console.log('[AIM SITE SETUP] Lite mode — read-only surfaces + validators only; all site-write tools gated.');
 
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
+    // Per-tab identity shared across frames via window.top (same-origin).
+
+    // Must match the Control Panel's aimTabId so hotkeys/actions stay tab-local.
+
+    function aimTabId() {
+
+        try {
+
+            const pw = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+
+            const t = pw.top;
+
+            if (!t.__AIM_TAB_ID) t.__AIM_TAB_ID = 'tab-' + Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
+
+            return t.__AIM_TAB_ID;
+
+        } catch (e) { return null; }
+
+    }
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     // LITE backstop: called at the top of every site-write function. In Lite
@@ -70,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.230';
+    const SCRIPT_VERSION = '4.231';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -7956,6 +7975,10 @@
                 handleSopToggle(msg);
             }
             else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID && CONTEXT === 'IFRAME') {
+                // Cross-tab guard: BroadcastChannel delivers to EVERY open tab — only
+                // the tab that pressed/clicked may act (tabId from CP v1.43+; visibility
+                // fallback under an older CP).
+                if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;
                 // Gate to IFRAME + focused tab (same pattern as Map Styler v34.28)
                 if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
                 if (msg.actionId === 'refresh-entities') {
@@ -7970,6 +7993,10 @@
                 }
             }
             else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SOP_SCRIPT_ID && CONTEXT === 'IFRAME') {
+                // Cross-tab guard: BroadcastChannel delivers to EVERY open tab — only
+                // the tab that pressed/clicked may act (tabId from CP v1.43+; visibility
+                // fallback under an older CP).
+                if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;
                 if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
                 if (msg.actionId === 'sop-draw') {
                     if (!sopMasterEnabled) { showToast('SOP validators are disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
@@ -7982,6 +8009,10 @@
                 handleAirspaceToggle(msg);
             }
             else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === AIRSPACE_SCRIPT_ID && CONTEXT === 'IFRAME') {
+                // Cross-tab guard: BroadcastChannel delivers to EVERY open tab — only
+                // the tab that pressed/clicked may act (tabId from CP v1.43+; visibility
+                // fallback under an older CP).
+                if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;
                 if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
                 if (msg.actionId === 'air-run') {
                     if (!airMasterEnabled) { showToast('Airspace Checker is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
@@ -7994,6 +8025,10 @@
                 handleTerrainToggle(msg);
             }
             else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === TER_SCRIPT_ID && CONTEXT === 'IFRAME') {
+                // Cross-tab guard: BroadcastChannel delivers to EVERY open tab — only
+                // the tab that pressed/clicked may act (tabId from CP v1.43+; visibility
+                // fallback under an older CP).
+                if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;
                 if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
                 if (msg.actionId === 'ter-run') {
                     if (!terMasterEnabled) { showToast('Terrain Profiler is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }

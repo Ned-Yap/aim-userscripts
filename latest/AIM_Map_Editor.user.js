@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.57
+// @version      0.58
 // @description  Edit Percepto map entities (flight paths + FFZs) from the map. AGL VIEW (Shift+G): on Mountain-terrain (MSL) sites, an overlay over the native editor shows + edits altitudes as height-above-ground (AGL/Δ/MSL columns, color-coded, live-linked) — backend stays MSL; works for flight-path segments AND FFZ bands; also augments Percepto's hover ALT tooltip with AGL. Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH) — and on ANY other mid-path vertex it SEVERS the path there; then either delete the unwanted piece and Save, or use the red chip's "💾 Save as N separate paths" to keep BOTH pieces as independent flight paths (direct POST /map_objects/: largest piece keeps the original id+name, others created as <name>_splitN; JSON backup + create-before-trim ordering + fresh-fetch verify + mandatory refresh overlay; a validated path's pieces stay validated). After the refresh an AUTO-VERIFY re-audits the saved paths against a fresh server fetch and toasts the verdict (structure, counts, shape parity, validated flag). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -58,6 +58,16 @@
         }
     } catch (e) {}
     const TAG = '[AIM FPE]';
+    // Per-tab identity shared across frames via window.top (same-origin).
+    // Must match the Control Panel's aimTabId so hotkeys/actions stay tab-local.
+    function aimTabId() {
+        try {
+            const pw = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+            const t = pw.top;
+            if (!t.__AIM_TAB_ID) t.__AIM_TAB_ID = 'tab-' + Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
+            return t.__AIM_TAB_ID;
+        } catch (e) { return null; }
+    }
     const IS_IFRAME = window !== window.top;
     if (!IS_IFRAME) { try { console.log(`${TAG} top frame — idle (map is in iframe)`); } catch (e) {} return; }
 
@@ -78,7 +88,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.57';
+    const SCRIPT_VERSION = '0.58';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -1603,10 +1613,13 @@
                 else if (m.toggleId === 'maxVarFt') { const nv = Number(v) || DEF_SETTINGS.maxVarFt; if (nv !== settings.maxVarFt) { settings.maxVarFt = nv; changed = true; } }
                 if (changed) { saveSettings(); ensureSmartUI(); }
             } else if (m.type === 'TRIGGER_ACTION' && m.actionId === 'fillPath') {
+                if (m.tabId ? m.tabId !== aimTabId() : document.hidden) return; // cross-tab guard
                 previewFill().catch(e => warn('previewFill threw', e));
             } else if (m.type === 'TRIGGER_ACTION' && m.actionId === 'prewarm') {
+                if (m.tabId ? m.tabId !== aimTabId() : document.hidden) return; // cross-tab guard
                 preWarmCorridor().catch(e => warn('preWarmCorridor threw', e));
             } else if (m.type === 'TRIGGER_ACTION' && m.actionId === 'trimPanel') {
+                if (m.tabId ? m.tabId !== aimTabId() : document.hidden) return; // cross-tab guard
                 openTrimPanel();
             }
         };

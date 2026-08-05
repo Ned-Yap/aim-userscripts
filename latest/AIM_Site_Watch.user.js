@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.21
+// @version      0.22
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON (and optionally its missions) on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Daily Slack digest. Configurable in the AIM Control Panel ("Site Watch").
@@ -69,6 +69,16 @@
     const TAG = '[AIM WATCH]';
     const IS_TOP = (window === window.top);
 
+    // Per-tab identity shared across frames via window.top (same-origin).
+    // Must match the Control Panel's aimTabId so hotkeys/actions stay tab-local.
+    function aimTabId() {
+        try {
+            const pw = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+            const t = pw.top;
+            if (!t.__AIM_TAB_ID) t.__AIM_TAB_ID = 'tab-' + Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
+            return t.__AIM_TAB_ID;
+        } catch (e) { return null; }
+    }
     // TOP frame only. The react-pages iframe (also @match'd) does nothing —
     // fetches are same-origin from top, and gating here avoids a top/iframe
     // double-runner inside a single tab.
@@ -76,7 +86,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.21';
+    const SCRIPT_VERSION = '0.22';
 
     // Server model (v0.21): prod and QA are separate databases with their own
     // site lists — the same numeric ID is two different sites. A QA leader
@@ -1785,7 +1795,7 @@
             const msg = ev.data || {};
             if (msg.type === 'REQUEST_REGISTRATIONS') registerWithControlPanel();
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) handleSetToggle(msg);
-            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID) handleAction(msg.actionId);
+            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID) { if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return; /* cross-tab guard */ handleAction(msg.actionId); }
             else if (msg.type === 'SW_RESET_SYNC' && msg.scriptId === SCRIPT_ID && msg.from !== tabId) doResetBaselines('synced from another tab');
             else if (msg.type === 'TOKEN_VALUE') handleTokenValue(msg.token || '');
         };
