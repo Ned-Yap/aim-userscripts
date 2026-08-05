@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.40
+// @version      2.50
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -124,7 +124,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.40';
+    const SCRIPT_VERSION = '2.50';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -254,6 +254,14 @@
     let showAglInEditor = gmGet(CACHE_KEY_AGL_VIEW, true);
     const CACHE_KEY_HIDE_FLAGPOLE = 'aim-mb-hide-flagpole';
     let hideFlagPoleOverlay = gmGet(CACHE_KEY_HIDE_FLAGPOLE, false);
+    // 🧮 Math in native step number fields (#236): type an arithmetic
+    // expression ("2630+15") into any Ant InputNumber in the step edit form
+    // and press Enter (or click away) — MBT evaluates it and commits the
+    // result through the InputNumber component's onChange (the same commit
+    // path the Apply queue uses). A LEADING +, * or / is relative to the
+    // field's committed value: "+15" on a field holding 2630 → 2645.
+    const CACHE_KEY_MATH_FIELDS = 'aim-mb-math-fields';
+    let mathFieldsEnabled = gmGet(CACHE_KEY_MATH_FIELDS, true);
 
     // Battery → flights mapping. User's IFS formula:
     //   > 560 → 7, > 480 → 6, > 360 → 5, > 270 → 4, > 180 → 3, >= 90 → 2, else 1
@@ -392,6 +400,12 @@
                         gmSet(CACHE_KEY_DEFAULT_SNAP_AGL, defaultSnapAglFt);
                         if (CONTEXT === 'IFRAME') { try { updateAutoSnapAglUI(); } catch (e) {} }
                     }
+                } else if (msg.toggleId === 'math-fields') {
+                    const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                    if (v !== mathFieldsEnabled) {
+                        mathFieldsEnabled = v;
+                        gmSet(CACHE_KEY_MATH_FIELDS, mathFieldsEnabled);
+                    }
                 } else if (typeof msg.toggleId === 'string' && msg.toggleId.indexOf('color-') === 0) {
                     const key = msg.toggleId.slice(6);
                     if (Object.prototype.hasOwnProperty.call(STEP_COLOR_DEFAULTS, key)) {
@@ -442,6 +456,7 @@
                 { id: 'mission-preview', label: '👁 Mission preview (map-tools button, Site Setup + Mission Bank)', type: 'boolean', default: true },
                 { id: 'preview-all', label: '👁 Show ALL missions (light dots — no lines/labels)', type: 'boolean', default: false },
                 { id: 'default-snap-agl', label: 'Default snapshot AGL (auto-AGL toggle)', type: 'number', min: -50, max: 500, step: 1, default: 10, unit: 'ft' },
+                { id: 'math-fields', label: '🧮 Math in step number fields (type 2630+15 or +15, then Enter)', type: 'boolean', default: true },
                 { id: 'colors-header', label: 'Step colors (editor cards + map badges)', type: 'header' },
                 { id: 'color-nav', label: 'Navigate', type: 'color', default: STEP_COLOR_DEFAULTS.nav },
                 { id: 'color-snap', label: 'Snapshot', type: 'color', default: STEP_COLOR_DEFAULTS.snap },
@@ -1710,7 +1725,7 @@
         const kml = document.createElement('button');
         kml.type = 'button';
         kml.textContent = '⬇ KML';
-        kml.title = 'Export this mission to a Google-Earth KML — flight path + N#/S# pins, each pin showing its step details';
+        kml.title = 'Export this mission to a Google-Earth KML — white nav→nav mission path + cyan routed base path + N#/S# pins, each pin showing its step details';
         kml.style.cssText = 'flex:0 0 auto;padding:5px 8px;background:rgba(150,180,255,0.12);border:1px solid rgba(150,180,255,0.5);' +
             'color:#9cf;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
         kml.onclick = (e) => { e.preventDefault(); e.stopPropagation(); exportOpenMissionKml(); };
@@ -5149,10 +5164,16 @@
     // color; member pads get that outline + a name chip; the legend counts
     // pads that still aren't in any macro. All click-through.
     // ════════════════════════════════════════════════════════════════════════
-    const mcv = { on: false, busy: false, layers: [], legendEl: null };
+    // hidden = per-session visibility filter (v2.47) — mission ids whose map
+    // layers are currently switched off in the legend; resets to all-visible
+    // every fresh 🧩 toggle-on. macroLayers groups layers per mission id so a
+    // single macro can be hidden/shown without a full redraw.
+    const mcv = { on: false, busy: false, layers: [], legendEl: null, hidden: new Set(), macroLayers: new Map() };
     function mcvClear() {
         mcv.layers.forEach(l => { try { l.remove(); } catch (e) {} });
         mcv.layers = [];
+        mcv.macroLayers = new Map();
+        try { mcvClearRoutes(); } catch (e) {}
         if (mcv.legendEl) { try { mcv.legendEl.remove(); } catch (e) {} mcv.legendEl = null; }
     }
     // mission → distinct pads its located steps touch (inside or ≤150 ft of
@@ -5165,22 +5186,37 @@
         const covered = new Set();
         const missionPads = new Map();
         (missions || []).forEach(m => {
-            const ins = (m.instructions || []).filter(i => i && i.location && typeof i.location.lat === 'number' && i.type !== 0 && i.type !== 99);
             const padIds = new Set(), pads = [];
-            ins.forEach(i => {
-                const p = i.location;
-                let best = null;
-                for (let ai = 0; ai < assets.length; ai++) {
-                    const bb = boxes[ai];
-                    if (p.lat < bb.s || p.lat > bb.n || p.lng < bb.w || p.lng > bb.e) continue;
-                    const d = mbPointToPolygonMeters(p.lat, p.lng, assets[ai].ring);
-                    if (d <= tolM && (!best || d < best.d)) best = { a: assets[ai], d };
+            // v2.40: also build the mission's BLOCK structure — contiguous runs
+            // of steps per pad, in flight order. Unlocated steps (waits/camera)
+            // and off-pad transit navs travel with the pad they follow; steps
+            // before the first pad go in a leading null-block. Blocks are what
+            // ♻ reorder resequences (each pad's own steps stay intact).
+            const blocks = [];
+            let curPad;   // undefined until the first pad assignment
+            (m.instructions || []).forEach(i => {
+                if (!i || i.type === 0 || i.type === 99) return;
+                if (i.location && typeof i.location.lat === 'number') {
+                    const p = i.location;
+                    let best = null;
+                    for (let ai = 0; ai < assets.length; ai++) {
+                        const bb = boxes[ai];
+                        if (p.lat < bb.s || p.lat > bb.n || p.lng < bb.w || p.lng > bb.e) continue;
+                        const d = mbPointToPolygonMeters(p.lat, p.lng, assets[ai].ring);
+                        if (d <= tolM && (!best || d < best.d)) best = { a: assets[ai], d };
+                    }
+                    if (best) {
+                        curPad = best.a.id;
+                        if (!padIds.has(best.a.id)) { padIds.add(best.a.id); pads.push(best.a); }
+                    }
                 }
-                if (best && !padIds.has(best.a.id)) { padIds.add(best.a.id); pads.push(best.a); }
+                const aId = (curPad === undefined) ? null : curPad;
+                if (!blocks.length || blocks[blocks.length - 1].aId !== aId) blocks.push({ aId, steps: [] });
+                blocks[blocks.length - 1].steps.push(i);
             });
             if (pads.length) missionPads.set(m.id, pads);
             if (pads.length >= 2) {
-                macros.push({ mission: m, pads });
+                macros.push({ mission: m, pads, blocks });
                 pads.forEach(a => covered.add(a.id));
             }
         });
@@ -5196,48 +5232,437 @@
         const COLORS = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
         det.macros.forEach((mc, i) => {
             const col = COLORS[i % COLORS.length];
+            // v2.47: layers grouped per macro so the legend can hide/show one
+            // macro without a redraw. Hidden macros' layers are built but NOT
+            // added to the map (mcvSetVis adds them on unhide).
+            const vis = !mcv.hidden.has(mc.mission.id);
+            const lys = [];
+            const keep = (l) => { mcv.layers.push(l); lys.push(l); if (vis) l.addTo(map); return l; };
             let deepest = null;
-            mc.pads.forEach(a => {
+            mc.pads.forEach((a, pi) => {
                 try {
                     // SOLID fill (v2.38) — covered pads read as painted, so the
                     // eye only hunts for UNfilled pads (the remaining work)
-                    mcv.layers.push(L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: col, weight: 3, opacity: 0.95, fill: true, fillColor: col, fillOpacity: 0.55, interactive: false }).addTo(map));
+                    keep(L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: col, weight: 3, opacity: 0.95, fill: true, fillColor: col, fillOpacity: 0.55, interactive: false }));
+                    // v2.43: visit-order number on every covered pad, in the
+                    // macro's color. Pads shared by two macros get side-by-side
+                    // badges (x-offset per macro index). Click-through.
+                    const c2 = genCentroid(a.ring);
+                    keep(L.marker([c2.lat, c2.lng], {
+                        icon: L.divIcon({
+                            className: 'aim-mb-rng-chip',
+                            html: `<div style="pointer-events:none;width:19px;height:19px;border-radius:50%;background:${col};color:#10131a;font:800 11px/19px monospace;text-align:center;border:1.5px solid #10131a;box-shadow:0 1px 4px rgba(0,0,0,0.7);">${pi + 1}</div>`,
+                            iconSize: [19, 19], iconAnchor: [10 - (i % 3) * 14, 10],
+                        }),
+                        interactive: false, keyboard: false, zIndexOffset: -300,
+                    }));
                 } catch (e) {}
                 if (!deepest) deepest = a;   // first pad = mission's first stop
             });
             if (deepest) {
                 const c = genCentroid(deepest.ring);
                 try {
-                    mcv.layers.push(L.marker([c.lat, c.lng], {
+                    keep(L.marker([c.lat, c.lng], {
                         icon: L.divIcon({
                             className: 'aim-mb-rng-chip',
                             html: `<div style="pointer-events:none;background:${col};color:#10131a;font:800 11px/1 'Lato',sans-serif;padding:3px 7px;border-radius:4px;border:1.5px solid #10131a;box-shadow:0 1px 5px rgba(0,0,0,0.7);white-space:nowrap;">${escapeHtml(String(mc.mission.name || '').slice(0, 24))}</div>`,
                             iconSize: [0, 0], iconAnchor: [0, 22],
                         }),
                         interactive: false, keyboard: false, zIndexOffset: -400,
-                    }).addTo(map));
+                    }));
                 } catch (e) {}
             }
+            mcv.macroLayers.set(mc.mission.id, lys);
         });
         // legend (top-left, under the toolbar)
         const el = document.createElement('div');
         el.style.cssText = 'position:fixed;left:12px;top:70px;z-index:2147483599;max-height:50vh;overflow:auto;background:rgba(16,19,26,0.92);border:1px solid #2a3340;border-radius:8px;padding:8px 11px;color:#e6e6e6;font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 4px 16px rgba(0,0,0,0.6);';
         const COLORS2 = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
-        el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><b style="color:#7adfe6;">🧩 Macro coverage</b><button data-mcv-report title="Copy the coverage report (Name / Classification / Captured / Battery / Section / Mission / Order) — colored cells, paste into Google Sheets" style="padding:1px 7px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">📋 Report</button><span data-mcv-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
+        el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><b style="color:#7adfe6;">🧩 Macro coverage</b><button data-mcv-report title="Copy the coverage report (Name / Classification / Captured / Battery / Section / Mission / Order) — colored cells, paste into Google Sheets" style="padding:1px 7px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">📋 Report</button><button data-mcv-vis-all title="Show every macro on the map" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">All</button><button data-mcv-vis-none title="Hide every macro — then re-check just the ones you want" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">None</button><span data-mcv-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
             + (det.macros.length
-                ? det.macros.map((mc, i) => `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px;">${escapeHtml(String(mc.mission.name || ''))}</span><b style="margin-left:auto;padding-left:10px;">${mc.pads.length}</b></div>`).join('')
+                ? det.macros.map((mc, i) => {
+                    const au = (mcv.data && mcv.data.audits) ? mcv.data.audits.get(mc.mission.id) : null;
+                    let auditLine = '';
+                    let reBtn = '';
+                    if (au && au.cur && au.re) {
+                        const c = au.calib;
+                        const curFl = c ? c.curFl : au.cur.flights.length;
+                        const reFl = c ? c.reFl : au.re.flights.length;
+                        const curFt = c && c.curDistM ? c.curDistM * 3.28084 : au.cur.totalFt;
+                        const reFt = c && c.reDistM ? c.reDistM * 3.28084 : au.re.totalFt;
+                        const dFl = curFl - reFl;
+                        const dPct = au.cur.totalFt > 0 ? Math.round((au.cur.totalFt - au.re.totalFt) / au.cur.totalFt * 100) : 0;
+                        const days = mcvDays(curFl).days;
+                        const worth = dFl >= 1 || dPct >= 10;
+                        auditLine = `<div title="${c ? 'Percepto-calibrated: absolutes from the mission\'s own battery/distance estimate; only the current↔replan ratio comes from the route simulator' : 'Simulator estimate (no Percepto battery data on this mission)'}" style="margin:0 0 3px 16px;font-size:10px;color:${worth ? '#ffb74d' : '#789'};">`
+                            + `${(curFt / 1000).toFixed(0)}k ft · ${curFl} fl · ~${days.toFixed(1)}d${c ? '' : ' <span style="color:#567;">(sim)</span>'}`
+                            + (worth ? ` → ♻ ${(reFt / 1000).toFixed(0)}k · ${reFl} fl (−${dFl} fl, −${dPct}%)` : ' · ✓ near-optimal')
+                            + `${au.unknown ? ` · ⚠${au.unknown} unranged` : ''}</div>`;
+                        if (worth) reBtn = `<button data-mcv-reorder="${mc.mission.id}" title="Re-order this mission's pad blocks in place (backup + verify; steps untouched)" style="padding:0 5px;background:rgba(255,183,77,0.15);border:1px solid rgba(255,183,77,0.5);color:#ffb74d;border-radius:4px;cursor:pointer;font-size:10px;">♻</button>`;
+                        reBtn += `<button data-mcv-route="${mc.mission.id}" data-mcv-route-col="${COLORS2[i % COLORS2.length]}" title="Draw this macro's CURRENT route (solid) vs the ♻ replan route (dashed white) on the map" style="padding:0 5px;background:rgba(122,223,230,0.12);border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">👁</button>`;
+                    }
+                    // v2.47: per-macro visibility — checkbox toggles this macro's
+                    // map layers; clicking the color swatch SOLOs it (hide all
+                    // others; click again to bring everything back).
+                    const vis = !mcv.hidden.has(mc.mission.id);
+                    if (auditLine) auditLine = auditLine.replace('<div ', `<div data-mcv-au="${mc.mission.id}" `);
+                    return `<div data-mcv-row="${mc.mission.id}" style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:${vis ? 1 : 0.38};"><input type="checkbox" data-mcv-vis="${mc.mission.id}" ${vis ? 'checked' : ''} title="Show/hide this macro on the map" style="margin:0;cursor:pointer;accent-color:${COLORS2[i % COLORS2.length]};"><span data-mcv-solo="${mc.mission.id}" title="Solo — show ONLY this macro (click again to show all)" style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;cursor:pointer;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${reBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine ? auditLine.replace('style="', `style="opacity:${vis ? 1 : 0.38};`) : ''}`;
+                }).join('')
                 : '<div style="color:#888;">No macro missions yet (≥2 pads in one mission).</div>')
             + `<div style="color:#ffb74d;margin-top:5px;">⬜ ${det.todo.length} pad(s) with missions, not in any macro</div>`
+            + (() => { const t = mcvTimeCfg(); const perDay = mcvDays(1).perDay; return `<div style="display:flex;gap:5px;align-items:center;margin-top:5px;font-size:10px;color:#9ad;flex-wrap:wrap;">`
+                + `flight <input data-mcv-t="flightMin" type="number" value="${t.flightMin}" style="width:34px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">m`
+                + ` charge <input data-mcv-t="chargeMin" type="number" value="${t.chargeMin}" style="width:38px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">m`
+                + ` ops <input data-mcv-t="opsHrs" type="number" value="${t.opsHrs}" style="width:30px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">h/d`
+                + ` <span style="color:#789;">≈${perDay} fl/day</span></div>`; })()
             + '<div style="color:#789;margin-top:3px;">Filled = covered · UNfilled = still to do · click-through</div>';
         document.body.appendChild(el);
         el.querySelector('[data-mcv-x]').onclick = () => { mcv.on = false; mcvClear(); const b = document.querySelector('[data-mcv-toggle]'); if (b) b.classList.remove('active'); };
         el.querySelector('[data-mcv-report]').onclick = () => mcvReport();
+        el.querySelectorAll('[data-mcv-reorder]').forEach(b => b.onclick = () => mcvReorder(Number(b.getAttribute('data-mcv-reorder')) || b.getAttribute('data-mcv-reorder')));
+        el.querySelectorAll('[data-mcv-route]').forEach(b => b.onclick = () => {
+            const id = Number(b.getAttribute('data-mcv-route')) || b.getAttribute('data-mcv-route');
+            const on = mcvToggleRoute(id, b.getAttribute('data-mcv-route-col'));
+            b.style.background = on ? 'rgba(122,223,230,0.4)' : 'rgba(122,223,230,0.12)';
+        });
+        // v2.47: per-macro show/hide + solo + All/None
+        el.querySelectorAll('input[data-mcv-vis]').forEach(cb => cb.onchange = () => {
+            const id = Number(cb.getAttribute('data-mcv-vis')) || cb.getAttribute('data-mcv-vis');
+            mcvSetVis(id, cb.checked);
+        });
+        el.querySelectorAll('[data-mcv-solo]').forEach(sw => sw.onclick = () => {
+            const id = Number(sw.getAttribute('data-mcv-solo')) || sw.getAttribute('data-mcv-solo');
+            mcvSolo(id);
+        });
+        el.querySelector('[data-mcv-vis-all]').onclick = () => mcvAllVis(true);
+        el.querySelector('[data-mcv-vis-none]').onclick = () => mcvAllVis(false);
+        el.querySelectorAll('[data-mcv-t]').forEach(inp => inp.onchange = () => {
+            const patch = {}; patch[inp.getAttribute('data-mcv-t')] = Number(inp.value);
+            gmSet(MCV_TIME_KEY, Object.assign({}, mcvTimeCfg(), patch));
+            // redraw with the new day math
+            if (mcv.data && mcv.data.det) { mcvClear(); mcvDraw(mcv.data.det); }
+        });
         mcv.legendEl = el;
         // subtle dashed white outline on not-yet-covered pads — the TODO list
         det.todo.forEach(a => {
             try { mcv.layers.push(L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: '#ffffff', weight: 2, dashArray: '2 6', opacity: 0.65, fill: false, interactive: false }).addTo(map)); } catch (e) {}
         });
     }
+    // ── per-macro visibility (v2.47) ────────────────────────────────────────
+    // Isolate the macro being worked on: checkbox per legend row, click the
+    // color swatch to SOLO, All/None in the header. Session-only — resets to
+    // all-visible on every fresh 🧩 toggle-on. Hiding a macro also clears its
+    // 👁 route-comparison lines (they'd float context-free otherwise).
+    function mcvSetVis(id, visible) {
+        const lys = mcv.macroLayers.get(id) || [];
+        if (visible) {
+            mcv.hidden.delete(id);
+            const map = getLeafletMap();
+            if (map) lys.forEach(l => { try { l.addTo(map); } catch (e) {} });
+        } else {
+            mcv.hidden.add(id);
+            lys.forEach(l => { try { l.remove(); } catch (e) {} });
+            if (mcvRoutes.has(id)) {
+                mcvClearRoutes(id);
+                const rb = mcv.legendEl && mcv.legendEl.querySelector(`[data-mcv-route="${id}"]`);
+                if (rb) rb.style.background = 'rgba(122,223,230,0.12)';
+            }
+        }
+        if (mcv.legendEl) {
+            const row = mcv.legendEl.querySelector(`[data-mcv-row="${id}"]`);
+            if (row) row.style.opacity = visible ? '1' : '0.38';
+            const au = mcv.legendEl.querySelector(`[data-mcv-au="${id}"]`);
+            if (au) au.style.opacity = visible ? '1' : '0.38';
+            const cb = mcv.legendEl.querySelector(`input[data-mcv-vis="${id}"]`);
+            if (cb) cb.checked = visible;
+        }
+    }
+    function mcvAllVis(visible) {
+        const det = mcv.data && mcv.data.det;
+        if (det) det.macros.forEach(mc => mcvSetVis(mc.mission.id, visible));
+    }
+    function mcvSolo(id) {
+        const det = mcv.data && mcv.data.det;
+        if (!det) return;
+        const others = det.macros.map(mc => mc.mission.id).filter(x => x !== id);
+        const alreadySolo = !mcv.hidden.has(id) && others.length > 0 && others.every(x => mcv.hidden.has(x));
+        if (alreadySolo) mcvAllVis(true);
+        else det.macros.forEach(mc => mcvSetVis(mc.mission.id, mc.mission.id === id));
+    }
+    // ── ♻ EFFICIENCY AUDIT + REORDER (v2.40) ────────────────────────────────
+    // Flight-hours are the SLA currency: ~20-25 min flight + ~80 min recharge
+    // means EVERY flight costs ~1¾ h of wall clock, so a 6-flight macro eats
+    // an ops day. The audit simulates each macro's CURRENT step order vs the
+    // spur-walk replan of the same pads, and converts flights → days via
+    // editable time knobs. ♻ then resequences the macro's per-pad step
+    // blocks in place (same id + name, backup first, verify after).
+    const MCV_TIME_KEY = 'aim-mb-mcv-time';
+    function mcvTimeCfg() {
+        const d = { flightMin: 22, chargeMin: 80, opsHrs: 8 };
+        const s = gmGet(MCV_TIME_KEY, null);
+        const o = Object.assign({}, d, (s && typeof s === 'object') ? s : {});
+        Object.keys(d).forEach(k => { const v = Number(o[k]); o[k] = (isFinite(v) && v > 0) ? v : d[k]; });
+        return o;
+    }
+    function mcvDays(flights) {
+        const t = mcvTimeCfg();
+        // last flight of the day needs no recharge after it
+        const perDay = Math.max(1, Math.floor((t.opsHrs * 60 + t.chargeMin) / (t.flightMin + t.chargeMin)));
+        return { days: flights / perDay, perDay };
+    }
+    function mcvAudit(det, ent) {
+        const t0 = Date.now();
+        let sol;
+        try { sol = rngSolve(ent); } catch (e) { console.warn(`${TAG} [mcv] audit range solve failed`, e); return new Map(); }
+        const byAsset = new Map(sol.results.map(r => [r.asset.id, r]));
+        const cfg = agCfg();
+        const audits = new Map();
+        det.macros.forEach(mc => {
+            try {
+                const stepsByPad = new Map();
+                (mc.blocks || []).forEach(b => {
+                    if (b.aId == null) return;
+                    if (!stepsByPad.has(b.aId)) stepsByPad.set(b.aId, []);
+                    b.steps.forEach(s => stepsByPad.get(b.aId).push(s));
+                });
+                const rows = [];
+                let unknown = 0;
+                mc.pads.forEach(a => {
+                    const r = byAsset.get(a.id);
+                    if (!r || r.status !== 'ok') { unknown++; return; }
+                    rows.push({
+                        asset: a,
+                        mission: { id: `blk:${a.id}`, name: a.name, instructions: stepsByPad.get(a.id) || [] },
+                        ft: r.worstFt,
+                        tulip: r.worstFt > cfg.tattuRadiusFt,
+                    });
+                });
+                if (rows.length < 2) { audits.set(mc.mission.id, null); return; }
+                const budget = rows.some(r => r.tulip) ? cfg.tulipBudgetFt : cfg.tattuBudgetFt;
+                const pw = lassoBuildPairwise(rows, ent, byAsset);
+                if (!pw || !pw.ok) { audits.set(mc.mission.id, null); return; }
+                const cur = agSimulate(rows.map((_, i) => i), pw.dPad, pw.dBase, pw.costOf, budget);
+                const re = lassoOrderRows(rows, budget, pw);
+                // Percepto calibration (v2.41): our sim runs ~2× hot in absolute
+                // terms (energy-ft conflation + conservative budgets + RTB legs)
+                // — live cross-check vs the SUM table. So absolutes anchor to
+                // PERCEPTO's own per-mission estimates (battery_consumption %,
+                // flight_distance) and our sim provides only the RATIO, where
+                // systematic model error cancels. Flights via the SUM panel's
+                // own estimateFlights thresholds (the ⚙ knob).
+                let calib = null;
+                // v2.43: the consumption/distance fields live under app_data
+                // (same source buildMissionRow uses) — reading the mission root
+                // made EVERY macro silently fall back to "(sim)".
+                const app = mc.mission.app_data || {};
+                const bPct = Number(app.battery_consumption) || null;
+                const distM = Number(app.flight_distance) || null;
+                if (bPct && re.sim && cur.totalFt > 0) {
+                    // v2.42: reorder only shrinks the NAV phase — Wait /
+                    // takeoff / landing / extra burn is order-invariant (live
+                    // SUM breakdown: West Side 404% = 293% nav + 111% fixed).
+                    // The ratio is therefore computed on the sim's NAV-like
+                    // energy (legs + intra-pad flying; per-step hover cost
+                    // excluded from both sides) and applied to Percepto's
+                    // nav_consumption only; the fixed phases carry over.
+                    const stepOnly = rows.reduce((t2, r2) => t2 + pcmStepCount(r2.mission) * cfg.stepCostFt, 0);
+                    const navCurFt = Math.max(1, cur.totalFt - stepOnly);
+                    const navReFt = Math.max(1, re.sim.totalFt - stepOnly);
+                    const navRatio = Math.min(2, Math.max(0.1, navReFt / navCurFt));
+                    const navB = Number(app.nav_consumption) || null;
+                    const fixedB = navB != null ? Math.max(0, bPct - navB) : null;
+                    const reB = (navB != null && fixedB != null)
+                        ? navB * navRatio + fixedB
+                        : bPct * (re.sim.totalFt / cur.totalFt);   // no phase data → whole-ratio fallback
+                    calib = {
+                        ratio: navRatio,
+                        curB: bPct, reB,
+                        curFl: estimateFlights(bPct) || cur.flights.length,
+                        reFl: estimateFlights(reB) || re.sim.flights.length,
+                        curDistM: distM, reDistM: distM ? distM * navRatio : null,
+                    };
+                }
+                audits.set(mc.mission.id, { cur, re: re.sim, reRows: re.rows, unknown, budget, calib });
+            } catch (e) {
+                console.warn(`${TAG} [mcv] audit failed for "${mc.mission.name}"`, e);
+                audits.set(mc.mission.id, null);
+            }
+        });
+        console.log(`${TAG} [mcv] audit: ${det.macros.length} macro(s) in ${Date.now() - t0} ms`);
+        return audits;
+    }
+    // ♻ resequence a macro's per-pad blocks into the replan order, in place.
+    let mcvReorderBusy = false;
+    async function mcvReorder(missionId) {
+        if (mcvReorderBusy) return;
+        const data = mcv.data;
+        const mc = data && data.det.macros.find(x => x.mission.id === missionId);
+        const audit = data && data.audits ? data.audits.get(missionId) : null;
+        if (!mc || !audit || !audit.re) { showToast('No replan available for this mission.', '#ff9800', 3000); return; }
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4500); return; }
+        const m = mc.mission;
+        const ins = m.instructions || [];
+        const to = ins.filter(i => i && i.type === 0).slice(0, 1);
+        const rh = ins.filter(i => i && i.type === 99).slice(-1);
+        const lead = (mc.blocks[0] && mc.blocks[0].aId == null) ? mc.blocks[0].steps : [];
+        const byPad = new Map();
+        mc.blocks.forEach(b => {
+            if (b.aId == null) return;
+            if (!byPad.has(b.aId)) byPad.set(b.aId, []);
+            b.steps.forEach(s => byPad.get(b.aId).push(s));
+        });
+        const orderIds = audit.reRows.map(r => r.asset.id);
+        const seen = new Set(orderIds);
+        mc.pads.forEach(a => { if (!seen.has(a.id) && byPad.has(a.id)) { orderIds.push(a.id); seen.add(a.id); } });
+        const body = lead.slice();
+        orderIds.forEach(id => (byPad.get(id) || []).forEach(s => body.push(s)));
+        const instrs = to.map(pcmNormStep).concat(body.map(pcmNormStep), rh.map(pcmNormStep));
+        // hard sanity: exactly the same steps, only re-sequenced
+        const expected = to.length + rh.length + ins.filter(i => i && i.type !== 0 && i.type !== 99).length;
+        if (instrs.length !== expected) {
+            console.warn(`${TAG} [mcv] reorder ABORT — step count mismatch (${instrs.length} vs ${expected})`, m.name);
+            showToast('♻ Aborted: rebuilt step count does not match the original (see console). Nothing saved.', '#ff5252', 6000);
+            return;
+        }
+        const cFl = audit.calib ? audit.calib.curFl : audit.cur.flights.length;
+        const rFl = audit.calib ? audit.calib.reFl : audit.re.flights.length;
+        const cFt = (audit.calib && audit.calib.curDistM) ? audit.calib.curDistM * 3.28084 : audit.cur.totalFt;
+        const rFt = (audit.calib && audit.calib.reDistM) ? audit.calib.reDistM * 3.28084 : audit.re.totalFt;
+        const dCur = mcvDays(cFl), dRe = mcvDays(rFl);
+        if (!window.confirm(`♻ Re-order "${m.name}" IN PLACE?\n\n`
+            + `${cFl} flights (~${dCur.days.toFixed(1)} day(s)) → ${rFl} flights (~${dRe.days.toFixed(1)} day(s))\n`
+            + `est ${(cFt / 1000).toFixed(0)}k ft → ${(rFt / 1000).toFixed(0)}k ft${audit.calib ? ' (Percepto-calibrated)' : ''}\n\n`
+            + `Each pad's steps stay intact — only the pad ORDER changes. Mission id + name unchanged.\nA JSON backup downloads first.`)) return;
+        mcvReorderBusy = true;
+        try {
+            // backup (same frame-walking download as the wrap tools)
+            try {
+                const blob = new Blob([JSON.stringify({ site: getCurrentSiteID(), savedAt: new Date().toISOString(), reason: 'pre-reorder', mission: m })], { type: 'application/json' });
+                const blobUrl = URL.createObjectURL(blob);
+                let downloaded = false;
+                for (const doc of [(window.top || window).document, document]) {
+                    if (downloaded) break;
+                    try {
+                        const a = doc.createElement('a');
+                        a.href = blobUrl; a.download = `mission${m.id}_prereorder_backup.json`;
+                        (doc.body || document.body).appendChild(a); a.click(); a.remove();
+                        downloaded = true;
+                    } catch (e) {}
+                }
+                setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 5000);
+                if (!downloaded) throw new Error('no frame allowed the download');
+            } catch (e) {
+                console.warn(`${TAG} [mcv] backup download failed`, e);
+                if (!window.confirm('Backup download FAILED — continue WITHOUT a backup?')) { mcvReorderBusy = false; return; }
+            }
+            showToast(`♻ Saving re-ordered "${m.name}"…`, '#9cf', 3000);
+            await ctx.saveApp(Object.assign({}, m, { instructions: instrs }), m.name);
+            // verify: fresh fetch → same pad set, new order, same step count
+            await new Promise(r => setTimeout(r, 1200));
+            const after = await mbFetchMissionsFull(getCurrentSiteID());
+            const m2 = after.find(x => x.id === m.id);
+            let good = false;
+            if (m2) {
+                const det2 = mcvDetect(data.ent, [m2]);
+                const mc2 = det2.macros[0];
+                const gotOrder = mc2 ? mc2.pads.map(a => a.id).join(',') : '';
+                const wantOrder = orderIds.join(',');
+                const steps2 = (m2.instructions || []).filter(i => i && i.type !== 0 && i.type !== 99).length;
+                const steps1 = ins.filter(i => i && i.type !== 0 && i.type !== 99).length;
+                good = gotOrder === wantOrder && steps2 === steps1;
+                if (!good) console.warn(`${TAG} [mcv] verify mismatch — order got [${gotOrder}] want [${wantOrder}] · steps ${steps2}/${steps1}`);
+            }
+            showToast(good
+                ? `♻ "${m.name}" re-ordered ✓ verified — ${cFl} → ${rFl} flights. Re-check its schedule if one is active.`
+                : `⚠ "${m.name}" saved but verify mismatched — check the mission + console (backup downloaded).`, good ? '#5fff5f' : '#ff9800', 9000);
+            // refresh overlay data
+            mcv.data.missions = after;
+            mcv.data.det = mcvDetect(data.ent, after);
+            mcv.data.audits = mcvAudit(mcv.data.det, data.ent);
+            mcvClear();
+            mcvDraw(mcv.data.det);
+            mcv.on = true;
+        } catch (e) {
+            console.warn(`${TAG} [mcv] reorder failed`, e);
+            showToast('♻ Reorder FAILED — nothing verified, backup downloaded (see console).', '#ff5252', 6000);
+        }
+        mcvReorderBusy = false;
+    }
+
+    // 👁 route comparison (v2.44) — draw a macro's CURRENT order (solid, the
+    // macro's color) and the ♻ replan order (dashed white) as legal routes on
+    // the verified graph, base to base. Answers "how is it so much further"
+    // with feet of line instead of vibes. Click-through; per-macro toggle.
+    const mcvRoutes = new Map();   // missionId -> layers[]
+    function mcvClearRoutes(missionId) {
+        const clear = (id) => { (mcvRoutes.get(id) || []).forEach(l => { try { l.remove(); } catch (e) {} }); mcvRoutes.delete(id); };
+        if (missionId != null) clear(missionId);
+        else Array.from(mcvRoutes.keys()).forEach(clear);
+    }
+    function mcvRouteBuilt() {
+        const data = mcv.data;
+        if (!data) return null;
+        if (!data.routeBuilt) {
+            try {
+                const built = rngBuildGraph(data.ent, false);
+                built.boxes = built.ffzs.map(f => agRingBbox(f.ring, MB_ENTRY_FFZ_FT / 3.28084));
+                data.routeBuilt = built;
+            } catch (e) { console.warn(`${TAG} [mcv] route graph build failed`, e); return null; }
+        }
+        return data.routeBuilt;
+    }
+    function mcvToggleRoute(missionId, color) {
+        if (mcvRoutes.has(missionId)) { mcvClearRoutes(missionId); return false; }
+        const L = composerGetL(), map = getLeafletMap();
+        const data = mcv.data;
+        if (!L || !map || !data) return false;
+        const mc = data.det.macros.find(x => x.mission.id === missionId);
+        const au = data.audits ? data.audits.get(missionId) : null;
+        const built = mcvRouteBuilt();
+        if (!mc || !built) { showToast('Route compare unavailable (see console).', '#ff9800', 3000); return false; }
+        const base = data.ent.base;
+        const layers = [];
+        // v2.45: anchor at the mission's ACTUAL NAV POINTS, never centroids —
+        // the drone flies navs; centroid stubs reached illegally into pads and
+        // exaggerated the drawn length (live catch). Per pad we walk its block
+        // steps' navs in order; legs between stops route legally.
+        const stepsByPad = new Map();
+        (mc.blocks || []).forEach(b => {
+            if (b.aId == null) return;
+            if (!stepsByPad.has(b.aId)) stepsByPad.set(b.aId, []);
+            b.steps.forEach(s => stepsByPad.get(b.aId).push(s));
+        });
+        const padById = new Map(mc.pads.map(a => [a.id, a]));
+        const navsOf = (padId) => {
+            const steps = stepsByPad.get(padId) || [];
+            const navs = steps.filter(s => s && s.type === 1 && s.location && typeof s.location.lat === 'number').map(s => s.location);
+            if (navs.length) return navs;
+            const a = padById.get(padId);
+            return a ? [genCentroid(a.ring)] : [];
+        };
+        const pathFor = (padIds) => {
+            const stops = [];
+            if (base) stops.push(base);
+            padIds.forEach(id => navsOf(id).forEach(p => stops.push(p)));
+            if (base) stops.push(base);
+            let pts = [];
+            for (let i = 1; i < stops.length; i++) {
+                const leg = mpvLegalPath(built, stops[i - 1], stops[i]) || [[stops[i - 1].lat, stops[i - 1].lng], [stops[i].lat, stops[i].lng]];
+                pts = pts.length ? pts.concat(leg.slice(1)) : leg.slice();
+            }
+            return pts;
+        };
+        try {
+            layers.push(L.polyline(pathFor(mc.pads.map(a => a.id)), { color, weight: 4, opacity: 0.9, interactive: false }).addTo(map));
+            if (au && au.reRows && au.reRows.length) {
+                layers.push(L.polyline(pathFor(au.reRows.map(r => r.asset.id)), { color: '#ffffff', weight: 2.5, opacity: 0.9, dashArray: '6 6', interactive: false }).addTo(map));
+            }
+        } catch (e) { console.warn(`${TAG} [mcv] route draw failed`, e); }
+        mcvRoutes.set(missionId, layers);
+        return true;
+    }
+
     // 📋 Report (v2.39) — the user's planning spreadsheet, generated: one row
     // per pad with Name / Asset Classification / Captured? / Battery /
     // Section / Mission Name / Order, grouped by mission (uncovered pads at
@@ -5300,11 +5725,41 @@
                     + '</tr>';
             }).join('')
             + '</table>';
+        // ♻ mission-level audit table (v2.40) — appended below the pad table
+        const audits = data.audits || new Map();
+        const auRows = det.macros.map(mc => {
+            const au = audits.get(mc.mission.id);
+            const steps = (mc.mission.instructions || []).filter(i => i && i.type !== 0 && i.type !== 99).length;
+            if (!au || !au.cur || !au.re) return { name: mc.mission.name, pads: mc.pads.length, steps, cur: '', curFl: '', re: '', reFl: '', dFl: '', days: '' };
+            const c = au.calib;
+            const curFl = c ? c.curFl : au.cur.flights.length;
+            const reFl = c ? c.reFl : au.re.flights.length;
+            const curFt = c && c.curDistM ? c.curDistM * 3.28084 : au.cur.totalFt;
+            const reFt = c && c.reDistM ? c.reDistM * 3.28084 : au.re.totalFt;
+            return {
+                name: mc.mission.name, pads: mc.pads.length, steps,
+                cur: Math.round(curFt / 1000) + 'k', curFl,
+                re: Math.round(reFt / 1000) + 'k', reFl,
+                dFl: curFl - reFl,
+                days: mcvDays(curFl).days.toFixed(1),
+            };
+        }).sort((a, b) => (Number(b.dFl) || 0) - (Number(a.dFl) || 0));
+        const auHtml = auRows.length
+            ? '<br><table style="border-collapse:collapse;font-family:Arial;font-size:12px;"><tr>'
+                + ['Mission', 'Pads', 'Steps', 'Current est ft', 'Current flights', 'Replan est ft', 'Replan flights', 'Flights saved', 'Est days (current)'].map(h => `<td style="border:1px solid #999;padding:2px 8px;background:#efefef;font-weight:bold;">${h}</td>`).join('')
+                + '</tr>'
+                + auRows.map(r3 => '<tr>' + [r3.name, r3.pads, r3.steps, r3.cur, r3.curFl, r3.re, r3.reFl, r3.dFl, r3.days].map((v, ci) => td(v, ci === 7 && Number(v) >= 1 ? '#ffe0b2' : '', '#333')).join('') + '</tr>').join('')
+                + '</table>'
+            : '';
+        const html2 = html + auHtml;
         const tsv = ['Name\tAsset Classification\tCaptured?\tBattery\tSection\tMission Name\tOrder']
-            .concat(rows.map(r2 => [r2.name, r2.cls, r2.captured ? 'TRUE' : 'FALSE', r2.bat, r2.sec, r2.mission, r2.order].join('\t'))).join('\n');
+            .concat(rows.map(r2 => [r2.name, r2.cls, r2.captured ? 'TRUE' : 'FALSE', r2.bat, r2.sec, r2.mission, r2.order].join('\t')))
+            .concat(auRows.length ? ['', 'Mission\tPads\tSteps\tCurrent est ft\tCurrent flights\tReplan est ft\tReplan flights\tFlights saved\tEst days (current)']
+                .concat(auRows.map(r3 => [r3.name, r3.pads, r3.steps, r3.cur, r3.curFl, r3.re, r3.reFl, r3.dFl, r3.days].join('\t'))) : [])
+            .join('\n');
         try {
             await navigator.clipboard.write([new ClipboardItem({
-                'text/html': new Blob([html], { type: 'text/html' }),
+                'text/html': new Blob([html2], { type: 'text/html' }),
                 'text/plain': new Blob([tsv], { type: 'text/plain' }),
             })]);
             showToast(`📋 Report copied (${rows.length} pads) — paste into Google Sheets.`, '#5fff5f', 5000);
@@ -5329,7 +5784,10 @@
             const [ent, missions] = await Promise.all([genFetchEntities(sid), new Promise((res, rej) => fetchMissions(sid, res, rej))]);
             const det = mcvDetect(ent, missions);
             mcv.data = { ent, missions, det };
+            showToast('♻ Auditing macro efficiency (current order vs replan)…', '#7adfe6', 2500);
+            mcv.data.audits = mcvAudit(det, ent);
             mcvClear();
+            mcv.hidden = new Set();   // default: every macro visible on a fresh open
             mcvDraw(det);
             mcv.on = true;
             if (btn) btn.classList.add('active');
@@ -8986,7 +9444,7 @@
                             <input type="checkbox" data-collapse-blocks ${collapseScanBlocks ? 'checked' : ''}> Collapse scan blocks
                         </label>
                         <button class="aim-mb-tbtn" data-detail-export="sheets" title="Copy visible rows → Sheets">Copy → Sheets</button>
-                        <button class="aim-mb-tbtn" data-detail-export="kml" title="Export as KML — flight-path line + N#/S# 3D pins, each pin showing its step details (bundled Thermal/GEM/Wait)">Export KML</button>
+                        <button class="aim-mb-tbtn" data-detail-export="kml" title="Export as KML — nav→nav mission path (+ routed base path if this mission is open on the map) + N#/S# 3D pins, each pin showing its step details (bundled Thermal/GEM/Wait)">Export KML</button>
                     </div>
                     ${(() => {
                         const n = countPending(missionId);
@@ -9669,7 +10127,9 @@
     }
 
     // Build a Google-Earth KML for an ordered list of mission steps:
-    //   • a WHITE Flight Path line nav→nav (the real drone route),
+    //   • a WHITE Mission Path line nav→nav (the step order N1→N2→…),
+    //   • a CYAN Routed Path line when opts.routes is supplied (the map's
+    //     dashed base→mission→base transit, following the FPs/FFZs),
     //   • PURPLE sightlines nav→each of its snapshots (what it's looking at),
     //     labeled with the nav↔snapshot standoff distance (ideal ~100 ft),
     //   • N# pins (blue) whose description is the WHOLE stop — nav params + its
@@ -9710,11 +10170,22 @@
         const anySnap = snapBlocks.some(sb => sb.snap.location && sb.snap.location.lat != null);
         if (!navsLoc.length && !anySnap) return null;
 
-        // Flight path: prefer the REAL routed path captured from AIM's map (the
-        // white dashed line that follows the FPs/FFZs, base→steps→back). Fall
-        // back to a straight nav→nav line when it isn't readable (e.g. the SUM
-        // export, where the open map may be a different mission).
+        // Flight path: emit BOTH lines when we can —
+        //   • the straight nav→nav zigzag (WHITE) = the mission's step order,
+        //     always present so N1→N2→N3… is visible in every export;
+        //   • the REAL routed path captured off AIM's map (CYAN, the dashed
+        //     line that follows the FPs/FFZs, base→steps→back) when readable.
+        // Previously routes REPLACED the zigzag, so the editor export lost the
+        // step order and the SUM export lost the base transit — now combined.
         let pathPlacemark = '';
+        if (navsLoc.length >= 2) {
+            const pathCoords = navsLoc.map(n => `${Number(n.location.lng)},${Number(n.location.lat)},${kmlAltM(n)}`).join(' ');
+            pathPlacemark = `    <Placemark>
+      <name>Mission Path (nav→nav)</name>
+      <styleUrl>#style-path</styleUrl>
+      <LineString><tessellate>1</tessellate><altitudeMode>absolute</altitudeMode><coordinates>${pathCoords}</coordinates></LineString>
+    </Placemark>`;
+        }
         if (opts.routes && opts.routes.length) {
             // The captured route is 2D (lat/lng only). Raise each vertex to the
             // altitude of the NEAREST navigate so the line rides up with the nav
@@ -9726,21 +10197,15 @@
                 return best;
             };
             const mode = navAlts.length ? 'absolute' : 'clampToGround';
-            pathPlacemark = opts.routes.map((route, i) => {
+            const routed = opts.routes.map((route, i) => {
                 const coords = route.map(p => `${p.lng},${p.lat},${altForPoint(p)}`).join(' ');
                 return `    <Placemark>
-      <name>Flight Path${opts.routes.length > 1 ? ' ' + (i + 1) : ''}</name>
-      <styleUrl>#style-path</styleUrl>
+      <name>Routed Path (base→mission→base)${opts.routes.length > 1 ? ' ' + (i + 1) : ''}</name>
+      <styleUrl>#style-route</styleUrl>
       <LineString><tessellate>1</tessellate><altitudeMode>${mode}</altitudeMode><coordinates>${coords}</coordinates></LineString>
     </Placemark>`;
             }).join('\n');
-        } else if (navsLoc.length >= 2) {
-            const pathCoords = navsLoc.map(n => `${Number(n.location.lng)},${Number(n.location.lat)},${kmlAltM(n)}`).join(' ');
-            pathPlacemark = `    <Placemark>
-      <name>Flight Path (straight nav→nav)</name>
-      <styleUrl>#style-path</styleUrl>
-      <LineString><tessellate>1</tessellate><altitudeMode>absolute</altitudeMode><coordinates>${pathCoords}</coordinates></LineString>
-    </Placemark>`;
+            pathPlacemark = pathPlacemark ? `${pathPlacemark}\n${routed}` : routed;
         }
 
         // PURPLE sightlines: nav → each of its snapshots, named with distance.
@@ -9813,10 +10278,11 @@
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>
     <name>${escapeXml(docName)}</name>
-    <description>White line = flight path (nav→nav). Purple lines = nav→snapshot sightlines (labeled with distance). Blue/pink pins carry per-stop step detail. Exported by AIM Mission Bank Tools v${SCRIPT_VERSION}.</description>
+    <description>White line = mission path in step order (nav→nav). Cyan line = the routed path off the map (base→mission→base, follows the FPs/FFZs — only present when the mission was open on the map at export). Purple lines = nav→snapshot sightlines (labeled with distance). Blue/pink pins carry per-stop step detail. Exported by AIM Mission Bank Tools v${SCRIPT_VERSION}.</description>
     <Style id="style-nav"><IconStyle><color>${navColor}</color><scale>1.1</scale><Icon><href>${PIN}</href></Icon></IconStyle><LabelStyle><color>${navColor}</color></LabelStyle></Style>
     <Style id="style-snap"><IconStyle><color>${snapColor}</color><scale>1.1</scale><Icon><href>${PIN}</href></Icon></IconStyle><LabelStyle><color>${snapColor}</color></LabelStyle></Style>
     <Style id="style-path"><LineStyle><color>ffffffff</color><width>3</width></LineStyle></Style>
+    <Style id="style-route"><LineStyle><color>d0ffd966</color><width>2.4</width></LineStyle></Style>
     <Style id="style-look"><LineStyle><color>ffe24db0</color><width>1.6</width></LineStyle></Style>
     <Folder><name>Flight Path</name>
 ${pathPlacemark}
@@ -9857,9 +10323,18 @@ ${snapPlacemarks}
     }
 
     function exportDetailToKML(row, allSteps) {
-        const built = buildMissionKml(row && row.name, allSteps || []);
+        // If THIS mission is the one open on the map, grab its routed line too
+        // (a different open mission's route would be wrong — skip it then).
+        let routes = null;
+        try {
+            if (composerMission && row && row.id != null && String(composerMission.id) === String(row.id)) routes = captureFlightRoutes();
+        } catch (e) { console.warn(`${TAG} [kml] route capture skipped`, e); }
+        const built = buildMissionKml(row && row.name, allSteps || [], { routes });
         if (!built) { showToast('No GPS steps (navigate/snapshot) to export.', '#ff9800'); return; }
-        if (downloadKmlFile(row && row.name, built.kml)) showToast(`Exported KML — ${built.navCount} stops · ${built.snapCount} snapshots`, '#5fff5f');
+        if (downloadKmlFile(row && row.name, built.kml)) {
+            const path = built.usedRoute ? ' · nav path + routed base path' : '';
+            showToast(`Exported KML — ${built.navCount} stops · ${built.snapCount} snapshots${path}`, '#5fff5f');
+        }
     }
 
     // Map-edit row: export the mission currently open in the native editor,
@@ -9872,7 +10347,7 @@ ${snapPlacemarks}
         const built = buildMissionKml(composerMission.name, ordered, { routes });
         if (!built) { showToast('No GPS steps (navigate/snapshot) to export.', '#ff9800'); return; }
         if (downloadKmlFile(composerMission.name, built.kml)) {
-            const path = built.usedRoute ? 'real routed path' : 'straight nav→nav path (couldn\'t read the routed line)';
+            const path = built.usedRoute ? 'nav path + routed base path' : 'nav path only (couldn\'t read the routed line)';
             showToast(`Exported KML — ${built.navCount} stops · ${built.snapCount} snapshots · ${path}`, '#5fff5f', 4500);
         }
     }
@@ -10399,6 +10874,120 @@ ${snapPlacemarks}
             }
         } catch (e) { /* fall through — DOM events are the fallback */ }
         return false;
+    }
+
+    // ── 🧮 Math in native step number fields (#236) ──────────────────────────
+    // Ant InputNumber lets you TYPE "2630+15" but reverts it on blur (invalid
+    // number). We catch Enter/blur in the capture phase first, evaluate the
+    // expression ourselves, rewrite the display via setReactInputValue and
+    // commit through commitInputNumberViaFiber — so the form model gets the
+    // computed number exactly like the Apply queue writes one.
+    //
+    // Safe evaluator: + - * / ( ) and decimals only, recursive descent, no
+    // eval(). Returns null unless the WHOLE string parses to a finite number.
+    function mathEvalExpr(str) {
+        const s = str.replace(/\s+/g, '');
+        let i = 0;
+        function num() {
+            const m = /^\d*\.?\d+/.exec(s.slice(i));
+            if (!m) return null;
+            i += m[0].length;
+            return parseFloat(m[0]);
+        }
+        function factor() {
+            if (s[i] === '(') {
+                i++;
+                const v = expr();
+                if (v == null || s[i] !== ')') return null;
+                i++;
+                return v;
+            }
+            if (s[i] === '-') { i++; const v = factor(); return v == null ? null : -v; }
+            if (s[i] === '+') { i++; return factor(); }
+            return num();
+        }
+        function term() {
+            let v = factor();
+            while (v != null && (s[i] === '*' || s[i] === '/')) {
+                const op = s[i++];
+                const r = factor();
+                if (r == null) return null;
+                v = op === '*' ? v * r : v / r;
+            }
+            return v;
+        }
+        function expr() {
+            let v = term();
+            while (v != null && (s[i] === '+' || s[i] === '-')) {
+                const op = s[i++];
+                const r = term();
+                if (r == null) return null;
+                v = op === '+' ? v + r : v - r;
+            }
+            return v;
+        }
+        const v = expr();
+        return (v != null && i === s.length && isFinite(v)) ? v : null;
+    }
+
+    // Evaluate the field if (and only if) it holds an expression. Plain
+    // numbers and foreign text pass through untouched. Returns true when a
+    // value was computed AND committed via the component onChange.
+    function mathFieldMaybeEval(input, why) {
+        const raw = String(input.value || '').trim();
+        if (!raw) return false;
+        if (/^-?\d*\.?\d+$/.test(raw)) return false;            // plain number — not ours
+        if (!/^[\d.\s()+*/x×-]+$/i.test(raw)) return false;     // foreign chars — not ours
+        let exprStr = raw.replace(/[x×]/gi, '*');
+        // Leading +, * or / = relative to the committed value (aria-valuenow).
+        // Leading '-' stays absolute — it's indistinguishable from a negative.
+        if (/^[+*/]/.test(exprStr)) {
+            const cur = parseFloat(input.getAttribute('aria-valuenow'));
+            if (!isFinite(cur)) {
+                console.warn(`${TAG} [math] relative "${raw}" but no committed value to base it on — ignoring`);
+                return false;
+            }
+            exprStr = `(${cur})${exprStr}`;
+        }
+        const v = mathEvalExpr(exprStr);
+        if (v == null) {
+            console.warn(`${TAG} [math] could not evaluate "${raw}" — leaving field alone (Ant will revert it on blur)`);
+            return false;
+        }
+        const out = Math.round(v * 100) / 100;
+        setReactInputValue(input, out);
+        const committed = commitInputNumberViaFiber(input, out);
+        if (committed) console.log(`${TAG} [math] (${why}) "${raw}" → ${out} (committed)`);
+        else console.warn(`${TAG} [math] (${why}) "${raw}" → ${out} — component onChange NOT found; display updated, letting Ant's own ${why} commit it`);
+        return committed;
+    }
+
+    function mathFieldTarget(e) {
+        const t = e.target;
+        if (!t || t.tagName !== 'INPUT' || !t.classList || !t.classList.contains('ant-input-number-input')) return null;
+        return t.closest('.edit-instruction') ? t : null;
+    }
+    function installMathFields() {
+        // Enter — evaluate + commit, and swallow the key so nothing else
+        // (Percepto's form, the Quick Mission Editor's Enter listener) reacts
+        // to an Enter that was "just math". A second Enter on the now-plain
+        // number behaves natively. If the fiber commit failed we let the key
+        // through so Ant's own Enter handling commits the rewritten display.
+        window.addEventListener('keydown', (e) => {
+            if (!masterEnabled || !mathFieldsEnabled || e.key !== 'Enter') return;
+            const t = mathFieldTarget(e);
+            if (t && mathFieldMaybeEval(t, 'enter')) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+        }, true);
+        // Click-away — evaluate + commit BEFORE Ant's blur handler reverts the
+        // "invalid" expression text.
+        window.addEventListener('focusout', (e) => {
+            if (!masterEnabled || !mathFieldsEnabled) return;
+            const t = mathFieldTarget(e);
+            if (t) mathFieldMaybeEval(t, 'blur');
+        }, true);
     }
 
     function findEditDialogInputByLabel(...labelTexts) {
@@ -12150,6 +12739,23 @@ ${snapPlacemarks}
         try {
             const ka = mpvAttachPoint(built, a, 'a', temp);
             const kb = mpvAttachPoint(built, b, 'b', temp);
+            // v2.46: two points in the SAME FFZ connect DIRECTLY when the
+            // straight segment stays inside it. mpvAttachPoint deliberately
+            // never links temp points to each other, so without this every
+            // same-FFZ leg doglegged via a ring/FP vertex (live catch: a
+            // nav→nav leg retraced through an interior vertex instead of
+            // flying straight).
+            const entryM2 = MB_ENTRY_FFZ_FT / 3.28084;
+            for (let fi = 0; fi < built.ffzs.length; fi++) {
+                const f = built.ffzs[fi];
+                if (mbPointToPolygonMeters(a.lat, a.lng, f.ring) > entryM2) continue;
+                if (mbPointToPolygonMeters(b.lat, b.lng, f.ring) > entryM2) continue;
+                if (!rngSegInside(a, b, f.ring)) continue;
+                const w = mbApproxMeters(a.lat, a.lng, b.lat, b.lng);
+                graph.adj.get(ka).push({ to: kb, w });
+                graph.adj.get(kb).push({ to: ka, w });
+                break;
+            }
             const { dist, prev } = agDijkstra(graph, ka);
             if (!dist.has(kb)) return null;
             const path = [];
@@ -12710,6 +13316,9 @@ ${snapPlacemarks}
                 Object.keys(p).forEach(k => { p[k] = 0; });
             }, 5000);
             installRightClickHandler();
+            // 🧮 Math in native step number fields (#236) — capture-phase
+            // Enter/blur on Ant InputNumbers inside the step edit form.
+            installMathFields();
             // READ-ONLY probe: logs + diffs each mission save vs the cached
             // original (never modifies the save). Tells us whether the form
             // recomputes dependent fields, which decides if a fast body-patch

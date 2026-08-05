@@ -6,6 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-05 — ⭐ PROMOTED: Mission Bank Tools v2.50 → PROD (coworkers jump from v2.40)
+
+The whole v2.41–v2.50 dev arc reaches everyone. Highlights:
+
+- **🧮 Math in step number fields (v2.50)** — type `2630+15` (or just `+15` for "add to what's there") into any native step number field, press Enter or click away, and it evaluates and commits the result. Supports `+ - * / ( )` and decimals. Toggle in Control Panel → Mission Bank Tools (on by default).
+- **🧩 Macro overlay upgrades (v2.41–v2.47)** — order-number badges, per-macro route comparison (current solid vs. replan dashed), route lines anchored at nav points, per-macro show/hide + solo swatch + All/None in the legend.
+- **KML export draws the full flight (v2.48)** — both the white nav→nav mission path and the cyan routed base→mission→base path in one export (editor ⬇ KML and SUM Export KML).
+- **Tab-local hotkey guard (v2.49)** — hotkeys/panel actions fired from the Control Panel act only in the tab you clicked in, never in other open Percepto tabs.
+
 ## 2026-08-05 — 🧮 Math in mission-step number fields (Mission Bank Tools latest v2.50 — dev only)
 
 Type an arithmetic expression straight into any native step number field (e.g. Snapshot **Target altitude**) and press **Enter** — MBT evaluates it and commits the result to the form. `2630+15` becomes `2645`; a **leading** `+`, `*` or `/` works relative to the current value, so typing just `+15` after clicking into a field holding 2630 also gives 2645. Supports `+ - * / ( )` and decimals; clicking away (blur) evaluates too. Plain numbers and anything that isn't pure math are left completely untouched. Toggle: Control Panel → Mission Bank Tools → "🧮 Math in step number fields" (on by default).
