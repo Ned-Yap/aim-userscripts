@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.50
+// @version      2.54
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -22,6 +22,7 @@
 // Features:
 //   - Mission Summary panel (SUM button)            — features.csv #48
 //   - Right-click mission inspector                  — features.csv #50
+//   - ⧉ Duplicate missions (bulk + right-click)      — features.csv #237
 //
 // v0.6 changes (NEW: right-click mission inspector):
 //   - Plain right-click on any mission row in Percepto's `.missions-list`
@@ -124,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.50';
+    const SCRIPT_VERSION = '2.54';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -7917,6 +7918,7 @@
             <div class="aim-mb-rc-body">${bodyHtml}</div>
             <div class="aim-mb-rc-footer">
                 <button class="aim-mb-tbtn" data-rc-open-sum>Open in SUM →</button>
+                <button class="aim-mb-tbtn" data-rc-duplicate title="Duplicate this mission on this site (create-only — copy named with your saved qualifier, default '(copy)')">⧉ Duplicate</button>
             </div>
         `;
         document.body.appendChild(pop);
@@ -7962,6 +7964,20 @@
         if (openBtn) openBtn.onclick = () => {
             closeRightClickPopup();
             openPanelAndDrill(missionId);
+        };
+        // "⧉ Duplicate" — same-site copy of this one mission (v2.51)
+        const dupBtn = pop.querySelector('[data-rc-duplicate]');
+        if (dupBtn) dupBtn.onclick = async () => {
+            const sid = getCurrentSiteID();
+            const ms = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
+            const m = ms.find(x => String(x.id) === String(missionId));
+            if (!m) { showToast('Mission not loaded yet — try again in a second.', '#ff9800', 3000); return; }
+            dupBtn.disabled = true;
+            dupBtn.textContent = '⧉ Duplicating…';
+            const taken = new Set(ms.map(x => String(x.name || '').toLowerCase()));
+            const pair = { m, newName: uniqueCopyName(String(m.name || ('#' + m.id)), taken, getDupSuffix()) };
+            await duplicatePairsNow([pair], null);
+            closeRightClickPopup();
         };
         // Click-to-copy stat cards
         pop.querySelectorAll('[data-rc-copy]').forEach(el => {
@@ -8696,6 +8712,7 @@
                 <input class="aim-mb-search" type="text" placeholder="Search by name…" value="${escapeHtml(panelState.search)}" />
                 <button class="aim-mb-tbtn" data-cols>Columns ▾</button>
                 <button class="aim-mb-tbtn" data-bulk-rename title="Find & replace text across the SELECTED missions' names (e.g. N - → NNE - )">✎ Rename ▾</button>
+                <button class="aim-mb-tbtn" data-bulk-duplicate title="Duplicate the SELECTED missions on this site — create-only, with an editable name qualifier ('(copy)' or whatever you set). For other sites use 📥 Copy from the target site.">⧉ Duplicate</button>
                 <button class="aim-mb-tbtn" data-bulk-delete title="Permanently delete the SELECTED missions from the server" style="color:#ff8a8a;">🗑 Delete</button>
                 <button class="aim-mb-tbtn" data-copy-missions title="Copy missions from another site into this one (create-only, dup names skipped)">📥 Copy</button>
                 <button class="aim-mb-tbtn ${pcm.on ? 'active' : ''}" data-pcm-toggle title="Merge missions by right-clicking pads on the map in order (pad name = mission name)">🔗 Merge</button>
@@ -8942,6 +8959,175 @@
         setTimeout(() => document.addEventListener('mousedown', outside, true), 0);
     }
 
+    // ── ⧉ Duplicate missions (v2.51–v2.52, features.csv #237) ───────────────
+    // Same-site duplicate via the proven create path (ctx.saveApp({id:null}) —
+    // identical to 📥 cross-site copy / 🔗 merge). Copies are create-only;
+    // originals untouched. The name qualifier appended to each copy is
+    // user-editable in the popover (default '(copy)', persisted) — a ' 2'/' 3'
+    // counter is added only when needed so the create never collides with an
+    // existing mission name.
+    const CACHE_KEY_DUP_SUFFIX = 'aim-mb-dup-suffix';
+    function getDupSuffix() {
+        const s = String(gmGet(CACHE_KEY_DUP_SUFFIX, '(copy)') || '').trim();
+        return s || '(copy)';
+    }
+    // suffix MAY be empty (e.g. find/replace alone already makes the name
+    // unique) — the counter loop still guarantees no collision either way.
+    function uniqueCopyName(base, takenLower, suffix) {
+        const suf = String(suffix || '').trim();
+        const stem = String(base || '').replace(/\s+/g, ' ').trim();
+        let cand = suf ? `${stem} ${suf}` : stem;
+        let n = 1;
+        while (takenLower.has(cand.toLowerCase())) { n++; cand = suf ? `${stem} ${suf} ${n}` : `${stem} ${n}`; }
+        takenLower.add(cand.toLowerCase());
+        return cand;
+    }
+
+    // pairs = [{ m, newName }] — serialized creates; auto-AGL suppressed so a
+    // duplicate is byte-identical to its source (no snapshot re-float).
+    async function duplicatePairsNow(pairs, statusFn) {
+        const sid = getCurrentSiteID();
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Duplicate: mission context not found — be on the Mission Bank page.', '#ff5252', 4000); return null; }
+        let ok = 0, fail = 0;
+        renameSuppressAutoAgl++;
+        try {
+            for (let i = 0; i < pairs.length; i++) {
+                const { m, newName } = pairs[i];
+                if (statusFn) statusFn(`Duplicating ${i + 1}/${pairs.length} — ${newName}…`);
+                try {
+                    await ctx.saveApp({ id: null, type: 1, instructions: (m.instructions || []), data_report_object_arr: [] }, newName);
+                    ok++;
+                } catch (e) { fail++; console.warn(`${TAG} [dup] failed "${m.name}"`, e); }
+            }
+        } finally { renameSuppressAutoAgl--; }
+        try { refreshMissionList(); } catch (e) {}
+        // Re-fetch so the SUM table shows the new copies with full app_data.
+        try {
+            fetchMissions(sid, () => {
+                try { if (panelEl && panelState && panelState.drillId == null) renderTableView(); } catch (e) {}
+            }, () => {});
+        } catch (e) {}
+        showToast(`⧉ Duplicated ${ok} mission${ok === 1 ? '' : 's'}${fail ? ` · ${fail} failed (see console)` : ''}.`, ok ? '#5fff5f' : '#ff5252', 6000);
+        console.log(`${TAG} [dup] created ${ok}, failed ${fail}`);
+        return { ok, fail };
+    }
+
+    function openBulkDuplicatePopover(anchor) {
+        try { closeOpenMenus(); } catch (e) {}
+        const sid = getCurrentSiteID();
+        const ms = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
+        const selected = ms.filter(m => panelState.selectedIds.has(m.id));
+        if (!selected.length) { showToast('Select missions first (row checkboxes), then ⧉ Duplicate.', '#ff9800', 3500); return; }
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Duplicate: mission context not found — be on the Mission Bank page.', '#ff5252', 4000); return; }
+        // Copy-name recipe: optional find→replace on the source name (same
+        // case-sensitive split/join as ✎ Rename), then the appended qualifier.
+        // Either alone is fine — uniqueCopyName's counter covers collisions.
+        const buildPairs = (suffix, find, repl) => {
+            const taken = new Set(ms.map(m => String(m.name || '').toLowerCase()));
+            return selected.map(m => {
+                let base = String(m.name || ('#' + m.id));
+                if (find) base = base.split(find).join(repl);
+                return { m, newName: uniqueCopyName(base, taken, suffix) };
+            });
+        };
+        let pairs = buildPairs(String(gmGet(CACHE_KEY_DUP_SUFFIX, '(copy)') || ''), '', '');
+        const menu = document.createElement('div');
+        menu.className = 'aim-mb-bulk-dup-pop';
+        menu.style.cssText = 'position:fixed;z-index:2147483647;width:400px;min-width:320px;min-height:220px;max-height:72vh;display:flex;flex-direction:column;background:#101a1c;border:1px solid #14d2dc;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        menu.innerHTML = `
+            <div data-dup-head style="padding:9px 12px;background:rgba(20,210,220,0.10);border-bottom:1px solid rgba(20,210,220,0.35);font-weight:800;color:#7adfe6;font-size:13px;display:flex;align-items:center;gap:8px;cursor:move;user-select:none;">
+                <span style="flex:1;">⧉ Duplicate missions · ${pairs.length} selected</span>
+                <button data-dup-x title="Close" style="flex:none;background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button>
+            </div>
+            <div style="padding:8px 12px;font-size:11px;color:#9ad;border-bottom:1px solid #1e2f33;">Create-only — originals untouched. Rename copies inline afterward (click the Name cell).</div>
+            <div style="padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid #1e2f33;">
+                <label style="font-size:11px;color:#7adfe6;font-weight:700;white-space:nowrap;">Name qualifier</label>
+                <input data-dup-suffix type="text" value="${escapeHtml(String(gmGet(CACHE_KEY_DUP_SUFFIX, '(copy)') || ''))}" placeholder="none — blank OK with Replace" style="flex:1;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:4px;padding:3px 6px;font-size:12px;" />
+            </div>
+            <div style="padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid #1e2f33;">
+                <label style="font-size:11px;color:#7adfe6;font-weight:700;white-space:nowrap;">Replace</label>
+                <input data-dup-find type="text" placeholder="find (e.g. OGI)" style="flex:1;min-width:0;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:4px;padding:3px 6px;font-size:12px;" />
+                <span style="color:#7adfe6;font-weight:800;">→</span>
+                <input data-dup-repl type="text" placeholder="with (e.g. THERMAL)" style="flex:1;min-width:0;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:4px;padding:3px 6px;font-size:12px;" />
+            </div>
+            <div data-dup-list style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;min-height:60px;"></div>
+            <div style="padding:9px 12px;border-top:1px solid #1e2f33;display:flex;align-items:center;gap:8px;">
+                <span data-dup-status style="flex:1;font-size:11px;color:#9ad;"></span>
+                <button data-dup-cancel class="aim-mb-tbtn" style="padding:5px 10px;">Cancel</button>
+                <button data-dup-go style="padding:5px 12px;background:#5fff5f;border:none;color:#04220a;border-radius:6px;cursor:pointer;font-weight:800;">Duplicate ${pairs.length}</button>
+            </div>
+            <div data-dup-resize title="Resize" style="position:absolute;right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;background:linear-gradient(135deg, transparent 55%, rgba(20,210,220,0.65) 55%);border-bottom-right-radius:8px;"></div>`;
+        document.body.appendChild(menu);
+        try { positionFloatingMenu(menu, anchor); } catch (e) { const r = anchor.getBoundingClientRect(); menu.style.left = r.left + 'px'; menu.style.top = (r.bottom + 4) + 'px'; }
+        const listEl = menu.querySelector('[data-dup-list]');
+        const renderList = () => {
+            listEl.innerHTML = pairs.slice(0, 400).map(p => `<div style="padding:2px 0;border-bottom:1px solid #17262a;color:#cfe8ec;">${escapeHtml(p.m.name || ('#' + p.m.id))} <span style="color:#5fff5f;">→ ${escapeHtml(p.newName)}</span></div>`).join('');
+        };
+        renderList();
+        const suffixInput = menu.querySelector('[data-dup-suffix]');
+        const findInput = menu.querySelector('[data-dup-find]');
+        const replInput = menu.querySelector('[data-dup-repl]');
+        const rebuild = () => {
+            pairs = buildPairs(String(suffixInput.value || '').trim(), String(findInput.value || ''), String(replInput.value || ''));
+            renderList();
+        };
+        suffixInput.addEventListener('input', rebuild);
+        findInput.addEventListener('input', rebuild);
+        replInput.addEventListener('input', rebuild);
+        // v2.54 — mini-panel chrome: ✕ close (no outside-click close so the
+        // popover survives clicks elsewhere), drag by header, ↘ corner resize.
+        // Pointer events + setPointerCapture per the house panel pattern.
+        const close = () => { menu.remove(); };
+        const xBtn = menu.querySelector('[data-dup-x]');
+        const cancelBtn = menu.querySelector('[data-dup-cancel]');
+        let dupRunning = false;
+        xBtn.onclick = () => { if (!dupRunning) close(); };
+        cancelBtn.onclick = () => { if (!dupRunning) close(); };
+        const headEl = menu.querySelector('[data-dup-head]');
+        headEl.addEventListener('pointerdown', (ev) => {
+            if (ev.target.closest('[data-dup-x]')) return;
+            const r = menu.getBoundingClientRect();
+            const offX = ev.clientX - r.left, offY = ev.clientY - r.top;
+            const move = (e2) => {
+                menu.style.left = Math.max(0, Math.min(window.innerWidth - 60, e2.clientX - offX)) + 'px';
+                menu.style.top = Math.max(0, Math.min(window.innerHeight - 40, e2.clientY - offY)) + 'px';
+            };
+            const up = () => { headEl.removeEventListener('pointermove', move); headEl.removeEventListener('pointerup', up); };
+            try { headEl.setPointerCapture(ev.pointerId); } catch (e) {}
+            headEl.addEventListener('pointermove', move);
+            headEl.addEventListener('pointerup', up);
+            ev.preventDefault();
+        });
+        const rsEl = menu.querySelector('[data-dup-resize]');
+        rsEl.addEventListener('pointerdown', (ev) => {
+            const r = menu.getBoundingClientRect();
+            const sx = ev.clientX, sy = ev.clientY, sw = r.width, sh = r.height;
+            menu.style.maxHeight = 'none';   // manual resize wins over the 72vh initial cap
+            const move = (e2) => {
+                menu.style.width = Math.max(320, sw + e2.clientX - sx) + 'px';
+                menu.style.height = Math.max(220, sh + e2.clientY - sy) + 'px';
+            };
+            const up = () => { rsEl.removeEventListener('pointermove', move); rsEl.removeEventListener('pointerup', up); };
+            try { rsEl.setPointerCapture(ev.pointerId); } catch (e) {}
+            rsEl.addEventListener('pointermove', move);
+            rsEl.addEventListener('pointerup', up);
+            ev.preventDefault(); ev.stopPropagation();
+        });
+        const statusEl = menu.querySelector('[data-dup-status]');
+        const goBtn = menu.querySelector('[data-dup-go]');
+        goBtn.onclick = async () => {
+            dupRunning = true;
+            goBtn.disabled = true; cancelBtn.disabled = true; xBtn.disabled = true;
+            suffixInput.disabled = true; findInput.disabled = true; replInput.disabled = true;
+            gmSet(CACHE_KEY_DUP_SUFFIX, String(suffixInput.value || '').trim());
+            await duplicatePairsNow(pairs, (t) => { statusEl.textContent = t; });
+            dupRunning = false;
+            close();
+        };
+    }
+
     function wireTableEvents(rows, visibleCols) {
         // Search — DEBOUNCED 250ms. Full table re-render on every
         // keystroke was the main mid-session perf hit (98 missions × 13
@@ -8983,6 +9169,9 @@
         // Bulk delete (selected)
         const bdBtn = panelEl.querySelector('[data-bulk-delete]');
         if (bdBtn) bdBtn.onclick = () => openBulkDeletePopover(bdBtn);
+        // Bulk duplicate (selected) — v2.51
+        const bDupBtn = panelEl.querySelector('[data-bulk-duplicate]');
+        if (bDupBtn) bDupBtn.onclick = () => openBulkDuplicatePopover(bDupBtn);
         // v1.99 — cross-site mission copy + pad-click merge mode
         const cpBtn = panelEl.querySelector('[data-copy-missions]');
         if (cpBtn) cpBtn.onclick = () => openCopyMissionsPanel();

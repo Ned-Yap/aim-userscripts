@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-11 — ⭐ PROMOTED: Mission Bank Tools v2.54 → PROD (coworkers jump from v2.50)
+
+The ⧉ Duplicate arc (v2.51–v2.54, below) reaches everyone: select missions in the SUM panel → **⧉ Duplicate** to copy them on the same site, with an editable name qualifier, find→replace on copy names (e.g. `OGI` → `THERMAL`), a live old→new preview, and a movable/resizable popover. One-click ⧉ Duplicate also lives in the right-click mission popup. Copies are create-only and collision-proof. Cross-site copying is unchanged — the existing 📥 Copy from the target site.
+
 ## 2026-08-11 — Mission Bank Tools latest v2.51–v2.54: ⧉ Duplicate missions
 
 - **Popover is a mini-panel now (v2.54)** — top-right ✕ to close, drag it anywhere by the header, resize from the bottom-right corner. It no longer closes when you click elsewhere on the page.
