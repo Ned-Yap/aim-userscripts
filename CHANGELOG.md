@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-11 — Mission Bank Tools latest v2.51: ⧉ Duplicate missions
+
+- **⧉ Duplicate (dev/latest only)** — copy missions on the same site in two ways: select rows in the SUM panel → **⧉ Duplicate** (preview popover shows `old → new` names, then creates them all), or right-click a mission in the native sidebar → **⧉ Duplicate** in the popup. Copies are create-only (originals untouched) and named `… (copy)` / `… (copy 2)` so nothing collides — rename inline afterward if needed. For copying to a *different* site, the existing 📥 Copy button already does it: open the target site's SUM and pull from the source site ID.
+
 ## 2026-08-05 — ⭐ PROMOTED: Site Setup Tools v4.244 + Map Styler v34.135 + 6 more → PROD
 
 Big batch. What's new for everyone:
