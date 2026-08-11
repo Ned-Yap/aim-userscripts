@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.55
+// @version      2.56
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.55';
+    const SCRIPT_VERSION = '2.56';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -2424,6 +2424,212 @@
             console.warn(`${TAG} [wrap] site-wide failed`, e);
             showToast('Site-wide wrap failed — see console.', '#ff5252', 5000);
         } finally { wrapSiteBusy = false; }
+    }
+    // ── 🧹 REMOVE A STEP TYPE SITE-WIDE (v2.56, feature #239) ───────────────
+    // "Open each mission, delete the step, save" ×N missions, automated with
+    // a review gate. Pick a target from what actually exists across the
+    // site's missions — WAIT steps are grouped BY DURATION on purpose: the
+    // 10 s GEM dwell IS the emission measurement and must never be swept up
+    // while clearing a stray 1 s wait. Flag poles were always added with a
+    // dedicated nav DIRECTLY BEFORE them, so the flag-pole target takes that
+    // paired nav too by default (per-row untick in the review; a row whose
+    // FOLLOWING step is a snapshot is flagged — that snapshot would lose the
+    // nav). Apply saves each affected mission in place on the same rails as
+    // 🌐 site-wide wrap: confirm → JSON backup download → sequential
+    // ctx.saveApp → fresh-fetch verify.
+    const SRM_PANEL_ID = 'aim-mb-srm-panel';
+    let srmBusy = false;
+    function srmLabel(s, edge) {
+        if (!s) return edge || 'end';
+        const names = { 0: 'takeoff', 1: 'nav', 5: 'wait', 6: 'snapshot', 7: 'camera', 16: 'flag pole', 24: 'GEM', 99: 'returnHome' };
+        const t = names[s.type] || s.type_name || ('type ' + s.type);
+        return s.type === 5 ? `wait ${s.value1 == null ? '?' : s.value1}s` : t;
+    }
+    function srmMatch(s, tgt) { return !!s && s.type === tgt.type && (tgt.type !== 5 || String(s.value1) === String(tgt.value1)); }
+    function srmTargets(missions) {
+        const map = new Map();
+        missions.forEach(m => (m.instructions || []).forEach(s => {
+            // takeoff/returnHome are structural; navs only ever leave as a
+            // flag pole's pair — never offered as a site-wide target.
+            if (!s || s.type === 0 || s.type === 1 || s.type === 99) return;
+            const key = s.type === 5 ? `5:${s.value1}` : String(s.type);
+            if (!map.has(key)) map.set(key, { key, type: s.type, value1: s.type === 5 ? s.value1 : null, label: srmLabel(s), count: 0, missionIds: new Set() });
+            const t = map.get(key); t.count++; t.missionIds.add(m.id);
+        }));
+        return Array.from(map.values()).sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+    }
+    function srmBuildPlan(missions, tgt, pairNav) {
+        const plan = [];
+        missions.forEach(m => {
+            const ins = m.instructions || [];
+            const groups = [];
+            const claimed = new Set();
+            ins.forEach((s, i) => {
+                if (!srmMatch(s, tgt)) return;
+                const idxs = [];
+                if (tgt.type === 16 && pairNav && i > 0 && ins[i - 1] && ins[i - 1].type === 1 && !claimed.has(i - 1)) idxs.push(i - 1);
+                idxs.push(i);
+                idxs.forEach(x => claimed.add(x));
+                const nxt = ins[i + 1];
+                const warn = (idxs.length === 2 && nxt && nxt.type === 6) ? '⚠ next step is a snapshot — it would lose this nav' : null;
+                const noNav = (tgt.type === 16 && pairNav && idxs.length === 1) ? 'no nav directly before — flag only' : null;
+                groups.push({
+                    idxs,
+                    label: idxs.map(x => `#${x + 1} ${srmLabel(ins[x])}`).join(' + '),
+                    ctx: `${srmLabel(ins[Math.min.apply(null, idxs) - 1], 'start')} → ✂ → ${srmLabel(nxt)}`,
+                    warn, noNav,
+                });
+            });
+            if (groups.length) plan.push({ m, groups });
+        });
+        return plan;
+    }
+    async function srmOpen() {
+        const old = document.getElementById(SRM_PANEL_ID);
+        if (old) { old.remove(); return; }
+        if (srmBusy) return;
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded.', '#ff5252', 3000); return; }
+        showToast('🧹 Fetching all missions…', '#ffd54f', 2000);
+        let missions;
+        try { missions = await mbFetchMissionsFull(sid); }
+        catch (e) { console.warn(`${TAG} [srm] fetch failed`, e); showToast('🧹 Mission fetch failed — see console.', '#ff5252', 4500); return; }
+        if (!missions.length) { showToast('No missions on this site.', '#ff9800', 3000); return; }
+        const targets = srmTargets(missions);
+        if (!targets.length) { showToast('No removable step types found in any mission.', '#ff9800', 4000); return; }
+        const p = document.createElement('div');
+        p.id = SRM_PANEL_ID;
+        p.style.cssText = 'position:fixed;top:60px;right:24px;width:430px;max-height:82vh;display:flex;flex-direction:column;z-index:2147483602;'
+            + 'background:#161a20;border:1px solid #ffd54f;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        p.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(255,213,79,0.08);border-bottom:1px solid rgba(255,213,79,0.3);">
+                <span style="font-weight:800;color:#ffd54f;font-size:13px;">🧹 Remove steps — site ${escapeHtml(String(sid))}</span>
+                <button data-srm-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button>
+            </div>
+            <div style="padding:7px 12px;border-bottom:1px solid #2a2f38;">
+                <div style="font-size:10px;color:#9ad;margin-bottom:5px;">Pick what to remove (found across ${missions.length} mission(s); waits are split by duration on purpose):</div>
+                ${targets.map(t => `<label style="display:flex;align-items:center;gap:6px;padding:2px 2px;cursor:pointer;font-size:12px;">
+                    <input type="radio" name="srm-target" data-srm-t="${escapeHtml(t.key)}" />
+                    <span style="flex:1;">${escapeHtml(t.label)}</span>
+                    <span style="color:#9ad;font-size:11px;">${t.count} step(s) · ${t.missionIds.size} mission(s)</span>
+                </label>`).join('')}
+                <label data-srm-pairwrap style="display:none;align-items:center;gap:6px;margin-top:5px;padding:4px 6px;background:rgba(255,138,210,0.08);border:1px solid rgba(255,138,210,0.3);border-radius:5px;font-size:11px;cursor:pointer;">
+                    <input type="checkbox" data-srm-pairnav checked />
+                    <span>Also remove the <b>nav directly before</b> each flag pole (they were added just for it)</span>
+                </label>
+            </div>
+            <div data-srm-review style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;color:#888;">Pick a target above to review the proposed removals.</div>
+            <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
+                <span data-srm-status style="flex:1;font-size:11px;color:#9ad;"></span>
+                <button data-srm-go style="padding:6px 12px;background:#ffd54f;border:none;color:#2a2004;border-radius:6px;cursor:pointer;font-weight:800;" disabled>🧹 Remove 0</button>
+            </div>`;
+        document.body.appendChild(p);
+        const reviewEl = p.querySelector('[data-srm-review]');
+        const goBtn = p.querySelector('[data-srm-go]');
+        const pairWrap = p.querySelector('[data-srm-pairwrap]');
+        const pairCb = p.querySelector('[data-srm-pairnav]');
+        let curTgt = null, curPlan = null;
+        const updateGo = () => {
+            const n = reviewEl.querySelectorAll('input[data-srm-g]:checked').length;
+            const steps = Array.from(reviewEl.querySelectorAll('input[data-srm-g]:checked'))
+                .reduce((a, cb) => { const [mi, gi] = cb.getAttribute('data-srm-g').split(':').map(Number); return a + curPlan[mi].groups[gi].idxs.length; }, 0);
+            goBtn.textContent = `🧹 Remove ${steps}`;
+            goBtn.disabled = srmBusy || !n;
+        };
+        const renderReview = () => {
+            if (!curTgt) return;
+            curPlan = srmBuildPlan(missions, curTgt, curTgt.type === 16 && pairCb.checked);
+            pairWrap.style.display = curTgt.type === 16 ? 'flex' : 'none';
+            if (!curPlan.length) { reviewEl.innerHTML = '<div style="padding:8px;color:#ff9800;">No matches (unexpected — re-open the panel).</div>'; updateGo(); return; }
+            reviewEl.innerHTML = `<div style="padding:3px 2px;color:#9ad;">${curPlan.length} mission(s) · <a data-srm-all href="#" style="color:#7adfe6;">all</a> / <a data-srm-none href="#" style="color:#7adfe6;">none</a> — every ticked row is removed on Apply</div>`
+                + curPlan.map((pm, mi) => `<div style="margin:4px 0 1px;font-weight:700;color:#7adfe6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(String(pm.m.name || ('#' + pm.m.id)))} <span style="color:#789;font-weight:400;">· ${pm.groups.length} removal(s)</span></div>`
+                    + pm.groups.map((g, gi) => `<label style="display:flex;align-items:center;gap:6px;padding:1px 2px 1px 12px;border-bottom:1px solid #20262e;cursor:pointer;">
+                        <input type="checkbox" data-srm-g="${mi}:${gi}" checked />
+                        <span style="flex:1;color:#e6e6e6;">${escapeHtml(g.label)}</span>
+                        <span style="color:#789;font-size:10px;white-space:nowrap;">${escapeHtml(g.ctx)}</span>
+                    </label>${g.warn ? `<div style="margin-left:30px;color:#ffb74d;font-size:10px;">${escapeHtml(g.warn)}</div>` : ''}${g.noNav ? `<div style="margin-left:30px;color:#789;font-size:10px;">${escapeHtml(g.noNav)}</div>` : ''}`).join('')).join('');
+            reviewEl.querySelectorAll('input[data-srm-g]').forEach(cb => { cb.onchange = updateGo; });
+            const allA = reviewEl.querySelector('[data-srm-all]'), noneA = reviewEl.querySelector('[data-srm-none]');
+            if (allA) allA.onclick = (ev) => { ev.preventDefault(); reviewEl.querySelectorAll('input[data-srm-g]').forEach(cb => { cb.checked = true; }); updateGo(); };
+            if (noneA) noneA.onclick = (ev) => { ev.preventDefault(); reviewEl.querySelectorAll('input[data-srm-g]').forEach(cb => { cb.checked = false; }); updateGo(); };
+            updateGo();
+        };
+        p.querySelector('[data-srm-close]').onclick = () => { if (!srmBusy) p.remove(); };
+        p.querySelectorAll('input[data-srm-t]').forEach(r => r.onchange = () => {
+            curTgt = targets.find(t => t.key === r.getAttribute('data-srm-t')) || null;
+            renderReview();
+        });
+        pairCb.onchange = () => renderReview();
+        goBtn.onclick = () => srmApply(p, curPlan, curTgt, updateGo);
+    }
+    async function srmApply(panel, plan, tgt, updateGo) {
+        if (srmBusy || !plan || !tgt) return;
+        if (document.querySelector('.edit-instruction')) { showToast('Close the open STEP editor first (save or cancel it), then retry.', '#ff9800', 4500); return; }
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4500); return; }
+        const sid = getCurrentSiteID();
+        const work = [];
+        plan.forEach((pm, mi) => {
+            const remove = new Set();
+            pm.groups.forEach((g, gi) => {
+                const cb = panel.querySelector(`input[data-srm-g="${mi}:${gi}"]`);
+                if (cb && cb.checked) g.idxs.forEach(x => remove.add(x));
+            });
+            if (remove.size) work.push({ m: pm.m, remove });
+        });
+        if (!work.length) { showToast('Nothing ticked.', '#ff9800', 2500); return; }
+        const totalSteps = work.reduce((a, w) => a + w.remove.size, 0);
+        if (!window.confirm(`Remove ${totalSteps} step(s) — target: ${tgt.label}${tgt.type === 16 ? ' (+ paired navs)' : ''} — across ${work.length} mission(s)?\n\n`
+            + 'A JSON backup of the affected missions downloads first.\nThis SAVES every affected mission. Continue?')) return;
+        try {
+            const backup = JSON.stringify({ site: sid, savedAt: new Date().toISOString(), target: tgt.label, missions: work.map(w => w.m) });
+            const blob = new Blob([backup], { type: 'application/json' });
+            const blobUrl = URL.createObjectURL(blob);
+            let downloaded = false;
+            for (const doc of [(window.top || window).document, document]) {
+                if (downloaded) break;
+                try {
+                    const a = doc.createElement('a');
+                    a.href = blobUrl; a.download = `site${sid}_missions_preremove_backup.json`;
+                    (doc.body || document.body).appendChild(a); a.click(); a.remove();
+                    downloaded = true;
+                } catch (e) {}
+            }
+            setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 5000);
+            if (!downloaded) throw new Error('no frame allowed the download');
+        } catch (e) {
+            console.warn(`${TAG} [srm] backup download failed`, e);
+            if (!window.confirm('Backup download FAILED — continue WITHOUT a backup?')) return;
+        }
+        const statusEl = panel.querySelector('[data-srm-status]');
+        let ok = 0, fail = 0; const failedNames = [];
+        srmBusy = true; updateGo();
+        renameSuppressAutoAgl++;
+        try {
+            for (let k = 0; k < work.length; k++) {
+                const w = work[k];
+                if (statusEl) statusEl.textContent = `Saving ${k + 1}/${work.length} — ${w.m.name}…`;
+                try {
+                    const keep = (w.m.instructions || []).filter((s, i) => !w.remove.has(i)).map(pcmNormStep);
+                    await ctx.saveApp(Object.assign({}, w.m, { instructions: keep }), w.m.name);
+                    ok++;
+                } catch (e) { fail++; failedNames.push(w.m.name); console.warn(`${TAG} [srm] save FAILED for "${w.m.name}"`, e); }
+                await new Promise(r => setTimeout(r, 150));
+            }
+        } finally { renameSuppressAutoAgl--; }
+        if (statusEl) statusEl.textContent = 'Verifying (fresh fetch)…';
+        let remaining = null;
+        try {
+            await new Promise(r => setTimeout(r, 1500));
+            const after = await mbFetchMissionsFull(sid);
+            remaining = after.reduce((a, m) => a + (m.instructions || []).filter(s => srmMatch(s, tgt)).length, 0);
+        } catch (e) { console.warn(`${TAG} [srm] verify fetch failed`, e); }
+        srmBusy = false; updateGo();
+        const vTxt = remaining == null ? 'verify fetch failed — check manually' : `${remaining} "${tgt.label}" step(s) left on site (includes any you unticked)`;
+        showToast(`🧹 Removed ${totalSteps} step(s) across ${ok} mission(s)${fail ? ` · ${fail} save(s) FAILED (see console)` : ''} · ${vTxt}.`, fail ? '#ff9800' : '#5fff5f', 9000);
+        console.log(`${TAG} [srm] target="${tgt.label}" removed=${totalSteps} ok=${ok} fail=${fail}${failedNames.length ? ` failed=[${failedNames.join(', ')}]` : ''} remaining=${remaining}`);
+        try { fetchMissions(sid, () => {}, () => {}); } catch (e) {}
+        if (!fail) { try { panel.remove(); } catch (e) {} }
     }
     function wrapPopup(anchorBtn) {
         if (wrapPopEl) { wrapPopEl.remove(); wrapPopEl = null; return; }
@@ -8890,6 +9096,7 @@
                 <button class="aim-mb-tbtn ${rng.on ? 'active' : ''}" data-rng-toggle title="Color every pad's FFZ by the TRUE shortest LEGAL route from base (inside FFZ/FP only, triple-verified: path audit + dense second opinion + lower bound). Overlay is click-through — M2 merge picking still works.">🔋 Range</button>
                 <button class="aim-mb-tbtn ${lasso.armed ? 'active' : ''}" data-lasso-toggle title="Draw a freehand loop around pads → auto-build a furthest→closest merge list (Tulip pads auto-split into a separate '2' mission) and stage it in the merge editor for inspection.">🖊 Lasso</button>
                 <button class="aim-mb-tbtn ${mcv.on ? 'active' : ''}" data-mcv-toggle title="Show which pads are already claimed by macro (merged) missions — each macro gets a color + name chip; white dashed pads have missions but no macro yet. Click-through.">🧩 Macros</button>
+                <button class="aim-mb-tbtn" data-srm-open title="Find every step of a chosen type across ALL missions on this site (flag poles, 1s waits, …) and remove them after a per-row review. Flag poles take their paired nav too. Backup JSON downloads before anything saves.">🧹 Steps</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'imperial' ? 'active' : ''}" data-unit="imperial">mi</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'metric' ? 'active' : ''}" data-unit="metric">km</button>
                 <button class="aim-mb-tbtn" data-settings title="Battery → flights thresholds">⚙</button>
@@ -9352,6 +9559,9 @@
         if (lassoBtn) lassoBtn.onclick = () => lassoToggle(lassoBtn);
         const mcvBtn = panelEl.querySelector('[data-mcv-toggle]');
         if (mcvBtn) mcvBtn.onclick = () => mcvToggle(mcvBtn);
+        // v2.56 — 🧹 site-wide step removal
+        const srmBtn = panelEl.querySelector('[data-srm-open]');
+        if (srmBtn) srmBtn.onclick = () => srmOpen();
         const pcmBtn = panelEl.querySelector('[data-pcm-toggle]');
         if (pcmBtn) pcmBtn.onclick = async () => {
             if (pcm.on) { pcmExit(); }

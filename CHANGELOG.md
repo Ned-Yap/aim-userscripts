@@ -6,6 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-11 — 🧹 Remove a step type from ALL missions, with review (Mission Bank Tools latest v2.56 — dev only)
+
+No more opening every mission to delete the same step. New **🧹 Steps** button in the SUM toolbar:
+
+- Scans every mission on the site and lists the step types it actually found — **wait steps are split by duration on purpose** (removing the stray 1s waits can never touch the 10s GEM dwells, which are the emission measurement itself).
+- Pick a target → a **review list** shows every proposed removal per mission with before/after context; untick any row.
+- **Flag poles bring their paired nav**: each flag pole was added with a nav directly before it, so the default removes both (toggleable). Rows where the step after the flag pole is a snapshot get a ⚠ — that snapshot would lose the nav.
+- Apply runs on the proven site-wide rails: confirm → **JSON backup download** of the affected missions → sequential in-place saves → fresh-fetch verify reporting how many matching steps remain.
+
 ## 2026-08-11 — ✂ Split macro missions into per-pad micros (Mission Bank Tools latest v2.55 — dev only)
 
 For sites whose macros were built directly — no micro missions to merge from, so nothing to reorder with. Every macro row in the 🧩 Macro coverage legend now has a **✂ Split** button:
