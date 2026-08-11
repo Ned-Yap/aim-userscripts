@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.52
+// @version      2.53
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.52';
+    const SCRIPT_VERSION = '2.53';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -8971,11 +8971,14 @@
         const s = String(gmGet(CACHE_KEY_DUP_SUFFIX, '(copy)') || '').trim();
         return s || '(copy)';
     }
+    // suffix MAY be empty (e.g. find/replace alone already makes the name
+    // unique) — the counter loop still guarantees no collision either way.
     function uniqueCopyName(base, takenLower, suffix) {
-        const suf = String(suffix || '(copy)').trim() || '(copy)';
-        let cand = `${base} ${suf}`;
+        const suf = String(suffix || '').trim();
+        const stem = String(base || '').replace(/\s+/g, ' ').trim();
+        let cand = suf ? `${stem} ${suf}` : stem;
         let n = 1;
-        while (takenLower.has(cand.toLowerCase())) { n++; cand = `${base} ${suf} ${n}`; }
+        while (takenLower.has(cand.toLowerCase())) { n++; cand = suf ? `${stem} ${suf} ${n}` : `${stem} ${n}`; }
         takenLower.add(cand.toLowerCase());
         return cand;
     }
@@ -9018,11 +9021,18 @@
         if (!selected.length) { showToast('Select missions first (row checkboxes), then ⧉ Duplicate.', '#ff9800', 3500); return; }
         const ctx = findMissionAppCtx();
         if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Duplicate: mission context not found — be on the Mission Bank page.', '#ff5252', 4000); return; }
-        const buildPairs = (suffix) => {
+        // Copy-name recipe: optional find→replace on the source name (same
+        // case-sensitive split/join as ✎ Rename), then the appended qualifier.
+        // Either alone is fine — uniqueCopyName's counter covers collisions.
+        const buildPairs = (suffix, find, repl) => {
             const taken = new Set(ms.map(m => String(m.name || '').toLowerCase()));
-            return selected.map(m => ({ m, newName: uniqueCopyName(String(m.name || ('#' + m.id)), taken, suffix) }));
+            return selected.map(m => {
+                let base = String(m.name || ('#' + m.id));
+                if (find) base = base.split(find).join(repl);
+                return { m, newName: uniqueCopyName(base, taken, suffix) };
+            });
         };
-        let pairs = buildPairs(getDupSuffix());
+        let pairs = buildPairs(String(gmGet(CACHE_KEY_DUP_SUFFIX, '(copy)') || ''), '', '');
         const menu = document.createElement('div');
         menu.className = 'aim-mb-bulk-dup-pop';
         menu.style.cssText = 'position:fixed;z-index:2147483647;width:400px;max-height:72vh;display:flex;flex-direction:column;background:#101a1c;border:1px solid #14d2dc;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
@@ -9031,7 +9041,13 @@
             <div style="padding:8px 12px;font-size:11px;color:#9ad;border-bottom:1px solid #1e2f33;">Create-only — originals untouched. Rename copies inline afterward (click the Name cell).</div>
             <div style="padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid #1e2f33;">
                 <label style="font-size:11px;color:#7adfe6;font-weight:700;white-space:nowrap;">Name qualifier</label>
-                <input data-dup-suffix type="text" value="${escapeHtml(getDupSuffix())}" placeholder="(copy)" style="flex:1;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:4px;padding:3px 6px;font-size:12px;" />
+                <input data-dup-suffix type="text" value="${escapeHtml(String(gmGet(CACHE_KEY_DUP_SUFFIX, '(copy)') || ''))}" placeholder="none — blank OK with Replace" style="flex:1;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:4px;padding:3px 6px;font-size:12px;" />
+            </div>
+            <div style="padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid #1e2f33;">
+                <label style="font-size:11px;color:#7adfe6;font-weight:700;white-space:nowrap;">Replace</label>
+                <input data-dup-find type="text" placeholder="find (e.g. OGI)" style="flex:1;min-width:0;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:4px;padding:3px 6px;font-size:12px;" />
+                <span style="color:#7adfe6;font-weight:800;">→</span>
+                <input data-dup-repl type="text" placeholder="with (e.g. THERMAL)" style="flex:1;min-width:0;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:4px;padding:3px 6px;font-size:12px;" />
             </div>
             <div data-dup-list style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;min-height:60px;"></div>
             <div style="padding:9px 12px;border-top:1px solid #1e2f33;display:flex;align-items:center;gap:8px;">
@@ -9047,19 +9063,24 @@
         };
         renderList();
         const suffixInput = menu.querySelector('[data-dup-suffix]');
-        suffixInput.addEventListener('input', () => {
-            const suf = String(suffixInput.value || '').trim() || '(copy)';
-            pairs = buildPairs(suf);
+        const findInput = menu.querySelector('[data-dup-find]');
+        const replInput = menu.querySelector('[data-dup-repl]');
+        const rebuild = () => {
+            pairs = buildPairs(String(suffixInput.value || '').trim(), String(findInput.value || ''), String(replInput.value || ''));
             renderList();
-        });
+        };
+        suffixInput.addEventListener('input', rebuild);
+        findInput.addEventListener('input', rebuild);
+        replInput.addEventListener('input', rebuild);
         const close = () => { menu.remove(); document.removeEventListener('mousedown', outside, true); };
         const outside = (e) => { if (!menu.contains(e.target) && e.target !== anchor) close(); };
         menu.querySelector('[data-dup-cancel]').onclick = close;
         const statusEl = menu.querySelector('[data-dup-status]');
         const goBtn = menu.querySelector('[data-dup-go]');
         goBtn.onclick = async () => {
-            goBtn.disabled = true; menu.querySelector('[data-dup-cancel]').disabled = true; suffixInput.disabled = true;
-            gmSet(CACHE_KEY_DUP_SUFFIX, String(suffixInput.value || '').trim() || '(copy)');
+            goBtn.disabled = true; menu.querySelector('[data-dup-cancel]').disabled = true;
+            suffixInput.disabled = true; findInput.disabled = true; replInput.disabled = true;
+            gmSet(CACHE_KEY_DUP_SUFFIX, String(suffixInput.value || '').trim());
             await duplicatePairsNow(pairs, (t) => { statusEl.textContent = t; });
             close();
         };

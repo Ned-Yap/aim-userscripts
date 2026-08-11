@@ -6,7 +6,9 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
-## 2026-08-11 — Mission Bank Tools latest v2.51–v2.52: ⧉ Duplicate missions
+## 2026-08-11 — Mission Bank Tools latest v2.51–v2.53: ⧉ Duplicate missions
+
+- **Find → replace in copy names (v2.53)** — the popover's new **Replace** row rewrites part of each copy's name (e.g. `OGI` → `THERMAL`) before the qualifier is appended, with the preview updating live. Works together with the qualifier or alone — clear the qualifier box if the replacement already makes names unique (a ` 2` counter still guards any collision). Same case-sensitive matching as ✎ Rename.
 
 - **⧉ Duplicate (v2.51, dev/latest only)** — copy missions on the same site in two ways: select rows in the SUM panel → **⧉ Duplicate** (preview popover shows `old → new` names, then creates them all), or right-click a mission in the native sidebar → **⧉ Duplicate** in the popup. Copies are create-only (originals untouched) and uniquely named so nothing collides — rename inline afterward if needed. For copying to a *different* site, the existing 📥 Copy button already does it: open the target site's SUM and pull from the source site ID.
 - **Editable name qualifier (v2.52)** — the popover has a **Name qualifier** box (default `(copy)`): type whatever you want appended to each copy's name and the preview list updates live; a ` 2` / ` 3` counter is added only if a name would collide. Your qualifier is remembered and also used by the right-click one-click duplicate.
