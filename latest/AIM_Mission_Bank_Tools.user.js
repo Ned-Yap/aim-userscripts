@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.51
+// @version      2.52
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.51';
+    const SCRIPT_VERSION = '2.52';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -7918,7 +7918,7 @@
             <div class="aim-mb-rc-body">${bodyHtml}</div>
             <div class="aim-mb-rc-footer">
                 <button class="aim-mb-tbtn" data-rc-open-sum>Open in SUM →</button>
-                <button class="aim-mb-tbtn" data-rc-duplicate title="Duplicate this mission on this site (create-only — copy named '… (copy)')">⧉ Duplicate</button>
+                <button class="aim-mb-tbtn" data-rc-duplicate title="Duplicate this mission on this site (create-only — copy named with your saved qualifier, default '(copy)')">⧉ Duplicate</button>
             </div>
         `;
         document.body.appendChild(pop);
@@ -7975,7 +7975,7 @@
             dupBtn.disabled = true;
             dupBtn.textContent = '⧉ Duplicating…';
             const taken = new Set(ms.map(x => String(x.name || '').toLowerCase()));
-            const pair = { m, newName: uniqueCopyName(String(m.name || ('#' + m.id)), taken) };
+            const pair = { m, newName: uniqueCopyName(String(m.name || ('#' + m.id)), taken, getDupSuffix()) };
             await duplicatePairsNow([pair], null);
             closeRightClickPopup();
         };
@@ -8712,7 +8712,7 @@
                 <input class="aim-mb-search" type="text" placeholder="Search by name…" value="${escapeHtml(panelState.search)}" />
                 <button class="aim-mb-tbtn" data-cols>Columns ▾</button>
                 <button class="aim-mb-tbtn" data-bulk-rename title="Find & replace text across the SELECTED missions' names (e.g. N - → NNE - )">✎ Rename ▾</button>
-                <button class="aim-mb-tbtn" data-bulk-duplicate title="Duplicate the SELECTED missions on this site — create-only, copies named '… (copy)'. For other sites use 📥 Copy from the target site.">⧉ Duplicate</button>
+                <button class="aim-mb-tbtn" data-bulk-duplicate title="Duplicate the SELECTED missions on this site — create-only, with an editable name qualifier ('(copy)' or whatever you set). For other sites use 📥 Copy from the target site.">⧉ Duplicate</button>
                 <button class="aim-mb-tbtn" data-bulk-delete title="Permanently delete the SELECTED missions from the server" style="color:#ff8a8a;">🗑 Delete</button>
                 <button class="aim-mb-tbtn" data-copy-missions title="Copy missions from another site into this one (create-only, dup names skipped)">📥 Copy</button>
                 <button class="aim-mb-tbtn ${pcm.on ? 'active' : ''}" data-pcm-toggle title="Merge missions by right-clicking pads on the map in order (pad name = mission name)">🔗 Merge</button>
@@ -8959,15 +8959,23 @@
         setTimeout(() => document.addEventListener('mousedown', outside, true), 0);
     }
 
-    // ── ⧉ Duplicate missions (v2.51, features.csv #237) ─────────────────────
+    // ── ⧉ Duplicate missions (v2.51–v2.52, features.csv #237) ───────────────
     // Same-site duplicate via the proven create path (ctx.saveApp({id:null}) —
     // identical to 📥 cross-site copy / 🔗 merge). Copies are create-only;
-    // originals untouched. Names get a ' (copy)' / ' (copy N)' suffix so the
-    // create never collides with an existing mission name.
-    function uniqueCopyName(base, takenLower) {
-        let cand = `${base} (copy)`;
+    // originals untouched. The name qualifier appended to each copy is
+    // user-editable in the popover (default '(copy)', persisted) — a ' 2'/' 3'
+    // counter is added only when needed so the create never collides with an
+    // existing mission name.
+    const CACHE_KEY_DUP_SUFFIX = 'aim-mb-dup-suffix';
+    function getDupSuffix() {
+        const s = String(gmGet(CACHE_KEY_DUP_SUFFIX, '(copy)') || '').trim();
+        return s || '(copy)';
+    }
+    function uniqueCopyName(base, takenLower, suffix) {
+        const suf = String(suffix || '(copy)').trim() || '(copy)';
+        let cand = `${base} ${suf}`;
         let n = 1;
-        while (takenLower.has(cand.toLowerCase())) { n++; cand = `${base} (copy ${n})`; }
+        while (takenLower.has(cand.toLowerCase())) { n++; cand = `${base} ${suf} ${n}`; }
         takenLower.add(cand.toLowerCase());
         return cand;
     }
@@ -9010,15 +9018,22 @@
         if (!selected.length) { showToast('Select missions first (row checkboxes), then ⧉ Duplicate.', '#ff9800', 3500); return; }
         const ctx = findMissionAppCtx();
         if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Duplicate: mission context not found — be on the Mission Bank page.', '#ff5252', 4000); return; }
-        const taken = new Set(ms.map(m => String(m.name || '').toLowerCase()));
-        const pairs = selected.map(m => ({ m, newName: uniqueCopyName(String(m.name || ('#' + m.id)), taken) }));
+        const buildPairs = (suffix) => {
+            const taken = new Set(ms.map(m => String(m.name || '').toLowerCase()));
+            return selected.map(m => ({ m, newName: uniqueCopyName(String(m.name || ('#' + m.id)), taken, suffix) }));
+        };
+        let pairs = buildPairs(getDupSuffix());
         const menu = document.createElement('div');
         menu.className = 'aim-mb-bulk-dup-pop';
         menu.style.cssText = 'position:fixed;z-index:2147483647;width:400px;max-height:72vh;display:flex;flex-direction:column;background:#101a1c;border:1px solid #14d2dc;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
         menu.innerHTML = `
             <div style="padding:9px 12px;background:rgba(20,210,220,0.10);border-bottom:1px solid rgba(20,210,220,0.35);font-weight:800;color:#7adfe6;font-size:13px;">⧉ Duplicate missions · ${pairs.length} selected</div>
             <div style="padding:8px 12px;font-size:11px;color:#9ad;border-bottom:1px solid #1e2f33;">Create-only — originals untouched. Rename copies inline afterward (click the Name cell).</div>
-            <div style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;min-height:60px;">${pairs.slice(0, 400).map(p => `<div style="padding:2px 0;border-bottom:1px solid #17262a;color:#cfe8ec;">${escapeHtml(p.m.name || ('#' + p.m.id))} <span style="color:#5fff5f;">→ ${escapeHtml(p.newName)}</span></div>`).join('')}</div>
+            <div style="padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid #1e2f33;">
+                <label style="font-size:11px;color:#7adfe6;font-weight:700;white-space:nowrap;">Name qualifier</label>
+                <input data-dup-suffix type="text" value="${escapeHtml(getDupSuffix())}" placeholder="(copy)" style="flex:1;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:4px;padding:3px 6px;font-size:12px;" />
+            </div>
+            <div data-dup-list style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;min-height:60px;"></div>
             <div style="padding:9px 12px;border-top:1px solid #1e2f33;display:flex;align-items:center;gap:8px;">
                 <span data-dup-status style="flex:1;font-size:11px;color:#9ad;"></span>
                 <button data-dup-cancel class="aim-mb-tbtn" style="padding:5px 10px;">Cancel</button>
@@ -9026,13 +9041,25 @@
             </div>`;
         document.body.appendChild(menu);
         try { positionFloatingMenu(menu, anchor); } catch (e) { const r = anchor.getBoundingClientRect(); menu.style.left = r.left + 'px'; menu.style.top = (r.bottom + 4) + 'px'; }
+        const listEl = menu.querySelector('[data-dup-list]');
+        const renderList = () => {
+            listEl.innerHTML = pairs.slice(0, 400).map(p => `<div style="padding:2px 0;border-bottom:1px solid #17262a;color:#cfe8ec;">${escapeHtml(p.m.name || ('#' + p.m.id))} <span style="color:#5fff5f;">→ ${escapeHtml(p.newName)}</span></div>`).join('');
+        };
+        renderList();
+        const suffixInput = menu.querySelector('[data-dup-suffix]');
+        suffixInput.addEventListener('input', () => {
+            const suf = String(suffixInput.value || '').trim() || '(copy)';
+            pairs = buildPairs(suf);
+            renderList();
+        });
         const close = () => { menu.remove(); document.removeEventListener('mousedown', outside, true); };
         const outside = (e) => { if (!menu.contains(e.target) && e.target !== anchor) close(); };
         menu.querySelector('[data-dup-cancel]').onclick = close;
         const statusEl = menu.querySelector('[data-dup-status]');
         const goBtn = menu.querySelector('[data-dup-go]');
         goBtn.onclick = async () => {
-            goBtn.disabled = true; menu.querySelector('[data-dup-cancel]').disabled = true;
+            goBtn.disabled = true; menu.querySelector('[data-dup-cancel]').disabled = true; suffixInput.disabled = true;
+            gmSet(CACHE_KEY_DUP_SUFFIX, String(suffixInput.value || '').trim() || '(copy)');
             await duplicatePairsNow(pairs, (t) => { statusEl.textContent = t; });
             close();
         };
