@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.54
+// @version      2.55
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.54';
+    const SCRIPT_VERSION = '2.55';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5307,7 +5307,9 @@
                     // others; click again to bring everything back).
                     const vis = !mcv.hidden.has(mc.mission.id);
                     if (auditLine) auditLine = auditLine.replace('<div ', `<div data-mcv-au="${mc.mission.id}" `);
-                    return `<div data-mcv-row="${mc.mission.id}" style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:${vis ? 1 : 0.38};"><input type="checkbox" data-mcv-vis="${mc.mission.id}" ${vis ? 'checked' : ''} title="Show/hide this macro on the map" style="margin:0;cursor:pointer;accent-color:${COLORS2[i % COLORS2.length]};"><span data-mcv-solo="${mc.mission.id}" title="Solo — show ONLY this macro (click again to show all)" style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;cursor:pointer;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${reBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine ? auditLine.replace('style="', `style="opacity:${vis ? 1 : 0.38};`) : ''}`;
+                    // v2.55: ✂ split — always available, even without audit data
+                    const splitBtn = `<button data-mcv-split="${mc.mission.id}" title="✂ Split this macro into one mission per pad (named after the pad) — create-only, this macro is untouched" style="padding:0 5px;background:rgba(255,138,210,0.12);border:1px solid rgba(255,138,210,0.45);color:#ff8ad2;border-radius:4px;cursor:pointer;font-size:10px;">✂</button>`;
+                    return `<div data-mcv-row="${mc.mission.id}" style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:${vis ? 1 : 0.38};"><input type="checkbox" data-mcv-vis="${mc.mission.id}" ${vis ? 'checked' : ''} title="Show/hide this macro on the map" style="margin:0;cursor:pointer;accent-color:${COLORS2[i % COLORS2.length]};"><span data-mcv-solo="${mc.mission.id}" title="Solo — show ONLY this macro (click again to show all)" style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;cursor:pointer;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${reBtn}${splitBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine ? auditLine.replace('style="', `style="opacity:${vis ? 1 : 0.38};`) : ''}`;
                 }).join('')
                 : '<div style="color:#888;">No macro missions yet (≥2 pads in one mission).</div>')
             + `<div style="color:#ffb74d;margin-top:5px;">⬜ ${det.todo.length} pad(s) with missions, not in any macro</div>`
@@ -5325,6 +5327,11 @@
             const id = Number(b.getAttribute('data-mcv-route')) || b.getAttribute('data-mcv-route');
             const on = mcvToggleRoute(id, b.getAttribute('data-mcv-route-col'));
             b.style.background = on ? 'rgba(122,223,230,0.4)' : 'rgba(122,223,230,0.12)';
+        });
+        // v2.55: ✂ split macro into per-pad micros
+        el.querySelectorAll('[data-mcv-split]').forEach(b => b.onclick = () => {
+            const id = Number(b.getAttribute('data-mcv-split')) || b.getAttribute('data-mcv-split');
+            mcvOpenSplit(id);
         });
         // v2.47: per-macro show/hide + solo + All/None
         el.querySelectorAll('input[data-mcv-vis]').forEach(cb => cb.onchange = () => {
@@ -5389,6 +5396,170 @@
         const alreadySolo = !mcv.hidden.has(id) && others.length > 0 && others.every(x => mcv.hidden.has(x));
         if (alreadySolo) mcvAllVis(true);
         else det.macros.forEach(mc => mcvSetVis(mc.mission.id, mc.mission.id === id));
+    }
+    // ── ✂ SPLIT MACRO → per-pad micro missions (v2.55, feature #238) ────────
+    // Some sites' macros were built directly, without micro missions to merge
+    // from — so there's nothing to reorder with. ✂ decomposes a macro into
+    // one mission per pad, named after the pad. CREATE-ONLY: the macro is
+    // never touched; a pad whose name already exists as a mission is skipped.
+    // Grouping (user's field rule): snapshots belong to their PRECEDING nav —
+    // a nav starts a "unit" and snaps/waits/camera/gem ride with it. A unit
+    // is firmly assigned to the pad any of its located steps sit in (≤150 ft,
+    // same tolerance as macro detection); still-unassigned units (approach /
+    // exit navs) join the NEXT firm pad if the nav sits inside that pad's
+    // adjacent FFZ, else the PREVIOUS firm pad's, else they're dropped as
+    // corridor transit (counted in the preview). Setup steps between takeoff
+    // and the first nav ride into EVERY micro; each micro is wrapped in the
+    // macro's own takeoff + returnHome.
+    const MCV_SPLIT_PANEL_ID = 'aim-mb-mcv-split';
+    let mcvSplitBusy = false;
+    function mcvSplitPlan(mc) {
+        const ent = mcv.data && mcv.data.ent;
+        const assets = ((ent && ent.assets) || []).filter(a => a.ring && a.ring.length >= 3);
+        const ffzs = (ent && ent.ffzs) || [];
+        const tolM = 46;   // 150 ft
+        const boxes = assets.map(a => agRingBbox(a.ring, tolM + 5));
+        const padOf = (p) => {
+            let best = null;
+            for (let i = 0; i < assets.length; i++) {
+                const bb = boxes[i];
+                if (p.lat < bb.s || p.lat > bb.n || p.lng < bb.w || p.lng > bb.e) continue;
+                const d = mbPointToPolygonMeters(p.lat, p.lng, assets[i].ring);
+                if (d <= tolM && (!best || d < best.d)) best = { a: assets[i], d };
+            }
+            return best ? best.a : null;
+        };
+        const ffzCache = new Map();   // asset id → adjacent FFZ
+        const padFfz = (a) => {
+            if (!ffzCache.has(a.id)) ffzCache.set(a.id, genAssetFFZ(genCentroid(a.ring), ffzs));
+            return ffzCache.get(a.id);
+        };
+        // units: a located nav + everything until the next nav; body steps
+        // before the first nav = shared preamble (camera setup etc.)
+        const preamble = [], units = [];
+        ((mc.mission && mc.mission.instructions) || []).forEach(s => {
+            if (!s || s.type === 0 || s.type === 99) return;
+            if (s.type === 1 && s.location && typeof s.location.lat === 'number') units.push({ nav: s, steps: [s], pad: null, firm: false });
+            else if (units.length) units[units.length - 1].steps.push(s);
+            else preamble.push(s);
+        });
+        // pass 1 — firm: any located non-nav step (snap/flag/…) in a pad wins;
+        // else the nav itself sitting in a pad
+        units.forEach(u => {
+            for (const s of u.steps) {
+                if (s === u.nav || !s.location || typeof s.location.lat !== 'number') continue;
+                const a = padOf(s.location);
+                if (a) { u.pad = a; u.firm = true; return; }
+            }
+            const a = padOf(u.nav.location);
+            if (a) { u.pad = a; u.firm = true; }
+        });
+        // pass 2 — approach/exit navs by adjacent-FFZ membership: next firm
+        // pad first (approach semantics), then previous
+        units.forEach((u, i) => {
+            if (u.pad) return;
+            const fits = (a) => { const f = a && padFfz(a); return (f && genPointInPoly(u.nav.location, f.ring)) ? a : null; };
+            let nxt = null, prv = null;
+            for (let j = i + 1; j < units.length && !nxt; j++) if (units[j].firm) nxt = units[j].pad;
+            for (let j = i - 1; j >= 0 && !prv; j--) if (units[j].firm) prv = units[j].pad;
+            u.pad = fits(nxt) || fits(prv);
+        });
+        // group by pad in first-appearance (flight) order
+        const order = [], byPad = new Map();
+        let dropped = 0, droppedSteps = 0;
+        units.forEach(u => {
+            if (!u.pad) { dropped++; droppedSteps += u.steps.length; return; }
+            if (!byPad.has(u.pad.id)) { byPad.set(u.pad.id, { asset: u.pad, steps: [], navs: 0, snaps: 0 }); order.push(u.pad.id); }
+            const g = byPad.get(u.pad.id);
+            u.steps.forEach(s => { g.steps.push(s); if (s.type === 1) g.navs++; else if (s.type === 6) g.snaps++; });
+        });
+        return { groups: order.map(id => byPad.get(id)), preamble, dropped, droppedSteps, unitCount: units.length };
+    }
+    function mcvOpenSplit(missionId) {
+        const old = document.getElementById(MCV_SPLIT_PANEL_ID);
+        if (old) { old.remove(); return; }
+        const data = mcv.data;
+        const mc = data && data.det.macros.find(x => x.mission.id === missionId);
+        if (!mc) { showToast('Macro not found — toggle 🧩 off/on and retry.', '#ff9800', 3500); return; }
+        const plan = mcvSplitPlan(mc);
+        if (!plan.groups.length) { showToast('✂ No pad groups found — this mission has no located steps near assets.', '#ff9800', 5000); return; }
+        const taken = new Set((data.missions || []).map(m => String((m && m.name) || '').trim().toLowerCase()));
+        const p = document.createElement('div');
+        p.id = MCV_SPLIT_PANEL_ID;
+        p.style.cssText = 'position:fixed;top:60px;right:24px;width:400px;max-height:80vh;display:flex;flex-direction:column;z-index:2147483602;'
+            + 'background:#161a20;border:1px solid #ff8ad2;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        const rows = plan.groups.map((g, i) => {
+            const name = String(g.asset.name || ('Pad ' + g.asset.id)).trim();
+            const dup = taken.has(name.toLowerCase());
+            return `<label style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;${dup ? 'opacity:0.5;' : 'cursor:pointer;'}">
+                <input type="checkbox" data-mcvs-pick="${i}" ${dup ? 'disabled' : 'checked'} />
+                <span style="flex:1;color:#e6e6e6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(name)}</span>
+                <span style="color:#9ad;white-space:nowrap;font-size:11px;">${g.navs} nav · ${g.snaps} snap · ${g.steps.length} steps</span>
+                ${dup ? '<span style="color:#ff9800;font-size:10px;white-space:nowrap;">exists — skipped</span>' : ''}
+            </label>`;
+        }).join('');
+        const notes = []
+            .concat(plan.dropped ? [`⚠ ${plan.dropped} transit nav(s) (${plan.droppedSteps} step${plan.droppedSteps === 1 ? '' : 's'}) outside every pad's FFZ — dropped (corridor legs between pads).`] : [])
+            .concat(plan.preamble.length ? [`${plan.preamble.length} setup step(s) before the first nav ride into every micro.`] : []);
+        p.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(255,138,210,0.08);border-bottom:1px solid rgba(255,138,210,0.3);">
+                <span style="font-weight:800;color:#ff8ad2;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">✂ Split “${escapeHtml(String(mc.mission.name || ''))}”</span>
+                <button data-mcvs-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;flex:none;">✕</button>
+            </div>
+            <div style="padding:6px 12px;font-size:11px;color:#9ad;border-bottom:1px solid #2a2f38;">One mission per pad, named after the pad — create-only, the macro is untouched. Each micro = macro's takeoff + that pad's navs/snaps + returnHome. <a data-mcvs-all href="#" style="color:#7adfe6;">all</a> / <a data-mcvs-none href="#" style="color:#7adfe6;">none</a></div>
+            <div style="overflow:auto;flex:1;padding:4px 10px;">${rows}</div>
+            ${notes.length ? `<div style="padding:6px 12px;font-size:10px;color:#ffb74d;border-top:1px solid #2a2f38;">${notes.map(escapeHtml).join('<br>')}</div>` : ''}
+            <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
+                <span data-mcvs-status style="flex:1;font-size:11px;color:#9ad;"></span>
+                <button data-mcvs-go style="padding:6px 12px;background:#ff8ad2;border:none;color:#2a0420;border-radius:6px;cursor:pointer;font-weight:800;">✂ Create</button>
+            </div>`;
+        document.body.appendChild(p);
+        const goBtn = p.querySelector('[data-mcvs-go]');
+        const updateGo = () => {
+            const n = p.querySelectorAll('input[data-mcvs-pick]:checked').length;
+            goBtn.textContent = `✂ Create ${n}`;
+            goBtn.disabled = mcvSplitBusy || !n;
+        };
+        p.querySelector('[data-mcvs-close]').onclick = () => { if (!mcvSplitBusy) p.remove(); };
+        p.querySelectorAll('input[data-mcvs-pick]').forEach(cb => { cb.onchange = updateGo; });
+        p.querySelector('[data-mcvs-all]').onclick = (ev) => { ev.preventDefault(); p.querySelectorAll('input[data-mcvs-pick]:not(:disabled)').forEach(cb => { cb.checked = true; }); updateGo(); };
+        p.querySelector('[data-mcvs-none]').onclick = (ev) => { ev.preventDefault(); p.querySelectorAll('input[data-mcvs-pick]').forEach(cb => { if (!cb.disabled) cb.checked = false; }); updateGo(); };
+        goBtn.onclick = () => {
+            const picks = Array.from(p.querySelectorAll('input[data-mcvs-pick]:checked'))
+                .map(cb => plan.groups[Number(cb.getAttribute('data-mcvs-pick'))]).filter(Boolean);
+            if (picks.length) mcvSplitCommit(mc, plan, picks, p, updateGo);
+        };
+        updateGo();
+    }
+    async function mcvSplitCommit(mc, plan, picks, panel, updateGo) {
+        if (mcvSplitBusy) return;
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('✂ Mission context not found — be on the Mission Bank page.', '#ff5252', 4500); return; }
+        const statusEl = panel.querySelector('[data-mcvs-status]');
+        const ins = (mc.mission.instructions || []);
+        const to = pcmNormStep((ins.find(i => i && i.type === 0)) || mbMakeStep(0, 20));
+        const rh = pcmNormStep((Array.from(ins).reverse().find(i => i && i.type === 99)) || mbMakeStep(99));
+        const pre = plan.preamble.map(pcmNormStep);
+        let ok = 0, fail = 0;
+        mcvSplitBusy = true; updateGo();
+        renameSuppressAutoAgl++;
+        try {
+            for (let i = 0; i < picks.length; i++) {
+                const g = picks[i];
+                const name = String(g.asset.name || ('Pad ' + g.asset.id)).trim();
+                if (statusEl) statusEl.textContent = `Creating ${i + 1}/${picks.length} — ${name}…`;
+                try {
+                    await ctx.saveApp({ id: null, type: 1, instructions: [to].concat(pre, g.steps.map(pcmNormStep), [rh]), data_report_object_arr: [] }, name);
+                    ok++;
+                } catch (e) { fail++; console.warn(`${TAG} [mcv] ✂ create failed "${name}"`, e); }
+            }
+        } finally { renameSuppressAutoAgl--; }
+        mcvSplitBusy = false; updateGo();
+        const refreshed = ok ? refreshMissionList() : false;
+        if (statusEl) statusEl.textContent = `Done — created ${ok}${fail ? `, ${fail} failed` : ''}.`;
+        showToast(`✂ Created ${ok} micro mission(s) from "${mc.mission.name}"${fail ? ` · ${fail} failed (see console)` : ''}.${ok && !refreshed ? ' Reload the list to see them.' : ''} The macro is untouched.`, ok ? '#5fff5f' : '#ff5252', 8000);
+        console.log(`${TAG} [mcv] ✂ split "${mc.mission.name}" → ${ok} created, ${fail} failed (${plan.dropped} transit unit(s) dropped)`);
+        if (ok && !fail) { try { panel.remove(); } catch (e) {} }
     }
     // ── ♻ EFFICIENCY AUDIT + REORDER (v2.40) ────────────────────────────────
     // Flight-hours are the SLA currency: ~20-25 min flight + ~80 min recharge
