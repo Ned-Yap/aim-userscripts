@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.56
+// @version      2.57
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.56';
+    const SCRIPT_VERSION = '2.57';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5705,15 +5705,21 @@
             </label>`;
         }).join('');
         const notes = []
-            .concat(plan.dropped ? [`⚠ ${plan.dropped} transit nav(s) (${plan.droppedSteps} step${plan.droppedSteps === 1 ? '' : 's'}) outside every pad's FFZ — dropped (corridor legs between pads).`] : [])
-            .concat(plan.preamble.length ? [`${plan.preamble.length} setup step(s) before the first nav ride into every micro.`] : []);
+            .concat(plan.dropped ? [`⚠ ${plan.dropped} transit nav(s) (${plan.droppedSteps} step${plan.droppedSteps === 1 ? '' : 's'}) outside every pad's FFZ — dropped (corridor legs between pads).`] : []);
+        // v2.57: name the pre-first-nav steps so "setup steps" isn't a mystery,
+        // and let the user leave them out entirely.
+        const preLabels = plan.preamble.map(s => srmLabel(s)).join(', ');
         p.innerHTML = `
             <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(255,138,210,0.08);border-bottom:1px solid rgba(255,138,210,0.3);">
                 <span style="font-weight:800;color:#ff8ad2;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">✂ Split “${escapeHtml(String(mc.mission.name || ''))}”</span>
                 <button data-mcvs-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;flex:none;">✕</button>
             </div>
-            <div style="padding:6px 12px;font-size:11px;color:#9ad;border-bottom:1px solid #2a2f38;">One mission per pad, named after the pad — create-only, the macro is untouched. Each micro = macro's takeoff + that pad's navs/snaps + returnHome. <a data-mcvs-all href="#" style="color:#7adfe6;">all</a> / <a data-mcvs-none href="#" style="color:#7adfe6;">none</a></div>
+            <div style="padding:6px 12px;font-size:11px;color:#9ad;border-bottom:1px solid #2a2f38;">One mission per pad, named after the pad — create-only, the macro is untouched. Every micro gets the macro's <b>takeoff</b> at the front and <b>returnHome (land)</b> at the end, with that pad's navs/snaps in between. <a data-mcvs-all href="#" style="color:#7adfe6;">all</a> / <a data-mcvs-none href="#" style="color:#7adfe6;">none</a></div>
             <div style="overflow:auto;flex:1;padding:4px 10px;">${rows}</div>
+            ${plan.preamble.length ? `<label style="display:flex;align-items:center;gap:6px;padding:6px 12px;font-size:10px;color:#ffb74d;border-top:1px solid #2a2f38;cursor:pointer;">
+                <input type="checkbox" data-mcvs-pre checked style="margin:0;" />
+                <span>The macro has ${plan.preamble.length} step(s) between takeoff and the first nav — <b>${escapeHtml(preLabels)}</b>. Copy them into each micro right after its takeoff (untick to drop them).</span>
+            </label>` : ''}
             ${notes.length ? `<div style="padding:6px 12px;font-size:10px;color:#ffb74d;border-top:1px solid #2a2f38;">${notes.map(escapeHtml).join('<br>')}</div>` : ''}
             <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
                 <span data-mcvs-status style="flex:1;font-size:11px;color:#9ad;"></span>
@@ -5745,7 +5751,8 @@
         const ins = (mc.mission.instructions || []);
         const to = pcmNormStep((ins.find(i => i && i.type === 0)) || mbMakeStep(0, 20));
         const rh = pcmNormStep((Array.from(ins).reverse().find(i => i && i.type === 99)) || mbMakeStep(99));
-        const pre = plan.preamble.map(pcmNormStep);
+        const preCb = panel.querySelector('[data-mcvs-pre]');
+        const pre = (!preCb || preCb.checked) ? plan.preamble.map(pcmNormStep) : [];
         let ok = 0, fail = 0;
         mcvSplitBusy = true; updateGo();
         renameSuppressAutoAgl++;

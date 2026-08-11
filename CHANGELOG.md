@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-11 — ✂ Split preview: setup steps named + optional (Mission Bank Tools latest v2.57 — dev only)
+
+Clarity fix from the first look at the ✂ Split preview. Every micro always gets the macro's **takeoff at the front and returnHome (land) at the end** — that never changed. The confusing "N setup step(s) ride into every micro" note referred to steps sitting between the macro's takeoff and its first nav (camera select etc.). The preview now **names those steps** (e.g. "camera, wait 1s") and gives you a **checkbox to drop them** instead of copying them into each micro.
+
 ## 2026-08-11 — 🧹 Remove a step type from ALL missions, with review (Mission Bank Tools latest v2.56 — dev only)
 
 No more opening every mission to delete the same step. New **🧹 Steps** button in the SUM toolbar:
