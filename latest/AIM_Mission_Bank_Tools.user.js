@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.53
+// @version      2.54
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.53';
+    const SCRIPT_VERSION = '2.54';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -9035,9 +9035,12 @@
         let pairs = buildPairs(String(gmGet(CACHE_KEY_DUP_SUFFIX, '(copy)') || ''), '', '');
         const menu = document.createElement('div');
         menu.className = 'aim-mb-bulk-dup-pop';
-        menu.style.cssText = 'position:fixed;z-index:2147483647;width:400px;max-height:72vh;display:flex;flex-direction:column;background:#101a1c;border:1px solid #14d2dc;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        menu.style.cssText = 'position:fixed;z-index:2147483647;width:400px;min-width:320px;min-height:220px;max-height:72vh;display:flex;flex-direction:column;background:#101a1c;border:1px solid #14d2dc;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
         menu.innerHTML = `
-            <div style="padding:9px 12px;background:rgba(20,210,220,0.10);border-bottom:1px solid rgba(20,210,220,0.35);font-weight:800;color:#7adfe6;font-size:13px;">⧉ Duplicate missions · ${pairs.length} selected</div>
+            <div data-dup-head style="padding:9px 12px;background:rgba(20,210,220,0.10);border-bottom:1px solid rgba(20,210,220,0.35);font-weight:800;color:#7adfe6;font-size:13px;display:flex;align-items:center;gap:8px;cursor:move;user-select:none;">
+                <span style="flex:1;">⧉ Duplicate missions · ${pairs.length} selected</span>
+                <button data-dup-x title="Close" style="flex:none;background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button>
+            </div>
             <div style="padding:8px 12px;font-size:11px;color:#9ad;border-bottom:1px solid #1e2f33;">Create-only — originals untouched. Rename copies inline afterward (click the Name cell).</div>
             <div style="padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid #1e2f33;">
                 <label style="font-size:11px;color:#7adfe6;font-weight:700;white-space:nowrap;">Name qualifier</label>
@@ -9054,7 +9057,8 @@
                 <span data-dup-status style="flex:1;font-size:11px;color:#9ad;"></span>
                 <button data-dup-cancel class="aim-mb-tbtn" style="padding:5px 10px;">Cancel</button>
                 <button data-dup-go style="padding:5px 12px;background:#5fff5f;border:none;color:#04220a;border-radius:6px;cursor:pointer;font-weight:800;">Duplicate ${pairs.length}</button>
-            </div>`;
+            </div>
+            <div data-dup-resize title="Resize" style="position:absolute;right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;background:linear-gradient(135deg, transparent 55%, rgba(20,210,220,0.65) 55%);border-bottom-right-radius:8px;"></div>`;
         document.body.appendChild(menu);
         try { positionFloatingMenu(menu, anchor); } catch (e) { const r = anchor.getBoundingClientRect(); menu.style.left = r.left + 'px'; menu.style.top = (r.bottom + 4) + 'px'; }
         const listEl = menu.querySelector('[data-dup-list]');
@@ -9072,19 +9076,56 @@
         suffixInput.addEventListener('input', rebuild);
         findInput.addEventListener('input', rebuild);
         replInput.addEventListener('input', rebuild);
-        const close = () => { menu.remove(); document.removeEventListener('mousedown', outside, true); };
-        const outside = (e) => { if (!menu.contains(e.target) && e.target !== anchor) close(); };
-        menu.querySelector('[data-dup-cancel]').onclick = close;
+        // v2.54 — mini-panel chrome: ✕ close (no outside-click close so the
+        // popover survives clicks elsewhere), drag by header, ↘ corner resize.
+        // Pointer events + setPointerCapture per the house panel pattern.
+        const close = () => { menu.remove(); };
+        const xBtn = menu.querySelector('[data-dup-x]');
+        const cancelBtn = menu.querySelector('[data-dup-cancel]');
+        let dupRunning = false;
+        xBtn.onclick = () => { if (!dupRunning) close(); };
+        cancelBtn.onclick = () => { if (!dupRunning) close(); };
+        const headEl = menu.querySelector('[data-dup-head]');
+        headEl.addEventListener('pointerdown', (ev) => {
+            if (ev.target.closest('[data-dup-x]')) return;
+            const r = menu.getBoundingClientRect();
+            const offX = ev.clientX - r.left, offY = ev.clientY - r.top;
+            const move = (e2) => {
+                menu.style.left = Math.max(0, Math.min(window.innerWidth - 60, e2.clientX - offX)) + 'px';
+                menu.style.top = Math.max(0, Math.min(window.innerHeight - 40, e2.clientY - offY)) + 'px';
+            };
+            const up = () => { headEl.removeEventListener('pointermove', move); headEl.removeEventListener('pointerup', up); };
+            try { headEl.setPointerCapture(ev.pointerId); } catch (e) {}
+            headEl.addEventListener('pointermove', move);
+            headEl.addEventListener('pointerup', up);
+            ev.preventDefault();
+        });
+        const rsEl = menu.querySelector('[data-dup-resize]');
+        rsEl.addEventListener('pointerdown', (ev) => {
+            const r = menu.getBoundingClientRect();
+            const sx = ev.clientX, sy = ev.clientY, sw = r.width, sh = r.height;
+            menu.style.maxHeight = 'none';   // manual resize wins over the 72vh initial cap
+            const move = (e2) => {
+                menu.style.width = Math.max(320, sw + e2.clientX - sx) + 'px';
+                menu.style.height = Math.max(220, sh + e2.clientY - sy) + 'px';
+            };
+            const up = () => { rsEl.removeEventListener('pointermove', move); rsEl.removeEventListener('pointerup', up); };
+            try { rsEl.setPointerCapture(ev.pointerId); } catch (e) {}
+            rsEl.addEventListener('pointermove', move);
+            rsEl.addEventListener('pointerup', up);
+            ev.preventDefault(); ev.stopPropagation();
+        });
         const statusEl = menu.querySelector('[data-dup-status]');
         const goBtn = menu.querySelector('[data-dup-go]');
         goBtn.onclick = async () => {
-            goBtn.disabled = true; menu.querySelector('[data-dup-cancel]').disabled = true;
+            dupRunning = true;
+            goBtn.disabled = true; cancelBtn.disabled = true; xBtn.disabled = true;
             suffixInput.disabled = true; findInput.disabled = true; replInput.disabled = true;
             gmSet(CACHE_KEY_DUP_SUFFIX, String(suffixInput.value || '').trim());
             await duplicatePairsNow(pairs, (t) => { statusEl.textContent = t; });
+            dupRunning = false;
             close();
         };
-        setTimeout(() => document.addEventListener('mousedown', outside, true), 0);
     }
 
     function wireTableEvents(rows, visibleCols) {
