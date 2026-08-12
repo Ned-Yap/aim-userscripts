@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-12 — 🔋 Range cutoffs editable in the Control Panel (Mission Bank Tools latest v2.58 — dev only)
+
+The Tattu/Tulip distance cutoffs the 🔋 Range overlay classifies by (14k / 18k ft by default) are now editable without any console unlock: the **Mission Bank Tools card in the AIM Control Panel** gains a "🔋 Range battery cutoffs" section with the two numbers. Changing one while the overlay is on re-colors the pads instantly — routes don't change, only the class thresholds. The same numbers still drive the 🖊 Lasso tier split and the 🧠 Auto-Group optimizer, so every tool stays consistent.
+
 ## 2026-08-11 — ✂ Split preview: setup steps named + optional (Mission Bank Tools latest v2.57 — dev only)
 
 Clarity fix from the first look at the ✂ Split preview. Every micro always gets the macro's **takeoff at the front and returnHome (land) at the end** — that never changed. The confusing "N setup step(s) ride into every micro" note referred to steps sitting between the macro's takeoff and its first nav (camera select etc.). The preview now **names those steps** (e.g. "camera, wait 1s") and gives you a **checkbox to drop them** instead of copying them into each micro.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.57
+// @version      2.58
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.57';
+    const SCRIPT_VERSION = '2.58';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -407,6 +407,19 @@
                         mathFieldsEnabled = v;
                         gmSet(CACHE_KEY_MATH_FIELDS, mathFieldsEnabled);
                     }
+                } else if (msg.toggleId === 'rng-tattu-ft' || msg.toggleId === 'rng-tulip-ft') {
+                    // 🔋 Range battery cutoffs — write the SHARED agCfg keys (the
+                    // same numbers the gated Auto-Group knobs row edits), so the
+                    // Range overlay, lasso tier-split and merge optimizer all move
+                    // together. Idempotent: the CP echoes SET_TOGGLE from TOP +
+                    // IFRAME and on every REGISTER.
+                    const v = Number(msg.value !== undefined ? msg.value : msg.enabled);
+                    const key = msg.toggleId === 'rng-tattu-ft' ? 'tattuRadiusFt' : 'tulipRadiusFt';
+                    if (isFinite(v) && v > 0 && v !== agCfg()[key]) {
+                        const patch = {}; patch[key] = v;
+                        agSetCfg(patch);
+                        if (mpvFrameOk()) try { rngRefresh(); } catch (e) { console.warn(`${TAG} [range] refresh after cutoff change failed`, e); }
+                    }
                 } else if (typeof msg.toggleId === 'string' && msg.toggleId.indexOf('color-') === 0) {
                     const key = msg.toggleId.slice(6);
                     if (Object.prototype.hasOwnProperty.call(STEP_COLOR_DEFAULTS, key)) {
@@ -458,6 +471,14 @@
                 { id: 'preview-all', label: '👁 Show ALL missions (light dots — no lines/labels)', type: 'boolean', default: false },
                 { id: 'default-snap-agl', label: 'Default snapshot AGL (auto-AGL toggle)', type: 'number', min: -50, max: 500, step: 1, default: 10, unit: 'ft' },
                 { id: 'math-fields', label: '🧮 Math in step number fields (type 2630+15 or +15, then Enter)', type: 'boolean', default: true },
+                { id: 'range-header', label: '🔋 Range battery cutoffs (also drive Lasso/Auto-Group tiers)', type: 'header' },
+                // Defaults are read LIVE from agCfg() so the CP's register-echo
+                // (which fires with the default when the user never touched the
+                // CP control) can't clobber a value set via the Auto-Group knobs
+                // row. If the user customizes the value IN the CP, the CP's
+                // stored copy wins on every reload — one consistent authority.
+                { id: 'rng-tattu-ft', label: 'Tattu — one-way route ≤ this', type: 'number', min: 1000, max: 60000, step: 500, default: agCfg().tattuRadiusFt, unit: 'ft' },
+                { id: 'rng-tulip-ft', label: 'Tulip — beyond this = out of range', type: 'number', min: 1000, max: 60000, step: 500, default: agCfg().tulipRadiusFt, unit: 'ft' },
                 { id: 'colors-header', label: 'Step colors (editor cards + map badges)', type: 'header' },
                 { id: 'color-nav', label: 'Navigate', type: 'color', default: STEP_COLOR_DEFAULTS.nav },
                 { id: 'color-snap', label: 'Snapshot', type: 'color', default: STEP_COLOR_DEFAULTS.snap },
@@ -4864,13 +4885,21 @@
     }
 
     // ── rendering (all click-through) ──
-    const rng = { on: false, busy: false, layers: [], legendEl: null, chips: [], hover: null };
+    const rng = { on: false, busy: false, layers: [], legendEl: null, chips: [], hover: null, sol: null };
     function rngClear() {
         rng.layers.forEach(l => { try { l.remove(); } catch (e) {} });
         rng.layers = [];
         rng.chips = [];
         rngUnbindHover();
         if (rng.legendEl) { try { rng.legendEl.remove(); } catch (e) {} rng.legendEl = null; }
+    }
+    // Re-classify + redraw a LIVE overlay from the stashed solve — cutoff knobs
+    // (CP 🔋 toggles / Auto-Group knobs) change the Tattu/Tulip thresholds, not
+    // the routes, so no re-solve is needed: rngDraw re-reads agCfg().
+    function rngRefresh() {
+        if (!rng.on || !rng.sol) return;
+        rngClear();
+        rngDraw(rng.sol);
     }
     // Big tintable battery icon (v2.21 — the text chip was too small to spot).
     // pointer-events:none throughout: nothing about it is pressable.
@@ -5014,6 +5043,7 @@
             const sol = rngSolve(ent);
             rngClear();
             rngDraw(sol);
+            rng.sol = sol;   // stash so cutoff-knob changes can redraw without a re-solve
             rng.on = true;
             if (btn) btn.classList.add('active');
             showToast('🔋 Range overlay ON — colors are triple-verified shortest LEGAL routes. M2 picking still works.', '#5fff5f', 4500);
@@ -7173,8 +7203,9 @@
         p.querySelectorAll('[data-ag-k]').forEach(inp => inp.onchange = () => {
             const patch = {}; patch[inp.getAttribute('data-ag-k')] = Number(inp.value);
             agSetCfg(patch); rerender();
+            try { rngRefresh(); } catch (e) {}   // live 🔋 overlay tracks the radii knobs too
         });
-        p.querySelector('[data-ag-reset]').onclick = () => { agSetCfg(Object.assign({}, AG_DEFAULTS)); rerender(); };
+        p.querySelector('[data-ag-reset]').onclick = () => { agSetCfg(Object.assign({}, AG_DEFAULTS)); rerender(); try { rngRefresh(); } catch (e) {} };
         p.querySelectorAll('[data-ag-route]').forEach(b => b.onclick = () => {
             const gi = Number(b.getAttribute('data-ag-route'));
             const on = agToggleRoute(mergeGroups[gi], gi, AG_COLORS[gi % AG_COLORS.length], ent, data);
