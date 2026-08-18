@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-18 — ✂ Split ALL macros in one pass (Mission Bank Tools latest v2.60 — dev only)
+
+New **✂ All** button in the 🧩 Macro coverage legend header: splits **every macro on the site in one combined review** instead of one macro at a time. Each macro gets its own color-chipped section listing its pads (with its setup steps named). All the per-row skip logic carries over — existing mission names hard-skipped, pads that already have a geometry-detected micro unticked with the cyan tag — plus one rule unique to the combined pass: a **pad claimed by two macros** only defaults ticked in the macro where it has more steps; the other occurrence shows a purple "also in …" tag. One confirm dialog, then create-only as always — no macro is modified.
+
 ## 2026-08-18 — ↩ Undo for issue reshapes + icon moves (AIM Issues v1.38 — prod + latest)
 
 Accidentally dragged or redrew an issue's area? Open the issue → History: the entry that owns the **current** shape (or icon position) now carries an **↩ Undo** chip. One click restores what that edit replaced — as a new audited history entry (history is never rewritten, so it syncs safely across tabs and coworkers, threads into Slack as "reshaped — ↩ undo of reshape by @who", and can itself be undone). Reshape entries now also record the **pre-edit polygon**, so even an issue's first-ever reshape is undoable going forward (older first-reshapes predate the recording and can't offer the chip). Same permissions as Reshape: creator or approver, live non-validator issues.
