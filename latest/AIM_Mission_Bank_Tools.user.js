@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.58
+// @version      2.59
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.58';
+    const SCRIPT_VERSION = '2.59';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5420,6 +5420,7 @@
         const tolM = 46;   // 150 ft
         const boxes = assets.map(a => agRingBbox(a.ring, tolM + 5));
         const macros = [];
+        const solos = [];
         const covered = new Set();
         const missionPads = new Map();
         (missions || []).forEach(m => {
@@ -5456,12 +5457,15 @@
                 macros.push({ mission: m, pads, blocks });
                 pads.forEach(a => covered.add(a.id));
             }
+            // v2.59: solo (micro) missions — exactly one pad — banked so ✂
+            // Split can default-untick pads that already have their micro.
+            if (pads.length === 1) solos.push({ mission: m, pad: pads[0] });
         });
         // pads that have SOME mission on them but no macro yet
         const touched = new Set();
         missionPads.forEach(pads => pads.forEach(a => touched.add(a.id)));
         const todo = assets.filter(a => touched.has(a.id) && !covered.has(a.id));
-        return { macros, covered, todo, touched, assets, padCount: assets.length };
+        return { macros, solos, covered, todo, touched, assets, padCount: assets.length };
     }
     function mcvDraw(det) {
         const L = composerGetL(), map = getLeafletMap();
@@ -5720,21 +5724,37 @@
         const plan = mcvSplitPlan(mc);
         if (!plan.groups.length) { showToast('✂ No pad groups found — this mission has no located steps near assets.', '#ff9800', 5000); return; }
         const taken = new Set((data.missions || []).map(m => String((m && m.name) || '').trim().toLowerCase()));
+        // v2.59: pads that already have a SOLO (micro) mission — detected by
+        // GEOMETRY (a mission touching exactly this one pad), not by name, so
+        // differently-named micros still count. Default-UNTICKED, not
+        // disabled: tick one back on if you want a duplicate anyway.
+        const soloByPad = new Map();
+        (data.det.solos || []).forEach(s => {
+            if (!soloByPad.has(s.pad.id)) soloByPad.set(s.pad.id, []);
+            soloByPad.get(s.pad.id).push(String(s.mission.name || ('#' + s.mission.id)));
+        });
         const p = document.createElement('div');
         p.id = MCV_SPLIT_PANEL_ID;
-        p.style.cssText = 'position:fixed;top:60px;right:24px;width:400px;max-height:80vh;display:flex;flex-direction:column;z-index:2147483602;'
+        p.style.cssText = 'position:fixed;top:60px;right:24px;width:430px;max-height:80vh;display:flex;flex-direction:column;z-index:2147483602;'
             + 'background:#161a20;border:1px solid #ff8ad2;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        let soloSkipped = 0;
         const rows = plan.groups.map((g, i) => {
             const name = String(g.asset.name || ('Pad ' + g.asset.id)).trim();
             const dup = taken.has(name.toLowerCase());
-            return `<label style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;${dup ? 'opacity:0.5;' : 'cursor:pointer;'}">
-                <input type="checkbox" data-mcvs-pick="${i}" ${dup ? 'disabled' : 'checked'} />
+            const solos = soloByPad.get(g.asset.id) || [];
+            const hasSolo = !dup && solos.length > 0;
+            if (hasSolo) soloSkipped++;
+            const soloTxt = solos.length ? `has micro: ${solos[0]}${solos.length > 1 ? ` +${solos.length - 1}` : ''}` : '';
+            return `<label style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;${dup ? 'opacity:0.5;' : 'cursor:pointer;'}${hasSolo ? 'opacity:0.75;' : ''}">
+                <input type="checkbox" data-mcvs-pick="${i}" ${dup ? 'disabled' : (hasSolo ? '' : 'checked')} />
                 <span style="flex:1;color:#e6e6e6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(name)}</span>
                 <span style="color:#9ad;white-space:nowrap;font-size:11px;">${g.navs} nav · ${g.snaps} snap · ${g.steps.length} steps</span>
                 ${dup ? '<span style="color:#ff9800;font-size:10px;white-space:nowrap;">exists — skipped</span>' : ''}
+                ${hasSolo ? `<span title="${escapeHtml(solos.join('\n'))}" style="color:#7adfe6;font-size:10px;white-space:nowrap;max-width:130px;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(soloTxt)}</span>` : ''}
             </label>`;
         }).join('');
         const notes = []
+            .concat(soloSkipped ? [`${soloSkipped} pad(s) already have their own micro mission (cyan "has micro") — unticked by default so you don't duplicate them. Tick one back on to create anyway.`] : [])
             .concat(plan.dropped ? [`⚠ ${plan.dropped} transit nav(s) (${plan.droppedSteps} step${plan.droppedSteps === 1 ? '' : 's'}) outside every pad's FFZ — dropped (corridor legs between pads).`] : []);
         // v2.57: name the pre-first-nav steps so "setup steps" isn't a mystery,
         // and let the user leave them out entirely.

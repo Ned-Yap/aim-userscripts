@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-18 — ✂ Split: pads that already have a micro are unticked by default (Mission Bank Tools latest v2.59 — dev only)
+
+The ✂ Split preview now detects pads that **already have their own solo (micro) mission** — by geometry, not by name, so a micro named differently than its pad still counts (any mission whose steps touch exactly that one pad). Those rows show a cyan **"has micro: <mission name>"** tag (hover for the full list if there are several) and start **unticked**, so splitting a macro can't duplicate micros that already exist. They're not locked — tick one back on if you want a fresh copy anyway. Exact-name matches stay hard-skipped as before.
+
 ## 2026-08-12 — 🔋 Range cutoffs editable in the Control Panel (Mission Bank Tools latest v2.58 — dev only)
 
 The Tattu/Tulip distance cutoffs the 🔋 Range overlay classifies by (14k / 18k ft by default) are now editable without any console unlock: the **Mission Bank Tools card in the AIM Control Panel** gains a "🔋 Range battery cutoffs" section with the two numbers. Changing one while the overlay is on re-colors the pads instantly — routes don't change, only the class thresholds. The same numbers still drive the 🖊 Lasso tier split and the 🧠 Auto-Group optimizer, so every tool stays consistent.
