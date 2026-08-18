@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.37
+// @version      1.38
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -60,7 +60,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.37';
+    const SCRIPT_VERSION = '1.38';
 
     // Server model (v1.36): prod and QA are separate databases — the same
     // numeric site ID is two different sites. QA issues live in their own
@@ -1208,14 +1208,17 @@
     // v1.30: reshape → threaded reply with the refreshed affected-entity
     // count. No mentions — geometry edits aren't actionable pings. Parent
     // board untouched (status/note unchanged, and it carries no geometry).
-    async function postSlackReshape(issue, by) {
+    async function postSlackReshape(issue, by, note) {
         if (!slackPostable(issue)) return;
         try {
             await ensureSlackThread(issue);   // adopt pre-Slack issues
             const actor = slackPlain(by);
             const affected = affectedEntitiesFor(issue);
             const nVerts = Array.isArray(issue.polygon) ? issue.polygon.length : '?';
-            const head = `✏ ${actor} *reshaped* this issue's area (${nVerts}-point ${slackEsc(issue.shape || 'polygon')}) — now affects ${affected.length} entit${affected.length === 1 ? 'y' : 'ies'}`;
+            // v1.38: the ↩ Undo path passes a note so the thread reads
+            // "moved → undone" instead of two indistinguishable reshapes.
+            const head = `✏ ${actor} *reshaped* this issue's area (${nVerts}-point ${slackEsc(issue.shape || 'polygon')}) — now affects ${affected.length} entit${affected.length === 1 ? 'y' : 'ies'}`
+                + (note ? ` — _${slackEsc(note)}_` : '');
             const text = issue.slackThreadTs ? head
                        : `${head}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack()})_`;
             await slackPost(text, issue.slackThreadTs || null);
@@ -1257,7 +1260,7 @@
         if (h.toStatus === 'deleted') return `${by} deleted`;
         if (h.kind === 'assign') return h.toAssignee ? `${by} assigned → ${slackMention(h.toAssignee) || ('@' + slackEsc(h.toAssignee))}` : `${by} unassigned`;
         if (h.kind === 'priority') return `${by} set priority → ${slackEsc((h.toPriority || 'none'))}`;
-        if (h.kind === 'reshape') return `${by} reshaped the area`;
+        if (h.kind === 'reshape') return `${by} reshaped the area${h.note ? ` — ${slackEsc(h.note.slice(0, 80))}` : ''}`;
         if (h.kind === 'markermove') return h.markerPos ? `${by} moved the map icon` : `${by} reset the map icon position`;
         if (h.kind === 'category') return (h.toCategory === 'unshielded') ? `${by} marked as Unshielded Route` : `${by} converted to normal issue`;
         if (h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus)) return `${by} commented: ${slackEsc((h.note || '').slice(0, 80))}`;
@@ -1447,6 +1450,54 @@
         if (reshapeAt > bestAt) return null;
         const p = best.markerPos;
         return (Array.isArray(p) && p.length === 2 && isFinite(p[0]) && isFinite(p[1])) ? p : null;
+    }
+
+    // v1.38: ↩ Undo target for the LATEST reshape — the geometry an undo
+    // would restore. Prefers the entry's own fromPolygon (recorded since
+    // v1.38, exact), else falls back to the previous reshape entry's polygon.
+    // Returns { shape, polygon, entry } or null when nothing is restorable
+    // (no reshape at all, or a legacy first reshape whose creation polygon
+    // was never recorded). Undo NEVER removes history — union-merge would
+    // resurrect it from any other copy — it appends a compensating entry.
+    function reshapeUndoTarget(issue) {
+        const reshapes = ((issue && issue.history) || [])
+            .filter(h => h && h.kind === 'reshape' && Array.isArray(h.polygon) && h.polygon.length >= 3)
+            .sort((a, b) => {
+                const ta = new Date(a.at).getTime(), tb = new Date(b.at).getTime();
+                return (isNaN(ta) ? 0 : ta) - (isNaN(tb) ? 0 : tb);
+            });
+        if (!reshapes.length) return null;
+        const last = reshapes[reshapes.length - 1];
+        if (Array.isArray(last.fromPolygon) && last.fromPolygon.length >= 3) {
+            return { shape: last.fromShape || issue.shape || 'polygon', polygon: last.fromPolygon, entry: last };
+        }
+        if (reshapes.length >= 2) {
+            const prev = reshapes[reshapes.length - 2];
+            return { shape: prev.toShape || 'polygon', polygon: prev.polygon, entry: last };
+        }
+        return null;
+    }
+
+    // v1.38: ↩ Undo target for the LATEST icon move — recomputes what
+    // markerPosFromHistory would yield WITHOUT that entry (local filter
+    // only; the entry itself is never removed from the stored history).
+    // Returns { pos, entry } (pos null = auto placement) or null when
+    // there's no markermove to undo, or a newer reshape already reset the
+    // icon (the move is inert — undo would be a no-op).
+    function markerMoveUndoTarget(issue) {
+        const hist = (issue && issue.history) || [];
+        let last = null, lastAt = -Infinity, reshapeAt = -Infinity;
+        hist.forEach(h => {
+            if (!h) return;
+            const t = new Date(h.at).getTime();
+            const at = isNaN(t) ? 0 : t;
+            if (h.kind === 'reshape') { if (at >= reshapeAt) reshapeAt = at; return; }
+            if (h.kind !== 'markermove') return;
+            if (at >= lastAt) { lastAt = at; last = h; }
+        });
+        if (!last || reshapeAt > lastAt) return null;
+        const pos = markerPosFromHistory(hist.filter(h => h !== last), undefined);
+        return { pos: pos || null, entry: last };
     }
 
     // v1.31: derive category from the last kind:'category' conversion in a
@@ -2812,13 +2863,18 @@
     }
 
     // The mutation. Mirrors applyComment's save + sync + Slack pattern.
-    function applyReshape(issue, shape, polygon) {
+    // v1.38: optional `note` rides in the history entry + Slack reply (the
+    // ↩ Undo path uses it to label the entry as an undo).
+    function applyReshape(issue, shape, polygon, note) {
         const nowIso = new Date().toISOString();
         const by = cachedUsername || 'local-only';
         if (!Array.isArray(issue.history)) issue.history = [];
         // The NEW polygon rides in the history entry — that's what lets the
         // reshape survive distributed sync (mergeIssueObjects re-derives
         // polygon/shape from the latest reshape entry in the union history).
+        // v1.38: the PRE-reshape polygon is recorded too (fromPolygon) so an
+        // issue's FIRST reshape is undoable — without it the creation polygon
+        // exists nowhere in the history and undo would have no target.
         issue.history.push({
             at: nowIso,
             by,
@@ -2826,9 +2882,10 @@
             toStatus: issue.status || 'open',
             kind: 'reshape',
             fromShape: issue.shape || null,
+            fromPolygon: (Array.isArray(issue.polygon) && issue.polygon.length >= 3) ? issue.polygon : null,
             toShape: shape,
             polygon,
-            note: '',
+            note: note || '',
         });
         issue.shape = shape;
         issue.polygon = polygon;
@@ -2846,7 +2903,7 @@
         if (cachedToken && !wasLocalOnly) {
             showToast('Issue reshaped — pushing to GitHub…', 2500);
             commitIssuesToGitHub(`@${by}: reshape ${issue.id.slice(0, 14)}`);
-            postSlackReshape(issue, by);
+            postSlackReshape(issue, by, note);
         } else {
             showToast('Issue reshaped (local only).', 2500);
         }
@@ -2950,7 +3007,7 @@
     // The mutation. Mirrors applyReshape's save + sync pattern, minus Slack —
     // an icon nudge is cosmetic, so the watermark advances silently to keep
     // the backfill sweep from posting a catch-up line about it.
-    function applyMarkerMove(issue, markerPos) {
+    function applyMarkerMove(issue, markerPos, note) {
         const nowIso = new Date().toISOString();
         const by = cachedUsername || 'local-only';
         if (!Array.isArray(issue.history)) issue.history = [];
@@ -2961,7 +3018,7 @@
             toStatus: issue.status || 'open',
             kind: 'markermove',
             markerPos: markerPos || null,
-            note: '',
+            note: note || '',
         });
         issue.markerPos = markerPos || null;
         // Silent Slack watermark bump — see comment above.
@@ -5020,6 +5077,36 @@
             const sColor = (s) => (STATUS_LABEL[s] || { color: '#aaa' }).color;
             const sText = (s) => (STATUS_LABEL[s] || { text: (s || '').toUpperCase() }).text;
             const statusPill = (s) => `${sIcon(s)} <span style="color:${sColor(s)};font-weight:700">${sText(s)}</span>`;
+            // v1.38: permission gates hoisted above the history render — the
+            // ↩ Undo chips need them, and the action buttons below reuse them.
+            const isCreator = !!(liveIssue.createdBy && cachedUsername && liveIssue.createdBy === cachedUsername);
+            const isLocalOnly = (liveIssue.createdBy === 'local-only');
+            // v1.25: approvers can delete any issue (see deleteIssue). The
+            // label flags WHY the button is available so the deleter knows
+            // they're acting as an approver on someone else's issue.
+            // v1.31: per-issue (global approver, or category approver on
+            // issues of their category).
+            const canModerate = isApproverFor(liveIssue);
+            // v1.26: a tombstoned issue shows Reinstate (approver-only) instead
+            // of Delete, and suppresses all transition/comment/priority actions.
+            const isDeleted = !!liveIssue.deleted;
+            // v1.38: shared gate for geometry edits (reshape / move icon /
+            // their undos) — creator, local-only, or approver, on live,
+            // non-validator issues (validator shapes regenerate each run).
+            const canEditGeometry = (isCreator || isLocalOnly || canModerate) && !isDeleted
+                && liveIssue.source !== 'validator';
+            // v1.38: ↩ Undo — offered ONLY on the single entry whose effect
+            // IS the current state (latest reshape / latest icon move). An
+            // undo appends a compensating entry, so it syncs like any edit
+            // and is itself undoable.
+            const reshapeUndo = canEditGeometry ? reshapeUndoTarget(liveIssue) : null;
+            const markerUndo = canEditGeometry ? markerMoveUndoTarget(liveIssue) : null;
+            const undoBtnHtml = (kind) => `<button class="aim-issues-hist-undo" data-undo="${kind}"
+                title="${kind === 'reshape'
+                    ? 'Restore the shape this reshape replaced. Adds an undo entry — history is never removed.'
+                    : 'Restore the icon position this move replaced. Adds an undo entry — history is never removed.'}"
+                style="padding:1px 8px;background:#2a2f36;color:#ffd24d;border:1px solid rgba(255,210,77,0.4);
+                       border-radius:3px;cursor:pointer;font:inherit;font-size:10px;font-weight:700;flex-shrink:0">↩ Undo</button>`;
             const histRows = sortedHistory.map(h => {
                 const safeHistNote = escHtml(h.note);
                 const safeBy = escHtml(h.by || '?');
@@ -5058,24 +5145,20 @@
                 } else {
                     label = `${statusPill(h.fromStatus)} → ${statusPill(h.toStatus)}`;
                 }
+                // v1.38: ↩ Undo chip on the entry that owns the current
+                // geometry / icon position (reference equality — sortedHistory
+                // and the undo targets both hold refs into liveIssue.history).
+                const undoHtml = (reshapeUndo && h === reshapeUndo.entry) ? undoBtnHtml('reshape')
+                    : (markerUndo && h === markerUndo.entry) ? undoBtnHtml('markermove') : '';
                 return `<div style="padding:6px 8px;border-bottom:1px dotted rgba(255,255,255,0.08);font-size:12px">
                     <div style="color:#a8c4ff;font-size:11px;font-weight:600">${fmtDateTime(h.at)} &middot; @${safeBy}</div>
-                    <div style="color:${labelColor};margin-top:2px">${label}</div>
+                    <div style="color:${labelColor};margin-top:2px;display:flex;align-items:center;gap:8px"><span>${label}</span>${undoHtml}</div>
                     ${safeHistNote ? `<div style="color:#bbb;font-size:11px;margin-top:2px">"${safeHistNote}"</div>` : ''}
                 </div>`;
             }).join('');
 
-            const isCreator = !!(liveIssue.createdBy && cachedUsername && liveIssue.createdBy === cachedUsername);
-            const isLocalOnly = (liveIssue.createdBy === 'local-only');
-            // v1.25: approvers can delete any issue (see deleteIssue). The
-            // label flags WHY the button is available so the deleter knows
-            // they're acting as an approver on someone else's issue.
-            // v1.31: per-issue (global approver, or category approver on
-            // issues of their category).
-            const canModerate = isApproverFor(liveIssue);
-            // v1.26: a tombstoned issue shows Reinstate (approver-only) instead
-            // of Delete, and suppresses all transition/comment/priority actions.
-            const isDeleted = !!liveIssue.deleted;
+            // v1.38: isCreator / isLocalOnly / canModerate / isDeleted are
+            // declared above the history render (the ↩ Undo chips need them).
             const canDelete = (isCreator || isLocalOnly || canModerate) && !isDeleted;
             const canReinstate = isDeleted && canModerate;
             const deleteLabel = isCreator ? ' (you created this)'
@@ -5101,8 +5184,8 @@
             // v1.30: reshape (redraw the polygon). Same gate as delete —
             // creator, local-only, or approver — on live, non-validator
             // issues (validator shapes are regenerated on each run).
-            const canReshape = (isCreator || isLocalOnly || canModerate) && !isDeleted
-                && liveIssue.source !== 'validator';
+            // v1.38: shared with the ↩ Undo chips as canEditGeometry.
+            const canReshape = canEditGeometry;
             const reshapeBtnHtml = canReshape
                 ? `<button id="aim-issues-modal-reshape"
                        title="Redraw this issue's shape — the current shape shows grey dashed while you draw the replacement"
@@ -5817,6 +5900,30 @@
                     startMarkerMove(liveIssue.id);
                 };
             }
+            // v1.38: ↩ Undo chips in the history list. Single click — the
+            // undo is audited (compensating history entry) and itself
+            // undoable, same safety class as Convert. Targets recompute at
+            // click time in case a sync landed since the render.
+            card.querySelectorAll('.aim-issues-hist-undo').forEach(btn => {
+                btn.onclick = () => {
+                    // Re-resolve by id — a background sync may have replaced
+                    // the issue object since this render (merges build new
+                    // objects; mutating a stale ref would be lost on save).
+                    const live = currentSiteIssues.find(i => i.id === liveIssue.id);
+                    if (!live || live.deleted) { showToast('Issue vanished in a sync — nothing changed.', 3500); return; }
+                    const kind = btn.getAttribute('data-undo');
+                    if (kind === 'reshape') {
+                        const t = reshapeUndoTarget(live);
+                        if (!t) { showToast('Nothing to undo — the pre-reshape shape was never recorded.', 3500); return; }
+                        applyReshape(live, t.shape, t.polygon, `↩ undo of reshape by @${t.entry.by || '?'}`);
+                    } else if (kind === 'markermove') {
+                        const t = markerMoveUndoTarget(live);
+                        if (!t) { showToast('Nothing to undo — the icon position is already automatic.', 3000); return; }
+                        applyMarkerMove(live, t.pos, `↩ undo of icon move by @${t.entry.by || '?'}`);
+                    }
+                    render();
+                };
+            });
             // v1.31: category convert toggle. Non-destructive + audited, so
             // single click; re-render reflects the new chip/buttons.
             const convertBtn = card.querySelector('#aim-issues-modal-convert');

@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-18 — ↩ Undo for issue reshapes + icon moves (AIM Issues v1.38 — prod + latest)
+
+Accidentally dragged or redrew an issue's area? Open the issue → History: the entry that owns the **current** shape (or icon position) now carries an **↩ Undo** chip. One click restores what that edit replaced — as a new audited history entry (history is never rewritten, so it syncs safely across tabs and coworkers, threads into Slack as "reshaped — ↩ undo of reshape by @who", and can itself be undone). Reshape entries now also record the **pre-edit polygon**, so even an issue's first-ever reshape is undoable going forward (older first-reshapes predate the recording and can't offer the chip). Same permissions as Reshape: creator or approver, live non-validator issues.
+
 ## 2026-08-18 — ✂ Split: pads that already have a micro are unticked by default (Mission Bank Tools latest v2.59 — dev only)
 
 The ✂ Split preview now detects pads that **already have their own solo (micro) mission** — by geometry, not by name, so a micro named differently than its pad still counts (any mission whose steps touch exactly that one pad). Those rows show a cyan **"has micro: <mission name>"** tag (hover for the full list if there are several) and start **unticked**, so splitting a macro can't duplicate micros that already exist. They're not locked — tick one back on if you want a fresh copy anyway. Exact-name matches stay hard-skipped as before.
