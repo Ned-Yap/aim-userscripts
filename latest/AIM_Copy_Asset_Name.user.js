@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.245
+// @version      4.246
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.245';
+    const SCRIPT_VERSION = '4.246';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -15232,6 +15232,9 @@
         bufferFt: NFZ_DEFAULTS.bufferFt, minFt: NFZ_DEFAULTS.minFt,
         drafts: [],                                    // [{name, src, points:[{lat,lng}]}]
         lastCreated: [],                               // ids from the most recent commit (undo)
+        committed: [], committedSite: null,            // PLACEHOLDER shapes for NFZs committed this session (visible until reload)
+        committedLayers: [],                           // …their Leaflet layers (survive modal close, cleared on site change/reload)
+        narrowLayers: [], narrowOn: false,             // ⚠ Narrow-check overlay layers + toggle state
         layers: [], _container: null, _onDown: null, _onMove: null, _onDbl: null, _onKey: null,
     };
     function nfzSaveParams() { try { GM_setValue(NFZ_PARAMS_KEY, JSON.stringify({ bufferFt: nfzDraw.bufferFt, minFt: nfzDraw.minFt })); } catch (e) {} }
@@ -15258,12 +15261,51 @@
             const arr = JSON.parse(localStorage.getItem(NFZ_DRAFTS_LS + siteID) || 'null');
             if (Array.isArray(arr)) nfzDraw.drafts = arr.filter(d => d && Array.isArray(d.points) && d.points.length >= 3);
         } catch (e) {}
+        // committed placeholders are per-site + per-session; site change wipes them
+        if (nfzDraw.committedSite !== String(siteID)) {
+            nfzDraw.committed = [];
+            nfzDraw.committedSite = String(siteID);
+            try { nfzClearCommittedLayers(); } catch (e) {}
+        }
+        try { nfzClearNarrowLayers(); } catch (e) {}
+        try { nfzRenderCommitted(); } catch (e) {}
+    }
+    // Outward-offset a {lat,lng} ring by offM with WINDING-corrected normals.
+    // assetOffsetRing's "away from centroid" outward test is only right for
+    // convex rings (pads) — on a CONCAVE trace (L/U shapes) it flips the
+    // normal of notch edges and offsets them INWARD, distorting the shape
+    // ("doesn't make the shape exactly as I draw", live test 2026-08-20).
+    // Signed area fixes the direction for every edge regardless of concavity.
+    function nfzOffsetRing(ring, offM) {
+        if (!offM) return ring.slice();
+        const cen = ringCentroid(ring), proj = genProjector(cen.lat, cen.lng);
+        const m = ringMeters(ring, proj), n = m.length;
+        let sa = 0;
+        for (let i = 0; i < n; i++) { const a = m[i], b = m[(i + 1) % n]; sa += a.x * b.y - b.x * a.y; }
+        const ccw = sa > 0;
+        const segN = [];
+        for (let i = 0; i < n; i++) {
+            const A = m[i], B = m[(i + 1) % n];
+            const ex = B.x - A.x, ey = B.y - A.y; const L = Math.hypot(ex, ey) || 1;
+            segN.push(ccw ? { nx: ey / L, ny: -ex / L } : { nx: -ey / L, ny: ex / L });
+        }
+        const out = [];
+        for (let i = 0; i < n; i++) {
+            const nPrev = segN[(i - 1 + n) % n], nCur = segN[i];
+            const a0 = { x: m[i].x + nPrev.nx * offM, y: m[i].y + nPrev.ny * offM };
+            const a1 = { x: m[i].x + nCur.nx * offM, y: m[i].y + nCur.ny * offM };
+            const d0 = { x: m[i].x - m[(i - 1 + n) % n].x, y: m[i].y - m[(i - 1 + n) % n].y };
+            const d1 = { x: m[(i + 1) % n].x - m[i].x, y: m[(i + 1) % n].y - m[i].y };
+            const X = lineX(a0, d0, a1, d1);
+            out.push((X && Math.hypot(X.x - m[i].x, X.y - m[i].y) <= offM * 4) ? X : a1);
+        }
+        return out.map(q => proj.inv(q));
     }
     // Outward-offset a {lat,lng} ring by ft, mitered; clean any loops the
     // offset created on concave rings.
     function nfzGrowRing(ring, ft) {
         if (!ft) return ring.slice();
-        return cleanSelfIntersections(assetOffsetRing(ring, ft * GEN_FT_TO_M));
+        return cleanSelfIntersections(nfzOffsetRing(ring, ft * GEN_FT_TO_M));
     }
     function nfzRingSizeM(ring) {
         const cen = ringCentroid(ring), proj = genProjector(cen.lat, cen.lng);
@@ -15279,7 +15321,7 @@
         const minM = minFt * GEN_FT_TO_M;
         const extraM = Math.max(0, (minM - sz.w) / 2, (minM - sz.h) / 2);
         if (extraM <= 0.01) return { ring, paddedFt: 0 };
-        return { ring: cleanSelfIntersections(assetOffsetRing(ring, extraM)), paddedFt: Math.round(extraM / GEN_FT_TO_M * 10) / 10 };
+        return { ring: cleanSelfIntersections(nfzOffsetRing(ring, extraM)), paddedFt: Math.round(extraM / GEN_FT_TO_M * 10) / 10 };
     }
     // Server rule: every NFZ vertex must lie INSIDE a Free Zone. Pick the FFZ
     // containing most of the ring; pull outside / too-close vertices to the
@@ -15376,13 +15418,127 @@
             if (mm.paddedFt) bits.push(`padded +${mm.paddedFt} ft to meet the ${nfzDraw.minFt}×${nfzDraw.minFt} ft minimum`);
             if (cl.moved) bits.push(`${cl.moved} vert(s) pulled inside the FFZ`);
             if (cl.noFfz) bits.push('⚠ NO FFZ on this site — the server rejects NFZs outside a Free Zone');
-            showToast(`NFZ draft "${name}"${bits.length ? ' — ' + bits.join(' · ') : ''}`, cl.noFfz ? 'rgba(255,179,71,0.6)' : undefined);
+            // auto narrow-check the fresh draft — a notch under min gets painted yellow immediately
+            let narrowWarn = false;
+            try {
+                const res = nfzNarrowParts(r, nfzDraw.minFt);
+                if (res && (res.whole || res.parts.length)) {
+                    narrowWarn = true;
+                    bits.push(res.whole ? `⚠ ENTIRE zone narrower than ${nfzDraw.minFt} ft` : `⚠ ${res.parts.length} part(s) narrower than ${nfzDraw.minFt} ft (yellow)`);
+                    const L = getLeafletL(), map = getLeafletMap();
+                    if (L && map) nfzDrawNarrowOverlay({ name, ring: r }, res, L, map);
+                }
+            } catch (e) {}
+            showToast(`NFZ draft "${name}"${bits.length ? ' — ' + bits.join(' · ') : ''}`, (cl.noFfz || narrowWarn) ? 'rgba(255,179,71,0.6)' : undefined);
         } catch (e) { console.warn(`${TAG} nfz finalize:`, e); showToast('NFZ finalize failed — see console', 'rgba(255,96,96,0.55)'); }
     }
     function nfzClearLayers() {
         const map = getLeafletMap();
         nfzDraw.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
         nfzDraw.layers = [];
+    }
+    // --- Committed PLACEHOLDERS: Percepto only renders a new NFZ after a
+    // reload, so a successful commit draws each created NFZ as a solid red
+    // locked shape (like committed FFZs) until the page reloads. Survives
+    // modal close; cleared on site change (and naturally on reload).
+    function nfzClearCommittedLayers() {
+        const map = getLeafletMap();
+        nfzDraw.committedLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        nfzDraw.committedLayers = [];
+    }
+    function nfzRenderCommitted() {
+        const L = getLeafletL(), map = getLeafletMap();
+        if (!L || !map) return;
+        nfzClearCommittedLayers();
+        nfzDraw.committed.forEach(c => {
+            try {
+                const pl = L.polygon(c.points.map(p => [p.lat, p.lng]), { color: '#ff5555', weight: 3, opacity: 0.95, fillColor: '#ff5555', fillOpacity: 0.25, interactive: false });
+                pl.addTo(map); nfzDraw.committedLayers.push(pl);
+            } catch (e) {}
+        });
+    }
+    // --- ⚠ NARROW CHECK: find every part of an NFZ narrower than minFt — a
+    // notch/tab/neck sticking out that the bbox min-size check can't see.
+    // Morphological OPEN (erode by min/2 then dilate back, same complement
+    // trick as morphCloseRing); what the opened shape fails to cover is
+    // narrower than min. Returns {whole, parts} or null when the vendored
+    // polygon-clipping lib is unavailable.
+    function nfzNarrowParts(ringLL, minFt) {
+        const PC = (typeof polygonClipping !== 'undefined') ? polygonClipping : (typeof unsafeWindow !== 'undefined' && unsafeWindow.polygonClipping);
+        if (!PC || typeof PC.union !== 'function' || !Array.isArray(ringLL) || ringLL.length < 3) return null;
+        try {
+            // 0.98: a shape EXACTLY min-sized must survive erosion, not flag
+            const d = (minFt * GEN_FT_TO_M) / 2 * 0.98, proj = genProjector(ringLL[0].lat, ringLL[0].lng);
+            const ringXY = ringLL.map(p => { const m = proj.fwd(p); return [m.x, m.y]; });
+            const closed = ringXY.slice(); closed.push(ringXY[0]);
+            const P = [[closed]];
+            const dilateMP = (mp) => {
+                const parts = [mp];
+                for (const poly of mp) for (const ring of poly) { const n = ring.length; for (let i = 0; i < n - 1; i++) { const a = ring[i], b = ring[i + 1]; const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1, nx = -dy / L * d, ny = dx / L * d; const q = [[a[0] + nx, a[1] + ny], [b[0] + nx, b[1] + ny], [b[0] - nx, b[1] - ny], [a[0] - nx, a[1] - ny]]; q.push(q[0]); parts.push([q]); const s = [[a[0] + d, a[1] + d], [a[0] + d, a[1] - d], [a[0] - d, a[1] - d], [a[0] - d, a[1] + d]]; s.push(s[0]); parts.push([s]); } }
+                return PC.union(parts[0], ...parts.slice(1));
+            };
+            let mnx = 1e18, mny = 1e18, mxx = -1e18, mxy = -1e18;
+            for (const p of ringXY) { mnx = Math.min(mnx, p[0]); mny = Math.min(mny, p[1]); mxx = Math.max(mxx, p[0]); mxy = Math.max(mxy, p[1]); }
+            const mg = d * 4, Bc = [[mnx - mg, mny - mg], [mxx + mg, mny - mg], [mxx + mg, mxy + mg], [mnx - mg, mxy + mg]]; Bc.push(Bc[0]);
+            const eroded = PC.difference([Bc], dilateMP(PC.difference([Bc], P)));
+            if (!eroded || !eroded.length) return { whole: true, parts: [] };   // nothing survives erosion — the whole shape is under min
+            const opened = dilateMP(eroded);
+            const narrow = PC.difference(P, opened);
+            const areaXY = r => { let a = 0; for (let i = 0; i < r.length; i++) { const p = r[i], q = r[(i + 1) % r.length]; a += p[0] * q[1] - q[0] * p[1]; } return Math.abs(a) / 2; };
+            // ignore corner-rounding artifacts of the square structuring element
+            const floor = Math.max(1.5, 0.1 * Math.pow(minFt * GEN_FT_TO_M, 2));
+            const parts = [];
+            (narrow || []).forEach(poly => {
+                const outer = poly[0];
+                if (!outer || outer.length < 4 || areaXY(outer) < floor) return;
+                const r2 = outer.map(c => proj.inv({ x: c[0], y: c[1] }));
+                if (r2.length > 1) { const a = r2[0], b = r2[r2.length - 1]; if (a.lat === b.lat && a.lng === b.lng) r2.pop(); }
+                if (r2.length >= 3) parts.push(r2);
+            });
+            return { whole: false, parts };
+        } catch (e) { console.warn(`${TAG} nfz narrow check:`, e); return null; }
+    }
+    function nfzClearNarrowLayers() {
+        const map = getLeafletMap();
+        nfzDraw.narrowLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        nfzDraw.narrowLayers = [];
+        nfzDraw.narrowOn = false;
+        try { const b = document.getElementById('aim-nfz-narrow'); if (b) { b.style.background = 'rgba(255,212,0,0.12)'; b.textContent = '⚠ Narrow check'; } } catch (e) {}
+    }
+    function nfzDrawNarrowOverlay(t, res, L, map) {
+        if (res.whole) {
+            try { const pl = L.polygon(t.ring.map(p => [p.lat, p.lng]), { color: '#ffd400', weight: 3, opacity: 1, dashArray: '2,4', fillColor: '#ffd400', fillOpacity: 0.25, interactive: false }); pl.addTo(map); nfzDraw.narrowLayers.push(pl); } catch (e) {}
+            return;
+        }
+        res.parts.forEach(pr => {
+            try { const pl = L.polygon(pr.map(p => [p.lat, p.lng]), { color: '#ffd400', weight: 2, opacity: 1, fillColor: '#ffd400', fillOpacity: 0.45, interactive: false }); pl.addTo(map); nfzDraw.narrowLayers.push(pl); } catch (e) {}
+        });
+    }
+    // Scan drafts + this session's committed placeholders + the site's LIVE
+    // NFZs; paint every too-narrow part yellow.
+    function nfzNarrowScan() {
+        const L = getLeafletL(), map = getLeafletMap();
+        if (!L || !map) return;
+        nfzClearNarrowLayers();
+        nfzDraw.narrowOn = true;
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        const targets = [];
+        nfzDraw.drafts.forEach(d => targets.push({ name: d.name, ring: d.points }));
+        nfzDraw.committed.forEach(c => targets.push({ name: c.name, ring: c.points }));
+        ents.filter(e => e.type === 4).forEach(e => { const r = entityCoords(e); if (r && r.length >= 3) targets.push({ name: e.name, ring: r }); });
+        let flagged = 0, wholes = 0, noPc = false;
+        const names = [];
+        targets.forEach(t => {
+            const res = nfzNarrowParts(t.ring, nfzDraw.minFt);
+            if (!res) { noPc = true; return; }
+            if (res.whole || res.parts.length) { flagged++; if (res.whole) wholes++; names.push(t.name + (res.whole ? ' (WHOLE zone under min)' : '')); nfzDrawNarrowOverlay(t, res, L, map); }
+        });
+        const resEl = document.getElementById('aim-nfz-result');
+        const msg = noPc ? 'Narrow check unavailable — polygon-clipping lib not loaded'
+            : (flagged ? `⚠ ${flagged}/${targets.length} NFZ(s) have parts narrower than ${nfzDraw.minFt} ft (yellow)${wholes ? `, ${wholes} entirely under min` : ''}: ${names.join(' · ')}` : `✓ all ${targets.length} NFZ(s) (drafts + live) are ≥ ${nfzDraw.minFt} ft wide everywhere`);
+        try { if (resEl) resEl.textContent = msg; } catch (e) {}
+        console.log(`${TAG} nfz narrow scan: ${msg}`);
+        try { const b = document.getElementById('aim-nfz-narrow'); if (b) { b.style.background = 'rgba(255,212,0,0.32)'; b.textContent = `⚠ Narrow: ${noPc ? 'n/a' : flagged + ' flagged'} (click to clear)`; } } catch (e) {}
     }
     function nfzRender() {
         const L = getLeafletL(), map = getLeafletMap();
@@ -15438,7 +15594,7 @@
                 if (!a) { showToast('⚡ Stamp: ALT+click INSIDE an asset polygon', 'rgba(255,179,71,0.6)'); return; }
                 const ring = entityCoords(a);
                 if (!ring || ring.length < 3) { showToast('Asset has no usable polygon', 'rgba(255,96,96,0.55)'); return; }
-                nfzFinalize(cleanSelfIntersections(assetOffsetRing(ring, nfzDraw.bufferFt * GEN_FT_TO_M)), a.name, true);
+                nfzFinalize(cleanSelfIntersections(nfzOffsetRing(ring, nfzDraw.bufferFt * GEN_FT_TO_M)), a.name, true);
                 return;
             }
             const drawingNow = nfzDraw.drawing && nfzDraw.verts.length > 0;
@@ -15558,7 +15714,7 @@
                 const txt = await r.text(); let json = null; try { json = JSON.parse(txt); } catch (e) {}
                 const saved = json && json.map_objects;
                 if (r.status === 403) throw Object.assign(new Error('403 — write permission lost, ABORTING'), { fatal: true });
-                if (r.status === 200 && saved && saved.id != null) { ok++; created.push(saved.id); logL(`✓ ${ok + fail}/${writes.length} "${w.body.name}" → #${saved.id}`); }
+                if (r.status === 200 && saved && saved.id != null) { ok++; created.push({ id: saved.id, name: w.body.name, points: w.draft.points }); logL(`✓ ${ok + fail}/${writes.length} "${w.body.name}" → #${saved.id}`); }
                 else throw new Error(`server ${r.status} ${(txt || '').slice(0, 120)}`);
             } catch (e) {
                 fail++; failedDrafts.push(w.draft);
@@ -15569,9 +15725,14 @@
         try { await fetchMapObjects(sid, true); } catch (e) {}
         const after = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
         const byId = new Set(after.map(e => e.id));
-        const verified = created.filter(id => byId.has(id));
-        nfzDraw.lastCreated = verified.slice();
+        const verified = created.filter(c => byId.has(c.id));
+        nfzDraw.lastCreated = verified.map(c => c.id);
         nfzDraw.drafts = (fail === 0 && verified.length === created.length) ? [] : failedDrafts;  // failed drafts stay retryable
+        // PLACEHOLDERS: keep every verified create visible as a solid red
+        // locked shape until reload (Percepto won't render it until then).
+        nfzDraw.committedSite = String(sid);
+        verified.forEach(c => nfzDraw.committed.push({ id: c.id, name: c.name, points: c.points }));
+        nfzRenderCommitted();
         nfzSaveDrafts(); nfzRender(); nfzSyncUi();
         logL(`DONE: ${ok}/${writes.length} NFZ(s) created${fail ? `, ${fail} FAILED (kept as drafts)` : ''} · verify ${verified.length}/${created.length} present · refresh to see them natively`);
         showToast(fail ? `NFZ commit: ${ok} ok, ${fail} FAILED — see the NFZ panel` : `✓ ${ok} NFZ(s) created`, fail ? 'rgba(255,96,96,0.55)' : undefined);
@@ -15584,13 +15745,17 @@
         if (!csrf) { showToast('No CSRF token', 'rgba(255,96,96,0.55)'); return; }
         if (!confirm(`Delete the ${nfzDraw.lastCreated.length} NFZ(s) created by the last commit? (Delete Guard banks each when installed)`)) return;
         let ok = 0, fail = 0;
+        const deleted = new Set();
         for (const id of nfzDraw.lastCreated) {
             try {
                 const r = await fetch(`/map_objects/${id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf } });
-                if (r.ok) ok++; else { fail++; console.warn(`${TAG} nfz undo #${id}: server ${r.status}`); }
+                if (r.ok) { ok++; deleted.add(id); } else { fail++; console.warn(`${TAG} nfz undo #${id}: server ${r.status}`); }
             } catch (e) { fail++; console.warn(`${TAG} nfz undo #${id}:`, e.message); }
         }
-        if (fail === 0) nfzDraw.lastCreated = [];
+        nfzDraw.lastCreated = nfzDraw.lastCreated.filter(id => !deleted.has(id));
+        // drop the placeholders of everything actually deleted
+        nfzDraw.committed = nfzDraw.committed.filter(c => !deleted.has(c.id));
+        nfzRenderCommitted();
         showToast(fail ? `Undo: ${ok} deleted, ${fail} FAILED` : `↩ ${ok} NFZ(s) deleted`, fail ? 'rgba(255,96,96,0.55)' : undefined);
     }
 
@@ -17965,7 +18130,8 @@
         // corridor survives close/reload — restored when the mode is re-armed).
         try { if (advDraw.active) { advDraw.active = false; advUnwire(); advClearLayers(); } } catch (e) {}
         // NFZ draw: same deal — drafts stay in localStorage, layers come off the map.
-        try { if (nfzDraw.active) { nfzDraw.active = false; nfzDraw.drawing = false; nfzDraw.verts = []; nfzDraw.tentative = null; nfzUnwire(); } nfzClearLayers(); } catch (e) {}
+        // Committed PLACEHOLDERS deliberately stay on the map until reload/site change.
+        try { if (nfzDraw.active) { nfzDraw.active = false; nfzDraw.drawing = false; nfzDraw.verts = []; nfzDraw.tentative = null; nfzUnwire(); } nfzClearLayers(); nfzClearNarrowLayers(); } catch (e) {}
         genDraw.active = false; genDraw.drawing = false; genDraw.pts = []; genDraw.tentative = null; genDraw.tentVertex = false; genDraw.tentOrtho = false; genDraw.lastSnap = null;
         try { const mp = getLeafletMap(); if (mp) { if (genDraw.poly) { try { mp.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(mp); clearGhost(mp); clearSnapTargets(mp); if (genDraw.onMapMove) { try { mp.off('moveend', genDraw.onMapMove); } catch (e) {} genDraw.onMapMove = null; } mp.getContainer().style.cursor = ''; try { mp.doubleClickZoom.enable(); } catch (e) {} } } catch (e) {}
     }
@@ -18066,6 +18232,7 @@
                     <button id="aim-nfz-commit" title="Create the drafted NFZs on the site (type 4, CREATE-ONLY — existing NFZs are never touched). Honors the Dry run checkbox below. Backup file downloads first; verify-by-refetch after." style="background:rgba(95,255,95,0.18);color:#5fff5f;border:1px solid rgba(95,255,95,0.6);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">✓ Commit NFZs</button>
                     <button id="aim-nfz-clear" title="Discard all NFZ drafts (local only — nothing on the server is touched)." style="background:rgba(255,90,90,0.12);color:#ff8a80;border:1px solid rgba(255,90,90,0.45);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">🗑 Clear drafts</button>
                     <button id="aim-nfz-undo" title="Delete exactly the NFZs the most recent commit created (this session). Each delete rides Delete Guard's 24h undo ring when installed." style="background:rgba(255,179,71,0.12);color:#ffb347;border:1px solid rgba(255,179,71,0.45);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">↩ Undo last commit</button>
+                    <button id="aim-nfz-narrow" title="Paint every part of every NFZ (drafts + this session's commits + the site's live NFZs) that is NARROWER than the Min size — catches a thin notch/tab on an otherwise-large NFZ that the simple min-size check can't see. Click again to clear the yellow overlay." style="background:rgba(255,212,0,0.12);color:#ffd400;border:1px solid rgba(255,212,0,0.45);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">⚠ Narrow check</button>
                 </div>
                 <div id="aim-nfz-result" style="font-size:11px;color:#9ad;line-height:1.5">Drafts auto-grow by the Buffer, pad to the Min size, and pull inside the FFZ. Commit honors the Dry run checkbox in the Commit box.</div>
             </div>
@@ -18412,6 +18579,8 @@
         };
         const nfzUndoBtn = box.querySelector('#aim-nfz-undo');
         if (nfzUndoBtn) nfzUndoBtn.onclick = () => { nfzUndoLast(); };
+        const nfzNarrowBtn = box.querySelector('#aim-nfz-narrow');
+        if (nfzNarrowBtn) nfzNarrowBtn.onclick = () => { if (nfzDraw.narrowOn) nfzClearNarrowLayers(); else nfzNarrowScan(); };
         nfzRender(); nfzSyncUi();   // restore autosaved drafts onto the map right away
 
         // Advanced Draw live controls — load remembered params first so the fields show them.
