@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.60
+// @version      2.61
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.60';
+    const SCRIPT_VERSION = '2.61';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -4273,17 +4273,38 @@
         const dist = new Map(), prev = new Map();
         if (!graph.adj.has(startKey)) return { dist, prev };
         dist.set(startKey, 0);
+        // v2.61: binary min-heap — the old linear-scan pop was O(n) per pop,
+        // which on visibility-clique graphs (one edge per member pair inside
+        // every FFZ) turned big sites into multi-second runs per source.
+        // Distances are identical; only tie-broken path choices can differ.
+        const hk = [startKey], hd = [0];
+        const swap = (i, j) => { const tk = hk[i]; hk[i] = hk[j]; hk[j] = tk; const td = hd[i]; hd[i] = hd[j]; hd[j] = td; };
+        const push = (k, d) => {
+            hk.push(k); hd.push(d);
+            let i = hk.length - 1;
+            while (i > 0) { const p = (i - 1) >> 1; if (hd[p] <= hd[i]) break; swap(i, p); i = p; }
+        };
         const vis = new Set();
-        const pq = [{ k: startKey, d: 0 }];
-        while (pq.length) {
-            let mi = 0;
-            for (let i = 1; i < pq.length; i++) if (pq[i].d < pq[mi].d) mi = i;
-            const { k, d } = pq.splice(mi, 1)[0];
+        while (hk.length) {
+            const k = hk[0], d = hd[0];
+            const lk = hk.pop(), ld = hd.pop();
+            if (hk.length) {
+                hk[0] = lk; hd[0] = ld;
+                let i = 0;
+                for (;;) {
+                    const l = 2 * i + 1, r = l + 1;
+                    let m = i;
+                    if (l < hk.length && hd[l] < hd[m]) m = l;
+                    if (r < hk.length && hd[r] < hd[m]) m = r;
+                    if (m === i) break;
+                    swap(i, m); i = m;
+                }
+            }
             if (vis.has(k)) continue;
             vis.add(k);
             (graph.adj.get(k) || []).forEach(({ to, w }) => {
                 const nd = d + w;
-                if (nd < (dist.has(to) ? dist.get(to) : Infinity)) { dist.set(to, nd); prev.set(to, k); pq.push({ k: to, d: nd }); }
+                if (nd < (dist.has(to) ? dist.get(to) : Infinity)) { dist.set(to, nd); prev.set(to, k); push(to, nd); }
             });
         }
         return { dist, prev };
@@ -4642,13 +4663,41 @@
     // so a flagged route always means a real bug, never sampling noise. (The
     // audit caught exactly this on 1583: a 56 m visibility edge clipping a
     // concave notch between 10 m construction samples.)
+    // Convex rings admit a free visibility answer: any segment between two
+    // points strictly inside stays inside, no sampling needed (v2.61 —
+    // rngSegInside sampled every 4 m per pair over an O(members²) clique,
+    // which dominated the solve on sites with big many-vertex FFZs).
+    function rngRingConvex(ring) {
+        let sign = 0;
+        for (let i = 0; i < ring.length; i++) {
+            const a = ring[i], b = ring[(i + 1) % ring.length], c = ring[(i + 2) % ring.length];
+            const cross = (b.lng - a.lng) * (c.lat - b.lat) - (b.lat - a.lat) * (c.lng - b.lng);
+            if (Math.abs(cross) < 1e-14) continue;
+            const s = cross > 0 ? 1 : -1;
+            if (!sign) sign = s;
+            else if (s !== sign) return false;
+        }
+        return true;
+    }
     function rngSegInside(a, b, ring) {
         const total = mbApproxMeters(a.lat, a.lng, b.lat, b.lng);
         const n = Math.max(2, Math.ceil(total / 4));
-        for (let i = 1; i < n; i++) {
+        // v2.61: probe middle-out — SAME sample set as the old 1..n-1 walk
+        // (identical verdicts), but a failing pair on a concave ring (the
+        // common case inside the O(members²) clique) exits on probe #1
+        // instead of sampling half the segment first.
+        const check = (i) => {
             const t = i / n;
             const p = { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t };
-            if (!genPointInPoly(p, ring) && mbPointToPolygonMeters(p.lat, p.lng, ring) > 2) return false;
+            return genPointInPoly(p, ring) || mbPointToPolygonMeters(p.lat, p.lng, ring) <= 2;
+        };
+        const mid = n >> 1;
+        if (mid >= 1 && !check(mid)) return false;
+        for (let s = 1; s < n; s++) {
+            const hi = mid + s, lo = mid - s;
+            if (hi > n - 1 && lo < 1) break;
+            if (hi <= n - 1 && !check(hi)) return false;
+            if (lo >= 1 && !check(lo)) return false;
         }
         return true;
     }
@@ -4694,14 +4743,19 @@
         const boxes = ffzs.map(f => agRingBbox(f.ring, entryM));
         ffzs.forEach((f, fi) => {
             const bb = boxes[fi];
+            const convex = rngRingConvex(f.ring);
             const members = [];
             graph.verts.forEach((v, k) => {
                 if (v.lat < bb.s || v.lat > bb.n || v.lng < bb.w || v.lng > bb.e) return;
-                if (mbPointToPolygonMeters(v.lat, v.lng, f.ring) <= entryM) members.push({ k, v });
+                const dm = mbPointToPolygonMeters(v.lat, v.lng, f.ring);
+                if (dm <= entryM) members.push({ k, v, inside: dm === 0 });
             });
             for (let i = 0; i < members.length; i++) {
                 for (let j = i + 1; j < members.length; j++) {
-                    if (!rngSegInside(members[i].v, members[j].v, f.ring)) continue;
+                    // convex + both strictly inside ⇒ inside by geometry (same
+                    // verdict rngSegInside would sample its way to)
+                    if (!(convex && members[i].inside && members[j].inside)
+                        && !rngSegInside(members[i].v, members[j].v, f.ring)) continue;
                     link(members[i].k, members[j].k, mbApproxMeters(members[i].v.lat, members[i].v.lng, members[j].v.lat, members[j].v.lng));
                 }
             }
@@ -4802,13 +4856,61 @@
         return best;
     }
 
+    // ── v2.61 shared solver cache ──────────────────────────────────────────
+    // The solver used to be rebuilt + re-run from scratch by EVERY consumer:
+    // 🔋 overlay, 🖊 lasso, 🧩 audit (once + once per macro via pairwise),
+    // 📋 report, 👁 preview routing. On big sites (1386: 50 s per solve) that
+    // multiplied into minutes of frozen tab. Routing inputs are POSITIONS
+    // only, so one geometry signature keys graph + solve caches; any
+    // coordinate change or entity add/remove produces a new signature.
+    function rngEntSig(ent) {
+        let h = 0, n = 0;
+        const add = (x) => { h = (h * 31 + (Math.round(x * 1e6) | 0)) | 0; n++; };
+        (ent.fps || []).forEach(e => (e.arcs || []).forEach(a => {
+            if (a.point_a && typeof a.point_a.lat === 'number') { add(a.point_a.lat); add(a.point_a.lng); }
+            if (a.point_b && typeof a.point_b.lat === 'number') { add(a.point_b.lat); add(a.point_b.lng); }
+        }));
+        (ent.ffzs || []).forEach(f => (f.ring || []).forEach(p => { add(p.lat); add(p.lng); }));
+        (ent.assets || []).forEach(a => (a.ring || []).forEach(p => { add(p.lat); add(p.lng); }));
+        (ent.baseEnts || []).forEach(b => { const c = b.coords && b.coords[0]; if (c) { add(c.lat); add(c.lng); } });
+        if (ent.base) { add(ent.base.lat); add(ent.base.lng); }
+        return `${getCurrentSiteID()}|${n}|${h}`;
+    }
+    const rngGraphCache = { sig: null, sparse: null, dense: null };
+    function rngBuildGraphCached(ent, dense, sig) {
+        if (rngGraphCache.sig !== sig) { rngGraphCache.sig = sig; rngGraphCache.sparse = null; rngGraphCache.dense = null; }
+        const slot = dense ? 'dense' : 'sparse';
+        if (!rngGraphCache[slot]) rngGraphCache[slot] = rngBuildGraph(ent, dense);
+        return rngGraphCache[slot];
+    }
+    // Consumers that splice their own vertices in (lasso pairwise, 👁 attach)
+    // must clone: vert objects are shared read-only, adjacency arrays are not.
+    function rngCloneBuilt(built) {
+        const adj = new Map();
+        built.graph.adj.forEach((list, k) => adj.set(k, list.slice()));
+        return { graph: { verts: new Map(built.graph.verts), adj }, ffzs: built.ffzs, baseKeys: built.baseKeys };
+    }
+    const rngSolveCache = { sig: null, sol: null };
+    function rngSolveCached(ent) {
+        const sig = rngEntSig(ent);
+        if (rngSolveCache.sig === sig && rngSolveCache.sol) {
+            console.log(`${TAG} [range] solve cache HIT — geometry unchanged, reusing verified routes`);
+            return rngSolveCache.sol;
+        }
+        const sol = rngSolve(ent);
+        rngSolveCache.sig = sig;
+        rngSolveCache.sol = sol;
+        return sol;
+    }
+
     // Solve the whole site: sparse + dense runs, per-pad classification with
     // the three verification passes. Distances in FEET.
     function rngSolve(ent) {
         const t0 = Date.now();
+        const sig = rngEntSig(ent);
         const reachM = MB_REACH_FFZ_FT / 3.28084;
         const runFor = (dense) => {
-            const g = rngBuildGraph(ent, dense);
+            const g = rngBuildGraphCached(ent, dense, sig);
             const runs = g.baseKeys.map(bk => agDijkstra(g.graph, bk));
             return {
                 g, runs,
@@ -4820,7 +4922,9 @@
             };
         };
         const sparse = runFor(false);
+        const tSparse = Date.now();
         const dense = runFor(true);
+        const tDense = Date.now();
         const ffzs = sparse.g.ffzs;
         const boxes = ffzs.map(f => agRingBbox(f.ring, 5));
         const arcs = [];
@@ -4879,7 +4983,7 @@
             results.push(Object.assign({ asset: a }, r));
         });
         const flagged = results.filter(x => x.status === 'ok' && (!x.verified || x.disagree));
-        console.log(`${TAG} [range] ${results.length} pads solved in ${Date.now() - t0} ms · ${flagged.length} flagged (illegal-sample or sparse/dense disagreement)`);
+        console.log(`${TAG} [range] ${results.length} pads solved in ${Date.now() - t0} ms (sparse ${tSparse - t0} · dense ${tDense - tSparse} · classify ${Date.now() - tDense}) · ${flagged.length} flagged (illegal-sample or sparse/dense disagreement)`);
         flagged.forEach(x => console.log(`${TAG} [range] ⚠ ${x.asset.name}: verified=${x.verified} disagree=${x.disagree} badFrac=${(x.badFrac || 0).toFixed(3)}`));
         return { results, ffzs, byFfz };
     }
@@ -5040,7 +5144,7 @@
         showToast('🔋 Range check — building legal-route graph (double + triple checking)…', '#7adfe6', 3000);
         try {
             const ent = await genFetchEntities(sid);
-            const sol = rngSolve(ent);
+            const sol = rngSolveCached(ent);
             rngClear();
             rngDraw(sol);
             rng.sol = sol;   // stash so cutoff-knob changes can redraw without a re-solve
@@ -5096,7 +5200,7 @@
         let ent, missions, sol;
         try {
             [ent, missions] = await Promise.all([genFetchEntities(sid), new Promise((res, rej) => fetchMissions(sid, res, rej))]);
-            sol = rngSolve(ent);   // the trusted router — same engine as 🔋
+            sol = rngSolveCached(ent);   // the trusted router — same engine as 🔋
         } catch (e) {
             console.warn(`${TAG} [lasso] load failed`, e);
             showToast('Lasso: failed to load site data (see console).', '#ff5252', 4000);
@@ -5162,7 +5266,10 @@
     // straight-line ×1.25 and are counted + logged.
     function lassoBuildPairwise(rows, ent, byAsset) {
         try {
-            const built = rngBuildGraph(ent, false);
+            // v2.61: clone the cached sparse build instead of rebuilding —
+            // this runs once PER MACRO in the 🧩 audit and splices pad
+            // vertices into shared adjacency lists, hence the clone.
+            const built = rngCloneBuilt(rngBuildGraphCached(ent, false, rngEntSig(ent)));
             const link = (ka, kb, w) => { built.graph.adj.get(ka).push({ to: kb, w }); built.graph.adj.get(kb).push({ to: ka, w }); };
             // v2.33: anchor each pad to its OWN FFZ's ring vertices (the fi the
             // verified solver assigned it) — real missions put navs inside the
@@ -5993,7 +6100,7 @@
     function mcvAudit(det, ent) {
         const t0 = Date.now();
         let sol;
-        try { sol = rngSolve(ent); } catch (e) { console.warn(`${TAG} [mcv] audit range solve failed`, e); return new Map(); }
+        try { sol = rngSolveCached(ent); } catch (e) { console.warn(`${TAG} [mcv] audit range solve failed`, e); return new Map(); }
         const byAsset = new Map(sol.results.map(r => [r.asset.id, r]));
         const cfg = agCfg();
         const audits = new Map();
@@ -6258,7 +6365,7 @@
         const { ent, missions, det } = data;
         showToast('📋 Building coverage report…', '#7adfe6', 2000);
         let bat = new Map();
-        try { const sol = rngSolve(ent); bat = new Map(sol.results.map(r => [r.asset.id, r])); } catch (e) { console.warn(`${TAG} [mcv] report range solve failed`, e); }
+        try { const sol = rngSolveCached(ent); bat = new Map(sol.results.map(r => [r.asset.id, r])); } catch (e) { console.warn(`${TAG} [mcv] report range solve failed`, e); }
         const secName = { N: 'North', E: 'East', S: 'South', W: 'West', NE: 'NE', SE: 'SE', SW: 'SW', NW: 'NW', C: 'Central' };
         const macrosOf = new Map();
         det.macros.forEach(mc => mc.pads.forEach((a, i) => {
@@ -13428,7 +13535,9 @@ ${snapPlacemarks}
         }
         mpvRoute.building = true;
         Promise.resolve(genFetchEntities(sid)).then(ent => {
-            const built = rngBuildGraph(ent);
+            // v2.61: clone of the cached sparse build (mpvAttachPoint splices
+            // temp vertices into adjacency lists, so no sharing).
+            const built = rngCloneBuilt(rngBuildGraphCached(ent, false, rngEntSig(ent)));
             built.boxes = built.ffzs.map(f => agRingBbox(f.ring, MB_ENTRY_FFZ_FT / 3.28084));
             mpvRoute.sid = sid;
             mpvRoute.built = built;
