@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.135
+// @version      34.136
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -67,7 +67,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.135';
+    const SCRIPT_VERSION = '34.136';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -294,6 +294,33 @@
                 { id: 'ffz.violation-distance', label: 'Violation distance', type: 'number',
                   min: 1, max: 100, step: 1, default: 15, unit: 'ft' },
                 { id: 'ffz.hide-native', label: 'Hide native (green / dashed FFZ)', type: 'boolean', default: true },
+            ],
+        },
+        {
+            type: 'category',
+            id: 'nfz-cat',
+            label: 'No Fly Zone',
+            meta: '(red)',
+            master: { id: 'nfz.show', default: true },
+            children: [
+                { id: 'nfz.buffer', label: 'Show buffer', type: 'boolean', default: true },
+                // 15 ft = the SOP NFZ separation distance (NFZ↔NFZ / NFZ↔FFZ),
+                // so the ring visually answers "is anything too close".
+                { id: 'nfz.distance', label: 'Buffer distance', type: 'number',
+                  min: 5, max: 500, step: 1, default: 15, unit: 'ft' },
+                { id: 'nfz.color', label: 'Buffer color', type: 'color', default: '#ff5555' },
+                { id: 'nfz.opacity', label: 'Buffer opacity', type: 'number',
+                  min: 0.05, max: 1, step: 0.05, default: 0.4, unit: 'fill' },
+                { id: 'nfz.line-color', label: 'Line color (override)', type: 'color', default: '#ff5555' },
+                { id: 'nfz.line-opacity', label: 'Line opacity', type: 'number',
+                  min: 0.05, max: 1, step: 0.05, default: 1, unit: 'fill' },
+                { id: 'nfz.force-thickness', label: 'Force line thickness', type: 'boolean', default: true },
+                // Fill override is opt-in — off means the host app's native
+                // NFZ fill is left completely untouched.
+                { id: 'nfz.fill', label: 'Override fill', type: 'boolean', default: false },
+                { id: 'nfz.fill-color', label: 'Fill color', type: 'color', default: '#ff5555' },
+                { id: 'nfz.fill-opacity', label: 'Fill opacity', type: 'number',
+                  min: 0, max: 1, step: 0.05, default: 0.15, unit: 'fill' },
             ],
         },
         {
@@ -758,7 +785,18 @@
     // match by class instead. DV-only class → zero matches on Site Setup.
     const DV_ASSET_SELECTOR = 'path.app-poi-outside-of-data-map.leaflet-interactive';
 
-    const ALL_TARGETS_SELECTOR = `${SOLID_GREEN_SELECTOR}, ${WHITE_ASSET_SELECTOR}, ${BLUE_FLIGHT_PATH_SELECTOR}, ${EDIT_MODE_SELECTOR}, ${DV_ASSET_SELECTOR}`;
+    // v34.136 — NFZ (No Fly Zone). Stroke signature UNVERIFIED on a live map:
+    // FFZ uses var(--color-green), so var(--color-red) is the likely twin, plus
+    // the common literal reds as fallbacks. If none match while nfz.show is on,
+    // runUpdate logs every distinct path signature ONCE so the real value can
+    // be read straight off the console and added here.
+    const NFZ_SOLID_SELECTOR = [
+        'path.leaflet-interactive[stroke="var(--color-red)"][stroke-opacity="1"]',
+        'path.leaflet-interactive[stroke="#ff0000"][stroke-opacity="1"]',
+        'path.leaflet-interactive[stroke="red"][stroke-opacity="1"]',
+    ].join(', ');
+
+    const ALL_TARGETS_SELECTOR = `${SOLID_GREEN_SELECTOR}, ${WHITE_ASSET_SELECTOR}, ${BLUE_FLIGHT_PATH_SELECTOR}, ${NFZ_SOLID_SELECTOR}, ${EDIT_MODE_SELECTOR}, ${DV_ASSET_SELECTOR}`;
     const CUSTOM_BUFFER_ATTR = 'data-custom-buffer-v24';
 
     // --- KML / Shielding ---
@@ -800,6 +838,8 @@
     // dense sites where idle heartbeat would otherwise rebuild hundreds of
     // SVG elements 20 times/min for no visual change.
     let lastUpdateHash = null;
+    // One-shot NFZ stroke-signature discovery log (see NFZ_SOLID_SELECTOR).
+    let nfzSigLogged = false;
 
     // KML / shielding state — keyed by `${siteID}|${type}` where type is
     // 'distro', 'trans', or 'route'. Each entry holds an array of parsed features.
@@ -1007,8 +1047,25 @@
 
         // 4. REBUILD & ENFORCE
         const lines = document.querySelectorAll(ALL_TARGETS_SELECTOR);
+
+        // NFZ signature discovery: candidates in NFZ_SOLID_SELECTOR are
+        // unverified — if the category is on, paths exist, but nothing red
+        // matched, dump every distinct signature once so the real one can be
+        // read off the console and banked.
+        if (!nfzSigLogged && toggleState['nfz.show'] && lines.length
+            && ![...lines].some(l => l.matches(NFZ_SOLID_SELECTOR))) {
+            nfzSigLogged = true;
+            const sigs = new Set();
+            document.querySelectorAll('path.leaflet-interactive').forEach(p => {
+                if (p.hasAttribute(CUSTOM_BUFFER_ATTR)) return;
+                sigs.add(`stroke=${p.getAttribute('stroke')} opacity=${p.getAttribute('stroke-opacity')} dash=${p.getAttribute('stroke-dasharray')} fill=${p.getAttribute('fill')}`);
+            });
+            console.log('[AIM STYLER] no NFZ path matched the candidate selectors. If this site HAS NFZs, report these signatures:', [...sigs]);
+        }
+
         lines.forEach(line => {
             const isSolidGreen = line.matches(SOLID_GREEN_SELECTOR);
+            const isNfz = line.matches(NFZ_SOLID_SELECTOR);
             // v34.123: DV entity boxes count as asset-class lines — all the
             // asset.* toggles (color, buffer, thickness, fill) capture them.
             const isWhiteAsset = line.matches(WHITE_ASSET_SELECTOR) || line.matches(DV_ASSET_SELECTOR);
@@ -1028,6 +1085,7 @@
             //   asset class → asset.show && asset.edit-mode
             //   everything else (FFZ, possibly FP edit lines) → ffz.show && ffz.edit-mode
             const want40 = (isSolidGreen && toggleState['ffz.show'] && toggleState['ffz.buffer']) ||
+                           (isNfz && toggleState['nfz.show'] && toggleState['nfz.buffer']) ||
                            (isWhiteAsset && toggleState['asset.show'] && toggleState['asset.buffer']) ||
                            (isBlueFlight && toggleState['fp.show'] && toggleState['fp.buffer']) ||
                            (isEditAsset && toggleState['asset.show'] && toggleState['asset.edit-mode']) ||
@@ -1039,6 +1097,7 @@
                                (isBlueFlight && toggleState['fp.show'] && toggleState['fp.shielding']) ||
                                (isEditNonAsset && toggleState['ffz.show'] && toggleState['ffz.shielding']);
             const wantForce = (isSolidGreen && toggleState['ffz.show'] && toggleState['ffz.force-thickness']) ||
+                              (isNfz && toggleState['nfz.show'] && toggleState['nfz.force-thickness']) ||
                               (isWhiteAsset && toggleState['asset.show'] && toggleState['asset.force-thickness']) ||
                               (isBlueFlight && toggleState['fp.show'] && toggleState['fp.force-thickness']);
             // Asset fill applies regardless of buffer toggle — user might want
@@ -1113,6 +1172,25 @@
                     line.style.stroke = '';
                     line.style.strokeOpacity = '';
                 }
+            } else if (isNfz) {
+                if (toggleState['nfz.show']) {
+                    line.style.stroke = toggleState['nfz.line-color'] || '';
+                    const op = Number(toggleState['nfz.line-opacity']);
+                    line.style.strokeOpacity = isNaN(op) ? '' : String(op);
+                    if (toggleState['nfz.fill']) {
+                        line.style.fill = toggleState['nfz.fill-color'] || '';
+                        const fo = Number(toggleState['nfz.fill-opacity']);
+                        line.style.fillOpacity = isNaN(fo) ? '' : String(fo);
+                    } else {
+                        line.style.fill = '';
+                        line.style.fillOpacity = '';
+                    }
+                } else {
+                    line.style.stroke = '';
+                    line.style.strokeOpacity = '';
+                    line.style.fill = '';
+                    line.style.fillOpacity = '';
+                }
             }
 
             if (!want40 && !want65 && !wantShield && !wantForce && !wantAssetFillOverride) return;
@@ -1134,7 +1212,7 @@
                 if (currentAttrWidth !== String(lineThickness)) {
                     line.setAttribute('stroke-width', lineThickness);
                 }
-            } else if ((isBlueFlight || isSolidGreen || isWhiteAsset)
+            } else if ((isBlueFlight || isSolidGreen || isWhiteAsset || isNfz)
                        && !isNaN(originalWidth) && currentAttrWidth !== String(originalWidth)) {
                 // Revert anything we previously forced (global thickness OR a
                 // now-disabled per-state width) back to the native width.
@@ -1209,6 +1287,10 @@
                 bufferStroke = assetStyle ? (assetStyle.color || '#ffffff') : (toggleState['asset.color'] || '#ffffff');
                 bufferOpacity = readOpacity('asset.opacity', 0.4);
                 finalBufferWidth = ftToUnits(Number(toggleState['asset.distance']) || 15);
+            } else if (isNfz) {
+                bufferStroke = toggleState['nfz.color'] || '#ff5555';
+                bufferOpacity = readOpacity('nfz.opacity', 0.4);
+                finalBufferWidth = ftToUnits(Number(toggleState['nfz.distance']) || 15);
             } else {
                 // solid green (FFZ)
                 bufferStroke = toggleState['ffz.color'] || '#5fff5f';

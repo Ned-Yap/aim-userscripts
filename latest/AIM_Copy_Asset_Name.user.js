@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.244
+// @version      4.245
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.244';
+    const SCRIPT_VERSION = '4.245';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -138,7 +138,7 @@
         ffzAssetFt: 15, fpAssetFt: 15, ffzFfzFt: 0,
         fpOverlapFt: 6.56,                      // min shared altitude band (= 2 m, the SOP/server minimum), connected FP / FP-in-FFZ
         aglFloorMinFt: 90, aglFloorMaxFt: 210,  // floor (min alt) must sit in this AGL band
-        nfzMinFt: 30, nfzSepFt: 15,             // NFZ min side; NFZ→NFZ/FFZ separation
+        nfzMinFt: 25, nfzSepFt: 15,             // NFZ min side (25 per user 2026-08-20, was 30 — matches the NFZ drawer's min); NFZ→NFZ/FFZ separation
         bandSoftFt: 40, bandHardFt: 200,        // alt-band height (max−min): soft warn / hard flag
         gmTowerFt: 60,                          // "Tower" general-markers must stay this far from FFZ/FP
         fpFfzAngleDeg: 15,                      // FP→FFZ boundary crossing angle hard min (ideal 45°)
@@ -15208,6 +15208,393 @@
     }
 
     // ============================================================
+    // ⬠ NFZ DRAW — polygon trace + one-click asset stamp NFZ builder (#243).
+    // Trace: ALT+click starts, click adds vertices (Ctrl = snap exactly onto
+    // the nearest asset's boundary — trace the shape, the buffer does the
+    // rest), dbl-click/Enter = finish. The finished ring auto-GROWS outward by
+    // `bufferFt`, then pads with extra uniform offset until the footprint is
+    // ≥ `minFt` on BOTH axes (RULE: an NFZ can never be smaller than
+    // minFt×minFt), then overhanging vertices are pulled ≥15 ft INSIDE the
+    // containing FFZ (server rejects NFZ vertices outside every Free Zone —
+    // proven live in Plan Import). Stamp: ALT+click inside an asset = instant
+    // NFZ from that asset's ring + buffer. Drafts render red, autosave
+    // per-site, commit CREATE-ONLY as type 4 via POST /map_objects/ with the
+    // terrain-builder rails (template clone, unique names, backup file,
+    // verify-by-refetch, undo-this-run). Deletes ride Delete Guard when installed.
+    // ============================================================
+    const NFZ_DRAFTS_LS = 'aim_nfz_drafts:';           // + siteID
+    const NFZ_PARAMS_KEY = 'aim_nfz_params';
+    const NFZ_DEFAULTS = { bufferFt: 25, minFt: 25 };
+    const NFZ_FFZ_INSET_FT = 15;                       // pull-inside margin = SOP NFZ↔FFZ separation
+    let nfzDraw = {
+        active: false, mode: 'trace',                  // 'trace' | 'stamp'
+        drawing: false, verts: [], tentative: null,
+        bufferFt: NFZ_DEFAULTS.bufferFt, minFt: NFZ_DEFAULTS.minFt,
+        drafts: [],                                    // [{name, src, points:[{lat,lng}]}]
+        lastCreated: [],                               // ids from the most recent commit (undo)
+        layers: [], _container: null, _onDown: null, _onMove: null, _onDbl: null, _onKey: null,
+    };
+    function nfzSaveParams() { try { GM_setValue(NFZ_PARAMS_KEY, JSON.stringify({ bufferFt: nfzDraw.bufferFt, minFt: nfzDraw.minFt })); } catch (e) {} }
+    function nfzLoadParams() {
+        try {
+            const raw = GM_getValue(NFZ_PARAMS_KEY, ''); if (!raw) return;
+            const o = JSON.parse(raw); if (!o) return;
+            if (typeof o.bufferFt === 'number' && o.bufferFt >= 0) nfzDraw.bufferFt = o.bufferFt;
+            if (typeof o.minFt === 'number' && o.minFt >= 0) nfzDraw.minFt = o.minFt;
+        } catch (e) {}
+    }
+    function nfzSaveDrafts() {
+        const sid = genState.siteID; if (!sid) return;
+        try {
+            const k = NFZ_DRAFTS_LS + sid;
+            if (nfzDraw.drafts.length) localStorage.setItem(k, JSON.stringify(nfzDraw.drafts.map(d => ({ name: d.name, src: d.src, points: d.points }))));
+            else localStorage.removeItem(k);
+        } catch (e) {}
+    }
+    function nfzLoadDrafts(siteID) {
+        // ALWAYS resets — a site with no saved drafts must not inherit another site's.
+        nfzDraw.drafts = [];
+        try {
+            const arr = JSON.parse(localStorage.getItem(NFZ_DRAFTS_LS + siteID) || 'null');
+            if (Array.isArray(arr)) nfzDraw.drafts = arr.filter(d => d && Array.isArray(d.points) && d.points.length >= 3);
+        } catch (e) {}
+    }
+    // Outward-offset a {lat,lng} ring by ft, mitered; clean any loops the
+    // offset created on concave rings.
+    function nfzGrowRing(ring, ft) {
+        if (!ft) return ring.slice();
+        return cleanSelfIntersections(assetOffsetRing(ring, ft * GEN_FT_TO_M));
+    }
+    function nfzRingSizeM(ring) {
+        const cen = ringCentroid(ring), proj = genProjector(cen.lat, cen.lng);
+        const m = ringMeters(ring, proj);
+        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+        m.forEach(p => { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); });
+        return { w: x1 - x0, h: y1 - y0 };
+    }
+    // Pad by extra UNIFORM outward offset until the bbox is ≥ minFt on both
+    // axes — keeps the drawn proportions (no axis-stretch slivers).
+    function nfzEnforceMin(ring, minFt) {
+        const sz = nfzRingSizeM(ring);
+        const minM = minFt * GEN_FT_TO_M;
+        const extraM = Math.max(0, (minM - sz.w) / 2, (minM - sz.h) / 2);
+        if (extraM <= 0.01) return { ring, paddedFt: 0 };
+        return { ring: cleanSelfIntersections(assetOffsetRing(ring, extraM)), paddedFt: Math.round(extraM / GEN_FT_TO_M * 10) / 10 };
+    }
+    // Server rule: every NFZ vertex must lie INSIDE a Free Zone. Pick the FFZ
+    // containing most of the ring; pull outside / too-close vertices to the
+    // nearest boundary point nudged NFZ_FFZ_INSET_FT inside (the proven Plan
+    // Import approach — convexity-immune, exact for small buffer overhangs).
+    function nfzClampToFfz(ring) {
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        const ffzRings = ents.filter(e => e.type === 16).map(e => entityCoords(e)).filter(r => r && r.length >= 3);
+        if (!ffzRings.length) return { ring, moved: 0, noFfz: true };
+        let best = null, bestIn = -1;
+        for (const fr of ffzRings) {
+            const nin = ring.filter(p => pointInPolygon(p.lat, p.lng, fr)).length;
+            if (nin > bestIn) { bestIn = nin; best = fr; }
+        }
+        const cen = ringCentroid(best), proj = genProjector(cen.lat, cen.lng);
+        const fm = ringMeters(best, proj);
+        const insetM = NFZ_FFZ_INSET_FT * GEN_FT_TO_M;
+        const distToEdge = (p) => {
+            let bd = Infinity;
+            for (let i = 0; i < fm.length; i++) {
+                const A = fm[i], B = fm[(i + 1) % fm.length];
+                const ax = B.x - A.x, ay = B.y - A.y; const L2 = ax * ax + ay * ay;
+                const t = L2 ? Math.max(0, Math.min(1, ((p.x - A.x) * ax + (p.y - A.y) * ay) / L2)) : 0;
+                bd = Math.min(bd, Math.hypot(p.x - A.x - t * ax, p.y - A.y - t * ay));
+            }
+            return bd;
+        };
+        const nearestInside = (p) => {
+            let bq = null, bd = Infinity, bn = null;
+            for (let i = 0; i < fm.length; i++) {
+                const A = fm[i], B = fm[(i + 1) % fm.length];
+                const ax = B.x - A.x, ay = B.y - A.y; const L2 = ax * ax + ay * ay;
+                const t = L2 ? Math.max(0, Math.min(1, ((p.x - A.x) * ax + (p.y - A.y) * ay) / L2)) : 0;
+                const q = { x: A.x + t * ax, y: A.y + t * ay };
+                const d = Math.hypot(p.x - q.x, p.y - q.y);
+                if (d < bd) { bd = d; bq = q; const L = Math.sqrt(L2) || 1; bn = { nx: -ay / L, ny: ax / L }; }
+            }
+            const c1 = proj.inv({ x: bq.x + bn.nx * insetM, y: bq.y + bn.ny * insetM });
+            const c2 = proj.inv({ x: bq.x - bn.nx * insetM, y: bq.y - bn.ny * insetM });
+            if (pointInPolygon(c1.lat, c1.lng, best)) return c1;
+            if (pointInPolygon(c2.lat, c2.lng, best)) return c2;
+            return proj.inv(bq);   // degenerate corner — leave on-boundary, user warned via moved count
+        };
+        let moved = 0;
+        const out = ring.map(p => {
+            const pm = proj.fwd(p);
+            if (pointInPolygon(p.lat, p.lng, best) && distToEdge(pm) >= insetM * 0.98) return p;
+            moved++;
+            return nearestInside(pm);
+        });
+        return { ring: out, moved, noFfz: false };
+    }
+    // Ctrl-snap for the trace: the asset's EXACT ring (corner <40 ft wins, else edge <120 ft).
+    function nfzSnapToAsset(cursor) {
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        let bestCorner = null, bestCornerD = Infinity, bestEdge = null, bestEdgeD = Infinity;
+        for (const a of ents) {
+            if (a.type !== 3) continue;
+            const ring = entityCoords(a);
+            if (!ring || ring.length < 3) continue;
+            for (const v of ring) { const d = approxMeters(cursor.lat, cursor.lng, v.lat, v.lng); if (d < bestCornerD) { bestCornerD = d; bestCorner = v; } }
+            const np = nearestPointOnRing(cursor, ring);
+            if (np && np.d < bestEdgeD) { bestEdgeD = np.d; bestEdge = np.pt; }
+        }
+        if (bestCorner && bestCornerD < 40 * GEN_FT_TO_M) return { lat: bestCorner.lat, lng: bestCorner.lng };
+        if (bestEdge && bestEdgeD < 120 * GEN_FT_TO_M) return { lat: bestEdge.lat, lng: bestEdge.lng };
+        return cursor;
+    }
+    function nfzAssetAt(ll) {
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        for (const a of ents) {
+            if (a.type !== 3) continue;
+            const ring = entityCoords(a);
+            if (ring && ring.length >= 3 && pointInPolygon(ll.lat, ll.lng, ring)) return a;
+        }
+        return null;
+    }
+    // grow → min-size pad → FFZ clamp → bowtie gate → draft. preGrown = the
+    // ring already includes the buffer (stamp path).
+    function nfzFinalize(ring, srcName, preGrown) {
+        try {
+            let r = preGrown ? cleanSelfIntersections(ring.slice()) : nfzGrowRing(ring, nfzDraw.bufferFt);
+            if (!r || r.length < 3) { showToast('NFZ: geometry collapsed — redraw', 'rgba(255,96,96,0.55)'); return; }
+            const mm = nfzEnforceMin(r, nfzDraw.minFt);
+            r = mm.ring;
+            const cl = nfzClampToFfz(r);
+            r = cl.ring;
+            if (!r || r.length < 3 || ringSelfIntersects(r)) { showToast('NFZ BLOCKED — self-intersecting after grow/clamp; redraw simpler', 'rgba(255,96,96,0.55)'); return; }
+            const name = genCleanName(`NFZ ${srcName || 'draw'} ${nfzDraw.drafts.length + 1}`) || `NFZ ${nfzDraw.drafts.length + 1}`;
+            nfzDraw.drafts.push({ name, src: srcName || null, points: r });
+            nfzSaveDrafts(); nfzRender(); nfzSyncUi();
+            const bits = [];
+            if (!preGrown) bits.push(`grown ${nfzDraw.bufferFt} ft`);
+            if (mm.paddedFt) bits.push(`padded +${mm.paddedFt} ft to meet the ${nfzDraw.minFt}×${nfzDraw.minFt} ft minimum`);
+            if (cl.moved) bits.push(`${cl.moved} vert(s) pulled inside the FFZ`);
+            if (cl.noFfz) bits.push('⚠ NO FFZ on this site — the server rejects NFZs outside a Free Zone');
+            showToast(`NFZ draft "${name}"${bits.length ? ' — ' + bits.join(' · ') : ''}`, cl.noFfz ? 'rgba(255,179,71,0.6)' : undefined);
+        } catch (e) { console.warn(`${TAG} nfz finalize:`, e); showToast('NFZ finalize failed — see console', 'rgba(255,96,96,0.55)'); }
+    }
+    function nfzClearLayers() {
+        const map = getLeafletMap();
+        nfzDraw.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        nfzDraw.layers = [];
+    }
+    function nfzRender() {
+        const L = getLeafletL(), map = getLeafletMap();
+        if (!L || !map) return;
+        nfzClearLayers();
+        nfzDraw.drafts.forEach(d => {
+            try {
+                const pl = L.polygon(d.points.map(p => [p.lat, p.lng]), { color: '#ff5555', weight: 2.5, opacity: 0.95, dashArray: '6,4', fillColor: '#ff5555', fillOpacity: 0.15, interactive: false });
+                pl.addTo(map); nfzDraw.layers.push(pl);
+            } catch (e) {}
+        });
+        if (!nfzDraw.active || nfzDraw.mode !== 'trace' || !nfzDraw.verts.length) return;
+        const pts = nfzDraw.verts.slice();
+        if (nfzDraw.tentative) pts.push(nfzDraw.tentative);
+        try { const ln = L.polyline(pts.map(p => [p.lat, p.lng]), { color: '#ff5555', weight: 2, dashArray: '4,4', interactive: false }); ln.addTo(map); nfzDraw.layers.push(ln); } catch (e) {}
+        nfzDraw.verts.forEach(v => { try { const c = L.circleMarker([v.lat, v.lng], { radius: 4, color: '#fff', fillColor: '#ff5555', fillOpacity: 1, weight: 1, interactive: false }); c.addTo(map); nfzDraw.layers.push(c); } catch (e) {} });
+        // live preview of the GROWN outline so what commits is what you see
+        if (pts.length >= 3) {
+            try {
+                const grown = nfzGrowRing(pts, nfzDraw.bufferFt);
+                if (grown && grown.length >= 3) {
+                    const gp = L.polygon(grown.map(p => [p.lat, p.lng]), { color: '#ff5555', weight: 1.5, opacity: 0.6, fillColor: '#ff5555', fillOpacity: 0.08, interactive: false });
+                    gp.addTo(map); nfzDraw.layers.push(gp);
+                }
+            } catch (e) {}
+        }
+    }
+    function nfzFinishTrace() {
+        if (nfzDraw.verts.length < 3) { showToast('NFZ trace needs at least 3 points', 'rgba(255,179,71,0.6)'); return; }
+        const verts = nfzDraw.verts.slice();
+        nfzDraw.verts = []; nfzDraw.drawing = false; nfzDraw.tentative = null;
+        let src = null;   // nearest asset name, cosmetic only
+        try { const cen = ringCentroid(verts); const a = nfzAssetAt(cen); if (a) src = a.name; } catch (e) {}
+        nfzFinalize(verts, src, false);
+    }
+    function nfzWire() {
+        const map = getLeafletMap(); if (!map) return;
+        nfzUnwire();
+        nfzDraw._container = map.getContainer();
+        nfzDraw._onMove = (ev) => {
+            if (!nfzDraw.active || nfzDraw.mode !== 'trace' || !nfzDraw.drawing) return;
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            nfzDraw.tentative = ev.ctrlKey ? nfzSnapToAsset(ll) : ll;
+            nfzRender();
+        };
+        nfzDraw._onDown = (ev) => {
+            if (!nfzDraw.active || ev.button !== 0) return;
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            if (nfzDraw.mode === 'stamp') {
+                if (!ev.altKey) return;                    // plain click stays free (pan / edit)
+                ev.preventDefault(); ev.stopPropagation();
+                const a = nfzAssetAt(ll);
+                if (!a) { showToast('⚡ Stamp: ALT+click INSIDE an asset polygon', 'rgba(255,179,71,0.6)'); return; }
+                const ring = entityCoords(a);
+                if (!ring || ring.length < 3) { showToast('Asset has no usable polygon', 'rgba(255,96,96,0.55)'); return; }
+                nfzFinalize(cleanSelfIntersections(assetOffsetRing(ring, nfzDraw.bufferFt * GEN_FT_TO_M)), a.name, true);
+                return;
+            }
+            const drawingNow = nfzDraw.drawing && nfzDraw.verts.length > 0;
+            if (!drawingNow && !ev.altKey) return;         // ALT starts a new trace; plain m1 stays free
+            ev.preventDefault(); ev.stopPropagation();
+            nfzDraw.drawing = true;
+            nfzDraw.verts.push(ev.ctrlKey ? nfzSnapToAsset(ll) : ll);
+            nfzDraw.tentative = null;
+            nfzRender();
+        };
+        nfzDraw._onDbl = (ev) => {
+            if (!nfzDraw.active || nfzDraw.mode !== 'trace' || !nfzDraw.drawing) return;
+            ev.preventDefault(); ev.stopPropagation();
+            nfzFinishTrace();
+        };
+        nfzDraw._onKey = (ev) => {
+            if (!nfzDraw.active) return;
+            const k = (ev.key || '').toLowerCase();
+            if (k === 'escape') {
+                ev.preventDefault(); ev.stopImmediatePropagation();
+                const t = ev.target; if (t && t.blur) { try { t.blur(); } catch (e) {} }
+                if (nfzDraw.mode === 'trace' && nfzDraw.verts.length) {
+                    nfzDraw.verts.pop();
+                    nfzDraw.drawing = nfzDraw.verts.length > 0;
+                    nfzRender();
+                } else setNfzMode(null);
+                return;
+            }
+            const t = ev.target;
+            const inField = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+            if (inField) return;
+            if (k === 'enter' && nfzDraw.mode === 'trace' && nfzDraw.drawing) { ev.preventDefault(); ev.stopImmediatePropagation(); nfzFinishTrace(); }
+        };
+        nfzDraw._container.addEventListener('mousedown', nfzDraw._onDown, true);
+        nfzDraw._container.addEventListener('mousemove', nfzDraw._onMove, true);
+        nfzDraw._container.addEventListener('dblclick', nfzDraw._onDbl, true);
+        try { uwin().addEventListener('keydown', nfzDraw._onKey, true); } catch (e) {}
+        try { map.doubleClickZoom.disable(); } catch (e) {}
+        try { map.getContainer().style.cursor = 'crosshair'; } catch (e) {}
+    }
+    function nfzUnwire() {
+        const c = nfzDraw._container;
+        if (c) {
+            try { c.removeEventListener('mousedown', nfzDraw._onDown, true); } catch (e) {}
+            try { c.removeEventListener('mousemove', nfzDraw._onMove, true); } catch (e) {}
+            try { c.removeEventListener('dblclick', nfzDraw._onDbl, true); } catch (e) {}
+        }
+        try { uwin().removeEventListener('keydown', nfzDraw._onKey, true); } catch (e) {}
+        const map = getLeafletMap();
+        // restore dbl-click zoom / cursor only if Adv Draw isn't also armed
+        if (map && !advDraw.active) { try { map.doubleClickZoom.enable(); } catch (e) {} try { map.getContainer().style.cursor = ''; } catch (e) {} }
+        nfzDraw._container = null;
+    }
+    function setNfzMode(mode) {
+        nfzDraw.active = !!mode;
+        if (mode) nfzDraw.mode = mode;
+        if (nfzDraw.active) {
+            try { if (advDraw.active) setAdvDraw(false); } catch (e) {}   // mutually exclusive
+            try { if (genDraw.active) { const b = document.getElementById('aim-gen-draw'); if (b) b.click(); } } catch (e) {}
+            nfzWire();
+        } else {
+            nfzDraw.drawing = false; nfzDraw.verts = []; nfzDraw.tentative = null;
+            nfzUnwire();
+        }
+        nfzRender(); nfzSyncUi();
+    }
+    function nfzSyncUi() {
+        try {
+            const bt = document.getElementById('aim-gen-nfztrace');
+            if (bt) { const on = nfzDraw.active && nfzDraw.mode === 'trace'; bt.style.background = on ? 'rgba(255,85,85,0.32)' : 'rgba(255,85,85,0.12)'; bt.textContent = on ? '⬠ NFZ Trace ON — ALT+click starts · click adds · Ctrl=snap to asset edge · dbl-click/Enter=finish · Esc=undo/off' : '⬠ NFZ Trace'; }
+            const bs = document.getElementById('aim-gen-nfzstamp');
+            if (bs) { const on = nfzDraw.active && nfzDraw.mode === 'stamp'; bs.style.background = on ? 'rgba(255,85,85,0.32)' : 'rgba(255,85,85,0.12)'; bs.textContent = on ? '⚡ NFZ Stamp ON — ALT+click inside an asset · Esc=off' : '⚡ NFZ Stamp'; }
+            const c = document.getElementById('aim-nfz-controls');
+            if (c) c.style.display = (nfzDraw.active || nfzDraw.drafts.length) ? 'block' : 'none';
+            const cnt = document.getElementById('aim-nfz-count');
+            if (cnt) cnt.textContent = String(nfzDraw.drafts.length);
+        } catch (e) {}
+    }
+    // CREATE-ONLY commit — never touches an existing NFZ. Terrain-builder rails.
+    async function nfzCommit() {
+        if (liteBlockedWrite('create NFZs')) return;
+        const sid = genState.siteID;
+        if (!sid || String(sid) !== String(getCurrentSiteID())) { showToast('Site changed — reopen the generator', 'rgba(255,96,96,0.55)'); return; }
+        if (!nfzDraw.drafts.length) { showToast('No NFZ drafts', 'rgba(255,96,96,0.55)'); return; }
+        const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
+        const resEl = document.getElementById('aim-nfz-result');
+        const logL = (m) => { try { if (resEl) resEl.textContent = m; } catch (e) {} console.log(`${TAG} nfz: ${m}`); };
+        const bad = nfzDraw.drafts.filter(d => ringSelfIntersects(d.points));
+        if (bad.length) { logL(`BLOCKED — ${bad.length} self-intersecting draft(s): ${bad.map(d => d.name).join(', ')}`); return; }
+        if (dry) { logL(`DRY RUN — would create ${nfzDraw.drafts.length} NFZ(s): ${nfzDraw.drafts.map(d => d.name).join(' · ')}. Untick Dry run to write.`); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { showToast('No CSRF token — make one native save anywhere in Percepto first, then retry', 'rgba(255,96,96,0.55)'); return; }
+        let siteCfg = null; try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        const tmplNfz = ents.find(e => e.type === 4 && entityCoords(e));
+        let tmplBody = null;
+        if (tmplNfz) { try { tmplBody = buildWriteBody(tmplNfz, siteCfg); } catch (e) {} }
+        const used = new Set(ents.filter(e => e.type === 4 && e.name).map(e => e.name));
+        const uniq = (base) => { base = genCleanName(base) || 'NFZ'; if (!used.has(base)) { used.add(base); return base; } let i = 2, n2; do { n2 = `${base}_${i++}`; } while (used.has(n2)); used.add(n2); return n2; };
+        const writes = nfzDraw.drafts.map(d => {
+            let b;
+            if (tmplBody) { b = JSON.parse(JSON.stringify(tmplBody)); delete b.id; }
+            else b = { type: 4, description: '', custom: {}, params: {}, asset_waypoints: null, constantly_present_asset_name: false, general_marker_type: '', marker_height: 0, is_unshielded: false, restrictions: [] };
+            b.type = 4; b.name = uniq(d.name); b.description = 'AIM NFZ draw';
+            b.site_id = sid; b.points = d.points; b.validated = false; b.arcs = [];
+            b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
+            return { draft: d, body: b };
+        });
+        const backup = { site: sid, at: new Date().toISOString(), nfzs: writes.map(w => w.body) };
+        try { localStorage.setItem(`aim_nfz_commit_backup:${sid}`, JSON.stringify(backup)); } catch (e) {}
+        try { downloadJSONFile(`nfz-draw-${sid}-${Date.now()}.json`, JSON.stringify(backup, null, 1)); } catch (e) { logL('backup download failed (localStorage stash still written)'); }
+        let ok = 0, fail = 0; const created = []; const failedDrafts = [];
+        for (const w of writes) {
+            try {
+                const r = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(w.body) });
+                const txt = await r.text(); let json = null; try { json = JSON.parse(txt); } catch (e) {}
+                const saved = json && json.map_objects;
+                if (r.status === 403) throw Object.assign(new Error('403 — write permission lost, ABORTING'), { fatal: true });
+                if (r.status === 200 && saved && saved.id != null) { ok++; created.push(saved.id); logL(`✓ ${ok + fail}/${writes.length} "${w.body.name}" → #${saved.id}`); }
+                else throw new Error(`server ${r.status} ${(txt || '').slice(0, 120)}`);
+            } catch (e) {
+                fail++; failedDrafts.push(w.draft);
+                console.warn(`${TAG} nfz create "${w.body.name}":`, e.message);
+                if (e.fatal) break;
+            }
+        }
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        const after = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        const byId = new Set(after.map(e => e.id));
+        const verified = created.filter(id => byId.has(id));
+        nfzDraw.lastCreated = verified.slice();
+        nfzDraw.drafts = (fail === 0 && verified.length === created.length) ? [] : failedDrafts;  // failed drafts stay retryable
+        nfzSaveDrafts(); nfzRender(); nfzSyncUi();
+        logL(`DONE: ${ok}/${writes.length} NFZ(s) created${fail ? `, ${fail} FAILED (kept as drafts)` : ''} · verify ${verified.length}/${created.length} present · refresh to see them natively`);
+        showToast(fail ? `NFZ commit: ${ok} ok, ${fail} FAILED — see the NFZ panel` : `✓ ${ok} NFZ(s) created`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+    }
+    // Undo THIS RUN: delete exactly the ids the last commit created.
+    async function nfzUndoLast() {
+        if (liteBlockedWrite('delete NFZs (undo)')) return;
+        if (!nfzDraw.lastCreated.length) { showToast('Nothing to undo (only the most recent commit this session)', 'rgba(255,96,96,0.55)'); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { showToast('No CSRF token', 'rgba(255,96,96,0.55)'); return; }
+        if (!confirm(`Delete the ${nfzDraw.lastCreated.length} NFZ(s) created by the last commit? (Delete Guard banks each when installed)`)) return;
+        let ok = 0, fail = 0;
+        for (const id of nfzDraw.lastCreated) {
+            try {
+                const r = await fetch(`/map_objects/${id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf } });
+                if (r.ok) ok++; else { fail++; console.warn(`${TAG} nfz undo #${id}: server ${r.status}`); }
+            } catch (e) { fail++; console.warn(`${TAG} nfz undo #${id}:`, e.message); }
+        }
+        if (fail === 0) nfzDraw.lastCreated = [];
+        showToast(fail ? `Undo: ${ok} deleted, ${fail} FAILED` : `↩ ${ok} NFZ(s) deleted`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+    }
+
+    // ============================================================
     // ✦ ADVANCED DRAW — interactive zigzag corridor FFZ builder.
     // You draw the INNER (asset-facing) edge click-by-click; each segment is a
     // box of `widthFt` extending to one side (F flips). A live shielding BAND of
@@ -15694,6 +16081,7 @@
         advDraw.active = !!on;
         if (advDraw.active) {
             try { genDraw.active = false; } catch (e) {} // mutually exclusive with the simple Draw
+            try { if (nfzDraw.active) setNfzMode(null); } catch (e) {} // …and with NFZ draw
             if (!advDraw.verts.length) advRestore();      // resume a crash/reload in-progress draw
             try { const w = document.getElementById('aim-adv-width'); if (w) w.value = advDraw.widthFt; const o = document.getElementById('aim-adv-offset'); if (o) o.value = advDraw.offsetFt; const an = document.getElementById('aim-adv-anchor'); if (an) an.value = advDraw.anchor; } catch (e) {}
             advWire(); advRender();
@@ -17576,6 +17964,8 @@
         // Tear down Advanced Draw but DON'T clear its localStorage (so an in-progress
         // corridor survives close/reload — restored when the mode is re-armed).
         try { if (advDraw.active) { advDraw.active = false; advUnwire(); advClearLayers(); } } catch (e) {}
+        // NFZ draw: same deal — drafts stay in localStorage, layers come off the map.
+        try { if (nfzDraw.active) { nfzDraw.active = false; nfzDraw.drawing = false; nfzDraw.verts = []; nfzDraw.tentative = null; nfzUnwire(); } nfzClearLayers(); } catch (e) {}
         genDraw.active = false; genDraw.drawing = false; genDraw.pts = []; genDraw.tentative = null; genDraw.tentVertex = false; genDraw.tentOrtho = false; genDraw.lastSnap = null;
         try { const mp = getLeafletMap(); if (mp) { if (genDraw.poly) { try { mp.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(mp); clearGhost(mp); clearSnapTargets(mp); if (genDraw.onMapMove) { try { mp.off('moveend', genDraw.onMapMove); } catch (e) {} genDraw.onMapMove = null; } mp.getContainer().style.cursor = ''; try { mp.doubleClickZoom.enable(); } catch (e) {} } } catch (e) {}
     }
@@ -17646,6 +18036,8 @@
                 <button id="aim-gen-clear" style="background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Clear preview</button>
                 <button id="aim-gen-draw" style="background:rgba(255,225,77,0.12);color:#ffe14d;border:1px solid rgba(255,225,77,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✏️ Draw</button>
                 <button id="aim-gen-advdraw" title="Advanced Draw — click the inner (asset-facing) edge point-to-point to build a zigzag corridor FFZ. Live full-box preview + shielding band on the line. Shift=angle-snap 15° off the last segment · Ctrl=magnet-snap to the offset off the nearest asset · F=flip width side · double-click/Enter=finish · Esc=undo last point. Autosaves; commits as ONE FFZ via Commit." style="background:rgba(95,184,255,0.12);color:#5fb8ff;border:1px solid rgba(95,184,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✦ Advanced Draw</button>
+                <button id="aim-gen-nfztrace" title="NFZ Trace — ALT+click to start, click to add vertices around anything (trace the shape exactly — the ring auto-grows by the Buffer on finish). Ctrl=snap onto the nearest asset's boundary · dbl-click/Enter=finish · Esc=undo last point. Grows by Buffer, pads to the min footprint, pulls overhangs inside the FFZ. Commits as type-4 NFZs, create-only." style="background:rgba(255,85,85,0.12);color:#ff5555;border:1px solid rgba(255,85,85,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">⬠ NFZ Trace</button>
+                <button id="aim-gen-nfzstamp" title="NFZ Stamp — ALT+click inside any asset polygon to instantly stage an NFZ = that asset's ring grown by the Buffer (min footprint + FFZ containment applied). Rapid-fire: keep ALT+clicking assets." style="background:rgba(255,85,85,0.12);color:#ff5555;border:1px solid rgba(255,85,85,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">⚡ NFZ Stamp</button>
                 <button id="aim-gen-fpsnap" title="Arm CTRL-snap for Percepto's native flight-path draw tool: hold CTRL while clicking to place a waypoint and it snaps ~50ft parallel to the nearest power line (purple dot shows where). Release CTRL = free point." style="background:rgba(186,140,255,0.12);color:#ba8cff;border:1px solid rgba(186,140,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🧲 CTRL-snap: off</button>
                 <button id="aim-gen-loadfp" title="Load the site's existing flight paths (drawn natively in Percepto) into the editable preview so they can be cleaned up." style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FPs</button>
                 <button id="aim-gen-loadffz" title="Load the site's existing FFZs (amber) into the editable preview — move / rotate / Alt-snap (auto-size) / resize them, then 💾 Save FFZ edits to write them back in place." style="background:rgba(255,179,71,0.12);color:#ffb347;border:1px solid rgba(255,179,71,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FFZs</button>
@@ -17665,6 +18057,17 @@
                     <label style="display:inline-flex;align-items:center;gap:4px">Opacity <input type="range" id="aim-adv-opacity" min="0" max="0.7" step="0.05" value="0.28" style="width:70px"></label>
                 </div>
                 <div style="font-size:10px;color:#7a8794;margin-top:6px"><b style="color:#ffd24d">ALT+click</b>=start a NEW corridor (plain click edits existing shapes) · <b style="color:#ff5fff">magenta dots</b>=snap flush to an existing corridor's centerline (matches width) · then <b style="color:#fff">click</b>=add points · <b style="color:#fff">drag a dot</b>=move vertex · <b style="color:#fff">drag an outer edge</b>=widen · <b style="color:#fff">Shift</b>=angle 15° · <b style="color:#fff">Ctrl</b>=snap to asset · <b style="color:#fff">F</b>=flip · <b style="color:#fff">dbl-click</b>=finish · <b style="color:#fff">Esc</b>=undo / turn off</div>
+            </div>
+            <div id="aim-nfz-controls" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(255,85,85,0.06);border:1px dashed rgba(255,85,85,0.35);border-radius:3px">
+                <div style="font-size:11px;color:#ff5555;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">⬠ NFZ Draw — <span id="aim-nfz-count">0</span> draft(s)</div>
+                <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;font-size:11px;color:#cfd6dc;margin-bottom:8px">
+                    <label style="display:inline-flex;align-items:center;gap:4px" title="Horizontal buffer: the traced/stamped ring grows outward by this much on finish — trace the shape exactly, the buffer does the safety margin.">Buffer <input type="number" id="aim-nfz-buffer" value="25" min="0" step="5" style="width:50px;background:#1a1d23;border:1px solid rgba(255,85,85,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px;text-align:right"> ft</label>
+                    <label style="display:inline-flex;align-items:center;gap:4px" title="An NFZ can never be smaller than this on either axis — smaller results get padded with extra uniform outward offset.">Min size <input type="number" id="aim-nfz-min" value="25" min="0" step="5" style="width:50px;background:#1a1d23;border:1px solid rgba(255,85,85,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px;text-align:right"> ft</label>
+                    <button id="aim-nfz-commit" title="Create the drafted NFZs on the site (type 4, CREATE-ONLY — existing NFZs are never touched). Honors the Dry run checkbox below. Backup file downloads first; verify-by-refetch after." style="background:rgba(95,255,95,0.18);color:#5fff5f;border:1px solid rgba(95,255,95,0.6);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">✓ Commit NFZs</button>
+                    <button id="aim-nfz-clear" title="Discard all NFZ drafts (local only — nothing on the server is touched)." style="background:rgba(255,90,90,0.12);color:#ff8a80;border:1px solid rgba(255,90,90,0.45);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">🗑 Clear drafts</button>
+                    <button id="aim-nfz-undo" title="Delete exactly the NFZs the most recent commit created (this session). Each delete rides Delete Guard's 24h undo ring when installed." style="background:rgba(255,179,71,0.12);color:#ffb347;border:1px solid rgba(255,179,71,0.45);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">↩ Undo last commit</button>
+                </div>
+                <div id="aim-nfz-result" style="font-size:11px;color:#9ad;line-height:1.5">Drafts auto-grow by the Buffer, pad to the Min size, and pull inside the FFZ. Commit honors the Dry run checkbox in the Commit box.</div>
             </div>
             <div style="padding:8px 10px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25);border-radius:3px">
                 <div style="font-size:11px;color:#9ad;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Commit</div>
@@ -17985,6 +18388,32 @@
                 setAdvDraw(true);
             }
         };
+        // ⬠ NFZ Trace / ⚡ NFZ Stamp (feature #243)
+        nfzLoadParams();
+        nfzLoadDrafts(siteID);
+        const nfzTraceBtn = box.querySelector('#aim-gen-nfztrace');
+        if (nfzTraceBtn) nfzTraceBtn.onclick = () => {
+            if (nfzDraw.active && nfzDraw.mode === 'trace') {
+                if (nfzDraw.drawing && nfzDraw.verts.length >= 3) nfzFinishTrace();  // turning off mid-trace finishes it
+                setNfzMode(null);
+            } else setNfzMode('trace');
+        };
+        const nfzStampBtn = box.querySelector('#aim-gen-nfzstamp');
+        if (nfzStampBtn) nfzStampBtn.onclick = () => { setNfzMode(nfzDraw.active && nfzDraw.mode === 'stamp' ? null : 'stamp'); };
+        const nfzB = box.querySelector('#aim-nfz-buffer'), nfzM = box.querySelector('#aim-nfz-min');
+        if (nfzB) { nfzB.value = nfzDraw.bufferFt; nfzB.oninput = () => { const v = parseFloat(nfzB.value); if (isFinite(v) && v >= 0) { nfzDraw.bufferFt = v; nfzSaveParams(); nfzRender(); } }; }
+        if (nfzM) { nfzM.value = nfzDraw.minFt; nfzM.oninput = () => { const v = parseFloat(nfzM.value); if (isFinite(v) && v >= 0) { nfzDraw.minFt = v; nfzSaveParams(); } }; }
+        const nfzCommitBtn = box.querySelector('#aim-nfz-commit');
+        if (nfzCommitBtn) nfzCommitBtn.onclick = () => { nfzCommit(); };
+        const nfzClearBtn = box.querySelector('#aim-nfz-clear');
+        if (nfzClearBtn) nfzClearBtn.onclick = () => {
+            if (nfzDraw.drafts.length && !confirm(`Discard all ${nfzDraw.drafts.length} NFZ draft(s)? (local only — nothing on the server is touched)`)) return;
+            nfzDraw.drafts = []; nfzSaveDrafts(); nfzRender(); nfzSyncUi();
+        };
+        const nfzUndoBtn = box.querySelector('#aim-nfz-undo');
+        if (nfzUndoBtn) nfzUndoBtn.onclick = () => { nfzUndoLast(); };
+        nfzRender(); nfzSyncUi();   // restore autosaved drafts onto the map right away
+
         // Advanced Draw live controls — load remembered params first so the fields show them.
         advLoadParams();
         const advAnchor = box.querySelector('#aim-adv-anchor');

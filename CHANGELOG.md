@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-20 — ⬠ NFZ Trace + ⚡ Asset Stamp builder (Asset Inspector latest v4.245 — dev only)
+
+Two new red buttons in the ⊕ Site Setup Generator modal build **No Fly Zones** the way ✦ Advanced Draw builds FFZs. **⬠ NFZ Trace**: ALT+click to start, click around anything (hold **Ctrl** to snap exactly onto the nearest asset's boundary — trace the shape, the tool does the safety math), double-click/Enter to finish. The finished ring automatically **grows outward by the Buffer** (default 25 ft), pads itself until the footprint is at least the **Min size** (default 25×25 ft — an NFZ can never be smaller), and pulls any overhanging corners back **inside the FFZ** (the server rejects NFZ vertices outside a Free Zone). **⚡ NFZ Stamp**: ALT+click inside any asset polygon → an instant staged NFZ = that asset's outline grown by the Buffer; keep clicking assets to rapid-fire. Drafts render red on the map, survive reloads per-site, and commit **create-only** (existing NFZs are never touched) with the full rails: dry-run, backup file download, unique names, verify-by-refetch, and **↩ Undo last commit** (deletes ride Delete Guard's 24h ring when installed). Buffer + Min size are editable in the new ⬠ NFZ Draw panel and remembered. Also: the SOP validator's **NFZ min side default drops 30 → 25 ft** to match the new rule.
+
+## 2026-08-20 — NFZ styling category (Map Styler latest v34.136 — dev only)
+
+The Map Styler finally knows about No Fly Zones: a new **No Fly Zone (red)** category in the Control Panel with the same persistent controls FFZs have — line color/opacity override, force line thickness, a **buffer ring** (default **15 ft** = the SOP NFZ separation distance, so the ring answers "is anything too close to this NFZ"), buffer color/opacity, and an opt-in fill override. Note for first testers: the NFZ's on-map stroke signature is unverified — if NFZs on your site don't pick up the styling, the console logs a one-time `[AIM STYLER]` line listing the site's path signatures; send that line back and the next patch locks it in.
+
 ## 2026-08-18 — ✂ Split ALL macros in one pass (Mission Bank Tools latest v2.60 — dev only)
 
 New **✂ All** button in the 🧩 Macro coverage legend header: splits **every macro on the site in one combined review** instead of one macro at a time. Each macro gets its own color-chipped section listing its pads (with its setup steps named). All the per-row skip logic carries over — existing mission names hard-skipped, pads that already have a geometry-detected micro unticked with the cyan tag — plus one rule unique to the combined pass: a **pad claimed by two macros** only defaults ticked in the macro where it has more steps; the other occurrence shows a purple "also in …" tag. One confirm dialog, then create-only as always — no macro is modified.
