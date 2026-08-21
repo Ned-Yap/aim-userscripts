@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.62
+// @version      2.63
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.62';
+    const SCRIPT_VERSION = '2.63';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5514,6 +5514,7 @@
         mcv.layers = [];
         mcv.macroLayers = new Map();
         try { mcvClearRoutes(); } catch (e) {}
+        try { mcvCloseOrderPanel(); } catch (e) {}
         if (mcv.legendEl) { try { mcv.legendEl.remove(); } catch (e) {} mcv.legendEl = null; }
     }
     // mission → distinct pads its located steps touch (inside or ≤150 ft of
@@ -5673,7 +5674,9 @@
                     if (auditLine) auditLine = auditLine.replace('<div ', `<div data-mcv-au="${mc.mission.id}" `);
                     // v2.55: ✂ split — always available, even without audit data
                     const splitBtn = `<button data-mcv-split="${mc.mission.id}" title="✂ Split this macro into one mission per pad (named after the pad) — create-only, this macro is untouched" style="padding:0 5px;background:rgba(255,138,210,0.12);border:1px solid rgba(255,138,210,0.45);color:#ff8ad2;border-radius:4px;cursor:pointer;font-size:10px;">✂</button>`;
-                    return `<div data-mcv-row="${mc.mission.id}" style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:${vis ? 1 : 0.38};"><input type="checkbox" data-mcv-vis="${mc.mission.id}" ${vis ? 'checked' : ''} title="Show/hide this macro on the map" style="margin:0;cursor:pointer;accent-color:${COLORS2[i % COLORS2.length]};"><span data-mcv-solo="${mc.mission.id}" title="Solo — show ONLY this macro (click again to show all)" style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;cursor:pointer;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${reBtn}${splitBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine ? auditLine.replace('style="', `style="opacity:${vis ? 1 : 0.38};`) : ''}`;
+                    // v2.63: ⇅ manual pad order — always available
+                    const orderBtn = `<button data-mcv-order="${mc.mission.id}" title="⇅ See + hand-edit this macro's pad visit order (the order actually flown — same numbers as the badges). Drag rows, Apply saves in place with backup + verify." style="padding:0 5px;background:rgba(122,223,230,0.12);border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">⇅</button>`;
+                    return `<div data-mcv-row="${mc.mission.id}" style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:${vis ? 1 : 0.38};"><input type="checkbox" data-mcv-vis="${mc.mission.id}" ${vis ? 'checked' : ''} title="Show/hide this macro on the map" style="margin:0;cursor:pointer;accent-color:${COLORS2[i % COLORS2.length]};"><span data-mcv-solo="${mc.mission.id}" title="Solo — show ONLY this macro (click again to show all)" style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;cursor:pointer;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${reBtn}${orderBtn}${splitBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine ? auditLine.replace('style="', `style="opacity:${vis ? 1 : 0.38};`) : ''}`;
                 }).join('')
                 : '<div style="color:#888;">No macro missions yet (≥2 pads in one mission).</div>')
             + `<div style="color:#ffb74d;margin-top:5px;">⬜ ${det.todo.length} pad(s) with missions, not in any macro</div>`
@@ -5687,6 +5690,7 @@
         el.querySelector('[data-mcv-x]').onclick = () => { mcv.on = false; mcvClear(); const b = document.querySelector('[data-mcv-toggle]'); if (b) b.classList.remove('active'); };
         el.querySelector('[data-mcv-report]').onclick = () => mcvReport();
         el.querySelectorAll('[data-mcv-reorder]').forEach(b => b.onclick = () => mcvReorder(Number(b.getAttribute('data-mcv-reorder')) || b.getAttribute('data-mcv-reorder')));
+        el.querySelectorAll('[data-mcv-order]').forEach(b => b.onclick = () => mcvOpenOrderPanel(Number(b.getAttribute('data-mcv-order')) || b.getAttribute('data-mcv-order')));
         el.querySelectorAll('[data-mcv-route]').forEach(b => b.onclick = () => {
             const id = Number(b.getAttribute('data-mcv-route')) || b.getAttribute('data-mcv-route');
             const on = mcvToggleRoute(id, b.getAttribute('data-mcv-route-col'));
@@ -6198,13 +6202,33 @@
     // ♻ resequence a macro's per-pad blocks into the replan order, in place.
     let mcvReorderBusy = false;
     async function mcvReorder(missionId) {
-        if (mcvReorderBusy) return;
         const data = mcv.data;
         const mc = data && data.det.macros.find(x => x.mission.id === missionId);
         const audit = data && data.audits ? data.audits.get(missionId) : null;
         if (!mc || !audit || !audit.re) { showToast('No replan available for this mission.', '#ff9800', 3000); return; }
+        const orderIds = audit.reRows.map(r => r.asset.id);
+        const seen = new Set(orderIds);
+        mc.pads.forEach(a => { if (!seen.has(a.id)) { orderIds.push(a.id); seen.add(a.id); } });
+        const cFl = audit.calib ? audit.calib.curFl : audit.cur.flights.length;
+        const rFl = audit.calib ? audit.calib.reFl : audit.re.flights.length;
+        const cFt = (audit.calib && audit.calib.curDistM) ? audit.calib.curDistM * 3.28084 : audit.cur.totalFt;
+        const rFt = (audit.calib && audit.calib.reDistM) ? audit.calib.reDistM * 3.28084 : audit.re.totalFt;
+        const dCur = mcvDays(cFl), dRe = mcvDays(rFl);
+        await mcvApplyOrder(mc, orderIds, `♻ Re-order "${mc.mission.name}" IN PLACE?\n\n`
+            + `${cFl} flights (~${dCur.days.toFixed(1)} day(s)) → ${rFl} flights (~${dRe.days.toFixed(1)} day(s))\n`
+            + `est ${(cFt / 1000).toFixed(0)}k ft → ${(rFt / 1000).toFixed(0)}k ft${audit.calib ? ' (Percepto-calibrated)' : ''}\n\n`
+            + `Each pad's steps stay intact — only the pad ORDER changes. Mission id + name unchanged.\nA JSON backup downloads first.`);
+    }
+    // Shared apply pipeline for ♻ (audit replan order) and ⇅ (manual order,
+    // v2.63): consolidate each pad's blocks in the given pad-id order (any
+    // leading pre-pad steps stay first), hard step-count sanity, JSON backup,
+    // save in place, verify by refetch + re-detect, redraw the overlay.
+    // Returns true once the save went through (even if verify then warned).
+    async function mcvApplyOrder(mc, orderIds, confirmMsg) {
+        if (mcvReorderBusy) return false;
+        const data = mcv.data;
         const ctx = findMissionAppCtx();
-        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4500); return; }
+        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4500); return false; }
         const m = mc.mission;
         const ins = m.instructions || [];
         const to = ins.filter(i => i && i.type === 0).slice(0, 1);
@@ -6216,9 +6240,6 @@
             if (!byPad.has(b.aId)) byPad.set(b.aId, []);
             b.steps.forEach(s => byPad.get(b.aId).push(s));
         });
-        const orderIds = audit.reRows.map(r => r.asset.id);
-        const seen = new Set(orderIds);
-        mc.pads.forEach(a => { if (!seen.has(a.id) && byPad.has(a.id)) { orderIds.push(a.id); seen.add(a.id); } });
         const body = lead.slice();
         orderIds.forEach(id => (byPad.get(id) || []).forEach(s => body.push(s)));
         const instrs = to.map(pcmNormStep).concat(body.map(pcmNormStep), rh.map(pcmNormStep));
@@ -6227,18 +6248,11 @@
         if (instrs.length !== expected) {
             console.warn(`${TAG} [mcv] reorder ABORT — step count mismatch (${instrs.length} vs ${expected})`, m.name);
             showToast('♻ Aborted: rebuilt step count does not match the original (see console). Nothing saved.', '#ff5252', 6000);
-            return;
+            return false;
         }
-        const cFl = audit.calib ? audit.calib.curFl : audit.cur.flights.length;
-        const rFl = audit.calib ? audit.calib.reFl : audit.re.flights.length;
-        const cFt = (audit.calib && audit.calib.curDistM) ? audit.calib.curDistM * 3.28084 : audit.cur.totalFt;
-        const rFt = (audit.calib && audit.calib.reDistM) ? audit.calib.reDistM * 3.28084 : audit.re.totalFt;
-        const dCur = mcvDays(cFl), dRe = mcvDays(rFl);
-        if (!window.confirm(`♻ Re-order "${m.name}" IN PLACE?\n\n`
-            + `${cFl} flights (~${dCur.days.toFixed(1)} day(s)) → ${rFl} flights (~${dRe.days.toFixed(1)} day(s))\n`
-            + `est ${(cFt / 1000).toFixed(0)}k ft → ${(rFt / 1000).toFixed(0)}k ft${audit.calib ? ' (Percepto-calibrated)' : ''}\n\n`
-            + `Each pad's steps stay intact — only the pad ORDER changes. Mission id + name unchanged.\nA JSON backup downloads first.`)) return;
+        if (!window.confirm(confirmMsg)) return false;
         mcvReorderBusy = true;
+        let saved = false;
         try {
             // backup (same frame-walking download as the wrap tools)
             try {
@@ -6262,6 +6276,7 @@
             }
             showToast(`♻ Saving re-ordered "${m.name}"…`, '#9cf', 3000);
             await ctx.saveApp(Object.assign({}, m, { instructions: instrs }), m.name);
+            saved = true;
             // verify: fresh fetch → same pad set, new order, same step count
             await new Promise(r => setTimeout(r, 1200));
             const after = await mbFetchMissionsFull(getCurrentSiteID());
@@ -6278,7 +6293,7 @@
                 if (!good) console.warn(`${TAG} [mcv] verify mismatch — order got [${gotOrder}] want [${wantOrder}] · steps ${steps2}/${steps1}`);
             }
             showToast(good
-                ? `♻ "${m.name}" re-ordered ✓ verified — ${cFl} → ${rFl} flights. Re-check its schedule if one is active.`
+                ? `⇅ "${m.name}" re-ordered ✓ verified — badges now match. Re-check its schedule if one is active.`
                 : `⚠ "${m.name}" saved but verify mismatched — check the mission + console (backup downloaded).`, good ? '#5fff5f' : '#ff9800', 9000);
             // refresh overlay data
             mcv.data.missions = after;
@@ -6292,6 +6307,86 @@
             showToast('♻ Reorder FAILED — nothing verified, backup downloaded (see console).', '#ff5252', 6000);
         }
         mcvReorderBusy = false;
+        return saved;
+    }
+    // ⇅ MANUAL PAD ORDER (v2.63) — see the macro's TRUE visit order (same
+    // numbers as the map badges) and hand-edit it. Born from a live confusion:
+    // a macro whose long member mission enters a NEIGHBORING pad's ring first
+    // makes the badges disagree with the merge editor's mission list, and no
+    // merge re-save can change that — the visit order lives in the step
+    // geometry. This panel shows it (incl. ×N when a pad's steps are split
+    // across separate visits) and applies a chosen order via the same rails
+    // as ♻ (consolidate blocks, backup, save in place, verify, redraw).
+    const MCV_ORDER_PANEL_ID = 'aim-mb-mcv-order';
+    function mcvCloseOrderPanel() { const old = document.getElementById(MCV_ORDER_PANEL_ID); if (old) old.remove(); }
+    function mcvOpenOrderPanel(missionId) {
+        mcvCloseOrderPanel();
+        const data = mcv.data;
+        const mc = data && data.det && data.det.macros.find(x => x.mission.id === missionId);
+        if (!mc) { showToast('Macro not found — re-toggle 🧩.', '#ff9800', 3000); return; }
+        let order = mc.pads.slice();
+        const stepsOf = id => mc.blocks.reduce((s, b) => s + (b.aId === id ? b.steps.length : 0), 0);
+        const visitsOf = id => mc.blocks.reduce((n, b) => n + (b.aId === id ? 1 : 0), 0);
+        const leadN = (mc.blocks[0] && mc.blocks[0].aId == null) ? mc.blocks[0].steps.length : 0;
+        const el = document.createElement('div');
+        el.id = MCV_ORDER_PANEL_ID;
+        el.style.cssText = 'position:fixed;left:12px;bottom:16px;width:310px;max-height:44vh;overflow:auto;z-index:2147483600;'
+            + 'background:rgba(16,19,26,0.96);border:1px solid #7adfe6;border-radius:8px;padding:9px 11px;color:#e6e6e6;'
+            + 'font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 6px 22px rgba(0,0,0,0.7);';
+        let dragIdx = null;
+        const render = () => {
+            const changed = order.map(a => a.id).join(',') !== mc.pads.map(a => a.id).join(',');
+            const rows = order.map((a, i) => {
+                const v = visitsOf(a.id);
+                return `<div data-mo-row="${i}" draggable="true" style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;cursor:grab;">
+                    <span style="color:#567;">⠿</span>
+                    <b style="width:18px;text-align:right;color:#7adfe6;">${i + 1}</b>
+                    <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(String(a.name || ''))}">${escapeHtml(String(a.name || ('pad ' + a.id)))}</span>
+                    ${v > 1 ? `<span title="This pad's steps are split across ${v} separate visits in the current step order — Apply pulls them together at this slot" style="color:#ffb74d;font-weight:800;">×${v}</span>` : ''}
+                    <span style="color:#789;">${stepsOf(a.id)} st</span>
+                    <button data-mo-up="${i}" ${i === 0 ? 'disabled' : ''} style="padding:0 4px;background:#20262e;border:1px solid #2a3340;color:#9ad;border-radius:3px;cursor:pointer;font-size:10px;">▲</button>
+                    <button data-mo-dn="${i}" ${i === order.length - 1 ? 'disabled' : ''} style="padding:0 4px;background:#20262e;border:1px solid #2a3340;color:#9ad;border-radius:3px;cursor:pointer;font-size:10px;">▼</button>
+                </div>`;
+            }).join('');
+            el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
+                    <b style="color:#7adfe6;">⇅ Pad order — ${escapeHtml(String(mc.mission.name || ''))}</b>
+                    <span data-mo-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span>
+                </div>
+                <div style="color:#789;font-size:10px;margin-bottom:4px;">The order actually FLOWN (same numbers as the map badges). Drag rows or ▲▼, then Apply — each pad's steps move as one intact group.${leadN ? ` ${leadN} pre-pad step(s) stay first.` : ''}</div>
+                ${rows}
+                <div style="display:flex;align-items:center;gap:8px;margin-top:7px;">
+                    <button data-mo-reset ${changed ? '' : 'disabled'} style="padding:3px 9px;background:rgba(255,255,255,0.08);border:1px solid #2a3340;color:${changed ? '#9ad' : '#456'};border-radius:5px;cursor:pointer;font-size:10px;">↺ Reset</button>
+                    <button data-mo-apply ${changed ? '' : 'disabled'} style="margin-left:auto;padding:4px 12px;background:${changed ? '#5fff5f' : '#2a3340'};border:none;color:${changed ? '#04220a' : '#567'};border-radius:5px;cursor:pointer;font-weight:800;">💾 Apply order</button>
+                </div>`;
+            el.querySelector('[data-mo-x]').onclick = mcvCloseOrderPanel;
+            el.querySelector('[data-mo-reset]').onclick = () => { order = mc.pads.slice(); render(); };
+            el.querySelector('[data-mo-apply]').onclick = async () => {
+                const ids = order.map(a => a.id);
+                const ok = await mcvApplyOrder(mc, ids,
+                    `⇅ Apply MANUAL pad order to "${mc.mission.name}"?\n\n`
+                    + `${mc.pads.length} pads — each pad's steps stay intact and move as one group`
+                    + ` (a pad with split visits gets all its steps consolidated at its new slot).\n`
+                    + `Mission id + name unchanged. A JSON backup downloads first.`);
+                if (ok) mcvCloseOrderPanel();
+            };
+            el.querySelectorAll('[data-mo-up]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-up')); const t = order.splice(i, 1)[0]; order.splice(i - 1, 0, t); render(); });
+            el.querySelectorAll('[data-mo-dn]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-dn')); const t = order.splice(i, 1)[0]; order.splice(i + 1, 0, t); render(); });
+            el.querySelectorAll('[data-mo-row]').forEach(r => {
+                r.ondragstart = (e) => { dragIdx = Number(r.getAttribute('data-mo-row')); try { e.dataTransfer.setData('text/plain', ''); } catch (e2) {} };
+                r.ondragover = (e) => e.preventDefault();
+                r.ondrop = (e) => {
+                    e.preventDefault();
+                    if (dragIdx == null) return;
+                    const to = Number(r.getAttribute('data-mo-row'));
+                    const moved = order.splice(dragIdx, 1)[0];
+                    order.splice(to > dragIdx ? to - 1 : to, 0, moved);
+                    dragIdx = null;
+                    render();
+                };
+            });
+        };
+        render();
+        document.body.appendChild(el);
     }
 
     // 👁 route comparison (v2.44) — draw a macro's CURRENT order (solid, the
