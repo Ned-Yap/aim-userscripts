@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.61
+// @version      2.62
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.61';
+    const SCRIPT_VERSION = '2.62';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5331,55 +5331,50 @@
             return { ok: false };
         }
     }
-    // Order a subset: 2-opt scored by the flight simulator on trusted
-    // distances (a pad that forces an RTB shouldn't drag the route back over
-    // ground it already covered — pure furthest→closest zigzagged, live test).
-    // SPUR-WALK ORDER (v2.36) — decoded from the user's hand-corrected order
-    // ("this is how I updated, but I'm just eyeballing it"): fly to the
-    // DEEPEST pad of an area first, peel back toward base along its corridor
-    // (never stepping to a deeper pad), and when the nearest continuation
-    // would cost more than a fresh out-leg from base, JUMP to the deepest
-    // remaining pad — the next area. Deterministic, auditable, and matches
-    // the far→near SOP per area. The simulator then adds the part eyeballing
-    // can't: battery breaks, landing reserves, real route distances.
-    // (2-opt was rejected live twice: transit-cheaper LOOP shapes read as
-    // chaos and give deep pads a half-drained battery.)
+    // BRANCH WALK (v2.62) — doctrine update from live use: ordering NEVER
+    // accounts for RTB / battery (the simulator still DISPLAYS breaks, it no
+    // longer shapes the order). Order is always furthest→nearest, but
+    // branch-coherent: at a Y in the route, finish every pad on one side
+    // before jumping to the other side — even when the other side holds a
+    // deeper pad than the next pad on this side. Mechanic: junction depth
+    // between two pads = how far from base their legal routes stay together
+    // = (dBase(a)+dBase(b)−dPad(a,b))/2 on the trusted route graph. A pad on
+    // the current pad's way home shares its whole own dBase; a pad across
+    // the Y only shares up to the fork. Next pad = deepest shared junction;
+    // ties within 500 ft go to the deeper pad — which IS the far→near rule
+    // inside a branch, and "jump to the deepest remaining" when everything
+    // left forks off equally low.
     function lassoOrderRows(subset, budgetFt, pw) {
         const rowsD = subset.slice().sort((x, y) => y.ft - x.ft);
         try {
             if (!(pw && pw.ok) || rowsD.length < 2) return { rows: rowsD, sim: null };
             const remaining = new Set(rowsD.map(r => pw.idxOf.get(r)));
             const ftOf = i => pw.rows[i].ft;
+            const dBase = new Map();
+            const dB = i => { if (!dBase.has(i)) dBase.set(i, pw.dBase(i)); return dBase.get(i); };
+            const junc = (a, b) => Math.max(0, (dB(a) + dB(b) - pw.dPad(a, b)) / 2);
+            const JUNC_TOL_FT = 500;
             const order = [];
-            let cur = null, guard = 0;
-            while (remaining.size && guard++ < 5000) {
+            let cur = null;
+            while (remaining.size) {
+                let pick = null;
                 if (cur == null) {
-                    // new area → deepest remaining pad
-                    let deep = null;
-                    remaining.forEach(i => { if (deep == null || ftOf(i) > ftOf(deep)) deep = i; });
-                    cur = deep;
+                    // start → deepest pad overall
+                    remaining.forEach(i => { if (pick == null || ftOf(i) > ftOf(pick)) pick = i; });
                 } else {
-                    // continue the area: nearest remaining pad that is NOT
-                    // deeper than where we are (±500 ft tolerance)
-                    let best = null;
-                    remaining.forEach(i => {
-                        if (ftOf(i) > ftOf(cur) + 500) return;
-                        const d = pw.dPad(cur, i);
-                        if (!best || d < best.d) best = { i, d };
-                    });
-                    // area exhausted (or continuing costs more than a fresh
-                    // out-leg from base) → jump to the next area's deepest
-                    if (!best || best.d > pw.dBase(best.i)) { cur = null; continue; }
-                    cur = best.i;
+                    let maxJ = -Infinity;
+                    const js = new Map();
+                    remaining.forEach(i => { const j = junc(cur, i); js.set(i, j); if (j > maxJ) maxJ = j; });
+                    remaining.forEach(i => { if (js.get(i) >= maxJ - JUNC_TOL_FT && (pick == null || ftOf(i) > ftOf(pick))) pick = i; });
                 }
-                order.push(cur);
-                remaining.delete(cur);
+                order.push(pick);
+                remaining.delete(pick);
+                cur = pick;
             }
-            remaining.forEach(i => order.push(i));   // guard-overflow safety
             const sim = agSimulate(order, pw.dPad, pw.dBase, pw.costOf, budgetFt);
             return { rows: order.map(i => pw.rows[i]), sim };
         } catch (e) {
-            console.warn(`${TAG} [lasso] spur-walk failed — plain furthest→closest`, e);
+            console.warn(`${TAG} [lasso] branch walk failed — plain furthest→closest`, e);
             return { rows: rowsD, sim: null };
         }
     }
@@ -5425,10 +5420,11 @@
         const pw = rows.length > 1 ? lassoBuildPairwise(rows, ent, byAsset) : null;
         const variants = [];
         // Tulip pads present → auto-split: "1" = Tattu only, "2" = everything.
-        // Each variant's order = 2-opt + flight simulator on trusted distances.
+        // Each variant's order = far→near branch walk on trusted distances;
+        // the simulator only annotates battery breaks, it never reorders.
         const mkVariant = (name, subPrefix, set, budgetFt) => {
             const o = lassoOrderRows(set, budgetFt, pw);
-            variants.push({ name, sub: `${subPrefix} · ${set.length} pads · deep-first spur walk, verified routes`, rows: o.rows, sim: o.sim });
+            variants.push({ name, sub: `${subPrefix} · ${set.length} pads · far→near branch walk, verified routes`, rows: o.rows, sim: o.sim });
         };
         if (tulips.length && tattu.length) {
             mkVariant(`${wind} 1`, 'Tattu only', tattu, cfg.tattuBudgetFt);
@@ -5538,8 +5534,9 @@
             // before the first pad go in a leading null-block. Blocks are what
             // ♻ reorder resequences (each pad's own steps stay intact).
             const blocks = [];
+            const touch = new Map();   // asset.id → { a, loose: step idx, inside: step idx|null }
             let curPad;   // undefined until the first pad assignment
-            (m.instructions || []).forEach(i => {
+            (m.instructions || []).forEach((i, si) => {
                 if (!i || i.type === 0 || i.type === 99) return;
                 if (i.location && typeof i.location.lat === 'number') {
                     const p = i.location;
@@ -5552,13 +5549,33 @@
                     }
                     if (best) {
                         curPad = best.a.id;
-                        if (!padIds.has(best.a.id)) { padIds.add(best.a.id); pads.push(best.a); }
+                        // v2.62: bank both the first LOOSE touch (≤150 ft, the
+                        // coverage rule) and the first step actually INSIDE the
+                        // ring (≤2 m ≈ on/inside the pad edge) — visit ORDER
+                        // uses inside-first below.
+                        const t = touch.get(best.a.id);
+                        if (!t) touch.set(best.a.id, { a: best.a, loose: si, inside: best.d <= 2 ? si : null });
+                        else if (t.inside == null && best.d <= 2) t.inside = si;
                     }
                 }
                 const aId = (curPad === undefined) ? null : curPad;
                 if (!blocks.length || blocks[blocks.length - 1].aId !== aId) blocks.push({ aId, steps: [] });
                 blocks[blocks.length - 1].steps.push(i);
             });
+            // v2.62: visit order = first step INSIDE each pad's ring, falling
+            // back to the loose 150-ft touch only for pads the mission never
+            // enters. Before this, an approach/transit nav skimming a
+            // NEIGHBORING pad's 150-ft halo stole that pad's visit slot, so
+            // the 🧩 badge numbers disagreed with the macro's real step order
+            // (live report: two adjacent pads showed swapped) — and no
+            // re-save could ever fix it, since the swap was in detection.
+            const recs = Array.from(touch.values())
+                .sort((x, y) => ((x.inside != null ? x.inside : x.loose) - (y.inside != null ? y.inside : y.loose)) || (x.loose - y.loose));
+            recs.forEach(t => { padIds.add(t.a.id); pads.push(t.a); });
+            const looseSorted = Array.from(touch.values()).sort((x, y) => x.loose - y.loose);
+            if (recs.some((t, k) => looseSorted[k] !== t)) {
+                console.log(`${TAG} [macros] "${m.name}": visit order corrected — a nav within 150 ft of a neighboring pad no longer counts as visiting it (first inside-the-ring step wins)`);
+            }
             if (pads.length) missionPads.set(m.id, pads);
             if (pads.length >= 2) {
                 macros.push({ mission: m, pads, blocks });
