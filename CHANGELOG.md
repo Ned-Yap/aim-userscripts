@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-21 — 🧩 ♻ always visible (Mission Bank Tools latest v2.65 — dev only)
+
+The ♻ replan button no longer hides behind the "saves ≥1 flight or ≥10% distance" gate — feet is the wrong lens for *order*: a huge pad that fills a whole flight by itself costs the same distance anywhere in the sequence, so the audit can honestly say "near-optimal" while the visit numbers look obviously wrong on the map (live example: a 91-step battery pad flown last, mid-route). ♻ now shows on every audited macro, dimmed when the sim rates the current order near-optimal (tooltip explains it may change little in that case — use ⇅ to impose a specific order).
+
 ## 2026-08-21 — 🧩 ⇅ live badge renumbering + M2-on-badge (Mission Bank Tools latest v2.64 — dev only)
 
 The ⇅ order editor is now fully live on the map. While the panel is open, that macro's badges get a **white ring + cyan glow** and **renumber instantly** as you drag rows or ▲▼ — what you see on the map is always the pending order. And you can work directly on the map: **M2 (right-click) any glowing badge** → a small popup with the pad's name and a number box — type the position, Enter/Set, and every badge + the panel reshuffle around it. Close without applying and the badges snap back to the real flown order; 💾 Apply saves as before (intact per-pad step groups, backup, verify). The M2 is captured before the merge editor's pad-click handler and the Asset Inspector's right-click inspector, so nothing else pops.

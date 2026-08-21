@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.64
+// @version      2.65
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.64';
+    const SCRIPT_VERSION = '2.65';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5697,7 +5697,16 @@
                             + `${(curFt / 1000).toFixed(0)}k ft · ${curFl} fl · ~${days.toFixed(1)}d${c ? '' : ' <span style="color:#567;">(sim)</span>'}`
                             + (worth ? ` → ♻ ${(reFt / 1000).toFixed(0)}k · ${reFl} fl (−${dFl} fl, −${dPct}%)` : ' · ✓ near-optimal')
                             + `${au.unknown ? ` · ⚠${au.unknown} unranged` : ''}</div>`;
-                        if (worth) reBtn = `<button data-mcv-reorder="${mc.mission.id}" title="Re-order this mission's pad blocks in place (backup + verify; steps untouched)" style="padding:0 5px;background:rgba(255,183,77,0.15);border:1px solid rgba(255,183,77,0.5);color:#ffb74d;border-radius:4px;cursor:pointer;font-size:10px;">♻</button>`;
+                        // v2.65: ♻ always visible when an audit exists (was
+                        // gated on ≥1 flight / ≥10% ft saved — but feet is the
+                        // wrong lens for ORDER: a huge pad that fills a whole
+                        // flight costs the same anywhere in the sequence, so
+                        // "near-optimal" can coexist with a visually crazy
+                        // order). Dimmed when the sim rates it near-optimal.
+                        const reTitle = worth
+                            ? 'Re-order this mission\'s pad blocks in place (backup + verify; steps untouched)'
+                            : 'Apply the simulator\'s replan order anyway — it rates the current order near-optimal in feet, so this may change little or nothing. For a SPECIFIC order use ⇅.';
+                        reBtn = `<button data-mcv-reorder="${mc.mission.id}" title="${reTitle}" style="padding:0 5px;background:rgba(255,183,77,${worth ? '0.15' : '0.06'});border:1px solid rgba(255,183,77,${worth ? '0.5' : '0.22'});color:${worth ? '#ffb74d' : '#93835e'};border-radius:4px;cursor:pointer;font-size:10px;">♻</button>`;
                         reBtn += `<button data-mcv-route="${mc.mission.id}" data-mcv-route-col="${COLORS2[i % COLORS2.length]}" title="Draw this macro's CURRENT route (solid) vs the ♻ replan route (dashed white) on the map" style="padding:0 5px;background:rgba(122,223,230,0.12);border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">👁</button>`;
                     }
                     // v2.47: per-macro visibility — checkbox toggles this macro's
