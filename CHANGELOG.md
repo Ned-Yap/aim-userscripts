@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-21 — 🧩 ⇅ live badge renumbering + M2-on-badge (Mission Bank Tools latest v2.64 — dev only)
+
+The ⇅ order editor is now fully live on the map. While the panel is open, that macro's badges get a **white ring + cyan glow** and **renumber instantly** as you drag rows or ▲▼ — what you see on the map is always the pending order. And you can work directly on the map: **M2 (right-click) any glowing badge** → a small popup with the pad's name and a number box — type the position, Enter/Set, and every badge + the panel reshuffle around it. Close without applying and the badges snap back to the real flown order; 💾 Apply saves as before (intact per-pad step groups, backup, verify). The M2 is captured before the merge editor's pad-click handler and the Asset Inspector's right-click inspector, so nothing else pops.
+
 ## 2026-08-21 — 🧩 ⇅ manual pad-order editor per macro (Mission Bank Tools latest v2.63 — dev only)
 
 New **⇅ button on every macro row** in the 🧩 Macro coverage legend. It opens a panel listing that macro's pads in the order **actually flown** — the same numbers as the map badges, which come from the mission's step geometry, not from the merge editor's mission list (that's why re-saving a merge can never move them: a member mission that dips into a neighboring pad's ring first genuinely visits that pad first). The panel shows each pad's step count and flags **×N** when a pad's steps are split across separate visits — the tell for exactly that situation. Drag rows (or ▲▼) into the order you want and hit **💾 Apply**: each pad's steps move as one intact group (split visits get consolidated at the pad's new slot), with the full ♻ rails — step-count sanity abort, JSON backup download, save in place (same id + name), verify-by-refetch, badge redraw. ♻ (audit replan) now runs through the same shared pipeline.

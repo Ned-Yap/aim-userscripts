@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.63
+// @version      2.64
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.63';
+    const SCRIPT_VERSION = '2.64';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5508,14 +5508,44 @@
     // layers are currently switched off in the legend; resets to all-visible
     // every fresh 🧩 toggle-on. macroLayers groups layers per mission id so a
     // single macro can be hidden/shown without a full redraw.
-    const mcv = { on: false, busy: false, layers: [], legendEl: null, hidden: new Set(), macroLayers: new Map() };
+    const mcv = { on: false, busy: false, layers: [], legendEl: null, hidden: new Set(), macroLayers: new Map(), badgeReg: new Map() };
     function mcvClear() {
         mcv.layers.forEach(l => { try { l.remove(); } catch (e) {} });
         mcv.layers = [];
         mcv.macroLayers = new Map();
+        mcv.badgeReg = new Map();
         try { mcvClearRoutes(); } catch (e) {}
         try { mcvCloseOrderPanel(); } catch (e) {}
         if (mcv.legendEl) { try { mcv.legendEl.remove(); } catch (e) {} mcv.legendEl = null; }
+    }
+    // Badge inner HTML (shared by mcvDraw + the ⇅ live preview). Edit mode
+    // (⇅ panel open for this macro) arms the badge as a live M2 target:
+    // white ring + glow + pointer-events so the document-capture contextmenu
+    // handler can renumber it in place.
+    function mcvBadgeHtml(missionId, padId, n, col, edit) {
+        return `<div data-aim-mo-pad="${padId}" data-aim-mo-mid="${missionId}" style="pointer-events:${edit ? 'auto' : 'none'};cursor:${edit ? 'context-menu' : 'default'};width:19px;height:19px;border-radius:50%;background:${col};color:#10131a;font:800 11px/19px monospace;text-align:center;border:1.5px solid ${edit ? '#fff' : '#10131a'};box-shadow:${edit ? '0 0 7px 2px rgba(122,223,230,0.85)' : '0 1px 4px rgba(0,0,0,0.7)'};">${n}</div>`;
+    }
+    // Renumber a macro's map badges to a given pad order — the ⇅ panel's
+    // LIVE preview (edit=true also arms them for M2), and the restore path
+    // on panel close (edit=false, original mc.pads order). setIcon works on
+    // hidden macros too (Leaflet stores the icon for the next add).
+    function mcvPreviewOrder(missionId, orderPads, edit) {
+        const reg = mcv.badgeReg.get(missionId);
+        const L = composerGetL();
+        if (!reg || !L) return;
+        orderPads.forEach((a, n) => {
+            const r = reg.get(a.id);
+            if (!r) return;
+            try {
+                r.mk.setIcon(L.divIcon({
+                    className: 'aim-mb-rng-chip',
+                    html: mcvBadgeHtml(missionId, a.id, n + 1, r.col, edit),
+                    iconSize: [19, 19], iconAnchor: [r.ax, 10],
+                }));
+                const ge = r.mk.getElement ? r.mk.getElement() : r.mk._icon;
+                if (ge) ge.style.pointerEvents = edit ? 'auto' : '';
+            } catch (e) {}
+        });
     }
     // mission → distinct pads its located steps touch (inside or ≤150 ft of
     // an asset ring; bbox-prefiltered)
@@ -5614,14 +5644,17 @@
                     // macro's color. Pads shared by two macros get side-by-side
                     // badges (x-offset per macro index). Click-through.
                     const c2 = genCentroid(a.ring);
-                    keep(L.marker([c2.lat, c2.lng], {
+                    const bm = keep(L.marker([c2.lat, c2.lng], {
                         icon: L.divIcon({
                             className: 'aim-mb-rng-chip',
-                            html: `<div style="pointer-events:none;width:19px;height:19px;border-radius:50%;background:${col};color:#10131a;font:800 11px/19px monospace;text-align:center;border:1.5px solid #10131a;box-shadow:0 1px 4px rgba(0,0,0,0.7);">${pi + 1}</div>`,
+                            html: mcvBadgeHtml(mc.mission.id, a.id, pi + 1, col, false),
                             iconSize: [19, 19], iconAnchor: [10 - (i % 3) * 14, 10],
                         }),
                         interactive: false, keyboard: false, zIndexOffset: -300,
                     }));
+                    // v2.64: registry so the ⇅ panel can live-renumber badges
+                    if (!mcv.badgeReg.has(mc.mission.id)) mcv.badgeReg.set(mc.mission.id, new Map());
+                    mcv.badgeReg.get(mc.mission.id).set(a.id, { mk: bm, col, ax: 10 - (i % 3) * 14 });
                 } catch (e) {}
                 if (!deepest) deepest = a;   // first pad = mission's first stop
             });
@@ -6318,13 +6351,71 @@
     // across separate visits) and applies a chosen order via the same rails
     // as ♻ (consolidate blocks, backup, save in place, verify, redraw).
     const MCV_ORDER_PANEL_ID = 'aim-mb-mcv-order';
-    function mcvCloseOrderPanel() { const old = document.getElementById(MCV_ORDER_PANEL_ID); if (old) old.remove(); }
+    // ⇅ edit-mode draft: panel rows AND map badges render from moState.order.
+    let moState = null;
+    function mcvCloseOrderPanel() {
+        const old = document.getElementById(MCV_ORDER_PANEL_ID); if (old) old.remove();
+        moCloseBadgeRenumber();
+        try { document.removeEventListener('contextmenu', moContextHandler, true); } catch (e) {}
+        if (moState) {
+            // restore the flown numbers + disarm the badges. On the apply
+            // path mcvClear already emptied badgeReg, so this no-ops there.
+            try { mcvPreviewOrder(moState.missionId, moState.mc.pads, false); } catch (e) {}
+            moState = null;
+        }
+    }
+    // M2 on an armed badge (⇅ panel open) → renumber popup at the cursor.
+    // Document-CAPTURE so it runs before pcm's container-capture handler and
+    // the Asset Inspector's window-bubble inspector; stopImmediatePropagation
+    // keeps the pad underneath from reacting.
+    function moContextHandler(e) {
+        if (!moState) return;
+        const t = (e.target && e.target.closest) ? e.target.closest('[data-aim-mo-pad]') : null;
+        if (!t) return;
+        if (String(t.getAttribute('data-aim-mo-mid')) !== String(moState.missionId)) return;
+        e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+        const padId = Number(t.getAttribute('data-aim-mo-pad')) || t.getAttribute('data-aim-mo-pad');
+        moOpenBadgeRenumber(padId, e.clientX + 8, e.clientY + 8);
+    }
+    const MO_RENUM_ID = 'aim-mb-mo-renum';
+    function moCloseBadgeRenumber() { const old = document.getElementById(MO_RENUM_ID); if (old) old.remove(); }
+    function moOpenBadgeRenumber(padId, x, y) {
+        moCloseBadgeRenumber();
+        const st = moState; if (!st) return;
+        const idx = st.order.findIndex(a => a.id === padId);
+        if (idx < 0) return;
+        const a = st.order[idx];
+        const el = document.createElement('div');
+        el.id = MO_RENUM_ID;
+        el.style.cssText = `position:fixed;left:${Math.min(x, (window.innerWidth || 1200) - 210)}px;top:${Math.min(y, (window.innerHeight || 700) - 70)}px;z-index:2147483602;`
+            + 'background:#161a20;border:1px solid #7adfe6;border-radius:6px;padding:7px 9px;color:#e6e6e6;'
+            + 'font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 6px 20px rgba(0,0,0,0.8);display:flex;align-items:center;gap:6px;';
+        el.innerHTML = `<span style="max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#7adfe6;font-weight:800;" title="${escapeHtml(String(a.name || ''))}">${escapeHtml(String(a.name || ('pad ' + a.id)))}</span>
+            <input data-mo-renum type="number" min="1" max="${st.order.length}" value="${idx + 1}" style="width:52px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:4px;padding:2px 5px;">
+            <button data-mo-renum-go style="padding:2px 9px;background:#5fff5f;border:none;color:#04220a;border-radius:4px;cursor:pointer;font-weight:800;">Set</button>
+            <span data-mo-renum-x style="cursor:pointer;color:#888;font-weight:800;">✕</span>`;
+        document.body.appendChild(el);
+        const inp = el.querySelector('[data-mo-renum]');
+        const go = () => {
+            const st2 = moState; if (!st2) { moCloseBadgeRenumber(); return; }
+            const from = st2.order.findIndex(p => p.id === padId);
+            if (from < 0) { moCloseBadgeRenumber(); return; }
+            const v = Math.max(1, Math.min(st2.order.length, Number(inp.value) || (from + 1)));
+            const moved = st2.order.splice(from, 1)[0];
+            st2.order.splice(v - 1, 0, moved);
+            moCloseBadgeRenumber();
+            st2.render();
+        };
+        el.querySelector('[data-mo-renum-go]').onclick = go;
+        inp.onkeydown = (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); go(); } else if (ev.key === 'Escape') moCloseBadgeRenumber(); };
+        el.querySelector('[data-mo-renum-x]').onclick = moCloseBadgeRenumber;
+        try { inp.focus(); inp.select(); } catch (e) {}
+    }
     function mcvOpenOrderPanel(missionId) {
         mcvCloseOrderPanel();
         const data = mcv.data;
         const mc = data && data.det && data.det.macros.find(x => x.mission.id === missionId);
         if (!mc) { showToast('Macro not found — re-toggle 🧩.', '#ff9800', 3000); return; }
-        let order = mc.pads.slice();
         const stepsOf = id => mc.blocks.reduce((s, b) => s + (b.aId === id ? b.steps.length : 0), 0);
         const visitsOf = id => mc.blocks.reduce((n, b) => n + (b.aId === id ? 1 : 0), 0);
         const leadN = (mc.blocks[0] && mc.blocks[0].aId == null) ? mc.blocks[0].steps.length : 0;
@@ -6334,7 +6425,11 @@
             + 'background:rgba(16,19,26,0.96);border:1px solid #7adfe6;border-radius:8px;padding:9px 11px;color:#e6e6e6;'
             + 'font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 6px 22px rgba(0,0,0,0.7);';
         let dragIdx = null;
+        moState = { missionId, mc, order: mc.pads.slice(), render: null };
         const render = () => {
+            const order = moState.order;
+            // live badge preview — the map renumbers as you move rows
+            mcvPreviewOrder(missionId, order, true);
             const changed = order.map(a => a.id).join(',') !== mc.pads.map(a => a.id).join(',');
             const rows = order.map((a, i) => {
                 const v = visitsOf(a.id);
@@ -6352,14 +6447,14 @@
                     <b style="color:#7adfe6;">⇅ Pad order — ${escapeHtml(String(mc.mission.name || ''))}</b>
                     <span data-mo-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span>
                 </div>
-                <div style="color:#789;font-size:10px;margin-bottom:4px;">The order actually FLOWN (same numbers as the map badges). Drag rows or ▲▼, then Apply — each pad's steps move as one intact group.${leadN ? ` ${leadN} pre-pad step(s) stay first.` : ''}</div>
+                <div style="color:#789;font-size:10px;margin-bottom:4px;">The order actually FLOWN — the map badges renumber LIVE as you move rows. Drag rows, ▲▼, or <b style="color:#9ad;">M2 a glowing badge on the map</b> to type its new number. Apply saves — each pad's steps move as one intact group.${leadN ? ` ${leadN} pre-pad step(s) stay first.` : ''}</div>
                 ${rows}
                 <div style="display:flex;align-items:center;gap:8px;margin-top:7px;">
                     <button data-mo-reset ${changed ? '' : 'disabled'} style="padding:3px 9px;background:rgba(255,255,255,0.08);border:1px solid #2a3340;color:${changed ? '#9ad' : '#456'};border-radius:5px;cursor:pointer;font-size:10px;">↺ Reset</button>
                     <button data-mo-apply ${changed ? '' : 'disabled'} style="margin-left:auto;padding:4px 12px;background:${changed ? '#5fff5f' : '#2a3340'};border:none;color:${changed ? '#04220a' : '#567'};border-radius:5px;cursor:pointer;font-weight:800;">💾 Apply order</button>
                 </div>`;
             el.querySelector('[data-mo-x]').onclick = mcvCloseOrderPanel;
-            el.querySelector('[data-mo-reset]').onclick = () => { order = mc.pads.slice(); render(); };
+            el.querySelector('[data-mo-reset]').onclick = () => { moState.order = mc.pads.slice(); render(); };
             el.querySelector('[data-mo-apply]').onclick = async () => {
                 const ids = order.map(a => a.id);
                 const ok = await mcvApplyOrder(mc, ids,
@@ -6385,8 +6480,10 @@
                 };
             });
         };
+        moState.render = render;
         render();
         document.body.appendChild(el);
+        document.addEventListener('contextmenu', moContextHandler, true);
     }
 
     // 👁 route comparison (v2.44) — draw a macro's CURRENT order (solid, the
