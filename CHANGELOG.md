@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-21 — 🪄 v2.69: standoff doctrine tuned to ideal-100 (Mission Bank Tools latest — dev only)
+
+Live review round: the re-home chooser was aiming at the middle of the 100–200 band (~150 ft), picking 159–195 ft homes when navs near 100 existed. Tuned to the real doctrine: **100 ft is ideal, 90 is the floor** — snapshots at 90–99 ft stop flagging entirely, and a flagged snapshot re-homes to the nav closest to 100 with the farther side winning (closest above 100; only if nothing sits above 100, the best of 90–99). New `ideal` knob in the panel footer alongside the band.
+
 ## 2026-08-21 — 🪄 v2.68: full change preview (Mission Bank Tools latest — dev only)
 
 👁 in the 🪄 panel now previews the whole change, not just the two route lines (which overlap and show nothing when the order is kept): white numbered badges on every nav showing the NEW flight order, a red-dashed→green-solid sightline pair for every ticked snapshot re-home (old vantage vs new — the part worth eyeballing before commit), and red ✕ marks on duplicates ticked for removal. The preview live-updates as fixes are ticked and unticked.

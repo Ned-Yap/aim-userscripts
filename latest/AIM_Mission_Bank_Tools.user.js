@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.68
+// @version      2.69
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.68';
+    const SCRIPT_VERSION = '2.69';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5720,7 +5720,7 @@
                     // v2.63: ⇅ manual pad order — always available
                     const orderBtn = `<button data-mcv-order="${mc.mission.id}" title="⇅ See + hand-edit this macro's pad visit order (the order actually flown — same numbers as the badges). Drag rows, Apply saves in place with backup + verify." style="padding:0 5px;background:rgba(122,223,230,0.12);border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">⇅</button>`;
                     // v2.66: 🪄 step optimizer (feature #244) — always available
-                    const stoBtn = `<button data-mcv-sto="${mc.mission.id}" data-mcv-sto-col="${COLORS2[i % COLORS2.length]}" title="🪄 Step Optimizer — reorder the navs/steps INSIDE this macro for the shortest legal route (intertwined pads interleave), fix snapshot⇄nav standoff (100–200 ft, err farther), rebuild scrambled wraps, drop stacked duplicates. Preview first; Apply saves in place with backup + verify." style="padding:0 5px;background:rgba(195,157,255,0.12);border:1px solid rgba(195,157,255,0.45);color:#c39dff;border-radius:4px;cursor:pointer;font-size:10px;">🪄</button>`;
+                    const stoBtn = `<button data-mcv-sto="${mc.mission.id}" data-mcv-sto-col="${COLORS2[i % COLORS2.length]}" title="🪄 Step Optimizer — reorder the navs/steps INSIDE this macro for the shortest legal route (intertwined pads interleave), fix snapshot⇄nav standoff (ideal 100 ft, min 90, farther side wins), rebuild scrambled wraps, drop stacked duplicates. Preview first; Apply saves in place with backup + verify." style="padding:0 5px;background:rgba(195,157,255,0.12);border:1px solid rgba(195,157,255,0.45);color:#c39dff;border-radius:4px;cursor:pointer;font-size:10px;">🪄</button>`;
                     return `<div data-mcv-row="${mc.mission.id}" style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:${vis ? 1 : 0.38};"><input type="checkbox" data-mcv-vis="${mc.mission.id}" ${vis ? 'checked' : ''} title="Show/hide this macro on the map" style="margin:0;cursor:pointer;accent-color:${COLORS2[i % COLORS2.length]};"><span data-mcv-solo="${mc.mission.id}" title="Solo — show ONLY this macro (click again to show all)" style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;cursor:pointer;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${reBtn}${orderBtn}${stoBtn}${splitBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine ? auditLine.replace('style="', `style="opacity:${vis ? 1 : 0.38};`) : ''}`;
                 }).join('')
                 : '<div style="color:#888;">No macro missions yet (≥2 pads in one mission).</div>')
@@ -6376,7 +6376,9 @@
     // saveApp in place, fresh-fetch verify, overlay refresh.
     const STO_CFG_KEY = 'aim-mb-sto-cfg';
     function stoCfg() {
-        const d = { clusterFt: 400, dupFt: 15, bandMinFt: 100, bandMaxFt: 200, standoffMaxFt: 250, legalOverFt: 600 };
+        // idealFt 100 / bandMinFt 90 (v2.69, user live-tune): 100 ft is the
+        // IDEAL standoff, 90–99 is still fine (no flag), under 90 crops.
+        const d = { clusterFt: 400, dupFt: 15, idealFt: 100, bandMinFt: 90, bandMaxFt: 200, standoffMaxFt: 250, legalOverFt: 600 };
         const s = gmGet(STO_CFG_KEY, null);
         const o = Object.assign({}, d, (s && typeof s === 'object') ? s : {});
         Object.keys(d).forEach(k => { const v = Number(o[k]); o[k] = (isFinite(v) && v > 0) ? v : d[k]; });
@@ -6543,19 +6545,27 @@
                 }
             }
         });
-        // snapshot standoff vs its owner nav (100–200 ft band; err farther)
+        // snapshot standoff vs its owner nav. Doctrine (v2.69 live-tune):
+        // IDEAL = idealFt (100). 90–99 is fine, under bandMinFt (90) crops →
+        // flag. Replacement nav = as close to 100 as possible, farther side
+        // winning: among navs ≥ idealFt take the CLOSEST to it; only when
+        // nothing sits above 100 take the best one in the 90–100 range.
+        // (The old chooser aimed at mid-band ~150 ft — live screenshot showed
+        // it picking 159–195 ft homes when ~110 ft navs existed.)
         const standoff = [];   // {uid, d, alt: unitIdx|null, altD}
         parsed.units.forEach((u, ui) => u.bundles.forEach(b => {
             const d = mbApproxMeters(u.nav.location.lat, u.nav.location.lng, b.snap.location.lat, b.snap.location.lng) * STO_FT;
             if (d >= cfg.bandMinFt && d <= cfg.standoffMaxFt) return;
-            let alt = null, altD = 0;
+            let altAbove = null, altAboveD = 0, altBelow = null, altBelowD = 0;
             parsed.units.forEach((u2, ui2) => {
                 if (ui2 === ui) return;
                 const d2 = mbApproxMeters(u2.nav.location.lat, u2.nav.location.lng, b.snap.location.lat, b.snap.location.lng) * STO_FT;
                 if (d2 < cfg.bandMinFt || d2 > cfg.bandMaxFt) return;
-                const mid = (cfg.bandMinFt + cfg.bandMaxFt) / 2;
-                if (alt === null || Math.abs(d2 - mid) < Math.abs(altD - mid)) { alt = ui2; altD = d2; }
+                if (d2 >= cfg.idealFt) { if (altAbove === null || d2 < altAboveD) { altAbove = ui2; altAboveD = d2; } }
+                else { if (altBelow === null || d2 > altBelowD) { altBelow = ui2; altBelowD = d2; } }
             });
+            const alt = altAbove !== null ? altAbove : altBelow;
+            const altD = altAbove !== null ? altAboveD : altBelowD;
             standoff.push({ uid: b.uid, d, alt, altD, tooClose: d < cfg.bandMinFt });
         }));
         // pad per unit (≤150 ft of a macro pad ring), transit navs travel with
@@ -6880,7 +6890,7 @@
                 + an.dupBundles.map(d => row(`<label style="cursor:pointer;margin-left:8px;"><input type="checkbox" data-sto-dropb="${escapeHtml(d.uid)}" ${stt.dropBundles.has(d.uid) ? 'checked' : ''} style="accent-color:#ff8ad2;"> drop duplicate snapshot (${escapeHtml(d.uid)}, twin of ${escapeHtml(d.ofUid)})</label>`)).join(''));
         }
         if (an.standoff.length) {
-            secs.push(`<b style="color:#c39dff;">Snapshot standoff (target ${cfg.bandMinFt}–${cfg.bandMaxFt} ft — err farther, never closer)</b>`
+            secs.push(`<b style="color:#c39dff;">Snapshot standoff (ideal ${cfg.idealFt} ft, min ${cfg.bandMinFt} — nearest-to-${cfg.idealFt}, farther side wins)</b>`
                 + an.standoff.map(s => {
                     const [ui] = s.uid.split(':').map(Number);
                     if (s.alt === null) return row(`<span style="color:#93835e;margin-left:8px;">snap ${escapeHtml(s.uid)} @ ${s.d.toFixed(0)} ft from its nav (${s.tooClose ? 'too close' : 'far'}) — no in-band nav available, left as-is</span>`);
@@ -6899,7 +6909,7 @@
             + `<button data-sto-prev title="Draw the full change on the map: current route solid vs proposed dashed white, NEW flight-order numbers on every nav, red→green sightlines for each ticked snapshot re-home (old vs new vantage), red ✕ on dropped duplicates. Live-updates as you tick fixes." style="padding:3px 9px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:5px;cursor:pointer;">👁 Preview changes</button>`
             + `<button data-sto-apply style="padding:3px 10px;background:rgba(95,255,95,0.13);border:1px solid rgba(95,255,95,0.5);color:#5fff5f;border-radius:5px;cursor:pointer;font-weight:700;">💾 Apply in place</button>`
             + `<span style="margin-left:auto;color:#567;">backup + verify</span></div>`;
-        body += `<div style="display:flex;gap:5px;align-items:center;margin-top:7px;font-size:10px;color:#789;flex-wrap:wrap;">cluster <input data-sto-cfg="clusterFt" type="number" value="${cfg.clusterFt}" style="width:42px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft · dup <input data-sto-cfg="dupFt" type="number" value="${cfg.dupFt}" style="width:32px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft · band <input data-sto-cfg="bandMinFt" type="number" value="${cfg.bandMinFt}" style="width:38px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">–<input data-sto-cfg="bandMaxFt" type="number" value="${cfg.bandMaxFt}" style="width:38px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft (re-analyzes)</div>`;
+        body += `<div style="display:flex;gap:5px;align-items:center;margin-top:7px;font-size:10px;color:#789;flex-wrap:wrap;">cluster <input data-sto-cfg="clusterFt" type="number" value="${cfg.clusterFt}" style="width:42px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft · dup <input data-sto-cfg="dupFt" type="number" value="${cfg.dupFt}" style="width:32px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft · ideal <input data-sto-cfg="idealFt" type="number" value="${cfg.idealFt}" style="width:38px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft · band <input data-sto-cfg="bandMinFt" type="number" value="${cfg.bandMinFt}" style="width:38px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">–<input data-sto-cfg="bandMaxFt" type="number" value="${cfg.bandMaxFt}" style="width:38px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft (re-analyzes)</div>`;
         el.innerHTML = body;
         document.body.appendChild(el);
         sto.panelEl = el;
