@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.66
+// @version      2.67
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.66';
+    const SCRIPT_VERSION = '2.67';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -6573,118 +6573,129 @@
             });
             u.padId = best ? best.a.id : (ui > 0 ? parsed.units[ui - 1].padId : (mc.pads[0] && mc.pads[0].id));
         });
-        // clusters: union-find over pads by min unit-nav distance
+        // clusters + solve — tried at TWO radii, and the CURRENT order is a
+        // scored candidate too (v2.67). Live NE 1-2 test: the user's manual
+        // interleave (Rivers 1974JH sandwiched INSIDE the Jack Mohr run) BEAT
+        // contiguous clusters under legal routing by 3% — 1974JH sat just
+        // outside the 400 ft radius, so the solver wasn't allowed to consider
+        // that shape. 2× radius puts it in the search space, and keeping the
+        // current order as a candidate guarantees the proposal is NEVER worse
+        // than what's already flown.
         const padIds = mc.pads.map(a => a.id);
         const unitsByPad = new Map();
         parsed.units.forEach((u, ui) => { if (!unitsByPad.has(u.padId)) unitsByPad.set(u.padId, []); unitsByPad.get(u.padId).push(ui); });
-        const parent = padIds.map((_, i) => i);
-        const find = i => parent[i] === i ? i : (parent[i] = find(parent[i]));
-        const clM = cfg.clusterFt / STO_FT;
-        for (let i = 0; i < padIds.length; i++) for (let j = i + 1; j < padIds.length; j++) {
-            const A = unitsByPad.get(padIds[i]) || [], B = unitsByPad.get(padIds[j]) || [];
-            let minD = Infinity;
-            A.forEach(ua => B.forEach(ub => {
-                const la = parsed.units[ua].nav.location, lb = parsed.units[ub].nav.location;
-                minD = Math.min(minD, mbApproxMeters(la.lat, la.lng, lb.lat, lb.lng));
-            }));
-            if (minD < clM) parent[find(i)] = find(j);
-        }
-        const clMap = new Map();
-        padIds.forEach((pid, i) => { const r = find(i); if (!clMap.has(r)) clMap.set(r, []); clMap.get(r).push(pid); });
         const padName = new Map(mc.pads.map(a => [a.id, a.name || ('pad ' + a.id)]));
-        const clusters = Array.from(clMap.values())
-            .map(pids => ({ pids, name: pids.map(p => padName.get(p)).join(' + '), unitIdx: pids.flatMap(p => unitsByPad.get(p) || []) }))
-            .filter(c => c.unitIdx.length > 0);
-        // cluster depth from base — trusted rng solve when available
         let byAsset = null;
         try { const sol = rngSolveCached(data.ent); byAsset = new Map(sol.results.map(r => [r.asset.id, r])); } catch (e) {}
         const base = data.ent.base || null;
-        clusters.forEach(c => {
-            let depth = 0;
-            c.pids.forEach(pid => {
-                const r = byAsset && byAsset.get(pid);
-                if (r && r.status === 'ok') depth = Math.max(depth, r.worstFt);
-                else if (base) (unitsByPad.get(pid) || []).forEach(ui => {
-                    depth = Math.max(depth, mbApproxMeters(base.lat, base.lng, parsed.units[ui].nav.location.lat, parsed.units[ui].nav.location.lng) * STO_FT);
-                });
-            });
-            c.depth = depth;
-        });
-        // solve
         const st = { cfg, built: mcvRouteBuilt(), distCache: new Map(), fallbacks: 0 };
-        const solvedCl = clusters.map(c => {
-            const pts = c.unitIdx.map(ui => parsed.units[ui].nav.location);
-            const n = pts.length;
-            const D = Array.from({ length: n }, (_, i) => pts.map(p => stoDistM(st, pts[i], p)));
-            const hk = n <= 12 ? stoHeldKarp(n, D) : stoHeurPath(n, D);
-            // deepest nav of the cluster — the doctrine start anchor. An open
-            // path's cost is direction-symmetric, so without this the solver
-            // happily flies near→far (harness caught it on NE 1-2: it started
-            // at the CLOSEST pad and finished at PEUGH, the deepest).
-            let deepLocal = 0, dd = -1;
-            pts.forEach((p, i) => { const d = base ? mbApproxMeters(base.lat, base.lng, p.lat, p.lng) : 0; if (d > dd) { dd = d; deepLocal = i; } });
-            return Object.assign({}, c, { pts, hk, exact: n <= 12, deepLocal });
-        });
-        const startCi = solvedCl.reduce((bi, c, i) => c.depth > solvedCl[bi].depth ? i : bi, 0);
-        const chain = (order) => {
-            let states = null;
-            for (const ci of order) {
-                const c = solvedCl[ci], n = c.pts.length, next = [];
-                for (let j = 0; j < n; j++) {
-                    let best = Infinity, from = null;
-                    for (let i2 = 0; i2 < n; i2++) {
-                        const intra = c.hk.res[i2][j];
-                        if (intra === Infinity) continue;
-                        // first cluster starts at its DEEPEST nav (far→near SOP)
-                        if (!states) { if (i2 !== c.deepLocal) continue; if (intra < best) { best = intra; from = { entry: i2, prev: null }; } }
-                        else states.forEach(stt => {
-                            const v = stt.cost + stoDistM(st, stt.pt, c.pts[i2]) + intra;
-                            if (v < best) { best = v; from = { entry: i2, prev: stt }; }
-                        });
-                    }
-                    next.push({ cost: best, pt: c.pts[j], ci, exit: j, from });
-                }
-                states = next;
-            }
-            return states.reduce((a, b) => a.cost < b.cost ? a : b);
-        };
-        const rest = solvedCl.map((_, i) => i).filter(i => i !== startCi);
-        let bestEnd = null;
-        if (rest.length <= 6) {
-            const perms = (arr) => arr.length <= 1 ? [arr]
-                : arr.flatMap((x, i) => perms(arr.slice(0, i).concat(arr.slice(i + 1))).map(p => [x].concat(p)));
-            perms(rest).forEach(p => {
-                const end = chain([startCi].concat(p));
-                if (!bestEnd || end.cost < bestEnd.cost) bestEnd = end;
-            });
-        } else {
-            // greedy nearest-cluster chain from the start cluster
-            const centro = c => { let la = 0, lg = 0; c.pts.forEach(p => { la += p.lat; lg += p.lng; }); return { lat: la / c.pts.length, lng: lg / c.pts.length }; };
-            const cs = solvedCl.map(centro);
-            const left = new Set(rest); const order = [startCi];
-            while (left.size) {
-                let best = null, bd = Infinity;
-                left.forEach(i => { const d = mbApproxMeters(cs[order[order.length - 1]].lat, cs[order[order.length - 1]].lng, cs[i].lat, cs[i].lng); if (d < bd) { bd = d; best = i; } });
-                order.push(best); left.delete(best);
-            }
-            bestEnd = chain(order);
-        }
-        // reconstruct proposed unit order
-        const proposed = [];
-        const walk = [];
-        let cur2 = bestEnd;
-        while (cur2) { walk.unshift(cur2); cur2 = cur2.from && cur2.from.prev; }
-        walk.forEach(stp => {
-            const c = solvedCl[stp.ci];
-            const path = c.hk.trace[stp.from.entry][stp.exit] || [];
-            path.forEach(k => proposed.push(c.unitIdx[k]));
-        });
-        // current + proposed nav path lengths on the SAME distance engine
         const seqLen = (idxArr) => { let t = 0; for (let i = 1; i < idxArr.length; i++) t += stoDistM(st, parsed.units[idxArr[i - 1]].nav.location, parsed.units[idxArr[i]].nav.location); return t; };
+        const solveAt = (clusterFtVal) => {
+            const parent = padIds.map((_, i) => i);
+            const find = i => parent[i] === i ? i : (parent[i] = find(parent[i]));
+            const clM = clusterFtVal / STO_FT;
+            for (let i = 0; i < padIds.length; i++) for (let j = i + 1; j < padIds.length; j++) {
+                const A = unitsByPad.get(padIds[i]) || [], B = unitsByPad.get(padIds[j]) || [];
+                let minD = Infinity;
+                A.forEach(ua => B.forEach(ub => {
+                    const la = parsed.units[ua].nav.location, lb = parsed.units[ub].nav.location;
+                    minD = Math.min(minD, mbApproxMeters(la.lat, la.lng, lb.lat, lb.lng));
+                }));
+                if (minD < clM) parent[find(i)] = find(j);
+            }
+            const clMap = new Map();
+            padIds.forEach((pid, i) => { const r = find(i); if (!clMap.has(r)) clMap.set(r, []); clMap.get(r).push(pid); });
+            const clusters = Array.from(clMap.values())
+                .map(pids => ({ pids, name: pids.map(p => padName.get(p)).join(' + '), unitIdx: pids.flatMap(p => unitsByPad.get(p) || []) }))
+                .filter(c => c.unitIdx.length > 0);
+            // cluster depth from base — trusted rng solve when available
+            clusters.forEach(c => {
+                let depth = 0;
+                c.pids.forEach(pid => {
+                    const r = byAsset && byAsset.get(pid);
+                    if (r && r.status === 'ok') depth = Math.max(depth, r.worstFt);
+                    else if (base) (unitsByPad.get(pid) || []).forEach(ui => {
+                        depth = Math.max(depth, mbApproxMeters(base.lat, base.lng, parsed.units[ui].nav.location.lat, parsed.units[ui].nav.location.lng) * STO_FT);
+                    });
+                });
+                c.depth = depth;
+            });
+            const solvedCl = clusters.map(c => {
+                const pts = c.unitIdx.map(ui => parsed.units[ui].nav.location);
+                const n = pts.length;
+                const D = Array.from({ length: n }, (_, i) => pts.map(p => stoDistM(st, pts[i], p)));
+                const hk = n <= 12 ? stoHeldKarp(n, D) : stoHeurPath(n, D);
+                // deepest nav of the cluster — the doctrine start anchor. An
+                // open path's cost is direction-symmetric, so without this the
+                // solver happily flies near→far (harness caught it on NE 1-2).
+                let deepLocal = 0, dd = -1;
+                pts.forEach((p, i) => { const d = base ? mbApproxMeters(base.lat, base.lng, p.lat, p.lng) : 0; if (d > dd) { dd = d; deepLocal = i; } });
+                return Object.assign({}, c, { pts, hk, exact: n <= 12, deepLocal });
+            });
+            const startCi = solvedCl.reduce((bi, c, i) => c.depth > solvedCl[bi].depth ? i : bi, 0);
+            const chain = (order) => {
+                let states = null;
+                for (const ci of order) {
+                    const c = solvedCl[ci], n = c.pts.length, next = [];
+                    for (let j = 0; j < n; j++) {
+                        let best = Infinity, from = null;
+                        for (let i2 = 0; i2 < n; i2++) {
+                            const intra = c.hk.res[i2][j];
+                            if (intra === Infinity) continue;
+                            // first cluster starts at its DEEPEST nav (far→near SOP)
+                            if (!states) { if (i2 !== c.deepLocal) continue; if (intra < best) { best = intra; from = { entry: i2, prev: null }; } }
+                            else states.forEach(stt => {
+                                const v = stt.cost + stoDistM(st, stt.pt, c.pts[i2]) + intra;
+                                if (v < best) { best = v; from = { entry: i2, prev: stt }; }
+                            });
+                        }
+                        next.push({ cost: best, pt: c.pts[j], ci, exit: j, from });
+                    }
+                    states = next;
+                }
+                return states.reduce((a, b) => a.cost < b.cost ? a : b);
+            };
+            const rest = solvedCl.map((_, i) => i).filter(i => i !== startCi);
+            let bestEnd = null;
+            if (rest.length <= 6) {
+                const perms = (arr) => arr.length <= 1 ? [arr]
+                    : arr.flatMap((x, i) => perms(arr.slice(0, i).concat(arr.slice(i + 1))).map(p => [x].concat(p)));
+                perms(rest).forEach(p => {
+                    const end = chain([startCi].concat(p));
+                    if (!bestEnd || end.cost < bestEnd.cost) bestEnd = end;
+                });
+            } else {
+                // greedy nearest-cluster chain from the start cluster
+                const centro = c => { let la = 0, lg = 0; c.pts.forEach(p => { la += p.lat; lg += p.lng; }); return { lat: la / c.pts.length, lng: lg / c.pts.length }; };
+                const cs = solvedCl.map(centro);
+                const left = new Set(rest); const order = [startCi];
+                while (left.size) {
+                    let best = null, bd = Infinity;
+                    left.forEach(i => { const d = mbApproxMeters(cs[order[order.length - 1]].lat, cs[order[order.length - 1]].lng, cs[i].lat, cs[i].lng); if (d < bd) { bd = d; best = i; } });
+                    order.push(best); left.delete(best);
+                }
+                bestEnd = chain(order);
+            }
+            const proposed = [];
+            const walk = [];
+            let cur2 = bestEnd;
+            while (cur2) { walk.unshift(cur2); cur2 = cur2.from && cur2.from.prev; }
+            walk.forEach(stp => {
+                const c = solvedCl[stp.ci];
+                const path = c.hk.trace[stp.from.entry][stp.exit] || [];
+                path.forEach(k => proposed.push(c.unitIdx[k]));
+            });
+            return { proposed, propM: seqLen(proposed), clusters: solvedCl, clusterOrder: walk.map(w => w.ci), startCi, usedFt: clusterFtVal };
+        };
+        const variants = [solveAt(cfg.clusterFt)];
+        try { variants.push(solveAt(cfg.clusterFt * 2)); } catch (e) { console.warn(`${TAG} [sto] 2× cluster variant failed`, e); }
+        const bestV = variants.reduce((a, b) => (b.propM < a.propM ? b : a));
         const curOrder = parsed.units.map((_, i) => i);
         const curM = seqLen(curOrder);
-        const propM = seqLen(proposed);
-        return { m, mc, cfg, parsed, clusters: solvedCl, clusterOrder: walk.map(w => w.ci), startCi,
+        let proposed = bestV.proposed, propM = bestV.propM, keptCurrent = false;
+        if (curM <= propM) { proposed = curOrder; propM = curM; keptCurrent = true; }
+        return { m, mc, cfg, parsed, clusters: bestV.clusters, clusterOrder: bestV.clusterOrder, startCi: bestV.startCi,
+            usedClusterFt: bestV.usedFt, keptCurrent,
             proposed, curM, propM, fallbacks: st.fallbacks, st,
             hasCanon, canonSig, canonTemplate, wrapAnoms, fragUnits, dupUnits, dupBundles, standoff, issues };
     }
@@ -6806,9 +6817,11 @@
         };
         const row = (html) => `<div style="margin:2px 0;">${html}</div>`;
         let body = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><b style="color:#7adfe6;">🪄 Step Optimizer</b><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px;color:#9ad;">${escapeHtml(String(an.m.name || ''))}</span><span data-sto-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`;
-        body += `<div style="font-size:12px;margin-bottom:4px;color:${savedFt > 100 ? '#5fff5f' : '#9ad'};">nav route: <b>${(an.curM * STO_FT / 1000).toFixed(1)}k ft</b> → <b>${(an.propM * STO_FT / 1000).toFixed(1)}k ft</b> (−${(savedFt / 1000).toFixed(1)}k ft, −${pct}%)${an.fallbacks ? ` · <span style="color:#ffb74d;">⚠ ${an.fallbacks} leg(s) off-graph (straight ×1.25)</span>` : ''}</div>`;
-        body += `<div style="color:#789;margin-bottom:6px;">start = deepest cluster · clusters (navs within ${cfg.clusterFt} ft interleave): ${an.clusters.length}${an.clusters.some(c => !c.exact) ? ' · <span style="color:#ffb74d;">large cluster → heuristic path</span>' : ''}</div>`;
-        body += `<div style="margin-bottom:6px;"><b style="color:#7adfe6;">Proposed order</b>${an.clusterOrder.map(ci => `<div style="margin:3px 0 3px 8px;"><span style="color:#ffd54f;">${escapeHtml(an.clusters[ci].name.slice(0, 52))}</span><div style="color:#9ad;margin-left:8px;">${an.proposed.filter(ui => an.clusters[ci].unitIdx.includes(ui)).map(ui => 'N' + an.parsed.units[ui].nav.index_in_app).join(' → ')}</div></div>`).join('')}</div>`;
+        body += an.keptCurrent
+            ? `<div style="font-size:12px;margin-bottom:4px;color:#9ad;">nav route: <b>${(an.curM * STO_FT / 1000).toFixed(1)}k ft</b> — current order already shortest under legal routing ✓ (structure repairs still apply)${an.fallbacks ? ` · <span style="color:#ffb74d;">⚠ ${an.fallbacks} leg(s) off-graph (straight ×1.25)</span>` : ''}</div>`
+            : `<div style="font-size:12px;margin-bottom:4px;color:${savedFt > 100 ? '#5fff5f' : '#9ad'};">nav route: <b>${(an.curM * STO_FT / 1000).toFixed(1)}k ft</b> → <b>${(an.propM * STO_FT / 1000).toFixed(1)}k ft</b> (−${(savedFt / 1000).toFixed(1)}k ft, −${pct}%)${an.fallbacks ? ` · <span style="color:#ffb74d;">⚠ ${an.fallbacks} leg(s) off-graph (straight ×1.25)</span>` : ''}</div>`;
+        body += `<div style="color:#789;margin-bottom:6px;">start = deepest cluster · clusters (navs within ${an.usedClusterFt} ft interleave): ${an.clusters.length}${an.usedClusterFt !== cfg.clusterFt ? ` · <span style="color:#ffd54f;">2× radius won</span>` : ''}${an.clusters.some(c => !c.exact) ? ' · <span style="color:#ffb74d;">large cluster → heuristic path</span>' : ''}</div>`;
+        body += `<div style="margin-bottom:6px;"><b style="color:#7adfe6;">${an.keptCurrent ? 'Order (current, kept)' : 'Proposed order'}</b>${an.clusterOrder.map(ci => `<div style="margin:3px 0 3px 8px;"><span style="color:#ffd54f;">${escapeHtml(an.clusters[ci].name.slice(0, 52))}</span><div style="color:#9ad;margin-left:8px;">${an.proposed.filter(ui => an.clusters[ci].unitIdx.includes(ui)).map(ui => 'N' + an.parsed.units[ui].nav.index_in_app).join(' → ')}</div></div>`).join('')}</div>`;
         const secs = [];
         if (an.wrapAnoms.length || an.fragUnits.length) {
             secs.push(row(`<label style="cursor:pointer;"><input type="checkbox" data-sto-wraps ${stt.fixWraps ? 'checked' : ''} style="accent-color:#5fff5f;"> <b style="color:#ffb74d;">Fix ${an.wrapAnoms.length} scrambled wrap(s)${an.fragUnits.length ? ` + ${an.fragUnits.length} stray fragment(s)` : ''}</b> — rebuild every snapshot's wrap to this mission's own pattern</label>`)
@@ -6894,7 +6907,9 @@
         }
         const savedFt = (an.curM - an.propM) * STO_FT;
         if (!window.confirm(`🪄 Optimize steps of "${m.name}" IN PLACE?\n\n`
-            + `nav route ${(an.curM * STO_FT / 1000).toFixed(1)}k ft → ${(an.propM * STO_FT / 1000).toFixed(1)}k ft (−${(savedFt / 1000).toFixed(1)}k ft)\n`
+            + (an.keptCurrent
+                ? `nav route ${(an.curM * STO_FT / 1000).toFixed(1)}k ft — order unchanged (already shortest), structure repairs only\n`
+                : `nav route ${(an.curM * STO_FT / 1000).toFixed(1)}k ft → ${(an.propM * STO_FT / 1000).toFixed(1)}k ft (−${(savedFt / 1000).toFixed(1)}k ft)\n`)
             + `${rb.acc.navs} navs · ${rb.acc.snaps} snapshots${stt.fixWraps ? ' · wraps rebuilt to the mission pattern' : ''}${stt.dropUnits.size || stt.dropBundles.size ? ` · ${stt.dropUnits.size + stt.dropBundles.size} duplicate(s) removed` : ''}${stt.rehome.size ? ` · ${stt.rehome.size} snapshot(s) re-homed` : ''}\n\n`
             + `Mission id + name unchanged. A JSON backup downloads first.`)) return;
         stoBusy = true;
@@ -6934,7 +6949,7 @@
                 if (!good) console.warn(`${TAG} [sto] verify mismatch — navs ${gotNavs === wantNavs ? 'ok' : 'DIFFER'} · snaps ${snaps2}/${rb.acc.snaps}`);
             }
             showToast(good
-                ? `🪄 "${m.name}" optimized ✓ verified (−${(savedFt / 1000).toFixed(1)}k ft of nav route). Re-check its schedule if one is active.`
+                ? `🪄 "${m.name}" ${an.keptCurrent ? 'repaired ✓ verified (order kept)' : `optimized ✓ verified (−${(savedFt / 1000).toFixed(1)}k ft of nav route)`}. Re-check its schedule if one is active.`
                 : `⚠ "${m.name}" saved but verify mismatched — check the mission + console (backup downloaded).`, good ? '#5fff5f' : '#ff9800', 9000);
             stoClosePanel();
             // refresh 🧩 overlay data (same tail as mcvApplyOrder)
