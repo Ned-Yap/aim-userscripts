@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-21 — 🪄 v2.71: preview legs route legally (Mission Bank Tools latest — dev only)
+
+Live catch on the 👁 preview: legs shorter than 600 ft drew as straight chords slicing across non-FFZ ground. That 600 ft cutoff is a solver-metric speed heuristic (applied equally to both orders being compared), but the preview must show the flown path — every leg now routes along the legal FP/FFZ graph, cached per pair so re-ticking fixes stays instant.
+
 ## 2026-08-21 — 🪄 v2.70: OGI band 90–210 + far-snapshot handling (Mission Bank Tools latest — dev only)
 
 The standoff rules now carry the OGI physics: the camera resolves enough particles per square inch between **90 and 210 ft** (ideal 100), so the band max moved 200 → 210 and the panel says why. Over-band snapshots are flagged as *"far — not necessarily wrong"* (rare but legitimate), suggestion default-unticked — and when no in-band nav exists for one, the tool now still offers the **closest** available nav even if that nav is itself outside 210 ft (closer beats farther for the OGI; previously those were just "left as-is").

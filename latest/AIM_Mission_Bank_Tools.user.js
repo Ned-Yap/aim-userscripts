@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.70
+// @version      2.71
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.70';
+    const SCRIPT_VERSION = '2.71';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -6779,6 +6779,7 @@
         if (sto.panelEl) { try { sto.panelEl.remove(); } catch (e) {} sto.panelEl = null; }
         stoClearPreview();
         sto.state = null;
+        sto.legCache = null;
     }
     // Full CHANGE preview (v2.68, user request): not just the two route lines
     // but everything Apply would do, live-updating as fixes are ticked —
@@ -6792,12 +6793,21 @@
         const L = composerGetL(), map = getLeafletMap();
         if (!L || !map) return;
         const stt = sto.state || { dropUnits: new Set(), dropBundles: new Set(), rehome: new Map() };
+        // v2.71: EVERY leg draws along the legal FP/FFZ route (live catch:
+        // sub-600 ft legs drew as straight chords slicing across red — the
+        // 600 ft shortcut is a solver-metric speed heuristic, not the flown
+        // path, so the preview must not inherit it). Cached per pair.
+        if (!sto.legCache) sto.legCache = new Map();
         const legsOf = (idxArr) => {
             let pts = [];
             for (let i = 1; i < idxArr.length; i++) {
                 const a = an.parsed.units[idxArr[i - 1]].nav.location, b = an.parsed.units[idxArr[i]].nav.location;
-                const straightFt = mbApproxMeters(a.lat, a.lng, b.lat, b.lng) * STO_FT;
-                const leg = (straightFt > an.cfg.legalOverFt && an.st.built) ? (mpvLegalPath(an.st.built, a, b) || [[a.lat, a.lng], [b.lat, b.lng]]) : [[a.lat, a.lng], [b.lat, b.lng]];
+                const ck = stoLocKey(a) + '>' + stoLocKey(b);
+                let leg = sto.legCache.get(ck);
+                if (!leg) {
+                    leg = (an.st.built && mpvLegalPath(an.st.built, a, b)) || [[a.lat, a.lng], [b.lat, b.lng]];
+                    sto.legCache.set(ck, leg);
+                }
                 pts = pts.length ? pts.concat(leg.slice(1)) : leg.slice();
             }
             return pts;
