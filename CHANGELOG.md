@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-21 — 🪄 Step Optimizer (Mission Bank Tools latest v2.66 — dev only, feature #244)
+
+New 🪄 button on every macro row in the 🧩 legend: the step-level sibling of ♻/⇅. Where those move whole pad blocks, 🪄 reorders the **navs inside** the macro for the shortest legal route — pads whose navs intertwine (within 400 ft) merge into one cluster and interleave freely, each cluster is solved as an exact shortest open path, and clusters chain on entry/exit starting from the deepest pad's deepest nav (far→near SOP). Doctrine + tuning decoded from a hand-reordered macro (NE 1-2, site 1350): the manual reorder was good (8.5k ft of nav route vs 8.9k naive) but the solver finds 6.6k (−22%) — the eye can't hold a 12-nav facility. It also repairs what manual reordering breaks: scrambled snapshot wraps rebuilt to the mission's own majority pattern (5 found on NE 1-2), stray wrap fragments dropped, stacked duplicate navs/snapshots flagged for removal, snapshot⇄nav standoff checked against the 100–200 ft band (err farther — under 100 ft crops the asset). Preview panel with 👁 current-vs-proposed routes; Apply saves in place on the ♻ rails (JSON backup, hard nav/snapshot accounting abort, verify-by-refetch). Offline-validated against the real dump; untested live at ship.
+
 ## 2026-08-21 — 🧩 ♻ always visible (Mission Bank Tools latest v2.65 — dev only)
 
 The ♻ replan button no longer hides behind the "saves ≥1 flight or ≥10% distance" gate — feet is the wrong lens for *order*: a huge pad that fills a whole flight by itself costs the same distance anywhere in the sequence, so the audit can honestly say "near-optimal" while the visit numbers look obviously wrong on the map (live example: a 91-step battery pad flown last, mid-route). ♻ now shows on every audited macro, dimmed when the sim rates the current order near-optimal (tooltip explains it may change little in that case — use ⇅ to impose a specific order).

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.65
+// @version      2.66
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.65';
+    const SCRIPT_VERSION = '2.66';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5516,6 +5516,7 @@
         mcv.badgeReg = new Map();
         try { mcvClearRoutes(); } catch (e) {}
         try { mcvCloseOrderPanel(); } catch (e) {}
+        try { stoClosePanel(); } catch (e) {}
         if (mcv.legendEl) { try { mcv.legendEl.remove(); } catch (e) {} mcv.legendEl = null; }
     }
     // Badge inner HTML (shared by mcvDraw + the ⇅ live preview). Edit mode
@@ -5718,7 +5719,9 @@
                     const splitBtn = `<button data-mcv-split="${mc.mission.id}" title="✂ Split this macro into one mission per pad (named after the pad) — create-only, this macro is untouched" style="padding:0 5px;background:rgba(255,138,210,0.12);border:1px solid rgba(255,138,210,0.45);color:#ff8ad2;border-radius:4px;cursor:pointer;font-size:10px;">✂</button>`;
                     // v2.63: ⇅ manual pad order — always available
                     const orderBtn = `<button data-mcv-order="${mc.mission.id}" title="⇅ See + hand-edit this macro's pad visit order (the order actually flown — same numbers as the badges). Drag rows, Apply saves in place with backup + verify." style="padding:0 5px;background:rgba(122,223,230,0.12);border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">⇅</button>`;
-                    return `<div data-mcv-row="${mc.mission.id}" style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:${vis ? 1 : 0.38};"><input type="checkbox" data-mcv-vis="${mc.mission.id}" ${vis ? 'checked' : ''} title="Show/hide this macro on the map" style="margin:0;cursor:pointer;accent-color:${COLORS2[i % COLORS2.length]};"><span data-mcv-solo="${mc.mission.id}" title="Solo — show ONLY this macro (click again to show all)" style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;cursor:pointer;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${reBtn}${orderBtn}${splitBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine ? auditLine.replace('style="', `style="opacity:${vis ? 1 : 0.38};`) : ''}`;
+                    // v2.66: 🪄 step optimizer (feature #244) — always available
+                    const stoBtn = `<button data-mcv-sto="${mc.mission.id}" data-mcv-sto-col="${COLORS2[i % COLORS2.length]}" title="🪄 Step Optimizer — reorder the navs/steps INSIDE this macro for the shortest legal route (intertwined pads interleave), fix snapshot⇄nav standoff (100–200 ft, err farther), rebuild scrambled wraps, drop stacked duplicates. Preview first; Apply saves in place with backup + verify." style="padding:0 5px;background:rgba(195,157,255,0.12);border:1px solid rgba(195,157,255,0.45);color:#c39dff;border-radius:4px;cursor:pointer;font-size:10px;">🪄</button>`;
+                    return `<div data-mcv-row="${mc.mission.id}" style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:${vis ? 1 : 0.38};"><input type="checkbox" data-mcv-vis="${mc.mission.id}" ${vis ? 'checked' : ''} title="Show/hide this macro on the map" style="margin:0;cursor:pointer;accent-color:${COLORS2[i % COLORS2.length]};"><span data-mcv-solo="${mc.mission.id}" title="Solo — show ONLY this macro (click again to show all)" style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;cursor:pointer;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${reBtn}${orderBtn}${stoBtn}${splitBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine ? auditLine.replace('style="', `style="opacity:${vis ? 1 : 0.38};`) : ''}`;
                 }).join('')
                 : '<div style="color:#888;">No macro missions yet (≥2 pads in one mission).</div>')
             + `<div style="color:#ffb74d;margin-top:5px;">⬜ ${det.todo.length} pad(s) with missions, not in any macro</div>`
@@ -5733,6 +5736,7 @@
         el.querySelector('[data-mcv-report]').onclick = () => mcvReport();
         el.querySelectorAll('[data-mcv-reorder]').forEach(b => b.onclick = () => mcvReorder(Number(b.getAttribute('data-mcv-reorder')) || b.getAttribute('data-mcv-reorder')));
         el.querySelectorAll('[data-mcv-order]').forEach(b => b.onclick = () => mcvOpenOrderPanel(Number(b.getAttribute('data-mcv-order')) || b.getAttribute('data-mcv-order')));
+        el.querySelectorAll('[data-mcv-sto]').forEach(b => b.onclick = () => stoOpen(Number(b.getAttribute('data-mcv-sto')) || b.getAttribute('data-mcv-sto'), b.getAttribute('data-mcv-sto-col')));
         el.querySelectorAll('[data-mcv-route]').forEach(b => b.onclick = () => {
             const id = Number(b.getAttribute('data-mcv-route')) || b.getAttribute('data-mcv-route');
             const on = mcvToggleRoute(id, b.getAttribute('data-mcv-route-col'));
@@ -6351,6 +6355,604 @@
         mcvReorderBusy = false;
         return saved;
     }
+    // ── 🪄 STEP OPTIMIZER (feature #244, v2.66) ────────────────────────────
+    // Reorders the steps INSIDE a macro for the shortest legal route — the
+    // granular layer under ♻/⇅ (which only move whole pad blocks). Decoded
+    // from the user's hand-tuned NE 1-2 macro on site 1350 (offline: manual
+    // 8,522 ft of nav path vs 6,605 ft from the exact solve — the eye can't
+    // hold a 12-nav facility). Doctrine (user-ruled 2026-08-21):
+    //   · pure shortest point-to-point; NO RTB/battery in the objective
+    //   · start at the pad furthest from base, then whatever chains shortest
+    //   · intertwined pads (navs within clusterFt) merge into ONE cluster and
+    //     interleave freely; per-cluster exact open-path DP chained on
+    //     entry/exit across clusters (dead-end pads fall out as in-and-out)
+    //   · a snapshot belongs to exactly ONE nav; standoff target 100–200 ft —
+    //     under 100 ft crops the asset, so err FARTHER, never closer
+    //   · duplicates (stacked nav+snap pairs) are defects — detect, don't fly
+    //   · first located step must be a NAV; wrap scrambles get rebuilt to the
+    //     mission's own majority wrap pattern (NOT hardcoded to the emission
+    //     recipe — plain-RGB missions have no wrap and none is invented)
+    // Apply rides the same rails as ♻: JSON backup, hard count sanity,
+    // saveApp in place, fresh-fetch verify, overlay refresh.
+    const STO_CFG_KEY = 'aim-mb-sto-cfg';
+    function stoCfg() {
+        const d = { clusterFt: 400, dupFt: 15, bandMinFt: 100, bandMaxFt: 200, standoffMaxFt: 250, legalOverFt: 600 };
+        const s = gmGet(STO_CFG_KEY, null);
+        const o = Object.assign({}, d, (s && typeof s === 'object') ? s : {});
+        Object.keys(d).forEach(k => { const v = Number(o[k]); o[k] = (isFinite(v) && v > 0) ? v : d[k]; });
+        return o;
+    }
+    const STO_FT = 3.28084;
+    const sto = { panelEl: null, layers: [], state: null };
+
+    // Parse a macro into nav UNITS (nav + its snapshot bundles + stray frags).
+    // A bundle = snapshot + the unlocated steps that follow it (its wrap).
+    // Unlocated steps under a nav BEFORE its first snapshot are "frags" —
+    // wrap shrapnel from manual reorders (real example: N140 on NE 1-2 was
+    // preceded-followed by half a wrap with no snapshot).
+    function stoParse(m) {
+        const ins = Array.isArray(m.instructions) ? m.instructions : [];
+        const takeoff = ins.find(i => i && i.type === 0) || null;
+        const rh = Array.from(ins).reverse().find(i => i && i.type === 99) || null;
+        const lead = [], units = [], orphans = [];
+        let unit = null, bundle = null;
+        ins.forEach(i => {
+            if (!i || i.type === 0 || i.type === 99) return;
+            const located = i.location && typeof i.location.lat === 'number';
+            if (located && i.type === 1) {
+                unit = { nav: i, frags: [], bundles: [], others: [] };
+                units.push(unit); bundle = null;
+            } else if (located && i.type === 6) {
+                bundle = { snap: i, wrap: [] };
+                if (unit) unit.bundles.push(bundle);
+                else orphans.push(bundle);   // snapshot before any nav = problem
+            } else if (located) {
+                // unknown located type — travels with its nav, never reordered internally
+                if (unit) { unit.others.push(i); bundle = null; }
+                else orphans.push({ snap: i, wrap: [], other: true });
+            } else {
+                if (bundle) bundle.wrap.push(i);
+                else if (unit) unit.frags.push(i);
+                else lead.push(i);
+            }
+        });
+        return { takeoff, rh, lead, units, orphans };
+    }
+    function stoWrapSig(bundle) {
+        return bundle.wrap.map(s => `${s.type_name}:${s.value1 === true ? 1 : s.value1 === false ? 0 : s.value1}`).join('|');
+    }
+    function stoLocKey(loc) { return loc.lat.toFixed(7) + ',' + loc.lng.toFixed(7); }
+
+    // Legal-route distance in meters between two points, cached. Short legs
+    // fly straight in practice (route_points on real missions show direct
+    // legs inside a pad, FP corridors between pads) so the router only runs
+    // where it matters — over legalOverFt. Fallback = straight ×1.25, counted
+    // and SURFACED (engraved rule: a silently-degraded distance looks random).
+    function stoDistM(st, a, b) {
+        const k1 = stoLocKey(a) + '>' + stoLocKey(b);
+        const hit = st.distCache.get(k1);
+        if (hit !== undefined) return hit;
+        const straight = mbApproxMeters(a.lat, a.lng, b.lat, b.lng);
+        let d;
+        if (straight * STO_FT <= st.cfg.legalOverFt || !st.built) {
+            d = straight;
+        } else {
+            const path = mpvLegalPath(st.built, a, b);
+            if (path && path.length >= 2) {
+                d = 0;
+                for (let i = 1; i < path.length; i++) d += mbApproxMeters(path[i - 1][0], path[i - 1][1], path[i][0], path[i][1]);
+            } else { d = straight * 1.25; st.fallbacks++; }
+        }
+        st.distCache.set(k1, d);
+        st.distCache.set(stoLocKey(b) + '>' + stoLocKey(a), d);
+        return d;
+    }
+    // exact open path over pts (indices), all (entry,exit) pairs — n ≤ 12
+    function stoHeldKarp(n, D) {
+        const res = Array.from({ length: n }, () => new Array(n).fill(Infinity));
+        const trace = Array.from({ length: n }, () => new Array(n).fill(null));
+        for (let s = 0; s < n; s++) {
+            const dp = Array.from({ length: 1 << n }, () => new Array(n).fill(Infinity));
+            const par = Array.from({ length: 1 << n }, () => new Array(n).fill(-1));
+            dp[1 << s][s] = 0;
+            for (let mask = 0; mask < (1 << n); mask++) {
+                const row = dp[mask];
+                for (let j = 0; j < n; j++) {
+                    const cur = row[j];
+                    if (cur === Infinity) continue;
+                    for (let k = 0; k < n; k++) {
+                        if (mask & (1 << k)) continue;
+                        const nm = mask | (1 << k), v = cur + D[j][k];
+                        if (v < dp[nm][k]) { dp[nm][k] = v; par[nm][k] = j; }
+                    }
+                }
+            }
+            const full = (1 << n) - 1;
+            for (let j = 0; j < n; j++) {
+                res[s][j] = dp[full][j];
+                const path = []; let mask = full, cur = j;
+                while (cur !== -1) { path.push(cur); const p = par[mask][cur]; mask ^= (1 << cur); cur = p; }
+                trace[s][j] = path.reverse();
+            }
+        }
+        return { res, trace };
+    }
+    // NN + 2-opt open path fallback for clusters over the DP cap
+    function stoHeurPath(n, D) {
+        const res = Array.from({ length: n }, () => new Array(n).fill(Infinity));
+        const trace = Array.from({ length: n }, () => new Array(n).fill(null));
+        const len = ord => { let t = 0; for (let i = 1; i < ord.length; i++) t += D[ord[i - 1]][ord[i]]; return t; };
+        for (let s = 0; s < n; s++) {
+            const left = new Set(Array.from({ length: n }, (_, i) => i)); left.delete(s);
+            const ord = [s];
+            while (left.size) {
+                let best = null;
+                left.forEach(k => { if (!best || D[ord[ord.length - 1]][k] < D[ord[ord.length - 1]][best]) best = k; });
+                ord.push(best); left.delete(best);
+            }
+            let cur = ord, curLen = len(cur), improved = true;
+            while (improved) {
+                improved = false;
+                for (let i = 1; i < cur.length - 1; i++) for (let k = i + 1; k < cur.length; k++) {
+                    const cand = cur.slice(0, i).concat(cur.slice(i, k + 1).reverse(), cur.slice(k + 1));
+                    const l = len(cand);
+                    if (l < curLen - 0.3) { cur = cand; curLen = l; improved = true; }
+                }
+            }
+            res[s][cur[cur.length - 1]] = curLen;
+            trace[s][cur[cur.length - 1]] = cur;
+        }
+        return { res, trace };
+    }
+    function stoAnalyze(mc, data) {
+        const cfg = stoCfg();
+        const m = mc.mission;
+        const parsed = stoParse(m);
+        const issues = [];
+        if (parsed.orphans.length) issues.push({ kind: 'orphan', text: `${parsed.orphans.length} located step(s) before the first NAV — a mission must start with a navigate. They will be re-attached to the first nav on Apply.` });
+        // wrap canon = the mission's own majority pattern
+        const allBundles = [];
+        parsed.units.forEach((u, ui) => u.bundles.forEach((b, bi) => { b.uid = `${ui}:${bi}`; allBundles.push(b); }));
+        const tally = new Map();
+        allBundles.forEach(b => { const s = stoWrapSig(b); tally.set(s, (tally.get(s) || 0) + 1); });
+        let canonSig = null, canonN = 0;
+        tally.forEach((n, s) => { if (n > canonN) { canonN = n; canonSig = s; } });
+        const hasCanon = canonSig !== null && canonSig !== '' && canonN >= 2 && canonN / Math.max(1, allBundles.length) >= 0.5;
+        const wrapAnoms = hasCanon ? allBundles.filter(b => stoWrapSig(b) !== canonSig) : [];
+        const canonTemplate = hasCanon ? (allBundles.find(b => stoWrapSig(b) === canonSig) || null) : null;
+        const fragUnits = parsed.units.filter(u => u.frags.length);
+        // duplicates: stacked nav pairs whose snapshots also stack, + stacked
+        // snapshot pairs under one nav
+        const dupM = cfg.dupFt / STO_FT;
+        const dupUnits = [];   // {ui, ofUi}
+        for (let i = 0; i < parsed.units.length; i++) {
+            for (let j = i + 1; j < parsed.units.length; j++) {
+                const a = parsed.units[i], b = parsed.units[j];
+                if (mbApproxMeters(a.nav.location.lat, a.nav.location.lng, b.nav.location.lat, b.nav.location.lng) > dupM) continue;
+                const covered = b.bundles.every(bb => a.bundles.some(ab =>
+                    mbApproxMeters(ab.snap.location.lat, ab.snap.location.lng, bb.snap.location.lat, bb.snap.location.lng) <= dupM));
+                if (covered && !b.others.length) dupUnits.push({ ui: j, ofUi: i });
+            }
+        }
+        const dupBundles = [];   // {uid, ofUid} within one unit
+        parsed.units.forEach((u, ui) => {
+            for (let i = 0; i < u.bundles.length; i++) for (let j = i + 1; j < u.bundles.length; j++) {
+                if (mbApproxMeters(u.bundles[i].snap.location.lat, u.bundles[i].snap.location.lng,
+                    u.bundles[j].snap.location.lat, u.bundles[j].snap.location.lng) <= dupM) {
+                    dupBundles.push({ uid: u.bundles[j].uid, ofUid: u.bundles[i].uid });
+                }
+            }
+        });
+        // snapshot standoff vs its owner nav (100–200 ft band; err farther)
+        const standoff = [];   // {uid, d, alt: unitIdx|null, altD}
+        parsed.units.forEach((u, ui) => u.bundles.forEach(b => {
+            const d = mbApproxMeters(u.nav.location.lat, u.nav.location.lng, b.snap.location.lat, b.snap.location.lng) * STO_FT;
+            if (d >= cfg.bandMinFt && d <= cfg.standoffMaxFt) return;
+            let alt = null, altD = 0;
+            parsed.units.forEach((u2, ui2) => {
+                if (ui2 === ui) return;
+                const d2 = mbApproxMeters(u2.nav.location.lat, u2.nav.location.lng, b.snap.location.lat, b.snap.location.lng) * STO_FT;
+                if (d2 < cfg.bandMinFt || d2 > cfg.bandMaxFt) return;
+                const mid = (cfg.bandMinFt + cfg.bandMaxFt) / 2;
+                if (alt === null || Math.abs(d2 - mid) < Math.abs(altD - mid)) { alt = ui2; altD = d2; }
+            });
+            standoff.push({ uid: b.uid, d, alt, altD, tooClose: d < cfg.bandMinFt });
+        }));
+        // pad per unit (≤150 ft of a macro pad ring), transit navs travel with
+        // the previous located unit
+        const tolM = 46;
+        const boxes = mc.pads.map(a => agRingBbox(a.ring, tolM + 5));
+        parsed.units.forEach((u, ui) => {
+            const p = u.nav.location;
+            let best = null;
+            mc.pads.forEach((a, ai) => {
+                const bb = boxes[ai];
+                if (p.lat < bb.s || p.lat > bb.n || p.lng < bb.w || p.lng > bb.e) return;
+                const d = mbPointToPolygonMeters(p.lat, p.lng, a.ring);
+                if (d <= tolM && (!best || d < best.d)) best = { a, d };
+            });
+            u.padId = best ? best.a.id : (ui > 0 ? parsed.units[ui - 1].padId : (mc.pads[0] && mc.pads[0].id));
+        });
+        // clusters: union-find over pads by min unit-nav distance
+        const padIds = mc.pads.map(a => a.id);
+        const unitsByPad = new Map();
+        parsed.units.forEach((u, ui) => { if (!unitsByPad.has(u.padId)) unitsByPad.set(u.padId, []); unitsByPad.get(u.padId).push(ui); });
+        const parent = padIds.map((_, i) => i);
+        const find = i => parent[i] === i ? i : (parent[i] = find(parent[i]));
+        const clM = cfg.clusterFt / STO_FT;
+        for (let i = 0; i < padIds.length; i++) for (let j = i + 1; j < padIds.length; j++) {
+            const A = unitsByPad.get(padIds[i]) || [], B = unitsByPad.get(padIds[j]) || [];
+            let minD = Infinity;
+            A.forEach(ua => B.forEach(ub => {
+                const la = parsed.units[ua].nav.location, lb = parsed.units[ub].nav.location;
+                minD = Math.min(minD, mbApproxMeters(la.lat, la.lng, lb.lat, lb.lng));
+            }));
+            if (minD < clM) parent[find(i)] = find(j);
+        }
+        const clMap = new Map();
+        padIds.forEach((pid, i) => { const r = find(i); if (!clMap.has(r)) clMap.set(r, []); clMap.get(r).push(pid); });
+        const padName = new Map(mc.pads.map(a => [a.id, a.name || ('pad ' + a.id)]));
+        const clusters = Array.from(clMap.values())
+            .map(pids => ({ pids, name: pids.map(p => padName.get(p)).join(' + '), unitIdx: pids.flatMap(p => unitsByPad.get(p) || []) }))
+            .filter(c => c.unitIdx.length > 0);
+        // cluster depth from base — trusted rng solve when available
+        let byAsset = null;
+        try { const sol = rngSolveCached(data.ent); byAsset = new Map(sol.results.map(r => [r.asset.id, r])); } catch (e) {}
+        const base = data.ent.base || null;
+        clusters.forEach(c => {
+            let depth = 0;
+            c.pids.forEach(pid => {
+                const r = byAsset && byAsset.get(pid);
+                if (r && r.status === 'ok') depth = Math.max(depth, r.worstFt);
+                else if (base) (unitsByPad.get(pid) || []).forEach(ui => {
+                    depth = Math.max(depth, mbApproxMeters(base.lat, base.lng, parsed.units[ui].nav.location.lat, parsed.units[ui].nav.location.lng) * STO_FT);
+                });
+            });
+            c.depth = depth;
+        });
+        // solve
+        const st = { cfg, built: mcvRouteBuilt(), distCache: new Map(), fallbacks: 0 };
+        const solvedCl = clusters.map(c => {
+            const pts = c.unitIdx.map(ui => parsed.units[ui].nav.location);
+            const n = pts.length;
+            const D = Array.from({ length: n }, (_, i) => pts.map(p => stoDistM(st, pts[i], p)));
+            const hk = n <= 12 ? stoHeldKarp(n, D) : stoHeurPath(n, D);
+            // deepest nav of the cluster — the doctrine start anchor. An open
+            // path's cost is direction-symmetric, so without this the solver
+            // happily flies near→far (harness caught it on NE 1-2: it started
+            // at the CLOSEST pad and finished at PEUGH, the deepest).
+            let deepLocal = 0, dd = -1;
+            pts.forEach((p, i) => { const d = base ? mbApproxMeters(base.lat, base.lng, p.lat, p.lng) : 0; if (d > dd) { dd = d; deepLocal = i; } });
+            return Object.assign({}, c, { pts, hk, exact: n <= 12, deepLocal });
+        });
+        const startCi = solvedCl.reduce((bi, c, i) => c.depth > solvedCl[bi].depth ? i : bi, 0);
+        const chain = (order) => {
+            let states = null;
+            for (const ci of order) {
+                const c = solvedCl[ci], n = c.pts.length, next = [];
+                for (let j = 0; j < n; j++) {
+                    let best = Infinity, from = null;
+                    for (let i2 = 0; i2 < n; i2++) {
+                        const intra = c.hk.res[i2][j];
+                        if (intra === Infinity) continue;
+                        // first cluster starts at its DEEPEST nav (far→near SOP)
+                        if (!states) { if (i2 !== c.deepLocal) continue; if (intra < best) { best = intra; from = { entry: i2, prev: null }; } }
+                        else states.forEach(stt => {
+                            const v = stt.cost + stoDistM(st, stt.pt, c.pts[i2]) + intra;
+                            if (v < best) { best = v; from = { entry: i2, prev: stt }; }
+                        });
+                    }
+                    next.push({ cost: best, pt: c.pts[j], ci, exit: j, from });
+                }
+                states = next;
+            }
+            return states.reduce((a, b) => a.cost < b.cost ? a : b);
+        };
+        const rest = solvedCl.map((_, i) => i).filter(i => i !== startCi);
+        let bestEnd = null;
+        if (rest.length <= 6) {
+            const perms = (arr) => arr.length <= 1 ? [arr]
+                : arr.flatMap((x, i) => perms(arr.slice(0, i).concat(arr.slice(i + 1))).map(p => [x].concat(p)));
+            perms(rest).forEach(p => {
+                const end = chain([startCi].concat(p));
+                if (!bestEnd || end.cost < bestEnd.cost) bestEnd = end;
+            });
+        } else {
+            // greedy nearest-cluster chain from the start cluster
+            const centro = c => { let la = 0, lg = 0; c.pts.forEach(p => { la += p.lat; lg += p.lng; }); return { lat: la / c.pts.length, lng: lg / c.pts.length }; };
+            const cs = solvedCl.map(centro);
+            const left = new Set(rest); const order = [startCi];
+            while (left.size) {
+                let best = null, bd = Infinity;
+                left.forEach(i => { const d = mbApproxMeters(cs[order[order.length - 1]].lat, cs[order[order.length - 1]].lng, cs[i].lat, cs[i].lng); if (d < bd) { bd = d; best = i; } });
+                order.push(best); left.delete(best);
+            }
+            bestEnd = chain(order);
+        }
+        // reconstruct proposed unit order
+        const proposed = [];
+        const walk = [];
+        let cur2 = bestEnd;
+        while (cur2) { walk.unshift(cur2); cur2 = cur2.from && cur2.from.prev; }
+        walk.forEach(stp => {
+            const c = solvedCl[stp.ci];
+            const path = c.hk.trace[stp.from.entry][stp.exit] || [];
+            path.forEach(k => proposed.push(c.unitIdx[k]));
+        });
+        // current + proposed nav path lengths on the SAME distance engine
+        const seqLen = (idxArr) => { let t = 0; for (let i = 1; i < idxArr.length; i++) t += stoDistM(st, parsed.units[idxArr[i - 1]].nav.location, parsed.units[idxArr[i]].nav.location); return t; };
+        const curOrder = parsed.units.map((_, i) => i);
+        const curM = seqLen(curOrder);
+        const propM = seqLen(proposed);
+        return { m, mc, cfg, parsed, clusters: solvedCl, clusterOrder: walk.map(w => w.ci), startCi,
+            proposed, curM, propM, fallbacks: st.fallbacks, st,
+            hasCanon, canonSig, canonTemplate, wrapAnoms, fragUnits, dupUnits, dupBundles, standoff, issues };
+    }
+    // Rebuild the instruction list from an analysis + the user's fix choices.
+    function stoRebuild(an, opts) {
+        const { parsed } = an;
+        const dropUnit = new Set(opts.dropUnits || []);
+        const dropBundle = new Set(opts.dropBundles || []);
+        const rehome = opts.rehome || new Map();   // uid -> target unit idx
+        const fixWraps = !!opts.fixWraps;
+        const canonWrap = an.canonTemplate ? an.canonTemplate.wrap : null;
+        // bundle placement: default owner, unless re-homed
+        const byUnit = new Map();
+        parsed.units.forEach((u, ui) => u.bundles.forEach(b => {
+            if (dropBundle.has(b.uid) || dropUnit.has(ui)) return;
+            // re-home target dropped as a duplicate → stay with the original owner
+            const t0 = rehome.has(b.uid) ? rehome.get(b.uid) : ui;
+            const target = dropUnit.has(t0) ? ui : t0;
+            if (!byUnit.has(target)) byUnit.set(target, []);
+            byUnit.get(target).push(b);
+        }));
+        // orphan bundles (snap before any nav) re-attach to the first kept unit
+        const firstKept = an.proposed.find(ui => !dropUnit.has(ui));
+        parsed.orphans.forEach(b => {
+            if (firstKept === undefined) return;
+            if (!byUnit.has(firstKept)) byUnit.set(firstKept, []);
+            byUnit.get(firstKept).push(b);
+        });
+        const out = [];
+        const acc = { navs: 0, snaps: 0, droppedSteps: 0, addedWrapSteps: 0 };
+        if (an.parsed.takeoff) out.push(an.parsed.takeoff);
+        parsed.lead.forEach(s => out.push(s));
+        an.proposed.forEach(ui => {
+            if (dropUnit.has(ui)) { acc.droppedSteps += 1 + parsed.units[ui].frags.length + parsed.units[ui].others.length + parsed.units[ui].bundles.reduce((t, b) => t + 1 + b.wrap.length, 0); return; }
+            const u = parsed.units[ui];
+            out.push(u.nav); acc.navs++;
+            if (!fixWraps) u.frags.forEach(s => out.push(s));
+            else acc.droppedSteps += u.frags.length;
+            (byUnit.get(ui) || []).forEach(b => {
+                out.push(b.snap);
+                if (b.other) return;
+                acc.snaps++;
+                if (fixWraps && canonWrap) {
+                    const before = b.wrap.length;
+                    canonWrap.forEach(s => out.push(s));
+                    acc.addedWrapSteps += Math.max(0, canonWrap.length - before);
+                    acc.droppedSteps += Math.max(0, before - canonWrap.length);
+                } else {
+                    b.wrap.forEach(s => out.push(s));
+                }
+            });
+            u.others.forEach(s => out.push(s));
+        });
+        if (an.parsed.rh) out.push(an.parsed.rh);
+        return { out, acc };
+    }
+    function stoClearPreview() {
+        sto.layers.forEach(l => { try { l.remove(); } catch (e) {} });
+        sto.layers = [];
+    }
+    function stoClosePanel() {
+        if (sto.panelEl) { try { sto.panelEl.remove(); } catch (e) {} sto.panelEl = null; }
+        stoClearPreview();
+        sto.state = null;
+    }
+    function stoDrawPreview(an, col) {
+        stoClearPreview();
+        const L = composerGetL(), map = getLeafletMap();
+        if (!L || !map) return;
+        const legsOf = (idxArr) => {
+            let pts = [];
+            for (let i = 1; i < idxArr.length; i++) {
+                const a = an.parsed.units[idxArr[i - 1]].nav.location, b = an.parsed.units[idxArr[i]].nav.location;
+                const straightFt = mbApproxMeters(a.lat, a.lng, b.lat, b.lng) * STO_FT;
+                const leg = (straightFt > an.cfg.legalOverFt && an.st.built) ? (mpvLegalPath(an.st.built, a, b) || [[a.lat, a.lng], [b.lat, b.lng]]) : [[a.lat, a.lng], [b.lat, b.lng]];
+                pts = pts.length ? pts.concat(leg.slice(1)) : leg.slice();
+            }
+            return pts;
+        };
+        try {
+            sto.layers.push(L.polyline(legsOf(an.parsed.units.map((_, i) => i)), { color: col || '#7adfe6', weight: 3, opacity: 0.8, interactive: false }).addTo(map));
+            sto.layers.push(L.polyline(legsOf(an.proposed), { color: '#ffffff', weight: 3, opacity: 0.95, dashArray: '8,7', interactive: false }).addTo(map));
+        } catch (e) { console.warn(`${TAG} [sto] preview draw failed`, e); }
+    }
+    let stoBusy = false;
+    async function stoOpen(missionId, col) {
+        if (stoBusy) return;
+        const data = mcv.data;
+        const mc = data && data.det.macros.find(x => x.mission.id === missionId);
+        if (!mc) { showToast('Macro not found — re-open 🧩.', '#ff9800', 3000); return; }
+        stoBusy = true;
+        stoClosePanel();
+        showToast('🪄 Analyzing step order (legal-route solve)…', '#7adfe6', 2500);
+        await new Promise(r => setTimeout(r, 30));   // let the toast paint
+        let an;
+        try { an = stoAnalyze(mc, data); }
+        catch (e) { console.warn(`${TAG} [sto] analyze failed`, e); showToast('🪄 Analysis failed (see console).', '#ff5252', 4500); stoBusy = false; return; }
+        stoBusy = false;
+        console.log(`${TAG} [sto] "${mc.mission.name}": ${an.parsed.units.length} navs · cur ${(an.curM * STO_FT / 1000).toFixed(1)}k ft → opt ${(an.propM * STO_FT / 1000).toFixed(1)}k ft · ${an.fallbacks} route fallback(s)`);
+        sto.state = { an, col, fixWraps: (an.wrapAnoms.length + an.fragUnits.length) > 0,
+            dropUnits: new Set(an.dupUnits.map(d => d.ui)),
+            dropBundles: new Set(an.dupBundles.map(d => d.uid)),
+            rehome: new Map(an.standoff.filter(s => s.tooClose && s.alt !== null).map(s => [s.uid, s.alt])) };
+        stoRenderPanel();
+    }
+    function stoRenderPanel() {
+        const stt = sto.state; if (!stt) return;
+        const an = stt.an, cfg = an.cfg;
+        if (sto.panelEl) { try { sto.panelEl.remove(); } catch (e) {} }
+        const savedFt = (an.curM - an.propM) * STO_FT;
+        const pct = an.curM > 0 ? Math.round(savedFt / (an.curM * STO_FT) * 100) : 0;
+        const el = document.createElement('div');
+        el.id = 'aim-mb-sto-panel';
+        el.style.cssText = 'position:fixed;right:14px;top:64px;z-index:2147483601;width:420px;max-height:76vh;overflow:auto;background:rgba(14,17,23,0.97);border:1px solid #7adfe6;border-radius:9px;padding:10px 12px;color:#e6e6e6;font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 6px 24px rgba(0,0,0,0.7);';
+        const padNames = new Map(an.mc.pads.map(a => [a.id, a.name || ('pad ' + a.id)]));
+        const unitLabel = ui => {
+            const u = an.parsed.units[ui];
+            return `${escapeHtml(String(padNames.get(u.padId) || '?').slice(0, 26))} · nav#${u.nav.index_in_app}`;
+        };
+        const row = (html) => `<div style="margin:2px 0;">${html}</div>`;
+        let body = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><b style="color:#7adfe6;">🪄 Step Optimizer</b><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px;color:#9ad;">${escapeHtml(String(an.m.name || ''))}</span><span data-sto-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`;
+        body += `<div style="font-size:12px;margin-bottom:4px;color:${savedFt > 100 ? '#5fff5f' : '#9ad'};">nav route: <b>${(an.curM * STO_FT / 1000).toFixed(1)}k ft</b> → <b>${(an.propM * STO_FT / 1000).toFixed(1)}k ft</b> (−${(savedFt / 1000).toFixed(1)}k ft, −${pct}%)${an.fallbacks ? ` · <span style="color:#ffb74d;">⚠ ${an.fallbacks} leg(s) off-graph (straight ×1.25)</span>` : ''}</div>`;
+        body += `<div style="color:#789;margin-bottom:6px;">start = deepest cluster · clusters (navs within ${cfg.clusterFt} ft interleave): ${an.clusters.length}${an.clusters.some(c => !c.exact) ? ' · <span style="color:#ffb74d;">large cluster → heuristic path</span>' : ''}</div>`;
+        body += `<div style="margin-bottom:6px;"><b style="color:#7adfe6;">Proposed order</b>${an.clusterOrder.map(ci => `<div style="margin:3px 0 3px 8px;"><span style="color:#ffd54f;">${escapeHtml(an.clusters[ci].name.slice(0, 52))}</span><div style="color:#9ad;margin-left:8px;">${an.proposed.filter(ui => an.clusters[ci].unitIdx.includes(ui)).map(ui => 'N' + an.parsed.units[ui].nav.index_in_app).join(' → ')}</div></div>`).join('')}</div>`;
+        const secs = [];
+        if (an.wrapAnoms.length || an.fragUnits.length) {
+            secs.push(row(`<label style="cursor:pointer;"><input type="checkbox" data-sto-wraps ${stt.fixWraps ? 'checked' : ''} style="accent-color:#5fff5f;"> <b style="color:#ffb74d;">Fix ${an.wrapAnoms.length} scrambled wrap(s)${an.fragUnits.length ? ` + ${an.fragUnits.length} stray fragment(s)` : ''}</b> — rebuild every snapshot's wrap to this mission's own pattern</label>`)
+                + an.wrapAnoms.slice(0, 8).map(b => `<div style="color:#ffb74d;margin-left:16px;">snap#${b.snap.index_in_app}: [${escapeHtml(stoWrapSig(b) || 'no wrap')}]</div>`).join('')
+                + (an.wrapAnoms.length > 8 ? `<div style="color:#789;margin-left:16px;">…+${an.wrapAnoms.length - 8} more</div>` : ''));
+        }
+        if (an.dupUnits.length || an.dupBundles.length) {
+            secs.push(`<b style="color:#ff8ad2;">Duplicates (stacked — the drone doubles back for an identical shot)</b>`
+                + an.dupUnits.map(d => row(`<label style="cursor:pointer;margin-left:8px;"><input type="checkbox" data-sto-dropu="${d.ui}" ${stt.dropUnits.has(d.ui) ? 'checked' : ''} style="accent-color:#ff8ad2;"> drop ${unitLabel(d.ui)} — duplicate of ${unitLabel(d.ofUi)}</label>`)).join('')
+                + an.dupBundles.map(d => row(`<label style="cursor:pointer;margin-left:8px;"><input type="checkbox" data-sto-dropb="${escapeHtml(d.uid)}" ${stt.dropBundles.has(d.uid) ? 'checked' : ''} style="accent-color:#ff8ad2;"> drop duplicate snapshot (${escapeHtml(d.uid)}, twin of ${escapeHtml(d.ofUid)})</label>`)).join(''));
+        }
+        if (an.standoff.length) {
+            secs.push(`<b style="color:#c39dff;">Snapshot standoff (target ${cfg.bandMinFt}–${cfg.bandMaxFt} ft — err farther, never closer)</b>`
+                + an.standoff.map(s => {
+                    const [ui] = s.uid.split(':').map(Number);
+                    if (s.alt === null) return row(`<span style="color:#93835e;margin-left:8px;">snap ${escapeHtml(s.uid)} @ ${s.d.toFixed(0)} ft from its nav (${s.tooClose ? 'too close' : 'far'}) — no in-band nav available, left as-is</span>`);
+                    return row(`<label style="cursor:pointer;margin-left:8px;"><input type="checkbox" data-sto-rehome="${escapeHtml(s.uid)}" data-sto-rehome-to="${s.alt}" ${stt.rehome.has(s.uid) ? 'checked' : ''} style="accent-color:#c39dff;"> snap ${escapeHtml(s.uid)} @ ${s.d.toFixed(0)} ft (${s.tooClose ? 'TOO CLOSE' : 'far'}) → re-home to ${unitLabel(s.alt)} @ ${s.altD.toFixed(0)} ft</label>`);
+                }).join(''));
+        }
+        an.issues.forEach(i => secs.push(`<div style="color:#ff9800;">⚠ ${escapeHtml(i.text)}</div>`));
+        if (secs.length) body += `<div style="border-top:1px solid #2a3340;padding-top:5px;margin-bottom:6px;">${secs.join('<div style="height:5px;"></div>')}</div>`;
+        else body += `<div style="color:#5fff5f;margin-bottom:6px;">✓ structure clean — no wrap scrambles, duplicates, or standoff violations</div>`;
+        // step-count delta from the current fix choices
+        const rb = stoRebuild(an, { fixWraps: stt.fixWraps, dropUnits: Array.from(stt.dropUnits), dropBundles: Array.from(stt.dropBundles), rehome: stt.rehome });
+        const bodyLen = (an.m.instructions || []).filter(i => i && i.type !== 0 && i.type !== 99).length;
+        const newLen = rb.out.filter(i => i && i.type !== 0 && i.type !== 99).length;
+        body += `<div style="color:#9ad;margin-bottom:7px;">steps: ${bodyLen} → ${newLen} (${rb.acc.navs} navs · ${rb.acc.snaps} snaps${rb.acc.droppedSteps ? ` · −${rb.acc.droppedSteps} dropped` : ''}${rb.acc.addedWrapSteps ? ` · +${rb.acc.addedWrapSteps} wrap-rebuild` : ''})</div>`;
+        body += `<div style="display:flex;gap:7px;align-items:center;">`
+            + `<button data-sto-prev style="padding:3px 9px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:5px;cursor:pointer;">👁 Preview routes</button>`
+            + `<button data-sto-apply style="padding:3px 10px;background:rgba(95,255,95,0.13);border:1px solid rgba(95,255,95,0.5);color:#5fff5f;border-radius:5px;cursor:pointer;font-weight:700;">💾 Apply in place</button>`
+            + `<span style="margin-left:auto;color:#567;">backup + verify</span></div>`;
+        body += `<div style="display:flex;gap:5px;align-items:center;margin-top:7px;font-size:10px;color:#789;flex-wrap:wrap;">cluster <input data-sto-cfg="clusterFt" type="number" value="${cfg.clusterFt}" style="width:42px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft · dup <input data-sto-cfg="dupFt" type="number" value="${cfg.dupFt}" style="width:32px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft · band <input data-sto-cfg="bandMinFt" type="number" value="${cfg.bandMinFt}" style="width:38px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">–<input data-sto-cfg="bandMaxFt" type="number" value="${cfg.bandMaxFt}" style="width:38px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft (re-analyzes)</div>`;
+        el.innerHTML = body;
+        document.body.appendChild(el);
+        sto.panelEl = el;
+        el.querySelector('[data-sto-x]').onclick = () => stoClosePanel();
+        const wrapsCb = el.querySelector('[data-sto-wraps]');
+        if (wrapsCb) wrapsCb.onchange = () => { stt.fixWraps = wrapsCb.checked; stoRenderPanel(); };
+        el.querySelectorAll('[data-sto-dropu]').forEach(cb => cb.onchange = () => {
+            const ui = Number(cb.getAttribute('data-sto-dropu'));
+            if (cb.checked) stt.dropUnits.add(ui); else stt.dropUnits.delete(ui);
+            stoRenderPanel();
+        });
+        el.querySelectorAll('[data-sto-dropb]').forEach(cb => cb.onchange = () => {
+            const uid = cb.getAttribute('data-sto-dropb');
+            if (cb.checked) stt.dropBundles.add(uid); else stt.dropBundles.delete(uid);
+            stoRenderPanel();
+        });
+        el.querySelectorAll('[data-sto-rehome]').forEach(cb => cb.onchange = () => {
+            const uid = cb.getAttribute('data-sto-rehome'), to = Number(cb.getAttribute('data-sto-rehome-to'));
+            if (cb.checked) stt.rehome.set(uid, to); else stt.rehome.delete(uid);
+            stoRenderPanel();
+        });
+        el.querySelectorAll('[data-sto-cfg]').forEach(inp => inp.onchange = () => {
+            const patch = {}; patch[inp.getAttribute('data-sto-cfg')] = Number(inp.value);
+            gmSet(STO_CFG_KEY, Object.assign({}, stoCfg(), patch));
+            const id = an.m.id, col = stt.col;
+            stoClosePanel();
+            stoOpen(id, col);
+        });
+        el.querySelector('[data-sto-prev]').onclick = () => {
+            if (sto.layers.length) { stoClearPreview(); el.querySelector('[data-sto-prev]').style.background = 'rgba(122,223,230,0.14)'; }
+            else { stoDrawPreview(an, stt.col); el.querySelector('[data-sto-prev]').style.background = 'rgba(122,223,230,0.4)'; }
+        };
+        el.querySelector('[data-sto-apply]').onclick = () => stoApply();
+    }
+    async function stoApply() {
+        const stt = sto.state; if (!stt || stoBusy) return;
+        const an = stt.an, m = an.m;
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4500); return; }
+        const rb = stoRebuild(an, { fixWraps: stt.fixWraps, dropUnits: Array.from(stt.dropUnits), dropBundles: Array.from(stt.dropBundles), rehome: stt.rehome });
+        // hard sanity: every nav + snapshot accounted for (minus explicit drops)
+        const origNavs = an.parsed.units.length;
+        const origSnaps = an.parsed.units.reduce((t, u) => t + u.bundles.length, 0) + an.parsed.orphans.filter(o => !o.other).length;
+        const expNavs = origNavs - stt.dropUnits.size;
+        const droppedByUnit = an.parsed.units.reduce((t, u, ui) => t + (stt.dropUnits.has(ui) ? u.bundles.filter(b => !stt.dropBundles.has(b.uid)).length : 0), 0);
+        const expSnaps = origSnaps - stt.dropBundles.size - droppedByUnit;
+        if (rb.acc.navs !== expNavs || rb.acc.snaps !== expSnaps) {
+            console.warn(`${TAG} [sto] ABORT — rebuild accounting mismatch: navs ${rb.acc.navs}/${expNavs}, snaps ${rb.acc.snaps}/${expSnaps}`, m.name);
+            showToast('🪄 Aborted: rebuilt nav/snapshot count does not match (see console). Nothing saved.', '#ff5252', 6000);
+            return;
+        }
+        const savedFt = (an.curM - an.propM) * STO_FT;
+        if (!window.confirm(`🪄 Optimize steps of "${m.name}" IN PLACE?\n\n`
+            + `nav route ${(an.curM * STO_FT / 1000).toFixed(1)}k ft → ${(an.propM * STO_FT / 1000).toFixed(1)}k ft (−${(savedFt / 1000).toFixed(1)}k ft)\n`
+            + `${rb.acc.navs} navs · ${rb.acc.snaps} snapshots${stt.fixWraps ? ' · wraps rebuilt to the mission pattern' : ''}${stt.dropUnits.size || stt.dropBundles.size ? ` · ${stt.dropUnits.size + stt.dropBundles.size} duplicate(s) removed` : ''}${stt.rehome.size ? ` · ${stt.rehome.size} snapshot(s) re-homed` : ''}\n\n`
+            + `Mission id + name unchanged. A JSON backup downloads first.`)) return;
+        stoBusy = true;
+        try {
+            try {
+                const blob = new Blob([JSON.stringify({ site: getCurrentSiteID(), savedAt: new Date().toISOString(), reason: 'pre-step-optimize', mission: m })], { type: 'application/json' });
+                const blobUrl = URL.createObjectURL(blob);
+                let downloaded = false;
+                for (const doc of [(window.top || window).document, document]) {
+                    if (downloaded) break;
+                    try {
+                        const a = doc.createElement('a');
+                        a.href = blobUrl; a.download = `mission${m.id}_prestepopt_backup.json`;
+                        (doc.body || document.body).appendChild(a); a.click(); a.remove();
+                        downloaded = true;
+                    } catch (e) {}
+                }
+                setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 5000);
+                if (!downloaded) throw new Error('no frame allowed the download');
+            } catch (e) {
+                console.warn(`${TAG} [sto] backup download failed`, e);
+                if (!window.confirm('Backup download FAILED — continue WITHOUT a backup?')) { stoBusy = false; return; }
+            }
+            showToast(`🪄 Saving optimized "${m.name}"…`, '#9cf', 3000);
+            const instrs = rb.out.map(pcmNormStep);
+            await ctx.saveApp(Object.assign({}, m, { instructions: instrs }), m.name);
+            // verify: fresh fetch → nav coordinate sequence matches the proposal
+            await new Promise(r => setTimeout(r, 1200));
+            const after = await mbFetchMissionsFull(getCurrentSiteID());
+            const m2 = after.find(x => x.id === m.id);
+            let good = false;
+            if (m2) {
+                const gotNavs = (m2.instructions || []).filter(i => i && i.type === 1 && i.location).map(i => stoLocKey(i.location)).join(';');
+                const wantNavs = rb.out.filter(i => i && i.type === 1 && i.location).map(i => stoLocKey(i.location)).join(';');
+                const snaps2 = (m2.instructions || []).filter(i => i && i.type === 6).length;
+                good = gotNavs === wantNavs && snaps2 === rb.acc.snaps;
+                if (!good) console.warn(`${TAG} [sto] verify mismatch — navs ${gotNavs === wantNavs ? 'ok' : 'DIFFER'} · snaps ${snaps2}/${rb.acc.snaps}`);
+            }
+            showToast(good
+                ? `🪄 "${m.name}" optimized ✓ verified (−${(savedFt / 1000).toFixed(1)}k ft of nav route). Re-check its schedule if one is active.`
+                : `⚠ "${m.name}" saved but verify mismatched — check the mission + console (backup downloaded).`, good ? '#5fff5f' : '#ff9800', 9000);
+            stoClosePanel();
+            // refresh 🧩 overlay data (same tail as mcvApplyOrder)
+            if (mcv.data) {
+                mcv.data.missions = after;
+                mcv.data.det = mcvDetect(mcv.data.ent, after);
+                mcv.data.audits = mcvAudit(mcv.data.det, mcv.data.ent);
+                mcvClear();
+                mcvDraw(mcv.data.det);
+                mcv.on = true;
+            }
+        } catch (e) {
+            console.warn(`${TAG} [sto] apply failed`, e);
+            showToast('🪄 Apply FAILED — nothing verified (see console).', '#ff5252', 6000);
+        }
+        stoBusy = false;
+    }
+
     // ⇅ MANUAL PAD ORDER (v2.63) — see the macro's TRUE visit order (same
     // numbers as the map badges) and hand-edit it. Born from a live confusion:
     // a macro whose long member mission enters a NEIGHBORING pad's ring first
