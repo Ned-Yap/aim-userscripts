@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.71
+// @version      2.72
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.71';
+    const SCRIPT_VERSION = '2.72';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -6380,9 +6380,14 @@
         // camera resolves enough particles/in² is 90–210 ft, ideal 100.
         // Under 90 crops → real flag. Over 210 is RARE BUT LEGITIMATE →
         // informational flag only, suggestion default-unticked.
-        const d = { clusterFt: 400, dupFt: 15, idealFt: 100, bandMinFt: 90, bandMaxFt: 210, legalOverFt: 600 };
+        // legalOverFt 600→100 (v2.72, live round 6): pricing sub-600 ft legs
+        // as straight chords let the solver "win" on fake feet — a 300 ft
+        // chord across red can be a 900 ft corridor. Legs over 100 ft (i.e.
+        // anything that could leave the pad) now price on the legal graph.
+        const d = { clusterFt: 400, dupFt: 15, idealFt: 100, bandMinFt: 90, bandMaxFt: 210, legalOverFt: 100 };
         const s = gmGet(STO_CFG_KEY, null);
         const o = Object.assign({}, d, (s && typeof s === 'object') ? s : {});
+        if (o.legalOverFt === 600) o.legalOverFt = 100;   // migrate the pre-v2.72 default if persisted
         Object.keys(d).forEach(k => { const v = Number(o[k]); o[k] = (isFinite(v) && v > 0) ? v : d[k]; });
         return o;
     }
@@ -6609,6 +6614,11 @@
         const base = data.ent.base || null;
         const st = { cfg, built: mcvRouteBuilt(), distCache: new Map(), fallbacks: 0 };
         const seqLen = (idxArr) => { let t = 0; for (let i = 1; i < idxArr.length; i++) t += stoDistM(st, parsed.units[idxArr[i - 1]].nav.location, parsed.units[idxArr[i]].nav.location); return t; };
+        // per-nav depth from base (ft) — fuels the deep-first TIE-BREAKS.
+        // Dead-end spurs cost identical feet in both directions, so equal-cost
+        // orders MUST resolve deeper-first (the lasso's engraved "10>8" rule;
+        // live round 6 caught pads 1↔2 swapped on exactly such a tie).
+        const navDep = parsed.units.map(u => base ? mbApproxMeters(base.lat, base.lng, u.nav.location.lat, u.nav.location.lng) * STO_FT : 0);
         const solveAt = (clusterFtVal) => {
             const parent = padIds.map((_, i) => i);
             const find = i => parent[i] === i ? i : (parent[i] = find(parent[i]));
@@ -6662,9 +6672,12 @@
                             const intra = c.hk.res[i2][j];
                             if (intra === Infinity) continue;
                             // first cluster starts at its DEEPEST nav (far→near SOP)
-                            if (!states) { if (i2 !== c.deepLocal) continue; if (intra < best) { best = intra; from = { entry: i2, prev: null }; } }
+                            // eps: sub-millimeter bias — enter DEEP, exit SHALLOW —
+                            // decides only genuine ties, never real feet
+                            const eps = ((navDep[c.unitIdx[j]] || 0) + (Math.max(0, 30000 - (navDep[c.unitIdx[i2]] || 0)))) * 1e-7;
+                            if (!states) { if (i2 !== c.deepLocal) continue; if (intra + eps < best) { best = intra + eps; from = { entry: i2, prev: null }; } }
                             else states.forEach(stt => {
-                                const v = stt.cost + stoDistM(st, stt.pt, c.pts[i2]) + intra;
+                                const v = stt.cost + stoDistM(st, stt.pt, c.pts[i2]) + intra + eps;
                                 if (v < best) { best = v; from = { entry: i2, prev: stt }; }
                             });
                         }
@@ -6680,8 +6693,14 @@
                 const perms = (arr) => arr.length <= 1 ? [arr]
                     : arr.flatMap((x, i) => perms(arr.slice(0, i).concat(arr.slice(i + 1))).map(p => [x].concat(p)));
                 perms(rest).forEach(p => {
-                    const end = chain([startCi].concat(p));
-                    if (!bestEnd || end.cost < bestEnd.cost) bestEnd = end;
+                    const order = [startCi].concat(p);
+                    const end = chain(order);
+                    // deep-early tie term: ~centimeters at most — among orders
+                    // with equal real cost, the one visiting deep clusters
+                    // earlier wins (position × depth, minimized)
+                    const tie = order.reduce((t, ci2, k) => t + k * (solvedCl[ci2].depth || 0), 0) * 1e-7;
+                    const scored = end.cost + tie;
+                    if (!bestEnd || scored < bestEnd.scored) { bestEnd = end; bestEnd.scored = scored; }
                 });
             } else {
                 // greedy nearest-cluster chain from the start cluster
@@ -6928,7 +6947,7 @@
             + `<button data-sto-prev title="Draw the full change on the map: current route solid vs proposed dashed white, NEW flight-order numbers on every nav, red→green sightlines for each ticked snapshot re-home (old vs new vantage), red ✕ on dropped duplicates. Live-updates as you tick fixes." style="padding:3px 9px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:5px;cursor:pointer;">👁 Preview changes</button>`
             + `<button data-sto-apply style="padding:3px 10px;background:rgba(95,255,95,0.13);border:1px solid rgba(95,255,95,0.5);color:#5fff5f;border-radius:5px;cursor:pointer;font-weight:700;">💾 Apply in place</button>`
             + `<span style="margin-left:auto;color:#567;">backup + verify</span></div>`;
-        body += `<div style="display:flex;gap:5px;align-items:center;margin-top:7px;font-size:10px;color:#789;flex-wrap:wrap;">cluster <input data-sto-cfg="clusterFt" type="number" value="${cfg.clusterFt}" style="width:42px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft · dup <input data-sto-cfg="dupFt" type="number" value="${cfg.dupFt}" style="width:32px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft · ideal <input data-sto-cfg="idealFt" type="number" value="${cfg.idealFt}" style="width:38px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft · band <input data-sto-cfg="bandMinFt" type="number" value="${cfg.bandMinFt}" style="width:38px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">–<input data-sto-cfg="bandMaxFt" type="number" value="${cfg.bandMaxFt}" style="width:38px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft (re-analyzes)</div>`;
+        body += `<div style="display:flex;gap:5px;align-items:center;margin-top:7px;font-size:10px;color:#789;flex-wrap:wrap;">cluster <input data-sto-cfg="clusterFt" type="number" value="${cfg.clusterFt}" style="width:42px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft · dup <input data-sto-cfg="dupFt" type="number" value="${cfg.dupFt}" style="width:32px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft · ideal <input data-sto-cfg="idealFt" type="number" value="${cfg.idealFt}" style="width:38px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft · band <input data-sto-cfg="bandMinFt" type="number" value="${cfg.bandMinFt}" style="width:38px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">–<input data-sto-cfg="bandMaxFt" type="number" value="${cfg.bandMaxFt}" style="width:38px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft · <span title="Legs longer than this price on the legal FP/FFZ route graph; shorter legs price straight (intra-pad). Raise if analysis is slow on a huge macro.">legal&gt;</span> <input data-sto-cfg="legalOverFt" type="number" value="${cfg.legalOverFt}" style="width:42px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft (re-analyzes)</div>`;
         el.innerHTML = body;
         document.body.appendChild(el);
         sto.panelEl = el;

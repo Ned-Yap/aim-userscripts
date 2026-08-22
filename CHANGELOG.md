@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-21 — 🪄 v2.72: honest metric + deep-first tie-breaks (Mission Bank Tools latest — dev only)
+
+First test on a raw lasso merge (TEST NE 1-2): 🪄 improved it 6.78 → 6.55 mi, but the hand-tuned macro sits at 6.07 — and two pads on a dead-end spur came out in the wrong order. Two fixes. **Honest metric**: legs were priced straight-line under 600 ft, so a 300 ft chord across red "cost" 300 ft when the flyable corridor is 900 — the solver optimized against fake prices (and the 400 ft cluster variant beat the 800 ft one on paper while losing in reality). Legs over 100 ft now price on the legal route graph, per-pair cached; new `legal>` knob in the footer if a huge macro analyzes slowly. **Deep-first tie-breaks**: two pads on the same spur cost identical feet in either direction — the lasso's engraved "10>8" rule, ported: sub-centimeter position-weighted depth terms resolve equal-cost orders deeper-first, at the cluster level and in every entry/exit choice (enter deep, exit shallow). Real feet always win; the bias only decides genuine ties.
+
 ## 2026-08-21 — 🪄 v2.71: preview legs route legally (Mission Bank Tools latest — dev only)
 
 Live catch on the 👁 preview: legs shorter than 600 ft drew as straight chords slicing across non-FFZ ground. That 600 ft cutoff is a solver-metric speed heuristic (applied equally to both orders being compared), but the preview must show the flown path — every leg now routes along the legal FP/FFZ graph, cached per pair so re-ticking fixes stays instant.
