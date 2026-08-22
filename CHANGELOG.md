@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-21 — 🪄 v2.68: full change preview (Mission Bank Tools latest — dev only)
+
+👁 in the 🪄 panel now previews the whole change, not just the two route lines (which overlap and show nothing when the order is kept): white numbered badges on every nav showing the NEW flight order, a red-dashed→green-solid sightline pair for every ticked snapshot re-home (old vantage vs new — the part worth eyeballing before commit), and red ✕ marks on duplicates ticked for removal. The preview live-updates as fixes are ticked and unticked.
+
 ## 2026-08-21 — 🪄 v2.67: never-worse guarantee + 2× cluster variant (Mission Bank Tools latest — dev only)
 
 First live run of 🪄 (on a copy of NE 1-2, good instinct) showed the proposal 3% WORSE than the hand-tuned order — the manual macro sandwiches Rivers 1974JH *inside* the Jack Mohr run, that interleave genuinely wins under legal FP-corridor routing, and 1974JH sat just outside the 400 ft cluster radius so the solver was never allowed to consider that shape (it also exposed a `−-0.6k` double-sign display bug). v2.67: the solve now runs at both the configured cluster radius AND 2×, and the CURRENT order is scored as a candidate under the same distance engine — the proposal can never be worse than what's already flown. When the current order wins, the panel says so plainly ("current order already shortest under legal routing — structure repairs still apply") and Apply becomes a repairs-only save.

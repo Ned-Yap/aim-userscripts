@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.67
+// @version      2.68
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.67';
+    const SCRIPT_VERSION = '2.68';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -6761,10 +6761,18 @@
         stoClearPreview();
         sto.state = null;
     }
+    // Full CHANGE preview (v2.68, user request): not just the two route lines
+    // but everything Apply would do, live-updating as fixes are ticked —
+    //   · current route solid (macro color) vs proposed dashed white
+    //   · numbered white badge at each kept nav = NEW flight order
+    //   · re-homed snapshots: red dashed line to the OLD nav, green solid to
+    //     the NEW one (the vantage change, visible before committing)
+    //   · dropped duplicates: red ✕ at the dropped nav/snapshot
     function stoDrawPreview(an, col) {
         stoClearPreview();
         const L = composerGetL(), map = getLeafletMap();
         if (!L || !map) return;
+        const stt = sto.state || { dropUnits: new Set(), dropBundles: new Set(), rehome: new Map() };
         const legsOf = (idxArr) => {
             let pts = [];
             for (let i = 1; i < idxArr.length; i++) {
@@ -6775,9 +6783,47 @@
             }
             return pts;
         };
+        const keep = (l) => { sto.layers.push(l); try { l.addTo(map); } catch (e) {} return l; };
         try {
-            sto.layers.push(L.polyline(legsOf(an.parsed.units.map((_, i) => i)), { color: col || '#7adfe6', weight: 3, opacity: 0.8, interactive: false }).addTo(map));
-            sto.layers.push(L.polyline(legsOf(an.proposed), { color: '#ffffff', weight: 3, opacity: 0.95, dashArray: '8,7', interactive: false }).addTo(map));
+            const keptOrder = an.proposed.filter(ui => !stt.dropUnits.has(ui));
+            keep(L.polyline(legsOf(an.parsed.units.map((_, i) => i)), { color: col || '#7adfe6', weight: 3, opacity: 0.8, interactive: false }));
+            keep(L.polyline(legsOf(keptOrder), { color: '#ffffff', weight: 3, opacity: 0.95, dashArray: '8,7', interactive: false }));
+            // NEW flight-order badges on every kept nav
+            keptOrder.forEach((ui, k) => {
+                const p = an.parsed.units[ui].nav.location;
+                keep(L.marker([p.lat, p.lng], {
+                    icon: L.divIcon({
+                        className: 'aim-mb-rng-chip',
+                        html: `<div style="pointer-events:none;width:17px;height:17px;border-radius:50%;background:#fff;color:#10131a;font:800 10px/17px monospace;text-align:center;border:1.5px solid #10131a;box-shadow:0 1px 4px rgba(0,0,0,0.7);">${k + 1}</div>`,
+                        iconSize: [17, 17], iconAnchor: [8, 8],
+                    }),
+                    interactive: false, keyboard: false, zIndexOffset: 900,
+                }));
+            });
+            // re-home sightlines: old owner red dashed, new owner green solid
+            an.parsed.units.forEach((u, ui) => u.bundles.forEach(b => {
+                if (!stt.rehome.has(b.uid)) return;
+                const to = stt.rehome.get(b.uid);
+                const s = b.snap.location, oldN = u.nav.location, newN = an.parsed.units[to].nav.location;
+                keep(L.polyline([[oldN.lat, oldN.lng], [s.lat, s.lng]], { color: '#ff5252', weight: 2, opacity: 0.85, dashArray: '3,5', interactive: false }));
+                keep(L.polyline([[newN.lat, newN.lng], [s.lat, s.lng]], { color: '#5fff5f', weight: 2, opacity: 0.9, interactive: false }));
+            }));
+            // dropped duplicates: red ✕
+            const xIcon = () => L.divIcon({
+                className: 'aim-mb-rng-chip',
+                html: '<div style="pointer-events:none;color:#ff5252;font:800 15px/15px monospace;text-shadow:0 1px 3px #000;">✕</div>',
+                iconSize: [15, 15], iconAnchor: [7, 7],
+            });
+            stt.dropUnits.forEach(ui => {
+                const u = an.parsed.units[ui];
+                keep(L.marker([u.nav.location.lat, u.nav.location.lng], { icon: xIcon(), interactive: false, keyboard: false, zIndexOffset: 950 }));
+                u.bundles.forEach(b => keep(L.marker([b.snap.location.lat, b.snap.location.lng], { icon: xIcon(), interactive: false, keyboard: false, zIndexOffset: 950 })));
+            });
+            stt.dropBundles.forEach(uid => {
+                const [ui, bi] = String(uid).split(':').map(Number);
+                const b = an.parsed.units[ui] && an.parsed.units[ui].bundles[bi];
+                if (b) keep(L.marker([b.snap.location.lat, b.snap.location.lng], { icon: xIcon(), interactive: false, keyboard: false, zIndexOffset: 950 }));
+            });
         } catch (e) { console.warn(`${TAG} [sto] preview draw failed`, e); }
     }
     let stoBusy = false;
@@ -6850,7 +6896,7 @@
         const newLen = rb.out.filter(i => i && i.type !== 0 && i.type !== 99).length;
         body += `<div style="color:#9ad;margin-bottom:7px;">steps: ${bodyLen} → ${newLen} (${rb.acc.navs} navs · ${rb.acc.snaps} snaps${rb.acc.droppedSteps ? ` · −${rb.acc.droppedSteps} dropped` : ''}${rb.acc.addedWrapSteps ? ` · +${rb.acc.addedWrapSteps} wrap-rebuild` : ''})</div>`;
         body += `<div style="display:flex;gap:7px;align-items:center;">`
-            + `<button data-sto-prev style="padding:3px 9px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:5px;cursor:pointer;">👁 Preview routes</button>`
+            + `<button data-sto-prev title="Draw the full change on the map: current route solid vs proposed dashed white, NEW flight-order numbers on every nav, red→green sightlines for each ticked snapshot re-home (old vs new vantage), red ✕ on dropped duplicates. Live-updates as you tick fixes." style="padding:3px 9px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:5px;cursor:pointer;">👁 Preview changes</button>`
             + `<button data-sto-apply style="padding:3px 10px;background:rgba(95,255,95,0.13);border:1px solid rgba(95,255,95,0.5);color:#5fff5f;border-radius:5px;cursor:pointer;font-weight:700;">💾 Apply in place</button>`
             + `<span style="margin-left:auto;color:#567;">backup + verify</span></div>`;
         body += `<div style="display:flex;gap:5px;align-items:center;margin-top:7px;font-size:10px;color:#789;flex-wrap:wrap;">cluster <input data-sto-cfg="clusterFt" type="number" value="${cfg.clusterFt}" style="width:42px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft · dup <input data-sto-cfg="dupFt" type="number" value="${cfg.dupFt}" style="width:32px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft · band <input data-sto-cfg="bandMinFt" type="number" value="${cfg.bandMinFt}" style="width:38px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">–<input data-sto-cfg="bandMaxFt" type="number" value="${cfg.bandMaxFt}" style="width:38px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft (re-analyzes)</div>`;
@@ -6887,6 +6933,12 @@
             else { stoDrawPreview(an, stt.col); el.querySelector('[data-sto-prev]').style.background = 'rgba(122,223,230,0.4)'; }
         };
         el.querySelector('[data-sto-apply]').onclick = () => stoApply();
+        // preview stays live: a re-render from a ticked fix redraws it in place
+        if (sto.layers.length) {
+            stoDrawPreview(an, stt.col);
+            const pb = el.querySelector('[data-sto-prev]');
+            if (pb) pb.style.background = 'rgba(122,223,230,0.4)';
+        }
     }
     async function stoApply() {
         const stt = sto.state; if (!stt || stoBusy) return;
