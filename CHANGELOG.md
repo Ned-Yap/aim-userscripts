@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-21 — 🪄 v2.70: OGI band 90–210 + far-snapshot handling (Mission Bank Tools latest — dev only)
+
+The standoff rules now carry the OGI physics: the camera resolves enough particles per square inch between **90 and 210 ft** (ideal 100), so the band max moved 200 → 210 and the panel says why. Over-band snapshots are flagged as *"far — not necessarily wrong"* (rare but legitimate), suggestion default-unticked — and when no in-band nav exists for one, the tool now still offers the **closest** available nav even if that nav is itself outside 210 ft (closer beats farther for the OGI; previously those were just "left as-is").
+
 ## 2026-08-21 — 🪄 v2.69: standoff doctrine tuned to ideal-100 (Mission Bank Tools latest — dev only)
 
 Live review round: the re-home chooser was aiming at the middle of the 100–200 band (~150 ft), picking 159–195 ft homes when navs near 100 existed. Tuned to the real doctrine: **100 ft is ideal, 90 is the floor** — snapshots at 90–99 ft stop flagging entirely, and a flagged snapshot re-homes to the nav closest to 100 with the farther side winning (closest above 100; only if nothing sits above 100, the best of 90–99). New `ideal` knob in the panel footer alongside the band.

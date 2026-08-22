@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.69
+// @version      2.70
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.69';
+    const SCRIPT_VERSION = '2.70';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -6376,9 +6376,11 @@
     // saveApp in place, fresh-fetch verify, overlay refresh.
     const STO_CFG_KEY = 'aim-mb-sto-cfg';
     function stoCfg() {
-        // idealFt 100 / bandMinFt 90 (v2.69, user live-tune): 100 ft is the
-        // IDEAL standoff, 90–99 is still fine (no flag), under 90 crops.
-        const d = { clusterFt: 400, dupFt: 15, idealFt: 100, bandMinFt: 90, bandMaxFt: 200, standoffMaxFt: 250, legalOverFt: 600 };
+        // Standoff = OGI physics (v2.69/v2.70 live-tune): the band the OGI
+        // camera resolves enough particles/in² is 90–210 ft, ideal 100.
+        // Under 90 crops → real flag. Over 210 is RARE BUT LEGITIMATE →
+        // informational flag only, suggestion default-unticked.
+        const d = { clusterFt: 400, dupFt: 15, idealFt: 100, bandMinFt: 90, bandMaxFt: 210, legalOverFt: 600 };
         const s = gmGet(STO_CFG_KEY, null);
         const o = Object.assign({}, d, (s && typeof s === 'object') ? s : {});
         Object.keys(d).forEach(k => { const v = Number(o[k]); o[k] = (isFinite(v) && v > 0) ? v : d[k]; });
@@ -6552,21 +6554,28 @@
         // nothing sits above 100 take the best one in the 90–100 range.
         // (The old chooser aimed at mid-band ~150 ft — live screenshot showed
         // it picking 159–195 ft homes when ~110 ft navs existed.)
-        const standoff = [];   // {uid, d, alt: unitIdx|null, altD}
+        const standoff = [];   // {uid, d, alt: unitIdx|null, altD, tooClose, outOfBand}
         parsed.units.forEach((u, ui) => u.bundles.forEach(b => {
             const d = mbApproxMeters(u.nav.location.lat, u.nav.location.lng, b.snap.location.lat, b.snap.location.lng) * STO_FT;
-            if (d >= cfg.bandMinFt && d <= cfg.standoffMaxFt) return;
-            let altAbove = null, altAboveD = 0, altBelow = null, altBelowD = 0;
+            if (d >= cfg.bandMinFt && d <= cfg.bandMaxFt) return;
+            let altAbove = null, altAboveD = 0, altBelow = null, altBelowD = 0, nearest = null, nearestD = Infinity;
             parsed.units.forEach((u2, ui2) => {
                 if (ui2 === ui) return;
                 const d2 = mbApproxMeters(u2.nav.location.lat, u2.nav.location.lng, b.snap.location.lat, b.snap.location.lng) * STO_FT;
-                if (d2 < cfg.bandMinFt || d2 > cfg.bandMaxFt) return;
+                if (d2 < cfg.bandMinFt) return;
+                if (d2 < nearestD) { nearest = ui2; nearestD = d2; }
+                if (d2 > cfg.bandMaxFt) return;
                 if (d2 >= cfg.idealFt) { if (altAbove === null || d2 < altAboveD) { altAbove = ui2; altAboveD = d2; } }
                 else { if (altBelow === null || d2 > altBelowD) { altBelow = ui2; altBelowD = d2; } }
             });
-            const alt = altAbove !== null ? altAbove : altBelow;
-            const altD = altAbove !== null ? altAboveD : altBelowD;
-            standoff.push({ uid: b.uid, d, alt, altD, tooClose: d < cfg.bandMinFt });
+            let alt = altAbove !== null ? altAbove : altBelow;
+            let altD = altAbove !== null ? altAboveD : altBelowD;
+            let outOfBand = false;
+            // far snapshot with no in-band nav: still offer the CLOSEST nav
+            // even outside 210 — closer is better for the OGI, and over-band
+            // is rare-but-legitimate rather than wrong (user doctrine).
+            if (alt === null && d > cfg.bandMaxFt && nearest !== null && nearestD < d) { alt = nearest; altD = nearestD; outOfBand = true; }
+            standoff.push({ uid: b.uid, d, alt, altD, tooClose: d < cfg.bandMinFt, outOfBand });
         }));
         // pad per unit (≤150 ft of a macro pad ring), transit navs travel with
         // the previous located unit
@@ -6890,11 +6899,11 @@
                 + an.dupBundles.map(d => row(`<label style="cursor:pointer;margin-left:8px;"><input type="checkbox" data-sto-dropb="${escapeHtml(d.uid)}" ${stt.dropBundles.has(d.uid) ? 'checked' : ''} style="accent-color:#ff8ad2;"> drop duplicate snapshot (${escapeHtml(d.uid)}, twin of ${escapeHtml(d.ofUid)})</label>`)).join(''));
         }
         if (an.standoff.length) {
-            secs.push(`<b style="color:#c39dff;">Snapshot standoff (ideal ${cfg.idealFt} ft, min ${cfg.bandMinFt} — nearest-to-${cfg.idealFt}, farther side wins)</b>`
+            secs.push(`<b style="color:#c39dff;">Snapshot standoff (OGI band ${cfg.bandMinFt}–${cfg.bandMaxFt} ft · ideal ${cfg.idealFt} — farther side wins; over-band is rare but legit)</b>`
                 + an.standoff.map(s => {
-                    const [ui] = s.uid.split(':').map(Number);
-                    if (s.alt === null) return row(`<span style="color:#93835e;margin-left:8px;">snap ${escapeHtml(s.uid)} @ ${s.d.toFixed(0)} ft from its nav (${s.tooClose ? 'too close' : 'far'}) — no in-band nav available, left as-is</span>`);
-                    return row(`<label style="cursor:pointer;margin-left:8px;"><input type="checkbox" data-sto-rehome="${escapeHtml(s.uid)}" data-sto-rehome-to="${s.alt}" ${stt.rehome.has(s.uid) ? 'checked' : ''} style="accent-color:#c39dff;"> snap ${escapeHtml(s.uid)} @ ${s.d.toFixed(0)} ft (${s.tooClose ? 'TOO CLOSE' : 'far'}) → re-home to ${unitLabel(s.alt)} @ ${s.altD.toFixed(0)} ft</label>`);
+                    const kindTxt = s.tooClose ? 'TOO CLOSE' : 'far — not necessarily wrong';
+                    if (s.alt === null) return row(`<span style="color:#93835e;margin-left:8px;">snap ${escapeHtml(s.uid)} @ ${s.d.toFixed(0)} ft from its nav (${kindTxt}) — no closer nav available, left as-is</span>`);
+                    return row(`<label style="cursor:pointer;margin-left:8px;"><input type="checkbox" data-sto-rehome="${escapeHtml(s.uid)}" data-sto-rehome-to="${s.alt}" ${stt.rehome.has(s.uid) ? 'checked' : ''} style="accent-color:#c39dff;"> snap ${escapeHtml(s.uid)} @ ${s.d.toFixed(0)} ft (${kindTxt}) → re-home to ${unitLabel(s.alt)} @ ${s.altD.toFixed(0)} ft${s.outOfBand ? ' <span style="color:#93835e;">(closest available — still over-band)</span>' : ''}</label>`);
                 }).join(''));
         }
         an.issues.forEach(i => secs.push(`<div style="color:#ff9800;">⚠ ${escapeHtml(i.text)}</div>`));
