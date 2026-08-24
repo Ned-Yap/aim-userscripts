@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.77
+// @version      2.78
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.77';
+    const SCRIPT_VERSION = '2.78';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -6547,7 +6547,7 @@
         }
         return { res, trace };
     }
-    function stoAnalyze(mc, data) {
+    async function stoAnalyze(mc, data) {
         const cfg = stoCfg();
         const m = mc.mission;
         const parsed = stoParse(m);
@@ -6688,7 +6688,32 @@
         let byAsset = null;
         try { const sol = rngSolveCached(data.ent); byAsset = new Map(sol.results.map(r => [r.asset.id, r])); } catch (e) {}
         const base = data.ent.base || null;
-        const st = { cfg, built: mcvRouteBuilt(), distCache: new Map(), fallbacks: 0 };
+        // Distance cache is SHARED across the whole 🧩 session (v2.78) — the
+        // sweep and every re-analyze reuse legs already routed. Keyed to the
+        // legalOverFt knob so changing it can't serve stale straight/legal
+        // mixes. And the expensive legal routing is PRECOMPUTED here with
+        // cooperative yielding — a 60-nav site is ~1,800 Dijkstras, which
+        // froze the tab (3× "Page Unresponsive", live) when run in one
+        // synchronous block. After this loop the solver is pure cache hits.
+        if (!data.stoDist || data.stoDist.ft !== cfg.legalOverFt) data.stoDist = { ft: cfg.legalOverFt, map: new Map() };
+        const st = { cfg, built: mcvRouteBuilt(), distCache: data.stoDist.map, fallbacks: 0 };
+        {
+            const navPts = parsed.units.map(u => u.nav.location);
+            const allPts = base ? [base].concat(navPts) : navPts;
+            const totalPairs = allPts.length * (allPts.length - 1) / 2;
+            let done = 0, misses = 0;
+            for (let i = 0; i < allPts.length; i++) {
+                for (let j = i + 1; j < allPts.length; j++) {
+                    const hit = st.distCache.has(stoLocKey(allPts[i]) + '>' + stoLocKey(allPts[j]));
+                    if (!hit) { stoDistM(st, allPts[i], allPts[j]); misses++; }
+                    done++;
+                    if (misses > 0 && misses % 12 === 0 && !hit) {
+                        if (misses % 48 === 12) showToast(`🪄 Routing legs… ${done}/${totalPairs}`, '#c39dff', 1200);
+                        await new Promise(r => setTimeout(r, 0));
+                    }
+                }
+            }
+        }
         const seqLen = (idxArr) => { let t = 0; for (let i = 1; i < idxArr.length; i++) t += stoDistM(st, parsed.units[idxArr[i - 1]].nav.location, parsed.units[idxArr[i]].nav.location); return t; };
         // per-nav depth from base (ft) — fuels the deep-first TIE-BREAKS.
         // Dead-end spurs cost identical feet in both directions, so equal-cost
@@ -7093,7 +7118,7 @@
             showToast(`🪄 Sweeping ${i + 1}/${data.det.macros.length}: ${mc.mission.name}…`, '#c39dff', 2000);
             await new Promise(r => setTimeout(r, 30));
             try {
-                const an = stoAnalyze(mc, data);
+                const an = await stoAnalyze(mc, data);
                 rows.push({ mc, an, col: COLORS[i % COLORS.length], err: null });
             } catch (e) {
                 console.warn(`${TAG} [sto] sweep failed for "${mc.mission.name}"`, e);
@@ -7145,7 +7170,7 @@
         showToast('🪄 Analyzing step order (legal-route solve)…', '#7adfe6', 2500);
         await new Promise(r => setTimeout(r, 30));   // let the toast paint
         let an;
-        try { an = stoAnalyze(mc, data); }
+        try { an = await stoAnalyze(mc, data); }
         catch (e) { console.warn(`${TAG} [sto] analyze failed`, e); showToast('🪄 Analysis failed (see console).', '#ff5252', 4500); stoBusy = false; return; }
         stoBusy = false;
         console.log(`${TAG} [sto] "${mc.mission.name}": ${an.parsed.units.length} navs · cur ${(an.curM * STO_FT / 1000).toFixed(1)}k ft → opt ${(an.propM * STO_FT / 1000).toFixed(1)}k ft · ${an.fallbacks} route fallback(s)`);
