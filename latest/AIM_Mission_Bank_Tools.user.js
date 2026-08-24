@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.78
+// @version      2.79
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.78';
+    const SCRIPT_VERSION = '2.79';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -6892,6 +6892,41 @@
         // never flip: reversal there costs real feet. Legal distances decide
         // "far" — at PEUGH the corridor arrives from the WEST though base
         // sits east, so the straight-line guess picks the wrong side.
+        // v2.79 — the pass is now the full lasso BRANCH WALK applied inside
+        // every same-pad run, with that run's arrival point as "base". Decoded
+        // from the SW 1-2 MIDKIFF pad via the route_points corridor graph:
+        // the user's expected order (12→11→15→14→13) is exactly: start at the
+        // LEGAL-deepest nav from the arrival, next = deepest route junction
+        // with the current nav (junc = (dArr(a)+dArr(b)−d(a,b))/2), ties →
+        // deeper. This supersedes v2.74's whole-run reversal AND v2.73's
+        // "arrival-side" reading — PEUGH's east-first was far-first all along
+        // (the corridor arrives from the WEST; straight-line depth is inverted
+        // by the corridor loop, so LEGAL distances are mandatory here).
+        // Doctrine over feet: the walk may cost a little more than the feet-
+        // optimal sweep (MIDKIFF: ~300 ft) — "we ALWAYS start at the furthest
+        // nav at a pad and move back". Applied unconditionally per run.
+        const branchWalk = (uis, arrPt) => {
+            const loc = ui => parsed.units[ui].nav.location;
+            const dA = new Map(uis.map(ui => [ui, stoDistM(st, arrPt, loc(ui))]));
+            const rem = new Set(uis);
+            const out = [];
+            let cur = uis[0];
+            rem.forEach(x => { if (dA.get(x) > dA.get(cur)) cur = x; });   // start = deepest
+            out.push(cur); rem.delete(cur);
+            const TIE = 9;   // ~30 ft junction tie window
+            while (rem.size) {
+                let maxJ = -Infinity;
+                rem.forEach(x => { const j = (dA.get(cur) + dA.get(x) - stoDistM(st, loc(cur), loc(x))) / 2; if (j > maxJ) maxJ = j; });
+                let next = null;
+                rem.forEach(x => {
+                    const j = (dA.get(cur) + dA.get(x) - stoDistM(st, loc(cur), loc(x))) / 2;
+                    if (j >= maxJ - TIE && (next === null || dA.get(x) > dA.get(next))) next = x;
+                });
+                out.push(next); rem.delete(next);
+                cur = next;
+            }
+            return out;
+        };
         const doctrinePass = (order) => {
             const runs = [];
             order.forEach(ui => {
@@ -6901,21 +6936,13 @@
             });
             const out = [];
             let flips = 0;
-            runs.forEach((r, k) => {
+            runs.forEach(r => {
                 let run = r.uis;
                 const arrPt = out.length ? parsed.units[out[out.length - 1]].nav.location : base;
-                const depPt = (k < runs.length - 1) ? parsed.units[runs[k + 1].uis[0]].nav.location : null;
                 if (run.length >= 2 && arrPt) {
-                    const rev = run.slice().reverse();
-                    const dFwd = stoDistM(st, arrPt, parsed.units[run[0]].nav.location);
-                    const dRev = stoDistM(st, arrPt, parsed.units[rev[0]].nav.location);
-                    if (dRev > dFwd + 3) {   // reversed is meaningfully more far-first (>3 m)
-                        const exitF = depPt ? stoDistM(st, parsed.units[run[run.length - 1]].nav.location, depPt) : 0;
-                        const exitR = depPt ? stoDistM(st, parsed.units[rev[rev.length - 1]].nav.location, depPt) : 0;
-                        // intra-run length is reversal-invariant; only the two
-                        // outer legs differ
-                        if (!depPt || (dRev + exitR) <= (dFwd + exitF) + 2) { run = rev; flips++; }
-                    }
+                    const walked = branchWalk(run, arrPt);
+                    if (walked.join(',') !== run.join(',')) flips++;
+                    run = walked;
                 }
                 out.push(...run);
             });

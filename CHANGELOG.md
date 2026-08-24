@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-24 — 🪄 v2.79: branch walk inside pads — the unified intra-pad doctrine (Mission Bank Tools latest — dev only)
+
+The N11/N12 + N13–N15 spur ordering got its proper fix, decoded from the SW 1-2 dump instead of guessed. The mission's own `route_points` (Percepto's legal corridor routing) became an offline route graph, and the decode showed the expected order (12→11→15→14→13) is exactly the **lasso branch walk applied inside the pad with the run's arrival point as base**: start at the LEGAL-deepest nav, next = deepest route junction with the current nav, ties go deeper. Straight-line depth is inverted by corridor loops (from the arrival, N12 is straight-line *closest* but legally *deepest*), which is why every screenshot-based guess failed — and it retroactively explains PEUGH: v2.73's "arrival-side entry" reading was wrong; east-first there was far-first all along. The v2.74 whole-run reversal is replaced by this walk, applied unconditionally per same-pad run (doctrine over feet — the walk costs ~300 ft over the feet-optimal sweep at MIDKIFF and that's the SOP). Validated against the real SW 1-2 mission with the corridor-graph metric: produces the user's exact expected order with the rest of the sequence kept (~1.6% doctrine premium); NE 1-2 and stranding regressions clean.
+
 ## 2026-08-24 — 🪄 v2.78: no more tab freezes (Mission Bank Tools latest — dev only)
 
 The honest metric's cost came due on a 60-nav site: ~1,800 legal-route Dijkstras ran in one synchronous block and Chrome threw "Page Unresponsive" three times. The legal routing is now precomputed with cooperative yielding ("🪄 Routing legs… N/M" toasts, tab stays live) before the solver runs on pure cache hits — and the distance cache is shared across the whole 🧩 session, so re-analyzes, config tweaks, and the 🪄 All sweep reuse every leg already routed instead of starting over.
