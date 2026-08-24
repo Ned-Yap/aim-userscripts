@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.76
+// @version      2.77
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.76';
+    const SCRIPT_VERSION = '2.77';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -6429,6 +6429,25 @@
         });
         return { takeoff, rh, lead, units, orphans };
     }
+    // Standoff preference LADDER (v2.77, user-ruled after a live 87→182 ft
+    // re-home — "that's TOO BIG of a swing"). 100 ft ideal, then:
+    //   101–120  beats  80–100
+    //   121–160  beats  60–80
+    //   160–200  beats  40–60
+    //   200+     only if there's no other option · under 40 = worst
+    // Lower tier wins; within a tier, closer to 100 wins. A re-home is only
+    // offered when the alternative lands in a strictly better tier (or same
+    // tier, meaningfully closer to 100).
+    function stoTier(d) {
+        if (d >= 100 && d <= 120) return 1;
+        if (d >= 80 && d < 100) return 2;
+        if (d > 120 && d <= 160) return 3;
+        if (d >= 60 && d < 80) return 4;
+        if (d > 160 && d <= 200) return 5;
+        if (d >= 40 && d < 60) return 6;
+        if (d > 200) return 7;
+        return 8;   // under 40 ft — severe cropping
+    }
     function stoWrapSig(bundle) {
         return bundle.wrap.map(s => `${s.type_name}:${s.value1 === true ? 1 : s.value1 === false ? 0 : s.value1}`).join('|');
     }
@@ -6489,11 +6508,13 @@
         return { res, trace };
     }
     // NN + 2-opt open path fallback for clusters over the DP cap
-    function stoHeurPath(n, D) {
+    function stoHeurPath(n, D, onlyStarts) {
         const res = Array.from({ length: n }, () => new Array(n).fill(Infinity));
         const trace = Array.from({ length: n }, () => new Array(n).fill(null));
         const len = ord => { let t = 0; for (let i = 1; i < ord.length; i++) t += D[ord[i - 1]][ord[i]]; return t; };
+        const startSet = onlyStarts ? new Set(onlyStarts) : null;
         for (let s = 0; s < n; s++) {
+            if (startSet && !startSet.has(s)) continue;
             const left = new Set(Array.from({ length: n }, (_, i) => i)); left.delete(s);
             const ord = [s];
             while (left.size) {
@@ -6506,6 +6527,17 @@
                 improved = false;
                 for (let i = 1; i < cur.length - 1; i++) for (let k = i + 1; k < cur.length; k++) {
                     const cand = cur.slice(0, i).concat(cur.slice(i, k + 1).reverse(), cur.slice(k + 1));
+                    const l = len(cand);
+                    if (l < curLen - 0.3) { cur = cand; curLen = l; improved = true; }
+                }
+                // or-opt: relocate a single nav — catches the lone-nav zigzag
+                // that 2-opt's segment reversals can't express (v2.77, live:
+                // an out-of-the-way excursion mid-pad survived 2-opt)
+                for (let i = 1; i < cur.length; i++) for (let k = 1; k < cur.length; k++) {
+                    if (k === i || k === i - 1) continue;
+                    const cand = cur.slice();
+                    const [mv] = cand.splice(i, 1);
+                    cand.splice(k > i ? k - 1 : k, 0, mv);
                     const l = len(cand);
                     if (l < curLen - 0.3) { cur = cand; curLen = l; improved = true; }
                 }
@@ -6565,24 +6597,26 @@
         parsed.units.forEach((u, ui) => u.bundles.forEach(b => {
             const d = mbApproxMeters(u.nav.location.lat, u.nav.location.lng, b.snap.location.lat, b.snap.location.lng) * STO_FT;
             if (d >= cfg.bandMinFt && d <= cfg.bandMaxFt) return;
-            let altAbove = null, altAboveD = 0, altBelow = null, altBelowD = 0, nearest = null, nearestD = Infinity;
+            // best alternative BY THE LADDER: lowest tier, then closest to 100
+            let alt = null, altD = 0;
             parsed.units.forEach((u2, ui2) => {
                 if (ui2 === ui) return;
                 const d2 = mbApproxMeters(u2.nav.location.lat, u2.nav.location.lng, b.snap.location.lat, b.snap.location.lng) * STO_FT;
-                if (d2 < cfg.bandMinFt) return;
-                if (d2 < nearestD) { nearest = ui2; nearestD = d2; }
-                if (d2 > cfg.bandMaxFt) return;
-                if (d2 >= cfg.idealFt) { if (altAbove === null || d2 < altAboveD) { altAbove = ui2; altAboveD = d2; } }
-                else { if (altBelow === null || d2 > altBelowD) { altBelow = ui2; altBelowD = d2; } }
+                if (alt === null || stoTier(d2) < stoTier(altD)
+                    || (stoTier(d2) === stoTier(altD) && Math.abs(d2 - cfg.idealFt) < Math.abs(altD - cfg.idealFt))) { alt = ui2; altD = d2; }
             });
-            let alt = altAbove !== null ? altAbove : altBelow;
-            let altD = altAbove !== null ? altAboveD : altBelowD;
-            let outOfBand = false;
-            // far snapshot with no in-band nav: still offer the CLOSEST nav
-            // even outside 210 — closer is better for the OGI, and over-band
-            // is rare-but-legitimate rather than wrong (user doctrine).
-            if (alt === null && d > cfg.bandMaxFt && nearest !== null && nearestD < d) { alt = nearest; altD = nearestD; outOfBand = true; }
-            standoff.push({ uid: b.uid, d, alt, altD, tooClose: d < cfg.bandMinFt, outOfBand });
+            // only offer a move that climbs the ladder — a strictly better
+            // tier, or the same tier meaningfully (>10 ft) closer to ideal.
+            // Live catch: 87 ft (tier 80–100) was "fixed" to 182 ft (tier
+            // 160–200) — a downgrade the flat band couldn't see.
+            const improves = alt !== null && (stoTier(altD) < stoTier(d)
+                || (stoTier(altD) === stoTier(d) && Math.abs(altD - cfg.idealFt) < Math.abs(d - cfg.idealFt) - 10));
+            // NEVER offer a move that would leave the donor nav snap-less —
+            // the snap was attached there on purpose (user rule); moving a
+            // nav's only snapshot away IS a consolidation, and that stays
+            // explicit + opt-in in the nav-diet section.
+            if (!improves || u.bundles.length === 1) { alt = null; altD = 0; }
+            standoff.push({ uid: b.uid, d, alt, altD, tooClose: d < cfg.bandMinFt, outOfBand: alt !== null && (altD < cfg.bandMinFt || altD > cfg.bandMaxFt) });
         }));
         // pad per unit (≤150 ft of a macro pad ring), transit navs travel with
         // the previous located unit
@@ -6635,6 +6669,10 @@
                 dietUsed.add(i); dietUsed.add(j);
             }
         }
+        // NO NAVS WITHOUT SNAPS (v2.77, user rule): "if there's no snap
+        // there's no reason for a nav." Original snap-less navs listed here;
+        // navs EMPTIED by re-homes/merges are caught at rebuild time.
+        const emptyNavs = parsed.units.map((u, ui) => ui).filter(ui => !parsed.units[ui].bundles.length && !parsed.units[ui].others.length);
         // clusters + solve — tried at TWO radii, and the CURRENT order is a
         // scored candidate too (v2.67). Live NE 1-2 test: the user's manual
         // interleave (Rivers 1974JH sandwiched INSIDE the Jack Mohr run) BEAT
@@ -6696,7 +6734,6 @@
                 const pts = c.unitIdx.map(ui => parsed.units[ui].nav.location);
                 const n = pts.length;
                 const D = Array.from({ length: n }, (_, i) => pts.map(p => stoDistM(st, pts[i], p)));
-                const hk = n <= 12 ? stoHeldKarp(n, D) : stoHeurPath(n, D);
                 // Mission-start anchor (v2.73, user live-tune): the flight
                 // begins in the deepest PAD, entered on its ARRIVAL side —
                 // the drone transits out from base and grabs the near nav on
@@ -6715,6 +6752,10 @@
                     });
                     if (bestI >= 0) anchorLocal = bestI;
                 }
+                // perf: a lone merged mega-cluster only ever enters at the
+                // anchor — skip the other n−1 heuristic multi-starts (v2.77)
+                const starts = (clusters.length === 1 && n > 20) ? [anchorLocal] : null;
+                const hk = n <= 12 ? stoHeldKarp(n, D) : stoHeurPath(n, D, starts);
                 return Object.assign({}, c, { pts, hk, exact: n <= 12, anchorLocal });
             });
             const startCi = solvedCl.reduce((bi, c, i) => c.depth > solvedCl[bi].depth ? i : bi, 0);
@@ -6864,7 +6905,7 @@
         return { m, mc, cfg, parsed, clusters: bestV.clusters, clusterOrder: bestV.clusterOrder, startCi: bestV.startCi,
             usedClusterFt: bestV.usedFt, keptCurrent, doctrineFlips,
             proposed, curM, propM, fallbacks: st.fallbacks, st,
-            hasCanon, canonSig, canonTemplate, wrapAnoms, fragUnits, dupUnits, dupBundles, standoff, navDiet, issues };
+            hasCanon, canonSig, canonTemplate, wrapAnoms, fragUnits, dupUnits, dupBundles, standoff, navDiet, emptyNavs, issues };
     }
     // Rebuild the instruction list from an analysis + the user's fix choices.
     function stoRebuild(an, opts) {
@@ -6897,13 +6938,21 @@
             byUnit.get(firstKept).push(b);
         });
         const out = [];
-        const acc = { navs: 0, snaps: 0, droppedSteps: 0, addedWrapSteps: 0, merged: merge.size };
+        const acc = { navs: 0, snaps: 0, droppedSteps: 0, addedWrapSteps: 0, merged: merge.size, emptyDropped: 0, keptUnits: [] };
         if (an.parsed.takeoff) out.push(an.parsed.takeoff);
         parsed.lead.forEach(s => out.push(s));
         an.proposed.forEach(ui => {
             if (dropUnit.has(ui)) { acc.droppedSteps += 1 + parsed.units[ui].frags.length + parsed.units[ui].others.length + parsed.units[ui].bundles.reduce((t, b) => t + 1 + b.wrap.length, 0); return; }
             if (merge.has(ui)) { acc.droppedSteps += 1 + parsed.units[ui].frags.length; return; }   // nav + frags go; bundles moved above
             const u = parsed.units[ui];
+            // NO NAVS WITHOUT SNAPS (v2.77): a nav with no bundles here —
+            // originally empty, or emptied by re-homes — is a stop with no
+            // purpose. Dropped when the fix is on.
+            if (opts.dropEmpty && !(byUnit.get(ui) || []).length && !u.others.length) {
+                acc.emptyDropped++; acc.droppedSteps += 1 + u.frags.length;
+                return;
+            }
+            acc.keptUnits.push(ui);
             out.push(u.nav); acc.navs++;
             if (!fixWraps) u.frags.forEach(s => out.push(s));
             else acc.droppedSteps += u.frags.length;
@@ -6969,7 +7018,10 @@
         };
         const keep = (l) => { sto.layers.push(l); try { l.addTo(map); } catch (e) {} return l; };
         try {
-            const keptOrder = an.proposed.filter(ui => !stt.dropUnits.has(ui) && !stt.navMerge.has(ui));
+            // kept navs from the same rebuild logic Apply uses (incl. the
+            // no-snap-less-navs rule) so the drawn route IS the saved route
+            const rbPrev = stoRebuild(an, { fixWraps: stt.fixWraps, dropUnits: Array.from(stt.dropUnits), dropBundles: Array.from(stt.dropBundles), rehome: stt.rehome, mergeUnits: stt.navMerge, dropEmpty: stt.dropEmpty });
+            const keptOrder = rbPrev.acc.keptUnits;
             keep(L.polyline(legsOf(an.parsed.units.map((_, i) => i)), { color: col || '#7adfe6', weight: 3, opacity: 0.8, interactive: false }));
             keep(L.polyline(legsOf(keptOrder), { color: '#ffffff', weight: 3, opacity: 0.95, dashArray: '8,7', interactive: false }));
             // NEW flight-order badges on every kept nav
@@ -7101,7 +7153,8 @@
             dropUnits: new Set(an.dupUnits.map(d => d.ui)),
             dropBundles: new Set(an.dupBundles.map(d => d.uid)),
             rehome: new Map(an.standoff.filter(s => s.tooClose && s.alt !== null).map(s => [s.uid, s.alt])),
-            navMerge: new Map() };   // nav consolidation opt-IN (default unticked — vantage changes)
+            navMerge: new Map(),   // nav consolidation opt-IN (default unticked — vantage changes)
+            dropEmpty: true };     // no navs without snaps (user rule) — default ON
         stoRenderPanel();
     }
     function stoRenderPanel() {
@@ -7138,12 +7191,18 @@
                 + an.dupBundles.map(d => row(`<label style="cursor:pointer;margin-left:8px;"><input type="checkbox" data-sto-dropb="${escapeHtml(d.uid)}" ${stt.dropBundles.has(d.uid) ? 'checked' : ''} style="accent-color:#ff8ad2;"> drop duplicate snapshot (${escapeHtml(d.uid)}, twin of ${escapeHtml(d.ofUid)})</label>`)).join(''));
         }
         if (an.standoff.length) {
-            secs.push(`<b style="color:#c39dff;">Snapshot standoff (OGI band ${cfg.bandMinFt}–${cfg.bandMaxFt} ft · ideal ${cfg.idealFt} — farther side wins; over-band is rare but legit)</b>`
+            secs.push(`<b style="color:#c39dff;" title="Preference ladder: 100 ideal · 101–120 beats 80–100 · 121–160 beats 60–80 · 160–200 beats 40–60 · 200+ only if nothing else. A move is only offered when it climbs the ladder.">Snapshot standoff (OGI band ${cfg.bandMinFt}–${cfg.bandMaxFt} ft · ideal ${cfg.idealFt} · ladder-scored — hover for the ladder)</b>`
                 + an.standoff.map(s => {
                     const kindTxt = s.tooClose ? 'TOO CLOSE' : 'far — not necessarily wrong';
                     if (s.alt === null) return row(`<span style="color:#93835e;margin-left:8px;">snap ${escapeHtml(s.uid)} @ ${s.d.toFixed(0)} ft from its nav (${kindTxt}) — no closer nav available, left as-is</span>`);
                     return row(`<label style="cursor:pointer;margin-left:8px;"><input type="checkbox" data-sto-rehome="${escapeHtml(s.uid)}" data-sto-rehome-to="${s.alt}" ${stt.rehome.has(s.uid) ? 'checked' : ''} style="accent-color:#c39dff;"> snap ${escapeHtml(s.uid)} @ ${s.d.toFixed(0)} ft (${kindTxt}) → re-home to ${unitLabel(s.alt)} @ ${s.altD.toFixed(0)} ft${s.outOfBand ? ' <span style="color:#93835e;">(closest available — still over-band)</span>' : ''}</label>`);
                 }).join(''));
+        }
+        // snap-less navs (v2.77) — no snap, no reason for the nav
+        if (an.emptyNavs.length) {
+            secs.push(row(`<label style="cursor:pointer;"><input type="checkbox" data-sto-empty ${stt.dropEmpty ? 'checked' : ''} style="accent-color:#ff9e9e;"> <b style="color:#ff9e9e;">Drop ${an.emptyNavs.length} snap-less nav(s)</b> — a nav with no snapshot is a stop with no purpose</label>`)
+                + an.emptyNavs.slice(0, 8).map(ui => `<div style="color:#ff9e9e;margin-left:16px;">${unitLabel(ui)}</div>`).join('')
+                + (an.emptyNavs.length > 8 ? `<div style="color:#789;margin-left:16px;">…+${an.emptyNavs.length - 8} more</div>` : ''));
         }
         // nav consolidation (v2.75) — opt-in, every merge removes one stop
         if (an.navDiet.length) {
@@ -7154,10 +7213,10 @@
         if (secs.length) body += `<div style="border-top:1px solid #2a3340;padding-top:5px;margin-bottom:6px;">${secs.join('<div style="height:5px;"></div>')}</div>`;
         else body += `<div style="color:#5fff5f;margin-bottom:6px;">✓ structure clean — no wrap scrambles, duplicates, or standoff violations</div>`;
         // step-count delta from the current fix choices
-        const rb = stoRebuild(an, { fixWraps: stt.fixWraps, dropUnits: Array.from(stt.dropUnits), dropBundles: Array.from(stt.dropBundles), rehome: stt.rehome, mergeUnits: stt.navMerge });
+        const rb = stoRebuild(an, { fixWraps: stt.fixWraps, dropUnits: Array.from(stt.dropUnits), dropBundles: Array.from(stt.dropBundles), rehome: stt.rehome, mergeUnits: stt.navMerge, dropEmpty: stt.dropEmpty });
         const bodyLen = (an.m.instructions || []).filter(i => i && i.type !== 0 && i.type !== 99).length;
         const newLen = rb.out.filter(i => i && i.type !== 0 && i.type !== 99).length;
-        body += `<div style="color:#9ad;margin-bottom:7px;">steps: ${bodyLen} → ${newLen} (${rb.acc.navs} navs · ${rb.acc.snaps} snaps${rb.acc.merged ? ` · −${rb.acc.merged} stop(s)` : ''}${rb.acc.droppedSteps ? ` · −${rb.acc.droppedSteps} dropped` : ''}${rb.acc.addedWrapSteps ? ` · +${rb.acc.addedWrapSteps} wrap-rebuild` : ''})</div>`;
+        body += `<div style="color:#9ad;margin-bottom:7px;">steps: ${bodyLen} → ${newLen} (${rb.acc.navs} navs · ${rb.acc.snaps} snaps${rb.acc.merged ? ` · −${rb.acc.merged} stop(s)` : ''}${rb.acc.emptyDropped ? ` · −${rb.acc.emptyDropped} snap-less nav(s)` : ''}${rb.acc.droppedSteps ? ` · −${rb.acc.droppedSteps} dropped` : ''}${rb.acc.addedWrapSteps ? ` · +${rb.acc.addedWrapSteps} wrap-rebuild` : ''})</div>`;
         body += `<div style="display:flex;gap:7px;align-items:center;">`
             + `<button data-sto-prev title="Draw the full change on the map: current route solid vs proposed dashed white, NEW flight-order numbers on every nav, red→green sightlines for each ticked snapshot re-home (old vs new vantage), red ✕ on dropped duplicates. Live-updates as you tick fixes." style="padding:3px 9px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:5px;cursor:pointer;">👁 Preview changes</button>`
             + `<button data-sto-apply style="padding:3px 10px;background:rgba(95,255,95,0.13);border:1px solid rgba(95,255,95,0.5);color:#5fff5f;border-radius:5px;cursor:pointer;font-weight:700;">💾 Apply in place</button>`
@@ -7169,6 +7228,8 @@
         el.querySelector('[data-sto-x]').onclick = () => stoClosePanel();
         const wrapsCb = el.querySelector('[data-sto-wraps]');
         if (wrapsCb) wrapsCb.onchange = () => { stt.fixWraps = wrapsCb.checked; stoRenderPanel(); };
+        const emptyCb = el.querySelector('[data-sto-empty]');
+        if (emptyCb) emptyCb.onchange = () => { stt.dropEmpty = emptyCb.checked; stoRenderPanel(); };
         el.querySelectorAll('[data-sto-dropu]').forEach(cb => cb.onchange = () => {
             const ui = Number(cb.getAttribute('data-sto-dropu'));
             if (cb.checked) stt.dropUnits.add(ui); else stt.dropUnits.delete(ui);
@@ -7213,12 +7274,13 @@
         const an = stt.an, m = an.m;
         const ctx = findMissionAppCtx();
         if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4500); return; }
-        const rb = stoRebuild(an, { fixWraps: stt.fixWraps, dropUnits: Array.from(stt.dropUnits), dropBundles: Array.from(stt.dropBundles), rehome: stt.rehome, mergeUnits: stt.navMerge });
+        const rb = stoRebuild(an, { fixWraps: stt.fixWraps, dropUnits: Array.from(stt.dropUnits), dropBundles: Array.from(stt.dropBundles), rehome: stt.rehome, mergeUnits: stt.navMerge, dropEmpty: stt.dropEmpty });
         // hard sanity: every nav + snapshot accounted for (minus explicit
-        // drops; consolidated navs go but their snapshots MOVE, not vanish)
+        // drops; consolidated navs go but their snapshots MOVE, not vanish;
+        // snap-less navs counted by the rebuild itself)
         const origNavs = an.parsed.units.length;
         const origSnaps = an.parsed.units.reduce((t, u) => t + u.bundles.length, 0) + an.parsed.orphans.filter(o => !o.other).length;
-        const expNavs = origNavs - stt.dropUnits.size - stt.navMerge.size;
+        const expNavs = origNavs - stt.dropUnits.size - stt.navMerge.size - rb.acc.emptyDropped;
         const droppedByUnit = an.parsed.units.reduce((t, u, ui) => t + (stt.dropUnits.has(ui) ? u.bundles.filter(b => !stt.dropBundles.has(b.uid)).length : 0), 0);
         const expSnaps = origSnaps - stt.dropBundles.size - droppedByUnit;
         if (rb.acc.navs !== expNavs || rb.acc.snaps !== expSnaps) {
@@ -7233,7 +7295,7 @@
                     ? `nav route ${(an.curM * STO_FT / 1000).toFixed(1)}k ft — order kept EXCEPT ${an.doctrineFlips} far-first direction fix(es)\n`
                     : `nav route ${(an.curM * STO_FT / 1000).toFixed(1)}k ft — order unchanged (already shortest), structure repairs only\n`)
                 : `nav route ${(an.curM * STO_FT / 1000).toFixed(1)}k ft → ${(an.propM * STO_FT / 1000).toFixed(1)}k ft (−${(savedFt / 1000).toFixed(1)}k ft)${an.doctrineFlips ? ` · ${an.doctrineFlips} far-first flip(s)` : ''}\n`)
-            + `${rb.acc.navs} navs · ${rb.acc.snaps} snapshots${stt.fixWraps ? ' · wraps rebuilt to the mission pattern' : ''}${stt.dropUnits.size || stt.dropBundles.size ? ` · ${stt.dropUnits.size + stt.dropBundles.size} duplicate(s) removed` : ''}${stt.rehome.size ? ` · ${stt.rehome.size} snapshot(s) re-homed` : ''}${stt.navMerge.size ? ` · ${stt.navMerge.size} nav(s) consolidated (−${stt.navMerge.size} stop(s))` : ''}\n\n`
+            + `${rb.acc.navs} navs · ${rb.acc.snaps} snapshots${stt.fixWraps ? ' · wraps rebuilt to the mission pattern' : ''}${stt.dropUnits.size || stt.dropBundles.size ? ` · ${stt.dropUnits.size + stt.dropBundles.size} duplicate(s) removed` : ''}${stt.rehome.size ? ` · ${stt.rehome.size} snapshot(s) re-homed` : ''}${stt.navMerge.size ? ` · ${stt.navMerge.size} nav(s) consolidated (−${stt.navMerge.size} stop(s))` : ''}${rb.acc.emptyDropped ? ` · ${rb.acc.emptyDropped} snap-less nav(s) dropped` : ''}\n\n`
             + `Mission id + name unchanged. A JSON backup downloads first.`)) return;
         stoBusy = true;
         try {

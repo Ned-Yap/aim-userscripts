@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-24 — 🪄 v2.77: standoff ladder + no snap-less navs (Mission Bank Tools latest — dev only)
+
+Big-site live round: a snapshot at 87 ft was re-homed to 182 ft ("that's TOO BIG of a swing"), which also left its nav snap-less, which also bent the route. Three rules from it. **The standoff LADDER** replaces the flat band for choosing vantage: 100 ideal · 101–120 beats 80–100 · 121–160 beats 60–80 · 160–200 beats 40–60 · 200+ only if nothing else. A re-home is only offered when the alternative climbs the ladder (87→182 is a downgrade and never offered again; 71→144 is a real climb and stays). **A nav's snapshot never moves if it's the only one** — it was attached on purpose; moving a nav's last snap is a consolidation and stays explicit/opt-in in the nav-diet section. **No navs without snaps**: originally snap-less navs are flagged and dropped (default on, "a stop with no purpose"), and the rebuild guarantees no nav ever *becomes* snap-less. Also: the intra-cluster heuristic gained a relocate pass (single-nav zigzags survive 2-opt), and lone mega-clusters now solve from the anchor only (much faster on 60-nav macros).
+
 ## 2026-08-24 — 🪄 v2.76: cluster-order improvement — no more stranded pads (Mission Bank Tools latest — dev only)
 
 Live catch on a 30-pad site: the flight went from N41 far east, then doubled back past a pad to N57/S90. Cause: with more than 7 clusters the cluster ordering fell to a plain greedy nearest-neighbor chain, and greedy NN strands slightly-off-corridor clusters — it sails past chasing the nearest big target and comes back later. The greedy seed now gets a 2-opt + relocate improvement pass over the cluster sequence, scored by the real chained cost with the start cluster pinned. Validated on a synthetic stranding case (10-pad corridor + one off-corridor pad): both solver branches now tuck the odd pad between its corridor neighbors instead of appending it after a doubleback.
