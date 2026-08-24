@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-24 — 🪄 v2.76: cluster-order improvement — no more stranded pads (Mission Bank Tools latest — dev only)
+
+Live catch on a 30-pad site: the flight went from N41 far east, then doubled back past a pad to N57/S90. Cause: with more than 7 clusters the cluster ordering fell to a plain greedy nearest-neighbor chain, and greedy NN strands slightly-off-corridor clusters — it sails past chasing the nearest big target and comes back later. The greedy seed now gets a 2-opt + relocate improvement pass over the cluster sequence, scored by the real chained cost with the start cluster pinned. Validated on a synthetic stranding case (10-pad corridor + one off-corridor pad): both solver branches now tuck the odd pad between its corridor neighbors instead of appending it after a doubleback.
+
 ## 2026-08-24 — 🪄 v2.75: site-wide sweep + nav consolidation (Mission Bank Tools latest — dev only)
 
 Two new efficiency layers. **🪄 All** in the 🧩 legend header sweeps every macro on the site through the Step Optimizer analysis and ranks them in one report — route savings, far-first fixes, wrap scrambles, duplicates, too-close standoffs, consolidation candidates — with a 🪄 button per row opening the normal review panel. Analysis only; every Apply still goes through per-macro review. **Nav consolidation ("nav diet")**: every nav is a stop (decelerate, position, stabilize) that distance metrics never see — where one nav's every snapshot would still sit inside the 90–210 OGI band shot from a same-pad sibling, the panel offers to drop the redundant stop and move its snapshots over. Never invents a new position (a nav's altitude is its FFZ floor — only an existing nav may survive); suggestions default-unticked, previewed with an orange ✕ on the dropped stop and blue sightlines from the survivor. On NE 1-2: 4 candidates, 22 → 18 stops with all 49 snapshots kept. (Velocity and altitude ruled out as levers: 12 m/s is the platform's top speed and always set; nav altitudes are FFZ floors by design.)

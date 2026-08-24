@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.75
+// @version      2.76
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.75';
+    const SCRIPT_VERSION = '2.76';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -6760,14 +6760,42 @@
                     if (!bestEnd || scored < bestEnd.scored) { bestEnd = end; bestEnd.scored = scored; }
                 });
             } else {
-                // greedy nearest-cluster chain from the start cluster
+                // greedy nearest-cluster seed from the start cluster…
                 const centro = c => { let la = 0, lg = 0; c.pts.forEach(p => { la += p.lat; lg += p.lng; }); return { lat: la / c.pts.length, lng: lg / c.pts.length }; };
                 const cs = solvedCl.map(centro);
-                const left = new Set(rest); const order = [startCi];
+                const left = new Set(rest); let order = [startCi];
                 while (left.size) {
                     let best = null, bd = Infinity;
                     left.forEach(i => { const d = mbApproxMeters(cs[order[order.length - 1]].lat, cs[order[order.length - 1]].lng, cs[i].lat, cs[i].lng); if (d < bd) { bd = d; best = i; } });
                     order.push(best); left.delete(best);
+                }
+                // …then 2-opt + relocate on the CLUSTER SEQUENCE, scored by the
+                // real chained cost (v2.76). Greedy NN alone STRANDS a slightly
+                // off-corridor cluster: it sails past chasing the nearest big
+                // target and doubles back later (live catch on a 30-pad site —
+                // N41 → far east → back past a pad to N57/S90). Start pinned.
+                const tieOf = (ord) => ord.reduce((t, ci2, k) => t + k * (solvedCl[ci2].depth || 0), 0) * 1e-7;
+                const scoreOf = (ord) => chain(ord).cost + tieOf(ord);
+                let bestScore = scoreOf(order), improvedO = true, guardO = 0;
+                while (improvedO && guardO++ < 12) {
+                    improvedO = false;
+                    for (let i = 1; i < order.length - 1; i++) {
+                        for (let k = i + 1; k < order.length; k++) {
+                            const cand = order.slice(0, i).concat(order.slice(i, k + 1).reverse(), order.slice(k + 1));
+                            const s2 = scoreOf(cand);
+                            if (s2 < bestScore - 1e-6) { order = cand; bestScore = s2; improvedO = true; }
+                        }
+                    }
+                    for (let i = 1; i < order.length; i++) {
+                        for (let k = 1; k < order.length; k++) {
+                            if (k === i || k === i - 1) continue;
+                            const cand = order.slice();
+                            const [mv] = cand.splice(i, 1);
+                            cand.splice(k > i ? k - 1 : k, 0, mv);
+                            const s2 = scoreOf(cand);
+                            if (s2 < bestScore - 1e-6) { order = cand; bestScore = s2; improvedO = true; }
+                        }
+                    }
                 }
                 bestEnd = chain(order);
             }
