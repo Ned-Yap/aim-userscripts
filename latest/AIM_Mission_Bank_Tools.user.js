@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.73
+// @version      2.74
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.73';
+    const SCRIPT_VERSION = '2.74';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -6749,10 +6749,54 @@
         const bestV = variants.reduce((a, b) => (b.propM < a.propM ? b : a));
         const curOrder = parsed.units.map((_, i) => i);
         const curM = seqLen(curOrder);
-        let proposed = bestV.proposed, propM = bestV.propM, keptCurrent = false;
-        if (curM <= propM) { proposed = curOrder; propM = curM; keptCurrent = true; }
+        // FAR-FIRST DIRECTION PASS (v2.74, user doctrine): "always start at
+        // the furthest NAV point at a pad and move back if only one way in
+        // and out." Per contiguous same-PAD run: if reversing the run makes
+        // its first nav LEGALLY farther from the arrival point, flip it —
+        // when feet-neutral (dead-end pads are symmetric once the exit leg is
+        // counted), and ALWAYS on the final run (no exit leg exists there, so
+        // near-first is cheaper on paper but the doctrine is fly-deep-then-
+        // back; the user's hand tunes do exactly this). Pass-through pads
+        // never flip: reversal there costs real feet. Legal distances decide
+        // "far" — at PEUGH the corridor arrives from the WEST though base
+        // sits east, so the straight-line guess picks the wrong side.
+        const doctrinePass = (order) => {
+            const runs = [];
+            order.forEach(ui => {
+                const last = runs[runs.length - 1];
+                if (last && last.pid === parsed.units[ui].padId) last.uis.push(ui);
+                else runs.push({ pid: parsed.units[ui].padId, uis: [ui] });
+            });
+            const out = [];
+            let flips = 0;
+            runs.forEach((r, k) => {
+                let run = r.uis;
+                const arrPt = out.length ? parsed.units[out[out.length - 1]].nav.location : base;
+                const depPt = (k < runs.length - 1) ? parsed.units[runs[k + 1].uis[0]].nav.location : null;
+                if (run.length >= 2 && arrPt) {
+                    const rev = run.slice().reverse();
+                    const dFwd = stoDistM(st, arrPt, parsed.units[run[0]].nav.location);
+                    const dRev = stoDistM(st, arrPt, parsed.units[rev[0]].nav.location);
+                    if (dRev > dFwd + 3) {   // reversed is meaningfully more far-first (>3 m)
+                        const exitF = depPt ? stoDistM(st, parsed.units[run[run.length - 1]].nav.location, depPt) : 0;
+                        const exitR = depPt ? stoDistM(st, parsed.units[rev[rev.length - 1]].nav.location, depPt) : 0;
+                        // intra-run length is reversal-invariant; only the two
+                        // outer legs differ
+                        if (!depPt || (dRev + exitR) <= (dFwd + exitF) + 2) { run = rev; flips++; }
+                    }
+                }
+                out.push(...run);
+            });
+            return { order: out, flips };
+        };
+        const dProp = doctrinePass(bestV.proposed);
+        const dCur = doctrinePass(curOrder);
+        const dPropM = seqLen(dProp.order), dCurM = seqLen(dCur.order);
+        let proposed, propM, doctrineFlips, keptCurrent = false;
+        if (dCurM <= dPropM) { proposed = dCur.order; propM = dCurM; doctrineFlips = dCur.flips; keptCurrent = true; }
+        else { proposed = dProp.order; propM = dPropM; doctrineFlips = dProp.flips; }
         return { m, mc, cfg, parsed, clusters: bestV.clusters, clusterOrder: bestV.clusterOrder, startCi: bestV.startCi,
-            usedClusterFt: bestV.usedFt, keptCurrent,
+            usedClusterFt: bestV.usedFt, keptCurrent, doctrineFlips,
             proposed, curM, propM, fallbacks: st.fallbacks, st,
             hasCanon, canonSig, canonTemplate, wrapAnoms, fragUnits, dupUnits, dupBundles, standoff, issues };
     }
@@ -6930,11 +6974,12 @@
         };
         const row = (html) => `<div style="margin:2px 0;">${html}</div>`;
         let body = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><b style="color:#7adfe6;">🪄 Step Optimizer</b><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px;color:#9ad;">${escapeHtml(String(an.m.name || ''))}</span><span data-sto-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`;
+        const flipNote = an.doctrineFlips ? ` · <span style="color:#ffd54f;">↩ ${an.doctrineFlips} far-first flip(s)</span>` : '';
         body += an.keptCurrent
-            ? `<div style="font-size:12px;margin-bottom:4px;color:#9ad;">nav route: <b>${(an.curM * STO_FT / 1000).toFixed(1)}k ft</b> — current order already shortest under legal routing ✓ (structure repairs still apply)${an.fallbacks ? ` · <span style="color:#ffb74d;">⚠ ${an.fallbacks} leg(s) off-graph (straight ×1.25)</span>` : ''}</div>`
-            : `<div style="font-size:12px;margin-bottom:4px;color:${savedFt > 100 ? '#5fff5f' : '#9ad'};">nav route: <b>${(an.curM * STO_FT / 1000).toFixed(1)}k ft</b> → <b>${(an.propM * STO_FT / 1000).toFixed(1)}k ft</b> (−${(savedFt / 1000).toFixed(1)}k ft, −${pct}%)${an.fallbacks ? ` · <span style="color:#ffb74d;">⚠ ${an.fallbacks} leg(s) off-graph (straight ×1.25)</span>` : ''}</div>`;
+            ? `<div style="font-size:12px;margin-bottom:4px;color:#9ad;">nav route: <b>${(an.curM * STO_FT / 1000).toFixed(1)}k ft</b> — current order ${an.doctrineFlips ? `kept, with <b style="color:#ffd54f;">${an.doctrineFlips} far-first direction fix(es)</b> (fly to a pad's far nav first, capture working back)` : 'already shortest under legal routing ✓ (structure repairs still apply)'}${an.fallbacks ? ` · <span style="color:#ffb74d;">⚠ ${an.fallbacks} leg(s) off-graph (straight ×1.25)</span>` : ''}</div>`
+            : `<div style="font-size:12px;margin-bottom:4px;color:${savedFt > 100 ? '#5fff5f' : '#9ad'};">nav route: <b>${(an.curM * STO_FT / 1000).toFixed(1)}k ft</b> → <b>${(an.propM * STO_FT / 1000).toFixed(1)}k ft</b> (−${(savedFt / 1000).toFixed(1)}k ft, −${pct}%)${flipNote}${an.fallbacks ? ` · <span style="color:#ffb74d;">⚠ ${an.fallbacks} leg(s) off-graph (straight ×1.25)</span>` : ''}</div>`;
         body += `<div style="color:#789;margin-bottom:6px;">start = deepest cluster · clusters (navs within ${an.usedClusterFt} ft interleave): ${an.clusters.length}${an.usedClusterFt !== cfg.clusterFt ? ` · <span style="color:#ffd54f;">2× radius won</span>` : ''}${an.clusters.some(c => !c.exact) ? ' · <span style="color:#ffb74d;">large cluster → heuristic path</span>' : ''}</div>`;
-        body += `<div style="margin-bottom:6px;"><b style="color:#7adfe6;">${an.keptCurrent ? 'Order (current, kept)' : 'Proposed order'}</b>${an.clusterOrder.map(ci => `<div style="margin:3px 0 3px 8px;"><span style="color:#ffd54f;">${escapeHtml(an.clusters[ci].name.slice(0, 52))}</span><div style="color:#9ad;margin-left:8px;">${an.proposed.filter(ui => an.clusters[ci].unitIdx.includes(ui)).map(ui => 'N' + an.parsed.units[ui].nav.index_in_app).join(' → ')}</div></div>`).join('')}</div>`;
+        body += `<div style="margin-bottom:6px;"><b style="color:#7adfe6;">${an.keptCurrent ? (an.doctrineFlips ? 'Order (current + far-first fixes)' : 'Order (current, kept)') : 'Proposed order'}</b>${an.clusterOrder.map(ci => `<div style="margin:3px 0 3px 8px;"><span style="color:#ffd54f;">${escapeHtml(an.clusters[ci].name.slice(0, 52))}</span><div style="color:#9ad;margin-left:8px;">${an.proposed.filter(ui => an.clusters[ci].unitIdx.includes(ui)).map(ui => 'N' + an.parsed.units[ui].nav.index_in_app).join(' → ')}</div></div>`).join('')}</div>`;
         const secs = [];
         if (an.wrapAnoms.length || an.fragUnits.length) {
             secs.push(row(`<label style="cursor:pointer;"><input type="checkbox" data-sto-wraps ${stt.fixWraps ? 'checked' : ''} style="accent-color:#5fff5f;"> <b style="color:#ffb74d;">Fix ${an.wrapAnoms.length} scrambled wrap(s)${an.fragUnits.length ? ` + ${an.fragUnits.length} stray fragment(s)` : ''}</b> — rebuild every snapshot's wrap to this mission's own pattern</label>`)
@@ -7027,8 +7072,10 @@
         const savedFt = (an.curM - an.propM) * STO_FT;
         if (!window.confirm(`🪄 Optimize steps of "${m.name}" IN PLACE?\n\n`
             + (an.keptCurrent
-                ? `nav route ${(an.curM * STO_FT / 1000).toFixed(1)}k ft — order unchanged (already shortest), structure repairs only\n`
-                : `nav route ${(an.curM * STO_FT / 1000).toFixed(1)}k ft → ${(an.propM * STO_FT / 1000).toFixed(1)}k ft (−${(savedFt / 1000).toFixed(1)}k ft)\n`)
+                ? (an.doctrineFlips
+                    ? `nav route ${(an.curM * STO_FT / 1000).toFixed(1)}k ft — order kept EXCEPT ${an.doctrineFlips} far-first direction fix(es)\n`
+                    : `nav route ${(an.curM * STO_FT / 1000).toFixed(1)}k ft — order unchanged (already shortest), structure repairs only\n`)
+                : `nav route ${(an.curM * STO_FT / 1000).toFixed(1)}k ft → ${(an.propM * STO_FT / 1000).toFixed(1)}k ft (−${(savedFt / 1000).toFixed(1)}k ft)${an.doctrineFlips ? ` · ${an.doctrineFlips} far-first flip(s)` : ''}\n`)
             + `${rb.acc.navs} navs · ${rb.acc.snaps} snapshots${stt.fixWraps ? ' · wraps rebuilt to the mission pattern' : ''}${stt.dropUnits.size || stt.dropBundles.size ? ` · ${stt.dropUnits.size + stt.dropBundles.size} duplicate(s) removed` : ''}${stt.rehome.size ? ` · ${stt.rehome.size} snapshot(s) re-homed` : ''}\n\n`
             + `Mission id + name unchanged. A JSON backup downloads first.`)) return;
         stoBusy = true;
@@ -7068,7 +7115,7 @@
                 if (!good) console.warn(`${TAG} [sto] verify mismatch — navs ${gotNavs === wantNavs ? 'ok' : 'DIFFER'} · snaps ${snaps2}/${rb.acc.snaps}`);
             }
             showToast(good
-                ? `🪄 "${m.name}" ${an.keptCurrent ? 'repaired ✓ verified (order kept)' : `optimized ✓ verified (−${(savedFt / 1000).toFixed(1)}k ft of nav route)`}. Re-check its schedule if one is active.`
+                ? `🪄 "${m.name}" ${an.keptCurrent ? (an.doctrineFlips ? `repaired ✓ verified (${an.doctrineFlips} far-first fix(es))` : 'repaired ✓ verified (order kept)') : `optimized ✓ verified (−${(savedFt / 1000).toFixed(1)}k ft of nav route)`}. Re-check its schedule if one is active.`
                 : `⚠ "${m.name}" saved but verify mismatched — check the mission + console (backup downloaded).`, good ? '#5fff5f' : '#ff9800', 9000);
             stoClosePanel();
             // refresh 🧩 overlay data (same tail as mcvApplyOrder)

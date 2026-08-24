@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-24 — 🪄 v2.74: far-first direction pass (Mission Bank Tools latest — dev only)
+
+The unifying doctrine, from live round 8: **at a dead-end pad, fly to the pad's farthest nav first (relative to where the flight enters it), then capture working back toward the way out.** This is why N1/N2 looked right at PEUGH (the FP corridor arrives from the WEST even though base sits east — legal distances, not straight lines, define "far") and why N21/N22 was wrong at the last pad (with RTB excluded, ending at the far corner is cheaper on paper — but the rule is fly-deep-then-back). New post-solve pass: every contiguous same-pad run flips when its reverse is more far-first — accepted when feet-neutral (dead-end runs are symmetric once the exit leg counts) and always on the final run; pass-through pads never flip (reversal costs real feet). The pass also runs on the CURRENT order, so re-running 🪄 on an already-applied macro offers direction fixes even when the order is otherwise kept ("current order kept, with N far-first direction fix(es)").
+
 ## 2026-08-24 — 🪄 v2.73: arrival-side start ("don't fly past") — Mission Bank Tools latest, dev only
 
 Big live milestone first: on a raw lasso merge (TEST2 NE 1-2), 🪄 took 6.78 mi → **6.07 mi — identical to the hour-long hand tune**. One doctrine nit remained: the first pad was entered at its far corner. The mission-start anchor was "deepest nav"; the human rule is the drone arrives at the deepest **pad** from the base side and grabs the near nav on the way in — it never flies past a nav to start at the far corner (feet-equal spur tie, doctrinal choice). Start anchor is now the deepest pad's *arrival-side* nav, and the tie-break inside the chain became "prefer the shorter arrival leg" (same don't-fly-past logic) instead of enter-deep. Harness confirms the exact N1↔N2 swap requested. (Also fixed: the offline harness itself had a bbox bug that mis-clustered fake pads — the shipped code was never affected.)
