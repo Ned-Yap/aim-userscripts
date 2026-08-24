@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.74
+// @version      2.75
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.74';
+    const SCRIPT_VERSION = '2.75';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5517,6 +5517,7 @@
         try { mcvClearRoutes(); } catch (e) {}
         try { mcvCloseOrderPanel(); } catch (e) {}
         try { stoClosePanel(); } catch (e) {}
+        try { const sw = document.getElementById('aim-mb-sto-sweep'); if (sw) sw.remove(); } catch (e) {}
         if (mcv.legendEl) { try { mcv.legendEl.remove(); } catch (e) {} mcv.legendEl = null; }
     }
     // Badge inner HTML (shared by mcvDraw + the ⇅ live preview). Edit mode
@@ -5678,7 +5679,7 @@
         const el = document.createElement('div');
         el.style.cssText = 'position:fixed;left:12px;top:70px;z-index:2147483599;max-height:50vh;overflow:auto;background:rgba(16,19,26,0.92);border:1px solid #2a3340;border-radius:8px;padding:8px 11px;color:#e6e6e6;font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 4px 16px rgba(0,0,0,0.6);';
         const COLORS2 = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
-        el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><b style="color:#7adfe6;">🧩 Macro coverage</b><button data-mcv-report title="Copy the coverage report (Name / Classification / Captured / Battery / Section / Mission / Order) — colored cells, paste into Google Sheets" style="padding:1px 7px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">📋 Report</button><button data-mcv-vis-all title="Show every macro on the map" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">All</button><button data-mcv-vis-none title="Hide every macro — then re-check just the ones you want" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">None</button><button data-mcv-split-all title="✂ Split EVERY macro into per-pad micro missions in ONE combined review — pads with existing micros, name collisions, or a better copy in another macro default-skipped. Create-only." style="padding:1px 6px;background:rgba(255,138,210,0.12);border:1px solid rgba(255,138,210,0.45);color:#ff8ad2;border-radius:4px;cursor:pointer;font-size:10px;">✂ All</button><span data-mcv-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
+        el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><b style="color:#7adfe6;">🧩 Macro coverage</b><button data-mcv-report title="Copy the coverage report (Name / Classification / Captured / Battery / Section / Mission / Order) — colored cells, paste into Google Sheets" style="padding:1px 7px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">📋 Report</button><button data-mcv-vis-all title="Show every macro on the map" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">All</button><button data-mcv-vis-none title="Hide every macro — then re-check just the ones you want" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">None</button><button data-mcv-split-all title="✂ Split EVERY macro into per-pad micro missions in ONE combined review — pads with existing micros, name collisions, or a better copy in another macro default-skipped. Create-only." style="padding:1px 6px;background:rgba(255,138,210,0.12);border:1px solid rgba(255,138,210,0.45);color:#ff8ad2;border-radius:4px;cursor:pointer;font-size:10px;">✂ All</button><button data-mcv-sto-all title="🪄 Run the Step Optimizer analysis on EVERY macro — one ranked report: route savings, far-first fixes, wrap scrambles, duplicates, standoff violations, nav consolidations. Open any row to review + apply." style="padding:1px 6px;background:rgba(195,157,255,0.12);border:1px solid rgba(195,157,255,0.45);color:#c39dff;border-radius:4px;cursor:pointer;font-size:10px;">🪄 All</button><span data-mcv-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
             + (det.macros.length
                 ? det.macros.map((mc, i) => {
                     const au = (mcv.data && mcv.data.audits) ? mcv.data.audits.get(mc.mission.id) : null;
@@ -5748,6 +5749,7 @@
             mcvOpenSplit(id);
         });
         el.querySelector('[data-mcv-split-all]').onclick = () => mcvOpenSplitAll();
+        el.querySelector('[data-mcv-sto-all]').onclick = () => stoSweep();
         // v2.47: per-macro show/hide + solo + All/None
         el.querySelectorAll('input[data-mcv-vis]').forEach(cb => cb.onchange = () => {
             const id = Number(cb.getAttribute('data-mcv-vis')) || cb.getAttribute('data-mcv-vis');
@@ -6597,6 +6599,42 @@
             });
             u.padId = best ? best.a.id : (ui > 0 ? parsed.units[ui - 1].padId : (mc.pads[0] && mc.pads[0].id));
         });
+        // NAV CONSOLIDATION suggestions (v2.75, "nav diet"): every nav is a
+        // stop (decelerate, position, stabilize) that distance metrics never
+        // see. Where one nav's EVERY snapshot would still sit inside the OGI
+        // band shot from a same-pad sibling nav, the pair can become one stop.
+        // Never invents a new position — a nav's altitude is its FFZ floor,
+        // so only an EXISTING nav may survive; the other is dropped and its
+        // bundles move over. Default-unticked in the panel (vantage changes).
+        const navDiet = [];   // {drop, into, dists[], navFt, worst}
+        const dupSet = new Set(dupUnits.map(d2 => d2.ui));
+        const dietUsed = new Set();
+        const dietFit = (fromUi, intoUi) => {
+            const from = parsed.units[fromUi], into = parsed.units[intoUi];
+            if (from.others.length || !from.bundles.length) return null;
+            const dists = [];
+            let worst = 0;
+            for (const b of from.bundles) {
+                const d2 = mbApproxMeters(into.nav.location.lat, into.nav.location.lng, b.snap.location.lat, b.snap.location.lng) * STO_FT;
+                if (d2 < cfg.bandMinFt || d2 > cfg.bandMaxFt) return null;
+                dists.push(d2);
+                worst = Math.max(worst, Math.abs(d2 - cfg.idealFt));
+            }
+            return { dists, worst };
+        };
+        for (let i = 0; i < parsed.units.length; i++) {
+            for (let j = i + 1; j < parsed.units.length; j++) {
+                if (parsed.units[i].padId !== parsed.units[j].padId) continue;
+                if (dupSet.has(i) || dupSet.has(j) || dietUsed.has(i) || dietUsed.has(j)) continue;
+                const dropJ = dietFit(j, i), dropI = dietFit(i, j);
+                if (!dropJ && !dropI) continue;
+                const pick = (dropJ && dropI) ? (dropJ.worst <= dropI.worst ? { drop: j, into: i, fit: dropJ } : { drop: i, into: j, fit: dropI })
+                    : (dropJ ? { drop: j, into: i, fit: dropJ } : { drop: i, into: j, fit: dropI });
+                navDiet.push({ drop: pick.drop, into: pick.into, dists: pick.fit.dists,
+                    navFt: mbApproxMeters(parsed.units[i].nav.location.lat, parsed.units[i].nav.location.lng, parsed.units[j].nav.location.lat, parsed.units[j].nav.location.lng) * STO_FT });
+                dietUsed.add(i); dietUsed.add(j);
+            }
+        }
         // clusters + solve — tried at TWO radii, and the CURRENT order is a
         // scored candidate too (v2.67). Live NE 1-2 test: the user's manual
         // interleave (Rivers 1974JH sandwiched INSIDE the Jack Mohr run) BEAT
@@ -6798,7 +6836,7 @@
         return { m, mc, cfg, parsed, clusters: bestV.clusters, clusterOrder: bestV.clusterOrder, startCi: bestV.startCi,
             usedClusterFt: bestV.usedFt, keptCurrent, doctrineFlips,
             proposed, curM, propM, fallbacks: st.fallbacks, st,
-            hasCanon, canonSig, canonTemplate, wrapAnoms, fragUnits, dupUnits, dupBundles, standoff, issues };
+            hasCanon, canonSig, canonTemplate, wrapAnoms, fragUnits, dupUnits, dupBundles, standoff, navDiet, issues };
     }
     // Rebuild the instruction list from an analysis + the user's fix choices.
     function stoRebuild(an, opts) {
@@ -6806,31 +6844,37 @@
         const dropUnit = new Set(opts.dropUnits || []);
         const dropBundle = new Set(opts.dropBundles || []);
         const rehome = opts.rehome || new Map();   // uid -> target unit idx
+        const merge = opts.mergeUnits || new Map();   // dropped nav ui -> surviving nav ui (bundles MOVE, v2.75)
         const fixWraps = !!opts.fixWraps;
         const canonWrap = an.canonTemplate ? an.canonTemplate.wrap : null;
-        // bundle placement: default owner, unless re-homed
+        const gone = (ui) => dropUnit.has(ui) || merge.has(ui);
+        // bundle placement: default owner, unless re-homed or the owner nav
+        // was consolidated away (its bundles move to the surviving nav)
         const byUnit = new Map();
         parsed.units.forEach((u, ui) => u.bundles.forEach(b => {
-            if (dropBundle.has(b.uid) || dropUnit.has(ui)) return;
-            // re-home target dropped as a duplicate → stay with the original owner
-            const t0 = rehome.has(b.uid) ? rehome.get(b.uid) : ui;
-            const target = dropUnit.has(t0) ? ui : t0;
+            if (dropBundle.has(b.uid) || dropUnit.has(ui)) return;   // dup drops kill their bundles
+            let t0 = rehome.has(b.uid) ? rehome.get(b.uid) : (merge.has(ui) ? merge.get(ui) : ui);
+            if (merge.has(t0)) t0 = merge.get(t0);
+            // target gone → stay with the original owner (unless that's gone too)
+            const target = gone(t0) ? (gone(ui) ? null : ui) : t0;
+            if (target === null) return;
             if (!byUnit.has(target)) byUnit.set(target, []);
             byUnit.get(target).push(b);
         }));
         // orphan bundles (snap before any nav) re-attach to the first kept unit
-        const firstKept = an.proposed.find(ui => !dropUnit.has(ui));
+        const firstKept = an.proposed.find(ui => !gone(ui));
         parsed.orphans.forEach(b => {
             if (firstKept === undefined) return;
             if (!byUnit.has(firstKept)) byUnit.set(firstKept, []);
             byUnit.get(firstKept).push(b);
         });
         const out = [];
-        const acc = { navs: 0, snaps: 0, droppedSteps: 0, addedWrapSteps: 0 };
+        const acc = { navs: 0, snaps: 0, droppedSteps: 0, addedWrapSteps: 0, merged: merge.size };
         if (an.parsed.takeoff) out.push(an.parsed.takeoff);
         parsed.lead.forEach(s => out.push(s));
         an.proposed.forEach(ui => {
             if (dropUnit.has(ui)) { acc.droppedSteps += 1 + parsed.units[ui].frags.length + parsed.units[ui].others.length + parsed.units[ui].bundles.reduce((t, b) => t + 1 + b.wrap.length, 0); return; }
+            if (merge.has(ui)) { acc.droppedSteps += 1 + parsed.units[ui].frags.length; return; }   // nav + frags go; bundles moved above
             const u = parsed.units[ui];
             out.push(u.nav); acc.navs++;
             if (!fixWraps) u.frags.forEach(s => out.push(s));
@@ -6874,7 +6918,8 @@
         stoClearPreview();
         const L = composerGetL(), map = getLeafletMap();
         if (!L || !map) return;
-        const stt = sto.state || { dropUnits: new Set(), dropBundles: new Set(), rehome: new Map() };
+        const stt = sto.state || { dropUnits: new Set(), dropBundles: new Set(), rehome: new Map(), navMerge: new Map() };
+        if (!stt.navMerge) stt.navMerge = new Map();
         // v2.71: EVERY leg draws along the legal FP/FFZ route (live catch:
         // sub-600 ft legs drew as straight chords slicing across red — the
         // 600 ft shortcut is a solver-metric speed heuristic, not the flown
@@ -6896,7 +6941,7 @@
         };
         const keep = (l) => { sto.layers.push(l); try { l.addTo(map); } catch (e) {} return l; };
         try {
-            const keptOrder = an.proposed.filter(ui => !stt.dropUnits.has(ui));
+            const keptOrder = an.proposed.filter(ui => !stt.dropUnits.has(ui) && !stt.navMerge.has(ui));
             keep(L.polyline(legsOf(an.parsed.units.map((_, i) => i)), { color: col || '#7adfe6', weight: 3, opacity: 0.8, interactive: false }));
             keep(L.polyline(legsOf(keptOrder), { color: '#ffffff', weight: 3, opacity: 0.95, dashArray: '8,7', interactive: false }));
             // NEW flight-order badges on every kept nav
@@ -6935,7 +6980,79 @@
                 const b = an.parsed.units[ui] && an.parsed.units[ui].bundles[bi];
                 if (b) keep(L.marker([b.snap.location.lat, b.snap.location.lng], { icon: xIcon(), interactive: false, keyboard: false, zIndexOffset: 950 }));
             });
+            // nav consolidations: orange ✕ at the dropped stop, blue sightlines
+            // from the surviving nav to the snapshots it inherits
+            stt.navMerge.forEach((toUi, dropUi) => {
+                const u = an.parsed.units[dropUi], into = an.parsed.units[toUi];
+                keep(L.marker([u.nav.location.lat, u.nav.location.lng], {
+                    icon: L.divIcon({ className: 'aim-mb-rng-chip', html: '<div style="pointer-events:none;color:#ffab73;font:800 15px/15px monospace;text-shadow:0 1px 3px #000;">✕</div>', iconSize: [15, 15], iconAnchor: [7, 7] }),
+                    interactive: false, keyboard: false, zIndexOffset: 950 }));
+                u.bundles.forEach(b => {
+                    const s = b.snap.location;
+                    keep(L.polyline([[u.nav.location.lat, u.nav.location.lng], [s.lat, s.lng]], { color: '#ff5252', weight: 2, opacity: 0.85, dashArray: '3,5', interactive: false }));
+                    keep(L.polyline([[into.nav.location.lat, into.nav.location.lng], [s.lat, s.lng]], { color: '#8ab6ff', weight: 2, opacity: 0.9, interactive: false }));
+                });
+            });
         } catch (e) { console.warn(`${TAG} [sto] preview draw failed`, e); }
+    }
+    // 🪄 All — site-wide sweep (v2.75): run the analysis on every macro and
+    // rank them by what a pass would buy. Analysis only — each Apply still
+    // goes through the per-macro review panel.
+    const STO_SWEEP_ID = 'aim-mb-sto-sweep';
+    let stoSweepBusy = false;
+    async function stoSweep() {
+        if (stoSweepBusy) return;
+        const data = mcv.data;
+        if (!data || !data.det.macros.length) { showToast('No macros to sweep — open 🧩 on a site with macro missions.', '#ff9800', 3500); return; }
+        stoSweepBusy = true;
+        const old = document.getElementById(STO_SWEEP_ID); if (old) old.remove();
+        const COLORS = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
+        const rows = [];
+        for (let i = 0; i < data.det.macros.length; i++) {
+            const mc = data.det.macros[i];
+            showToast(`🪄 Sweeping ${i + 1}/${data.det.macros.length}: ${mc.mission.name}…`, '#c39dff', 2000);
+            await new Promise(r => setTimeout(r, 30));
+            try {
+                const an = stoAnalyze(mc, data);
+                rows.push({ mc, an, col: COLORS[i % COLORS.length], err: null });
+            } catch (e) {
+                console.warn(`${TAG} [sto] sweep failed for "${mc.mission.name}"`, e);
+                rows.push({ mc, an: null, col: COLORS[i % COLORS.length], err: String(e && e.message || e) });
+            }
+        }
+        stoSweepBusy = false;
+        rows.sort((a, b) => {
+            const sa = a.an ? (a.an.curM - a.an.propM) : -1, sb = b.an ? (b.an.curM - b.an.propM) : -1;
+            return sb - sa;
+        });
+        const el = document.createElement('div');
+        el.id = STO_SWEEP_ID;
+        el.style.cssText = 'position:fixed;right:14px;top:64px;z-index:2147483600;width:470px;max-height:72vh;overflow:auto;background:rgba(14,17,23,0.97);border:1px solid #c39dff;border-radius:9px;padding:10px 12px;color:#e6e6e6;font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 6px 24px rgba(0,0,0,0.7);';
+        const td = (v, extra) => `<td style="padding:2px 6px;border-bottom:1px solid #222b36;${extra || ''}">${v}</td>`;
+        el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><b style="color:#c39dff;">🪄 Site sweep</b><span style="color:#789;">${rows.length} macro(s) — sorted by route savings</span><span data-sto-sw-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
+            + `<table style="border-collapse:collapse;width:100%;font-size:10.5px;"><tr style="color:#9ad;text-align:left;"><th style="padding:2px 6px;">Macro</th><th style="padding:2px 6px;">route</th><th style="padding:2px 6px;">↩</th><th style="padding:2px 6px;">wraps</th><th style="padding:2px 6px;">dups</th><th style="padding:2px 6px;">standoff</th><th style="padding:2px 6px;">stops</th><th></th></tr>`
+            + rows.map(r => {
+                if (!r.an) return `<tr>${td(escapeHtml(String(r.mc.mission.name || '')))}${td(`<span style="color:#ff5252;">failed</span>`, '')}${td('')}${td('')}${td('')}${td('')}${td('')}${td('')}</tr>`;
+                const an = r.an;
+                const saved = (an.curM - an.propM) * STO_FT;
+                const routeTxt = an.keptCurrent && !an.doctrineFlips
+                    ? '<span style="color:#5fff5f;">✓ optimal</span>'
+                    : `${(an.curM * STO_FT / 1000).toFixed(1)}k→${(an.propM * STO_FT / 1000).toFixed(1)}k <b style="color:${saved > 100 ? '#5fff5f' : '#9ad'};">−${Math.max(0, Math.round(saved / (an.curM * STO_FT || 1) * 100))}%</b>`;
+                const n0 = (v, warnCol) => v ? `<b style="color:${warnCol};">${v}</b>` : '<span style="color:#456;">0</span>';
+                return `<tr>${td(`<span style="color:${r.col};">■</span> ${escapeHtml(String(r.mc.mission.name || '').slice(0, 22))}`)}`
+                    + td(routeTxt) + td(n0(an.doctrineFlips, '#ffd54f')) + td(n0(an.wrapAnoms.length + an.fragUnits.length, '#ffb74d'))
+                    + td(n0(an.dupUnits.length + an.dupBundles.length, '#ff8ad2')) + td(n0(an.standoff.filter(s2 => s2.tooClose).length, '#c39dff'))
+                    + td(n0(an.navDiet.length, '#8ab6ff'))
+                    + td(`<button data-sto-sw-open="${r.mc.mission.id}" data-sto-sw-col="${r.col}" style="padding:0 6px;background:rgba(195,157,255,0.14);border:1px solid rgba(195,157,255,0.5);color:#c39dff;border-radius:4px;cursor:pointer;font-size:10px;">🪄</button>`)
+                    + '</tr>';
+            }).join('') + '</table>'
+            + `<div style="color:#789;margin-top:6px;">standoff counts too-close only · stops = nav-consolidation candidates · open a row to review + apply</div>`;
+        document.body.appendChild(el);
+        el.querySelector('[data-sto-sw-x]').onclick = () => el.remove();
+        el.querySelectorAll('[data-sto-sw-open]').forEach(b => b.onclick = () => {
+            stoOpen(Number(b.getAttribute('data-sto-sw-open')) || b.getAttribute('data-sto-sw-open'), b.getAttribute('data-sto-sw-col'));
+        });
+        console.log(`${TAG} [sto] sweep done — ${rows.length} macro(s)`);
     }
     let stoBusy = false;
     async function stoOpen(missionId, col) {
@@ -6955,7 +7072,8 @@
         sto.state = { an, col, fixWraps: (an.wrapAnoms.length + an.fragUnits.length) > 0,
             dropUnits: new Set(an.dupUnits.map(d => d.ui)),
             dropBundles: new Set(an.dupBundles.map(d => d.uid)),
-            rehome: new Map(an.standoff.filter(s => s.tooClose && s.alt !== null).map(s => [s.uid, s.alt])) };
+            rehome: new Map(an.standoff.filter(s => s.tooClose && s.alt !== null).map(s => [s.uid, s.alt])),
+            navMerge: new Map() };   // nav consolidation opt-IN (default unticked — vantage changes)
         stoRenderPanel();
     }
     function stoRenderPanel() {
@@ -6999,14 +7117,19 @@
                     return row(`<label style="cursor:pointer;margin-left:8px;"><input type="checkbox" data-sto-rehome="${escapeHtml(s.uid)}" data-sto-rehome-to="${s.alt}" ${stt.rehome.has(s.uid) ? 'checked' : ''} style="accent-color:#c39dff;"> snap ${escapeHtml(s.uid)} @ ${s.d.toFixed(0)} ft (${kindTxt}) → re-home to ${unitLabel(s.alt)} @ ${s.altD.toFixed(0)} ft${s.outOfBand ? ' <span style="color:#93835e;">(closest available — still over-band)</span>' : ''}</label>`);
                 }).join(''));
         }
+        // nav consolidation (v2.75) — opt-in, every merge removes one stop
+        if (an.navDiet.length) {
+            secs.push(`<b style="color:#8ab6ff;">Nav consolidation (each merge = one fewer stop; opt-in — the moved snapshots change vantage)</b>`
+                + an.navDiet.map(nd => row(`<label style="cursor:pointer;margin-left:8px;"><input type="checkbox" data-sto-merge="${nd.drop}" data-sto-merge-to="${nd.into}" ${stt.navMerge.has(nd.drop) ? 'checked' : ''} style="accent-color:#8ab6ff;"> drop ${unitLabel(nd.drop)} (${nd.navFt.toFixed(0)} ft away) → its ${nd.dists.length} snap(s) shoot from ${unitLabel(nd.into)} @ ${nd.dists.map(d2 => d2.toFixed(0)).join('/')} ft</label>`)).join(''));
+        }
         an.issues.forEach(i => secs.push(`<div style="color:#ff9800;">⚠ ${escapeHtml(i.text)}</div>`));
         if (secs.length) body += `<div style="border-top:1px solid #2a3340;padding-top:5px;margin-bottom:6px;">${secs.join('<div style="height:5px;"></div>')}</div>`;
         else body += `<div style="color:#5fff5f;margin-bottom:6px;">✓ structure clean — no wrap scrambles, duplicates, or standoff violations</div>`;
         // step-count delta from the current fix choices
-        const rb = stoRebuild(an, { fixWraps: stt.fixWraps, dropUnits: Array.from(stt.dropUnits), dropBundles: Array.from(stt.dropBundles), rehome: stt.rehome });
+        const rb = stoRebuild(an, { fixWraps: stt.fixWraps, dropUnits: Array.from(stt.dropUnits), dropBundles: Array.from(stt.dropBundles), rehome: stt.rehome, mergeUnits: stt.navMerge });
         const bodyLen = (an.m.instructions || []).filter(i => i && i.type !== 0 && i.type !== 99).length;
         const newLen = rb.out.filter(i => i && i.type !== 0 && i.type !== 99).length;
-        body += `<div style="color:#9ad;margin-bottom:7px;">steps: ${bodyLen} → ${newLen} (${rb.acc.navs} navs · ${rb.acc.snaps} snaps${rb.acc.droppedSteps ? ` · −${rb.acc.droppedSteps} dropped` : ''}${rb.acc.addedWrapSteps ? ` · +${rb.acc.addedWrapSteps} wrap-rebuild` : ''})</div>`;
+        body += `<div style="color:#9ad;margin-bottom:7px;">steps: ${bodyLen} → ${newLen} (${rb.acc.navs} navs · ${rb.acc.snaps} snaps${rb.acc.merged ? ` · −${rb.acc.merged} stop(s)` : ''}${rb.acc.droppedSteps ? ` · −${rb.acc.droppedSteps} dropped` : ''}${rb.acc.addedWrapSteps ? ` · +${rb.acc.addedWrapSteps} wrap-rebuild` : ''})</div>`;
         body += `<div style="display:flex;gap:7px;align-items:center;">`
             + `<button data-sto-prev title="Draw the full change on the map: current route solid vs proposed dashed white, NEW flight-order numbers on every nav, red→green sightlines for each ticked snapshot re-home (old vs new vantage), red ✕ on dropped duplicates. Live-updates as you tick fixes." style="padding:3px 9px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:5px;cursor:pointer;">👁 Preview changes</button>`
             + `<button data-sto-apply style="padding:3px 10px;background:rgba(95,255,95,0.13);border:1px solid rgba(95,255,95,0.5);color:#5fff5f;border-radius:5px;cursor:pointer;font-weight:700;">💾 Apply in place</button>`
@@ -7033,6 +7156,11 @@
             if (cb.checked) stt.rehome.set(uid, to); else stt.rehome.delete(uid);
             stoRenderPanel();
         });
+        el.querySelectorAll('[data-sto-merge]').forEach(cb => cb.onchange = () => {
+            const drop = Number(cb.getAttribute('data-sto-merge')), to = Number(cb.getAttribute('data-sto-merge-to'));
+            if (cb.checked) stt.navMerge.set(drop, to); else stt.navMerge.delete(drop);
+            stoRenderPanel();
+        });
         el.querySelectorAll('[data-sto-cfg]').forEach(inp => inp.onchange = () => {
             const patch = {}; patch[inp.getAttribute('data-sto-cfg')] = Number(inp.value);
             gmSet(STO_CFG_KEY, Object.assign({}, stoCfg(), patch));
@@ -7057,11 +7185,12 @@
         const an = stt.an, m = an.m;
         const ctx = findMissionAppCtx();
         if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4500); return; }
-        const rb = stoRebuild(an, { fixWraps: stt.fixWraps, dropUnits: Array.from(stt.dropUnits), dropBundles: Array.from(stt.dropBundles), rehome: stt.rehome });
-        // hard sanity: every nav + snapshot accounted for (minus explicit drops)
+        const rb = stoRebuild(an, { fixWraps: stt.fixWraps, dropUnits: Array.from(stt.dropUnits), dropBundles: Array.from(stt.dropBundles), rehome: stt.rehome, mergeUnits: stt.navMerge });
+        // hard sanity: every nav + snapshot accounted for (minus explicit
+        // drops; consolidated navs go but their snapshots MOVE, not vanish)
         const origNavs = an.parsed.units.length;
         const origSnaps = an.parsed.units.reduce((t, u) => t + u.bundles.length, 0) + an.parsed.orphans.filter(o => !o.other).length;
-        const expNavs = origNavs - stt.dropUnits.size;
+        const expNavs = origNavs - stt.dropUnits.size - stt.navMerge.size;
         const droppedByUnit = an.parsed.units.reduce((t, u, ui) => t + (stt.dropUnits.has(ui) ? u.bundles.filter(b => !stt.dropBundles.has(b.uid)).length : 0), 0);
         const expSnaps = origSnaps - stt.dropBundles.size - droppedByUnit;
         if (rb.acc.navs !== expNavs || rb.acc.snaps !== expSnaps) {
@@ -7076,7 +7205,7 @@
                     ? `nav route ${(an.curM * STO_FT / 1000).toFixed(1)}k ft — order kept EXCEPT ${an.doctrineFlips} far-first direction fix(es)\n`
                     : `nav route ${(an.curM * STO_FT / 1000).toFixed(1)}k ft — order unchanged (already shortest), structure repairs only\n`)
                 : `nav route ${(an.curM * STO_FT / 1000).toFixed(1)}k ft → ${(an.propM * STO_FT / 1000).toFixed(1)}k ft (−${(savedFt / 1000).toFixed(1)}k ft)${an.doctrineFlips ? ` · ${an.doctrineFlips} far-first flip(s)` : ''}\n`)
-            + `${rb.acc.navs} navs · ${rb.acc.snaps} snapshots${stt.fixWraps ? ' · wraps rebuilt to the mission pattern' : ''}${stt.dropUnits.size || stt.dropBundles.size ? ` · ${stt.dropUnits.size + stt.dropBundles.size} duplicate(s) removed` : ''}${stt.rehome.size ? ` · ${stt.rehome.size} snapshot(s) re-homed` : ''}\n\n`
+            + `${rb.acc.navs} navs · ${rb.acc.snaps} snapshots${stt.fixWraps ? ' · wraps rebuilt to the mission pattern' : ''}${stt.dropUnits.size || stt.dropBundles.size ? ` · ${stt.dropUnits.size + stt.dropBundles.size} duplicate(s) removed` : ''}${stt.rehome.size ? ` · ${stt.rehome.size} snapshot(s) re-homed` : ''}${stt.navMerge.size ? ` · ${stt.navMerge.size} nav(s) consolidated (−${stt.navMerge.size} stop(s))` : ''}\n\n`
             + `Mission id + name unchanged. A JSON backup downloads first.`)) return;
         stoBusy = true;
         try {
