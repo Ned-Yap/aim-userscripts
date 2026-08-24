@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.72
+// @version      2.73
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.72';
+    const SCRIPT_VERSION = '2.73';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -6637,29 +6637,47 @@
             const clusters = Array.from(clMap.values())
                 .map(pids => ({ pids, name: pids.map(p => padName.get(p)).join(' + '), unitIdx: pids.flatMap(p => unitsByPad.get(p) || []) }))
                 .filter(c => c.unitIdx.length > 0);
-            // cluster depth from base — trusted rng solve when available
+            // cluster depth from base — trusted rng solve when available.
+            // deepPid = the cluster's deepest PAD: the mission-start anchor
+            // is that pad's ARRIVAL-SIDE nav (v2.73).
             clusters.forEach(c => {
-                let depth = 0;
+                let depth = 0, deepPid = null;
                 c.pids.forEach(pid => {
+                    let pd = 0;
                     const r = byAsset && byAsset.get(pid);
-                    if (r && r.status === 'ok') depth = Math.max(depth, r.worstFt);
+                    if (r && r.status === 'ok') pd = r.worstFt;
                     else if (base) (unitsByPad.get(pid) || []).forEach(ui => {
-                        depth = Math.max(depth, mbApproxMeters(base.lat, base.lng, parsed.units[ui].nav.location.lat, parsed.units[ui].nav.location.lng) * STO_FT);
+                        pd = Math.max(pd, mbApproxMeters(base.lat, base.lng, parsed.units[ui].nav.location.lat, parsed.units[ui].nav.location.lng) * STO_FT);
                     });
+                    if (pd > depth) { depth = pd; deepPid = pid; }
                 });
                 c.depth = depth;
+                c.deepPid = deepPid;
             });
             const solvedCl = clusters.map(c => {
                 const pts = c.unitIdx.map(ui => parsed.units[ui].nav.location);
                 const n = pts.length;
                 const D = Array.from({ length: n }, (_, i) => pts.map(p => stoDistM(st, pts[i], p)));
                 const hk = n <= 12 ? stoHeldKarp(n, D) : stoHeurPath(n, D);
-                // deepest nav of the cluster — the doctrine start anchor. An
-                // open path's cost is direction-symmetric, so without this the
-                // solver happily flies near→far (harness caught it on NE 1-2).
+                // Mission-start anchor (v2.73, user live-tune): the flight
+                // begins in the deepest PAD, entered on its ARRIVAL side —
+                // the drone transits out from base and grabs the near nav on
+                // the way in, it never flies past one corner to start at the
+                // far one (feet-identical spur tie; "don't fly past" is the
+                // human rule). Fallback when no base: deepest nav (still
+                // prevents the direction-symmetric near→far reversal).
                 let deepLocal = 0, dd = -1;
                 pts.forEach((p, i) => { const d = base ? mbApproxMeters(base.lat, base.lng, p.lat, p.lng) : 0; if (d > dd) { dd = d; deepLocal = i; } });
-                return Object.assign({}, c, { pts, hk, exact: n <= 12, deepLocal });
+                let anchorLocal = deepLocal;
+                if (base && c.deepPid != null) {
+                    let bestI = -1, bestD = Infinity;
+                    c.unitIdx.forEach((ui, i) => {
+                        if (parsed.units[ui].padId !== c.deepPid) return;
+                        if (navDep[ui] < bestD) { bestD = navDep[ui]; bestI = i; }
+                    });
+                    if (bestI >= 0) anchorLocal = bestI;
+                }
+                return Object.assign({}, c, { pts, hk, exact: n <= 12, anchorLocal });
             });
             const startCi = solvedCl.reduce((bi, c, i) => c.depth > solvedCl[bi].depth ? i : bi, 0);
             const chain = (order) => {
@@ -6671,13 +6689,14 @@
                         for (let i2 = 0; i2 < n; i2++) {
                             const intra = c.hk.res[i2][j];
                             if (intra === Infinity) continue;
-                            // first cluster starts at its DEEPEST nav (far→near SOP)
-                            // eps: sub-millimeter bias — enter DEEP, exit SHALLOW —
-                            // decides only genuine ties, never real feet
-                            const eps = ((navDep[c.unitIdx[j]] || 0) + (Math.max(0, 30000 - (navDep[c.unitIdx[i2]] || 0)))) * 1e-7;
-                            if (!states) { if (i2 !== c.deepLocal) continue; if (intra + eps < best) { best = intra + eps; from = { entry: i2, prev: null }; } }
+                            // first cluster starts at the anchor (deepest pad,
+                            // arrival-side nav — far→near SOP + "don't fly past")
+                            if (!states) { if (i2 !== c.anchorLocal) continue; if (intra < best) { best = intra; from = { entry: i2, prev: null }; } }
                             else states.forEach(stt => {
-                                const v = stt.cost + stoDistM(st, stt.pt, c.pts[i2]) + intra + eps;
+                                const legM = stoDistM(st, stt.pt, c.pts[i2]);
+                                // tie eps: prefer the SHORTER arrival leg ("don't
+                                // fly past") — sub-mm, decides only genuine ties
+                                const v = stt.cost + legM + intra + legM * 1e-7;
                                 if (v < best) { best = v; from = { entry: i2, prev: stt }; }
                             });
                         }

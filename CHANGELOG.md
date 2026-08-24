@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-24 — 🪄 v2.73: arrival-side start ("don't fly past") — Mission Bank Tools latest, dev only
+
+Big live milestone first: on a raw lasso merge (TEST2 NE 1-2), 🪄 took 6.78 mi → **6.07 mi — identical to the hour-long hand tune**. One doctrine nit remained: the first pad was entered at its far corner. The mission-start anchor was "deepest nav"; the human rule is the drone arrives at the deepest **pad** from the base side and grabs the near nav on the way in — it never flies past a nav to start at the far corner (feet-equal spur tie, doctrinal choice). Start anchor is now the deepest pad's *arrival-side* nav, and the tie-break inside the chain became "prefer the shorter arrival leg" (same don't-fly-past logic) instead of enter-deep. Harness confirms the exact N1↔N2 swap requested. (Also fixed: the offline harness itself had a bbox bug that mis-clustered fake pads — the shipped code was never affected.)
+
 ## 2026-08-21 — 🪄 v2.72: honest metric + deep-first tie-breaks (Mission Bank Tools latest — dev only)
 
 First test on a raw lasso merge (TEST NE 1-2): 🪄 improved it 6.78 → 6.55 mi, but the hand-tuned macro sits at 6.07 — and two pads on a dead-end spur came out in the wrong order. Two fixes. **Honest metric**: legs were priced straight-line under 600 ft, so a 300 ft chord across red "cost" 300 ft when the flyable corridor is 900 — the solver optimized against fake prices (and the 400 ft cluster variant beat the 800 ft one on paper while losing in reality). Legs over 100 ft now price on the legal route graph, per-pair cached; new `legal>` knob in the footer if a huge macro analyzes slowly. **Deep-first tie-breaks**: two pads on the same spur cost identical feet in either direction — the lasso's engraved "10>8" rule, ported: sub-centimeter position-weighted depth terms resolve equal-cost orders deeper-first, at the cluster level and in every entry/exit choice (enter deep, exit shallow). Real feet always win; the bias only decides genuine ties.
