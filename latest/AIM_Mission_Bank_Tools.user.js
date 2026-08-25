@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.79
+// @version      2.80
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.79';
+    const SCRIPT_VERSION = '2.80';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -7072,7 +7072,8 @@
         try {
             // kept navs from the same rebuild logic Apply uses (incl. the
             // no-snap-less-navs rule) so the drawn route IS the saved route
-            const rbPrev = stoRebuild(an, { fixWraps: stt.fixWraps, dropUnits: Array.from(stt.dropUnits), dropBundles: Array.from(stt.dropBundles), rehome: stt.rehome, mergeUnits: stt.navMerge, dropEmpty: stt.dropEmpty });
+            const dropUP = new Set([...stt.dropUnits, ...(stt.cutUnits||[])]), dropBP = new Set([...stt.dropBundles, ...(stt.cutBundles||[])]);
+            const rbPrev = stoRebuild(an, { fixWraps: stt.fixWraps, dropUnits: Array.from(dropUP), dropBundles: Array.from(dropBP), rehome: stt.rehome, mergeUnits: stt.navMerge, dropEmpty: stt.dropEmpty });
             const keptOrder = rbPrev.acc.keptUnits;
             keep(L.polyline(legsOf(an.parsed.units.map((_, i) => i)), { color: col || '#7adfe6', weight: 3, opacity: 0.8, interactive: false }));
             keep(L.polyline(legsOf(keptOrder), { color: '#ffffff', weight: 3, opacity: 0.95, dashArray: '8,7', interactive: false }));
@@ -7102,12 +7103,12 @@
                 html: '<div style="pointer-events:none;color:#ff5252;font:800 15px/15px monospace;text-shadow:0 1px 3px #000;">✕</div>',
                 iconSize: [15, 15], iconAnchor: [7, 7],
             });
-            stt.dropUnits.forEach(ui => {
+            dropUP.forEach(ui => {
                 const u = an.parsed.units[ui];
                 keep(L.marker([u.nav.location.lat, u.nav.location.lng], { icon: xIcon(), interactive: false, keyboard: false, zIndexOffset: 950 }));
                 u.bundles.forEach(b => keep(L.marker([b.snap.location.lat, b.snap.location.lng], { icon: xIcon(), interactive: false, keyboard: false, zIndexOffset: 950 })));
             });
-            stt.dropBundles.forEach(uid => {
+            dropBP.forEach(uid => {
                 const [ui, bi] = String(uid).split(':').map(Number);
                 const b = an.parsed.units[ui] && an.parsed.units[ui].bundles[bi];
                 if (b) keep(L.marker([b.snap.location.lat, b.snap.location.lng], { icon: xIcon(), interactive: false, keyboard: false, zIndexOffset: 950 }));
@@ -7206,7 +7207,10 @@
             dropBundles: new Set(an.dupBundles.map(d => d.uid)),
             rehome: new Map(an.standoff.filter(s => s.tooClose && s.alt !== null).map(s => [s.uid, s.alt])),
             navMerge: new Map(),   // nav consolidation opt-IN (default unticked — vantage changes)
-            dropEmpty: true };     // no navs without snaps (user rule) — default ON
+            dropEmpty: true,       // no navs without snaps (user rule) — default ON
+            cutUnits: new Set(),   // ✂ cut (v2.80): whole navs removed from this macro
+            cutBundles: new Set(),   // ✂ cut: individual snapshots removed
+            cutOpen: false, cutOpenPads: new Set() };   // ✂ section UI state (survives re-render)
         stoRenderPanel();
     }
     function stoRenderPanel() {
@@ -7264,8 +7268,35 @@
         an.issues.forEach(i => secs.push(`<div style="color:#ff9800;">⚠ ${escapeHtml(i.text)}</div>`));
         if (secs.length) body += `<div style="border-top:1px solid #2a3340;padding-top:5px;margin-bottom:6px;">${secs.join('<div style="height:5px;"></div>')}</div>`;
         else body += `<div style="color:#5fff5f;margin-bottom:6px;">✓ structure clean — no wrap scrambles, duplicates, or standoff violations</div>`;
+        // ✂ CUT (v2.80, user request): surgically remove whole pads, single
+        // navs, or single snapshots from THIS macro (micros untouched). Rides
+        // the same drop machinery as duplicates — accounting rails, red ✕
+        // preview, backup + verify all apply. Cutting a nav's last snapshot
+        // leaves a snap-less nav, which the no-snap-less-navs rule sweeps.
+        {
+            const padGroups = new Map();
+            an.proposed.forEach(ui => { const pid = an.parsed.units[ui].padId; if (!padGroups.has(pid)) padGroups.set(pid, []); padGroups.get(pid).push(ui); });
+            let cutHtml = '';
+            padGroups.forEach((uis, pid) => {
+                const allCut = uis.every(ui => stt.cutUnits.has(ui));
+                const snapN = uis.reduce((t, ui) => t + an.parsed.units[ui].bundles.length, 0);
+                const pname = escapeHtml(String(padNames.get(pid) || ('pad ' + pid)).slice(0, 34));
+                let inner = '';
+                uis.forEach(ui => {
+                    const u = an.parsed.units[ui];
+                    inner += `<div style="margin-left:14px;"><label style="cursor:pointer;"><input type="checkbox" data-sto-cutu="${ui}" ${stt.cutUnits.has(ui) ? 'checked' : ''} style="accent-color:#ff8ad2;"> nav#${u.nav.index_in_app} <span style="color:#789;">(+${u.bundles.length} snap${u.bundles.length === 1 ? '' : 's'})</span></label></div>`;
+                    u.bundles.forEach(b => {
+                        inner += `<div style="margin-left:30px;"><label style="cursor:${stt.cutUnits.has(ui) ? 'default' : 'pointer'};opacity:${stt.cutUnits.has(ui) ? 0.4 : 1};"><input type="checkbox" data-sto-cutb="${escapeHtml(b.uid)}" ${stt.cutBundles.has(b.uid) || stt.cutUnits.has(ui) ? 'checked' : ''} ${stt.cutUnits.has(ui) ? 'disabled' : ''} style="accent-color:#ff8ad2;"> snap#${b.snap.index_in_app} <span style="color:#789;">@ ${(mbApproxMeters(u.nav.location.lat, u.nav.location.lng, b.snap.location.lat, b.snap.location.lng) * STO_FT).toFixed(0)} ft</span></label></div>`;
+                    });
+                });
+                cutHtml += `<details data-sto-cut-pad-det="${pid}" ${stt.cutOpenPads.has(String(pid)) ? 'open' : ''} style="margin:2px 0 2px 8px;"><summary style="cursor:pointer;"><label style="cursor:pointer;"><input type="checkbox" data-sto-cutpad="${pid}" ${allCut ? 'checked' : ''} style="accent-color:#ff8ad2;"> <b style="color:${allCut ? '#ff8ad2' : '#e6e6e6'};">${pname}</b> <span style="color:#789;">· ${uis.length} nav · ${snapN} snap</span></label></summary>${inner}</details>`;
+            });
+            const marked = stt.cutUnits.size || stt.cutBundles.size;
+            body += `<details data-sto-cut-root ${stt.cutOpen ? 'open' : ''} style="border-top:1px solid #2a3340;padding-top:5px;margin-bottom:6px;"><summary style="cursor:pointer;color:#ff8ad2;font-weight:700;">✂ Cut from this macro${marked ? ` — ${stt.cutUnits.size} nav(s) + ${stt.cutBundles.size} snap(s) marked` : ''}</summary><div style="color:#789;margin:3px 0 3px 8px;">Tick a pad to cut ALL its steps, or expand it for single navs / snapshots. Removes from THIS macro only — micros are untouched. Wraps travel with their snapshot.</div>${cutHtml}</details>`;
+        }
         // step-count delta from the current fix choices
-        const rb = stoRebuild(an, { fixWraps: stt.fixWraps, dropUnits: Array.from(stt.dropUnits), dropBundles: Array.from(stt.dropBundles), rehome: stt.rehome, mergeUnits: stt.navMerge, dropEmpty: stt.dropEmpty });
+        const dropU = new Set([...stt.dropUnits, ...stt.cutUnits]), dropB = new Set([...stt.dropBundles, ...stt.cutBundles]);
+        const rb = stoRebuild(an, { fixWraps: stt.fixWraps, dropUnits: Array.from(dropU), dropBundles: Array.from(dropB), rehome: stt.rehome, mergeUnits: stt.navMerge, dropEmpty: stt.dropEmpty });
         const bodyLen = (an.m.instructions || []).filter(i => i && i.type !== 0 && i.type !== 99).length;
         const newLen = rb.out.filter(i => i && i.type !== 0 && i.type !== 99).length;
         body += `<div style="color:#9ad;margin-bottom:7px;">steps: ${bodyLen} → ${newLen} (${rb.acc.navs} navs · ${rb.acc.snaps} snaps${rb.acc.merged ? ` · −${rb.acc.merged} stop(s)` : ''}${rb.acc.emptyDropped ? ` · −${rb.acc.emptyDropped} snap-less nav(s)` : ''}${rb.acc.droppedSteps ? ` · −${rb.acc.droppedSteps} dropped` : ''}${rb.acc.addedWrapSteps ? ` · +${rb.acc.addedWrapSteps} wrap-rebuild` : ''})</div>`;
@@ -7302,6 +7333,33 @@
             if (cb.checked) stt.navMerge.set(drop, to); else stt.navMerge.delete(drop);
             stoRenderPanel();
         });
+        // ✂ cut wiring (v2.80) — details open-state persisted so re-renders
+        // from checkbox ticks don't collapse the tree
+        const cutRoot = el.querySelector('[data-sto-cut-root]');
+        if (cutRoot) cutRoot.addEventListener('toggle', () => { stt.cutOpen = cutRoot.open; });
+        el.querySelectorAll('[data-sto-cut-pad-det]').forEach(d => d.addEventListener('toggle', () => {
+            const pid = d.getAttribute('data-sto-cut-pad-det');
+            if (d.open) stt.cutOpenPads.add(pid); else stt.cutOpenPads.delete(pid);
+        }));
+        el.querySelectorAll('[data-sto-cutpad]').forEach(cb => cb.onclick = (ev) => { ev.stopPropagation(); });
+        el.querySelectorAll('[data-sto-cutpad]').forEach(cb => cb.onchange = () => {
+            const pidRaw = cb.getAttribute('data-sto-cutpad');
+            an.proposed.forEach(ui => {
+                if (String(an.parsed.units[ui].padId) !== pidRaw) return;
+                if (cb.checked) stt.cutUnits.add(ui); else stt.cutUnits.delete(ui);
+            });
+            stoRenderPanel();
+        });
+        el.querySelectorAll('[data-sto-cutu]').forEach(cb => cb.onchange = () => {
+            const ui = Number(cb.getAttribute('data-sto-cutu'));
+            if (cb.checked) stt.cutUnits.add(ui); else stt.cutUnits.delete(ui);
+            stoRenderPanel();
+        });
+        el.querySelectorAll('[data-sto-cutb]').forEach(cb => cb.onchange = () => {
+            const uid = cb.getAttribute('data-sto-cutb');
+            if (cb.checked) stt.cutBundles.add(uid); else stt.cutBundles.delete(uid);
+            stoRenderPanel();
+        });
         el.querySelectorAll('[data-sto-cfg]').forEach(inp => inp.onchange = () => {
             const patch = {}; patch[inp.getAttribute('data-sto-cfg')] = Number(inp.value);
             gmSet(STO_CFG_KEY, Object.assign({}, stoCfg(), patch));
@@ -7326,15 +7384,16 @@
         const an = stt.an, m = an.m;
         const ctx = findMissionAppCtx();
         if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4500); return; }
-        const rb = stoRebuild(an, { fixWraps: stt.fixWraps, dropUnits: Array.from(stt.dropUnits), dropBundles: Array.from(stt.dropBundles), rehome: stt.rehome, mergeUnits: stt.navMerge, dropEmpty: stt.dropEmpty });
+        const dropU = new Set([...stt.dropUnits, ...stt.cutUnits]), dropB = new Set([...stt.dropBundles, ...stt.cutBundles]);
+        const rb = stoRebuild(an, { fixWraps: stt.fixWraps, dropUnits: Array.from(dropU), dropBundles: Array.from(dropB), rehome: stt.rehome, mergeUnits: stt.navMerge, dropEmpty: stt.dropEmpty });
         // hard sanity: every nav + snapshot accounted for (minus explicit
         // drops; consolidated navs go but their snapshots MOVE, not vanish;
         // snap-less navs counted by the rebuild itself)
         const origNavs = an.parsed.units.length;
         const origSnaps = an.parsed.units.reduce((t, u) => t + u.bundles.length, 0) + an.parsed.orphans.filter(o => !o.other).length;
-        const expNavs = origNavs - stt.dropUnits.size - stt.navMerge.size - rb.acc.emptyDropped;
-        const droppedByUnit = an.parsed.units.reduce((t, u, ui) => t + (stt.dropUnits.has(ui) ? u.bundles.filter(b => !stt.dropBundles.has(b.uid)).length : 0), 0);
-        const expSnaps = origSnaps - stt.dropBundles.size - droppedByUnit;
+        const expNavs = origNavs - dropU.size - stt.navMerge.size - rb.acc.emptyDropped;
+        const droppedByUnit = an.parsed.units.reduce((t, u, ui) => t + (dropU.has(ui) ? u.bundles.filter(b => !dropB.has(b.uid)).length : 0), 0);
+        const expSnaps = origSnaps - dropB.size - droppedByUnit;
         if (rb.acc.navs !== expNavs || rb.acc.snaps !== expSnaps) {
             console.warn(`${TAG} [sto] ABORT — rebuild accounting mismatch: navs ${rb.acc.navs}/${expNavs}, snaps ${rb.acc.snaps}/${expSnaps}`, m.name);
             showToast('🪄 Aborted: rebuilt nav/snapshot count does not match (see console). Nothing saved.', '#ff5252', 6000);
@@ -7347,7 +7406,7 @@
                     ? `nav route ${(an.curM * STO_FT / 1000).toFixed(1)}k ft — order kept EXCEPT ${an.doctrineFlips} far-first direction fix(es)\n`
                     : `nav route ${(an.curM * STO_FT / 1000).toFixed(1)}k ft — order unchanged (already shortest), structure repairs only\n`)
                 : `nav route ${(an.curM * STO_FT / 1000).toFixed(1)}k ft → ${(an.propM * STO_FT / 1000).toFixed(1)}k ft (−${(savedFt / 1000).toFixed(1)}k ft)${an.doctrineFlips ? ` · ${an.doctrineFlips} far-first flip(s)` : ''}\n`)
-            + `${rb.acc.navs} navs · ${rb.acc.snaps} snapshots${stt.fixWraps ? ' · wraps rebuilt to the mission pattern' : ''}${stt.dropUnits.size || stt.dropBundles.size ? ` · ${stt.dropUnits.size + stt.dropBundles.size} duplicate(s) removed` : ''}${stt.rehome.size ? ` · ${stt.rehome.size} snapshot(s) re-homed` : ''}${stt.navMerge.size ? ` · ${stt.navMerge.size} nav(s) consolidated (−${stt.navMerge.size} stop(s))` : ''}${rb.acc.emptyDropped ? ` · ${rb.acc.emptyDropped} snap-less nav(s) dropped` : ''}\n\n`
+            + `${rb.acc.navs} navs · ${rb.acc.snaps} snapshots${stt.fixWraps ? ' · wraps rebuilt to the mission pattern' : ''}${stt.dropUnits.size || stt.dropBundles.size ? ` · ${stt.dropUnits.size + stt.dropBundles.size} duplicate(s) removed` : ''}${stt.rehome.size ? ` · ${stt.rehome.size} snapshot(s) re-homed` : ''}${stt.navMerge.size ? ` · ${stt.navMerge.size} nav(s) consolidated (−${stt.navMerge.size} stop(s))` : ''}${rb.acc.emptyDropped ? ` · ${rb.acc.emptyDropped} snap-less nav(s) dropped` : ''}${stt.cutUnits.size || stt.cutBundles.size ? ` · ✂ CUT ${stt.cutUnits.size} nav(s) + ${stt.cutBundles.size} snapshot(s)` : ''}\n\n`
             + `Mission id + name unchanged. A JSON backup downloads first.`)) return;
         stoBusy = true;
         try {
