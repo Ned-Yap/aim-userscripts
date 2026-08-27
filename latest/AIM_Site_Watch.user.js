@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.22
+// @version      0.23
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON (and optionally its missions) on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Daily Slack digest. Configurable in the AIM Control Panel ("Site Watch").
@@ -31,12 +31,12 @@
 //   - ON CHANGE: pulls the previous snapshot from GitHub, computes a field-level
 //     diff, appends rows to site-watch/changes.csv (the audit log), and stores
 //     the new JSON as latest.json.gz + a 10-deep rotating snap-NNN.json.gz ring.
-//   - DAILY SLACK DIGEST: once per PT day at digestHourPT (default 6pm PT) the
-//     leader tab reads changes.csv back and posts ONE message to the
-//     CSM-Site-Issues channel — a parent listing which sites were touched, with
-//     a threaded per-site rollup table of what changed. Uses the bot token in
-//     DATA_REPO/slack-config.json (same bot/channel as AIM Issues). Silent on a
-//     day with zero changes. Catches up a missed day if no tab was open at 6pm.
+//   - SLACK DIGEST (MANUAL ONLY since v0.23, 2026-08-27): the automatic daily
+//     post to CSM-Site-Issues was removed — channel policy is issue
+//     opened/updated/closed events only (AIM Issues), nothing scheduled.
+//     The "Post Slack digest now" Control Panel button still posts an
+//     on-demand last-24h digest (parent + threaded per-site rollup) using the
+//     bot token in DATA_REPO/slack-config.json (same bot/channel as AIM Issues).
 //   - Robustness: AUTH-LOSS FREEZE (weekend logout / login redirect → never
 //     hashes a login page as data, just pauses and resumes Monday); timestamp
 //     scheduler with wake catch-up (sleep just delays, never corrupts);
@@ -86,7 +86,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.22';
+    const SCRIPT_VERSION = '0.23';
 
     // Server model (v0.21): prod and QA are separate databases with their own
     // site lists — the same numeric ID is two different sites. A QA leader
@@ -1158,7 +1158,7 @@
     }
     function buildParent(sites, dayLabel, sinceISO, nowISO) {
         const n = sites.size;
-        const lines = [`:satellite: *Site Watch — daily digest* (${slackEsc(dayLabel)}, ${hourLabelPT(cfg.digestHourPT)})`,
+        const lines = [`:satellite: *Site Watch — digest* (${slackEsc(dayLabel)}, on-demand)`,
                        `*${n}* site${n === 1 ? '' : 's'} changed · _${fmtPT(sinceISO)} → ${fmtPT(nowISO)}_`, ''];
         const arr = orderedSites(sites);
         const CAP = 50;
@@ -1240,6 +1240,10 @@
         return 'posted';
     }
 
+    // *** UNCALLED since v0.23 (2026-08-27): the automatic daily digest was
+    // removed (channel policy — only AIM Issues open/update/close posts).
+    // Kept intact in case a scheduled digest ever comes back; re-wire the
+    // runCycle tail + leader-heartbeat calls to re-enable. ***
     // Fire the daily digest once the PT boundary passes. Cheap when not firing
     // (pure GM/clock checks); only the leader tab posts. Guarded against reentry.
     async function maybeDailyDigest(trigger) {
@@ -1576,7 +1580,8 @@
                 ? `${stillDue} still due — next batch in ~${Math.round(WAKE_MS / 60000)} min (or click "Check all due now")`
                 : `all ${siteList.length} sites baselined — now watching on the adaptive schedule`;
             console.log(`%c${TAG} cycle done: ${checked} checked, ${changed} changed · ${tail}`, 'color:#5fd0ff;font-weight:600');
-            await maybeDailyDigest('cycle');
+            // v0.23: automatic daily digest removed (channel policy 2026-08-27) —
+            // digest is manual-only via the "Post Slack digest now" button.
         } catch (e) {
             console.error(TAG, 'cycle error', e);
         } finally {
@@ -1592,12 +1597,11 @@
         { id: 'coldHours', label: 'Quiet check interval (hours)', type: 'number', default: DEFAULTS.coldHours, min: 1, max: 168, step: 1 },
         { id: 'hotHours', label: 'Active check interval (hours)', type: 'number', default: DEFAULTS.hotHours, min: 1, max: 24, step: 1 },
         { id: 'hotWindowHours', label: 'Stay-active window after a change (hours)', type: 'number', default: DEFAULTS.hotWindowHours, min: 3, max: 168, step: 1 },
-        { id: 'digestHourPT', label: 'Daily Slack digest hour (PT, 24h)', type: 'number', default: DEFAULTS.digestHourPT, min: 0, max: 23, step: 1 },
         { id: 'watchMissions', label: 'Also watch missions (steps · distance · values)', type: 'boolean', default: DEFAULTS.watchMissions },
         { id: 'check-now', label: 'Check all due now', type: 'button', action: 'check-now' },
         { id: 'simulate', label: 'Simulate a change (console preview)', type: 'button', action: 'simulate' },
         { id: 'status', label: 'Show status (console)', type: 'button', action: 'status' },
-        { id: 'post-digest-now', label: 'Post Slack digest now (last 24h, test)', type: 'button', action: 'post-digest-now' },
+        { id: 'post-digest-now', label: 'Post Slack digest now (last 24h, manual only)', type: 'button', action: 'post-digest-now' },
         { id: 'reset-baselines', label: 'Reset all baselines (re-learn)', type: 'button', action: 'reset-baselines' },
     ];
 
@@ -1629,14 +1633,6 @@
             cfg[id] = n;
             saveConfig();
             console.log(`${TAG} ${id} = ${n}`);
-        }
-        if (id === 'digestHourPT') {
-            const n = Number(val);
-            if (!isFinite(n) || n < 0 || n > 23) return;
-            if (cfg.digestHourPT === n) return;     // idempotent
-            cfg.digestHourPT = n;
-            saveConfig();
-            console.log(`${TAG} digestHourPT = ${n} (PT)`);
         }
         if (id === 'watchMissions') {
             const on = !!val;
@@ -1824,10 +1820,8 @@
         if (!masterEnabled || !cachedToken) return;
         if (amLeader) renewLeader();
         else claimLeader();
-        // Only the leader posts; the day-boundary check inside is cheap and
-        // idempotent, so firing it every heartbeat catches the 6pm boundary even
-        // on a quiet day where no sites are due and runCycle returns early.
-        if (amLeader) maybeDailyDigest('heartbeat');
+        // v0.23: automatic daily digest removed (channel policy 2026-08-27) —
+        // the heartbeat no longer fires maybeDailyDigest.
     }, HEARTBEAT_MS);
     // Free the lease on refresh/close so the next load takes over immediately.
     window.addEventListener('pagehide', releaseLeader);

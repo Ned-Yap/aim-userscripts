@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.38
+// @version      1.39
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -60,7 +60,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.38';
+    const SCRIPT_VERSION = '1.39';
 
     // Server model (v1.36): prod and QA are separate databases — the same
     // numeric site ID is two different sites. QA issues live in their own
@@ -1621,6 +1621,9 @@
     }
 
     // ---- v1.20: stale-issue auto-bump (client-side) -------------------
+    // *** DISABLED in v1.39 (2026-08-27): no scheduled callers remain. ***
+    // Channel policy: #CSM-Site-Issues only gets issue opened/updated/closed
+    // events — no weekly re-pings. Code kept intact for possible re-enable.
     // Pings assignee + approvers when an issue sits in open/pending for >7
     // days, re-bumping weekly. Runs in the IFRAME (sync owner) after each
     // refetch + hourly. Dedups across browsers via the synced kind:'bump'
@@ -1940,9 +1943,9 @@
                 setSyncStatus('ok');
                 console.log(`${TAG} synced from GitHub: ${remote.issues.length} issue${remote.issues.length === 1 ? '' : 's'} on site ${sid}`);
             }
-            // v1.20: after we have authoritative synced data, check for stale
-            // issues to bump (fire-and-forget).
-            runStaleBumpCheck();
+            // v1.39: stale-bump check DISABLED (channel policy 2026-08-27 —
+            // Slack only gets issue opened/updated/closed events, no re-pings).
+            // runStaleBumpCheck();
             // v1.29: reconcile Slack — backfill any issue whose history ran
             // ahead of its Slack watermark (a transition that never posted
             // because the actor's Slack was down). Runs once per site.
@@ -7019,18 +7022,10 @@
         } else {
             syncStatus = 'no-token';
         }
-        // v1.20: hourly stale-issue bump check while the page is open
-        // (refetchIssues also triggers one on each site load). IFRAME-gated
-        // inside runStaleBumpCheck — only ever sees the open site.
-        if (!IS_TOP) setInterval(() => { try { runStaleBumpCheck(); } catch (e) {} }, 60 * 60 * 1000);
-        // v1.22: GLOBAL cross-site sweep in the TOP frame — bumps stale issues
-        // on EVERY site without needing one open (approver-gated, see
-        // runGlobalStaleSweep). Kick once shortly after load (let the
-        // Control Panel broadcast a fresh token first), then hourly.
-        if (IS_TOP) {
-            setTimeout(() => { try { runGlobalStaleSweep(); } catch (e) {} }, 30 * 1000);
-            setInterval(() => { try { runGlobalStaleSweep(); } catch (e) {} }, 60 * 60 * 1000);
-        }
+        // v1.39: stale-issue bump timers REMOVED (channel policy 2026-08-27 —
+        // Slack only gets issue opened/updated/closed events, no weekly
+        // re-pings). runStaleBumpCheck/runGlobalStaleSweep are kept in the file
+        // but unscheduled; restore the v1.20/v1.22 timers here to re-enable.
         // Always ask the Control Panel for the current token so we get
         // the latest if the user updated it elsewhere.
         try { if (controlChannel) controlChannel.postMessage({ type: 'REQUEST_TOKEN' }); } catch (e) {}
