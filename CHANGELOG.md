@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-27 — ⏱ NEW SCRIPT: AIM Time Tracker v0.1 — Phase 1 capture engine (latest — dev only, feature #246)
+
+First piece of the CSM time/project tracking platform (replaces the manual Daily CSM Tracker page — full design in ShortKeys/AIM_Time_Tracker_Design.md). This phase is **local-only passive capture, no sync, no calendar yet**: it records which site + app area you're actively working in (only the focused tab accrues — open tabs never double-count), stops counting after 5 idle minutes (CP-editable), logs per-tab open/close spans, and tags time blocks with which AIM tools fired in that tab. Raw minutes are stored locally in the script's own storage; 15-min rounding is display-only. Debug readout via Shift+T or the Control Panel's "Time Tracker" section — it shows live state, today's ledger (raw → rounded), open tabs, recent slices, and the **route→area mappings it guessed, which is the thing to validate**: run it for 2–3 normal days and report any route listed with the wrong area (or as "other").
+
 ## 2026-08-24 — 🪄 v2.80: ✂ Cut pads & steps from macros (Mission Bank Tools latest — dev only, feature #245)
 
 New collapsible **✂ Cut from this macro** section in the 🪄 panel: tick a pad to remove ALL its steps from the macro, or expand it and cut single navs or single snapshots (each snapshot row shows its standoff). Removal is from this macro only — micros stay untouched. It rides the exact machinery the duplicate-drops use, so everything already holds: red ✕ marks in the 👁 change preview, wraps travel with their snapshot, the hard nav/snapshot accounting includes the cuts, and Apply runs the usual rails (backup, in-place save, verify-by-refetch). Cutting a nav's last snapshot leaves a snap-less nav — the no-snap-less-navs rule sweeps it in the same pass.
