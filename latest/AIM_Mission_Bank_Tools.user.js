@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.80
+// @version      2.81
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.80';
+    const SCRIPT_VERSION = '2.81';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5721,7 +5721,7 @@
                     // v2.63: ⇅ manual pad order — always available
                     const orderBtn = `<button data-mcv-order="${mc.mission.id}" title="⇅ See + hand-edit this macro's pad visit order (the order actually flown — same numbers as the badges). Drag rows, Apply saves in place with backup + verify." style="padding:0 5px;background:rgba(122,223,230,0.12);border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">⇅</button>`;
                     // v2.66: 🪄 step optimizer (feature #244) — always available
-                    const stoBtn = `<button data-mcv-sto="${mc.mission.id}" data-mcv-sto-col="${COLORS2[i % COLORS2.length]}" title="🪄 Step Optimizer — reorder the navs/steps INSIDE this macro for the shortest legal route (intertwined pads interleave), fix snapshot⇄nav standoff (ideal 100 ft, min 90, farther side wins), rebuild scrambled wraps, drop stacked duplicates. Preview first; Apply saves in place with backup + verify." style="padding:0 5px;background:rgba(195,157,255,0.12);border:1px solid rgba(195,157,255,0.45);color:#c39dff;border-radius:4px;cursor:pointer;font-size:10px;">🪄</button>`;
+                    const stoBtn = `<button data-mcv-sto="${mc.mission.id}" data-mcv-sto-col="${COLORS2[i % COLORS2.length]}" title="🪄 Step Optimizer — reorder the navs/steps INSIDE this macro for the shortest legal route (intertwined pads interleave), flag snapshot standoff (info-only — pairings are pilot-tuned, moves are strictly opt-in), rebuild scrambled wraps, drop stacked duplicates. Preview first; Apply saves in place with backup + verify." style="padding:0 5px;background:rgba(195,157,255,0.12);border:1px solid rgba(195,157,255,0.45);color:#c39dff;border-radius:4px;cursor:pointer;font-size:10px;">🪄</button>`;
                     return `<div data-mcv-row="${mc.mission.id}" style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:${vis ? 1 : 0.38};"><input type="checkbox" data-mcv-vis="${mc.mission.id}" ${vis ? 'checked' : ''} title="Show/hide this macro on the map" style="margin:0;cursor:pointer;accent-color:${COLORS2[i % COLORS2.length]};"><span data-mcv-solo="${mc.mission.id}" title="Solo — show ONLY this macro (click again to show all)" style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;cursor:pointer;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${reBtn}${orderBtn}${stoBtn}${splitBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine ? auditLine.replace('style="', `style="opacity:${vis ? 1 : 0.38};`) : ''}`;
                 }).join('')
                 : '<div style="color:#888;">No macro missions yet (≥2 pads in one mission).</div>')
@@ -7205,7 +7205,14 @@
         sto.state = { an, col, fixWraps: (an.wrapAnoms.length + an.fragUnits.length) > 0,
             dropUnits: new Set(an.dupUnits.map(d => d.ui)),
             dropBundles: new Set(an.dupBundles.map(d => d.uid)),
-            rehome: new Map(an.standoff.filter(s => s.tooClose && s.alt !== null).map(s => [s.uid, s.alt])),
+            // v2.81 DOCTRINE — snapshot⇄nav associations are FLIGHT-TUNED
+            // data: each one encodes pilot feedback from real dial-in flights
+            // (too close/far/left/right/high/low/empty). Re-homing one undoes
+            // that calibration and restarts the dial-in from scratch, so the
+            // tool NEVER moves a snapshot by default: every suggestion renders
+            // info-only (distances + ladder tier shown) and starts UNCHECKED.
+            // Reordering is safe — bundles ride their nav by construction.
+            rehome: new Map(),
             navMerge: new Map(),   // nav consolidation opt-IN (default unticked — vantage changes)
             dropEmpty: true,       // no navs without snaps (user rule) — default ON
             cutUnits: new Set(),   // ✂ cut (v2.80): whole navs removed from this macro
@@ -7248,6 +7255,7 @@
         }
         if (an.standoff.length) {
             secs.push(`<b style="color:#c39dff;" title="Preference ladder: 100 ideal · 101–120 beats 80–100 · 121–160 beats 60–80 · 160–200 beats 40–60 · 200+ only if nothing else. A move is only offered when it climbs the ladder.">Snapshot standoff (OGI band ${cfg.bandMinFt}–${cfg.bandMaxFt} ft · ideal ${cfg.idealFt} · ladder-scored — hover for the ladder)</b>`
+                + `<div style="color:#93835e;margin-left:8px;">ℹ INFO-ONLY by default — snapshot⇄nav pairings are pilot-tuned from real flights, so nothing moves unless YOU tick it. Order changes never touch pairings.</div>`
                 + an.standoff.map(s => {
                     const kindTxt = s.tooClose ? 'TOO CLOSE' : 'far — not necessarily wrong';
                     if (s.alt === null) return row(`<span style="color:#93835e;margin-left:8px;">snap ${escapeHtml(s.uid)} @ ${s.d.toFixed(0)} ft from its nav (${kindTxt}) — no closer nav available, left as-is</span>`);
