@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.39
+// @version      1.40
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -60,7 +60,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.39';
+    const SCRIPT_VERSION = '1.40';
 
     // Server model (v1.36): prod and QA are separate databases — the same
     // numeric site ID is two different sites. QA issues live in their own
@@ -744,6 +744,11 @@
 
     // ------- Slack notification helpers (v1.03) -------
     function slackEnabled() {
+        // v1.40: muteAll is a fleet-wide EMERGENCY KILL SWITCH — set
+        // "muteAll": true in aim-userscripts-data/slack-config.json and every
+        // v1.40+ browser goes Slack-silent on its next config fetch (page
+        // load), without waiting ~24h for a Tampermonkey script update.
+        if (slackConfig && slackConfig.muteAll) return false;
         return !!(slackConfig && slackConfig.botToken && slackConfig.channelId);
     }
     // Slack control-char escaping for free text. Mentions (<@id>) are built
@@ -1275,8 +1280,15 @@
     async function backfillSlackForIssue(issue) {
         try {
             const wm = issue.slackPostedHistoryLen || 0;
-            const missed = (issue.history || []).slice(wm);
-            if (!missed.length || !issue.slackThreadTs) return;
+            // v1.40: NEVER re-blast 'bump' entries. The v1.38 global sweep
+            // wrote bump history from the TOP frame without advancing the
+            // watermark, so the next site-open saw "history ahead of Slack"
+            // and posted a Catch-up reply per issue re-describing bumps that
+            // HAD already posted — the 2026-08-27 ~30-message burst. Bumps
+            // are dead (v1.39) and were never lifecycle events anyway.
+            const missed = (issue.history || []).slice(wm).filter(h => h.kind !== 'bump');
+            if (!missed.length) { markSlackPosted(issue); return; }   // bumps only — advance silently
+            if (!issue.slackThreadTs) return;
             const lines = missed.map(h => `• ${slackHistLine(h)}`);
             const txt = `🔄 *Catch-up* — these updates happened while Slack was unreachable:\n${lines.join('\n')}`;
             const ts = await slackPost(txt, issue.slackThreadTs);

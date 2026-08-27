@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-27 — 🚨 AIM Issues v1.40: burst-spam fix + fleet-wide Slack mute switch (feature #247 follow-up)
+
+Root-caused today's ~30-message Slack burst: the (now-removed) v1.38 weekly stale sweep bumped 5 issues on site 1603, and because the sweep never advanced the Slack watermark, the next site-open's "Catch-up" reconcile re-blasted those same bumps as 7 more catch-up replies. Two fixes: **(1)** catch-up backfill now skips `bump` history entries entirely — it can never re-post a bump wave again (a bumps-only gap just advances the watermark silently). **(2)** New emergency kill switch: setting `"muteAll": true` in `aim-userscripts-data/slack-config.json` silences ALL Slack posting from every v1.40+ browser at next page load — no waiting ~24h for a Tampermonkey update. **Please update AIM Issues via Tampermonkey → "Check for userscript updates" now** rather than waiting for the auto-check: v1.38 installs still run the hourly bump sweep until updated.
+
 ## 2026-08-27 — 🔕 Slack channel quiet-down: AIM Issues v1.39 + Site Watch v0.23 (feature #247)
 
 #CSM-Site-Issues was getting too noisy, so the channel now carries **only issue lifecycle events — opened, updated (comments / status changes / assignments), and closed**. Two automated posters were removed: **AIM Issues v1.39** (prod + latest) no longer runs the weekly stale-issue bumps — neither the per-site check nor the hourly cross-site sweep — so old open issues stop re-pinging assignees and approvers. **Site Watch v0.23** (latest, personal) no longer posts the daily 6pm change digest; the digest is still available on demand via the Control Panel's "Post Slack digest now" button. Site Watch keeps auditing and logging changes exactly as before — only the scheduled Slack post is gone.
