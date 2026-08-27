@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.82
+// @version      2.83
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.82';
+    const SCRIPT_VERSION = '2.83';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5957,6 +5957,7 @@
                 <button data-mcvs-go style="padding:6px 12px;background:#ff8ad2;border:none;color:#2a0420;border-radius:6px;cursor:pointer;font-weight:800;">✂ Create</button>
             </div>`;
         document.body.appendChild(p);
+        mbPanelMovable(p, p.firstElementChild);
         const goBtn = p.querySelector('[data-mcvs-go]');
         const updateGo = () => {
             const n = p.querySelectorAll('input[data-mcvs-pick]:checked').length;
@@ -7186,6 +7187,7 @@
             + `<div style="color:#789;margin-top:6px;">standoff counts too-close only · stops = nav-consolidation candidates · open a row to review + apply</div>`;
         document.body.appendChild(el);
         el.querySelector('[data-sto-sw-x]').onclick = () => el.remove();
+        mbPanelMovable(el, el.firstElementChild);
         el.querySelectorAll('[data-sto-sw-open]').forEach(b => b.onclick = () => {
             stoOpen(Number(b.getAttribute('data-sto-sw-open')) || b.getAttribute('data-sto-sw-open'), b.getAttribute('data-sto-sw-col'));
         });
@@ -7320,6 +7322,28 @@
         el.innerHTML = body;
         document.body.appendChild(el);
         sto.panelEl = el;
+        // v2.83: the 🪄 panel re-renders on every checkbox tick — restore the
+        // user's dragged position / resized size, and keep tracking them
+        if (sto.panelRect) {
+            const pr = sto.panelRect;
+            if (pr.left != null) { el.style.left = pr.left + 'px'; el.style.top = pr.top + 'px'; el.style.right = 'auto'; }
+            if (pr.w) el.style.width = pr.w + 'px';
+            if (pr.h) { el.style.height = pr.h + 'px'; el.style.maxHeight = 'none'; }
+        }
+        mbPanelMovable(el, el.firstElementChild, (l, t) => { sto.panelRect = Object.assign(sto.panelRect || {}, { left: l, top: t }); });
+        try {
+            // record size ONLY during a live pointer-drag on the panel (the
+            // native resize handle) — content-driven height changes must not
+            // freeze the panel at a stale size
+            el.addEventListener('pointerdown', () => { el.__pdown = true; }, true);
+            document.addEventListener('pointerup', () => { el.__pdown = false; }, true);
+            new ResizeObserver(() => {
+                if (!el.__pdown) return;
+                const r = el.getBoundingClientRect();
+                if (!r.width || !r.height) return;
+                sto.panelRect = Object.assign(sto.panelRect || {}, { w: Math.round(r.width), h: Math.round(r.height) });
+            }).observe(el);
+        } catch (e) {}
         el.querySelector('[data-sto-x]').onclick = () => stoClosePanel();
         const wrapsCb = el.querySelector('[data-sto-wraps]');
         if (wrapsCb) wrapsCb.onchange = () => { stt.fixWraps = wrapsCb.checked; stoRenderPanel(); };
@@ -7803,6 +7827,36 @@
         }
     }
 
+    // Drag + resize for the floating tool panels (v2.83, user request):
+    // drag anywhere on the header (buttons/inputs/links still click), resize
+    // via the native bottom-right handle. onMove reports the new position so
+    // callers that RE-RENDER their panel (🪄) can restore it.
+    function mbPanelMovable(el, handle, onMove) {
+        try {
+            el.style.resize = 'both';
+            const ov = getComputedStyle(el).overflow;
+            if (ov === 'visible') el.style.overflow = 'hidden';   // CSS resize needs non-visible overflow
+        } catch (e) {}
+        if (!handle) return;
+        handle.style.cursor = 'move';
+        handle.addEventListener('pointerdown', (e) => {
+            if (e.target.closest && e.target.closest('button,input,a,select,textarea,label,summary')) return;
+            const r = el.getBoundingClientRect();
+            // right-anchored panels convert to left-anchored so dragging sticks
+            el.style.left = r.left + 'px'; el.style.top = r.top + 'px'; el.style.right = 'auto';
+            const ox = e.clientX - r.left, oy = e.clientY - r.top;
+            const move = (ev) => {
+                const l = Math.max(0, Math.min((window.innerWidth || 1600) - 60, ev.clientX - ox));
+                const t = Math.max(0, Math.min((window.innerHeight || 900) - 40, ev.clientY - oy));
+                el.style.left = l + 'px'; el.style.top = t + 'px';
+                if (onMove) onMove(l, t);
+            };
+            const up = () => { document.removeEventListener('pointermove', move, true); document.removeEventListener('pointerup', up, true); };
+            document.addEventListener('pointermove', move, true);
+            document.addEventListener('pointerup', up, true);
+            e.preventDefault();
+        });
+    }
     // ── ⟳ RE-MERGE (feature #248, v2.82) ───────────────────────────────────
     // The workflow: pilot feedback lands in the MICRO missions (the source of
     // truth); the macro is derived. ⟳ rebuilds this macro from its pads'
@@ -7887,6 +7941,7 @@
             </div>`;
         document.body.appendChild(p);
         p.querySelector('[data-mcvr-close]').onclick = () => p.remove();
+        mbPanelMovable(p, p.firstElementChild);
         p.querySelector('[data-mcvr-all]').onclick = (e) => { e.preventDefault(); p.querySelectorAll('input[data-mcvr-pick]:not(:disabled)').forEach(cb => { cb.checked = true; }); };
         p.querySelector('[data-mcvr-none]').onclick = (e) => { e.preventDefault(); p.querySelectorAll('input[data-mcvr-pick]').forEach(cb => { cb.checked = false; }); };
         p.querySelector('[data-mcvr-go]').onclick = async () => {
