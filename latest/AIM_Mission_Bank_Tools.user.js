@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.81
+// @version      2.82
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.81';
+    const SCRIPT_VERSION = '2.82';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5518,6 +5518,7 @@
         try { mcvCloseOrderPanel(); } catch (e) {}
         try { stoClosePanel(); } catch (e) {}
         try { const sw = document.getElementById('aim-mb-sto-sweep'); if (sw) sw.remove(); } catch (e) {}
+        try { const rm = document.getElementById('aim-mb-mcv-remerge'); if (rm) rm.remove(); } catch (e) {}
         if (mcv.legendEl) { try { mcv.legendEl.remove(); } catch (e) {} mcv.legendEl = null; }
     }
     // Badge inner HTML (shared by mcvDraw + the ⇅ live preview). Edit mode
@@ -5720,9 +5721,11 @@
                     const splitBtn = `<button data-mcv-split="${mc.mission.id}" title="✂ Split this macro into one mission per pad (named after the pad) — create-only, this macro is untouched" style="padding:0 5px;background:rgba(255,138,210,0.12);border:1px solid rgba(255,138,210,0.45);color:#ff8ad2;border-radius:4px;cursor:pointer;font-size:10px;">✂</button>`;
                     // v2.63: ⇅ manual pad order — always available
                     const orderBtn = `<button data-mcv-order="${mc.mission.id}" title="⇅ See + hand-edit this macro's pad visit order (the order actually flown — same numbers as the badges). Drag rows, Apply saves in place with backup + verify." style="padding:0 5px;background:rgba(122,223,230,0.12);border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">⇅</button>`;
+                    // v2.82: ⟳ re-merge from micros (feature #248) — always available
+                    const remergeBtn = `<button data-mcv-remerge="${mc.mission.id}" title="⟳ Re-merge — rebuild this macro from its pads' CURRENT micro missions (same pad order, name, id). Pilot fixes go in the micros; this pulls them into the macro. Review panel shows which pads changed; backup + verify on apply." style="padding:0 5px;background:rgba(255,213,79,0.12);border:1px solid rgba(255,213,79,0.45);color:#ffd54f;border-radius:4px;cursor:pointer;font-size:10px;">⟳</button>`;
                     // v2.66: 🪄 step optimizer (feature #244) — always available
                     const stoBtn = `<button data-mcv-sto="${mc.mission.id}" data-mcv-sto-col="${COLORS2[i % COLORS2.length]}" title="🪄 Step Optimizer — reorder the navs/steps INSIDE this macro for the shortest legal route (intertwined pads interleave), flag snapshot standoff (info-only — pairings are pilot-tuned, moves are strictly opt-in), rebuild scrambled wraps, drop stacked duplicates. Preview first; Apply saves in place with backup + verify." style="padding:0 5px;background:rgba(195,157,255,0.12);border:1px solid rgba(195,157,255,0.45);color:#c39dff;border-radius:4px;cursor:pointer;font-size:10px;">🪄</button>`;
-                    return `<div data-mcv-row="${mc.mission.id}" style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:${vis ? 1 : 0.38};"><input type="checkbox" data-mcv-vis="${mc.mission.id}" ${vis ? 'checked' : ''} title="Show/hide this macro on the map" style="margin:0;cursor:pointer;accent-color:${COLORS2[i % COLORS2.length]};"><span data-mcv-solo="${mc.mission.id}" title="Solo — show ONLY this macro (click again to show all)" style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;cursor:pointer;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${reBtn}${orderBtn}${stoBtn}${splitBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine ? auditLine.replace('style="', `style="opacity:${vis ? 1 : 0.38};`) : ''}`;
+                    return `<div data-mcv-row="${mc.mission.id}" style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:${vis ? 1 : 0.38};"><input type="checkbox" data-mcv-vis="${mc.mission.id}" ${vis ? 'checked' : ''} title="Show/hide this macro on the map" style="margin:0;cursor:pointer;accent-color:${COLORS2[i % COLORS2.length]};"><span data-mcv-solo="${mc.mission.id}" title="Solo — show ONLY this macro (click again to show all)" style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;cursor:pointer;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${reBtn}${orderBtn}${remergeBtn}${stoBtn}${splitBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine ? auditLine.replace('style="', `style="opacity:${vis ? 1 : 0.38};`) : ''}`;
                 }).join('')
                 : '<div style="color:#888;">No macro missions yet (≥2 pads in one mission).</div>')
             + `<div style="color:#ffb74d;margin-top:5px;">⬜ ${det.todo.length} pad(s) with missions, not in any macro</div>`
@@ -5738,6 +5741,7 @@
         el.querySelectorAll('[data-mcv-reorder]').forEach(b => b.onclick = () => mcvReorder(Number(b.getAttribute('data-mcv-reorder')) || b.getAttribute('data-mcv-reorder')));
         el.querySelectorAll('[data-mcv-order]').forEach(b => b.onclick = () => mcvOpenOrderPanel(Number(b.getAttribute('data-mcv-order')) || b.getAttribute('data-mcv-order')));
         el.querySelectorAll('[data-mcv-sto]').forEach(b => b.onclick = () => stoOpen(Number(b.getAttribute('data-mcv-sto')) || b.getAttribute('data-mcv-sto'), b.getAttribute('data-mcv-sto-col')));
+        el.querySelectorAll('[data-mcv-remerge]').forEach(b => b.onclick = () => mcvOpenRemerge(Number(b.getAttribute('data-mcv-remerge')) || b.getAttribute('data-mcv-remerge')));
         el.querySelectorAll('[data-mcv-route]').forEach(b => b.onclick = () => {
             const id = Number(b.getAttribute('data-mcv-route')) || b.getAttribute('data-mcv-route');
             const on = mcvToggleRoute(id, b.getAttribute('data-mcv-route-col'));
@@ -7799,6 +7803,167 @@
         }
     }
 
+    // ── ⟳ RE-MERGE (feature #248, v2.82) ───────────────────────────────────
+    // The workflow: pilot feedback lands in the MICRO missions (the source of
+    // truth); the macro is derived. ⟳ rebuilds this macro from its pads'
+    // CURRENT micros — same pad order, same name, same id — killing the old
+    // dance of re-lassoing, deleting the macro, and renaming. Semantics match
+    // a hand re-merge exactly (pcmCommit: takeoff + concat of each micro's
+    // body + returnHome); pads with no micro keep their current macro steps.
+    // NOTE: a pad visited in multiple separate runs (interleaved facility)
+    // consolidates at its first slot — run 🪄 afterwards to re-optimize.
+    const MCV_REMERGE_ID = 'aim-mb-mcv-remerge';
+    let mcvRemergeBusy = false;
+    function mcvOpenRemerge(missionId) {
+        const old = document.getElementById(MCV_REMERGE_ID);
+        if (old) { old.remove(); return; }
+        const data = mcv.data;
+        const mc = data && data.det.macros.find(x => x.mission.id === missionId);
+        if (!mc) { showToast('Macro not found — toggle 🧩 off/on and retry.', '#ff9800', 3500); return; }
+        const locKey = loc => loc.lat.toFixed(7) + ',' + loc.lng.toFixed(7);
+        // current macro steps per pad (fallback + diff baseline)
+        const stepsByPad = new Map();
+        (mc.blocks || []).forEach(b => {
+            if (b.aId == null) return;
+            if (!stepsByPad.has(b.aId)) stepsByPad.set(b.aId, []);
+            b.steps.forEach(s => stepsByPad.get(b.aId).push(s));
+        });
+        // pad → micros (geometry-detected solos; name-ranked when several)
+        const soloByPad = new Map();
+        (data.det.solos || []).forEach(s => {
+            if (!soloByPad.has(s.pad.id)) soloByPad.set(s.pad.id, []);
+            soloByPad.get(s.pad.id).push(s.mission);
+        });
+        const sig = steps => {
+            const loc = steps.filter(s => s && s.location && typeof s.location.lat === 'number');
+            return {
+                navs: loc.filter(s => s.type === 1).length,
+                snaps: loc.filter(s => s.type === 6).length,
+                steps: steps.length,
+                key: loc.map(s => s.type + '@' + locKey(s.location)).sort().join(';'),
+            };
+        };
+        const rows = mc.pads.map(a => {
+            const micros = soloByPad.get(a.id) || [];
+            let micro = null;
+            if (micros.length === 1) micro = micros[0];
+            else if (micros.length > 1) micro = rankMatchMissions(a.name, micros)[0] || micros[0];
+            const curSteps = stepsByPad.get(a.id) || [];
+            const cur = sig(curSteps);
+            let status, changed = false;
+            if (!micro) status = { txt: 'no micro — keeping current steps', col: '#ffb74d' };
+            else {
+                const nu = sig(mbMissionBody(micro));
+                changed = nu.key !== cur.key || nu.steps !== cur.steps;
+                status = changed
+                    ? { txt: `UPDATED · ${cur.navs}n/${cur.snaps}s/${cur.steps}st → ${nu.navs}n/${nu.snaps}s/${nu.steps}st`, col: '#5fff5f' }
+                    : { txt: 'in sync', col: '#789' };
+            }
+            return { pad: a, micro, curSteps, changed, status };
+        });
+        const p = document.createElement('div');
+        p.id = MCV_REMERGE_ID;
+        p.style.cssText = 'position:fixed;top:60px;right:24px;width:440px;max-height:80vh;display:flex;flex-direction:column;z-index:2147483602;'
+            + 'background:#161a20;border:1px solid #ffd54f;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        const rowsHtml = rows.map((r, i) => `<label style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;cursor:${r.micro ? 'pointer' : 'default'};">
+                <span style="color:#789;width:18px;text-align:right;flex:none;">${i + 1}</span>
+                <input type="checkbox" data-mcvr-pick="${i}" ${r.micro ? (r.changed ? 'checked' : '') : 'disabled'} />
+                <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(String(r.pad.name || ('pad ' + r.pad.id)))}</span>
+                ${r.micro ? `<span title="${escapeHtml(String(r.micro.name || ''))}" style="color:#7adfe6;font-size:10px;white-space:nowrap;max-width:110px;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(String(r.micro.name || ''))}</span>` : ''}
+                <span style="color:${r.status.col};font-size:10px;white-space:nowrap;">${escapeHtml(r.status.txt)}</span>
+            </label>`).join('');
+        const changedN = rows.filter(r => r.changed).length;
+        p.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(255,213,79,0.08);border-bottom:1px solid rgba(255,213,79,0.3);">
+                <span style="font-weight:800;color:#ffd54f;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">⟳ Re-merge “${escapeHtml(String(mc.mission.name || ''))}”</span>
+                <button data-mcvr-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;flex:none;">✕</button>
+            </div>
+            <div style="padding:6px 12px;font-size:11px;color:#9ad;border-bottom:1px solid #2a2f38;">Rebuilds THIS macro from its pads' current micro missions — <b>same pad order, same name, same id</b>. Micros are the source of truth: pilot fixes go there, ⟳ pulls them in. Ticked pads pull fresh steps from their micro; unticked keep the macro's current steps. ${changedN ? `<b style="color:#5fff5f;">${changedN} pad(s) have micro changes.</b>` : '<b>Everything is in sync.</b>'} <a data-mcvr-all href="#" style="color:#7adfe6;">all</a> / <a data-mcvr-none href="#" style="color:#7adfe6;">none</a></div>
+            <div style="overflow:auto;flex:1;padding:4px 10px;">${rowsHtml}</div>
+            <div style="padding:6px 12px;font-size:10px;color:#789;border-top:1px solid #2a2f38;">Interleaved pads consolidate at their first slot — run 🪄 after if this macro interleaved a facility. Takeoff + returnHome stay the macro's own. A JSON backup downloads before saving.</div>
+            <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
+                <span data-mcvr-status style="flex:1;font-size:11px;color:#9ad;"></span>
+                <button data-mcvr-go style="padding:6px 12px;background:#ffd54f;border:none;color:#3a2c00;border-radius:6px;cursor:pointer;font-weight:800;">⟳ Re-merge</button>
+            </div>`;
+        document.body.appendChild(p);
+        p.querySelector('[data-mcvr-close]').onclick = () => p.remove();
+        p.querySelector('[data-mcvr-all]').onclick = (e) => { e.preventDefault(); p.querySelectorAll('input[data-mcvr-pick]:not(:disabled)').forEach(cb => { cb.checked = true; }); };
+        p.querySelector('[data-mcvr-none]').onclick = (e) => { e.preventDefault(); p.querySelectorAll('input[data-mcvr-pick]').forEach(cb => { cb.checked = false; }); };
+        p.querySelector('[data-mcvr-go]').onclick = async () => {
+            if (mcvRemergeBusy) return;
+            const ctx = findMissionAppCtx();
+            if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4500); return; }
+            const picks = new Set(Array.from(p.querySelectorAll('input[data-mcvr-pick]:checked')).map(cb => Number(cb.getAttribute('data-mcvr-pick'))));
+            const m = mc.mission;
+            const ins = m.instructions || [];
+            const to = ins.find(i => i && i.type === 0);
+            const rh = Array.from(ins).reverse().find(i => i && i.type === 99);
+            const body = [];
+            let pulled = 0, kept = 0, emptyPads = [];
+            rows.forEach((r, i) => {
+                const src = (picks.has(i) && r.micro) ? mbMissionBody(r.micro) : r.curSteps;
+                if (picks.has(i) && r.micro) pulled++; else kept++;
+                if (!src.length) emptyPads.push(String(r.pad.name || r.pad.id));
+                src.forEach(s => body.push(s));
+            });
+            if (emptyPads.length) { showToast(`⟳ Aborted: no steps found for ${emptyPads.join(', ')} — nothing saved.`, '#ff5252', 6000); return; }
+            const instrs = (to ? [pcmNormStep(to)] : []).concat(body.map(pcmNormStep), rh ? [pcmNormStep(rh)] : []);
+            const oldN = ins.length;
+            if (!window.confirm(`⟳ Re-merge "${m.name}" IN PLACE?\n\n`
+                + `${pulled} pad(s) pulled fresh from their micros · ${kept} kept as-is\n`
+                + `steps ${oldN} → ${instrs.length} · pad order, name and id unchanged\n\nA JSON backup downloads first.`)) return;
+            mcvRemergeBusy = true;
+            const st = p.querySelector('[data-mcvr-status]');
+            try {
+                try {
+                    const blob = new Blob([JSON.stringify({ site: getCurrentSiteID(), savedAt: new Date().toISOString(), reason: 'pre-remerge', mission: m })], { type: 'application/json' });
+                    const blobUrl = URL.createObjectURL(blob);
+                    let downloaded = false;
+                    for (const doc of [(window.top || window).document, document]) {
+                        if (downloaded) break;
+                        try {
+                            const a = doc.createElement('a');
+                            a.href = blobUrl; a.download = `mission${m.id}_preremerge_backup.json`;
+                            (doc.body || document.body).appendChild(a); a.click(); a.remove();
+                            downloaded = true;
+                        } catch (e) {}
+                    }
+                    setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 5000);
+                    if (!downloaded) throw new Error('no frame allowed the download');
+                } catch (e) {
+                    console.warn(`${TAG} [remerge] backup download failed`, e);
+                    if (!window.confirm('Backup download FAILED — continue WITHOUT a backup?')) { mcvRemergeBusy = false; return; }
+                }
+                if (st) st.textContent = 'Saving…';
+                await ctx.saveApp(Object.assign({}, m, { instructions: instrs }), m.name);
+                await new Promise(r => setTimeout(r, 1200));
+                const after = await mbFetchMissionsFull(getCurrentSiteID());
+                const m2 = after.find(x => x.id === m.id);
+                let good = false;
+                if (m2) {
+                    const det2 = mcvDetect(data.ent, [m2]);
+                    const mc2 = det2.macros[0];
+                    const gotOrder = mc2 ? mc2.pads.map(a => a.id).join(',') : '';
+                    good = gotOrder === mc.pads.map(a => a.id).join(',') && (m2.instructions || []).length === instrs.length;
+                    if (!good) console.warn(`${TAG} [remerge] verify mismatch — order [${gotOrder}] vs [${mc.pads.map(a => a.id).join(',')}] · steps ${(m2.instructions || []).length}/${instrs.length}`);
+                }
+                showToast(good
+                    ? `⟳ "${m.name}" re-merged ✓ verified (${pulled} pad(s) refreshed). Re-check its schedule if one is active.`
+                    : `⚠ "${m.name}" saved but verify mismatched — check the mission + console (backup downloaded).`, good ? '#5fff5f' : '#ff9800', 9000);
+                p.remove();
+                mcv.data.missions = after;
+                mcv.data.det = mcvDetect(data.ent, after);
+                mcv.data.audits = mcvAudit(mcv.data.det, data.ent);
+                mcvClear();
+                mcvDraw(mcv.data.det);
+                mcv.on = true;
+            } catch (e) {
+                console.warn(`${TAG} [remerge] failed`, e);
+                showToast('⟳ Re-merge FAILED — nothing verified (see console, backup downloaded).', '#ff5252', 6000);
+            }
+            mcvRemergeBusy = false;
+        };
+    }
     async function mcvToggle(btn) {
         if (mcv.on) { mcv.on = false; mcvClear(); if (btn) btn.classList.remove('active'); return; }
         if (mcv.busy) return;
