@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.85
+// @version      2.86
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.85';
+    const SCRIPT_VERSION = '2.86';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -7904,9 +7904,27 @@
     const MCV_REMERGE_ID = 'aim-mb-mcv-remerge';
     const MCV_REMERGE_ALL_ID = 'aim-mb-mcv-remerge-all';
     let mcvRemergeBusy = false;
+    // step signature for re-merge diffs: type + values + coords + a stable
+    // stringify of extra_options (pitch lives there — pilot tuning must flag)
+    function mcvStepSig(st) {
+        const v1 = (typeof st.value1 === 'number') ? st.value1.toFixed(2) : String(st.value1);
+        const v2 = (typeof st.value2 === 'number') ? st.value2.toFixed(2) : String(st.value2);
+        const loc = (st.location && typeof st.location.lat === 'number') ? st.location.lat.toFixed(7) + ',' + st.location.lng.toFixed(7) : '-';
+        let eo = '';
+        try { if (st.extra_options) eo = JSON.stringify(Object.keys(st.extra_options).sort().reduce((o, k) => { o[k] = st.extra_options[k]; return o; }, {})); } catch (e) {}
+        return st.type + '|' + v1 + '|' + v2 + '|' + loc + '|' + eo;
+    }
     // per-pad plan for one macro: {pad, micro, curSteps, changed, status}
     function mcvRemergePlan(mc, data) {
         const locKey = loc => loc.lat.toFixed(7) + ',' + loc.lng.toFixed(7);
+        // v2.86 IDEMPOTENT DIFF: "in sync" = the micro's exact step sequence
+        // appears as a CONTIGUOUS run inside the macro body. The old per-pad
+        // diff compared against the macro's GEOMETRY-sliced block — a micro
+        // step straying near a neighboring pad got filed under the neighbor,
+        // so the pad flagged UPDATED forever no matter how many times it was
+        // re-merged (live: 11 macros × 5 re-merges, never converged).
+        const D = '\u0001';
+        const macroSeq = D + mbMissionBody(mc.mission).map(mcvStepSig).join(D) + D;
         const stepsByPad = new Map();
         (mc.blocks || []).forEach(b => {
             if (b.aId == null) return;
@@ -7937,8 +7955,11 @@
             let status, changed = false;
             if (!micro) status = { txt: 'no micro — keeping current steps', col: '#ffb74d' };
             else {
-                const nu = sig(mbMissionBody(micro));
-                changed = nu.key !== cur.key || nu.steps !== cur.steps;
+                const microBody = mbMissionBody(micro);
+                const microSeq = D + microBody.map(mcvStepSig).join(D) + D;
+                const inSync = microBody.length > 0 && macroSeq.indexOf(microSeq) >= 0;
+                changed = !inSync;
+                const nu = sig(microBody);
                 status = changed
                     ? { txt: `UPDATED · ${cur.navs}n/${cur.snaps}s/${cur.steps}st → ${nu.navs}n/${nu.snaps}s/${nu.steps}st`, col: '#5fff5f' }
                     : { txt: 'in sync', col: '#789' };
@@ -7979,6 +8000,25 @@
         const rh = Array.from(ins).reverse().find(i => i && i.type === 99);
         const body = [];
         let pulled = 0, kept = 0; const emptyPads = [];
+        // cross-pad overlap guard (v2.86): geometry slicing can file a pulled
+        // micro's stray step under a KEPT pad's block — concatenating both
+        // would DUPLICATE it. Located steps only (wrap steps are identical
+        // everywhere by design).
+        const locSig = st => (st.location && typeof st.location.lat === 'number') ? mcvStepSig(st) : null;
+        const pulledLoc = new Map();
+        rows.forEach((r, i) => {
+            if (!(picks.has(i) && r.micro)) return;
+            mbMissionBody(r.micro).forEach(st => { const k = locSig(st); if (k) pulledLoc.set(k, String(r.pad.name || r.pad.id)); });
+        });
+        const overlaps = [];
+        rows.forEach((r, i) => {
+            if (picks.has(i) && r.micro) return;
+            r.curSteps.forEach(st => { const k = locSig(st); if (k && pulledLoc.has(k)) overlaps.push(`${pulledLoc.get(k)} ⇄ ${r.pad.name || r.pad.id}`); });
+        });
+        if (overlaps.length) {
+            showToast(`⟳ "${m.name}" skipped: pulled micro steps also live in kept pads (${Array.from(new Set(overlaps)).slice(0, 3).join(' · ')}) — pull BOTH pads (tick them) or neither, else steps would duplicate.`, '#ff5252', 10000);
+            return { ok: false };
+        }
         rows.forEach((r, i) => {
             const useMicro = picks.has(i) && r.micro;
             const src = useMicro ? mbMissionBody(r.micro) : r.curSteps;
