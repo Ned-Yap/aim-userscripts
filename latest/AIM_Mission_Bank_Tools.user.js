@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.84
+// @version      2.85
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.84';
+    const SCRIPT_VERSION = '2.85';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -6279,7 +6279,7 @@
     // leading pre-pad steps stay first), hard step-count sanity, JSON backup,
     // save in place, verify by refetch + re-detect, redraw the overlay.
     // Returns true once the save went through (even if verify then warned).
-    async function mcvApplyOrder(mc, orderIds, confirmMsg) {
+    async function mcvApplyOrder(mc, orderIds, confirmMsg, removedIds) {
         if (mcvReorderBusy) return false;
         const data = mcv.data;
         const ctx = findMissionAppCtx();
@@ -6295,11 +6295,16 @@
             if (!byPad.has(b.aId)) byPad.set(b.aId, []);
             b.steps.forEach(s => byPad.get(b.aId).push(s));
         });
+        // v2.85: ⇅ can DELETE pads — orderIds excludes them; every step of a
+        // removed pad leaves the macro (micros untouched), and the hard
+        // sanity accounts for exactly those steps and no others.
+        const removed = (removedIds && removedIds.size) ? removedIds : null;
+        const removedSteps = removed ? mc.blocks.reduce((t, b) => t + (b.aId != null && removed.has(b.aId) ? b.steps.length : 0), 0) : 0;
         const body = lead.slice();
         orderIds.forEach(id => (byPad.get(id) || []).forEach(s => body.push(s)));
         const instrs = to.map(pcmNormStep).concat(body.map(pcmNormStep), rh.map(pcmNormStep));
-        // hard sanity: exactly the same steps, only re-sequenced
-        const expected = to.length + rh.length + ins.filter(i => i && i.type !== 0 && i.type !== 99).length;
+        // hard sanity: exactly the same steps minus the deleted pads'
+        const expected = to.length + rh.length + ins.filter(i => i && i.type !== 0 && i.type !== 99).length - removedSteps;
         if (instrs.length !== expected) {
             console.warn(`${TAG} [mcv] reorder ABORT — step count mismatch (${instrs.length} vs ${expected})`, m.name);
             showToast('♻ Aborted: rebuilt step count does not match the original (see console). Nothing saved.', '#ff5252', 6000);
@@ -6343,7 +6348,7 @@
                 const gotOrder = mc2 ? mc2.pads.map(a => a.id).join(',') : '';
                 const wantOrder = orderIds.join(',');
                 const steps2 = (m2.instructions || []).filter(i => i && i.type !== 0 && i.type !== 99).length;
-                const steps1 = ins.filter(i => i && i.type !== 0 && i.type !== 99).length;
+                const steps1 = ins.filter(i => i && i.type !== 0 && i.type !== 99).length - removedSteps;
                 good = gotOrder === wantOrder && steps2 === steps1;
                 if (!good) console.warn(`${TAG} [mcv] verify mismatch — order got [${gotOrder}] want [${wantOrder}] · steps ${steps2}/${steps1}`);
             }
@@ -7585,12 +7590,25 @@
             + 'background:rgba(16,19,26,0.96);border:1px solid #7adfe6;border-radius:8px;padding:9px 11px;color:#e6e6e6;'
             + 'font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 6px 22px rgba(0,0,0,0.7);';
         let dragIdx = null;
-        moState = { missionId, mc, order: mc.pads.slice(), render: null };
+        moState = { missionId, mc, order: mc.pads.slice(), removed: [], render: null };
         const render = () => {
             const order = moState.order;
-            // live badge preview — the map renumbers as you move rows
+            const removedL = moState.removed;
+            // live badge preview — the map renumbers as you move rows; deleted
+            // pads' badges turn into a grey ✕ (v2.85)
             mcvPreviewOrder(missionId, order, true);
-            const changed = order.map(a => a.id).join(',') !== mc.pads.map(a => a.id).join(',');
+            const reg = mcv.badgeReg.get(missionId);
+            const L2 = composerGetL();
+            if (reg && L2) removedL.forEach(a => {
+                const r = reg.get(a.id);
+                if (!r) return;
+                try {
+                    r.mk.setIcon(L2.divIcon({ className: 'aim-mb-rng-chip',
+                        html: mcvBadgeHtml(missionId, a.id, '✕', '#555', false),
+                        iconSize: [19, 19], iconAnchor: [r.ax, 10] }));
+                } catch (e) {}
+            });
+            const changed = removedL.length > 0 || order.map(a => a.id).join(',') !== mc.pads.map(a => a.id).join(',');
             const rows = order.map((a, i) => {
                 const v = visitsOf(a.id);
                 return `<div data-mo-row="${i}" draggable="true" style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;cursor:grab;">
@@ -7601,31 +7619,45 @@
                     <span style="color:#789;">${stepsOf(a.id)} st</span>
                     <button data-mo-up="${i}" ${i === 0 ? 'disabled' : ''} style="padding:0 4px;background:#20262e;border:1px solid #2a3340;color:#9ad;border-radius:3px;cursor:pointer;font-size:10px;">▲</button>
                     <button data-mo-dn="${i}" ${i === order.length - 1 ? 'disabled' : ''} style="padding:0 4px;background:#20262e;border:1px solid #2a3340;color:#9ad;border-radius:3px;cursor:pointer;font-size:10px;">▼</button>
+                    <button data-mo-del="${i}" title="Delete this pad from the macro — every one of its steps is removed on Apply (its micro mission is untouched)" style="padding:0 5px;background:rgba(255,82,82,0.12);border:1px solid rgba(255,82,82,0.45);color:#ff5252;border-radius:3px;cursor:pointer;font-size:10px;">✕</button>
                 </div>`;
             }).join('');
+            const removedRows = removedL.map((a, i) => `<div style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;opacity:0.75;">
+                    <span style="color:#ff5252;font-weight:800;">✕</span>
+                    <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-decoration:line-through;color:#b88;">${escapeHtml(String(a.name || ('pad ' + a.id)))}</span>
+                    <span style="color:#789;">−${stepsOf(a.id)} st</span>
+                    <button data-mo-undel="${i}" style="padding:0 6px;background:rgba(95,255,95,0.1);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;border-radius:3px;cursor:pointer;font-size:10px;">↩</button>
+                </div>`).join('');
             el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
                     <b style="color:#7adfe6;">⇅ Pad order — ${escapeHtml(String(mc.mission.name || ''))}</b>
                     <span data-mo-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span>
                 </div>
-                <div style="color:#789;font-size:10px;margin-bottom:4px;">The order actually FLOWN — the map badges renumber LIVE as you move rows. Drag rows, ▲▼, or <b style="color:#9ad;">M2 a glowing badge on the map</b> to type its new number. Apply saves — each pad's steps move as one intact group.${leadN ? ` ${leadN} pre-pad step(s) stay first.` : ''}</div>
+                <div style="color:#789;font-size:10px;margin-bottom:4px;">The order actually FLOWN — the map badges renumber LIVE as you move rows. Drag rows, ▲▼, or <b style="color:#9ad;">M2 a glowing badge on the map</b> to type its new number. ✕ on a row DELETES that pad from the macro (its micro is untouched). Apply saves — each pad's steps move as one intact group.${leadN ? ` ${leadN} pre-pad step(s) stay first.` : ''}</div>
                 ${rows}
+                ${removedL.length ? `<div style="color:#ff5252;font-weight:700;margin-top:5px;">Deleting ${removedL.length} pad(s):</div>${removedRows}` : ''}
                 <div style="display:flex;align-items:center;gap:8px;margin-top:7px;">
                     <button data-mo-reset ${changed ? '' : 'disabled'} style="padding:3px 9px;background:rgba(255,255,255,0.08);border:1px solid #2a3340;color:${changed ? '#9ad' : '#456'};border-radius:5px;cursor:pointer;font-size:10px;">↺ Reset</button>
                     <button data-mo-apply ${changed ? '' : 'disabled'} style="margin-left:auto;padding:4px 12px;background:${changed ? '#5fff5f' : '#2a3340'};border:none;color:${changed ? '#04220a' : '#567'};border-radius:5px;cursor:pointer;font-weight:800;">💾 Apply order</button>
                 </div>`;
             el.querySelector('[data-mo-x]').onclick = mcvCloseOrderPanel;
-            el.querySelector('[data-mo-reset]').onclick = () => { moState.order = mc.pads.slice(); render(); };
+            el.querySelector('[data-mo-reset]').onclick = () => { moState.order = mc.pads.slice(); moState.removed = []; render(); };
             el.querySelector('[data-mo-apply]').onclick = async () => {
+                if (!order.length) { showToast('⇅ Cannot delete EVERY pad — at least one must remain.', '#ff9800', 4000); return; }
                 const ids = order.map(a => a.id);
+                const removedIds = new Set(removedL.map(a => a.id));
+                const delSteps = removedL.reduce((t, a) => t + stepsOf(a.id), 0);
                 const ok = await mcvApplyOrder(mc, ids,
-                    `⇅ Apply MANUAL pad order to "${mc.mission.name}"?\n\n`
-                    + `${mc.pads.length} pads — each pad's steps stay intact and move as one group`
+                    `⇅ Apply pad order${removedIds.size ? ' + DELETIONS' : ''} to "${mc.mission.name}"?\n\n`
+                    + `${order.length} pad(s) kept — each pad's steps stay intact and move as one group`
                     + ` (a pad with split visits gets all its steps consolidated at its new slot).\n`
-                    + `Mission id + name unchanged. A JSON backup downloads first.`);
+                    + (removedIds.size ? `✕ DELETING ${removedIds.size} pad(s) (−${delSteps} steps): ${removedL.map(a => a.name || a.id).join(', ')} — their micros are untouched.\n` : '')
+                    + `Mission id + name unchanged. A JSON backup downloads first.`, removedIds);
                 if (ok) mcvCloseOrderPanel();
             };
             el.querySelectorAll('[data-mo-up]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-up')); const t = order.splice(i, 1)[0]; order.splice(i - 1, 0, t); render(); });
             el.querySelectorAll('[data-mo-dn]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-dn')); const t = order.splice(i, 1)[0]; order.splice(i + 1, 0, t); render(); });
+            el.querySelectorAll('[data-mo-del]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-del')); moState.removed.push(order.splice(i, 1)[0]); render(); });
+            el.querySelectorAll('[data-mo-undel]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-undel')); moState.order.push(moState.removed.splice(i, 1)[0]); render(); });
             el.querySelectorAll('[data-mo-row]').forEach(r => {
                 r.ondragstart = (e) => { dragIdx = Number(r.getAttribute('data-mo-row')); try { e.dataTransfer.setData('text/plain', ''); } catch (e2) {} };
                 r.ondragover = (e) => e.preventDefault();
