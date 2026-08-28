@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.86
+// @version      2.87
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.86';
+    const SCRIPT_VERSION = '2.87';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -7909,9 +7909,17 @@
     function mcvStepSig(st) {
         const v1 = (typeof st.value1 === 'number') ? st.value1.toFixed(2) : String(st.value1);
         const v2 = (typeof st.value2 === 'number') ? st.value2.toFixed(2) : String(st.value2);
-        const loc = (st.location && typeof st.location.lat === 'number') ? st.location.lat.toFixed(7) + ',' + st.location.lng.toFixed(7) : '-';
+        // v2.87: 6 decimals (~11 cm), not 7 — Percepto stores coords as 1e-7°
+        // INTS and its save path can truncate where the float rounds up at
+        // the 7th decimal, leaving a one-digit sig mismatch that never
+        // converges (live: 2 of 11 macros stuck after the v2.86 fix).
+        const loc = (st.location && typeof st.location.lat === 'number') ? st.location.lat.toFixed(6) + ',' + st.location.lng.toFixed(6) : '-';
         let eo = '';
-        try { if (st.extra_options) eo = JSON.stringify(Object.keys(st.extra_options).sort().reduce((o, k) => { o[k] = st.extra_options[k]; return o; }, {})); } catch (e) {}
+        try {
+            if (st.extra_options) eo = JSON.stringify(Object.keys(st.extra_options).sort()
+                .filter(k => st.extra_options[k] !== null && st.extra_options[k] !== undefined)   // null-vs-absent round-trip noise
+                .reduce((o, k) => { o[k] = st.extra_options[k]; return o; }, {}));
+        } catch (e) {}
         return st.type + '|' + v1 + '|' + v2 + '|' + loc + '|' + eo;
     }
     // per-pad plan for one macro: {pad, micro, curSteps, changed, status}
@@ -7956,9 +7964,16 @@
             if (!micro) status = { txt: 'no micro — keeping current steps', col: '#ffb74d' };
             else {
                 const microBody = mbMissionBody(micro);
-                const microSeq = D + microBody.map(mcvStepSig).join(D) + D;
+                const microSigs = microBody.map(mcvStepSig);
+                const microSeq = D + microSigs.join(D) + D;
                 const inSync = microBody.length > 0 && macroSeq.indexOf(microSeq) >= 0;
                 changed = !inSync;
+                if (changed) {
+                    // diagnostic (v2.87): name the exact steps that break the
+                    // match, so a stuck pad reports its own root cause
+                    const missing = microSigs.map((g, si) => ({ g, si })).filter(x => macroSeq.indexOf(D + x.g + D) < 0).slice(0, 3);
+                    console.log(`${TAG} [remerge] "${a.name || a.id}" not contained — ${missing.length ? 'unmatched step sig(s): ' + missing.map(x => `#${x.si} ${x.g}`).join('  ·  ') : 'all steps present individually but NOT contiguous (order/interleave differs)'}`);
+                }
                 const nu = sig(microBody);
                 status = changed
                     ? { txt: `UPDATED · ${cur.navs}n/${cur.snaps}s/${cur.steps}st → ${nu.navs}n/${nu.snaps}s/${nu.steps}st`, col: '#5fff5f' }
