@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.87
+// @version      2.88
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.87';
+    const SCRIPT_VERSION = '2.88';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -7914,11 +7914,19 @@
         // the 7th decimal, leaving a one-digit sig mismatch that never
         // converges (live: 2 of 11 macros stuck after the v2.86 fix).
         const loc = (st.location && typeof st.location.lat === 'number') ? st.location.lat.toFixed(6) + ',' + st.location.lng.toFixed(6) : '-';
+        // v2.88: only TUNING-RELEVANT extra_options per step type. Live
+        // diagnostic caught old micros (ids 4762/21785) whose navs lack the
+        // pitch key the save path adds by default — full-eo compare could
+        // never converge. Snapshots keep pitch (pilot points the camera);
+        // navigates keep shouldUseFreezoneMinAlt (altitude behavior); all
+        // other keys are save-path churn and excluded.
         let eo = '';
         try {
-            if (st.extra_options) eo = JSON.stringify(Object.keys(st.extra_options).sort()
-                .filter(k => st.extra_options[k] !== null && st.extra_options[k] !== undefined)   // null-vs-absent round-trip noise
-                .reduce((o, k) => { o[k] = st.extra_options[k]; return o; }, {}));
+            const src = st.extra_options || {};
+            const keep = {};
+            if (st.type === 6 && src.pitch !== null && src.pitch !== undefined) keep.p = src.pitch;
+            if (st.type === 1 && src.shouldUseFreezoneMinAlt !== null && src.shouldUseFreezoneMinAlt !== undefined) keep.f = src.shouldUseFreezoneMinAlt;
+            eo = JSON.stringify(keep);
         } catch (e) {}
         return st.type + '|' + v1 + '|' + v2 + '|' + loc + '|' + eo;
     }
@@ -7969,10 +7977,17 @@
                 const inSync = microBody.length > 0 && macroSeq.indexOf(microSeq) >= 0;
                 changed = !inSync;
                 if (changed) {
-                    // diagnostic (v2.87): name the exact steps that break the
-                    // match, so a stuck pad reports its own root cause
+                    // diagnostic (v2.87, upgraded v2.88): name the exact steps
+                    // that break the match AND the macro's counterpart at the
+                    // same coordinates — the console line IS the field delta
                     const missing = microSigs.map((g, si) => ({ g, si })).filter(x => macroSeq.indexOf(D + x.g + D) < 0).slice(0, 3);
-                    console.log(`${TAG} [remerge] "${a.name || a.id}" not contained — ${missing.length ? 'unmatched step sig(s): ' + missing.map(x => `#${x.si} ${x.g}`).join('  ·  ') : 'all steps present individually but NOT contiguous (order/interleave differs)'}`);
+                    const macroBody = mbMissionBody(mc.mission);
+                    const detail = missing.map(x => {
+                        const xloc = x.g.split('|')[3];
+                        const twin = macroBody.filter(st2 => mcvStepSig(st2).split('|')[3] === xloc).map(mcvStepSig);
+                        return `#${x.si} micro[${x.g}] vs macro[${twin.join(' / ') || 'NO STEP AT THIS LOCATION'}]`;
+                    });
+                    console.log(`${TAG} [remerge] "${a.name || a.id}" not contained — ${missing.length ? detail.join('  ·  ') : 'all steps present individually but NOT contiguous (order/interleave differs)'}`);
                 }
                 const nu = sig(microBody);
                 status = changed
