@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.88
+// @version      2.89
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.88';
+    const SCRIPT_VERSION = '2.89';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -6279,7 +6279,7 @@
     // leading pre-pad steps stay first), hard step-count sanity, JSON backup,
     // save in place, verify by refetch + re-detect, redraw the overlay.
     // Returns true once the save went through (even if verify then warned).
-    async function mcvApplyOrder(mc, orderIds, confirmMsg, removedIds) {
+    async function mcvApplyOrder(mc, orderIds, confirmMsg, removedIds, addedSteps) {
         if (mcvReorderBusy) return false;
         const data = mcv.data;
         const ctx = findMissionAppCtx();
@@ -6300,11 +6300,18 @@
         // sanity accounts for exactly those steps and no others.
         const removed = (removedIds && removedIds.size) ? removedIds : null;
         const removedSteps = removed ? mc.blocks.reduce((t, b) => t + (b.aId != null && removed.has(b.aId) ? b.steps.length : 0), 0) : 0;
+        // v2.89: ⇅ can ADD pads — their steps come from the pad's micro
+        // (addedSteps: padId → steps[]), spliced at the ordered slot
+        let addedCount = 0;
+        if (addedSteps) addedSteps.forEach(st2 => { addedCount += st2.length; });
         const body = lead.slice();
-        orderIds.forEach(id => (byPad.get(id) || []).forEach(s => body.push(s)));
+        orderIds.forEach(id => {
+            const steps = byPad.get(id) || (addedSteps && addedSteps.get(id)) || [];
+            steps.forEach(s => body.push(s));
+        });
         const instrs = to.map(pcmNormStep).concat(body.map(pcmNormStep), rh.map(pcmNormStep));
-        // hard sanity: exactly the same steps minus the deleted pads'
-        const expected = to.length + rh.length + ins.filter(i => i && i.type !== 0 && i.type !== 99).length - removedSteps;
+        // hard sanity: original steps minus deleted pads' plus added micros'
+        const expected = to.length + rh.length + ins.filter(i => i && i.type !== 0 && i.type !== 99).length - removedSteps + addedCount;
         if (instrs.length !== expected) {
             console.warn(`${TAG} [mcv] reorder ABORT — step count mismatch (${instrs.length} vs ${expected})`, m.name);
             showToast('♻ Aborted: rebuilt step count does not match the original (see console). Nothing saved.', '#ff5252', 6000);
@@ -6348,7 +6355,7 @@
                 const gotOrder = mc2 ? mc2.pads.map(a => a.id).join(',') : '';
                 const wantOrder = orderIds.join(',');
                 const steps2 = (m2.instructions || []).filter(i => i && i.type !== 0 && i.type !== 99).length;
-                const steps1 = ins.filter(i => i && i.type !== 0 && i.type !== 99).length - removedSteps;
+                const steps1 = ins.filter(i => i && i.type !== 0 && i.type !== 99).length - removedSteps + addedCount;
                 good = gotOrder === wantOrder && steps2 === steps1;
                 if (!good) console.warn(`${TAG} [mcv] verify mismatch — order got [${gotOrder}] want [${wantOrder}] · steps ${steps2}/${steps1}`);
             }
@@ -7523,6 +7530,14 @@
         moCloseBadgeRenumber();
         try { document.removeEventListener('contextmenu', moContextHandler, true); } catch (e) {}
         if (moState) {
+            // added-pad temp badges (v2.89) go away with the panel
+            try {
+                (moState.tempBadges || []).forEach(tb => {
+                    try { tb.mk.remove(); } catch (e) {}
+                    const reg = mcv.badgeReg.get(moState.missionId);
+                    if (reg) reg.delete(tb.padId);
+                });
+            } catch (e) {}
             // restore the flown numbers + disarm the badges. On the apply
             // path mcvClear already emptied badgeReg, so this no-ops there.
             try { mcvPreviewOrder(moState.missionId, moState.mc.pads, false); } catch (e) {}
@@ -7535,12 +7550,87 @@
     // keeps the pad underneath from reacting.
     function moContextHandler(e) {
         if (!moState) return;
+        const eat = () => { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); };
         const t = (e.target && e.target.closest) ? e.target.closest('[data-aim-mo-pad]') : null;
-        if (!t) return;
-        if (String(t.getAttribute('data-aim-mo-mid')) !== String(moState.missionId)) return;
-        e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
-        const padId = Number(t.getAttribute('data-aim-mo-pad')) || t.getAttribute('data-aim-mo-pad');
-        moOpenBadgeRenumber(padId, e.clientX + 8, e.clientY + 8);
+        if (t) {
+            if (String(t.getAttribute('data-aim-mo-mid')) !== String(moState.missionId)) return;
+            eat();
+            const padId = Number(t.getAttribute('data-aim-mo-pad')) || t.getAttribute('data-aim-mo-pad');
+            moPadGesture(padId, !!e.ctrlKey, e.clientX + 8, e.clientY + 8);
+            return;
+        }
+        // v2.89: M2 on the MAP while ⇅ is open — hit-test pad rings so pads
+        // without an armed badge (removed pads, non-member pads) are reachable
+        const map = getLeafletMap();
+        if (!map) return;
+        const container = map.getContainer();
+        if (!container || !(e.target && container.contains(e.target))) return;
+        let ll;
+        try {
+            const rect = container.getBoundingClientRect();
+            ll = map.containerPointToLatLng([e.clientX - rect.left, e.clientY - rect.top]);
+        } catch (e2) { return; }
+        const tolM = 9;   // ~30 ft aim slack around a ring
+        const inPad = a2 => a2 && a2.ring && a2.ring.length >= 3 && mbPointToPolygonMeters(ll.lat, ll.lng, a2.ring) <= tolM;
+        const member = moState.order.find(inPad) || moState.removed.find(inPad);
+        if (member) { eat(); moPadGesture(member.id, !!e.ctrlKey, e.clientX + 8, e.clientY + 8); return; }
+        const data = mcv.data;
+        const outsider = ((data && data.det.assets) || []).find(a2 => inPad(a2)
+            && !moState.mc.pads.some(p2 => p2.id === a2.id)
+            && !moState.order.some(p2 => p2.id === a2.id));
+        if (outsider) { eat(); moAddPad(outsider); }
+    }
+    // one pad, one gesture (v2.89): Ctrl+M2 = remove (or restore if already
+    // removed; an ADDED pad is discarded outright) · plain M2 = renumber box
+    // (or restore a removed pad).
+    function moPadGesture(padId, ctrl, x, y) {
+        const st = moState; if (!st) return;
+        const remIdx = st.removed.findIndex(a => a.id === padId);
+        if (remIdx >= 0) { st.order.push(st.removed.splice(remIdx, 1)[0]); st.render(); return; }   // restore either way
+        const idx = st.order.findIndex(a => a.id === padId);
+        if (idx < 0) return;
+        if (ctrl) {
+            const padObj = st.order.splice(idx, 1)[0];
+            if (st.added && st.added.has(padId)) {   // added pad → discard, drop temp badge
+                st.added.delete(padId);
+                const ti = (st.tempBadges || []).findIndex(tb => tb.padId === padId);
+                if (ti >= 0) { try { st.tempBadges[ti].mk.remove(); } catch (e) {} const reg = mcv.badgeReg.get(st.missionId); if (reg) reg.delete(padId); st.tempBadges.splice(ti, 1); }
+            } else st.removed.push(padObj);
+            st.render();
+            return;
+        }
+        moOpenBadgeRenumber(padId, x, y);
+    }
+    // v2.89: M2 on a NON-member pad adds it — steps come from its MICRO
+    // (source of truth). Appended at the end; M2 its new green badge to
+    // renumber. Refused when the pad has no micro (nothing to pull).
+    function moAddPad(asset) {
+        const st = moState; if (!st) return;
+        const data = mcv.data;
+        const micros = ((data && data.det.solos) || []).filter(sl => sl.pad.id === asset.id).map(sl => sl.mission);
+        const micro = micros.length > 1 ? (rankMatchMissions(asset.name, micros)[0] || micros[0]) : micros[0];
+        if (!micro || !mbMissionBody(micro).length) { showToast(`"${asset.name || asset.id}" has no micro mission — build its micro first, then add it.`, '#ff9800', 5000); return; }
+        if (!st.added) st.added = new Map();
+        if (!st.tempBadges) st.tempBadges = [];
+        st.added.set(asset.id, { pad: asset, micro });
+        st.order.push(asset);
+        // temp badge (green = new) registered into badgeReg so the live
+        // renumber preview + M2 gestures treat it like any other badge
+        try {
+            const L = composerGetL(), map = getLeafletMap();
+            if (L && map) {
+                const c = genCentroid(asset.ring);
+                const mk = L.marker([c.lat, c.lng], {
+                    icon: L.divIcon({ className: 'aim-mb-rng-chip', html: mcvBadgeHtml(st.missionId, asset.id, st.order.length, '#5fff5f', true), iconSize: [19, 19], iconAnchor: [10, 10] }),
+                    interactive: false, keyboard: false, zIndexOffset: 950,
+                }).addTo(map);
+                if (!mcv.badgeReg.has(st.missionId)) mcv.badgeReg.set(st.missionId, new Map());
+                mcv.badgeReg.get(st.missionId).set(asset.id, { mk, col: '#5fff5f', ax: 10 });
+                st.tempBadges.push({ padId: asset.id, mk });
+            }
+        } catch (e) {}
+        showToast(`＋ "${asset.name || asset.id}" added at #${st.order.length} (${mbMissionBody(micro).length} steps from its micro) — M2 its green badge to renumber.`, '#5fff5f', 5000);
+        st.render();
     }
     const MO_RENUM_ID = 'aim-mb-mo-renum';
     function moCloseBadgeRenumber() { const old = document.getElementById(MO_RENUM_ID); if (old) old.remove(); }
@@ -7590,7 +7680,7 @@
             + 'background:rgba(16,19,26,0.96);border:1px solid #7adfe6;border-radius:8px;padding:9px 11px;color:#e6e6e6;'
             + 'font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 6px 22px rgba(0,0,0,0.7);';
         let dragIdx = null;
-        moState = { missionId, mc, order: mc.pads.slice(), removed: [], render: null };
+        moState = { missionId, mc, order: mc.pads.slice(), removed: [], added: new Map(), tempBadges: [], render: null };
         const render = () => {
             const order = moState.order;
             const removedL = moState.removed;
@@ -7603,20 +7693,24 @@
                 const r = reg.get(a.id);
                 if (!r) return;
                 try {
+                    // edit=true keeps the grey ✕ badge armed — M2 it to restore
                     r.mk.setIcon(L2.divIcon({ className: 'aim-mb-rng-chip',
-                        html: mcvBadgeHtml(missionId, a.id, '✕', '#555', false),
+                        html: mcvBadgeHtml(missionId, a.id, '✕', '#555', true),
                         iconSize: [19, 19], iconAnchor: [r.ax, 10] }));
                 } catch (e) {}
             });
-            const changed = removedL.length > 0 || order.map(a => a.id).join(',') !== mc.pads.map(a => a.id).join(',');
+            const changed = removedL.length > 0 || moState.added.size > 0 || order.map(a => a.id).join(',') !== mc.pads.map(a => a.id).join(',');
             const rows = order.map((a, i) => {
-                const v = visitsOf(a.id);
+                const addedInfo = moState.added.get(a.id);
+                const v = addedInfo ? 0 : visitsOf(a.id);
+                const stCount = addedInfo ? mbMissionBody(addedInfo.micro).length : stepsOf(a.id);
                 return `<div data-mo-row="${i}" draggable="true" style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;cursor:grab;">
                     <span style="color:#567;">⠿</span>
                     <b style="width:18px;text-align:right;color:#7adfe6;">${i + 1}</b>
                     <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(String(a.name || ''))}">${escapeHtml(String(a.name || ('pad ' + a.id)))}</span>
                     ${v > 1 ? `<span title="This pad's steps are split across ${v} separate visits in the current step order — Apply pulls them together at this slot" style="color:#ffb74d;font-weight:800;">×${v}</span>` : ''}
-                    <span style="color:#789;">${stepsOf(a.id)} st</span>
+                    ${addedInfo ? '<span style="color:#5fff5f;font-weight:800;" title="New pad — steps pulled from its micro mission on Apply">＋NEW</span>' : ''}
+                    <span style="color:#789;">${stCount} st</span>
                     <button data-mo-up="${i}" ${i === 0 ? 'disabled' : ''} style="padding:0 4px;background:#20262e;border:1px solid #2a3340;color:#9ad;border-radius:3px;cursor:pointer;font-size:10px;">▲</button>
                     <button data-mo-dn="${i}" ${i === order.length - 1 ? 'disabled' : ''} style="padding:0 4px;background:#20262e;border:1px solid #2a3340;color:#9ad;border-radius:3px;cursor:pointer;font-size:10px;">▼</button>
                     <button data-mo-del="${i}" title="Delete this pad from the macro — every one of its steps is removed on Apply (its micro mission is untouched)" style="padding:0 5px;background:rgba(255,82,82,0.12);border:1px solid rgba(255,82,82,0.45);color:#ff5252;border-radius:3px;cursor:pointer;font-size:10px;">✕</button>
@@ -7632,7 +7726,7 @@
                     <b style="color:#7adfe6;">⇅ Pad order — ${escapeHtml(String(mc.mission.name || ''))}</b>
                     <span data-mo-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span>
                 </div>
-                <div style="color:#789;font-size:10px;margin-bottom:4px;">The order actually FLOWN — the map badges renumber LIVE as you move rows. Drag rows, ▲▼, or <b style="color:#9ad;">M2 a glowing badge on the map</b> to type its new number. ✕ on a row DELETES that pad from the macro (its micro is untouched). Apply saves — each pad's steps move as one intact group.${leadN ? ` ${leadN} pre-pad step(s) stay first.` : ''}</div>
+                <div style="color:#789;font-size:10px;margin-bottom:4px;">The order actually FLOWN — the map badges renumber LIVE as you move rows. Drag rows, ▲▼, or <b style="color:#9ad;">M2 a glowing badge on the map</b> to type its new number. ✕ on a row (or Ctrl+M2 a badge) DELETES that pad; M2 a grey ✕ badge restores it; M2 an OUTSIDE pad on the map ADDS it (steps from its micro, green ＋ badge). Apply saves — each pad's steps move as one intact group.${leadN ? ` ${leadN} pre-pad step(s) stay first.` : ''}</div>
                 ${rows}
                 ${removedL.length ? `<div style="color:#ff5252;font-weight:700;margin-top:5px;">Deleting ${removedL.length} pad(s):</div>${removedRows}` : ''}
                 <div style="display:flex;align-items:center;gap:8px;margin-top:7px;">
@@ -7646,17 +7740,21 @@
                 const ids = order.map(a => a.id);
                 const removedIds = new Set(removedL.map(a => a.id));
                 const delSteps = removedL.reduce((t, a) => t + stepsOf(a.id), 0);
+                const addedSteps = new Map();
+                moState.added.forEach((info, pid) => addedSteps.set(pid, mbMissionBody(info.micro)));
+                let addN = 0; addedSteps.forEach(st2 => { addN += st2.length; });
                 const ok = await mcvApplyOrder(mc, ids,
-                    `⇅ Apply pad order${removedIds.size ? ' + DELETIONS' : ''} to "${mc.mission.name}"?\n\n`
-                    + `${order.length} pad(s) kept — each pad's steps stay intact and move as one group`
+                    `⇅ Apply pad order${removedIds.size ? ' + DELETIONS' : ''}${addedSteps.size ? ' + ADDITIONS' : ''} to "${mc.mission.name}"?\n\n`
+                    + `${order.length} pad(s) — each pad's steps stay intact and move as one group`
                     + ` (a pad with split visits gets all its steps consolidated at its new slot).\n`
                     + (removedIds.size ? `✕ DELETING ${removedIds.size} pad(s) (−${delSteps} steps): ${removedL.map(a => a.name || a.id).join(', ')} — their micros are untouched.\n` : '')
-                    + `Mission id + name unchanged. A JSON backup downloads first.`, removedIds);
+                    + (addedSteps.size ? `＋ ADDING ${addedSteps.size} pad(s) (+${addN} steps from their micros): ${Array.from(moState.added.values()).map(x => x.pad.name || x.pad.id).join(', ')}.\n` : '')
+                    + `Mission id + name unchanged. A JSON backup downloads first.`, removedIds, addedSteps);
                 if (ok) mcvCloseOrderPanel();
             };
             el.querySelectorAll('[data-mo-up]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-up')); const t = order.splice(i, 1)[0]; order.splice(i - 1, 0, t); render(); });
             el.querySelectorAll('[data-mo-dn]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-dn')); const t = order.splice(i, 1)[0]; order.splice(i + 1, 0, t); render(); });
-            el.querySelectorAll('[data-mo-del]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-del')); moState.removed.push(order.splice(i, 1)[0]); render(); });
+            el.querySelectorAll('[data-mo-del]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-del')); moPadGesture(order[i].id, true); });
             el.querySelectorAll('[data-mo-undel]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-undel')); moState.order.push(moState.removed.splice(i, 1)[0]); render(); });
             el.querySelectorAll('[data-mo-row]').forEach(r => {
                 r.ondragstart = (e) => { dragIdx = Number(r.getAttribute('data-mo-row')); try { e.dataTransfer.setData('text/plain', ''); } catch (e2) {} };
