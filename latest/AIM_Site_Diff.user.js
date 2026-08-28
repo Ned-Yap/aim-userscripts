@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Site Diff
 // @namespace    http://tampermonkey.net/
-// @version      0.71
+// @version      0.80
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
-// @description  Site comparison suite: shadow-site ghost overlay (per-type show/color/opacity), swipe divider, significant-change diff (→ AIM Issues), and Phase 3a Import — create-only copy of shadow entities (assets etc.) onto the current site with dry-run preview + verify. v0.70: cross-SERVER shadows — a QA site can shadow/import from a prod site and vice versa (picker server tabs; needs a login on both servers). Full migration executor later.
+// @description  Site comparison suite: shadow-site ghost overlay (per-type show/color/opacity), swipe divider, significant-change diff (→ AIM Issues), and Phase 3a Import — create-only copy of shadow entities (assets etc.) onto the current site with dry-run preview + verify. v0.70: cross-SERVER shadows. v0.80 (#250 layer 2): neighboring-site overlay — shows every other site's FFZs/FPs/assets within a display radius (Site Watch snapshot bboxes prefilter, live /map_objects/ for the math) and flags cross-site conflicts under the threshold (segment-to-segment, default 200 ft).
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -35,6 +35,9 @@
 //     entities onto the CURRENT site — per-type checkboxes (assets
 //     default-on), dup-name skip, dry-run preview, double-click arm,
 //     sequential POST /map_objects/ + fresh-fetch verify + run log.
+//   Neighbors (#250 layer 2): overlay every OTHER site's FFZs/FPs/assets
+//     within a display radius (default 1000 ft) and flag cross-site
+//     conflicts under the threshold (default 200 ft, segment-to-segment).
 // No hotkeys. Log tag: [AIM DIFF]
 
 (function () {
@@ -139,7 +142,7 @@
     }
 
     const SCRIPT_ID = 'aim-site-diff';
-    const SCRIPT_VERSION = '0.71';
+    const SCRIPT_VERSION = '0.80';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const PANE_NAME = 'aim-site-diff-pane';
     const HL_PANE_NAME = 'aim-site-diff-hl';
@@ -2611,6 +2614,873 @@
         try { const sp = map.getPane(PANE_NAME); if (sp) sp.style.visibility = vis; } catch (e) {}
     }
 
+    // ==================================================================
+    // Feature #250 Layer 2 — Neighboring-site overlay + conflict check
+    //
+    // Sites are starting to overlap geographically; two drones on two
+    // different sites can share airspace. This layer shows every OTHER
+    // site's FFZs / flight paths / assets within a display radius of
+    // this site, and flags any foreign entity within the conflict
+    // threshold of a local one.
+    //
+    // Hybrid data model (user decision, see AIM_Site_Overlap_Design.md):
+    //   - Site Watch snapshots (site-watch[-qa]/<id>/latest.json.gz in
+    //     the private data repo, PAT via TOKEN_VALUE) supply cheap
+    //     bounding boxes → prefilter which sites are even candidates.
+    //   - Live /map_objects/ fetches supply CURRENT geometry for the
+    //     real math on candidate sites only.
+    //   - Sites with no snapshot fall back to a /sites/ center + a
+    //     generous radius; sites with neither are listed as UNCHECKED
+    //     in the report — never silently skipped.
+    //
+    // ENGRAVED: all proximity is segment-to-segment / point-in-polygon —
+    // NEVER vertex-to-vertex. Strict QA isolation: neighbors come only
+    // from THIS server's site set; the index key is env-namespaced.
+    //
+    // [#250 shared glue] bboxFromEntities / bboxGapFt / segSegClosestM /
+    // nbPrepareEntity are the neighbor-discovery + segment-math helpers
+    // this project duplicates into AIM_Fleet_Tools and the Asset
+    // Inspector validator check #13 (userscripts can't import from each
+    // other). Keep names + shapes identical — a fix here is a mechanical
+    // 3-file sweep.
+    // ==================================================================
+    const KEY_NB = 'aim-sd-nb';
+    const KEY_NB_INDEX = IS_QA ? 'aim-sd-nb-index-qa' : 'aim-sd-nb-index';
+    const NB_PANE_NAME = 'aim-site-diff-nb';
+    const NB_HL_PANE_NAME = 'aim-site-diff-nb-hl';
+    const NB_WATCH_DIR = IS_QA ? 'site-watch-qa' : 'site-watch';
+    const NB_SNAP_RE = new RegExp(`^${NB_WATCH_DIR}/(\\d+)/latest\\.json\\.gz$`);
+    const NB_CENTER_MARGIN_FT = 5280;   // extent unknown from a bare center — assume up to 1 mi
+    const NB_INDEX_RECHECK_MS = 6 * 3600 * 1000;   // auto re-check snapshot shas at most every 6h
+    const NB_FETCH_CONCURRENCY = 4;
+    // One color per NEIGHBOR SITE (not per type) — that alone makes foreign
+    // geometry unmistakable vs native (color = type) and vs the warm shadow
+    // palette; dotted strokes double the distinction.
+    const NB_PALETTE = ['#7986cb', '#4db6ac', '#f06292', '#a1887f', '#90a4ae', '#dce775', '#64b5f6', '#ffb74d'];
+    const NB_CONFLICT_COLOR = '#ff3d00';
+    const NB_CLASSES = [
+        { key: 'ffz', type: 16, label: 'FFZs' },
+        { key: 'fp', type: 15, label: 'Flight paths' },
+        { key: 'asset', type: 3, label: 'Assets' },
+    ];
+    const NB_TYPE_TO_CLASS = { 16: 'ffz', 15: 'fp', 3: 'asset' };
+
+    function defaultNbCfg() {
+        return { enabled: false, radiusFt: 1000, thresholdFt: 200, classes: { ffz: true, fp: true, asset: true } };
+    }
+    function loadNbCfg() {
+        const d = defaultNbCfg();
+        try {
+            const raw = gmGet(KEY_NB, null);
+            if (raw) {
+                const s = JSON.parse(raw);
+                if (typeof s.enabled === 'boolean') d.enabled = s.enabled;
+                if (typeof s.radiusFt === 'number') d.radiusFt = s.radiusFt;
+                if (typeof s.thresholdFt === 'number') d.thresholdFt = s.thresholdFt;
+                if (s.classes) NB_CLASSES.forEach(c => {
+                    if (typeof s.classes[c.key] === 'boolean') d.classes[c.key] = s.classes[c.key];
+                });
+            }
+        } catch (e) { console.warn(`${TAG} loadNbCfg:`, e); }
+        return d;
+    }
+    let nbCfg = loadNbCfg();
+    function saveNbCfg() {
+        try { gmSet(KEY_NB, JSON.stringify(nbCfg)); }
+        catch (e) { console.warn(`${TAG} saveNbCfg:`, e); }
+    }
+
+    // Index: { shas: {siteId: gitSha}, bboxes: {siteId: {minLat,minLng,
+    // maxLat,maxLng, ffz,fp,asset} | {empty:true}}, builtAt, checkedAt }
+    function loadNbIndex() {
+        try {
+            const raw = gmGet(KEY_NB_INDEX, null);
+            if (raw) {
+                const s = JSON.parse(raw);
+                if (s && s.shas && s.bboxes) return s;
+            }
+        } catch (e) { console.warn(`${TAG} loadNbIndex:`, e); }
+        return { shas: {}, bboxes: {}, builtAt: 0, checkedAt: 0 };
+    }
+    let nbIndex = loadNbIndex();
+    function saveNbIndex() {
+        try { gmSet(KEY_NB_INDEX, JSON.stringify(nbIndex)); }
+        catch (e) { console.warn(`${TAG} saveNbIndex:`, e); }
+    }
+
+    let nbState = null;    // last scan result — see scanNeighbors
+    let nbLayers = [];
+    let nbPinLayers = [];
+    let nbScanSeq = 0;
+    let nbPanelEl = null;
+
+    const nbYield = () => new Promise(r => setTimeout(r, 0));
+
+    async function nbGunzipToText(bytes) {
+        const ds = new DecompressionStream('gzip');
+        const writer = ds.writable.getWriter();
+        writer.write(bytes);
+        writer.close();
+        const ab = await new Response(ds.readable).arrayBuffer();
+        return new TextDecoder('utf-8').decode(new Uint8Array(ab));
+    }
+
+    // [#250 shared glue] bbox over conflict-relevant geometry (types 3/15/16
+    // only — a stray GM marker miles out must not inflate the site's extent).
+    // Returns null when the site has no such geometry.
+    function bboxFromEntities(entities) {
+        let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+        const counts = { ffz: 0, fp: 0, asset: 0 };
+        const eat = (p) => {
+            if (!p || typeof p.lat !== 'number' || typeof p.lng !== 'number') return;
+            if (p.lat < minLat) minLat = p.lat;
+            if (p.lat > maxLat) maxLat = p.lat;
+            if (p.lng < minLng) minLng = p.lng;
+            if (p.lng > maxLng) maxLng = p.lng;
+        };
+        (entities || []).forEach(e => {
+            const cls = e && NB_TYPE_TO_CLASS[e.type];
+            if (!cls) return;
+            let had = false;
+            const cs = entityCoords(e);
+            if (cs) { cs.forEach(eat); had = cs.length > 0; }
+            if (e.type === 15 && Array.isArray(e.arcs)) {
+                e.arcs.forEach(a => { if (a) { eat(a.point_a); eat(a.point_b); had = true; } });
+            }
+            if (had) counts[cls]++;
+        });
+        if (!isFinite(minLat)) return null;
+        return { minLat, minLng, maxLat, maxLng, ffz: counts.ffz, fp: counts.fp, asset: counts.asset };
+    }
+
+    // [#250 shared glue] gap between two lat/lng bboxes in feet (0 = overlap).
+    function bboxGapFt(a, b) {
+        const midLat = (Math.min(a.minLat, b.minLat) + Math.max(a.maxLat, b.maxLat)) / 2;
+        const mLat = 111320;
+        const mLng = 111320 * Math.cos(midLat * Math.PI / 180) || 1e-6;
+        const gapLat = Math.max(0, Math.max(a.minLat - b.maxLat, b.minLat - a.maxLat)) * mLat;
+        const gapLng = Math.max(0, Math.max(a.minLng - b.maxLng, b.minLng - a.maxLng)) * mLng;
+        return Math.hypot(gapLat, gapLng) * FT_PER_M;
+    }
+
+    // ---------------- Site Watch snapshot index (bbox prefilter) ----------------
+
+    async function nbGhTree() {
+        // One request returns every path+sha in the data repo — the cheap way
+        // to know which snapshots changed since the cached index.
+        const r = await fetchWithTimeout(
+            `${GH_API}/repos/${DATA_REPO}/git/trees/${DATA_BRANCH}?recursive=1`,
+            { headers: { 'Authorization': `Bearer ${cachedToken}`, 'Accept': 'application/vnd.github+json' } }, 30000);
+        if (!r.ok) throw new Error(`tree HTTP ${r.status}`);
+        const j = await r.json();
+        if (!Array.isArray(j.tree)) throw new Error('unexpected tree shape');
+        const shas = {};
+        j.tree.forEach(f => {
+            if (!f || f.type !== 'blob') return;
+            const m = NB_SNAP_RE.exec(f.path);
+            if (m) shas[m[1]] = f.sha;
+        });
+        return { shas, truncated: !!j.truncated };
+    }
+
+    async function nbFetchSnapshotBbox(id) {
+        const r = await fetchWithTimeout(
+            `${GH_API}/repos/${DATA_REPO}/contents/${NB_WATCH_DIR}/${id}/latest.json.gz?ref=${DATA_BRANCH}`,
+            { headers: { 'Authorization': `Bearer ${cachedToken}`, 'Accept': 'application/vnd.github.raw' } }, 60000);
+        if (!r.ok) throw new Error(`snapshot GET HTTP ${r.status}`);
+        const bytes = new Uint8Array(await r.arrayBuffer());
+        const parsed = JSON.parse(await nbGunzipToText(bytes));
+        const v = validateBackupEntities(parsed);   // snapshots are the raw /map_objects list
+        if (v.error) return { empty: true };        // a site with no drawable geometry is a valid (empty) answer
+        return bboxFromEntities(v.entities) || { empty: true };
+    }
+
+    // Refresh the bbox index from the data repo. Incremental: only snapshots
+    // whose git sha changed are re-downloaded. Progress reported via cb.
+    async function ensureNbIndex(progress, forceCheck) {
+        const notes = [];
+        const haveIndex = Object.keys(nbIndex.bboxes).length > 0;
+        if (!cachedToken) {
+            try { if (controlChannel) controlChannel.postMessage({ type: 'REQUEST_TOKEN' }); } catch (e) {}
+            await new Promise(r => setTimeout(r, 800));
+        }
+        if (!cachedToken) {
+            if (haveIndex) {
+                notes.push('no GitHub token — using the cached neighbor index (may be stale)');
+                return notes;
+            }
+            throw new Error('GitHub token needed to build the neighbor index — set the PAT in AIM Controls (gear)');
+        }
+        const fresh = (Date.now() - (nbIndex.checkedAt || 0)) < NB_INDEX_RECHECK_MS;
+        if (haveIndex && fresh && !forceCheck) return notes;
+        let tree;
+        try { tree = await nbGhTree(); }
+        catch (e) {
+            if (haveIndex) {
+                notes.push(`snapshot listing failed (${String(e && e.message || e)}) — using the cached index`);
+                return notes;
+            }
+            throw e;
+        }
+        if (tree.truncated) notes.push('data-repo tree listing was truncated by GitHub — some sites may be missing from the index');
+        // Drop sites whose snapshot vanished
+        Object.keys(nbIndex.shas).forEach(id => {
+            if (!tree.shas[id]) { delete nbIndex.shas[id]; delete nbIndex.bboxes[id]; }
+        });
+        const changed = Object.keys(tree.shas).filter(id => nbIndex.shas[id] !== tree.shas[id] || !nbIndex.bboxes[id]);
+        const total = changed.length;
+        if (total) {
+            console.log(`${TAG} neighbor index: ${total} snapshot(s) to (re)fetch of ${Object.keys(tree.shas).length}`);
+            let done = 0, failed = 0, cursor = 0;
+            const worker = async () => {
+                while (cursor < changed.length) {
+                    const id = changed[cursor++];
+                    try {
+                        const box = await nbFetchSnapshotBbox(id);
+                        nbIndex.bboxes[id] = box;
+                        nbIndex.shas[id] = tree.shas[id];
+                    } catch (e) {
+                        failed++;
+                        console.warn(`${TAG} neighbor index: snapshot fetch failed for site ${id}:`, e);
+                    }
+                    done++;
+                    if (progress) progress(done, total);
+                    if (done % 25 === 0) { saveNbIndex(); await nbYield(); }
+                }
+            };
+            await Promise.all(Array.from({ length: Math.min(NB_FETCH_CONCURRENCY, changed.length) }, worker));
+            if (failed) notes.push(`${failed} snapshot fetch(es) failed — those sites are UNCHECKED this scan`);
+            nbIndex.builtAt = Date.now();
+        }
+        nbIndex.checkedAt = Date.now();
+        saveNbIndex();
+        return notes;
+    }
+
+    // ---------------- segment math ----------------
+
+    // [#250 shared glue] entity → projected segment list (+ ring for
+    // polygons) with a padded-less bbox for pair prefiltering. Returns null
+    // for entities outside the conflict classes or without usable geometry.
+    function nbPrepareEntity(e, proj) {
+        const cls = e && NB_TYPE_TO_CLASS[e.type];
+        if (!cls || !nbCfg.classes[cls]) return null;
+        const segs = [];
+        let ring = null;
+        if (e.type === 15) {
+            (Array.isArray(e.arcs) ? e.arcs : []).forEach(a => {
+                if (!a || !a.point_a || !a.point_b) return;
+                if (typeof a.point_a.lat !== 'number' || typeof a.point_b.lat !== 'number') return;
+                const A = proj.toXY(a.point_a), B = proj.toXY(a.point_b);
+                segs.push({ ax: A.x, ay: A.y, bx: B.x, by: B.y });
+            });
+            if (!segs.length) {
+                const cs = (entityCoords(e) || []).filter(p => p && typeof p.lat === 'number');
+                for (let i = 1; i < cs.length; i++) {
+                    const A = proj.toXY(cs[i - 1]), B = proj.toXY(cs[i]);
+                    segs.push({ ax: A.x, ay: A.y, bx: B.x, by: B.y });
+                }
+            }
+        } else {
+            const cs = (entityCoords(e) || []).filter(p => p && typeof p.lat === 'number');
+            if (cs.length < 3) return null;
+            const xs = [], ys = [];
+            cs.forEach(p => { const q = proj.toXY(p); xs.push(q.x); ys.push(q.y); });
+            ring = { xs, ys };
+            for (let i = 0; i < xs.length; i++) {
+                const j = (i + 1) % xs.length;
+                segs.push({ ax: xs[i], ay: ys[i], bx: xs[j], by: ys[j] });
+            }
+        }
+        if (!segs.length) return null;
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        segs.forEach(s => {
+            minX = Math.min(minX, s.ax, s.bx); maxX = Math.max(maxX, s.ax, s.bx);
+            minY = Math.min(minY, s.ay, s.by); maxY = Math.max(maxY, s.ay, s.by);
+        });
+        return {
+            cls, type: e.type, id: e.id,
+            name: e.name || `${cls.toUpperCase()} ${e.id}`,
+            segs, ring, minX, maxX, minY, maxY,
+        };
+    }
+
+    function nbSegPtClosest(px, py, ax, ay, bx, by) {
+        const dx = bx - ax, dy = by - ay;
+        const len2 = dx * dx + dy * dy;
+        let t = 0;
+        if (len2 > 0) t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2));
+        const x = ax + t * dx, y = ay + t * dy;
+        return { d: Math.hypot(px - x, py - y), x, y };
+    }
+
+    function nbOrient(ax, ay, bx, by, cx, cy) { return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax); }
+
+    // [#250 shared glue] min distance between two segments, with the point
+    // of closest approach. Crossing segments → 0 at the intersection —
+    // endpoint-only math would call an X-crossing "far apart".
+    function segSegClosestM(s, t) {
+        const o1 = nbOrient(s.ax, s.ay, s.bx, s.by, t.ax, t.ay);
+        const o2 = nbOrient(s.ax, s.ay, s.bx, s.by, t.bx, t.by);
+        const o3 = nbOrient(t.ax, t.ay, t.bx, t.by, s.ax, s.ay);
+        const o4 = nbOrient(t.ax, t.ay, t.bx, t.by, s.bx, s.by);
+        if (((o1 > 0) !== (o2 > 0)) && ((o3 > 0) !== (o4 > 0))) {
+            const denom = (s.bx - s.ax) * (t.by - t.ay) - (s.by - s.ay) * (t.bx - t.ax);
+            if (denom !== 0) {
+                const u = ((t.ax - s.ax) * (t.by - t.ay) - (t.ay - s.ay) * (t.bx - t.ax)) / denom;
+                return { d: 0, x: s.ax + u * (s.bx - s.ax), y: s.ay + u * (s.by - s.ay) };
+            }
+        }
+        let best = null;
+        const consider = (px, py, seg) => {
+            const c = nbSegPtClosest(px, py, seg.ax, seg.ay, seg.bx, seg.by);
+            if (!best || c.d < best.d) best = { d: c.d, x: (px + c.x) / 2, y: (py + c.y) / 2 };
+        };
+        consider(t.ax, t.ay, s);
+        consider(t.bx, t.by, s);
+        consider(s.ax, s.ay, t);
+        consider(s.bx, s.by, t);
+        return best;
+    }
+
+    // Min distance between two prepared entities (segment-to-segment +
+    // polygon containment). Containment matters: a local asset wholly inside
+    // a foreign FFZ can have every edge pair far apart while the airspace
+    // fully overlaps.
+    function nbEntityPairClosest(a, b) {
+        let best = null;
+        const keep = (c) => { if (c && (!best || c.d < best.d)) best = c; };
+        if (a.ring) {
+            for (const s of b.segs) {
+                if (pointInRingXY(s.ax, s.ay, a.ring.xs, a.ring.ys)) { keep({ d: 0, x: s.ax, y: s.ay }); return best; }
+            }
+        }
+        if (b.ring) {
+            for (const s of a.segs) {
+                if (pointInRingXY(s.ax, s.ay, b.ring.xs, b.ring.ys)) { keep({ d: 0, x: s.ax, y: s.ay }); return best; }
+            }
+        }
+        for (const sa of a.segs) {
+            for (const sb of b.segs) {
+                keep(segSegClosestM(sa, sb));
+                if (best && best.d === 0) return best;
+            }
+        }
+        return best;
+    }
+
+    // ---------------- scan ----------------
+
+    function ensureNbPanes(map) {
+        if (!map || map._aim_sd_nb_panes) return;
+        try {
+            if (typeof map.createPane !== 'function') return;
+            // z 540: just under the shadow pane (550) — foreign sites read as
+            // background context, the paired shadow stays on top of them.
+            const p = map.createPane(NB_PANE_NAME);
+            if (p) { p.style.zIndex = 540; p.style.pointerEvents = 'none'; }
+            // Conflict pins above everything incl. diff highlights (620) —
+            // never swipe-clipped, a cross-site conflict must never hide.
+            const hl = map.createPane(NB_HL_PANE_NAME);
+            if (hl) { hl.style.zIndex = 630; hl.style.pointerEvents = 'none'; }
+            map._aim_sd_nb_panes = true;
+        } catch (e) { console.warn(`${TAG} ensureNbPanes failed:`, e); }
+    }
+
+    function clearNbLayers() {
+        const map = getLeafletMap();
+        nbLayers.concat(nbPinLayers).forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        nbLayers = [];
+        nbPinLayers = [];
+    }
+
+    function nbBuildEntityLayers(e, L, color) {
+        const cls = NB_TYPE_TO_CLASS[e.type];
+        if (!cls || !nbCfg.classes[cls]) return [];
+        const base = {
+            color, weight: 2, opacity: 0.85, dashArray: '2,6',
+            interactive: false, bubblingMouseEvents: false, pane: NB_PANE_NAME,
+        };
+        if (e.type === 15) {
+            const segs = (Array.isArray(e.arcs) ? e.arcs : [])
+                .filter(a => a && a.point_a && a.point_b
+                    && typeof a.point_a.lat === 'number' && typeof a.point_b.lat === 'number')
+                .map(a => [[a.point_a.lat, a.point_a.lng], [a.point_b.lat, a.point_b.lng]]);
+            if (segs.length) return [L.polyline(segs, base)];
+            const cs = entityCoords(e);
+            if (cs && cs.length > 1) return [L.polyline(cs.map(p => [p.lat, p.lng]), base)];
+            return [];
+        }
+        const cs = entityCoords(e);
+        if (!cs || cs.length < 3) return [];
+        return [L.polygon(cs.map(p => [p.lat, p.lng]), Object.assign({}, base, {
+            fillColor: color, fillOpacity: 0.06,
+        }))];
+    }
+
+    function nbDrawAttempt(seq, attempt) {
+        if (seq !== nbScanSeq || !nbState || nbState.scanning) return;
+        const map = getLeafletMap();
+        const L = getL();
+        if (!map || !L) {
+            if (attempt < 60) setTimeout(() => nbDrawAttempt(seq, attempt + 1), 500);
+            else if (document.querySelector('.leaflet-container')) console.warn(`${TAG} neighbor draw gave up — no Leaflet map after ${attempt} tries`);
+            return;
+        }
+        ensureNbPanes(map);
+        let drawn = 0;
+        nbState.neighbors.forEach(nb => {
+            nb.entities.forEach(e => {
+                try {
+                    nbBuildEntityLayers(e, L, nb.color).forEach(l => {
+                        l.addTo(map);
+                        try { if (l._path) l._path.style.pointerEvents = 'none'; } catch (err) {}
+                        nbLayers.push(l);
+                        drawn++;
+                    });
+                } catch (err) { console.warn(`${TAG} neighbor draw failed for entity ${e && e.id}:`, err); }
+            });
+        });
+        nbState.conflicts.forEach(c => {
+            try {
+                const halo = L.circleMarker([c.lat, c.lng], {
+                    radius: 14, color: NB_CONFLICT_COLOR, weight: 2, opacity: 0.6,
+                    fillColor: NB_CONFLICT_COLOR, fillOpacity: 0.12,
+                    interactive: false, bubblingMouseEvents: false, pane: NB_HL_PANE_NAME,
+                });
+                const core = L.circleMarker([c.lat, c.lng], {
+                    radius: 4, color: NB_CONFLICT_COLOR, weight: 1, opacity: 1,
+                    fillColor: NB_CONFLICT_COLOR, fillOpacity: 1,
+                    interactive: false, bubblingMouseEvents: false, pane: NB_HL_PANE_NAME,
+                });
+                halo.addTo(map); core.addTo(map);
+                c._halo = halo;
+                nbPinLayers.push(halo, core);
+            } catch (err) { console.warn(`${TAG} conflict pin draw failed:`, err); }
+        });
+        console.log(`${TAG} neighbors: drew ${drawn} foreign layer(s) + ${nbState.conflicts.length} conflict pin(s)`);
+    }
+
+    // Probe a raw /sites/ list entry for a usable center. No script has ever
+    // needed coordinates from /sites/, so the real field name is UNVERIFIED —
+    // probe the plausible shapes and log once if nothing hits.
+    let nbCenterProbeLogged = false;
+    function nbSiteEntryCenter(s) {
+        if (!s || typeof s !== 'object') return null;
+        const cands = [
+            s.location, s.center, s.position, s.coordinates,
+            { lat: s.lat, lng: s.lng }, { lat: s.latitude, lng: s.longitude },
+        ];
+        for (const c of cands) {
+            if (c && typeof c === 'object') {
+                const lat = Number(c.lat != null ? c.lat : c.latitude);
+                const lng = Number(c.lng != null ? c.lng : (c.lon != null ? c.lon : c.longitude));
+                if (isFinite(lat) && isFinite(lng) && (lat !== 0 || lng !== 0)) return { lat, lng };
+            }
+        }
+        if (!nbCenterProbeLogged) {
+            nbCenterProbeLogged = true;
+            try { console.log(`${TAG} /sites/ entry carries no recognizable center — keys:`, Object.keys(s).join(', ')); } catch (e) {}
+        }
+        return null;
+    }
+
+    // Raw /sites/ payload (id → raw entry) for the center fallback. Cached
+    // per session; separate from fetchSiteList's slim {id,name} cache.
+    let nbRawSites = null;
+    async function nbFetchRawSites() {
+        if (nbRawSites) return nbRawSites;
+        try {
+            const r = await fetchWithTimeout('/sites/', {
+                credentials: 'same-origin', headers: { 'Accept': 'application/json' },
+            }, 20000);
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const list = extractList(await r.json());
+            const map = {};
+            list.forEach(s => {
+                const id = String(s && (s.id != null ? s.id : s.site_id) || '');
+                if (id) map[id] = s;
+            });
+            nbRawSites = map;
+        } catch (e) {
+            console.warn(`${TAG} raw /sites/ fetch failed (center fallback unavailable):`, e);
+            nbRawSites = {};
+        }
+        return nbRawSites;
+    }
+
+    function nbSetStatus(msg) {
+        if (nbState) nbState.status = msg;
+        const el = nbPanelEl && nbPanelEl.querySelector('#aim-sd-nb-status');
+        if (el) el.textContent = msg;
+        updateNbBadge();
+    }
+
+    async function scanNeighbors(manual) {
+        const seq = ++nbScanSeq;
+        clearNbLayers();
+        if (!nbCfg.enabled || !siteID) {
+            nbState = null;
+            updateNbBadge();
+            if (nbPanelEl && nbPanelEl.style.display !== 'none') renderNbPanel();
+            return;
+        }
+        nbState = { scanning: true, status: 'starting…', neighbors: [], conflicts: [], unchecked: [], notes: [], at: null };
+        updateNbBadge();
+        if (nbPanelEl && nbPanelEl.style.display !== 'none') renderNbPanel();
+        const scanSite = siteID;
+        try {
+            nbSetStatus('fetching this site\'s geometry…');
+            const mine = await fetchShadowEntities({ id: scanSite, server: THIS_SERVER }, true);
+            if (seq !== nbScanSeq) return;
+            if (!mine) throw new Error('could not fetch this site\'s /map_objects/');
+            const myBox = bboxFromEntities(mine);
+            if (!myBox) {
+                nbState.scanning = false;
+                nbState.at = Date.now();
+                nbSetStatus('this site has no FFZ/FP/asset geometry — nothing to check against');
+                if (nbPanelEl && nbPanelEl.style.display !== 'none') renderNbPanel();
+                return;
+            }
+            nbSetStatus('checking neighbor index…');
+            const notes = await ensureNbIndex((done, total) => {
+                if (seq === nbScanSeq) nbSetStatus(`indexing site snapshots… ${done}/${total}`);
+            }, manual);
+            if (seq !== nbScanSeq) return;
+            nbState.notes.push(...notes);
+
+            const maxFt = Math.max(nbCfg.radiusFt, nbCfg.thresholdFt);
+            const candidates = [];
+            Object.keys(nbIndex.bboxes).forEach(id => {
+                if (id === String(scanSite)) return;
+                const b = nbIndex.bboxes[id];
+                if (!b || b.empty) return;
+                if (bboxGapFt(myBox, b) <= maxFt) candidates.push({ id, src: 'snapshot' });
+            });
+
+            // Sites with NO snapshot: center fallback + generous margin; no
+            // center either → UNCHECKED, listed in the report.
+            const siteList = await fetchSiteList(THIS_SERVER, false);
+            if (seq !== nbScanSeq) return;
+            if (siteList) {
+                const noSnap = siteList.filter(s => s.id !== String(scanSite) && !nbIndex.bboxes[s.id]);
+                if (noSnap.length) {
+                    const raw = await nbFetchRawSites();
+                    if (seq !== nbScanSeq) return;
+                    noSnap.forEach(s => {
+                        const c = nbSiteEntryCenter(raw[s.id]);
+                        if (c) {
+                            const ptBox = { minLat: c.lat, maxLat: c.lat, minLng: c.lng, maxLng: c.lng };
+                            if (bboxGapFt(myBox, ptBox) <= maxFt + NB_CENTER_MARGIN_FT) {
+                                candidates.push({ id: s.id, src: 'center' });
+                            }
+                        } else {
+                            nbState.unchecked.push({ id: s.id, name: s.name });
+                        }
+                    });
+                }
+            } else {
+                nbState.notes.push('site list unavailable — snapshot-less sites could not be checked or counted');
+            }
+
+            // Live geometry for candidates only — the real math runs on
+            // CURRENT data, the index is only the prefilter.
+            const proj = projector((myBox.minLat + myBox.maxLat) / 2);
+            const thrM = nbCfg.thresholdFt / FT_PER_M;
+            const minePrepared = [];
+            mine.forEach(e => {
+                const p = nbPrepareEntity(e, proj);
+                if (p) minePrepared.push(p);
+            });
+            const neighbors = [];
+            for (let i = 0; i < candidates.length; i++) {
+                if (seq !== nbScanSeq) return;
+                const cand = candidates[i];
+                nbSetStatus(`fetching neighbor site ${cand.id} (${i + 1}/${candidates.length})…`);
+                const ents = await fetchShadowEntities({ id: cand.id, server: THIS_SERVER }, manual);
+                if (seq !== nbScanSeq) return;
+                if (!ents) {
+                    nbState.notes.push(`site ${cand.id} live fetch failed — NOT checked this scan`);
+                    continue;
+                }
+                const prepared = [];
+                ents.forEach(e => {
+                    const p = nbPrepareEntity(e, proj);
+                    if (p) prepared.push(p);
+                });
+                if (!prepared.length) continue;
+                neighbors.push({
+                    id: cand.id,
+                    name: siteLabel(cand.id, THIS_SERVER),
+                    src: cand.src,
+                    color: NB_PALETTE[neighbors.length % NB_PALETTE.length],
+                    entities: ents.filter(e => NB_TYPE_TO_CLASS[e.type] && nbCfg.classes[NB_TYPE_TO_CLASS[e.type]]),
+                    prepared,
+                    counts: {
+                        ffz: prepared.filter(p => p.cls === 'ffz').length,
+                        fp: prepared.filter(p => p.cls === 'fp').length,
+                        asset: prepared.filter(p => p.cls === 'asset').length,
+                    },
+                    minFt: null,
+                });
+            }
+
+            // Conflict math — segment-to-segment with per-pair bbox skip and
+            // cooperative yielding (engraved: long spatial loops must yield).
+            nbSetStatus('running conflict check…');
+            const conflicts = [];
+            const thrPad = thrM + 1;
+            let ops = 0;
+            for (const nb of neighbors) {
+                for (const fe of nb.prepared) {
+                    for (const le of minePrepared) {
+                        if (le.minX > fe.maxX + thrPad || le.maxX < fe.minX - thrPad
+                            || le.minY > fe.maxY + thrPad || le.maxY < fe.minY - thrPad) continue;
+                        ops += le.segs.length * fe.segs.length;
+                        const c = nbEntityPairClosest(le, fe);
+                        if (ops >= 4000) { ops = 0; await nbYield(); if (seq !== nbScanSeq) return; }
+                        if (!c) continue;
+                        const ft = c.d * FT_PER_M;
+                        if (nb.minFt === null || ft < nb.minFt) nb.minFt = ft;
+                        // Round-then-compare (engraved): flag on the displayed
+                        // integer — a distance that DISPLAYS as the threshold
+                        // never flags.
+                        if (Math.round(ft) >= nbCfg.thresholdFt) continue;
+                        const ll = proj.toLatLng(c.x, c.y);
+                        conflicts.push({
+                            localName: le.name, localCls: le.cls,
+                            foreignName: fe.name, foreignCls: fe.cls,
+                            siteId: nb.id, siteName: nb.name, siteColor: nb.color,
+                            ft: Math.round(ft), overlap: c.d === 0,
+                            lat: ll[0], lng: ll[1],
+                        });
+                    }
+                }
+            }
+            conflicts.sort((a, b) => a.ft - b.ft);
+            nbState.neighbors = neighbors;
+            nbState.conflicts = conflicts;
+            nbState.scanning = false;
+            nbState.at = Date.now();
+            const uncheckedBit = nbState.unchecked.length ? ` · ${nbState.unchecked.length} site(s) UNCHECKED (no snapshot/center)` : '';
+            nbSetStatus(`${neighbors.length} neighbor(s) within ${nbCfg.radiusFt} ft · `
+                + (conflicts.length ? `⚠ ${conflicts.length} conflict(s) under ${nbCfg.thresholdFt} ft` : `no conflicts under ${nbCfg.thresholdFt} ft ✓`)
+                + uncheckedBit);
+            console.log(`${TAG} neighbor scan: ${candidates.length} candidate(s) → ${neighbors.length} with geometry, ${conflicts.length} conflict(s), ${nbState.unchecked.length} unchecked`);
+            nbDrawAttempt(seq, 0);
+            updateNbBadge();
+            if (nbPanelEl && nbPanelEl.style.display !== 'none') renderNbPanel();
+            if (conflicts.length && !manual) openNbPanel();   // conflicts must not pass silently
+        } catch (e) {
+            if (seq !== nbScanSeq) return;
+            console.warn(`${TAG} neighbor scan failed:`, e);
+            nbState.scanning = false;
+            nbState.error = String(e && e.message || e);
+            nbState.at = Date.now();
+            nbSetStatus(`scan failed — ${nbState.error}`);
+            if (nbPanelEl && nbPanelEl.style.display !== 'none') renderNbPanel();
+        }
+    }
+
+    // ---------------- badge + panel ----------------
+
+    function updateNbBadge() {
+        let b = document.getElementById('aim-sd-nb-badge');
+        const show = nbCfg.enabled && siteID && document.querySelector('.leaflet-container');
+        if (!show) { if (b) b.style.display = 'none'; return; }
+        if (!b) {
+            b = document.createElement('div');
+            b.id = 'aim-sd-nb-badge';
+            // Sits just above the shadow badge (bottom:10)
+            b.style.cssText = 'position:fixed;left:10px;bottom:38px;z-index:2147480000;'
+                + 'background:rgba(20,24,32,0.9);border:1px solid #7986cb66;'
+                + 'border-radius:4px;padding:3px 8px;font:12px/1.4 monospace;cursor:pointer;'
+                + 'user-select:none;';
+            b.title = 'AIM Site Diff — neighboring sites (click for conflict panel)';
+            b.addEventListener('click', (ev) => { ev.stopPropagation(); openNbPanel(); });
+            document.body.appendChild(b);
+        }
+        if (!nbState) {
+            b.textContent = '⬡ Neighbors: not scanned';
+            b.style.color = '#8899bb';
+        } else if (nbState.scanning) {
+            b.textContent = `⬡ ${nbState.status || 'scanning…'}`;
+            b.style.color = '#8899bb';
+        } else if (nbState.error) {
+            b.textContent = '⬡ Neighbors: scan FAILED';
+            b.style.color = '#ff5252';
+        } else {
+            const n = nbState.neighbors.length, c = nbState.conflicts.length;
+            b.textContent = c ? `⬡ ${n} neighbor(s) · ⚠ ${c} conflict(s)` : `⬡ ${n} neighbor(s) · ✓`;
+            b.style.color = c ? NB_CONFLICT_COLOR : (n ? '#7986cb' : '#667');
+        }
+        b.style.display = 'block';
+    }
+
+    function buildNbReport() {
+        const lines = [];
+        lines.push(`AIM Site Diff — cross-site overlap report — site ${siteID} (${siteLabel(siteID, THIS_SERVER)}) [${SERVER_LABELS[THIS_SERVER]}]`);
+        const cls = NB_CLASSES.filter(c => nbCfg.classes[c.key]).map(c => c.label).join(', ');
+        lines.push(`Scanned ${nbState && nbState.at ? new Date(nbState.at).toLocaleString() : '—'} · display radius ${nbCfg.radiusFt} ft · conflict threshold ${nbCfg.thresholdFt} ft · classes: ${cls}`);
+        if (!nbState || nbState.scanning) { lines.push('(scan not finished)'); return lines.join('\n'); }
+        if (nbState.error) lines.push(`SCAN FAILED: ${nbState.error}`);
+        lines.push('');
+        lines.push(`Neighbors in range (${nbState.neighbors.length}):`);
+        nbState.neighbors.forEach(nb => {
+            const min = nb.minFt === null ? 'no pair within checking range' : `closest approach ${Math.round(nb.minFt)} ft`;
+            const srcBit = nb.src === 'center' ? ' [center-only prefilter — no snapshot]' : '';
+            lines.push(`  • ${nb.name} (#${nb.id})${srcBit} — ${nb.counts.ffz} FFZ · ${nb.counts.fp} FP · ${nb.counts.asset} assets — ${min} — ${location.origin}/#/site/${nb.id}/control-panel/site-setup`);
+        });
+        lines.push('');
+        lines.push(`Conflicts under ${nbCfg.thresholdFt} ft (${nbState.conflicts.length}):`);
+        nbState.conflicts.forEach((c, i) => {
+            lines.push(`  ${i + 1}. ${c.localCls.toUpperCase()} "${c.localName}" ↔ ${c.foreignCls.toUpperCase()} "${c.foreignName}" (${c.siteName} #${c.siteId}) — ${c.overlap ? 'OVERLAP' : `${c.ft} ft`} @ ${c.lat.toFixed(6)}, ${c.lng.toFixed(6)}`);
+        });
+        if (nbState.unchecked.length) {
+            lines.push('');
+            lines.push(`NOT CHECKED — no Site Watch snapshot and no usable /sites/ center (${nbState.unchecked.length}):`);
+            nbState.unchecked.forEach(u => lines.push(`  • ${u.name || 'site'} (#${u.id})`));
+        }
+        nbState.notes.forEach(n => lines.push(`Note: ${n}`));
+        return lines.join('\n');
+    }
+
+    function renderNbPanel() {
+        if (!nbPanelEl) return;
+        const body = nbPanelEl.querySelector('#aim-sd-nb-body');
+        if (!body) return;
+        if (!nbCfg.enabled) {
+            body.innerHTML = '<div style="padding:8px;color:#888">Neighbor overlay is OFF — enable "Show neighboring site setups" in the Control Panel (Site Diff card).</div>';
+            return;
+        }
+        if (!nbState) {
+            body.innerHTML = '<div style="padding:8px;color:#888">Not scanned yet.</div>'
+                + '<div style="padding:0 8px 8px;"><span data-nb="scan" style="cursor:pointer;color:#5fff5f">⬡ Scan now</span></div>';
+            return;
+        }
+        const rows = [];
+        if (nbState.scanning) {
+            rows.push('<div style="padding:8px;color:#8899bb">Scanning…</div>');
+        } else {
+            if (nbState.error) rows.push(`<div style="padding:6px 8px;color:#ff5252">Scan failed: ${escapeHtml(nbState.error)}</div>`);
+            rows.push('<div style="padding:4px 8px;border-bottom:1px solid #222834;color:#7adfe6;font-weight:bold">Neighbors in range</div>');
+            if (!nbState.neighbors.length) {
+                rows.push(`<div style="padding:4px 8px;color:#888">None within ${nbCfg.radiusFt} ft.</div>`);
+            }
+            nbState.neighbors.forEach(nb => {
+                const min = nb.minFt === null ? '—' : `${Math.round(nb.minFt)} ft`;
+                rows.push(`<div class="aim-sd-nb-row" data-nb-site="${nb.id}" style="padding:3px 8px;cursor:pointer;border-bottom:1px solid #1d2430;">`
+                    + `<span style="color:${nb.color}">◼</span> ${escapeHtml(nb.name)} <span style="color:#666">#${nb.id}</span>`
+                    + (nb.src === 'center' ? ' <span style="color:#ffa030" title="no Site Watch snapshot — found via site center">◦center</span>' : '')
+                    + `<span style="color:#888"> — ${nb.counts.ffz} FFZ · ${nb.counts.fp} FP · ${nb.counts.asset} assets · closest ${min}</span></div>`);
+            });
+            rows.push(`<div style="padding:4px 8px;border-bottom:1px solid #222834;color:${nbState.conflicts.length ? NB_CONFLICT_COLOR : '#5fff5f'};font-weight:bold">`
+                + (nbState.conflicts.length ? `⚠ ${nbState.conflicts.length} conflict(s) under ${nbCfg.thresholdFt} ft` : `No conflicts under ${nbCfg.thresholdFt} ft ✓`) + '</div>');
+            nbState.conflicts.forEach((c, i) => {
+                rows.push(`<div class="aim-sd-nb-row" data-nb-z="${i}" style="padding:3px 8px;cursor:pointer;border-bottom:1px solid #1d2430;">`
+                    + `<span style="color:${NB_CONFLICT_COLOR};font-weight:bold">${c.overlap ? 'OVERLAP' : `${c.ft} ft`}</span> `
+                    + `${c.localCls.toUpperCase()} <span style="color:#ddd">${escapeHtml(c.localName)}</span>`
+                    + ` ↔ ${c.foreignCls.toUpperCase()} <span style="color:${c.siteColor}">${escapeHtml(c.foreignName)}</span>`
+                    + `<span style="color:#888"> (${escapeHtml(c.siteName)})</span></div>`);
+            });
+            if (nbState.unchecked.length) {
+                rows.push(`<div style="padding:4px 8px;color:#ffa030">⚠ ${nbState.unchecked.length} site(s) NOT checked — no snapshot, no usable center. Full list in 📋 Copy report.</div>`);
+            }
+            nbState.notes.forEach(n => rows.push(`<div style="padding:2px 8px;color:#888">note: ${escapeHtml(n)}</div>`));
+        }
+        body.innerHTML = `<div style="max-height:46vh;overflow-y:auto;">${rows.join('')}</div>`;
+    }
+
+    function openNbPanel() {
+        if (!nbPanelEl) {
+            nbPanelEl = document.createElement('div');
+            nbPanelEl.id = 'aim-sd-nb-panel';
+            nbPanelEl.style.cssText = 'position:fixed;top:90px;right:16px;z-index:2147480002;width:480px;'
+                + 'background:#14181f;color:#ddd;border:1px solid #2a3140;border-radius:6px;'
+                + 'font:12px/1.5 monospace;box-shadow:0 4px 18px rgba(0,0,0,0.5);';
+            nbPanelEl.innerHTML = ''
+                + '<div id="aim-sd-nb-drag" style="padding:7px 10px;color:#7adfe6;font-weight:bold;border-bottom:1px solid #2a3140;cursor:move;user-select:none;">'
+                + '⬡ Site Diff — neighboring sites <span data-nb="close" style="float:right;cursor:pointer;color:#888">✕</span></div>'
+                + '<div id="aim-sd-nb-status" style="padding:5px 10px;border-bottom:1px solid #222834;color:#aaa;"></div>'
+                + '<div id="aim-sd-nb-body"></div>'
+                + '<div style="padding:6px 10px;border-top:1px solid #222834;display:flex;gap:12px;flex-wrap:wrap;">'
+                + '<span data-nb="scan" style="cursor:pointer;color:#5fff5f">⟲ Rescan</span>'
+                + '<span data-nb="copy" style="cursor:pointer;color:#7adfe6">📋 Copy report</span>'
+                + '<span data-nb="index" style="cursor:pointer;color:#ffa030" title="Re-check every Site Watch snapshot sha and refetch changed ones">⟳ Update index</span>'
+                + '</div>';
+            document.body.appendChild(nbPanelEl);
+            const hoverCss = document.createElement('style');
+            hoverCss.textContent = '#aim-sd-nb-body .aim-sd-nb-row:hover{background:#222a38;}';
+            nbPanelEl.appendChild(hoverCss);
+            // Delegated — body is rebuilt per render, the panel root never is
+            nbPanelEl.addEventListener('click', (ev) => {
+                const act = ev.target.closest('[data-nb]');
+                if (act) {
+                    const cmd = act.getAttribute('data-nb');
+                    if (cmd === 'close') nbPanelEl.style.display = 'none';
+                    else if (cmd === 'scan') scanNeighbors(true);
+                    else if (cmd === 'index') { nbIndex.checkedAt = 0; scanNeighbors(true); }
+                    else if (cmd === 'copy') {
+                        try {
+                            navigator.clipboard.writeText(buildNbReport())
+                                .then(() => nbSetStatus('report copied to clipboard'))
+                                .catch(e => { console.warn(`${TAG} clipboard write failed:`, e); nbSetStatus('clipboard write failed'); });
+                        } catch (e) { console.warn(`${TAG} clipboard unavailable:`, e); }
+                    }
+                    return;
+                }
+                const zRow = ev.target.closest('[data-nb-z]');
+                if (zRow && nbState) {
+                    const c = nbState.conflicts[Number(zRow.getAttribute('data-nb-z'))];
+                    const map = getLeafletMap();
+                    if (c && map) {
+                        try {
+                            map.setView([c.lat, c.lng], Math.max(map.getZoom ? map.getZoom() : 17, 17));
+                            if (c._halo) {
+                                c._halo.setStyle({ weight: 5, opacity: 1 });
+                                setTimeout(() => { try { c._halo.setStyle({ weight: 2, opacity: 0.6 }); } catch (e) {} }, 1400);
+                            }
+                        } catch (e) { console.warn(`${TAG} zoom-to-conflict failed:`, e); }
+                    }
+                    return;
+                }
+                const sRow = ev.target.closest('[data-nb-site]');
+                if (sRow && nbState) {
+                    const nb = nbState.neighbors.find(n => n.id === sRow.getAttribute('data-nb-site'));
+                    const b = nb && nbIndex.bboxes[nb.id];
+                    const map = getLeafletMap();
+                    const L = getL();
+                    if (b && !b.empty && map && L) {
+                        try { map.fitBounds(L.latLngBounds([[b.minLat, b.minLng], [b.maxLat, b.maxLng]]).pad(0.2)); }
+                        catch (e) { console.warn(`${TAG} zoom-to-neighbor failed:`, e); }
+                    }
+                }
+            });
+            const dragBar = nbPanelEl.querySelector('#aim-sd-nb-drag');
+            dragBar.addEventListener('pointerdown', (ev) => {
+                if (ev.target.getAttribute && ev.target.getAttribute('data-nb') === 'close') return;
+                ev.preventDefault();
+                const r = nbPanelEl.getBoundingClientRect();
+                const offX = ev.clientX - r.left, offY = ev.clientY - r.top;
+                const onMove = (mv) => {
+                    nbPanelEl.style.left = `${Math.max(0, mv.clientX - offX)}px`;
+                    nbPanelEl.style.right = 'auto';
+                    nbPanelEl.style.top = `${Math.max(0, mv.clientY - offY)}px`;
+                };
+                const onUp = () => {
+                    document.removeEventListener('pointermove', onMove);
+                    document.removeEventListener('pointerup', onUp);
+                };
+                document.addEventListener('pointermove', onMove);
+                document.addEventListener('pointerup', onUp);
+            });
+        }
+        nbPanelEl.style.display = 'block';
+        const st = nbPanelEl.querySelector('#aim-sd-nb-status');
+        if (st && nbState && nbState.status) st.textContent = nbState.status;
+        renderNbPanel();
+    }
+
     // ------------------------------------------------------------------
     // Control Panel integration
     // ------------------------------------------------------------------
@@ -2628,6 +3498,15 @@
                 { id: 'master', label: 'Enable shadow overlay', type: 'boolean', default: false, master: true },
                 { id: 'choose-site', label: '🗺 Choose shadow (site or JSON backup)…', type: 'button', action: 'choose-site' },
                 { id: 'refresh-shadow', label: '⟳ Refresh shadow data', type: 'button', action: 'refresh-shadow' },
+                { type: 'header', label: 'Neighbor sites (cross-site overlap)' },
+                { id: 'nb-enable', label: 'Show neighboring site setups', type: 'boolean', default: false },
+                { id: 'nb-radius', label: 'Neighbor display radius', type: 'number', min: 100, max: 20000, step: 100, default: 1000, unit: 'ft' },
+                { id: 'nb-threshold', label: 'Conflict threshold', type: 'number', min: 10, max: 2000, step: 10, default: 200, unit: 'ft' },
+                { id: 'nb-ffz', label: 'Check FFZs', type: 'boolean', default: true },
+                { id: 'nb-fp', label: 'Check flight paths', type: 'boolean', default: true },
+                { id: 'nb-asset', label: 'Check assets', type: 'boolean', default: true },
+                { id: 'nb-scan', label: '⬡ Scan neighbors now', type: 'button', action: 'nb-scan' },
+                { id: 'nb-panel', label: '⚠ Neighbor conflicts panel…', type: 'button', action: 'nb-panel' },
                 { type: 'header', label: 'Compare' },
                 { id: 'swipe', label: 'Swipe divider', type: 'boolean', default: false },
                 { id: 'swipe-mode', label: 'Swipe mode (or drag handle: M1 split / M2 overlay)', type: 'select', default: 'split', options: [
@@ -2676,6 +3555,34 @@
             gmSet(KEY_MASTER, v);
             console.log(`${TAG} shadow overlay ${v ? 'ON' : 'OFF'}`);
             renderShadow(false);
+            return;
+        }
+        if (id === 'nb-enable') {
+            const v = !!rawVal;
+            if (v === nbCfg.enabled) return;
+            nbCfg.enabled = v;
+            saveNbCfg();
+            console.log(`${TAG} neighbor overlay ${v ? 'ON' : 'OFF'}`);
+            if (v) scanNeighbors(false);
+            else { nbScanSeq++; clearNbLayers(); nbState = null; updateNbBadge(); if (nbPanelEl && nbPanelEl.style.display !== 'none') renderNbPanel(); }
+            return;
+        }
+        if (id === 'nb-radius' || id === 'nb-threshold') {
+            const n = Number(rawVal);
+            const prop = id === 'nb-radius' ? 'radiusFt' : 'thresholdFt';
+            if (isNaN(n) || n === nbCfg[prop]) return;
+            nbCfg[prop] = n;
+            saveNbCfg();
+            if (nbCfg.enabled) scanNeighbors(false);
+            return;
+        }
+        const nbCls = id.match(/^nb-(ffz|fp|asset)$/);
+        if (nbCls) {
+            const v = !!rawVal;
+            if (v === nbCfg.classes[nbCls[1]]) return;
+            nbCfg.classes[nbCls[1]] = v;
+            saveNbCfg();
+            if (nbCfg.enabled) scanNeighbors(false);
             return;
         }
         if (id === 'dashed') {
@@ -2781,6 +3688,8 @@
         else if (actionId === 'plan-migration') planMigration();
         else if (actionId === 'backup-live') backupLiveSite();
         else if (actionId === 'open-import') openImportPanel();
+        else if (actionId === 'nb-scan') { openNbPanel(); scanNeighbors(true); }
+        else if (actionId === 'nb-panel') openNbPanel();
     }
 
     function setupControlPanel() {
@@ -2824,7 +3733,14 @@
         // An import plan is target-site-specific — never carry it across
         if (impPanelEl) { impPanelEl.style.display = 'none'; }
         impState = null;
+        // Neighbor results belong to the site they ran on
+        nbScanSeq++;
+        clearNbLayers();
+        nbState = null;
+        if (nbPanelEl) { nbPanelEl.style.display = 'none'; }
+        updateNbBadge();
         renderShadow(false);
+        if (nbCfg.enabled && siteID) scanNeighbors(false);
     }
 
     function attachHashListener() {
@@ -2886,5 +3802,6 @@
         if (id !== siteID) setCurrentSite(id);
     }, 2000);
     renderShadow(false);
-    console.log(`${TAG} v${SCRIPT_VERSION} ready (master ${masterEnabled ? 'ON' : 'OFF'}${siteID ? `, site ${siteID}` : ''})`);
+    if (nbCfg.enabled && siteID) scanNeighbors(false);
+    console.log(`${TAG} v${SCRIPT_VERSION} ready (master ${masterEnabled ? 'ON' : 'OFF'}, neighbors ${nbCfg.enabled ? 'ON' : 'OFF'}${siteID ? `, site ${siteID}` : ''})`);
 })();
