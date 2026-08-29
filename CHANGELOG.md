@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-29 — 📥 Site Setup Tools v4.249: Asset Importer — tiny staged markers (latest — dev only, feature #249)
+
+Staged points shrunk to near-minimum dots (selected slightly larger so state still reads; duplicate flag keeps its red ring) and the viewport cull tightened — only what's actually on screen renders, so a 10,000-row region list stays a sane map.
+
 ## 2026-08-29 — 📥 Site Setup Tools v4.248: Asset Importer — ⬆ Shape (KML) selection (latest — dev only, feature #249)
 
 Fourth selection input alongside ⭕/🖊/☝: **⬆ Shape (KML)** uploads a KML whose polygon(s) ARE the access shape — everything inside gets selected, exactly like a drawn lasso (additive, works in 🗑 Delete mode too). This is the direct replacement for the old external-script "outline" step: the shape file you already have selects the subset with zero drawing. Reads every Polygon (MultiGeometry included) plus closed LineStrings (some converters draw outlines as paths). A polygon-only KML dropped anywhere on the panel routes to shape selection automatically; a KML carrying both points and polygons loads as data and tells you the polygons are there.

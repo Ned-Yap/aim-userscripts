@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.248
+// @version      4.249
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.248';
+    const SCRIPT_VERSION = '4.249';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -16092,18 +16092,21 @@
         if (!live.length) { impEnsureMoveEnd(false); return; }
         impEnsureMoveEnd(true);
         if (!imp.renderer) { try { imp.renderer = L.canvas({ padding: 0.3 }); } catch (e) { imp.renderer = null; } }
-        let bounds = null; try { bounds = map.getBounds().pad(0.2); } catch (e) {}
+        // Tight cull: only what's actually in view (+small pan margin) is
+        // drawn — a 10k-row region list never renders 10k markers. Markers
+        // deliberately TINY (selected slightly larger so state still reads).
+        let bounds = null; try { bounds = map.getBounds().pad(0.08); } catch (e) {}
         let drawn = 0, culled = 0;
         for (const p of live) {
             if (bounds && !bounds.contains([p.lat, p.lng])) { culled++; continue; }
             if (drawn >= IMP_MAX_RENDER) { culled++; continue; }
             try {
                 const opts = {
-                    radius: p.sel ? 6 : 4.5,
+                    radius: p.sel ? 4 : 2.2,
                     color: p.dup ? '#ff3b3b' : '#ffffff',
-                    weight: p.dup ? 2 : 1,
+                    weight: p.dup ? 1.5 : 0.6,
                     fillColor: p.sel ? '#5fff5f' : '#ff9d00',
-                    fillOpacity: 0.9, opacity: 0.95, interactive: false,
+                    fillOpacity: 0.9, opacity: 0.9, interactive: false,
                 };
                 if (imp.renderer) opts.renderer = imp.renderer;
                 const c = L.circleMarker([p.lat, p.lng], opts);
