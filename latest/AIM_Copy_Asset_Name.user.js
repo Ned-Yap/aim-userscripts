@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.247
+// @version      4.248
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.247';
+    const SCRIPT_VERSION = '4.248';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -15983,7 +15983,13 @@
                 const text = String(rd.result || '');
                 const isKml = /\.kml$/i.test(file.name) || /<kml[\s>]/i.test(text.slice(0, 2000));
                 const parsed = isKml ? impParseKml(text) : impParseCsv(text);
-                if (!parsed.rows.length) { impStatus(`"${impEsc(file.name)}" — no data rows found`, '#ff6060'); return; }
+                let kmlShapes = [];
+                if (isKml) { try { kmlShapes = impParseKmlShapes(text); } catch (e) {} }
+                if (!parsed.rows.length) {
+                    // polygon-only KML = an access SHAPE, not a data file — route it
+                    if (kmlShapes.length) { impApplyShapeRings(kmlShapes, file.name); return; }
+                    impStatus(`"${impEsc(file.name)}" — no data rows found`, '#ff6060'); return;
+                }
                 imp.fileName = file.name;
                 imp.headers = parsed.headers;
                 imp.rows = parsed.rows;
@@ -15994,7 +16000,8 @@
                     : impGuessMapping(parsed.headers));
                 impClearLayers(); impClearShapeLayers(); impClearAssetLayers();
                 impRenderMappingUi();
-                impStatus(`Loaded <b>${impEsc(file.name)}</b> — ${imp.rows.length} row(s). Confirm the column mapping, then ✓ Apply.`);
+                impStatus(`Loaded <b>${impEsc(file.name)}</b> — ${imp.rows.length} row(s). Confirm the column mapping, then ✓ Apply.`
+                    + (kmlShapes.length ? ` <span style="color:#ffb347">(file also carries ${kmlShapes.length} polygon(s) — load it again via ⬆ Shape to use them as the access shape)</span>` : ''));
                 impSyncUi();
             } catch (e) {
                 console.warn(`${TAG} 📥 file parse:`, e);
@@ -16196,6 +16203,89 @@
         impRenderShapes(); impSyncUi();
         impStatus(`🖊 lasso added — <b>+${n}</b> ${imp.target === 'assets' ? 'existing asset(s)' : 'point(s)'} selected`);
     }
+    // ---- ⬆ Shape (KML): a KML polygon acts as the access shape — the exact
+    // replacement for the old external-script "outline" workflow. Every
+    // Polygon (outer boundary; MultiGeometry included) plus any CLOSED
+    // LineString (some converters draw outlines as paths) becomes one
+    // additive lasso-style shape. Target-aware like ⭕/🖊/☝.
+    function impParseKmlShapes(text) {
+        const doc = new DOMParser().parseFromString(String(text || ''), 'text/xml');
+        if (doc.querySelector('parsererror')) throw new Error('KML parse error — file is not valid XML');
+        const parseRing = (coordEl) => {
+            if (!coordEl) return null;
+            const ring = [];
+            String(coordEl.textContent || '').trim().split(/\s+/).forEach(tuple => {
+                const parts = tuple.split(',');
+                const lng = parseFloat(parts[0]), lat = parseFloat(parts[1]);
+                if (isFinite(lat) && isFinite(lng)) ring.push({ lat, lng });
+            });
+            // drop the KML closing duplicate — our rings are open like Percepto's
+            if (ring.length > 1) {
+                const a = ring[0], b = ring[ring.length - 1];
+                if (a.lat === b.lat && a.lng === b.lng) ring.pop();
+            }
+            return ring.length >= 3 ? ring : null;
+        };
+        const nameOf = (el) => {
+            const pm = el.closest ? el.closest('Placemark') : null;
+            const nm = pm && pm.querySelector(':scope > name');
+            return nm ? String(nm.textContent || '').trim() : '';
+        };
+        const shapes = [];
+        doc.querySelectorAll('Polygon').forEach(poly => {
+            const ring = parseRing(poly.querySelector('outerBoundaryIs LinearRing coordinates'));
+            if (ring) shapes.push({ name: nameOf(poly), ring });
+        });
+        doc.querySelectorAll('LineString').forEach(ls => {
+            const coordEl = ls.querySelector('coordinates');
+            if (!coordEl) return;
+            const raw = String(coordEl.textContent || '').trim().split(/\s+/);
+            if (raw.length < 4) return;
+            const first = raw[0].split(','), last = raw[raw.length - 1].split(',');
+            const closed = first[0] === last[0] && first[1] === last[1];
+            if (!closed) return;                                        // open path = not an access shape
+            const ring = parseRing(coordEl);
+            if (ring) shapes.push({ name: nameOf(ls), ring });
+        });
+        return shapes;
+    }
+    function impApplyShapeRings(shapes, srcName) {
+        if (!impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+        if (!shapes.length) { impStatus(`No usable polygon in "${impEsc(srcName)}" — the shape KML needs a Polygon (or closed path)`, '#ff6060'); return; }
+        if (imp.target === 'assets' && !imp.assetIndex) impBuildAssetIndex();
+        if (imp.target === 'staged' && !imp.points.some(p => !p.done)) {
+            impStatus(`Shape "${impEsc(srcName)}" parsed (${shapes.length} polygon(s)) but nothing is staged — load the data CSV/KML first, or tick 🗑 Delete mode to select existing assets`, '#ffb347');
+            return;
+        }
+        let n = 0;
+        shapes.forEach(s => {
+            imp.shapes.push({ kind: 'lasso', ring: s.ring, name: s.name || srcName });
+            if (imp.target === 'assets') {
+                imp.assetIndex.forEach(a => {
+                    if (imp.assetSel.has(a.id)) return;
+                    if (pointInPolygon(a.centroid.lat, a.centroid.lng, s.ring) || a.ring.some(v => pointInPolygon(v.lat, v.lng, s.ring))) { imp.assetSel.add(a.id); n++; }
+                });
+            } else {
+                imp.points.forEach(p => {
+                    if (p.done || p.sel) return;
+                    if (pointInPolygon(p.lat, p.lng, s.ring)) { p.sel = true; n++; }
+                });
+            }
+        });
+        if (imp.target === 'assets') impRenderAssetSel(); else impRenderStaged();
+        impRenderShapes(); impSyncUi();
+        impStatus(`⬆ shape "${impEsc(srcName)}" applied — ${shapes.length} polygon(s), <b>+${n}</b> ${imp.target === 'assets' ? 'existing asset(s)' : 'point(s)'} selected`);
+    }
+    function impHandleShapeFile(file) {
+        if (!file) return;
+        const rd = new FileReader();
+        rd.onload = () => {
+            try { impApplyShapeRings(impParseKmlShapes(String(rd.result || '')), file.name); }
+            catch (e) { console.warn(`${TAG} 📥 shape parse:`, e); impStatus(`Shape parse failed: ${impEsc(e && e.message || e)}`, '#ff6060'); }
+        };
+        rd.onerror = () => impStatus('Shape file read failed', '#ff6060');
+        rd.readAsText(file);
+    }
     function impPickAt(ll) {
         const map = getLeafletMap(); if (!map) return;
         let cp; try { cp = map.latLngToContainerPoint([ll.lat, ll.lng]); } catch (e) { return; }
@@ -16321,6 +16411,7 @@
                     <select id="aim-imp-radius-unit" style="${inCss};text-align:left"><option value="mi">mi</option><option value="ft">ft</option></select></label>
                 <button id="aim-imp-lasso" style="${btnCss('122,223,230')}">🖊 Lasso</button>
                 <button id="aim-imp-pick" style="${btnCss('122,223,230')}">☝ Pick</button>
+                <button id="aim-imp-shape" title="Upload a KML whose polygon(s) ARE the access shape — everything inside gets selected, exactly like a drawn lasso. Additive; works in 🗑 Delete mode too. A polygon-only KML dropped on the panel routes here automatically." style="${btnCss('186,140,255')}">⬆ Shape (KML)</button>
                 <button id="aim-imp-selall" style="${btnCss('160,160,160')}">Select all</button>
                 <button id="aim-imp-clearsel" style="${btnCss('160,160,160')}">Clear selection</button>
                 <button id="aim-imp-clearshapes" style="${btnCss('160,160,160')}">Clear shapes</button>
@@ -16367,6 +16458,13 @@
         q('aim-imp-circle').onclick = () => impSetMode(imp.mode === 'circle' ? null : 'circle');
         q('aim-imp-lasso').onclick = () => impSetMode(imp.mode === 'lasso' ? null : 'lasso');
         q('aim-imp-pick').onclick = () => impSetMode(imp.mode === 'pick' ? null : 'pick');
+        q('aim-imp-shape').onclick = () => {
+            const inp = document.createElement('input');
+            inp.type = 'file';
+            inp.accept = '.kml,application/vnd.google-earth.kml+xml';
+            inp.onchange = () => { const f = inp.files && inp.files[0]; if (f) impHandleShapeFile(f); };
+            inp.click();
+        };
         q('aim-imp-selall').onclick = () => {
             if (imp.target === 'assets') { imp.assetIndex.forEach(a => imp.assetSel.add(a.id)); impRenderAssetSel(); }
             else { imp.points.forEach(p => { if (!p.done) p.sel = true; }); impRenderStaged(); }
