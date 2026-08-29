@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.246
+// @version      4.247
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.246';
+    const SCRIPT_VERSION = '4.247';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -184,6 +184,14 @@
     // reference-faa-airspace-data). Own Control Panel card, same
     // AIM_VALIDATOR_ISSUES handoff to AIM Issues as the SOP validators. ----
     const AIRSPACE_SCRIPT_ID = 'aim-airspace-checker';
+    // ---- 📥 Asset Importer (#249) — CP card id + init-referenced state.
+    // Declared HERE (not in the importer section) because registerWithControlPanel
+    // runs at init and references them — a later const would TDZ-throw.
+    const IMP_SCRIPT_ID = 'aim-asset-importer';
+    let impMasterEnabled = true;
+    let impDupFt = 50;              // duplicate-guard proximity, CP-editable
+    let impSizeFt = 30;             // created-asset square side ft, CP-editable
+    let impDeleteGuardSeen = 0;     // ts of the last Delete Guard REGISTER seen on the control channel
     const AIR_THRESH_KEY = 'aim-airspace-thresholds';
     const AIR_ENABLE_KEY = 'aim-airspace-enabled';
     const AIR_FAA_BASE = 'https://services6.arcgis.com/ssFJjBXIUyZDrSYZ/arcgis/rest/services';
@@ -8046,6 +8054,25 @@
                     airspaceClear();
                 }
             }
+            else if (msg.type === 'REGISTER' && msg.scriptId === 'aim-delete-guard') {
+                // 📥 importer's Delete Guard presence probe — the guard has no
+                // beacon, but it re-REGISTERs on REQUEST_REGISTRATIONS.
+                impDeleteGuardSeen = Date.now();
+            }
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === IMP_SCRIPT_ID) {
+                handleImporterToggle(msg);
+            }
+            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === IMP_SCRIPT_ID && CONTEXT === 'IFRAME') {
+                // Cross-tab guard: BroadcastChannel delivers to EVERY open tab — only
+                // the tab that pressed/clicked may act (tabId from CP v1.43+; visibility
+                // fallback under an older CP).
+                if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;
+                if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
+                if (msg.actionId === 'imp-open') {
+                    if (!impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+                    impOpenFromAction();
+                }
+            }
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === TER_SCRIPT_ID) {
                 handleTerrainToggle(msg);
             }
@@ -8085,6 +8112,29 @@
             if (msg.value === airThresholds[id]) return;
             airThresholds[id] = msg.value;
             saveAirThresholds();
+        }
+    }
+    // Idempotent — the panel runs in TOP + IFRAME so duplicate SET_TOGGLE
+    // is normal (same contract as handleSopToggle below).
+    function handleImporterToggle(msg) {
+        const id = msg.toggleId;
+        if (id === 'imp-master') {
+            const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            if (v === impMasterEnabled) return;
+            impMasterEnabled = v;
+            if (!v) { try { impSetMode(null); } catch (e) {} }
+            return;
+        }
+        if (id === 'imp-dup-ft' && typeof msg.value === 'number') {
+            if (msg.value === impDupFt || msg.value < 0) return;
+            impDupFt = msg.value;
+            try { if (imp.points.length) { impComputeDups(); impRenderStaged(); impSyncUi(); } } catch (e) {}
+            return;
+        }
+        if (id === 'imp-size-ft' && typeof msg.value === 'number') {
+            if (msg.value === impSizeFt || msg.value < 5 || msg.value > 2000) return;
+            impSizeFt = msg.value;
+            try { const el = document.getElementById('aim-imp-size'); if (el) el.value = impSizeFt; } catch (e) {}
         }
     }
     // Idempotent per [[feedback_set_toggle_handlers_must_be_idempotent]] —
@@ -8238,6 +8288,21 @@
                 { id: 'opacity', label: 'Overlay opacity', type: 'number', min: 0.1, max: 1, step: 0.05, default: TER_THRESH_DEFAULTS.opacity },
                 { id: 'ter-run', label: '⛰ Run profiler', type: 'button', action: 'ter-run' },
                 { id: 'ter-clear', label: 'Clear overlay + panel', type: 'button', action: 'ter-clear' },
+            ],
+            hotkeys: [],
+        });
+        // v4.247: 📥 Asset Importer — own card (feature #249). CSV/KML region
+        // list → staged map points → circle/lasso subset → bulk-create as
+        // assets; inverse 🗑 delete mode rides Delete Guard.
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: IMP_SCRIPT_ID, name: 'Asset Importer',
+            description: 'Load a region CSV/KML, stage its points on the map, select a subset spatially (circle / lasso / pick) and bulk-create them as real assets — create-only, dry-run + backup + verify. 🗑 Delete mode spatially selects EXISTING assets for a heavily-confirmed bulk delete (rides Delete Guard).',
+            version: SCRIPT_VERSION, group: 'Asset Importer', scope: 'site-setup', priority: 35,
+            toggles: [
+                { id: 'imp-master', label: 'Enable Asset Importer', type: 'boolean', default: true, master: true },
+                { id: 'imp-dup-ft', label: 'Duplicate guard radius (staged point near an existing asset)', type: 'number', min: 0, max: 1000, step: 5, default: 50, unit: 'ft' },
+                { id: 'imp-size-ft', label: 'Created-asset square size', type: 'number', min: 5, max: 2000, step: 5, default: 30, unit: 'ft' },
+                { id: 'imp-open', label: '📥 Open Asset Importer', type: 'button', action: 'imp-open' },
             ],
             hotkeys: [],
         });
@@ -15653,6 +15718,7 @@
         if (mode) nfzDraw.mode = mode;
         if (nfzDraw.active) {
             try { if (advDraw.active) setAdvDraw(false); } catch (e) {}   // mutually exclusive
+            try { if (imp.mode) impSetMode(null); } catch (e) {}          // …and with the importer's select tools
             try { if (genDraw.active) { const b = document.getElementById('aim-gen-draw'); if (b) b.click(); } } catch (e) {}
             nfzWire();
         } else {
@@ -15757,6 +15823,1082 @@
         nfzDraw.committed = nfzDraw.committed.filter(c => !deleted.has(c.id));
         nfzRenderCommitted();
         showToast(fail ? `Undo: ${ok} deleted, ${fail} FAILED` : `↩ ${ok} NFZ(s) deleted`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+    }
+
+    // ============================================================
+    // 📥 ASSET IMPORTER (#249) — CSV/KML region list → staged preview points
+    // on the map → spatial selection (⭕ circle / 🖊 freehand lasso / ☝ pick)
+    // → bulk-CREATE the selected subset as real type-3 assets via the
+    // createAssetSquare rail (dry-run, backup manifest, verify-by-refetch,
+    // Lite gate, unique names, 120 ms gap). Inverse 🗑 Delete mode: same
+    // spatial selection over EXISTING assets → ack + slide-and-HOLD-5s
+    // ceremony → DELETE /map_objects/ (rides Delete Guard's 24h undo ring;
+    // refuses by default when Delete Guard isn't detected) + ↩ Undo batch
+    // (re-creates from our own pre-delete bank; NEW ids). Staged points are
+    // NEVER written until Commit; parse + selection are fully local.
+    // ============================================================
+    const IMP_PARAMS_KEY = 'aim_imp_params';        // GM: {radiusVal, radiusUnit, includeDups}
+    const IMP_MAPPINGS_KEY = 'aim_imp_mappings';    // GM: {headerSig: {name,lat,lng,type}} — vendor CSV remembers its mapping
+    const IMP_TYPEMAP_KEY = 'aim_imp_typemap';      // GM: {csvTypeValueLower: percepto subtype} — global dictionary
+    const IMP_DEL_MODAL_ID = 'aim-imp-del-modal';
+    const IMP_PICK_PX = 14;                         // ☝ pick hit radius (container px)
+    const IMP_MAX_RENDER = 4000;                    // staged markers drawn per viewport (perf cap, surfaced when hit)
+    let imp = {
+        siteID: null,
+        fileName: null, headers: [], rows: [],
+        mapping: null,                              // {name, lat, lng, type|null} — header names
+        points: [],                                 // [{i, name, lat, lng, typeRaw, sel, dup, dupWhy, done}]
+        invalid: 0,
+        typeMap: {},                                // loaded from GM at wire time
+        target: 'staged',                           // 'staged' | 'assets' (🗑 delete mode)
+        mode: null,                                 // null | 'circle' | 'lasso' | 'pick'
+        radiusVal: 0.5, radiusUnit: 'mi', includeDups: false,
+        shapes: [],                                 // [{kind:'circle',center:{lat,lng},radiusM} | {kind:'lasso',ring:[{lat,lng}]}]
+        assetSel: new Set(),                        // selected EXISTING asset ids (delete mode)
+        renderer: null, layers: [], shapeLayers: [], assetLayers: [], lassoLayer: null,
+        _container: null, _onDown: null, _onMove: null, _onUp: null, _onKey: null, _onMoveEnd: null,
+        lassoRing: null, lassoDownPt: null,
+        lastCreated: [],                            // ids from the most recent import commit (↩ undo = delete them)
+        lastDelete: null,                           // {siteID, when, entities:[full bodies]} — ↩ Undo batch source
+        assetIndex: null,                           // cached [{id,name,clean,ring,bbox,centroid}] for dup-guard + delete select
+    };
+    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups })); } catch (e) {} }
+    function impLoadParams() {
+        try {
+            const raw = GM_getValue(IMP_PARAMS_KEY, ''); if (!raw) return;
+            const o = JSON.parse(raw); if (!o) return;
+            if (typeof o.radiusVal === 'number' && o.radiusVal > 0) imp.radiusVal = o.radiusVal;
+            if (o.radiusUnit === 'mi' || o.radiusUnit === 'ft') imp.radiusUnit = o.radiusUnit;
+            if (typeof o.includeDups === 'boolean') imp.includeDups = o.includeDups;
+        } catch (e) {}
+    }
+    function impLoadTypeMap() { try { imp.typeMap = JSON.parse(GM_getValue(IMP_TYPEMAP_KEY, '{}')) || {}; } catch (e) { imp.typeMap = {}; } }
+    function impSaveTypeMap() { try { GM_setValue(IMP_TYPEMAP_KEY, JSON.stringify(imp.typeMap)); } catch (e) {} }
+    function impEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+    function impStatus(msg, color) {
+        try { const el = document.getElementById('aim-imp-result'); if (el) { el.innerHTML = `<span style="color:${color || '#9ad'}">${msg}</span>`; } } catch (e) {}
+        console.log(`${TAG} 📥 ${String(msg).replace(/<[^>]*>/g, '')}`);
+    }
+    function impRadiusM() {
+        const v = Number(imp.radiusVal);
+        if (!isFinite(v) || v <= 0) return 0;
+        return imp.radiusUnit === 'mi' ? v * MI_TO_M : v * GEN_FT_TO_M;
+    }
+    // ---- CSV parse (RFC4180-ish: quoted fields, embedded commas/quotes/newlines;
+    // delimiter auto-detected among , ; \t from the header line) ----
+    function impParseCsv(text) {
+        text = String(text || '').replace(/^\uFEFF/, '');
+        const firstLine = text.slice(0, text.indexOf('\n') < 0 ? text.length : text.indexOf('\n'));
+        let delim = ',', best = -1;
+        [',', ';', '\t'].forEach(d => { const n = firstLine.split(d).length; if (n > best) { best = n; delim = d; } });
+        const rows = []; let field = '', row = [], inQ = false;
+        for (let i = 0; i < text.length; i++) {
+            const c = text[i];
+            if (inQ) {
+                if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQ = false; }
+                else field += c;
+            } else if (c === '"') inQ = true;
+            else if (c === delim) { row.push(field); field = ''; }
+            else if (c === '\n' || c === '\r') {
+                if (c === '\r' && text[i + 1] === '\n') i++;
+                row.push(field); field = '';
+                if (row.length > 1 || (row.length === 1 && row[0].trim() !== '')) rows.push(row);
+                row = [];
+            } else field += c;
+        }
+        row.push(field);
+        if (row.length > 1 || (row.length === 1 && row[0].trim() !== '')) rows.push(row);
+        if (!rows.length) return { headers: [], rows: [] };
+        const headers = rows[0].map(h => String(h || '').trim());
+        const out = rows.slice(1).map(r => { const o = {}; headers.forEach((h, i) => { o[h] = (r[i] == null ? '' : String(r[i])).trim(); }); return o; });
+        return { headers, rows: out };
+    }
+    // ---- KML parse: Placemark > Point > coordinates ("lng,lat[,alt]").
+    // name + ExtendedData (Data/value + SchemaData/SimpleData) become columns.
+    function impParseKml(text) {
+        const doc = new DOMParser().parseFromString(String(text || ''), 'text/xml');
+        if (doc.querySelector('parsererror')) throw new Error('KML parse error — file is not valid XML');
+        const headerSet = new Set(['name', 'lat', 'lng']);
+        const rows = [];
+        doc.querySelectorAll('Placemark').forEach(pm => {
+            const coordEl = pm.querySelector('Point > coordinates');
+            if (!coordEl) return;                                          // lines/polygons: not import targets
+            const parts = String(coordEl.textContent || '').trim().split(/[,\s]+/);
+            const lng = parseFloat(parts[0]), lat = parseFloat(parts[1]);
+            if (!isFinite(lat) || !isFinite(lng)) return;
+            const o = { lat: String(lat), lng: String(lng) };
+            const nmEl = pm.querySelector(':scope > name');
+            o.name = nmEl ? String(nmEl.textContent || '').trim() : '';
+            pm.querySelectorAll('ExtendedData Data').forEach(d => {
+                const k = d.getAttribute('name'); if (!k) return;
+                const v = d.querySelector('value');
+                o[k] = v ? String(v.textContent || '').trim() : '';
+                headerSet.add(k);
+            });
+            pm.querySelectorAll('ExtendedData SimpleData').forEach(d => {
+                const k = d.getAttribute('name'); if (!k) return;
+                o[k] = String(d.textContent || '').trim();
+                headerSet.add(k);
+            });
+            rows.push(o);
+        });
+        return { headers: [...headerSet], rows };
+    }
+    // ---- column mapping: remembered per header-signature, else auto-guessed ----
+    function impHeaderSig(headers) { return headers.map(h => String(h).toLowerCase()).join('|'); }
+    function impGuessMapping(headers) {
+        const lower = headers.map(h => String(h).toLowerCase());
+        const find = (cands, rx) => {
+            for (const c of cands) { const i = lower.indexOf(c); if (i >= 0) return headers[i]; }
+            if (rx) { const i = lower.findIndex(h => rx.test(h)); if (i >= 0) return headers[i]; }
+            return null;
+        };
+        return {
+            lat: find(['latitude', 'lat', 'y'], /lat/),
+            lng: find(['longitude', 'lon', 'lng', 'long', 'x'], /lon|lng/),
+            name: find(['name', 'pad_name', 'well name', 'asset name', 'asset', 'title', 'label'], /name/),
+            type: find(['type', 'pad_type', 'category', 'profiletype', 'v or h', 'designation', 'subtype', 'class'], /type/),
+        };
+    }
+    function impStoredMapping(headers) {
+        try {
+            const all = JSON.parse(GM_getValue(IMP_MAPPINGS_KEY, '{}')) || {};
+            const m = all[impHeaderSig(headers)];
+            if (m && headers.includes(m.lat) && headers.includes(m.lng)) return m;
+        } catch (e) {}
+        return null;
+    }
+    function impStoreMapping(headers, mapping) {
+        try {
+            const all = JSON.parse(GM_getValue(IMP_MAPPINGS_KEY, '{}')) || {};
+            all[impHeaderSig(headers)] = mapping;
+            GM_setValue(IMP_MAPPINGS_KEY, JSON.stringify(all));
+        } catch (e) {}
+    }
+    function impHandleFile(file) {
+        if (!file) return;
+        const rd = new FileReader();
+        rd.onload = () => {
+            try {
+                const text = String(rd.result || '');
+                const isKml = /\.kml$/i.test(file.name) || /<kml[\s>]/i.test(text.slice(0, 2000));
+                const parsed = isKml ? impParseKml(text) : impParseCsv(text);
+                if (!parsed.rows.length) { impStatus(`"${impEsc(file.name)}" — no data rows found`, '#ff6060'); return; }
+                imp.fileName = file.name;
+                imp.headers = parsed.headers;
+                imp.rows = parsed.rows;
+                imp.siteID = genState.siteID;
+                imp.points = []; imp.shapes = []; imp.assetSel.clear(); imp.invalid = 0;
+                imp.mapping = impStoredMapping(parsed.headers) || (isKml
+                    ? { name: 'name', lat: 'lat', lng: 'lng', type: impGuessMapping(parsed.headers).type }
+                    : impGuessMapping(parsed.headers));
+                impClearLayers(); impClearShapeLayers(); impClearAssetLayers();
+                impRenderMappingUi();
+                impStatus(`Loaded <b>${impEsc(file.name)}</b> — ${imp.rows.length} row(s). Confirm the column mapping, then ✓ Apply.`);
+                impSyncUi();
+            } catch (e) {
+                console.warn(`${TAG} 📥 file parse:`, e);
+                impStatus(`Parse failed: ${impEsc(e && e.message || e)}`, '#ff6060');
+            }
+        };
+        rd.onerror = () => impStatus('File read failed', '#ff6060');
+        rd.readAsText(file);
+    }
+    // ---- staged points from rows + mapping ----
+    function impBuildPoints() {
+        const m = imp.mapping;
+        if (!m || !m.lat || !m.lng) { impStatus('Pick the Latitude and Longitude columns first', '#ff6060'); return; }
+        // a type column that is entirely empty is treated as "no type column"
+        if (m.type && !imp.rows.some(r => (r[m.type] || '').trim() !== '')) m.type = null;
+        imp.points = []; imp.invalid = 0;
+        imp.rows.forEach((r, i) => {
+            const lat = parseFloat(r[m.lat]), lng = parseFloat(r[m.lng]);
+            if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) { imp.invalid++; return; }
+            const name = m.name ? (r[m.name] || '').trim() : '';
+            imp.points.push({ i, name: name || `Import ${i + 1}`, lat, lng, typeRaw: m.type ? (r[m.type] || '').trim() : '', sel: false, dup: false, dupWhy: '', done: false });
+        });
+        impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type });
+        impBuildAssetIndex();
+        impComputeDups();
+        impRenderStaged();
+        impRenderTypeMapUi();
+        const dupN = imp.points.filter(p => p.dup).length;
+        impStatus(`Staged <b>${imp.points.length}</b> point(s)`
+            + (imp.invalid ? ` · <span style="color:#ffb347">${imp.invalid} row(s) skipped (bad/missing coordinates)</span>` : '')
+            + (dupN ? ` · <span style="color:#ffd400">${dupN} flagged as likely duplicates</span>` : '')
+            + ' — ⭕/🖊 select a subset, then Create.');
+        impSyncUi();
+    }
+    // ---- duplicate guard vs EXISTING site assets (name OR proximity) ----
+    function impBuildAssetIndex() {
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        imp.assetIndex = ents.filter(e => e.type === 3).map(e => {
+            const ring = entityCoords(e);
+            if (!ring || ring.length < 3) return null;
+            let la0 = Infinity, lo0 = Infinity, la1 = -Infinity, lo1 = -Infinity;
+            ring.forEach(p => { la0 = Math.min(la0, p.lat); lo0 = Math.min(lo0, p.lng); la1 = Math.max(la1, p.lat); lo1 = Math.max(lo1, p.lng); });
+            return { id: e.id, name: e.name || '', clean: (genCleanName(e.name || '') || '').toLowerCase(), ring, bbox: { la0, lo0, la1, lo1 }, centroid: ringCentroid(ring) };
+        }).filter(Boolean);
+    }
+    function impComputeDups() {
+        if (!imp.assetIndex) impBuildAssetIndex();
+        const dupM = Math.max(0, impDupFt) * GEN_FT_TO_M;
+        const dLat = (dupM / 111320) * 1.05;
+        const byName = new Map();
+        imp.assetIndex.forEach(a => { if (a.clean) byName.set(a.clean, a); });
+        imp.points.forEach(p => {
+            p.dup = false; p.dupWhy = '';
+            const clean = (genCleanName(p.name) || '').toLowerCase();
+            const nm = clean && byName.get(clean);
+            if (nm) { p.dup = true; p.dupWhy = `name matches existing asset "${nm.name}"`; return; }
+            if (!dupM) return;
+            const dLng = dLat / Math.max(0.2, Math.cos(p.lat * Math.PI / 180));
+            for (const a of imp.assetIndex) {
+                if (p.lat < a.bbox.la0 - dLat || p.lat > a.bbox.la1 + dLat || p.lng < a.bbox.lo0 - dLng || p.lng > a.bbox.lo1 + dLng) continue;
+                const d = pointToPolygonMeters(p.lat, p.lng, a.ring);
+                if (d <= dupM) { p.dup = true; p.dupWhy = `${Math.round(d * M_TO_FT)} ft from existing asset "${a.name}" (guard ${impDupFt} ft)`; break; }
+            }
+        });
+    }
+    // ---- staged rendering: one shared canvas renderer, viewport-culled ----
+    function impClearLayers() {
+        const map = getLeafletMap();
+        imp.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        imp.layers = [];
+    }
+    function impClearShapeLayers() {
+        const map = getLeafletMap();
+        imp.shapeLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        imp.shapeLayers = [];
+        if (imp.lassoLayer) { try { if (map) map.removeLayer(imp.lassoLayer); } catch (e) {} imp.lassoLayer = null; }
+    }
+    function impClearAssetLayers() {
+        const map = getLeafletMap();
+        imp.assetLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        imp.assetLayers = [];
+    }
+    function impRenderStaged() {
+        const L = getLeafletL(), map = getLeafletMap();
+        if (!L || !map) return;
+        impClearLayers();
+        const live = imp.points.filter(p => !p.done);
+        if (!live.length) { impEnsureMoveEnd(false); return; }
+        impEnsureMoveEnd(true);
+        if (!imp.renderer) { try { imp.renderer = L.canvas({ padding: 0.3 }); } catch (e) { imp.renderer = null; } }
+        let bounds = null; try { bounds = map.getBounds().pad(0.2); } catch (e) {}
+        let drawn = 0, culled = 0;
+        for (const p of live) {
+            if (bounds && !bounds.contains([p.lat, p.lng])) { culled++; continue; }
+            if (drawn >= IMP_MAX_RENDER) { culled++; continue; }
+            try {
+                const opts = {
+                    radius: p.sel ? 6 : 4.5,
+                    color: p.dup ? '#ff3b3b' : '#ffffff',
+                    weight: p.dup ? 2 : 1,
+                    fillColor: p.sel ? '#5fff5f' : '#ff9d00',
+                    fillOpacity: 0.9, opacity: 0.95, interactive: false,
+                };
+                if (imp.renderer) opts.renderer = imp.renderer;
+                const c = L.circleMarker([p.lat, p.lng], opts);
+                c.addTo(map); imp.layers.push(c); drawn++;
+            } catch (e) {}
+        }
+        const capEl = document.getElementById('aim-imp-render-note');
+        if (capEl) capEl.textContent = culled ? `${drawn} of ${live.length} staged points drawn in this view (${culled} off-screen / over the ${IMP_MAX_RENDER} render cap — zoom/pan to see them)` : '';
+    }
+    function impEnsureMoveEnd(on) {
+        const map = getLeafletMap(); if (!map) return;
+        if (on && !imp._onMoveEnd) {
+            imp._onMoveEnd = () => { try { impRenderStaged(); } catch (e) {} };
+            try { map.on('moveend', imp._onMoveEnd); } catch (e) { imp._onMoveEnd = null; }
+        } else if (!on && imp._onMoveEnd) {
+            try { map.off('moveend', imp._onMoveEnd); } catch (e) {}
+            imp._onMoveEnd = null;
+        }
+    }
+    function impRenderShapes() {
+        const L = getLeafletL(), map = getLeafletMap();
+        if (!L || !map) return;
+        impClearShapeLayers();
+        const col = imp.target === 'assets' ? '#ff5555' : '#7adfe6';
+        imp.shapes.forEach(s => {
+            try {
+                if (s.kind === 'circle') {
+                    const c = L.circle([s.center.lat, s.center.lng], { radius: s.radiusM, color: col, weight: 2, opacity: 0.8, dashArray: '6,5', fillColor: col, fillOpacity: 0.05, interactive: false });
+                    c.addTo(map); imp.shapeLayers.push(c);
+                } else {
+                    const pl = L.polygon(s.ring.map(p => [p.lat, p.lng]), { color: col, weight: 2, opacity: 0.8, dashArray: '6,5', fillColor: col, fillOpacity: 0.05, interactive: false });
+                    pl.addTo(map); imp.shapeLayers.push(pl);
+                }
+            } catch (e) {}
+        });
+        // in-progress freehand lasso
+        if (imp.lassoRing && imp.lassoRing.length >= 2) {
+            try {
+                imp.lassoLayer = L.polyline(imp.lassoRing.map(p => [p.lat, p.lng]), { color: col, weight: 2, dashArray: '4,4', interactive: false });
+                imp.lassoLayer.addTo(map);
+            } catch (e) {}
+        }
+    }
+    function impRenderAssetSel() {
+        const L = getLeafletL(), map = getLeafletMap();
+        if (!L || !map) return;
+        impClearAssetLayers();
+        if (!imp.assetIndex) return;
+        imp.assetIndex.forEach(a => {
+            if (!imp.assetSel.has(a.id)) return;
+            try {
+                const pl = L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: '#ff3b3b', weight: 3, opacity: 0.95, dashArray: '8,4', fillColor: '#ff3b3b', fillOpacity: 0.18, interactive: false });
+                pl.addTo(map); imp.assetLayers.push(pl);
+            } catch (e) {}
+        });
+    }
+    // ---- spatial selection application (ADDITIVE) ----
+    function impApplyCircle(center) {
+        const rM = impRadiusM();
+        if (!rM) { showToast('Set a circle radius first', 'rgba(255,179,71,0.6)'); return; }
+        imp.shapes.push({ kind: 'circle', center: { lat: center.lat, lng: center.lng }, radiusM: rM });
+        let n = 0;
+        if (imp.target === 'assets') {
+            imp.assetIndex.forEach(a => {
+                if (imp.assetSel.has(a.id)) return;
+                if (pointToPolygonMeters(center.lat, center.lng, a.ring) <= rM) { imp.assetSel.add(a.id); n++; }
+            });
+            impRenderAssetSel();
+        } else {
+            imp.points.forEach(p => {
+                if (p.done || p.sel) return;
+                if (approxMeters(center.lat, center.lng, p.lat, p.lng) <= rM) { p.sel = true; n++; }
+            });
+            impRenderStaged();
+        }
+        impRenderShapes(); impSyncUi();
+        impStatus(`⭕ circle added — <b>+${n}</b> ${imp.target === 'assets' ? 'existing asset(s)' : 'point(s)'} selected`);
+    }
+    function impApplyLasso(ring) {
+        if (!ring || ring.length < 3) { showToast('Lasso too small — ALT+drag a loop around the points', 'rgba(255,179,71,0.6)'); return; }
+        imp.shapes.push({ kind: 'lasso', ring });
+        let n = 0;
+        if (imp.target === 'assets') {
+            imp.assetIndex.forEach(a => {
+                if (imp.assetSel.has(a.id)) return;
+                const inside = pointInPolygon(a.centroid.lat, a.centroid.lng, ring) || a.ring.some(v => pointInPolygon(v.lat, v.lng, ring));
+                if (inside) { imp.assetSel.add(a.id); n++; }
+            });
+            impRenderAssetSel();
+        } else {
+            imp.points.forEach(p => {
+                if (p.done || p.sel) return;
+                if (pointInPolygon(p.lat, p.lng, ring)) { p.sel = true; n++; }
+            });
+            impRenderStaged();
+        }
+        impRenderShapes(); impSyncUi();
+        impStatus(`🖊 lasso added — <b>+${n}</b> ${imp.target === 'assets' ? 'existing asset(s)' : 'point(s)'} selected`);
+    }
+    function impPickAt(ll) {
+        const map = getLeafletMap(); if (!map) return;
+        let cp; try { cp = map.latLngToContainerPoint([ll.lat, ll.lng]); } catch (e) { return; }
+        if (imp.target === 'assets') {
+            // inside-ring wins; else nearest centroid within the pick radius
+            let hit = imp.assetIndex.find(a => pointInPolygon(ll.lat, ll.lng, a.ring));
+            if (!hit) {
+                let bd = Infinity;
+                imp.assetIndex.forEach(a => {
+                    try { const d = cp.distanceTo(map.latLngToContainerPoint([a.centroid.lat, a.centroid.lng])); if (d < bd) { bd = d; hit = a; } } catch (e) {}
+                });
+                if (bd > IMP_PICK_PX) hit = null;
+            }
+            if (!hit) return;
+            if (imp.assetSel.has(hit.id)) imp.assetSel.delete(hit.id); else imp.assetSel.add(hit.id);
+            impRenderAssetSel(); impSyncUi();
+        } else {
+            let best = null, bd = Infinity;
+            imp.points.forEach(p => {
+                if (p.done) return;
+                try { const d = cp.distanceTo(map.latLngToContainerPoint([p.lat, p.lng])); if (d < bd) { bd = d; best = p; } } catch (e) {}
+            });
+            if (!best || bd > IMP_PICK_PX) return;
+            best.sel = !best.sel;
+            impRenderStaged(); impSyncUi();
+        }
+    }
+    // ---- map interaction: same capture-phase harness + ALT-gate as NFZ Trace ----
+    function impWire() {
+        const map = getLeafletMap(); if (!map) return;
+        impUnwire();
+        imp._container = map.getContainer();
+        imp._onDown = (ev) => {
+            if (!imp.mode || ev.button !== 0 || !ev.altKey) return;      // plain click stays free (pan / native edit)
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            ev.preventDefault(); ev.stopPropagation();
+            if (imp.mode === 'circle') { impApplyCircle(ll); return; }
+            if (imp.mode === 'pick') { impPickAt(ll); return; }
+            imp.lassoRing = [ll];                                        // 'lasso' — freehand starts
+            imp.lassoDownPt = { x: ev.clientX, y: ev.clientY };
+        };
+        imp._onMove = (ev) => {
+            if (imp.mode !== 'lasso' || !imp.lassoRing) return;
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            ev.preventDefault(); ev.stopPropagation();
+            if (!(ev.buttons & 1)) {                                     // released outside the container — finish now
+                const ring = imp.lassoRing;
+                imp.lassoRing = null; imp.lassoDownPt = null;
+                if (ring.length >= 3) impApplyLasso(ring); else impRenderShapes();
+                return;
+            }
+            const last = imp.lassoRing[imp.lassoRing.length - 1];
+            try {
+                const a = map.latLngToContainerPoint([last.lat, last.lng]);
+                const b = map.latLngToContainerPoint([ll.lat, ll.lng]);
+                if (a.distanceTo(b) < 4) return;                         // densify by ~4px steps
+            } catch (e) {}
+            imp.lassoRing.push(ll);
+            impRenderShapes();
+        };
+        imp._onUp = (ev) => {
+            if (imp.mode !== 'lasso' || !imp.lassoRing) return;
+            ev.preventDefault(); ev.stopPropagation();
+            const ring = imp.lassoRing;
+            imp.lassoRing = null; imp.lassoDownPt = null;
+            if (ring.length >= 3) impApplyLasso(ring);
+            else impRenderShapes();                                      // tiny drag — just clear the trail
+        };
+        imp._onKey = (ev) => {
+            if (!imp.mode) return;
+            if ((ev.key || '').toLowerCase() === 'escape') {
+                ev.preventDefault(); ev.stopImmediatePropagation();
+                if (imp.lassoRing) { imp.lassoRing = null; impRenderShapes(); }
+                else impSetMode(null);
+            }
+        };
+        imp._container.addEventListener('mousedown', imp._onDown, true);
+        imp._container.addEventListener('mousemove', imp._onMove, true);
+        imp._container.addEventListener('mouseup', imp._onUp, true);
+        try { uwin().addEventListener('keydown', imp._onKey, true); } catch (e) {}
+        try { map.getContainer().style.cursor = 'crosshair'; } catch (e) {}
+    }
+    function impUnwire() {
+        const c = imp._container;
+        if (c) {
+            try { c.removeEventListener('mousedown', imp._onDown, true); } catch (e) {}
+            try { c.removeEventListener('mousemove', imp._onMove, true); } catch (e) {}
+            try { c.removeEventListener('mouseup', imp._onUp, true); } catch (e) {}
+        }
+        try { uwin().removeEventListener('keydown', imp._onKey, true); } catch (e) {}
+        const map = getLeafletMap();
+        if (map && !advDraw.active && !nfzDraw.active) { try { map.getContainer().style.cursor = ''; } catch (e) {} }
+        imp._container = null;
+        imp.lassoRing = null;
+    }
+    function impSetMode(mode) {
+        if (mode && !impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+        imp.mode = mode || null;
+        if (imp.mode) {
+            try { if (nfzDraw.active) setNfzMode(null); } catch (e) {}   // mutually exclusive with the other map tools
+            try { if (advDraw.active) setAdvDraw(false); } catch (e) {}
+            try { if (genDraw.active) { const b = document.getElementById('aim-gen-draw'); if (b) b.click(); } } catch (e) {}
+            impWire();
+        } else impUnwire();
+        impSyncUi();
+    }
+    // ---- panel body (built in JS — the generator template just carries the container) ----
+    function impRenderPanelBody() {
+        const host = document.getElementById('aim-imp-controls');
+        if (!host) return;
+        const btnCss = (col) => `background:rgba(${col},0.12);color:rgb(${col});border:1px solid rgba(${col},0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px`;
+        const inCss = 'background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px;text-align:right';
+        host.innerHTML = `
+            <div style="font-size:11px;color:#7adfe6;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">📥 Asset Importer — <span id="aim-imp-file-label" style="text-transform:none;letter-spacing:0">${impEsc(imp.fileName || 'no file loaded')}</span></div>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
+                <button id="aim-imp-load" style="${btnCss('122,223,230')}">📂 Load CSV / KML</button>
+                <span style="color:#888;font-size:10px">or drag &amp; drop the file onto this panel</span>
+            </div>
+            <div id="aim-imp-mapping" style="margin-bottom:8px"></div>
+            <div id="aim-imp-selrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
+                <button id="aim-imp-circle" style="${btnCss('122,223,230')}">⭕ Circle</button>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc">r <input type="number" id="aim-imp-radius" min="0" step="0.1" style="width:56px;${inCss}">
+                    <select id="aim-imp-radius-unit" style="${inCss};text-align:left"><option value="mi">mi</option><option value="ft">ft</option></select></label>
+                <button id="aim-imp-lasso" style="${btnCss('122,223,230')}">🖊 Lasso</button>
+                <button id="aim-imp-pick" style="${btnCss('122,223,230')}">☝ Pick</button>
+                <button id="aim-imp-selall" style="${btnCss('160,160,160')}">Select all</button>
+                <button id="aim-imp-clearsel" style="${btnCss('160,160,160')}">Clear selection</button>
+                <button id="aim-imp-clearshapes" style="${btnCss('160,160,160')}">Clear shapes</button>
+            </div>
+            <div id="aim-imp-typemap" style="margin-bottom:8px"></div>
+            <div id="aim-imp-commitrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Square side of each created asset — same shape ➕ Create asset uses. Reshape in Percepto afterwards (auto-reshape is feature #251).">Size <input type="number" id="aim-imp-size" min="5" max="2000" step="5" style="width:52px;${inCss}"> ft</label>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ffd400" title="Duplicate guard: a staged point is flagged when its name matches an existing asset OR it lies within the guard radius (Control Panel → Asset Importer) of one. Flagged points are SKIPPED unless this is on."><input type="checkbox" id="aim-imp-incdups" style="accent-color:#ffd400"> include flagged duplicates</label>
+                <button id="aim-imp-commit" style="${btnCss('95,255,95')};font-weight:600">✓ Create selected</button>
+                <button id="aim-imp-undocreate" style="${btnCss('255,179,71')}" title="Delete exactly the assets the most recent import created (this session). Each delete rides Delete Guard's undo ring when installed.">↩ Undo last import</button>
+            </div>
+            <div id="aim-imp-delrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px;padding-top:8px;border-top:1px dashed rgba(255,85,85,0.35)">
+                <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#ff8a80;font-weight:600" title="Flip the ⭕/🖊/☝ tools to select EXISTING site assets instead of staged points. Deleting requires the ack + slide-and-hold ceremony and rides Delete Guard's 24h undo ring."><input type="checkbox" id="aim-imp-delmode" style="accent-color:#ff5555"> 🗑 Delete mode — select existing assets</label>
+                <button id="aim-imp-delete" style="${btnCss('255,85,85')};font-weight:600;display:none">🗑 Delete selected…</button>
+                <button id="aim-imp-undodel" style="${btnCss('255,179,71')};display:none" title="Re-create the assets from the most recent bulk delete's bank (create-only — they come back with NEW ids; mission references do NOT rebind).">↩ Undo delete batch</button>
+            </div>
+            <div id="aim-imp-render-note" style="font-size:10px;color:#7a8794;margin-bottom:4px"></div>
+            <div id="aim-imp-result" style="font-size:11px;color:#9ad;line-height:1.5">Load a region CSV or KML — points stage on the map (nothing is written), then select the subset this site's drone can cover.</div>`;
+        impWirePanelControls(host);
+        impRenderMappingUi();
+        impRenderTypeMapUi();
+        impSyncUi();
+    }
+    function impWirePanelControls(host) {
+        const q = (id) => host.querySelector('#' + id);
+        q('aim-imp-load').onclick = () => {
+            const inp = document.createElement('input');
+            inp.type = 'file';
+            inp.accept = '.csv,.kml,.txt,text/csv,application/vnd.google-earth.kml+xml';
+            inp.onchange = () => { const f = inp.files && inp.files[0]; if (f) impHandleFile(f); };
+            inp.click();
+        };
+        host.addEventListener('dragover', (ev) => { ev.preventDefault(); ev.stopPropagation(); host.style.outline = '2px dashed #7adfe6'; });
+        host.addEventListener('dragleave', () => { host.style.outline = ''; });
+        host.addEventListener('drop', (ev) => {
+            ev.preventDefault(); ev.stopPropagation(); host.style.outline = '';
+            const f = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
+            if (f) impHandleFile(f);
+        });
+        const rEl = q('aim-imp-radius'), ruEl = q('aim-imp-radius-unit');
+        rEl.value = imp.radiusVal; ruEl.value = imp.radiusUnit;
+        rEl.oninput = () => { const v = parseFloat(rEl.value); if (isFinite(v) && v > 0) { imp.radiusVal = v; impSaveParams(); } };
+        ruEl.onchange = () => { imp.radiusUnit = ruEl.value; impSaveParams(); };
+        q('aim-imp-circle').onclick = () => impSetMode(imp.mode === 'circle' ? null : 'circle');
+        q('aim-imp-lasso').onclick = () => impSetMode(imp.mode === 'lasso' ? null : 'lasso');
+        q('aim-imp-pick').onclick = () => impSetMode(imp.mode === 'pick' ? null : 'pick');
+        q('aim-imp-selall').onclick = () => {
+            if (imp.target === 'assets') { imp.assetIndex.forEach(a => imp.assetSel.add(a.id)); impRenderAssetSel(); }
+            else { imp.points.forEach(p => { if (!p.done) p.sel = true; }); impRenderStaged(); }
+            impSyncUi();
+        };
+        q('aim-imp-clearsel').onclick = () => {
+            if (imp.target === 'assets') { imp.assetSel.clear(); impRenderAssetSel(); }
+            else { imp.points.forEach(p => { p.sel = false; }); impRenderStaged(); }
+            impSyncUi();
+        };
+        q('aim-imp-clearshapes').onclick = () => { imp.shapes = []; impClearShapeLayers(); impSyncUi(); };
+        const szEl = q('aim-imp-size');
+        szEl.value = impSizeFt;
+        szEl.oninput = () => { const v = parseFloat(szEl.value); if (isFinite(v) && v >= 5 && v <= 2000) impSizeFt = v; };
+        const incEl = q('aim-imp-incdups');
+        incEl.checked = imp.includeDups;
+        incEl.onchange = () => { imp.includeDups = incEl.checked; impSaveParams(); impSyncUi(); };
+        q('aim-imp-commit').onclick = () => { impCommit(); };
+        q('aim-imp-undocreate').onclick = () => { impUndoCreate(); };
+        const dmEl = q('aim-imp-delmode');
+        dmEl.checked = imp.target === 'assets';
+        dmEl.onchange = () => {
+            imp.target = dmEl.checked ? 'assets' : 'staged';
+            imp.shapes = []; impClearShapeLayers();
+            if (imp.target === 'assets') { impBuildAssetIndex(); impStatus('🗑 Delete mode — ⭕/🖊/☝ now select EXISTING assets (red). Nothing is deleted until the confirm ceremony.', '#ff8a80'); }
+            else { imp.assetSel.clear(); impClearAssetLayers(); impStatus('Back to staged-point selection.'); }
+            impSyncUi();
+        };
+        q('aim-imp-delete').onclick = () => { impOpenDeleteModal(); };
+        q('aim-imp-undodel').onclick = () => { impUndoDeleteBatch(); };
+    }
+    function impRenderMappingUi() {
+        const el = document.getElementById('aim-imp-mapping');
+        if (!el) return;
+        if (!imp.headers.length) { el.innerHTML = ''; return; }
+        const m = imp.mapping || {};
+        const sel = (key, label, allowNone) => {
+            const opts = (allowNone ? `<option value="">— none —</option>` : '')
+                + imp.headers.map(h => `<option value="${impEsc(h)}"${m[key] === h ? ' selected' : ''}>${impEsc(h)}</option>`).join('');
+            return `<label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc">${label}
+                <select data-impmap="${key}" style="max-width:130px;background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px">${opts}</select></label>`;
+        };
+        el.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:6px 8px;background:rgba(122,223,230,0.05);border:1px dashed rgba(122,223,230,0.3);border-radius:3px">
+            ${sel('name', 'Name', true)} ${sel('lat', 'Lat', false)} ${sel('lng', 'Lng', false)} ${sel('type', 'Type', true)}
+            <button id="aim-imp-applymap" style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:4px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">✓ Apply</button>
+        </div>`;
+        el.querySelectorAll('select[data-impmap]').forEach(s => {
+            s.onchange = () => { if (!imp.mapping) imp.mapping = {}; imp.mapping[s.getAttribute('data-impmap')] = s.value || null; };
+        });
+        el.querySelector('#aim-imp-applymap').onclick = () => { impBuildPoints(); };
+    }
+    function impSiteSubtypes() {
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        const counts = new Map();
+        ents.filter(e => e.type === 3 && e.custom && e.custom.poi_type_str).forEach(e => {
+            const s = String(e.custom.poi_type_str).trim();
+            if (s) counts.set(s, (counts.get(s) || 0) + 1);
+        });
+        return counts;
+    }
+    function impRenderTypeMapUi() {
+        const el = document.getElementById('aim-imp-typemap');
+        if (!el) return;
+        if (!imp.points.length) { el.innerHTML = ''; return; }
+        const subCounts = impSiteSubtypes();
+        const subtypes = [...subCounts.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0]);
+        const defSub = subtypes[0] || 'well-cluster';
+        const dl = `<datalist id="aim-imp-subtype-list">${subtypes.map(s => `<option value="${impEsc(s)}"></option>`).join('')}</datalist>`;
+        const inCss = 'background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px';
+        if (!imp.mapping || !imp.mapping.type) {
+            const cur = imp.typeMap['__all__'] || defSub;
+            el.innerHTML = `<div style="padding:6px 8px;background:rgba(122,223,230,0.05);border:1px dashed rgba(122,223,230,0.3);border-radius:3px;font-size:11px;color:#cfd6dc">
+                No type column — subtype for ALL created assets:
+                <input id="aim-imp-sub-all" type="text" list="aim-imp-subtype-list" value="${impEsc(cur)}" style="${inCss};width:140px">${dl}
+                <span style="color:#888;font-size:10px">(site's existing subtypes suggested; a new value is created on the site)</span></div>`;
+            el.querySelector('#aim-imp-sub-all').oninput = function () { imp.typeMap['__all__'] = this.value.trim(); impSaveTypeMap(); impSyncUi(); };
+            return;
+        }
+        const vals = new Map();
+        imp.points.forEach(p => { const k = p.typeRaw || '(blank)'; vals.set(k, (vals.get(k) || 0) + 1); });
+        const rows = [...vals.entries()].sort((a, b) => b[1] - a[1]).map(([v, n]) => {
+            const key = v.toLowerCase();
+            const mapped = (imp.typeMap[key] || '').trim();
+            const warn = !mapped;
+            return `<div style="display:flex;gap:8px;align-items:center;padding:2px 0${warn ? ';background:rgba(255,212,0,0.08)' : ''}">
+                <span style="min-width:130px;color:${warn ? '#ffd400' : '#cfd6dc'};font-size:11px">${warn ? '⚠ ' : ''}${impEsc(v)} <span style="color:#888">×${n}</span></span>
+                <span style="color:#888">→</span>
+                <input type="text" list="aim-imp-subtype-list" data-imptype="${impEsc(key)}" value="${impEsc(mapped)}" placeholder="pick a subtype" style="${inCss};width:140px">
+            </div>`;
+        }).join('');
+        el.innerHTML = `<div style="padding:6px 8px;background:rgba(122,223,230,0.05);border:1px dashed rgba(122,223,230,0.3);border-radius:3px">
+            <div style="font-size:10px;color:#9ad;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Type mapping — CSV value → Percepto subtype <span style="color:#888;text-transform:none;letter-spacing:0">(remembered for next time; ⚠ unmapped values block Commit)</span></div>
+            ${rows}${dl}</div>`;
+        el.querySelectorAll('input[data-imptype]').forEach(inp => {
+            inp.oninput = () => {
+                const k = inp.getAttribute('data-imptype');
+                const v = inp.value.trim();
+                if (v) imp.typeMap[k] = v; else delete imp.typeMap[k];
+                impSaveTypeMap();
+                inp.parentElement.style.background = v ? '' : 'rgba(255,212,0,0.08)';
+                impSyncUi();
+            };
+        });
+    }
+    function impSyncUi() {
+        try {
+            const live = imp.points.filter(p => !p.done);
+            const selN = imp.target === 'assets' ? imp.assetSel.size : live.filter(p => p.sel).length;
+            const show = (id, on, flex) => { const el = document.getElementById(id); if (el) el.style.display = on ? (flex ? 'flex' : '') : 'none'; };
+            show('aim-imp-selrow', live.length > 0 || imp.target === 'assets', true);
+            show('aim-imp-commitrow', live.length > 0 || imp.lastCreated.length > 0, true);
+            show('aim-imp-delrow', true, true);
+            const modeBtn = (id, mode, label, onLabel) => {
+                const b = document.getElementById(id); if (!b) return;
+                const on = imp.mode === mode;
+                b.style.background = on ? 'rgba(122,223,230,0.35)' : 'rgba(122,223,230,0.12)';
+                b.textContent = on ? onLabel : label;
+            };
+            modeBtn('aim-imp-circle', 'circle', '⭕ Circle', '⭕ ON — ALT+click centers a circle · Esc=off');
+            modeBtn('aim-imp-lasso', 'lasso', '🖊 Lasso', '🖊 ON — ALT+drag a loop · Esc=off');
+            modeBtn('aim-imp-pick', 'pick', '☝ Pick', '☝ ON — ALT+click toggles one · Esc=off');
+            const cb = document.getElementById('aim-imp-commit');
+            if (cb) {
+                const dupsIn = live.filter(p => p.sel && p.dup).length;
+                const n = live.filter(p => p.sel && (!p.dup || imp.includeDups)).length;
+                cb.textContent = `✓ Create ${n} asset${n === 1 ? '' : 's'}${(dupsIn && !imp.includeDups) ? ` (${dupsIn} dup skipped)` : ''}`;
+            }
+            const db = document.getElementById('aim-imp-delete');
+            if (db) { db.style.display = imp.target === 'assets' ? '' : 'none'; db.textContent = `🗑 Delete ${imp.assetSel.size} selected…`; }
+            const ub = document.getElementById('aim-imp-undodel');
+            if (ub) ub.style.display = imp.lastDelete ? '' : 'none';
+            const uc = document.getElementById('aim-imp-undocreate');
+            if (uc) uc.style.display = imp.lastCreated.length ? '' : 'none';
+            const fl = document.getElementById('aim-imp-file-label');
+            if (fl) fl.textContent = imp.fileName ? `${imp.fileName} · ${live.length} staged · ${selN} selected` : 'no file loaded';
+        } catch (e) {}
+    }
+    // ---- COMMIT: create-only, rides createAssetSquare (template clone, Lite
+    // gate, CSRF, elevation, ghost, session names) + batch rails on top ----
+    async function impCommit() {
+        if (!impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+        if (liteBlockedWrite('import assets')) return;
+        const sid = genState.siteID;
+        if (!sid || String(sid) !== String(getCurrentSiteID())) { showToast('Site changed — reopen the generator', 'rgba(255,96,96,0.55)'); return; }
+        const targets = imp.points.filter(p => !p.done && p.sel && (!p.dup || imp.includeDups));
+        const skippedDups = imp.points.filter(p => !p.done && p.sel && p.dup && !imp.includeDups).length;
+        if (!targets.length) { impStatus(`Nothing to create — select staged points first${skippedDups ? ` (${skippedDups} selected point(s) are dup-flagged; tick "include flagged duplicates" to force them)` : ''}`, '#ffb347'); return; }
+        // resolve every point's subtype BEFORE anything writes — unmapped types block loudly
+        const subCounts = impSiteSubtypes();
+        // same frequency-sorted default the type-mapping UI shows
+        const defSub = [...subCounts.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0])[0] || 'well-cluster';
+        const missing = new Set();
+        const subtypeFor = (p) => {
+            if (!imp.mapping || !imp.mapping.type) return (imp.typeMap['__all__'] || '').trim() || defSub;
+            const v = (imp.typeMap[(p.typeRaw || '(blank)').toLowerCase()] || '').trim();
+            if (!v) missing.add(p.typeRaw || '(blank)');
+            return v;
+        };
+        const plan = targets.map(p => ({ p, subtype: subtypeFor(p) }));
+        if (missing.size) { impStatus(`BLOCKED — unmapped type value(s): <b>${impEsc([...missing].join(' · '))}</b>. Map each in the Type mapping table above.`, '#ff6060'); return; }
+        const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
+        if (dry) { impStatus(`DRY RUN — would create <b>${plan.length}</b> asset(s) (${impSizeFt}×${impSizeFt} ft squares)${skippedDups ? `, skipping ${skippedDups} dup(s)` : ''}: ${impEsc(plan.slice(0, 12).map(x => x.p.name).join(' · '))}${plan.length > 12 ? ' …' : ''}. Untick Dry run to write.`); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { impStatus('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
+        // fresh entity fetch → template + used names reflect the live server
+        impStatus('Fetching fresh site data…');
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        impBuildAssetIndex();
+        const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        const usedNames = new Set(ents.filter(e => e.name).map(e => e.name));
+        (assetSessionNames.get(String(sid)) || []).forEach(n => usedNames.add(n));
+        const uniq = (base) => {
+            base = genCleanName(base) || 'Import Asset';
+            if (!usedNames.has(base)) { usedNames.add(base); return base; }
+            let i = 2, n2; do { n2 = `${base}-${i++}`; } while (usedNames.has(n2));
+            usedNames.add(n2); return n2;
+        };
+        plan.forEach(x => { x.name = uniq(x.p.name); });
+        // backup manifest BEFORE any write (rollback = delete the created ids)
+        const manifest = { site: sid, at: new Date().toISOString(), file: imp.fileName, sizeFt: impSizeFt, creates: plan.map(x => ({ name: x.name, subtype: x.subtype, lat: x.p.lat, lng: x.p.lng })) };
+        try { localStorage.setItem(`aim_imp_commit_backup:${sid}`, JSON.stringify(manifest)); } catch (e) {}
+        try { downloadJSONFile(`asset-import-${sid}-${Date.now()}.json`, JSON.stringify(manifest, null, 1)); } catch (e) { impStatus('backup manifest download failed (localStorage stash still written)'); }
+        // fresh subtypes only need new_poi_type_str on their FIRST create
+        const knownSubs = new Set([...impSiteSubtypes().keys()]);
+        let ok = 0, fail = 0, aborted = false;
+        const created = [];
+        for (let i = 0; i < plan.length; i++) {
+            const x = plan[i];
+            impStatus(`creating ${i + 1}/${plan.length} — "${impEsc(x.name)}"…`);
+            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impSizeFt, x.name, x.subtype, !knownSubs.has(x.subtype));
+            if (r && r.ok) {
+                ok++; created.push({ id: r.id, name: x.name, point: x.p });
+                knownSubs.add(x.subtype);
+                x.p.done = true; x.p.sel = false;
+            } else {
+                fail++;
+                console.warn(`${TAG} 📥 create "${x.name}" failed:`, r && r.error);
+                if (r && /Server 403/.test(r.error || '')) { aborted = true; impStatus(`ABORTED at ${i + 1}/${plan.length} — server 403 (write permission lost). ${ok} created, rest kept staged.`, '#ff6060'); break; }
+            }
+            await sleep(DELETE_GAP_MS);
+        }
+        // verify-by-refetch: every created id must exist server-side
+        impStatus('verifying against a fresh fetch…');
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        const after = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        const byId = new Set(after.map(e => e.id));
+        const verified = created.filter(c => byId.has(c.id));
+        imp.lastCreated = verified.map(c => c.id);
+        impBuildAssetIndex(); impComputeDups(); impRenderStaged(); impSyncUi();
+        if (!aborted) impStatus(`DONE: <b>${ok}/${plan.length}</b> asset(s) created${fail ? `, <span style="color:#ff6060">${fail} FAILED (kept staged + selected)</span>` : ''}${skippedDups ? ` · ${skippedDups} dup(s) skipped` : ''} · verify ${verified.length}/${created.length} present · reload to edit them natively`, fail ? '#ffb347' : '#5fff5f');
+        showToast(fail ? `Import: ${ok} created, ${fail} FAILED — see the importer panel` : `✓ ${ok} asset(s) created`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+    }
+    // Undo THIS import: delete exactly the ids the last commit created.
+    async function impUndoCreate() {
+        if (liteBlockedWrite('delete imported assets (undo)')) return;
+        if (!imp.lastCreated.length) { showToast('Nothing to undo (only the most recent import this session)', 'rgba(255,96,96,0.55)'); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { showToast('No CSRF token', 'rgba(255,96,96,0.55)'); return; }
+        if (!confirm(`Delete the ${imp.lastCreated.length} asset(s) created by the last import? (Delete Guard banks each when installed)`)) return;
+        let ok = 0, fail = 0;
+        const deleted = new Set();
+        for (const id of imp.lastCreated) {
+            try {
+                const r = await fetch(`/map_objects/${encodeURIComponent(id)}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
+                if (r.ok || r.status === 404) { ok++; deleted.add(id); }
+                else { fail++; console.warn(`${TAG} 📥 undo-create #${id}: server ${r.status}${r.status === 409 ? ' (Delete Guard blocked — its pre-delete backup failed)' : ''}`); }
+            } catch (e) { fail++; console.warn(`${TAG} 📥 undo-create #${id}:`, e.message); }
+            await sleep(DELETE_GAP_MS);
+        }
+        imp.lastCreated = imp.lastCreated.filter(id => !deleted.has(id));
+        try { await fetchMapObjects(genState.siteID, true); } catch (e) {}
+        impBuildAssetIndex(); impComputeDups(); impSyncUi();
+        showToast(fail ? `Undo: ${ok} deleted, ${fail} FAILED` : `↩ ${ok} imported asset(s) deleted`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+    }
+    // ---- Delete Guard detection: it has no beacon — round-trip the control
+    // channel: REQUEST_REGISTRATIONS makes every script (incl. Delete Guard)
+    // re-REGISTER; setupControlPanel stamps impDeleteGuardSeen on its reply.
+    function impDetectDeleteGuard() {
+        return new Promise(resolve => {
+            if (Date.now() - impDeleteGuardSeen < 15000) { resolve(true); return; }
+            try { if (controlChannel) controlChannel.postMessage({ type: 'REQUEST_REGISTRATIONS' }); } catch (e) {}
+            setTimeout(() => resolve(Date.now() - impDeleteGuardSeen < 15000), 1300);
+        });
+    }
+    // ---- 🗑 DELETE MODE ceremony — assets are deliberately NOT in the SUM
+    // bulk-delete's DELETABLE_TYPES, so this is its own explicitly-scoped
+    // path with the same rails: fresh fetch, mission-ref scan, full backup
+    // download BEFORE arming, ack + slide-and-HOLD-5s, 120 ms gap, 403
+    // aborts, 404 = already gone, 409 = Delete Guard blocked (backup failed),
+    // verify-by-refetch, ↩ Undo batch from our own bank. Refuses when Delete
+    // Guard is absent unless the extra override is ticked.
+    async function impOpenDeleteModal() {
+        if (!impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+        if (liteBlockedWrite('bulk delete assets')) return;
+        const sid = genState.siteID;
+        if (!sid || String(sid) !== String(getCurrentSiteID())) { showToast('Site changed — reopen the generator', 'rgba(255,96,96,0.55)'); return; }
+        if (!imp.assetSel.size) { showToast('Select existing assets first (🗑 Delete mode + ⭕/🖊/☝)', 'rgba(255,85,85,0.7)'); return; }
+        const old = document.getElementById(IMP_DEL_MODAL_ID);
+        if (old) old.remove();
+        const modal = document.createElement('div');
+        modal.id = IMP_DEL_MODAL_ID;
+        modal.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2147480070;'
+            + 'width:600px;max-width:94vw;max-height:84vh;overflow-y:auto;background:#1a1214;color:#e6e6e6;'
+            + 'border:2px solid #ff5555;border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,0.75);'
+            + 'font:12px/1.5 monospace;padding:0;';
+        modal.innerHTML = ''
+            + '<div style="padding:9px 14px;border-bottom:1px solid #552;color:#ff5555;font-weight:bold;font-size:14px;">'
+            + '🗑 BULK DELETE ASSETS — this removes assets from the LIVE site'
+            + '<span id="aim-impd-close" style="float:right;cursor:pointer;color:#888">✕</span></div>'
+            + '<div id="aim-impd-body" style="padding:10px 14px;"><span style="color:#aaa">Preparing…</span></div>';
+        document.body.appendChild(modal);
+        let running = false, abortFlag = { abort: false };
+        modal.querySelector('#aim-impd-close').addEventListener('click', () => {
+            if (running) { showToast('Run in progress — use ✋ Abort first', 'rgba(255,85,85,0.7)'); return; }
+            modal.remove();
+        });
+        const body = () => modal.querySelector('#aim-impd-body');
+        try {
+            // fresh fetch FIRST — plan + backup must reflect the live server
+            body().innerHTML = '<span style="color:#aaa">Fetching fresh site data…</span>';
+            delete mapObjectsBySite[sid];
+            await fetchMapObjects(sid, true);
+            impBuildAssetIndex();
+            const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+            const rows = ents.filter(e => e.type === 3 && imp.assetSel.has(e.id)).map(e => ({ ent: e, missionRefs: [] }));
+            if (!rows.length) { body().innerHTML = '<span style="color:#ffa030">Selection no longer matches any live asset — refetch changed things. Re-select and retry.</span>'; return; }
+            // mission-reference scan (assets are heavily mission-referenced)
+            body().innerHTML = '<span style="color:#aaa">Scanning missions for references…</span>';
+            let missionScan = null;
+            try {
+                const r = await fetch(`/available_app/?site_id=${encodeURIComponent(sid)}&type=1`, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                const data = await r.json();
+                const missions = Array.isArray(data) ? data : (Array.isArray(data.results) ? data.results : []);
+                missionScan = { ok: true, count: missions.length };
+                missions.forEach(mn => {
+                    let s = ''; try { s = JSON.stringify(mn); } catch (e) { return; }
+                    rows.forEach(row => { if (new RegExp(`\\b${row.ent.id}\\b`).test(s)) row.missionRefs.push(String(mn.name || mn.id || 'unnamed mission')); });
+                });
+            } catch (e) { missionScan = { ok: false }; console.warn(`${TAG} 📥 mission scan failed:`, e); }
+            // Delete Guard presence
+            body().innerHTML = '<span style="color:#aaa">Checking for Delete Guard…</span>';
+            const dgPresent = await impDetectDeleteGuard();
+            // full backup BEFORE anything arms
+            body().innerHTML = '<span style="color:#aaa">Downloading backup…</span>';
+            const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+            const backupName = `aim-imp-predelete-site${sid}-${stamp}.json`;
+            const snap = { siteID: sid, when: new Date().toISOString(), reason: 'pre-importer-asset-delete', count: rows.length, entities: rows.map(r => r.ent) };
+            try { downloadJSONFile(backupName, JSON.stringify(snap, null, 2)); } catch (e) {}
+            const refCount = rows.filter(r => r.missionRefs.length).length;
+            const listHtml = rows.map(r => `<div style="padding:2px 6px;border-bottom:1px solid #2a1a1a;">`
+                + `<span style="color:#fff;font-weight:bold">ASSET</span> ${impEsc(String(r.ent.name || r.ent.id))}`
+                + (r.missionRefs.length ? `<br><span style="color:#ff5555;font-weight:bold">⚠ referenced by mission(s): ${impEsc(r.missionRefs.join(', '))} — a restore creates NEW ids, mission refs will NOT rebind</span>` : '')
+                + '</div>').join('');
+            const scanNote = missionScan && missionScan.ok
+                ? `mission scan: ${missionScan.count} mission(s) checked${refCount ? `, <span style="color:#ff5555">${refCount} asset(s) referenced</span>` : ', no references ✓'}`
+                : '<span style="color:#ffa030">⚠ mission scan FAILED — references unknown, proceed with extra caution</span>';
+            const dgNote = dgPresent
+                ? '<span style="color:#5fff5f">🕘 Delete Guard detected — every delete is banked to its 24h undo ring</span>'
+                : '<span style="color:#ff5555;font-weight:bold">⛔ Delete Guard NOT detected — deletes will have NO automatic undo ring. Blocked by default.</span>';
+            body().innerHTML = ''
+                + `<div style="margin-bottom:8px;">Site <b>${impEsc(String(sid))}</b> — deleting <b style="color:#ff5555">${rows.length} asset(s)</b>`
+                + `<br><span style="color:#888">${scanNote}</span>`
+                + `<br>${dgNote}`
+                + `<br><span style="color:#5fff5f">💾 backup saved: ${impEsc(backupName)}</span> <span style="color:#888">— ↩ Undo batch re-creates from this bank (NEW ids)</span></div>`
+                + `<div style="max-height:30vh;overflow-y:auto;border:1px solid #2a1a1a;margin-bottom:10px;">${listHtml}</div>`
+                + (dgPresent ? '' : '<label style="display:flex;gap:8px;align-items:center;margin-bottom:6px;cursor:pointer;color:#ff8a80;">'
+                    + '<input type="checkbox" id="aim-impd-override"> OVERRIDE: delete WITHOUT Delete Guard (only my backup file + ↩ Undo batch protect me)</label>')
+                + '<label style="display:flex;gap:8px;align-items:center;margin-bottom:10px;cursor:pointer;">'
+                + `<input type="checkbox" id="aim-impd-ack"> I understand these ${rows.length} assets will be DELETED from this site</label>`
+                + '<div id="aim-impd-slider-wrap" style="opacity:0.45;pointer-events:none;">'
+                + '<div style="color:#ff5555;font-weight:bold;margin-bottom:4px;">Slide to the end and HOLD for 5 seconds:</div>'
+                + '<div id="aim-impd-track" style="position:relative;height:38px;background:linear-gradient(90deg,#3a1518,#7a1f24);border:1px solid #ff5555;border-radius:19px;user-select:none;touch-action:none;">'
+                + '<div id="aim-impd-knob" style="position:absolute;top:2px;left:2px;width:34px;height:34px;background:#ff5555;border-radius:50%;cursor:grab;display:flex;align-items:center;justify-content:center;font-size:16px;">🗑</div>'
+                + '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#ffb3b3;pointer-events:none;">slide ➜</div>'
+                + '</div></div>'
+                + '<div id="aim-impd-countdown" style="display:none;margin-top:10px;padding:10px;background:#7a1f24;border-radius:6px;color:#fff;font-weight:bold;font-size:15px;text-align:center;"></div>'
+                + '<div id="aim-impd-status" style="margin-top:8px;min-height:18px;color:#aaa;"></div>'
+                + '<div id="aim-impd-actions" style="margin-top:8px;display:flex;gap:14px;"></div>';
+            const ack = body().querySelector('#aim-impd-ack');
+            const ovr = body().querySelector('#aim-impd-override');
+            const sliderWrap = body().querySelector('#aim-impd-slider-wrap');
+            const armed = () => ack.checked && (dgPresent || (ovr && ovr.checked));
+            const syncArm = () => {
+                const on = armed();
+                sliderWrap.style.opacity = on ? '1' : '0.45';
+                sliderWrap.style.pointerEvents = on ? 'auto' : 'none';
+            };
+            ack.addEventListener('change', syncArm);
+            if (ovr) ovr.addEventListener('change', syncArm);
+            const track = body().querySelector('#aim-impd-track');
+            const knob = body().querySelector('#aim-impd-knob');
+            const countdownEl = body().querySelector('#aim-impd-countdown');
+            const statusEl = body().querySelector('#aim-impd-status');
+            const actionsEl = body().querySelector('#aim-impd-actions');
+            let holdTimer = null, holdLeft = 0, dragging = false, fired = false;
+            const setKnob = (px) => {
+                const max = track.clientWidth - knob.offsetWidth - 4;
+                const x = Math.max(2, Math.min(max + 2, px));
+                knob.style.left = x + 'px';
+                return (x - 2) / max;
+            };
+            const cancelHold = () => { if (holdTimer) { clearInterval(holdTimer); holdTimer = null; } countdownEl.style.display = 'none'; };
+            const resetKnob = () => { cancelHold(); knob.style.left = '2px'; };
+            const ui = {
+                status: (msg, color) => { statusEl.innerHTML = `<span style="color:${color || '#aaa'}">${msg}</span>`; },
+                runStarted: () => {
+                    running = true;
+                    sliderWrap.style.display = 'none';
+                    ack.disabled = true;
+                    actionsEl.innerHTML = '<span id="aim-impd-abort" style="cursor:pointer;color:#ffa030;font-weight:bold">✋ Abort (finishes current delete, keeps the rest)</span>';
+                    actionsEl.querySelector('#aim-impd-abort').addEventListener('click', () => { abortFlag.abort = true; ui.status('aborting after the in-flight delete…', '#ffa030'); });
+                },
+                finished: (report) => {
+                    running = false;
+                    const good = !report.failed.length && !report.verifyProblems.length && !report.aborted;
+                    ui.status(`Done — <b>${report.deleted.length} deleted</b>`
+                        + (report.failed.length ? `, <span style="color:#ff5555">${report.failed.length} FAILED</span>` : '')
+                        + (report.aborted ? ', <span style="color:#ffa030">ABORTED early</span>' : '')
+                        + (report.verifyProblems.length ? `, <span style="color:#ff5555">${report.verifyProblems.length} verify problem(s)</span>` : ', all verified gone ✓'),
+                        good ? '#5fff5f' : (report.deleted.length ? '#ffa030' : '#ff5555'));
+                    actionsEl.innerHTML = '<span id="aim-impd-undo" style="cursor:pointer;color:#ffb347;font-weight:bold">↩ Undo this batch (re-create from bank — NEW ids)</span>'
+                        + `<span style="color:#888">backup: ${impEsc(backupName)} · Delete Guard 🕘 Restore also has each one${dgPresent ? '' : ' (NOT this time — no guard)'}</span>`;
+                    actionsEl.querySelector('#aim-impd-undo').addEventListener('click', () => { impUndoDeleteBatch(); });
+                },
+            };
+            knob.addEventListener('pointerdown', (ev) => { if (fired || running) return; dragging = true; knob.setPointerCapture(ev.pointerId); ev.preventDefault(); });
+            knob.addEventListener('pointermove', (ev) => {
+                if (!dragging || fired) return;
+                const r = track.getBoundingClientRect();
+                const frac = setKnob(ev.clientX - r.left - knob.offsetWidth / 2);
+                if (frac >= 0.95) {
+                    if (!holdTimer) {
+                        holdLeft = 5;
+                        countdownEl.style.display = 'block';
+                        countdownEl.textContent = `⚠ DELETING ${rows.length} ASSETS FROM SITE ${sid} IN ${holdLeft}s — RELEASE TO CANCEL`;
+                        holdTimer = setInterval(() => {
+                            holdLeft--;
+                            if (holdLeft <= 0) {
+                                cancelHold(); fired = true; dragging = false;
+                                impDeleteExecute(sid, rows, snap, abortFlag, ui);
+                                return;
+                            }
+                            countdownEl.textContent = `⚠ DELETING ${rows.length} ASSETS FROM SITE ${sid} IN ${holdLeft}s — RELEASE TO CANCEL`;
+                        }, 1000);
+                    }
+                } else cancelHold();
+            });
+            const release = () => { if (fired) return; dragging = false; resetKnob(); };
+            knob.addEventListener('pointerup', release);
+            knob.addEventListener('pointercancel', release);
+        } catch (e) {
+            console.warn(`${TAG} 📥 delete modal prepare failed:`, e);
+            body().innerHTML = `<span style="color:#ff5555">Prepare failed — ${impEsc(String(e && e.message || e))}. Nothing was deleted.</span>`;
+        }
+    }
+    async function impDeleteExecute(sid, rows, snap, abortFlag, ui) {
+        if (liteBlockedWrite('bulk delete assets')) return;
+        const csrf = getCsrfToken();
+        if (!csrf) { ui.status('no CSRF token — make one native save/edit anywhere in Percepto first, then retry', '#ff5555'); return; }
+        ui.runStarted();
+        const results = { deleted: [], failed: [], aborted: false, verifyProblems: [] };
+        for (let i = 0; i < rows.length; i++) {
+            if (abortFlag.abort) { results.aborted = true; break; }
+            const r = rows[i];
+            ui.status(`deleting ${i + 1}/${rows.length} — "${impEsc(String(r.ent.name || r.ent.id))}"…`);
+            try {
+                const resp = await fetch(`/map_objects/${encodeURIComponent(r.ent.id)}/`, {
+                    method: 'DELETE', credentials: 'same-origin',
+                    headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' },
+                });
+                if (resp.status === 403) {
+                    try { ((typeof unsafeWindow !== 'undefined') ? unsafeWindow : window).localStorage.removeItem(CSRF_LS_KEY); } catch (e2) {}
+                    results.failed.push({ id: r.ent.id, name: r.ent.name, reason: 'server 403 — CSRF rejected; banked token cleared. Make one native edit and re-run.' });
+                    results.aborted = true;
+                    break;
+                }
+                if (resp.status === 409) {
+                    // Delete Guard synthesizes 409 when its pre-delete backup fails —
+                    // the delete was BLOCKED client-side, not a server error.
+                    results.failed.push({ id: r.ent.id, name: r.ent.name, reason: 'Delete Guard blocked the delete (its backup GET failed) — entity untouched, retry later' });
+                    continue;
+                }
+                if (!resp.ok && resp.status !== 404) {
+                    const t = await resp.text();
+                    throw new Error(`server ${resp.status} — ${(t || '').slice(0, 150)}`);
+                }
+                results.deleted.push({ id: r.ent.id, name: r.ent.name, note: resp.status === 404 ? 'was already gone (404)' : '' });
+            } catch (e) {
+                console.warn(`${TAG} 📥 delete failed for "${r.ent.name}":`, e);
+                results.failed.push({ id: r.ent.id, name: r.ent.name, reason: String(e && e.message || e) });
+            }
+            await sleep(DELETE_GAP_MS);
+        }
+        ui.status('verifying against a fresh fetch…');
+        try {
+            delete mapObjectsBySite[sid];
+            await fetchMapObjects(sid, true);
+            const fresh = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+            results.deleted.forEach(d => { if (fresh.some(e => e && e.id === d.id)) results.verifyProblems.push(`"${d.name}" (id ${d.id}) still present after delete`); });
+        } catch (e) { results.verifyProblems.push('verify fetch failed — check the site manually'); }
+        // bank ONLY what actually deleted — the ↩ Undo batch source
+        const deletedIds = new Set(results.deleted.map(d => d.id));
+        imp.lastDelete = { siteID: sid, when: new Date().toISOString(), entities: snap.entities.filter(e => deletedIds.has(e.id)) };
+        imp.assetSel.clear();
+        impBuildAssetIndex(); impClearAssetLayers(); impComputeDups(); impRenderStaged(); impSyncUi();
+        const report = { ranAt: new Date().toISOString(), siteID: sid, deleted: results.deleted, failed: results.failed, aborted: results.aborted, verifyProblems: results.verifyProblems };
+        console.log(`${TAG} 📥 asset bulk delete done: ${results.deleted.length} deleted, ${results.failed.length} failed${results.aborted ? ' (ABORTED)' : ''}`, report);
+        ui.finished(report);
+    }
+    // ↩ Undo batch: create-only re-POST of the banked bodies. NEW ids —
+    // mission references do NOT rebind (surfaced in the ceremony + here).
+    async function impUndoDeleteBatch() {
+        if (liteBlockedWrite('restore deleted assets')) return;
+        const bank = imp.lastDelete;
+        if (!bank || !bank.entities.length) { showToast('No delete batch banked this session — use Delete Guard’s 🕘 Restore panel instead', 'rgba(255,96,96,0.55)'); return; }
+        if (String(bank.siteID) !== String(getCurrentSiteID())) { showToast('Banked batch belongs to another site', 'rgba(255,96,96,0.55)'); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { showToast('No CSRF token — make one native save anywhere in Percepto first, then retry', 'rgba(255,96,96,0.55)'); return; }
+        if (!confirm(`Re-create the ${bank.entities.length} deleted asset(s) from the bank? They come back with NEW ids — mission references will NOT rebind.`)) return;
+        let siteCfg = null;
+        try { siteCfg = await fetchSiteConfig(bank.siteID); } catch (e) { showToast('GET /sites/ failed — restore blocked (mountain_terrain_site would be wrong)', 'rgba(255,96,96,0.55)'); return; }
+        let ok = 0, fail = 0;
+        const restored = [];
+        for (const ent of bank.entities) {
+            try {
+                const b = buildWriteBody(ent, siteCfg);
+                delete b.id;
+                const r = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(b) });
+                const txt = await r.text(); let json = null; try { json = JSON.parse(txt); } catch (e) {}
+                if (r.status === 200 && json && json.map_objects && json.map_objects.id != null) { ok++; restored.push(ent.id); }
+                else throw new Error(`server ${r.status} ${(txt || '').slice(0, 120)}`);
+            } catch (e) { fail++; console.warn(`${TAG} 📥 restore "${ent.name}":`, e.message); }
+            await sleep(DELETE_GAP_MS);
+        }
+        const restoredSet = new Set(restored);
+        bank.entities = bank.entities.filter(e => !restoredSet.has(e.id));   // failed ones stay retryable
+        if (!bank.entities.length) imp.lastDelete = null;
+        try { await fetchMapObjects(bank.siteID, true); } catch (e) {}
+        impBuildAssetIndex(); impComputeDups(); impSyncUi();
+        impStatus(`↩ Undo batch: <b>${ok}</b> restored${fail ? `, <span style="color:#ff6060">${fail} FAILED (kept banked — retry)</span>` : ''} · restored assets have NEW ids · reload to see them natively`, fail ? '#ffb347' : '#5fff5f');
+        showToast(fail ? `Restore: ${ok} ok, ${fail} FAILED` : `↩ ${ok} asset(s) restored`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+    }
+    // ---- teardown (closeSiteGenerator) + panel show + CP open action ----
+    function impTeardown() {
+        try { impSetMode(null); } catch (e) {}
+        impEnsureMoveEnd(false);
+        impClearLayers(); impClearShapeLayers(); impClearAssetLayers();
+        // parsed data stays in memory — reopening the generator on the SAME
+        // site restores the staged view; a different site resets it.
+    }
+    function impShowPanel() {
+        const c = document.getElementById('aim-imp-controls');
+        if (!c) return;
+        c.style.display = 'block';
+        const b = document.getElementById('aim-gen-import');
+        if (b) b.style.background = 'rgba(122,223,230,0.32)';
+    }
+    function impOpenFromAction() {
+        // TRIGGER_ACTION 'imp-open' (CP card button) — mirrors the ⊕ map-button flow
+        if (LITE) { showToast('Asset Importer needs Full mode (CSM access)', 'rgba(255,180,0,0.6)'); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
+        const go = () => {
+            try {
+                if (!document.getElementById(GEN_MODAL_ID)) openSiteGenerator(sid);
+                impShowPanel();
+            } catch (e) { console.warn(`${TAG} 📥 open failed:`, e); }
+        };
+        const bucket = mapObjectsBySite[sid];
+        if (!bucket || !bucket.entities) fetchMapObjects(sid, true).then(go);
+        else go();
     }
 
     // ============================================================
@@ -16247,6 +17389,7 @@
         if (advDraw.active) {
             try { genDraw.active = false; } catch (e) {} // mutually exclusive with the simple Draw
             try { if (nfzDraw.active) setNfzMode(null); } catch (e) {} // …and with NFZ draw
+            try { if (imp.mode) impSetMode(null); } catch (e) {} // …and with the importer's select tools
             if (!advDraw.verts.length) advRestore();      // resume a crash/reload in-progress draw
             try { const w = document.getElementById('aim-adv-width'); if (w) w.value = advDraw.widthFt; const o = document.getElementById('aim-adv-offset'); if (o) o.value = advDraw.offsetFt; const an = document.getElementById('aim-adv-anchor'); if (an) an.value = advDraw.anchor; } catch (e) {}
             advWire(); advRender();
@@ -18132,6 +19275,9 @@
         // NFZ draw: same deal — drafts stay in localStorage, layers come off the map.
         // Committed PLACEHOLDERS deliberately stay on the map until reload/site change.
         try { if (nfzDraw.active) { nfzDraw.active = false; nfzDraw.drawing = false; nfzDraw.verts = []; nfzDraw.tentative = null; nfzUnwire(); } nfzClearLayers(); nfzClearNarrowLayers(); } catch (e) {}
+        // 📥 importer: layers + listeners off the map; parsed data survives in
+        // memory so reopening on the same site restores the staged view.
+        try { impTeardown(); } catch (e) {}
         genDraw.active = false; genDraw.drawing = false; genDraw.pts = []; genDraw.tentative = null; genDraw.tentVertex = false; genDraw.tentOrtho = false; genDraw.lastSnap = null;
         try { const mp = getLeafletMap(); if (mp) { if (genDraw.poly) { try { mp.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(mp); clearGhost(mp); clearSnapTargets(mp); if (genDraw.onMapMove) { try { mp.off('moveend', genDraw.onMapMove); } catch (e) {} genDraw.onMapMove = null; } mp.getContainer().style.cursor = ''; try { mp.doubleClickZoom.enable(); } catch (e) {} } } catch (e) {}
     }
@@ -18204,6 +19350,7 @@
                 <button id="aim-gen-advdraw" title="Advanced Draw — click the inner (asset-facing) edge point-to-point to build a zigzag corridor FFZ. Live full-box preview + shielding band on the line. Shift=angle-snap 15° off the last segment · Ctrl=magnet-snap to the offset off the nearest asset · F=flip width side · double-click/Enter=finish · Esc=undo last point. Autosaves; commits as ONE FFZ via Commit." style="background:rgba(95,184,255,0.12);color:#5fb8ff;border:1px solid rgba(95,184,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✦ Advanced Draw</button>
                 <button id="aim-gen-nfztrace" title="NFZ Trace — ALT+click to start, click to add vertices around anything (trace the shape exactly — the ring auto-grows by the Buffer on finish). Ctrl=snap onto the nearest asset's boundary · dbl-click/Enter=finish · Esc=undo last point. Grows by Buffer, pads to the min footprint, pulls overhangs inside the FFZ. Commits as type-4 NFZs, create-only." style="background:rgba(255,85,85,0.12);color:#ff5555;border:1px solid rgba(255,85,85,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">⬠ NFZ Trace</button>
                 <button id="aim-gen-nfzstamp" title="NFZ Stamp — ALT+click inside any asset polygon to instantly stage an NFZ = that asset's ring grown by the Buffer (min footprint + FFZ containment applied). Rapid-fire: keep ALT+clicking assets." style="background:rgba(255,85,85,0.12);color:#ff5555;border:1px solid rgba(255,85,85,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">⚡ NFZ Stamp</button>
+                <button id="aim-gen-import" title="Asset Importer — load a region CSV or KML, stage the points on the map (nothing is written), select a subset with a circle / freehand lasso / single picks, map CSV types to Percepto subtypes, and bulk-create the selection as real assets. Create-only + dry-run + backup. Also the inverse: 🗑 Delete mode spatially selects EXISTING assets for a heavily-confirmed bulk delete that rides Delete Guard." style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Import</button>
                 <button id="aim-gen-fpsnap" title="Arm CTRL-snap for Percepto's native flight-path draw tool: hold CTRL while clicking to place a waypoint and it snaps ~50ft parallel to the nearest power line (purple dot shows where). Release CTRL = free point." style="background:rgba(186,140,255,0.12);color:#ba8cff;border:1px solid rgba(186,140,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🧲 CTRL-snap: off</button>
                 <button id="aim-gen-loadfp" title="Load the site's existing flight paths (drawn natively in Percepto) into the editable preview so they can be cleaned up." style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FPs</button>
                 <button id="aim-gen-loadffz" title="Load the site's existing FFZs (amber) into the editable preview — move / rotate / Alt-snap (auto-size) / resize them, then 💾 Save FFZ edits to write them back in place." style="background:rgba(255,179,71,0.12);color:#ffb347;border:1px solid rgba(255,179,71,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FFZs</button>
@@ -18236,6 +19383,7 @@
                 </div>
                 <div id="aim-nfz-result" style="font-size:11px;color:#9ad;line-height:1.5">Drafts auto-grow by the Buffer, pad to the Min size, and pull inside the FFZ. Commit honors the Dry run checkbox in the Commit box.</div>
             </div>
+            <div id="aim-imp-controls" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.35);border-radius:3px"></div>
             <div style="padding:8px 10px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25);border-radius:3px">
                 <div style="font-size:11px;color:#9ad;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Commit</div>
                 <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc;margin-bottom:8px"><input type="checkbox" id="aim-gen-dryrun" checked style="accent-color:#7adfe6"> Dry run <span style="color:#888;font-size:10px">(build + count, don't write)</span></label>
@@ -18582,6 +19730,29 @@
         const nfzNarrowBtn = box.querySelector('#aim-nfz-narrow');
         if (nfzNarrowBtn) nfzNarrowBtn.onclick = () => { if (nfzDraw.narrowOn) nfzClearNarrowLayers(); else nfzNarrowScan(); };
         nfzRender(); nfzSyncUi();   // restore autosaved drafts onto the map right away
+
+        // 📥 Asset Importer (feature #249)
+        impLoadParams(); impLoadTypeMap();
+        if (imp.siteID && String(imp.siteID) !== String(siteID)) {
+            // a different site must never inherit another site's staged points
+            imp.fileName = null; imp.headers = []; imp.rows = []; imp.mapping = null;
+            imp.points = []; imp.shapes = []; imp.assetSel.clear();
+            imp.lastCreated = []; imp.lastDelete = null; imp.assetIndex = null;
+            imp.target = 'staged'; imp.siteID = String(siteID);
+        }
+        impRenderPanelBody();
+        const impBtn = box.querySelector('#aim-gen-import');
+        if (impBtn) impBtn.onclick = () => {
+            const c = document.getElementById('aim-imp-controls');
+            if (!c) return;
+            const opening = c.style.display === 'none';
+            c.style.display = opening ? 'block' : 'none';
+            impBtn.style.background = opening ? 'rgba(122,223,230,0.32)' : 'rgba(122,223,230,0.12)';
+            if (!opening) impSetMode(null);
+        };
+        if (imp.points.some(p => !p.done)) {           // staged points from this session → panel opens armed
+            impShowPanel(); impRenderStaged(); impRenderShapes(); impRenderAssetSel();
+        }
 
         // Advanced Draw live controls — load remembered params first so the fields show them.
         advLoadParams();
