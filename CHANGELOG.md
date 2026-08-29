@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-29 — 📥 Site Setup Tools v4.250: Asset Importer — movable shapes + live per-shape counters (latest — dev only, feature #249)
+
+Selection went live: shapes are now geometry the selection derives from, not a one-time stamp. **Every circle/lasso/KML polygon gets a numbered grab handle — ALT+drag it to move the shape anywhere**, with the selection and counts updating live as you drag (Esc drops it in place). New **Shapes list** in the panel, numbered to match the map handles: per shape — how many staged points (or existing assets in 🗑 mode) it contains, dup-flagged count, a type breakdown, and its size (circle radius + acres / lasso vertex count + acres) — plus a ✕ to remove just that shape. Below it, the **union totals**: what will actually be created/deleted, its full type breakdown, and how many ☝ manual adds/removes are in play. Multiple shapes are an additive union — an overlap point counts in every shape's row but selects once. ☝ Pick is now a *sticky* override (add points outside every shape, or knock ones out inside), surviving shape moves and removals; "Clear shapes" keeps those picks, "Clear selection" resets everything. Shapes also carry across the 🗑 Delete-mode switch, re-applying to the new target.
+
 ## 2026-08-29 — 📥 Site Setup Tools v4.249: Asset Importer — tiny staged markers (latest — dev only, feature #249)
 
 Staged points shrunk to near-minimum dots (selected slightly larger so state still reads; duplicate flag keeps its red ring) and the viewport cull tightened — only what's actually on screen renders, so a 10,000-row region list stays a sane map.

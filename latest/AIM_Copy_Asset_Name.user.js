@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.249
+// @version      4.250
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.249';
+    const SCRIPT_VERSION = '4.250';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -15853,8 +15853,15 @@
         target: 'staged',                           // 'staged' | 'assets' (🗑 delete mode)
         mode: null,                                 // null | 'circle' | 'lasso' | 'pick'
         radiusVal: 0.5, radiusUnit: 'mi', includeDups: false,
-        shapes: [],                                 // [{kind:'circle',center:{lat,lng},radiusM} | {kind:'lasso',ring:[{lat,lng}]}]
-        assetSel: new Set(),                        // selected EXISTING asset ids (delete mode)
+        // LIVE selection model (v4.250): selected = manual override ?? inside-any-shape.
+        // Shapes are movable, so membership RECOMPUTES (impRecomputeSel) instead of
+        // being stamped once. Manual picks (selManual / assetManual) are sticky —
+        // they survive shape moves and shape removal.
+        shapes: [],                                 // [{id, kind:'circle',center,radiusM} | {id, kind:'lasso',ring,handle,name?}]
+        shapeSeq: 1,
+        dragShape: null, dragLast: null,            // ALT+drag on a shape's numbered handle moves it
+        assetSel: new Set(),                        // DERIVED: selected EXISTING asset ids (delete mode)
+        assetManual: new Map(),                     // asset id → true/false manual override
         renderer: null, layers: [], shapeLayers: [], assetLayers: [], lassoLayer: null,
         _container: null, _onDown: null, _onMove: null, _onUp: null, _onKey: null, _onMoveEnd: null,
         lassoRing: null, lassoDownPt: null,
@@ -16027,6 +16034,7 @@
         impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type });
         impBuildAssetIndex();
         impComputeDups();
+        impRecomputeSel();          // shapes placed before the data still apply
         impRenderStaged();
         impRenderTypeMapUi();
         const dupN = imp.points.filter(p => p.dup).length;
@@ -16044,7 +16052,7 @@
             if (!ring || ring.length < 3) return null;
             let la0 = Infinity, lo0 = Infinity, la1 = -Infinity, lo1 = -Infinity;
             ring.forEach(p => { la0 = Math.min(la0, p.lat); lo0 = Math.min(lo0, p.lng); la1 = Math.max(la1, p.lat); lo1 = Math.max(lo1, p.lng); });
-            return { id: e.id, name: e.name || '', clean: (genCleanName(e.name || '') || '').toLowerCase(), ring, bbox: { la0, lo0, la1, lo1 }, centroid: ringCentroid(ring) };
+            return { id: e.id, name: e.name || '', clean: (genCleanName(e.name || '') || '').toLowerCase(), subtype: (e.custom && e.custom.poi_type_str) ? String(e.custom.poi_type_str).trim() : '', ring, bbox: { la0, lo0, la1, lo1 }, centroid: ringCentroid(ring) };
         }).filter(Boolean);
     }
     function impComputeDups() {
@@ -16140,6 +16148,15 @@
                     const pl = L.polygon(s.ring.map(p => [p.lat, p.lng]), { color: col, weight: 2, opacity: 0.8, dashArray: '6,5', fillColor: col, fillOpacity: 0.05, interactive: false });
                     pl.addTo(map); imp.shapeLayers.push(pl);
                 }
+                // numbered grab handle (matches the Shapes list) — ALT+drag moves the shape
+                const h = s.kind === 'circle' ? s.center : s.handle;
+                const icon = L.divIcon({
+                    className: '',
+                    html: `<div style="transform:translate(-50%,-50%);width:20px;height:20px;border-radius:50%;background:#1f2228;border:2px solid ${col};color:${col};display:flex;align-items:center;justify-content:center;font:700 10px -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 1px 4px rgba(0,0,0,0.6);pointer-events:none;">${s.id}</div>`,
+                    iconSize: [0, 0],
+                });
+                const mk = L.marker([h.lat, h.lng], { icon, interactive: false });
+                mk.addTo(map); imp.shapeLayers.push(mk);
             } catch (e) {}
         });
         // in-progress freehand lasso
@@ -16163,48 +16180,55 @@
             } catch (e) {}
         });
     }
-    // ---- spatial selection application (ADDITIVE) ----
+    // ---- spatial selection (ADDITIVE, LIVE): shapes are geometry, selection
+    // derives from them. Moving/removing a shape recomputes; manual ☝ picks
+    // override either way and stick. ----
+    function impShapeContains(s, lat, lng) {
+        if (s.kind === 'circle') return approxMeters(s.center.lat, s.center.lng, lat, lng) <= s.radiusM;
+        return pointInPolygon(lat, lng, s.ring);
+    }
+    function impAssetInShape(s, a) {
+        if (s.kind === 'circle') return pointToPolygonMeters(s.center.lat, s.center.lng, a.ring) <= s.radiusM;
+        return pointInPolygon(a.centroid.lat, a.centroid.lng, s.ring) || a.ring.some(v => pointInPolygon(v.lat, v.lng, s.ring));
+    }
+    function impSelCount() {
+        return imp.target === 'assets' ? imp.assetSel.size : imp.points.filter(p => !p.done && p.sel).length;
+    }
+    function impRecomputeSel() {
+        if (imp.target === 'assets') {
+            if (!imp.assetIndex) impBuildAssetIndex();
+            imp.assetSel.clear();
+            imp.assetIndex.forEach(a => {
+                const man = imp.assetManual.get(a.id);
+                const on = (man !== undefined) ? man : imp.shapes.some(s => impAssetInShape(s, a));
+                if (on) imp.assetSel.add(a.id);
+            });
+        } else {
+            imp.points.forEach(p => {
+                if (p.done) { p.sel = false; return; }
+                p.sel = (p.selManual !== undefined) ? p.selManual : imp.shapes.some(s => impShapeContains(s, p.lat, p.lng));
+            });
+        }
+    }
+    function impRefreshAfterSelChange() {
+        impRecomputeSel();
+        if (imp.target === 'assets') impRenderAssetSel(); else impRenderStaged();
+        impRenderShapes(); impSyncUi();
+    }
     function impApplyCircle(center) {
         const rM = impRadiusM();
         if (!rM) { showToast('Set a circle radius first', 'rgba(255,179,71,0.6)'); return; }
-        imp.shapes.push({ kind: 'circle', center: { lat: center.lat, lng: center.lng }, radiusM: rM });
-        let n = 0;
-        if (imp.target === 'assets') {
-            imp.assetIndex.forEach(a => {
-                if (imp.assetSel.has(a.id)) return;
-                if (pointToPolygonMeters(center.lat, center.lng, a.ring) <= rM) { imp.assetSel.add(a.id); n++; }
-            });
-            impRenderAssetSel();
-        } else {
-            imp.points.forEach(p => {
-                if (p.done || p.sel) return;
-                if (approxMeters(center.lat, center.lng, p.lat, p.lng) <= rM) { p.sel = true; n++; }
-            });
-            impRenderStaged();
-        }
-        impRenderShapes(); impSyncUi();
-        impStatus(`⭕ circle added — <b>+${n}</b> ${imp.target === 'assets' ? 'existing asset(s)' : 'point(s)'} selected`);
+        const before = impSelCount();
+        imp.shapes.push({ id: imp.shapeSeq++, kind: 'circle', center: { lat: center.lat, lng: center.lng }, radiusM: rM });
+        impRefreshAfterSelChange();
+        impStatus(`⭕ circle ${imp.shapes[imp.shapes.length - 1].id} added — <b>+${impSelCount() - before}</b> ${imp.target === 'assets' ? 'existing asset(s)' : 'point(s)'} selected. ALT+drag its numbered handle to move it.`);
     }
     function impApplyLasso(ring) {
         if (!ring || ring.length < 3) { showToast('Lasso too small — ALT+drag a loop around the points', 'rgba(255,179,71,0.6)'); return; }
-        imp.shapes.push({ kind: 'lasso', ring });
-        let n = 0;
-        if (imp.target === 'assets') {
-            imp.assetIndex.forEach(a => {
-                if (imp.assetSel.has(a.id)) return;
-                const inside = pointInPolygon(a.centroid.lat, a.centroid.lng, ring) || a.ring.some(v => pointInPolygon(v.lat, v.lng, ring));
-                if (inside) { imp.assetSel.add(a.id); n++; }
-            });
-            impRenderAssetSel();
-        } else {
-            imp.points.forEach(p => {
-                if (p.done || p.sel) return;
-                if (pointInPolygon(p.lat, p.lng, ring)) { p.sel = true; n++; }
-            });
-            impRenderStaged();
-        }
-        impRenderShapes(); impSyncUi();
-        impStatus(`🖊 lasso added — <b>+${n}</b> ${imp.target === 'assets' ? 'existing asset(s)' : 'point(s)'} selected`);
+        const before = impSelCount();
+        imp.shapes.push({ id: imp.shapeSeq++, kind: 'lasso', ring, handle: ringCentroid(ring) });
+        impRefreshAfterSelChange();
+        impStatus(`🖊 lasso ${imp.shapes[imp.shapes.length - 1].id} added — <b>+${impSelCount() - before}</b> ${imp.target === 'assets' ? 'existing asset(s)' : 'point(s)'} selected. ALT+drag its numbered handle to move it.`);
     }
     // ---- ⬆ Shape (KML): a KML polygon acts as the access shape — the exact
     // replacement for the old external-script "outline" workflow. Every
@@ -16260,24 +16284,12 @@
             impStatus(`Shape "${impEsc(srcName)}" parsed (${shapes.length} polygon(s)) but nothing is staged — load the data CSV/KML first, or tick 🗑 Delete mode to select existing assets`, '#ffb347');
             return;
         }
-        let n = 0;
+        const before = impSelCount();
         shapes.forEach(s => {
-            imp.shapes.push({ kind: 'lasso', ring: s.ring, name: s.name || srcName });
-            if (imp.target === 'assets') {
-                imp.assetIndex.forEach(a => {
-                    if (imp.assetSel.has(a.id)) return;
-                    if (pointInPolygon(a.centroid.lat, a.centroid.lng, s.ring) || a.ring.some(v => pointInPolygon(v.lat, v.lng, s.ring))) { imp.assetSel.add(a.id); n++; }
-                });
-            } else {
-                imp.points.forEach(p => {
-                    if (p.done || p.sel) return;
-                    if (pointInPolygon(p.lat, p.lng, s.ring)) { p.sel = true; n++; }
-                });
-            }
+            imp.shapes.push({ id: imp.shapeSeq++, kind: 'lasso', ring: s.ring, handle: ringCentroid(s.ring), name: s.name || srcName });
         });
-        if (imp.target === 'assets') impRenderAssetSel(); else impRenderStaged();
-        impRenderShapes(); impSyncUi();
-        impStatus(`⬆ shape "${impEsc(srcName)}" applied — ${shapes.length} polygon(s), <b>+${n}</b> ${imp.target === 'assets' ? 'existing asset(s)' : 'point(s)'} selected`);
+        impRefreshAfterSelChange();
+        impStatus(`⬆ shape "${impEsc(srcName)}" applied — ${shapes.length} polygon(s), <b>+${impSelCount() - before}</b> ${imp.target === 'assets' ? 'existing asset(s)' : 'point(s)'} selected. ALT+drag a numbered handle to move a polygon.`);
     }
     function impHandleShapeFile(file) {
         if (!file) return;
@@ -16303,8 +16315,8 @@
                 if (bd > IMP_PICK_PX) hit = null;
             }
             if (!hit) return;
-            if (imp.assetSel.has(hit.id)) imp.assetSel.delete(hit.id); else imp.assetSel.add(hit.id);
-            impRenderAssetSel(); impSyncUi();
+            imp.assetManual.set(hit.id, !imp.assetSel.has(hit.id));     // sticky override — survives shape moves
+            impRefreshAfterSelChange();
         } else {
             let best = null, bd = Infinity;
             imp.points.forEach(p => {
@@ -16312,9 +16324,24 @@
                 try { const d = cp.distanceTo(map.latLngToContainerPoint([p.lat, p.lng])); if (d < bd) { bd = d; best = p; } } catch (e) {}
             });
             if (!best || bd > IMP_PICK_PX) return;
-            best.sel = !best.sel;
-            impRenderStaged(); impSyncUi();
+            best.selManual = !best.sel;                                  // sticky override — survives shape moves
+            impRefreshAfterSelChange();
         }
+    }
+    function impShapeHandleAt(map, ll) {
+        let cp; try { cp = map.latLngToContainerPoint([ll.lat, ll.lng]); } catch (e) { return null; }
+        for (const s of imp.shapes) {
+            const h = s.kind === 'circle' ? s.center : s.handle;
+            try { if (cp.distanceTo(map.latLngToContainerPoint([h.lat, h.lng])) <= IMP_PICK_PX) return s; } catch (e) {}
+        }
+        return null;
+    }
+    function impEndShapeDrag() {
+        const s = imp.dragShape;
+        imp.dragShape = null; imp.dragLast = null;
+        if (!s) return;
+        impRefreshAfterSelChange();
+        impStatus(`${s.kind === 'circle' ? '⭕' : '🖊'} shape ${s.id} moved — <b>${impSelCount()}</b> ${imp.target === 'assets' ? 'existing asset(s)' : 'point(s)'} selected now`);
     }
     // ---- map interaction: same capture-phase harness + ALT-gate as NFZ Trace ----
     function impWire() {
@@ -16325,12 +16352,31 @@
             if (!imp.mode || ev.button !== 0 || !ev.altKey) return;      // plain click stays free (pan / native edit)
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
             ev.preventDefault(); ev.stopPropagation();
+            // grabbing a shape's numbered handle beats the mode action — move it
+            const hs = impShapeHandleAt(map, ll);
+            if (hs) { imp.dragShape = hs; imp.dragLast = ll; return; }
             if (imp.mode === 'circle') { impApplyCircle(ll); return; }
             if (imp.mode === 'pick') { impPickAt(ll); return; }
             imp.lassoRing = [ll];                                        // 'lasso' — freehand starts
             imp.lassoDownPt = { x: ev.clientX, y: ev.clientY };
         };
         imp._onMove = (ev) => {
+            if (imp.dragShape) {                                         // shape move in progress
+                ev.preventDefault(); ev.stopPropagation();
+                let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+                if (!(ev.buttons & 1)) { impEndShapeDrag(); return; }    // released outside the container
+                const dLat = ll.lat - imp.dragLast.lat, dLng = ll.lng - imp.dragLast.lng;
+                if (!dLat && !dLng) return;
+                const s = imp.dragShape;
+                if (s.kind === 'circle') { s.center.lat += dLat; s.center.lng += dLng; }
+                else {
+                    s.ring = s.ring.map(p => ({ lat: p.lat + dLat, lng: p.lng + dLng }));
+                    s.handle = { lat: s.handle.lat + dLat, lng: s.handle.lng + dLng };
+                }
+                imp.dragLast = ll;
+                impRefreshAfterSelChange();                              // live counts while dragging
+                return;
+            }
             if (imp.mode !== 'lasso' || !imp.lassoRing) return;
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
             ev.preventDefault(); ev.stopPropagation();
@@ -16350,6 +16396,7 @@
             impRenderShapes();
         };
         imp._onUp = (ev) => {
+            if (imp.dragShape) { ev.preventDefault(); ev.stopPropagation(); impEndShapeDrag(); return; }
             if (imp.mode !== 'lasso' || !imp.lassoRing) return;
             ev.preventDefault(); ev.stopPropagation();
             const ring = imp.lassoRing;
@@ -16361,7 +16408,8 @@
             if (!imp.mode) return;
             if ((ev.key || '').toLowerCase() === 'escape') {
                 ev.preventDefault(); ev.stopImmediatePropagation();
-                if (imp.lassoRing) { imp.lassoRing = null; impRenderShapes(); }
+                if (imp.dragShape) { impEndShapeDrag(); }
+                else if (imp.lassoRing) { imp.lassoRing = null; impRenderShapes(); }
                 else impSetMode(null);
             }
         };
@@ -16383,6 +16431,7 @@
         if (map && !advDraw.active && !nfzDraw.active) { try { map.getContainer().style.cursor = ''; } catch (e) {} }
         imp._container = null;
         imp.lassoRing = null;
+        imp.dragShape = null; imp.dragLast = null;
     }
     function impSetMode(mode) {
         if (mode && !impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
@@ -16419,6 +16468,7 @@
                 <button id="aim-imp-clearsel" style="${btnCss('160,160,160')}">Clear selection</button>
                 <button id="aim-imp-clearshapes" style="${btnCss('160,160,160')}">Clear shapes</button>
             </div>
+            <div id="aim-imp-shapes" style="margin-bottom:8px"></div>
             <div id="aim-imp-typemap" style="margin-bottom:8px"></div>
             <div id="aim-imp-commitrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Square side of each created asset — same shape ➕ Create asset uses. Reshape in Percepto afterwards (auto-reshape is feature #251).">Size <input type="number" id="aim-imp-size" min="5" max="2000" step="5" style="width:52px;${inCss}"> ft</label>
@@ -16469,16 +16519,18 @@
             inp.click();
         };
         q('aim-imp-selall').onclick = () => {
-            if (imp.target === 'assets') { imp.assetIndex.forEach(a => imp.assetSel.add(a.id)); impRenderAssetSel(); }
-            else { imp.points.forEach(p => { if (!p.done) p.sel = true; }); impRenderStaged(); }
-            impSyncUi();
+            if (imp.target === 'assets') { (imp.assetIndex || []).forEach(a => imp.assetManual.set(a.id, true)); }
+            else imp.points.forEach(p => { if (!p.done) p.selManual = true; });
+            impRefreshAfterSelChange();
         };
         q('aim-imp-clearsel').onclick = () => {
-            if (imp.target === 'assets') { imp.assetSel.clear(); impRenderAssetSel(); }
-            else { imp.points.forEach(p => { p.sel = false; }); impRenderStaged(); }
-            impSyncUi();
+            // full reset for the active target: shapes AND manual picks
+            imp.shapes = [];
+            if (imp.target === 'assets') imp.assetManual.clear();
+            else imp.points.forEach(p => { delete p.selManual; });
+            impRefreshAfterSelChange();
         };
-        q('aim-imp-clearshapes').onclick = () => { imp.shapes = []; impClearShapeLayers(); impSyncUi(); };
+        q('aim-imp-clearshapes').onclick = () => { imp.shapes = []; impRefreshAfterSelChange(); impStatus(`shapes cleared — <b>${impSelCount()}</b> still selected via ☝ manual picks`); };
         const szEl = q('aim-imp-size');
         szEl.value = impSizeFt;
         szEl.oninput = () => { const v = parseFloat(szEl.value); if (isFinite(v) && v >= 5 && v <= 2000) impSizeFt = v; };
@@ -16490,11 +16542,12 @@
         const dmEl = q('aim-imp-delmode');
         dmEl.checked = imp.target === 'assets';
         dmEl.onchange = () => {
+            // shapes are geometry — they carry across the switch and select
+            // the NEW target; each target keeps its own sticky manual picks.
             imp.target = dmEl.checked ? 'assets' : 'staged';
-            imp.shapes = []; impClearShapeLayers();
-            if (imp.target === 'assets') { impBuildAssetIndex(); impStatus('🗑 Delete mode — ⭕/🖊/☝ now select EXISTING assets (red). Nothing is deleted until the confirm ceremony.', '#ff8a80'); }
-            else { imp.assetSel.clear(); impClearAssetLayers(); impStatus('Back to staged-point selection.'); }
-            impSyncUi();
+            if (imp.target === 'assets') { impBuildAssetIndex(); impStatus('🗑 Delete mode — the tools AND existing shapes now select EXISTING assets (red). Nothing is deleted until the confirm ceremony.', '#ff8a80'); }
+            else { impClearAssetLayers(); impStatus('Back to staged-point selection — shapes re-applied to staged points.'); }
+            impRefreshAfterSelChange();
         };
         q('aim-imp-delete').onclick = () => { impOpenDeleteModal(); };
         q('aim-imp-undodel').onclick = () => { impUndoDeleteBatch(); };
@@ -16572,8 +16625,100 @@
             };
         });
     }
+    // ---- Shapes list: per-shape count / type breakdown / dups / size, ✕
+    // remove, union totals. Overlapping shapes count a point in EVERY shape
+    // it sits in; the union (what commits/deletes) counts it once.
+    function impShapeStats(s) {
+        const types = new Map();
+        let n = 0, dups = 0;
+        if (imp.target === 'assets') {
+            (imp.assetIndex || []).forEach(a => {
+                if (!impAssetInShape(s, a)) return;
+                n++;
+                const t = a.subtype || '(no subtype)';
+                types.set(t, (types.get(t) || 0) + 1);
+            });
+        } else {
+            imp.points.forEach(p => {
+                if (p.done || !impShapeContains(s, p.lat, p.lng)) return;
+                n++;
+                if (p.dup) dups++;
+                const t = p.typeRaw || '(no type)';
+                types.set(t, (types.get(t) || 0) + 1);
+            });
+        }
+        return { n, dups, types };
+    }
+    function impFmtTypes(types, max) {
+        const sorted = [...types.entries()].sort((a, b) => b[1] - a[1]);
+        const shown = sorted.slice(0, max).map(([t, c]) => `${impEsc(t)} ×${c}`).join(' · ');
+        return shown + (sorted.length > max ? ` · +${sorted.length - max} more` : '');
+    }
+    function impShapeSizeLabel(s) {
+        const AC = 4046.8564;
+        if (s.kind === 'circle') {
+            const r = s.radiusM * M_TO_FT;
+            const rTxt = r >= 1320 ? `${(s.radiusM / MI_TO_M).toFixed(2)} mi` : `${Math.round(r)} ft`;
+            return `r ${rTxt} · ${(Math.PI * s.radiusM * s.radiusM / AC).toFixed(0)} ac`;
+        }
+        let area = 0; try { area = polygonAreaM2(s.ring); } catch (e) {}
+        return `${s.ring.length} verts · ${(area / AC).toFixed(0)} ac`;
+    }
+    function impRenderShapesUi() {
+        const el = document.getElementById('aim-imp-shapes');
+        if (!el) return;
+        if (!imp.shapes.length) { el.innerHTML = ''; return; }
+        const isAssets = imp.target === 'assets';
+        const rows = imp.shapes.map(s => {
+            const st = impShapeStats(s);
+            const label = s.kind === 'circle' ? `⭕ ${s.id}` : `🖊 ${s.id}${s.name ? ` ${impEsc(s.name)}` : ''}`;
+            return `<div style="display:flex;gap:8px;align-items:baseline;padding:2px 0;border-bottom:1px solid rgba(255,255,255,0.06);font-size:11px">
+                <span style="color:${isAssets ? '#ff8a80' : '#7adfe6'};font-weight:600;min-width:44px">${label}</span>
+                <span style="color:#cfd6dc;white-space:nowrap"><b>${st.n}</b> ${isAssets ? 'asset' : 'pt'}${st.n === 1 ? '' : 's'}${st.dups ? ` <span style="color:#ffd400">(${st.dups} dup)</span>` : ''}</span>
+                <span style="color:#888;white-space:nowrap">${impShapeSizeLabel(s)}</span>
+                <span style="color:#9ad;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${st.types.size ? impFmtTypes(st.types, 4) : ''}</span>
+                <button data-impshapedel="${s.id}" title="Remove this shape (manual ☝ picks survive)" style="background:transparent;color:#ff8a80;border:1px solid rgba(255,90,90,0.4);border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px;flex:none">✕</button>
+            </div>`;
+        }).join('');
+        // union totals — what will actually commit / delete
+        const selTypes = new Map();
+        let selN = 0, selDups = 0, manAdd = 0, manRem = 0;
+        if (isAssets) {
+            (imp.assetIndex || []).forEach(a => {
+                if (!imp.assetSel.has(a.id)) return;
+                selN++;
+                const t = a.subtype || '(no subtype)';
+                selTypes.set(t, (selTypes.get(t) || 0) + 1);
+            });
+            imp.assetManual.forEach(v => { if (v) manAdd++; else manRem++; });
+        } else {
+            imp.points.forEach(p => {
+                if (p.done) return;
+                if (p.selManual === true) manAdd++; else if (p.selManual === false) manRem++;
+                if (!p.sel) return;
+                selN++;
+                if (p.dup) selDups++;
+                const t = p.typeRaw || '(no type)';
+                selTypes.set(t, (selTypes.get(t) || 0) + 1);
+            });
+        }
+        el.innerHTML = `<div style="padding:6px 8px;background:rgba(122,223,230,0.05);border:1px dashed rgba(122,223,230,0.3);border-radius:3px">
+            <div style="font-size:10px;color:#9ad;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Shapes — numbered like their map handles · ALT+drag a handle to move · overlaps count in every shape, select once</div>
+            ${rows}
+            <div style="padding-top:4px;font-size:11px;color:#cfd6dc"><b style="color:${isAssets ? '#ff8a80' : '#5fff5f'}">Union: ${selN} ${isAssets ? 'existing asset(s)' : 'point(s)'} selected</b>${selDups ? ` <span style="color:#ffd400">(${selDups} dup-flagged)</span>` : ''}${(manAdd || manRem) ? ` <span style="color:#888">· ☝ manual +${manAdd} / −${manRem}</span>` : ''}${selTypes.size ? `<br><span style="color:#9ad">${impFmtTypes(selTypes, 6)}</span>` : ''}</div>
+        </div>`;
+        el.querySelectorAll('button[data-impshapedel]').forEach(b => {
+            b.onclick = () => {
+                const id = Number(b.getAttribute('data-impshapedel'));
+                imp.shapes = imp.shapes.filter(s => s.id !== id);
+                impRefreshAfterSelChange();
+                impStatus(`shape ${id} removed — <b>${impSelCount()}</b> selected now (manual ☝ picks kept)`);
+            };
+        });
+    }
     function impSyncUi() {
         try {
+            impRenderShapesUi();
             const live = imp.points.filter(p => !p.done);
             const selN = imp.target === 'assets' ? imp.assetSel.size : live.filter(p => p.sel).length;
             const show = (id, on, flex) => { const el = document.getElementById(id); if (el) el.style.display = on ? (flex ? 'flex' : '') : 'none'; };
@@ -16676,7 +16821,7 @@
         const byId = new Set(after.map(e => e.id));
         const verified = created.filter(c => byId.has(c.id));
         imp.lastCreated = verified.map(c => c.id);
-        impBuildAssetIndex(); impComputeDups(); impRenderStaged(); impSyncUi();
+        impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
         if (!aborted) impStatus(`DONE: <b>${ok}/${plan.length}</b> asset(s) created${fail ? `, <span style="color:#ff6060">${fail} FAILED (kept staged + selected)</span>` : ''}${skippedDups ? ` · ${skippedDups} dup(s) skipped` : ''} · verify ${verified.length}/${created.length} present · reload to edit them natively`, fail ? '#ffb347' : '#5fff5f');
         showToast(fail ? `Import: ${ok} created, ${fail} FAILED — see the importer panel` : `✓ ${ok} asset(s) created`, fail ? 'rgba(255,96,96,0.55)' : undefined);
     }
@@ -16699,7 +16844,7 @@
         }
         imp.lastCreated = imp.lastCreated.filter(id => !deleted.has(id));
         try { await fetchMapObjects(genState.siteID, true); } catch (e) {}
-        impBuildAssetIndex(); impComputeDups(); impSyncUi();
+        impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
         showToast(fail ? `Undo: ${ok} deleted, ${fail} FAILED` : `↩ ${ok} imported asset(s) deleted`, fail ? 'rgba(255,96,96,0.55)' : undefined);
     }
     // ---- Delete Guard detection: it has no beacon — round-trip the control
@@ -16932,8 +17077,10 @@
         // bank ONLY what actually deleted — the ↩ Undo batch source
         const deletedIds = new Set(results.deleted.map(d => d.id));
         imp.lastDelete = { siteID: sid, when: new Date().toISOString(), entities: snap.entities.filter(e => deletedIds.has(e.id)) };
-        imp.assetSel.clear();
-        impBuildAssetIndex(); impClearAssetLayers(); impComputeDups(); impRenderStaged(); impSyncUi();
+        // selection consumed: drop shapes + manual picks so surviving assets
+        // inside the old shapes don't come straight back as selected
+        imp.shapes = []; imp.assetManual.clear();
+        impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
         const report = { ranAt: new Date().toISOString(), siteID: sid, deleted: results.deleted, failed: results.failed, aborted: results.aborted, verifyProblems: results.verifyProblems };
         console.log(`${TAG} 📥 asset bulk delete done: ${results.deleted.length} deleted, ${results.failed.length} failed${results.aborted ? ' (ABORTED)' : ''}`, report);
         ui.finished(report);
@@ -16967,7 +17114,7 @@
         bank.entities = bank.entities.filter(e => !restoredSet.has(e.id));   // failed ones stay retryable
         if (!bank.entities.length) imp.lastDelete = null;
         try { await fetchMapObjects(bank.siteID, true); } catch (e) {}
-        impBuildAssetIndex(); impComputeDups(); impSyncUi();
+        impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
         impStatus(`↩ Undo batch: <b>${ok}</b> restored${fail ? `, <span style="color:#ff6060">${fail} FAILED (kept banked — retry)</span>` : ''} · restored assets have NEW ids · reload to see them natively`, fail ? '#ffb347' : '#5fff5f');
         showToast(fail ? `Restore: ${ok} ok, ${fail} FAILED` : `↩ ${ok} asset(s) restored`, fail ? 'rgba(255,96,96,0.55)' : undefined);
     }
@@ -19837,7 +19984,7 @@
         if (imp.siteID && String(imp.siteID) !== String(siteID)) {
             // a different site must never inherit another site's staged points
             imp.fileName = null; imp.headers = []; imp.rows = []; imp.mapping = null;
-            imp.points = []; imp.shapes = []; imp.assetSel.clear();
+            imp.points = []; imp.shapes = []; imp.shapeSeq = 1; imp.assetSel.clear(); imp.assetManual.clear();
             imp.lastCreated = []; imp.lastDelete = null; imp.assetIndex = null;
             imp.target = 'staged'; imp.siteID = String(siteID);
         }
