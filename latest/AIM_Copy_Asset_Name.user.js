@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.250
+// @version      4.251
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.250';
+    const SCRIPT_VERSION = '4.251';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -15860,6 +15860,7 @@
         shapes: [],                                 // [{id, kind:'circle',center,radiusM} | {id, kind:'lasso',ring,handle,name?}]
         shapeSeq: 1,
         dragShape: null, dragLast: null,            // ALT+drag on a shape's numbered handle moves it
+        editDrag: null,                             // ✎ Edit: {s, i} vertex drag | {s, radius:true} circle resize
         assetSel: new Set(),                        // DERIVED: selected EXISTING asset ids (delete mode)
         assetManual: new Map(),                     // asset id → true/false manual override
         renderer: null, layers: [], shapeLayers: [], assetLayers: [], lassoLayer: null,
@@ -16157,6 +16158,28 @@
                 });
                 const mk = L.marker([h.lat, h.lng], { icon, interactive: false });
                 mk.addTo(map); imp.shapeLayers.push(mk);
+                // ✎ Edit mode: vertex dots (ALT+drag=move, ALT+right-click=delete),
+                // midpoint dots (ALT+click/drag=insert a new vertex), circle edge
+                // dot (ALT+drag=resize). Canvas renderer — dense freehand rings
+                // would otherwise flood the SVG pane.
+                if (imp.mode === 'edit') {
+                    if (!imp.renderer) { try { imp.renderer = L.canvas({ padding: 0.3 }); } catch (e2) {} }
+                    const rOpt = imp.renderer ? { renderer: imp.renderer } : {};
+                    if (s.kind === 'circle') {
+                        const ep = impCircleEdgePoint(s);
+                        const em = L.circleMarker([ep.lat, ep.lng], Object.assign({ radius: 5, color: col, weight: 2, fillColor: '#fff', fillOpacity: 1, interactive: false }, rOpt));
+                        em.addTo(map); imp.shapeLayers.push(em);
+                    } else {
+                        const n = s.ring.length;
+                        for (let i = 0; i < n; i++) {
+                            const v = s.ring[i], w = s.ring[(i + 1) % n];
+                            const vm = L.circleMarker([v.lat, v.lng], Object.assign({ radius: 4.5, color: '#fff', weight: 1.5, fillColor: col, fillOpacity: 1, interactive: false }, rOpt));
+                            vm.addTo(map); imp.shapeLayers.push(vm);
+                            const mm = L.circleMarker([(v.lat + w.lat) / 2, (v.lng + w.lng) / 2], Object.assign({ radius: 3, color: col, weight: 1, opacity: 0.8, fillColor: '#1f2228', fillOpacity: 1, interactive: false }, rOpt));
+                            mm.addTo(map); imp.shapeLayers.push(mm);
+                        }
+                    }
+                }
             } catch (e) {}
         });
         // in-progress freehand lasso
@@ -16343,6 +16366,49 @@
         impRefreshAfterSelChange();
         impStatus(`${s.kind === 'circle' ? '⭕' : '🖊'} shape ${s.id} moved — <b>${impSelCount()}</b> ${imp.target === 'assets' ? 'existing asset(s)' : 'point(s)'} selected now`);
     }
+    // ---- ✎ Edit mode helpers ----
+    function impCircleEdgePoint(s) {
+        const proj = genProjector(s.center.lat, s.center.lng);
+        return proj.inv({ x: s.radiusM, y: 0 });                         // east edge = the resize handle
+    }
+    // 24-point polygon standing in for the circle — same id, fully vertex-editable.
+    function impCircleToPolygon(s) {
+        const proj = genProjector(s.center.lat, s.center.lng);
+        const ring = [];
+        for (let k = 0; k < 24; k++) {
+            const a = (k / 24) * 2 * Math.PI;
+            ring.push(proj.inv({ x: Math.cos(a) * s.radiusM, y: Math.sin(a) * s.radiusM }));
+        }
+        s.kind = 'lasso'; s.ring = ring; s.handle = { lat: s.center.lat, lng: s.center.lng };
+        delete s.center; delete s.radiusM;
+    }
+    // What ✎ is grabbing: a vertex beats a midpoint beats a circle edge.
+    function impEditTargetAt(map, ll) {
+        let cp; try { cp = map.latLngToContainerPoint([ll.lat, ll.lng]); } catch (e) { return null; }
+        const px = (p) => { try { return cp.distanceTo(map.latLngToContainerPoint([p.lat, p.lng])); } catch (e) { return Infinity; } };
+        for (const s of imp.shapes) {
+            if (s.kind !== 'lasso') continue;
+            for (let i = 0; i < s.ring.length; i++) if (px(s.ring[i]) <= IMP_PICK_PX) return { s, i, type: 'vert' };
+        }
+        for (const s of imp.shapes) {
+            if (s.kind === 'lasso') {
+                const n = s.ring.length;
+                for (let i = 0; i < n; i++) {
+                    const v = s.ring[i], w = s.ring[(i + 1) % n];
+                    if (px({ lat: (v.lat + w.lat) / 2, lng: (v.lng + w.lng) / 2 }) <= IMP_PICK_PX) return { s, i, type: 'mid' };
+                }
+            } else if (px(impCircleEdgePoint(s)) <= IMP_PICK_PX) return { s, type: 'radius' };
+        }
+        return null;
+    }
+    function impEndEditDrag() {
+        const d = imp.editDrag;
+        imp.editDrag = null;
+        if (!d) return;
+        if (!d.radius) d.s.handle = ringCentroid(d.s.ring);
+        impRefreshAfterSelChange();
+        impStatus(`✎ shape ${d.s.id} ${d.radius ? `radius set — ${impShapeSizeLabel(d.s)}` : `reshaped (${d.s.ring.length} points)`} — <b>${impSelCount()}</b> selected now`);
+    }
     // ---- map interaction: same capture-phase harness + ALT-gate as NFZ Trace ----
     function impWire() {
         const map = getLeafletMap(); if (!map) return;
@@ -16352,6 +16418,21 @@
             if (!imp.mode || ev.button !== 0 || !ev.altKey) return;      // plain click stays free (pan / native edit)
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
             ev.preventDefault(); ev.stopPropagation();
+            if (imp.mode === 'edit') {                                   // ✎ vertex / midpoint / circle-edge grab
+                const t = impEditTargetAt(map, ll);
+                if (t) {
+                    if (t.type === 'mid') {                              // insert a new vertex, start dragging it
+                        t.s.ring.splice(t.i + 1, 0, { lat: ll.lat, lng: ll.lng });
+                        imp.editDrag = { s: t.s, i: t.i + 1 };
+                        impRefreshAfterSelChange();
+                    } else if (t.type === 'radius') imp.editDrag = { s: t.s, radius: true };
+                    else imp.editDrag = { s: t.s, i: t.i };
+                    return;
+                }
+                const eh = impShapeHandleAt(map, ll);                    // whole-shape move still works in ✎
+                if (eh) { imp.dragShape = eh; imp.dragLast = ll; }
+                return;                                                  // ✎ never creates new shapes
+            }
             // grabbing a shape's numbered handle beats the mode action — move it
             const hs = impShapeHandleAt(map, ll);
             if (hs) { imp.dragShape = hs; imp.dragLast = ll; return; }
@@ -16361,6 +16442,16 @@
             imp.lassoDownPt = { x: ev.clientX, y: ev.clientY };
         };
         imp._onMove = (ev) => {
+            if (imp.editDrag) {                                          // ✎ vertex / radius drag in progress
+                ev.preventDefault(); ev.stopPropagation();
+                let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+                if (!(ev.buttons & 1)) { impEndEditDrag(); return; }     // released outside the container
+                const d = imp.editDrag;
+                if (d.radius) d.s.radiusM = Math.max(5, approxMeters(d.s.center.lat, d.s.center.lng, ll.lat, ll.lng));
+                else d.s.ring[d.i] = { lat: ll.lat, lng: ll.lng };
+                impRefreshAfterSelChange();                              // live counts while dragging
+                return;
+            }
             if (imp.dragShape) {                                         // shape move in progress
                 ev.preventDefault(); ev.stopPropagation();
                 let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
@@ -16396,6 +16487,7 @@
             impRenderShapes();
         };
         imp._onUp = (ev) => {
+            if (imp.editDrag) { ev.preventDefault(); ev.stopPropagation(); impEndEditDrag(); return; }
             if (imp.dragShape) { ev.preventDefault(); ev.stopPropagation(); impEndShapeDrag(); return; }
             if (imp.mode !== 'lasso' || !imp.lassoRing) return;
             ev.preventDefault(); ev.stopPropagation();
@@ -16408,14 +16500,30 @@
             if (!imp.mode) return;
             if ((ev.key || '').toLowerCase() === 'escape') {
                 ev.preventDefault(); ev.stopImmediatePropagation();
-                if (imp.dragShape) { impEndShapeDrag(); }
+                if (imp.editDrag) { impEndEditDrag(); }
+                else if (imp.dragShape) { impEndShapeDrag(); }
                 else if (imp.lassoRing) { imp.lassoRing = null; impRenderShapes(); }
                 else impSetMode(null);
             }
         };
+        // ✎ ALT+right-click a vertex deletes it (capture — beats the inspector's
+        // right-click hit-test while Edit is armed).
+        imp._onCtx = (ev) => {
+            if (imp.mode !== 'edit' || !ev.altKey) return;
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            const t = impEditTargetAt(map, ll);
+            if (!t || t.type !== 'vert') return;
+            ev.preventDefault(); ev.stopImmediatePropagation();
+            if (t.s.ring.length <= 3) { showToast('A shape needs at least 3 points', 'rgba(255,179,71,0.6)'); return; }
+            t.s.ring.splice(t.i, 1);
+            t.s.handle = ringCentroid(t.s.ring);
+            impRefreshAfterSelChange();
+            impStatus(`✎ vertex removed from shape ${t.s.id} — ${t.s.ring.length} points, <b>${impSelCount()}</b> selected now`);
+        };
         imp._container.addEventListener('mousedown', imp._onDown, true);
         imp._container.addEventListener('mousemove', imp._onMove, true);
         imp._container.addEventListener('mouseup', imp._onUp, true);
+        imp._container.addEventListener('contextmenu', imp._onCtx, true);
         try { uwin().addEventListener('keydown', imp._onKey, true); } catch (e) {}
         try { map.getContainer().style.cursor = 'crosshair'; } catch (e) {}
     }
@@ -16425,6 +16533,7 @@
             try { c.removeEventListener('mousedown', imp._onDown, true); } catch (e) {}
             try { c.removeEventListener('mousemove', imp._onMove, true); } catch (e) {}
             try { c.removeEventListener('mouseup', imp._onUp, true); } catch (e) {}
+            try { c.removeEventListener('contextmenu', imp._onCtx, true); } catch (e) {}
         }
         try { uwin().removeEventListener('keydown', imp._onKey, true); } catch (e) {}
         const map = getLeafletMap();
@@ -16432,6 +16541,7 @@
         imp._container = null;
         imp.lassoRing = null;
         imp.dragShape = null; imp.dragLast = null;
+        imp.editDrag = null;
     }
     function impSetMode(mode) {
         if (mode && !impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
@@ -16442,6 +16552,7 @@
             try { if (genDraw.active) { const b = document.getElementById('aim-gen-draw'); if (b) b.click(); } } catch (e) {}
             impWire();
         } else impUnwire();
+        impRenderShapes();   // ✎ vertex/midpoint dots appear only while Edit is armed
         impSyncUi();
     }
     // ---- panel body (built in JS — the generator template just carries the container) ----
@@ -16463,6 +16574,7 @@
                     <select id="aim-imp-radius-unit" style="${inCss};text-align:left"><option value="mi">mi</option><option value="ft">ft</option></select></label>
                 <button id="aim-imp-lasso" style="${btnCss('122,223,230')}">🖊 Lasso</button>
                 <button id="aim-imp-pick" style="${btnCss('122,223,230')}">☝ Pick</button>
+                <button id="aim-imp-edit" title="Edit shapes — ALT+drag a vertex dot to move it · ALT+click a small midpoint dot to insert a new vertex there (keep dragging to place it) · ALT+right-click a vertex to delete it · ALT+drag a circle's white edge dot to resize it · numbered handles still move whole shapes. To add points to a CIRCLE, first convert it with the ⬡ button on its row below." style="${btnCss('122,223,230')}">✎ Edit</button>
                 <button id="aim-imp-shape" title="Upload a KML whose polygon(s) ARE the access shape — everything inside gets selected, exactly like a drawn lasso. Additive; works in 🗑 Delete mode too. A polygon-only KML dropped on the panel routes here automatically." style="${btnCss('186,140,255')}">⬆ Shape (KML)</button>
                 <button id="aim-imp-selall" style="${btnCss('160,160,160')}">Select all</button>
                 <button id="aim-imp-clearsel" style="${btnCss('160,160,160')}">Clear selection</button>
@@ -16511,6 +16623,7 @@
         q('aim-imp-circle').onclick = () => impSetMode(imp.mode === 'circle' ? null : 'circle');
         q('aim-imp-lasso').onclick = () => impSetMode(imp.mode === 'lasso' ? null : 'lasso');
         q('aim-imp-pick').onclick = () => impSetMode(imp.mode === 'pick' ? null : 'pick');
+        q('aim-imp-edit').onclick = () => impSetMode(imp.mode === 'edit' ? null : 'edit');
         q('aim-imp-shape').onclick = () => {
             const inp = document.createElement('input');
             inp.type = 'file';
@@ -16677,6 +16790,7 @@
                 <span style="color:#cfd6dc;white-space:nowrap"><b>${st.n}</b> ${isAssets ? 'asset' : 'pt'}${st.n === 1 ? '' : 's'}${st.dups ? ` <span style="color:#ffd400">(${st.dups} dup)</span>` : ''}</span>
                 <span style="color:#888;white-space:nowrap">${impShapeSizeLabel(s)}</span>
                 <span style="color:#9ad;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${st.types.size ? impFmtTypes(st.types, 4) : ''}</span>
+                ${s.kind === 'circle' ? `<button data-impshapepoly="${s.id}" title="Convert this circle to a 24-point polygon so ✎ Edit can add / move / delete its points" style="background:transparent;color:#7adfe6;border:1px solid rgba(122,223,230,0.4);border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px;flex:none">⬡</button>` : ''}
                 <button data-impshapedel="${s.id}" title="Remove this shape (manual ☝ picks survive)" style="background:transparent;color:#ff8a80;border:1px solid rgba(255,90,90,0.4);border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px;flex:none">✕</button>
             </div>`;
         }).join('');
@@ -16707,6 +16821,15 @@
             ${rows}
             <div style="padding-top:4px;font-size:11px;color:#cfd6dc"><b style="color:${isAssets ? '#ff8a80' : '#5fff5f'}">Union: ${selN} ${isAssets ? 'existing asset(s)' : 'point(s)'} selected</b>${selDups ? ` <span style="color:#ffd400">(${selDups} dup-flagged)</span>` : ''}${(manAdd || manRem) ? ` <span style="color:#888">· ☝ manual +${manAdd} / −${manRem}</span>` : ''}${selTypes.size ? `<br><span style="color:#9ad">${impFmtTypes(selTypes, 6)}</span>` : ''}</div>
         </div>`;
+        el.querySelectorAll('button[data-impshapepoly]').forEach(b => {
+            b.onclick = () => {
+                const s = imp.shapes.find(x => x.id === Number(b.getAttribute('data-impshapepoly')));
+                if (!s || s.kind !== 'circle') return;
+                impCircleToPolygon(s);
+                impRefreshAfterSelChange();
+                impStatus(`⭕→⬡ shape ${s.id} is now a 24-point polygon — arm ✎ Edit to add / move / delete points`);
+            };
+        });
         el.querySelectorAll('button[data-impshapedel]').forEach(b => {
             b.onclick = () => {
                 const id = Number(b.getAttribute('data-impshapedel'));
@@ -16734,6 +16857,7 @@
             modeBtn('aim-imp-circle', 'circle', '⭕ Circle', '⭕ ON — ALT+click centers a circle · Esc=off');
             modeBtn('aim-imp-lasso', 'lasso', '🖊 Lasso', '🖊 ON — ALT+drag a loop · Esc=off');
             modeBtn('aim-imp-pick', 'pick', '☝ Pick', '☝ ON — ALT+click toggles one · Esc=off');
+            modeBtn('aim-imp-edit', 'edit', '✎ Edit', '✎ ON — ALT+drag vertex=move · midpoint dot=add · right-click=delete · circle edge=resize · Esc=off');
             const cb = document.getElementById('aim-imp-commit');
             if (cb) {
                 const dupsIn = live.filter(p => p.sel && p.dup).length;
