@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.89
+// @version      2.90
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.89';
+    const SCRIPT_VERSION = '2.90';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -392,6 +392,7 @@
                     if (v !== mpvAllOn) {
                         mpvAllOn = v;
                         gmSet(CACHE_KEY_MPV_ALL, mpvAllOn);
+                        try { mpvSyncDotsCheckbox(); } catch (e) {}
                         if (mpvFrameOk()) try { mpvAllChanged(); } catch (e) {}
                     }
                 } else if (msg.toggleId === 'default-snap-agl') {
@@ -15756,6 +15757,32 @@ ${snapPlacemarks}
         }, 900);
     }
 
+    // v2.90: flip "Show ALL missions" from the 👁 panel's dots checkbox.
+    // Same setting as the Control Panel toggle — mirror the change back to
+    // CP over the control channel (CP handles inbound SET_TOGGLE by writing
+    // its prefs without re-broadcasting), so the two never fight.
+    function mpvSetAllDots(v) {
+        v = !!v;
+        if (v === mpvAllOn) return;
+        mpvAllOn = v;
+        gmSet(CACHE_KEY_MPV_ALL, mpvAllOn);
+        try { mpvAllChanged(); } catch (e) { console.warn(`${TAG} [mpv] dots redraw failed:`, e); }
+        try {
+            if (controlChannel) controlChannel.postMessage({
+                type: 'SET_TOGGLE', scriptId: SCRIPT_ID, toggleId: 'preview-all',
+                value: v, enabled: v,
+            });
+        } catch (e) { console.warn(`${TAG} [mpv] dots CP sync failed:`, e); }
+    }
+
+    // Keep the open panel's dots checkbox honest when the setting changes
+    // elsewhere (Control Panel, or the same toggle in the other frame).
+    function mpvSyncDotsCheckbox() {
+        if (!mpv.panelEl) return;
+        const cb = mpv.panelEl.querySelector('input[data-mpv-alldots]');
+        if (cb && cb.checked !== mpvAllOn) cb.checked = mpvAllOn;
+    }
+
     // "Show ALL missions" toggled — fetch if the cache is cold, then redraw.
     function mpvAllChanged() {
         const sid = getCurrentSiteID();
@@ -15796,6 +15823,9 @@ ${snapPlacemarks}
             <div style="display:flex;gap:6px;padding:6px 10px;border-bottom:1px solid rgba(255,255,255,0.08);">
                 <button data-mpv-all style="${btnCss}">All</button>
                 <button data-mpv-none style="${btnCss}">None</button>
+                <label title="Show ALL missions as light nav/snap dots (no lines or labels) — same setting as the Control Panel's '👁 Show ALL missions'" style="display:flex;align-items:center;gap:4px;cursor:pointer;color:#e6e6e6;font-size:11px;align-self:center;">
+                    <input type="checkbox" data-mpv-alldots ${mpvAllOn ? 'checked' : ''} style="accent-color:#14d2dc;margin:0;">dots
+                </label>
                 <span style="flex:1;text-align:right;color:#9ad;font-size:10px;align-self:center;">hover a badge for step info</span>
             </div>
             <div data-mpv-list style="overflow:auto;padding:4px 0;"></div>`;
@@ -15804,6 +15834,8 @@ ${snapPlacemarks}
         try { makeDraggable(el, el.querySelector('[data-mpv-drag]')); } catch (e) {}
         el.addEventListener('click', mpvPanelClick);
         el.addEventListener('change', (e) => {
+            const dots = e.target && e.target.closest && e.target.closest('input[data-mpv-alldots]');
+            if (dots) { mpvSetAllDots(dots.checked); return; }
             const cb = e.target && e.target.closest && e.target.closest('input[data-mpv-mid]');
             if (!cb) return;
             const sid2 = getCurrentSiteID();

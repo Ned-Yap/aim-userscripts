@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-31 — 👁 Mission Bank Tools v2.90: "dots" toggle in the Mission preview panel (latest — dev only)
+
+The **Show ALL missions light-dots layer** (blue nav / pink snap circles) is now toggleable right on the Site Setup map: the 👁 Mission preview panel's header row has a new **dots** checkbox next to All/None. It's the same setting as the Control Panel's "👁 Show ALL missions" toggle — flipping either updates the other, and it still persists across reloads.
+
 ## 2026-08-31 — 🎨 Map Styler v34.137: Asset Styles — custom color rules + client presets (latest — dev only, feature #252)
 
 The fixed six-state asset coloring is now a fully customizable **rule + preset system**. New **🎨 Edit styles & presets** button in the Assets card opens a floating editor: an ordered rule list where each rule matches assets by **state, equipment type (contains), and/or asset name (contains)** — first match wins — and carries full styling: line color, width, dashed, line opacity, fill on/off, fill color, fill opacity, plus a 👁 hide toggle per rule and for unmatched assets. Everything previews **live on the map as you tweak** (real color pickers) until you 💾 Save. Rules live in named **presets** — the shipped look is the read-only ★ Default (Upstream) preset — and a preset can **auto-apply by client from the site name** ("Exxon", "Diamondback"); an explicit pick is remembered per site (QA and prod kept separate). Presets export/import as JSON for sharing. The old per-state Control Panel rows and per-equipment show/hide checkboxes are replaced by this editor (equipment hiding = a rule with Type match + 👁 off); prior per-state color tweaks reset to defaults — recreate them in the editor.
