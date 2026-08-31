@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.251
+// @version      4.252
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.251';
+    const SCRIPT_VERSION = '4.252';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -5503,6 +5503,19 @@
         let matches = rows.filter(r => norm(r) === want);
         if (!matches.length) matches = rows.filter(r => norm(r).endsWith('- ' + want) || norm(r).endsWith('– ' + want));
         if (!matches.length) matches = rows.filter(r => norm(r).indexOf(want) >= 0);
+        if (!matches.length) {
+            // v4.252: pad-root rung (mirrors MBT rankMatchMissions v2.91) —
+            // sites that name missions "<PAD> _ID <n>" but assets
+            // "<Pad> <Equipment>" share only the pad-root prefix. Drop up to
+            // 3 trailing tokens and match missions that continue the root at
+            // a token boundary; 5-char floor guards against lease-wide hits.
+            const toks = want.split(/\s+/);
+            for (let drop = 1; drop <= 3 && toks.length - drop >= 1 && !matches.length; drop++) {
+                const root = toks.slice(0, toks.length - drop).join(' ');
+                if (root.length < 5) break;
+                matches = rows.filter(r => norm(r) === root || norm(r).startsWith(root + ' '));
+            }
+        }
         if (!matches.length) {
             showToast(`No mission matching "${name}" in the list`, 'rgba(255,180,0,0.55)');
             return;

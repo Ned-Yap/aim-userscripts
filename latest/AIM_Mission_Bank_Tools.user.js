@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.90
+// @version      2.91
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.90';
+    const SCRIPT_VERSION = '2.91';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5390,6 +5390,11 @@
         if (!inside.length) { showToast('🖊 No pads inside the loop.', '#ff9800', 3500); return; }
         const rows = [], skipped = [];
         const skip = (a, reason) => skipped.push({ name: a.name, reason, pt: genCentroid(a.ring) });
+        // v2.91: several asset polygons can resolve to the SAME mission now
+        // that the pad-root ladder rung maps "<Pad> <Equipment>" polygons to
+        // their pad's mission — collapse them to one row per mission, keeping
+        // the farthest polygon so battery math stays worst-case.
+        const rowByMission = new Map();
         inside.forEach(a => {
             const cands = rankMatchMissions(a.name, missions);
             if (!cands.length) { skip(a, 'no mission with this name'); return; }
@@ -5398,7 +5403,14 @@
             if (!r || r.status !== 'ok') { skip(a, r ? (r.status === 'no-ffz' ? 'no FFZ' : 'no legal route') : 'no range data'); return; }
             if (!r.verified || r.disagree) { skip(a, 'range unverified (see console)'); return; }
             if (r.worstFt > cfg.tulipRadiusFt) { skip(a, `over ${(cfg.tulipRadiusFt / 1000).toFixed(0)}k ft`); return; }
-            rows.push({ asset: a, mission: cands[0], ft: r.worstFt, tulip: r.worstFt > cfg.tattuRadiusFt });
+            const prev = rowByMission.get(cands[0].id);
+            if (prev) {
+                if (r.worstFt > prev.ft) { prev.asset = a; prev.ft = r.worstFt; prev.tulip = prev.ft > cfg.tattuRadiusFt; }
+                return;
+            }
+            const row = { asset: a, mission: cands[0], ft: r.worstFt, tulip: r.worstFt > cfg.tattuRadiusFt };
+            rowByMission.set(cands[0].id, row);
+            rows.push(row);
         });
         // Pre-order = bearing sweep around base with the seam at the largest
         // angular gap — the human "walk the loop" order. It feeds the
@@ -8674,7 +8686,25 @@
         if (c.length) return c;
         c = all.filter(m => norm(m).endsWith('- ' + want) || norm(m).endsWith('– ' + want));
         if (c.length) return c;
-        return all.filter(m => norm(m).indexOf(want) >= 0);
+        c = all.filter(m => norm(m).indexOf(want) >= 0);
+        if (c.length) return c;
+        // v2.91: pad-root rung — some sites name missions "<PAD> _ID <n>"
+        // while asset polygons are "<Pad> <Equipment>" ("LHS Ranch 1702BH
+        // Pump Jack" ↔ "LHS RANCH 1702BH _ID 5062"). Neither name contains
+        // the other, but both extend the same pad root. Drop up to 3
+        // trailing tokens (equipment suffixes are 1–3 words: "Pump Jack",
+        // "Gas Lift Header", "Flow Line 2") and take missions whose name IS
+        // that root or continues it at a token boundary — the boundary keeps
+        // "1701AH" from matching "1701H". Longest root wins; the 5-char
+        // floor stops a lone short token from matching a whole lease.
+        const toks = want.split(/\s+/);
+        for (let drop = 1; drop <= 3 && toks.length - drop >= 1; drop++) {
+            const root = toks.slice(0, toks.length - drop).join(' ');
+            if (root.length < 5) break;
+            c = all.filter(m => norm(m) === root || norm(m).startsWith(root + ' '));
+            if (c.length) return c;
+        }
+        return [];
     }
 
     async function pcmEnter() {

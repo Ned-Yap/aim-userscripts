@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-31 — 🖊 Mission Bank Tools v2.91 + Site Setup Tools v4.252: pad-root mission matching (latest — dev only)
+
+The 🖊 Lasso (and every other asset-name → mission matcher) was skipping whole sites whose missions are named `<PAD> _ID <n>` while the asset polygons are named `<Pad> <Equipment>` — "LHS Ranch 1702BH Pump Jack" never matched mission "LHS RANCH 1702BH _ID 5062", so dozens of pads reported "no mission with this name". The shared rank ladder gets a fourth, last-resort **pad-root rung**: drop up to 3 trailing tokens off the asset name (equipment suffixes like "Pump Jack" / "Gas Lift Header" / "Flow Line 2") and match missions that continue that pad root at a token boundary (so 1701AH can't hit 1701H). Because several equipment polygons on one pad now resolve to the same mission, the Lasso collapses them to **one row per mission**, keeping the farthest polygon's range so battery math stays worst-case. The Asset Inspector's 🔍 Find in Missions mirrors the same rung (v4.252) so both features keep agreeing on which mission a pad name means.
+
 ## 2026-08-31 — 🎨 Map Styler v34.138: Asset Styles — 🧭 Auto row in the preset dropdown (latest — dev only, feature #252)
 
 Follow-up to v34.137: manually picking a preset pins it to the site, but there was no way back to automatic detection. The preset dropdown now leads with **🧭 Auto — by site name**, which shows which preset auto-detection currently resolves to; selecting it unpins the site so the client preset again follows the site name.
