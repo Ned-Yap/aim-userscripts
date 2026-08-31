@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.136
+// @version      34.137
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -67,7 +67,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.136';
+    const SCRIPT_VERSION = '34.137';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -75,12 +75,9 @@
     stateChannel.onmessage = (event) => {
         const d = event.data || {};
         if (d.action === "TOGGLE") setActiveState(d.state);
-        // The map iframe is the only frame that fetches asset data, so it
-        // broadcasts the discovered equipment set; every frame adopts it and
-        // re-registers so the panel schema is identical across frames (same
-        // scriptId → last register wins, so they MUST agree). See
-        // applyEquipFromBroadcast.
-        else if (d.action === "ASSET_EQUIP") applyEquipFromBroadcast(d);
+        // (v34.137: the ASSET_EQUIP schema-sync broadcast is gone — the
+        // per-equipment checkboxes it kept in sync were replaced by the
+        // 🎨 Asset Styles rule editor, which lives only in the render frame.)
         else if (d.action === "RRC_OPERATORS") applyRrcOperatorsFromBroadcast(d);
         // v34.134: Site Setup Tools' ✏ Fast FP Draw asks for the live fp.*
         // buffer settings so its draw-time preview bands match the real FP
@@ -169,47 +166,21 @@
     const ASSET_STATE_FALLBACK = { color: '#9aa0a6', width: 10, dashed: true, fill: false, fillColor: '#9aa0a6', opacity: 0.25 };
     const stateSlug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-');
     const MAP_OBJECTS_URL = '/map_objects/?getPoiMapObjectsAsList=true&site_id=';
-    // Builds the per-state Control Panel rows appended to the Assets category.
+    // v34.137 (#252): the old per-state CP rows (astate.*) and dynamic
+    // per-equipment show/hide checkboxes (aeq.*) are replaced by the 🎨 Asset
+    // Styles editor — a rule/preset system (match by state, equipment type,
+    // or asset name; full style control incl. hide) with per-client presets
+    // that auto-select from the site name. The by-state toggle id is kept so
+    // existing on/off customizations survive the upgrade.
     function buildAssetStateToggles() {
-        const out = [
-            { type: 'header', label: 'Color assets by state' },
-            { id: 'asset.by-state', label: 'Color assets by state (overrides white)', type: 'boolean', default: false },
+        return [
+            { type: 'header', label: 'Custom asset styles' },
+            { id: 'asset.by-state', label: 'Custom asset styles (rules & presets)', type: 'boolean', default: false },
+            { id: 'asset-styles-editor', label: '🎨 Edit styles & presets', type: 'button', action: 'asset-styles-editor' },
             // Asset state/equipment is cached per site at load; after editing an
             // asset in Percepto this re-fetches so its color/visibility updates.
             { id: 'asset-refresh', label: '↻ Refresh asset data (after edits)', type: 'button', action: 'refresh-asset-data' },
         ];
-        ASSET_STATE_ORDER.forEach(state => {
-            const slug = stateSlug(state);
-            const d = ASSET_STATE_DEFAULTS[state];
-            out.push({ type: 'header', label: `· ${state}` });
-            out.push({ id: `astate.${slug}.show`, label: `${state} — show on map`, type: 'boolean', default: true });
-            out.push({ id: `astate.${slug}.color`, label: `${state} outline color`, type: 'color', default: d.color });
-            out.push({ id: `astate.${slug}.width`, label: `${state} outline width`, type: 'number',
-                      min: 1, max: 20, step: 1, default: d.width, unit: 'px' });
-            out.push({ id: `astate.${slug}.dashed`, label: `${state} dashed`, type: 'boolean', default: d.dashed });
-            out.push({ id: `astate.${slug}.fill`, label: `${state} show fill`, type: 'boolean', default: d.fill });
-            out.push({ id: `astate.${slug}.fill-color`, label: `${state} fill color`, type: 'color', default: d.fillColor });
-            out.push({ id: `astate.${slug}.opacity`, label: `${state} fill opacity`, type: 'number',
-                      min: 0.05, max: 1, step: 0.05, default: d.opacity, unit: 'fill' });
-        });
-        return out;
-    }
-
-    // Equipment types (battery / v-well / h-well / sat / …) are the HEAD of
-    // the subtype before " - ". They vary per site, so the show/hide
-    // checkboxes are built dynamically: fetchAssetStates discovers the set on
-    // the loaded site, stores it here, and re-registers with the Control Panel
-    // so the panel renders one checkbox per type. Each entry: { name, slug }.
-    let assetEquipTypes = [];
-    // Builds the per-equipment-type "show" checkboxes appended to the Assets
-    // category. Empty until a site's assets have loaded.
-    function buildAssetEquipToggles() {
-        if (!assetEquipTypes.length) return [];
-        const out = [{ type: 'header', label: 'Show equipment types' }];
-        assetEquipTypes.forEach(eq => {
-            out.push({ id: `aeq.${eq.slug}.show`, label: `${eq.name} — show on map`, type: 'boolean', default: true });
-        });
-        return out;
     }
 
     // Duster-relevant USDA CDL classes: [code, name, official-color hex].
@@ -1018,11 +989,10 @@
         // stale projection. We only OVERWRITE a tag on a positive match, so a
         // transient (data still loading) never blanks an existing tag.
         //
-        // We need entity data whenever Assets are shown — by-state coloring
-        // uses it, the per-state/equipment hide filters use it, and we also
-        // fetch once per site (even with nothing engaged) so the equipment
-        // checkboxes can populate the panel. Fetch is cached + idempotent per
-        // site, so calling it each run is cheap.
+        // We need entity data whenever Assets are shown — rule styling and
+        // rule-based hiding use it, and the 🎨 editor's match counts and
+        // type/state suggestion lists populate from it. Fetch is cached +
+        // idempotent per site, so calling it each run is cheap.
         const assetByStateOn = !!(toggleState['asset.show'] && toggleState['asset.by-state']);
         const assetDataWanted = !!toggleState['asset.show'];
         if (assetDataWanted) {
@@ -1040,6 +1010,12 @@
                     if (a) {
                         if (a.state) p.setAttribute('data-aim-asset-state', a.state);
                         if (a.equip) p.setAttribute('data-aim-asset-equip', a.equip);
+                        // v34.137: resolve the asset's style RULE (first match
+                        // wins in the active preset) and tag it — the per-line
+                        // loop styles off this tag. Re-resolved every run, so
+                        // rule/preset edits repaint on the next update.
+                        const r = assetRuleFor(a);
+                        p.setAttribute('data-aim-asset-rule', r ? r.id : '__fallback');
                     }
                 });
             }
@@ -1104,26 +1080,19 @@
             // outlines without fill even when halos are off.
             const wantAssetFillOverride = isWhiteAsset;
 
-            // Per-state asset styling. Non-null only for a white asset that
-            // we've tagged with a state while "Color assets by state" is on.
-            // When null, assets fall back to the uniform asset.* settings.
-            const assetState = (assetByStateOn && isWhiteAsset)
-                ? line.getAttribute('data-aim-asset-state') : null;
-            const assetStyle = assetState ? assetStateStyle(assetState) : null;
+            // Per-rule asset styling (v34.137, #252). Non-null only for a
+            // white asset tagged with a rule while "Custom asset styles" is
+            // on. When null, assets fall back to the uniform asset.* settings.
+            const assetRuleInfo = (assetByStateOn && isWhiteAsset)
+                ? assetRuleInfoFromTag(line.getAttribute('data-aim-asset-rule')) : null;
+            const assetStyle = assetRuleInfo ? assetRuleInfo.style : null;
 
-            // --- Asset hide filter (per-state + per-equipment "show" boxes) ---
-            // Independent of by-state coloring: an asset box (and its halo)
-            // disappears when its STATE or its EQUIPMENT type is unchecked.
+            // --- Asset hide filter (rule "show on map" unchecked) ---
             // display is always reset to '' when not hiding — including when
-            // the whole Assets category is off — so nothing stays stuck hidden.
+            // custom styles or the whole Assets category are off — so nothing
+            // stays stuck hidden.
             if (isWhiteAsset) {
-                let hide = false;
-                if (toggleState['asset.show']) {
-                    const sTag = line.getAttribute('data-aim-asset-state');
-                    const eTag = line.getAttribute('data-aim-asset-equip');
-                    hide = (!!sTag && toggleState[`astate.${stateSlug(sTag)}.show`] === false)
-                        || (!!eTag && toggleState[`aeq.${eTag}.show`] === false);
-                }
+                const hide = !!(toggleState['asset.show'] && assetRuleInfo && assetRuleInfo.show === false);
                 line.style.display = hide ? 'none' : '';
                 if (hide) return; // skip styling + buffer creation for hidden assets
             }
@@ -1147,10 +1116,9 @@
             } else if (isWhiteAsset) {
                 if (toggleState['asset.show']) {
                     if (assetStyle) {
-                        // Per-state: state color + optional dashed outline.
-                        // strokeOpacity left at full so the state color reads true.
+                        // Per-rule: rule color + line opacity + optional dash.
                         line.style.stroke = assetStyle.color || '';
-                        line.style.strokeOpacity = '';
+                        line.style.strokeOpacity = assetStyle.lineOpacity >= 1 ? '' : String(assetStyle.lineOpacity);
                         line.style.strokeDasharray = assetStyle.dashed ? assetDash(assetStyle.width) : '';
                     } else {
                         line.style.stroke = toggleState['asset.line-color'] || '';
@@ -3508,7 +3476,9 @@
             // toggleState is small (~50 keys × ~30 chars) so JSON.stringify
             // costs ~0.5ms — still vastly cheaper than rebuilding overlays.
             const tHash = JSON.stringify(toggleState);
-            return `${ffzN}|${asN}|${fpN}|${editN}|${distroN}|${transN}|${routeN}|${valN}|${dismN}|${ourN}|${zoom}|${tHash}`;
+            // assetRulesRev bumps on any asset-style rule/preset/draft change
+            // so live edits in the 🎨 editor repaint past the heartbeat skip.
+            return `${ffzN}|${asN}|${fpN}|${editN}|${distroN}|${transN}|${routeN}|${valN}|${dismN}|${ourN}|${zoom}|r${assetRulesRev}|${tHash}`;
         } catch (e) {
             return null; // any error → force run (safe default)
         }
@@ -3595,26 +3565,572 @@
         return { name, slug: stateSlug(name) };
     }
 
-    // Resolve the effective style for a state from the per-state toggles,
-    // falling back to ASSET_STATE_DEFAULTS (or the gray fallback for states
-    // with no Control Panel row, e.g. midstream taxonomies).
-    function assetStateStyle(state) {
-        const slug = stateSlug(state);
-        const def = ASSET_STATE_DEFAULTS[state] || ASSET_STATE_FALLBACK;
-        const get = (suffix, d) => {
-            const v = toggleState[`astate.${slug}.${suffix}`];
-            return v === undefined ? d : v;
-        };
-        const w = Number(get('width', def.width));
-        const fo = Number(get('opacity', def.opacity));
+    // ============================================================
+    // 🎨 ASSET STYLE RULES & PRESETS (v34.137, feature #252)
+    // ============================================================
+    // Replaces the fixed per-state controls with an ordered RULE list:
+    // each rule matches assets by derived state, equipment type (contains),
+    // and/or asset name (contains) — first match wins, all filled criteria
+    // must hit, a rule with no criteria is a catch-all. Each rule carries a
+    // full style (line color/width/dash/opacity + fill color/opacity) and a
+    // "show on map" flag (unchecked = hide matching assets + halos).
+    // Rules live in named PRESETS (per client). A preset can auto-apply by
+    // site-name match ("Exxon", "Diamondback"); an explicit pick in the
+    // editor is remembered per site (env-namespaced — QA ≠ prod). Edits are
+    // a live-preview DRAFT until 💾 Save. Stored in GM (per-user; presets
+    // shareable via 📤/📥 JSON). Editor lives ONLY in the render frame.
+    const ASSET_PRESETS_GM_KEY = 'aim-asset-style-presets-v1';
+    const ASSET_BUILTIN_PRESET_ID = 'builtin-upstream';
+    const ASP_PANEL_ID = 'aim-asset-styles-panel';
+    let _assetStylesStore = null;   // lazy: { presets:[], perSite:{}, lastPresetId }
+    let _assetBuiltinCache = null;  // read-only — always duplicated before editing
+    let assetRulesRev = 0;          // bumps on any rule/preset change → repaint
+    let assetDraft = null;          // { presetId, preset } while editing (unsaved)
+    let _assetRuleIndex = { rev: -1, presetId: null, map: null, fallback: null };
+    let siteNameCache = { sid: null, name: '', loading: false };
+    let _aspRepaintTimer = null;
+    let _aspCountsTimer = null;
+
+    function assetDeepCopy(o) { return JSON.parse(JSON.stringify(o)); }
+
+    // Normalize a stored/edited style into the shape the render loop uses.
+    function normAssetStyle(s) {
+        s = s || {};
+        const num = (v, fb) => { const n = Number(v); return isNaN(n) ? fb : n; };
         return {
-            color: get('color', def.color),
-            width: isNaN(w) ? def.width : w,
-            dashed: !!get('dashed', def.dashed),
-            fill: get('fill', def.fill) !== false,
-            fillColor: get('fill-color', def.fillColor),
-            fillOpacity: isNaN(fo) ? def.opacity : fo,
+            color: s.color || ASSET_STATE_FALLBACK.color,
+            width: num(s.width, 10),
+            dashed: !!s.dashed,
+            lineOpacity: num(s.lineOpacity, 1),
+            fill: !!s.fill,
+            fillColor: s.fillColor || s.color || ASSET_STATE_FALLBACK.fillColor,
+            fillOpacity: num(s.fillOpacity, 0.25),
         };
+    }
+
+    // The shipped look (upstream taxonomy) as a read-only preset — one rule
+    // per state in the safety-precedence display order.
+    function assetBuiltinPreset() {
+        if (_assetBuiltinCache) return _assetBuiltinCache;
+        _assetBuiltinCache = {
+            id: ASSET_BUILTIN_PRESET_ID,
+            name: 'Default (Upstream)',
+            builtin: true,
+            siteMatch: [],
+            fallback: { show: true, style: { color: ASSET_STATE_FALLBACK.color, width: ASSET_STATE_FALLBACK.width,
+                dashed: ASSET_STATE_FALLBACK.dashed, lineOpacity: 1, fill: ASSET_STATE_FALLBACK.fill,
+                fillColor: ASSET_STATE_FALLBACK.fillColor, fillOpacity: ASSET_STATE_FALLBACK.opacity } },
+            rules: ASSET_STATE_ORDER.map(state => {
+                const d = ASSET_STATE_DEFAULTS[state];
+                return {
+                    id: `state-${stateSlug(state)}`, label: state, enabled: true, show: true,
+                    match: { state, equip: '', name: '' },
+                    style: { color: d.color, width: d.width, dashed: d.dashed, lineOpacity: 1,
+                             fill: d.fill, fillColor: d.fillColor, fillOpacity: d.opacity },
+                };
+            }),
+        };
+        return _assetBuiltinCache;
+    }
+
+    function assetStylesLoadStore() {
+        if (_assetStylesStore) return _assetStylesStore;
+        let s = null;
+        try {
+            const raw = gmGet(ASSET_PRESETS_GM_KEY, '');
+            if (raw) s = JSON.parse(raw);
+        } catch (e) { console.warn(`${TAG} asset-styles: unreadable preset store — starting fresh:`, e); }
+        if (!s || typeof s !== 'object') s = {};
+        if (!Array.isArray(s.presets)) s.presets = [];
+        if (!s.perSite || typeof s.perSite !== 'object') s.perSite = {};
+        _assetStylesStore = s;
+        return s;
+    }
+    function assetStylesPersist() {
+        try { gmSet(ASSET_PRESETS_GM_KEY, JSON.stringify(assetStylesLoadStore())); }
+        catch (e) { console.warn(`${TAG} asset-styles: persist failed:`, e); }
+    }
+    function assetAllPresets() { return [assetBuiltinPreset(), ...assetStylesLoadStore().presets]; }
+    function assetPresetById(id) { return id ? (assetAllPresets().find(p => p && p.id === id) || null) : null; }
+
+    // Site name (for preset auto-select) — GET /sites/<id>/ origin-relative,
+    // cookie auth. Cached per site; a repaint fires when the name lands so a
+    // site-matched preset applies without user interaction.
+    function ensureSiteName(sid) {
+        if (!sid || siteNameCache.sid === sid) return;
+        if (siteNameCache.loading) return;
+        siteNameCache = { sid, name: '', loading: true };
+        fetch(`/sites/${encodeURIComponent(sid)}/`, { credentials: 'include' })
+            .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+            .then(data => {
+                if (getCurrentSiteID() !== sid) { siteNameCache = { sid: null, name: '', loading: false }; return; }
+                siteNameCache = { sid, name: String((data && (data.name || data.title)) || ''), loading: false };
+                console.log(`${TAG} asset-styles: site ${sid} name = "${siteNameCache.name}"`);
+                aspBump();
+                if (isActive) runUpdate();
+                renderAssetStylesPanel(); // refresh header/preset hint if open
+            })
+            .catch(err => {
+                siteNameCache = { sid, name: '', loading: false };
+                console.warn(`${TAG} asset-styles: site name fetch failed for ${sid}:`, err);
+            });
+    }
+
+    // Resolve the preset in effect: unsaved draft > explicit per-site pick >
+    // site-name auto-match > last used > built-in.
+    function assetActivePreset() {
+        if (assetDraft) return assetDraft.preset;
+        const store = assetStylesLoadStore();
+        const sid = getCurrentSiteID();
+        if (sid) {
+            ensureSiteName(sid);
+            const chosen = assetPresetById(store.perSite[envSiteKey(sid)]);
+            if (chosen) return chosen;
+            const sname = (siteNameCache.sid === sid ? siteNameCache.name : '').toLowerCase();
+            if (sname) {
+                const hit = assetAllPresets().find(p => (p.siteMatch || [])
+                    .some(tok => tok && sname.indexOf(String(tok).toLowerCase()) !== -1));
+                if (hit) return hit;
+            }
+        }
+        return assetPresetById(store.lastPresetId) || assetBuiltinPreset();
+    }
+
+    // First-match-wins over the active preset's enabled rules. Every filled
+    // criterion must hit; a rule with no criteria matches everything.
+    function assetRuleFor(poly) {
+        const rules = assetActivePreset().rules || [];
+        for (let i = 0; i < rules.length; i++) {
+            const r = rules[i];
+            if (!r || r.enabled === false) continue;
+            const m = r.match || {};
+            if (m.state && String(poly.state || '').toLowerCase() !== String(m.state).toLowerCase()) continue;
+            if (m.equip && String(poly.equipName || '').toLowerCase().indexOf(String(m.equip).toLowerCase()) === -1) continue;
+            if (m.name && String(poly.name || '').toLowerCase().indexOf(String(m.name).toLowerCase()) === -1) continue;
+            return r;
+        }
+        return null;
+    }
+
+    // Style/visibility for a tagged path. '__fallback' = no rule matched.
+    // Unknown/stale tag → null (uniform asset.* styling — safe transient).
+    function assetRuleInfoFromTag(tag) {
+        if (!tag) return null;
+        const p = assetActivePreset();
+        if (_assetRuleIndex.rev !== assetRulesRev || _assetRuleIndex.presetId !== p.id || !_assetRuleIndex.map) {
+            const map = {};
+            (p.rules || []).forEach(r => {
+                if (r && r.id) map[r.id] = { show: r.show !== false, style: normAssetStyle(r.style) };
+            });
+            const fb = p.fallback || {};
+            _assetRuleIndex = {
+                rev: assetRulesRev, presetId: p.id, map,
+                fallback: { show: fb.show !== false, style: normAssetStyle(fb.style) },
+            };
+        }
+        if (tag === '__fallback') return _assetRuleIndex.fallback;
+        return _assetRuleIndex.map[tag] || null;
+    }
+
+    // --- 🎨 editor panel ---
+    function aspEsc(s) {
+        return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    function aspBump() { assetRulesRev++; }
+    // Live preview: debounce the wipe+rebuild slightly so dragging a color
+    // picker doesn't rebuild overlays on every 1-px hue change.
+    function aspRepaint() {
+        aspBump();
+        clearTimeout(_aspRepaintTimer);
+        _aspRepaintTimer = setTimeout(() => { if (isActive) runUpdate(); }, 120);
+    }
+    function aspEnsureDraft() {
+        if (assetDraft) return assetDraft;
+        const p = assetActivePreset();
+        if (p.builtin) return null; // builtin inputs are disabled — belt & suspenders
+        assetDraft = { presetId: p.id, preset: assetDeepCopy(p) };
+        return assetDraft;
+    }
+    function aspDiscovered() {
+        const states = [];
+        ASSET_STATE_ORDER.forEach(s => states.push(s));
+        const equips = new Set();
+        (assetStateData.polys || []).forEach(p => {
+            if (p.state && states.indexOf(p.state) === -1) states.push(p.state);
+            if (p.equipName) equips.add(p.equipName);
+        });
+        return { states, equips: [...equips].sort() };
+    }
+    function aspMatchCounts() {
+        const counts = { __fallback: 0 };
+        (assetStateData.polys || []).forEach(poly => {
+            const r = assetRuleFor(poly);
+            const k = r ? r.id : '__fallback';
+            counts[k] = (counts[k] || 0) + 1;
+        });
+        return counts;
+    }
+    function aspScheduleCounts() {
+        clearTimeout(_aspCountsTimer);
+        _aspCountsTimer = setTimeout(() => {
+            const panel = document.getElementById(ASP_PANEL_ID);
+            if (!panel) return;
+            const counts = aspMatchCounts();
+            panel.querySelectorAll('[data-asp-rule]').forEach(card => {
+                const span = card.querySelector('[data-asp-count]');
+                if (span) span.textContent = `${counts[card.getAttribute('data-asp-rule')] || 0}⌂`;
+            });
+        }, 250);
+    }
+    // Called by fetchAssetStates when fresh entity data lands.
+    function assetStylesPanelDataRefresh() {
+        const panel = document.getElementById(ASP_PANEL_ID);
+        if (!panel) return;
+        const dl = panel.querySelector('#asp-equip-list');
+        if (dl) dl.innerHTML = aspDiscovered().equips.map(n => `<option value="${aspEsc(n)}">`).join('');
+        aspScheduleCounts();
+    }
+    function aspMarkUnsaved() {
+        const b = document.querySelector(`#${ASP_PANEL_ID} [data-asp-act="save"]`);
+        if (b) { b.textContent = '💾 Save*'; b.style.borderColor = '#ffd24d'; b.style.color = '#ffd24d'; }
+    }
+
+    function openAssetStylesPanel() {
+        const existing = document.getElementById(ASP_PANEL_ID);
+        if (existing) { existing.remove(); return; }
+        // Editing implies previewing: flip custom styles on (echo to the CP
+        // so its checkbox + persisted value stay in sync) and make sure the
+        // entity data is loaded so counts/dropdowns populate.
+        if (toggleState['asset.by-state'] !== true) {
+            toggleState['asset.by-state'] = true;
+            try {
+                if (controlChannel) controlChannel.postMessage({
+                    type: 'SET_TOGGLE', scriptId: SCRIPT_ID, toggleId: 'asset.by-state', value: true, enabled: true,
+                });
+            } catch (e) {}
+        }
+        const sid = getCurrentSiteID();
+        if (sid) { fetchAssetStates(sid); ensureSiteName(sid); }
+        buildAssetStylesPanel();
+        if (isActive) runUpdate();
+    }
+
+    function buildAssetStylesPanel() {
+        const wrap = document.createElement('div');
+        wrap.id = ASP_PANEL_ID;
+        wrap.style.cssText = 'position:fixed;top:64px;left:64px;width:600px;max-width:94vw;max-height:82vh;z-index:2147483000;'
+            + 'background:rgba(16,22,32,0.97);border:1px solid rgba(122,223,230,0.45);border-radius:10px;'
+            + 'color:#dfe9f0;font-size:12px;line-height:1.4;font-family:-apple-system,Segoe UI,Roboto,sans-serif;'
+            + 'box-shadow:0 8px 30px rgba(0,0,0,0.55);display:flex;flex-direction:column;';
+        wrap.innerHTML = '<style>'
+            + `#${ASP_PANEL_ID} input,#${ASP_PANEL_ID} select{background:#0d1420;border:1px solid rgba(122,223,230,0.35);color:#dfe9f0;border-radius:4px;font-size:11px;font-family:inherit;padding:2px 4px;}`
+            + `#${ASP_PANEL_ID} input[type=color]{padding:1px;width:28px;height:20px;cursor:pointer;}`
+            + `#${ASP_PANEL_ID} input[type=checkbox]{accent-color:#7adfe6;margin:0 2px 0 0;vertical-align:middle;}`
+            + `#${ASP_PANEL_ID} input[type=range]{width:60px;padding:0;vertical-align:middle;}`
+            + `#${ASP_PANEL_ID} input:disabled,#${ASP_PANEL_ID} select:disabled{opacity:0.45;cursor:not-allowed;}`
+            + `#${ASP_PANEL_ID} button{background:none;border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:5px;padding:2px 8px;cursor:pointer;font-size:11px;font-family:inherit;}`
+            + `#${ASP_PANEL_ID} button:hover{background:rgba(122,223,230,0.12);}`
+            + `#${ASP_PANEL_ID} button:disabled{opacity:0.4;cursor:not-allowed;}`
+            + `#${ASP_PANEL_ID} .asp-rule{border:1px solid rgba(122,223,230,0.22);border-radius:8px;padding:6px 8px;margin-bottom:6px;background:rgba(255,255,255,0.03);}`
+            + `#${ASP_PANEL_ID} .asp-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px;}`
+            + `#${ASP_PANEL_ID} .asp-row:last-child{margin-bottom:0;}`
+            + `#${ASP_PANEL_ID} .asp-muted{opacity:0.65;}`
+            + `#${ASP_PANEL_ID} label{white-space:nowrap;cursor:pointer;}`
+            + '</style>'
+            + '<div data-asp-drag style="padding:8px 12px;display:flex;align-items:center;gap:8px;'
+            + 'border-bottom:1px solid rgba(122,223,230,0.25);cursor:move;user-select:none;">'
+            + '<span style="color:#7adfe6;font-weight:700;">🎨 Asset Styles</span>'
+            + '<span class="asp-muted" data-asp-sitename></span>'
+            + '<span style="flex:1"></span>'
+            + '<button data-asp-act="close" style="border:none;color:#dfe9f0;font-size:15px;">✕</button></div>'
+            + '<div data-asp-body style="padding:8px 12px;overflow-y:auto;"></div>';
+        wrap.addEventListener('input', onAspInput);
+        wrap.addEventListener('change', onAspInput);
+        wrap.addEventListener('click', onAspClick);
+        // Drag by the header (pointer events so it also works with touch).
+        let dragging = false, sx = 0, sy = 0, ox = 0, oy = 0;
+        const dragBar = wrap.querySelector('[data-asp-drag]');
+        dragBar.addEventListener('pointerdown', (e) => {
+            if (e.target.closest('button')) return;
+            dragging = true; sx = e.clientX; sy = e.clientY;
+            const r = wrap.getBoundingClientRect(); ox = r.left; oy = r.top;
+            try { dragBar.setPointerCapture(e.pointerId); } catch (err) {}
+            e.preventDefault();
+        });
+        dragBar.addEventListener('pointermove', (e) => {
+            if (!dragging) return;
+            wrap.style.left = `${Math.max(0, ox + e.clientX - sx)}px`;
+            wrap.style.top = `${Math.max(0, oy + e.clientY - sy)}px`;
+        });
+        dragBar.addEventListener('pointerup', () => { dragging = false; });
+        document.body.appendChild(wrap);
+        renderAssetStylesPanel();
+        console.log(`${TAG} asset-styles: editor opened`);
+    }
+
+    function aspStyleRowHtml(style, dis) {
+        const s = normAssetStyle(style);
+        return `<div class="asp-row">`
+            + `<span class="asp-muted">Line</span>`
+            + `<input type="color" data-asp-field="style.color" value="${aspEsc(s.color)}" title="Line color" ${dis}>`
+            + `<input type="number" data-asp-field="style.width" value="${s.width}" min="1" max="30" step="1" style="width:44px;" title="Line width (px)" ${dis}>`
+            + `<label title="Dashed outline"><input type="checkbox" data-asp-field="style.dashed" ${s.dashed ? 'checked' : ''} ${dis}>dash</label>`
+            + `<input type="range" data-asp-field="style.lineOpacity" value="${s.lineOpacity}" min="0.05" max="1" step="0.05" title="Line opacity" ${dis}>`
+            + `<span class="asp-muted" style="margin-left:6px;">Fill</span>`
+            + `<label title="Show fill"><input type="checkbox" data-asp-field="style.fill" ${s.fill ? 'checked' : ''} ${dis}>on</label>`
+            + `<input type="color" data-asp-field="style.fillColor" value="${aspEsc(s.fillColor)}" title="Fill color" ${dis}>`
+            + `<input type="range" data-asp-field="style.fillOpacity" value="${s.fillOpacity}" min="0" max="1" step="0.05" title="Fill opacity" ${dis}>`
+            + `</div>`;
+    }
+
+    function renderAssetStylesPanel() {
+        const panel = document.getElementById(ASP_PANEL_ID);
+        if (!panel) return;
+        const body = panel.querySelector('[data-asp-body]');
+        if (!body) return;
+        const p = assetActivePreset();
+        const isBuiltin = !!p.builtin;
+        const dis = isBuiltin ? 'disabled' : '';
+        const disc = aspDiscovered();
+        const counts = aspMatchCounts();
+        const sname = panel.querySelector('[data-asp-sitename]');
+        if (sname) sname.textContent = siteNameCache.name ? `· ${siteNameCache.name}` : '';
+
+        const presetOpts = assetAllPresets().map(pr =>
+            `<option value="${aspEsc(pr.id)}" ${pr.id === p.id ? 'selected' : ''}>${pr.builtin ? '★ ' : ''}${aspEsc(pr.name)}</option>`).join('');
+        const stateOpts = (sel) => [`<option value="">(any)</option>`]
+            .concat(disc.states.map(st => `<option value="${aspEsc(st)}" ${String(sel || '').toLowerCase() === st.toLowerCase() ? 'selected' : ''}>${aspEsc(st)}</option>`))
+            .join('');
+
+        const ruleHtml = (p.rules || []).map(r => {
+            const m = r.match || {};
+            return `<div class="asp-rule" data-asp-rule="${aspEsc(r.id)}">`
+                + `<div class="asp-row">`
+                + `<button data-asp-act="up" title="Move up (earlier rules win)" ${dis}>▲</button>`
+                + `<button data-asp-act="down" title="Move down" ${dis}>▼</button>`
+                + `<label title="Rule enabled"><input type="checkbox" data-asp-field="enabled" ${r.enabled !== false ? 'checked' : ''} ${dis}>on</label>`
+                + `<input type="text" data-asp-field="label" value="${aspEsc(r.label || '')}" placeholder="Rule name" style="flex:1;min-width:70px;" ${dis}>`
+                + `<span class="asp-muted" data-asp-count title="Assets this rule styles (first match wins)">${counts[r.id] || 0}⌂</span>`
+                + `<label title="Show matching assets on the map (uncheck = hide them)"><input type="checkbox" data-asp-field="show" ${r.show !== false ? 'checked' : ''} ${dis}>👁</label>`
+                + `<button data-asp-act="del" title="Delete rule" ${dis}>✕</button>`
+                + `</div>`
+                + `<div class="asp-row">`
+                + `<span class="asp-muted">State</span><select data-asp-field="match.state" ${dis}>${stateOpts(m.state)}</select>`
+                + `<span class="asp-muted">Type has</span><input type="text" data-asp-field="match.equip" value="${aspEsc(m.equip || '')}" list="asp-equip-list" style="width:100px;" ${dis}>`
+                + `<span class="asp-muted">Name has</span><input type="text" data-asp-field="match.name" value="${aspEsc(m.name || '')}" style="width:100px;" ${dis}>`
+                + `</div>`
+                + aspStyleRowHtml(r.style, dis)
+                + `</div>`;
+        }).join('');
+
+        const fb = p.fallback || {};
+        body.innerHTML = `<div class="asp-row" style="margin-bottom:8px;">`
+            + `<span class="asp-muted">Preset</span>`
+            + `<select data-asp-preset-select style="flex:1;min-width:120px;">${presetOpts}</select>`
+            + `<button data-asp-act="preset-new" title="New preset (copy of current)">＋</button>`
+            + `<button data-asp-act="preset-dup" title="Duplicate this preset">⧉</button>`
+            + `<button data-asp-act="preset-del" title="Delete this preset" ${isBuiltin ? 'disabled' : ''}>🗑</button>`
+            + `</div>`
+            + `<div class="asp-row" style="margin-bottom:8px;">`
+            + `<span class="asp-muted" title="Comma-separated. First preset whose word appears in the site name auto-applies.">Auto-apply if site name has</span>`
+            + `<input type="text" data-asp-field="preset.siteMatch" value="${aspEsc((p.siteMatch || []).join(', '))}" placeholder="Exxon, Diamondback…" style="flex:1;min-width:100px;" ${dis}>`
+            + `</div>`
+            + (isBuiltin ? `<div class="asp-muted" style="margin-bottom:8px;">★ Built-in preset (read-only) — ⧉ Duplicate it to customize, or ＋ for a fresh copy.</div>` : '')
+            + `<datalist id="asp-equip-list">${disc.equips.map(n => `<option value="${aspEsc(n)}">`).join('')}</datalist>`
+            + ruleHtml
+            + `<div class="asp-row" style="margin-bottom:8px;"><button data-asp-act="rule-add" ${dis}>＋ Add rule</button>`
+            + `<span class="asp-muted">Rules check top-down — first match styles the asset.</span></div>`
+            + `<div class="asp-rule" data-asp-rule="__fallback" style="border-style:dashed;">`
+            + `<div class="asp-row"><strong>Unmatched assets</strong>`
+            + `<span class="asp-muted" data-asp-count>${counts.__fallback || 0}⌂</span>`
+            + `<label title="Show unmatched assets on the map"><input type="checkbox" data-asp-field="show" ${fb.show !== false ? 'checked' : ''} ${dis}>👁</label></div>`
+            + aspStyleRowHtml(fb.style, dis)
+            + `</div>`
+            + `<div class="asp-row" style="margin-top:8px;">`
+            + `<button data-asp-act="save" ${isBuiltin ? 'disabled' : ''}>${assetDraft ? '💾 Save*' : '💾 Save'}</button>`
+            + `<button data-asp-act="revert" title="Discard unsaved edits">↩ Revert</button>`
+            + `<span style="flex:1"></span>`
+            + `<button data-asp-act="export" title="Copy this preset as JSON">📤 Export</button>`
+            + `<button data-asp-act="import" title="Paste a preset JSON">📥 Import</button>`
+            + `</div>`
+            + `<div class="asp-muted" style="margin-top:4px;">Changes preview live on the map; 💾 Save makes them permanent.</div>`;
+        if (assetDraft) aspMarkUnsaved();
+    }
+
+    function onAspInput(e) {
+        const el = e.target;
+        if (el.hasAttribute && el.hasAttribute('data-asp-preset-select')) {
+            if (e.type !== 'change') return;
+            aspSwitchPreset(el.value);
+            return;
+        }
+        const field = el.getAttribute && el.getAttribute('data-asp-field');
+        if (!field) return;
+        // Dedup: text/number/range fire both input+change — act on input only
+        // (checkbox/select only fire change).
+        if (e.type === 'change' && el.type !== 'checkbox' && el.tagName !== 'SELECT') return;
+        const draft = aspEnsureDraft();
+        if (!draft) return; // builtin (inputs disabled — shouldn't reach here)
+        let value;
+        if (el.type === 'checkbox') value = el.checked;
+        else if (el.type === 'number' || el.type === 'range') value = Number(el.value);
+        else value = el.value;
+        if (field === 'preset.siteMatch') {
+            draft.preset.siteMatch = String(value).split(',').map(s => s.trim()).filter(Boolean);
+        } else {
+            const host = el.closest('[data-asp-rule]');
+            if (!host) return;
+            const rid = host.getAttribute('data-asp-rule');
+            const target = rid === '__fallback'
+                ? (draft.preset.fallback = draft.preset.fallback || { show: true, style: {} })
+                : (draft.preset.rules || []).find(r => r && r.id === rid);
+            if (!target) return;
+            const dot = field.indexOf('.');
+            if (dot !== -1) {
+                const head = field.slice(0, dot), leaf = field.slice(dot + 1);
+                target[head] = target[head] || {};
+                target[head][leaf] = value;
+            } else {
+                target[field] = value;
+            }
+        }
+        aspMarkUnsaved();
+        aspRepaint();
+        if (field.indexOf('match.') === 0 || field === 'enabled') aspScheduleCounts();
+    }
+
+    function onAspClick(e) {
+        const btn = e.target.closest('[data-asp-act]');
+        if (!btn || btn.disabled) return;
+        const act = btn.getAttribute('data-asp-act');
+        const panel = document.getElementById(ASP_PANEL_ID);
+        if (act === 'close') { if (panel) panel.remove(); return; }
+        if (act === 'save') { aspSave(); return; }
+        if (act === 'revert') {
+            if (assetDraft && !confirm('Discard unsaved style edits?')) return;
+            assetDraft = null;
+            aspBump(); if (isActive) runUpdate();
+            renderAssetStylesPanel();
+            return;
+        }
+        if (act === 'preset-new' || act === 'preset-dup') {
+            const src = assetActivePreset();
+            const defName = act === 'preset-dup' ? `${src.name} copy` : 'New preset';
+            const name = prompt('Preset name:', defName);
+            if (!name) return;
+            const np = assetDeepCopy(src);
+            np.id = `user-${Date.now().toString(36)}`;
+            np.name = name.trim();
+            np.builtin = false;
+            assetStylesLoadStore().presets.push(np);
+            assetDraft = null;
+            aspApplyPresetChoice(np.id);
+            return;
+        }
+        if (act === 'preset-del') {
+            const p = assetActivePreset();
+            if (p.builtin) return;
+            if (!confirm(`Delete preset "${p.name}"? This cannot be undone.`)) return;
+            const store = assetStylesLoadStore();
+            store.presets = store.presets.filter(pr => pr.id !== p.id);
+            Object.keys(store.perSite).forEach(k => { if (store.perSite[k] === p.id) delete store.perSite[k]; });
+            if (store.lastPresetId === p.id) store.lastPresetId = null;
+            assetDraft = null;
+            aspApplyPresetChoice(ASSET_BUILTIN_PRESET_ID);
+            return;
+        }
+        if (act === 'rule-add') {
+            const draft = aspEnsureDraft();
+            if (!draft) return;
+            draft.preset.rules = draft.preset.rules || [];
+            draft.preset.rules.push({
+                id: `r-${Date.now().toString(36)}`, label: 'New rule', enabled: true, show: true,
+                match: { state: '', equip: '', name: '' },
+                style: { color: '#ffffff', width: 10, dashed: false, lineOpacity: 1, fill: false, fillColor: '#ffffff', fillOpacity: 0.25 },
+            });
+            aspRepaint();
+            renderAssetStylesPanel();
+            return;
+        }
+        if (act === 'export') {
+            const json = JSON.stringify(assetDeepCopy(assetActivePreset()), null, 2);
+            navigator.clipboard.writeText(json).then(
+                () => showKMLToast('Preset JSON copied — paste to a coworker (they 📥 Import it).', 4000),
+                () => showKMLToast('Copy failed.', 3000));
+            return;
+        }
+        if (act === 'import') {
+            const raw = prompt('Paste a preset JSON:');
+            if (!raw) return;
+            try {
+                const np = JSON.parse(raw);
+                if (!np || !Array.isArray(np.rules)) throw new Error('not a preset (no rules array)');
+                np.id = `user-${Date.now().toString(36)}`;
+                np.name = String(np.name || 'Imported preset');
+                np.builtin = false;
+                assetStylesLoadStore().presets.push(np);
+                assetDraft = null;
+                aspApplyPresetChoice(np.id);
+                showKMLToast(`Imported "${np.name}".`, 3000);
+            } catch (err) {
+                console.warn(`${TAG} asset-styles: import failed:`, err);
+                showKMLToast(`Import failed: ${err.message}`, 5000);
+            }
+            return;
+        }
+        // Per-rule ordering / delete
+        const host = e.target.closest('[data-asp-rule]');
+        if (!host) return;
+        const rid = host.getAttribute('data-asp-rule');
+        if (rid === '__fallback') return;
+        const draft = aspEnsureDraft();
+        if (!draft) return;
+        const rules = draft.preset.rules || [];
+        const idx = rules.findIndex(r => r && r.id === rid);
+        if (idx === -1) return;
+        if (act === 'del') {
+            if (!confirm(`Delete rule "${rules[idx].label || rid}"?`)) return;
+            rules.splice(idx, 1);
+        } else if (act === 'up' && idx > 0) {
+            const [r] = rules.splice(idx, 1); rules.splice(idx - 1, 0, r);
+        } else if (act === 'down' && idx < rules.length - 1) {
+            const [r] = rules.splice(idx, 1); rules.splice(idx + 1, 0, r);
+        } else {
+            return;
+        }
+        aspRepaint();
+        renderAssetStylesPanel();
+    }
+
+    // Explicit preset pick: applies now AND is remembered for this site
+    // (env-namespaced) + as the global last-used. Draft (if any) must be
+    // resolved by the caller before switching.
+    function aspApplyPresetChoice(id) {
+        const store = assetStylesLoadStore();
+        const sid = getCurrentSiteID();
+        if (sid) store.perSite[envSiteKey(sid)] = id;
+        store.lastPresetId = id;
+        assetStylesPersist();
+        aspBump(); if (isActive) runUpdate();
+        renderAssetStylesPanel();
+    }
+    function aspSwitchPreset(id) {
+        if (assetDraft && !confirm('Discard unsaved style edits?')) { renderAssetStylesPanel(); return; }
+        assetDraft = null;
+        aspApplyPresetChoice(id);
+    }
+    function aspSave() {
+        if (!assetDraft) { showKMLToast('No unsaved changes.', 2500); return; }
+        const store = assetStylesLoadStore();
+        const idx = store.presets.findIndex(pr => pr && pr.id === assetDraft.presetId);
+        const saved = assetDeepCopy(assetDraft.preset);
+        if (idx === -1) store.presets.push(saved); else store.presets[idx] = saved;
+        assetStylesPersist();
+        assetDraft = null;
+        aspBump(); if (isActive) runUpdate();
+        renderAssetStylesPanel();
+        showKMLToast(`Preset "${saved.name}" saved.`, 2500);
     }
 
     // SVG dash pattern scaled to the line width so it reads at any thickness.
@@ -3642,8 +4158,6 @@
             .then(data => {
                 const list = Array.isArray(data) ? data : ((data && data.results) || []);
                 const polys = [];
-                const equipByName = new Map(); // name → slug, de-duped + ordered by count
-                const equipCount = {};
                 list.forEach(e => {
                     if (!e || e.type !== 3) return;
                     const raw = Array.isArray(e.coords) ? e.coords
@@ -3653,8 +4167,6 @@
                     let sLat = 0, sLng = 0;
                     pts.forEach(p => { sLat += p.lat; sLng += p.lng; });
                     const eq = classifyAssetEquipment(e);
-                    equipByName.set(eq.name, eq.slug);
-                    equipCount[eq.name] = (equipCount[eq.name] || 0) + 1;
                     polys.push({
                         name: e.name || (e.id != null ? `#${e.id}` : '?'),
                         state: classifyAssetState(e),
@@ -3671,23 +4183,10 @@
                     return;
                 }
                 assetStateData = { siteID, polys, loading: false, failed: false };
-                // Publish the discovered equipment set (most-common first) and
-                // re-register so the panel shows a checkbox per type. Seed
-                // toggleState so hiding works before the panel echoes values.
-                const newEquip = [...equipByName.keys()]
-                    .sort((a, b) => (equipCount[b] - equipCount[a]) || a.localeCompare(b))
-                    .map(name => ({ name, slug: equipByName.get(name) }));
-                const sig = newEquip.map(e => e.slug).join('|');
-                const prevSig = assetEquipTypes.map(e => e.slug).join('|');
-                if (sig !== prevSig) {
-                    assetEquipTypes = newEquip;
-                    newEquip.forEach(e => {
-                        const k = `aeq.${e.slug}.show`;
-                        if (toggleState[k] === undefined) toggleState[k] = true;
-                    });
-                    registerWithControlPanel(); // pushes the new schema to the panel
-                }
-                console.log(`${TAG} asset-state: loaded ${polys.length} asset polygons for site ${siteID} (${newEquip.length} equipment types)`);
+                console.log(`${TAG} asset-state: loaded ${polys.length} asset polygons for site ${siteID}`);
+                // Fresh data → the 🎨 editor's match counts + state/type
+                // suggestion lists may have changed.
+                assetStylesPanelDataRefresh();
                 if (isActive) runUpdate();
             })
             .catch(err => {
@@ -3737,43 +4236,16 @@
     }
 
     // The registration schema = static TOGGLES with the dynamically-discovered
-    // equipment checkboxes spliced into the Assets category. Posted to the
+    // RRC operator checkboxes spliced into their category. Posted to the
     // Control Panel on every register; the panel only re-renders when the
-    // equipment set actually changes (it signatures the payload).
+    // set actually changes (it signatures the payload).
     function buildRegistrationToggles() {
-        const extra = buildAssetEquipToggles();
         const rrcExtra = buildRrcOperatorToggles();
-        if (!extra.length && !rrcExtra.length) return TOGGLES;
+        if (!rrcExtra.length) return TOGGLES;
         return TOGGLES.map(cat => {
-            if (cat && cat.id === 'asset-cat' && extra.length) return { ...cat, children: [...cat.children, ...extra] };
             if (cat && cat.id === 'rrc-cat' && rrcExtra.length) return { ...cat, children: [...cat.children, ...rrcExtra] };
             return cat;
         });
-    }
-
-    // True if the user has unchecked any state or equipment "show" box — i.e.
-    // an asset hide filter is engaged. Drives whether we need entity data even
-    // when by-state coloring is off.
-    function anyAssetHidden() {
-        for (const k in toggleState) {
-            if (toggleState[k] !== false) continue;
-            if ((k.indexOf('astate.') === 0 || k.indexOf('aeq.') === 0) && k.endsWith('.show')) return true;
-        }
-        return false;
-    }
-
-    // Adopt an equipment set broadcast by the map iframe (cross-frame sync so
-    // every frame registers an identical schema). No-op if it's for a
-    // different site or matches what we already have.
-    function applyEquipFromBroadcast(d) {
-        if (!d || d.siteID !== getCurrentSiteID()) return;
-        const equip = Array.isArray(d.equip) ? d.equip : [];
-        const sig = equip.map(e => e.slug).join('|');
-        const prevSig = assetEquipTypes.map(e => e.slug).join('|');
-        if (sig === prevSig) return;
-        assetEquipTypes = equip;
-        equip.forEach(e => { const k = `aeq.${e.slug}.show`; if (toggleState[k] === undefined) toggleState[k] = true; });
-        registerWithControlPanel();
     }
 
     // GM storage helpers. Returns def if GM is unavailable (script grants
@@ -8910,6 +9382,10 @@
                         'basemap-set-custom',
                         'parcels-arm', 'parcels-clear',
                         'rrc-scout-view', 'rrc-scout-clear', 'rrc-recon',
+                        // 🎨 Asset styles are a view preference — DV renders
+                        // asset boxes too (DV_ASSET_SELECTOR), so the editor
+                        // and data refresh work there.
+                        'asset-styles-editor', 'refresh-asset-data',
                     ];
                     if (!DV_SAFE_ACTIONS.includes(msg.actionId)) {
                         showKMLToast('That tool is Site-Setup-only — Data View is view-only.', 4000);
@@ -8965,6 +9441,9 @@
                 else if (msg.actionId === 'refresh-asset-data') {
                     const sid = getCurrentSiteID();
                     if (sid) { console.log(`${TAG} asset-state: manual refresh requested`); fetchAssetStates(sid, true); }
+                }
+                else if (msg.actionId === 'asset-styles-editor') {
+                    openAssetStylesPanel();
                 }
             } else if (msg.type === 'PERF_TOGGLE') {
                 // Driven by AIM Performance Shield. Mirror its state, then
@@ -9042,16 +9521,6 @@
             toggles: buildRegistrationToggles(),
             hotkeys: HOTKEYS,
         });
-        // Keep TOP's schema in sync: whenever the iframe (which owns the data)
-        // registers and has a discovered equipment set, broadcast it so other
-        // frames adopt the same schema. Idempotent on the receiving side.
-        if (CONTEXT === 'IFRAME' && assetEquipTypes.length) {
-            try {
-                stateChannel.postMessage({
-                    action: 'ASSET_EQUIP', siteID: getCurrentSiteID(), equip: assetEquipTypes,
-                });
-            } catch (e) {}
-        }
         if (CONTEXT === 'IFRAME' && _rrcOperators.length) {
             try {
                 stateChannel.postMessage({
