@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.137
+// @version      34.138
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -67,7 +67,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.137';
+    const SCRIPT_VERSION = '34.138';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -3897,8 +3897,17 @@
         const sname = panel.querySelector('[data-asp-sitename]');
         if (sname) sname.textContent = siteNameCache.name ? `· ${siteNameCache.name}` : '';
 
-        const presetOpts = assetAllPresets().map(pr =>
-            `<option value="${aspEsc(pr.id)}" ${pr.id === p.id ? 'selected' : ''}>${pr.builtin ? '★ ' : ''}${aspEsc(pr.name)}</option>`).join('');
+        // 🧭 Auto row (v34.138): no per-site pin → the preset auto-resolves
+        // (site-name match > last used > builtin) and the Auto row shows what
+        // it resolved to. Picking a preset pins this site; picking Auto unpins.
+        const store = assetStylesLoadStore();
+        const sid = getCurrentSiteID();
+        const pinnedId = sid ? store.perSite[envSiteKey(sid)] : null;
+        const autoSelected = !pinnedId && !assetDraft;
+        const presetOpts = [`<option value="__auto" ${autoSelected ? 'selected' : ''}>🧭 Auto — by site name (now: ${aspEsc(p.name)})</option>`]
+            .concat(assetAllPresets().map(pr =>
+                `<option value="${aspEsc(pr.id)}" ${!autoSelected && pr.id === p.id ? 'selected' : ''}>${pr.builtin ? '★ ' : ''}${aspEsc(pr.name)}</option>`))
+            .join('');
         const stateOpts = (sel) => [`<option value="">(any)</option>`]
             .concat(disc.states.map(st => `<option value="${aspEsc(st)}" ${String(sel || '').toLowerCase() === st.toLowerCase() ? 'selected' : ''}>${aspEsc(st)}</option>`))
             .join('');
@@ -4118,6 +4127,17 @@
     function aspSwitchPreset(id) {
         if (assetDraft && !confirm('Discard unsaved style edits?')) { renderAssetStylesPanel(); return; }
         assetDraft = null;
+        if (id === '__auto') {
+            // Unpin this site — back to automatic resolution (site-name
+            // match > last used > builtin). lastPresetId left alone.
+            const store = assetStylesLoadStore();
+            const sid = getCurrentSiteID();
+            if (sid) delete store.perSite[envSiteKey(sid)];
+            assetStylesPersist();
+            aspBump(); if (isActive) runUpdate();
+            renderAssetStylesPanel();
+            return;
+        }
         aspApplyPresetChoice(id);
     }
     function aspSave() {

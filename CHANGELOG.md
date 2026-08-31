@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-08-31 — 🎨 Map Styler v34.138: Asset Styles — 🧭 Auto row in the preset dropdown (latest — dev only, feature #252)
+
+Follow-up to v34.137: manually picking a preset pins it to the site, but there was no way back to automatic detection. The preset dropdown now leads with **🧭 Auto — by site name**, which shows which preset auto-detection currently resolves to; selecting it unpins the site so the client preset again follows the site name.
+
 ## 2026-08-31 — 👁 Mission Bank Tools v2.90: "dots" toggle in the Mission preview panel (latest — dev only)
 
 The **Show ALL missions light-dots layer** (blue nav / pink snap circles) is now toggleable right on the Site Setup map: the 👁 Mission preview panel's header row has a new **dots** checkbox next to All/None. It's the same setting as the Control Panel's "👁 Show ALL missions" toggle — flipping either updates the other, and it still persists across reloads.
