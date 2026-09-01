@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-01 — ⬡ AIM HotspotFinder v0.1: the site-selection tool, now in your browser (CSMs)
+
+The standalone HotspotFinder desktop app (base-station site selection — clusters assets, scores them by weighted category, checks power-line reachability, excludes active sites) is now a web app: [hotspot.html](https://ned-yap.github.io/aim-userscripts/hotspot.html). No Python, no installs — unlock it with the same AIM access token you use for map outlines. Results render on a live dark map (hotspot circles, centers, per-group colored assets) plus the usual KML / Summary CSV / Assets CSV downloads. Client profiles (column mapping, weights, group toggles) are shared: save one and every CSM sees it. Your asset CSV is processed entirely in your browser — it is never uploaded anywhere. In validation — report anything odd.
+
 ## 2026-09-01 — ⚙ Control Panel v1.44: settings now survive Percepto sign-outs ([#1](https://github.com/Ned-Yap/aim-userscripts-issues/issues/1))
 
 Percepto's sign-out (the ~weekly session expiry) wipes the browser storage the Control Panel kept every setting in, so all toggles — outlines included — reset to defaults each time you signed back in. The panel now mirrors every setting (toggles, hotkey rebinds, panel position/size, Lite/Full mode) into Tampermonkey's own storage, which Percepto can't touch, and restores it automatically after a wipe. No action needed: your current settings are backed up the first time v1.44 loads, and the next sign-out will no longer reset them. Reported by Chris S.
