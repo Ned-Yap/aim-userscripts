@@ -6,55 +6,69 @@
 <meta name="robots" content="noindex">
 <title>AIM HotspotFinder</title>
 <style>
+  /* Matches the in-app AIM panel look (Control Panel): charcoal cards, cyan rgb(20,210,220). */
   :root {
-    --bg: #0d1117; --bg-card: #1c2128; --bg-input: #010409;
-    --border: #30363d; --border-strong: #4d5460;
-    --text: #e6edf3; --muted: #8d96a0; --faint: #6e7681;
-    --cyan: #5fdde5; --green: #5fff5f; --red: #ff6b6b;
+    --bg: rgb(24,24,24); --bg-card: rgba(40,40,40,0.96); --bg-head: rgb(28,28,28);
+    --bg-input: rgb(20,20,20);
+    --border: rgba(255,255,255,0.12); --border-strong: rgba(255,255,255,0.18);
+    --text: #e6e6e6; --muted: #888; --soft: #bbb;
+    --cyan: rgb(20,210,220); --cyan-soft: #7adfe6; --cyan-bg: rgba(20,210,220,0.18);
+    --cyan-border: rgba(20,210,220,0.5); --green: #39ff14; --red: #ff6060;
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    min-height: 100vh; display: flex; align-items: center; justify-content: center; font-size: 12px;
   }
   .gate {
-    width: min(440px, 92vw); background: var(--bg-card);
-    border: 1px solid var(--border); border-radius: 14px; padding: 34px 36px 30px;
-    text-align: center;
+    width: min(400px, 92vw); background: var(--bg-card);
+    border: 1px solid var(--border-strong); border-radius: 6px; overflow: hidden;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.5);
   }
-  h1 { font-size: 1.5rem; margin: 0 0 4px; color: var(--cyan); letter-spacing: .02em; }
-  .sub { color: var(--muted); font-size: .85rem; margin: 0 0 24px; line-height: 1.5; }
-  label { display: block; text-align: left; font-size: .8rem; color: var(--muted); margin: 0 0 6px; }
+  .gate-title {
+    display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+    background: var(--bg-head); border-bottom: 1px solid var(--border);
+  }
+  .gate-title .hex { font-size: 16px; line-height: 1; color: var(--green); }
+  .gate-title strong { color: var(--cyan); font-size: 14px; }
+  .gate-body { padding: 14px 16px 16px; }
+  .sub {
+    color: var(--cyan-soft); font-size: 10px; font-weight: 600; letter-spacing: .5px;
+    text-transform: uppercase; margin: 0 0 4px;
+  }
+  .desc { color: var(--muted); font-size: 11px; margin: 0 0 14px; line-height: 1.5; }
+  label { display: block; font-size: 11px; color: var(--soft); margin: 0 0 5px; }
   input[type=password] {
     width: 100%; background: var(--bg-input); color: var(--text);
-    border: 1px solid var(--border-strong); border-radius: 8px; padding: 10px 12px;
-    font-size: .9rem; font-family: "SF Mono", Menlo, Consolas, monospace;
+    border: 1px solid var(--border-strong); border-radius: 3px; padding: 6px 8px;
+    font-size: 11px; font-family: ui-monospace, Menlo, Consolas, monospace;
   }
-  input:focus { outline: none; border-color: var(--cyan); }
+  input:focus { outline: none; border-color: var(--cyan-border); }
   button {
-    width: 100%; margin-top: 14px; background: var(--green); color: #06210a;
-    border: none; border-radius: 8px; padding: 11px; font-size: .95rem; font-weight: 700;
-    cursor: pointer; font-family: inherit; letter-spacing: .03em;
+    width: 100%; margin-top: 12px; background: var(--cyan-bg); color: var(--cyan);
+    border: 1px solid var(--cyan-border); border-radius: 4px; padding: 8px;
+    font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit; letter-spacing: .04em;
   }
-  button:hover { background: #7dff7d; }
+  button:hover { background: rgba(20,210,220,0.3); box-shadow: 0 0 8px rgba(20,210,220,0.35); }
   button:disabled { opacity: .5; cursor: default; }
-  .err { color: var(--red); font-size: .82rem; margin: 12px 0 0; min-height: 1.2em; line-height: 1.5; }
-  .hint { color: var(--faint); font-size: .74rem; margin-top: 18px; line-height: 1.55; }
-  .hex { font-size: 2rem; margin-bottom: 8px; }
+  .err { color: var(--red); font-size: 11px; margin: 10px 0 0; min-height: 1.2em; line-height: 1.5; }
+  .hint { color: var(--muted); font-size: 10.5px; margin: 14px 0 0; line-height: 1.55; }
 </style>
 </head>
 <body>
 <div class="gate" id="gate">
-  <div class="hex">⬡</div>
-  <h1>AIM HotspotFinder</h1>
-  <p class="sub">Base-station site selection — clusters, scores, and maps asset hotspots.<br>CSM access only.</p>
-  <label for="pat">AIM access token</label>
-  <input type="password" id="pat" autocomplete="off" placeholder="ghp_… / github_pat_…">
-  <button id="unlock">Unlock</button>
-  <p class="err" id="err"></p>
-  <p class="hint">Same token you saved in the AIM Control Panel for map outlines.
-  It stays in this browser only. Ask Payden if you don't have one.</p>
+  <div class="gate-title"><span class="hex">⬡</span><strong>AIM HotspotFinder</strong></div>
+  <div class="gate-body">
+    <p class="sub">CSM access only</p>
+    <p class="desc">Base-station site selection — clusters, scores, and maps asset hotspots.</p>
+    <label for="pat">AIM access token</label>
+    <input type="password" id="pat" autocomplete="off" placeholder="ghp_… / github_pat_…">
+    <button id="unlock">Unlock</button>
+    <p class="err" id="err"></p>
+    <p class="hint">Same token you saved in the AIM Control Panel for map outlines.
+    It stays in this browser only. Ask Payden if you don't have one.</p>
+  </div>
 </div>
 <script>
 (function() {
