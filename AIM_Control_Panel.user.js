@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.43
+// @version      1.44
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -58,7 +58,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.41';
+    const VERSION = '1.44';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -225,11 +225,11 @@
         } catch (e) { state.panelUi = { locked: false, pos: null, size: null }; }
     }
     function savePrefs() {
-        try { localStorage.setItem(PREFS_KEY, JSON.stringify(state.prefs)); } catch (e) {}
-        try { localStorage.setItem(HOTKEYS_KEY, JSON.stringify(state.hotkeys)); } catch (e) {}
+        lsSetMirrored(PREFS_KEY, JSON.stringify(state.prefs));
+        lsSetMirrored(HOTKEYS_KEY, JSON.stringify(state.hotkeys));
     }
     function savePanelUi() {
-        try { localStorage.setItem(PANEL_UI_KEY, JSON.stringify(state.panelUi)); } catch (e) {}
+        lsSetMirrored(PANEL_UI_KEY, JSON.stringify(state.panelUi));
     }
     // v1.31 — Lite/Full mode (shared localStorage, see MODE_KEY note above).
     // Anything other than the literal 'full' is treated as LITE (the safe
@@ -240,7 +240,7 @@
     }
     function isFull() { return getMode() === 'full'; }
     function setMode(mode) {
-        try { localStorage.setItem(MODE_KEY, mode === 'full' ? 'full' : 'lite'); } catch (e) {}
+        lsSetMirrored(MODE_KEY, mode === 'full' ? 'full' : 'lite');
     }
     function getModeLogin() {
         try { return localStorage.getItem(MODE_LOGIN_KEY) || ''; } catch (e) { return ''; }
@@ -248,6 +248,49 @@
     function isCsmUser() {
         try { return localStorage.getItem(MODE_CSM_KEY) === '1'; } catch (e) { return false; }
     }
+    // v1.44 — GM-mirrored localStorage. Percepto's sign-out flow wipes origin
+    // localStorage, so every panel setting (prefs/hotkeys/panel geometry/mode)
+    // reset to defaults each weekly session expiry (reported by ChrisS-AIM).
+    // GM storage lives extension-side and survives the wipe: every persisted
+    // key is mirrored there on write (lsSetMirrored) and restored at load ONLY
+    // when the localStorage copy is MISSING (null = the wipe signature). An
+    // existing localStorage value always wins, so normal operation is
+    // unchanged; if GM storage is unavailable, gmGet/gmSet no-op and behavior
+    // degrades to the old localStorage-only path. Note: GM storage is shared
+    // across prod/QA origins, so a wiped origin restores the settings last
+    // saved on EITHER — acceptable (same user, same preferences).
+    const GM_LS_BACKUP_PREFIX = 'aim-cp-ls-backup:';
+    const MIRRORED_LS_KEYS = [PREFS_KEY, HOTKEYS_KEY, PANEL_UI_KEY, MODE_KEY, MODE_CSM_KEY, MODE_LOGIN_KEY];
+    function lsSetMirrored(key, value) {
+        try { localStorage.setItem(key, value); } catch (e) {}
+        gmSet(GM_LS_BACKUP_PREFIX + key, String(value));
+    }
+    function restoreLsFromGmBackup() {
+        let restored = 0;
+        MIRRORED_LS_KEYS.forEach((key) => {
+            try {
+                const live = localStorage.getItem(key);
+                const backup = gmGet(GM_LS_BACKUP_PREFIX + key, null);
+                if (live !== null) {
+                    // Live value wins — never overwrite it. But SEED the backup
+                    // from it, so users who installed before v1.44 (backup still
+                    // empty) are covered by the very next sign-out, not only
+                    // after their next settings change.
+                    if (backup !== live) gmSet(GM_LS_BACKUP_PREFIX + key, live);
+                    return;
+                }
+                if (typeof backup !== 'string') return; // nothing mirrored yet (fresh install)
+                localStorage.setItem(key, backup);
+                restored++;
+            } catch (e) { console.warn(`${TAG} GM-backup restore failed for ${key}:`, e); }
+        });
+        if (restored > 0) console.log(`${TAG} restored ${restored} setting key(s) from GM backup (localStorage was wiped — likely Percepto sign-out)`);
+    }
+    // Run the restore BEFORE anything reads mode or prefs (ACTIVE_MODE below,
+    // loadPrefs at init). Other AIM scripts may read aim-mode before this runs
+    // (userscript order isn't guaranteed) — they fall back to Lite for that one
+    // page load and self-heal on the next, same as today.
+    restoreLsFromGmBackup();
     // The mode the page actually LOADED with — i.e. what every script's init
     // guard read. resolveMode() may change MODE_KEY later (async), but that
     // only takes effect on the next reload, so the banner compares this against
@@ -269,7 +312,7 @@
         ghJson('https://api.github.com/user', token, (me) => {
             const login = me && me.login;
             if (!login) { modeResolving = false; return; }
-            try { localStorage.setItem(MODE_LOGIN_KEY, login); } catch (e) {}
+            lsSetMirrored(MODE_LOGIN_KEY, login);
             const url = `https://api.github.com/repos/${KMLS_REPO}/contents/${CSM_WHITELIST_PATH}?ref=${KMLS_BRANCH}`;
             ghJson(url, token, (file) => {
                 modeResolving = false;
@@ -285,7 +328,7 @@
                     return; // don't downgrade on a missing/garbled list
                 }
                 const isCsm = list.some(u => String(u).toLowerCase() === login.toLowerCase());
-                try { localStorage.setItem(MODE_CSM_KEY, isCsm ? '1' : '0'); } catch (e) {}
+                lsSetMirrored(MODE_CSM_KEY, isCsm ? '1' : '0');
                 const prev = getMode();
                 let raw = null;
                 try { raw = localStorage.getItem(MODE_KEY); } catch (e) {}

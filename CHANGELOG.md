@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-01 — ⚙ Control Panel v1.44: settings now survive Percepto sign-outs ([#1](https://github.com/Ned-Yap/aim-userscripts-issues/issues/1))
+
+Percepto's sign-out (the ~weekly session expiry) wipes the browser storage the Control Panel kept every setting in, so all toggles — outlines included — reset to defaults each time you signed back in. The panel now mirrors every setting (toggles, hotkey rebinds, panel position/size, Lite/Full mode) into Tampermonkey's own storage, which Percepto can't touch, and restores it automatically after a wipe. No action needed: your current settings are backed up the first time v1.44 loads, and the next sign-out will no longer reset them. Reported by Chris S.
+
 ## 2026-08-31 — 🖊 Mission Bank Tools v2.91 + Site Setup Tools v4.252: pad-root mission matching (latest — dev only)
 
 The 🖊 Lasso (and every other asset-name → mission matcher) was skipping whole sites whose missions are named `<PAD> _ID <n>` while the asset polygons are named `<Pad> <Equipment>` — "LHS Ranch 1702BH Pump Jack" never matched mission "LHS RANCH 1702BH _ID 5062", so dozens of pads reported "no mission with this name". The shared rank ladder gets a fourth, last-resort **pad-root rung**: drop up to 3 trailing tokens off the asset name (equipment suffixes like "Pump Jack" / "Gas Lift Header" / "Flow Line 2") and match missions that continue that pad root at a token boundary (so 1701AH can't hit 1701H). Because several equipment polygons on one pad now resolve to the same mission, the Lasso collapses them to **one row per mission**, keeping the farthest polygon's range so battery math stays worst-case. The Asset Inspector's 🔍 Find in Missions mirrors the same rung (v4.252) so both features keep agreeing on which mission a pad name means.
