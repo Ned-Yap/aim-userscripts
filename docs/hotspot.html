@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex">
+<title>AIM HotspotFinder</title>
+<style>
+  :root {
+    --bg: #0d1117; --bg-card: #1c2128; --bg-input: #010409;
+    --border: #30363d; --border-strong: #4d5460;
+    --text: #e6edf3; --muted: #8d96a0; --faint: #6e7681;
+    --cyan: #5fdde5; --green: #5fff5f; --red: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  }
+  .gate {
+    width: min(440px, 92vw); background: var(--bg-card);
+    border: 1px solid var(--border); border-radius: 14px; padding: 34px 36px 30px;
+    text-align: center;
+  }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; color: var(--cyan); letter-spacing: .02em; }
+  .sub { color: var(--muted); font-size: .85rem; margin: 0 0 24px; line-height: 1.5; }
+  label { display: block; text-align: left; font-size: .8rem; color: var(--muted); margin: 0 0 6px; }
+  input[type=password] {
+    width: 100%; background: var(--bg-input); color: var(--text);
+    border: 1px solid var(--border-strong); border-radius: 8px; padding: 10px 12px;
+    font-size: .9rem; font-family: "SF Mono", Menlo, Consolas, monospace;
+  }
+  input:focus { outline: none; border-color: var(--cyan); }
+  button {
+    width: 100%; margin-top: 14px; background: var(--green); color: #06210a;
+    border: none; border-radius: 8px; padding: 11px; font-size: .95rem; font-weight: 700;
+    cursor: pointer; font-family: inherit; letter-spacing: .03em;
+  }
+  button:hover { background: #7dff7d; }
+  button:disabled { opacity: .5; cursor: default; }
+  .err { color: var(--red); font-size: .82rem; margin: 12px 0 0; min-height: 1.2em; line-height: 1.5; }
+  .hint { color: var(--faint); font-size: .74rem; margin-top: 18px; line-height: 1.55; }
+  .hex { font-size: 2rem; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+<div class="gate" id="gate">
+  <div class="hex">⬡</div>
+  <h1>AIM HotspotFinder</h1>
+  <p class="sub">Base-station site selection — clusters, scores, and maps asset hotspots.<br>CSM access only.</p>
+  <label for="pat">AIM access token</label>
+  <input type="password" id="pat" autocomplete="off" placeholder="ghp_… / github_pat_…">
+  <button id="unlock">Unlock</button>
+  <p class="err" id="err"></p>
+  <p class="hint">Same token you saved in the AIM Control Panel for map outlines.
+  It stays in this browser only. Ask Payden if you don't have one.</p>
+</div>
+<script>
+(function() {
+    'use strict';
+    var TAG = '[AIM HOTSPOT GATE]';
+    var APP_URL = 'https://api.github.com/repos/Ned-Yap/aim-userscripts-data/contents/hotspotfinder/app.js';
+    var LS_KEY = 'aim-hf-pat';
+    var patInput = document.getElementById('pat');
+    var btn = document.getElementById('unlock');
+    var errEl = document.getElementById('err');
+
+    function getSaved() {
+        try { return localStorage.getItem(LS_KEY) || ''; } catch (e) { return ''; }
+    }
+    function save(pat) {
+        try { localStorage.setItem(LS_KEY, pat); } catch (e) { console.warn(TAG, 'localStorage blocked'); }
+    }
+
+    function unlock(pat, silent) {
+        if (!pat) { if (!silent) errEl.textContent = 'Enter your token.'; return; }
+        btn.disabled = true;
+        btn.textContent = 'Loading…';
+        errEl.textContent = '';
+        fetch(APP_URL, { headers: { 'Authorization': 'token ' + pat, 'Accept': 'application/vnd.github.raw' } })
+            .then(function(res) {
+                if (res.status === 401 || res.status === 403) throw new Error('Token rejected — check it and try again.');
+                if (res.status === 404) throw new Error('Token accepted no access, or app missing. Ask Payden.');
+                if (!res.ok) throw new Error('Load failed: HTTP ' + res.status);
+                return res.text();
+            })
+            .then(function(code) {
+                save(pat);
+                window.AIM_HF_PAT = pat;
+                console.log(TAG, 'app fetched (' + code.length + ' bytes), launching');
+                /* run the private payload */
+                (new Function(code))();
+            })
+            .catch(function(e) {
+                console.error(TAG, e);
+                btn.disabled = false;
+                btn.textContent = 'Unlock';
+                errEl.textContent = e.message;
+            });
+    }
+
+    btn.addEventListener('click', function() { unlock(patInput.value.trim(), false); });
+    patInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') unlock(patInput.value.trim(), false); });
+
+    var saved = getSaved();
+    if (saved) {
+        patInput.value = saved;
+        unlock(saved, true);
+    }
+    console.log(TAG, 'ready');
+})();
+</script>
+</body>
+</html>
