@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-04 — 🌙 Map Styler v34.136 (prod) / v34.139 (latest): Dark & Light map basemaps fixed
+
+CARTO put their free basemap tiles behind an API key, so the "Dark map" and "Light map" base layers started rendering "API KEY REQUIRED" watermarks over everything. Both now use Esri's Dark/Light Gray Canvas instead — no key, no watermark, and your saved base-layer choice carries over automatically. One tradeoff: the Esri canvas maps only have native detail to zoom 16, so they get a little soft when zoomed all the way into a pad (the satellite basemaps are unaffected).
+
 ## 2026-09-01 — ⬡ AIM HotspotFinder v0.1: the site-selection tool, now in your browser (CSMs)
 
 The standalone HotspotFinder desktop app (base-station site selection — clusters assets, scores them by weighted category, checks power-line reachability, excludes active sites) is now a web app: [hotspot.html](https://ned-yap.github.io/aim-userscripts/hotspot.html). No Python, no installs — unlock it with the same AIM access token you use for map outlines. Results render on a live dark map (hotspot circles, centers, per-group colored assets) plus the usual KML / Summary CSV / Assets CSV downloads. Client profiles (column mapping, weights, group toggles) are shared: save one and every CSM sees it. Your asset CSV is processed entirely in your browser — it is never uploaded anywhere. In validation — report anything odd.

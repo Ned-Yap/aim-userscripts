@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.138
+// @version      34.139
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -67,7 +67,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.138';
+    const SCRIPT_VERSION = '34.139';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -471,7 +471,7 @@
             // Basemap switcher (v34.108) — swap Percepto's HERE base for
             // fresher/legal alternatives: Esri World Imagery (usually the
             // most current satellite in oil country), USGS NAIP aerials
-            // (public domain), OSM streets, CARTO dark/light map modes, or
+            // (public domain), OSM streets, Esri dark/light gray canvas, or
             // a custom XYZ template (your key, your terms). Google's
             // scrape endpoint is deliberately NOT a preset (ToS).
             type: 'category',
@@ -485,8 +485,8 @@
                       { value: 'percepto', label: 'Percepto default (HERE)' },
                       { value: 'esri', label: 'Esri World Imagery (fresher satellite)' },
                       { value: 'usgs', label: 'USGS NAIP aerial (public domain)' },
-                      { value: 'carto-dark', label: '🌙 Dark map (CARTO)' },
-                      { value: 'carto-light', label: 'Light map (CARTO)' },
+                      { value: 'carto-dark', label: '🌙 Dark map (Esri)' },
+                      { value: 'carto-light', label: 'Light map (Esri)' },
                       { value: 'osm', label: 'OpenStreetMap' },
                       { value: 'custom', label: 'Custom tile URL…' },
                   ],
@@ -1695,14 +1695,18 @@
     // ArcGIS tile path is /tile/{z}/{y}/{x} — y BEFORE x.
     // Basemap switcher (v34.108). Our replacement layer sits at zIndex 0
     // (under orthos + charts); the HERE layers hide via the same container
-    // display mechanism as hide-satellite. IMPORTANT: Esri/CARTO URLs match
+    // display mechanism as hide-satellite. IMPORTANT: Esri URLs match
     // _SAT_URL_PATTERNS, so applyMapBackgroundVisibility must exempt
     // _aimBasemapLayer (same trap as the FAA chart in v34.87).
     const BASEMAP_SOURCES = {
         esri: { url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', maxNative: 19, attribution: 'Esri, Maxar, Earthstar Geographics' },
         usgs: { url: 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}', maxNative: 16, attribution: 'USGS' },
-        'carto-dark': { url: 'https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png', maxNative: 19, attribution: '© OpenStreetMap contributors © CARTO' },
-        'carto-light': { url: 'https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png', maxNative: 19, attribution: '© OpenStreetMap contributors © CARTO' },
+        // v34.139: CARTO's public basemap CDN went key-required (tiles render
+        // an "API KEY REQUIRED" watermark) — swapped to Esri's keyless
+        // Dark/Light Gray Canvas. Option keys stay 'carto-*' so saved
+        // basemap.source prefs keep resolving.
+        'carto-dark': { url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', maxNative: 16, attribution: 'Esri, HERE, Garmin, © OpenStreetMap contributors' },
+        'carto-light': { url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', maxNative: 16, attribution: 'Esri, HERE, Garmin, © OpenStreetMap contributors' },
         osm: { url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', maxNative: 19, attribution: '© OpenStreetMap contributors' },
     };
     const BASEMAP_CUSTOM_KEY = 'aim-basemap-custom-url';
