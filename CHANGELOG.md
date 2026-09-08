@@ -6,6 +6,13 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-08 — ⭐ PROMOTED TO PROD: Map Styler v34.139 (coworkers jump from v34.136)
+
+Everything from the dev branch since early August now reaches everyone:
+- **🎨 Asset Styles — custom color rules + client presets (feature #252):** the fixed six-state asset coloring is now fully customizable. Assets card → **🎨 Edit styles & presets**: ordered rules matching by state / equipment type / asset name (first match wins) with full styling (line color, width, dashed, line+fill opacity, fill color) and per-rule hide; live map preview until 💾 Save. Named presets **auto-apply by client from the site name** (🧭 Auto row shows what detection resolved; picking a preset pins it per site), JSON export/import for sharing. The old per-state rows and per-equipment checkboxes are replaced by the editor.
+- **⬠ NFZ category (feature #242):** No-Fly Zones get their own card (show/hide, buffer, line color/width, fill) like FFZs and FPs.
+- (The CARTO→Esri Gray Canvas basemap fix from 2026-09-04 was already in prod as v34.136.)
+
 ## 2026-09-04 — 🌙 Map Styler v34.136 (prod) / v34.139 (latest): Dark & Light map basemaps fixed
 
 CARTO put their free basemap tiles behind an API key, so the "Dark map" and "Light map" base layers started rendering "API KEY REQUIRED" watermarks over everything. Both now use Esri's Dark/Light Gray Canvas instead — no key, no watermark, and your saved base-layer choice carries over automatically. One tradeoff: the Esri canvas maps only have native detail to zoom 16, so they get a little soft when zoomed all the way into a pad (the satellite basemaps are unaffected).
