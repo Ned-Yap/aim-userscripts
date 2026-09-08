@@ -6,6 +6,17 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-08 — ⭐ PROMOTED TO PROD: Mission Bank Tools v2.91 (coworkers jump from v2.54)
+
+The entire mission-macro management arc from the last month reaches everyone:
+- **✂ Split macros into per-pad micros (v2.55–v2.60, feature #238):** slice any macro mission into one micro mission per pad (geometry-based), with setup steps named + optional, already-split pads unticked, and a Split-ALL one-pass mode. Micros become the per-pad source of truth.
+- **🧹 Remove a step type site-wide (v2.56, feature #239):** pick any step type that exists across the site's missions (waits grouped by duration so the 10 s GEM dwell is never swept up with a stray 1 s wait), review per-row, apply on the usual backup → save → verify rails. Flag poles take their paired nav by default.
+- **🪄 Step Optimizer (v2.66–v2.81, feature #244):** reorders navs/steps *inside* a macro for the shortest legal route — legal-graph distances (never straight-line through FFZs), far-first branch walk inside each pad, cluster ordering with a never-worse guarantee (your current order is always a candidate), OGI standoff ladder (ideal 100 ft, band 90–210) shown info-only, duplicate/snap-less-nav detection, and a 🪄 All site sweep. **Snapshot↔nav pairings are pilot-tuned calibration and are never changed unless you explicitly tick them.**
+- **✂ Cut (v2.80, feature #245):** remove whole pads, single navs, or single snapshots from a macro inside the 🪄 panel.
+- **⟳ Re-merge from micros (v2.82–v2.88, feature #248):** rebuild a macro in place from its pads' current micro missions — fix a pad in its micro, hit ⟳ (or ⟳ All for every changed macro), and the macro updates with the same name/id/pad order. No re-lasso, no delete-and-rename.
+- **⇅ reorder panel is now a full macro composer (v2.63–v2.64, v2.85, v2.89):** drag to reorder pads with live badge renumbering, ✕ to delete a pad, M2 on the map to ADD a pad from its micro, Ctrl+M2 to remove, M2 on a badge to renumber.
+- Plus: floating panels drag/resize (v2.83), 🔋 Range cutoffs editable in the Control Panel (v2.58), big-site route-solver speedup (v2.61), 👁 "dots" toggle in the Mission preview panel (v2.90), and pad-root mission matching so `<PAD> _ID <n>` missions match `<Pad> <Equipment>` assets (v2.91).
+
 ## 2026-09-08 — ⭐ PROMOTED TO PROD: Map Styler v34.139 (coworkers jump from v34.136)
 
 Everything from the dev branch since early August now reaches everyone:

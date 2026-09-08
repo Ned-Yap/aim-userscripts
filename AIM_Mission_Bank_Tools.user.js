@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.54
+// @version      2.91
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.54';
+    const SCRIPT_VERSION = '2.91';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -392,6 +392,7 @@
                     if (v !== mpvAllOn) {
                         mpvAllOn = v;
                         gmSet(CACHE_KEY_MPV_ALL, mpvAllOn);
+                        try { mpvSyncDotsCheckbox(); } catch (e) {}
                         if (mpvFrameOk()) try { mpvAllChanged(); } catch (e) {}
                     }
                 } else if (msg.toggleId === 'default-snap-agl') {
@@ -406,6 +407,19 @@
                     if (v !== mathFieldsEnabled) {
                         mathFieldsEnabled = v;
                         gmSet(CACHE_KEY_MATH_FIELDS, mathFieldsEnabled);
+                    }
+                } else if (msg.toggleId === 'rng-tattu-ft' || msg.toggleId === 'rng-tulip-ft') {
+                    // 🔋 Range battery cutoffs — write the SHARED agCfg keys (the
+                    // same numbers the gated Auto-Group knobs row edits), so the
+                    // Range overlay, lasso tier-split and merge optimizer all move
+                    // together. Idempotent: the CP echoes SET_TOGGLE from TOP +
+                    // IFRAME and on every REGISTER.
+                    const v = Number(msg.value !== undefined ? msg.value : msg.enabled);
+                    const key = msg.toggleId === 'rng-tattu-ft' ? 'tattuRadiusFt' : 'tulipRadiusFt';
+                    if (isFinite(v) && v > 0 && v !== agCfg()[key]) {
+                        const patch = {}; patch[key] = v;
+                        agSetCfg(patch);
+                        if (mpvFrameOk()) try { rngRefresh(); } catch (e) { console.warn(`${TAG} [range] refresh after cutoff change failed`, e); }
                     }
                 } else if (typeof msg.toggleId === 'string' && msg.toggleId.indexOf('color-') === 0) {
                     const key = msg.toggleId.slice(6);
@@ -458,6 +472,14 @@
                 { id: 'preview-all', label: '👁 Show ALL missions (light dots — no lines/labels)', type: 'boolean', default: false },
                 { id: 'default-snap-agl', label: 'Default snapshot AGL (auto-AGL toggle)', type: 'number', min: -50, max: 500, step: 1, default: 10, unit: 'ft' },
                 { id: 'math-fields', label: '🧮 Math in step number fields (type 2630+15 or +15, then Enter)', type: 'boolean', default: true },
+                { id: 'range-header', label: '🔋 Range battery cutoffs (also drive Lasso/Auto-Group tiers)', type: 'header' },
+                // Defaults are read LIVE from agCfg() so the CP's register-echo
+                // (which fires with the default when the user never touched the
+                // CP control) can't clobber a value set via the Auto-Group knobs
+                // row. If the user customizes the value IN the CP, the CP's
+                // stored copy wins on every reload — one consistent authority.
+                { id: 'rng-tattu-ft', label: 'Tattu — one-way route ≤ this', type: 'number', min: 1000, max: 60000, step: 500, default: agCfg().tattuRadiusFt, unit: 'ft' },
+                { id: 'rng-tulip-ft', label: 'Tulip — beyond this = out of range', type: 'number', min: 1000, max: 60000, step: 500, default: agCfg().tulipRadiusFt, unit: 'ft' },
                 { id: 'colors-header', label: 'Step colors (editor cards + map badges)', type: 'header' },
                 { id: 'color-nav', label: 'Navigate', type: 'color', default: STEP_COLOR_DEFAULTS.nav },
                 { id: 'color-snap', label: 'Snapshot', type: 'color', default: STEP_COLOR_DEFAULTS.snap },
@@ -2425,6 +2447,212 @@
             showToast('Site-wide wrap failed — see console.', '#ff5252', 5000);
         } finally { wrapSiteBusy = false; }
     }
+    // ── 🧹 REMOVE A STEP TYPE SITE-WIDE (v2.56, feature #239) ───────────────
+    // "Open each mission, delete the step, save" ×N missions, automated with
+    // a review gate. Pick a target from what actually exists across the
+    // site's missions — WAIT steps are grouped BY DURATION on purpose: the
+    // 10 s GEM dwell IS the emission measurement and must never be swept up
+    // while clearing a stray 1 s wait. Flag poles were always added with a
+    // dedicated nav DIRECTLY BEFORE them, so the flag-pole target takes that
+    // paired nav too by default (per-row untick in the review; a row whose
+    // FOLLOWING step is a snapshot is flagged — that snapshot would lose the
+    // nav). Apply saves each affected mission in place on the same rails as
+    // 🌐 site-wide wrap: confirm → JSON backup download → sequential
+    // ctx.saveApp → fresh-fetch verify.
+    const SRM_PANEL_ID = 'aim-mb-srm-panel';
+    let srmBusy = false;
+    function srmLabel(s, edge) {
+        if (!s) return edge || 'end';
+        const names = { 0: 'takeoff', 1: 'nav', 5: 'wait', 6: 'snapshot', 7: 'camera', 16: 'flag pole', 24: 'GEM', 99: 'returnHome' };
+        const t = names[s.type] || s.type_name || ('type ' + s.type);
+        return s.type === 5 ? `wait ${s.value1 == null ? '?' : s.value1}s` : t;
+    }
+    function srmMatch(s, tgt) { return !!s && s.type === tgt.type && (tgt.type !== 5 || String(s.value1) === String(tgt.value1)); }
+    function srmTargets(missions) {
+        const map = new Map();
+        missions.forEach(m => (m.instructions || []).forEach(s => {
+            // takeoff/returnHome are structural; navs only ever leave as a
+            // flag pole's pair — never offered as a site-wide target.
+            if (!s || s.type === 0 || s.type === 1 || s.type === 99) return;
+            const key = s.type === 5 ? `5:${s.value1}` : String(s.type);
+            if (!map.has(key)) map.set(key, { key, type: s.type, value1: s.type === 5 ? s.value1 : null, label: srmLabel(s), count: 0, missionIds: new Set() });
+            const t = map.get(key); t.count++; t.missionIds.add(m.id);
+        }));
+        return Array.from(map.values()).sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+    }
+    function srmBuildPlan(missions, tgt, pairNav) {
+        const plan = [];
+        missions.forEach(m => {
+            const ins = m.instructions || [];
+            const groups = [];
+            const claimed = new Set();
+            ins.forEach((s, i) => {
+                if (!srmMatch(s, tgt)) return;
+                const idxs = [];
+                if (tgt.type === 16 && pairNav && i > 0 && ins[i - 1] && ins[i - 1].type === 1 && !claimed.has(i - 1)) idxs.push(i - 1);
+                idxs.push(i);
+                idxs.forEach(x => claimed.add(x));
+                const nxt = ins[i + 1];
+                const warn = (idxs.length === 2 && nxt && nxt.type === 6) ? '⚠ next step is a snapshot — it would lose this nav' : null;
+                const noNav = (tgt.type === 16 && pairNav && idxs.length === 1) ? 'no nav directly before — flag only' : null;
+                groups.push({
+                    idxs,
+                    label: idxs.map(x => `#${x + 1} ${srmLabel(ins[x])}`).join(' + '),
+                    ctx: `${srmLabel(ins[Math.min.apply(null, idxs) - 1], 'start')} → ✂ → ${srmLabel(nxt)}`,
+                    warn, noNav,
+                });
+            });
+            if (groups.length) plan.push({ m, groups });
+        });
+        return plan;
+    }
+    async function srmOpen() {
+        const old = document.getElementById(SRM_PANEL_ID);
+        if (old) { old.remove(); return; }
+        if (srmBusy) return;
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded.', '#ff5252', 3000); return; }
+        showToast('🧹 Fetching all missions…', '#ffd54f', 2000);
+        let missions;
+        try { missions = await mbFetchMissionsFull(sid); }
+        catch (e) { console.warn(`${TAG} [srm] fetch failed`, e); showToast('🧹 Mission fetch failed — see console.', '#ff5252', 4500); return; }
+        if (!missions.length) { showToast('No missions on this site.', '#ff9800', 3000); return; }
+        const targets = srmTargets(missions);
+        if (!targets.length) { showToast('No removable step types found in any mission.', '#ff9800', 4000); return; }
+        const p = document.createElement('div');
+        p.id = SRM_PANEL_ID;
+        p.style.cssText = 'position:fixed;top:60px;right:24px;width:430px;max-height:82vh;display:flex;flex-direction:column;z-index:2147483602;'
+            + 'background:#161a20;border:1px solid #ffd54f;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        p.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(255,213,79,0.08);border-bottom:1px solid rgba(255,213,79,0.3);">
+                <span style="font-weight:800;color:#ffd54f;font-size:13px;">🧹 Remove steps — site ${escapeHtml(String(sid))}</span>
+                <button data-srm-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button>
+            </div>
+            <div style="padding:7px 12px;border-bottom:1px solid #2a2f38;">
+                <div style="font-size:10px;color:#9ad;margin-bottom:5px;">Pick what to remove (found across ${missions.length} mission(s); waits are split by duration on purpose):</div>
+                ${targets.map(t => `<label style="display:flex;align-items:center;gap:6px;padding:2px 2px;cursor:pointer;font-size:12px;">
+                    <input type="radio" name="srm-target" data-srm-t="${escapeHtml(t.key)}" />
+                    <span style="flex:1;">${escapeHtml(t.label)}</span>
+                    <span style="color:#9ad;font-size:11px;">${t.count} step(s) · ${t.missionIds.size} mission(s)</span>
+                </label>`).join('')}
+                <label data-srm-pairwrap style="display:none;align-items:center;gap:6px;margin-top:5px;padding:4px 6px;background:rgba(255,138,210,0.08);border:1px solid rgba(255,138,210,0.3);border-radius:5px;font-size:11px;cursor:pointer;">
+                    <input type="checkbox" data-srm-pairnav checked />
+                    <span>Also remove the <b>nav directly before</b> each flag pole (they were added just for it)</span>
+                </label>
+            </div>
+            <div data-srm-review style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;color:#888;">Pick a target above to review the proposed removals.</div>
+            <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
+                <span data-srm-status style="flex:1;font-size:11px;color:#9ad;"></span>
+                <button data-srm-go style="padding:6px 12px;background:#ffd54f;border:none;color:#2a2004;border-radius:6px;cursor:pointer;font-weight:800;" disabled>🧹 Remove 0</button>
+            </div>`;
+        document.body.appendChild(p);
+        const reviewEl = p.querySelector('[data-srm-review]');
+        const goBtn = p.querySelector('[data-srm-go]');
+        const pairWrap = p.querySelector('[data-srm-pairwrap]');
+        const pairCb = p.querySelector('[data-srm-pairnav]');
+        let curTgt = null, curPlan = null;
+        const updateGo = () => {
+            const n = reviewEl.querySelectorAll('input[data-srm-g]:checked').length;
+            const steps = Array.from(reviewEl.querySelectorAll('input[data-srm-g]:checked'))
+                .reduce((a, cb) => { const [mi, gi] = cb.getAttribute('data-srm-g').split(':').map(Number); return a + curPlan[mi].groups[gi].idxs.length; }, 0);
+            goBtn.textContent = `🧹 Remove ${steps}`;
+            goBtn.disabled = srmBusy || !n;
+        };
+        const renderReview = () => {
+            if (!curTgt) return;
+            curPlan = srmBuildPlan(missions, curTgt, curTgt.type === 16 && pairCb.checked);
+            pairWrap.style.display = curTgt.type === 16 ? 'flex' : 'none';
+            if (!curPlan.length) { reviewEl.innerHTML = '<div style="padding:8px;color:#ff9800;">No matches (unexpected — re-open the panel).</div>'; updateGo(); return; }
+            reviewEl.innerHTML = `<div style="padding:3px 2px;color:#9ad;">${curPlan.length} mission(s) · <a data-srm-all href="#" style="color:#7adfe6;">all</a> / <a data-srm-none href="#" style="color:#7adfe6;">none</a> — every ticked row is removed on Apply</div>`
+                + curPlan.map((pm, mi) => `<div style="margin:4px 0 1px;font-weight:700;color:#7adfe6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(String(pm.m.name || ('#' + pm.m.id)))} <span style="color:#789;font-weight:400;">· ${pm.groups.length} removal(s)</span></div>`
+                    + pm.groups.map((g, gi) => `<label style="display:flex;align-items:center;gap:6px;padding:1px 2px 1px 12px;border-bottom:1px solid #20262e;cursor:pointer;">
+                        <input type="checkbox" data-srm-g="${mi}:${gi}" checked />
+                        <span style="flex:1;color:#e6e6e6;">${escapeHtml(g.label)}</span>
+                        <span style="color:#789;font-size:10px;white-space:nowrap;">${escapeHtml(g.ctx)}</span>
+                    </label>${g.warn ? `<div style="margin-left:30px;color:#ffb74d;font-size:10px;">${escapeHtml(g.warn)}</div>` : ''}${g.noNav ? `<div style="margin-left:30px;color:#789;font-size:10px;">${escapeHtml(g.noNav)}</div>` : ''}`).join('')).join('');
+            reviewEl.querySelectorAll('input[data-srm-g]').forEach(cb => { cb.onchange = updateGo; });
+            const allA = reviewEl.querySelector('[data-srm-all]'), noneA = reviewEl.querySelector('[data-srm-none]');
+            if (allA) allA.onclick = (ev) => { ev.preventDefault(); reviewEl.querySelectorAll('input[data-srm-g]').forEach(cb => { cb.checked = true; }); updateGo(); };
+            if (noneA) noneA.onclick = (ev) => { ev.preventDefault(); reviewEl.querySelectorAll('input[data-srm-g]').forEach(cb => { cb.checked = false; }); updateGo(); };
+            updateGo();
+        };
+        p.querySelector('[data-srm-close]').onclick = () => { if (!srmBusy) p.remove(); };
+        p.querySelectorAll('input[data-srm-t]').forEach(r => r.onchange = () => {
+            curTgt = targets.find(t => t.key === r.getAttribute('data-srm-t')) || null;
+            renderReview();
+        });
+        pairCb.onchange = () => renderReview();
+        goBtn.onclick = () => srmApply(p, curPlan, curTgt, updateGo);
+    }
+    async function srmApply(panel, plan, tgt, updateGo) {
+        if (srmBusy || !plan || !tgt) return;
+        if (document.querySelector('.edit-instruction')) { showToast('Close the open STEP editor first (save or cancel it), then retry.', '#ff9800', 4500); return; }
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4500); return; }
+        const sid = getCurrentSiteID();
+        const work = [];
+        plan.forEach((pm, mi) => {
+            const remove = new Set();
+            pm.groups.forEach((g, gi) => {
+                const cb = panel.querySelector(`input[data-srm-g="${mi}:${gi}"]`);
+                if (cb && cb.checked) g.idxs.forEach(x => remove.add(x));
+            });
+            if (remove.size) work.push({ m: pm.m, remove });
+        });
+        if (!work.length) { showToast('Nothing ticked.', '#ff9800', 2500); return; }
+        const totalSteps = work.reduce((a, w) => a + w.remove.size, 0);
+        if (!window.confirm(`Remove ${totalSteps} step(s) — target: ${tgt.label}${tgt.type === 16 ? ' (+ paired navs)' : ''} — across ${work.length} mission(s)?\n\n`
+            + 'A JSON backup of the affected missions downloads first.\nThis SAVES every affected mission. Continue?')) return;
+        try {
+            const backup = JSON.stringify({ site: sid, savedAt: new Date().toISOString(), target: tgt.label, missions: work.map(w => w.m) });
+            const blob = new Blob([backup], { type: 'application/json' });
+            const blobUrl = URL.createObjectURL(blob);
+            let downloaded = false;
+            for (const doc of [(window.top || window).document, document]) {
+                if (downloaded) break;
+                try {
+                    const a = doc.createElement('a');
+                    a.href = blobUrl; a.download = `site${sid}_missions_preremove_backup.json`;
+                    (doc.body || document.body).appendChild(a); a.click(); a.remove();
+                    downloaded = true;
+                } catch (e) {}
+            }
+            setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 5000);
+            if (!downloaded) throw new Error('no frame allowed the download');
+        } catch (e) {
+            console.warn(`${TAG} [srm] backup download failed`, e);
+            if (!window.confirm('Backup download FAILED — continue WITHOUT a backup?')) return;
+        }
+        const statusEl = panel.querySelector('[data-srm-status]');
+        let ok = 0, fail = 0; const failedNames = [];
+        srmBusy = true; updateGo();
+        renameSuppressAutoAgl++;
+        try {
+            for (let k = 0; k < work.length; k++) {
+                const w = work[k];
+                if (statusEl) statusEl.textContent = `Saving ${k + 1}/${work.length} — ${w.m.name}…`;
+                try {
+                    const keep = (w.m.instructions || []).filter((s, i) => !w.remove.has(i)).map(pcmNormStep);
+                    await ctx.saveApp(Object.assign({}, w.m, { instructions: keep }), w.m.name);
+                    ok++;
+                } catch (e) { fail++; failedNames.push(w.m.name); console.warn(`${TAG} [srm] save FAILED for "${w.m.name}"`, e); }
+                await new Promise(r => setTimeout(r, 150));
+            }
+        } finally { renameSuppressAutoAgl--; }
+        if (statusEl) statusEl.textContent = 'Verifying (fresh fetch)…';
+        let remaining = null;
+        try {
+            await new Promise(r => setTimeout(r, 1500));
+            const after = await mbFetchMissionsFull(sid);
+            remaining = after.reduce((a, m) => a + (m.instructions || []).filter(s => srmMatch(s, tgt)).length, 0);
+        } catch (e) { console.warn(`${TAG} [srm] verify fetch failed`, e); }
+        srmBusy = false; updateGo();
+        const vTxt = remaining == null ? 'verify fetch failed — check manually' : `${remaining} "${tgt.label}" step(s) left on site (includes any you unticked)`;
+        showToast(`🧹 Removed ${totalSteps} step(s) across ${ok} mission(s)${fail ? ` · ${fail} save(s) FAILED (see console)` : ''} · ${vTxt}.`, fail ? '#ff9800' : '#5fff5f', 9000);
+        console.log(`${TAG} [srm] target="${tgt.label}" removed=${totalSteps} ok=${ok} fail=${fail}${failedNames.length ? ` failed=[${failedNames.join(', ')}]` : ''} remaining=${remaining}`);
+        try { fetchMissions(sid, () => {}, () => {}); } catch (e) {}
+        if (!fail) { try { panel.remove(); } catch (e) {} }
+    }
     function wrapPopup(anchorBtn) {
         if (wrapPopEl) { wrapPopEl.remove(); wrapPopEl = null; return; }
         const selCss = 'background:#0f1216;border:1px solid #9cf;color:#fff;border-radius:3px;padding:3px 4px;font:inherit;font-size:11px;';
@@ -4046,17 +4274,38 @@
         const dist = new Map(), prev = new Map();
         if (!graph.adj.has(startKey)) return { dist, prev };
         dist.set(startKey, 0);
+        // v2.61: binary min-heap — the old linear-scan pop was O(n) per pop,
+        // which on visibility-clique graphs (one edge per member pair inside
+        // every FFZ) turned big sites into multi-second runs per source.
+        // Distances are identical; only tie-broken path choices can differ.
+        const hk = [startKey], hd = [0];
+        const swap = (i, j) => { const tk = hk[i]; hk[i] = hk[j]; hk[j] = tk; const td = hd[i]; hd[i] = hd[j]; hd[j] = td; };
+        const push = (k, d) => {
+            hk.push(k); hd.push(d);
+            let i = hk.length - 1;
+            while (i > 0) { const p = (i - 1) >> 1; if (hd[p] <= hd[i]) break; swap(i, p); i = p; }
+        };
         const vis = new Set();
-        const pq = [{ k: startKey, d: 0 }];
-        while (pq.length) {
-            let mi = 0;
-            for (let i = 1; i < pq.length; i++) if (pq[i].d < pq[mi].d) mi = i;
-            const { k, d } = pq.splice(mi, 1)[0];
+        while (hk.length) {
+            const k = hk[0], d = hd[0];
+            const lk = hk.pop(), ld = hd.pop();
+            if (hk.length) {
+                hk[0] = lk; hd[0] = ld;
+                let i = 0;
+                for (;;) {
+                    const l = 2 * i + 1, r = l + 1;
+                    let m = i;
+                    if (l < hk.length && hd[l] < hd[m]) m = l;
+                    if (r < hk.length && hd[r] < hd[m]) m = r;
+                    if (m === i) break;
+                    swap(i, m); i = m;
+                }
+            }
             if (vis.has(k)) continue;
             vis.add(k);
             (graph.adj.get(k) || []).forEach(({ to, w }) => {
                 const nd = d + w;
-                if (nd < (dist.has(to) ? dist.get(to) : Infinity)) { dist.set(to, nd); prev.set(to, k); pq.push({ k: to, d: nd }); }
+                if (nd < (dist.has(to) ? dist.get(to) : Infinity)) { dist.set(to, nd); prev.set(to, k); push(to, nd); }
             });
         }
         return { dist, prev };
@@ -4415,13 +4664,41 @@
     // so a flagged route always means a real bug, never sampling noise. (The
     // audit caught exactly this on 1583: a 56 m visibility edge clipping a
     // concave notch between 10 m construction samples.)
+    // Convex rings admit a free visibility answer: any segment between two
+    // points strictly inside stays inside, no sampling needed (v2.61 —
+    // rngSegInside sampled every 4 m per pair over an O(members²) clique,
+    // which dominated the solve on sites with big many-vertex FFZs).
+    function rngRingConvex(ring) {
+        let sign = 0;
+        for (let i = 0; i < ring.length; i++) {
+            const a = ring[i], b = ring[(i + 1) % ring.length], c = ring[(i + 2) % ring.length];
+            const cross = (b.lng - a.lng) * (c.lat - b.lat) - (b.lat - a.lat) * (c.lng - b.lng);
+            if (Math.abs(cross) < 1e-14) continue;
+            const s = cross > 0 ? 1 : -1;
+            if (!sign) sign = s;
+            else if (s !== sign) return false;
+        }
+        return true;
+    }
     function rngSegInside(a, b, ring) {
         const total = mbApproxMeters(a.lat, a.lng, b.lat, b.lng);
         const n = Math.max(2, Math.ceil(total / 4));
-        for (let i = 1; i < n; i++) {
+        // v2.61: probe middle-out — SAME sample set as the old 1..n-1 walk
+        // (identical verdicts), but a failing pair on a concave ring (the
+        // common case inside the O(members²) clique) exits on probe #1
+        // instead of sampling half the segment first.
+        const check = (i) => {
             const t = i / n;
             const p = { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t };
-            if (!genPointInPoly(p, ring) && mbPointToPolygonMeters(p.lat, p.lng, ring) > 2) return false;
+            return genPointInPoly(p, ring) || mbPointToPolygonMeters(p.lat, p.lng, ring) <= 2;
+        };
+        const mid = n >> 1;
+        if (mid >= 1 && !check(mid)) return false;
+        for (let s = 1; s < n; s++) {
+            const hi = mid + s, lo = mid - s;
+            if (hi > n - 1 && lo < 1) break;
+            if (hi <= n - 1 && !check(hi)) return false;
+            if (lo >= 1 && !check(lo)) return false;
         }
         return true;
     }
@@ -4467,14 +4744,19 @@
         const boxes = ffzs.map(f => agRingBbox(f.ring, entryM));
         ffzs.forEach((f, fi) => {
             const bb = boxes[fi];
+            const convex = rngRingConvex(f.ring);
             const members = [];
             graph.verts.forEach((v, k) => {
                 if (v.lat < bb.s || v.lat > bb.n || v.lng < bb.w || v.lng > bb.e) return;
-                if (mbPointToPolygonMeters(v.lat, v.lng, f.ring) <= entryM) members.push({ k, v });
+                const dm = mbPointToPolygonMeters(v.lat, v.lng, f.ring);
+                if (dm <= entryM) members.push({ k, v, inside: dm === 0 });
             });
             for (let i = 0; i < members.length; i++) {
                 for (let j = i + 1; j < members.length; j++) {
-                    if (!rngSegInside(members[i].v, members[j].v, f.ring)) continue;
+                    // convex + both strictly inside ⇒ inside by geometry (same
+                    // verdict rngSegInside would sample its way to)
+                    if (!(convex && members[i].inside && members[j].inside)
+                        && !rngSegInside(members[i].v, members[j].v, f.ring)) continue;
                     link(members[i].k, members[j].k, mbApproxMeters(members[i].v.lat, members[i].v.lng, members[j].v.lat, members[j].v.lng));
                 }
             }
@@ -4575,13 +4857,61 @@
         return best;
     }
 
+    // ── v2.61 shared solver cache ──────────────────────────────────────────
+    // The solver used to be rebuilt + re-run from scratch by EVERY consumer:
+    // 🔋 overlay, 🖊 lasso, 🧩 audit (once + once per macro via pairwise),
+    // 📋 report, 👁 preview routing. On big sites (1386: 50 s per solve) that
+    // multiplied into minutes of frozen tab. Routing inputs are POSITIONS
+    // only, so one geometry signature keys graph + solve caches; any
+    // coordinate change or entity add/remove produces a new signature.
+    function rngEntSig(ent) {
+        let h = 0, n = 0;
+        const add = (x) => { h = (h * 31 + (Math.round(x * 1e6) | 0)) | 0; n++; };
+        (ent.fps || []).forEach(e => (e.arcs || []).forEach(a => {
+            if (a.point_a && typeof a.point_a.lat === 'number') { add(a.point_a.lat); add(a.point_a.lng); }
+            if (a.point_b && typeof a.point_b.lat === 'number') { add(a.point_b.lat); add(a.point_b.lng); }
+        }));
+        (ent.ffzs || []).forEach(f => (f.ring || []).forEach(p => { add(p.lat); add(p.lng); }));
+        (ent.assets || []).forEach(a => (a.ring || []).forEach(p => { add(p.lat); add(p.lng); }));
+        (ent.baseEnts || []).forEach(b => { const c = b.coords && b.coords[0]; if (c) { add(c.lat); add(c.lng); } });
+        if (ent.base) { add(ent.base.lat); add(ent.base.lng); }
+        return `${getCurrentSiteID()}|${n}|${h}`;
+    }
+    const rngGraphCache = { sig: null, sparse: null, dense: null };
+    function rngBuildGraphCached(ent, dense, sig) {
+        if (rngGraphCache.sig !== sig) { rngGraphCache.sig = sig; rngGraphCache.sparse = null; rngGraphCache.dense = null; }
+        const slot = dense ? 'dense' : 'sparse';
+        if (!rngGraphCache[slot]) rngGraphCache[slot] = rngBuildGraph(ent, dense);
+        return rngGraphCache[slot];
+    }
+    // Consumers that splice their own vertices in (lasso pairwise, 👁 attach)
+    // must clone: vert objects are shared read-only, adjacency arrays are not.
+    function rngCloneBuilt(built) {
+        const adj = new Map();
+        built.graph.adj.forEach((list, k) => adj.set(k, list.slice()));
+        return { graph: { verts: new Map(built.graph.verts), adj }, ffzs: built.ffzs, baseKeys: built.baseKeys };
+    }
+    const rngSolveCache = { sig: null, sol: null };
+    function rngSolveCached(ent) {
+        const sig = rngEntSig(ent);
+        if (rngSolveCache.sig === sig && rngSolveCache.sol) {
+            console.log(`${TAG} [range] solve cache HIT — geometry unchanged, reusing verified routes`);
+            return rngSolveCache.sol;
+        }
+        const sol = rngSolve(ent);
+        rngSolveCache.sig = sig;
+        rngSolveCache.sol = sol;
+        return sol;
+    }
+
     // Solve the whole site: sparse + dense runs, per-pad classification with
     // the three verification passes. Distances in FEET.
     function rngSolve(ent) {
         const t0 = Date.now();
+        const sig = rngEntSig(ent);
         const reachM = MB_REACH_FFZ_FT / 3.28084;
         const runFor = (dense) => {
-            const g = rngBuildGraph(ent, dense);
+            const g = rngBuildGraphCached(ent, dense, sig);
             const runs = g.baseKeys.map(bk => agDijkstra(g.graph, bk));
             return {
                 g, runs,
@@ -4593,7 +4923,9 @@
             };
         };
         const sparse = runFor(false);
+        const tSparse = Date.now();
         const dense = runFor(true);
+        const tDense = Date.now();
         const ffzs = sparse.g.ffzs;
         const boxes = ffzs.map(f => agRingBbox(f.ring, 5));
         const arcs = [];
@@ -4652,19 +4984,27 @@
             results.push(Object.assign({ asset: a }, r));
         });
         const flagged = results.filter(x => x.status === 'ok' && (!x.verified || x.disagree));
-        console.log(`${TAG} [range] ${results.length} pads solved in ${Date.now() - t0} ms · ${flagged.length} flagged (illegal-sample or sparse/dense disagreement)`);
+        console.log(`${TAG} [range] ${results.length} pads solved in ${Date.now() - t0} ms (sparse ${tSparse - t0} · dense ${tDense - tSparse} · classify ${Date.now() - tDense}) · ${flagged.length} flagged (illegal-sample or sparse/dense disagreement)`);
         flagged.forEach(x => console.log(`${TAG} [range] ⚠ ${x.asset.name}: verified=${x.verified} disagree=${x.disagree} badFrac=${(x.badFrac || 0).toFixed(3)}`));
         return { results, ffzs, byFfz };
     }
 
     // ── rendering (all click-through) ──
-    const rng = { on: false, busy: false, layers: [], legendEl: null, chips: [], hover: null };
+    const rng = { on: false, busy: false, layers: [], legendEl: null, chips: [], hover: null, sol: null };
     function rngClear() {
         rng.layers.forEach(l => { try { l.remove(); } catch (e) {} });
         rng.layers = [];
         rng.chips = [];
         rngUnbindHover();
         if (rng.legendEl) { try { rng.legendEl.remove(); } catch (e) {} rng.legendEl = null; }
+    }
+    // Re-classify + redraw a LIVE overlay from the stashed solve — cutoff knobs
+    // (CP 🔋 toggles / Auto-Group knobs) change the Tattu/Tulip thresholds, not
+    // the routes, so no re-solve is needed: rngDraw re-reads agCfg().
+    function rngRefresh() {
+        if (!rng.on || !rng.sol) return;
+        rngClear();
+        rngDraw(rng.sol);
     }
     // Big tintable battery icon (v2.21 — the text chip was too small to spot).
     // pointer-events:none throughout: nothing about it is pressable.
@@ -4805,9 +5145,10 @@
         showToast('🔋 Range check — building legal-route graph (double + triple checking)…', '#7adfe6', 3000);
         try {
             const ent = await genFetchEntities(sid);
-            const sol = rngSolve(ent);
+            const sol = rngSolveCached(ent);
             rngClear();
             rngDraw(sol);
+            rng.sol = sol;   // stash so cutoff-knob changes can redraw without a re-solve
             rng.on = true;
             if (btn) btn.classList.add('active');
             showToast('🔋 Range overlay ON — colors are triple-verified shortest LEGAL routes. M2 picking still works.', '#5fff5f', 4500);
@@ -4860,7 +5201,7 @@
         let ent, missions, sol;
         try {
             [ent, missions] = await Promise.all([genFetchEntities(sid), new Promise((res, rej) => fetchMissions(sid, res, rej))]);
-            sol = rngSolve(ent);   // the trusted router — same engine as 🔋
+            sol = rngSolveCached(ent);   // the trusted router — same engine as 🔋
         } catch (e) {
             console.warn(`${TAG} [lasso] load failed`, e);
             showToast('Lasso: failed to load site data (see console).', '#ff5252', 4000);
@@ -4926,7 +5267,10 @@
     // straight-line ×1.25 and are counted + logged.
     function lassoBuildPairwise(rows, ent, byAsset) {
         try {
-            const built = rngBuildGraph(ent, false);
+            // v2.61: clone the cached sparse build instead of rebuilding —
+            // this runs once PER MACRO in the 🧩 audit and splices pad
+            // vertices into shared adjacency lists, hence the clone.
+            const built = rngCloneBuilt(rngBuildGraphCached(ent, false, rngEntSig(ent)));
             const link = (ka, kb, w) => { built.graph.adj.get(ka).push({ to: kb, w }); built.graph.adj.get(kb).push({ to: ka, w }); };
             // v2.33: anchor each pad to its OWN FFZ's ring vertices (the fi the
             // verified solver assigned it) — real missions put navs inside the
@@ -4988,55 +5332,50 @@
             return { ok: false };
         }
     }
-    // Order a subset: 2-opt scored by the flight simulator on trusted
-    // distances (a pad that forces an RTB shouldn't drag the route back over
-    // ground it already covered — pure furthest→closest zigzagged, live test).
-    // SPUR-WALK ORDER (v2.36) — decoded from the user's hand-corrected order
-    // ("this is how I updated, but I'm just eyeballing it"): fly to the
-    // DEEPEST pad of an area first, peel back toward base along its corridor
-    // (never stepping to a deeper pad), and when the nearest continuation
-    // would cost more than a fresh out-leg from base, JUMP to the deepest
-    // remaining pad — the next area. Deterministic, auditable, and matches
-    // the far→near SOP per area. The simulator then adds the part eyeballing
-    // can't: battery breaks, landing reserves, real route distances.
-    // (2-opt was rejected live twice: transit-cheaper LOOP shapes read as
-    // chaos and give deep pads a half-drained battery.)
+    // BRANCH WALK (v2.62) — doctrine update from live use: ordering NEVER
+    // accounts for RTB / battery (the simulator still DISPLAYS breaks, it no
+    // longer shapes the order). Order is always furthest→nearest, but
+    // branch-coherent: at a Y in the route, finish every pad on one side
+    // before jumping to the other side — even when the other side holds a
+    // deeper pad than the next pad on this side. Mechanic: junction depth
+    // between two pads = how far from base their legal routes stay together
+    // = (dBase(a)+dBase(b)−dPad(a,b))/2 on the trusted route graph. A pad on
+    // the current pad's way home shares its whole own dBase; a pad across
+    // the Y only shares up to the fork. Next pad = deepest shared junction;
+    // ties within 500 ft go to the deeper pad — which IS the far→near rule
+    // inside a branch, and "jump to the deepest remaining" when everything
+    // left forks off equally low.
     function lassoOrderRows(subset, budgetFt, pw) {
         const rowsD = subset.slice().sort((x, y) => y.ft - x.ft);
         try {
             if (!(pw && pw.ok) || rowsD.length < 2) return { rows: rowsD, sim: null };
             const remaining = new Set(rowsD.map(r => pw.idxOf.get(r)));
             const ftOf = i => pw.rows[i].ft;
+            const dBase = new Map();
+            const dB = i => { if (!dBase.has(i)) dBase.set(i, pw.dBase(i)); return dBase.get(i); };
+            const junc = (a, b) => Math.max(0, (dB(a) + dB(b) - pw.dPad(a, b)) / 2);
+            const JUNC_TOL_FT = 500;
             const order = [];
-            let cur = null, guard = 0;
-            while (remaining.size && guard++ < 5000) {
+            let cur = null;
+            while (remaining.size) {
+                let pick = null;
                 if (cur == null) {
-                    // new area → deepest remaining pad
-                    let deep = null;
-                    remaining.forEach(i => { if (deep == null || ftOf(i) > ftOf(deep)) deep = i; });
-                    cur = deep;
+                    // start → deepest pad overall
+                    remaining.forEach(i => { if (pick == null || ftOf(i) > ftOf(pick)) pick = i; });
                 } else {
-                    // continue the area: nearest remaining pad that is NOT
-                    // deeper than where we are (±500 ft tolerance)
-                    let best = null;
-                    remaining.forEach(i => {
-                        if (ftOf(i) > ftOf(cur) + 500) return;
-                        const d = pw.dPad(cur, i);
-                        if (!best || d < best.d) best = { i, d };
-                    });
-                    // area exhausted (or continuing costs more than a fresh
-                    // out-leg from base) → jump to the next area's deepest
-                    if (!best || best.d > pw.dBase(best.i)) { cur = null; continue; }
-                    cur = best.i;
+                    let maxJ = -Infinity;
+                    const js = new Map();
+                    remaining.forEach(i => { const j = junc(cur, i); js.set(i, j); if (j > maxJ) maxJ = j; });
+                    remaining.forEach(i => { if (js.get(i) >= maxJ - JUNC_TOL_FT && (pick == null || ftOf(i) > ftOf(pick))) pick = i; });
                 }
-                order.push(cur);
-                remaining.delete(cur);
+                order.push(pick);
+                remaining.delete(pick);
+                cur = pick;
             }
-            remaining.forEach(i => order.push(i));   // guard-overflow safety
             const sim = agSimulate(order, pw.dPad, pw.dBase, pw.costOf, budgetFt);
             return { rows: order.map(i => pw.rows[i]), sim };
         } catch (e) {
-            console.warn(`${TAG} [lasso] spur-walk failed — plain furthest→closest`, e);
+            console.warn(`${TAG} [lasso] branch walk failed — plain furthest→closest`, e);
             return { rows: rowsD, sim: null };
         }
     }
@@ -5051,6 +5390,11 @@
         if (!inside.length) { showToast('🖊 No pads inside the loop.', '#ff9800', 3500); return; }
         const rows = [], skipped = [];
         const skip = (a, reason) => skipped.push({ name: a.name, reason, pt: genCentroid(a.ring) });
+        // v2.91: several asset polygons can resolve to the SAME mission now
+        // that the pad-root ladder rung maps "<Pad> <Equipment>" polygons to
+        // their pad's mission — collapse them to one row per mission, keeping
+        // the farthest polygon so battery math stays worst-case.
+        const rowByMission = new Map();
         inside.forEach(a => {
             const cands = rankMatchMissions(a.name, missions);
             if (!cands.length) { skip(a, 'no mission with this name'); return; }
@@ -5059,7 +5403,14 @@
             if (!r || r.status !== 'ok') { skip(a, r ? (r.status === 'no-ffz' ? 'no FFZ' : 'no legal route') : 'no range data'); return; }
             if (!r.verified || r.disagree) { skip(a, 'range unverified (see console)'); return; }
             if (r.worstFt > cfg.tulipRadiusFt) { skip(a, `over ${(cfg.tulipRadiusFt / 1000).toFixed(0)}k ft`); return; }
-            rows.push({ asset: a, mission: cands[0], ft: r.worstFt, tulip: r.worstFt > cfg.tattuRadiusFt });
+            const prev = rowByMission.get(cands[0].id);
+            if (prev) {
+                if (r.worstFt > prev.ft) { prev.asset = a; prev.ft = r.worstFt; prev.tulip = prev.ft > cfg.tattuRadiusFt; }
+                return;
+            }
+            const row = { asset: a, mission: cands[0], ft: r.worstFt, tulip: r.worstFt > cfg.tattuRadiusFt };
+            rowByMission.set(cands[0].id, row);
+            rows.push(row);
         });
         // Pre-order = bearing sweep around base with the seam at the largest
         // angular gap — the human "walk the loop" order. It feeds the
@@ -5082,10 +5433,11 @@
         const pw = rows.length > 1 ? lassoBuildPairwise(rows, ent, byAsset) : null;
         const variants = [];
         // Tulip pads present → auto-split: "1" = Tattu only, "2" = everything.
-        // Each variant's order = 2-opt + flight simulator on trusted distances.
+        // Each variant's order = far→near branch walk on trusted distances;
+        // the simulator only annotates battery breaks, it never reorders.
         const mkVariant = (name, subPrefix, set, budgetFt) => {
             const o = lassoOrderRows(set, budgetFt, pw);
-            variants.push({ name, sub: `${subPrefix} · ${set.length} pads · deep-first spur walk, verified routes`, rows: o.rows, sim: o.sim });
+            variants.push({ name, sub: `${subPrefix} · ${set.length} pads · far→near branch walk, verified routes`, rows: o.rows, sim: o.sim });
         };
         if (tulips.length && tattu.length) {
             mkVariant(`${wind} 1`, 'Tattu only', tattu, cfg.tattuBudgetFt);
@@ -5169,13 +5521,48 @@
     // layers are currently switched off in the legend; resets to all-visible
     // every fresh 🧩 toggle-on. macroLayers groups layers per mission id so a
     // single macro can be hidden/shown without a full redraw.
-    const mcv = { on: false, busy: false, layers: [], legendEl: null, hidden: new Set(), macroLayers: new Map() };
+    const mcv = { on: false, busy: false, layers: [], legendEl: null, hidden: new Set(), macroLayers: new Map(), badgeReg: new Map() };
     function mcvClear() {
         mcv.layers.forEach(l => { try { l.remove(); } catch (e) {} });
         mcv.layers = [];
         mcv.macroLayers = new Map();
+        mcv.badgeReg = new Map();
         try { mcvClearRoutes(); } catch (e) {}
+        try { mcvCloseOrderPanel(); } catch (e) {}
+        try { stoClosePanel(); } catch (e) {}
+        try { const sw = document.getElementById('aim-mb-sto-sweep'); if (sw) sw.remove(); } catch (e) {}
+        try { const rm = document.getElementById('aim-mb-mcv-remerge'); if (rm) rm.remove(); } catch (e) {}
+        try { const rma = document.getElementById('aim-mb-mcv-remerge-all'); if (rma) rma.remove(); } catch (e) {}
         if (mcv.legendEl) { try { mcv.legendEl.remove(); } catch (e) {} mcv.legendEl = null; }
+    }
+    // Badge inner HTML (shared by mcvDraw + the ⇅ live preview). Edit mode
+    // (⇅ panel open for this macro) arms the badge as a live M2 target:
+    // white ring + glow + pointer-events so the document-capture contextmenu
+    // handler can renumber it in place.
+    function mcvBadgeHtml(missionId, padId, n, col, edit) {
+        return `<div data-aim-mo-pad="${padId}" data-aim-mo-mid="${missionId}" style="pointer-events:${edit ? 'auto' : 'none'};cursor:${edit ? 'context-menu' : 'default'};width:19px;height:19px;border-radius:50%;background:${col};color:#10131a;font:800 11px/19px monospace;text-align:center;border:1.5px solid ${edit ? '#fff' : '#10131a'};box-shadow:${edit ? '0 0 7px 2px rgba(122,223,230,0.85)' : '0 1px 4px rgba(0,0,0,0.7)'};">${n}</div>`;
+    }
+    // Renumber a macro's map badges to a given pad order — the ⇅ panel's
+    // LIVE preview (edit=true also arms them for M2), and the restore path
+    // on panel close (edit=false, original mc.pads order). setIcon works on
+    // hidden macros too (Leaflet stores the icon for the next add).
+    function mcvPreviewOrder(missionId, orderPads, edit) {
+        const reg = mcv.badgeReg.get(missionId);
+        const L = composerGetL();
+        if (!reg || !L) return;
+        orderPads.forEach((a, n) => {
+            const r = reg.get(a.id);
+            if (!r) return;
+            try {
+                r.mk.setIcon(L.divIcon({
+                    className: 'aim-mb-rng-chip',
+                    html: mcvBadgeHtml(missionId, a.id, n + 1, r.col, edit),
+                    iconSize: [19, 19], iconAnchor: [r.ax, 10],
+                }));
+                const ge = r.mk.getElement ? r.mk.getElement() : r.mk._icon;
+                if (ge) ge.style.pointerEvents = edit ? 'auto' : '';
+            } catch (e) {}
+        });
     }
     // mission → distinct pads its located steps touch (inside or ≤150 ft of
     // an asset ring; bbox-prefiltered)
@@ -5184,6 +5571,7 @@
         const tolM = 46;   // 150 ft
         const boxes = assets.map(a => agRingBbox(a.ring, tolM + 5));
         const macros = [];
+        const solos = [];
         const covered = new Set();
         const missionPads = new Map();
         (missions || []).forEach(m => {
@@ -5194,8 +5582,9 @@
             // before the first pad go in a leading null-block. Blocks are what
             // ♻ reorder resequences (each pad's own steps stay intact).
             const blocks = [];
+            const touch = new Map();   // asset.id → { a, loose: step idx, inside: step idx|null }
             let curPad;   // undefined until the first pad assignment
-            (m.instructions || []).forEach(i => {
+            (m.instructions || []).forEach((i, si) => {
                 if (!i || i.type === 0 || i.type === 99) return;
                 if (i.location && typeof i.location.lat === 'number') {
                     const p = i.location;
@@ -5208,24 +5597,47 @@
                     }
                     if (best) {
                         curPad = best.a.id;
-                        if (!padIds.has(best.a.id)) { padIds.add(best.a.id); pads.push(best.a); }
+                        // v2.62: bank both the first LOOSE touch (≤150 ft, the
+                        // coverage rule) and the first step actually INSIDE the
+                        // ring (≤2 m ≈ on/inside the pad edge) — visit ORDER
+                        // uses inside-first below.
+                        const t = touch.get(best.a.id);
+                        if (!t) touch.set(best.a.id, { a: best.a, loose: si, inside: best.d <= 2 ? si : null });
+                        else if (t.inside == null && best.d <= 2) t.inside = si;
                     }
                 }
                 const aId = (curPad === undefined) ? null : curPad;
                 if (!blocks.length || blocks[blocks.length - 1].aId !== aId) blocks.push({ aId, steps: [] });
                 blocks[blocks.length - 1].steps.push(i);
             });
+            // v2.62: visit order = first step INSIDE each pad's ring, falling
+            // back to the loose 150-ft touch only for pads the mission never
+            // enters. Before this, an approach/transit nav skimming a
+            // NEIGHBORING pad's 150-ft halo stole that pad's visit slot, so
+            // the 🧩 badge numbers disagreed with the macro's real step order
+            // (live report: two adjacent pads showed swapped) — and no
+            // re-save could ever fix it, since the swap was in detection.
+            const recs = Array.from(touch.values())
+                .sort((x, y) => ((x.inside != null ? x.inside : x.loose) - (y.inside != null ? y.inside : y.loose)) || (x.loose - y.loose));
+            recs.forEach(t => { padIds.add(t.a.id); pads.push(t.a); });
+            const looseSorted = Array.from(touch.values()).sort((x, y) => x.loose - y.loose);
+            if (recs.some((t, k) => looseSorted[k] !== t)) {
+                console.log(`${TAG} [macros] "${m.name}": visit order corrected — a nav within 150 ft of a neighboring pad no longer counts as visiting it (first inside-the-ring step wins)`);
+            }
             if (pads.length) missionPads.set(m.id, pads);
             if (pads.length >= 2) {
                 macros.push({ mission: m, pads, blocks });
                 pads.forEach(a => covered.add(a.id));
             }
+            // v2.59: solo (micro) missions — exactly one pad — banked so ✂
+            // Split can default-untick pads that already have their micro.
+            if (pads.length === 1) solos.push({ mission: m, pad: pads[0] });
         });
         // pads that have SOME mission on them but no macro yet
         const touched = new Set();
         missionPads.forEach(pads => pads.forEach(a => touched.add(a.id)));
         const todo = assets.filter(a => touched.has(a.id) && !covered.has(a.id));
-        return { macros, covered, todo, touched, assets, padCount: assets.length };
+        return { macros, solos, covered, todo, touched, assets, padCount: assets.length };
     }
     function mcvDraw(det) {
         const L = composerGetL(), map = getLeafletMap();
@@ -5249,14 +5661,17 @@
                     // macro's color. Pads shared by two macros get side-by-side
                     // badges (x-offset per macro index). Click-through.
                     const c2 = genCentroid(a.ring);
-                    keep(L.marker([c2.lat, c2.lng], {
+                    const bm = keep(L.marker([c2.lat, c2.lng], {
                         icon: L.divIcon({
                             className: 'aim-mb-rng-chip',
-                            html: `<div style="pointer-events:none;width:19px;height:19px;border-radius:50%;background:${col};color:#10131a;font:800 11px/19px monospace;text-align:center;border:1.5px solid #10131a;box-shadow:0 1px 4px rgba(0,0,0,0.7);">${pi + 1}</div>`,
+                            html: mcvBadgeHtml(mc.mission.id, a.id, pi + 1, col, false),
                             iconSize: [19, 19], iconAnchor: [10 - (i % 3) * 14, 10],
                         }),
                         interactive: false, keyboard: false, zIndexOffset: -300,
                     }));
+                    // v2.64: registry so the ⇅ panel can live-renumber badges
+                    if (!mcv.badgeReg.has(mc.mission.id)) mcv.badgeReg.set(mc.mission.id, new Map());
+                    mcv.badgeReg.get(mc.mission.id).set(a.id, { mk: bm, col, ax: 10 - (i % 3) * 14 });
                 } catch (e) {}
                 if (!deepest) deepest = a;   // first pad = mission's first stop
             });
@@ -5279,7 +5694,7 @@
         const el = document.createElement('div');
         el.style.cssText = 'position:fixed;left:12px;top:70px;z-index:2147483599;max-height:50vh;overflow:auto;background:rgba(16,19,26,0.92);border:1px solid #2a3340;border-radius:8px;padding:8px 11px;color:#e6e6e6;font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 4px 16px rgba(0,0,0,0.6);';
         const COLORS2 = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
-        el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><b style="color:#7adfe6;">🧩 Macro coverage</b><button data-mcv-report title="Copy the coverage report (Name / Classification / Captured / Battery / Section / Mission / Order) — colored cells, paste into Google Sheets" style="padding:1px 7px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">📋 Report</button><button data-mcv-vis-all title="Show every macro on the map" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">All</button><button data-mcv-vis-none title="Hide every macro — then re-check just the ones you want" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">None</button><span data-mcv-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
+        el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><b style="color:#7adfe6;">🧩 Macro coverage</b><button data-mcv-report title="Copy the coverage report (Name / Classification / Captured / Battery / Section / Mission / Order) — colored cells, paste into Google Sheets" style="padding:1px 7px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">📋 Report</button><button data-mcv-vis-all title="Show every macro on the map" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">All</button><button data-mcv-vis-none title="Hide every macro — then re-check just the ones you want" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">None</button><button data-mcv-split-all title="✂ Split EVERY macro into per-pad micro missions in ONE combined review — pads with existing micros, name collisions, or a better copy in another macro default-skipped. Create-only." style="padding:1px 6px;background:rgba(255,138,210,0.12);border:1px solid rgba(255,138,210,0.45);color:#ff8ad2;border-radius:4px;cursor:pointer;font-size:10px;">✂ All</button><button data-mcv-sto-all title="🪄 Run the Step Optimizer analysis on EVERY macro — one ranked report: route savings, far-first fixes, wrap scrambles, duplicates, standoff violations, nav consolidations. Open any row to review + apply." style="padding:1px 6px;background:rgba(195,157,255,0.12);border:1px solid rgba(195,157,255,0.45);color:#c39dff;border-radius:4px;cursor:pointer;font-size:10px;">🪄 All</button><button data-mcv-remerge-all title="⟳ Re-merge EVERY macro from its pads' current micro missions in one review — only pads whose micro changed are pulled; pad orders, names and ids unchanged. One combined backup, sequential apply with per-macro verify." style="padding:1px 6px;background:rgba(255,213,79,0.12);border:1px solid rgba(255,213,79,0.45);color:#ffd54f;border-radius:4px;cursor:pointer;font-size:10px;">⟳ All</button><span data-mcv-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
             + (det.macros.length
                 ? det.macros.map((mc, i) => {
                     const au = (mcv.data && mcv.data.audits) ? mcv.data.audits.get(mc.mission.id) : null;
@@ -5299,7 +5714,16 @@
                             + `${(curFt / 1000).toFixed(0)}k ft · ${curFl} fl · ~${days.toFixed(1)}d${c ? '' : ' <span style="color:#567;">(sim)</span>'}`
                             + (worth ? ` → ♻ ${(reFt / 1000).toFixed(0)}k · ${reFl} fl (−${dFl} fl, −${dPct}%)` : ' · ✓ near-optimal')
                             + `${au.unknown ? ` · ⚠${au.unknown} unranged` : ''}</div>`;
-                        if (worth) reBtn = `<button data-mcv-reorder="${mc.mission.id}" title="Re-order this mission's pad blocks in place (backup + verify; steps untouched)" style="padding:0 5px;background:rgba(255,183,77,0.15);border:1px solid rgba(255,183,77,0.5);color:#ffb74d;border-radius:4px;cursor:pointer;font-size:10px;">♻</button>`;
+                        // v2.65: ♻ always visible when an audit exists (was
+                        // gated on ≥1 flight / ≥10% ft saved — but feet is the
+                        // wrong lens for ORDER: a huge pad that fills a whole
+                        // flight costs the same anywhere in the sequence, so
+                        // "near-optimal" can coexist with a visually crazy
+                        // order). Dimmed when the sim rates it near-optimal.
+                        const reTitle = worth
+                            ? 'Re-order this mission\'s pad blocks in place (backup + verify; steps untouched)'
+                            : 'Apply the simulator\'s replan order anyway — it rates the current order near-optimal in feet, so this may change little or nothing. For a SPECIFIC order use ⇅.';
+                        reBtn = `<button data-mcv-reorder="${mc.mission.id}" title="${reTitle}" style="padding:0 5px;background:rgba(255,183,77,${worth ? '0.15' : '0.06'});border:1px solid rgba(255,183,77,${worth ? '0.5' : '0.22'});color:${worth ? '#ffb74d' : '#93835e'};border-radius:4px;cursor:pointer;font-size:10px;">♻</button>`;
                         reBtn += `<button data-mcv-route="${mc.mission.id}" data-mcv-route-col="${COLORS2[i % COLORS2.length]}" title="Draw this macro's CURRENT route (solid) vs the ♻ replan route (dashed white) on the map" style="padding:0 5px;background:rgba(122,223,230,0.12);border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">👁</button>`;
                     }
                     // v2.47: per-macro visibility — checkbox toggles this macro's
@@ -5307,7 +5731,15 @@
                     // others; click again to bring everything back).
                     const vis = !mcv.hidden.has(mc.mission.id);
                     if (auditLine) auditLine = auditLine.replace('<div ', `<div data-mcv-au="${mc.mission.id}" `);
-                    return `<div data-mcv-row="${mc.mission.id}" style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:${vis ? 1 : 0.38};"><input type="checkbox" data-mcv-vis="${mc.mission.id}" ${vis ? 'checked' : ''} title="Show/hide this macro on the map" style="margin:0;cursor:pointer;accent-color:${COLORS2[i % COLORS2.length]};"><span data-mcv-solo="${mc.mission.id}" title="Solo — show ONLY this macro (click again to show all)" style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;cursor:pointer;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${reBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine ? auditLine.replace('style="', `style="opacity:${vis ? 1 : 0.38};`) : ''}`;
+                    // v2.55: ✂ split — always available, even without audit data
+                    const splitBtn = `<button data-mcv-split="${mc.mission.id}" title="✂ Split this macro into one mission per pad (named after the pad) — create-only, this macro is untouched" style="padding:0 5px;background:rgba(255,138,210,0.12);border:1px solid rgba(255,138,210,0.45);color:#ff8ad2;border-radius:4px;cursor:pointer;font-size:10px;">✂</button>`;
+                    // v2.63: ⇅ manual pad order — always available
+                    const orderBtn = `<button data-mcv-order="${mc.mission.id}" title="⇅ See + hand-edit this macro's pad visit order (the order actually flown — same numbers as the badges). Drag rows, Apply saves in place with backup + verify." style="padding:0 5px;background:rgba(122,223,230,0.12);border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">⇅</button>`;
+                    // v2.82: ⟳ re-merge from micros (feature #248) — always available
+                    const remergeBtn = `<button data-mcv-remerge="${mc.mission.id}" title="⟳ Re-merge — rebuild this macro from its pads' CURRENT micro missions (same pad order, name, id). Pilot fixes go in the micros; this pulls them into the macro. Review panel shows which pads changed; backup + verify on apply." style="padding:0 5px;background:rgba(255,213,79,0.12);border:1px solid rgba(255,213,79,0.45);color:#ffd54f;border-radius:4px;cursor:pointer;font-size:10px;">⟳</button>`;
+                    // v2.66: 🪄 step optimizer (feature #244) — always available
+                    const stoBtn = `<button data-mcv-sto="${mc.mission.id}" data-mcv-sto-col="${COLORS2[i % COLORS2.length]}" title="🪄 Step Optimizer — reorder the navs/steps INSIDE this macro for the shortest legal route (intertwined pads interleave), flag snapshot standoff (info-only — pairings are pilot-tuned, moves are strictly opt-in), rebuild scrambled wraps, drop stacked duplicates. Preview first; Apply saves in place with backup + verify." style="padding:0 5px;background:rgba(195,157,255,0.12);border:1px solid rgba(195,157,255,0.45);color:#c39dff;border-radius:4px;cursor:pointer;font-size:10px;">🪄</button>`;
+                    return `<div data-mcv-row="${mc.mission.id}" style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:${vis ? 1 : 0.38};"><input type="checkbox" data-mcv-vis="${mc.mission.id}" ${vis ? 'checked' : ''} title="Show/hide this macro on the map" style="margin:0;cursor:pointer;accent-color:${COLORS2[i % COLORS2.length]};"><span data-mcv-solo="${mc.mission.id}" title="Solo — show ONLY this macro (click again to show all)" style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;cursor:pointer;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${reBtn}${orderBtn}${remergeBtn}${stoBtn}${splitBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine ? auditLine.replace('style="', `style="opacity:${vis ? 1 : 0.38};`) : ''}`;
                 }).join('')
                 : '<div style="color:#888;">No macro missions yet (≥2 pads in one mission).</div>')
             + `<div style="color:#ffb74d;margin-top:5px;">⬜ ${det.todo.length} pad(s) with missions, not in any macro</div>`
@@ -5321,11 +5753,22 @@
         el.querySelector('[data-mcv-x]').onclick = () => { mcv.on = false; mcvClear(); const b = document.querySelector('[data-mcv-toggle]'); if (b) b.classList.remove('active'); };
         el.querySelector('[data-mcv-report]').onclick = () => mcvReport();
         el.querySelectorAll('[data-mcv-reorder]').forEach(b => b.onclick = () => mcvReorder(Number(b.getAttribute('data-mcv-reorder')) || b.getAttribute('data-mcv-reorder')));
+        el.querySelectorAll('[data-mcv-order]').forEach(b => b.onclick = () => mcvOpenOrderPanel(Number(b.getAttribute('data-mcv-order')) || b.getAttribute('data-mcv-order')));
+        el.querySelectorAll('[data-mcv-sto]').forEach(b => b.onclick = () => stoOpen(Number(b.getAttribute('data-mcv-sto')) || b.getAttribute('data-mcv-sto'), b.getAttribute('data-mcv-sto-col')));
+        el.querySelectorAll('[data-mcv-remerge]').forEach(b => b.onclick = () => mcvOpenRemerge(Number(b.getAttribute('data-mcv-remerge')) || b.getAttribute('data-mcv-remerge')));
         el.querySelectorAll('[data-mcv-route]').forEach(b => b.onclick = () => {
             const id = Number(b.getAttribute('data-mcv-route')) || b.getAttribute('data-mcv-route');
             const on = mcvToggleRoute(id, b.getAttribute('data-mcv-route-col'));
             b.style.background = on ? 'rgba(122,223,230,0.4)' : 'rgba(122,223,230,0.12)';
         });
+        // v2.55: ✂ split macro into per-pad micros · v2.60: ✂ All combined
+        el.querySelectorAll('[data-mcv-split]').forEach(b => b.onclick = () => {
+            const id = Number(b.getAttribute('data-mcv-split')) || b.getAttribute('data-mcv-split');
+            mcvOpenSplit(id);
+        });
+        el.querySelector('[data-mcv-split-all]').onclick = () => mcvOpenSplitAll();
+        el.querySelector('[data-mcv-sto-all]').onclick = () => stoSweep();
+        el.querySelector('[data-mcv-remerge-all]').onclick = () => mcvOpenRemergeAll();
         // v2.47: per-macro show/hide + solo + All/None
         el.querySelectorAll('input[data-mcv-vis]').forEach(cb => cb.onchange = () => {
             const id = Number(cb.getAttribute('data-mcv-vis')) || cb.getAttribute('data-mcv-vis');
@@ -5390,6 +5833,338 @@
         if (alreadySolo) mcvAllVis(true);
         else det.macros.forEach(mc => mcvSetVis(mc.mission.id, mc.mission.id === id));
     }
+    // ── ✂ SPLIT MACRO → per-pad micro missions (v2.55, feature #238) ────────
+    // Some sites' macros were built directly, without micro missions to merge
+    // from — so there's nothing to reorder with. ✂ decomposes a macro into
+    // one mission per pad, named after the pad. CREATE-ONLY: the macro is
+    // never touched; a pad whose name already exists as a mission is skipped.
+    // Grouping (user's field rule): snapshots belong to their PRECEDING nav —
+    // a nav starts a "unit" and snaps/waits/camera/gem ride with it. A unit
+    // is firmly assigned to the pad any of its located steps sit in (≤150 ft,
+    // same tolerance as macro detection); still-unassigned units (approach /
+    // exit navs) join the NEXT firm pad if the nav sits inside that pad's
+    // adjacent FFZ, else the PREVIOUS firm pad's, else they're dropped as
+    // corridor transit (counted in the preview). Setup steps between takeoff
+    // and the first nav ride into EVERY micro; each micro is wrapped in the
+    // macro's own takeoff + returnHome.
+    const MCV_SPLIT_PANEL_ID = 'aim-mb-mcv-split';
+    let mcvSplitBusy = false;
+    function mcvSplitPlan(mc) {
+        const ent = mcv.data && mcv.data.ent;
+        const assets = ((ent && ent.assets) || []).filter(a => a.ring && a.ring.length >= 3);
+        const ffzs = (ent && ent.ffzs) || [];
+        const tolM = 46;   // 150 ft
+        const boxes = assets.map(a => agRingBbox(a.ring, tolM + 5));
+        const padOf = (p) => {
+            let best = null;
+            for (let i = 0; i < assets.length; i++) {
+                const bb = boxes[i];
+                if (p.lat < bb.s || p.lat > bb.n || p.lng < bb.w || p.lng > bb.e) continue;
+                const d = mbPointToPolygonMeters(p.lat, p.lng, assets[i].ring);
+                if (d <= tolM && (!best || d < best.d)) best = { a: assets[i], d };
+            }
+            return best ? best.a : null;
+        };
+        const ffzCache = new Map();   // asset id → adjacent FFZ
+        const padFfz = (a) => {
+            if (!ffzCache.has(a.id)) ffzCache.set(a.id, genAssetFFZ(genCentroid(a.ring), ffzs));
+            return ffzCache.get(a.id);
+        };
+        // units: a located nav + everything until the next nav; body steps
+        // before the first nav = shared preamble (camera setup etc.)
+        const preamble = [], units = [];
+        ((mc.mission && mc.mission.instructions) || []).forEach(s => {
+            if (!s || s.type === 0 || s.type === 99) return;
+            if (s.type === 1 && s.location && typeof s.location.lat === 'number') units.push({ nav: s, steps: [s], pad: null, firm: false });
+            else if (units.length) units[units.length - 1].steps.push(s);
+            else preamble.push(s);
+        });
+        // pass 1 — firm: any located non-nav step (snap/flag/…) in a pad wins;
+        // else the nav itself sitting in a pad
+        units.forEach(u => {
+            for (const s of u.steps) {
+                if (s === u.nav || !s.location || typeof s.location.lat !== 'number') continue;
+                const a = padOf(s.location);
+                if (a) { u.pad = a; u.firm = true; return; }
+            }
+            const a = padOf(u.nav.location);
+            if (a) { u.pad = a; u.firm = true; }
+        });
+        // pass 2 — approach/exit navs by adjacent-FFZ membership: next firm
+        // pad first (approach semantics), then previous
+        units.forEach((u, i) => {
+            if (u.pad) return;
+            const fits = (a) => { const f = a && padFfz(a); return (f && genPointInPoly(u.nav.location, f.ring)) ? a : null; };
+            let nxt = null, prv = null;
+            for (let j = i + 1; j < units.length && !nxt; j++) if (units[j].firm) nxt = units[j].pad;
+            for (let j = i - 1; j >= 0 && !prv; j--) if (units[j].firm) prv = units[j].pad;
+            u.pad = fits(nxt) || fits(prv);
+        });
+        // group by pad in first-appearance (flight) order
+        const order = [], byPad = new Map();
+        let dropped = 0, droppedSteps = 0;
+        units.forEach(u => {
+            if (!u.pad) { dropped++; droppedSteps += u.steps.length; return; }
+            if (!byPad.has(u.pad.id)) { byPad.set(u.pad.id, { asset: u.pad, steps: [], navs: 0, snaps: 0 }); order.push(u.pad.id); }
+            const g = byPad.get(u.pad.id);
+            u.steps.forEach(s => { g.steps.push(s); if (s.type === 1) g.navs++; else if (s.type === 6) g.snaps++; });
+        });
+        return { groups: order.map(id => byPad.get(id)), preamble, dropped, droppedSteps, unitCount: units.length };
+    }
+    function mcvOpenSplit(missionId) {
+        const old = document.getElementById(MCV_SPLIT_PANEL_ID);
+        if (old) { old.remove(); return; }
+        const data = mcv.data;
+        const mc = data && data.det.macros.find(x => x.mission.id === missionId);
+        if (!mc) { showToast('Macro not found — toggle 🧩 off/on and retry.', '#ff9800', 3500); return; }
+        const plan = mcvSplitPlan(mc);
+        if (!plan.groups.length) { showToast('✂ No pad groups found — this mission has no located steps near assets.', '#ff9800', 5000); return; }
+        const taken = new Set((data.missions || []).map(m => String((m && m.name) || '').trim().toLowerCase()));
+        // v2.59: pads that already have a SOLO (micro) mission — detected by
+        // GEOMETRY (a mission touching exactly this one pad), not by name, so
+        // differently-named micros still count. Default-UNTICKED, not
+        // disabled: tick one back on if you want a duplicate anyway.
+        const soloByPad = new Map();
+        (data.det.solos || []).forEach(s => {
+            if (!soloByPad.has(s.pad.id)) soloByPad.set(s.pad.id, []);
+            soloByPad.get(s.pad.id).push(String(s.mission.name || ('#' + s.mission.id)));
+        });
+        const p = document.createElement('div');
+        p.id = MCV_SPLIT_PANEL_ID;
+        p.style.cssText = 'position:fixed;top:60px;right:24px;width:430px;max-height:80vh;display:flex;flex-direction:column;z-index:2147483602;'
+            + 'background:#161a20;border:1px solid #ff8ad2;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        let soloSkipped = 0;
+        const rows = plan.groups.map((g, i) => {
+            const name = String(g.asset.name || ('Pad ' + g.asset.id)).trim();
+            const dup = taken.has(name.toLowerCase());
+            const solos = soloByPad.get(g.asset.id) || [];
+            const hasSolo = !dup && solos.length > 0;
+            if (hasSolo) soloSkipped++;
+            const soloTxt = solos.length ? `has micro: ${solos[0]}${solos.length > 1 ? ` +${solos.length - 1}` : ''}` : '';
+            return `<label style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;${dup ? 'opacity:0.5;' : 'cursor:pointer;'}${hasSolo ? 'opacity:0.75;' : ''}">
+                <input type="checkbox" data-mcvs-pick="${i}" ${dup ? 'disabled' : (hasSolo ? '' : 'checked')} />
+                <span style="flex:1;color:#e6e6e6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(name)}</span>
+                <span style="color:#9ad;white-space:nowrap;font-size:11px;">${g.navs} nav · ${g.snaps} snap · ${g.steps.length} steps</span>
+                ${dup ? '<span style="color:#ff9800;font-size:10px;white-space:nowrap;">exists — skipped</span>' : ''}
+                ${hasSolo ? `<span title="${escapeHtml(solos.join('\n'))}" style="color:#7adfe6;font-size:10px;white-space:nowrap;max-width:130px;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(soloTxt)}</span>` : ''}
+            </label>`;
+        }).join('');
+        const notes = []
+            .concat(soloSkipped ? [`${soloSkipped} pad(s) already have their own micro mission (cyan "has micro") — unticked by default so you don't duplicate them. Tick one back on to create anyway.`] : [])
+            .concat(plan.dropped ? [`⚠ ${plan.dropped} transit nav(s) (${plan.droppedSteps} step${plan.droppedSteps === 1 ? '' : 's'}) outside every pad's FFZ — dropped (corridor legs between pads).`] : []);
+        // v2.57: name the pre-first-nav steps so "setup steps" isn't a mystery,
+        // and let the user leave them out entirely.
+        const preLabels = plan.preamble.map(s => srmLabel(s)).join(', ');
+        p.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(255,138,210,0.08);border-bottom:1px solid rgba(255,138,210,0.3);">
+                <span style="font-weight:800;color:#ff8ad2;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">✂ Split “${escapeHtml(String(mc.mission.name || ''))}”</span>
+                <button data-mcvs-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;flex:none;">✕</button>
+            </div>
+            <div style="padding:6px 12px;font-size:11px;color:#9ad;border-bottom:1px solid #2a2f38;">One mission per pad, named after the pad — create-only, the macro is untouched. Every micro gets the macro's <b>takeoff</b> at the front and <b>returnHome (land)</b> at the end, with that pad's navs/snaps in between. <a data-mcvs-all href="#" style="color:#7adfe6;">all</a> / <a data-mcvs-none href="#" style="color:#7adfe6;">none</a></div>
+            <div style="overflow:auto;flex:1;padding:4px 10px;">${rows}</div>
+            ${plan.preamble.length ? `<label style="display:flex;align-items:center;gap:6px;padding:6px 12px;font-size:10px;color:#ffb74d;border-top:1px solid #2a2f38;cursor:pointer;">
+                <input type="checkbox" data-mcvs-pre checked style="margin:0;" />
+                <span>The macro has ${plan.preamble.length} step(s) between takeoff and the first nav — <b>${escapeHtml(preLabels)}</b>. Copy them into each micro right after its takeoff (untick to drop them).</span>
+            </label>` : ''}
+            ${notes.length ? `<div style="padding:6px 12px;font-size:10px;color:#ffb74d;border-top:1px solid #2a2f38;">${notes.map(escapeHtml).join('<br>')}</div>` : ''}
+            <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
+                <span data-mcvs-status style="flex:1;font-size:11px;color:#9ad;"></span>
+                <button data-mcvs-go style="padding:6px 12px;background:#ff8ad2;border:none;color:#2a0420;border-radius:6px;cursor:pointer;font-weight:800;">✂ Create</button>
+            </div>`;
+        document.body.appendChild(p);
+        mbPanelMovable(p, p.firstElementChild);
+        const goBtn = p.querySelector('[data-mcvs-go]');
+        const updateGo = () => {
+            const n = p.querySelectorAll('input[data-mcvs-pick]:checked').length;
+            goBtn.textContent = `✂ Create ${n}`;
+            goBtn.disabled = mcvSplitBusy || !n;
+        };
+        p.querySelector('[data-mcvs-close]').onclick = () => { if (!mcvSplitBusy) p.remove(); };
+        p.querySelectorAll('input[data-mcvs-pick]').forEach(cb => { cb.onchange = updateGo; });
+        p.querySelector('[data-mcvs-all]').onclick = (ev) => { ev.preventDefault(); p.querySelectorAll('input[data-mcvs-pick]:not(:disabled)').forEach(cb => { cb.checked = true; }); updateGo(); };
+        p.querySelector('[data-mcvs-none]').onclick = (ev) => { ev.preventDefault(); p.querySelectorAll('input[data-mcvs-pick]').forEach(cb => { if (!cb.disabled) cb.checked = false; }); updateGo(); };
+        goBtn.onclick = () => {
+            const picks = Array.from(p.querySelectorAll('input[data-mcvs-pick]:checked'))
+                .map(cb => plan.groups[Number(cb.getAttribute('data-mcvs-pick'))]).filter(Boolean);
+            if (picks.length) mcvSplitCommit(mc, plan, picks, p, updateGo);
+        };
+        updateGo();
+    }
+    async function mcvSplitCommit(mc, plan, picks, panel, updateGo) {
+        if (mcvSplitBusy) return;
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('✂ Mission context not found — be on the Mission Bank page.', '#ff5252', 4500); return; }
+        const statusEl = panel.querySelector('[data-mcvs-status]');
+        const ins = (mc.mission.instructions || []);
+        const to = pcmNormStep((ins.find(i => i && i.type === 0)) || mbMakeStep(0, 20));
+        const rh = pcmNormStep((Array.from(ins).reverse().find(i => i && i.type === 99)) || mbMakeStep(99));
+        const preCb = panel.querySelector('[data-mcvs-pre]');
+        const pre = (!preCb || preCb.checked) ? plan.preamble.map(pcmNormStep) : [];
+        let ok = 0, fail = 0;
+        mcvSplitBusy = true; updateGo();
+        renameSuppressAutoAgl++;
+        try {
+            for (let i = 0; i < picks.length; i++) {
+                const g = picks[i];
+                const name = String(g.asset.name || ('Pad ' + g.asset.id)).trim();
+                if (statusEl) statusEl.textContent = `Creating ${i + 1}/${picks.length} — ${name}…`;
+                try {
+                    await ctx.saveApp({ id: null, type: 1, instructions: [to].concat(pre, g.steps.map(pcmNormStep), [rh]), data_report_object_arr: [] }, name);
+                    ok++;
+                } catch (e) { fail++; console.warn(`${TAG} [mcv] ✂ create failed "${name}"`, e); }
+            }
+        } finally { renameSuppressAutoAgl--; }
+        mcvSplitBusy = false; updateGo();
+        const refreshed = ok ? refreshMissionList() : false;
+        if (statusEl) statusEl.textContent = `Done — created ${ok}${fail ? `, ${fail} failed` : ''}.`;
+        showToast(`✂ Created ${ok} micro mission(s) from "${mc.mission.name}"${fail ? ` · ${fail} failed (see console)` : ''}.${ok && !refreshed ? ' Reload the list to see them.' : ''} The macro is untouched.`, ok ? '#5fff5f' : '#ff5252', 8000);
+        console.log(`${TAG} [mcv] ✂ split "${mc.mission.name}" → ${ok} created, ${fail} failed (${plan.dropped} transit unit(s) dropped)`);
+        if (ok && !fail) { try { panel.remove(); } catch (e) {} }
+    }
+    // ── ✂ SPLIT ALL MACROS in one combined review (v2.60, #238 cont.) ───────
+    // Same engine as single-macro ✂, run over EVERY detected macro at once.
+    // Extra rule only this mode needs: a pad claimed by TWO macros must not
+    // become two identical micros — the occurrence with the MOST steps stays
+    // ticked, the other defaults off and says where the pad is kept. All the
+    // single-mode defaults carry over (existing-name = hard skip, existing
+    // solo micro = default-unticked cyan tag). One confirm, then create-only
+    // like everything else here — the macros are untouched.
+    function mcvOpenSplitAll() {
+        const old = document.getElementById(MCV_SPLIT_PANEL_ID);
+        if (old) { old.remove(); return; }
+        const data = mcv.data;
+        const det = data && data.det;
+        if (!det || !det.macros.length) { showToast('No macro missions detected — toggle 🧩 on first.', '#ff9800', 3500); return; }
+        const entries = det.macros.map(mc => ({ mc, plan: mcvSplitPlan(mc) })).filter(e => e.plan.groups.length);
+        if (!entries.length) { showToast('✂ No pad groups found in any macro.', '#ff9800', 4500); return; }
+        const taken = new Set((data.missions || []).map(m => String((m && m.name) || '').trim().toLowerCase()));
+        const soloByPad = new Map();
+        (det.solos || []).forEach(s => {
+            if (!soloByPad.has(s.pad.id)) soloByPad.set(s.pad.id, []);
+            soloByPad.get(s.pad.id).push(String(s.mission.name || ('#' + s.mission.id)));
+        });
+        const best = new Map();   // padId → occurrence with the most steps
+        entries.forEach((e, mi) => e.plan.groups.forEach((g, gi) => {
+            const b = best.get(g.asset.id);
+            if (!b || g.steps.length > b.steps) best.set(g.asset.id, { mi, gi, steps: g.steps.length });
+        }));
+        const COLORS = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
+        let soloSkipped = 0, sharedSkipped = 0, totalDropped = 0, totalDroppedSteps = 0, anyPre = false;
+        const sections = entries.map((e, mi) => {
+            const col = COLORS[det.macros.indexOf(e.mc) % COLORS.length];
+            if (e.plan.preamble.length) anyPre = true;
+            totalDropped += e.plan.dropped; totalDroppedSteps += e.plan.droppedSteps;
+            const rows = e.plan.groups.map((g, gi) => {
+                const name = String(g.asset.name || ('Pad ' + g.asset.id)).trim();
+                const dup = taken.has(name.toLowerCase());
+                const solos = soloByPad.get(g.asset.id) || [];
+                const hasSolo = !dup && solos.length > 0;
+                const b = best.get(g.asset.id);
+                const shared = !dup && !hasSolo && b && !(b.mi === mi && b.gi === gi);
+                if (hasSolo) soloSkipped++;
+                if (shared) sharedSkipped++;
+                const soloTxt = solos.length ? `has micro: ${solos[0]}${solos.length > 1 ? ` +${solos.length - 1}` : ''}` : '';
+                return `<label style="display:flex;align-items:center;gap:6px;padding:2px 4px 2px 14px;border-bottom:1px solid #20262e;${dup ? 'opacity:0.5;' : 'cursor:pointer;'}${(hasSolo || shared) ? 'opacity:0.75;' : ''}">
+                    <input type="checkbox" data-mcvsa-pick="${mi}:${gi}" ${dup ? 'disabled' : ((hasSolo || shared) ? '' : 'checked')} />
+                    <span style="flex:1;color:#e6e6e6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(name)}</span>
+                    <span style="color:#9ad;white-space:nowrap;font-size:11px;">${g.navs} nav · ${g.snaps} snap · ${g.steps.length} steps</span>
+                    ${dup ? '<span style="color:#ff9800;font-size:10px;white-space:nowrap;">exists — skipped</span>' : ''}
+                    ${hasSolo ? `<span title="${escapeHtml(solos.join('\n'))}" style="color:#7adfe6;font-size:10px;white-space:nowrap;max-width:120px;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(soloTxt)}</span>` : ''}
+                    ${shared ? `<span title="This pad is in two macros — the copy with more steps defaults ticked there." style="color:#c39dff;font-size:10px;white-space:nowrap;max-width:150px;overflow:hidden;text-overflow:ellipsis;">also in “${escapeHtml(String(entries[b.mi].mc.mission.name || ''))}”</span>` : ''}
+                </label>`;
+            }).join('');
+            const preTxt = e.plan.preamble.length ? ` · setup: ${escapeHtml(e.plan.preamble.map(s => srmLabel(s)).join(', '))}` : '';
+            return `<div style="margin:5px 0 1px;display:flex;align-items:center;gap:6px;">
+                <span style="width:10px;height:10px;border-radius:2px;background:${col};flex:none;"></span>
+                <b style="color:#7adfe6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(String(e.mc.mission.name || ''))}</b>
+                <span style="color:#789;font-size:10px;white-space:nowrap;">${e.plan.groups.length} pad(s)${preTxt}</span>
+            </div>${rows}`;
+        }).join('');
+        const notes = []
+            .concat(soloSkipped ? [`${soloSkipped} pad(s) already have their own micro (cyan) — unticked by default.`] : [])
+            .concat(sharedSkipped ? [`${sharedSkipped} pad(s) appear in two macros (purple) — kept in the macro with more steps, unticked in the other.`] : [])
+            .concat(totalDropped ? [`⚠ ${totalDropped} transit nav(s) (${totalDroppedSteps} steps) outside every pad's FFZ — dropped (corridor legs).`] : []);
+        const p = document.createElement('div');
+        p.id = MCV_SPLIT_PANEL_ID;
+        p.style.cssText = 'position:fixed;top:60px;right:24px;width:460px;max-height:84vh;display:flex;flex-direction:column;z-index:2147483602;'
+            + 'background:#161a20;border:1px solid #ff8ad2;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        p.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(255,138,210,0.08);border-bottom:1px solid rgba(255,138,210,0.3);">
+                <span style="font-weight:800;color:#ff8ad2;font-size:13px;">✂ Split ALL macros — ${entries.length} macro(s)</span>
+                <button data-mcvs-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;flex:none;">✕</button>
+            </div>
+            <div style="padding:6px 12px;font-size:11px;color:#9ad;border-bottom:1px solid #2a2f38;">One mission per pad, named after the pad — create-only, every macro is untouched. Each micro gets its macro's <b>takeoff</b> front and <b>returnHome (land)</b> end. <a data-mcvs-all href="#" style="color:#7adfe6;">all</a> / <a data-mcvs-none href="#" style="color:#7adfe6;">none</a></div>
+            <div style="overflow:auto;flex:1;padding:4px 10px;">${sections}</div>
+            ${anyPre ? `<label style="display:flex;align-items:center;gap:6px;padding:6px 12px;font-size:10px;color:#ffb74d;border-top:1px solid #2a2f38;cursor:pointer;">
+                <input type="checkbox" data-mcvsa-pre checked style="margin:0;" />
+                <span>Copy each macro's setup steps (between its takeoff and first nav — listed per macro above) into its micros right after takeoff.</span>
+            </label>` : ''}
+            ${notes.length ? `<div style="padding:6px 12px;font-size:10px;color:#ffb74d;border-top:1px solid #2a2f38;">${notes.map(escapeHtml).join('<br>')}</div>` : ''}
+            <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
+                <span data-mcvs-status style="flex:1;font-size:11px;color:#9ad;"></span>
+                <button data-mcvs-go style="padding:6px 12px;background:#ff8ad2;border:none;color:#2a0420;border-radius:6px;cursor:pointer;font-weight:800;">✂ Create</button>
+            </div>`;
+        document.body.appendChild(p);
+        const goBtn = p.querySelector('[data-mcvs-go]');
+        const updateGo = () => {
+            const n = p.querySelectorAll('input[data-mcvsa-pick]:checked').length;
+            goBtn.textContent = `✂ Create ${n}`;
+            goBtn.disabled = mcvSplitBusy || !n;
+        };
+        p.querySelector('[data-mcvs-close]').onclick = () => { if (!mcvSplitBusy) p.remove(); };
+        p.querySelectorAll('input[data-mcvsa-pick]').forEach(cb => { cb.onchange = updateGo; });
+        p.querySelector('[data-mcvs-all]').onclick = (ev) => { ev.preventDefault(); p.querySelectorAll('input[data-mcvsa-pick]:not(:disabled)').forEach(cb => { cb.checked = true; }); updateGo(); };
+        p.querySelector('[data-mcvs-none]').onclick = (ev) => { ev.preventDefault(); p.querySelectorAll('input[data-mcvsa-pick]').forEach(cb => { if (!cb.disabled) cb.checked = false; }); updateGo(); };
+        goBtn.onclick = () => mcvSplitAllCommit(entries, p, updateGo);
+        updateGo();
+    }
+    async function mcvSplitAllCommit(entries, panel, updateGo) {
+        if (mcvSplitBusy) return;
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('✂ Mission context not found — be on the Mission Bank page.', '#ff5252', 4500); return; }
+        const preCb = panel.querySelector('[data-mcvsa-pre]');
+        const preOn = !preCb || preCb.checked;
+        const work = [];
+        entries.forEach((e, mi) => {
+            const picked = [];
+            e.plan.groups.forEach((g, gi) => {
+                const cb = panel.querySelector(`input[data-mcvsa-pick="${mi}:${gi}"]`);
+                if (cb && !cb.disabled && cb.checked) picked.push(g);
+            });
+            if (picked.length) work.push({ mc: e.mc, plan: e.plan, picked });
+        });
+        if (!work.length) { showToast('Nothing ticked.', '#ff9800', 2500); return; }
+        const totalN = work.reduce((a, w) => a + w.picked.length, 0);
+        if (!window.confirm(`Create ${totalN} micro mission(s) from ${work.length} macro(s)?\n\nCreate-only — the macros are untouched.`)) return;
+        const statusEl = panel.querySelector('[data-mcvs-status]');
+        let ok = 0, fail = 0, done = 0;
+        mcvSplitBusy = true; updateGo();
+        renameSuppressAutoAgl++;
+        try {
+            for (const w of work) {
+                const ins = (w.mc.mission.instructions || []);
+                const to = pcmNormStep((ins.find(i => i && i.type === 0)) || mbMakeStep(0, 20));
+                const rh = pcmNormStep((Array.from(ins).reverse().find(i => i && i.type === 99)) || mbMakeStep(99));
+                const pre = preOn ? w.plan.preamble.map(pcmNormStep) : [];
+                for (const g of w.picked) {
+                    const name = String(g.asset.name || ('Pad ' + g.asset.id)).trim();
+                    done++;
+                    if (statusEl) statusEl.textContent = `Creating ${done}/${totalN} — ${name}…`;
+                    try {
+                        await ctx.saveApp({ id: null, type: 1, instructions: [to].concat(pre, g.steps.map(pcmNormStep), [rh]), data_report_object_arr: [] }, name);
+                        ok++;
+                    } catch (e2) { fail++; console.warn(`${TAG} [mcv] ✂all create failed "${name}"`, e2); }
+                    await new Promise(r => setTimeout(r, 150));
+                }
+            }
+        } finally { renameSuppressAutoAgl--; }
+        mcvSplitBusy = false; updateGo();
+        const refreshed = ok ? refreshMissionList() : false;
+        if (statusEl) statusEl.textContent = `Done — created ${ok}${fail ? `, ${fail} failed` : ''}.`;
+        showToast(`✂ Created ${ok} micro mission(s) from ${work.length} macro(s)${fail ? ` · ${fail} failed (see console)` : ''}.${ok && !refreshed ? ' Reload the list to see them.' : ''} Macros untouched.`, ok && !fail ? '#5fff5f' : (ok ? '#ff9800' : '#ff5252'), 9000);
+        console.log(`${TAG} [mcv] ✂all: ${ok} created, ${fail} failed across ${work.length} macro(s)`);
+        if (ok && !fail) { try { panel.remove(); } catch (e) {} }
+    }
     // ── ♻ EFFICIENCY AUDIT + REORDER (v2.40) ────────────────────────────────
     // Flight-hours are the SLA currency: ~20-25 min flight + ~80 min recharge
     // means EVERY flight costs ~1¾ h of wall clock, so a 6-flight macro eats
@@ -5414,7 +6189,7 @@
     function mcvAudit(det, ent) {
         const t0 = Date.now();
         let sol;
-        try { sol = rngSolve(ent); } catch (e) { console.warn(`${TAG} [mcv] audit range solve failed`, e); return new Map(); }
+        try { sol = rngSolveCached(ent); } catch (e) { console.warn(`${TAG} [mcv] audit range solve failed`, e); return new Map(); }
         const byAsset = new Map(sol.results.map(r => [r.asset.id, r]));
         const cfg = agCfg();
         const audits = new Map();
@@ -5495,13 +6270,33 @@
     // ♻ resequence a macro's per-pad blocks into the replan order, in place.
     let mcvReorderBusy = false;
     async function mcvReorder(missionId) {
-        if (mcvReorderBusy) return;
         const data = mcv.data;
         const mc = data && data.det.macros.find(x => x.mission.id === missionId);
         const audit = data && data.audits ? data.audits.get(missionId) : null;
         if (!mc || !audit || !audit.re) { showToast('No replan available for this mission.', '#ff9800', 3000); return; }
+        const orderIds = audit.reRows.map(r => r.asset.id);
+        const seen = new Set(orderIds);
+        mc.pads.forEach(a => { if (!seen.has(a.id)) { orderIds.push(a.id); seen.add(a.id); } });
+        const cFl = audit.calib ? audit.calib.curFl : audit.cur.flights.length;
+        const rFl = audit.calib ? audit.calib.reFl : audit.re.flights.length;
+        const cFt = (audit.calib && audit.calib.curDistM) ? audit.calib.curDistM * 3.28084 : audit.cur.totalFt;
+        const rFt = (audit.calib && audit.calib.reDistM) ? audit.calib.reDistM * 3.28084 : audit.re.totalFt;
+        const dCur = mcvDays(cFl), dRe = mcvDays(rFl);
+        await mcvApplyOrder(mc, orderIds, `♻ Re-order "${mc.mission.name}" IN PLACE?\n\n`
+            + `${cFl} flights (~${dCur.days.toFixed(1)} day(s)) → ${rFl} flights (~${dRe.days.toFixed(1)} day(s))\n`
+            + `est ${(cFt / 1000).toFixed(0)}k ft → ${(rFt / 1000).toFixed(0)}k ft${audit.calib ? ' (Percepto-calibrated)' : ''}\n\n`
+            + `Each pad's steps stay intact — only the pad ORDER changes. Mission id + name unchanged.\nA JSON backup downloads first.`);
+    }
+    // Shared apply pipeline for ♻ (audit replan order) and ⇅ (manual order,
+    // v2.63): consolidate each pad's blocks in the given pad-id order (any
+    // leading pre-pad steps stay first), hard step-count sanity, JSON backup,
+    // save in place, verify by refetch + re-detect, redraw the overlay.
+    // Returns true once the save went through (even if verify then warned).
+    async function mcvApplyOrder(mc, orderIds, confirmMsg, removedIds, addedSteps) {
+        if (mcvReorderBusy) return false;
+        const data = mcv.data;
         const ctx = findMissionAppCtx();
-        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4500); return; }
+        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4500); return false; }
         const m = mc.mission;
         const ins = m.instructions || [];
         const to = ins.filter(i => i && i.type === 0).slice(0, 1);
@@ -5513,29 +6308,31 @@
             if (!byPad.has(b.aId)) byPad.set(b.aId, []);
             b.steps.forEach(s => byPad.get(b.aId).push(s));
         });
-        const orderIds = audit.reRows.map(r => r.asset.id);
-        const seen = new Set(orderIds);
-        mc.pads.forEach(a => { if (!seen.has(a.id) && byPad.has(a.id)) { orderIds.push(a.id); seen.add(a.id); } });
+        // v2.85: ⇅ can DELETE pads — orderIds excludes them; every step of a
+        // removed pad leaves the macro (micros untouched), and the hard
+        // sanity accounts for exactly those steps and no others.
+        const removed = (removedIds && removedIds.size) ? removedIds : null;
+        const removedSteps = removed ? mc.blocks.reduce((t, b) => t + (b.aId != null && removed.has(b.aId) ? b.steps.length : 0), 0) : 0;
+        // v2.89: ⇅ can ADD pads — their steps come from the pad's micro
+        // (addedSteps: padId → steps[]), spliced at the ordered slot
+        let addedCount = 0;
+        if (addedSteps) addedSteps.forEach(st2 => { addedCount += st2.length; });
         const body = lead.slice();
-        orderIds.forEach(id => (byPad.get(id) || []).forEach(s => body.push(s)));
+        orderIds.forEach(id => {
+            const steps = byPad.get(id) || (addedSteps && addedSteps.get(id)) || [];
+            steps.forEach(s => body.push(s));
+        });
         const instrs = to.map(pcmNormStep).concat(body.map(pcmNormStep), rh.map(pcmNormStep));
-        // hard sanity: exactly the same steps, only re-sequenced
-        const expected = to.length + rh.length + ins.filter(i => i && i.type !== 0 && i.type !== 99).length;
+        // hard sanity: original steps minus deleted pads' plus added micros'
+        const expected = to.length + rh.length + ins.filter(i => i && i.type !== 0 && i.type !== 99).length - removedSteps + addedCount;
         if (instrs.length !== expected) {
             console.warn(`${TAG} [mcv] reorder ABORT — step count mismatch (${instrs.length} vs ${expected})`, m.name);
             showToast('♻ Aborted: rebuilt step count does not match the original (see console). Nothing saved.', '#ff5252', 6000);
-            return;
+            return false;
         }
-        const cFl = audit.calib ? audit.calib.curFl : audit.cur.flights.length;
-        const rFl = audit.calib ? audit.calib.reFl : audit.re.flights.length;
-        const cFt = (audit.calib && audit.calib.curDistM) ? audit.calib.curDistM * 3.28084 : audit.cur.totalFt;
-        const rFt = (audit.calib && audit.calib.reDistM) ? audit.calib.reDistM * 3.28084 : audit.re.totalFt;
-        const dCur = mcvDays(cFl), dRe = mcvDays(rFl);
-        if (!window.confirm(`♻ Re-order "${m.name}" IN PLACE?\n\n`
-            + `${cFl} flights (~${dCur.days.toFixed(1)} day(s)) → ${rFl} flights (~${dRe.days.toFixed(1)} day(s))\n`
-            + `est ${(cFt / 1000).toFixed(0)}k ft → ${(rFt / 1000).toFixed(0)}k ft${audit.calib ? ' (Percepto-calibrated)' : ''}\n\n`
-            + `Each pad's steps stay intact — only the pad ORDER changes. Mission id + name unchanged.\nA JSON backup downloads first.`)) return;
+        if (!window.confirm(confirmMsg)) return false;
         mcvReorderBusy = true;
+        let saved = false;
         try {
             // backup (same frame-walking download as the wrap tools)
             try {
@@ -5559,6 +6356,7 @@
             }
             showToast(`♻ Saving re-ordered "${m.name}"…`, '#9cf', 3000);
             await ctx.saveApp(Object.assign({}, m, { instructions: instrs }), m.name);
+            saved = true;
             // verify: fresh fetch → same pad set, new order, same step count
             await new Promise(r => setTimeout(r, 1200));
             const after = await mbFetchMissionsFull(getCurrentSiteID());
@@ -5570,12 +6368,12 @@
                 const gotOrder = mc2 ? mc2.pads.map(a => a.id).join(',') : '';
                 const wantOrder = orderIds.join(',');
                 const steps2 = (m2.instructions || []).filter(i => i && i.type !== 0 && i.type !== 99).length;
-                const steps1 = ins.filter(i => i && i.type !== 0 && i.type !== 99).length;
+                const steps1 = ins.filter(i => i && i.type !== 0 && i.type !== 99).length - removedSteps + addedCount;
                 good = gotOrder === wantOrder && steps2 === steps1;
                 if (!good) console.warn(`${TAG} [mcv] verify mismatch — order got [${gotOrder}] want [${wantOrder}] · steps ${steps2}/${steps1}`);
             }
             showToast(good
-                ? `♻ "${m.name}" re-ordered ✓ verified — ${cFl} → ${rFl} flights. Re-check its schedule if one is active.`
+                ? `⇅ "${m.name}" re-ordered ✓ verified — badges now match. Re-check its schedule if one is active.`
                 : `⚠ "${m.name}" saved but verify mismatched — check the mission + console (backup downloaded).`, good ? '#5fff5f' : '#ff9800', 9000);
             // refresh overlay data
             mcv.data.missions = after;
@@ -5589,6 +6387,1406 @@
             showToast('♻ Reorder FAILED — nothing verified, backup downloaded (see console).', '#ff5252', 6000);
         }
         mcvReorderBusy = false;
+        return saved;
+    }
+    // ── 🪄 STEP OPTIMIZER (feature #244, v2.66) ────────────────────────────
+    // Reorders the steps INSIDE a macro for the shortest legal route — the
+    // granular layer under ♻/⇅ (which only move whole pad blocks). Decoded
+    // from the user's hand-tuned NE 1-2 macro on site 1350 (offline: manual
+    // 8,522 ft of nav path vs 6,605 ft from the exact solve — the eye can't
+    // hold a 12-nav facility). Doctrine (user-ruled 2026-08-21):
+    //   · pure shortest point-to-point; NO RTB/battery in the objective
+    //   · start at the pad furthest from base, then whatever chains shortest
+    //   · intertwined pads (navs within clusterFt) merge into ONE cluster and
+    //     interleave freely; per-cluster exact open-path DP chained on
+    //     entry/exit across clusters (dead-end pads fall out as in-and-out)
+    //   · a snapshot belongs to exactly ONE nav; standoff target 100–200 ft —
+    //     under 100 ft crops the asset, so err FARTHER, never closer
+    //   · duplicates (stacked nav+snap pairs) are defects — detect, don't fly
+    //   · first located step must be a NAV; wrap scrambles get rebuilt to the
+    //     mission's own majority wrap pattern (NOT hardcoded to the emission
+    //     recipe — plain-RGB missions have no wrap and none is invented)
+    // Apply rides the same rails as ♻: JSON backup, hard count sanity,
+    // saveApp in place, fresh-fetch verify, overlay refresh.
+    const STO_CFG_KEY = 'aim-mb-sto-cfg';
+    function stoCfg() {
+        // Standoff = OGI physics (v2.69/v2.70 live-tune): the band the OGI
+        // camera resolves enough particles/in² is 90–210 ft, ideal 100.
+        // Under 90 crops → real flag. Over 210 is RARE BUT LEGITIMATE →
+        // informational flag only, suggestion default-unticked.
+        // legalOverFt 600→100 (v2.72, live round 6): pricing sub-600 ft legs
+        // as straight chords let the solver "win" on fake feet — a 300 ft
+        // chord across red can be a 900 ft corridor. Legs over 100 ft (i.e.
+        // anything that could leave the pad) now price on the legal graph.
+        const d = { clusterFt: 400, dupFt: 15, idealFt: 100, bandMinFt: 90, bandMaxFt: 210, legalOverFt: 100 };
+        const s = gmGet(STO_CFG_KEY, null);
+        const o = Object.assign({}, d, (s && typeof s === 'object') ? s : {});
+        if (o.legalOverFt === 600) o.legalOverFt = 100;   // migrate the pre-v2.72 default if persisted
+        Object.keys(d).forEach(k => { const v = Number(o[k]); o[k] = (isFinite(v) && v > 0) ? v : d[k]; });
+        return o;
+    }
+    const STO_FT = 3.28084;
+    const sto = { panelEl: null, layers: [], state: null };
+
+    // Parse a macro into nav UNITS (nav + its snapshot bundles + stray frags).
+    // A bundle = snapshot + the unlocated steps that follow it (its wrap).
+    // Unlocated steps under a nav BEFORE its first snapshot are "frags" —
+    // wrap shrapnel from manual reorders (real example: N140 on NE 1-2 was
+    // preceded-followed by half a wrap with no snapshot).
+    function stoParse(m) {
+        const ins = Array.isArray(m.instructions) ? m.instructions : [];
+        const takeoff = ins.find(i => i && i.type === 0) || null;
+        const rh = Array.from(ins).reverse().find(i => i && i.type === 99) || null;
+        const lead = [], units = [], orphans = [];
+        let unit = null, bundle = null;
+        ins.forEach(i => {
+            if (!i || i.type === 0 || i.type === 99) return;
+            const located = i.location && typeof i.location.lat === 'number';
+            if (located && i.type === 1) {
+                unit = { nav: i, frags: [], bundles: [], others: [] };
+                units.push(unit); bundle = null;
+            } else if (located && i.type === 6) {
+                bundle = { snap: i, wrap: [] };
+                if (unit) unit.bundles.push(bundle);
+                else orphans.push(bundle);   // snapshot before any nav = problem
+            } else if (located) {
+                // unknown located type — travels with its nav, never reordered internally
+                if (unit) { unit.others.push(i); bundle = null; }
+                else orphans.push({ snap: i, wrap: [], other: true });
+            } else {
+                if (bundle) bundle.wrap.push(i);
+                else if (unit) unit.frags.push(i);
+                else lead.push(i);
+            }
+        });
+        return { takeoff, rh, lead, units, orphans };
+    }
+    // Standoff preference LADDER (v2.77, user-ruled after a live 87→182 ft
+    // re-home — "that's TOO BIG of a swing"). 100 ft ideal, then:
+    //   101–120  beats  80–100
+    //   121–160  beats  60–80
+    //   160–200  beats  40–60
+    //   200+     only if there's no other option · under 40 = worst
+    // Lower tier wins; within a tier, closer to 100 wins. A re-home is only
+    // offered when the alternative lands in a strictly better tier (or same
+    // tier, meaningfully closer to 100).
+    function stoTier(d) {
+        if (d >= 100 && d <= 120) return 1;
+        if (d >= 80 && d < 100) return 2;
+        if (d > 120 && d <= 160) return 3;
+        if (d >= 60 && d < 80) return 4;
+        if (d > 160 && d <= 200) return 5;
+        if (d >= 40 && d < 60) return 6;
+        if (d > 200) return 7;
+        return 8;   // under 40 ft — severe cropping
+    }
+    function stoWrapSig(bundle) {
+        return bundle.wrap.map(s => `${s.type_name}:${s.value1 === true ? 1 : s.value1 === false ? 0 : s.value1}`).join('|');
+    }
+    function stoLocKey(loc) { return loc.lat.toFixed(7) + ',' + loc.lng.toFixed(7); }
+
+    // Legal-route distance in meters between two points, cached. Short legs
+    // fly straight in practice (route_points on real missions show direct
+    // legs inside a pad, FP corridors between pads) so the router only runs
+    // where it matters — over legalOverFt. Fallback = straight ×1.25, counted
+    // and SURFACED (engraved rule: a silently-degraded distance looks random).
+    function stoDistM(st, a, b) {
+        const k1 = stoLocKey(a) + '>' + stoLocKey(b);
+        const hit = st.distCache.get(k1);
+        if (hit !== undefined) return hit;
+        const straight = mbApproxMeters(a.lat, a.lng, b.lat, b.lng);
+        let d;
+        if (straight * STO_FT <= st.cfg.legalOverFt || !st.built) {
+            d = straight;
+        } else {
+            const path = mpvLegalPath(st.built, a, b);
+            if (path && path.length >= 2) {
+                d = 0;
+                for (let i = 1; i < path.length; i++) d += mbApproxMeters(path[i - 1][0], path[i - 1][1], path[i][0], path[i][1]);
+            } else { d = straight * 1.25; st.fallbacks++; }
+        }
+        st.distCache.set(k1, d);
+        st.distCache.set(stoLocKey(b) + '>' + stoLocKey(a), d);
+        return d;
+    }
+    // exact open path over pts (indices), all (entry,exit) pairs — n ≤ 12
+    function stoHeldKarp(n, D) {
+        const res = Array.from({ length: n }, () => new Array(n).fill(Infinity));
+        const trace = Array.from({ length: n }, () => new Array(n).fill(null));
+        for (let s = 0; s < n; s++) {
+            const dp = Array.from({ length: 1 << n }, () => new Array(n).fill(Infinity));
+            const par = Array.from({ length: 1 << n }, () => new Array(n).fill(-1));
+            dp[1 << s][s] = 0;
+            for (let mask = 0; mask < (1 << n); mask++) {
+                const row = dp[mask];
+                for (let j = 0; j < n; j++) {
+                    const cur = row[j];
+                    if (cur === Infinity) continue;
+                    for (let k = 0; k < n; k++) {
+                        if (mask & (1 << k)) continue;
+                        const nm = mask | (1 << k), v = cur + D[j][k];
+                        if (v < dp[nm][k]) { dp[nm][k] = v; par[nm][k] = j; }
+                    }
+                }
+            }
+            const full = (1 << n) - 1;
+            for (let j = 0; j < n; j++) {
+                res[s][j] = dp[full][j];
+                const path = []; let mask = full, cur = j;
+                while (cur !== -1) { path.push(cur); const p = par[mask][cur]; mask ^= (1 << cur); cur = p; }
+                trace[s][j] = path.reverse();
+            }
+        }
+        return { res, trace };
+    }
+    // NN + 2-opt open path fallback for clusters over the DP cap
+    function stoHeurPath(n, D, onlyStarts) {
+        const res = Array.from({ length: n }, () => new Array(n).fill(Infinity));
+        const trace = Array.from({ length: n }, () => new Array(n).fill(null));
+        const len = ord => { let t = 0; for (let i = 1; i < ord.length; i++) t += D[ord[i - 1]][ord[i]]; return t; };
+        const startSet = onlyStarts ? new Set(onlyStarts) : null;
+        for (let s = 0; s < n; s++) {
+            if (startSet && !startSet.has(s)) continue;
+            const left = new Set(Array.from({ length: n }, (_, i) => i)); left.delete(s);
+            const ord = [s];
+            while (left.size) {
+                let best = null;
+                left.forEach(k => { if (!best || D[ord[ord.length - 1]][k] < D[ord[ord.length - 1]][best]) best = k; });
+                ord.push(best); left.delete(best);
+            }
+            let cur = ord, curLen = len(cur), improved = true;
+            while (improved) {
+                improved = false;
+                for (let i = 1; i < cur.length - 1; i++) for (let k = i + 1; k < cur.length; k++) {
+                    const cand = cur.slice(0, i).concat(cur.slice(i, k + 1).reverse(), cur.slice(k + 1));
+                    const l = len(cand);
+                    if (l < curLen - 0.3) { cur = cand; curLen = l; improved = true; }
+                }
+                // or-opt: relocate a single nav — catches the lone-nav zigzag
+                // that 2-opt's segment reversals can't express (v2.77, live:
+                // an out-of-the-way excursion mid-pad survived 2-opt)
+                for (let i = 1; i < cur.length; i++) for (let k = 1; k < cur.length; k++) {
+                    if (k === i || k === i - 1) continue;
+                    const cand = cur.slice();
+                    const [mv] = cand.splice(i, 1);
+                    cand.splice(k > i ? k - 1 : k, 0, mv);
+                    const l = len(cand);
+                    if (l < curLen - 0.3) { cur = cand; curLen = l; improved = true; }
+                }
+            }
+            res[s][cur[cur.length - 1]] = curLen;
+            trace[s][cur[cur.length - 1]] = cur;
+        }
+        return { res, trace };
+    }
+    async function stoAnalyze(mc, data) {
+        const cfg = stoCfg();
+        const m = mc.mission;
+        const parsed = stoParse(m);
+        const issues = [];
+        if (parsed.orphans.length) issues.push({ kind: 'orphan', text: `${parsed.orphans.length} located step(s) before the first NAV — a mission must start with a navigate. They will be re-attached to the first nav on Apply.` });
+        // wrap canon = the mission's own majority pattern
+        const allBundles = [];
+        parsed.units.forEach((u, ui) => u.bundles.forEach((b, bi) => { b.uid = `${ui}:${bi}`; allBundles.push(b); }));
+        const tally = new Map();
+        allBundles.forEach(b => { const s = stoWrapSig(b); tally.set(s, (tally.get(s) || 0) + 1); });
+        let canonSig = null, canonN = 0;
+        tally.forEach((n, s) => { if (n > canonN) { canonN = n; canonSig = s; } });
+        const hasCanon = canonSig !== null && canonSig !== '' && canonN >= 2 && canonN / Math.max(1, allBundles.length) >= 0.5;
+        const wrapAnoms = hasCanon ? allBundles.filter(b => stoWrapSig(b) !== canonSig) : [];
+        const canonTemplate = hasCanon ? (allBundles.find(b => stoWrapSig(b) === canonSig) || null) : null;
+        const fragUnits = parsed.units.filter(u => u.frags.length);
+        // duplicates: stacked nav pairs whose snapshots also stack, + stacked
+        // snapshot pairs under one nav
+        const dupM = cfg.dupFt / STO_FT;
+        const dupUnits = [];   // {ui, ofUi}
+        for (let i = 0; i < parsed.units.length; i++) {
+            for (let j = i + 1; j < parsed.units.length; j++) {
+                const a = parsed.units[i], b = parsed.units[j];
+                if (mbApproxMeters(a.nav.location.lat, a.nav.location.lng, b.nav.location.lat, b.nav.location.lng) > dupM) continue;
+                const covered = b.bundles.every(bb => a.bundles.some(ab =>
+                    mbApproxMeters(ab.snap.location.lat, ab.snap.location.lng, bb.snap.location.lat, bb.snap.location.lng) <= dupM));
+                if (covered && !b.others.length) dupUnits.push({ ui: j, ofUi: i });
+            }
+        }
+        const dupBundles = [];   // {uid, ofUid} within one unit
+        parsed.units.forEach((u, ui) => {
+            for (let i = 0; i < u.bundles.length; i++) for (let j = i + 1; j < u.bundles.length; j++) {
+                if (mbApproxMeters(u.bundles[i].snap.location.lat, u.bundles[i].snap.location.lng,
+                    u.bundles[j].snap.location.lat, u.bundles[j].snap.location.lng) <= dupM) {
+                    dupBundles.push({ uid: u.bundles[j].uid, ofUid: u.bundles[i].uid });
+                }
+            }
+        });
+        // snapshot standoff vs its owner nav. Doctrine (v2.69 live-tune):
+        // IDEAL = idealFt (100). 90–99 is fine, under bandMinFt (90) crops →
+        // flag. Replacement nav = as close to 100 as possible, farther side
+        // winning: among navs ≥ idealFt take the CLOSEST to it; only when
+        // nothing sits above 100 take the best one in the 90–100 range.
+        // (The old chooser aimed at mid-band ~150 ft — live screenshot showed
+        // it picking 159–195 ft homes when ~110 ft navs existed.)
+        const standoff = [];   // {uid, d, alt: unitIdx|null, altD, tooClose, outOfBand}
+        parsed.units.forEach((u, ui) => u.bundles.forEach(b => {
+            const d = mbApproxMeters(u.nav.location.lat, u.nav.location.lng, b.snap.location.lat, b.snap.location.lng) * STO_FT;
+            if (d >= cfg.bandMinFt && d <= cfg.bandMaxFt) return;
+            // best alternative BY THE LADDER: lowest tier, then closest to 100
+            let alt = null, altD = 0;
+            parsed.units.forEach((u2, ui2) => {
+                if (ui2 === ui) return;
+                const d2 = mbApproxMeters(u2.nav.location.lat, u2.nav.location.lng, b.snap.location.lat, b.snap.location.lng) * STO_FT;
+                if (alt === null || stoTier(d2) < stoTier(altD)
+                    || (stoTier(d2) === stoTier(altD) && Math.abs(d2 - cfg.idealFt) < Math.abs(altD - cfg.idealFt))) { alt = ui2; altD = d2; }
+            });
+            // only offer a move that climbs the ladder — a strictly better
+            // tier, or the same tier meaningfully (>10 ft) closer to ideal.
+            // Live catch: 87 ft (tier 80–100) was "fixed" to 182 ft (tier
+            // 160–200) — a downgrade the flat band couldn't see.
+            const improves = alt !== null && (stoTier(altD) < stoTier(d)
+                || (stoTier(altD) === stoTier(d) && Math.abs(altD - cfg.idealFt) < Math.abs(d - cfg.idealFt) - 10));
+            // NEVER offer a move that would leave the donor nav snap-less —
+            // the snap was attached there on purpose (user rule); moving a
+            // nav's only snapshot away IS a consolidation, and that stays
+            // explicit + opt-in in the nav-diet section.
+            if (!improves || u.bundles.length === 1) { alt = null; altD = 0; }
+            standoff.push({ uid: b.uid, d, alt, altD, tooClose: d < cfg.bandMinFt, outOfBand: alt !== null && (altD < cfg.bandMinFt || altD > cfg.bandMaxFt) });
+        }));
+        // pad per unit (≤150 ft of a macro pad ring), transit navs travel with
+        // the previous located unit
+        const tolM = 46;
+        const boxes = mc.pads.map(a => agRingBbox(a.ring, tolM + 5));
+        parsed.units.forEach((u, ui) => {
+            const p = u.nav.location;
+            let best = null;
+            mc.pads.forEach((a, ai) => {
+                const bb = boxes[ai];
+                if (p.lat < bb.s || p.lat > bb.n || p.lng < bb.w || p.lng > bb.e) return;
+                const d = mbPointToPolygonMeters(p.lat, p.lng, a.ring);
+                if (d <= tolM && (!best || d < best.d)) best = { a, d };
+            });
+            u.padId = best ? best.a.id : (ui > 0 ? parsed.units[ui - 1].padId : (mc.pads[0] && mc.pads[0].id));
+        });
+        // NAV CONSOLIDATION suggestions (v2.75, "nav diet"): every nav is a
+        // stop (decelerate, position, stabilize) that distance metrics never
+        // see. Where one nav's EVERY snapshot would still sit inside the OGI
+        // band shot from a same-pad sibling nav, the pair can become one stop.
+        // Never invents a new position — a nav's altitude is its FFZ floor,
+        // so only an EXISTING nav may survive; the other is dropped and its
+        // bundles move over. Default-unticked in the panel (vantage changes).
+        const navDiet = [];   // {drop, into, dists[], navFt, worst}
+        const dupSet = new Set(dupUnits.map(d2 => d2.ui));
+        const dietUsed = new Set();
+        const dietFit = (fromUi, intoUi) => {
+            const from = parsed.units[fromUi], into = parsed.units[intoUi];
+            if (from.others.length || !from.bundles.length) return null;
+            const dists = [];
+            let worst = 0;
+            for (const b of from.bundles) {
+                const d2 = mbApproxMeters(into.nav.location.lat, into.nav.location.lng, b.snap.location.lat, b.snap.location.lng) * STO_FT;
+                if (d2 < cfg.bandMinFt || d2 > cfg.bandMaxFt) return null;
+                dists.push(d2);
+                worst = Math.max(worst, Math.abs(d2 - cfg.idealFt));
+            }
+            return { dists, worst };
+        };
+        for (let i = 0; i < parsed.units.length; i++) {
+            for (let j = i + 1; j < parsed.units.length; j++) {
+                if (parsed.units[i].padId !== parsed.units[j].padId) continue;
+                if (dupSet.has(i) || dupSet.has(j) || dietUsed.has(i) || dietUsed.has(j)) continue;
+                const dropJ = dietFit(j, i), dropI = dietFit(i, j);
+                if (!dropJ && !dropI) continue;
+                const pick = (dropJ && dropI) ? (dropJ.worst <= dropI.worst ? { drop: j, into: i, fit: dropJ } : { drop: i, into: j, fit: dropI })
+                    : (dropJ ? { drop: j, into: i, fit: dropJ } : { drop: i, into: j, fit: dropI });
+                navDiet.push({ drop: pick.drop, into: pick.into, dists: pick.fit.dists,
+                    navFt: mbApproxMeters(parsed.units[i].nav.location.lat, parsed.units[i].nav.location.lng, parsed.units[j].nav.location.lat, parsed.units[j].nav.location.lng) * STO_FT });
+                dietUsed.add(i); dietUsed.add(j);
+            }
+        }
+        // NO NAVS WITHOUT SNAPS (v2.77, user rule): "if there's no snap
+        // there's no reason for a nav." Original snap-less navs listed here;
+        // navs EMPTIED by re-homes/merges are caught at rebuild time.
+        const emptyNavs = parsed.units.map((u, ui) => ui).filter(ui => !parsed.units[ui].bundles.length && !parsed.units[ui].others.length);
+        // clusters + solve — tried at TWO radii, and the CURRENT order is a
+        // scored candidate too (v2.67). Live NE 1-2 test: the user's manual
+        // interleave (Rivers 1974JH sandwiched INSIDE the Jack Mohr run) BEAT
+        // contiguous clusters under legal routing by 3% — 1974JH sat just
+        // outside the 400 ft radius, so the solver wasn't allowed to consider
+        // that shape. 2× radius puts it in the search space, and keeping the
+        // current order as a candidate guarantees the proposal is NEVER worse
+        // than what's already flown.
+        const padIds = mc.pads.map(a => a.id);
+        const unitsByPad = new Map();
+        parsed.units.forEach((u, ui) => { if (!unitsByPad.has(u.padId)) unitsByPad.set(u.padId, []); unitsByPad.get(u.padId).push(ui); });
+        const padName = new Map(mc.pads.map(a => [a.id, a.name || ('pad ' + a.id)]));
+        let byAsset = null;
+        try { const sol = rngSolveCached(data.ent); byAsset = new Map(sol.results.map(r => [r.asset.id, r])); } catch (e) {}
+        const base = data.ent.base || null;
+        // Distance cache is SHARED across the whole 🧩 session (v2.78) — the
+        // sweep and every re-analyze reuse legs already routed. Keyed to the
+        // legalOverFt knob so changing it can't serve stale straight/legal
+        // mixes. And the expensive legal routing is PRECOMPUTED here with
+        // cooperative yielding — a 60-nav site is ~1,800 Dijkstras, which
+        // froze the tab (3× "Page Unresponsive", live) when run in one
+        // synchronous block. After this loop the solver is pure cache hits.
+        if (!data.stoDist || data.stoDist.ft !== cfg.legalOverFt) data.stoDist = { ft: cfg.legalOverFt, map: new Map() };
+        const st = { cfg, built: mcvRouteBuilt(), distCache: data.stoDist.map, fallbacks: 0 };
+        {
+            const navPts = parsed.units.map(u => u.nav.location);
+            const allPts = base ? [base].concat(navPts) : navPts;
+            const totalPairs = allPts.length * (allPts.length - 1) / 2;
+            let done = 0, misses = 0;
+            for (let i = 0; i < allPts.length; i++) {
+                for (let j = i + 1; j < allPts.length; j++) {
+                    const hit = st.distCache.has(stoLocKey(allPts[i]) + '>' + stoLocKey(allPts[j]));
+                    if (!hit) { stoDistM(st, allPts[i], allPts[j]); misses++; }
+                    done++;
+                    if (misses > 0 && misses % 12 === 0 && !hit) {
+                        if (misses % 48 === 12) showToast(`🪄 Routing legs… ${done}/${totalPairs}`, '#c39dff', 1200);
+                        await new Promise(r => setTimeout(r, 0));
+                    }
+                }
+            }
+        }
+        const seqLen = (idxArr) => { let t = 0; for (let i = 1; i < idxArr.length; i++) t += stoDistM(st, parsed.units[idxArr[i - 1]].nav.location, parsed.units[idxArr[i]].nav.location); return t; };
+        // per-nav depth from base (ft) — fuels the deep-first TIE-BREAKS.
+        // Dead-end spurs cost identical feet in both directions, so equal-cost
+        // orders MUST resolve deeper-first (the lasso's engraved "10>8" rule;
+        // live round 6 caught pads 1↔2 swapped on exactly such a tie).
+        const navDep = parsed.units.map(u => base ? mbApproxMeters(base.lat, base.lng, u.nav.location.lat, u.nav.location.lng) * STO_FT : 0);
+        const solveAt = (clusterFtVal) => {
+            const parent = padIds.map((_, i) => i);
+            const find = i => parent[i] === i ? i : (parent[i] = find(parent[i]));
+            const clM = clusterFtVal / STO_FT;
+            for (let i = 0; i < padIds.length; i++) for (let j = i + 1; j < padIds.length; j++) {
+                const A = unitsByPad.get(padIds[i]) || [], B = unitsByPad.get(padIds[j]) || [];
+                let minD = Infinity;
+                A.forEach(ua => B.forEach(ub => {
+                    const la = parsed.units[ua].nav.location, lb = parsed.units[ub].nav.location;
+                    minD = Math.min(minD, mbApproxMeters(la.lat, la.lng, lb.lat, lb.lng));
+                }));
+                if (minD < clM) parent[find(i)] = find(j);
+            }
+            const clMap = new Map();
+            padIds.forEach((pid, i) => { const r = find(i); if (!clMap.has(r)) clMap.set(r, []); clMap.get(r).push(pid); });
+            const clusters = Array.from(clMap.values())
+                .map(pids => ({ pids, name: pids.map(p => padName.get(p)).join(' + '), unitIdx: pids.flatMap(p => unitsByPad.get(p) || []) }))
+                .filter(c => c.unitIdx.length > 0);
+            // cluster depth from base — trusted rng solve when available.
+            // deepPid = the cluster's deepest PAD: the mission-start anchor
+            // is that pad's ARRIVAL-SIDE nav (v2.73).
+            clusters.forEach(c => {
+                let depth = 0, deepPid = null;
+                c.pids.forEach(pid => {
+                    let pd = 0;
+                    const r = byAsset && byAsset.get(pid);
+                    if (r && r.status === 'ok') pd = r.worstFt;
+                    else if (base) (unitsByPad.get(pid) || []).forEach(ui => {
+                        pd = Math.max(pd, mbApproxMeters(base.lat, base.lng, parsed.units[ui].nav.location.lat, parsed.units[ui].nav.location.lng) * STO_FT);
+                    });
+                    if (pd > depth) { depth = pd; deepPid = pid; }
+                });
+                c.depth = depth;
+                c.deepPid = deepPid;
+            });
+            const solvedCl = clusters.map(c => {
+                const pts = c.unitIdx.map(ui => parsed.units[ui].nav.location);
+                const n = pts.length;
+                const D = Array.from({ length: n }, (_, i) => pts.map(p => stoDistM(st, pts[i], p)));
+                // Mission-start anchor (v2.73, user live-tune): the flight
+                // begins in the deepest PAD, entered on its ARRIVAL side —
+                // the drone transits out from base and grabs the near nav on
+                // the way in, it never flies past one corner to start at the
+                // far one (feet-identical spur tie; "don't fly past" is the
+                // human rule). Fallback when no base: deepest nav (still
+                // prevents the direction-symmetric near→far reversal).
+                let deepLocal = 0, dd = -1;
+                pts.forEach((p, i) => { const d = base ? mbApproxMeters(base.lat, base.lng, p.lat, p.lng) : 0; if (d > dd) { dd = d; deepLocal = i; } });
+                let anchorLocal = deepLocal;
+                if (base && c.deepPid != null) {
+                    let bestI = -1, bestD = Infinity;
+                    c.unitIdx.forEach((ui, i) => {
+                        if (parsed.units[ui].padId !== c.deepPid) return;
+                        if (navDep[ui] < bestD) { bestD = navDep[ui]; bestI = i; }
+                    });
+                    if (bestI >= 0) anchorLocal = bestI;
+                }
+                // perf: a lone merged mega-cluster only ever enters at the
+                // anchor — skip the other n−1 heuristic multi-starts (v2.77)
+                const starts = (clusters.length === 1 && n > 20) ? [anchorLocal] : null;
+                const hk = n <= 12 ? stoHeldKarp(n, D) : stoHeurPath(n, D, starts);
+                return Object.assign({}, c, { pts, hk, exact: n <= 12, anchorLocal });
+            });
+            const startCi = solvedCl.reduce((bi, c, i) => c.depth > solvedCl[bi].depth ? i : bi, 0);
+            const chain = (order) => {
+                let states = null;
+                for (const ci of order) {
+                    const c = solvedCl[ci], n = c.pts.length, next = [];
+                    for (let j = 0; j < n; j++) {
+                        let best = Infinity, from = null;
+                        for (let i2 = 0; i2 < n; i2++) {
+                            const intra = c.hk.res[i2][j];
+                            if (intra === Infinity) continue;
+                            // first cluster starts at the anchor (deepest pad,
+                            // arrival-side nav — far→near SOP + "don't fly past")
+                            if (!states) { if (i2 !== c.anchorLocal) continue; if (intra < best) { best = intra; from = { entry: i2, prev: null }; } }
+                            else states.forEach(stt => {
+                                const legM = stoDistM(st, stt.pt, c.pts[i2]);
+                                // tie eps: prefer the SHORTER arrival leg ("don't
+                                // fly past") — sub-mm, decides only genuine ties
+                                const v = stt.cost + legM + intra + legM * 1e-7;
+                                if (v < best) { best = v; from = { entry: i2, prev: stt }; }
+                            });
+                        }
+                        next.push({ cost: best, pt: c.pts[j], ci, exit: j, from });
+                    }
+                    states = next;
+                }
+                return states.reduce((a, b) => a.cost < b.cost ? a : b);
+            };
+            const rest = solvedCl.map((_, i) => i).filter(i => i !== startCi);
+            let bestEnd = null;
+            if (rest.length <= 6) {
+                const perms = (arr) => arr.length <= 1 ? [arr]
+                    : arr.flatMap((x, i) => perms(arr.slice(0, i).concat(arr.slice(i + 1))).map(p => [x].concat(p)));
+                perms(rest).forEach(p => {
+                    const order = [startCi].concat(p);
+                    const end = chain(order);
+                    // deep-early tie term: ~centimeters at most — among orders
+                    // with equal real cost, the one visiting deep clusters
+                    // earlier wins (position × depth, minimized)
+                    const tie = order.reduce((t, ci2, k) => t + k * (solvedCl[ci2].depth || 0), 0) * 1e-7;
+                    const scored = end.cost + tie;
+                    if (!bestEnd || scored < bestEnd.scored) { bestEnd = end; bestEnd.scored = scored; }
+                });
+            } else {
+                // greedy nearest-cluster seed from the start cluster…
+                const centro = c => { let la = 0, lg = 0; c.pts.forEach(p => { la += p.lat; lg += p.lng; }); return { lat: la / c.pts.length, lng: lg / c.pts.length }; };
+                const cs = solvedCl.map(centro);
+                const left = new Set(rest); let order = [startCi];
+                while (left.size) {
+                    let best = null, bd = Infinity;
+                    left.forEach(i => { const d = mbApproxMeters(cs[order[order.length - 1]].lat, cs[order[order.length - 1]].lng, cs[i].lat, cs[i].lng); if (d < bd) { bd = d; best = i; } });
+                    order.push(best); left.delete(best);
+                }
+                // …then 2-opt + relocate on the CLUSTER SEQUENCE, scored by the
+                // real chained cost (v2.76). Greedy NN alone STRANDS a slightly
+                // off-corridor cluster: it sails past chasing the nearest big
+                // target and doubles back later (live catch on a 30-pad site —
+                // N41 → far east → back past a pad to N57/S90). Start pinned.
+                const tieOf = (ord) => ord.reduce((t, ci2, k) => t + k * (solvedCl[ci2].depth || 0), 0) * 1e-7;
+                const scoreOf = (ord) => chain(ord).cost + tieOf(ord);
+                let bestScore = scoreOf(order), improvedO = true, guardO = 0;
+                while (improvedO && guardO++ < 12) {
+                    improvedO = false;
+                    for (let i = 1; i < order.length - 1; i++) {
+                        for (let k = i + 1; k < order.length; k++) {
+                            const cand = order.slice(0, i).concat(order.slice(i, k + 1).reverse(), order.slice(k + 1));
+                            const s2 = scoreOf(cand);
+                            if (s2 < bestScore - 1e-6) { order = cand; bestScore = s2; improvedO = true; }
+                        }
+                    }
+                    for (let i = 1; i < order.length; i++) {
+                        for (let k = 1; k < order.length; k++) {
+                            if (k === i || k === i - 1) continue;
+                            const cand = order.slice();
+                            const [mv] = cand.splice(i, 1);
+                            cand.splice(k > i ? k - 1 : k, 0, mv);
+                            const s2 = scoreOf(cand);
+                            if (s2 < bestScore - 1e-6) { order = cand; bestScore = s2; improvedO = true; }
+                        }
+                    }
+                }
+                bestEnd = chain(order);
+            }
+            const proposed = [];
+            const walk = [];
+            let cur2 = bestEnd;
+            while (cur2) { walk.unshift(cur2); cur2 = cur2.from && cur2.from.prev; }
+            walk.forEach(stp => {
+                const c = solvedCl[stp.ci];
+                const path = c.hk.trace[stp.from.entry][stp.exit] || [];
+                path.forEach(k => proposed.push(c.unitIdx[k]));
+            });
+            return { proposed, propM: seqLen(proposed), clusters: solvedCl, clusterOrder: walk.map(w => w.ci), startCi, usedFt: clusterFtVal };
+        };
+        const variants = [solveAt(cfg.clusterFt)];
+        try { variants.push(solveAt(cfg.clusterFt * 2)); } catch (e) { console.warn(`${TAG} [sto] 2× cluster variant failed`, e); }
+        const bestV = variants.reduce((a, b) => (b.propM < a.propM ? b : a));
+        const curOrder = parsed.units.map((_, i) => i);
+        const curM = seqLen(curOrder);
+        // FAR-FIRST DIRECTION PASS (v2.74, user doctrine): "always start at
+        // the furthest NAV point at a pad and move back if only one way in
+        // and out." Per contiguous same-PAD run: if reversing the run makes
+        // its first nav LEGALLY farther from the arrival point, flip it —
+        // when feet-neutral (dead-end pads are symmetric once the exit leg is
+        // counted), and ALWAYS on the final run (no exit leg exists there, so
+        // near-first is cheaper on paper but the doctrine is fly-deep-then-
+        // back; the user's hand tunes do exactly this). Pass-through pads
+        // never flip: reversal there costs real feet. Legal distances decide
+        // "far" — at PEUGH the corridor arrives from the WEST though base
+        // sits east, so the straight-line guess picks the wrong side.
+        // v2.79 — the pass is now the full lasso BRANCH WALK applied inside
+        // every same-pad run, with that run's arrival point as "base". Decoded
+        // from the SW 1-2 MIDKIFF pad via the route_points corridor graph:
+        // the user's expected order (12→11→15→14→13) is exactly: start at the
+        // LEGAL-deepest nav from the arrival, next = deepest route junction
+        // with the current nav (junc = (dArr(a)+dArr(b)−d(a,b))/2), ties →
+        // deeper. This supersedes v2.74's whole-run reversal AND v2.73's
+        // "arrival-side" reading — PEUGH's east-first was far-first all along
+        // (the corridor arrives from the WEST; straight-line depth is inverted
+        // by the corridor loop, so LEGAL distances are mandatory here).
+        // Doctrine over feet: the walk may cost a little more than the feet-
+        // optimal sweep (MIDKIFF: ~300 ft) — "we ALWAYS start at the furthest
+        // nav at a pad and move back". Applied unconditionally per run.
+        const branchWalk = (uis, arrPt) => {
+            const loc = ui => parsed.units[ui].nav.location;
+            const dA = new Map(uis.map(ui => [ui, stoDistM(st, arrPt, loc(ui))]));
+            const rem = new Set(uis);
+            const out = [];
+            let cur = uis[0];
+            rem.forEach(x => { if (dA.get(x) > dA.get(cur)) cur = x; });   // start = deepest
+            out.push(cur); rem.delete(cur);
+            const TIE = 9;   // ~30 ft junction tie window
+            while (rem.size) {
+                let maxJ = -Infinity;
+                rem.forEach(x => { const j = (dA.get(cur) + dA.get(x) - stoDistM(st, loc(cur), loc(x))) / 2; if (j > maxJ) maxJ = j; });
+                let next = null;
+                rem.forEach(x => {
+                    const j = (dA.get(cur) + dA.get(x) - stoDistM(st, loc(cur), loc(x))) / 2;
+                    if (j >= maxJ - TIE && (next === null || dA.get(x) > dA.get(next))) next = x;
+                });
+                out.push(next); rem.delete(next);
+                cur = next;
+            }
+            return out;
+        };
+        const doctrinePass = (order) => {
+            const runs = [];
+            order.forEach(ui => {
+                const last = runs[runs.length - 1];
+                if (last && last.pid === parsed.units[ui].padId) last.uis.push(ui);
+                else runs.push({ pid: parsed.units[ui].padId, uis: [ui] });
+            });
+            const out = [];
+            let flips = 0;
+            runs.forEach(r => {
+                let run = r.uis;
+                const arrPt = out.length ? parsed.units[out[out.length - 1]].nav.location : base;
+                if (run.length >= 2 && arrPt) {
+                    const walked = branchWalk(run, arrPt);
+                    if (walked.join(',') !== run.join(',')) flips++;
+                    run = walked;
+                }
+                out.push(...run);
+            });
+            return { order: out, flips };
+        };
+        const dProp = doctrinePass(bestV.proposed);
+        const dCur = doctrinePass(curOrder);
+        const dPropM = seqLen(dProp.order), dCurM = seqLen(dCur.order);
+        let proposed, propM, doctrineFlips, keptCurrent = false;
+        if (dCurM <= dPropM) { proposed = dCur.order; propM = dCurM; doctrineFlips = dCur.flips; keptCurrent = true; }
+        else { proposed = dProp.order; propM = dPropM; doctrineFlips = dProp.flips; }
+        return { m, mc, cfg, parsed, clusters: bestV.clusters, clusterOrder: bestV.clusterOrder, startCi: bestV.startCi,
+            usedClusterFt: bestV.usedFt, keptCurrent, doctrineFlips,
+            proposed, curM, propM, fallbacks: st.fallbacks, st,
+            hasCanon, canonSig, canonTemplate, wrapAnoms, fragUnits, dupUnits, dupBundles, standoff, navDiet, emptyNavs, issues };
+    }
+    // Rebuild the instruction list from an analysis + the user's fix choices.
+    function stoRebuild(an, opts) {
+        const { parsed } = an;
+        const dropUnit = new Set(opts.dropUnits || []);
+        const dropBundle = new Set(opts.dropBundles || []);
+        const rehome = opts.rehome || new Map();   // uid -> target unit idx
+        const merge = opts.mergeUnits || new Map();   // dropped nav ui -> surviving nav ui (bundles MOVE, v2.75)
+        const fixWraps = !!opts.fixWraps;
+        const canonWrap = an.canonTemplate ? an.canonTemplate.wrap : null;
+        const gone = (ui) => dropUnit.has(ui) || merge.has(ui);
+        // bundle placement: default owner, unless re-homed or the owner nav
+        // was consolidated away (its bundles move to the surviving nav)
+        const byUnit = new Map();
+        parsed.units.forEach((u, ui) => u.bundles.forEach(b => {
+            if (dropBundle.has(b.uid) || dropUnit.has(ui)) return;   // dup drops kill their bundles
+            let t0 = rehome.has(b.uid) ? rehome.get(b.uid) : (merge.has(ui) ? merge.get(ui) : ui);
+            if (merge.has(t0)) t0 = merge.get(t0);
+            // target gone → stay with the original owner (unless that's gone too)
+            const target = gone(t0) ? (gone(ui) ? null : ui) : t0;
+            if (target === null) return;
+            if (!byUnit.has(target)) byUnit.set(target, []);
+            byUnit.get(target).push(b);
+        }));
+        // orphan bundles (snap before any nav) re-attach to the first kept unit
+        const firstKept = an.proposed.find(ui => !gone(ui));
+        parsed.orphans.forEach(b => {
+            if (firstKept === undefined) return;
+            if (!byUnit.has(firstKept)) byUnit.set(firstKept, []);
+            byUnit.get(firstKept).push(b);
+        });
+        const out = [];
+        const acc = { navs: 0, snaps: 0, droppedSteps: 0, addedWrapSteps: 0, merged: merge.size, emptyDropped: 0, keptUnits: [] };
+        if (an.parsed.takeoff) out.push(an.parsed.takeoff);
+        parsed.lead.forEach(s => out.push(s));
+        an.proposed.forEach(ui => {
+            if (dropUnit.has(ui)) { acc.droppedSteps += 1 + parsed.units[ui].frags.length + parsed.units[ui].others.length + parsed.units[ui].bundles.reduce((t, b) => t + 1 + b.wrap.length, 0); return; }
+            if (merge.has(ui)) { acc.droppedSteps += 1 + parsed.units[ui].frags.length; return; }   // nav + frags go; bundles moved above
+            const u = parsed.units[ui];
+            // NO NAVS WITHOUT SNAPS (v2.77): a nav with no bundles here —
+            // originally empty, or emptied by re-homes — is a stop with no
+            // purpose. Dropped when the fix is on.
+            if (opts.dropEmpty && !(byUnit.get(ui) || []).length && !u.others.length) {
+                acc.emptyDropped++; acc.droppedSteps += 1 + u.frags.length;
+                return;
+            }
+            acc.keptUnits.push(ui);
+            out.push(u.nav); acc.navs++;
+            if (!fixWraps) u.frags.forEach(s => out.push(s));
+            else acc.droppedSteps += u.frags.length;
+            (byUnit.get(ui) || []).forEach(b => {
+                out.push(b.snap);
+                if (b.other) return;
+                acc.snaps++;
+                if (fixWraps && canonWrap) {
+                    const before = b.wrap.length;
+                    canonWrap.forEach(s => out.push(s));
+                    acc.addedWrapSteps += Math.max(0, canonWrap.length - before);
+                    acc.droppedSteps += Math.max(0, before - canonWrap.length);
+                } else {
+                    b.wrap.forEach(s => out.push(s));
+                }
+            });
+            u.others.forEach(s => out.push(s));
+        });
+        if (an.parsed.rh) out.push(an.parsed.rh);
+        return { out, acc };
+    }
+    function stoClearPreview() {
+        sto.layers.forEach(l => { try { l.remove(); } catch (e) {} });
+        sto.layers = [];
+    }
+    function stoClosePanel() {
+        if (sto.panelEl) { try { sto.panelEl.remove(); } catch (e) {} sto.panelEl = null; }
+        stoClearPreview();
+        sto.state = null;
+        sto.legCache = null;
+    }
+    // Full CHANGE preview (v2.68, user request): not just the two route lines
+    // but everything Apply would do, live-updating as fixes are ticked —
+    //   · current route solid (macro color) vs proposed dashed white
+    //   · numbered white badge at each kept nav = NEW flight order
+    //   · re-homed snapshots: red dashed line to the OLD nav, green solid to
+    //     the NEW one (the vantage change, visible before committing)
+    //   · dropped duplicates: red ✕ at the dropped nav/snapshot
+    function stoDrawPreview(an, col) {
+        stoClearPreview();
+        const L = composerGetL(), map = getLeafletMap();
+        if (!L || !map) return;
+        const stt = sto.state || { dropUnits: new Set(), dropBundles: new Set(), rehome: new Map(), navMerge: new Map() };
+        if (!stt.navMerge) stt.navMerge = new Map();
+        // v2.71: EVERY leg draws along the legal FP/FFZ route (live catch:
+        // sub-600 ft legs drew as straight chords slicing across red — the
+        // 600 ft shortcut is a solver-metric speed heuristic, not the flown
+        // path, so the preview must not inherit it). Cached per pair.
+        if (!sto.legCache) sto.legCache = new Map();
+        const legsOf = (idxArr) => {
+            let pts = [];
+            for (let i = 1; i < idxArr.length; i++) {
+                const a = an.parsed.units[idxArr[i - 1]].nav.location, b = an.parsed.units[idxArr[i]].nav.location;
+                const ck = stoLocKey(a) + '>' + stoLocKey(b);
+                let leg = sto.legCache.get(ck);
+                if (!leg) {
+                    leg = (an.st.built && mpvLegalPath(an.st.built, a, b)) || [[a.lat, a.lng], [b.lat, b.lng]];
+                    sto.legCache.set(ck, leg);
+                }
+                pts = pts.length ? pts.concat(leg.slice(1)) : leg.slice();
+            }
+            return pts;
+        };
+        const keep = (l) => { sto.layers.push(l); try { l.addTo(map); } catch (e) {} return l; };
+        try {
+            // kept navs from the same rebuild logic Apply uses (incl. the
+            // no-snap-less-navs rule) so the drawn route IS the saved route
+            const dropUP = new Set([...stt.dropUnits, ...(stt.cutUnits||[])]), dropBP = new Set([...stt.dropBundles, ...(stt.cutBundles||[])]);
+            const rbPrev = stoRebuild(an, { fixWraps: stt.fixWraps, dropUnits: Array.from(dropUP), dropBundles: Array.from(dropBP), rehome: stt.rehome, mergeUnits: stt.navMerge, dropEmpty: stt.dropEmpty });
+            const keptOrder = rbPrev.acc.keptUnits;
+            keep(L.polyline(legsOf(an.parsed.units.map((_, i) => i)), { color: col || '#7adfe6', weight: 3, opacity: 0.8, interactive: false }));
+            keep(L.polyline(legsOf(keptOrder), { color: '#ffffff', weight: 3, opacity: 0.95, dashArray: '8,7', interactive: false }));
+            // NEW flight-order badges on every kept nav
+            keptOrder.forEach((ui, k) => {
+                const p = an.parsed.units[ui].nav.location;
+                keep(L.marker([p.lat, p.lng], {
+                    icon: L.divIcon({
+                        className: 'aim-mb-rng-chip',
+                        html: `<div style="pointer-events:none;width:17px;height:17px;border-radius:50%;background:#fff;color:#10131a;font:800 10px/17px monospace;text-align:center;border:1.5px solid #10131a;box-shadow:0 1px 4px rgba(0,0,0,0.7);">${k + 1}</div>`,
+                        iconSize: [17, 17], iconAnchor: [8, 8],
+                    }),
+                    interactive: false, keyboard: false, zIndexOffset: 900,
+                }));
+            });
+            // re-home sightlines: old owner red dashed, new owner green solid
+            an.parsed.units.forEach((u, ui) => u.bundles.forEach(b => {
+                if (!stt.rehome.has(b.uid)) return;
+                const to = stt.rehome.get(b.uid);
+                const s = b.snap.location, oldN = u.nav.location, newN = an.parsed.units[to].nav.location;
+                keep(L.polyline([[oldN.lat, oldN.lng], [s.lat, s.lng]], { color: '#ff5252', weight: 2, opacity: 0.85, dashArray: '3,5', interactive: false }));
+                keep(L.polyline([[newN.lat, newN.lng], [s.lat, s.lng]], { color: '#5fff5f', weight: 2, opacity: 0.9, interactive: false }));
+            }));
+            // dropped duplicates: red ✕
+            const xIcon = () => L.divIcon({
+                className: 'aim-mb-rng-chip',
+                html: '<div style="pointer-events:none;color:#ff5252;font:800 15px/15px monospace;text-shadow:0 1px 3px #000;">✕</div>',
+                iconSize: [15, 15], iconAnchor: [7, 7],
+            });
+            dropUP.forEach(ui => {
+                const u = an.parsed.units[ui];
+                keep(L.marker([u.nav.location.lat, u.nav.location.lng], { icon: xIcon(), interactive: false, keyboard: false, zIndexOffset: 950 }));
+                u.bundles.forEach(b => keep(L.marker([b.snap.location.lat, b.snap.location.lng], { icon: xIcon(), interactive: false, keyboard: false, zIndexOffset: 950 })));
+            });
+            dropBP.forEach(uid => {
+                const [ui, bi] = String(uid).split(':').map(Number);
+                const b = an.parsed.units[ui] && an.parsed.units[ui].bundles[bi];
+                if (b) keep(L.marker([b.snap.location.lat, b.snap.location.lng], { icon: xIcon(), interactive: false, keyboard: false, zIndexOffset: 950 }));
+            });
+            // nav consolidations: orange ✕ at the dropped stop, blue sightlines
+            // from the surviving nav to the snapshots it inherits
+            stt.navMerge.forEach((toUi, dropUi) => {
+                const u = an.parsed.units[dropUi], into = an.parsed.units[toUi];
+                keep(L.marker([u.nav.location.lat, u.nav.location.lng], {
+                    icon: L.divIcon({ className: 'aim-mb-rng-chip', html: '<div style="pointer-events:none;color:#ffab73;font:800 15px/15px monospace;text-shadow:0 1px 3px #000;">✕</div>', iconSize: [15, 15], iconAnchor: [7, 7] }),
+                    interactive: false, keyboard: false, zIndexOffset: 950 }));
+                u.bundles.forEach(b => {
+                    const s = b.snap.location;
+                    keep(L.polyline([[u.nav.location.lat, u.nav.location.lng], [s.lat, s.lng]], { color: '#ff5252', weight: 2, opacity: 0.85, dashArray: '3,5', interactive: false }));
+                    keep(L.polyline([[into.nav.location.lat, into.nav.location.lng], [s.lat, s.lng]], { color: '#8ab6ff', weight: 2, opacity: 0.9, interactive: false }));
+                });
+            });
+        } catch (e) { console.warn(`${TAG} [sto] preview draw failed`, e); }
+    }
+    // 🪄 All — site-wide sweep (v2.75): run the analysis on every macro and
+    // rank them by what a pass would buy. Analysis only — each Apply still
+    // goes through the per-macro review panel.
+    const STO_SWEEP_ID = 'aim-mb-sto-sweep';
+    let stoSweepBusy = false;
+    async function stoSweep() {
+        if (stoSweepBusy) return;
+        const data = mcv.data;
+        if (!data || !data.det.macros.length) { showToast('No macros to sweep — open 🧩 on a site with macro missions.', '#ff9800', 3500); return; }
+        stoSweepBusy = true;
+        const old = document.getElementById(STO_SWEEP_ID); if (old) old.remove();
+        const COLORS = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
+        const rows = [];
+        for (let i = 0; i < data.det.macros.length; i++) {
+            const mc = data.det.macros[i];
+            showToast(`🪄 Sweeping ${i + 1}/${data.det.macros.length}: ${mc.mission.name}…`, '#c39dff', 2000);
+            await new Promise(r => setTimeout(r, 30));
+            try {
+                const an = await stoAnalyze(mc, data);
+                rows.push({ mc, an, col: COLORS[i % COLORS.length], err: null });
+            } catch (e) {
+                console.warn(`${TAG} [sto] sweep failed for "${mc.mission.name}"`, e);
+                rows.push({ mc, an: null, col: COLORS[i % COLORS.length], err: String(e && e.message || e) });
+            }
+        }
+        stoSweepBusy = false;
+        rows.sort((a, b) => {
+            const sa = a.an ? (a.an.curM - a.an.propM) : -1, sb = b.an ? (b.an.curM - b.an.propM) : -1;
+            return sb - sa;
+        });
+        const el = document.createElement('div');
+        el.id = STO_SWEEP_ID;
+        el.style.cssText = 'position:fixed;right:14px;top:64px;z-index:2147483600;width:470px;max-height:72vh;overflow:auto;background:rgba(14,17,23,0.97);border:1px solid #c39dff;border-radius:9px;padding:10px 12px;color:#e6e6e6;font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 6px 24px rgba(0,0,0,0.7);';
+        const td = (v, extra) => `<td style="padding:2px 6px;border-bottom:1px solid #222b36;${extra || ''}">${v}</td>`;
+        el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><b style="color:#c39dff;">🪄 Site sweep</b><span style="color:#789;">${rows.length} macro(s) — sorted by route savings</span><span data-sto-sw-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
+            + `<table style="border-collapse:collapse;width:100%;font-size:10.5px;"><tr style="color:#9ad;text-align:left;"><th style="padding:2px 6px;">Macro</th><th style="padding:2px 6px;">route</th><th style="padding:2px 6px;">↩</th><th style="padding:2px 6px;">wraps</th><th style="padding:2px 6px;">dups</th><th style="padding:2px 6px;">standoff</th><th style="padding:2px 6px;">stops</th><th></th></tr>`
+            + rows.map(r => {
+                if (!r.an) return `<tr>${td(escapeHtml(String(r.mc.mission.name || '')))}${td(`<span style="color:#ff5252;">failed</span>`, '')}${td('')}${td('')}${td('')}${td('')}${td('')}${td('')}</tr>`;
+                const an = r.an;
+                const saved = (an.curM - an.propM) * STO_FT;
+                const routeTxt = an.keptCurrent && !an.doctrineFlips
+                    ? '<span style="color:#5fff5f;">✓ optimal</span>'
+                    : `${(an.curM * STO_FT / 1000).toFixed(1)}k→${(an.propM * STO_FT / 1000).toFixed(1)}k <b style="color:${saved > 100 ? '#5fff5f' : '#9ad'};">−${Math.max(0, Math.round(saved / (an.curM * STO_FT || 1) * 100))}%</b>`;
+                const n0 = (v, warnCol) => v ? `<b style="color:${warnCol};">${v}</b>` : '<span style="color:#456;">0</span>';
+                return `<tr>${td(`<span style="color:${r.col};">■</span> ${escapeHtml(String(r.mc.mission.name || '').slice(0, 22))}`)}`
+                    + td(routeTxt) + td(n0(an.doctrineFlips, '#ffd54f')) + td(n0(an.wrapAnoms.length + an.fragUnits.length, '#ffb74d'))
+                    + td(n0(an.dupUnits.length + an.dupBundles.length, '#ff8ad2')) + td(n0(an.standoff.filter(s2 => s2.tooClose).length, '#c39dff'))
+                    + td(n0(an.navDiet.length, '#8ab6ff'))
+                    + td(`<button data-sto-sw-open="${r.mc.mission.id}" data-sto-sw-col="${r.col}" style="padding:0 6px;background:rgba(195,157,255,0.14);border:1px solid rgba(195,157,255,0.5);color:#c39dff;border-radius:4px;cursor:pointer;font-size:10px;">🪄</button>`)
+                    + '</tr>';
+            }).join('') + '</table>'
+            + `<div style="color:#789;margin-top:6px;">standoff counts too-close only · stops = nav-consolidation candidates · open a row to review + apply</div>`;
+        document.body.appendChild(el);
+        el.querySelector('[data-sto-sw-x]').onclick = () => el.remove();
+        mbPanelMovable(el, el.firstElementChild);
+        el.querySelectorAll('[data-sto-sw-open]').forEach(b => b.onclick = () => {
+            stoOpen(Number(b.getAttribute('data-sto-sw-open')) || b.getAttribute('data-sto-sw-open'), b.getAttribute('data-sto-sw-col'));
+        });
+        console.log(`${TAG} [sto] sweep done — ${rows.length} macro(s)`);
+    }
+    let stoBusy = false;
+    async function stoOpen(missionId, col) {
+        if (stoBusy) return;
+        const data = mcv.data;
+        const mc = data && data.det.macros.find(x => x.mission.id === missionId);
+        if (!mc) { showToast('Macro not found — re-open 🧩.', '#ff9800', 3000); return; }
+        stoBusy = true;
+        stoClosePanel();
+        showToast('🪄 Analyzing step order (legal-route solve)…', '#7adfe6', 2500);
+        await new Promise(r => setTimeout(r, 30));   // let the toast paint
+        let an;
+        try { an = await stoAnalyze(mc, data); }
+        catch (e) { console.warn(`${TAG} [sto] analyze failed`, e); showToast('🪄 Analysis failed (see console).', '#ff5252', 4500); stoBusy = false; return; }
+        stoBusy = false;
+        console.log(`${TAG} [sto] "${mc.mission.name}": ${an.parsed.units.length} navs · cur ${(an.curM * STO_FT / 1000).toFixed(1)}k ft → opt ${(an.propM * STO_FT / 1000).toFixed(1)}k ft · ${an.fallbacks} route fallback(s)`);
+        sto.state = { an, col, fixWraps: (an.wrapAnoms.length + an.fragUnits.length) > 0,
+            dropUnits: new Set(an.dupUnits.map(d => d.ui)),
+            dropBundles: new Set(an.dupBundles.map(d => d.uid)),
+            // v2.81 DOCTRINE — snapshot⇄nav associations are FLIGHT-TUNED
+            // data: each one encodes pilot feedback from real dial-in flights
+            // (too close/far/left/right/high/low/empty). Re-homing one undoes
+            // that calibration and restarts the dial-in from scratch, so the
+            // tool NEVER moves a snapshot by default: every suggestion renders
+            // info-only (distances + ladder tier shown) and starts UNCHECKED.
+            // Reordering is safe — bundles ride their nav by construction.
+            rehome: new Map(),
+            navMerge: new Map(),   // nav consolidation opt-IN (default unticked — vantage changes)
+            dropEmpty: true,       // no navs without snaps (user rule) — default ON
+            cutUnits: new Set(),   // ✂ cut (v2.80): whole navs removed from this macro
+            cutBundles: new Set(),   // ✂ cut: individual snapshots removed
+            cutOpen: false, cutOpenPads: new Set() };   // ✂ section UI state (survives re-render)
+        stoRenderPanel();
+    }
+    function stoRenderPanel() {
+        const stt = sto.state; if (!stt) return;
+        const an = stt.an, cfg = an.cfg;
+        if (sto.panelEl) { try { sto.panelEl.remove(); } catch (e) {} }
+        const savedFt = (an.curM - an.propM) * STO_FT;
+        const pct = an.curM > 0 ? Math.round(savedFt / (an.curM * STO_FT) * 100) : 0;
+        const el = document.createElement('div');
+        el.id = 'aim-mb-sto-panel';
+        el.style.cssText = 'position:fixed;right:14px;top:64px;z-index:2147483601;width:420px;max-height:76vh;overflow:auto;background:rgba(14,17,23,0.97);border:1px solid #7adfe6;border-radius:9px;padding:10px 12px;color:#e6e6e6;font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 6px 24px rgba(0,0,0,0.7);';
+        const padNames = new Map(an.mc.pads.map(a => [a.id, a.name || ('pad ' + a.id)]));
+        const unitLabel = ui => {
+            const u = an.parsed.units[ui];
+            return `${escapeHtml(String(padNames.get(u.padId) || '?').slice(0, 26))} · nav#${u.nav.index_in_app}`;
+        };
+        const row = (html) => `<div style="margin:2px 0;">${html}</div>`;
+        let body = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><b style="color:#7adfe6;">🪄 Step Optimizer</b><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px;color:#9ad;">${escapeHtml(String(an.m.name || ''))}</span><span data-sto-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`;
+        const flipNote = an.doctrineFlips ? ` · <span style="color:#ffd54f;">↩ ${an.doctrineFlips} far-first flip(s)</span>` : '';
+        body += an.keptCurrent
+            ? `<div style="font-size:12px;margin-bottom:4px;color:#9ad;">nav route: <b>${(an.curM * STO_FT / 1000).toFixed(1)}k ft</b> — current order ${an.doctrineFlips ? `kept, with <b style="color:#ffd54f;">${an.doctrineFlips} far-first direction fix(es)</b> (fly to a pad's far nav first, capture working back)` : 'already shortest under legal routing ✓ (structure repairs still apply)'}${an.fallbacks ? ` · <span style="color:#ffb74d;">⚠ ${an.fallbacks} leg(s) off-graph (straight ×1.25)</span>` : ''}</div>`
+            : `<div style="font-size:12px;margin-bottom:4px;color:${savedFt > 100 ? '#5fff5f' : '#9ad'};">nav route: <b>${(an.curM * STO_FT / 1000).toFixed(1)}k ft</b> → <b>${(an.propM * STO_FT / 1000).toFixed(1)}k ft</b> (−${(savedFt / 1000).toFixed(1)}k ft, −${pct}%)${flipNote}${an.fallbacks ? ` · <span style="color:#ffb74d;">⚠ ${an.fallbacks} leg(s) off-graph (straight ×1.25)</span>` : ''}</div>`;
+        body += `<div style="color:#789;margin-bottom:6px;">start = deepest cluster · clusters (navs within ${an.usedClusterFt} ft interleave): ${an.clusters.length}${an.usedClusterFt !== cfg.clusterFt ? ` · <span style="color:#ffd54f;">2× radius won</span>` : ''}${an.clusters.some(c => !c.exact) ? ' · <span style="color:#ffb74d;">large cluster → heuristic path</span>' : ''}</div>`;
+        body += `<div style="margin-bottom:6px;"><b style="color:#7adfe6;">${an.keptCurrent ? (an.doctrineFlips ? 'Order (current + far-first fixes)' : 'Order (current, kept)') : 'Proposed order'}</b>${an.clusterOrder.map(ci => `<div style="margin:3px 0 3px 8px;"><span style="color:#ffd54f;">${escapeHtml(an.clusters[ci].name.slice(0, 52))}</span><div style="color:#9ad;margin-left:8px;">${an.proposed.filter(ui => an.clusters[ci].unitIdx.includes(ui)).map(ui => 'N' + an.parsed.units[ui].nav.index_in_app).join(' → ')}</div></div>`).join('')}</div>`;
+        const secs = [];
+        if (an.wrapAnoms.length || an.fragUnits.length) {
+            secs.push(row(`<label style="cursor:pointer;"><input type="checkbox" data-sto-wraps ${stt.fixWraps ? 'checked' : ''} style="accent-color:#5fff5f;"> <b style="color:#ffb74d;">Fix ${an.wrapAnoms.length} scrambled wrap(s)${an.fragUnits.length ? ` + ${an.fragUnits.length} stray fragment(s)` : ''}</b> — rebuild every snapshot's wrap to this mission's own pattern</label>`)
+                + an.wrapAnoms.slice(0, 8).map(b => `<div style="color:#ffb74d;margin-left:16px;">snap#${b.snap.index_in_app}: [${escapeHtml(stoWrapSig(b) || 'no wrap')}]</div>`).join('')
+                + (an.wrapAnoms.length > 8 ? `<div style="color:#789;margin-left:16px;">…+${an.wrapAnoms.length - 8} more</div>` : ''));
+        }
+        if (an.dupUnits.length || an.dupBundles.length) {
+            secs.push(`<b style="color:#ff8ad2;">Duplicates (stacked — the drone doubles back for an identical shot)</b>`
+                + an.dupUnits.map(d => row(`<label style="cursor:pointer;margin-left:8px;"><input type="checkbox" data-sto-dropu="${d.ui}" ${stt.dropUnits.has(d.ui) ? 'checked' : ''} style="accent-color:#ff8ad2;"> drop ${unitLabel(d.ui)} — duplicate of ${unitLabel(d.ofUi)}</label>`)).join('')
+                + an.dupBundles.map(d => row(`<label style="cursor:pointer;margin-left:8px;"><input type="checkbox" data-sto-dropb="${escapeHtml(d.uid)}" ${stt.dropBundles.has(d.uid) ? 'checked' : ''} style="accent-color:#ff8ad2;"> drop duplicate snapshot (${escapeHtml(d.uid)}, twin of ${escapeHtml(d.ofUid)})</label>`)).join(''));
+        }
+        if (an.standoff.length) {
+            secs.push(`<b style="color:#c39dff;" title="Preference ladder: 100 ideal · 101–120 beats 80–100 · 121–160 beats 60–80 · 160–200 beats 40–60 · 200+ only if nothing else. A move is only offered when it climbs the ladder.">Snapshot standoff (OGI band ${cfg.bandMinFt}–${cfg.bandMaxFt} ft · ideal ${cfg.idealFt} · ladder-scored — hover for the ladder)</b>`
+                + `<div style="color:#93835e;margin-left:8px;">ℹ INFO-ONLY by default — snapshot⇄nav pairings are pilot-tuned from real flights, so nothing moves unless YOU tick it. Order changes never touch pairings.</div>`
+                + an.standoff.map(s => {
+                    const kindTxt = s.tooClose ? 'TOO CLOSE' : 'far — not necessarily wrong';
+                    if (s.alt === null) return row(`<span style="color:#93835e;margin-left:8px;">snap ${escapeHtml(s.uid)} @ ${s.d.toFixed(0)} ft from its nav (${kindTxt}) — no closer nav available, left as-is</span>`);
+                    return row(`<label style="cursor:pointer;margin-left:8px;"><input type="checkbox" data-sto-rehome="${escapeHtml(s.uid)}" data-sto-rehome-to="${s.alt}" ${stt.rehome.has(s.uid) ? 'checked' : ''} style="accent-color:#c39dff;"> snap ${escapeHtml(s.uid)} @ ${s.d.toFixed(0)} ft (${kindTxt}) → re-home to ${unitLabel(s.alt)} @ ${s.altD.toFixed(0)} ft${s.outOfBand ? ' <span style="color:#93835e;">(closest available — still over-band)</span>' : ''}</label>`);
+                }).join(''));
+        }
+        // snap-less navs (v2.77) — no snap, no reason for the nav
+        if (an.emptyNavs.length) {
+            secs.push(row(`<label style="cursor:pointer;"><input type="checkbox" data-sto-empty ${stt.dropEmpty ? 'checked' : ''} style="accent-color:#ff9e9e;"> <b style="color:#ff9e9e;">Drop ${an.emptyNavs.length} snap-less nav(s)</b> — a nav with no snapshot is a stop with no purpose</label>`)
+                + an.emptyNavs.slice(0, 8).map(ui => `<div style="color:#ff9e9e;margin-left:16px;">${unitLabel(ui)}</div>`).join('')
+                + (an.emptyNavs.length > 8 ? `<div style="color:#789;margin-left:16px;">…+${an.emptyNavs.length - 8} more</div>` : ''));
+        }
+        // nav consolidation (v2.75) — opt-in, every merge removes one stop
+        if (an.navDiet.length) {
+            secs.push(`<b style="color:#8ab6ff;">Nav consolidation (each merge = one fewer stop; opt-in — the moved snapshots change vantage)</b>`
+                + an.navDiet.map(nd => row(`<label style="cursor:pointer;margin-left:8px;"><input type="checkbox" data-sto-merge="${nd.drop}" data-sto-merge-to="${nd.into}" ${stt.navMerge.has(nd.drop) ? 'checked' : ''} style="accent-color:#8ab6ff;"> drop ${unitLabel(nd.drop)} (${nd.navFt.toFixed(0)} ft away) → its ${nd.dists.length} snap(s) shoot from ${unitLabel(nd.into)} @ ${nd.dists.map(d2 => d2.toFixed(0)).join('/')} ft</label>`)).join(''));
+        }
+        an.issues.forEach(i => secs.push(`<div style="color:#ff9800;">⚠ ${escapeHtml(i.text)}</div>`));
+        if (secs.length) body += `<div style="border-top:1px solid #2a3340;padding-top:5px;margin-bottom:6px;">${secs.join('<div style="height:5px;"></div>')}</div>`;
+        else body += `<div style="color:#5fff5f;margin-bottom:6px;">✓ structure clean — no wrap scrambles, duplicates, or standoff violations</div>`;
+        // ✂ CUT (v2.80, user request): surgically remove whole pads, single
+        // navs, or single snapshots from THIS macro (micros untouched). Rides
+        // the same drop machinery as duplicates — accounting rails, red ✕
+        // preview, backup + verify all apply. Cutting a nav's last snapshot
+        // leaves a snap-less nav, which the no-snap-less-navs rule sweeps.
+        {
+            const padGroups = new Map();
+            an.proposed.forEach(ui => { const pid = an.parsed.units[ui].padId; if (!padGroups.has(pid)) padGroups.set(pid, []); padGroups.get(pid).push(ui); });
+            let cutHtml = '';
+            padGroups.forEach((uis, pid) => {
+                const allCut = uis.every(ui => stt.cutUnits.has(ui));
+                const snapN = uis.reduce((t, ui) => t + an.parsed.units[ui].bundles.length, 0);
+                const pname = escapeHtml(String(padNames.get(pid) || ('pad ' + pid)).slice(0, 34));
+                let inner = '';
+                uis.forEach(ui => {
+                    const u = an.parsed.units[ui];
+                    inner += `<div style="margin-left:14px;"><label style="cursor:pointer;"><input type="checkbox" data-sto-cutu="${ui}" ${stt.cutUnits.has(ui) ? 'checked' : ''} style="accent-color:#ff8ad2;"> nav#${u.nav.index_in_app} <span style="color:#789;">(+${u.bundles.length} snap${u.bundles.length === 1 ? '' : 's'})</span></label></div>`;
+                    u.bundles.forEach(b => {
+                        inner += `<div style="margin-left:30px;"><label style="cursor:${stt.cutUnits.has(ui) ? 'default' : 'pointer'};opacity:${stt.cutUnits.has(ui) ? 0.4 : 1};"><input type="checkbox" data-sto-cutb="${escapeHtml(b.uid)}" ${stt.cutBundles.has(b.uid) || stt.cutUnits.has(ui) ? 'checked' : ''} ${stt.cutUnits.has(ui) ? 'disabled' : ''} style="accent-color:#ff8ad2;"> snap#${b.snap.index_in_app} <span style="color:#789;">@ ${(mbApproxMeters(u.nav.location.lat, u.nav.location.lng, b.snap.location.lat, b.snap.location.lng) * STO_FT).toFixed(0)} ft</span></label></div>`;
+                    });
+                });
+                cutHtml += `<details data-sto-cut-pad-det="${pid}" ${stt.cutOpenPads.has(String(pid)) ? 'open' : ''} style="margin:2px 0 2px 8px;"><summary style="cursor:pointer;"><label style="cursor:pointer;"><input type="checkbox" data-sto-cutpad="${pid}" ${allCut ? 'checked' : ''} style="accent-color:#ff8ad2;"> <b style="color:${allCut ? '#ff8ad2' : '#e6e6e6'};">${pname}</b> <span style="color:#789;">· ${uis.length} nav · ${snapN} snap</span></label></summary>${inner}</details>`;
+            });
+            const marked = stt.cutUnits.size || stt.cutBundles.size;
+            body += `<details data-sto-cut-root ${stt.cutOpen ? 'open' : ''} style="border-top:1px solid #2a3340;padding-top:5px;margin-bottom:6px;"><summary style="cursor:pointer;color:#ff8ad2;font-weight:700;">✂ Cut from this macro${marked ? ` — ${stt.cutUnits.size} nav(s) + ${stt.cutBundles.size} snap(s) marked` : ''}</summary><div style="color:#789;margin:3px 0 3px 8px;">Tick a pad to cut ALL its steps, or expand it for single navs / snapshots. Removes from THIS macro only — micros are untouched. Wraps travel with their snapshot.</div>${cutHtml}</details>`;
+        }
+        // step-count delta from the current fix choices
+        const dropU = new Set([...stt.dropUnits, ...stt.cutUnits]), dropB = new Set([...stt.dropBundles, ...stt.cutBundles]);
+        const rb = stoRebuild(an, { fixWraps: stt.fixWraps, dropUnits: Array.from(dropU), dropBundles: Array.from(dropB), rehome: stt.rehome, mergeUnits: stt.navMerge, dropEmpty: stt.dropEmpty });
+        const bodyLen = (an.m.instructions || []).filter(i => i && i.type !== 0 && i.type !== 99).length;
+        const newLen = rb.out.filter(i => i && i.type !== 0 && i.type !== 99).length;
+        body += `<div style="color:#9ad;margin-bottom:7px;">steps: ${bodyLen} → ${newLen} (${rb.acc.navs} navs · ${rb.acc.snaps} snaps${rb.acc.merged ? ` · −${rb.acc.merged} stop(s)` : ''}${rb.acc.emptyDropped ? ` · −${rb.acc.emptyDropped} snap-less nav(s)` : ''}${rb.acc.droppedSteps ? ` · −${rb.acc.droppedSteps} dropped` : ''}${rb.acc.addedWrapSteps ? ` · +${rb.acc.addedWrapSteps} wrap-rebuild` : ''})</div>`;
+        body += `<div style="display:flex;gap:7px;align-items:center;">`
+            + `<button data-sto-prev title="Draw the full change on the map: current route solid vs proposed dashed white, NEW flight-order numbers on every nav, red→green sightlines for each ticked snapshot re-home (old vs new vantage), red ✕ on dropped duplicates. Live-updates as you tick fixes." style="padding:3px 9px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:5px;cursor:pointer;">👁 Preview changes</button>`
+            + `<button data-sto-apply style="padding:3px 10px;background:rgba(95,255,95,0.13);border:1px solid rgba(95,255,95,0.5);color:#5fff5f;border-radius:5px;cursor:pointer;font-weight:700;">💾 Apply in place</button>`
+            + `<span style="margin-left:auto;color:#567;">backup + verify</span></div>`;
+        body += `<div style="display:flex;gap:5px;align-items:center;margin-top:7px;font-size:10px;color:#789;flex-wrap:wrap;">cluster <input data-sto-cfg="clusterFt" type="number" value="${cfg.clusterFt}" style="width:42px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft · dup <input data-sto-cfg="dupFt" type="number" value="${cfg.dupFt}" style="width:32px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft · ideal <input data-sto-cfg="idealFt" type="number" value="${cfg.idealFt}" style="width:38px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft · band <input data-sto-cfg="bandMinFt" type="number" value="${cfg.bandMinFt}" style="width:38px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">–<input data-sto-cfg="bandMaxFt" type="number" value="${cfg.bandMaxFt}" style="width:38px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft · <span title="Legs longer than this price on the legal FP/FFZ route graph; shorter legs price straight (intra-pad). Raise if analysis is slow on a huge macro.">legal&gt;</span> <input data-sto-cfg="legalOverFt" type="number" value="${cfg.legalOverFt}" style="width:42px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">ft (re-analyzes)</div>`;
+        el.innerHTML = body;
+        document.body.appendChild(el);
+        sto.panelEl = el;
+        // v2.83: the 🪄 panel re-renders on every checkbox tick — restore the
+        // user's dragged position / resized size, and keep tracking them
+        if (sto.panelRect) {
+            const pr = sto.panelRect;
+            if (pr.left != null) { el.style.left = pr.left + 'px'; el.style.top = pr.top + 'px'; el.style.right = 'auto'; }
+            if (pr.w) el.style.width = pr.w + 'px';
+            if (pr.h) { el.style.height = pr.h + 'px'; el.style.maxHeight = 'none'; }
+        }
+        mbPanelMovable(el, el.firstElementChild, (l, t) => { sto.panelRect = Object.assign(sto.panelRect || {}, { left: l, top: t }); });
+        try {
+            // record size ONLY during a live pointer-drag on the panel (the
+            // native resize handle) — content-driven height changes must not
+            // freeze the panel at a stale size
+            el.addEventListener('pointerdown', () => { el.__pdown = true; }, true);
+            document.addEventListener('pointerup', () => { el.__pdown = false; }, true);
+            new ResizeObserver(() => {
+                if (!el.__pdown) return;
+                const r = el.getBoundingClientRect();
+                if (!r.width || !r.height) return;
+                sto.panelRect = Object.assign(sto.panelRect || {}, { w: Math.round(r.width), h: Math.round(r.height) });
+            }).observe(el);
+        } catch (e) {}
+        el.querySelector('[data-sto-x]').onclick = () => stoClosePanel();
+        const wrapsCb = el.querySelector('[data-sto-wraps]');
+        if (wrapsCb) wrapsCb.onchange = () => { stt.fixWraps = wrapsCb.checked; stoRenderPanel(); };
+        const emptyCb = el.querySelector('[data-sto-empty]');
+        if (emptyCb) emptyCb.onchange = () => { stt.dropEmpty = emptyCb.checked; stoRenderPanel(); };
+        el.querySelectorAll('[data-sto-dropu]').forEach(cb => cb.onchange = () => {
+            const ui = Number(cb.getAttribute('data-sto-dropu'));
+            if (cb.checked) stt.dropUnits.add(ui); else stt.dropUnits.delete(ui);
+            stoRenderPanel();
+        });
+        el.querySelectorAll('[data-sto-dropb]').forEach(cb => cb.onchange = () => {
+            const uid = cb.getAttribute('data-sto-dropb');
+            if (cb.checked) stt.dropBundles.add(uid); else stt.dropBundles.delete(uid);
+            stoRenderPanel();
+        });
+        el.querySelectorAll('[data-sto-rehome]').forEach(cb => cb.onchange = () => {
+            const uid = cb.getAttribute('data-sto-rehome'), to = Number(cb.getAttribute('data-sto-rehome-to'));
+            if (cb.checked) stt.rehome.set(uid, to); else stt.rehome.delete(uid);
+            stoRenderPanel();
+        });
+        el.querySelectorAll('[data-sto-merge]').forEach(cb => cb.onchange = () => {
+            const drop = Number(cb.getAttribute('data-sto-merge')), to = Number(cb.getAttribute('data-sto-merge-to'));
+            if (cb.checked) stt.navMerge.set(drop, to); else stt.navMerge.delete(drop);
+            stoRenderPanel();
+        });
+        // ✂ cut wiring (v2.80) — details open-state persisted so re-renders
+        // from checkbox ticks don't collapse the tree
+        const cutRoot = el.querySelector('[data-sto-cut-root]');
+        if (cutRoot) cutRoot.addEventListener('toggle', () => { stt.cutOpen = cutRoot.open; });
+        el.querySelectorAll('[data-sto-cut-pad-det]').forEach(d => d.addEventListener('toggle', () => {
+            const pid = d.getAttribute('data-sto-cut-pad-det');
+            if (d.open) stt.cutOpenPads.add(pid); else stt.cutOpenPads.delete(pid);
+        }));
+        el.querySelectorAll('[data-sto-cutpad]').forEach(cb => cb.onclick = (ev) => { ev.stopPropagation(); });
+        el.querySelectorAll('[data-sto-cutpad]').forEach(cb => cb.onchange = () => {
+            const pidRaw = cb.getAttribute('data-sto-cutpad');
+            an.proposed.forEach(ui => {
+                if (String(an.parsed.units[ui].padId) !== pidRaw) return;
+                if (cb.checked) stt.cutUnits.add(ui); else stt.cutUnits.delete(ui);
+            });
+            stoRenderPanel();
+        });
+        el.querySelectorAll('[data-sto-cutu]').forEach(cb => cb.onchange = () => {
+            const ui = Number(cb.getAttribute('data-sto-cutu'));
+            if (cb.checked) stt.cutUnits.add(ui); else stt.cutUnits.delete(ui);
+            stoRenderPanel();
+        });
+        el.querySelectorAll('[data-sto-cutb]').forEach(cb => cb.onchange = () => {
+            const uid = cb.getAttribute('data-sto-cutb');
+            if (cb.checked) stt.cutBundles.add(uid); else stt.cutBundles.delete(uid);
+            stoRenderPanel();
+        });
+        el.querySelectorAll('[data-sto-cfg]').forEach(inp => inp.onchange = () => {
+            const patch = {}; patch[inp.getAttribute('data-sto-cfg')] = Number(inp.value);
+            gmSet(STO_CFG_KEY, Object.assign({}, stoCfg(), patch));
+            const id = an.m.id, col = stt.col;
+            stoClosePanel();
+            stoOpen(id, col);
+        });
+        el.querySelector('[data-sto-prev]').onclick = () => {
+            if (sto.layers.length) { stoClearPreview(); el.querySelector('[data-sto-prev]').style.background = 'rgba(122,223,230,0.14)'; }
+            else { stoDrawPreview(an, stt.col); el.querySelector('[data-sto-prev]').style.background = 'rgba(122,223,230,0.4)'; }
+        };
+        el.querySelector('[data-sto-apply]').onclick = () => stoApply();
+        // preview stays live: a re-render from a ticked fix redraws it in place
+        if (sto.layers.length) {
+            stoDrawPreview(an, stt.col);
+            const pb = el.querySelector('[data-sto-prev]');
+            if (pb) pb.style.background = 'rgba(122,223,230,0.4)';
+        }
+    }
+    async function stoApply() {
+        const stt = sto.state; if (!stt || stoBusy) return;
+        const an = stt.an, m = an.m;
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4500); return; }
+        const dropU = new Set([...stt.dropUnits, ...stt.cutUnits]), dropB = new Set([...stt.dropBundles, ...stt.cutBundles]);
+        const rb = stoRebuild(an, { fixWraps: stt.fixWraps, dropUnits: Array.from(dropU), dropBundles: Array.from(dropB), rehome: stt.rehome, mergeUnits: stt.navMerge, dropEmpty: stt.dropEmpty });
+        // hard sanity: every nav + snapshot accounted for (minus explicit
+        // drops; consolidated navs go but their snapshots MOVE, not vanish;
+        // snap-less navs counted by the rebuild itself)
+        const origNavs = an.parsed.units.length;
+        const origSnaps = an.parsed.units.reduce((t, u) => t + u.bundles.length, 0) + an.parsed.orphans.filter(o => !o.other).length;
+        const expNavs = origNavs - dropU.size - stt.navMerge.size - rb.acc.emptyDropped;
+        const droppedByUnit = an.parsed.units.reduce((t, u, ui) => t + (dropU.has(ui) ? u.bundles.filter(b => !dropB.has(b.uid)).length : 0), 0);
+        const expSnaps = origSnaps - dropB.size - droppedByUnit;
+        if (rb.acc.navs !== expNavs || rb.acc.snaps !== expSnaps) {
+            console.warn(`${TAG} [sto] ABORT — rebuild accounting mismatch: navs ${rb.acc.navs}/${expNavs}, snaps ${rb.acc.snaps}/${expSnaps}`, m.name);
+            showToast('🪄 Aborted: rebuilt nav/snapshot count does not match (see console). Nothing saved.', '#ff5252', 6000);
+            return;
+        }
+        const savedFt = (an.curM - an.propM) * STO_FT;
+        if (!window.confirm(`🪄 Optimize steps of "${m.name}" IN PLACE?\n\n`
+            + (an.keptCurrent
+                ? (an.doctrineFlips
+                    ? `nav route ${(an.curM * STO_FT / 1000).toFixed(1)}k ft — order kept EXCEPT ${an.doctrineFlips} far-first direction fix(es)\n`
+                    : `nav route ${(an.curM * STO_FT / 1000).toFixed(1)}k ft — order unchanged (already shortest), structure repairs only\n`)
+                : `nav route ${(an.curM * STO_FT / 1000).toFixed(1)}k ft → ${(an.propM * STO_FT / 1000).toFixed(1)}k ft (−${(savedFt / 1000).toFixed(1)}k ft)${an.doctrineFlips ? ` · ${an.doctrineFlips} far-first flip(s)` : ''}\n`)
+            + `${rb.acc.navs} navs · ${rb.acc.snaps} snapshots${stt.fixWraps ? ' · wraps rebuilt to the mission pattern' : ''}${stt.dropUnits.size || stt.dropBundles.size ? ` · ${stt.dropUnits.size + stt.dropBundles.size} duplicate(s) removed` : ''}${stt.rehome.size ? ` · ${stt.rehome.size} snapshot(s) re-homed` : ''}${stt.navMerge.size ? ` · ${stt.navMerge.size} nav(s) consolidated (−${stt.navMerge.size} stop(s))` : ''}${rb.acc.emptyDropped ? ` · ${rb.acc.emptyDropped} snap-less nav(s) dropped` : ''}${stt.cutUnits.size || stt.cutBundles.size ? ` · ✂ CUT ${stt.cutUnits.size} nav(s) + ${stt.cutBundles.size} snapshot(s)` : ''}\n\n`
+            + `Mission id + name unchanged. A JSON backup downloads first.`)) return;
+        stoBusy = true;
+        try {
+            try {
+                const blob = new Blob([JSON.stringify({ site: getCurrentSiteID(), savedAt: new Date().toISOString(), reason: 'pre-step-optimize', mission: m })], { type: 'application/json' });
+                const blobUrl = URL.createObjectURL(blob);
+                let downloaded = false;
+                for (const doc of [(window.top || window).document, document]) {
+                    if (downloaded) break;
+                    try {
+                        const a = doc.createElement('a');
+                        a.href = blobUrl; a.download = `mission${m.id}_prestepopt_backup.json`;
+                        (doc.body || document.body).appendChild(a); a.click(); a.remove();
+                        downloaded = true;
+                    } catch (e) {}
+                }
+                setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 5000);
+                if (!downloaded) throw new Error('no frame allowed the download');
+            } catch (e) {
+                console.warn(`${TAG} [sto] backup download failed`, e);
+                if (!window.confirm('Backup download FAILED — continue WITHOUT a backup?')) { stoBusy = false; return; }
+            }
+            showToast(`🪄 Saving optimized "${m.name}"…`, '#9cf', 3000);
+            const instrs = rb.out.map(pcmNormStep);
+            await ctx.saveApp(Object.assign({}, m, { instructions: instrs }), m.name);
+            // verify: fresh fetch → nav coordinate sequence matches the proposal
+            await new Promise(r => setTimeout(r, 1200));
+            const after = await mbFetchMissionsFull(getCurrentSiteID());
+            const m2 = after.find(x => x.id === m.id);
+            let good = false;
+            if (m2) {
+                const gotNavs = (m2.instructions || []).filter(i => i && i.type === 1 && i.location).map(i => stoLocKey(i.location)).join(';');
+                const wantNavs = rb.out.filter(i => i && i.type === 1 && i.location).map(i => stoLocKey(i.location)).join(';');
+                const snaps2 = (m2.instructions || []).filter(i => i && i.type === 6).length;
+                good = gotNavs === wantNavs && snaps2 === rb.acc.snaps;
+                if (!good) console.warn(`${TAG} [sto] verify mismatch — navs ${gotNavs === wantNavs ? 'ok' : 'DIFFER'} · snaps ${snaps2}/${rb.acc.snaps}`);
+            }
+            showToast(good
+                ? `🪄 "${m.name}" ${an.keptCurrent ? (an.doctrineFlips ? `repaired ✓ verified (${an.doctrineFlips} far-first fix(es))` : 'repaired ✓ verified (order kept)') : `optimized ✓ verified (−${(savedFt / 1000).toFixed(1)}k ft of nav route)`}. Re-check its schedule if one is active.`
+                : `⚠ "${m.name}" saved but verify mismatched — check the mission + console (backup downloaded).`, good ? '#5fff5f' : '#ff9800', 9000);
+            stoClosePanel();
+            // refresh 🧩 overlay data (same tail as mcvApplyOrder)
+            if (mcv.data) {
+                mcv.data.missions = after;
+                mcv.data.det = mcvDetect(mcv.data.ent, after);
+                mcv.data.audits = mcvAudit(mcv.data.det, mcv.data.ent);
+                mcvClear();
+                mcvDraw(mcv.data.det);
+                mcv.on = true;
+            }
+        } catch (e) {
+            console.warn(`${TAG} [sto] apply failed`, e);
+            showToast('🪄 Apply FAILED — nothing verified (see console).', '#ff5252', 6000);
+        }
+        stoBusy = false;
+    }
+
+    // ⇅ MANUAL PAD ORDER (v2.63) — see the macro's TRUE visit order (same
+    // numbers as the map badges) and hand-edit it. Born from a live confusion:
+    // a macro whose long member mission enters a NEIGHBORING pad's ring first
+    // makes the badges disagree with the merge editor's mission list, and no
+    // merge re-save can change that — the visit order lives in the step
+    // geometry. This panel shows it (incl. ×N when a pad's steps are split
+    // across separate visits) and applies a chosen order via the same rails
+    // as ♻ (consolidate blocks, backup, save in place, verify, redraw).
+    const MCV_ORDER_PANEL_ID = 'aim-mb-mcv-order';
+    // ⇅ edit-mode draft: panel rows AND map badges render from moState.order.
+    let moState = null;
+    function mcvCloseOrderPanel() {
+        const old = document.getElementById(MCV_ORDER_PANEL_ID); if (old) old.remove();
+        moCloseBadgeRenumber();
+        try { document.removeEventListener('contextmenu', moContextHandler, true); } catch (e) {}
+        if (moState) {
+            // added-pad temp badges (v2.89) go away with the panel
+            try {
+                (moState.tempBadges || []).forEach(tb => {
+                    try { tb.mk.remove(); } catch (e) {}
+                    const reg = mcv.badgeReg.get(moState.missionId);
+                    if (reg) reg.delete(tb.padId);
+                });
+            } catch (e) {}
+            // restore the flown numbers + disarm the badges. On the apply
+            // path mcvClear already emptied badgeReg, so this no-ops there.
+            try { mcvPreviewOrder(moState.missionId, moState.mc.pads, false); } catch (e) {}
+            moState = null;
+        }
+    }
+    // M2 on an armed badge (⇅ panel open) → renumber popup at the cursor.
+    // Document-CAPTURE so it runs before pcm's container-capture handler and
+    // the Asset Inspector's window-bubble inspector; stopImmediatePropagation
+    // keeps the pad underneath from reacting.
+    function moContextHandler(e) {
+        if (!moState) return;
+        const eat = () => { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); };
+        const t = (e.target && e.target.closest) ? e.target.closest('[data-aim-mo-pad]') : null;
+        if (t) {
+            if (String(t.getAttribute('data-aim-mo-mid')) !== String(moState.missionId)) return;
+            eat();
+            const padId = Number(t.getAttribute('data-aim-mo-pad')) || t.getAttribute('data-aim-mo-pad');
+            moPadGesture(padId, !!e.ctrlKey, e.clientX + 8, e.clientY + 8);
+            return;
+        }
+        // v2.89: M2 on the MAP while ⇅ is open — hit-test pad rings so pads
+        // without an armed badge (removed pads, non-member pads) are reachable
+        const map = getLeafletMap();
+        if (!map) return;
+        const container = map.getContainer();
+        if (!container || !(e.target && container.contains(e.target))) return;
+        let ll;
+        try {
+            const rect = container.getBoundingClientRect();
+            ll = map.containerPointToLatLng([e.clientX - rect.left, e.clientY - rect.top]);
+        } catch (e2) { return; }
+        const tolM = 9;   // ~30 ft aim slack around a ring
+        const inPad = a2 => a2 && a2.ring && a2.ring.length >= 3 && mbPointToPolygonMeters(ll.lat, ll.lng, a2.ring) <= tolM;
+        const member = moState.order.find(inPad) || moState.removed.find(inPad);
+        if (member) { eat(); moPadGesture(member.id, !!e.ctrlKey, e.clientX + 8, e.clientY + 8); return; }
+        const data = mcv.data;
+        const outsider = ((data && data.det.assets) || []).find(a2 => inPad(a2)
+            && !moState.mc.pads.some(p2 => p2.id === a2.id)
+            && !moState.order.some(p2 => p2.id === a2.id));
+        if (outsider) { eat(); moAddPad(outsider); }
+    }
+    // one pad, one gesture (v2.89): Ctrl+M2 = remove (or restore if already
+    // removed; an ADDED pad is discarded outright) · plain M2 = renumber box
+    // (or restore a removed pad).
+    function moPadGesture(padId, ctrl, x, y) {
+        const st = moState; if (!st) return;
+        const remIdx = st.removed.findIndex(a => a.id === padId);
+        if (remIdx >= 0) { st.order.push(st.removed.splice(remIdx, 1)[0]); st.render(); return; }   // restore either way
+        const idx = st.order.findIndex(a => a.id === padId);
+        if (idx < 0) return;
+        if (ctrl) {
+            const padObj = st.order.splice(idx, 1)[0];
+            if (st.added && st.added.has(padId)) {   // added pad → discard, drop temp badge
+                st.added.delete(padId);
+                const ti = (st.tempBadges || []).findIndex(tb => tb.padId === padId);
+                if (ti >= 0) { try { st.tempBadges[ti].mk.remove(); } catch (e) {} const reg = mcv.badgeReg.get(st.missionId); if (reg) reg.delete(padId); st.tempBadges.splice(ti, 1); }
+            } else st.removed.push(padObj);
+            st.render();
+            return;
+        }
+        moOpenBadgeRenumber(padId, x, y);
+    }
+    // v2.89: M2 on a NON-member pad adds it — steps come from its MICRO
+    // (source of truth). Appended at the end; M2 its new green badge to
+    // renumber. Refused when the pad has no micro (nothing to pull).
+    function moAddPad(asset) {
+        const st = moState; if (!st) return;
+        const data = mcv.data;
+        const micros = ((data && data.det.solos) || []).filter(sl => sl.pad.id === asset.id).map(sl => sl.mission);
+        const micro = micros.length > 1 ? (rankMatchMissions(asset.name, micros)[0] || micros[0]) : micros[0];
+        if (!micro || !mbMissionBody(micro).length) { showToast(`"${asset.name || asset.id}" has no micro mission — build its micro first, then add it.`, '#ff9800', 5000); return; }
+        if (!st.added) st.added = new Map();
+        if (!st.tempBadges) st.tempBadges = [];
+        st.added.set(asset.id, { pad: asset, micro });
+        st.order.push(asset);
+        // temp badge (green = new) registered into badgeReg so the live
+        // renumber preview + M2 gestures treat it like any other badge
+        try {
+            const L = composerGetL(), map = getLeafletMap();
+            if (L && map) {
+                const c = genCentroid(asset.ring);
+                const mk = L.marker([c.lat, c.lng], {
+                    icon: L.divIcon({ className: 'aim-mb-rng-chip', html: mcvBadgeHtml(st.missionId, asset.id, st.order.length, '#5fff5f', true), iconSize: [19, 19], iconAnchor: [10, 10] }),
+                    interactive: false, keyboard: false, zIndexOffset: 950,
+                }).addTo(map);
+                if (!mcv.badgeReg.has(st.missionId)) mcv.badgeReg.set(st.missionId, new Map());
+                mcv.badgeReg.get(st.missionId).set(asset.id, { mk, col: '#5fff5f', ax: 10 });
+                st.tempBadges.push({ padId: asset.id, mk });
+            }
+        } catch (e) {}
+        showToast(`＋ "${asset.name || asset.id}" added at #${st.order.length} (${mbMissionBody(micro).length} steps from its micro) — M2 its green badge to renumber.`, '#5fff5f', 5000);
+        st.render();
+    }
+    const MO_RENUM_ID = 'aim-mb-mo-renum';
+    function moCloseBadgeRenumber() { const old = document.getElementById(MO_RENUM_ID); if (old) old.remove(); }
+    function moOpenBadgeRenumber(padId, x, y) {
+        moCloseBadgeRenumber();
+        const st = moState; if (!st) return;
+        const idx = st.order.findIndex(a => a.id === padId);
+        if (idx < 0) return;
+        const a = st.order[idx];
+        const el = document.createElement('div');
+        el.id = MO_RENUM_ID;
+        el.style.cssText = `position:fixed;left:${Math.min(x, (window.innerWidth || 1200) - 210)}px;top:${Math.min(y, (window.innerHeight || 700) - 70)}px;z-index:2147483602;`
+            + 'background:#161a20;border:1px solid #7adfe6;border-radius:6px;padding:7px 9px;color:#e6e6e6;'
+            + 'font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 6px 20px rgba(0,0,0,0.8);display:flex;align-items:center;gap:6px;';
+        el.innerHTML = `<span style="max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#7adfe6;font-weight:800;" title="${escapeHtml(String(a.name || ''))}">${escapeHtml(String(a.name || ('pad ' + a.id)))}</span>
+            <input data-mo-renum type="number" min="1" max="${st.order.length}" value="${idx + 1}" style="width:52px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:4px;padding:2px 5px;">
+            <button data-mo-renum-go style="padding:2px 9px;background:#5fff5f;border:none;color:#04220a;border-radius:4px;cursor:pointer;font-weight:800;">Set</button>
+            <span data-mo-renum-x style="cursor:pointer;color:#888;font-weight:800;">✕</span>`;
+        document.body.appendChild(el);
+        const inp = el.querySelector('[data-mo-renum]');
+        const go = () => {
+            const st2 = moState; if (!st2) { moCloseBadgeRenumber(); return; }
+            const from = st2.order.findIndex(p => p.id === padId);
+            if (from < 0) { moCloseBadgeRenumber(); return; }
+            const v = Math.max(1, Math.min(st2.order.length, Number(inp.value) || (from + 1)));
+            const moved = st2.order.splice(from, 1)[0];
+            st2.order.splice(v - 1, 0, moved);
+            moCloseBadgeRenumber();
+            st2.render();
+        };
+        el.querySelector('[data-mo-renum-go]').onclick = go;
+        inp.onkeydown = (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); go(); } else if (ev.key === 'Escape') moCloseBadgeRenumber(); };
+        el.querySelector('[data-mo-renum-x]').onclick = moCloseBadgeRenumber;
+        try { inp.focus(); inp.select(); } catch (e) {}
+    }
+    function mcvOpenOrderPanel(missionId) {
+        mcvCloseOrderPanel();
+        const data = mcv.data;
+        const mc = data && data.det && data.det.macros.find(x => x.mission.id === missionId);
+        if (!mc) { showToast('Macro not found — re-toggle 🧩.', '#ff9800', 3000); return; }
+        const stepsOf = id => mc.blocks.reduce((s, b) => s + (b.aId === id ? b.steps.length : 0), 0);
+        const visitsOf = id => mc.blocks.reduce((n, b) => n + (b.aId === id ? 1 : 0), 0);
+        const leadN = (mc.blocks[0] && mc.blocks[0].aId == null) ? mc.blocks[0].steps.length : 0;
+        const el = document.createElement('div');
+        el.id = MCV_ORDER_PANEL_ID;
+        el.style.cssText = 'position:fixed;left:12px;bottom:16px;width:310px;max-height:44vh;overflow:auto;z-index:2147483600;'
+            + 'background:rgba(16,19,26,0.96);border:1px solid #7adfe6;border-radius:8px;padding:9px 11px;color:#e6e6e6;'
+            + 'font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 6px 22px rgba(0,0,0,0.7);';
+        let dragIdx = null;
+        moState = { missionId, mc, order: mc.pads.slice(), removed: [], added: new Map(), tempBadges: [], render: null };
+        const render = () => {
+            const order = moState.order;
+            const removedL = moState.removed;
+            // live badge preview — the map renumbers as you move rows; deleted
+            // pads' badges turn into a grey ✕ (v2.85)
+            mcvPreviewOrder(missionId, order, true);
+            const reg = mcv.badgeReg.get(missionId);
+            const L2 = composerGetL();
+            if (reg && L2) removedL.forEach(a => {
+                const r = reg.get(a.id);
+                if (!r) return;
+                try {
+                    // edit=true keeps the grey ✕ badge armed — M2 it to restore
+                    r.mk.setIcon(L2.divIcon({ className: 'aim-mb-rng-chip',
+                        html: mcvBadgeHtml(missionId, a.id, '✕', '#555', true),
+                        iconSize: [19, 19], iconAnchor: [r.ax, 10] }));
+                } catch (e) {}
+            });
+            const changed = removedL.length > 0 || moState.added.size > 0 || order.map(a => a.id).join(',') !== mc.pads.map(a => a.id).join(',');
+            const rows = order.map((a, i) => {
+                const addedInfo = moState.added.get(a.id);
+                const v = addedInfo ? 0 : visitsOf(a.id);
+                const stCount = addedInfo ? mbMissionBody(addedInfo.micro).length : stepsOf(a.id);
+                return `<div data-mo-row="${i}" draggable="true" style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;cursor:grab;">
+                    <span style="color:#567;">⠿</span>
+                    <b style="width:18px;text-align:right;color:#7adfe6;">${i + 1}</b>
+                    <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(String(a.name || ''))}">${escapeHtml(String(a.name || ('pad ' + a.id)))}</span>
+                    ${v > 1 ? `<span title="This pad's steps are split across ${v} separate visits in the current step order — Apply pulls them together at this slot" style="color:#ffb74d;font-weight:800;">×${v}</span>` : ''}
+                    ${addedInfo ? '<span style="color:#5fff5f;font-weight:800;" title="New pad — steps pulled from its micro mission on Apply">＋NEW</span>' : ''}
+                    <span style="color:#789;">${stCount} st</span>
+                    <button data-mo-up="${i}" ${i === 0 ? 'disabled' : ''} style="padding:0 4px;background:#20262e;border:1px solid #2a3340;color:#9ad;border-radius:3px;cursor:pointer;font-size:10px;">▲</button>
+                    <button data-mo-dn="${i}" ${i === order.length - 1 ? 'disabled' : ''} style="padding:0 4px;background:#20262e;border:1px solid #2a3340;color:#9ad;border-radius:3px;cursor:pointer;font-size:10px;">▼</button>
+                    <button data-mo-del="${i}" title="Delete this pad from the macro — every one of its steps is removed on Apply (its micro mission is untouched)" style="padding:0 5px;background:rgba(255,82,82,0.12);border:1px solid rgba(255,82,82,0.45);color:#ff5252;border-radius:3px;cursor:pointer;font-size:10px;">✕</button>
+                </div>`;
+            }).join('');
+            const removedRows = removedL.map((a, i) => `<div style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;opacity:0.75;">
+                    <span style="color:#ff5252;font-weight:800;">✕</span>
+                    <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-decoration:line-through;color:#b88;">${escapeHtml(String(a.name || ('pad ' + a.id)))}</span>
+                    <span style="color:#789;">−${stepsOf(a.id)} st</span>
+                    <button data-mo-undel="${i}" style="padding:0 6px;background:rgba(95,255,95,0.1);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;border-radius:3px;cursor:pointer;font-size:10px;">↩</button>
+                </div>`).join('');
+            el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
+                    <b style="color:#7adfe6;">⇅ Pad order — ${escapeHtml(String(mc.mission.name || ''))}</b>
+                    <span data-mo-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span>
+                </div>
+                <div style="color:#789;font-size:10px;margin-bottom:4px;">The order actually FLOWN — the map badges renumber LIVE as you move rows. Drag rows, ▲▼, or <b style="color:#9ad;">M2 a glowing badge on the map</b> to type its new number. ✕ on a row (or Ctrl+M2 a badge) DELETES that pad; M2 a grey ✕ badge restores it; M2 an OUTSIDE pad on the map ADDS it (steps from its micro, green ＋ badge). Apply saves — each pad's steps move as one intact group.${leadN ? ` ${leadN} pre-pad step(s) stay first.` : ''}</div>
+                ${rows}
+                ${removedL.length ? `<div style="color:#ff5252;font-weight:700;margin-top:5px;">Deleting ${removedL.length} pad(s):</div>${removedRows}` : ''}
+                <div style="display:flex;align-items:center;gap:8px;margin-top:7px;">
+                    <button data-mo-reset ${changed ? '' : 'disabled'} style="padding:3px 9px;background:rgba(255,255,255,0.08);border:1px solid #2a3340;color:${changed ? '#9ad' : '#456'};border-radius:5px;cursor:pointer;font-size:10px;">↺ Reset</button>
+                    <button data-mo-apply ${changed ? '' : 'disabled'} style="margin-left:auto;padding:4px 12px;background:${changed ? '#5fff5f' : '#2a3340'};border:none;color:${changed ? '#04220a' : '#567'};border-radius:5px;cursor:pointer;font-weight:800;">💾 Apply order</button>
+                </div>`;
+            el.querySelector('[data-mo-x]').onclick = mcvCloseOrderPanel;
+            el.querySelector('[data-mo-reset]').onclick = () => { moState.order = mc.pads.slice(); moState.removed = []; render(); };
+            el.querySelector('[data-mo-apply]').onclick = async () => {
+                if (!order.length) { showToast('⇅ Cannot delete EVERY pad — at least one must remain.', '#ff9800', 4000); return; }
+                const ids = order.map(a => a.id);
+                const removedIds = new Set(removedL.map(a => a.id));
+                const delSteps = removedL.reduce((t, a) => t + stepsOf(a.id), 0);
+                const addedSteps = new Map();
+                moState.added.forEach((info, pid) => addedSteps.set(pid, mbMissionBody(info.micro)));
+                let addN = 0; addedSteps.forEach(st2 => { addN += st2.length; });
+                const ok = await mcvApplyOrder(mc, ids,
+                    `⇅ Apply pad order${removedIds.size ? ' + DELETIONS' : ''}${addedSteps.size ? ' + ADDITIONS' : ''} to "${mc.mission.name}"?\n\n`
+                    + `${order.length} pad(s) — each pad's steps stay intact and move as one group`
+                    + ` (a pad with split visits gets all its steps consolidated at its new slot).\n`
+                    + (removedIds.size ? `✕ DELETING ${removedIds.size} pad(s) (−${delSteps} steps): ${removedL.map(a => a.name || a.id).join(', ')} — their micros are untouched.\n` : '')
+                    + (addedSteps.size ? `＋ ADDING ${addedSteps.size} pad(s) (+${addN} steps from their micros): ${Array.from(moState.added.values()).map(x => x.pad.name || x.pad.id).join(', ')}.\n` : '')
+                    + `Mission id + name unchanged. A JSON backup downloads first.`, removedIds, addedSteps);
+                if (ok) mcvCloseOrderPanel();
+            };
+            el.querySelectorAll('[data-mo-up]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-up')); const t = order.splice(i, 1)[0]; order.splice(i - 1, 0, t); render(); });
+            el.querySelectorAll('[data-mo-dn]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-dn')); const t = order.splice(i, 1)[0]; order.splice(i + 1, 0, t); render(); });
+            el.querySelectorAll('[data-mo-del]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-del')); moPadGesture(order[i].id, true); });
+            el.querySelectorAll('[data-mo-undel]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-undel')); moState.order.push(moState.removed.splice(i, 1)[0]); render(); });
+            el.querySelectorAll('[data-mo-row]').forEach(r => {
+                r.ondragstart = (e) => { dragIdx = Number(r.getAttribute('data-mo-row')); try { e.dataTransfer.setData('text/plain', ''); } catch (e2) {} };
+                r.ondragover = (e) => e.preventDefault();
+                r.ondrop = (e) => {
+                    e.preventDefault();
+                    if (dragIdx == null) return;
+                    const to = Number(r.getAttribute('data-mo-row'));
+                    const moved = order.splice(dragIdx, 1)[0];
+                    order.splice(to > dragIdx ? to - 1 : to, 0, moved);
+                    dragIdx = null;
+                    render();
+                };
+            });
+        };
+        moState.render = render;
+        render();
+        document.body.appendChild(el);
+        document.addEventListener('contextmenu', moContextHandler, true);
     }
 
     // 👁 route comparison (v2.44) — draw a macro's CURRENT order (solid, the
@@ -5679,7 +7877,7 @@
         const { ent, missions, det } = data;
         showToast('📋 Building coverage report…', '#7adfe6', 2000);
         let bat = new Map();
-        try { const sol = rngSolve(ent); bat = new Map(sol.results.map(r => [r.asset.id, r])); } catch (e) { console.warn(`${TAG} [mcv] report range solve failed`, e); }
+        try { const sol = rngSolveCached(ent); bat = new Map(sol.results.map(r => [r.asset.id, r])); } catch (e) { console.warn(`${TAG} [mcv] report range solve failed`, e); }
         const secName = { N: 'North', E: 'East', S: 'South', W: 'West', NE: 'NE', SE: 'SE', SW: 'SW', NW: 'NW', C: 'Central' };
         const macrosOf = new Map();
         det.macros.forEach(mc => mc.pads.forEach((a, i) => {
@@ -5774,6 +7972,367 @@
         }
     }
 
+    // Drag + resize for the floating tool panels (v2.83, user request):
+    // drag anywhere on the header (buttons/inputs/links still click), resize
+    // via the native bottom-right handle. onMove reports the new position so
+    // callers that RE-RENDER their panel (🪄) can restore it.
+    function mbPanelMovable(el, handle, onMove) {
+        try {
+            el.style.resize = 'both';
+            const ov = getComputedStyle(el).overflow;
+            if (ov === 'visible') el.style.overflow = 'hidden';   // CSS resize needs non-visible overflow
+        } catch (e) {}
+        if (!handle) return;
+        handle.style.cursor = 'move';
+        handle.addEventListener('pointerdown', (e) => {
+            if (e.target.closest && e.target.closest('button,input,a,select,textarea,label,summary')) return;
+            const r = el.getBoundingClientRect();
+            // right-anchored panels convert to left-anchored so dragging sticks
+            el.style.left = r.left + 'px'; el.style.top = r.top + 'px'; el.style.right = 'auto';
+            const ox = e.clientX - r.left, oy = e.clientY - r.top;
+            const move = (ev) => {
+                const l = Math.max(0, Math.min((window.innerWidth || 1600) - 60, ev.clientX - ox));
+                const t = Math.max(0, Math.min((window.innerHeight || 900) - 40, ev.clientY - oy));
+                el.style.left = l + 'px'; el.style.top = t + 'px';
+                if (onMove) onMove(l, t);
+            };
+            const up = () => { document.removeEventListener('pointermove', move, true); document.removeEventListener('pointerup', up, true); };
+            document.addEventListener('pointermove', move, true);
+            document.addEventListener('pointerup', up, true);
+            e.preventDefault();
+        });
+    }
+    // ── ⟳ RE-MERGE (feature #248, v2.82; ⟳ All v2.84) ──────────────────────
+    // The workflow: pilot feedback lands in the MICRO missions (the source of
+    // truth); the macro is derived. ⟳ rebuilds a macro from its pads'
+    // CURRENT micros — same pad order, same name, same id — killing the old
+    // dance of re-lassoing, deleting the macro, and renaming. Semantics match
+    // a hand re-merge exactly (pcmCommit: takeoff + concat of each micro's
+    // body + returnHome); pads with no micro keep their current macro steps.
+    // ⟳ All sweeps every macro on the site in one review + sequential apply.
+    // NOTE: a pad visited in multiple separate runs (interleaved facility)
+    // consolidates at its first slot — run 🪄 afterwards to re-optimize.
+    const MCV_REMERGE_ID = 'aim-mb-mcv-remerge';
+    const MCV_REMERGE_ALL_ID = 'aim-mb-mcv-remerge-all';
+    let mcvRemergeBusy = false;
+    // step signature for re-merge diffs: type + values + coords + a stable
+    // stringify of extra_options (pitch lives there — pilot tuning must flag)
+    function mcvStepSig(st) {
+        const v1 = (typeof st.value1 === 'number') ? st.value1.toFixed(2) : String(st.value1);
+        const v2 = (typeof st.value2 === 'number') ? st.value2.toFixed(2) : String(st.value2);
+        // v2.87: 6 decimals (~11 cm), not 7 — Percepto stores coords as 1e-7°
+        // INTS and its save path can truncate where the float rounds up at
+        // the 7th decimal, leaving a one-digit sig mismatch that never
+        // converges (live: 2 of 11 macros stuck after the v2.86 fix).
+        const loc = (st.location && typeof st.location.lat === 'number') ? st.location.lat.toFixed(6) + ',' + st.location.lng.toFixed(6) : '-';
+        // v2.88: only TUNING-RELEVANT extra_options per step type. Live
+        // diagnostic caught old micros (ids 4762/21785) whose navs lack the
+        // pitch key the save path adds by default — full-eo compare could
+        // never converge. Snapshots keep pitch (pilot points the camera);
+        // navigates keep shouldUseFreezoneMinAlt (altitude behavior); all
+        // other keys are save-path churn and excluded.
+        let eo = '';
+        try {
+            const src = st.extra_options || {};
+            const keep = {};
+            if (st.type === 6 && src.pitch !== null && src.pitch !== undefined) keep.p = src.pitch;
+            if (st.type === 1 && src.shouldUseFreezoneMinAlt !== null && src.shouldUseFreezoneMinAlt !== undefined) keep.f = src.shouldUseFreezoneMinAlt;
+            eo = JSON.stringify(keep);
+        } catch (e) {}
+        return st.type + '|' + v1 + '|' + v2 + '|' + loc + '|' + eo;
+    }
+    // per-pad plan for one macro: {pad, micro, curSteps, changed, status}
+    function mcvRemergePlan(mc, data) {
+        const locKey = loc => loc.lat.toFixed(7) + ',' + loc.lng.toFixed(7);
+        // v2.86 IDEMPOTENT DIFF: "in sync" = the micro's exact step sequence
+        // appears as a CONTIGUOUS run inside the macro body. The old per-pad
+        // diff compared against the macro's GEOMETRY-sliced block — a micro
+        // step straying near a neighboring pad got filed under the neighbor,
+        // so the pad flagged UPDATED forever no matter how many times it was
+        // re-merged (live: 11 macros × 5 re-merges, never converged).
+        const D = '\u0001';
+        const macroSeq = D + mbMissionBody(mc.mission).map(mcvStepSig).join(D) + D;
+        const stepsByPad = new Map();
+        (mc.blocks || []).forEach(b => {
+            if (b.aId == null) return;
+            if (!stepsByPad.has(b.aId)) stepsByPad.set(b.aId, []);
+            b.steps.forEach(s => stepsByPad.get(b.aId).push(s));
+        });
+        const soloByPad = new Map();
+        (data.det.solos || []).forEach(sl => {
+            if (!soloByPad.has(sl.pad.id)) soloByPad.set(sl.pad.id, []);
+            soloByPad.get(sl.pad.id).push(sl.mission);
+        });
+        const sig = steps => {
+            const loc = steps.filter(st => st && st.location && typeof st.location.lat === 'number');
+            return {
+                navs: loc.filter(st => st.type === 1).length,
+                snaps: loc.filter(st => st.type === 6).length,
+                steps: steps.length,
+                key: loc.map(st => st.type + '@' + locKey(st.location)).sort().join(';'),
+            };
+        };
+        return mc.pads.map(a => {
+            const micros = soloByPad.get(a.id) || [];
+            let micro = null;
+            if (micros.length === 1) micro = micros[0];
+            else if (micros.length > 1) micro = rankMatchMissions(a.name, micros)[0] || micros[0];
+            const curSteps = stepsByPad.get(a.id) || [];
+            const cur = sig(curSteps);
+            let status, changed = false;
+            if (!micro) status = { txt: 'no micro — keeping current steps', col: '#ffb74d' };
+            else {
+                const microBody = mbMissionBody(micro);
+                const microSigs = microBody.map(mcvStepSig);
+                const microSeq = D + microSigs.join(D) + D;
+                const inSync = microBody.length > 0 && macroSeq.indexOf(microSeq) >= 0;
+                changed = !inSync;
+                if (changed) {
+                    // diagnostic (v2.87, upgraded v2.88): name the exact steps
+                    // that break the match AND the macro's counterpart at the
+                    // same coordinates — the console line IS the field delta
+                    const missing = microSigs.map((g, si) => ({ g, si })).filter(x => macroSeq.indexOf(D + x.g + D) < 0).slice(0, 3);
+                    const macroBody = mbMissionBody(mc.mission);
+                    const detail = missing.map(x => {
+                        const xloc = x.g.split('|')[3];
+                        const twin = macroBody.filter(st2 => mcvStepSig(st2).split('|')[3] === xloc).map(mcvStepSig);
+                        return `#${x.si} micro[${x.g}] vs macro[${twin.join(' / ') || 'NO STEP AT THIS LOCATION'}]`;
+                    });
+                    console.log(`${TAG} [remerge] "${a.name || a.id}" not contained — ${missing.length ? detail.join('  ·  ') : 'all steps present individually but NOT contiguous (order/interleave differs)'}`);
+                }
+                const nu = sig(microBody);
+                status = changed
+                    ? { txt: `UPDATED · ${cur.navs}n/${cur.snaps}s/${cur.steps}st → ${nu.navs}n/${nu.snaps}s/${nu.steps}st`, col: '#5fff5f' }
+                    : { txt: 'in sync', col: '#789' };
+            }
+            return { pad: a, micro, curSteps, changed, status };
+        });
+    }
+    function mcvRemergeBackup(missions, reason) {
+        try {
+            const blob = new Blob([JSON.stringify({ site: getCurrentSiteID(), savedAt: new Date().toISOString(), reason, missions })], { type: 'application/json' });
+            const blobUrl = URL.createObjectURL(blob);
+            let downloaded = false;
+            for (const doc of [(window.top || window).document, document]) {
+                if (downloaded) break;
+                try {
+                    const a = doc.createElement('a');
+                    a.href = blobUrl; a.download = `${reason}_${missions.length === 1 ? 'mission' + missions[0].id : missions.length + 'missions'}_backup.json`;
+                    (doc.body || document.body).appendChild(a); a.click(); a.remove();
+                    downloaded = true;
+                } catch (e) {}
+            }
+            setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 5000);
+            if (!downloaded) throw new Error('no frame allowed the download');
+            return true;
+        } catch (e) {
+            console.warn(`${TAG} [remerge] backup download failed`, e);
+            return window.confirm('Backup download FAILED — continue WITHOUT a backup?');
+        }
+    }
+    // rebuild + save + verify ONE macro. picks = Set of row indices to pull
+    // from their micro; unpicked rows keep the macro's current steps.
+    async function mcvRemergeSave(mc, rows, picks, data) {
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4500); return { ok: false }; }
+        const m = mc.mission;
+        const ins = m.instructions || [];
+        const to = ins.find(i => i && i.type === 0);
+        const rh = Array.from(ins).reverse().find(i => i && i.type === 99);
+        const body = [];
+        let pulled = 0, kept = 0; const emptyPads = [];
+        // cross-pad overlap guard (v2.86): geometry slicing can file a pulled
+        // micro's stray step under a KEPT pad's block — concatenating both
+        // would DUPLICATE it. Located steps only (wrap steps are identical
+        // everywhere by design).
+        const locSig = st => (st.location && typeof st.location.lat === 'number') ? mcvStepSig(st) : null;
+        const pulledLoc = new Map();
+        rows.forEach((r, i) => {
+            if (!(picks.has(i) && r.micro)) return;
+            mbMissionBody(r.micro).forEach(st => { const k = locSig(st); if (k) pulledLoc.set(k, String(r.pad.name || r.pad.id)); });
+        });
+        const overlaps = [];
+        rows.forEach((r, i) => {
+            if (picks.has(i) && r.micro) return;
+            r.curSteps.forEach(st => { const k = locSig(st); if (k && pulledLoc.has(k)) overlaps.push(`${pulledLoc.get(k)} ⇄ ${r.pad.name || r.pad.id}`); });
+        });
+        if (overlaps.length) {
+            showToast(`⟳ "${m.name}" skipped: pulled micro steps also live in kept pads (${Array.from(new Set(overlaps)).slice(0, 3).join(' · ')}) — pull BOTH pads (tick them) or neither, else steps would duplicate.`, '#ff5252', 10000);
+            return { ok: false };
+        }
+        rows.forEach((r, i) => {
+            const useMicro = picks.has(i) && r.micro;
+            const src = useMicro ? mbMissionBody(r.micro) : r.curSteps;
+            if (useMicro) pulled++; else kept++;
+            if (!src.length) emptyPads.push(String(r.pad.name || r.pad.id));
+            src.forEach(st => body.push(st));
+        });
+        if (emptyPads.length) { showToast(`⟳ "${m.name}" skipped: no steps found for ${emptyPads.join(', ')}.`, '#ff5252', 6000); return { ok: false }; }
+        const instrs = (to ? [pcmNormStep(to)] : []).concat(body.map(pcmNormStep), rh ? [pcmNormStep(rh)] : []);
+        await ctx.saveApp(Object.assign({}, m, { instructions: instrs }), m.name);
+        await new Promise(r => setTimeout(r, 1200));
+        const after = await mbFetchMissionsFull(getCurrentSiteID());
+        const m2 = after.find(x => x.id === m.id);
+        let good = false;
+        if (m2) {
+            const det2 = mcvDetect(data.ent, [m2]);
+            const mc2 = det2.macros[0];
+            const gotOrder = mc2 ? mc2.pads.map(a => a.id).join(',') : '';
+            good = gotOrder === mc.pads.map(a => a.id).join(',') && (m2.instructions || []).length === instrs.length;
+            if (!good) console.warn(`${TAG} [remerge] verify mismatch on "${m.name}" — order [${gotOrder}] vs [${mc.pads.map(a => a.id).join(',')}] · steps ${(m2.instructions || []).length}/${instrs.length}`);
+        }
+        return { ok: true, good, pulled, kept, steps: instrs.length, after };
+    }
+    function mcvRemergeRefresh(after) {
+        const data = mcv.data;
+        if (!data || !after) return;
+        data.missions = after;
+        data.det = mcvDetect(data.ent, after);
+        data.audits = mcvAudit(data.det, data.ent);
+        mcvClear();
+        mcvDraw(data.det);
+        mcv.on = true;
+    }
+    function mcvOpenRemerge(missionId) {
+        const old = document.getElementById(MCV_REMERGE_ID);
+        if (old) { old.remove(); return; }
+        const data = mcv.data;
+        const mc = data && data.det.macros.find(x => x.mission.id === missionId);
+        if (!mc) { showToast('Macro not found — toggle 🧩 off/on and retry.', '#ff9800', 3500); return; }
+        const rows = mcvRemergePlan(mc, data);
+        const p = document.createElement('div');
+        p.id = MCV_REMERGE_ID;
+        p.style.cssText = 'position:fixed;top:60px;right:24px;width:440px;max-height:80vh;display:flex;flex-direction:column;z-index:2147483602;'
+            + 'background:#161a20;border:1px solid #ffd54f;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        const rowsHtml = rows.map((r, i) => `<label style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;cursor:${r.micro ? 'pointer' : 'default'};">
+                <span style="color:#789;width:18px;text-align:right;flex:none;">${i + 1}</span>
+                <input type="checkbox" data-mcvr-pick="${i}" ${r.micro ? (r.changed ? 'checked' : '') : 'disabled'} />
+                <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(String(r.pad.name || ('pad ' + r.pad.id)))}</span>
+                ${r.micro ? `<span title="${escapeHtml(String(r.micro.name || ''))}" style="color:#7adfe6;font-size:10px;white-space:nowrap;max-width:110px;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(String(r.micro.name || ''))}</span>` : ''}
+                <span style="color:${r.status.col};font-size:10px;white-space:nowrap;">${escapeHtml(r.status.txt)}</span>
+            </label>`).join('');
+        const changedN = rows.filter(r => r.changed).length;
+        p.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(255,213,79,0.08);border-bottom:1px solid rgba(255,213,79,0.3);">
+                <span style="font-weight:800;color:#ffd54f;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">⟳ Re-merge “${escapeHtml(String(mc.mission.name || ''))}”</span>
+                <button data-mcvr-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;flex:none;">✕</button>
+            </div>
+            <div style="padding:6px 12px;font-size:11px;color:#9ad;border-bottom:1px solid #2a2f38;">Rebuilds THIS macro from its pads' current micro missions — <b>same pad order, same name, same id</b>. Micros are the source of truth: pilot fixes go there, ⟳ pulls them in. Ticked pads pull fresh steps from their micro; unticked keep the macro's current steps. ${changedN ? `<b style="color:#5fff5f;">${changedN} pad(s) have micro changes.</b>` : '<b>Everything is in sync.</b>'} <a data-mcvr-all href="#" style="color:#7adfe6;">all</a> / <a data-mcvr-none href="#" style="color:#7adfe6;">none</a></div>
+            <div style="overflow:auto;flex:1;padding:4px 10px;">${rowsHtml}</div>
+            <div style="padding:6px 12px;font-size:10px;color:#789;border-top:1px solid #2a2f38;">Interleaved pads consolidate at their first slot — run 🪄 after if this macro interleaved a facility. Takeoff + returnHome stay the macro's own. A JSON backup downloads before saving.</div>
+            <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
+                <span data-mcvr-status style="flex:1;font-size:11px;color:#9ad;"></span>
+                <button data-mcvr-go style="padding:6px 12px;background:#ffd54f;border:none;color:#3a2c00;border-radius:6px;cursor:pointer;font-weight:800;">⟳ Re-merge</button>
+            </div>`;
+        document.body.appendChild(p);
+        p.querySelector('[data-mcvr-close]').onclick = () => p.remove();
+        mbPanelMovable(p, p.firstElementChild);
+        p.querySelector('[data-mcvr-all]').onclick = (e) => { e.preventDefault(); p.querySelectorAll('input[data-mcvr-pick]:not(:disabled)').forEach(cb => { cb.checked = true; }); };
+        p.querySelector('[data-mcvr-none]').onclick = (e) => { e.preventDefault(); p.querySelectorAll('input[data-mcvr-pick]').forEach(cb => { cb.checked = false; }); };
+        p.querySelector('[data-mcvr-go]').onclick = async () => {
+            if (mcvRemergeBusy) return;
+            const picks = new Set(Array.from(p.querySelectorAll('input[data-mcvr-pick]:checked')).map(cb => Number(cb.getAttribute('data-mcvr-pick'))));
+            const pulled = rows.filter((r, i) => picks.has(i) && r.micro).length;
+            if (!window.confirm(`⟳ Re-merge "${mc.mission.name}" IN PLACE?\n\n`
+                + `${pulled} pad(s) pulled fresh from their micros · ${rows.length - pulled} kept as-is\n`
+                + `Pad order, name and id unchanged.\n\nA JSON backup downloads first.`)) return;
+            mcvRemergeBusy = true;
+            const st = p.querySelector('[data-mcvr-status]');
+            try {
+                if (!mcvRemergeBackup([mc.mission], 'pre-remerge')) { mcvRemergeBusy = false; return; }
+                if (st) st.textContent = 'Saving…';
+                const res = await mcvRemergeSave(mc, rows, picks, data);
+                if (res.ok) {
+                    showToast(res.good
+                        ? `⟳ "${mc.mission.name}" re-merged ✓ verified (${res.pulled} pad(s) refreshed). Re-check its schedule if one is active.`
+                        : `⚠ "${mc.mission.name}" saved but verify mismatched — check the mission + console (backup downloaded).`, res.good ? '#5fff5f' : '#ff9800', 9000);
+                    p.remove();
+                    mcvRemergeRefresh(res.after);
+                }
+            } catch (e) {
+                console.warn(`${TAG} [remerge] failed`, e);
+                showToast('⟳ Re-merge FAILED — nothing verified (see console, backup downloaded).', '#ff5252', 6000);
+            }
+            mcvRemergeBusy = false;
+        };
+    }
+    // ⟳ ALL (v2.84): one review across every macro, sequential apply.
+    // Pulls UPDATED pads only; in-sync and no-micro pads keep current steps.
+    function mcvOpenRemergeAll() {
+        const old = document.getElementById(MCV_REMERGE_ALL_ID);
+        if (old) { old.remove(); return; }
+        const data = mcv.data;
+        if (!data || !data.det.macros.length) { showToast('No macros — open 🧩 on a site with macro missions.', '#ff9800', 3500); return; }
+        const plans = data.det.macros.map(mc => {
+            const rows = mcvRemergePlan(mc, data);
+            return { mc, rows, changed: rows.filter(r => r.changed).length, noMicro: rows.filter(r => !r.micro).length };
+        });
+        const anyChanged = plans.some(pl => pl.changed > 0);
+        const p = document.createElement('div');
+        p.id = MCV_REMERGE_ALL_ID;
+        p.style.cssText = 'position:fixed;top:60px;right:24px;width:460px;max-height:80vh;display:flex;flex-direction:column;z-index:2147483602;'
+            + 'background:#161a20;border:1px solid #ffd54f;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        const rowsHtml = plans.map((pl, i) => {
+            const det = pl.changed
+                ? `<div style="margin:0 0 2px 40px;font-size:10px;color:#5fff5f;">${pl.rows.filter(r => r.changed).map(r => escapeHtml(String(r.pad.name || r.pad.id)) + ' (' + escapeHtml(r.status.txt.replace('UPDATED · ', '')) + ')').join(' · ')}</div>`
+                : '';
+            return `<label style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;cursor:${pl.changed ? 'pointer' : 'default'};">
+                    <input type="checkbox" data-mcvra-pick="${i}" ${pl.changed ? 'checked' : 'disabled'} />
+                    <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(String(pl.mc.mission.name || ''))}</span>
+                    <span style="color:#9ad;font-size:10px;white-space:nowrap;">${pl.rows.length} pad(s)</span>
+                    <span style="color:${pl.changed ? '#5fff5f' : '#789'};font-size:10px;white-space:nowrap;">${pl.changed ? pl.changed + ' UPDATED' : 'in sync'}</span>
+                    ${pl.noMicro ? `<span style="color:#ffb74d;font-size:10px;white-space:nowrap;">${pl.noMicro} no-micro</span>` : ''}
+                </label>${det}`;
+        }).join('');
+        p.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(255,213,79,0.08);border-bottom:1px solid rgba(255,213,79,0.3);">
+                <span style="font-weight:800;color:#ffd54f;font-size:13px;">⟳ Re-merge ALL macros</span>
+                <button data-mcvra-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;flex:none;">✕</button>
+            </div>
+            <div style="padding:6px 12px;font-size:11px;color:#9ad;border-bottom:1px solid #2a2f38;">Every macro rebuilt from its pads' current micros — same pad orders, names, ids. Only pads whose micro CHANGED are pulled; in-sync and no-micro pads keep their current steps. ${anyChanged ? '' : '<b>Everything is in sync — nothing to do.</b>'} ONE combined backup JSON downloads first.</div>
+            <div style="overflow:auto;flex:1;padding:4px 10px;">${rowsHtml}</div>
+            <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
+                <span data-mcvra-status style="flex:1;font-size:11px;color:#9ad;"></span>
+                <button data-mcvra-go style="padding:6px 12px;background:#ffd54f;border:none;color:#3a2c00;border-radius:6px;cursor:pointer;font-weight:800;" ${anyChanged ? '' : 'disabled'}>⟳ Re-merge</button>
+            </div>`;
+        document.body.appendChild(p);
+        p.querySelector('[data-mcvra-close]').onclick = () => p.remove();
+        mbPanelMovable(p, p.firstElementChild);
+        const goBtn = p.querySelector('[data-mcvra-go]');
+        const updateGo = () => { const n = p.querySelectorAll('input[data-mcvra-pick]:checked').length; goBtn.textContent = `⟳ Re-merge ${n}`; goBtn.disabled = mcvRemergeBusy || !n; };
+        p.querySelectorAll('input[data-mcvra-pick]').forEach(cb => cb.onchange = updateGo);
+        updateGo();
+        goBtn.onclick = async () => {
+            if (mcvRemergeBusy) return;
+            const picks = Array.from(p.querySelectorAll('input[data-mcvra-pick]:checked')).map(cb => Number(cb.getAttribute('data-mcvra-pick')));
+            if (!picks.length) return;
+            const names = picks.map(i => plans[i].mc.mission.name);
+            if (!window.confirm(`⟳ Re-merge ${picks.length} macro(s) IN PLACE?\n\n${names.join('\n')}\n\nOnly UPDATED pads are pulled from their micros. Pad orders, names and ids unchanged.\nONE combined backup JSON downloads first.`)) return;
+            mcvRemergeBusy = true;
+            const st = p.querySelector('[data-mcvra-status]');
+            try {
+                if (!mcvRemergeBackup(picks.map(i => plans[i].mc.mission), 'pre-remerge-all')) { mcvRemergeBusy = false; updateGo(); return; }
+                let okN = 0, warnN = 0, failN = 0, lastAfter = null;
+                for (let k = 0; k < picks.length; k++) {
+                    const pl = plans[picks[k]];
+                    if (st) st.textContent = `Re-merging ${k + 1}/${picks.length}: ${pl.mc.mission.name}…`;
+                    const rowPicks = new Set(pl.rows.map((r, ri) => (r.changed && r.micro) ? ri : -1).filter(ri => ri >= 0));
+                    try {
+                        const res = await mcvRemergeSave(pl.mc, pl.rows, rowPicks, data);
+                        if (!res.ok) failN++;
+                        else { if (res.good) okN++; else warnN++; lastAfter = res.after; }
+                    } catch (e) { console.warn(`${TAG} [remerge-all] "${pl.mc.mission.name}" failed`, e); failN++; }
+                }
+                showToast(`⟳ All done: ${okN} re-merged ✓${warnN ? ` · ${warnN} verify-warned` : ''}${failN ? ` · ${failN} FAILED` : ''} — backup downloaded.`, failN ? '#ff9800' : '#5fff5f', 9000);
+                p.remove();
+                if (lastAfter) mcvRemergeRefresh(lastAfter);
+            } catch (e) {
+                console.warn(`${TAG} [remerge-all] failed`, e);
+                showToast('⟳ All FAILED (see console, backup downloaded).', '#ff5252', 6000);
+            }
+            mcvRemergeBusy = false;
+        };
+    }
     async function mcvToggle(btn) {
         if (mcv.on) { mcv.on = false; mcvClear(); if (btn) btn.classList.remove('active'); return; }
         if (mcv.busy) return;
@@ -6127,7 +8686,25 @@
         if (c.length) return c;
         c = all.filter(m => norm(m).endsWith('- ' + want) || norm(m).endsWith('– ' + want));
         if (c.length) return c;
-        return all.filter(m => norm(m).indexOf(want) >= 0);
+        c = all.filter(m => norm(m).indexOf(want) >= 0);
+        if (c.length) return c;
+        // v2.91: pad-root rung — some sites name missions "<PAD> _ID <n>"
+        // while asset polygons are "<Pad> <Equipment>" ("LHS Ranch 1702BH
+        // Pump Jack" ↔ "LHS RANCH 1702BH _ID 5062"). Neither name contains
+        // the other, but both extend the same pad root. Drop up to 3
+        // trailing tokens (equipment suffixes are 1–3 words: "Pump Jack",
+        // "Gas Lift Header", "Flow Line 2") and take missions whose name IS
+        // that root or continues it at a token boundary — the boundary keeps
+        // "1701AH" from matching "1701H". Longest root wins; the 5-char
+        // floor stops a lone short token from matching a whole lease.
+        const toks = want.split(/\s+/);
+        for (let drop = 1; drop <= 3 && toks.length - drop >= 1; drop++) {
+            const root = toks.slice(0, toks.length - drop).join(' ');
+            if (root.length < 5) break;
+            c = all.filter(m => norm(m) === root || norm(m).startsWith(root + ' '));
+            if (c.length) return c;
+        }
+        return [];
     }
 
     async function pcmEnter() {
@@ -6789,8 +9366,9 @@
         p.querySelectorAll('[data-ag-k]').forEach(inp => inp.onchange = () => {
             const patch = {}; patch[inp.getAttribute('data-ag-k')] = Number(inp.value);
             agSetCfg(patch); rerender();
+            try { rngRefresh(); } catch (e) {}   // live 🔋 overlay tracks the radii knobs too
         });
-        p.querySelector('[data-ag-reset]').onclick = () => { agSetCfg(Object.assign({}, AG_DEFAULTS)); rerender(); };
+        p.querySelector('[data-ag-reset]').onclick = () => { agSetCfg(Object.assign({}, AG_DEFAULTS)); rerender(); try { rngRefresh(); } catch (e) {} };
         p.querySelectorAll('[data-ag-route]').forEach(b => b.onclick = () => {
             const gi = Number(b.getAttribute('data-ag-route'));
             const on = agToggleRoute(mergeGroups[gi], gi, AG_COLORS[gi % AG_COLORS.length], ent, data);
@@ -8719,6 +11297,7 @@
                 <button class="aim-mb-tbtn ${rng.on ? 'active' : ''}" data-rng-toggle title="Color every pad's FFZ by the TRUE shortest LEGAL route from base (inside FFZ/FP only, triple-verified: path audit + dense second opinion + lower bound). Overlay is click-through — M2 merge picking still works.">🔋 Range</button>
                 <button class="aim-mb-tbtn ${lasso.armed ? 'active' : ''}" data-lasso-toggle title="Draw a freehand loop around pads → auto-build a furthest→closest merge list (Tulip pads auto-split into a separate '2' mission) and stage it in the merge editor for inspection.">🖊 Lasso</button>
                 <button class="aim-mb-tbtn ${mcv.on ? 'active' : ''}" data-mcv-toggle title="Show which pads are already claimed by macro (merged) missions — each macro gets a color + name chip; white dashed pads have missions but no macro yet. Click-through.">🧩 Macros</button>
+                <button class="aim-mb-tbtn" data-srm-open title="Find every step of a chosen type across ALL missions on this site (flag poles, 1s waits, …) and remove them after a per-row review. Flag poles take their paired nav too. Backup JSON downloads before anything saves.">🧹 Steps</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'imperial' ? 'active' : ''}" data-unit="imperial">mi</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'metric' ? 'active' : ''}" data-unit="metric">km</button>
                 <button class="aim-mb-tbtn" data-settings title="Battery → flights thresholds">⚙</button>
@@ -9181,6 +11760,9 @@
         if (lassoBtn) lassoBtn.onclick = () => lassoToggle(lassoBtn);
         const mcvBtn = panelEl.querySelector('[data-mcv-toggle]');
         if (mcvBtn) mcvBtn.onclick = () => mcvToggle(mcvBtn);
+        // v2.56 — 🧹 site-wide step removal
+        const srmBtn = panelEl.querySelector('[data-srm-open]');
+        if (srmBtn) srmBtn.onclick = () => srmOpen();
         const pcmBtn = panelEl.querySelector('[data-pcm-toggle]');
         if (pcmBtn) pcmBtn.onclick = async () => {
             if (pcm.on) { pcmExit(); }
@@ -12844,7 +15426,9 @@ ${snapPlacemarks}
         }
         mpvRoute.building = true;
         Promise.resolve(genFetchEntities(sid)).then(ent => {
-            const built = rngBuildGraph(ent);
+            // v2.61: clone of the cached sparse build (mpvAttachPoint splices
+            // temp vertices into adjacency lists, so no sharing).
+            const built = rngCloneBuilt(rngBuildGraphCached(ent, false, rngEntSig(ent)));
             built.boxes = built.ffzs.map(f => agRingBbox(f.ring, MB_ENTRY_FFZ_FT / 3.28084));
             mpvRoute.sid = sid;
             mpvRoute.built = built;
@@ -13203,6 +15787,32 @@ ${snapPlacemarks}
         }, 900);
     }
 
+    // v2.90: flip "Show ALL missions" from the 👁 panel's dots checkbox.
+    // Same setting as the Control Panel toggle — mirror the change back to
+    // CP over the control channel (CP handles inbound SET_TOGGLE by writing
+    // its prefs without re-broadcasting), so the two never fight.
+    function mpvSetAllDots(v) {
+        v = !!v;
+        if (v === mpvAllOn) return;
+        mpvAllOn = v;
+        gmSet(CACHE_KEY_MPV_ALL, mpvAllOn);
+        try { mpvAllChanged(); } catch (e) { console.warn(`${TAG} [mpv] dots redraw failed:`, e); }
+        try {
+            if (controlChannel) controlChannel.postMessage({
+                type: 'SET_TOGGLE', scriptId: SCRIPT_ID, toggleId: 'preview-all',
+                value: v, enabled: v,
+            });
+        } catch (e) { console.warn(`${TAG} [mpv] dots CP sync failed:`, e); }
+    }
+
+    // Keep the open panel's dots checkbox honest when the setting changes
+    // elsewhere (Control Panel, or the same toggle in the other frame).
+    function mpvSyncDotsCheckbox() {
+        if (!mpv.panelEl) return;
+        const cb = mpv.panelEl.querySelector('input[data-mpv-alldots]');
+        if (cb && cb.checked !== mpvAllOn) cb.checked = mpvAllOn;
+    }
+
     // "Show ALL missions" toggled — fetch if the cache is cold, then redraw.
     function mpvAllChanged() {
         const sid = getCurrentSiteID();
@@ -13243,6 +15853,9 @@ ${snapPlacemarks}
             <div style="display:flex;gap:6px;padding:6px 10px;border-bottom:1px solid rgba(255,255,255,0.08);">
                 <button data-mpv-all style="${btnCss}">All</button>
                 <button data-mpv-none style="${btnCss}">None</button>
+                <label title="Show ALL missions as light nav/snap dots (no lines or labels) — same setting as the Control Panel's '👁 Show ALL missions'" style="display:flex;align-items:center;gap:4px;cursor:pointer;color:#e6e6e6;font-size:11px;align-self:center;">
+                    <input type="checkbox" data-mpv-alldots ${mpvAllOn ? 'checked' : ''} style="accent-color:#14d2dc;margin:0;">dots
+                </label>
                 <span style="flex:1;text-align:right;color:#9ad;font-size:10px;align-self:center;">hover a badge for step info</span>
             </div>
             <div data-mpv-list style="overflow:auto;padding:4px 0;"></div>`;
@@ -13251,6 +15864,8 @@ ${snapPlacemarks}
         try { makeDraggable(el, el.querySelector('[data-mpv-drag]')); } catch (e) {}
         el.addEventListener('click', mpvPanelClick);
         el.addEventListener('change', (e) => {
+            const dots = e.target && e.target.closest && e.target.closest('input[data-mpv-alldots]');
+            if (dots) { mpvSetAllDots(dots.checked); return; }
             const cb = e.target && e.target.closest && e.target.closest('input[data-mpv-mid]');
             if (!cb) return;
             const sid2 = getCurrentSiteID();
