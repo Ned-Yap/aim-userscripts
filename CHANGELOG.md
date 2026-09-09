@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-09 — ⚠ Fleet Tools v0.4: view filters + render caps — a 677-pair sweep can't flood the browser (latest — dev only, feature #250)
+
+First full sweep found 677 conflicting pairs (mostly duplicate/OFFLINE copies), so v0.4 adds display-side filters that slice the finished result instantly — no re-run: **Show FFZs / Flight paths / Assets** checkboxes (a conflict shows only when both its entity classes are on) and **client chips** derived from the site-name prefix ("Koch Fertilizer - Enid" → "Koch Fertilizer" — /sites/ carries no client field, so the naming convention is the grouping signal), toggleable per client with all/none shortcuts; a single enabled client still shows its cross-client conflicts (the dangerous kind). Hard safety caps: the panel lists at most the 400 closest pairs and the map draws at most the 300 closest pins, both sorted by filtered closest-distance with a "narrow the filters" note when capped. The 📋 report deliberately ignores the view filters — it stays the full record. All filter state persists.
+
 ## 2026-09-09 — ⚠ Fleet Tools v0.3: sweep results draw on the landing map (latest — dev only, feature #250)
 
 The sites-select page's own world map now shows the sweep: after a run (or on reload of a cached result), every conflicting site pair gets a pin at its closest approach — red for overlapping pairs, orange for near-misses — sitting above the "Multiple sites" bubbles. A 🎯 on each pair row flies the map to that spot and flashes the pin, and pins update live as sites are ⊘-turned off or back on. "Show on map" checkbox in the sweep config row (on by default). Map access uses the proven container-walk + full-method-set check; if the landing map is ever unreachable the pins fail loudly in console and the tables keep working.

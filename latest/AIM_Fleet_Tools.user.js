@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.3
+// @version      0.4
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.3';
+    const SCRIPT_VERSION = '0.4';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -94,7 +94,14 @@
     }
 
     function defaultCfg() {
-        return { thresholdFt: 200, marginFt: 500, classes: { ffz: true, fp: true, asset: true }, capPerPair: 200, onlyProduction: false, showOnMap: true };
+        return {
+            thresholdFt: 200, marginFt: 500, classes: { ffz: true, fp: true, asset: true },
+            capPerPair: 200, onlyProduction: false, showOnMap: true,
+            // Display-only view filters (never re-run the sweep): which
+            // conflict classes to SHOW, and which clients are toggled off.
+            view: { ffz: true, fp: true, asset: true },
+            clientsOff: {},
+        };
     }
     function loadCfg() {
         const d = defaultCfg();
@@ -105,6 +112,10 @@
             if (typeof s.capPerPair === 'number') d.capPerPair = s.capPerPair;
             if (typeof s.onlyProduction === 'boolean') d.onlyProduction = s.onlyProduction;
             if (typeof s.showOnMap === 'boolean') d.showOnMap = s.showOnMap;
+            if (s.view) NB_CLASSES.forEach(c => {
+                if (typeof s.view[c.key] === 'boolean') d.view[c.key] = s.view[c.key];
+            });
+            if (s.clientsOff && typeof s.clientsOff === 'object') d.clientsOff = s.clientsOff;
             if (s.classes) NB_CLASSES.forEach(c => {
                 if (typeof s.classes[c.key] === 'boolean') d.classes[c.key] = s.classes[c.key];
             });
@@ -734,9 +745,34 @@
         setStatus('sweep aborted');
     }
 
+    // Client is derived from the site-name prefix ("Koch Fertilizer - Enid"
+    // → "Koch Fertilizer") — /sites/ carries no client field (probe 2026-09-09),
+    // so the naming convention is the only grouping signal that exists.
+    function clientOf(name) {
+        const s = String(name || '');
+        const i = s.indexOf(' - ');
+        return (i > 0 ? s.slice(0, i) : s).trim() || '(unnamed)';
+    }
+
+    // View filters are DISPLAY-ONLY: they slice the finished sweep result
+    // for rendering (rows + map pins). The math and the 📋 report always
+    // carry everything.
+    function conflictInView(c) {
+        return !!(ftCfg.view[c.aCls] && ftCfg.view[c.bCls]);
+    }
+    function visibleConflicts(p) {
+        return (p.conflicts || []).filter(conflictInView);
+    }
+    function pairInView(p) {
+        if (ftIgnore[p.aId] || ftIgnore[p.bId]) return false;
+        // Hidden only when BOTH sides' clients are off — a single enabled
+        // client still shows its cross-client conflicts (the dangerous kind)
+        if (ftCfg.clientsOff[clientOf(p.aName)] && ftCfg.clientsOff[clientOf(p.bName)]) return false;
+        return visibleConflicts(p).length > 0;
+    }
     function visiblePairs() {
         if (!lastSweep || !lastSweep.pairs) return [];
-        return lastSweep.pairs.filter(p => !ftIgnore[p.aId] && !ftIgnore[p.bId]);
+        return lastSweep.pairs.filter(pairInView);
     }
 
     function buildSweepReport() {
@@ -747,10 +783,13 @@
         lines.push(`Ran ${lastSweep.at ? new Date(lastSweep.at).toLocaleString() : '—'} · threshold ${lastSweep.thresholdFt} ft (+${lastSweep.marginFt} ft prefilter margin) · classes: ${cls}${lastSweep.onlyProduction ? ' · Production-status sites only' : ''}`);
         lines.push(`${lastSweep.siteCount} sites → ${lastSweep.candidatePairs} candidate pair(s) → ${lastSweep.pairs.length} conflicting pair(s)`);
         if (lastSweep.error) lines.push(`SWEEP FAILED: ${lastSweep.error}`);
-        const vis = visiblePairs();
+        // The report deliberately IGNORES the panel's view filters (classes/
+        // clients) — it is the full record; only ⊘ turned-off sites are held
+        // out, and those are listed below.
+        const vis = lastSweep.pairs.filter(p => !ftIgnore[p.aId] && !ftIgnore[p.bId]);
         const hidden = lastSweep.pairs.length - vis.length;
         lines.push('');
-        lines.push(`Conflicting site pairs (${vis.length}${hidden ? ` shown — ${hidden} more hidden by turned-off sites` : ''}):`);
+        lines.push(`Conflicting site pairs (${vis.length}${hidden ? ` — ${hidden} more held out by turned-off sites` : ''}):`);
         vis.forEach((p, i) => {
             lines.push(`${i + 1}. ${p.aName} (#${p.aId}) ↔ ${p.bName} (#${p.bId}) — ${p.count}${p.capped ? '+' : ''} conflict(s), closest ${p.minFt === null ? '—' : (p.minFt === 0 ? 'OVERLAP' : `${p.minFt} ft`)}`);
             lines.push(`   ${siteSetupUrl(p.aId)}  ·  ${siteSetupUrl(p.bId)}`);
@@ -864,7 +903,9 @@
 
     function sweepPinsKey() {
         if (!lastSweep || !lastSweep.at) return 'none';
-        return `${lastSweep.at}:${visiblePairs().length}:${ftCfg.showOnMap}`;
+        return `${lastSweep.at}:${visiblePairs().length}:${ftCfg.showOnMap}`
+            + `:${NB_CLASSES.map(c => +ftCfg.view[c.key]).join('')}`
+            + `:${Object.keys(ftCfg.clientsOff).sort().join(',')}`;
     }
 
     function drawSweepPins(attempt) {
@@ -882,11 +923,17 @@
                 return;
             }
             ensureFtPane(map);
+            // Closest pairs win the pin budget — a cap keeps a 677-pair
+            // sweep from stuffing the landing map with SVG.
+            const PIN_CAP = 300;
+            const list = visiblePairs()
+                .map(p => ({ p, c: visibleConflicts(p)[0] }))
+                .filter(x => x.c)
+                .sort((a, b) => a.c.ft - b.c.ft);
+            if (list.length > PIN_CAP) console.log(`${TAG} ${list.length} visible pairs — drawing the ${PIN_CAP} closest pins (filter to see the rest)`);
             let drawn = 0;
-            visiblePairs().forEach(p => {
-                const c = p.conflicts && p.conflicts[0];   // closest conflict = the pair's pin
-                if (!c) return;
-                const color = p.minFt === 0 ? '#ff3d00' : '#ffa030';
+            list.slice(0, PIN_CAP).forEach(({ p, c }) => {
+                const color = c.overlap ? '#ff3d00' : '#ffa030';
                 try {
                     const halo = L.circleMarker([c.lat, c.lng], {
                         radius: 11, color, weight: 2, opacity: 0.75,
@@ -912,7 +959,7 @@
 
     function zoomToPair(key) {
         const p = lastSweep && lastSweep.pairs.find(x => `${x.aId}:${x.bId}` === key);
-        const c = p && p.conflicts && p.conflicts[0];
+        const c = p && (visibleConflicts(p)[0] || (p.conflicts && p.conflicts[0]));   // match the drawn pin
         const map = getLandingMap();
         if (!c || !map) return;
         try {
@@ -1041,10 +1088,37 @@
         rows.push(`<div style="padding:4px 10px;color:#aaa;border-bottom:1px solid #222834;">`
             + `Last run ${lastSweep.at ? new Date(lastSweep.at).toLocaleString() : '—'} · ${lastSweep.siteCount} sites → ${lastSweep.candidatePairs} candidate pair(s) → `
             + `<span style="color:${vis.length ? '#ff3d00' : '#5fff5f'};font-weight:bold">${vis.length} conflicting pair(s)</span>`
-            + (hidden ? ` <span style="color:#888">(+${hidden} hidden by turned-off sites)</span>` : '')
+            + (hidden ? ` <span style="color:#888">(+${hidden} hidden by view filters / turned-off sites)</span>` : '')
             + (lastSweep.skippedStatus && lastSweep.skippedStatus.length ? ` · <span style="color:#888">${lastSweep.skippedStatus.length} skipped (non-Production)</span>` : '')
             + (lastSweep.unchecked.length ? ` · <span style="color:#ffa030">${lastSweep.unchecked.length} UNCHECKED</span>` : '')
             + '</div>');
+        // View filters — display-only, instant, never re-run the sweep.
+        // The 📋 report always carries the full unfiltered data.
+        const vfBoxes = NB_CLASSES.map(c =>
+            `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;">`
+            + `<input type="checkbox" data-ft-view="${c.key}" ${ftCfg.view[c.key] ? 'checked' : ''}> ${c.label}</label>`).join(' ');
+        rows.push('<div style="padding:4px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + `<span style="color:#7adfe6">Show:</span> ${vfBoxes} <span style="color:#666">(display only — 📋 report keeps everything)</span></div>`);
+        // Client chips — one per name prefix, toggleable
+        const clientCounts = {};
+        lastSweep.pairs.forEach(p => {
+            if (ftIgnore[p.aId] || ftIgnore[p.bId]) return;
+            const ca = clientOf(p.aName), cb = clientOf(p.bName);
+            clientCounts[ca] = (clientCounts[ca] || 0) + 1;
+            if (cb !== ca) clientCounts[cb] = (clientCounts[cb] || 0) + 1;
+        });
+        const clientNames = Object.keys(clientCounts).sort((a, b) => a.localeCompare(b));
+        if (clientNames.length > 1) {
+            rows.push('<div style="padding:4px 10px;border-bottom:1px solid #222834;max-height:84px;overflow-y:auto;line-height:1.9;">'
+                + '<span style="color:#7adfe6">Clients:</span> '
+                + '<span data-ft-clients="all" style="cursor:pointer;color:#5fff5f">all</span> '
+                + '<span data-ft-clients="none" style="cursor:pointer;color:#ff5252">none</span> '
+                + clientNames.map(cl => {
+                    const off = !!ftCfg.clientsOff[cl];
+                    return `<span data-ft-client="${escapeHtml(cl)}" title="Toggle this client's pairs" style="cursor:pointer;border:1px solid ${off ? '#333' : '#7adfe655'};border-radius:3px;padding:0 5px;white-space:nowrap;color:${off ? '#555' : '#7adfe6'};">${escapeHtml(cl)} <span style="color:${off ? '#444' : '#888'}">${clientCounts[cl]}</span></span>`;
+                }).join(' ')
+                + '</div>');
+        }
         // turned-off chips
         const offIds = Object.keys(ftIgnore);
         if (offIds.length) {
@@ -1053,17 +1127,22 @@
                     + `<span data-ft-on="${id}" style="cursor:pointer;color:#5fff5f" title="Turn this site back on (re-run sweep to include it)">✕</span></span>`).join(' · ')
                 + '</div>');
         }
-        // pair rows
-        vis.forEach(p => {
+        // pair rows — sorted by the FILTERED closest distance, hard-capped
+        // so a 677-pair sweep can never flood the DOM
+        const ROW_CAP = 400;
+        const viewList = vis.map(p => ({ p, vc: visibleConflicts(p) }))
+            .sort((a, b) => a.vc[0].ft - b.vc[0].ft || b.vc.length - a.vc.length);
+        viewList.slice(0, ROW_CAP).forEach(({ p, vc }) => {
             const key = `${p.aId}:${p.bId}`;
             const open = expandedPair === key;
-            const minTxt = p.minFt === null ? '—' : (p.minFt === 0 ? 'OVERLAP' : `${p.minFt} ft`);
+            const min = vc[0];
+            const minTxt = min.overlap ? 'OVERLAP' : `${min.ft} ft`;
             const stTag = (st) => statusTag(st) ? ` <span style="color:#ffa030;border:1px solid #ffa03055;border-radius:3px;padding:0 3px;font-size:10px;" title="/sites/ status — not Production">${escapeHtml(st)}</span>` : '';
             rows.push(`<div class="aim-ft-row" data-ft-pair="${key}" style="padding:4px 10px;cursor:pointer;border-bottom:1px solid #1d2430;">`
-                + `${open ? '▾' : '▸'} <span style="color:${p.minFt === 0 ? '#ff3d00' : '#ffa030'};font-weight:bold">${minTxt}</span> `
+                + `${open ? '▾' : '▸'} <span style="color:${min.overlap ? '#ff3d00' : '#ffa030'};font-weight:bold">${minTxt}</span> `
                 + `${escapeHtml(p.aName)} <span style="color:#666">#${p.aId}</span>${stTag(p.aStatus)}`
                 + ` ↔ ${escapeHtml(p.bName)} <span style="color:#666">#${p.bId}</span>${stTag(p.bStatus)}`
-                + ` <span style="color:#888">— ${p.count}${p.capped ? '+' : ''} conflict(s)</span>`
+                + ` <span style="color:#888">— ${vc.length}${p.capped ? '+' : ''} conflict(s)</span>`
                 + ` <span data-ft-zoom="${key}" title="Fly the map to this conflict" style="cursor:pointer">🎯</span>`
                 + (p.aSrc === 'center' || p.bSrc === 'center' ? ' <span style="color:#ffa030" title="one side was prefiltered by bare site center — no snapshot">◦center</span>' : '')
                 + '</div>');
@@ -1073,15 +1152,18 @@
                     + ` · <a data-ft-link="${p.bId}" style="cursor:pointer;text-decoration:underline">open ${escapeHtml(p.bName)}</a>`
                     + ` · <span data-ft-off="${p.aId}" style="cursor:pointer;color:#ff5252" title="Turn off (duplicate/OFFLINE copy)">⊘ off ${escapeHtml(p.aName)}</span>`
                     + ` · <span data-ft-off="${p.bId}" style="cursor:pointer;color:#ff5252" title="Turn off (duplicate/OFFLINE copy)">⊘ off ${escapeHtml(p.bName)}</span></div>`
-                    + p.conflicts.slice(0, 60).map(c =>
+                    + vc.slice(0, 60).map(c =>
                         `<div style="padding:1px 0;">`
                         + `<span style="color:${c.overlap ? '#ff3d00' : '#ffa030'};font-weight:bold">${c.overlap ? 'OVERLAP' : `${c.ft} ft`}</span> `
                         + `${c.aCls.toUpperCase()} ${escapeHtml(c.aName)} ↔ ${c.bCls.toUpperCase()} ${escapeHtml(c.bName)}`
                         + ` <span style="color:#666">@ ${c.lat.toFixed(5)}, ${c.lng.toFixed(5)}</span></div>`).join('')
-                    + (p.count > 60 ? `<div style="color:#888">…and ${p.count - 60}${p.capped ? '+' : ''} more (full list via 📋 Copy report)</div>` : '')
+                    + (vc.length > 60 ? `<div style="color:#888">…and ${vc.length - 60}${p.capped ? '+' : ''} more (full list via 📋 Copy report)</div>` : '')
                     + '</div>');
             }
         });
+        if (viewList.length > ROW_CAP) {
+            rows.push(`<div style="padding:6px 10px;color:#ffa030">Showing the ${ROW_CAP} closest pairs of ${viewList.length} — narrow with the filters above, ⊘ off duplicate sites, or 📋 Copy report for everything.</div>`);
+        }
         if (!vis.length && !lastSweep.error) rows.push(`<div style="padding:6px 10px;color:#5fff5f">No site pairs conflict under ${lastSweep.thresholdFt} ft ✓</div>`);
         return rows.join('');
     }
@@ -1151,7 +1233,32 @@
 
             // Delegated — the body is rebuilt on every render, the root never is
             panelEl.addEventListener('click', (ev) => {
-                if (ev.target.closest('input[data-ft-class],input[data-ft-flag]')) return;   // checkbox → change handler
+                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-ft-view]')) return;   // checkbox → change handler
+                const clAll = ev.target.closest('[data-ft-clients]');
+                if (clAll) {
+                    if (clAll.getAttribute('data-ft-clients') === 'all') {
+                        ftCfg.clientsOff = {};
+                    } else if (lastSweep && lastSweep.pairs) {
+                        lastSweep.pairs.forEach(p => {
+                            ftCfg.clientsOff[clientOf(p.aName)] = true;
+                            ftCfg.clientsOff[clientOf(p.bName)] = true;
+                        });
+                    }
+                    saveCfg();
+                    renderPanel();
+                    drawSweepPins();
+                    return;
+                }
+                const clChip = ev.target.closest('[data-ft-client]');
+                if (clChip) {
+                    const cl = clChip.getAttribute('data-ft-client');
+                    if (ftCfg.clientsOff[cl]) delete ftCfg.clientsOff[cl];
+                    else ftCfg.clientsOff[cl] = true;
+                    saveCfg();
+                    renderPanel();
+                    drawSweepPins();
+                    return;
+                }
                 const act = ev.target.closest('[data-ft]');
                 if (act) {
                     const cmd = act.getAttribute('data-ft');
@@ -1242,6 +1349,17 @@
                         drawSweepPins();
                     } else {
                         setStatus(`${prop === 'onlyProduction' ? '"Production only"' : prop} ${flag.checked ? 'ON' : 'OFF'} — takes effect on the next sweep`);
+                    }
+                    return;
+                }
+                const vf = ev.target.closest('input[data-ft-view]');
+                if (vf) {
+                    const key = vf.getAttribute('data-ft-view');
+                    if (key in ftCfg.view) {
+                        ftCfg.view[key] = !!vf.checked;
+                        saveCfg();
+                        renderPanel();
+                        drawSweepPins();
                     }
                     return;
                 }
