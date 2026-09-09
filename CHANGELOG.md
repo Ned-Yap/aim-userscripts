@@ -12,6 +12,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-08 — 🏗 Site Setup Tools latest v4.256: Unshielded Site Builder — second live-stage round
+
+Second live Stage still had 8 pads split or outside, and the new gate detail showed two families: pad corners eroded at a profile edge, and whole pieces missing. Fixes: profile-edge vertices next to an asset no longer pull back at all (only seam vertices keep the half-gap floor); a ring whose inward offset inverts a notch is now cleaned into its real lobes (junk inversion loops filtered by size) instead of being dropped, and lobes cut by a narrow neck get a "lobe link" bridge; straddling pads are settled again after sliver cleanup; new gate "every asset-bearing region built a piece"; asset-gate lines now say which bands a pad straddled and where it was moved.
+
 ## 2026-09-08 — 🏗 Site Setup Tools latest v4.255: Unshielded Site Builder — first live-stage fixes
 
 First live Stage on a 19,700 ac site was stopped by the gates (8 pads split/outside — nothing written). Keyhole channels are now built deterministically (entry side chosen from the ring, hole walked to match) instead of trial-and-error, the slice fallback picks a cut line that misses every pad, a new **FFZ overlap** gate catches any hole that was neither keyholed nor sliced, the asset gate now names the pieces / gap involved, and a **Copy build report** button dumps pieces, gates, seams and the run log as text.

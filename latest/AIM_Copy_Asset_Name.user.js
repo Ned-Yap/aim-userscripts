@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.255
+// @version      4.256
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.255';
+    const SCRIPT_VERSION = '4.256';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -7659,6 +7659,19 @@
             return best && best.length >= 3 ? best : null;
         } catch (e) { console.warn(`${TAG} builder: ring clean threw:`, e); return null; }
     }
+    // Same, but returns EVERY outer ring the self-union produces (a pinched
+    // or figure-8 ring becomes its lobes instead of being thrown away).
+    function terUCleanRings(ring, minArea) {
+        const PC = terBPC();
+        if (!PC) return null;
+        try {
+            const r = ring.slice(); r.push(r[0].slice());
+            const res = PC.union([[r]]);
+            const out = [];
+            (res || []).forEach(poly => { const o = terBNormRing(poly[0]); if (o.length >= 3 && Math.abs(terBSignedArea(o)) >= (minArea || 0)) out.push(o); });
+            return out.length ? out : null;
+        } catch (e) { console.warn(`${TAG} builder: ring clean threw:`, e); return null; }
+    }
     // Segment intersection (lattice coords) → [x,y,tA] or null.
     function terUSegX(a, b, c, d) {
         const r1x = b[0] - a[0], r1y = b[1] - a[1], r2x = d[0] - c[0], r2y = d[1] - c[1];
@@ -7926,7 +7939,7 @@
         const labMax = new Float64Array(regInfo.length).fill(-Infinity);
         for (let i = 0; i < n; i++) { const l = lab[i]; if (l < 0 || nfzMask[i]) continue; const v = vals[i]; if (!isNaN(v) && v > labMax[l]) labMax[l] = v; }
         let straddled = 0;
-        assets.forEach((a, ai) => {
+        const straddlePass = () => assets.forEach((a, ai) => {
             if (a.px.length < 3) return;
             const buf = terBOffsetConvex(terBHull(a.px), padBufCells);
             const cells = [];
@@ -7937,14 +7950,17 @@
             labs.forEach(l => { const g = isFinite(labMax[l]) ? labMax[l] : regInfo[l].floorMSL - th.minAglFt; if (g > tf) { tf = g; tall = l; } });
             cells.forEach(i => { lab[i] = tall; nfzMask[i] = 0; });
             assetRegion[ai] = tall;
-            straddled++;
+            if (!a.straddle) straddled++;
             a.straddle = regInfo[tall].name;
+            a.straddleLabs = [...labs].map(l => regInfo[l].name).join('/');
         });
+        straddlePass();
         if (straddled) L(`${straddled} pad(s) straddle a band boundary → moved (with ${th.standoffFt + th.gapMinFt} ft margin) into the taller band`);
         // NFZ cells never under a pad
         assets.forEach((a, ai) => assetCellsOf[ai].forEach(i => { nfzMask[i] = 0; }));
         const specks = terUCleanSpecks(lab, w, h, Math.max(4, Math.round(th.absorbAc / dem.cellAcres)), assetSrc);
         if (specks) L(`${specks} sliver fragment(s) left by relabeling merged into their neighbor`);
+        straddlePass();   // cleanup can re-expose a seam under a pad — settle it again
         await terYield();
         regInfo.forEach(r => { r.assets = []; });
         assets.forEach((a, ai) => { if (assetRegion[ai] >= 0) regInfo[assetRegion[ai]].assets.push(ai); });
@@ -8000,7 +8016,7 @@
 
         // ---------- 7. rings → inward offset → keyhole → pieces ----------
         const ringPtsAndD = (ring, arcs, tolScale) => {
-            const P = [], D = [];
+            const P = [], D = [], S = [];
             for (const s of ring.arcSeq) {
                 const A = arcs[s.arc];
                 const pts = s.fwd ? A.simp : A.simp.slice().reverse();
@@ -8008,12 +8024,12 @@
                 for (let i = 0; i < pts.length; i++) {
                     const t = tl[i] * tolScale;
                     const d = A.seam ? t + gapD : t;
-                    if (i === 0 && P.length) { D[D.length - 1] = Math.max(D[D.length - 1], d); continue; }
-                    P.push(pts[i]); D.push(d);
+                    if (i === 0 && P.length) { D[D.length - 1] = Math.max(D[D.length - 1], d); S[S.length - 1] = S[S.length - 1] || A.seam; continue; }
+                    P.push(pts[i]); D.push(d); S.push(!!A.seam);
                 }
             }
-            while (P.length > 1 && P[0][0] === P[P.length - 1][0] && P[0][1] === P[P.length - 1][1]) { P.pop(); D.pop(); }
-            return { P, D };
+            while (P.length > 1 && P[0][0] === P[P.length - 1][0] && P[0][1] === P[P.length - 1][1]) { P.pop(); D.pop(); S.pop(); }
+            return { P, D, S };
         };
         const pieces = [];
         const pieceGrid = new Int16Array(n).fill(-1);
@@ -8038,18 +8054,45 @@
             const rings = topo.ringsByRegion.get(r.gi) || [];
             if (!rings.length) { L(`${r.name}: no boundary ring — skipped`); continue; }
             // 7a. raw (simplified) rings + classification: lobes vs holes by containment
-            const raw = rings.map(ring => { const { P, D } = ringPtsAndD(ring, topo.arcs, 1); return { P, D, area: Math.abs(terBSignedArea(P)) }; }).filter(x => x.P.length >= 3);
+            const raw = rings.map(ring => { const { P, D, S } = ringPtsAndD(ring, topo.arcs, 1); return { P, D, S, area: Math.abs(terBSignedArea(P)) }; }).filter(x => x.P.length >= 3);
             raw.sort((a, b2) => b2.area - a.area);
             raw.forEach((x, i) => { x.parent = -1; for (let j = 0; j < i; j++) { if (raw[j].parent === -1 && terUPip(x.P[0][0], x.P[0][1], raw[j].P)) { x.parent = j; break; } } });
-            // 7b. offset each ring (lobes shrink, holes grow) with a tolerance back-off on self-intersection
+            // 7b. offset each ring (lobes shrink, holes grow) with a tolerance back-off on
+            // self-intersection. Seam vertices never pull back less than half the gap;
+            // outer-edge vertices near assets may not pull back at all (a pad corner
+            // 3 ft from the profile edge must stay inside). A pinched/figure-8 result
+            // is split into its lobes rather than dropped. Returns an ARRAY of rings.
+            // Inward offsets invert every concave notch shorter than the offset
+            // distance into a tiny loop; the self-union removes them but leaves
+            // them as junk polygons (area ≲ (2·D)²). Real lobes (a neck cut by the
+            // gap) are bigger than that or hold an asset — keep those only.
+            const realLobes = (lobes, Dmax) => {
+                const minA = Math.max(4, 4 * Dmax * Dmax);
+                return lobes.filter(lb => Math.abs(terBSignedArea(lb)) >= minA || assets.some(a => terUPip(a.cx, a.cy, lb)));
+            };
             const offsetRing = (x, isHole) => {
                 for (let attempt = 0, scale = 1; attempt < 4; attempt++, scale /= 2) {
-                    const D = x.D.map(d => Math.max(gapD * 0.5, d * scale));
+                    const D = x.D.map((d, i) => x.S[i] ? Math.max(gapD * 0.5, d * scale) : d * scale);
+                    const Dmax = D.reduce((m2, v) => v > m2 ? v : m2, 0);
                     const off = terUOffsetAuto(x.P, D, isHole);
                     const bad = off.length <= 1500 && ringSelfIntersects(off.map(p => ({ lat: p[1], lng: p[0] })));
-                    if (!bad) return off;
-                    const cleaned = terUCleanRing(off);
-                    if (cleaned && Math.abs(terBSignedArea(cleaned)) > 0.5 * Math.abs(terBSignedArea(off))) return cleaned;
+                    if (!bad) return [off];
+                    const lobes = terUCleanRings(off, 1);
+                    if (!lobes || !lobes.length) continue;
+                    const real = realLobes(lobes, Dmax);
+                    if (!real.length) continue;
+                    if (real.length === 1) return real;
+                    // several real lobes touch at the cut neck — pull each back by the
+                    // gap and clean again so they end up ≥ gap apart
+                    const out = [];
+                    real.forEach(lb => {
+                        const o2 = terUOffsetAuto(lb, lb.map(() => gapD), isHole);
+                        const bad2 = o2.length <= 1500 && ringSelfIntersects(o2.map(p => ({ lat: p[1], lng: p[0] })));
+                        if (!bad2) { out.push(o2); return; }
+                        const l2 = terUCleanRings(o2, 1);
+                        if (l2) out.push(...realLobes(l2, gapD));
+                    });
+                    if (out.length) return out;
                 }
                 return null;
             };
@@ -8057,9 +8100,15 @@
             const finalRings = [];
             raw.forEach((lobe, li) => {
                 if (lobe.parent !== -1) return;
-                let cur = offsetRing(lobe, false);
-                if (!cur) { L(`${r.name}: a boundary ring self-intersects even at the tightest tolerance — ring dropped`); return; }
-                const holes = raw.filter(x => x.parent === li).map(x => offsetRing(x, true)).filter(Boolean);
+                const curs = offsetRing(lobe, false);
+                if (!curs) { L(`⚠ ${r.name}: a boundary ring (${lobe.P.length} verts) self-intersects even at the tightest tolerance — ring DROPPED`); return; }
+                if (curs.length > 1) L(`${r.name}: a pinched ring split into ${curs.length} lobes`);
+                const holesAll = [];
+                raw.filter(x => x.parent === li).forEach(x => { const hs = offsetRing(x, true); if (hs) holesAll.push(...hs); else L(`⚠ ${r.name}: a hole ring could not be offset — hole IGNORED (check the overlap gate)`); });
+                curs.forEach((cur0, ci) => {
+                let cur = cur0;
+                // holes belong to the lobe that contains them
+                const holes = holesAll.filter(hh => terUPip(hh[0][0], hh[0][1], cur0));
                 const leftover = [];
                 for (const hole of holes) {
                     // shortest asset-free channel from the hole to the current outer ring
@@ -8134,6 +8183,7 @@
                     finalRings.push(terUOffsetAuto(lat, lat.map(() => gapD), false));
                 });
                 usedSlice += leftover.length;
+                });
             });
             keyholes += usedKeyhole; sliced += usedSlice;
             finalRings.forEach((ringPts, pi) => {
@@ -8308,6 +8358,36 @@
                 });
             });
         });
+        // Lobes of ONE region (a neck narrower than the smoothing gap was cut) share
+        // no seam arc, so bridge them at their closest points.
+        let lobeBridges = 0;
+        for (let i = 0; i < pieces.length; i++) for (let j = i + 1; j < pieces.length; j++) {
+            if (pieces[i].region !== pieces[j].region) continue;
+            const A = pieces[i].latticePts, B = pieces[j].latticePts;
+            let best = null;
+            const sa = Math.max(1, Math.floor(A.length / 600)), sb = Math.max(1, Math.floor(B.length / 600));
+            for (let a = 0; a < A.length; a += sa) for (let b2 = 0; b2 < B.length; b2 += sb) {
+                const d = Math.hypot(A[a][0] - B[b2][0], A[a][1] - B[b2][1]);
+                if (!best || d < best.d) best = { d, pa: A[a], pb: B[b2] };
+            }
+            if (!best || best.d > ftToCells(th.bridgeMergeFt)) continue;
+            let ux = best.pb[0] - best.pa[0], uy = best.pb[1] - best.pa[1];
+            const lu = Math.hypot(ux, uy) || 1; ux /= lu; uy /= lu;
+            let placed = null;
+            for (const insFt of insetTry) {
+                const ins = ftToCells(insFt);
+                const pA = [best.pa[0] - ux * ins, best.pa[1] - uy * ins], pB = [best.pb[0] + ux * ins, best.pb[1] + uy * ins];
+                if (pieceAt(pA[0], pA[1]) === i && pieceAt(pB[0], pB[1]) === j) { placed = { pA, pB }; break; }
+            }
+            if (!placed) { bridgeSkipped++; continue; }
+            const PA = pieces[i], PB = pieces[j];
+            if (PA.floorMSL == null || PB.floorMSL == null) continue;
+            const fl = Math.max(PA.floorMSL, PB.floorMSL), ce = Math.min(PA.ceilMSL, PB.ceilMSL);
+            if (ce - fl < th.bridgeMinOverlapFt) { bridgeSkipped++; continue; }
+            bridges.push({ name: `BR ${PA.name}-${PB.name} ${bridges.length + 1}`, a: i, b: j, why: 'lobe link', waypoints: [placed.pA, placed.pB].map(p => terBLatticeToLL(dem, p[0], p[1])), arcs: [{ lo: fl, hi: ce }], staircase: false, bandFt: ce - fl, selected: true });
+            lobeBridges++;
+        }
+        if (lobeBridges) L(`${lobeBridges} lobe link(s) bridge pieces of one region that a narrow neck split`);
         if (bridgeSkipped) L(`${bridgeSkipped} bridge candidate(s) skipped — no room to land both waypoints inside their FFZs`);
 
         // ---------- 10. seams summary ----------
@@ -8351,11 +8431,13 @@
                     assetCellsOf[ai].forEach(i => { if (pieceGrid[i] === -1) { if (lab[i] < 0) off++; else gap++; } });
                     why = `partly outside every FFZ (${gap} cell(s) in a seam/keyhole gap, ${off} outside the profiled area${names.length ? `; rest in ${names.join('/')}` : ''})`;
                 } else why = `split across ${names.join(' / ')}`;
-                aBad.push(`${a.name}: ${why}`);
+                aBad.push(`${a.name}: ${why}${a.straddle ? ` · straddled ${a.straddleLabs} → ${a.straddle}` : ` · region ${assetRegion[ai] >= 0 ? regInfo[assetRegion[ai]].name : '?'}`}`);
             } else if (inNfz) aBad.push(`${a.name}: under an NFZ`);
             a.piece = vset.size === 1 ? [...vset][0] : -1;
         });
         gates.push({ ok: !aBad.length, label: aBad.length ? `${aBad.length} asset(s) not cleanly inside one FFZ` : `all ${assets.length} assets inside exactly one FFZ`, detail: aBad.slice(0, 12) });
+        const missing = regInfo.filter(r => r.keep && !r.dropped && r.absorbedInto < 0 && r.assets.length && !pieces.some(p => p.region === r.gi));
+        gates.push({ ok: !missing.length, label: missing.length ? `${missing.length} asset-bearing region(s) produced no FFZ piece (see log)` : 'every asset-bearing region built a piece', detail: missing.map(r => `${r.name}: ${r.assets.length} asset(s), ${Math.round(r.cells * dem.cellAcres)} ac`) });
         gates.push({ ok: !pieces.some(p => p.selected && p.infeasible), label: pieces.some(p => p.infeasible) ? `${pieces.filter(p => p.infeasible).length} infeasible piece(s) (deselected)` : 'all pieces feasible for the AGL band' });
         // reachability over pieces + bridges
         const padj = new Map(); pieces.forEach((p, pi) => padj.set(pi, new Set()));
