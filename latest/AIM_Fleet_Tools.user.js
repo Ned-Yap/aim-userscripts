@@ -1,15 +1,16 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.2
+// @version      0.3
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        unsafeWindow
 // @run-at       document-end
 // ==/UserScript==
 
@@ -31,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.2';
+    const SCRIPT_VERSION = '0.3';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -93,7 +94,7 @@
     }
 
     function defaultCfg() {
-        return { thresholdFt: 200, marginFt: 500, classes: { ffz: true, fp: true, asset: true }, capPerPair: 200, onlyProduction: false };
+        return { thresholdFt: 200, marginFt: 500, classes: { ffz: true, fp: true, asset: true }, capPerPair: 200, onlyProduction: false, showOnMap: true };
     }
     function loadCfg() {
         const d = defaultCfg();
@@ -103,6 +104,7 @@
             if (typeof s.marginFt === 'number') d.marginFt = s.marginFt;
             if (typeof s.capPerPair === 'number') d.capPerPair = s.capPerPair;
             if (typeof s.onlyProduction === 'boolean') d.onlyProduction = s.onlyProduction;
+            if (typeof s.showOnMap === 'boolean') d.showOnMap = s.showOnMap;
             if (s.classes) NB_CLASSES.forEach(c => {
                 if (typeof s.classes[c.key] === 'boolean') d.classes[c.key] = s.classes[c.key];
             });
@@ -718,6 +720,7 @@
             if (seq === sweepSeq) {
                 sweepRunning = false;
                 renderPanel();
+                drawSweepPins();
             }
         }
     }
@@ -781,6 +784,148 @@
     }
 
     // ==================================================================
+    // Landing-map integration — the sites-select page has its own Leaflet
+    // world map (#pr-sites-select-map, top frame; live-probed 2026-09-09).
+    // Sweep results draw on it as conflict pins: red = OVERLAP pair,
+    // orange = near-miss pair; 🎯 on a pair row flies the map there.
+    // ==================================================================
+    function getL() {
+        // With @grant, the sandbox's own L draws invisibly — always prefer
+        // the page's real L on unsafeWindow (engraved lesson, AIM Issues).
+        try {
+            const realWin = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+            if (realWin && realWin.L) return realWin.L;
+            if (window.L) return window.L;
+        } catch (e) {}
+        return null;
+    }
+
+    function looksLikeLeafletMap(v) {
+        // Full method set required — do NOT relax (partial matches latch
+        // onto Leaflet helpers that lack methods we need).
+        return v && typeof v === 'object'
+            && typeof v.latLngToLayerPoint === 'function'
+            && typeof v.latLngToContainerPoint === 'function'
+            && typeof v.layerPointToLatLng === 'function'
+            && typeof v.distance === 'function'
+            && typeof v.getContainer === 'function';
+    }
+
+    let landingMapRef = null;
+    function getLandingMap() {
+        if (landingMapRef && landingMapRef._container && document.body.contains(landingMapRef._container)) {
+            return landingMapRef;
+        }
+        landingMapRef = null;
+        // The landing map exists before we run, so the prototype-hook trick
+        // wouldn't have stamped it — walk container properties instead.
+        const containers = [document.getElementById('pr-sites-select-map'), ...document.querySelectorAll('.leaflet-container')];
+        for (const container of containers) {
+            if (!container) continue;
+            const candidates = [container.__aim_map__, container._leaflet_map, container._leaflet];
+            for (const c of candidates) {
+                if (looksLikeLeafletMap(c)) { landingMapRef = c; return c; }
+            }
+            for (const k in container) {
+                try {
+                    const v = container[k];
+                    if (looksLikeLeafletMap(v)) { landingMapRef = v; return v; }
+                } catch (e) {}
+            }
+        }
+        return null;
+    }
+
+    const FT_PANE = 'aim-ft-pins';
+    function ensureFtPane(map) {
+        if (!map || map._aim_ft_pane) return;
+        try {
+            if (typeof map.createPane !== 'function') return;
+            // Above the landing map's site-name markers (600) so a conflict
+            // pin is never buried under a "Multiple sites" bubble.
+            const p = map.createPane(FT_PANE);
+            if (p) { p.style.zIndex = 640; p.style.pointerEvents = 'none'; }
+            map._aim_ft_pane = true;
+        } catch (e) { console.warn(`${TAG} ensureFtPane failed:`, e); }
+    }
+
+    let mapPinLayers = [];
+    const pinByPairKey = {};   // "aId:bId" → halo layer (for flash-on-zoom)
+    let pinsKey = null;        // what the current pins represent — stops redraw loops
+    let pinDrawSeq = 0;
+
+    function clearSweepPins() {
+        const map = getLandingMap();
+        mapPinLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        mapPinLayers = [];
+        Object.keys(pinByPairKey).forEach(k => delete pinByPairKey[k]);
+        pinsKey = null;
+    }
+
+    function sweepPinsKey() {
+        if (!lastSweep || !lastSweep.at) return 'none';
+        return `${lastSweep.at}:${visiblePairs().length}:${ftCfg.showOnMap}`;
+    }
+
+    function drawSweepPins(attempt) {
+        const seq = ++pinDrawSeq;
+        clearSweepPins();
+        if (!onLandingPage()) return;   // pinsKey stays null → redrawn on return to landing
+        if (!ftCfg.showOnMap || !lastSweep || !lastSweep.at) { pinsKey = sweepPinsKey(); return; }
+        const tryDraw = (n) => {
+            if (seq !== pinDrawSeq) return;
+            const map = getLandingMap();
+            const L = getL();
+            if (!map || !L) {
+                if (n < 30) setTimeout(() => tryDraw(n + 1), 700);
+                else console.warn(`${TAG} landing map never found — sweep pins not drawn (tables still work)`);
+                return;
+            }
+            ensureFtPane(map);
+            let drawn = 0;
+            visiblePairs().forEach(p => {
+                const c = p.conflicts && p.conflicts[0];   // closest conflict = the pair's pin
+                if (!c) return;
+                const color = p.minFt === 0 ? '#ff3d00' : '#ffa030';
+                try {
+                    const halo = L.circleMarker([c.lat, c.lng], {
+                        radius: 11, color, weight: 2, opacity: 0.75,
+                        fillColor: color, fillOpacity: 0.15,
+                        interactive: false, bubblingMouseEvents: false, pane: FT_PANE,
+                    });
+                    const core = L.circleMarker([c.lat, c.lng], {
+                        radius: 3.5, color, weight: 1, opacity: 1,
+                        fillColor: color, fillOpacity: 1,
+                        interactive: false, bubblingMouseEvents: false, pane: FT_PANE,
+                    });
+                    halo.addTo(map); core.addTo(map);
+                    mapPinLayers.push(halo, core);
+                    pinByPairKey[`${p.aId}:${p.bId}`] = halo;
+                    drawn++;
+                } catch (e) { console.warn(`${TAG} pin draw failed for pair ${p.aId}:${p.bId}:`, e); }
+            });
+            pinsKey = sweepPinsKey();
+            if (drawn) console.log(`${TAG} drew ${drawn} conflict pin(s) on the landing map`);
+        };
+        tryDraw(attempt || 0);
+    }
+
+    function zoomToPair(key) {
+        const p = lastSweep && lastSweep.pairs.find(x => `${x.aId}:${x.bId}` === key);
+        const c = p && p.conflicts && p.conflicts[0];
+        const map = getLandingMap();
+        if (!c || !map) return;
+        try {
+            map.setView([c.lat, c.lng], Math.max(map.getZoom ? map.getZoom() : 4, 15));
+            const halo = pinByPairKey[key];
+            if (halo) {
+                halo.setStyle({ weight: 6, opacity: 1 });
+                setTimeout(() => { try { halo.setStyle({ weight: 2, opacity: 0.75 }); } catch (e) {} }, 1400);
+            }
+        } catch (e) { console.warn(`${TAG} zoom-to-pair failed:`, e); }
+    }
+
+    // ==================================================================
     // 📊 Fleet Metrics (bones) — per-site counts straight from the index
     // ==================================================================
     function buildMetricsRows() {
@@ -827,6 +972,11 @@
         if (!want) {
             if (buttonEl) buttonEl.style.display = 'none';
             if (panelEl && !sweepRunning) panelEl.style.display = 'none';
+            // SPA nav destroyed the landing map with our pins on it — drop
+            // the dead refs so a return to landing redraws from scratch
+            if (mapPinLayers.length) { mapPinLayers = []; Object.keys(pinByPairKey).forEach(k => delete pinByPairKey[k]); }
+            pinsKey = null;
+            landingMapRef = null;
             return;
         }
         if (!buttonEl) {
@@ -843,6 +993,9 @@
             console.log(`${TAG} landing page detected — Fleet Tools button placed`);
         }
         buttonEl.style.display = 'block';
+        // Keep the map pins current: covers the first draw of a GM-cached
+        // sweep on page load AND the redraw after returning from a site
+        if (pinsKey !== sweepPinsKey()) drawSweepPins();
     }
 
     function sectionHeader(key, icon, label, extra) {
@@ -867,6 +1020,8 @@
             + cls
             + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Skip sites whose /sites/ status is not 'Production' — where duplicate/OFFLINE copies should live if statuses are maintained">`
             + `<input type="checkbox" data-ft-flag="onlyProduction" ${ftCfg.onlyProduction ? 'checked' : ''} ${sweepRunning ? 'disabled' : ''}> Production only</label>`
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Draw a pin on the landing map at each conflicting pair's closest approach">`
+            + `<input type="checkbox" data-ft-flag="showOnMap" ${ftCfg.showOnMap ? 'checked' : ''}> Show on map</label>`
             + '</div>');
         // action row
         rows.push('<div style="padding:6px 10px;display:flex;gap:14px;flex-wrap:wrap;border-bottom:1px solid #222834;">'
@@ -909,6 +1064,7 @@
                 + `${escapeHtml(p.aName)} <span style="color:#666">#${p.aId}</span>${stTag(p.aStatus)}`
                 + ` ↔ ${escapeHtml(p.bName)} <span style="color:#666">#${p.bId}</span>${stTag(p.bStatus)}`
                 + ` <span style="color:#888">— ${p.count}${p.capped ? '+' : ''} conflict(s)</span>`
+                + ` <span data-ft-zoom="${key}" title="Fly the map to this conflict" style="cursor:pointer">🎯</span>`
                 + (p.aSrc === 'center' || p.bSrc === 'center' ? ' <span style="color:#ffa030" title="one side was prefiltered by bare site center — no snapshot">◦center</span>' : '')
                 + '</div>');
             if (open) {
@@ -1019,6 +1175,11 @@
                     }
                     return;
                 }
+                const zoom = ev.target.closest('[data-ft-zoom]');
+                if (zoom) {
+                    zoomToPair(zoom.getAttribute('data-ft-zoom'));
+                    return;   // don't also toggle the pair row open/closed
+                }
                 const sec = ev.target.closest('[data-ft-sec]');
                 if (sec) {
                     const k = sec.getAttribute('data-ft-sec');
@@ -1038,6 +1199,7 @@
                     saveIgnore();
                     console.log(`${TAG} site ${id} turned OFF (remembered for ${ENV_LABEL}) — its pairs are hidden; next sweep skips it entirely`);
                     renderPanel();
+                    drawSweepPins();
                     return;
                 }
                 const on = ev.target.closest('[data-ft-on]');
@@ -1048,6 +1210,7 @@
                     console.log(`${TAG} site ${id} turned back ON — re-run the sweep to include it`);
                     setStatus(`${siteName(id)} turned back on — re-run the sweep to include it`);
                     renderPanel();
+                    drawSweepPins();
                     return;
                 }
                 const pair = ev.target.closest('[data-ft-pair]');
@@ -1074,7 +1237,12 @@
                     const prop = flag.getAttribute('data-ft-flag');
                     ftCfg[prop] = !!flag.checked;
                     saveCfg();
-                    setStatus(`${prop === 'onlyProduction' ? '"Production only"' : prop} ${flag.checked ? 'ON' : 'OFF'} — takes effect on the next sweep`);
+                    if (prop === 'showOnMap') {
+                        setStatus(`map pins ${flag.checked ? 'ON' : 'OFF'}`);
+                        drawSweepPins();
+                    } else {
+                        setStatus(`${prop === 'onlyProduction' ? '"Production only"' : prop} ${flag.checked ? 'ON' : 'OFF'} — takes effect on the next sweep`);
+                    }
                     return;
                 }
                 const cb = ev.target.closest('input[data-ft-class]');

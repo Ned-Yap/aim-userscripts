@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-09 — ⚠ Fleet Tools v0.3: sweep results draw on the landing map (latest — dev only, feature #250)
+
+The sites-select page's own world map now shows the sweep: after a run (or on reload of a cached result), every conflicting site pair gets a pin at its closest approach — red for overlapping pairs, orange for near-misses — sitting above the "Multiple sites" bubbles. A 🎯 on each pair row flies the map to that spot and flashes the pin, and pins update live as sites are ⊘-turned off or back on. "Show on map" checkbox in the sweep config row (on by default). Map access uses the proven container-walk + full-method-set check; if the landing map is ever unreachable the pins fail loudly in console and the tables keep working.
+
 ## 2026-09-09 — ⚠ Fleet Tools v0.2: landing-page recon folded in — site status filter (latest — dev only, feature #250)
 
 The landing-page probe (ShortKeys/AIM_Landing_Probe.js) confirmed v0.1's assumptions: the sites-select page is top-frame at `#/`, the Control Panel answers the PAT request there, and `/sites/` carries `location` centers on 444/445 sites — so the center fallback already worked as shipped. It also revealed a `status` field (`"Production"`…): v0.2 surfaces status everywhere — orange tags on non-Production sites in pair rows, a Status column + CSV field in 📊 Fleet Metrics, and an optional **Production only** sweep filter (off by default until the status vocabulary is confirmed; the console logs the distinct statuses + counts on first fetch). If duplicate/OFFLINE copies carry a non-Production status, that one checkbox replaces manual ⊘-off curation. Skipped sites are counted in the summary and listed in the report — never silently dropped.
