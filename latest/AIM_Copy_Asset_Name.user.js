@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.268
+// @version      4.269
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.268';
+    const SCRIPT_VERSION = '4.269';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -6367,6 +6367,19 @@
         try { elevGmSet(TER_THRESH_KEY, JSON.stringify(terThresholds)); }
         catch (e) { console.warn(`${TAG} saveTerThresholds threw:`, e); }
     }
+    // Single-key read-modify-write. The script runs in TWO frames (top + map
+    // iframe); a Control Panel echo landing in the stale frame used to save that
+    // frame's whole object and clobber the other frame's values (the smoothing
+    // defaults reverted on every page load, 2026-09-09).
+    function saveTerThresholdKey(key, value) {
+        try {
+            let stored = {};
+            try { const raw = elevGmGet(TER_THRESH_KEY, null); if (raw) stored = JSON.parse(raw) || {}; } catch (e) { stored = {}; }
+            stored[key] = value;
+            if (!(stored.tunedV >= TER_THRESH_DEFAULTS.tunedV)) stored.tunedV = terThresholds.tunedV;
+            elevGmSet(TER_THRESH_KEY, JSON.stringify(stored));
+        } catch (e) { console.warn(`${TAG} saveTerThresholdKey threw:`, e); }
+    }
     function loadTerEnabled() {
         const out = { ...TER_ENABLE_DEFAULTS };
         try {
@@ -8375,6 +8388,56 @@
             pending = pending.filter(e => !e.dead);
         }
         if (detours) L(`${detours} pad(s) folded into their piece / carved out of the neighbor by a seam detour`);
+        // ---- out-of-band carve: ground inside a piece that belongs to another band
+        // becomes GAP (user rule 2026-09-09: "red should be gap, not absorbed"). Each
+        // patch ≥ 20 cells is removed by its convex hull so the cut stays straight. ----
+        if (PC2) {
+            let carved = 0, carvedAc = 0;
+            const closeRing3 = (r2) => { const q = r2.map(p => p.slice()); if (q[0][0] !== q[q.length - 1][0] || q[0][1] !== q[q.length - 1][1]) q.push(q[0].slice()); return q; };
+            const seen = new Uint8Array(n);
+            for (let k = 0; k < pending.length; k++) {
+                const e = pending[k];
+                if (e.dead) continue;
+                const outs = [];
+                terUFill(e.ringPts, w, h, (i) => { if (lab[i] !== e.r.gi) outs.push(i); });
+                if (outs.length < 20) continue;
+                const outSet = new Set(outs);
+                seen.fill(0);
+                const blobs = [];
+                for (const s0 of outs) {
+                    if (seen[s0]) continue;
+                    const blob = []; const st2 = [s0]; seen[s0] = 1;
+                    while (st2.length) {
+                        const i = st2.pop(); blob.push(i);
+                        const x = i % w, y = (i / w) | 0;
+                        for (const j of [i - 1, i + 1, i - w, i + w]) {
+                            if (j < 0 || j >= n || seen[j] || !outSet.has(j)) continue;
+                            const jx = j % w; if (Math.abs(jx - x) > 1) continue;
+                            seen[j] = 1; st2.push(j);
+                        }
+                    }
+                    if (blob.length >= 20 && !blob.some(i => assetSrc[i])) blobs.push(blob);
+                }
+                if (!blobs.length) continue;
+                let mp = [[closeRing3(e.ringPts)]];
+                for (const blob of blobs) {
+                    const corners = [];
+                    blob.forEach(i => { const x = i % w, y = (i / w) | 0; corners.push([x, y], [x + 1, y], [x, y + 1], [x + 1, y + 1]); });
+                    const hull = terBOffsetConvex(terBHull(corners), gapD);
+                    try { const res = PC2.difference(mp, [[closeRing3(hull)]]); if (res && res.length) { mp = res; carved++; carvedAc += blob.length * dem.cellAcres; } } catch (e2) { console.warn(`${TAG} builder: out-of-band carve threw:`, e2); }
+                }
+                const polys = mp.map(poly => terBNormRing(poly[0])).filter(o => o.length >= 3).sort((p1, p2) => Math.abs(terBSignedArea(p2)) - Math.abs(terBSignedArea(p1)));
+                if (!polys.length) { e.dead = true; continue; }
+                e.ringPts = polys[0];
+                for (let x2 = 1; x2 < polys.length; x2++) {
+                    let cellsIn = 0; terUFill(polys[x2], w, h, () => { cellsIn++; });
+                    const holdsPad = assets.some(a2 => terUPip(a2.cx, a2.cy, polys[x2]));
+                    if (cellsIn >= 20 || holdsPad) pending.push({ r: e.r, ringPts: polys[x2], pi: e.pi, nRings: e.nRings + 1, usedKeyhole: 0, lobeOf: e.r.name });
+                }
+            }
+            pending = pending.filter(e => !e.dead);
+            if (carved) L(`${carved} out-of-band patch(es) (${Math.round(carvedAc)} ac of neighbor-band ground) carved out as gap`);
+        }
         // names: pieces of one region get letters only when there are several
         const perRegion = new Map();
         pending.forEach(e => { perRegion.set(e.r.gi, (perRegion.get(e.r.gi) || 0) + 1); });
@@ -9077,6 +9140,7 @@
             return true;
         }
         if (e.target.closest('[data-ter-stage]')) {
+            { const fresh = loadTerThresholds(); for (const k in fresh) if (!(k in TER_THRESH_DEFAULTS) || typeof fresh[k] === typeof terThresholds[k]) terThresholds[k] = fresh[k]; }
             wrap.querySelectorAll('[data-ter-p]').forEach(inp => {
                 const k = inp.getAttribute('data-ter-p');
                 if (!(k in TER_THRESH_DEFAULTS)) return;
@@ -9172,7 +9236,7 @@
             if (msg.value === terThresholds[id]) return;
             if (/^(tolNearFt|tolFarFt|smoothNearFt|smoothFarFt|gapMinFt)$/.test(id)) console.log(`${TAG} profiler threshold ${id}: ${terThresholds[id]} → ${msg.value} (Control Panel toggle "${msg.toggleId}")`);
             terThresholds[id] = msg.value;
-            saveTerThresholds();
+            saveTerThresholdKey(id, msg.value);
             if (id === 'opacity' && terLayer && typeof terLayer.setOpacity === 'function') {
                 try { terLayer.setOpacity(msg.value); } catch (e) {}
             }
