@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.266
+// @version      4.267
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.266';
+    const SCRIPT_VERSION = '4.267';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -6306,12 +6306,12 @@
         opacity: 0.55,    // overlay opacity
         namePrefix: 'FFZ ', // Build: created-FFZ name prefix (string)
         // Unshielded Site Builder (#254) — see the 🏗 block below
-        gapMinFt: 10,           // seam gap near assets
-        smoothNearFt: 200,      // ≤ this far from an asset: near tolerance (seam hugs the terrain)
-        smoothFarFt: 1200,      // ≥ this far: far tolerance (linear ramp between)
-        tolNearFt: 25,          // simplification tolerance near assets (~¾ DEM cell: collapses stair-steps)
-        tolFarFt: 600,          // simplification tolerance far from assets (gap = 2·tol + gapMin ≈ 1,200 ft in the open)
-        tunedV: 2,              // defaults revision — stored older values are migrated in loadTerThresholds
+        gapMinFt: 50,           // seam gap between FFZs
+        smoothNearFt: 300,      // ≤ this far from an asset: near tolerance
+        smoothFarFt: 1500,      // ≥ this far: far tolerance (linear ramp between)
+        tolNearFt: 150,         // simplification tolerance near assets (pads get their own detour)
+        tolFarFt: 2000,         // simplification tolerance far from assets — straight edges thousands of feet long
+        tunedV: 3,              // defaults revision — stored older values are migrated in loadTerThresholds
         standoffFt: 15,         // pad buffer for straddle bends (SOP FFZ→asset standoff)
         pitAbsorbMaxAglFt: 250, // warn when an absorbed pit's low spot sits deeper than this under the floor
         bridgeMergeFt: 500,     // bridge candidates closer than this merge
@@ -6334,6 +6334,7 @@
         floorP95: false,  // floor ref = P95 elevation instead of true max
         deleteOldFfz: true, // Build: delete pre-existing FFZs after the new set verifies
         deleteOldFp: true,  // Build: delete pre-existing flight paths after the new set verifies
+        absorbBumps: true,  // Build: bump islands holding assets are absorbed (parent floor rises) instead of becoming keyholed islands
     };
     function loadTerThresholds() {
         const out = { ...TER_THRESH_DEFAULTS };
@@ -6349,12 +6350,14 @@
                 // v4.262: smoothing defaults changed (tol 0/250 → 25/600, ramp 300/1500 →
                 // 200/1200) after the first live builds — lift stored copies of the OLD
                 // defaults once; values the user changed themselves are kept.
-                if (!(o.tunedV >= 2)) {
-                    if (o.tolNearFt === 0 || o.tolNearFt === undefined) out.tolNearFt = TER_THRESH_DEFAULTS.tolNearFt;
-                    if (o.tolFarFt === 250 || o.tolFarFt === undefined) out.tolFarFt = TER_THRESH_DEFAULTS.tolFarFt;
-                    if (o.smoothNearFt === 300 || o.smoothNearFt === undefined) out.smoothNearFt = TER_THRESH_DEFAULTS.smoothNearFt;
-                    if (o.smoothFarFt === 1500 || o.smoothFarFt === undefined) out.smoothFarFt = TER_THRESH_DEFAULTS.smoothFarFt;
-                    out.tunedV = 2;
+                if (!(o.tunedV >= 3)) {
+                    // v4.267 "simple shapes" defaults: lift every stored copy of an earlier default
+                    if ([0, 25, undefined].includes(o.tolNearFt)) out.tolNearFt = TER_THRESH_DEFAULTS.tolNearFt;
+                    if ([250, 600, undefined].includes(o.tolFarFt)) out.tolFarFt = TER_THRESH_DEFAULTS.tolFarFt;
+                    if ([200, 300, undefined].includes(o.smoothNearFt)) out.smoothNearFt = TER_THRESH_DEFAULTS.smoothNearFt;
+                    if ([1200, 1500, undefined].includes(o.smoothFarFt)) out.smoothFarFt = TER_THRESH_DEFAULTS.smoothFarFt;
+                    if ([10, undefined].includes(o.gapMinFt)) out.gapMinFt = TER_THRESH_DEFAULTS.gapMinFt;
+                    out.tunedV = 3;
                 }
             }
         } catch (e) { console.warn(`${TAG} loadTerThresholds threw:`, e); }
@@ -7907,13 +7910,14 @@
             r.isIsland = true;
             r.dir = r.band > regInfo[parent].band ? 'bump' : (r.band < regInfo[parent].band ? 'pit' : 'mixed');
             if (r.assets.length) {
-                if (r.dir === 'pit') {
-                    // absorb upward into the parent
+                if (r.dir === 'pit' || terEnabled.absorbBumps) {
+                    // absorb into the parent: a pit only adds AGL; a bump raises the
+                    // parent's recomputed floor (simple shapes beat a keyholed island)
                     r.absorbedInto = parent;
                     regInfo[parent].assets.push(...r.assets);
                     r.assets.forEach(ai => { assetRegion[ai] = parent; });
                     for (let i = 0; i < n; i++) if (lab[i] === r.gi) lab[i] = parent;
-                    L(`${r.name}: pit island with ${r.assets.length} asset(s) → absorbed into ${regInfo[parent].name} (higher floor, extra AGL accepted)`);
+                    L(`${r.name}: ${r.dir} island with ${r.assets.length} asset(s) → absorbed into ${regInfo[parent].name}${r.dir === 'pit' ? ' (higher floor, extra AGL accepted)' : ' (parent floor rises to clear it)'}`);
                 } else {
                     L(`${r.name}: ${r.dir} island with ${r.assets.length} asset(s) → own FFZ inside ${regInfo[parent].name} (keyhole)`);
                 }
@@ -7942,7 +7946,7 @@
                 cells.forEach(i => { nfzMask[i] = 1; });
                 return;
             }
-            if (dir === 'pit') { L(`small pit (${cand.acres.toFixed(1)} ac) in ${regInfo[cand.region].name} holds an asset → stays absorbed (extra AGL accepted)`); return; }
+            if (dir === 'pit' || terEnabled.absorbBumps) { L(`small ${dir} (${cand.acres.toFixed(1)} ac) in ${regInfo[cand.region].name} holds an asset → stays absorbed${dir === 'pit' ? ' (extra AGL accepted)' : ' (parent floor rises to clear it)'}`); return; }
             // bump with an asset → carve it back out as its own region
             const gi = regInfo.length;
             let mx = -Infinity; cells.forEach(i => { const v = vals[i]; if (!isNaN(v) && v > mx) mx = v; });
@@ -7966,7 +7970,9 @@
         // The seam next to a pad is simplified at tolNear and pulled back tolNear +
         // half the gap, so the relabel margin must cover 2·tolNear on top of the
         // standoff + gap, or a raised near tolerance clips pad corners.
-        const padBufCells = ftToCells(th.standoffFt + th.gapMinFt + 2 * th.tolNearFt) + 0.75;
+        // raster stamp = assignment only (the vector fold/carve step bends the final
+        // seams precisely) — a bigger stamp just leaves 300 ft castellations behind
+        const padBufCells = ftToCells(th.standoffFt + th.gapMinFt) + 0.75;
         // "Taller" = the label whose ACTUAL highest ground (NFZ cells excluded)
         // is highest — the profiler's region floors include absorbed bump
         // cells, which would make a parent look taller than the bump itself.
@@ -8048,10 +8054,11 @@
             } else simp = terUSimplifyVar(A.pts, tols);
             A.simp = simp.pts; A.simpTol = simp.tol;
         };
+        const outerCap = ftToCells(Math.max(100, th.marginFt * 0.8));   // outer edges erode by their tolerance — never past the profile margin
         topo.arcs.forEach((A, ai) => {
             const side = topo.arcSide[ai];
             A.seam = side.left >= 0 && side.right >= 0;
-            A.rawTol = A.pts.map(p => terUTolCells(distFtAtCorner(p[0], p[1]), th, cellFt));
+            A.rawTol = A.pts.map(p => { const t = terUTolCells(distFtAtCorner(p[0], p[1]), th, cellFt); return A.seam ? t : Math.min(t, outerCap); });
             A.lenCells = terUPolyLen(A.pts);
             simplifyArc(A);
         });
@@ -8065,7 +8072,11 @@
                 const tl = s.fwd ? A.simpTol : A.simpTol.slice().reverse();
                 for (let i = 0; i < pts.length; i++) {
                     const t = tl[i] * tolScale;
-                    const d = A.seam ? t + gapD : t;
+                    // seams: half the gap only — the smoothed seam may wander into the
+                    // neighbor band and the piece's floor is recomputed from the ground
+                    // it really covers. Outer (profile) edges still erode by the
+                    // tolerance so a piece never covers unprofiled ground.
+                    const d = A.seam ? gapD : t;
                     if (i === 0 && P.length) { D[D.length - 1] = Math.max(D[D.length - 1], d); S[S.length - 1] = S[S.length - 1] || A.seam; continue; }
                     P.push(pts[i]); D.push(d); S.push(!!A.seam);
                 }
@@ -8093,8 +8104,9 @@
             return false;
         };
         const passLog = [];
+        let pending = [];
         const buildAllPieces = async () => {
-        pieces = []; pieceGrid = new Int16Array(n).fill(-1); keyholes = 0; sliced = 0; cuts = []; passLog.length = 0;
+        pieces = []; pieceGrid = new Int16Array(n).fill(-1); keyholes = 0; sliced = 0; cuts = []; passLog.length = 0; pending = [];
         const L = (m) => passLog.push(m);
         for (const r of regInfo) {
             if (r.dropped || r.absorbedInto >= 0) continue;
@@ -8115,7 +8127,12 @@
             // gap) are bigger than that or hold an asset — keep those only.
             const realLobes = (lobes, Dmax) => {
                 const minA = Math.max(4, 4 * Dmax * Dmax);
-                return lobes.filter(lb => Math.abs(terBSignedArea(lb)) >= minA || assets.some(a => terUPip(a.cx, a.cy, lb)));
+                return lobes.filter(lb => {
+                    if (assets.some(a => terUPip(a.cx, a.cy, lb))) return true;
+                    if (Math.abs(terBSignedArea(lb)) < minA) return false;
+                    let cellsIn = 0; terUFill(lb, w, h, () => { cellsIn++; });
+                    return cellsIn >= 20;   // a real lobe covers ground; inversion junk never does
+                });
             };
             const offsetRing = (x, isHole) => {
                 // The pull-back MUST equal the simplification tolerance (+ half gap):
@@ -8253,13 +8270,117 @@
                 });
             });
             keyholes += usedKeyhole; sliced += usedSlice;
-            finalRings.forEach((ringPts, pi) => {
-                pieceRecord(r, ringPts, pi, finalRings.length, usedKeyhole);
-            });
+            finalRings.forEach((ringPts, pi) => pending.push({ r, ringPts, pi, nRings: finalRings.length, usedKeyhole }));
             await terYield();
         }
+        // ---- pad detours: a pad near a smoothed seam is folded INTO its piece
+        // (union with pad + standoff) and carved OUT of every other piece (difference
+        // with pad + standoff + gap), so straight seams can cut through pad clusters
+        // without splitting a pad ----
+        const PC2 = terBPC();
+        let detours = 0;
+        if (PC2) {
+            const closeRing = (r2) => { const q = r2.map(p => p.slice()); if (q[0][0] !== q[q.length - 1][0] || q[0][1] !== q[q.length - 1][1]) q.push(q[0].slice()); return q; };
+            const sC = ftToCells(th.standoffFt), gC = ftToCells(th.standoffFt + th.gapMinFt);
+            const closeRing2 = closeRing;
+            const findTarget = (a, ai) => {
+                let target = -1, bestD = Infinity;
+                pending.forEach((e, k) => {
+                    if (e.r.gi !== assetRegion[ai] || e.dead) return;
+                    if (terUPip(a.cx, a.cy, e.ringPts)) { target = k; bestD = -1; return; }
+                    if (bestD < 0) return;
+                    let d = Infinity; for (let m = 0; m < e.ringPts.length; m += Math.max(1, Math.floor(e.ringPts.length / 200))) { const q = e.ringPts[m]; const dd = Math.hypot(q[0] - a.cx, q[1] - a.cy); if (dd < d) d = dd; }
+                    if (d < bestD) { bestD = d; target = k; }
+                });
+                return target;
+            };
+            const padHulls = assets.map((a, ai) => {
+                if (a.px.length < 3 || assetRegion[ai] < 0) return null;
+                const hull = terBHull(a.px);
+                return { hullS: terBOffsetConvex(hull, sC), hullG: terBOffsetConvex(hull, gC), target: -1 };
+            });
+            // CLUSTERS: pads whose clearance zones overlap must land in ONE piece (two
+            // pads 30 ft apart can't each keep a standoff plus the seam gap). Union-find
+            // on overlapping hullG, then the whole cluster takes the target of its
+            // tallest member — the "taller band wins" rule at cluster scale.
+            const par = assets.map((a, i) => i);
+            const find = (i) => { while (par[i] !== i) { par[i] = par[par[i]]; i = par[i]; } return i; };
+            for (let i = 0; i < assets.length; i++) {
+                if (!padHulls[i]) continue;
+                for (let j = i + 1; j < assets.length; j++) {
+                    if (!padHulls[j]) continue;
+                    if (Math.hypot(assets[i].cx - assets[j].cx, assets[i].cy - assets[j].cy) > gC * 2 + 40) continue;
+                    const o = padHulls[i].hullG.some(p => terUPip(p[0], p[1], padHulls[j].hullG)) || padHulls[j].hullG.some(p => terUPip(p[0], p[1], padHulls[i].hullG));
+                    if (o) par[find(i)] = find(j);
+                }
+            }
+            const clusterOf = new Map();
+            assets.forEach((a, ai) => { if (!padHulls[ai]) return; const c = find(ai); if (!clusterOf.has(c)) clusterOf.set(c, []); clusterOf.get(c).push(ai); });
+            clusterOf.forEach(members => {
+                // tallest member = highest actual ground under its cells
+                let tall = members[0], tg = -Infinity;
+                members.forEach(ai => { let g = -Infinity; assetCellsOf[ai].forEach(i => { const v = vals[i]; if (!isNaN(v) && v > g) g = v; }); if (g > tg) { tg = g; tall = ai; } });
+                let target = findTarget(assets[tall], tall);
+                // prefer a piece that already holds the tallest member's centroid (any region)
+                pending.forEach((e, k) => { if (!e.dead && terUPip(assets[tall].cx, assets[tall].cy, e.ringPts)) target = k; });
+                members.forEach(ai => { padHulls[ai].target = target; });
+                if (members.length > 1) members.forEach(ai => { assetRegion[ai] = pending[target] ? pending[target].r.gi : assetRegion[ai]; });
+            });
+            // pass 1 — CARVE: every piece that is not the pad's own loses pad + standoff + gap
+            padHulls.forEach((ph, ai) => {
+                if (!ph || ph.target < 0) return;
+                pending.forEach((e, k) => {
+                    if (k === ph.target || e.dead) return;
+                    const touches = ph.hullG.some(p => terUPip(p[0], p[1], e.ringPts)) || e.ringPts.some(p => terUPip(p[0], p[1], ph.hullG));
+                    if (!touches) return;
+                    try {
+                        const dRes = PC2.difference([[closeRing2(e.ringPts)]], [[closeRing2(ph.hullG)]]);
+                        const polys = (dRes || []).map(poly => terBNormRing(poly[0])).filter(o => o.length >= 3).sort((p1, p2) => Math.abs(terBSignedArea(p2)) - Math.abs(terBSignedArea(p1)));
+                        if (!polys.length) { e.dead = true; return; }
+                        e.ringPts = polys[0]; e.detour = (e.detour || 0) + 1; detours++;
+                        for (let x2 = 1; x2 < polys.length; x2++) {
+                            let cellsIn = 0; terUFill(polys[x2], w, h, () => { cellsIn++; });
+                            const holdsPad = assets.some(a2 => terUPip(a2.cx, a2.cy, polys[x2]));
+                            if (cellsIn >= 20 || holdsPad) pending.push({ r: e.r, ringPts: polys[x2], pi: e.pi, nRings: e.nRings + 1, usedKeyhole: 0, lobeOf: e.r.name });
+                        }
+                    } catch (e2) { console.warn(`${TAG} builder: pad carve threw:`, e2); }
+                });
+            });
+            // pass 2 — FOLD: every pad + standoff is unioned into its own piece
+            padHulls.forEach((ph, ai) => {
+                if (!ph || ph.target < 0) return;
+                const tgt = pending[ph.target];
+                if (tgt.dead) return;
+                if (ph.hullS.every(p => terUPip(p[0], p[1], tgt.ringPts))) return;
+                try {
+                    const u = PC2.union([[closeRing2(tgt.ringPts)]], [[closeRing2(ph.hullS)]]);
+                    if (u && u.length > 1) {
+                        // disconnected: bridge the pad to the piece with a corridor (pad hull → nearest ring vertex, standoff wide)
+                        let q = null, qd = Infinity; tgt.ringPts.forEach(p => { const d = Math.hypot(p[0] - assets[ai].cx, p[1] - assets[ai].cy); if (d < qd) { qd = d; q = p; } });
+                        if (q && qd < ftToCells(1500)) {
+                            let ux = q[0] - assets[ai].cx, uy = q[1] - assets[ai].cy; const lu = Math.hypot(ux, uy) || 1; ux /= lu; uy /= lu;
+                            const nx = -uy * sC, ny = ux * sC;
+                            const corr = [[assets[ai].cx + nx, assets[ai].cy + ny], [q[0] + nx + ux * 2, q[1] + ny + uy * 2], [q[0] - nx + ux * 2, q[1] - ny + uy * 2], [assets[ai].cx - nx, assets[ai].cy - ny]];
+                            const u2 = PC2.union(u, [[closeRing2(corr)]]);
+                            if (u2 && u2.length === 1) { tgt.ringPts = terBNormRing(u2[0][0]); tgt.detour = (tgt.detour || 0) + 1; detours++; L(`${assets[ai].name}: sat in the gap — joined to ${tgt.r.name} by a ${Math.round(qd * cellFt)} ft corridor`); return; }
+                        }
+                        L(`⚠ ${assets[ai].name}: could not be folded into ${tgt.r.name} (disconnected)`);
+                        return;
+                    }
+                    let best = null, bA = -1; (u || []).forEach(poly => { const o = terBNormRing(poly[0]); const A2 = Math.abs(terBSignedArea(o)); if (A2 > bA) { bA = A2; best = o; } });
+                    if (best) { tgt.ringPts = best; tgt.detour = (tgt.detour || 0) + 1; detours++; }
+                } catch (e2) { console.warn(`${TAG} builder: pad fold threw:`, e2); }
+            });
+            pending = pending.filter(e => !e.dead);
+        }
+        if (detours) L(`${detours} pad(s) folded into their piece / carved out of the neighbor by a seam detour`);
+        // names: pieces of one region get letters only when there are several
+        const perRegion = new Map();
+        pending.forEach(e => { perRegion.set(e.r.gi, (perRegion.get(e.r.gi) || 0) + 1); });
+        const idxInRegion = new Map();
+        pending.forEach(e => { const k = idxInRegion.get(e.r.gi) || 0; idxInRegion.set(e.r.gi, k + 1); pieceRecord(e.r, e.ringPts, k, perRegion.get(e.r.gi), e.usedKeyhole, e.detour || 0); });
         };
-        const pieceRecord = (r, ringPts, pi, nRings, usedKeyhole) => {
+        const pieceRecord = (r, ringPts, pi, nRings, usedKeyhole, detourN) => {
             {
                 if (ringPts.length < 3) return;
                 const pieceIdx = pieces.length;
@@ -8291,7 +8412,7 @@
                     const aglLow = floorMSL - mn;
                     if (aglLow > th.pitAbsorbMaxAglFt) flags.push(`AGL ${Math.round(aglLow)} ft over the lowest ground (limit ${th.pitAbsorbMaxAglFt})`);
                 } else flags.push('no valid ground cells');
-                if (outside > cells * 0.002) flags.push(`${outside} cell(s) outside the raw region`);
+                if (outside > cells * 0.05) flags.push(`${Math.round(outside * dem.cellAcres)} ac of neighbor-band ground inside (floor recomputed)`);
                 if (nanCells) flags.push(`${nanCells} unprofiled cell(s) inside`);
                 if (ringPts.length > th.maxVertsWarn) flags.push(`${ringPts.length} vertices (warn > ${th.maxVertsWarn})`);
                 const rawVerts = (topo.ringsByRegion.get(r.gi) || []).reduce((s2, ring) => s2 + ring.arcSeq.reduce((s3, s) => s3 + topo.arcs[s.arc].pts.length, 0), 0);
@@ -8301,7 +8422,7 @@
                     bandLo: r.bandLo, bandHi: r.bandHi, floorMSL, ceilMSL,
                     groundMin: mn, groundMax: mx, nfzCells, cells,
                     aglMin: floorMSL != null ? floorMSL - mx : null, aglMax: floorMSL != null ? floorMSL - mn : null,
-                    keyhole: usedKeyhole, flags, infeasible: !feasible, selected: feasible, outsideCells,
+                    keyhole: usedKeyhole, detours: detourN || 0, flags, infeasible: !feasible, selected: feasible, outsideCells,
                     assets: r.assets.length, isBase: r.gi === baseReg && pointInPolygon(base.pt.lat, base.pt.lng, pointsLL), dir: r.isIsland ? r.dir : '',
                 });
             }
@@ -8337,17 +8458,11 @@
             let ringL;
             let dMin = 1e9; z.cells.forEach(i => { if (distC[i] < dMin) dMin = distC[i]; });
             const tolC = terUTolCells(dMin * cellFt, th, cellFt);
-            if (z.ring && z.ring.length >= 3) {
-                const tols = z.ring.map(p => terUTolCells(distFtAtCorner(p[0], p[1]), th, cellFt));
-                const simp = terUSimplifyVar(z.ring.concat([z.ring[0]]), tols.concat([tols[0]]));
-                const P = simp.pts.slice(0, -1), T = simp.tol.slice(0, -1);
-                if (P.length < 3) return;
-                // the island's own ring has the ISLAND on its left → a negative distance offsets outward (NFZs only grow)
-                ringL = terUOffsetRing(P, T.map(t => -(t + 0.05)));
-            } else {
+            {
+                // convex hull + a small buffer: the simplest shape that fully covers the island
                 const corners = [];
                 z.cells.forEach(i => { const x = i % w, y = (i / w) | 0; corners.push([x, y], [x + 1, y], [x, y + 1], [x + 1, y + 1]); });
-                ringL = terBOffsetConvex(terBHull(corners), tolC + 0.05);
+                ringL = terBOffsetConvex(terBHull(corners), Math.min(tolC, ftToCells(50)) + 0.05);
             }
             const ll = ringL.map(p => terBLatticeToLL(dem, p[0], p[1]));
             if (ll.length < 3 || (ll.length <= 1500 && ringSelfIntersects(ll))) {
@@ -8356,9 +8471,18 @@
                 ringL = cleaned;
             }
             const points = ringL.map(p => terBLatticeToLL(dem, p[0], p[1]));
-            // parent piece = piece under the first cell
-            let parent = -1; for (const i of z.cells) { if (pieceGrid[i] >= 0) { parent = pieceGrid[i]; break; } }
-            nfzs.push({ name: `${z.name} ${nfzs.length + 1}`, points, acres: z.acres, dir: z.dir, parent, orphan: parent < 0, selected: parent >= 0, cells: z.cells.length });
+            // parent piece = the selected piece holding the island's centroid, else the nearest one
+            let cx2 = 0, cy2 = 0; z.cells.forEach(i => { cx2 += (i % w) + 0.5; cy2 += Math.floor(i / w) + 0.5; }); cx2 /= z.cells.length; cy2 /= z.cells.length;
+            let parent = -1, pd = Infinity;
+            pieces.forEach((p, pi) => {
+                if (!p.selected) return;
+                if (terUPip(cx2, cy2, p.latticePts)) { parent = pi; pd = -1; return; }
+                if (pd < 0) return;
+                let d = Infinity; for (let m = 0; m < p.latticePts.length; m += Math.max(1, Math.floor(p.latticePts.length / 200))) { const q = p.latticePts[m]; const dd = Math.hypot(q[0] - cx2, q[1] - cy2); if (dd < d) d = dd; }
+                if (d < pd) { pd = d; parent = pi; }
+            });
+            const far = pd > ftToCells(2000);
+            nfzs.push({ name: `${z.name} ${nfzs.length + 1}`, points, acres: z.acres, dir: z.dir, parent, orphan: parent < 0 || far, selected: parent >= 0 && !far, cells: z.cells.length });
         });
         if (nfzs.some(z => z.orphan)) L(`${nfzs.filter(z => z.orphan).length} NFZ(s) fall outside every FFZ piece (dropped region) — disabled`);
 
@@ -8419,7 +8543,7 @@
                 const tolHere = A.simpTol[Math.min(at.seg, A.simpTol.length - 1)] || 0;
                 let dx = at.dir[0], dy = at.dir[1]; const ld = Math.hypot(dx, dy) || 1; dx /= ld; dy /= ld;
                 const lnx = dy, lny = -dx;   // left normal (y-down) → side.left region
-                const localGapFt = (2 * tolHere + 2 * gapHalf) * cellFt;
+                const localGapFt = 2 * gapD * cellFt;
                 const wantFt = Math.max(th.bridgeInsetFt, localGapFt * 0.3);
                 // March from the seam crossing along the normal into each side until the
                 // point is inside a SELECTED piece of that region (true polygon test) AND
@@ -8453,7 +8577,7 @@
                     arcs.push({ lo: fl, hi: ce });
                 } else {
                     // staircase: A-edge / B-edge waypoints, middle arc overlaps each by ≥ minOverlap
-                    const edge = tolHere + gapHalf;
+                    const edge = gapD;
                     const eA = [at.p[0] + lnx * edge, at.p[1] + lny * edge], eB = [at.p[0] - lnx * edge, at.p[1] - lny * edge];
                     const lower = PA.ceilMSL < PB.floorMSL + th.bridgeMinOverlapFt ? 'A' : 'B';
                     const lo = lower === 'A' ? PA : PB, hi = lower === 'A' ? PB : PA;
@@ -8517,7 +8641,7 @@
             let s = seamMap.get(k);
             if (!s) { s = { a: regInfo[Math.min(side.left, side.right)].name, b: regInfo[Math.max(side.left, side.right)].name, lenFt: 0, rawVerts: 0, verts: 0, gapMin: Infinity, gapMax: 0, bridges: 0 }; seamMap.set(k, s); }
             s.lenFt += A.lenCells * cellFt; s.rawVerts += A.pts.length; s.verts += A.simp.length;
-            A.simpTol.forEach(t => { const g = (2 * t + 2 * gapHalf) * cellFt; if (g < s.gapMin) s.gapMin = g; if (g > s.gapMax) s.gapMax = g; });
+            { const g = 2 * gapD * cellFt; if (g < s.gapMin) s.gapMin = g; if (g > s.gapMax) s.gapMax = g; }
             s.bridges += (candByArc.get(ai) || []).length;
         });
         const seams = [...seamMap.values()];
@@ -8560,7 +8684,7 @@
         assets.forEach(a => { if (a.piece >= 0) pieces[a.piece].assets++; });
         pieces.forEach(p => {
             if (p.acres < 0.25 && !p.assets) { p.selected = false; p.flags.push('sliver — deselected'); }
-            else if (!p.assets && !p.isBase && p.acres < 20) { p.selected = false; p.flags.push('no assets — deselected'); }
+            else if (!p.assets && !p.isBase && p.acres < 100) { p.selected = false; p.flags.push('no assets — deselected'); }
         });
         gates.push({ ok: !aBad.length, label: aBad.length ? `${aBad.length} asset(s) not cleanly inside one FFZ` : `all ${assets.length} assets inside exactly one FFZ`, detail: aBad.slice(0, 12) });
         const missing = regInfo.filter(r => r.keep && !r.dropped && r.absorbedInto < 0 && r.assets.length && !pieces.some(p => p.region === r.gi));
@@ -8883,6 +9007,7 @@
             + `<label title="Name prefix for created FFZs" style="display:flex;align-items:center;gap:4px;">prefix<input data-ter-prefix type="text" value="${esc(th.namePrefix !== undefined ? th.namePrefix : 'FFZ ')}" style="width:56px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(255,225,77,0.35);border-radius:4px;padding:1px 3px;font:inherit;font-size:11px;"></label>`
             + `<label style="display:flex;align-items:center;gap:3px;cursor:pointer;" title="Delete every pre-existing FFZ after the new set verifies (Delete Guard keeps them 24 h)"><input data-ter-e="deleteOldFfz" type="checkbox" ${terEnabled.deleteOldFfz ? 'checked' : ''}>delete old FFZs</label>`
             + `<label style="display:flex;align-items:center;gap:3px;cursor:pointer;" title="Delete every pre-existing flight path after the new set verifies"><input data-ter-e="deleteOldFp" type="checkbox" ${terEnabled.deleteOldFp ? 'checked' : ''}>delete old FPs</label>`
+            + `<label style="display:flex;align-items:center;gap:3px;cursor:pointer;" title="Bump islands holding assets are absorbed into the parent (its floor rises to clear them) instead of becoming small keyholed FFZs"><input data-ter-e="absorbBumps" type="checkbox" ${terEnabled.absorbBumps ? 'checked' : ''}>absorb bumps</label>`
             + `<button data-ter-stage style="background:rgba(255,225,77,0.13);border:1px solid rgba(255,225,77,0.5);color:#ffe14d;border-radius:5px;padding:2px 10px;cursor:pointer;font-weight:600;">🏗 Stage</button>`
             + (bs && !bs.staging ? `<button data-ter-ucopy title="Copy the staged pieces, gates, seams and run log as text" style="background:none;border:1px solid rgba(255,225,77,0.4);color:#ffe14d;border-radius:5px;padding:2px 8px;cursor:pointer;">Copy build report</button>` : '')
             + `</div>`);
@@ -8903,7 +9028,7 @@
             h.push(`<div data-ter-ujump="p:${i}" style="margin:1px 0;line-height:1.4;${p.infeasible ? 'opacity:0.55;' : ''}cursor:pointer;" onmouseover="this.style.background='rgba(255,225,77,0.08)'" onmouseout="this.style.background=''">`
                 + `<label style="display:flex;align-items:flex-start;gap:5px;"><input data-ter-selp="${i}" type="checkbox" ${p.selected ? 'checked' : ''} ${p.infeasible ? 'disabled' : ''} style="margin-top:2px;">`
                 + `<span><strong style="color:#ffe14d">${esc(p.name)}</strong>${p.isBase ? ' 🏠' : ''}${p.dir ? ` <span style="opacity:0.7">(${p.dir} island)</span>` : ''} · band ${p.bandLo}–${p.bandHi} · ${acStr(p.acres)} ac · ${p.assets} asset${p.assets === 1 ? '' : 's'} · ${p.verts.toLocaleString()} verts (raw ${p.rawVerts.toLocaleString()})`
-                + `<br><span style="opacity:0.85;">floor <strong>${p.floorMSL != null ? p.floorMSL.toLocaleString() : '—'}</strong> / ceil <strong>${p.ceilMSL != null ? p.ceilMSL.toLocaleString() : '—'}</strong> ft MSL · AGL ${p.aglMin != null ? Math.round(p.aglMin) : '—'}–${p.aglMax != null ? Math.round(p.aglMax) : '—'} ft${p.keyhole ? ` · ${p.keyhole} keyhole` : ''}${p.nfzCells ? ' · NFZ cells excluded' : ''}</span>`
+                + `<br><span style="opacity:0.85;">floor <strong>${p.floorMSL != null ? p.floorMSL.toLocaleString() : '—'}</strong> / ceil <strong>${p.ceilMSL != null ? p.ceilMSL.toLocaleString() : '—'}</strong> ft MSL · AGL ${p.aglMin != null ? Math.round(p.aglMin) : '—'}–${p.aglMax != null ? Math.round(p.aglMax) : '—'} ft${p.keyhole ? ` · ${p.keyhole} keyhole` : ''}${p.detours ? ` · ${p.detours} pad detour${p.detours === 1 ? '' : 's'}` : ''}${p.nfzCells ? ' · NFZ cells excluded' : ''}</span>`
                 + (p.flags.length ? `<br><span style="color:#ffb020;">⚠ ${esc(p.flags.join(' · '))}</span>` : '') + `</span></label></div>`);
         });
         bs.nfzs.forEach((z, i) => {
@@ -9014,7 +9139,7 @@
     // v4.263: the smoothing tunables re-registered under NEW Control Panel ids —
     // the panel echoes its stored value per id on every load, which put the old
     // 0 / 250 defaults straight back over the migrated ones.
-    const TER_CP_ALIAS = { smoothNear2: 'smoothNearFt', smoothFar2: 'smoothFarFt', tolNear2: 'tolNearFt', tolFar2: 'tolFarFt' };
+    const TER_CP_ALIAS = { smoothNear3: 'smoothNearFt', smoothFar3: 'smoothFarFt', tolNear3: 'tolNearFt', tolFar3: 'tolFarFt', gapMin3: 'gapMinFt', smoothNear2: 'smoothNearFt', smoothFar2: 'smoothFarFt', tolNear2: 'tolNearFt', tolFar2: 'tolFarFt' };
     function handleTerrainToggle(msg) {
         const id = TER_CP_ALIAS[msg.toggleId] || msg.toggleId;
         if (id === 'ter-master') {
@@ -9362,11 +9487,12 @@
                 ], default: TER_THRESH_DEFAULTS.maskMode },
                 { id: 'fpCorridorFt', label: 'FP corridor width (FFZ+FP mode)', type: 'number', min: 50, max: 5000, step: 50, default: TER_THRESH_DEFAULTS.fpCorridorFt, unit: 'ft' },
                 { id: 'ter-build-hdr', label: '🏗 Build unshielded site', type: 'header' },
-                { id: 'gapMinFt', label: 'Seam gap between FFZs (near assets)', type: 'number', min: 5, max: 200, step: 5, default: TER_THRESH_DEFAULTS.gapMinFt, unit: 'ft' },
-                { id: 'smoothNear2', label: 'Near tolerance applies within … of an asset', type: 'number', min: 0, max: 5000, step: 50, default: TER_THRESH_DEFAULTS.smoothNearFt, unit: 'ft' },
-                { id: 'smoothFar2', label: 'Far tolerance applies beyond … from any asset', type: 'number', min: 0, max: 20000, step: 100, default: TER_THRESH_DEFAULTS.smoothFarFt, unit: 'ft' },
-                { id: 'tolNear2', label: 'Simplify tolerance near assets', type: 'number', min: 0, max: 200, step: 5, default: TER_THRESH_DEFAULTS.tolNearFt, unit: 'ft' },
-                { id: 'tolFar2', label: 'Simplify tolerance far from assets (gap = 2×tol + gap)', type: 'number', min: 0, max: 2000, step: 25, default: TER_THRESH_DEFAULTS.tolFarFt, unit: 'ft' },
+                { id: 'gapMin3', label: 'Seam gap between FFZs', type: 'number', min: 5, max: 500, step: 5, default: TER_THRESH_DEFAULTS.gapMinFt, unit: 'ft' },
+                { id: 'smoothNear3', label: 'Near tolerance applies within … of an asset', type: 'number', min: 0, max: 5000, step: 50, default: TER_THRESH_DEFAULTS.smoothNearFt, unit: 'ft' },
+                { id: 'smoothFar3', label: 'Far tolerance applies beyond … from any asset', type: 'number', min: 0, max: 20000, step: 100, default: TER_THRESH_DEFAULTS.smoothFarFt, unit: 'ft' },
+                { id: 'tolNear3', label: 'Simplify tolerance near assets', type: 'number', min: 0, max: 1000, step: 25, default: TER_THRESH_DEFAULTS.tolNearFt, unit: 'ft' },
+                { id: 'tolFar3', label: 'Simplify tolerance far from assets (edges wander into the next band; floors are recomputed)', type: 'number', min: 0, max: 10000, step: 100, default: TER_THRESH_DEFAULTS.tolFarFt, unit: 'ft' },
+                { id: 'absorbBumps', label: 'Absorb bump islands that hold assets (parent floor rises) instead of keyholing', type: 'boolean', default: TER_ENABLE_DEFAULTS.absorbBumps },
                 { id: 'standoffFt', label: 'Pad standoff when a pad straddles two bands', type: 'number', min: 0, max: 200, step: 5, default: TER_THRESH_DEFAULTS.standoffFt, unit: 'ft' },
                 { id: 'pitAbsorbMaxAglFt', label: 'Warn when an absorbed pit sits deeper than', type: 'number', min: 50, max: 400, step: 10, default: TER_THRESH_DEFAULTS.pitAbsorbMaxAglFt, unit: 'ft AGL' },
                 { id: 'bridgeMergeFt', label: 'Merge bridge candidates closer than', type: 'number', min: 0, max: 5000, step: 50, default: TER_THRESH_DEFAULTS.bridgeMergeFt, unit: 'ft' },

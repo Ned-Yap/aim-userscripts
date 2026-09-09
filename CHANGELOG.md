@@ -12,6 +12,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-09 — 🏗 Site Setup Tools latest v4.267: Unshielded Site Builder — simple shapes
+
+The builder no longer tries to keep every FFZ provably inside its terrain band; it builds the big simple shapes a CSM would draw by hand and lets the floor recompute do the safety work. Seams are simplified with tolerances in the thousands of feet (defaults 150 ft near assets, 2,000 ft in the open) and pulled back only by half the gap (now 50 ft), so an edge may wander into the next band and the piece's floor rises to clear whatever ground it really covers. Bump islands that hold assets are absorbed into the parent (toggle "absorb bumps") instead of becoming keyholed islands. Pads on a seam are handled at the vector level with polygon-clipping: pad clusters move as one unit into the taller piece (folded in with the standoff, carved out of the neighbor with standoff + gap), stranded pads get a corridor. NFZs are convex hulls. Outer edges erode no further than the profile margin. On the Cobra duplicate at Δ 30: 7 FFZs, 713 vertices, largest 231, every gate green — versus 14 pieces and 2,755 vertices the day before.
+
 ## 2026-09-09 — 🏗 Site Setup Tools latest v4.266: Unshielded Site Builder — bridge ends land inside the FFZs
 
 Bridge waypoints were placed from the smoothed seam using the raster grid, so ends sat on the dashed edge (median 65 ft, some at 0 ft, four outside their piece). Each end now marches along the seam normal until it is inside the real piece polygon with at least the inset clearance from its edge; lobe links only join selected pieces. Offline on the Cobra duplicate: all 121 ends inside, 68–300 ft clearance.
