@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-09 — ⬡ Site Diff v0.82: turn individual neighbor sites on/off from the panel (latest — dev only, feature #250)
+
+Real fleets carry Duplicate/OFFLINE copies of sites (BACKUP / TEST / "duplicate to test route approval"), which sit at 0 ft from everything and flood the conflict list. Every neighbor row in the ⬡ panel now has a checkbox: untick a site and it disappears from the map and the conflict math (no live fetch either), remembered per server across rescans and sessions. Turned-off sites stay listed grayed at the bottom of the neighbors list so they can be re-enabled right from the view, and the 📋 report names them under "TURNED OFF" — nothing is ever silently skipped.
+
 ## 2026-09-09 — ⬡ Site Diff v0.81: neighbor overlay high-contrast restyle (latest — dev only, feature #250)
 
 First live test of the v0.80 neighbor overlay: the scan/index pipeline worked, but the muted dotted lines were nearly invisible against real map clutter (parcel outlines, RRC layers, satellite ground). Foreign entities now draw cartographic-casing style — a fat dark solid underlay with a bright saturated dashed line on top (hot palette: yellow / pink / lime / magenta / …) — and neighbor polygons get a stronger tint fill. Color still identifies which neighbor site; conflict pins and the ⬡ panel are unchanged.

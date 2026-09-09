@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Diff
 // @namespace    http://tampermonkey.net/
-// @version      0.81
+// @version      0.82
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @description  Site comparison suite: shadow-site ghost overlay (per-type show/color/opacity), swipe divider, significant-change diff (→ AIM Issues), and Phase 3a Import — create-only copy of shadow entities (assets etc.) onto the current site with dry-run preview + verify. v0.70: cross-SERVER shadows. v0.80 (#250 layer 2): neighboring-site overlay — shows every other site's FFZs/FPs/assets within a display radius (Site Watch snapshot bboxes prefilter, live /map_objects/ for the math) and flags cross-site conflicts under the threshold (segment-to-segment, default 200 ft).
@@ -142,7 +142,7 @@
     }
 
     const SCRIPT_ID = 'aim-site-diff';
-    const SCRIPT_VERSION = '0.81';
+    const SCRIPT_VERSION = '0.82';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const PANE_NAME = 'aim-site-diff-pane';
     const HL_PANE_NAME = 'aim-site-diff-hl';
@@ -2711,6 +2711,28 @@
         catch (e) { console.warn(`${TAG} saveNbIndex:`, e); }
     }
 
+    // Per-site on/off (v0.82): duplicate/OFFLINE copies of a site (Duplicate
+    // Site with Site Setup workflow) land at 0 ft from everything and flood
+    // the conflict list — the panel checkbox turns a found neighbor off.
+    // Persisted per env; turned-off sites stay LISTED (grayed) and named in
+    // the report — never silently skipped.
+    const KEY_NB_IGNORE = IS_QA ? 'aim-sd-nb-ignore-qa' : 'aim-sd-nb-ignore';
+    function loadNbIgnore() {
+        try {
+            const raw = gmGet(KEY_NB_IGNORE, null);
+            if (raw) {
+                const s = JSON.parse(raw);
+                if (s && typeof s === 'object') return s;
+            }
+        } catch (e) { console.warn(`${TAG} loadNbIgnore:`, e); }
+        return {};
+    }
+    let nbIgnore = loadNbIgnore();   // { siteId: true }
+    function saveNbIgnore() {
+        try { gmSet(KEY_NB_IGNORE, JSON.stringify(nbIgnore)); }
+        catch (e) { console.warn(`${TAG} saveNbIgnore:`, e); }
+    }
+
     let nbState = null;    // last scan result — see scanNeighbors
     let nbLayers = [];
     let nbPinLayers = [];
@@ -3133,7 +3155,7 @@
             if (nbPanelEl && nbPanelEl.style.display !== 'none') renderNbPanel();
             return;
         }
-        nbState = { scanning: true, status: 'starting…', neighbors: [], conflicts: [], unchecked: [], notes: [], at: null };
+        nbState = { scanning: true, status: 'starting…', neighbors: [], ignoredNeighbors: [], conflicts: [], unchecked: [], notes: [], at: null };
         updateNbBadge();
         if (nbPanelEl && nbPanelEl.style.display !== 'none') renderNbPanel();
         const scanSite = siteID;
@@ -3191,6 +3213,14 @@
                 nbState.notes.push('site list unavailable — snapshot-less sites could not be checked or counted');
             }
 
+            // Turned-off sites (panel checkbox) sit out this scan entirely —
+            // no live fetch, no draw, no conflicts — but stay listed.
+            const activeCands = [];
+            candidates.forEach(c => {
+                if (nbIgnore[c.id]) nbState.ignoredNeighbors.push({ id: c.id, name: siteLabel(c.id, THIS_SERVER), src: c.src });
+                else activeCands.push(c);
+            });
+
             // Live geometry for candidates only — the real math runs on
             // CURRENT data, the index is only the prefilter.
             const proj = projector((myBox.minLat + myBox.maxLat) / 2);
@@ -3201,10 +3231,10 @@
                 if (p) minePrepared.push(p);
             });
             const neighbors = [];
-            for (let i = 0; i < candidates.length; i++) {
+            for (let i = 0; i < activeCands.length; i++) {
                 if (seq !== nbScanSeq) return;
-                const cand = candidates[i];
-                nbSetStatus(`fetching neighbor site ${cand.id} (${i + 1}/${candidates.length})…`);
+                const cand = activeCands[i];
+                nbSetStatus(`fetching neighbor site ${cand.id} (${i + 1}/${activeCands.length})…`);
                 const ents = await fetchShadowEntities({ id: cand.id, server: THIS_SERVER }, manual);
                 if (seq !== nbScanSeq) return;
                 if (!ents) {
@@ -3271,10 +3301,11 @@
             nbState.scanning = false;
             nbState.at = Date.now();
             const uncheckedBit = nbState.unchecked.length ? ` · ${nbState.unchecked.length} site(s) UNCHECKED (no snapshot/center)` : '';
+            const offBit = nbState.ignoredNeighbors.length ? ` · ${nbState.ignoredNeighbors.length} turned off` : '';
             nbSetStatus(`${neighbors.length} neighbor(s) within ${nbCfg.radiusFt} ft · `
                 + (conflicts.length ? `⚠ ${conflicts.length} conflict(s) under ${nbCfg.thresholdFt} ft` : `no conflicts under ${nbCfg.thresholdFt} ft ✓`)
-                + uncheckedBit);
-            console.log(`${TAG} neighbor scan: ${candidates.length} candidate(s) → ${neighbors.length} with geometry, ${conflicts.length} conflict(s), ${nbState.unchecked.length} unchecked`);
+                + offBit + uncheckedBit);
+            console.log(`${TAG} neighbor scan: ${candidates.length} candidate(s) → ${neighbors.length} with geometry, ${nbState.ignoredNeighbors.length} turned off, ${conflicts.length} conflict(s), ${nbState.unchecked.length} unchecked`);
             nbDrawAttempt(seq, 0);
             updateNbBadge();
             if (nbPanelEl && nbPanelEl.style.display !== 'none') renderNbPanel();
@@ -3344,6 +3375,11 @@
         nbState.conflicts.forEach((c, i) => {
             lines.push(`  ${i + 1}. ${c.localCls.toUpperCase()} "${c.localName}" ↔ ${c.foreignCls.toUpperCase()} "${c.foreignName}" (${c.siteName} #${c.siteId}) — ${c.overlap ? 'OVERLAP' : `${c.ft} ft`} @ ${c.lat.toFixed(6)}, ${c.lng.toFixed(6)}`);
         });
+        if (nbState.ignoredNeighbors.length) {
+            lines.push('');
+            lines.push(`TURNED OFF in the panel — in range but not drawn or conflict-checked (${nbState.ignoredNeighbors.length}):`);
+            nbState.ignoredNeighbors.forEach(u => lines.push(`  • ${u.name || 'site'} (#${u.id})`));
+        }
         if (nbState.unchecked.length) {
             lines.push('');
             lines.push(`NOT CHECKED — no Site Watch snapshot and no usable /sites/ center (${nbState.unchecked.length}):`);
@@ -3377,10 +3413,16 @@
             }
             nbState.neighbors.forEach(nb => {
                 const min = nb.minFt === null ? '—' : `${Math.round(nb.minFt)} ft`;
-                rows.push(`<div class="aim-sd-nb-row" data-nb-site="${nb.id}" style="padding:3px 8px;cursor:pointer;border-bottom:1px solid #1d2430;">`
-                    + `<span style="color:${nb.color}">◼</span> ${escapeHtml(nb.name)} <span style="color:#666">#${nb.id}</span>`
+                rows.push(`<div class="aim-sd-nb-row" data-nb-site="${nb.id}" style="padding:3px 8px;cursor:pointer;border-bottom:1px solid #1d2430;display:flex;align-items:baseline;gap:6px;">`
+                    + `<input type="checkbox" data-nb-onoff="${nb.id}" checked title="Untick to turn this site off (hidden + excluded from conflicts; remembered)">`
+                    + `<span style="flex:1;min-width:0;"><span style="color:${nb.color}">◼</span> ${escapeHtml(nb.name)} <span style="color:#666">#${nb.id}</span>`
                     + (nb.src === 'center' ? ' <span style="color:#ffa030" title="no Site Watch snapshot — found via site center">◦center</span>' : '')
-                    + `<span style="color:#888"> — ${nb.counts.ffz} FFZ · ${nb.counts.fp} FP · ${nb.counts.asset} assets · closest ${min}</span></div>`);
+                    + `<span style="color:#888"> — ${nb.counts.ffz} FFZ · ${nb.counts.fp} FP · ${nb.counts.asset} assets · closest ${min}</span></span></div>`);
+            });
+            nbState.ignoredNeighbors.forEach(nb => {
+                rows.push(`<div class="aim-sd-nb-row" style="padding:3px 8px;border-bottom:1px solid #1d2430;display:flex;align-items:baseline;gap:6px;opacity:0.55;">`
+                    + `<input type="checkbox" data-nb-onoff="${nb.id}" title="Tick to turn this site back on">`
+                    + `<span style="flex:1;min-width:0;color:#888">${escapeHtml(nb.name)} <span style="color:#666">#${nb.id}</span> — turned off (not drawn, not checked)</span></div>`);
             });
             rows.push(`<div style="padding:4px 8px;border-bottom:1px solid #222834;color:${nbState.conflicts.length ? NB_CONFLICT_COLOR : '#5fff5f'};font-weight:bold">`
                 + (nbState.conflicts.length ? `⚠ ${nbState.conflicts.length} conflict(s) under ${nbCfg.thresholdFt} ft` : `No conflicts under ${nbCfg.thresholdFt} ft ✓`) + '</div>');
@@ -3421,7 +3463,18 @@
             hoverCss.textContent = '#aim-sd-nb-body .aim-sd-nb-row:hover{background:#222a38;}';
             nbPanelEl.appendChild(hoverCss);
             // Delegated — body is rebuilt per render, the panel root never is
+            nbPanelEl.addEventListener('change', (ev) => {
+                const cb = ev.target.closest('input[data-nb-onoff]');
+                if (!cb) return;
+                const id = cb.getAttribute('data-nb-onoff');
+                if (cb.checked) delete nbIgnore[id];
+                else nbIgnore[id] = true;
+                saveNbIgnore();
+                console.log(`${TAG} neighbor site ${id} turned ${cb.checked ? 'ON' : 'OFF'} (remembered for ${SERVER_LABELS[THIS_SERVER]})`);
+                scanNeighbors(false);   // neighbor entities come from the session cache — cheap
+            });
             nbPanelEl.addEventListener('click', (ev) => {
+                if (ev.target.closest('input[data-nb-onoff]')) return;   // checkbox ≠ zoom-to-site
                 const act = ev.target.closest('[data-nb]');
                 if (act) {
                     const cmd = act.getAttribute('data-nb');
