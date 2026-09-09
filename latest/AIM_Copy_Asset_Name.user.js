@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.264
+// @version      4.265
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.264';
+    const SCRIPT_VERSION = '4.265';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -7632,6 +7632,9 @@
             for (let i = s; i <= e; i++) if (tols[i] < mn) mn = tols[i];
             const seg = pts.slice(s, e + 1);
             const simp = terBSimplify(seg, mn);
+            // the junction vertex sits on BOTH runs — the raw seam may deviate by
+            // the coarser tolerance right next to it, so it must pull back by that
+            if (outP.length) outT[outT.length - 1] = Math.max(outT[outT.length - 1], mn);
             const start = outP.length ? 1 : 0;
             for (let i = start; i < simp.length; i++) { outP.push(simp[i]); outT.push(mn); }
             s = e;
@@ -7639,11 +7642,14 @@
         return { pts: outP, tol: outT };
     }
     // Inward miter offset of a CLOSED ring (region on the LEFT of travel in
-    // lattice y-down coords) by a per-vertex distance (cells). Miter length
-    // capped at 2× so sharp corners can't spike.
+    // lattice y-down coords) by a per-vertex distance (cells). Where the miter
+    // would exceed 2× the distance the corner is BEVELED (two points, one per
+    // edge normal) so the offset edge is never closer than d to either raw
+    // edge — a capped miter at a sharp corner pulled back too little and let
+    // the neighbor band's spurs into the piece (Cobra, 2026-09-09).
     function terUOffsetRing(pts, dArr) {
         const n = pts.length;
-        const out = new Array(n);
+        const out = [];
         for (let i = 0; i < n; i++) {
             const p = pts[i], q = pts[(i + 1) % n], o = pts[(i + n - 1) % n];
             let ax = p[0] - o[0], ay = p[1] - o[1];
@@ -7654,11 +7660,12 @@
             const n1x = ay, n1y = -ax, n2x = by, n2y = -bx;
             let mx = n1x + n2x, my = n1y + n2y;
             const lm = Math.hypot(mx, my);
-            let scale;
-            if (lm < 1e-6) { mx = n2x; my = n2y; scale = 1; }
-            else { mx /= lm; my /= lm; scale = Math.min(2, 1 / Math.max(0.5, mx * n2x + my * n2y)); }
             const d = dArr[i] || 0;
-            out[i] = [p[0] + mx * d * scale, p[1] + my * d * scale];
+            if (lm < 1e-6) { out.push([p[0] + n2x * d, p[1] + n2y * d]); continue; }
+            mx /= lm; my /= lm;
+            const cosHalf = mx * n2x + my * n2y;
+            if (cosHalf >= 0.5) { const scale = 1 / cosHalf; out.push([p[0] + mx * d * scale, p[1] + my * d * scale]); }
+            else { out.push([p[0] + n1x * d, p[1] + n1y * d], [p[0] + n2x * d, p[1] + n2y * d]); }
         }
         return out;
     }
@@ -8111,39 +8118,48 @@
                 return lobes.filter(lb => Math.abs(terBSignedArea(lb)) >= minA || assets.some(a => terUPip(a.cx, a.cy, lb)));
             };
             const offsetRing = (x, isHole) => {
-                for (let attempt = 0, scale = 1; attempt < 4; attempt++, scale /= 2) {
-                    const D = x.D.map((d, i) => x.S[i] ? Math.max(gapD * 0.5, d * scale) : d * scale);
-                    const Dmax = D.reduce((m2, v) => v > m2 ? v : m2, 0);
-                    const off = terUOffsetAuto(x.P, D, isHole);
-                    const bad = off.length <= 1500 && ringSelfIntersects(off.map(p => ({ lat: p[1], lng: p[0] })));
-                    if (!bad) return [off];
-                    const lobes = terUCleanRings(off, 1);
-                    if (!lobes || !lobes.length) continue;
-                    const real = realLobes(lobes, Dmax);
-                    if (!real.length) continue;
-                    if (real.length === 1) return real;
-                    if (attempt < 3) continue;   // a neck got cut — try a tighter tolerance first
-                    // record where the lobes nearly touch so the NEXT pass can lower the
-                    // tolerance just there instead of everywhere
-                    for (let i2 = 0; i2 < real.length; i2++) for (let j2 = i2 + 1; j2 < real.length; j2++) {
-                        let bd = Infinity, bp = null;
-                        const sa = Math.max(1, Math.floor(real[i2].length / 300)), sb = Math.max(1, Math.floor(real[j2].length / 300));
-                        for (let a2 = 0; a2 < real[i2].length; a2 += sa) for (let b2 = 0; b2 < real[j2].length; b2 += sb) { const d2 = Math.hypot(real[i2][a2][0] - real[j2][b2][0], real[i2][a2][1] - real[j2][b2][1]); if (d2 < bd) { bd = d2; bp = real[i2][a2]; } }
-                        if (bp) cuts.push(bp);
+                // The pull-back MUST equal the simplification tolerance (+ half gap):
+                // an earlier version retried a self-intersecting ring at half the
+                // pull-back, which let the neighbor band's spurs into the piece
+                // (Cobra: 1,449 out-of-band cells). Self-intersections are cleaned
+                // by the self-union; when that yields nothing usable the crossing
+                // points become "cuts" and the next pass lowers the tolerance there.
+                const D = x.D.map((d, i) => x.S[i] ? Math.max(gapD * 0.5, d) : d);
+                const Dmax = D.reduce((m2, v) => v > m2 ? v : m2, 0);
+                const off = terUOffsetAuto(x.P, D, isHole);
+                const offLL = off.map(p => ({ lat: p[1], lng: p[0] }));
+                const bad = off.length <= 1500 && ringSelfIntersects(offLL);
+                if (!bad) return [off];
+                const lobes = terUCleanRings(off, 1);
+                const real = lobes && lobes.length ? realLobes(lobes, Dmax) : [];
+                if (real.length === 1) return real;
+                if (!real.length) {
+                    // nothing usable — mark the crossings as cuts for the next pass
+                    const n2 = off.length;
+                    let found = 0;
+                    for (let i = 0; i < n2 && found < 6; i++) for (let j = i + 2; j < n2 && found < 6; j++) {
+                        if ((j + 1) % n2 === i) continue;
+                        if (segProperCross(offLL[i], offLL[(i + 1) % n2], offLL[j], offLL[(j + 1) % n2])) { cuts.push(off[i]); found++; }
                     }
-                    // several real lobes touch at the cut neck — pull each back by the
-                    // gap and clean again so they end up ≥ gap apart
-                    const out = [];
-                    real.forEach(lb => {
-                        const o2 = terUOffsetAuto(lb, lb.map(() => gapD), isHole);
-                        const bad2 = o2.length <= 1500 && ringSelfIntersects(o2.map(p => ({ lat: p[1], lng: p[0] })));
-                        if (!bad2) { out.push(o2); return; }
-                        const l2 = terUCleanRings(o2, 1);
-                        if (l2) out.push(...realLobes(l2, gapD));
-                    });
-                    if (out.length) return out;
+                    return null;
                 }
-                return null;
+                // several real lobes: record where they nearly touch (next pass lowers
+                // the tolerance there); pull each back by the gap so they never touch
+                for (let i2 = 0; i2 < real.length; i2++) for (let j2 = i2 + 1; j2 < real.length; j2++) {
+                    let bd = Infinity, bp = null;
+                    const sa = Math.max(1, Math.floor(real[i2].length / 300)), sb = Math.max(1, Math.floor(real[j2].length / 300));
+                    for (let a2 = 0; a2 < real[i2].length; a2 += sa) for (let b2 = 0; b2 < real[j2].length; b2 += sb) { const d2 = Math.hypot(real[i2][a2][0] - real[j2][b2][0], real[i2][a2][1] - real[j2][b2][1]); if (d2 < bd) { bd = d2; bp = real[i2][a2]; } }
+                    if (bp) cuts.push(bp);
+                }
+                const out = [];
+                real.forEach(lb => {
+                    const o2 = terUOffsetAuto(lb, lb.map(() => gapD), isHole);
+                    const bad2 = o2.length <= 1500 && ringSelfIntersects(o2.map(p => ({ lat: p[1], lng: p[0] })));
+                    if (!bad2) { out.push(o2); return; }
+                    const l2 = terUCleanRings(o2, 1);
+                    if (l2) out.push(...realLobes(l2, gapD));
+                });
+                return out.length ? out : null;
             };
             let usedKeyhole = 0, usedSlice = 0;
             const finalRings = [];
@@ -8158,9 +8174,15 @@
                 let cur = cur0;
                 // holes belong to the lobe that contains them
                 const holes = holesAll.filter(hh => terUPip(hh[0][0], hh[0][1], cur0));
-                const leftover = [];
+                // Keyhole via polygon-clipping: for each hole find the shortest
+                // asset-free straight channel to the outer ring, then SUBTRACT a
+                // gap-wide rectangle along it from the polygon-with-holes. The lib
+                // owns the topology (a two-cell sliver between hole and edge is
+                // fine), and the slit is exactly the seam gap wide.
+                const PC = terBPC();
+                let mp = [[cur].concat(holes)];   // MultiPolygon in lattice coords
+                let chanOk = 0, chanFail = 0;
                 for (const hole of holes) {
-                    // shortest asset-free channel from the hole to the current outer ring
                     let best = null;
                     const step = Math.max(1, Math.floor(hole.length / 40));
                     for (let hi = 0; hi < hole.length; hi += step) {
@@ -8178,60 +8200,56 @@
                             if (clear) best = { d, hi, oi };
                         }
                     }
-                    if (!best) { leftover.push(hole); continue; }
+                    if (!best || !PC) { chanFail++; continue; }
                     const op = cur[best.oi], hp = hole[best.hi];
-                    let nx = -(hp[1] - op[1]), ny = hp[0] - op[0];
-                    const ln = Math.hypot(nx, ny) || 1; nx = nx / ln * gapD; ny = ny / ln * gapD;
-                    const holeSeq = hole.slice(best.hi).concat(hole.slice(0, best.hi));   // starts at hp
-                    // Deterministic construction: op itself is REPLACED by op±n so the
-                    // outer ring enters the channel from the side its previous vertex
-                    // is on; the hole is walked in the direction whose first step is
-                    // on the entry side, so the return leg is on the other side.
-                    const prevO = cur[(best.oi + cur.length - 1) % cur.length];
-                    const sgn = ((prevO[0] - op[0]) * nx + (prevO[1] - op[1]) * ny) >= 0 ? 1 : -1;
-                    const fwdFirst = holeSeq[1], revFirst = holeSeq[holeSeq.length - 1];
-                    const fwdSide = ((fwdFirst[0] - hp[0]) * nx + (fwdFirst[1] - hp[1]) * ny) * sgn;
-                    const revSide = ((revFirst[0] - hp[0]) * nx + (revFirst[1] - hp[1]) * ny) * sgn;
-                    const order = fwdSide >= revSide ? [false, true] : [true, false];
-                    let merged = null;
-                    for (const rev of order) {
-                        const seqR = rev ? [hp].concat(holeSeq.slice(1).reverse()) : holeSeq;
-                        const m = cur.slice(0, best.oi).map(p => p.slice());
-                        const jA = m.length;
-                        m.push([op[0] + sgn * nx, op[1] + sgn * ny], [hp[0] + sgn * nx, hp[1] + sgn * ny]);
-                        for (let k = 1; k < seqR.length; k++) m.push(seqR[k].slice());
-                        const jB = m.length;
-                        m.push([hp[0] - sgn * nx, hp[1] - sgn * ny], [op[0] - sgn * nx, op[1] - sgn * ny]);
-                        for (let k = best.oi + 1; k < cur.length; k++) m.push(cur[k].slice());
-                        if (!localCross(m, [jA - 1, jA, jA + 1, jB - 1, jB, jB + 1])) { merged = m; break; }
-                    }
-                    if (!merged) { leftover.push(hole); continue; }
-                    cur = merged;
-                    usedKeyhole++;
+                    let ux = hp[0] - op[0], uy = hp[1] - op[1];
+                    const lu = Math.hypot(ux, uy) || 1; ux /= lu; uy /= lu;
+                    const nx = -uy * gapD, ny = ux * gapD;
+                    const ext = 1.5;   // cells past each ring so the slit fully spans both
+                    const A0 = [op[0] - ux * ext, op[1] - uy * ext], B0 = [hp[0] + ux * ext, hp[1] + uy * ext];
+                    const rect = [[A0[0] + nx, A0[1] + ny], [B0[0] + nx, B0[1] + ny], [B0[0] - nx, B0[1] - ny], [A0[0] - nx, A0[1] - ny]];
+                    rect.push(rect[0].slice());
+                    try {
+                        const closed = mp.map(poly => poly.map(r2 => { const q = r2.slice(); if (q[0][0] !== q[q.length - 1][0] || q[0][1] !== q[q.length - 1][1]) q.push(q[0].slice()); return q; }));
+                        const res = PC.difference(closed, [[rect]]);
+                        if (res && res.length) { mp = res.map(poly => poly.map(terBNormRing)); chanOk++; }
+                        else chanFail++;
+                    } catch (e) { console.warn(`${TAG} builder: keyhole difference threw:`, e); chanFail++; }
                 }
-                if (!leftover.length) { finalRings.push(cur); return; }
-                // fallback: slice with polygon-clipping (lat/lng), then give the cut edges their gap
-                const toLL = (p) => { const q = terBLatticeToLL(dem, p[0], p[1]); return [q.lng, q.lat]; };
-                const poly = [cur.map(toLL)].concat(leftover.map(hh => hh.map(toLL)));
-                poly.forEach(r2 => r2.push(r2[0].slice()));
-                const flat = terBSliceHoles(poly, 0, (lat0) => {
-                    // cut-line picker: shift the latitude off any pad it would cross
-                    const rowOf = (lat) => Math.round(toY(lat));
-                    for (let k = 0; k < 40; k++) {
-                        const dLat = (k % 2 ? 1 : -1) * Math.ceil(k / 2) * (2 * cellFt / 364000);
-                        const y = rowOf(lat0 + dLat);
-                        let hit = false;
-                        if (y >= 0 && y < h) for (let x = 0; x < w && !hit; x++) if (assetSrc[y * w + x] && lab[y * w + x] === r.gi) hit = true;
-                        if (!hit) return lat0 + dLat;
-                    }
-                    return lat0;
-                }).map(terBNormRing);
-                flat.forEach(r2 => {
-                    const lat = r2.map(p => [toX(p[0]), toY(p[1])]);
-                    if (lat.length < 3) return;
-                    finalRings.push(terUOffsetAuto(lat, lat.map(() => gapD), false));
+                usedKeyhole += chanOk;
+                // whatever still has holes falls back to the pad-aware slicer
+                const leftover = [];
+                mp.forEach(poly => {
+                    if (poly.length === 1) { if (poly[0].length >= 3) finalRings.push(poly[0]); return; }
+                    leftover.push(poly);
                 });
-                usedSlice += leftover.length;
+                if (leftover.length) {
+                    const toLL = (p) => { const q = terBLatticeToLL(dem, p[0], p[1]); return [q.lng, q.lat]; };
+                    leftover.forEach(poly => {
+                        const pll = poly.map(r2 => { const q = r2.map(toLL); q.push(q[0].slice()); return q; });
+                        const flat = terBSliceHoles(pll, 0, (lat0) => {
+                            const rowOf = (lat) => Math.round(toY(lat));
+                            for (let k = 0; k < 40; k++) {
+                                const dLat = (k % 2 ? 1 : -1) * Math.ceil(k / 2) * (2 * cellFt / 364000);
+                                const y = rowOf(lat0 + dLat);
+                                let hit = false;
+                                if (y >= 0 && y < h) for (let x = 0; x < w && !hit; x++) if (assetSrc[y * w + x] && lab[y * w + x] === r.gi) hit = true;
+                                if (!hit) return lat0 + dLat;
+                            }
+                            return lat0;
+                        }).map(terBNormRing);
+                        flat.forEach(r2 => {
+                            const lat = r2.map(p => [toX(p[0]), toY(p[1])]);
+                            if (lat.length < 3) return;
+                            const o2 = terUOffsetAuto(lat, lat.map(() => gapD), false);
+                            const bad2 = o2.length <= 1500 && ringSelfIntersects(o2.map(p => ({ lat: p[1], lng: p[0] })));
+                            if (!bad2) { finalRings.push(o2); return; }
+                            const l2 = terUCleanRings(o2, 1);
+                            if (l2) finalRings.push(...realLobes(l2, gapD));
+                        });
+                        usedSlice += poly.length - 1;
+                    });
+                }
                 });
             });
             keyholes += usedKeyhole; sliced += usedSlice;

@@ -12,6 +12,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-09 — 🏗 Site Setup Tools latest v4.263–v4.265: Unshielded Site Builder — no more out-of-band ground
+
+With the Cobra duplicate now reproducible offline, three real defects fell out of one render: (1) a self-intersecting offset ring was retried at HALF the pull-back, which decoupled the pull-back from the simplification tolerance and let the neighbor band's spurs into a piece (1,449 out-of-band cells on one FFZ) — the pull-back now always matches the tolerance and self-intersections are cleaned or turned into local tolerance cuts; (2) the junction vertex between a coarse and a fine run pulled back by the fine tolerance only, and sharp corners hit the miter cap — junctions take the larger tolerance and capped corners bevel; (3) the hand-stitched keyhole failed on a two-cell sliver and fell back to slicing through a pad cluster — keyholes are now cut by polygon-clipping (a gap-wide slit subtracted from the polygon-with-holes). Also: the smoothing tunables re-registered under new Control Panel ids so stale stored values stop overriding the retuned defaults, the Build header shows the version, the run log prints the tolerances used, out-of-band cells are drawn as red dots in the preview, and bridge insets scale with the local gap.
+
 ## 2026-09-09 — 🏗 Site Setup Tools latest v4.261–v4.262: Unshielded Site Builder — fewer vertices, wider gaps
 
 Smoothing defaults retuned from the first live builds: near tolerance 25 ft (collapses the DEM stair-steps next to pads), far tolerance 600 ft (gaps up to ~1,200 ft in open ground), ramp 200–1,200 ft — 61 % fewer vertices on the reference site with every gate green; stored copies of the old defaults migrate automatically. The pad relabel margin now scales with the near tolerance so a raised tolerance can't clip a pad corner. Stray one-cell slivers and asset-free lobes under 20 ac are deselected instead of becoming tiny FFZs; piece rows show their own asset counts.
