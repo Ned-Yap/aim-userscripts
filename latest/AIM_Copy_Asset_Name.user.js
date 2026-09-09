@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.261
+// @version      4.262
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.261';
+    const SCRIPT_VERSION = '4.262';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -6307,10 +6307,11 @@
         namePrefix: 'FFZ ', // Build: created-FFZ name prefix (string)
         // Unshielded Site Builder (#254) — see the 🏗 block below
         gapMinFt: 10,           // seam gap near assets
-        smoothNearFt: 300,      // ≤ this far from an asset: seam follows the terrain exactly
-        smoothFarFt: 1500,      // ≥ this far: far tolerance (linear ramp between)
-        tolNearFt: 0,           // simplification tolerance near assets
-        tolFarFt: 250,          // simplification tolerance far from assets (gap = 2·tol + gapMin)
+        smoothNearFt: 200,      // ≤ this far from an asset: near tolerance (seam hugs the terrain)
+        smoothFarFt: 1200,      // ≥ this far: far tolerance (linear ramp between)
+        tolNearFt: 25,          // simplification tolerance near assets (~¾ DEM cell: collapses stair-steps)
+        tolFarFt: 600,          // simplification tolerance far from assets (gap = 2·tol + gapMin ≈ 1,200 ft in the open)
+        tunedV: 2,              // defaults revision — stored older values are migrated in loadTerThresholds
         standoffFt: 15,         // pad buffer for straddle bends (SOP FFZ→asset standoff)
         pitAbsorbMaxAglFt: 250, // warn when an absorbed pit's low spot sits deeper than this under the floor
         bridgeMergeFt: 500,     // bridge candidates closer than this merge
@@ -6344,6 +6345,16 @@
                     if (typeof o[k] !== typeof TER_THRESH_DEFAULTS[k]) continue;
                     if (typeof o[k] === 'number' && !isFinite(o[k])) continue;
                     out[k] = o[k];
+                }
+                // v4.262: smoothing defaults changed (tol 0/250 → 25/600, ramp 300/1500 →
+                // 200/1200) after the first live builds — lift stored copies of the OLD
+                // defaults once; values the user changed themselves are kept.
+                if (!(o.tunedV >= 2)) {
+                    if (o.tolNearFt === 0 || o.tolNearFt === undefined) out.tolNearFt = TER_THRESH_DEFAULTS.tolNearFt;
+                    if (o.tolFarFt === 250 || o.tolFarFt === undefined) out.tolFarFt = TER_THRESH_DEFAULTS.tolFarFt;
+                    if (o.smoothNearFt === 300 || o.smoothNearFt === undefined) out.smoothNearFt = TER_THRESH_DEFAULTS.smoothNearFt;
+                    if (o.smoothFarFt === 1500 || o.smoothFarFt === undefined) out.smoothFarFt = TER_THRESH_DEFAULTS.smoothFarFt;
+                    out.tunedV = 2;
                 }
             }
         } catch (e) { console.warn(`${TAG} loadTerThresholds threw:`, e); }
@@ -7945,7 +7956,10 @@
         // pad corner near a cell edge could sit 2 ft from the raw seam and end up
         // inside the pull-back gap. Grow the buffer by a cell's half-diagonal so
         // every cell the buffered pad touches is relabeled.
-        const padBufCells = ftToCells(th.standoffFt + th.gapMinFt) + 0.75;
+        // The seam next to a pad is simplified at tolNear and pulled back tolNear +
+        // half the gap, so the relabel margin must cover 2·tolNear on top of the
+        // standoff + gap, or a raised near tolerance clips pad corners.
+        const padBufCells = ftToCells(th.standoffFt + th.gapMinFt + 2 * th.tolNearFt) + 0.75;
         // "Taller" = the label whose ACTUAL highest ground (NFZ cells excluded)
         // is highest — the profiler's region floors include absorbed bump
         // cells, which would make a parent look taller than the bump itself.
@@ -8501,7 +8515,10 @@
         // per-piece asset counts + sliver pieces (never worth an FFZ) deselected
         pieces.forEach(p => { p.assets = 0; });
         assets.forEach(a => { if (a.piece >= 0) pieces[a.piece].assets++; });
-        pieces.forEach(p => { if (p.acres < 0.25 && !p.assets) { p.selected = false; p.flags.push('sliver — deselected'); } });
+        pieces.forEach(p => {
+            if (p.acres < 0.25 && !p.assets) { p.selected = false; p.flags.push('sliver — deselected'); }
+            else if (!p.assets && !p.isBase && p.acres < 20) { p.selected = false; p.flags.push('no assets — deselected'); }
+        });
         gates.push({ ok: !aBad.length, label: aBad.length ? `${aBad.length} asset(s) not cleanly inside one FFZ` : `all ${assets.length} assets inside exactly one FFZ`, detail: aBad.slice(0, 12) });
         const missing = regInfo.filter(r => r.keep && !r.dropped && r.absorbedInto < 0 && r.assets.length && !pieces.some(p => p.region === r.gi));
         gates.push({ ok: !missing.length, label: missing.length ? `${missing.length} asset-bearing region(s) produced no FFZ piece (see log)` : 'every asset-bearing region built a piece', detail: missing.map(r => `${r.name}: ${r.assets.length} asset(s), ${Math.round(r.cells * dem.cellAcres)} ac`) });

@@ -12,6 +12,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-09 — 🏗 Site Setup Tools latest v4.261–v4.262: Unshielded Site Builder — fewer vertices, wider gaps
+
+Smoothing defaults retuned from the first live builds: near tolerance 25 ft (collapses the DEM stair-steps next to pads), far tolerance 600 ft (gaps up to ~1,200 ft in open ground), ramp 200–1,200 ft — 61 % fewer vertices on the reference site with every gate green; stored copies of the old defaults migrate automatically. The pad relabel margin now scales with the near tolerance so a raised tolerance can't clip a pad corner. Stray one-cell slivers and asset-free lobes under 20 ac are deselected instead of becoming tiny FFZs; piece rows show their own asset counts.
+
 ## 2026-09-09 — 🏗 Site Setup Tools latest v4.259–v4.260: Unshielded Site Builder — all gates green live
 
 Fifth live Stage on the Cobra duplicate passed every gate: 11 giant FFZs over 19,844 ac, 308 assets each inside exactly one FFZ and reachable from base, 47 NFZs, 183 bridges. The preview now also draws the builder's own boundaries (white = seam between two FFZs, grey = outer edge) so the yellow pair can be checked against the terrain bands at a glance, and stale preview layers from an earlier stage are removed through the layer itself, which fixes a mismatch seen after re-running the profiler.
