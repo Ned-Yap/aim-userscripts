@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.259
+// @version      4.260
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.259';
+    const SCRIPT_VERSION = '4.260';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -7197,8 +7197,17 @@
     let terBUndoArm = 0;
 
     function terBClearStage() {
+        // Leaflet layers know their own map (l.remove()) — a stale preview
+        // survived a profiler re-run when getLeafletMap() came back with a
+        // different / null instance, and the yellow seams no longer matched
+        // the overlay (live report 2026-09-09).
         const map = getLeafletMap();
-        terBLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        let failed = 0;
+        terBLayers.forEach(l => {
+            try { if (typeof l.remove === 'function') l.remove(); else if (map) map.removeLayer(l); }
+            catch (e) { failed++; }
+        });
+        if (failed) console.warn(`${TAG} builder: ${failed} preview layer(s) could not be removed`);
         terBLayers = [];
         terBState = null;
         terBArm = 0; terBUndoArm = 0;

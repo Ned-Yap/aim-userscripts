@@ -12,6 +12,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-09 — 🏗 Site Setup Tools latest v4.259–v4.260: Unshielded Site Builder — all gates green live
+
+Fifth live Stage on the Cobra duplicate passed every gate: 11 giant FFZs over 19,844 ac, 308 assets each inside exactly one FFZ and reachable from base, 47 NFZs, 183 bridges. The preview now also draws the builder's own boundaries (white = seam between two FFZs, grey = outer edge) so the yellow pair can be checked against the terrain bands at a glance, and stale preview layers from an earlier stage are removed through the layer itself, which fixes a mismatch seen after re-running the profiler.
+
 ## 2026-09-09 — 🏗 Site Setup Tools latest v4.258: Unshielded Site Builder — pad corners in the seam gap
 
 Fourth live Stage was down to 6 pads, all the same signature: every cell inside its FFZ but one corner in the seam gap. The straddle relabel works by cell centers and the 25 ft pad buffer is under one 33 ft DEM cell, so a corner near a cell edge could sit 2 ft from the raw seam. The relabel buffer now grows by a cell's half-diagonal so every cell the buffered pad touches moves with it.
