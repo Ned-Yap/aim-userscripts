@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.1
+// @version      0.2
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index, grouped by client when detectable. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -31,7 +31,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.1';
+    const SCRIPT_VERSION = '0.2';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -93,7 +93,7 @@
     }
 
     function defaultCfg() {
-        return { thresholdFt: 200, marginFt: 500, classes: { ffz: true, fp: true, asset: true }, capPerPair: 200 };
+        return { thresholdFt: 200, marginFt: 500, classes: { ffz: true, fp: true, asset: true }, capPerPair: 200, onlyProduction: false };
     }
     function loadCfg() {
         const d = defaultCfg();
@@ -102,6 +102,7 @@
             if (typeof s.thresholdFt === 'number') d.thresholdFt = s.thresholdFt;
             if (typeof s.marginFt === 'number') d.marginFt = s.marginFt;
             if (typeof s.capPerPair === 'number') d.capPerPair = s.capPerPair;
+            if (typeof s.onlyProduction === 'boolean') d.onlyProduction = s.onlyProduction;
             if (s.classes) NB_CLASSES.forEach(c => {
                 if (typeof s.classes[c.key] === 'boolean') d.classes[c.key] = s.classes[c.key];
             });
@@ -496,13 +497,26 @@
         list.forEach(s => {
             const id = String(s && (s.id != null ? s.id : s.site_id) || '');
             if (!id) return;
-            map[id] = { name: String(s.name || s.site_name || s.title || `site ${id}`), raw: s };
+            // Payload shape live-probed 2026-09-09: id, name, location
+            // ({lat,lng} — the center fallback field, 444/445 sites),
+            // is_imperial, has_const_rid_location, status ('Production'…).
+            // No client field exists — grouping stays name-based for now.
+            map[id] = {
+                name: String(s.name || s.site_name || s.title || `site ${id}`),
+                status: String(s.status || ''),
+                raw: s,
+            };
         });
         if (!probeLogged && list.length) {
             probeLogged = true;
             const sample = list[0];
             if (!siteEntryCenter(sample)) console.log(`${TAG} /sites/ entry carries no recognizable center — keys:`, Object.keys(sample).join(', '));
             if (!siteEntryClient(sample)) console.log(`${TAG} /sites/ entry carries no recognizable client field — keys:`, Object.keys(sample).join(', '));
+            // Learn the status vocabulary — decides whether "Production only"
+            // can become the default duplicate/OFFLINE-site filter.
+            const statuses = {};
+            list.forEach(s => { const st = String(s.status || '(none)'); statuses[st] = (statuses[st] || 0) + 1; });
+            console.log(`${TAG} site status vocabulary:`, statuses);
         }
         rawSites = map;
         return map;
@@ -510,6 +524,14 @@
 
     function siteName(id) {
         return (rawSites && rawSites[id] && rawSites[id].name) || `site ${id}`;
+    }
+    function siteStatus(id) {
+        return (rawSites && rawSites[id] && rawSites[id].status) || '';
+    }
+    function statusTag(st) {
+        // Annotate anything that is NOT plain Production — that's where the
+        // duplicate/OFFLINE copies should live if statuses are maintained.
+        return st && st !== 'Production' ? st : '';
     }
 
     const entityCache = {};   // id → entities (per page-load session)
@@ -545,7 +567,8 @@
             at: null, env: ENV_LABEL,
             thresholdFt: ftCfg.thresholdFt, marginFt: ftCfg.marginFt,
             classes: Object.assign({}, ftCfg.classes),
-            pairs: [], offSites: [], unchecked: [], centerOnly: [], notes: [],
+            onlyProduction: ftCfg.onlyProduction,
+            pairs: [], offSites: [], skippedStatus: [], unchecked: [], centerOnly: [], notes: [],
             siteCount: 0, candidatePairs: 0, fetchedSites: 0,
         };
         try {
@@ -568,6 +591,11 @@
             const roster = [];
             allIds.forEach(id => {
                 if (ftIgnore[id]) { result.offSites.push({ id, name: siteName(id) }); return; }
+                const st = siteStatus(id);
+                if (ftCfg.onlyProduction && st && st !== 'Production') {
+                    result.skippedStatus.push({ id, name: siteName(id), status: st });
+                    return;
+                }
                 const b = nbIndex.bboxes[id];
                 if (b && !b.empty) { roster.push({ id, box: b, src: 'snapshot' }); return; }
                 if (b && b.empty) return;   // no flight geometry — nothing to overlap
@@ -668,8 +696,8 @@
                 if (total > 0) {
                     conflicts.sort((x, y) => x.ft - y.ft);
                     result.pairs.push({
-                        aId: A.id, aName: siteName(A.id), aSrc: A.src,
-                        bId: B.id, bName: siteName(B.id), bSrc: B.src,
+                        aId: A.id, aName: siteName(A.id), aSrc: A.src, aStatus: siteStatus(A.id),
+                        bId: B.id, bName: siteName(B.id), bSrc: B.src, bStatus: siteStatus(B.id),
                         count: total, capped, minFt: minFt === null ? null : Math.round(minFt),
                         conflicts,
                     });
@@ -713,7 +741,7 @@
         lines.push(`AIM Fleet Tools — cross-site overlap sweep [${ENV_LABEL}]`);
         if (!lastSweep) { lines.push('(no sweep run yet)'); return lines.join('\n'); }
         const cls = NB_CLASSES.filter(c => lastSweep.classes && lastSweep.classes[c.key]).map(c => c.label).join(', ');
-        lines.push(`Ran ${lastSweep.at ? new Date(lastSweep.at).toLocaleString() : '—'} · threshold ${lastSweep.thresholdFt} ft (+${lastSweep.marginFt} ft prefilter margin) · classes: ${cls}`);
+        lines.push(`Ran ${lastSweep.at ? new Date(lastSweep.at).toLocaleString() : '—'} · threshold ${lastSweep.thresholdFt} ft (+${lastSweep.marginFt} ft prefilter margin) · classes: ${cls}${lastSweep.onlyProduction ? ' · Production-status sites only' : ''}`);
         lines.push(`${lastSweep.siteCount} sites → ${lastSweep.candidatePairs} candidate pair(s) → ${lastSweep.pairs.length} conflicting pair(s)`);
         if (lastSweep.error) lines.push(`SWEEP FAILED: ${lastSweep.error}`);
         const vis = visiblePairs();
@@ -732,6 +760,11 @@
             lines.push('');
             lines.push(`TURNED OFF — excluded from the sweep (${lastSweep.offSites.length}):`);
             lastSweep.offSites.forEach(s => lines.push(`  • ${s.name} (#${s.id})`));
+        }
+        if (lastSweep.skippedStatus && lastSweep.skippedStatus.length) {
+            lines.push('');
+            lines.push(`SKIPPED by "Production only" — /sites/ status ≠ Production (${lastSweep.skippedStatus.length}):`);
+            lastSweep.skippedStatus.forEach(s => lines.push(`  • ${s.name} (#${s.id}) — ${s.status}`));
         }
         if (lastSweep.centerOnly && lastSweep.centerOnly.length) {
             lines.push('');
@@ -758,6 +791,7 @@
             rows.push({
                 id, name: siteName(id),
                 client: (raw && siteEntryClient(raw)) || '',
+                status: siteStatus(id),
                 ffz: b && !b.empty ? b.ffz : 0,
                 fp: b && !b.empty ? b.fp : 0,
                 asset: b && !b.empty ? b.asset : 0,
@@ -771,8 +805,8 @@
     function buildMetricsCsv() {
         const rows = buildMetricsRows();
         const esc = (v) => `"${String(v).replace(/"/g, '""')}"`;
-        const lines = ['site_id,site_name,client,ffz,fp,assets'];
-        rows.forEach(r => lines.push([r.id, esc(r.name), esc(r.client), r.ffz, r.fp, r.asset].join(',')));
+        const lines = ['site_id,site_name,client,status,ffz,fp,assets'];
+        rows.forEach(r => lines.push([r.id, esc(r.name), esc(r.client), esc(r.status), r.ffz, r.fp, r.asset].join(',')));
         return lines.join('\n');
     }
 
@@ -830,7 +864,10 @@
         rows.push('<div style="padding:6px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
             + `<label>threshold <input type="number" data-ft-num="thresholdFt" value="${ftCfg.thresholdFt}" min="10" max="2000" step="10" ${sweepRunning ? 'disabled' : ''} style="width:60px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:2px 4px;font:inherit;"> ft</label>`
             + `<label>margin <input type="number" data-ft-num="marginFt" value="${ftCfg.marginFt}" min="0" max="10000" step="100" ${sweepRunning ? 'disabled' : ''} style="width:60px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:2px 4px;font:inherit;"> ft</label>`
-            + cls + '</div>');
+            + cls
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Skip sites whose /sites/ status is not 'Production' — where duplicate/OFFLINE copies should live if statuses are maintained">`
+            + `<input type="checkbox" data-ft-flag="onlyProduction" ${ftCfg.onlyProduction ? 'checked' : ''} ${sweepRunning ? 'disabled' : ''}> Production only</label>`
+            + '</div>');
         // action row
         rows.push('<div style="padding:6px 10px;display:flex;gap:14px;flex-wrap:wrap;border-bottom:1px solid #222834;">'
             + (sweepRunning
@@ -850,6 +887,7 @@
             + `Last run ${lastSweep.at ? new Date(lastSweep.at).toLocaleString() : '—'} · ${lastSweep.siteCount} sites → ${lastSweep.candidatePairs} candidate pair(s) → `
             + `<span style="color:${vis.length ? '#ff3d00' : '#5fff5f'};font-weight:bold">${vis.length} conflicting pair(s)</span>`
             + (hidden ? ` <span style="color:#888">(+${hidden} hidden by turned-off sites)</span>` : '')
+            + (lastSweep.skippedStatus && lastSweep.skippedStatus.length ? ` · <span style="color:#888">${lastSweep.skippedStatus.length} skipped (non-Production)</span>` : '')
             + (lastSweep.unchecked.length ? ` · <span style="color:#ffa030">${lastSweep.unchecked.length} UNCHECKED</span>` : '')
             + '</div>');
         // turned-off chips
@@ -865,10 +903,11 @@
             const key = `${p.aId}:${p.bId}`;
             const open = expandedPair === key;
             const minTxt = p.minFt === null ? '—' : (p.minFt === 0 ? 'OVERLAP' : `${p.minFt} ft`);
+            const stTag = (st) => statusTag(st) ? ` <span style="color:#ffa030;border:1px solid #ffa03055;border-radius:3px;padding:0 3px;font-size:10px;" title="/sites/ status — not Production">${escapeHtml(st)}</span>` : '';
             rows.push(`<div class="aim-ft-row" data-ft-pair="${key}" style="padding:4px 10px;cursor:pointer;border-bottom:1px solid #1d2430;">`
                 + `${open ? '▾' : '▸'} <span style="color:${p.minFt === 0 ? '#ff3d00' : '#ffa030'};font-weight:bold">${minTxt}</span> `
-                + `${escapeHtml(p.aName)} <span style="color:#666">#${p.aId}</span>`
-                + ` ↔ ${escapeHtml(p.bName)} <span style="color:#666">#${p.bId}</span>`
+                + `${escapeHtml(p.aName)} <span style="color:#666">#${p.aId}</span>${stTag(p.aStatus)}`
+                + ` ↔ ${escapeHtml(p.bName)} <span style="color:#666">#${p.bId}</span>${stTag(p.bStatus)}`
                 + ` <span style="color:#888">— ${p.count}${p.capped ? '+' : ''} conflict(s)</span>`
                 + (p.aSrc === 'center' || p.bSrc === 'center' ? ' <span style="color:#ffa030" title="one side was prefiltered by bare site center — no snapshot">◦center</span>' : '')
                 + '</div>');
@@ -903,12 +942,14 @@
             + '<span data-ft="metrics-csv" style="cursor:pointer;color:#7adfe6">📋 Copy CSV</span>'
             + `<span style="color:#888">${rows.length} indexed site(s)</span></div>`);
         const hasClient = rows.some(r => r.client);
+        const hasStatus = rows.some(r => r.status);
         out.push('<div style="max-height:40vh;overflow-y:auto;">'
             + '<table style="border-collapse:collapse;width:100%;font:inherit;">'
-            + `<thead><tr style="color:#7adfe6;text-align:left;"><th style="padding:2px 8px;">Site</th>${hasClient ? '<th style="padding:2px 8px;">Client</th>' : ''}<th style="padding:2px 8px;">FFZ</th><th style="padding:2px 8px;">FP</th><th style="padding:2px 8px;">Assets</th></tr></thead><tbody>`
+            + `<thead><tr style="color:#7adfe6;text-align:left;"><th style="padding:2px 8px;">Site</th>${hasClient ? '<th style="padding:2px 8px;">Client</th>' : ''}${hasStatus ? '<th style="padding:2px 8px;">Status</th>' : ''}<th style="padding:2px 8px;">FFZ</th><th style="padding:2px 8px;">FP</th><th style="padding:2px 8px;">Assets</th></tr></thead><tbody>`
             + rows.map(r => `<tr style="border-bottom:1px solid #1d2430;${r.empty ? 'color:#666;' : ''}">`
                 + `<td style="padding:2px 8px;">${escapeHtml(r.name)} <span style="color:#666">#${r.id}</span></td>`
                 + (hasClient ? `<td style="padding:2px 8px;color:#aaa">${escapeHtml(r.client)}</td>` : '')
+                + (hasStatus ? `<td style="padding:2px 8px;color:${statusTag(r.status) ? '#ffa030' : '#888'}">${escapeHtml(r.status || '—')}</td>` : '')
                 + `<td style="padding:2px 8px;">${r.ffz}</td><td style="padding:2px 8px;">${r.fp}</td><td style="padding:2px 8px;">${r.asset}</td></tr>`).join('')
             + '</tbody></table></div>');
         return out.join('');
@@ -954,7 +995,7 @@
 
             // Delegated — the body is rebuilt on every render, the root never is
             panelEl.addEventListener('click', (ev) => {
-                if (ev.target.closest('input[data-ft-class]')) return;   // checkbox → change handler
+                if (ev.target.closest('input[data-ft-class],input[data-ft-flag]')) return;   // checkbox → change handler
                 const act = ev.target.closest('[data-ft]');
                 if (act) {
                     const cmd = act.getAttribute('data-ft');
@@ -1026,6 +1067,14 @@
                         saveCfg();
                         setStatus(`${prop === 'thresholdFt' ? 'threshold' : 'prefilter margin'} = ${v} ft — takes effect on the next sweep`);
                     }
+                    return;
+                }
+                const flag = ev.target.closest('input[data-ft-flag]');
+                if (flag) {
+                    const prop = flag.getAttribute('data-ft-flag');
+                    ftCfg[prop] = !!flag.checked;
+                    saveCfg();
+                    setStatus(`${prop === 'onlyProduction' ? '"Production only"' : prop} ${flag.checked ? 'ON' : 'OFF'} — takes effect on the next sweep`);
                     return;
                 }
                 const cb = ev.target.closest('input[data-ft-class]');
