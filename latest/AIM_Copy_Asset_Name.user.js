@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.256
+// @version      4.257
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.256';
+    const SCRIPT_VERSION = '4.257';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -7995,11 +7995,9 @@
         const topo = terBVectorize({ regGrid: lab }, dem);
         await terYield();
         const gapHalf = ftToCells(th.gapMinFt) / 2;
-        const gapD = gapHalf * 1.3;   // per-side pull-back: a hair over half the gap — miter caps / node chords eat a few %
-        topo.arcs.forEach((A, ai) => {
-            const side = topo.arcSide[ai];
-            A.seam = side.left >= 0 && side.right >= 0;
-            const tols = A.pts.map(p => terUTolCells(distFtAtCorner(p[0], p[1]), th, cellFt));
+        const gapD = gapHalf * 1.5;   // per-side pull-back: over half the gap — miter caps / node chords eat a few %
+        const simplifyArc = (A) => {
+            const tols = A.rawTol;
             const closedSplit = A.closed && A.pts.length >= 5;
             let simp;
             if (closedSplit) {
@@ -8010,8 +8008,14 @@
                 simp = { pts: h1.pts.concat(h2.pts.slice(1)), tol: h1.tol.concat(h2.tol.slice(1)) };
                 if (simp.pts.length < 5) { simp = { pts: A.pts.slice(), tol: tols.slice() }; }
             } else simp = terUSimplifyVar(A.pts, tols);
-            A.simp = simp.pts; A.simpTol = simp.tol; A.rawTol = tols;
+            A.simp = simp.pts; A.simpTol = simp.tol;
+        };
+        topo.arcs.forEach((A, ai) => {
+            const side = topo.arcSide[ai];
+            A.seam = side.left >= 0 && side.right >= 0;
+            A.rawTol = A.pts.map(p => terUTolCells(distFtAtCorner(p[0], p[1]), th, cellFt));
             A.lenCells = terUPolyLen(A.pts);
+            simplifyArc(A);
         });
 
         // ---------- 7. rings → inward offset → keyhole → pieces ----------
@@ -8031,9 +8035,10 @@
             while (P.length > 1 && P[0][0] === P[P.length - 1][0] && P[0][1] === P[P.length - 1][1]) { P.pop(); D.pop(); S.pop(); }
             return { P, D, S };
         };
-        const pieces = [];
-        const pieceGrid = new Int16Array(n).fill(-1);
+        let pieces = [];
+        let pieceGrid = new Int16Array(n).fill(-1);
         let keyholes = 0, sliced = 0;
+        let cuts = [];   // lattice points where an offset severed a region into lobes (this pass)
         // Local crossing test for a keyhole merge: the channel edges vs the
         // ring segments near the junctions (a full O(n²) check is skipped on
         // big rings, and this is where a bad merge actually crosses).
@@ -8049,6 +8054,10 @@
             }
             return false;
         };
+        const passLog = [];
+        const buildAllPieces = async () => {
+        pieces = []; pieceGrid = new Int16Array(n).fill(-1); keyholes = 0; sliced = 0; cuts = []; passLog.length = 0;
+        const L = (m) => passLog.push(m);
         for (const r of regInfo) {
             if (r.dropped || r.absorbedInto >= 0) continue;
             const rings = topo.ringsByRegion.get(r.gi) || [];
@@ -8082,6 +8091,15 @@
                     const real = realLobes(lobes, Dmax);
                     if (!real.length) continue;
                     if (real.length === 1) return real;
+                    if (attempt < 3) continue;   // a neck got cut — try a tighter tolerance first
+                    // record where the lobes nearly touch so the NEXT pass can lower the
+                    // tolerance just there instead of everywhere
+                    for (let i2 = 0; i2 < real.length; i2++) for (let j2 = i2 + 1; j2 < real.length; j2++) {
+                        let bd = Infinity, bp = null;
+                        const sa = Math.max(1, Math.floor(real[i2].length / 300)), sb = Math.max(1, Math.floor(real[j2].length / 300));
+                        for (let a2 = 0; a2 < real[i2].length; a2 += sa) for (let b2 = 0; b2 < real[j2].length; b2 += sb) { const d2 = Math.hypot(real[i2][a2][0] - real[j2][b2][0], real[i2][a2][1] - real[j2][b2][1]); if (d2 < bd) { bd = d2; bp = real[i2][a2]; } }
+                        if (bp) cuts.push(bp);
+                    }
                     // several real lobes touch at the cut neck — pull each back by the
                     // gap and clean again so they end up ≥ gap apart
                     const out = [];
@@ -8187,6 +8205,13 @@
             });
             keyholes += usedKeyhole; sliced += usedSlice;
             finalRings.forEach((ringPts, pi) => {
+                pieceRecord(r, ringPts, pi, finalRings.length, usedKeyhole);
+            });
+            await terYield();
+        }
+        };
+        const pieceRecord = (r, ringPts, pi, nRings, usedKeyhole) => {
+            {
                 if (ringPts.length < 3) return;
                 const pieceIdx = pieces.length;
                 // rasterize for the recompute + containment
@@ -8221,7 +8246,7 @@
                 if (ringPts.length > th.maxVertsWarn) flags.push(`${ringPts.length} vertices (warn > ${th.maxVertsWarn})`);
                 const rawVerts = (topo.ringsByRegion.get(r.gi) || []).reduce((s2, ring) => s2 + ring.arcSeq.reduce((s3, s) => s3 + topo.arcs[s.arc].pts.length, 0), 0);
                 pieces.push({
-                    region: r.gi, name: `${r.name}${finalRings.length > 1 ? String.fromCharCode(97 + pi) : ''}`,
+                    region: r.gi, name: `${r.name}${nRings > 1 ? String.fromCharCode(97 + pi) : ''}`,
                     points: pointsLL, latticePts: ringPts, acres, verts: ringPts.length, rawVerts,
                     bandLo: r.bandLo, bandHi: r.bandHi, floorMSL, ceilMSL,
                     groundMin: mn, groundMax: mx, nfzCells, cells,
@@ -8229,9 +8254,30 @@
                     keyhole: usedKeyhole, flags, infeasible: !feasible, selected: feasible,
                     assets: r.assets.length, isBase: r.gi === baseReg && pointInPolygon(base.pt.lat, base.pt.lng, pointsLL), dir: r.isIsland ? r.dir : '',
                 });
+            }
+        };
+        // Up to 4 passes: a pass that severed a region lowers the tolerance of the
+        // raw vertices around each cut (shared arcs → both neighbors stay in sync)
+        // and rebuilds everything; the last pass accepts lobes + lobe links.
+        for (let pass = 0; pass < 4; pass++) {
+            await buildAllPieces();
+            if (!cuts.length || pass === 3) break;
+            const R2 = ftToCells(th.tolFarFt) * 2;
+            let lowered = 0;
+            const touched = new Set();
+            topo.arcs.forEach((A, ai) => {
+                let hit = false;
+                A.rawTol = A.rawTol.map((t, i) => {
+                    if (t <= 0.25) return t;
+                    const p = A.pts[i];
+                    for (const c of cuts) if (Math.hypot(p[0] - c[0], p[1] - c[1]) <= R2) { hit = true; lowered++; return t * 0.5; }
+                    return t;
+                });
+                if (hit) { simplifyArc(A); touched.add(ai); }
             });
-            await terYield();
+            L(`pass ${pass + 1}: ${cuts.length} neck cut(s) — tolerance halved on ${lowered} vertices of ${touched.size} arc(s), rebuilding`);
         }
+        passLog.forEach(m => L(m));
         if (keyholes) L(`${keyholes} keyhole channel(s) cut so parents stay one polygon`);
         if (sliced) L(`${sliced} hole(s) had no asset-free channel → parent sliced instead`);
 

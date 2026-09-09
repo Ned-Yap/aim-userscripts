@@ -12,6 +12,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-08 — 🏗 Site Setup Tools latest v4.257: Unshielded Site Builder — stop cutting necks
+
+Third live Stage split one band into ten pieces: with the far tolerance at 250 ft each side pulls back ~256 ft, so any part of a region narrower than ~510 ft was severed into lobes. Stage now runs up to four passes — a pass that severs a region halves the tolerance only around the cut and rebuilds, so the rest of the seam stays smooth; only the final pass accepts lobes (with lobe-link bridges). Junk lobes from inverted notches are filtered by size.
+
 ## 2026-09-08 — 🏗 Site Setup Tools latest v4.256: Unshielded Site Builder — second live-stage round
 
 Second live Stage still had 8 pads split or outside, and the new gate detail showed two families: pad corners eroded at a profile edge, and whole pieces missing. Fixes: profile-edge vertices next to an asset no longer pull back at all (only seam vertices keep the half-gap floor); a ring whose inward offset inverts a notch is now cleaned into its real lobes (junk inversion loops filtered by size) instead of being dropped, and lobes cut by a narrow neck get a "lobe link" bridge; straddling pads are settled again after sliver cleanup; new gate "every asset-bearing region built a piece"; asset-gate lines now say which bands a pad straddled and where it was moved.
