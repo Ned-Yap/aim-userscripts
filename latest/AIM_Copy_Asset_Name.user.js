@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.263
+// @version      4.264
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.263';
+    const SCRIPT_VERSION = '4.264';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -8247,9 +8247,10 @@
                 const pieceIdx = pieces.length;
                 // rasterize for the recompute + containment
                 let mx = -Infinity, mn = Infinity, cells = 0, outside = 0, nanCells = 0, nfzCells = 0, lowCell = -1;
+                const outsideCells = [];
                 terUFill(ringPts, w, h, (i) => {
                     cells++;
-                    if (lab[i] !== r.gi) outside++;
+                    if (lab[i] !== r.gi) { outside++; if (outsideCells.length < 3000) outsideCells.push(i); }
                     if (pieceGrid[i] === -1) pieceGrid[i] = pieceIdx;
                     if (nfzMask[i]) { nfzCells++; return; }
                     const v = vals[i];
@@ -8282,7 +8283,7 @@
                     bandLo: r.bandLo, bandHi: r.bandHi, floorMSL, ceilMSL,
                     groundMin: mn, groundMax: mx, nfzCells, cells,
                     aglMin: floorMSL != null ? floorMSL - mx : null, aglMax: floorMSL != null ? floorMSL - mn : null,
-                    keyhole: usedKeyhole, flags, infeasible: !feasible, selected: feasible,
+                    keyhole: usedKeyhole, flags, infeasible: !feasible, selected: feasible, outsideCells,
                     assets: r.assets.length, isBase: r.gi === baseReg && pointInPolygon(base.pt.lat, base.pt.lng, pointsLL), dir: r.isIsland ? r.dir : '',
                 });
             }
@@ -8402,7 +8403,9 @@
                 const lnx = dy, lny = -dx;   // left normal (y-down) → side.left region
                 const edge = tolHere + gapHalf;
                 let placed = null;
-                for (const insFt of insetTry) {
+                const localGapFt = (2 * tolHere + 2 * gapHalf) * cellFt;
+                const insetScaled = insetTry.map(f => Math.max(f, f === th.bridgeInsetFt ? localGapFt * 0.3 : 0));
+                for (const insFt of insetScaled) {
                     const ins = edge + ftToCells(insFt);
                     const pL = [at.p[0] + lnx * ins, at.p[1] + lny * ins], pR = [at.p[0] - lnx * ins, at.p[1] - lny * ins];
                     const piL = pieceAt(pL[0], pL[1]), piR = pieceAt(pR[0], pR[1]);
@@ -8577,6 +8580,17 @@
         (bs.arcsLL || []).forEach(a => {
             if (a.pts.length < 2) return;
             add(L.polyline(a.pts.map(q => [q.lat, q.lng]), { color: a.seam ? '#ffffff' : '#9aa0a6', weight: 1, opacity: a.seam ? 0.8 : 0.5, interactive: false }));
+        });
+        // diagnostic: cells a piece covers that belong to another band (red dots)
+        const demD = terState && terState.dem;
+        (bs.pieces || []).forEach(p => {
+            if (!demD || !p.outsideCells || !p.outsideCells.length) return;
+            const step = Math.max(1, Math.floor(p.outsideCells.length / 600));
+            for (let k = 0; k < p.outsideCells.length; k += step) {
+                const i = p.outsideCells[k];
+                const q = terBLatticeToLL(demD, (i % demD.w) + 0.5, Math.floor(i / demD.w) + 0.5);
+                add(L.circleMarker([q.lat, q.lng], { radius: 2, color: '#ff2020', weight: 1, fillColor: '#ff2020', fillOpacity: 0.9, interactive: false }));
+            }
         });
         (bs.pieces || []).forEach(p => {
             const c = seg ? terColorFor((p.bandLo + p.bandHi) / 2, seg.mnFt, seg.mxFt) : [255, 225, 77];
