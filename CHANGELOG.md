@@ -12,6 +12,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-08 — 🏗 Site Setup Tools latest v4.255: Unshielded Site Builder — first live-stage fixes
+
+First live Stage on a 19,700 ac site was stopped by the gates (8 pads split/outside — nothing written). Keyhole channels are now built deterministically (entry side chosen from the ring, hole walked to match) instead of trial-and-error, the slice fallback picks a cut line that misses every pad, a new **FFZ overlap** gate catches any hole that was neither keyholed nor sliced, the asset gate now names the pieces / gap involved, and a **Copy build report** button dumps pieces, gates, seams and the run log as text.
+
 ## 2026-09-08 — 🏗 Site Setup Tools latest v4.254: Unshielded Site Builder (feature #254, dev only)
 
 The Terrain Profiler's Build section is now the **Unshielded Site Builder**: one giant fixed-floor FFZ per terrain band (Δ now defaults to 25 ft), seamed to the next band by short **bridge flight paths** so a DAA return from anywhere is a straight line to base. Asset-free islands become NFZs, pits holding an asset are absorbed upward, bumps holding an asset become their own taller FFZ with a keyhole channel so the parent stays one polygon, straddling pads go to the taller band. Seams keep a 10 ft gap next to assets and widen with inward-only smoothing far from them (gap = 2×tolerance + 10). Every FFZ's floor/ceiling is recomputed from the DEM inside its final polygon. Bridges land where each asset's straight line to base crosses a seam; band = intersection of the two FFZ bands. Commit is gated (MSL site, base inside a piece, every asset inside exactly one FFZ, feasibility, base→asset reachability) and ends by deleting the old pad FFZs and corridor FPs through Delete Guard. Full mode only; in live test on a Cobra 01 duplicate.

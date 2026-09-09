@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.254
+// @version      4.255
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.254';
+    const SCRIPT_VERSION = '4.255';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -7404,7 +7404,7 @@
 
     // Slice a polygon-with-holes ([outer, hole…] in [lng,lat]) into
     // hole-free rings via horizontal cuts through each hole's centroid.
-    function terBSliceHoles(poly, depth) {
+    function terBSliceHoles(poly, depth, pickLat) {
         if (poly.length <= 1) return [poly[0]];
         const PC = terBPC();
         if (!PC) return [poly[0]];   // no clipping lib → drop holes (logged by caller)
@@ -7413,6 +7413,7 @@
         let clat = 0;
         hole.forEach(p => { clat += p[1]; });
         clat /= hole.length;
+        if (typeof pickLat === 'function') { try { const c2 = pickLat(clat); if (isFinite(c2)) clat = c2; } catch (e) { console.warn(`${TAG} builder: cut-line picker threw:`, e); } }
         let mnLng = Infinity, mxLng = -Infinity, mnLat = Infinity, mxLat = -Infinity;
         poly[0].forEach(p => {
             if (p[0] < mnLng) mnLng = p[0]; if (p[0] > mxLng) mxLng = p[0];
@@ -7428,7 +7429,7 @@
             let res = null;
             try { res = PC.intersection([poly], [rect]); } catch (e) { console.warn(`${TAG} builder: hole slice threw:`, e); }
             (res || []).forEach(p => {
-                terBSliceHoles(p, (depth || 0) + 1).forEach(r2 => { if (r2 && r2.length >= 3) out.push(r2); });
+                terBSliceHoles(p, (depth || 0) + 1, pickLat).forEach(r2 => { if (r2 && r2.length >= 3) out.push(r2); });
             });
         }
         return out.length ? out : [poly[0]];
@@ -8083,22 +8084,28 @@
                     const op = cur[best.oi], hp = hole[best.hi];
                     let nx = -(hp[1] - op[1]), ny = hp[0] - op[0];
                     const ln = Math.hypot(nx, ny) || 1; nx = nx / ln * gapD; ny = ny / ln * gapD;
-                    const holeSeq = hole.slice(best.hi).concat(hole.slice(0, best.hi));
+                    const holeSeq = hole.slice(best.hi).concat(hole.slice(0, best.hi));   // starts at hp
+                    // Deterministic construction: op itself is REPLACED by op±n so the
+                    // outer ring enters the channel from the side its previous vertex
+                    // is on; the hole is walked in the direction whose first step is
+                    // on the entry side, so the return leg is on the other side.
+                    const prevO = cur[(best.oi + cur.length - 1) % cur.length];
+                    const sgn = ((prevO[0] - op[0]) * nx + (prevO[1] - op[1]) * ny) >= 0 ? 1 : -1;
+                    const fwdFirst = holeSeq[1], revFirst = holeSeq[holeSeq.length - 1];
+                    const fwdSide = ((fwdFirst[0] - hp[0]) * nx + (fwdFirst[1] - hp[1]) * ny) * sgn;
+                    const revSide = ((revFirst[0] - hp[0]) * nx + (revFirst[1] - hp[1]) * ny) * sgn;
+                    const order = fwdSide >= revSide ? [false, true] : [true, false];
                     let merged = null;
-                    for (const rev of [false, true]) {
-                        for (const sgn of [1, -1]) {
-                            const seq = rev ? holeSeq.slice().reverse() : holeSeq;   // reversed: starts at hp too (rev[0] = last = hp's neighbor… rotate so hp first)
-                            const seqR = rev ? [hp].concat(seq.slice(0, -1)) : seq;
-                            const m = cur.slice(0, best.oi + 1).map(p => p.slice());
-                            const jA = m.length;
-                            m.push([op[0] + sgn * nx, op[1] + sgn * ny], [hp[0] + sgn * nx, hp[1] + sgn * ny]);
-                            for (let k = 1; k < seqR.length; k++) m.push(seqR[k].slice());
-                            const jB = m.length;
-                            m.push([hp[0] - sgn * nx, hp[1] - sgn * ny], [op[0] - sgn * nx, op[1] - sgn * ny]);
-                            for (let k = best.oi + 1; k < cur.length; k++) m.push(cur[k].slice());
-                            if (!localCross(m, [jA - 1, jA, jA + 1, jB - 1, jB, jB + 1])) { merged = m; break; }
-                        }
-                        if (merged) break;
+                    for (const rev of order) {
+                        const seqR = rev ? [hp].concat(holeSeq.slice(1).reverse()) : holeSeq;
+                        const m = cur.slice(0, best.oi).map(p => p.slice());
+                        const jA = m.length;
+                        m.push([op[0] + sgn * nx, op[1] + sgn * ny], [hp[0] + sgn * nx, hp[1] + sgn * ny]);
+                        for (let k = 1; k < seqR.length; k++) m.push(seqR[k].slice());
+                        const jB = m.length;
+                        m.push([hp[0] - sgn * nx, hp[1] - sgn * ny], [op[0] - sgn * nx, op[1] - sgn * ny]);
+                        for (let k = best.oi + 1; k < cur.length; k++) m.push(cur[k].slice());
+                        if (!localCross(m, [jA - 1, jA, jA + 1, jB - 1, jB, jB + 1])) { merged = m; break; }
                     }
                     if (!merged) { leftover.push(hole); continue; }
                     cur = merged;
@@ -8109,7 +8116,18 @@
                 const toLL = (p) => { const q = terBLatticeToLL(dem, p[0], p[1]); return [q.lng, q.lat]; };
                 const poly = [cur.map(toLL)].concat(leftover.map(hh => hh.map(toLL)));
                 poly.forEach(r2 => r2.push(r2[0].slice()));
-                const flat = terBSliceHoles(poly, 0).map(terBNormRing);
+                const flat = terBSliceHoles(poly, 0, (lat0) => {
+                    // cut-line picker: shift the latitude off any pad it would cross
+                    const rowOf = (lat) => Math.round(toY(lat));
+                    for (let k = 0; k < 40; k++) {
+                        const dLat = (k % 2 ? 1 : -1) * Math.ceil(k / 2) * (2 * cellFt / 364000);
+                        const y = rowOf(lat0 + dLat);
+                        let hit = false;
+                        if (y >= 0 && y < h) for (let x = 0; x < w && !hit; x++) if (assetSrc[y * w + x] && lab[y * w + x] === r.gi) hit = true;
+                        if (!hit) return lat0 + dLat;
+                    }
+                    return lat0;
+                }).map(terBNormRing);
                 flat.forEach(r2 => {
                     const lat = r2.map(p => [toX(p[0]), toY(p[1])]);
                     if (lat.length < 3) return;
@@ -8325,8 +8343,16 @@
             assetCellsOf[ai].forEach(i => { set.add(pieceGrid[i]); if (nfzMask[i]) inNfz = true; });
             const vertsIn = a.ring.map(c => pieces.findIndex(p => pointInPolygon(c.lat, c.lng, p.points)));
             const vset = new Set(vertsIn);
-            if (set.has(-1) || set.size !== 1 || vset.size !== 1 || vset.has(-1)) aBad.push(`${a.name}: ${set.has(-1) || vset.has(-1) ? 'partly outside every FFZ' : 'split across FFZs'}`);
-            else if (inNfz) aBad.push(`${a.name}: under an NFZ`);
+            if (set.has(-1) || set.size !== 1 || vset.size !== 1 || vset.has(-1)) {
+                const names = [...new Set([...set, ...vset])].filter(x => x >= 0).map(x => pieces[x].name);
+                let why;
+                if (set.has(-1) || vset.has(-1)) {
+                    let gap = 0, off = 0;
+                    assetCellsOf[ai].forEach(i => { if (pieceGrid[i] === -1) { if (lab[i] < 0) off++; else gap++; } });
+                    why = `partly outside every FFZ (${gap} cell(s) in a seam/keyhole gap, ${off} outside the profiled area${names.length ? `; rest in ${names.join('/')}` : ''})`;
+                } else why = `split across ${names.join(' / ')}`;
+                aBad.push(`${a.name}: ${why}`);
+            } else if (inNfz) aBad.push(`${a.name}: under an NFZ`);
             a.piece = vset.size === 1 ? [...vset][0] : -1;
         });
         gates.push({ ok: !aBad.length, label: aBad.length ? `${aBad.length} asset(s) not cleanly inside one FFZ` : `all ${assets.length} assets inside exactly one FFZ`, detail: aBad.slice(0, 12) });
@@ -8339,6 +8365,20 @@
         if (basePiece >= 0) { const q2 = [basePiece]; reach.add(basePiece); while (q2.length) { const c = q2.shift(); padj.get(c).forEach(nb => { if (!reach.has(nb) && pieces[nb].selected) { reach.add(nb); q2.push(nb); } }); } }
         const unreach = assets.filter(a => a.piece < 0 || !reach.has(a.piece));
         gates.push({ ok: !unreach.length, label: unreach.length ? `${unreach.length} asset(s) unreachable from base over FFZs + bridges` : `all assets reachable from base (${bridges.length} bridge(s))`, detail: unreach.slice(0, 12).map(a => a.name) });
+        // FFZ↔FFZ overlap: a hole that was neither keyholed nor sliced would leave
+        // the parent covering the island piece — catch it here, never on the site.
+        const bbox = pieces.map(p => { let a = Infinity, b2 = -Infinity, c = Infinity, d = -Infinity; p.latticePts.forEach(q => { if (q[0] < a) a = q[0]; if (q[0] > b2) b2 = q[0]; if (q[1] < c) c = q[1]; if (q[1] > d) d = q[1]; }); return [a, b2, c, d]; });
+        const overlaps = [];
+        for (let i = 0; i < pieces.length; i++) for (let j = 0; j < pieces.length; j++) {
+            if (i === j || !pieces[i].selected || !pieces[j].selected) continue;
+            const A = bbox[i], B = bbox[j];
+            if (A[1] < B[0] || B[1] < A[0] || A[3] < B[2] || B[3] < A[2]) continue;
+            const step = Math.max(1, Math.floor(pieces[i].latticePts.length / 400));
+            let hit = 0;
+            for (let k = 0; k < pieces[i].latticePts.length; k += step) { const q = pieces[i].latticePts[k]; if (terUPip(q[0], q[1], pieces[j].latticePts)) { hit++; if (hit > 2) break; } }
+            if (hit > 2) overlaps.push(`${pieces[i].name} inside ${pieces[j].name}`);
+        }
+        gates.push({ ok: !overlaps.length, label: overlaps.length ? `${overlaps.length} FFZ overlap(s) — a hole was not carved` : 'no FFZ overlaps', detail: overlaps.slice(0, 8) });
         const bigV = pieces.filter(p => p.verts > th.maxVertsWarn);
         gates.push({ ok: true, warn: !!bigV.length, label: bigV.length ? `${bigV.length} piece(s) over ${th.maxVertsWarn} vertices (Percepto limit unknown — raise far tolerance if the editor chokes)` : `largest piece ${Math.max(0, ...pieces.map(p => p.verts))} vertices` });
 
@@ -8613,6 +8653,7 @@
             + `<label style="display:flex;align-items:center;gap:3px;cursor:pointer;" title="Delete every pre-existing FFZ after the new set verifies (Delete Guard keeps them 24 h)"><input data-ter-e="deleteOldFfz" type="checkbox" ${terEnabled.deleteOldFfz ? 'checked' : ''}>delete old FFZs</label>`
             + `<label style="display:flex;align-items:center;gap:3px;cursor:pointer;" title="Delete every pre-existing flight path after the new set verifies"><input data-ter-e="deleteOldFp" type="checkbox" ${terEnabled.deleteOldFp ? 'checked' : ''}>delete old FPs</label>`
             + `<button data-ter-stage style="background:rgba(255,225,77,0.13);border:1px solid rgba(255,225,77,0.5);color:#ffe14d;border-radius:5px;padding:2px 10px;cursor:pointer;font-weight:600;">🏗 Stage</button>`
+            + (bs && !bs.staging ? `<button data-ter-ucopy title="Copy the staged pieces, gates, seams and run log as text" style="background:none;border:1px solid rgba(255,225,77,0.4);color:#ffe14d;border-radius:5px;padding:2px 8px;cursor:pointer;">Copy build report</button>` : '')
             + `</div>`);
         if (!bs) { h.push(`<div style="opacity:0.75;">Stage to preview: giant FFZs (dashed, band color), NFZs (magenta), bridges (cyan), old entities to delete (red dashed). Nothing is written until Commit.</div>`); return h.join(''); }
         if (bs.staging) { h.push(`<div style="color:#ffe14d;">⏳ staging…</div>`); return h.join(''); }
@@ -8683,6 +8724,20 @@
             return true;
         }
         const bs = terBState;
+        if (e.target.closest('[data-ter-ucopy]') && bs && !bs.staging) {
+            const out = [`UNSHIELDED BUILD — ${terState ? terState.siteLabel : ''} · ${new Date().toISOString()}`];
+            const th = terThresholds;
+            out.push(`Params: AGL ${th.minAglFt}–${th.maxAglFt} · Δ ${th.deltaFt} · gap ${th.gapMinFt} · smooth ${th.smoothNearFt}/${th.smoothFarFt} · tol ${th.tolNearFt}/${th.tolFarFt} · standoff ${th.standoffFt} · bridges merge ${th.bridgeMergeFt} / max ${th.bridgeMaxSpacingFt} / inset ${th.bridgeInsetFt}`);
+            (bs.gates || []).forEach(g => { out.push(`${g.ok ? (g.warn ? '⚠' : '✓') : '✗'} ${g.label}`); (g.detail || []).forEach(d => out.push(`    ${d}`)); });
+            bs.pieces.forEach(p => out.push(`FFZ ${p.name}${p.isBase ? ' [BASE]' : ''}${p.dir ? ` (${p.dir} island)` : ''} · band ${p.bandLo}–${p.bandHi} · ${Math.round(p.acres)} ac · ${p.assets} assets · ${p.verts} verts (raw ${p.rawVerts}) · floor ${p.floorMSL} / ceil ${p.ceilMSL} · AGL ${p.aglMin != null ? Math.round(p.aglMin) : '—'}–${p.aglMax != null ? Math.round(p.aglMax) : '—'}${p.keyhole ? ` · ${p.keyhole} keyhole` : ''}${p.flags.length ? ` · ⚠ ${p.flags.join('; ')}` : ''}`));
+            bs.nfzs.forEach(z => out.push(`NFZ ${z.name} · ${z.acres.toFixed(1)} ac ${z.dir}${z.orphan ? ' · ORPHAN' : ''}`));
+            out.push(`Bridges: ${bs.bridges.length} (${bs.bridges.filter(b => b.staircase).length} staircase)`);
+            bs.seams.forEach(s2 => out.push(`Seam ${s2.a}↔${s2.b} · ${Math.round(s2.lenFt)} ft · gap ${Math.round(s2.gapMin)}–${Math.round(s2.gapMax)} · verts ${s2.rawVerts}→${s2.verts} · ${s2.bridges} bridges`));
+            out.push(`Deletions: ${bs.deletions.length}`);
+            out.push('Log:'); (bs.runLog || []).forEach(l2 => out.push(`  ${l2}`));
+            navigator.clipboard.writeText(out.join('\n')).then(() => showToast('Build report copied'), () => showToast('Copy failed', 'rgba(255,96,96,0.55)'));
+            return true;
+        }
         const flip = (attr, list) => {
             const el = e.target.closest(`[${attr}]`);
             if (!el || !bs) return false;
