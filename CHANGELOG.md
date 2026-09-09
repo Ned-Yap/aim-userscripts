@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-09 — ⚠ Fleet Tools v0.5: site setups drawn on the landing map (latest — dev only, feature #250)
+
+The landing map now shows actual site-setup geometry, not just conflict pins: zoom in to level 12+ and the sites in view draw their FFZs (green), flight paths (cyan), and assets (white) — native palette so it reads instantly. Built to the "see everything but not break the system" rule: geometry is zoom-gated (world view stays pins-only), viewport-culled via the snapshot-index bboxes, hard-capped at the 40 nearest sites, and redrawn incrementally as you pan/zoom (sites leaving the view are removed). The Show class checkboxes, client chips, and ⊘ turned-off sites all filter the drawn geometry live, and entities come from the session cache — sites the sweep already fetched draw instantly. New "Site setups (zoom in)" toggle next to "Conflict pins" (both on by default).
+
 ## 2026-09-09 — ⚠ Fleet Tools v0.4: view filters + render caps — a 677-pair sweep can't flood the browser (latest — dev only, feature #250)
 
 First full sweep found 677 conflicting pairs (mostly duplicate/OFFLINE copies), so v0.4 adds display-side filters that slice the finished result instantly — no re-run: **Show FFZs / Flight paths / Assets** checkboxes (a conflict shows only when both its entity classes are on) and **client chips** derived from the site-name prefix ("Koch Fertilizer - Enid" → "Koch Fertilizer" — /sites/ carries no client field, so the naming convention is the grouping signal), toggleable per client with all/none shortcuts; a single enabled client still shows its cross-client conflicts (the dangerous kind). Hard safety caps: the panel lists at most the 400 closest pairs and the map draws at most the 300 closest pins, both sorted by filtered closest-distance with a "narrow the filters" note when capped. The 📋 report deliberately ignores the view filters — it stays the full record. All filter state persists.
