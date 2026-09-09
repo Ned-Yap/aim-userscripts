@@ -12,6 +12,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-09 — 🏗 Site Setup Tools latest v4.258: Unshielded Site Builder — pad corners in the seam gap
+
+Fourth live Stage was down to 6 pads, all the same signature: every cell inside its FFZ but one corner in the seam gap. The straddle relabel works by cell centers and the 25 ft pad buffer is under one 33 ft DEM cell, so a corner near a cell edge could sit 2 ft from the raw seam. The relabel buffer now grows by a cell's half-diagonal so every cell the buffered pad touches moves with it.
+
 ## 2026-09-08 — 🏗 Site Setup Tools latest v4.257: Unshielded Site Builder — stop cutting necks
 
 Third live Stage split one band into ten pieces: with the far tolerance at 250 ft each side pulls back ~256 ft, so any part of a region narrower than ~510 ft was severed into lobes. Stage now runs up to four passes — a pass that severs a region halves the tolerance only around the cut and rebuilds, so the rest of the seam stays smooth; only the final pass accepts lobes (with lobe-link bridges). Junk lobes from inverted notches are filtered by size.
