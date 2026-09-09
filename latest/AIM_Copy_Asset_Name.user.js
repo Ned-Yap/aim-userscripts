@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.265
+// @version      4.266
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.265';
+    const SCRIPT_VERSION = '4.266';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -8419,16 +8419,29 @@
                 const tolHere = A.simpTol[Math.min(at.seg, A.simpTol.length - 1)] || 0;
                 let dx = at.dir[0], dy = at.dir[1]; const ld = Math.hypot(dx, dy) || 1; dx /= ld; dy /= ld;
                 const lnx = dy, lny = -dx;   // left normal (y-down) → side.left region
-                const edge = tolHere + gapHalf;
-                let placed = null;
                 const localGapFt = (2 * tolHere + 2 * gapHalf) * cellFt;
-                const insetScaled = insetTry.map(f => Math.max(f, f === th.bridgeInsetFt ? localGapFt * 0.3 : 0));
-                for (const insFt of insetScaled) {
-                    const ins = edge + ftToCells(insFt);
-                    const pL = [at.p[0] + lnx * ins, at.p[1] + lny * ins], pR = [at.p[0] - lnx * ins, at.p[1] - lny * ins];
-                    const piL = pieceAt(pL[0], pL[1]), piR = pieceAt(pR[0], pR[1]);
-                    if (piL >= 0 && piR >= 0 && pieces[piL].region === side.left && pieces[piR].region === side.right) { placed = { pL, pR, piL, piR, ins }; break; }
-                }
+                const wantFt = Math.max(th.bridgeInsetFt, localGapFt * 0.3);
+                // March from the seam crossing along the normal into each side until the
+                // point is inside a SELECTED piece of that region (true polygon test) AND
+                // at least the inset away from that piece's edge. The raster grid and the
+                // seam-based distance both mis-placed ends onto the dashed edge.
+                const landIn = (dirx, diry, regionWant) => {
+                    const maxC = ftToCells(localGapFt + wantFt * 3 + 200);
+                    for (let k = 0.5; k <= maxC; k += 0.5) {
+                        const q = [at.p[0] + dirx * k, at.p[1] + diry * k];
+                        const pi = pieceAt(q[0], q[1]);
+                        if (pi < 0 || pieces[pi].region !== regionWant || !pieces[pi].selected) continue;
+                        if (!terUPip(q[0], q[1], pieces[pi].latticePts)) continue;
+                        const ll = terBLatticeToLL(dem, q[0], q[1]);
+                        let edgeFt = Infinity;
+                        const P = pieces[pi].points;
+                        for (let m = 0; m < P.length; m++) { const d2 = pointToSegMeters(ll.lat, ll.lng, P[m], P[(m + 1) % P.length]) * M_TO_FT; if (d2 < edgeFt) edgeFt = d2; }
+                        if (edgeFt >= wantFt * 0.9) return { p: q, pi };
+                    }
+                    return null;
+                };
+                const L1 = landIn(lnx, lny, side.left), R1 = landIn(-lnx, -lny, side.right);
+                const placed = (L1 && R1) ? { pL: L1.p, pR: R1.p, piL: L1.pi, piR: R1.pi } : null;
                 if (!placed) { bridgeSkipped++; return; }
                 const PA = pieces[placed.piL], PB = pieces[placed.piR];
                 if (PA.floorMSL == null || PB.floorMSL == null) { bridgeSkipped++; return; }
@@ -8440,6 +8453,7 @@
                     arcs.push({ lo: fl, hi: ce });
                 } else {
                     // staircase: A-edge / B-edge waypoints, middle arc overlaps each by ≥ minOverlap
+                    const edge = tolHere + gapHalf;
                     const eA = [at.p[0] + lnx * edge, at.p[1] + lny * edge], eB = [at.p[0] - lnx * edge, at.p[1] - lny * edge];
                     const lower = PA.ceilMSL < PB.floorMSL + th.bridgeMinOverlapFt ? 'A' : 'B';
                     const lo = lower === 'A' ? PA : PB, hi = lower === 'A' ? PB : PA;
@@ -8460,7 +8474,7 @@
         // no seam arc, so bridge them at their closest points.
         let lobeBridges = 0;
         for (let i = 0; i < pieces.length; i++) for (let j = i + 1; j < pieces.length; j++) {
-            if (pieces[i].region !== pieces[j].region) continue;
+            if (pieces[i].region !== pieces[j].region || !pieces[i].selected || !pieces[j].selected) continue;
             const A = pieces[i].latticePts, B = pieces[j].latticePts;
             let best = null;
             const sa = Math.max(1, Math.floor(A.length / 600)), sb = Math.max(1, Math.floor(B.length / 600));
@@ -8472,11 +8486,19 @@
             let ux = best.pb[0] - best.pa[0], uy = best.pb[1] - best.pa[1];
             const lu = Math.hypot(ux, uy) || 1; ux /= lu; uy /= lu;
             let placed = null;
-            for (const insFt of insetTry) {
-                const ins = ftToCells(insFt);
-                const pA = [best.pa[0] - ux * ins, best.pa[1] - uy * ins], pB = [best.pb[0] + ux * ins, best.pb[1] + uy * ins];
-                if (pieceAt(pA[0], pA[1]) === i && pieceAt(pB[0], pB[1]) === j) { placed = { pA, pB }; break; }
-            }
+            const landLobe = (from, dirx, diry, want) => {
+                for (let k = 0.5; k <= ftToCells(th.bridgeInsetFt * 4 + 200); k += 0.5) {
+                    const q = [from[0] + dirx * k, from[1] + diry * k];
+                    if (pieceAt(q[0], q[1]) !== want || !terUPip(q[0], q[1], pieces[want].latticePts)) continue;
+                    const ll = terBLatticeToLL(dem, q[0], q[1]);
+                    let edgeFt = Infinity; const P = pieces[want].points;
+                    for (let m = 0; m < P.length; m++) { const d2 = pointToSegMeters(ll.lat, ll.lng, P[m], P[(m + 1) % P.length]) * M_TO_FT; if (d2 < edgeFt) edgeFt = d2; }
+                    if (edgeFt >= th.bridgeInsetFt * 0.9) return q;
+                }
+                return null;
+            };
+            const pA = landLobe(best.pa, -ux, -uy, i), pB = landLobe(best.pb, ux, uy, j);
+            if (pA && pB) placed = { pA, pB };
             if (!placed) { bridgeSkipped++; continue; }
             const PA = pieces[i], PB = pieces[j];
             if (PA.floorMSL == null || PB.floorMSL == null) continue;

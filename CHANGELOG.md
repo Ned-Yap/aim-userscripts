@@ -12,6 +12,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-09 — 🏗 Site Setup Tools latest v4.266: Unshielded Site Builder — bridge ends land inside the FFZs
+
+Bridge waypoints were placed from the smoothed seam using the raster grid, so ends sat on the dashed edge (median 65 ft, some at 0 ft, four outside their piece). Each end now marches along the seam normal until it is inside the real piece polygon with at least the inset clearance from its edge; lobe links only join selected pieces. Offline on the Cobra duplicate: all 121 ends inside, 68–300 ft clearance.
+
 ## 2026-09-09 — 🏗 Site Setup Tools latest v4.263–v4.265: Unshielded Site Builder — no more out-of-band ground
 
 With the Cobra duplicate now reproducible offline, three real defects fell out of one render: (1) a self-intersecting offset ring was retried at HALF the pull-back, which decoupled the pull-back from the simplification tolerance and let the neighbor band's spurs into a piece (1,449 out-of-band cells on one FFZ) — the pull-back now always matches the tolerance and self-intersections are cleaned or turned into local tolerance cuts; (2) the junction vertex between a coarse and a fine run pulled back by the fine tolerance only, and sharp corners hit the miter cap — junctions take the larger tolerance and capped corners bevel; (3) the hand-stitched keyhole failed on a two-cell sliver and fell back to slicing through a pad cluster — keyholes are now cut by polygon-clipping (a gap-wide slit subtracted from the polygon-with-holes). Also: the smoothing tunables re-registered under new Control Panel ids so stale stored values stop overriding the retuned defaults, the Build header shows the version, the run log prints the tolerances used, out-of-band cells are drawn as red dots in the preview, and bridge insets scale with the local gap.
