@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Diff
 // @namespace    http://tampermonkey.net/
-// @version      0.80
+// @version      0.81
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @description  Site comparison suite: shadow-site ghost overlay (per-type show/color/opacity), swipe divider, significant-change diff (→ AIM Issues), and Phase 3a Import — create-only copy of shadow entities (assets etc.) onto the current site with dry-run preview + verify. v0.70: cross-SERVER shadows. v0.80 (#250 layer 2): neighboring-site overlay — shows every other site's FFZs/FPs/assets within a display radius (Site Watch snapshot bboxes prefilter, live /map_objects/ for the math) and flags cross-site conflicts under the threshold (segment-to-segment, default 200 ft).
@@ -142,7 +142,7 @@
     }
 
     const SCRIPT_ID = 'aim-site-diff';
-    const SCRIPT_VERSION = '0.80';
+    const SCRIPT_VERSION = '0.81';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const PANE_NAME = 'aim-site-diff-pane';
     const HL_PANE_NAME = 'aim-site-diff-hl';
@@ -2655,8 +2655,11 @@
     const NB_FETCH_CONCURRENCY = 4;
     // One color per NEIGHBOR SITE (not per type) — that alone makes foreign
     // geometry unmistakable vs native (color = type) and vs the warm shadow
-    // palette; dotted strokes double the distinction.
-    const NB_PALETTE = ['#7986cb', '#4db6ac', '#f06292', '#a1887f', '#90a4ae', '#dce775', '#64b5f6', '#ffb74d'];
+    // palette. v0.81: hot saturated hues over a dark CASING underlay — the
+    // muted v0.80 dotted lines disappeared into parcel/RRC clutter on real
+    // sites (user report). Casing guarantees contrast on any basemap.
+    const NB_PALETTE = ['#ffea00', '#ff3d81', '#76ff03', '#e040fb', '#00b0ff', '#ffffff', '#1de9b6', '#c6ff00'];
+    const NB_CASING_COLOR = '#141821';
     const NB_CONFLICT_COLOR = '#ff3d00';
     const NB_CLASSES = [
         { key: 'ffz', type: 16, label: 'FFZs' },
@@ -2997,25 +3000,30 @@
     function nbBuildEntityLayers(e, L, color) {
         const cls = NB_TYPE_TO_CLASS[e.type];
         if (!cls || !nbCfg.classes[cls]) return [];
-        const base = {
-            color, weight: 2, opacity: 0.85, dashArray: '2,6',
-            interactive: false, bubblingMouseEvents: false, pane: NB_PANE_NAME,
-        };
+        // Two layers per entity, cartographic-casing style: a fat solid dark
+        // underlay, then the bright dashed color line on top (add order =
+        // draw order within the pane). Reads on satellite, ortho, and over
+        // parcel/RRC line clutter alike.
+        const shared = { interactive: false, bubblingMouseEvents: false, pane: NB_PANE_NAME };
+        const casing = Object.assign({ color: NB_CASING_COLOR, weight: 7, opacity: 0.85, fill: false }, shared);
+        const main = Object.assign({ color, weight: 3.5, opacity: 1, dashArray: '7,7' }, shared);
         if (e.type === 15) {
             const segs = (Array.isArray(e.arcs) ? e.arcs : [])
                 .filter(a => a && a.point_a && a.point_b
                     && typeof a.point_a.lat === 'number' && typeof a.point_b.lat === 'number')
                 .map(a => [[a.point_a.lat, a.point_a.lng], [a.point_b.lat, a.point_b.lng]]);
-            if (segs.length) return [L.polyline(segs, base)];
-            const cs = entityCoords(e);
-            if (cs && cs.length > 1) return [L.polyline(cs.map(p => [p.lat, p.lng]), base)];
-            return [];
+            const line = segs.length ? segs
+                : (() => { const cs = entityCoords(e); return (cs && cs.length > 1) ? cs.map(p => [p.lat, p.lng]) : null; })();
+            if (!line) return [];
+            return [L.polyline(line, casing), L.polyline(line, main)];
         }
         const cs = entityCoords(e);
         if (!cs || cs.length < 3) return [];
-        return [L.polygon(cs.map(p => [p.lat, p.lng]), Object.assign({}, base, {
-            fillColor: color, fillOpacity: 0.06,
-        }))];
+        const ring = cs.map(p => [p.lat, p.lng]);
+        return [
+            L.polygon(ring, casing),
+            L.polygon(ring, Object.assign({}, main, { fillColor: color, fillOpacity: 0.14 })),
+        ];
     }
 
     function nbDrawAttempt(seq, attempt) {
