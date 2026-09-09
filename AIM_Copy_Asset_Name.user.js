@@ -2,7 +2,7 @@
 // @name         AIM Copy Asset Name
 // @name:en      AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.244
+// @version      4.244.1
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.244';
+    const SCRIPT_VERSION = '4.244.1';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -7705,10 +7705,19 @@
         const logL = (m) => { bs.runLog.push(m); console.log(`${TAG} builder: ${m}`); };
         try {
             let siteCfg = null;
-            try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
-            if (siteCfg && siteCfg.mountain_terrain) {
-                logL('ABORT: this is a mountain-terrain site — the profiler’s MSL floor math does not apply.');
-                showToast('Aborted — mountain-terrain site (MSL floors invalid)', 'rgba(255,96,96,0.55)');
+            try { siteCfg = await fetchSiteConfig(sid); } catch (e) { console.warn(`${TAG} builder: site-cfg fetch failed:`, e); }
+            // SAFETY-CRITICAL altitude-mode guard (see siteAltMode): mountain_terrain
+            // === true is an MSL site (absolute altitudes) — the ONLY kind the
+            // profiler's fixed MSL floors are valid on. false = AGL site, where a
+            // written "2,755 ft" floor would be read as 2,755 ft ABOVE GROUND.
+            // (Pre-4.244.1 this check was inverted and refused MSL sites.)
+            const mtFlag = siteCfg && typeof siteCfg.mountain_terrain === 'boolean' ? siteCfg.mountain_terrain : null;
+            if (mtFlag !== true) {
+                const why = mtFlag === false
+                    ? 'this is an AGL site (Mountain terrain OFF) — its altitudes are height-above-ground, so the profiler’s fixed MSL floors would be written as thousands of feet AGL.'
+                    : 'could not read the site’s Mountain-terrain flag (GET /sites/<id>/ failed) — refusing to write altitudes of unknown reference.';
+                logL(`ABORT: ${why}`);
+                showToast(mtFlag === false ? 'Aborted — AGL site (profiler floors are MSL-only)' : 'Aborted — site altitude mode unknown', 'rgba(255,96,96,0.55)');
                 return;
             }
             await fetchMapObjects(sid, true);
