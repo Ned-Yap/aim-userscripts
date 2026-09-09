@@ -12,6 +12,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-09 — 🏗 Site Setup Tools latest v4.270: Unshielded Site Builder — bridge waypoints on the FFZ edge
+
+Bridge flight paths now end ON the edge of each FFZ (1 ft inside), the way a native flight path connects to a free zone, instead of 70–300 ft inside the polygon. Their altitude band is still the intersection of the two FFZ bands, and they are still created only after every FFZ and NFZ has been written and verified.
+
 ## 2026-09-09 — 🏗 Site Setup Tools latest v4.268–v4.269: Unshielded Site Builder — settings that stick, out-of-band ground becomes gap
 
 Two frames run this script (page + map iframe); a Control Panel echo landing in the stale one saved its whole settings object and reverted the smoothing defaults on every load — echoes now write only the key that changed, Stage re-reads the store first, and a ↺ smoothing defaults button forces the current defaults. Ground inside a piece that belongs to another band (the red dots) is now carved out as gap by the convex hull of each patch over half an acre, instead of being absorbed with a higher floor. Console lines report the thresholds at load and every change with its source.

@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.269
+// @version      4.270
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.269';
+    const SCRIPT_VERSION = '4.270';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -8555,6 +8555,21 @@
         pieces.forEach((p, pi) => { if (!pieceOfRegion.has(p.region)) pieceOfRegion.set(p.region, []); pieceOfRegion.get(p.region).push(pi); });
         const pieceAt = (x, y) => (x >= 0 && y >= 0 && x < w && y < h) ? pieceGrid[(y | 0) * w + (x | 0)] : -1;
         const seamArcs = topo.arcs.map((A, ai) => ({ A, ai, side: topo.arcSide[ai] })).filter(o => o.A.seam && !regInfo[o.side.left].dropped && !regInfo[o.side.right].dropped);
+        const edgeLand = (pIn, pi) => {
+            const P = pieces[pi].latticePts;
+            let best = null, bd = Infinity;
+            for (let m = 0; m < P.length; m++) {
+                const a = P[m], b = P[(m + 1) % P.length];
+                const dx = b[0] - a[0], dy = b[1] - a[1]; const l2 = dx * dx + dy * dy || 1;
+                let t = ((pIn[0] - a[0]) * dx + (pIn[1] - a[1]) * dy) / l2; t = Math.max(0, Math.min(1, t));
+                const q = [a[0] + t * dx, a[1] + t * dy];
+                const d = Math.hypot(q[0] - pIn[0], q[1] - pIn[1]);
+                if (d < bd) { bd = d; best = q; }
+            }
+            if (!best || bd < 1e-6) return pIn;
+            const nudge = ftToCells(1) / bd;
+            return [best[0] + (pIn[0] - best[0]) * nudge, best[1] + (pIn[1] - best[1]) * nudge];
+        };
         const mergeC = ftToCells(th.bridgeMergeFt), maxSpC = ftToCells(th.bridgeMaxSpacingFt);
         const candByArc = new Map();
         const addCand = (ai, along, why) => { let l = candByArc.get(ai); if (!l) { l = []; candByArc.set(ai, l); } l.push({ along, why }); };
@@ -8629,7 +8644,10 @@
                     return null;
                 };
                 const L1 = landIn(lnx, lny, side.left), R1 = landIn(-lnx, -lny, side.right);
-                const placed = (L1 && R1) ? { pL: L1.p, pR: R1.p, piL: L1.pi, piR: R1.pi } : null;
+                // Native convention (verified on site 1583's flight_path_4): an FP connects
+                // to an FFZ with its waypoint ON the FFZ edge. landIn proves the piece is
+                // there; the waypoint itself goes onto the nearest edge point, 1 ft in.
+                const placed = (L1 && R1) ? { pL: edgeLand(L1.p, L1.pi), pR: edgeLand(R1.p, R1.pi), piL: L1.pi, piR: R1.pi } : null;
                 if (!placed) { bridgeSkipped++; return; }
                 const PA = pieces[placed.piL], PB = pieces[placed.piR];
                 if (PA.floorMSL == null || PB.floorMSL == null) { bridgeSkipped++; return; }
@@ -8641,13 +8659,12 @@
                     arcs.push({ lo: fl, hi: ce });
                 } else {
                     // staircase: A-edge / B-edge waypoints, middle arc overlaps each by ≥ minOverlap
-                    const edge = gapD;
-                    const eA = [at.p[0] + lnx * edge, at.p[1] + lny * edge], eB = [at.p[0] - lnx * edge, at.p[1] - lny * edge];
+                    const eA = placed.pL, eB = placed.pR;   // edge waypoints; the deep points become the outer ends
                     const lower = PA.ceilMSL < PB.floorMSL + th.bridgeMinOverlapFt ? 'A' : 'B';
                     const lo = lower === 'A' ? PA : PB, hi = lower === 'A' ? PB : PA;
                     const mid = { lo: lo.ceilMSL - th.bridgeMinOverlapFt, hi: hi.floorMSL + th.bridgeMinOverlapFt };
                     if (mid.hi - mid.lo < 1 || lo.ceilMSL - lo.floorMSL < th.bridgeMinOverlapFt || hi.ceilMSL - hi.floorMSL < th.bridgeMinOverlapFt) { bridgeSkipped++; return; }
-                    wps.push(placed.pL, eA, eB, placed.pR);
+                    wps.push(L1.p, eA, eB, R1.p);
                     arcs.push({ lo: PA.floorMSL, hi: PA.ceilMSL }, mid, { lo: PB.floorMSL, hi: PB.ceilMSL });
                 }
                 bridges.push({
@@ -8686,7 +8703,7 @@
                 return null;
             };
             const pA = landLobe(best.pa, -ux, -uy, i), pB = landLobe(best.pb, ux, uy, j);
-            if (pA && pB) placed = { pA, pB };
+            if (pA && pB) placed = { pA: edgeLand(pA, i), pB: edgeLand(pB, j) };
             if (!placed) { bridgeSkipped++; continue; }
             const PA = pieces[i], PB = pieces[j];
             if (PA.floorMSL == null || PB.floorMSL == null) continue;
