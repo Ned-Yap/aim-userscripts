@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.253
+// @version      4.254
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.253';
+    const SCRIPT_VERSION = '4.254';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -6298,15 +6298,26 @@
     const TER_THRESH_DEFAULTS = {
         minAglFt: 80,     // AGL floor target (client SOP; universal — editable)
         maxAglFt: 200,    // AGL ceiling target
-        deltaFt: 30,      // max in-band terrain relief per region
+        deltaFt: 25,      // max in-band terrain relief per region (25: user SOP 2026-09-08)
         cellFt: 33,       // DEM sample cell (~10 m = native 3DEP 1/3 arc-sec)
         marginFt: 500,    // extra ring around the entity bbox
         absorbAc: 0.5,    // islands below this: silently absorbed
         nfzMaxAc: 5,      // absorbed islands up to this: NFZ candidates
         opacity: 0.55,    // overlay opacity
-        simplifyFt: 66,   // Phase 2: boundary simplification tolerance
-        nfzBufFt: 25,     // Phase 2: outward buffer around NFZ hulls
-        namePrefix: 'FFZ ', // Phase 2: created-FFZ name prefix (string)
+        namePrefix: 'FFZ ', // Build: created-FFZ name prefix (string)
+        // Unshielded Site Builder (#254) — see the 🏗 block below
+        gapMinFt: 10,           // seam gap near assets
+        smoothNearFt: 300,      // ≤ this far from an asset: seam follows the terrain exactly
+        smoothFarFt: 1500,      // ≥ this far: far tolerance (linear ramp between)
+        tolNearFt: 0,           // simplification tolerance near assets
+        tolFarFt: 250,          // simplification tolerance far from assets (gap = 2·tol + gapMin)
+        standoffFt: 15,         // pad buffer for straddle bends (SOP FFZ→asset standoff)
+        pitAbsorbMaxAglFt: 250, // warn when an absorbed pit's low spot sits deeper than this under the floor
+        bridgeMergeFt: 500,     // bridge candidates closer than this merge
+        bridgeMaxSpacingFt: 2500, // longest bridgeless stretch on a seam
+        bridgeInsetFt: 75,      // bridge waypoint depth inside each FFZ
+        bridgeMinOverlapFt: 10, // min bridge band height before a staircase is built
+        maxVertsWarn: 1000,     // polygon vertex warning
         // Profile area (v4.205 — FP-heavy sites have almost no FFZ footprint,
         // so an FFZ-union mask kept ~nothing there):
         //   'hull'   — convex hull of ALL site entities + margin (default;
@@ -6320,6 +6331,8 @@
     const TER_ENABLE_DEFAULTS = {
         median: true,     // 3×3 median despeckle before banding
         floorP95: false,  // floor ref = P95 elevation instead of true max
+        deleteOldFfz: true, // Build: delete pre-existing FFZs after the new set verifies
+        deleteOldFp: true,  // Build: delete pre-existing flight paths after the new set verifies
     };
     function loadTerThresholds() {
         const out = { ...TER_THRESH_DEFAULTS };
@@ -7159,8 +7172,10 @@
     });
 
     // ============================================================
-    // ⛰ Terrain Profiler — Phase 2: FFZ / NFZ auto-builder (v4.202,
-    // feature #203). Turns the profiled regions into REAL entities:
+    // ⛰ Terrain Profiler — Phase 2 builder (v4.202, #203), REPLACED in
+    // v4.254 by the 🏗 Unshielded Site Builder (#254) further down. The
+    // shared vectorize / simplify / slice / hull helpers below survive.
+    // Original Phase-2 notes:
     //   • vectorize the label grid into polygons whose shared borders
     //     are simplified ONCE (arc/topology approach — adjacent FFZs
     //     butt exactly, no sliver gaps/overlaps to trip the SOP checks)
@@ -7195,32 +7210,6 @@
         return null;
     }
 
-    // Simplify one arc. CLOSED loops can't be DP'd with both anchors on the
-    // same point (any loop smaller than the tolerance collapses to nothing —
-    // small regions were silently vanishing): split the loop at the point
-    // farthest from pts[0], simplify both halves, and rejoin.
-    function terBSimplifyArc(A, tol) {
-        if (!A.closed || A.pts.length < 5) return terBSimplify(A.pts, tol);
-        const pts = A.pts;
-        let far = 1, farD = -1;
-        for (let i = 1; i < pts.length - 1; i++) {
-            const dx = pts[i][0] - pts[0][0], dy = pts[i][1] - pts[0][1];
-            const d = dx * dx + dy * dy;
-            if (d > farD) { farD = d; far = i; }
-        }
-        const h1 = terBSimplify(pts.slice(0, far + 1), tol);
-        const h2 = terBSimplify(pts.slice(far), tol);
-        const joined = h1.concat(h2.slice(1));
-        if (joined.length >= 5) return joined;   // ≥4 distinct points (closed dup included)
-        // Loop smaller than the tolerance — DP collapses it to a line and
-        // the region silently vanishes. Keep a coarse-but-valid ring instead.
-        if (pts.length <= 9) return pts.slice();
-        const step = Math.ceil((pts.length - 1) / 8);
-        const out = [];
-        for (let i = 0; i < pts.length - 1; i += step) out.push(pts[i]);
-        out.push(pts[pts.length - 1]);
-        return out;
-    }
 
     // --- Douglas-Peucker on [x,y] lattice points, endpoints pinned ---
     function terBSimplify(pts, tol) {
@@ -7383,7 +7372,7 @@
             }
             ringsByRegion.set(r, rings);
         });
-        return { arcs, ringsByRegion };
+        return { arcs, ringsByRegion, arcSide };
     }
 
     // Emit a ring's lattice points from its (simplified) arcs.
@@ -7500,9 +7489,268 @@
         return out;
     }
 
-    // --- Stage: vectorize + simplify + slice + NFZ hulls → terBState ---
-    function terBStage() {
-        try { terBStageInner(); }
+    // ============================================================
+    // 🏗 UNSHIELDED SITE BUILDER (feature #254, v4.254) — replaces the
+    // Phase-2 "tile everything" Build. Model (user, 2026-09-08):
+    //   • ONE GIANT FFZ PER TERRAIN-BAND REGION (whole region) so that
+    //     from anywhere the drone can turn and fly straight to base on a
+    //     DAA event — no corridor grid, no per-pad FFZs.
+    //   • asset-free LEAF regions are dropped; asset-free regions on a
+    //     base→asset path are kept (the return crosses them)
+    //   • islands: pit w/o assets → NFZ · pit WITH assets → absorbed into
+    //     the parent (extra AGL accepted, warned past pitAbsorbMaxAglFt) ·
+    //     bump w/o assets → NFZ · bump WITH assets → own taller FFZ, and
+    //     the parent gets a KEYHOLE channel so it stays one polygon
+    //   • a pad straddling two bands goes to the TALLER band (lower
+    //     ground under a higher floor only adds AGL — never the reverse)
+    //   • seams: 10 ft gap near assets; where no assets are near the
+    //     boundary is simplified and the gap WIDENS: gap = 2·tol + 10 —
+    //     each side pulls back tol + 5 ft from the simplified seam, which
+    //     is provably on its own side of the raw seam. FFZs only ever
+    //     SHRINK, NFZs only ever GROW.
+    //   • floor/ceiling are recomputed from the DEM INSIDE EACH FINAL
+    //     POLYGON (NFZ cells excluded) — never from the band label
+    //   • bridges: where each asset's straight line to base crosses a
+    //     seam (merged at bridgeMergeFt, spacing floor per seam), short
+    //     FPs whose band = intersection of the two FFZ bands; staircase
+    //     waypoint only when a cliff makes that thinner than 10 ft
+    //   • commit: backup → FFZs → verify → NFZs → verify → bridges →
+    //     verify → DELETE the old pad FFZs + corridor FPs (plain DELETEs
+    //     so Delete Guard banks them) → verify. MSL sites only.
+    // ============================================================
+
+    // Scanline-fill a lattice polygon (float corner coords); visit(i) for
+    // every cell whose CENTER is inside.
+    function terUFill(px, w, h, visit) {
+        if (!px || px.length < 3) return;
+        let mnY = Infinity, mxY = -Infinity;
+        px.forEach(p => { if (p[1] < mnY) mnY = p[1]; if (p[1] > mxY) mxY = p[1]; });
+        const y0 = Math.max(0, Math.floor(mnY)), y1 = Math.min(h - 1, Math.ceil(mxY));
+        const xs = [];
+        for (let y = y0; y <= y1; y++) {
+            const cy = y + 0.5;
+            xs.length = 0;
+            for (let i = 0, j = px.length - 1; i < px.length; j = i++) {
+                const a = px[j], b = px[i];
+                if ((a[1] > cy) === (b[1] > cy)) continue;
+                xs.push(a[0] + (b[0] - a[0]) * (cy - a[1]) / (b[1] - a[1]));
+            }
+            if (xs.length < 2) continue;
+            xs.sort((q, r2) => q - r2);
+            for (let k = 0; k + 1 < xs.length; k += 2) {
+                const xA = Math.max(0, Math.ceil(xs[k] - 0.5)), xB = Math.min(w - 1, Math.floor(xs[k + 1] - 0.5));
+                for (let x = xA; x <= xB; x++) visit(y * w + x, x, y);
+            }
+        }
+    }
+    function terULatticeFns(dem) {
+        return {
+            toX: (lng) => (terMercX(lng) - dem.mercX1) / (dem.mercX2 - dem.mercX1) * dem.w,
+            toY: (lat) => (dem.mercY2 - terMercY(lat)) / (dem.mercY2 - dem.mercY1) * dem.h,
+        };
+    }
+    // Chamfer 3-4 distance transform (cells) from every set source cell.
+    function terUDistTransform(w, h, src) {
+        const n = w * h;
+        const INF = 1e9;
+        const d = new Float32Array(n);
+        for (let i = 0; i < n; i++) d[i] = src[i] ? 0 : INF;
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                const i = y * w + x;
+                let v = d[i];
+                if (x > 0 && d[i - 1] + 3 < v) v = d[i - 1] + 3;
+                if (y > 0) {
+                    if (d[i - w] + 3 < v) v = d[i - w] + 3;
+                    if (x > 0 && d[i - w - 1] + 4 < v) v = d[i - w - 1] + 4;
+                    if (x < w - 1 && d[i - w + 1] + 4 < v) v = d[i - w + 1] + 4;
+                }
+                d[i] = v;
+            }
+        }
+        for (let y = h - 1; y >= 0; y--) {
+            for (let x = w - 1; x >= 0; x--) {
+                const i = y * w + x;
+                let v = d[i];
+                if (x < w - 1 && d[i + 1] + 3 < v) v = d[i + 1] + 3;
+                if (y < h - 1) {
+                    if (d[i + w] + 3 < v) v = d[i + w] + 3;
+                    if (x < w - 1 && d[i + w + 1] + 4 < v) v = d[i + w + 1] + 4;
+                    if (x > 0 && d[i + w - 1] + 4 < v) v = d[i + w - 1] + 4;
+                }
+                d[i] = v;
+            }
+        }
+        for (let i = 0; i < n; i++) d[i] = d[i] >= INF ? 1e6 : d[i] / 3;
+        return d;
+    }
+    // Simplification tolerance (cells) as a function of asset distance (ft).
+    function terUTolCells(distFt, th, cellFt) {
+        const near = th.smoothNearFt, far = Math.max(th.smoothFarFt, near + 1);
+        let tolFt;
+        if (distFt <= near) tolFt = th.tolNearFt;
+        else if (distFt >= far) tolFt = th.tolFarFt;
+        else tolFt = th.tolNearFt + (th.tolFarFt - th.tolNearFt) * (distFt - near) / (far - near);
+        return Math.max(0, tolFt) / cellFt;
+    }
+    // Douglas-Peucker with a per-vertex tolerance: consecutive vertices of
+    // similar tolerance form a run, each run is simplified with the run's
+    // MINIMUM tolerance (conservative), runs are re-joined. Returns
+    // { pts, tol } (tol = per-kept-vertex tolerance in cells).
+    function terUSimplifyVar(pts, tols) {
+        const n = pts.length;
+        if (n <= 2) return { pts: pts.slice(), tol: tols.slice() };
+        const level = (t) => t < 0.25 ? 0 : Math.min(9, 1 + Math.floor(Math.log2(t + 0.25) + 1));
+        const outP = [], outT = [];
+        let s = 0;
+        while (s < n - 1) {
+            let e = s + 1;
+            const lv = level(tols[s]);
+            while (e < n - 1 && level(tols[e]) === lv) e++;
+            let mn = Infinity;
+            for (let i = s; i <= e; i++) if (tols[i] < mn) mn = tols[i];
+            const seg = pts.slice(s, e + 1);
+            const simp = terBSimplify(seg, mn);
+            const start = outP.length ? 1 : 0;
+            for (let i = start; i < simp.length; i++) { outP.push(simp[i]); outT.push(mn); }
+            s = e;
+        }
+        return { pts: outP, tol: outT };
+    }
+    // Inward miter offset of a CLOSED ring (region on the LEFT of travel in
+    // lattice y-down coords) by a per-vertex distance (cells). Miter length
+    // capped at 2× so sharp corners can't spike.
+    function terUOffsetRing(pts, dArr) {
+        const n = pts.length;
+        const out = new Array(n);
+        for (let i = 0; i < n; i++) {
+            const p = pts[i], q = pts[(i + 1) % n], o = pts[(i + n - 1) % n];
+            let ax = p[0] - o[0], ay = p[1] - o[1];
+            let bx = q[0] - p[0], by = q[1] - p[1];
+            const la = Math.hypot(ax, ay) || 1, lb = Math.hypot(bx, by) || 1;
+            ax /= la; ay /= la; bx /= lb; by /= lb;
+            // left normals (y-down): (dy, -dx)
+            const n1x = ay, n1y = -ax, n2x = by, n2y = -bx;
+            let mx = n1x + n2x, my = n1y + n2y;
+            const lm = Math.hypot(mx, my);
+            let scale;
+            if (lm < 1e-6) { mx = n2x; my = n2y; scale = 1; }
+            else { mx /= lm; my /= lm; scale = Math.min(2, 1 / Math.max(0.5, mx * n2x + my * n2y)); }
+            const d = dArr[i] || 0;
+            out[i] = [p[0] + mx * d * scale, p[1] + my * d * scale];
+        }
+        return out;
+    }
+    // Ring cleanup via polygon-clipping self-union: returns the largest
+    // simple outer ring, or null when the lib is missing / result empty.
+    function terUCleanRing(ring) {
+        const PC = terBPC();
+        if (!PC) return null;
+        try {
+            const r = ring.slice(); r.push(r[0].slice());
+            const res = PC.union([[r]]);
+            let best = null, bestA = -1;
+            (res || []).forEach(poly => {
+                const o = terBNormRing(poly[0]);
+                const A = Math.abs(terBSignedArea(o));
+                if (A > bestA) { bestA = A; best = o; }
+            });
+            return best && best.length >= 3 ? best : null;
+        } catch (e) { console.warn(`${TAG} builder: ring clean threw:`, e); return null; }
+    }
+    // Segment intersection (lattice coords) → [x,y,tA] or null.
+    function terUSegX(a, b, c, d) {
+        const r1x = b[0] - a[0], r1y = b[1] - a[1], r2x = d[0] - c[0], r2y = d[1] - c[1];
+        const den = r1x * r2y - r1y * r2x;
+        if (Math.abs(den) < 1e-12) return null;
+        const t = ((c[0] - a[0]) * r2y - (c[1] - a[1]) * r2x) / den;
+        const u = ((c[0] - a[0]) * r1y - (c[1] - a[1]) * r1x) / den;
+        if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+        return [a[0] + t * r1x, a[1] + t * r1y, t, u];
+    }
+    function terUPolyLen(pts) { let s = 0; for (let i = 1; i < pts.length; i++) s += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]); return s; }
+    function terUPip(x, y, pts) {
+        let inside = false;
+        for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+            const xi = pts[i][0], yi = pts[i][1], xj = pts[j][0], yj = pts[j][1];
+            if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) inside = !inside;
+        }
+        return inside;
+    }
+    // Offset a ring by a per-vertex distance so that its area SHRINKS
+    // (grow=false: an FFZ pulls back) or GROWS (grow=true: an NFZ / the
+    // region side of a hole). Orientation-agnostic: tries the left offset
+    // and flips it when the area moved the wrong way.
+    function terUOffsetAuto(pts, dArr, grow) {
+        const a0 = Math.abs(terBSignedArea(pts));
+        const o1 = terUOffsetRing(pts, dArr);
+        const a1 = Math.abs(terBSignedArea(o1));
+        if (grow ? a1 >= a0 : a1 <= a0) return o1;
+        return terUOffsetRing(pts, dArr.map(d => -d));
+    }
+    // Relabel tiny 4-connected fragments (a label's non-largest components
+    // under minCells that hold no asset cell) into their majority neighbor
+    // label — hull relabels leave 2-cell slivers along old boundaries that
+    // would otherwise become bogus holes/lobes.
+    function terUCleanSpecks(lab, w, h, minCells, assetSrc) {
+        const n = w * h;
+        const comp = new Int32Array(n).fill(-1);
+        const comps = [];
+        const stack = [];
+        for (let s = 0; s < n; s++) {
+            if (comp[s] !== -1 || lab[s] < 0) continue;
+            const l = lab[s], id = comps.length;
+            const rec = { label: l, cells: [], asset: false };
+            comps.push(rec);
+            stack.length = 0; stack.push(s); comp[s] = id;
+            while (stack.length) {
+                const i = stack.pop(); rec.cells.push(i); if (assetSrc[i]) rec.asset = true;
+                const x = i % w, y = (i / w) | 0;
+                if (x > 0 && comp[i - 1] === -1 && lab[i - 1] === l) { comp[i - 1] = id; stack.push(i - 1); }
+                if (x < w - 1 && comp[i + 1] === -1 && lab[i + 1] === l) { comp[i + 1] = id; stack.push(i + 1); }
+                if (y > 0 && comp[i - w] === -1 && lab[i - w] === l) { comp[i - w] = id; stack.push(i - w); }
+                if (y < h - 1 && comp[i + w] === -1 && lab[i + w] === l) { comp[i + w] = id; stack.push(i + w); }
+            }
+        }
+        const largest = new Map();
+        comps.forEach((c, id) => { const cur = largest.get(c.label); if (!cur || c.cells.length > comps[cur].cells.length) largest.set(c.label, id); });
+        let fixed = 0;
+        comps.forEach((c, id) => {
+            if (largest.get(c.label) === id || c.asset || c.cells.length >= minCells) return;
+            const cnt = new Map();
+            c.cells.forEach(i => {
+                const x = i % w, y = (i / w) | 0;
+                [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]].forEach(([qx, qy]) => {
+                    if (qx < 0 || qy < 0 || qx >= w || qy >= h) return;
+                    const l2 = lab[qy * w + qx];
+                    if (l2 >= 0 && l2 !== c.label) cnt.set(l2, (cnt.get(l2) || 0) + 1);
+                });
+            });
+            let best = -1, bc = -1; cnt.forEach((v, l2) => { if (v > bc) { bc = v; best = l2; } });
+            if (best < 0) return;
+            c.cells.forEach(i => { lab[i] = best; });
+            fixed++;
+        });
+        return fixed;
+    }
+    function terUPtAt(pts, along) {
+        let acc = 0;
+        for (let i = 1; i < pts.length; i++) {
+            const L2 = Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+            if (acc + L2 >= along || i === pts.length - 1) {
+                const t = L2 ? Math.max(0, Math.min(1, (along - acc) / L2)) : 0;
+                return { p: [pts[i - 1][0] + (pts[i][0] - pts[i - 1][0]) * t, pts[i - 1][1] + (pts[i][1] - pts[i - 1][1]) * t], dir: [pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]], seg: i - 1 };
+            }
+            acc += L2;
+        }
+        return { p: pts[0].slice(), dir: [1, 0], seg: 0 };
+    }
+
+    // --- Stage: classify → relabel → vectorize → smooth/offset → keyhole
+    //     → recompute → NFZs → bridges → gates → terBState ---
+    async function terBStage() {
+        if (terBState && terBState.staging) { showToast('Stage already running…'); return; }
+        try { await terBStageInner(); }
         catch (e) {
             console.warn(`${TAG} builder: stage threw:`, e);
             showToast(`Stage failed — ${e && e.message ? e.message : e}`, 'rgba(255,96,96,0.55)');
@@ -7510,165 +7758,594 @@
             terRenderPanel();
         }
     }
-    function terBStageInner() {
+    async function terBStageInner() {
         const st = terState;
         if (!st) { showToast('Run the profiler first', 'rgba(255,96,96,0.55)'); return; }
         terBClearStage();
+        terBState = { sid: st.sid, staging: true, pieces: [], nfzs: [], bridges: [], deletions: [], seams: [], gates: [], runLog: [], createdIds: [], committing: false };
+        terRenderPanel();
         const t0 = performance.now();
         const seg = st.seg, dem = st.dem, th = terThresholds;
-        const tolCells = Math.max(0, (th.simplifyFt || 0) / Math.max(1, dem.cellXft));
-        const topo = terBVectorize(seg, dem);
-        topo.arcs.forEach(A => { A.tol = tolCells; A.simp = terBSimplifyArc(A, tolCells); });
+        const w = dem.w, h = dem.h, n = w * h, vals = dem.vals;
+        const cellFt = Math.max(1, dem.cellXft);
+        const ftToCells = (ft) => ft / cellFt;
+        const { toX, toY } = terULatticeFns(dem);
         const log = [];
-        // Self-intersection repair loop: halve the tolerance of the arcs of
-        // any failing region ring and rebuild (shared arcs stay shared).
-        // HARD RAILS (v4.203 — a live run froze the tab without these):
-        //   • tolerance floor = 1 cell, NEVER raw lattice (a site-boundary
-        //     arc can be tens of thousands of stair-step vertices)
-        //   • ringSelfIntersects is O(n²) — skip rings > 1500 pts (log it)
-        //   • whole loop is time-budgeted; on overrun we bail loudly
-        const REPAIR_BUDGET_MS = 5000;
-        const repairT0 = performance.now();
-        for (let iter = 0; iter < 3; iter++) {
-            if (performance.now() - repairT0 > REPAIR_BUDGET_MS) { log.push('⚠ simplify repair: time budget hit — kept current geometry (raise simplify tolerance if a piece looks wrong)'); break; }
-            const badArcs = new Set();
-            let skippedBig = 0;
-            topo.ringsByRegion.forEach((rings, r) => {
-                rings.forEach(ring => {
-                    const pts = terBRingPoints(ring, topo.arcs);
-                    if (pts.length < 3) return;
-                    if (pts.length > 1500) { skippedBig++; return; }   // O(n²) guard
-                    const ll = pts.map(p => terBLatticeToLL(dem, p[0], p[1]));
-                    if (ringSelfIntersects(ll)) ring.arcSeq.forEach(s => badArcs.add(s.arc));
-                });
-            });
-            if (skippedBig && !iter) log.push(`${skippedBig} very large ring(s) skipped the self-intersect check (>1500 verts)`);
-            if (!badArcs.size) break;
-            let changed = 0;
-            badArcs.forEach(aId => {
-                const A = topo.arcs[aId];
-                const nt = Math.max(1, A.tol / 2);   // floor at 1 cell — never raw
-                if (nt !== A.tol) { A.tol = nt; A.simp = terBSimplifyArc(A, nt); changed++; }
-            });
-            if (!changed) break;
-            log.push(`simplify repair: relaxed ${badArcs.size} arc(s) (pass ${iter + 1})`);
-        }
-        // Build pieces per region (slicing holes).
-        const pieces = [];
-        const pieceRegion = [];
-        let droppedRegions = 0;
-        seg.order.forEach(gi => {
-            const rg = seg.regions[gi];
-            const before = pieces.length;
-            const rings = topo.ringsByRegion.get(gi) || [];
-            if (!rings.length) { droppedRegions++; return; }
-            const built = rings.map(ring => {
-                const pts = terBRingPoints(ring, topo.arcs);
-                return { pts, area: Math.abs(terBSignedArea(pts)) };
-            }).filter(r2 => r2.pts.length >= 3);
-            if (!built.length) { droppedRegions++; return; }
-            built.sort((a, b) => b.area - a.area);
-            const outer = built[0], holes = built.slice(1);
-            const toLLPair = (p) => { const q = terBLatticeToLL(dem, p[0], p[1]); return [q.lng, q.lat]; };
-            const polyLL = [outer.pts.map(toLLPair)].concat(holes.map(h2 => h2.pts.map(toLLPair)));
-            // close rings for polygon-clipping
-            polyLL.forEach(r2 => r2.push(r2[0].slice()));
-            let flat;
-            if (holes.length) {
-                flat = terBSliceHoles(polyLL, 0).map(terBNormRing);
-                log.push(`${rg.name}: ${holes.length} enclosed island(s) → sliced into ${flat.length} piece(s)`);
-            } else {
-                flat = [terBNormRing(polyLL[0])];
-            }
-            flat.forEach((ringLL, pi) => {
-                if (ringLL.length < 3) return;
-                const points = ringLL.map(p => ({ lat: p[1], lng: p[0] }));
-                if (points.length <= 1500 && ringSelfIntersects(points)) { log.push(`${rg.name}${flat.length > 1 ? String.fromCharCode(97 + pi) : ''}: self-intersecting after slicing — SKIPPED`); return; }
-                // area in acres (equirectangular)
-                const latRef = points[0].lat * Math.PI / 180;
-                let a2 = 0;
-                for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
-                    a2 += (points[j].lng * points[i].lat - points[i].lng * points[j].lat);
-                }
-                const acres = Math.abs(a2 / 2) * 111320 * Math.cos(latRef) * 110540 / 4046.8564224;
-                pieces.push({
-                    region: gi, name: `${rg.name}${flat.length > 1 ? String.fromCharCode(97 + pi) : ''}`,
-                    points, acres,
-                    floorMSL: rg.floorMSL, ceilMSL: rg.ceilMSL,
-                    bandLo: rg.bandLo, bandHi: rg.bandHi,
-                    verts: points.length,
-                    infeasible: rg.bandHeight <= 0,
-                    selected: rg.bandHeight > 0,
-                });
-                pieceRegion.push(gi);
-            });
-            if (pieces.length === before) droppedRegions++;
+        const L = (m) => { log.push(m); };
+        const ents = ((mapObjectsBySite[st.sid] || {}).entities) || [];
+        const regions = seg.regions;
+        let siteCfg = null;
+        try { siteCfg = await fetchSiteConfig(st.sid); } catch (e) { console.warn(`${TAG} builder: site-cfg fetch failed:`, e); }
+
+        // ---------- 0. inputs ----------
+        const assets = [];
+        ents.forEach(e => {
+            if (e.type !== 3) return;
+            const cs = (entityCoords(e) || []).filter(c => c && typeof c.lat === 'number');
+            if (!cs.length) return;
+            const ring = cs.length >= 3 ? simplifyPolygon(cs) : cs;
+            const px = ring.map(c => [toX(c.lng), toY(c.lat)]);
+            let cx = 0, cy = 0; px.forEach(p => { cx += p[0]; cy += p[1]; }); cx /= px.length; cy /= px.length;
+            assets.push({ e, name: e.name || `#${e.id}`, ring: cs, px, cx, cy });
         });
-        if (droppedRegions) log.push(`${droppedRegions} region(s) too small to vectorize at this tolerance — dropped (lower simplify ft to keep them)`);
-        // NFZ candidate hulls (candGrid carries candidate index + 1).
-        const nfzs = [];
-        const bufCells = Math.max(0, (th.nfzBufFt || 0) / Math.max(1, dem.cellXft));
-        const candCells = new Map();
-        const cg = seg.candGrid;
-        for (let i = 0; i < cg.length; i++) {
-            const c = cg[i];
-            if (!c) continue;
-            let list = candCells.get(c - 1);
-            if (!list) { list = []; candCells.set(c - 1, list); }
-            list.push(i);
+        if (!assets.length) throw new Error('site has no assets — nothing to build for');
+        const resolved = resolveBases(st.sid, ents);
+        let base = null;
+        if (resolved.bases.length) {
+            // several bases: the one nearest the asset cloud's centroid
+            let acx = 0, acy = 0; assets.forEach(a => { acx += a.cx; acy += a.cy; }); acx /= assets.length; acy /= assets.length;
+            let bd = Infinity;
+            resolved.bases.forEach(b => {
+                const pt = gmPoint(b); if (!pt) return;
+                const bx = toX(pt.lng), by = toY(pt.lat);
+                const d = Math.hypot(bx - acx, by - acy);
+                if (d < bd) { bd = d; base = { e: b, name: b.name || 'base', pt, x: bx, y: by }; }
+            });
+            if (resolved.bases.length > 1) L(`${resolved.bases.length} base stations — using "${base.name}" (nearest the asset cloud)`);
         }
+        if (!base) throw new Error('no base station (type 8 or a GM named "base") — the return-path model needs one');
+        const baseCell = (base.x >= 0 && base.y >= 0 && base.x < w && base.y < h) ? ((base.y | 0) * w + (base.x | 0)) : -1;
+        if (baseCell < 0 || seg.regGrid[baseCell] < 0) throw new Error(`base "${base.name}" is outside the profiled area — widen the margin / profile area and re-run`);
+
+        // ---------- 1. asset cells + distance transform ----------
+        const assetSrc = new Uint8Array(n);
+        const assetCellsOf = assets.map(a => {
+            const cells = [];
+            if (a.px.length >= 3) terUFill(a.px, w, h, (i) => { cells.push(i); assetSrc[i] = 1; });
+            if (!cells.length) { const x = a.cx | 0, y = a.cy | 0; if (x >= 0 && y >= 0 && x < w && y < h) { cells.push(y * w + x); assetSrc[y * w + x] = 1; } }
+            return cells;
+        });
+        await terYield();
+        const distC = terUDistTransform(w, h, assetSrc);   // cells to nearest asset
+        await terYield();
+        const distFtAtCorner = (x, y) => {
+            let m = 1e9;
+            for (let dy = -1; dy <= 0; dy++) for (let dx = -1; dx <= 0; dx++) {
+                const cx = x + dx, cy = y + dy;
+                if (cx < 0 || cy < 0 || cx >= w || cy >= h) continue;
+                const v = distC[cy * w + cx]; if (v < m) m = v;
+            }
+            return m * cellFt;
+        };
+
+        // ---------- 2. region graph on the raw grid ----------
+        const lab = new Int32Array(seg.regGrid);            // working labels
+        const R = regions.length;
+        const regInfo = regions.map((rg, gi) => ({ gi, name: rg.name, band: rg.band, bandLo: rg.bandLo, bandHi: rg.bandHi, floorMSL: rg.floorMSL, ceilMSL: rg.ceilMSL, cells: rg.cells, assets: [], nbr: new Map(), keep: false, dropped: false, absorbedInto: -1, nfz: false, isIsland: false, dir: '', synthetic: false }));
+        const contactScan = async () => {
+            regInfo.forEach(r => r.nbr.clear());
+            for (let y = 0; y < h; y++) {
+                if ((y & 63) === 63) await terYield();
+                for (let x = 0; x < w; x++) {
+                    const i = y * w + x, a = lab[i];
+                    if (a < 0) continue;
+                    if (x < w - 1) { const b = lab[i + 1]; if (b >= 0 && b !== a) { regInfo[a].nbr.set(b, (regInfo[a].nbr.get(b) || 0) + 1); regInfo[b].nbr.set(a, (regInfo[b].nbr.get(a) || 0) + 1); } }
+                    if (y < h - 1) { const b = lab[i + w]; if (b >= 0 && b !== a) { regInfo[a].nbr.set(b, (regInfo[a].nbr.get(b) || 0) + 1); regInfo[b].nbr.set(a, (regInfo[b].nbr.get(a) || 0) + 1); } }
+                }
+            }
+        };
+        await contactScan();
+        // asset → region (majority of its cells)
+        const assetRegion = assets.map((a, ai) => {
+            const cnt = new Map();
+            assetCellsOf[ai].forEach(i => { const l = lab[i]; if (l >= 0) cnt.set(l, (cnt.get(l) || 0) + 1); });
+            let best = -1, bc = -1; cnt.forEach((c, l) => { if (c > bc) { bc = c; best = l; } });
+            return best;
+        });
+        assets.forEach((a, ai) => { if (assetRegion[ai] >= 0) regInfo[assetRegion[ai]].assets.push(ai); });
+
+        // ---------- 3. islands (big = region with ONE neighbor; small = seg.nfzCands) ----------
+        const nfzMask = new Uint8Array(n);
+        const nfzOut = [];   // { cells:[], dir, acres, name, srcRegion|cand }
+        // vectorize the RAW grid once for island outlines (NFZ rings)
+        const topo0 = terBVectorize(seg, dem);
+        await terYield();
+        regInfo.forEach(r => {
+            if (r.nbr.size !== 1) return;
+            const parent = [...r.nbr.keys()][0];
+            r.isIsland = true;
+            r.dir = r.band > regInfo[parent].band ? 'bump' : (r.band < regInfo[parent].band ? 'pit' : 'mixed');
+            if (r.assets.length) {
+                if (r.dir === 'pit') {
+                    // absorb upward into the parent
+                    r.absorbedInto = parent;
+                    regInfo[parent].assets.push(...r.assets);
+                    r.assets.forEach(ai => { assetRegion[ai] = parent; });
+                    for (let i = 0; i < n; i++) if (lab[i] === r.gi) lab[i] = parent;
+                    L(`${r.name}: pit island with ${r.assets.length} asset(s) → absorbed into ${regInfo[parent].name} (higher floor, extra AGL accepted)`);
+                } else {
+                    L(`${r.name}: ${r.dir} island with ${r.assets.length} asset(s) → own FFZ inside ${regInfo[parent].name} (keyhole)`);
+                }
+            } else {
+                // asset-free island → NFZ, cells go to the parent FFZ
+                const rings = topo0.ringsByRegion.get(r.gi) || [];
+                let outer = null, oa = -1;
+                rings.forEach(ring => { const pts = terBRingPoints(ring, topo0.arcs); const A = Math.abs(terBSignedArea(pts)); if (A > oa) { oa = A; outer = pts; } });
+                const cells = [];
+                for (let i = 0; i < n; i++) if (lab[i] === r.gi) cells.push(i);
+                nfzOut.push({ cells, ring: outer, dir: r.dir, acres: r.cells * dem.cellAcres, parentName: regInfo[parent].name, name: `NFZ ${r.dir} ${regInfo[parent].name}` });
+                r.absorbedInto = parent; r.nfz = true;
+                cells.forEach(i => { lab[i] = parent; nfzMask[i] = 1; });
+            }
+        });
+        // small candidates (already merged into the parent by the profiler)
+        const candCells = new Map();
+        for (let i = 0; i < n; i++) { const c = seg.candGrid[i]; if (c) { let l = candCells.get(c - 1); if (!l) { l = []; candCells.set(c - 1, l); } l.push(i); } }
         seg.nfzCands.forEach((cand, ci) => {
             const cells = candCells.get(ci);
-            if (!cells || !cells.length) return;
-            const corners = [];
-            cells.forEach(i => {
-                const x = i % dem.w, y = (i / dem.w) | 0;
-                corners.push([x, y], [x + 1, y], [x, y + 1], [x + 1, y + 1]);
-            });
-            const hull = terBOffsetConvex(terBHull(corners), bufCells);
-            let ringLL = hull.map(p => { const q = terBLatticeToLL(dem, p[0], p[1]); return [q.lng, q.lat]; });
-            // containment: clip to the parent piece that holds the centroid
-            const ctr = terCandCentroid(cand);
-            let parent = -1;
-            for (let pi = 0; pi < pieces.length; pi++) {
-                if (pieces[pi].region === cand.region && pointInPolygon(ctr.lat, ctr.lng, pieces[pi].points)) { parent = pi; break; }
+            if (!cells || !cells.length || cand.region < 0) return;
+            const withAsset = cells.some(i => assetSrc[i]);
+            const dir = cand.dir === 'pit' ? 'pit' : 'bump';
+            if (!withAsset) {
+                nfzOut.push({ cells, ring: null, dir, acres: cand.acres, parentName: regInfo[cand.region].name, name: `NFZ ${dir} ${regInfo[cand.region].name}` });
+                cells.forEach(i => { nfzMask[i] = 1; });
+                return;
             }
-            if (parent === -1) { for (let pi = 0; pi < pieces.length; pi++) if (pointInPolygon(ctr.lat, ctr.lng, pieces[pi].points)) { parent = pi; break; } }
-            let clipped = false;
-            if (parent >= 0) {
-                const PC = terBPC();
-                if (PC) {
-                    try {
-                        const pp = pieces[parent].points.map(p => [p.lng, p.lat]);
-                        pp.push(pp[0].slice());
-                        const hh = ringLL.slice(); hh.push(hh[0].slice());
-                        const res = PC.intersection([[hh]], [[pp]]);
-                        let bestR = null, bestA = -1;
-                        (res || []).forEach(p => {
-                            const r2 = terBNormRing(p[0]);
-                            const A2 = Math.abs(terBSignedArea(r2));
-                            if (A2 > bestA) { bestA = A2; bestR = r2; }
-                        });
-                        if (bestR && bestR.length >= 3) {
-                            if (bestR.length !== ringLL.length) clipped = true;
-                            ringLL = bestR;
-                        }
-                    } catch (e) { console.warn(`${TAG} builder: NFZ clip threw:`, e); }
+            if (dir === 'pit') { L(`small pit (${cand.acres.toFixed(1)} ac) in ${regInfo[cand.region].name} holds an asset → stays absorbed (extra AGL accepted)`); return; }
+            // bump with an asset → carve it back out as its own region
+            const gi = regInfo.length;
+            let mx = -Infinity; cells.forEach(i => { const v = vals[i]; if (!isNaN(v) && v > mx) mx = v; });
+            regInfo.push({ gi, name: `${regInfo[cand.region].name}b${gi - R + 1}`, band: regInfo[cand.region].band + 1, bandLo: Math.round(mx), bandHi: Math.round(mx), floorMSL: Math.ceil(mx + th.minAglFt), ceilMSL: 0, cells: cells.length, assets: [], nbr: new Map(), keep: false, dropped: false, absorbedInto: -1, nfz: false, isIsland: true, dir: 'bump', synthetic: true });
+            cells.forEach(i => { lab[i] = gi; });
+            L(`small bump (${cand.acres.toFixed(1)} ac) in ${regInfo[cand.region].name} holds an asset → own taller FFZ (keyhole)`);
+        });
+        // re-assign assets after relabels
+        assets.forEach((a, ai) => {
+            const cnt = new Map();
+            assetCellsOf[ai].forEach(i => { const l = lab[i]; if (l >= 0) cnt.set(l, (cnt.get(l) || 0) + 1); });
+            let best = -1, bc = -1; cnt.forEach((c, l) => { if (c > bc) { bc = c; best = l; } });
+            assetRegion[ai] = best;
+        });
+
+        // ---------- 4. straddling pads → taller band ----------
+        const padBufCells = ftToCells(th.standoffFt + th.gapMinFt);
+        // "Taller" = the label whose ACTUAL highest ground (NFZ cells excluded)
+        // is highest — the profiler's region floors include absorbed bump
+        // cells, which would make a parent look taller than the bump itself.
+        const labMax = new Float64Array(regInfo.length).fill(-Infinity);
+        for (let i = 0; i < n; i++) { const l = lab[i]; if (l < 0 || nfzMask[i]) continue; const v = vals[i]; if (!isNaN(v) && v > labMax[l]) labMax[l] = v; }
+        let straddled = 0;
+        assets.forEach((a, ai) => {
+            if (a.px.length < 3) return;
+            const buf = terBOffsetConvex(terBHull(a.px), padBufCells);
+            const cells = [];
+            terUFill(buf, w, h, (i) => cells.push(i));
+            const labs = new Set(); cells.forEach(i => { if (lab[i] >= 0) labs.add(lab[i]); });
+            if (labs.size <= 1) { if (labs.size === 1) assetRegion[ai] = [...labs][0]; return; }
+            let tall = -1, tf = -Infinity;
+            labs.forEach(l => { const g = isFinite(labMax[l]) ? labMax[l] : regInfo[l].floorMSL - th.minAglFt; if (g > tf) { tf = g; tall = l; } });
+            cells.forEach(i => { lab[i] = tall; nfzMask[i] = 0; });
+            assetRegion[ai] = tall;
+            straddled++;
+            a.straddle = regInfo[tall].name;
+        });
+        if (straddled) L(`${straddled} pad(s) straddle a band boundary → moved (with ${th.standoffFt + th.gapMinFt} ft margin) into the taller band`);
+        // NFZ cells never under a pad
+        assets.forEach((a, ai) => assetCellsOf[ai].forEach(i => { nfzMask[i] = 0; }));
+        const specks = terUCleanSpecks(lab, w, h, Math.max(4, Math.round(th.absorbAc / dem.cellAcres)), assetSrc);
+        if (specks) L(`${specks} sliver fragment(s) left by relabeling merged into their neighbor`);
+        await terYield();
+        regInfo.forEach(r => { r.assets = []; });
+        assets.forEach((a, ai) => { if (assetRegion[ai] >= 0) regInfo[assetRegion[ai]].assets.push(ai); });
+
+        // ---------- 5. keep set (base → asset paths) ----------
+        await contactScan();
+        const baseReg = lab[baseCell];
+        if (baseReg < 0) throw new Error('base station cell has no region after relabeling');
+        const prev = new Int32Array(regInfo.length).fill(-2);
+        prev[baseReg] = -1;
+        const q = [baseReg];
+        while (q.length) { const r = q.shift(); regInfo[r].nbr.forEach((c, nb) => { if (prev[nb] === -2) { prev[nb] = r; q.push(nb); } }); }
+        regInfo[baseReg].keep = true;
+        let unreachableRegions = 0;
+        regInfo.forEach(r => {
+            if (!r.assets.length || r.absorbedInto >= 0) return;
+            if (prev[r.gi] === -2) { unreachableRegions++; r.keep = true; return; }   // disconnected from base — keep, gate will flag
+            let cur = r.gi;
+            while (cur >= 0) { regInfo[cur].keep = true; cur = prev[cur]; }
+        });
+        let droppedN = 0, droppedAc = 0;
+        regInfo.forEach(r => {
+            if (r.keep || r.absorbedInto >= 0) return;
+            r.dropped = true; droppedN++; droppedAc += r.cells * dem.cellAcres;
+        });
+        for (let i = 0; i < n; i++) { const l = lab[i]; if (l >= 0 && regInfo[l].dropped) lab[i] = -1; }
+        if (droppedN) L(`${droppedN} asset-free leaf region(s) dropped (${Math.round(droppedAc).toLocaleString()} ac) — outside the site`);
+        if (unreachableRegions) L(`⚠ ${unreachableRegions} asset region(s) are not connected to the base region on the terrain graph`);
+        await terYield();
+
+        // ---------- 6. vectorize the working grid + per-vertex tolerance ----------
+        const topo = terBVectorize({ regGrid: lab }, dem);
+        await terYield();
+        const gapHalf = ftToCells(th.gapMinFt) / 2;
+        const gapD = gapHalf * 1.3;   // per-side pull-back: a hair over half the gap — miter caps / node chords eat a few %
+        topo.arcs.forEach((A, ai) => {
+            const side = topo.arcSide[ai];
+            A.seam = side.left >= 0 && side.right >= 0;
+            const tols = A.pts.map(p => terUTolCells(distFtAtCorner(p[0], p[1]), th, cellFt));
+            const closedSplit = A.closed && A.pts.length >= 5;
+            let simp;
+            if (closedSplit) {
+                let far = 1, farD = -1;
+                for (let i = 1; i < A.pts.length - 1; i++) { const dx = A.pts[i][0] - A.pts[0][0], dy = A.pts[i][1] - A.pts[0][1]; const d = dx * dx + dy * dy; if (d > farD) { farD = d; far = i; } }
+                const h1 = terUSimplifyVar(A.pts.slice(0, far + 1), tols.slice(0, far + 1));
+                const h2 = terUSimplifyVar(A.pts.slice(far), tols.slice(far));
+                simp = { pts: h1.pts.concat(h2.pts.slice(1)), tol: h1.tol.concat(h2.tol.slice(1)) };
+                if (simp.pts.length < 5) { simp = { pts: A.pts.slice(), tol: tols.slice() }; }
+            } else simp = terUSimplifyVar(A.pts, tols);
+            A.simp = simp.pts; A.simpTol = simp.tol; A.rawTol = tols;
+            A.lenCells = terUPolyLen(A.pts);
+        });
+
+        // ---------- 7. rings → inward offset → keyhole → pieces ----------
+        const ringPtsAndD = (ring, arcs, tolScale) => {
+            const P = [], D = [];
+            for (const s of ring.arcSeq) {
+                const A = arcs[s.arc];
+                const pts = s.fwd ? A.simp : A.simp.slice().reverse();
+                const tl = s.fwd ? A.simpTol : A.simpTol.slice().reverse();
+                for (let i = 0; i < pts.length; i++) {
+                    const t = tl[i] * tolScale;
+                    const d = A.seam ? t + gapD : t;
+                    if (i === 0 && P.length) { D[D.length - 1] = Math.max(D[D.length - 1], d); continue; }
+                    P.push(pts[i]); D.push(d);
                 }
             }
-            const points = ringLL.map(p => ({ lat: p[1], lng: p[0] }));
-            if (points.length < 3 || ringSelfIntersects(points)) return;
-            nfzs.push({
-                name: `NFZ ${cand.dir || 'outlier'} ${cand.region >= 0 ? seg.regions[cand.region].name : ''} ${nfzs.length + 1}`.replace(/\s+/g, ' ').trim(),
-                points, acres: cand.acres, dir: cand.dir, parent, clipped,
-                orphan: parent === -1,
-                selected: parent !== -1,
+            while (P.length > 1 && P[0][0] === P[P.length - 1][0] && P[0][1] === P[P.length - 1][1]) { P.pop(); D.pop(); }
+            return { P, D };
+        };
+        const pieces = [];
+        const pieceGrid = new Int16Array(n).fill(-1);
+        let keyholes = 0, sliced = 0;
+        // Local crossing test for a keyhole merge: the channel edges vs the
+        // ring segments near the junctions (a full O(n²) check is skipped on
+        // big rings, and this is where a bad merge actually crosses).
+        const localCross = (ring, idxs) => {
+            const n2 = ring.length;
+            const segs = new Set();
+            idxs.forEach(i => { for (let k = -12; k <= 12; k++) segs.add(((i + k) % n2 + n2) % n2); });
+            const list = [...segs];
+            for (let a = 0; a < list.length; a++) for (let b2 = a + 1; b2 < list.length; b2++) {
+                const i = list[a], j = list[b2];
+                if ((i + 1) % n2 === j || (j + 1) % n2 === i) continue;
+                if (terUSegX(ring[i], ring[(i + 1) % n2], ring[j], ring[(j + 1) % n2])) return true;
+            }
+            return false;
+        };
+        for (const r of regInfo) {
+            if (r.dropped || r.absorbedInto >= 0) continue;
+            const rings = topo.ringsByRegion.get(r.gi) || [];
+            if (!rings.length) { L(`${r.name}: no boundary ring — skipped`); continue; }
+            // 7a. raw (simplified) rings + classification: lobes vs holes by containment
+            const raw = rings.map(ring => { const { P, D } = ringPtsAndD(ring, topo.arcs, 1); return { P, D, area: Math.abs(terBSignedArea(P)) }; }).filter(x => x.P.length >= 3);
+            raw.sort((a, b2) => b2.area - a.area);
+            raw.forEach((x, i) => { x.parent = -1; for (let j = 0; j < i; j++) { if (raw[j].parent === -1 && terUPip(x.P[0][0], x.P[0][1], raw[j].P)) { x.parent = j; break; } } });
+            // 7b. offset each ring (lobes shrink, holes grow) with a tolerance back-off on self-intersection
+            const offsetRing = (x, isHole) => {
+                for (let attempt = 0, scale = 1; attempt < 4; attempt++, scale /= 2) {
+                    const D = x.D.map(d => Math.max(gapD * 0.5, d * scale));
+                    const off = terUOffsetAuto(x.P, D, isHole);
+                    const bad = off.length <= 1500 && ringSelfIntersects(off.map(p => ({ lat: p[1], lng: p[0] })));
+                    if (!bad) return off;
+                    const cleaned = terUCleanRing(off);
+                    if (cleaned && Math.abs(terBSignedArea(cleaned)) > 0.5 * Math.abs(terBSignedArea(off))) return cleaned;
+                }
+                return null;
+            };
+            let usedKeyhole = 0, usedSlice = 0;
+            const finalRings = [];
+            raw.forEach((lobe, li) => {
+                if (lobe.parent !== -1) return;
+                let cur = offsetRing(lobe, false);
+                if (!cur) { L(`${r.name}: a boundary ring self-intersects even at the tightest tolerance — ring dropped`); return; }
+                const holes = raw.filter(x => x.parent === li).map(x => offsetRing(x, true)).filter(Boolean);
+                const leftover = [];
+                for (const hole of holes) {
+                    // shortest asset-free channel from the hole to the current outer ring
+                    let best = null;
+                    const step = Math.max(1, Math.floor(hole.length / 40));
+                    for (let hi = 0; hi < hole.length; hi += step) {
+                        const hp = hole[hi];
+                        for (let oi = 0; oi < cur.length; oi++) {
+                            const op = cur[oi];
+                            const d = Math.hypot(op[0] - hp[0], op[1] - hp[1]);
+                            if (!isFinite(d) || (best && d >= best.d)) continue;
+                            let clear = true;
+                            const steps = Math.min(5000, Math.max(2, Math.ceil(d)));
+                            for (let k = 0; k <= steps && clear; k++) {
+                                const x = (hp[0] + (op[0] - hp[0]) * k / steps) | 0, y = (hp[1] + (op[1] - hp[1]) * k / steps) | 0;
+                                if (x >= 0 && y >= 0 && x < w && y < h && assetSrc[y * w + x]) clear = false;
+                            }
+                            if (clear) best = { d, hi, oi };
+                        }
+                    }
+                    if (!best) { leftover.push(hole); continue; }
+                    const op = cur[best.oi], hp = hole[best.hi];
+                    let nx = -(hp[1] - op[1]), ny = hp[0] - op[0];
+                    const ln = Math.hypot(nx, ny) || 1; nx = nx / ln * gapD; ny = ny / ln * gapD;
+                    const holeSeq = hole.slice(best.hi).concat(hole.slice(0, best.hi));
+                    let merged = null;
+                    for (const rev of [false, true]) {
+                        for (const sgn of [1, -1]) {
+                            const seq = rev ? holeSeq.slice().reverse() : holeSeq;   // reversed: starts at hp too (rev[0] = last = hp's neighbor… rotate so hp first)
+                            const seqR = rev ? [hp].concat(seq.slice(0, -1)) : seq;
+                            const m = cur.slice(0, best.oi + 1).map(p => p.slice());
+                            const jA = m.length;
+                            m.push([op[0] + sgn * nx, op[1] + sgn * ny], [hp[0] + sgn * nx, hp[1] + sgn * ny]);
+                            for (let k = 1; k < seqR.length; k++) m.push(seqR[k].slice());
+                            const jB = m.length;
+                            m.push([hp[0] - sgn * nx, hp[1] - sgn * ny], [op[0] - sgn * nx, op[1] - sgn * ny]);
+                            for (let k = best.oi + 1; k < cur.length; k++) m.push(cur[k].slice());
+                            if (!localCross(m, [jA - 1, jA, jA + 1, jB - 1, jB, jB + 1])) { merged = m; break; }
+                        }
+                        if (merged) break;
+                    }
+                    if (!merged) { leftover.push(hole); continue; }
+                    cur = merged;
+                    usedKeyhole++;
+                }
+                if (!leftover.length) { finalRings.push(cur); return; }
+                // fallback: slice with polygon-clipping (lat/lng), then give the cut edges their gap
+                const toLL = (p) => { const q = terBLatticeToLL(dem, p[0], p[1]); return [q.lng, q.lat]; };
+                const poly = [cur.map(toLL)].concat(leftover.map(hh => hh.map(toLL)));
+                poly.forEach(r2 => r2.push(r2[0].slice()));
+                const flat = terBSliceHoles(poly, 0).map(terBNormRing);
+                flat.forEach(r2 => {
+                    const lat = r2.map(p => [toX(p[0]), toY(p[1])]);
+                    if (lat.length < 3) return;
+                    finalRings.push(terUOffsetAuto(lat, lat.map(() => gapD), false));
+                });
+                usedSlice += leftover.length;
+            });
+            keyholes += usedKeyhole; sliced += usedSlice;
+            finalRings.forEach((ringPts, pi) => {
+                if (ringPts.length < 3) return;
+                const pieceIdx = pieces.length;
+                // rasterize for the recompute + containment
+                let mx = -Infinity, mn = Infinity, cells = 0, outside = 0, nanCells = 0, nfzCells = 0, lowCell = -1;
+                terUFill(ringPts, w, h, (i) => {
+                    cells++;
+                    if (lab[i] !== r.gi) outside++;
+                    if (pieceGrid[i] === -1) pieceGrid[i] = pieceIdx;
+                    if (nfzMask[i]) { nfzCells++; return; }
+                    const v = vals[i];
+                    if (isNaN(v)) { nanCells++; return; }
+                    if (v > mx) mx = v;
+                    if (v < mn) { mn = v; lowCell = i; }
+                });
+                const pointsLL = ringPts.map(p => terBLatticeToLL(dem, p[0], p[1]));
+                const latRef = pointsLL[0].lat * Math.PI / 180;
+                let a2 = 0;
+                for (let i = 0, j = pointsLL.length - 1; i < pointsLL.length; j = i++) a2 += (pointsLL[j].lng * pointsLL[i].lat - pointsLL[i].lng * pointsLL[j].lat);
+                const acres = Math.abs(a2 / 2) * 111320 * Math.cos(latRef) * 110540 / 4046.8564224;
+                const flags = [];
+                let floorMSL = null, ceilMSL = null, feasible = false;
+                if (isFinite(mx) && isFinite(mn)) {
+                    floorMSL = Math.ceil(mx + th.minAglFt);
+                    ceilMSL = Math.floor(mn + th.maxAglFt);
+                    feasible = ceilMSL - floorMSL >= 40;
+                    if (ceilMSL - floorMSL < 40) flags.push(ceilMSL <= floorMSL ? 'infeasible: floor ≥ ceiling' : `thin band (${ceilMSL - floorMSL} ft)`);
+                    const aglLow = floorMSL - mn;
+                    if (aglLow > th.pitAbsorbMaxAglFt) flags.push(`AGL ${Math.round(aglLow)} ft over the lowest ground (limit ${th.pitAbsorbMaxAglFt})`);
+                } else flags.push('no valid ground cells');
+                if (outside > cells * 0.002) flags.push(`${outside} cell(s) outside the raw region`);
+                if (nanCells) flags.push(`${nanCells} unprofiled cell(s) inside`);
+                if (ringPts.length > th.maxVertsWarn) flags.push(`${ringPts.length} vertices (warn > ${th.maxVertsWarn})`);
+                const rawVerts = (topo.ringsByRegion.get(r.gi) || []).reduce((s2, ring) => s2 + ring.arcSeq.reduce((s3, s) => s3 + topo.arcs[s.arc].pts.length, 0), 0);
+                pieces.push({
+                    region: r.gi, name: `${r.name}${finalRings.length > 1 ? String.fromCharCode(97 + pi) : ''}`,
+                    points: pointsLL, latticePts: ringPts, acres, verts: ringPts.length, rawVerts,
+                    bandLo: r.bandLo, bandHi: r.bandHi, floorMSL, ceilMSL,
+                    groundMin: mn, groundMax: mx, nfzCells, cells,
+                    aglMin: floorMSL != null ? floorMSL - mx : null, aglMax: floorMSL != null ? floorMSL - mn : null,
+                    keyhole: usedKeyhole, flags, infeasible: !feasible, selected: feasible,
+                    assets: r.assets.length, isBase: r.gi === baseReg && pointInPolygon(base.pt.lat, base.pt.lng, pointsLL), dir: r.isIsland ? r.dir : '',
+                });
+            });
+            await terYield();
+        }
+        if (keyholes) L(`${keyholes} keyhole channel(s) cut so parents stay one polygon`);
+        if (sliced) L(`${sliced} hole(s) had no asset-free channel → parent sliced instead`);
+
+        // ---------- 8. NFZ polygons (outward offset only) ----------
+        const nfzs = [];
+        nfzOut.forEach((z) => {
+            let ringL;
+            let dMin = 1e9; z.cells.forEach(i => { if (distC[i] < dMin) dMin = distC[i]; });
+            const tolC = terUTolCells(dMin * cellFt, th, cellFt);
+            if (z.ring && z.ring.length >= 3) {
+                const tols = z.ring.map(p => terUTolCells(distFtAtCorner(p[0], p[1]), th, cellFt));
+                const simp = terUSimplifyVar(z.ring.concat([z.ring[0]]), tols.concat([tols[0]]));
+                const P = simp.pts.slice(0, -1), T = simp.tol.slice(0, -1);
+                if (P.length < 3) return;
+                // the island's own ring has the ISLAND on its left → a negative distance offsets outward (NFZs only grow)
+                ringL = terUOffsetRing(P, T.map(t => -(t + 0.05)));
+            } else {
+                const corners = [];
+                z.cells.forEach(i => { const x = i % w, y = (i / w) | 0; corners.push([x, y], [x + 1, y], [x, y + 1], [x + 1, y + 1]); });
+                ringL = terBOffsetConvex(terBHull(corners), tolC + 0.05);
+            }
+            const ll = ringL.map(p => terBLatticeToLL(dem, p[0], p[1]));
+            if (ll.length < 3 || (ll.length <= 1500 && ringSelfIntersects(ll))) {
+                const cleaned = terUCleanRing(ringL);
+                if (!cleaned) { L(`${z.name}: NFZ ring invalid — skipped`); return; }
+                ringL = cleaned;
+            }
+            const points = ringL.map(p => terBLatticeToLL(dem, p[0], p[1]));
+            // parent piece = piece under the first cell
+            let parent = -1; for (const i of z.cells) { if (pieceGrid[i] >= 0) { parent = pieceGrid[i]; break; } }
+            nfzs.push({ name: `${z.name} ${nfzs.length + 1}`, points, acres: z.acres, dir: z.dir, parent, orphan: parent < 0, selected: parent >= 0, cells: z.cells.length });
+        });
+        if (nfzs.some(z => z.orphan)) L(`${nfzs.filter(z => z.orphan).length} NFZ(s) fall outside every FFZ piece (dropped region) — disabled`);
+
+        // ---------- 9. bridges ----------
+        const pieceOfRegion = new Map();
+        pieces.forEach((p, pi) => { if (!pieceOfRegion.has(p.region)) pieceOfRegion.set(p.region, []); pieceOfRegion.get(p.region).push(pi); });
+        const pieceAt = (x, y) => (x >= 0 && y >= 0 && x < w && y < h) ? pieceGrid[(y | 0) * w + (x | 0)] : -1;
+        const seamArcs = topo.arcs.map((A, ai) => ({ A, ai, side: topo.arcSide[ai] })).filter(o => o.A.seam && !regInfo[o.side.left].dropped && !regInfo[o.side.right].dropped);
+        const mergeC = ftToCells(th.bridgeMergeFt), maxSpC = ftToCells(th.bridgeMaxSpacingFt);
+        const candByArc = new Map();
+        const addCand = (ai, along, why) => { let l = candByArc.get(ai); if (!l) { l = []; candByArc.set(ai, l); } l.push({ along, why }); };
+        // straight lines asset → base
+        assets.forEach((a) => {
+            const P0 = [a.cx, a.cy], P1 = [base.x, base.y];
+            seamArcs.forEach(({ A, ai }) => {
+                let acc = 0;
+                for (let i = 1; i < A.simp.length; i++) {
+                    const s0 = A.simp[i - 1], s1 = A.simp[i];
+                    const L2 = Math.hypot(s1[0] - s0[0], s1[1] - s0[1]);
+                    const X = terUSegX(P0, P1, s0, s1);
+                    if (X) addCand(ai, acc + L2 * X[3], 'asset line');
+                    acc += L2;
+                }
             });
         });
+        // per region-pair: ensure ≥1; per arc: spacing floor
+        const pairHas = new Set();
+        candByArc.forEach((l, ai) => { const s = topo.arcSide[ai]; pairHas.add(`${Math.min(s.left, s.right)}:${Math.max(s.left, s.right)}`); });
+        const pairLongest = new Map();
+        seamArcs.forEach(({ A, ai, side }) => {
+            const k = `${Math.min(side.left, side.right)}:${Math.max(side.left, side.right)}`;
+            const cur = pairLongest.get(k);
+            if (!cur || A.lenCells > cur.len) pairLongest.set(k, { ai, len: A.lenCells });
+        });
+        pairLongest.forEach((v, k) => { if (!pairHas.has(k)) addCand(v.ai, terUPolyLen(topo.arcs[v.ai].simp) / 2, 'seam minimum'); });
+        seamArcs.forEach(({ A, ai }) => {
+            const len = terUPolyLen(A.simp);
+            const list = (candByArc.get(ai) || []).sort((p, q2) => p.along - q2.along);
+            // merge
+            const merged = [];
+            list.forEach(c => { const last = merged[merged.length - 1]; if (last && c.along - last.along < mergeC) { last.along = (last.along + c.along) / 2; last.n++; } else merged.push({ along: c.along, why: c.why, n: 1 }); });
+            // spacing floor
+            const pts2 = [0].concat(merged.map(m => m.along), [len]);
+            for (let i = 1; i < pts2.length; i++) {
+                const gap = pts2[i] - pts2[i - 1];
+                if (gap > maxSpC) { const k = Math.floor(gap / maxSpC); for (let j = 1; j <= k; j++) merged.push({ along: pts2[i - 1] + gap * j / (k + 1), why: 'spacing', n: 1 }); }
+            }
+            merged.sort((p, q2) => p.along - q2.along);
+            candByArc.set(ai, merged);
+        });
+        const bridges = [];
+        const insetTry = [th.bridgeInsetFt, th.bridgeInsetFt * 0.6, th.bridgeInsetFt * 0.35, 15];
+        let bridgeSkipped = 0;
+        candByArc.forEach((list, ai) => {
+            const A = topo.arcs[ai], side = topo.arcSide[ai];
+            list.forEach(c => {
+                const at = terUPtAt(A.simp, c.along);
+                const tolHere = A.simpTol[Math.min(at.seg, A.simpTol.length - 1)] || 0;
+                let dx = at.dir[0], dy = at.dir[1]; const ld = Math.hypot(dx, dy) || 1; dx /= ld; dy /= ld;
+                const lnx = dy, lny = -dx;   // left normal (y-down) → side.left region
+                const edge = tolHere + gapHalf;
+                let placed = null;
+                for (const insFt of insetTry) {
+                    const ins = edge + ftToCells(insFt);
+                    const pL = [at.p[0] + lnx * ins, at.p[1] + lny * ins], pR = [at.p[0] - lnx * ins, at.p[1] - lny * ins];
+                    const piL = pieceAt(pL[0], pL[1]), piR = pieceAt(pR[0], pR[1]);
+                    if (piL >= 0 && piR >= 0 && pieces[piL].region === side.left && pieces[piR].region === side.right) { placed = { pL, pR, piL, piR, ins }; break; }
+                }
+                if (!placed) { bridgeSkipped++; return; }
+                const PA = pieces[placed.piL], PB = pieces[placed.piR];
+                if (PA.floorMSL == null || PB.floorMSL == null) { bridgeSkipped++; return; }
+                const fl = Math.max(PA.floorMSL, PB.floorMSL), ce = Math.min(PA.ceilMSL, PB.ceilMSL);
+                const wps = [];
+                const arcs = [];
+                if (ce - fl >= th.bridgeMinOverlapFt) {
+                    wps.push(placed.pL, placed.pR);
+                    arcs.push({ lo: fl, hi: ce });
+                } else {
+                    // staircase: A-edge / B-edge waypoints, middle arc overlaps each by ≥ minOverlap
+                    const eA = [at.p[0] + lnx * edge, at.p[1] + lny * edge], eB = [at.p[0] - lnx * edge, at.p[1] - lny * edge];
+                    const lower = PA.ceilMSL < PB.floorMSL + th.bridgeMinOverlapFt ? 'A' : 'B';
+                    const lo = lower === 'A' ? PA : PB, hi = lower === 'A' ? PB : PA;
+                    const mid = { lo: lo.ceilMSL - th.bridgeMinOverlapFt, hi: hi.floorMSL + th.bridgeMinOverlapFt };
+                    if (mid.hi - mid.lo < 1 || lo.ceilMSL - lo.floorMSL < th.bridgeMinOverlapFt || hi.ceilMSL - hi.floorMSL < th.bridgeMinOverlapFt) { bridgeSkipped++; return; }
+                    wps.push(placed.pL, eA, eB, placed.pR);
+                    arcs.push({ lo: PA.floorMSL, hi: PA.ceilMSL }, mid, { lo: PB.floorMSL, hi: PB.ceilMSL });
+                }
+                bridges.push({
+                    name: `BR ${PA.name}-${PB.name} ${bridges.length + 1}`,
+                    a: placed.piL, b: placed.piR, why: c.why,
+                    waypoints: wps.map(p => terBLatticeToLL(dem, p[0], p[1])),
+                    arcs, staircase: arcs.length > 1, bandFt: ce - fl, selected: true,
+                });
+            });
+        });
+        if (bridgeSkipped) L(`${bridgeSkipped} bridge candidate(s) skipped — no room to land both waypoints inside their FFZs`);
+
+        // ---------- 10. seams summary ----------
+        const seamMap = new Map();
+        seamArcs.forEach(({ A, ai, side }) => {
+            const k = `${Math.min(side.left, side.right)}:${Math.max(side.left, side.right)}`;
+            let s = seamMap.get(k);
+            if (!s) { s = { a: regInfo[Math.min(side.left, side.right)].name, b: regInfo[Math.max(side.left, side.right)].name, lenFt: 0, rawVerts: 0, verts: 0, gapMin: Infinity, gapMax: 0, bridges: 0 }; seamMap.set(k, s); }
+            s.lenFt += A.lenCells * cellFt; s.rawVerts += A.pts.length; s.verts += A.simp.length;
+            A.simpTol.forEach(t => { const g = (2 * t + 2 * gapHalf) * cellFt; if (g < s.gapMin) s.gapMin = g; if (g > s.gapMax) s.gapMax = g; });
+            s.bridges += (candByArc.get(ai) || []).length;
+        });
+        const seams = [...seamMap.values()];
+
+        // ---------- 11. deletions ----------
+        const prefixNow = genCleanName(String(th.namePrefix !== undefined ? th.namePrefix : 'FFZ ')) || '';
+        const oursRe = new RegExp('^(' + prefixNow.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\d+-\\d+ R\\d+|BR R\\d+)');
+        const deletions = ents.filter(e => (e.type === 16 || e.type === 15) && !oursRe.test(e.name || ''))
+            .sort((a, b) => (a.type === 15 ? 0 : 1) - (b.type === 15 ? 0 : 1))   // FPs first, then FFZs
+            .map(e => ({ id: e.id, name: e.name || `#${e.id}`, type: e.type, selected: e.type === 16 ? !!terEnabled.deleteOldFfz : !!terEnabled.deleteOldFp }));
+        const oursSkipped = ents.filter(e => (e.type === 16 || e.type === 15) && oursRe.test(e.name || '')).length;
+        if (oursSkipped) L(`${oursSkipped} entit${oursSkipped === 1 ? 'y' : 'ies'} look like a previous run of this builder — left out of the delete list`);
+
+        // ---------- 12. gates ----------
+        const gates = [];
+        const mt = siteCfg && typeof siteCfg.mountain_terrain === 'boolean' ? siteCfg.mountain_terrain : null;
+        gates.push({ ok: mt === true, label: mt === true ? 'MSL site (Mountain terrain ON)' : mt === false ? 'AGL site — profiler floors are MSL-only' : 'site altitude mode unknown (checked again at commit)' , soft: mt !== false });
+        gates.push({ ok: pieces.some(p => p.isBase && p.selected), label: pieces.some(p => p.isBase) ? `base "${base.name}" inside ${pieces.find(p => p.isBase).name}` : 'base station not inside any FFZ piece' });
+        // every asset inside exactly one piece, not under an NFZ
+        let aBad = [];
+        assets.forEach((a, ai) => {
+            const set = new Set(); let inNfz = false;
+            assetCellsOf[ai].forEach(i => { set.add(pieceGrid[i]); if (nfzMask[i]) inNfz = true; });
+            const vertsIn = a.ring.map(c => pieces.findIndex(p => pointInPolygon(c.lat, c.lng, p.points)));
+            const vset = new Set(vertsIn);
+            if (set.has(-1) || set.size !== 1 || vset.size !== 1 || vset.has(-1)) aBad.push(`${a.name}: ${set.has(-1) || vset.has(-1) ? 'partly outside every FFZ' : 'split across FFZs'}`);
+            else if (inNfz) aBad.push(`${a.name}: under an NFZ`);
+            a.piece = vset.size === 1 ? [...vset][0] : -1;
+        });
+        gates.push({ ok: !aBad.length, label: aBad.length ? `${aBad.length} asset(s) not cleanly inside one FFZ` : `all ${assets.length} assets inside exactly one FFZ`, detail: aBad.slice(0, 12) });
+        gates.push({ ok: !pieces.some(p => p.selected && p.infeasible), label: pieces.some(p => p.infeasible) ? `${pieces.filter(p => p.infeasible).length} infeasible piece(s) (deselected)` : 'all pieces feasible for the AGL band' });
+        // reachability over pieces + bridges
+        const padj = new Map(); pieces.forEach((p, pi) => padj.set(pi, new Set()));
+        bridges.forEach(b => { if (b.selected) { padj.get(b.a).add(b.b); padj.get(b.b).add(b.a); } });
+        const basePiece = pieces.findIndex(p => p.isBase && p.selected);
+        const reach = new Set();
+        if (basePiece >= 0) { const q2 = [basePiece]; reach.add(basePiece); while (q2.length) { const c = q2.shift(); padj.get(c).forEach(nb => { if (!reach.has(nb) && pieces[nb].selected) { reach.add(nb); q2.push(nb); } }); } }
+        const unreach = assets.filter(a => a.piece < 0 || !reach.has(a.piece));
+        gates.push({ ok: !unreach.length, label: unreach.length ? `${unreach.length} asset(s) unreachable from base over FFZs + bridges` : `all assets reachable from base (${bridges.length} bridge(s))`, detail: unreach.slice(0, 12).map(a => a.name) });
+        const bigV = pieces.filter(p => p.verts > th.maxVertsWarn);
+        gates.push({ ok: true, warn: !!bigV.length, label: bigV.length ? `${bigV.length} piece(s) over ${th.maxVertsWarn} vertices (Percepto limit unknown — raise far tolerance if the editor chokes)` : `largest piece ${Math.max(0, ...pieces.map(p => p.verts))} vertices` });
+
         const ms = Math.round(performance.now() - t0);
-        const totalVerts = pieces.reduce((s2, p) => s2 + p.verts, 0);
-        log.unshift(`staged ${pieces.length} FFZ piece(s) (${totalVerts} vertices) + ${nfzs.length} NFZ(s) in ${ms} ms · simplify ${th.simplifyFt} ft`);
-        terBState = { sid: st.sid, pieces, nfzs, runLog: log, createdIds: [], committing: false };
+        const totalV = pieces.reduce((s2, p) => s2 + p.verts, 0), totalRaw = pieces.reduce((s2, p) => s2 + p.rawVerts, 0);
+        log.unshift(`staged ${pieces.length} FFZ · ${nfzs.length} NFZ · ${bridges.length} bridge(s) · ${deletions.length} old entities to delete · ${totalV.toLocaleString()} vertices (raw ${totalRaw.toLocaleString()}) · ${ms} ms`);
+        terBState = { sid: st.sid, staging: false, pieces, nfzs, bridges, deletions, seams, gates, assets: assets.map(a => ({ name: a.name, piece: a.piece, straddle: a.straddle || '' })), base: { name: base.name, pt: base.pt }, runLog: log, createdIds: [], committing: false };
         terBDrawPreview();
         terRenderPanel();
         console.log(`${TAG} builder: ${log[0]}`);
@@ -7683,47 +8360,54 @@
         terBLayers.forEach(l => { try { map.removeLayer(l); } catch (e) {} });
         terBLayers = [];
         const seg = terState && terState.seg;
-        bs.pieces.forEach(p => {
-            try {
-                const c = seg ? terColorFor((p.bandLo + p.bandHi) / 2, seg.mnFt, seg.mxFt) : [255, 225, 77];
-                const col = `rgb(${c[0]},${c[1]},${c[2]})`;
-                const pl = L.polygon(p.points.map(q => [q.lat, q.lng]), {
-                    color: p.selected ? '#ffe14d' : '#666666', weight: 2.5, opacity: p.selected ? 0.95 : 0.5,
-                    dashArray: '7,5', fillColor: col, fillOpacity: p.selected ? 0.10 : 0.03, interactive: false,
-                });
-                pl.addTo(map);
-                terBLayers.push(pl);
-            } catch (e) {}
+        const add = (layer) => { try { layer.addTo(map); terBLayers.push(layer); } catch (e) {} };
+        (bs.pieces || []).forEach(p => {
+            const c = seg ? terColorFor((p.bandLo + p.bandHi) / 2, seg.mnFt, seg.mxFt) : [255, 225, 77];
+            add(L.polygon(p.points.map(q => [q.lat, q.lng]), {
+                color: p.selected ? '#ffe14d' : '#666666', weight: 2.5, opacity: p.selected ? 0.95 : 0.5,
+                dashArray: '7,5', fillColor: `rgb(${c[0]},${c[1]},${c[2]})`, fillOpacity: p.selected ? 0.10 : 0.03, interactive: false,
+            }));
         });
-        bs.nfzs.forEach(z => {
-            try {
-                const pl = L.polygon(z.points.map(q => [q.lat, q.lng]), {
-                    color: '#ff35d0', weight: 2, opacity: z.selected ? 0.95 : 0.45,
-                    dashArray: '3,4', fillColor: '#ff35d0', fillOpacity: z.selected ? 0.18 : 0.05, interactive: false,
-                });
-                pl.addTo(map);
-                terBLayers.push(pl);
-            } catch (e) {}
+        (bs.nfzs || []).forEach(z => {
+            add(L.polygon(z.points.map(q => [q.lat, q.lng]), {
+                color: '#ff35d0', weight: 2, opacity: z.selected ? 0.95 : 0.45, dashArray: '3,4', fillColor: '#ff35d0', fillOpacity: z.selected ? 0.18 : 0.05, interactive: false,
+            }));
+        });
+        (bs.bridges || []).forEach(b => {
+            add(L.polyline(b.waypoints.map(q => [q.lat, q.lng]), { color: b.selected ? '#00e5ff' : '#446', weight: 4, opacity: 0.95, interactive: false }));
+            b.waypoints.forEach(q => add(L.circleMarker([q.lat, q.lng], { radius: 4, color: '#00e5ff', weight: 2, fillColor: '#0d131d', fillOpacity: 1, interactive: false })));
+        });
+        const ents = ((mapObjectsBySite[bs.sid] || {}).entities) || [];
+        (bs.deletions || []).forEach(d => {
+            if (!d.selected) return;
+            const e = ents.find(x => x.id === d.id);
+            if (!e) return;
+            if (e.type === 16) { const cs = entityCoords(e); if (cs && cs.length >= 3) add(L.polygon(cs.map(q => [q.lat, q.lng]), { color: '#ff5555', weight: 1.5, opacity: 0.8, dashArray: '2,4', fill: false, interactive: false })); }
+            else if (Array.isArray(e.arcs)) e.arcs.forEach(a => { if (a.point_a && a.point_b) add(L.polyline([[a.point_a.lat, a.point_a.lng], [a.point_b.lat, a.point_b.lng]], { color: '#ff5555', weight: 2, opacity: 0.7, dashArray: '2,6', interactive: false })); });
         });
     }
 
-    // --- Commit: create-only, FFZs then NFZs, full rails ---
+    // --- Commit: backup → FFZs → verify → NFZs → verify → bridges → verify → deletions → verify ---
     async function terBCommit() {
-        if (liteBlockedWrite('build terrain FFZs/NFZs')) return;
+        if (liteBlockedWrite('build unshielded site')) return;
         const bs = terBState;
         const st = terState;
-        if (!bs || !st) { showToast('Nothing staged', 'rgba(255,96,96,0.55)'); return; }
+        if (!bs || !st || bs.staging) { showToast('Nothing staged', 'rgba(255,96,96,0.55)'); return; }
         if (bs.committing) { showToast('Commit already running…'); return; }
         const sid = getCurrentSiteID();
         if (!sid || sid !== bs.sid) { showToast('Site changed since staging — re-run the profiler', 'rgba(255,96,96,0.55)'); return; }
+        const hardFail = (bs.gates || []).filter(g => !g.ok && !g.soft);
+        if (hardFail.length) { showToast(`Gates not passed — ${hardFail[0].label}`, 'rgba(255,96,96,0.55)'); return; }
         const selP = bs.pieces.filter(p => p.selected);
         const selN = bs.nfzs.filter(z => z.selected);
-        if (!selP.length && !selN.length) { showToast('Nothing selected', 'rgba(255,96,96,0.55)'); return; }
+        const selB = bs.bridges.filter(b => b.selected && bs.pieces[b.a].selected && bs.pieces[b.b].selected);
+        const selD = bs.deletions.filter(d => d.selected);
+        if (!selP.length) { showToast('No FFZ piece selected', 'rgba(255,96,96,0.55)'); return; }
         const csrf = getCsrfToken();
         if (!csrf) { showToast('No CSRF token — make one native save/edit anywhere in Percepto first, then retry', 'rgba(255,96,96,0.55)'); return; }
         bs.committing = true;
         bs.runLog = [];
-        const logL = (m) => { bs.runLog.push(m); console.log(`${TAG} builder: ${m}`); };
+        const logL = (m) => { bs.runLog.push(m); console.log(`${TAG} builder: ${m}`); terRenderPanel(); };
         try {
             let siteCfg = null;
             try { siteCfg = await fetchSiteConfig(sid); } catch (e) { console.warn(`${TAG} builder: site-cfg fetch failed:`, e); }
@@ -7731,7 +8415,6 @@
             // === true is an MSL site (absolute altitudes) — the ONLY kind the
             // profiler's fixed MSL floors are valid on. false = AGL site, where a
             // written "2,755 ft" floor would be read as 2,755 ft ABOVE GROUND.
-            // (Pre-4.244.1 this check was inverted and refused MSL sites.)
             const mtFlag = siteCfg && typeof siteCfg.mountain_terrain === 'boolean' ? siteCfg.mountain_terrain : null;
             if (mtFlag !== true) {
                 const why = mtFlag === false
@@ -7745,98 +8428,132 @@
             const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
             const tmplFfz = ents.find(e => e.type === 16 && entityCoords(e));
             const tmplNfz = ents.find(e => e.type === 4 && entityCoords(e));
-            let tmplFfzBody = null, tmplNfzBody = null;
-            if (tmplFfz) { try { tmplFfzBody = buildWriteBody(tmplFfz, siteCfg); } catch (e) {} }
-            if (tmplNfz) { try { tmplNfzBody = buildWriteBody(tmplNfz, siteCfg); } catch (e) {} }
-            const usedF = new Set(ents.filter(e => e.type === 16 && e.name).map(e => e.name));
-            const usedN = new Set(ents.filter(e => e.type === 4 && e.name).map(e => e.name));
-            const uniq = (base, used) => { base = genCleanName(base) || 'FFZ'; if (!used.has(base)) { used.add(base); return base; } let i = 2, n2; do { n2 = `${base}_${i++}`; } while (used.has(n2)); used.add(n2); return n2; };
+            const tmplFp = ents.find(e => e.type === 15 && Array.isArray(e.arcs) && e.arcs.length);
+            let tmplFfzBody = null, tmplNfzBody = null, tmplFpBody = null;
+            if (tmplFfz) { try { tmplFfzBody = buildWriteBody(tmplFfz, siteCfg); } catch (e) { console.warn(`${TAG} builder: FFZ template failed:`, e); } }
+            if (tmplNfz) { try { tmplNfzBody = buildWriteBody(tmplNfz, siteCfg); } catch (e) { console.warn(`${TAG} builder: NFZ template failed:`, e); } }
+            if (tmplFp) { try { tmplFpBody = buildWriteBody(tmplFp, siteCfg); } catch (e) { console.warn(`${TAG} builder: FP template failed:`, e); } }
+            const tmplArc = tmplFpBody && Array.isArray(tmplFpBody.arcs) && tmplFpBody.arcs[0] ? tmplFpBody.arcs[0] : null;
+            const existingNames = (t) => new Set(ents.filter(e => e.type === t && e.name).map(e => e.name));
+            const usedF = existingNames(16), usedN = existingNames(4), usedP = existingNames(15);
+            // RESUMABLE: a staged item whose name already exists on the site was
+            // created by an earlier (interrupted) run → skip it.
+            const priorF = new Set(usedF), priorN = new Set(usedN), priorP = new Set(usedP);
+            const uniq = (base2, used) => { base2 = genCleanName(base2) || 'FFZ'; if (!used.has(base2)) { used.add(base2); return base2; } let i = 2, n2; do { n2 = `${base2}_${i++}`; } while (used.has(n2)); used.add(n2); return n2; };
             const prefix = (terThresholds.namePrefix !== undefined) ? String(terThresholds.namePrefix) : 'FFZ ';
-            // Build all bodies FIRST (backup covers exactly what we send).
-            const ffzWrites = selP.map(p => {
-                const body = genCreateBody({
-                    name: `${prefix}${p.bandLo}-${p.bandHi} ${p.name}`,
-                    points: p.points,
-                    restrictions: { minAlt: p.floorMSL / M_TO_FT, maxAlt: p.ceilMSL / M_TO_FT },
-                }, sid, siteCfg, tmplFfzBody);
+            const mtBool = !!(siteCfg && siteCfg.mountain_terrain);
+            const ffzWrites = [], nfzWrites = [], fpWrites = [];
+            let resumed = 0;
+            selP.forEach(p => {
+                const nm = genCleanName(`${prefix}${p.bandLo}-${p.bandHi} ${p.name}`);
+                if (priorF.has(nm)) { resumed++; p.createdName = nm; return; }
+                const body = genCreateBody({ name: nm, points: p.points, restrictions: { minAlt: p.floorMSL / M_TO_FT, maxAlt: p.ceilMSL / M_TO_FT } }, sid, siteCfg, tmplFfzBody);
                 body.name = uniq(body.name, usedF);
-                return { piece: p, body };
+                p.createdName = body.name;
+                ffzWrites.push({ piece: p, body });
             });
-            const nfzWrites = selN.map(z => {
+            selN.forEach(z => {
+                const nm = genCleanName(z.name);
+                if (priorN.has(nm)) { resumed++; return; }
                 let b;
                 if (tmplNfzBody) { b = JSON.parse(JSON.stringify(tmplNfzBody)); delete b.id; }
                 else b = { type: 4, description: '', custom: {}, params: {}, asset_waypoints: null, constantly_present_asset_name: false, general_marker_type: '', marker_height: 0, is_unshielded: false, restrictions: [] };
-                b.type = 4;
-                b.name = uniq(z.name, usedN);
-                b.description = '';
-                b.site_id = sid;
-                b.points = z.points;
-                b.validated = false;
-                b.arcs = [];
-                b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
-                return { zone: z, body: b };
+                b.type = 4; b.name = uniq(nm, usedN); b.description = ''; b.site_id = sid; b.points = z.points; b.validated = false; b.arcs = []; b.mountain_terrain_site = mtBool;
+                nfzWrites.push({ zone: z, body: b });
             });
-            // Backup: stash + download of everything about to be created.
-            const backup = { site: sid, at: new Date().toISOString(), ffzs: ffzWrites.map(w => w.body), nfzs: nfzWrites.map(w => w.body) };
-            try { localStorage.setItem(`aim_ter_build_backup:${sid}`, JSON.stringify(backup)); } catch (e) {}
-            try { downloadJSONFile(`terrain-build-${sid}-${Date.now()}.json`, JSON.stringify(backup, null, 1)); } catch (e) { logL('backup download failed (stash in localStorage still written)'); }
-            // Sequential creates — FFZs first.
-            const created = [];
-            const post = async (body, label) => {
+            selB.forEach(br => {
+                const nm = genCleanName(br.name);
+                if (priorP.has(nm)) { resumed++; return; }
+                let b;
+                if (tmplFpBody) { b = JSON.parse(JSON.stringify(tmplFpBody)); delete b.id; }
+                else b = { type: 15, description: '', custom: {}, params: {}, asset_waypoints: null, constantly_present_asset_name: false, general_marker_type: '', marker_height: 0, is_unshielded: false, restrictions: null };
+                b.type = 15; b.name = uniq(nm, usedP); b.description = ''; b.site_id = sid; b.validated = false; b.mountain_terrain_site = mtBool;
+                b.points = br.waypoints.map(q => ({ lat: q.lat, lng: q.lng }));
+                const emergM = (tmplArc && Number.isFinite(tmplArc.min_emergency_alt)) ? tmplArc.min_emergency_alt : 12;
+                b.arcs = br.arcs.map((band, i) => {
+                    let arc = {};
+                    if (tmplArc) { arc = JSON.parse(JSON.stringify(tmplArc)); delete arc.id; delete arc.mapobject; }
+                    const a = b.points[i], c = b.points[i + 1];
+                    arc.point_a = a; arc.point_b = c; arc.points = [a, c];
+                    arc.min_alt = Math.ceil(band.lo / M_TO_FT); arc.max_alt = Math.floor(band.hi / M_TO_FT);
+                    if (arc.max_alt - arc.min_alt < 2) arc.max_alt = arc.min_alt + 2;
+                    arc.min_emergency_alt = emergM;
+                    arc.distance = approxMeters(a.lat, a.lng, c.lat, c.lng);
+                    if (typeof arc.wait_until_approved !== 'boolean') arc.wait_until_approved = false;
+                    return arc;
+                });
+                try { bridgeArcContinuity(b.arcs); } catch (e) { console.warn(`${TAG} builder: arc continuity threw:`, e); }
+                fpWrites.push({ bridge: br, body: b });
+            });
+            if (resumed) logL(`resume: ${resumed} staged item(s) already exist on the site by name — skipped`);
+            if (!tmplFp && fpWrites.length) logL('⚠ site has no existing FP to clone as a template — bridges use a minimal body (if the server rejects them, draw one FP natively and re-run)');
+            // Backup: bodies we send + full JSON of everything we delete.
+            const delEnts = selD.map(d => ents.find(e => e.id === d.id)).filter(Boolean);
+            const backup = { site: sid, at: new Date().toISOString(), ffzs: ffzWrites.map(x => x.body), nfzs: nfzWrites.map(x => x.body), bridges: fpWrites.map(x => x.body), deleted: delEnts };
+            try { localStorage.setItem(`aim_usb_backup:${sid}`, JSON.stringify(backup)); } catch (e) { logL('⚠ localStorage backup stash failed (quota?) — download is the only copy'); }
+            try { downloadJSONFile(`unshielded-build-${sid}-${Date.now()}.json`, JSON.stringify(backup, null, 1)); } catch (e) { logL('backup download failed (stash in localStorage still written)'); }
+            const created = bs.createdIds;
+            const post = async (body) => {
                 const r = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
                 const txt = await r.text();
                 let json = null;
-                try { json = JSON.parse(txt); } catch (e) {}
+                try { json = JSON.parse(txt); } catch (e) { json = null; }
                 const saved = json && json.map_objects;
-                if (r.status === 403) { throw Object.assign(new Error('403 forbidden — write permission lost, ABORTING run'), { fatal: true }); }
+                if (r.status === 403) throw Object.assign(new Error('403 forbidden — write permission lost, ABORTING run'), { fatal: true });
                 if (r.status === 200 && saved && saved.id != null) return saved.id;
                 throw new Error(`server ${r.status} ${(txt || '').slice(0, 120)}`);
             };
-            let fOk = 0, fFail = 0;
-            for (const w2 of ffzWrites) {
-                try {
-                    const id = await post(w2.body, w2.body.name);
-                    created.push({ id, name: w2.body.name, type: 16 });
-                    fOk++;
-                    logL(`✓ FFZ "${w2.body.name}" → #${id} (floor ${w2.piece.floorMSL} / ceil ${w2.piece.ceilMSL} ft)`);
-                } catch (e) {
-                    fFail++;
-                    logL(`✗ FFZ "${w2.body.name}": ${e.message}`);
-                    if (e.fatal) throw e;
-                }
-            }
-            // Verify FFZs before touching NFZs (containment order rule).
-            await fetchMapObjects(sid, true);
-            const after = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
-            const byId = new Set(after.map(e => e.id));
-            const missing = created.filter(c => !byId.has(c.id));
-            if (missing.length) logL(`⚠ verify: ${missing.length} created FFZ(s) NOT found on re-fetch — check the site before trusting this run`);
-            else if (created.length) logL(`verify ✓ all ${created.length} FFZ(s) present on fresh fetch`);
-            let nOk = 0, nFail = 0;
-            if (nfzWrites.length && fFail === 0) {
-                for (const w2 of nfzWrites) {
+            const verify = async (label, list) => {
+                await fetchMapObjects(sid, true);
+                const after = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+                const byId = new Set(after.map(e => e.id));
+                const missing = list.filter(c => !byId.has(c.id));
+                if (missing.length) logL(`⚠ verify: ${missing.length} created ${label}(s) NOT found on re-fetch`);
+                else if (list.length) logL(`verify ✓ all ${list.length} ${label}(s) present on fresh fetch`);
+                return !missing.length;
+            };
+            const runStep = async (label, type, writes, describe) => {
+                let ok = 0, fail = 0;
+                const made = [];
+                for (const w2 of writes) {
                     try {
-                        const id = await post(w2.body, w2.body.name);
-                        created.push({ id, name: w2.body.name, type: 4 });
-                        nOk++;
-                        logL(`✓ NFZ "${w2.body.name}" → #${id}`);
+                        const id = await post(w2.body);
+                        const rec = { id, name: w2.body.name, type };
+                        created.push(rec); made.push(rec); ok++;
+                        logL(`✓ ${label} "${w2.body.name}" → #${id}${describe ? ' ' + describe(w2) : ''}`);
                     } catch (e) {
-                        nFail++;
-                        logL(`✗ NFZ "${w2.body.name}": ${e.message}`);
+                        fail++;
+                        logL(`✗ ${label} "${w2.body.name}": ${e.message}`);
                         if (e.fatal) throw e;
                     }
                 }
-                await fetchMapObjects(sid, true);
-                const after2 = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
-                const byId2 = new Set(after2.map(e => e.id));
-                const missN = created.filter(c => c.type === 4 && !byId2.has(c.id));
-                logL(missN.length ? `⚠ verify: ${missN.length} NFZ(s) missing on re-fetch` : (nOk ? `verify ✓ all ${nOk} NFZ(s) present` : 'no NFZs created'));
-            } else if (nfzWrites.length) {
-                logL(`NFZ creates SKIPPED — ${fFail} FFZ create(s) failed (fix + re-run; NFZs need their parent FFZs)`);
+                const v = await verify(label, made);
+                return { ok, fail, verified: v };
+            };
+            const f = await runStep('FFZ', 16, ffzWrites, (x) => `(floor ${x.piece.floorMSL} / ceil ${x.piece.ceilMSL} ft MSL)`);
+            if (f.fail || !f.verified) { logL(`STOP after FFZs — ${f.fail} failed${f.verified ? '' : ', verify incomplete'}. Fix + re-run Commit (already-created pieces are skipped by name).`); return; }
+            const z = await runStep('NFZ', 4, nfzWrites);
+            if (z.fail || !z.verified) { logL(`STOP after NFZs — ${z.fail} failed. Re-run Commit to resume.`); return; }
+            const b = await runStep('bridge', 15, fpWrites, (x) => `(${x.bridge.arcs.length} arc${x.bridge.arcs.length === 1 ? '' : 's'}, ${x.bridge.arcs.map(a => `${a.lo}–${a.hi}`).join(' / ')} ft)`);
+            if (b.fail || !b.verified) { logL(`STOP after bridges — ${b.fail} failed. Re-run Commit to resume (deletions NOT started).`); return; }
+            // Deletions — plain DELETEs so Delete Guard banks each one (24 h undo ring).
+            let dOk = 0, dFail = 0;
+            const createdIdSet = new Set(created.map(c => c.id));
+            for (const d of selD) {
+                if (createdIdSet.has(d.id)) continue;
+                try {
+                    const r = await fetch(`/map_objects/${d.id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
+                    if (r.status === 403) throw Object.assign(new Error('403 forbidden — ABORTING'), { fatal: true });
+                    if (r.status === 200 || r.status === 204) { dOk++; logL(`🗑 deleted ${d.type === 16 ? 'FFZ' : 'FP'} "${d.name}" (#${d.id})`); }
+                    else { dFail++; logL(`✗ delete "${d.name}": server ${r.status}`); }
+                } catch (e) { dFail++; logL(`✗ delete "${d.name}": ${e && e.message || e}`); if (e.fatal) throw e; }
             }
-            bs.createdIds = created;
-            logL(`DONE: ${fOk}/${ffzWrites.length} FFZ · ${nOk}/${nfzWrites.length} NFZ created${fFail + nFail ? ` · ${fFail + nFail} FAILED` : ''}`);
-            showToast(fFail + nFail ? `Build: ${fOk + nOk} created, ${fFail + nFail} FAILED — see panel log` : `Build ✓ ${fOk} FFZ + ${nOk} NFZ created`, fFail + nFail ? 'rgba(255,96,96,0.55)' : undefined);
+            await fetchMapObjects(sid, true);
+            const fin = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+            const still = selD.filter(d => fin.some(e => e.id === d.id)).length;
+            if (selD.length) logL(still ? `⚠ ${still} old entit${still === 1 ? 'y' : 'ies'} still present after delete` : `verify ✓ all ${dOk} old entities gone`);
+            logL(`DONE: ${f.ok} FFZ · ${z.ok} NFZ · ${b.ok} bridge(s) created · ${dOk} deleted${dFail ? ` · ${dFail} delete(s) FAILED` : ''}. Old entities are in Delete Guard's 🕘 Restore panel for 24 h.`);
+            showToast(`Unshielded build ✓ ${f.ok} FFZ + ${z.ok} NFZ + ${b.ok} bridges · ${dOk} old entities deleted`);
         } catch (e) {
             logL(`RUN ABORTED: ${e && e.message ? e.message : e}`);
             showToast('Build aborted — see panel log', 'rgba(255,96,96,0.55)');
@@ -7846,27 +8563,28 @@
         }
     }
 
-    // Undo THIS RUN: delete exactly the ids we created (NFZs first).
+    // Undo THIS RUN's creates (bridges → NFZs → FFZs). Deleted originals live in Delete Guard.
     async function terBUndo() {
         const bs = terBState;
         if (!bs || !bs.createdIds || !bs.createdIds.length) { showToast('Nothing to undo', 'rgba(255,96,96,0.55)'); return; }
-        if (liteBlockedWrite('undo terrain build')) return;
+        if (liteBlockedWrite('undo unshielded build')) return;
         const csrf = getCsrfToken();
         if (!csrf) { showToast('No CSRF token', 'rgba(255,96,96,0.55)'); return; }
         const sid = getCurrentSiteID();
         const logL = (m) => { bs.runLog.push(m); console.log(`${TAG} builder: ${m}`); };
-        const order = bs.createdIds.slice().sort((a, b) => (b.type === 4 ? 1 : 0) - (a.type === 4 ? 1 : 0));
+        const rank = { 15: 0, 4: 1, 16: 2 };
+        const order = bs.createdIds.slice().sort((a, b) => (rank[a.type] || 0) - (rank[b.type] || 0));
         let ok = 0, fail = 0;
         for (const c of order) {
             try {
                 const r = await fetch(`/map_objects/${c.id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
-                if (r.status === 200 || r.status === 204) { ok++; }
+                if (r.status === 200 || r.status === 204) ok++;
                 else { fail++; logL(`undo ✗ ${c.name} (#${c.id}): server ${r.status}`); }
             } catch (e) { fail++; logL(`undo ✗ ${c.name}: ${e && e.message || e}`); }
         }
-        logL(`UNDO: deleted ${ok}/${order.length}${fail ? ` · ${fail} failed` : ''}`);
-        bs.createdIds = bs.createdIds.filter(c => false);
-        try { await fetchMapObjects(sid, true); } catch (e) {}
+        logL(`UNDO: deleted ${ok}/${order.length}${fail ? ` · ${fail} failed` : ''}${bs.deletions.some(d => d.selected) ? ' · originals: Control Panel → Delete Guard → 🕘 Restore' : ''}`);
+        bs.createdIds = [];
+        try { await fetchMapObjects(sid, true); } catch (e) { console.warn(`${TAG} builder: refetch after undo failed:`, e); }
         showToast(fail ? `Undo: ${ok} deleted, ${fail} failed` : `Undo ✓ ${ok} deleted`, fail ? 'rgba(255,96,96,0.55)' : undefined);
         terRenderPanel();
     }
@@ -7877,37 +8595,72 @@
         const th = terThresholds;
         const bs = terBState;
         const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+        const inp = (id, label, val, step, title, w2) => `<label title="${esc(title)}" style="display:flex;align-items:center;gap:3px;">${label}<input data-ter-p="${id}" type="number" value="${val}" step="${step}" style="width:${w2 || 50}px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(255,225,77,0.35);border-radius:4px;padding:1px 3px;font:inherit;font-size:11px;">ft</label>`;
         const h = [];
-        h.push(`<div style="color:#ffe14d;font-weight:600;margin:12px 0 4px;border-bottom:1px solid rgba(255,225,77,0.3);padding-bottom:2px;">🏗 Build (Phase 2 — creates real entities)</div>`);
-        h.push(`<div style="display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;margin:4px 0 6px;">`
-            + `<label title="Boundary simplification tolerance — bigger = fewer vertices, straighter edges" style="display:flex;align-items:center;gap:4px;">simplify<input data-ter-p="simplifyFt" type="number" value="${th.simplifyFt}" step="10" style="width:58px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(255,225,77,0.35);border-radius:4px;padding:2px 4px;font:inherit;">ft</label>`
-            + `<label title="Outward buffer around each NFZ candidate hull" style="display:flex;align-items:center;gap:4px;">NFZ buf<input data-ter-p="nfzBufFt" type="number" value="${th.nfzBufFt}" step="5" style="width:52px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(255,53,208,0.35);border-radius:4px;padding:2px 4px;font:inherit;">ft</label>`
-            + `<label title="Name prefix for created FFZs" style="display:flex;align-items:center;gap:4px;">prefix<input data-ter-prefix type="text" value="${esc(th.namePrefix !== undefined ? th.namePrefix : 'FFZ ')}" style="width:70px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(255,225,77,0.35);border-radius:4px;padding:2px 4px;font:inherit;"></label>`
+        h.push(`<div style="color:#ffe14d;font-weight:600;margin:12px 0 4px;border-bottom:1px solid rgba(255,225,77,0.3);padding-bottom:2px;">🏗 Build unshielded site (giant FFZ per band + bridges)</div>`);
+        h.push(`<div style="display:flex;flex-wrap:wrap;gap:5px 9px;align-items:center;margin:4px 0 6px;font-size:11px;">`
+            + inp('gapMinFt', 'gap', th.gapMinFt, 5, 'Minimum seam gap between two FFZs (near assets)')
+            + inp('smoothNearFt', 'near', th.smoothNearFt, 50, 'Within this distance of an asset the seam follows the terrain exactly', 56)
+            + inp('smoothFarFt', 'far', th.smoothFarFt, 100, 'Beyond this distance from any asset the seam is simplified at the far tolerance', 56)
+            + inp('tolNearFt', 'tol near', th.tolNearFt, 5, 'Simplification tolerance near assets (0 = raw terrain edge)')
+            + inp('tolFarFt', 'tol far', th.tolFarFt, 25, 'Simplification tolerance far from assets — gap = 2×tol + min gap')
+            + inp('standoffFt', 'pad standoff', th.standoffFt, 5, 'Pad buffer when a pad straddles two bands (SOP FFZ→asset standoff)')
+            + inp('bridgeMergeFt', 'br merge', th.bridgeMergeFt, 50, 'Bridge candidates closer than this merge into one', 56)
+            + inp('bridgeMaxSpacingFt', 'br max spacing', th.bridgeMaxSpacingFt, 250, 'Longest bridgeless stretch allowed on a seam', 60)
+            + inp('bridgeInsetFt', 'br inset', th.bridgeInsetFt, 5, 'How far inside each FFZ a bridge waypoint lands')
+            + inp('pitAbsorbMaxAglFt', 'pit AGL warn', th.pitAbsorbMaxAglFt, 10, 'Warn when an absorbed pit puts the floor more than this above the ground', 56)
+            + `<label title="Name prefix for created FFZs" style="display:flex;align-items:center;gap:4px;">prefix<input data-ter-prefix type="text" value="${esc(th.namePrefix !== undefined ? th.namePrefix : 'FFZ ')}" style="width:56px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(255,225,77,0.35);border-radius:4px;padding:1px 3px;font:inherit;font-size:11px;"></label>`
+            + `<label style="display:flex;align-items:center;gap:3px;cursor:pointer;" title="Delete every pre-existing FFZ after the new set verifies (Delete Guard keeps them 24 h)"><input data-ter-e="deleteOldFfz" type="checkbox" ${terEnabled.deleteOldFfz ? 'checked' : ''}>delete old FFZs</label>`
+            + `<label style="display:flex;align-items:center;gap:3px;cursor:pointer;" title="Delete every pre-existing flight path after the new set verifies"><input data-ter-e="deleteOldFp" type="checkbox" ${terEnabled.deleteOldFp ? 'checked' : ''}>delete old FPs</label>`
             + `<button data-ter-stage style="background:rgba(255,225,77,0.13);border:1px solid rgba(255,225,77,0.5);color:#ffe14d;border-radius:5px;padding:2px 10px;cursor:pointer;font-weight:600;">🏗 Stage</button>`
             + `</div>`);
-        if (!bs) {
-            h.push(`<div style="opacity:0.75;">Stage to preview the FFZ polygons (dashed) + NFZ hulls (magenta) before anything is written.</div>`);
-            return h.join('');
-        }
-        const selP = bs.pieces.filter(p => p.selected).length;
-        const selN = bs.nfzs.filter(z => z.selected).length;
-        h.push(`<div style="margin:2px 0 4px;">Staged: <strong style="color:#ffe14d">${bs.pieces.length} FFZ piece(s)</strong> (${selP} selected) · <strong style="color:#ff35d0">${bs.nfzs.length} NFZ(s)</strong> (${selN} selected)</div>`);
+        if (!bs) { h.push(`<div style="opacity:0.75;">Stage to preview: giant FFZs (dashed, band color), NFZs (magenta), bridges (cyan), old entities to delete (red dashed). Nothing is written until Commit.</div>`); return h.join(''); }
+        if (bs.staging) { h.push(`<div style="color:#ffe14d;">⏳ staging…</div>`); return h.join(''); }
+        const selP = bs.pieces.filter(p => p.selected).length, selN = bs.nfzs.filter(z => z.selected).length, selB = bs.bridges.filter(b => b.selected).length, selD = bs.deletions.filter(d => d.selected).length;
+        const totalAc = bs.pieces.filter(p => p.selected).reduce((s2, p) => s2 + p.acres, 0);
+        h.push(`<div style="margin:2px 0 4px;">Staged: <strong style="color:#ffe14d">${bs.pieces.length} FFZ</strong> (${selP} sel, ${Math.round(totalAc).toLocaleString()} ac) · <strong style="color:#ff35d0">${bs.nfzs.length} NFZ</strong> (${selN}) · <strong style="color:#00e5ff">${bs.bridges.length} bridge${bs.bridges.length === 1 ? '' : 's'}</strong> (${selB}) · <strong style="color:#ff5555">${bs.deletions.length} to delete</strong> (${selD}) · base: ${esc(bs.base.name)}</div>`);
+        // gates
+        h.push(`<div style="margin:4px 0;padding:5px 7px;background:rgba(0,0,0,0.3);border-radius:6px;border:1px solid rgba(255,255,255,0.1);">`);
+        (bs.gates || []).forEach(g => {
+            const col = g.ok ? (g.warn ? '#ffb020' : '#7dffae') : (g.soft ? '#ffb020' : '#ff6b6b');
+            h.push(`<div style="color:${col};">${g.ok ? (g.warn ? '⚠' : '✓') : (g.soft ? '⚠' : '✗')} ${esc(g.label)}${g.detail && g.detail.length ? `<div style="opacity:0.8;padding-left:16px;font-size:11px;">${g.detail.map(esc).join('<br>')}</div>` : ''}</div>`);
+        });
+        h.push(`</div>`);
+        const acStr = (a) => a < 10 ? a.toFixed(1) : Math.round(a).toLocaleString();
         bs.pieces.forEach((p, i) => {
-            h.push(`<div style="margin:1px 0;line-height:1.4;${p.infeasible ? 'opacity:0.55;' : ''}">`
-                + `<label style="cursor:pointer;display:flex;align-items:flex-start;gap:5px;"><input data-ter-selp="${i}" type="checkbox" ${p.selected ? 'checked' : ''} ${p.infeasible ? 'disabled' : ''} style="margin-top:2px;">`
-                + `<span><strong style="color:#ffe14d">${esc(p.name)}</strong> · band ${p.bandLo}–${p.bandHi} · ${p.acres < 10 ? p.acres.toFixed(1) : Math.round(p.acres).toLocaleString()} ac · ${p.verts} verts · floor ${p.floorMSL.toLocaleString()} / ceil ${p.ceilMSL.toLocaleString()} ft${p.infeasible ? ' · <span style="color:#ff5555">infeasible band</span>' : ''}</span></label></div>`);
+            h.push(`<div data-ter-ujump="p:${i}" style="margin:1px 0;line-height:1.4;${p.infeasible ? 'opacity:0.55;' : ''}cursor:pointer;" onmouseover="this.style.background='rgba(255,225,77,0.08)'" onmouseout="this.style.background=''">`
+                + `<label style="display:flex;align-items:flex-start;gap:5px;"><input data-ter-selp="${i}" type="checkbox" ${p.selected ? 'checked' : ''} ${p.infeasible ? 'disabled' : ''} style="margin-top:2px;">`
+                + `<span><strong style="color:#ffe14d">${esc(p.name)}</strong>${p.isBase ? ' 🏠' : ''}${p.dir ? ` <span style="opacity:0.7">(${p.dir} island)</span>` : ''} · band ${p.bandLo}–${p.bandHi} · ${acStr(p.acres)} ac · ${p.assets} asset${p.assets === 1 ? '' : 's'} · ${p.verts.toLocaleString()} verts (raw ${p.rawVerts.toLocaleString()})`
+                + `<br><span style="opacity:0.85;">floor <strong>${p.floorMSL != null ? p.floorMSL.toLocaleString() : '—'}</strong> / ceil <strong>${p.ceilMSL != null ? p.ceilMSL.toLocaleString() : '—'}</strong> ft MSL · AGL ${p.aglMin != null ? Math.round(p.aglMin) : '—'}–${p.aglMax != null ? Math.round(p.aglMax) : '—'} ft${p.keyhole ? ` · ${p.keyhole} keyhole` : ''}${p.nfzCells ? ' · NFZ cells excluded' : ''}</span>`
+                + (p.flags.length ? `<br><span style="color:#ffb020;">⚠ ${esc(p.flags.join(' · '))}</span>` : '') + `</span></label></div>`);
         });
         bs.nfzs.forEach((z, i) => {
-            h.push(`<div style="margin:1px 0;line-height:1.4;${z.orphan ? 'opacity:0.55;' : ''}">`
-                + `<label style="cursor:pointer;display:flex;align-items:flex-start;gap:5px;"><input data-ter-seln="${i}" type="checkbox" ${z.selected ? 'checked' : ''} ${z.orphan ? 'disabled' : ''} style="margin-top:2px;">`
-                + `<span><strong style="color:#ff35d0">${esc(z.name)}</strong> · ${z.acres.toFixed(1)} ac ${esc(z.dir || '')}${z.clipped ? ' · clipped to FFZ' : ''}${z.orphan ? ' · <span style="color:#ff5555">no parent FFZ — skipped</span>' : ''}</span></label></div>`);
+            h.push(`<div data-ter-ujump="n:${i}" style="margin:1px 0;line-height:1.4;${z.orphan ? 'opacity:0.55;' : ''}cursor:pointer;" onmouseover="this.style.background='rgba(255,53,208,0.08)'" onmouseout="this.style.background=''">`
+                + `<label style="display:flex;align-items:flex-start;gap:5px;"><input data-ter-seln="${i}" type="checkbox" ${z.selected ? 'checked' : ''} ${z.orphan ? 'disabled' : ''} style="margin-top:2px;">`
+                + `<span><strong style="color:#ff35d0">${esc(z.name)}</strong> · ${z.acres.toFixed(1)} ac ${esc(z.dir || '')}${z.orphan ? ' · <span style="color:#ff5555">no parent FFZ — skipped</span>' : ''}</span></label></div>`);
         });
+        bs.bridges.forEach((b, i) => {
+            h.push(`<div data-ter-ujump="b:${i}" style="margin:1px 0;line-height:1.4;cursor:pointer;" onmouseover="this.style.background='rgba(0,229,255,0.08)'" onmouseout="this.style.background=''">`
+                + `<label style="display:flex;align-items:flex-start;gap:5px;"><input data-ter-selb="${i}" type="checkbox" ${b.selected ? 'checked' : ''} style="margin-top:2px;">`
+                + `<span><strong style="color:#00e5ff">${esc(b.name)}</strong> · ${esc(b.why)} · band ${b.arcs.map(a => `${a.lo}–${a.hi}`).join(' / ')} ft${b.staircase ? ' · <span style="color:#ffb020">staircase</span>' : ` (${b.bandFt} ft)`}</span></label></div>`);
+        });
+        if (bs.seams.length) {
+            h.push(`<div style="color:#ffe14d;font-weight:600;margin:8px 0 2px;font-size:11px;">Seams</div><div style="font-size:11px;opacity:0.9;">`);
+            bs.seams.forEach(s => h.push(`<div>${esc(s.a)}↔${esc(s.b)} · ${Math.round(s.lenFt).toLocaleString()} ft · gap ${Math.round(s.gapMin)}–${Math.round(s.gapMax)} ft · verts ${s.rawVerts.toLocaleString()}→${s.verts.toLocaleString()} · ${s.bridges} bridge${s.bridges === 1 ? '' : 's'}</div>`));
+            h.push(`</div>`);
+        }
+        if (bs.deletions.length) {
+            h.push(`<div style="color:#ff5555;font-weight:600;margin:8px 0 2px;font-size:11px;">Old entities to delete after the new set verifies</div><div style="max-height:120px;overflow-y:auto;font-size:11px;">`);
+            bs.deletions.forEach((d, i) => h.push(`<label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input data-ter-seld="${i}" type="checkbox" ${d.selected ? 'checked' : ''}><span style="color:${d.selected ? '#ff8080' : '#889'}">${d.type === 16 ? 'FFZ' : 'FP'} ${esc(d.name)}</span></label>`));
+            h.push(`</div>`);
+        }
+        const gateOk = !(bs.gates || []).some(g => !g.ok && !g.soft);
         h.push(`<div style="display:flex;gap:8px;margin:8px 0 2px;align-items:center;">`
-            + `<button data-ter-commit style="background:rgba(95,255,95,0.13);border:1px solid rgba(95,255,95,0.5);color:#7dffae;border-radius:5px;padding:3px 12px;cursor:pointer;font-weight:700;">⚡ Commit ${selP + selN} (double-click)</button>`
+            + `<button data-ter-commit ${gateOk && !bs.committing ? '' : 'disabled'} style="background:rgba(95,255,95,0.13);border:1px solid rgba(95,255,95,0.5);color:#7dffae;border-radius:5px;padding:3px 12px;cursor:pointer;font-weight:700;${gateOk ? '' : 'opacity:0.4;'}">⚡ Commit ${selP + selN + selB} + delete ${selD} (double-click)</button>`
             + (bs.createdIds && bs.createdIds.length ? `<button data-ter-undo style="background:rgba(255,96,96,0.12);border:1px solid rgba(255,96,96,0.5);color:#ff8080;border-radius:5px;padding:3px 12px;cursor:pointer;">🗑 Undo run (${bs.createdIds.length}) (double-click)</button>` : '')
             + `</div>`);
         if (bs.runLog && bs.runLog.length) {
-            h.push(`<div style="margin-top:6px;max-height:140px;overflow-y:auto;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:6px 8px;font-size:11px;">`
+            h.push(`<div style="margin-top:6px;max-height:160px;overflow-y:auto;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:6px 8px;font-size:11px;">`
                 + bs.runLog.map(l2 => `<div style="margin:1px 0;">${esc(l2)}</div>`).join('') + `</div>`);
         }
         return h.join('');
@@ -7915,41 +8668,54 @@
 
     // Returns true when the click was handled by the Build section.
     function terBHandleClick(e, wrap) {
-        const stageBtn = e.target.closest('[data-ter-stage]');
-        if (stageBtn) {
-            // pull the two build params + prefix first
-            const sInp = wrap.querySelector('[data-ter-p="simplifyFt"]');
-            const bInp = wrap.querySelector('[data-ter-p="nfzBufFt"]');
+        if (e.target.closest('[data-ter-stage]')) {
+            wrap.querySelectorAll('[data-ter-p]').forEach(inp => {
+                const k = inp.getAttribute('data-ter-p');
+                if (!(k in TER_THRESH_DEFAULTS)) return;
+                const v = parseFloat(inp.value);
+                if (isFinite(v) && v >= 0) terThresholds[k] = v;
+            });
             const pInp = wrap.querySelector('[data-ter-prefix]');
-            if (sInp) { const v = parseFloat(sInp.value); if (isFinite(v) && v >= 0) terThresholds.simplifyFt = v; }
-            if (bInp) { const v = parseFloat(bInp.value); if (isFinite(v) && v >= 0) terThresholds.nfzBufFt = v; }
             if (pInp) terThresholds.namePrefix = pInp.value;
-            saveTerThresholds();
+            wrap.querySelectorAll('[data-ter-e]').forEach(inp => { terEnabled[inp.getAttribute('data-ter-e')] = !!inp.checked; });
+            saveTerThresholds(); saveTerEnabled();
             terBStage();
             return true;
         }
-        const selP = e.target.closest('[data-ter-selp]');
-        if (selP && terBState) {
-            const p = terBState.pieces[+selP.getAttribute('data-ter-selp')];
-            if (p) { p.selected = !!selP.checked; terBDrawPreview(); }
+        const bs = terBState;
+        const flip = (attr, list) => {
+            const el = e.target.closest(`[${attr}]`);
+            if (!el || !bs) return false;
+            const it = list[+el.getAttribute(attr)];
+            if (it) { it.selected = !!el.checked; terBDrawPreview(); }
             return true;
-        }
-        const selN = e.target.closest('[data-ter-seln]');
-        if (selN && terBState) {
-            const z = terBState.nfzs[+selN.getAttribute('data-ter-seln')];
-            if (z) { z.selected = !!selN.checked; terBDrawPreview(); }
+        };
+        if (e.target.closest('[data-ter-selp]')) return flip('data-ter-selp', bs ? bs.pieces : []);
+        if (e.target.closest('[data-ter-seln]')) return flip('data-ter-seln', bs ? bs.nfzs : []);
+        if (e.target.closest('[data-ter-selb]')) return flip('data-ter-selb', bs ? bs.bridges : []);
+        if (e.target.closest('[data-ter-seld]')) return flip('data-ter-seld', bs ? bs.deletions : []);
+        const jump = e.target.closest('[data-ter-ujump]');
+        if (jump && bs && !e.target.closest('input')) {
+            const [kind, idx] = jump.getAttribute('data-ter-ujump').split(':');
+            const it = kind === 'p' ? bs.pieces[+idx] : kind === 'n' ? bs.nfzs[+idx] : bs.bridges[+idx];
+            const pts = it && (it.points || it.waypoints);
+            const map = getLeafletMap();
+            if (!pts || !pts.length || !map) return true;
+            let la = 0, ln = 0; pts.forEach(q => { la += q.lat; ln += q.lng; }); la /= pts.length; ln /= pts.length;
+            try { map.setView([la, ln], Math.max(map.getZoom(), kind === 'b' ? 17 : 14)); } catch (err) { console.warn(`${TAG} builder: setView failed:`, err); }
+            airPulseAt(la, ln);
             return true;
         }
         if (e.target.closest('[data-ter-commit]')) {
             const now = Date.now();
-            if (now - terBArm > 1600) { terBArm = now; showToast('Click Commit again within 1.5 s to CREATE the entities'); return true; }
+            if (now - terBArm > 1600) { terBArm = now; showToast('Click Commit again within 1.5 s to CREATE the new layout + DELETE the old one'); return true; }
             terBArm = 0;
             terBCommit();
             return true;
         }
         if (e.target.closest('[data-ter-undo]')) {
             const now = Date.now();
-            if (now - terBUndoArm > 1600) { terBUndoArm = now; showToast('Click Undo again within 1.5 s to DELETE this run’s entities'); return true; }
+            if (now - terBUndoArm > 1600) { terBUndoArm = now; showToast('Click Undo again within 1.5 s to DELETE this run’s created entities'); return true; }
             terBUndoArm = 0;
             terBUndo();
             return true;
@@ -8305,8 +9071,21 @@
                     { value: 'rect', label: 'Full rectangle (no mask)' },
                 ], default: TER_THRESH_DEFAULTS.maskMode },
                 { id: 'fpCorridorFt', label: 'FP corridor width (FFZ+FP mode)', type: 'number', min: 50, max: 5000, step: 50, default: TER_THRESH_DEFAULTS.fpCorridorFt, unit: 'ft' },
-                { id: 'simplifyFt', label: 'Build · simplify tolerance', type: 'number', min: 0, max: 500, step: 10, default: TER_THRESH_DEFAULTS.simplifyFt, unit: 'ft' },
-                { id: 'nfzBufFt', label: 'Build · NFZ hull buffer', type: 'number', min: 0, max: 200, step: 5, default: TER_THRESH_DEFAULTS.nfzBufFt, unit: 'ft' },
+                { id: 'ter-build-hdr', label: '🏗 Build unshielded site', type: 'header' },
+                { id: 'gapMinFt', label: 'Seam gap between FFZs (near assets)', type: 'number', min: 5, max: 200, step: 5, default: TER_THRESH_DEFAULTS.gapMinFt, unit: 'ft' },
+                { id: 'smoothNearFt', label: 'Follow terrain exactly within … of an asset', type: 'number', min: 0, max: 5000, step: 50, default: TER_THRESH_DEFAULTS.smoothNearFt, unit: 'ft' },
+                { id: 'smoothFarFt', label: 'Fully smoothed beyond … from any asset', type: 'number', min: 0, max: 20000, step: 100, default: TER_THRESH_DEFAULTS.smoothFarFt, unit: 'ft' },
+                { id: 'tolNearFt', label: 'Simplify tolerance near assets', type: 'number', min: 0, max: 200, step: 5, default: TER_THRESH_DEFAULTS.tolNearFt, unit: 'ft' },
+                { id: 'tolFarFt', label: 'Simplify tolerance far from assets (gap = 2×tol + gap)', type: 'number', min: 0, max: 2000, step: 25, default: TER_THRESH_DEFAULTS.tolFarFt, unit: 'ft' },
+                { id: 'standoffFt', label: 'Pad standoff when a pad straddles two bands', type: 'number', min: 0, max: 200, step: 5, default: TER_THRESH_DEFAULTS.standoffFt, unit: 'ft' },
+                { id: 'pitAbsorbMaxAglFt', label: 'Warn when an absorbed pit sits deeper than', type: 'number', min: 50, max: 400, step: 10, default: TER_THRESH_DEFAULTS.pitAbsorbMaxAglFt, unit: 'ft AGL' },
+                { id: 'bridgeMergeFt', label: 'Merge bridge candidates closer than', type: 'number', min: 0, max: 5000, step: 50, default: TER_THRESH_DEFAULTS.bridgeMergeFt, unit: 'ft' },
+                { id: 'bridgeMaxSpacingFt', label: 'Longest bridgeless stretch on a seam', type: 'number', min: 200, max: 50000, step: 250, default: TER_THRESH_DEFAULTS.bridgeMaxSpacingFt, unit: 'ft' },
+                { id: 'bridgeInsetFt', label: 'Bridge waypoint depth inside each FFZ', type: 'number', min: 5, max: 500, step: 5, default: TER_THRESH_DEFAULTS.bridgeInsetFt, unit: 'ft' },
+                { id: 'bridgeMinOverlapFt', label: 'Min bridge band height (else staircase)', type: 'number', min: 5, max: 100, step: 5, default: TER_THRESH_DEFAULTS.bridgeMinOverlapFt, unit: 'ft' },
+                { id: 'maxVertsWarn', label: 'Warn when a piece exceeds … vertices', type: 'number', min: 100, max: 20000, step: 100, default: TER_THRESH_DEFAULTS.maxVertsWarn },
+                { id: 'deleteOldFfz', label: 'Delete old FFZs after the new set verifies', type: 'boolean', default: TER_ENABLE_DEFAULTS.deleteOldFfz },
+                { id: 'deleteOldFp', label: 'Delete old flight paths after the new set verifies', type: 'boolean', default: TER_ENABLE_DEFAULTS.deleteOldFp },
                 { id: 'opacity', label: 'Overlay opacity', type: 'number', min: 0.1, max: 1, step: 0.05, default: TER_THRESH_DEFAULTS.opacity },
                 { id: 'ter-run', label: '⛰ Run profiler', type: 'button', action: 'ter-run' },
                 { id: 'ter-clear', label: 'Clear overlay + panel', type: 'button', action: 'ter-clear' },

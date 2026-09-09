@@ -12,6 +12,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-08 — 🏗 Site Setup Tools latest v4.254: Unshielded Site Builder (feature #254, dev only)
+
+The Terrain Profiler's Build section is now the **Unshielded Site Builder**: one giant fixed-floor FFZ per terrain band (Δ now defaults to 25 ft), seamed to the next band by short **bridge flight paths** so a DAA return from anywhere is a straight line to base. Asset-free islands become NFZs, pits holding an asset are absorbed upward, bumps holding an asset become their own taller FFZ with a keyhole channel so the parent stays one polygon, straddling pads go to the taller band. Seams keep a 10 ft gap next to assets and widen with inward-only smoothing far from them (gap = 2×tolerance + 10). Every FFZ's floor/ceiling is recomputed from the DEM inside its final polygon. Bridges land where each asset's straight line to base crosses a seam; band = intersection of the two FFZ bands. Commit is gated (MSL site, base inside a piece, every asset inside exactly one FFZ, feasibility, base→asset reachability) and ends by deleting the old pad FFZs and corridor FPs through Delete Guard. Full mode only; in live test on a Cobra 01 duplicate.
+
 ## 2026-09-08 — 🛡 Site Setup Tools v4.244.1 (prod) / v4.253 (latest): Terrain Profiler 🏗 Build altitude-mode guard fixed
 
 The Terrain Profiler's Build → Commit (Full mode only) had its site altitude-mode check **inverted**: it refused Mountain-terrain (MSL) sites — the only kind its fixed MSL floors are valid on — and would have let an AGL site through, where a floor like 2,755 ft MSL is stored as 2,755 ft *above ground*. Commit had never been run live, so nothing was written wrong. It now builds on MSL sites only and refuses AGL sites and sites whose flag can't be read.
