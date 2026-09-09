@@ -12,6 +12,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-09 — ⛰ Site Setup Tools latest v4.272: profiler settings check before the first run
+
+The first ⛰ Run of a session now opens a settings check (AGL band, Δ, cell, margin, profile area, seam gap, tolerances, bridge spacing, absorb/delete options) with a ▶ Run button, so bad settings never cost a DEM fetch and a stage. Δ is back to 25 ft by default and re-registered in the Control Panel so a stored 30 stops coming back.
+
 ## 2026-09-09 — 🏗 Site Setup Tools latest v4.271: Unshielded Site Builder — smaller out-of-band patches become gap, NFZs never cover a pad
 
 Out-of-band patches down to 6 cells (~0.15 ac) are now carved out as gap (was 20). An NFZ hull that covers a pad, either in a bay of a concave island or fully inside it, has the pad's clearance zone cut out, with a slit to the boundary when the pad is interior so the NFZ stays a single ring.

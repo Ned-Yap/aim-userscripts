@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.271
+// @version      4.272
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.271';
+    const SCRIPT_VERSION = '4.272';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -6311,7 +6311,7 @@
         smoothFarFt: 1500,      // ≥ this far: far tolerance (linear ramp between)
         tolNearFt: 150,         // simplification tolerance near assets (pads get their own detour)
         tolFarFt: 2000,         // simplification tolerance far from assets — straight edges thousands of feet long
-        tunedV: 3,              // defaults revision — stored older values are migrated in loadTerThresholds
+        tunedV: 4,              // defaults revision — stored older values are migrated in loadTerThresholds
         standoffFt: 15,         // pad buffer for straddle bends (SOP FFZ→asset standoff)
         pitAbsorbMaxAglFt: 250, // warn when an absorbed pit's low spot sits deeper than this under the floor
         bridgeMergeFt: 500,     // bridge candidates closer than this merge
@@ -6357,7 +6357,11 @@
                     if ([200, 300, undefined].includes(o.smoothNearFt)) out.smoothNearFt = TER_THRESH_DEFAULTS.smoothNearFt;
                     if ([1200, 1500, undefined].includes(o.smoothFarFt)) out.smoothFarFt = TER_THRESH_DEFAULTS.smoothFarFt;
                     if ([10, undefined].includes(o.gapMinFt)) out.gapMinFt = TER_THRESH_DEFAULTS.gapMinFt;
-                    out.tunedV = 3;
+                }
+                if (!(o.tunedV >= 4)) {
+                    // v4.272: Δ back to 25 (user: "default to 25 please" — a 30 kept coming back via the panel)
+                    if (o.deltaFt === 30 || o.deltaFt === undefined) out.deltaFt = TER_THRESH_DEFAULTS.deltaFt;
+                    out.tunedV = 4;
                 }
             }
         } catch (e) { console.warn(`${TAG} loadTerThresholds threw:`, e); }
@@ -7107,7 +7111,77 @@
         if (el) { try { el.remove(); } catch (e) {} }
     }
 
-    async function terrainProfilerRun() {
+    // Settings check BEFORE the first run of a session (user 2026-09-09: "give me
+    // the settings first … to save us from loading bad data"). Later runs go
+    // straight through; the profiler panel's ⟳ Re-run exposes the same inputs.
+    let terPreRunSeen = false;
+    function terPreRunPanel() {
+        terClosePanel();
+        { const fresh = loadTerThresholds(); for (const k in fresh) if (!(k in TER_THRESH_DEFAULTS) || typeof fresh[k] === typeof terThresholds[k]) terThresholds[k] = fresh[k]; }
+        const th = terThresholds, en = terEnabled;
+        const esc = (v) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+        const num = (id, label, step, title, w2) => `<label title="${esc(title || '')}" style="display:flex;align-items:center;justify-content:space-between;gap:8px;"><span>${label}</span><input data-ter-p="${id}" type="number" value="${th[id]}" step="${step}" style="width:${w2 || 64}px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(201,166,255,0.35);border-radius:4px;padding:2px 4px;font:inherit;"></label>`;
+        const chk = (id, label, title) => `<label title="${esc(title || '')}" style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input data-ter-e="${id}" type="checkbox" ${en[id] ? 'checked' : ''}>${label}</label>`;
+        const wrap = document.createElement('div');
+        wrap.id = TER_PANEL_ID;
+        wrap.style.cssText = 'position:fixed;top:70px;right:56px;width:400px;z-index:2147483000;background:rgba(16,22,32,0.97);border:1px solid rgba(201,166,255,0.45);border-radius:10px;color:#dfe9f0;font:12px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,0.55);';
+        wrap.innerHTML = `
+            <div style="padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid rgba(201,166,255,0.25);">
+                <span style="color:#c9a6ff;font-weight:700;">⛰ Terrain Profiler — settings check</span>
+                <span style="opacity:0.6;">v${SCRIPT_VERSION}</span><span style="flex:1"></span>
+                <button data-ter-close style="background:none;border:none;color:#dfe9f0;font-size:15px;cursor:pointer;">✕</button>
+            </div>
+            <div style="padding:8px 12px;display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;">
+                <div style="grid-column:1/3;color:#c9a6ff;font-weight:600;">Profile</div>
+                ${num('minAglFt', 'AGL floor (ft)', 5, 'Region floor = highest ground + this')}
+                ${num('maxAglFt', 'AGL ceiling (ft)', 5, 'Region ceiling = lowest ground + this')}
+                ${num('deltaFt', 'Δ max relief (ft)', 5, 'Max terrain relief inside one band')}
+                ${num('cellFt', 'DEM cell (ft)', 1, '33 ≈ native 3DEP 10 m')}
+                ${num('marginFt', 'margin (ft)', 50, 'Ring around the site hull')}
+                <label style="display:flex;align-items:center;justify-content:space-between;gap:8px;"><span>profile area</span><select data-ter-mask style="background:#0d131d;color:#dfe9f0;border:1px solid rgba(201,166,255,0.35);border-radius:4px;padding:2px 4px;font:inherit;">${[['hull', 'Site hull'], ['ffz-fp', 'FFZ + FP corridors'], ['ffz', 'FFZs only'], ['rect', 'Rectangle']].map(o => `<option value="${o[0]}" ${(th.maskMode || 'hull') === o[0] ? 'selected' : ''}>${o[1]}</option>`).join('')}</select></label>
+                ${chk('median', 'despeckle DEM', '3×3 median before banding')}
+                ${chk('floorP95', 'P95 floor reference', 'Floor from the 95th-percentile elevation instead of the true max')}
+                <div style="grid-column:1/3;color:#ffe14d;font-weight:600;margin-top:6px;">Build</div>
+                ${num('gapMinFt', 'seam gap (ft)', 5, 'Gap between neighbouring FFZs')}
+                ${num('standoffFt', 'pad standoff (ft)', 5, 'FFZ edge clearance around a pad on a seam')}
+                ${num('tolNearFt', 'tolerance near assets (ft)', 25, 'Seam simplification within the near distance of a pad')}
+                ${num('tolFarFt', 'tolerance far (ft)', 100, 'Seam simplification in open ground')}
+                ${num('smoothNearFt', 'near distance (ft)', 50, 'Near tolerance applies within this of a pad')}
+                ${num('smoothFarFt', 'far distance (ft)', 100, 'Far tolerance applies beyond this')}
+                ${num('bridgeMergeFt', 'bridge merge (ft)', 50, 'Bridge candidates closer than this merge')}
+                ${num('bridgeMaxSpacingFt', 'bridge max spacing (ft)', 250, 'Longest bridgeless stretch on a seam')}
+                ${chk('absorbBumps', 'absorb bump islands with assets', 'Parent floor rises instead of a keyholed island')}
+                ${chk('deleteOldFfz', 'delete old FFZs on commit', '')}
+                ${chk('deleteOldFp', 'delete old FPs on commit', '')}
+            </div>
+            <div style="padding:8px 12px;border-top:1px solid rgba(201,166,255,0.25);display:flex;gap:8px;align-items:center;">
+                <span style="opacity:0.7;font-size:11px;">Saved on Run. The profiler panel's ⟳ Re-run shows the same inputs afterwards.</span>
+                <span style="flex:1"></span>
+                <button data-ter-prerun style="background:rgba(201,166,255,0.15);border:1px solid rgba(201,166,255,0.5);color:#c9a6ff;border-radius:5px;padding:3px 12px;cursor:pointer;font-weight:700;">▶ Run profiler</button>
+            </div>`;
+        wrap.addEventListener('click', (e) => {
+            if (e.target.closest('[data-ter-close]')) { terClosePanel(); return; }
+            if (!e.target.closest('[data-ter-prerun]')) return;
+            let bad = null;
+            wrap.querySelectorAll('[data-ter-p]').forEach(inp => {
+                const k = inp.getAttribute('data-ter-p');
+                const v = parseFloat(inp.value);
+                if (!isFinite(v) || v < 0) { bad = k; return; }
+                terThresholds[k] = v;
+            });
+            wrap.querySelectorAll('[data-ter-e]').forEach(inp => { terEnabled[inp.getAttribute('data-ter-e')] = !!inp.checked; });
+            const mSel = wrap.querySelector('[data-ter-mask]');
+            if (mSel && mSel.value) terThresholds.maskMode = mSel.value;
+            if (bad) { showToast(`Invalid value for ${bad}`, 'rgba(255,96,96,0.55)'); return; }
+            saveTerThresholds(); saveTerEnabled();
+            terPreRunSeen = true;
+            terClosePanel();
+            terrainProfilerRun(true);
+        });
+        document.body.appendChild(wrap);
+    }
+    async function terrainProfilerRun(confirmed) {
+        if (!confirmed && !terPreRunSeen && !terState) { terPreRunPanel(); return; }
         if (terRunning) { showToast('Profiler already running…'); return; }
         const sid = getCurrentSiteID();
         if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
@@ -9262,7 +9336,7 @@
     // v4.263: the smoothing tunables re-registered under NEW Control Panel ids —
     // the panel echoes its stored value per id on every load, which put the old
     // 0 / 250 defaults straight back over the migrated ones.
-    const TER_CP_ALIAS = { smoothNear3: 'smoothNearFt', smoothFar3: 'smoothFarFt', tolNear3: 'tolNearFt', tolFar3: 'tolFarFt', gapMin3: 'gapMinFt', smoothNear2: 'smoothNearFt', smoothFar2: 'smoothFarFt', tolNear2: 'tolNearFt', tolFar2: 'tolFarFt' };
+    const TER_CP_ALIAS = { delta2: 'deltaFt', smoothNear3: 'smoothNearFt', smoothFar3: 'smoothFarFt', tolNear3: 'tolNearFt', tolFar3: 'tolFarFt', gapMin3: 'gapMinFt', smoothNear2: 'smoothNearFt', smoothFar2: 'smoothFarFt', tolNear2: 'tolNearFt', tolFar2: 'tolFarFt' };
     function handleTerrainToggle(msg) {
         const id = TER_CP_ALIAS[msg.toggleId] || msg.toggleId;
         if (id === 'ter-master') {
@@ -9596,7 +9670,7 @@
                 { id: 'ter-master', label: 'Enable Terrain Profiler', type: 'boolean', default: true, master: true },
                 { id: 'minAglFt', label: 'Target AGL floor', type: 'number', min: 10, max: 400, step: 5, default: TER_THRESH_DEFAULTS.minAglFt, unit: 'ft' },
                 { id: 'maxAglFt', label: 'Target AGL ceiling', type: 'number', min: 50, max: 400, step: 5, default: TER_THRESH_DEFAULTS.maxAglFt, unit: 'ft' },
-                { id: 'deltaFt', label: 'Max relief per region (Δ)', type: 'number', min: 5, max: 150, step: 5, default: TER_THRESH_DEFAULTS.deltaFt, unit: 'ft' },
+                { id: 'delta2', label: 'Max relief per region (Δ)', type: 'number', min: 5, max: 150, step: 5, default: TER_THRESH_DEFAULTS.deltaFt, unit: 'ft' },
                 { id: 'cellFt', label: 'DEM cell size (33 ≈ native 10 m)', type: 'number', min: 10, max: 150, step: 1, default: TER_THRESH_DEFAULTS.cellFt, unit: 'ft' },
                 { id: 'marginFt', label: 'Margin around site bbox', type: 'number', min: 0, max: 5280, step: 50, default: TER_THRESH_DEFAULTS.marginFt, unit: 'ft' },
                 { id: 'absorbAc', label: 'Absorb islands below', type: 'number', min: 0, max: 50, step: 0.5, default: TER_THRESH_DEFAULTS.absorbAc, unit: 'ac' },
