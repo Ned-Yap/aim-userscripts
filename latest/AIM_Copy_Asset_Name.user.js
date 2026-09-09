@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.258
+// @version      4.259
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.258';
+    const SCRIPT_VERSION = '4.259';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -8517,7 +8517,14 @@
         const ms = Math.round(performance.now() - t0);
         const totalV = pieces.reduce((s2, p) => s2 + p.verts, 0), totalRaw = pieces.reduce((s2, p) => s2 + p.rawVerts, 0);
         log.unshift(`staged ${pieces.length} FFZ · ${nfzs.length} NFZ · ${bridges.length} bridge(s) · ${deletions.length} old entities to delete · ${totalV.toLocaleString()} vertices (raw ${totalRaw.toLocaleString()}) · ${ms} ms`);
-        terBState = { sid: st.sid, staging: false, pieces, nfzs, bridges, deletions, seams, gates, assets: assets.map(a => ({ name: a.name, piece: a.piece, straddle: a.straddle || '' })), base: { name: base.name, pt: base.pt }, runLog: log, createdIds: [], committing: false };
+        // working-grid boundaries (raw lattice arcs, every 2nd vertex) — drawn thin
+        // white in the preview so a seam the profiler overlay doesn't show is visible
+        const arcsLL = topo.arcs.map((A, ai) => {
+            const side = topo.arcSide[ai];
+            const pts = A.pts.filter((p, i) => i % 2 === 0 || i === A.pts.length - 1).map(p => terBLatticeToLL(dem, p[0], p[1]));
+            return { pts, seam: !!A.seam, l: side.left >= 0 ? regInfo[side.left].name : '', r: side.right >= 0 ? regInfo[side.right].name : '' };
+        });
+        terBState = { sid: st.sid, staging: false, arcsLL, pieces, nfzs, bridges, deletions, seams, gates, assets: assets.map(a => ({ name: a.name, piece: a.piece, straddle: a.straddle || '' })), base: { name: base.name, pt: base.pt }, runLog: log, createdIds: [], committing: false };
         terBDrawPreview();
         terRenderPanel();
         console.log(`${TAG} builder: ${log[0]}`);
@@ -8533,6 +8540,10 @@
         terBLayers = [];
         const seg = terState && terState.seg;
         const add = (layer) => { try { layer.addTo(map); terBLayers.push(layer); } catch (e) {} };
+        (bs.arcsLL || []).forEach(a => {
+            if (a.pts.length < 2) return;
+            add(L.polyline(a.pts.map(q => [q.lat, q.lng]), { color: a.seam ? '#ffffff' : '#9aa0a6', weight: 1, opacity: a.seam ? 0.8 : 0.5, interactive: false }));
+        });
         (bs.pieces || []).forEach(p => {
             const c = seg ? terColorFor((p.bandLo + p.bandHi) / 2, seg.mnFt, seg.mxFt) : [255, 225, 77];
             add(L.polygon(p.points.map(q => [q.lat, q.lng]), {
