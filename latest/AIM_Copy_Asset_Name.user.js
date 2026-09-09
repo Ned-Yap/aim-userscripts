@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.262
+// @version      4.263
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.262';
+    const SCRIPT_VERSION = '4.263';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -8550,7 +8550,7 @@
 
         const ms = Math.round(performance.now() - t0);
         const totalV = pieces.reduce((s2, p) => s2 + p.verts, 0), totalRaw = pieces.reduce((s2, p) => s2 + p.rawVerts, 0);
-        log.unshift(`staged ${pieces.length} FFZ · ${nfzs.length} NFZ · ${bridges.length} bridge(s) · ${deletions.length} old entities to delete · ${totalV.toLocaleString()} vertices (raw ${totalRaw.toLocaleString()}) · ${ms} ms`);
+        log.unshift(`staged ${pieces.length} FFZ · ${nfzs.length} NFZ · ${bridges.length} bridge(s) · ${deletions.length} old entities to delete · ${totalV.toLocaleString()} vertices (raw ${totalRaw.toLocaleString()}) · ${ms} ms · tol ${th.tolNearFt}/${th.tolFarFt} ft within ${th.smoothNearFt}/beyond ${th.smoothFarFt} ft · gap ${th.gapMinFt} ft`);
         // working-grid boundaries (raw lattice arcs, every 2nd vertex) — drawn thin
         // white in the preview so a seam the profiler overlay doesn't show is visible
         const arcsLL = topo.arcs.map((A, ai) => {
@@ -8814,7 +8814,7 @@
         const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
         const inp = (id, label, val, step, title, w2) => `<label title="${esc(title)}" style="display:flex;align-items:center;gap:3px;">${label}<input data-ter-p="${id}" type="number" value="${val}" step="${step}" style="width:${w2 || 50}px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(255,225,77,0.35);border-radius:4px;padding:1px 3px;font:inherit;font-size:11px;">ft</label>`;
         const h = [];
-        h.push(`<div style="color:#ffe14d;font-weight:600;margin:12px 0 4px;border-bottom:1px solid rgba(255,225,77,0.3);padding-bottom:2px;">🏗 Build unshielded site (giant FFZ per band + bridges)</div>`);
+        h.push(`<div style="color:#ffe14d;font-weight:600;margin:12px 0 4px;border-bottom:1px solid rgba(255,225,77,0.3);padding-bottom:2px;">🏗 Build unshielded site (giant FFZ per band + bridges) <span style="opacity:0.6;font-weight:400;">v${SCRIPT_VERSION}</span></div>`);
         h.push(`<div style="display:flex;flex-wrap:wrap;gap:5px 9px;align-items:center;margin:4px 0 6px;font-size:11px;">`
             + inp('gapMinFt', 'gap', th.gapMinFt, 5, 'Minimum seam gap between two FFZs (near assets)')
             + inp('smoothNearFt', 'near', th.smoothNearFt, 50, 'Within this distance of an asset the seam follows the terrain exactly', 56)
@@ -8957,8 +8957,12 @@
 
     // Idempotent (CP echoes from TOP + IFRAME — same contract as
     // handleSopToggle / handleAirspaceToggle).
+    // v4.263: the smoothing tunables re-registered under NEW Control Panel ids —
+    // the panel echoes its stored value per id on every load, which put the old
+    // 0 / 250 defaults straight back over the migrated ones.
+    const TER_CP_ALIAS = { smoothNear2: 'smoothNearFt', smoothFar2: 'smoothFarFt', tolNear2: 'tolNearFt', tolFar2: 'tolFarFt' };
     function handleTerrainToggle(msg) {
-        const id = msg.toggleId;
+        const id = TER_CP_ALIAS[msg.toggleId] || msg.toggleId;
         if (id === 'ter-master') {
             const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
             if (v === terMasterEnabled) return;
@@ -9305,10 +9309,10 @@
                 { id: 'fpCorridorFt', label: 'FP corridor width (FFZ+FP mode)', type: 'number', min: 50, max: 5000, step: 50, default: TER_THRESH_DEFAULTS.fpCorridorFt, unit: 'ft' },
                 { id: 'ter-build-hdr', label: '🏗 Build unshielded site', type: 'header' },
                 { id: 'gapMinFt', label: 'Seam gap between FFZs (near assets)', type: 'number', min: 5, max: 200, step: 5, default: TER_THRESH_DEFAULTS.gapMinFt, unit: 'ft' },
-                { id: 'smoothNearFt', label: 'Follow terrain exactly within … of an asset', type: 'number', min: 0, max: 5000, step: 50, default: TER_THRESH_DEFAULTS.smoothNearFt, unit: 'ft' },
-                { id: 'smoothFarFt', label: 'Fully smoothed beyond … from any asset', type: 'number', min: 0, max: 20000, step: 100, default: TER_THRESH_DEFAULTS.smoothFarFt, unit: 'ft' },
-                { id: 'tolNearFt', label: 'Simplify tolerance near assets', type: 'number', min: 0, max: 200, step: 5, default: TER_THRESH_DEFAULTS.tolNearFt, unit: 'ft' },
-                { id: 'tolFarFt', label: 'Simplify tolerance far from assets (gap = 2×tol + gap)', type: 'number', min: 0, max: 2000, step: 25, default: TER_THRESH_DEFAULTS.tolFarFt, unit: 'ft' },
+                { id: 'smoothNear2', label: 'Near tolerance applies within … of an asset', type: 'number', min: 0, max: 5000, step: 50, default: TER_THRESH_DEFAULTS.smoothNearFt, unit: 'ft' },
+                { id: 'smoothFar2', label: 'Far tolerance applies beyond … from any asset', type: 'number', min: 0, max: 20000, step: 100, default: TER_THRESH_DEFAULTS.smoothFarFt, unit: 'ft' },
+                { id: 'tolNear2', label: 'Simplify tolerance near assets', type: 'number', min: 0, max: 200, step: 5, default: TER_THRESH_DEFAULTS.tolNearFt, unit: 'ft' },
+                { id: 'tolFar2', label: 'Simplify tolerance far from assets (gap = 2×tol + gap)', type: 'number', min: 0, max: 2000, step: 25, default: TER_THRESH_DEFAULTS.tolFarFt, unit: 'ft' },
                 { id: 'standoffFt', label: 'Pad standoff when a pad straddles two bands', type: 'number', min: 0, max: 200, step: 5, default: TER_THRESH_DEFAULTS.standoffFt, unit: 'ft' },
                 { id: 'pitAbsorbMaxAglFt', label: 'Warn when an absorbed pit sits deeper than', type: 'number', min: 50, max: 400, step: 10, default: TER_THRESH_DEFAULTS.pitAbsorbMaxAglFt, unit: 'ft AGL' },
                 { id: 'bridgeMergeFt', label: 'Merge bridge candidates closer than', type: 'number', min: 0, max: 5000, step: 50, default: TER_THRESH_DEFAULTS.bridgeMergeFt, unit: 'ft' },
