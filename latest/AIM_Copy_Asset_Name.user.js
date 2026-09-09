@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.267
+// @version      4.268
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.267';
+    const SCRIPT_VERSION = '4.268';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -6382,6 +6382,7 @@
     let terMasterEnabled = true;
     let terThresholds = loadTerThresholds();
     let terEnabled = loadTerEnabled();
+    console.log(`${TAG} profiler thresholds at load: tol ${terThresholds.tolNearFt}/${terThresholds.tolFarFt} within ${terThresholds.smoothNearFt}/beyond ${terThresholds.smoothFarFt} · gap ${terThresholds.gapMinFt} · Δ ${terThresholds.deltaFt} · tunedV ${terThresholds.tunedV}`);
     let terState = null;      // full result of the last run (see terrainProfilerRun)
     let terLayer = null;      // L.imageOverlay on the map
     let terLayerMap = null;
@@ -9008,6 +9009,7 @@
             + `<label style="display:flex;align-items:center;gap:3px;cursor:pointer;" title="Delete every pre-existing FFZ after the new set verifies (Delete Guard keeps them 24 h)"><input data-ter-e="deleteOldFfz" type="checkbox" ${terEnabled.deleteOldFfz ? 'checked' : ''}>delete old FFZs</label>`
             + `<label style="display:flex;align-items:center;gap:3px;cursor:pointer;" title="Delete every pre-existing flight path after the new set verifies"><input data-ter-e="deleteOldFp" type="checkbox" ${terEnabled.deleteOldFp ? 'checked' : ''}>delete old FPs</label>`
             + `<label style="display:flex;align-items:center;gap:3px;cursor:pointer;" title="Bump islands holding assets are absorbed into the parent (its floor rises to clear them) instead of becoming small keyholed FFZs"><input data-ter-e="absorbBumps" type="checkbox" ${terEnabled.absorbBumps ? 'checked' : ''}>absorb bumps</label>`
+            + `<button data-ter-defaults title="Reset gap / smoothing tolerances to the current defaults (${TER_THRESH_DEFAULTS.tolNearFt}/${TER_THRESH_DEFAULTS.tolFarFt} ft, ${TER_THRESH_DEFAULTS.smoothNearFt}/${TER_THRESH_DEFAULTS.smoothFarFt} ft, gap ${TER_THRESH_DEFAULTS.gapMinFt} ft)" style="background:none;border:1px solid rgba(255,225,77,0.4);color:#ffe14d;border-radius:5px;padding:2px 8px;cursor:pointer;">↺ smoothing defaults</button>`
             + `<button data-ter-stage style="background:rgba(255,225,77,0.13);border:1px solid rgba(255,225,77,0.5);color:#ffe14d;border-radius:5px;padding:2px 10px;cursor:pointer;font-weight:600;">🏗 Stage</button>`
             + (bs && !bs.staging ? `<button data-ter-ucopy title="Copy the staged pieces, gates, seams and run log as text" style="background:none;border:1px solid rgba(255,225,77,0.4);color:#ffe14d;border-radius:5px;padding:2px 8px;cursor:pointer;">Copy build report</button>` : '')
             + `</div>`);
@@ -9065,12 +9067,21 @@
 
     // Returns true when the click was handled by the Build section.
     function terBHandleClick(e, wrap) {
+        if (e.target.closest('[data-ter-defaults]')) {
+            ['tolNearFt', 'tolFarFt', 'smoothNearFt', 'smoothFarFt', 'gapMinFt'].forEach(k => { terThresholds[k] = TER_THRESH_DEFAULTS[k]; });
+            terThresholds.tunedV = TER_THRESH_DEFAULTS.tunedV;
+            saveTerThresholds();
+            console.log(`${TAG} profiler smoothing reset to defaults: tol ${terThresholds.tolNearFt}/${terThresholds.tolFarFt} within ${terThresholds.smoothNearFt}/beyond ${terThresholds.smoothFarFt} · gap ${terThresholds.gapMinFt}`);
+            showToast('Smoothing tunables reset to defaults — Stage again');
+            terRenderPanel();
+            return true;
+        }
         if (e.target.closest('[data-ter-stage]')) {
             wrap.querySelectorAll('[data-ter-p]').forEach(inp => {
                 const k = inp.getAttribute('data-ter-p');
                 if (!(k in TER_THRESH_DEFAULTS)) return;
                 const v = parseFloat(inp.value);
-                if (isFinite(v) && v >= 0) terThresholds[k] = v;
+                if (isFinite(v) && v >= 0) { if (v !== terThresholds[k]) console.log(`${TAG} profiler threshold ${k}: ${terThresholds[k]} → ${v} (panel input)`); terThresholds[k] = v; }
             });
             const pInp = wrap.querySelector('[data-ter-prefix]');
             if (pInp) terThresholds.namePrefix = pInp.value;
@@ -9159,6 +9170,7 @@
         // Type-matched (numbers AND strings — maskMode/namePrefix are strings).
         if (Object.prototype.hasOwnProperty.call(terThresholds, id) && typeof msg.value === typeof terThresholds[id]) {
             if (msg.value === terThresholds[id]) return;
+            if (/^(tolNearFt|tolFarFt|smoothNearFt|smoothFarFt|gapMinFt)$/.test(id)) console.log(`${TAG} profiler threshold ${id}: ${terThresholds[id]} → ${msg.value} (Control Panel toggle "${msg.toggleId}")`);
             terThresholds[id] = msg.value;
             saveTerThresholds();
             if (id === 'opacity' && terLayer && typeof terLayer.setOpacity === 'function') {
