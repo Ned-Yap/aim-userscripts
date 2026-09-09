@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.270
+// @version      4.271
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.270';
+    const SCRIPT_VERSION = '4.271';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -8390,7 +8390,7 @@
         if (detours) L(`${detours} pad(s) folded into their piece / carved out of the neighbor by a seam detour`);
         // ---- out-of-band carve: ground inside a piece that belongs to another band
         // becomes GAP (user rule 2026-09-09: "red should be gap, not absorbed"). Each
-        // patch ≥ 20 cells is removed by its convex hull so the cut stays straight. ----
+        // patch ≥ 6 cells is removed by its convex hull so the cut stays straight. ----
         if (PC2) {
             let carved = 0, carvedAc = 0;
             const closeRing3 = (r2) => { const q = r2.map(p => p.slice()); if (q[0][0] !== q[q.length - 1][0] || q[0][1] !== q[q.length - 1][1]) q.push(q[0].slice()); return q; };
@@ -8400,7 +8400,7 @@
                 if (e.dead) continue;
                 const outs = [];
                 terUFill(e.ringPts, w, h, (i) => { if (lab[i] !== e.r.gi) outs.push(i); });
-                if (outs.length < 20) continue;
+                if (outs.length < 6) continue;
                 const outSet = new Set(outs);
                 seen.fill(0);
                 const blobs = [];
@@ -8416,7 +8416,7 @@
                             seen[j] = 1; st2.push(j);
                         }
                     }
-                    if (blob.length >= 20 && !blob.some(i => assetSrc[i])) blobs.push(blob);
+                    if (blob.length >= 6 && !blob.some(i => assetSrc[i])) blobs.push(blob);
                 }
                 if (!blobs.length) continue;
                 let mp = [[closeRing3(e.ringPts)]];
@@ -8534,6 +8534,36 @@
                 if (!cleaned) { L(`${z.name}: NFZ ring invalid — skipped`); return; }
                 ringL = cleaned;
             }
+            // a convex hull over a concave island can swallow pads sitting in its bays —
+            // cut every such pad (+ standoff + gap) back out
+            {
+                const PCn = terBPC();
+                const covered = assets.filter(a => a.px.length >= 3 && (terUPip(a.cx, a.cy, ringL) || a.px.some(p => terUPip(p[0], p[1], ringL))));
+                if (covered.length && PCn) {
+                    try {
+                        let mpN = [[ringL.concat([ringL[0].slice()])]];
+                        covered.forEach(a => {
+                            const hw = ftToCells(th.standoffFt + th.gapMinFt);
+                            const hg = terBOffsetConvex(terBHull(a.px), hw);
+                            // a pad fully inside the island would leave a HOLE (Percepto can't
+                            // store one) — add a slit from the pad to the nearest hull vertex so
+                            // the NFZ stays a single ring with the pad outside it
+                            let q = null, qd = Infinity; ringL.forEach(p => { const d = Math.hypot(p[0] - a.cx, p[1] - a.cy); if (d < qd) { qd = d; q = p; } });
+                            let cutter = [[hg.concat([hg[0].slice()])]];
+                            if (q) {
+                                let ux = q[0] - a.cx, uy = q[1] - a.cy; const lu = Math.hypot(ux, uy) || 1; ux /= lu; uy /= lu;
+                                const nx = -uy * hw, ny = ux * hw;
+                                const corr = [[a.cx + nx, a.cy + ny], [q[0] + nx + ux * 3, q[1] + ny + uy * 3], [q[0] - nx + ux * 3, q[1] - ny + uy * 3], [a.cx - nx, a.cy - ny]];
+                                try { const u = PCn.union(cutter, [[corr.concat([corr[0].slice()])]]); if (u && u.length) cutter = u; } catch (e3) { console.warn(`${TAG} builder: NFZ slit union threw:`, e3); }
+                            }
+                            const res = PCn.difference(mpN, cutter);
+                            if (res && res.length) mpN = res;
+                        });
+                        const polys = mpN.map(poly => terBNormRing(poly[0])).filter(o => o.length >= 3).sort((p1, p2) => Math.abs(terBSignedArea(p2)) - Math.abs(terBSignedArea(p1)));
+                        if (polys.length) { ringL = polys[0]; z.padsCut = covered.length; }
+                    } catch (e2) { console.warn(`${TAG} builder: NFZ pad cut threw:`, e2); }
+                }
+            }
             const points = ringL.map(p => terBLatticeToLL(dem, p[0], p[1]));
             // parent piece = the selected piece holding the island's centroid, else the nearest one
             let cx2 = 0, cy2 = 0; z.cells.forEach(i => { cx2 += (i % w) + 0.5; cy2 += Math.floor(i / w) + 0.5; }); cx2 /= z.cells.length; cy2 /= z.cells.length;
@@ -8546,9 +8576,10 @@
                 if (d < pd) { pd = d; parent = pi; }
             });
             const far = pd > ftToCells(2000);
-            nfzs.push({ name: `${z.name} ${nfzs.length + 1}`, points, acres: z.acres, dir: z.dir, parent, orphan: parent < 0 || far, selected: parent >= 0 && !far, cells: z.cells.length });
+            nfzs.push({ name: `${z.name} ${nfzs.length + 1}`, points, acres: z.acres, dir: z.dir, parent, orphan: parent < 0 || far, selected: parent >= 0 && !far, cells: z.cells.length, padsCut: z.padsCut || 0 });
         });
         if (nfzs.some(z => z.orphan)) L(`${nfzs.filter(z => z.orphan).length} NFZ(s) fall outside every FFZ piece (dropped region) — disabled`);
+        { const cut = nfzs.reduce((s2, z) => s2 + (z.padsCut || 0), 0); if (cut) L(`${cut} pad(s) cut back out of NFZ hulls`); }
 
         // ---------- 9. bridges ----------
         const pieceOfRegion = new Map();
@@ -9116,7 +9147,7 @@
         bs.nfzs.forEach((z, i) => {
             h.push(`<div data-ter-ujump="n:${i}" style="margin:1px 0;line-height:1.4;${z.orphan ? 'opacity:0.55;' : ''}cursor:pointer;" onmouseover="this.style.background='rgba(255,53,208,0.08)'" onmouseout="this.style.background=''">`
                 + `<label style="display:flex;align-items:flex-start;gap:5px;"><input data-ter-seln="${i}" type="checkbox" ${z.selected ? 'checked' : ''} ${z.orphan ? 'disabled' : ''} style="margin-top:2px;">`
-                + `<span><strong style="color:#ff35d0">${esc(z.name)}</strong> · ${z.acres.toFixed(1)} ac ${esc(z.dir || '')}${z.orphan ? ' · <span style="color:#ff5555">no parent FFZ — skipped</span>' : ''}</span></label></div>`);
+                + `<span><strong style="color:#ff35d0">${esc(z.name)}</strong> · ${z.acres.toFixed(1)} ac ${esc(z.dir || '')}${z.padsCut ? ` · ${z.padsCut} pad${z.padsCut === 1 ? '' : 's'} cut out` : ''}${z.orphan ? ' · <span style="color:#ff5555">no parent FFZ — skipped</span>' : ''}</span></label></div>`);
         });
         bs.bridges.forEach((b, i) => {
             h.push(`<div data-ter-ujump="b:${i}" style="margin:1px 0;line-height:1.4;cursor:pointer;" onmouseover="this.style.background='rgba(0,229,255,0.08)'" onmouseout="this.style.background=''">`

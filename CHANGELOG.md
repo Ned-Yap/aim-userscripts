@@ -12,6 +12,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-09 — 🏗 Site Setup Tools latest v4.271: Unshielded Site Builder — smaller out-of-band patches become gap, NFZs never cover a pad
+
+Out-of-band patches down to 6 cells (~0.15 ac) are now carved out as gap (was 20). An NFZ hull that covers a pad, either in a bay of a concave island or fully inside it, has the pad's clearance zone cut out, with a slit to the boundary when the pad is interior so the NFZ stays a single ring.
+
 ## 2026-09-09 — 🏗 Site Setup Tools latest v4.270: Unshielded Site Builder — bridge waypoints on the FFZ edge
 
 Bridge flight paths now end ON the edge of each FFZ (1 ft inside), the way a native flight path connects to a free zone, instead of 70–300 ft inside the polygon. Their altitude band is still the intersection of the two FFZ bands, and they are still created only after every FFZ and NFZ has been written and verified.
