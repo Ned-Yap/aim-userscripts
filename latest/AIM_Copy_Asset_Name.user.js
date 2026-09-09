@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.260
+// @version      4.261
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.260';
+    const SCRIPT_VERSION = '4.261';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -7971,7 +7971,11 @@
         if (straddled) L(`${straddled} pad(s) straddle a band boundary → moved (with ${th.standoffFt + th.gapMinFt} ft margin) into the taller band`);
         // NFZ cells never under a pad
         assets.forEach((a, ai) => assetCellsOf[ai].forEach(i => { nfzMask[i] = 0; }));
-        const specks = terUCleanSpecks(lab, w, h, Math.max(4, Math.round(th.absorbAc / dem.cellAcres)), assetSrc);
+        // guard fragments by asset CENTROID cells only — a stray cell holding a pad
+        // corner must merge into its neighbor (it became a 0.0 ac "FFZ" live)
+        const assetCtr = new Uint8Array(n);
+        assets.forEach(a => { const x = a.cx | 0, y = a.cy | 0; if (x >= 0 && y >= 0 && x < w && y < h) assetCtr[y * w + x] = 1; });
+        const specks = terUCleanSpecks(lab, w, h, Math.max(4, Math.round(th.absorbAc / dem.cellAcres)), assetCtr);
         if (specks) L(`${specks} sliver fragment(s) left by relabeling merged into their neighbor`);
         straddlePass();   // cleanup can re-expose a seam under a pad — settle it again
         await terYield();
@@ -8494,6 +8498,10 @@
             } else if (inNfz) aBad.push(`${a.name}: under an NFZ`);
             a.piece = vset.size === 1 ? [...vset][0] : -1;
         });
+        // per-piece asset counts + sliver pieces (never worth an FFZ) deselected
+        pieces.forEach(p => { p.assets = 0; });
+        assets.forEach(a => { if (a.piece >= 0) pieces[a.piece].assets++; });
+        pieces.forEach(p => { if (p.acres < 0.25 && !p.assets) { p.selected = false; p.flags.push('sliver — deselected'); } });
         gates.push({ ok: !aBad.length, label: aBad.length ? `${aBad.length} asset(s) not cleanly inside one FFZ` : `all ${assets.length} assets inside exactly one FFZ`, detail: aBad.slice(0, 12) });
         const missing = regInfo.filter(r => r.keep && !r.dropped && r.absorbedInto < 0 && r.assets.length && !pieces.some(p => p.region === r.gi));
         gates.push({ ok: !missing.length, label: missing.length ? `${missing.length} asset-bearing region(s) produced no FFZ piece (see log)` : 'every asset-bearing region built a piece', detail: missing.map(r => `${r.name}: ${r.assets.length} asset(s), ${Math.round(r.cells * dem.cellAcres)} ac`) });
