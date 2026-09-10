@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-09 — 🚀 Fleet Tools v0.17: basemap fills in fast — stale-tile retention + center-out loading (latest — dev only, feature #250)
+
+The cover basemap took seconds to render after each zoom because the engine deleted the old zoom level's tiles immediately and re-downloaded the new level from scratch — with visible tiles queued behind off-screen prefetch tiles. Now it behaves like real Leaflet: the previous zoom's tiles stay in place (scaled by corner projection) until every tile of the new level has loaded, then fade out — so zooming shows a scaled version of what you already had instead of bare ground. New tiles are created center-out with browser fetch-priority hints (screen middle 'high', prefetch margin 'low'), so the area you're looking at fills first. 404s (FAA no-coverage) count as done so retention can't wedge, and a hard DOM cap keeps rapid multi-level zooms bounded.
+
 ## 2026-09-09 — 🌙 Fleet Tools v0.16: no more default-map flash while panning a cover basemap (latest — dev only, feature #250)
 
 Panning in Dark (or any non-default) basemap flashed the normal map in newly exposed areas until the cover caught up. Three-part fix: the cover now prefetches half a viewport beyond every edge, tops itself up every 150ms **during** the drag (not just at pan end), and — decisively — Percepto's own tile pane is hidden while a cover is active with the map ground tinted to match the chosen basemap, so anything that still peeks through is a matching dark tone rather than the bright default. Cover and FAA tiles also fade in over 150ms instead of popping. All style-only touches, fully reversed by "Percepto default".

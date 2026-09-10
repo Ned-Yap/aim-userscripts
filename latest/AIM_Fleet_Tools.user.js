@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.16
+// @version      0.17
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.16';
+    const SCRIPT_VERSION = '0.17';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -1395,8 +1395,22 @@
     function engClear(eng) {
         Object.keys(eng.tiles).forEach(k => { try { eng.tiles[k].remove(); } catch (e) {} });
         eng.tiles = {};
+        eng.needKeys = null;
     }
-    function engReset(eng) { eng.tiles = {}; eng.el = null; eng.srcUrl = null; }
+    function engReset(eng) { eng.tiles = {}; eng.el = null; eng.srcUrl = null; eng.needKeys = null; }
+
+    // Drop stale-zoom tiles once every needed current-zoom tile has loaded
+    function engPruneStale(eng) {
+        const need = eng.needKeys;
+        if (!need) return;
+        for (const k of need) {
+            const img = eng.tiles[k];
+            if (!img || !img.__loaded) return;   // new level not complete yet — keep the old one
+        }
+        Object.keys(eng.tiles).forEach(k => {
+            if (eng.tiles[k].__tz !== eng.curZ) { try { eng.tiles[k].remove(); } catch (e) {} delete eng.tiles[k]; }
+        });
+    }
 
     function engUpdate(eng, src, opacity) {
         if (!onLandingPage()) return;
@@ -1426,40 +1440,79 @@
                 engClear(eng);
                 return;
             }
+            eng.lastOpacity = opacity;
+            eng.curZ = z;
             const need = new Set();
+            const missing = [];
             const nMax = Math.pow(2, z) - 1;
+            const cx = (x0 + x1) / 2, cyv = (y0 + y1) / 2;
             for (let x = x0; x <= x1; x++) {
                 for (let y = Math.max(0, y0); y <= Math.min(nMax, y1); y++) {
                     const key = `${z}/${x}/${y}`;
                     need.add(key);
-                    let img = eng.tiles[key];
-                    if (!img) {
-                        img = document.createElement('img');
-                        img.__loaded = false;
-                        img.src = src.url.replace('{z}', z).replace('{x}', x).replace('{y}', y);
-                        // fade in on load instead of popping over the ground
-                        img.style.cssText = 'position:absolute;pointer-events:none;user-select:none;opacity:0;transition:opacity .15s;';
-                        img.draggable = false;
-                        img.addEventListener('load', () => { img.__loaded = true; img.style.opacity = eng.lastOpacity; });
-                        img.addEventListener('error', () => { img.style.display = 'none'; });   // no-coverage tiles 404 — fine
-                        eng.el.appendChild(img);
-                        eng.tiles[key] = img;
-                    }
-                    // Corner projection handles the z-clamp upscale (map
-                    // zoom beyond the source's native max) automatically
-                    const p1 = map.latLngToLayerPoint([tile2lat(y, z), tile2lng(x, z)]);
-                    const p2 = map.latLngToLayerPoint([tile2lat(y + 1, z), tile2lng(x + 1, z)]);
-                    img.style.left = `${p1.x}px`;
-                    img.style.top = `${p1.y}px`;
-                    img.style.width = `${p2.x - p1.x + 0.5}px`;
-                    img.style.height = `${p2.y - p1.y + 0.5}px`;
-                    eng.lastOpacity = opacity;
-                    if (img.__loaded) img.style.opacity = opacity;
+                    if (!eng.tiles[key]) missing.push({ key, x, y, d: (x - cx) * (x - cx) + (y - cyv) * (y - cyv) });
                 }
             }
-            Object.keys(eng.tiles).forEach(k => {
-                if (!need.has(k)) { try { eng.tiles[k].remove(); } catch (e) {} delete eng.tiles[k]; }
+            eng.needKeys = need;
+            // v0.17: create CENTER-OUT with fetch-priority hints, so the
+            // middle of the screen fills first and the prefetch margin
+            // loads last (row-order creation had visible tiles queued
+            // behind off-screen ones in the browser's per-host limit)
+            missing.sort((a, b2) => a.d - b2.d);
+            missing.forEach((m, idx) => {
+                const img = document.createElement('img');
+                img.__loaded = false;
+                img.__tx = m.x; img.__ty = m.y; img.__tz = z;
+                try { img.fetchPriority = idx < 16 ? 'high' : (idx > missing.length * 0.6 ? 'low' : 'auto'); } catch (e) {}
+                img.decoding = 'async';
+                img.src = src.url.replace('{z}', z).replace('{x}', m.x).replace('{y}', m.y);
+                // fade in on load instead of popping over the ground
+                img.style.cssText = 'position:absolute;pointer-events:none;user-select:none;opacity:0;transition:opacity .15s;';
+                img.draggable = false;
+                img.addEventListener('load', () => {
+                    img.__loaded = true;
+                    img.style.opacity = eng.lastOpacity;
+                    engPruneStale(eng);   // stale-zoom tiles leave once the new level is in
+                });
+                img.addEventListener('error', () => {
+                    // no-coverage tiles 404 — fine; counts as "done" so
+                    // stale-tile pruning is never blocked by a 404
+                    img.__loaded = true;
+                    img.style.display = 'none';
+                    engPruneStale(eng);
+                });
+                eng.el.appendChild(img);
+                eng.tiles[m.key] = img;
             });
+            // Position EVERY kept tile — including stale-zoom ones, which
+            // stay (scaled by corner projection, exactly like Leaflet keeps
+            // old tiles) until the new zoom level has fully loaded. This is
+            // what kills the seconds of bare ground after each zoom.
+            Object.keys(eng.tiles).forEach(k => {
+                const img = eng.tiles[k];
+                const tz = img.__tz;
+                if (tz === z && !need.has(k)) {
+                    // same zoom but out of the padded view → gone
+                    try { img.remove(); } catch (e) {}
+                    delete eng.tiles[k];
+                    return;
+                }
+                const p1 = map.latLngToLayerPoint([tile2lat(img.__ty, tz), tile2lng(img.__tx, tz)]);
+                const p2 = map.latLngToLayerPoint([tile2lat(img.__ty + 1, tz), tile2lng(img.__tx + 1, tz)]);
+                img.style.left = `${p1.x}px`;
+                img.style.top = `${p1.y}px`;
+                img.style.width = `${p2.x - p1.x + 0.5}px`;
+                img.style.height = `${p2.y - p1.y + 0.5}px`;
+                if (img.__loaded) img.style.opacity = opacity;
+            });
+            engPruneStale(eng);
+            // hard safety cap on retained DOM (rapid multi-level zooms)
+            const all = Object.keys(eng.tiles);
+            if (all.length > 900) {
+                all.forEach(k => {
+                    if (eng.tiles[k].__tz !== z) { try { eng.tiles[k].remove(); } catch (e) {} delete eng.tiles[k]; }
+                });
+            }
         } catch (e) { console.warn(`${TAG} raw tiles (${eng.paneName}) update failed:`, e); }
     }
 
