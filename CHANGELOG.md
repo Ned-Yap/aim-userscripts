@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-10 — ✂🧩 Mission Bank Tools v2.94: Split + macro detection respect "_ID ####" main pads (latest — dev only)
+
+The ✂ Split (and 🧩 macro/solo detection behind it) had the same legacy-site disease as the lasso: steps landing on a nested equipment polygon ("TXL 27 Unit 4 3405BH Gas Lift Header") were attributed to that polygon, so a split minted one micro per header/well head instead of one per pad. Now an equipment **asset** whose name extends an "_ID ####" asset's root folds into that main pad everywhere steps are attributed — split groups merge into the _ID pad (micro named after it), and micro missions that touch a pad plus its nested equipment finally count as **solo** missions again, so the split panel's "pad already has its micro" default-untick works on these sites. Name rule only, no geometry guessing: equipment with no _ID owner keeps being its own pad, and modern sites are untouched.
+
 ## 2026-09-10 — 🖊 Mission Bank Tools v2.93: no more ✕ storm on covered pads (latest — dev only)
 
 Follow-up to v2.92: a skipped polygon whose centroid sits **inside** a polygon that successfully staged its mission is covered ground, not a problem — so nested equipment (with or without a mission of its own) no longer draws a red ✕ inside an already-staged pad. Those reclassify into the "Folded into pad missions" list, which now scrolls in its own compact box. Red ✕ now means what it should: a genuinely uncovered pad.

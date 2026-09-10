@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.93
+// @version      2.94
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.93';
+    const SCRIPT_VERSION = '2.94';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5616,8 +5616,35 @@
     }
     // mission → distinct pads its located steps touch (inside or ≤150 ft of
     // an asset ring; bbox-prefiltered)
+    // v2.94: LEGACY nested-asset sites (same doctrine as the 🖊 lasso,
+    // 2026-09-10): "_ID ####" in an ASSET name marks THE PAD. An equipment
+    // polygon ("TXL 27 Unit 4 3405BH Gas Lift Header") whose name extends an
+    // _ID asset's root ("TXL 27 Unit 4 3405BH_ID 479") folds into that pad —
+    // steps attribute to the MAIN pad, so 🧩 macro/solo detection and ✂ split
+    // stop minting one micro per Gas Lift Header. NAME rule only (no
+    // geometry): equipment with no _ID owner keeps being its own pad, and
+    // modern sites (no _ID assets) fold nothing. Returns a resolver.
+    function mbBuildPadFold(assets) {
+        const fold = new Map();   // asset.id → host (_ID pad) asset
+        try {
+            const idAssets = assets
+                .filter(a => /_id\s*\d+/i.test(a.name || ''))
+                .map(a => ({ a, root: String(a.name).trim().toLowerCase().replace(/[\s_]*_id\s*\d+.*$/i, '') }))
+                .filter(x => x.root.length >= 4)
+                .sort((x, y) => y.root.length - x.root.length);
+            if (idAssets.length) assets.forEach(a => {
+                if (/_id\s*\d+/i.test(a.name || '')) return;
+                const want = String(a.name || '').trim().toLowerCase();
+                const own = idAssets.find(x => want === x.root || want.startsWith(x.root + ' ') || want.startsWith(x.root + '_'));
+                if (own) fold.set(a.id, own.a);
+            });
+        } catch (e) { console.warn(`${TAG} [padfold] fold build failed — every asset stays its own pad`, e); }
+        if (fold.size) console.log(`${TAG} [padfold] legacy nested-asset site: ${fold.size} equipment polygon(s) fold into their _ID main pad`);
+        return (a) => (a && fold.get(a.id)) || a;
+    }
     function mcvDetect(ent, missions) {
         const assets = (ent.assets || []).filter(a => a.ring && a.ring.length >= 3);
+        const padFold = mbBuildPadFold(assets);
         const tolM = 46;   // 150 ft
         const boxes = assets.map(a => agRingBbox(a.ring, tolM + 5));
         const macros = [];
@@ -5645,6 +5672,7 @@
                         const d = mbPointToPolygonMeters(p.lat, p.lng, assets[ai].ring);
                         if (d <= tolM && (!best || d < best.d)) best = { a: assets[ai], d };
                     }
+                    if (best) best.a = padFold(best.a);   // v2.94: equipment → its _ID main pad
                     if (best) {
                         curPad = best.a.id;
                         // v2.62: bank both the first LOOSE touch (≤150 ft, the
@@ -5902,6 +5930,7 @@
     function mcvSplitPlan(mc) {
         const ent = mcv.data && mcv.data.ent;
         const assets = ((ent && ent.assets) || []).filter(a => a.ring && a.ring.length >= 3);
+        const padFold = mbBuildPadFold(assets);   // v2.94: equipment → its _ID main pad
         const ffzs = (ent && ent.ffzs) || [];
         const tolM = 46;   // 150 ft
         const boxes = assets.map(a => agRingBbox(a.ring, tolM + 5));
@@ -5913,7 +5942,7 @@
                 const d = mbPointToPolygonMeters(p.lat, p.lng, assets[i].ring);
                 if (d <= tolM && (!best || d < best.d)) best = { a: assets[i], d };
             }
-            return best ? best.a : null;
+            return best ? padFold(best.a) : null;
         };
         const ffzCache = new Map();   // asset id → adjacent FFZ
         const padFfz = (a) => {
