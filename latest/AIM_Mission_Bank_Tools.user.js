@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.92
+// @version      2.93
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.92';
+    const SCRIPT_VERSION = '2.93';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5416,11 +5416,13 @@
             if (!hits.length) return null;
             return hits.filter(x => x.root.length === hits[0].root.length).map(x => x.m);
         };
+        const claims = [];   // every polygon → resolved mission (pre-gates), for the cover sweep below
         inside.forEach(a => {
             const cands = idOwners(a.name) || rankMatchMissions(a.name, missions);
             if (!cands.length) { skip(a, 'no mission with this name'); return; }
             if (cands.length > 1) { skip(a, `${cands.length} mission matches (add it via M2)`); return; }
             const mission = cands[0];
+            claims.push({ a, mission });
             const isFold = mission.name.trim().toLowerCase() !== String(a.name || '').trim().toLowerCase();
             const r = byAsset.get(a.id);
             const rOk = !!(r && r.status === 'ok' && r.verified && !r.disagree);
@@ -5447,6 +5449,17 @@
             const own = idOwners(skipped[i].name);
             const cover = own && own.length === 1 && rowByMission.get(own[0].id);
             if (cover) { folded.push({ name: skipped[i].name, mission: own[0].name }); skipped.splice(i, 1); }
+        }
+        // v2.93: cover sweep — a skipped polygon whose centroid sits INSIDE
+        // a polygon that staged its mission is covered ground, not a problem
+        // (legacy nested-equipment sites drew a ✕ storm inside already-staged
+        // pads: name folds catch the _ID cases, this catches the rest, e.g.
+        // nested equipment with no mission at all). Equipment nests in pads;
+        // pads never nest in pads — so this can't hide a truly missed pad.
+        for (let i = skipped.length - 1; i >= 0; i--) {
+            const pt = skipped[i].pt;
+            const host = pt && claims.find(cl => rowByMission.has(cl.mission.id) && genPointInPoly(pt, cl.a.ring));
+            if (host) { folded.push({ name: skipped[i].name, mission: host.mission.name }); skipped.splice(i, 1); }
         }
         // Pre-order = bearing sweep around base with the seam at the largest
         // angular gap — the human "walk the loop" order. It feeds the
@@ -5534,7 +5547,7 @@
             ${variants.map(vBtn).join('') || '<div style="color:#888;font-size:11px;">No stageable missions.</div>'}
             ${offN ? `<div style="margin-top:5px;color:#ffb74d;font-size:10px;">⚠ ${offN} pad-pair leg(s) estimated off-graph — order may be imperfect (see console)</div>` : ''}
             ${skipped.length ? `<div style="margin-top:6px;color:#ff9800;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Skipped (${skipped.length}) — marked ✕ on the map</div>${skipped.map(s => `<div style="color:#caa;font-size:10px;">${escapeHtml(s.name)} — ${escapeHtml(s.reason)}</div>`).join('')}` : ''}
-            ${(folded && folded.length) ? `<div style="margin-top:6px;color:#7adfe6;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Folded into pad missions (${folded.length})</div>${folded.map(f => `<div style="color:#678;font-size:10px;">${escapeHtml(f.name)} → ${escapeHtml(f.mission)}</div>`).join('')}` : ''}
+            ${(folded && folded.length) ? `<div style="margin-top:6px;color:#7adfe6;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Folded into pad missions (${folded.length})</div><div style="max-height:96px;overflow:auto;">${folded.map(f => `<div style="color:#678;font-size:10px;">${escapeHtml(f.name)} → ${escapeHtml(f.mission)}</div>`).join('')}</div>` : ''}
             <div style="color:#789;font-size:10px;margin-top:6px;">Stage a variant → inspect the numbered badges → 🔗 Create. Panel stays open so you can stage the other one after.</div>`;
         document.body.appendChild(el);
         el.querySelector('[data-lasso-close]').onclick = lassoCloseResults;
