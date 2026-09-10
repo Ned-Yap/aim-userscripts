@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.5
+// @version      0.6
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.5';
+    const SCRIPT_VERSION = '0.6';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -852,29 +852,147 @@
     }
 
     let landingMapRef = null;
+    let mapFoundLogged = false;
+
+    function stampFoundMap(map, via) {
+        landingMapRef = map;
+        try { const c = map.getContainer(); if (c && !c.__aim_map__) c.__aim_map__ = map; } catch (e) {}
+        if (!mapFoundLogged) {
+            mapFoundLogged = true;
+            console.log(`${TAG} landing map found via ${via}`);
+        }
+        return map;
+    }
+
+    // The landing page is the legacy Angular shell (pr-sites-select) —
+    // v0.5's container-property walk found nothing there because Leaflet
+    // never stores the map on its container; in the site iframes our other
+    // scripts stamp it via the L.Map prototype hook, but nothing does that
+    // here. The proven Data View pattern applies instead: the map lives on
+    // an Angular scope ($rootScope.current_map on data_view) — reach it
+    // through angular.element(...).injector() (works even with debug info
+    // off, unlike .scope()).
+    function ngWalkForMap(root) {
+        const queue = [root];
+        const seen = new Set();
+        let inspected = 0;
+        while (queue.length && inspected < 400) {
+            const s = queue.shift();
+            if (!s || seen.has(s.$id)) continue;
+            seen.add(s.$id);
+            inspected++;
+            for (const k in s) {
+                if (!Object.prototype.hasOwnProperty.call(s, k) || k.charAt(0) === '$') continue;
+                try { if (looksLikeLeafletMap(s[k])) return { map: s[k], key: k }; } catch (e) {}
+            }
+            if (s.$$childHead) {
+                let c = s.$$childHead;
+                while (c) { queue.push(c); c = c.$$nextSibling; }
+            }
+        }
+        return null;
+    }
+
     function getLandingMap() {
         if (landingMapRef && landingMapRef._container && document.body.contains(landingMapRef._container)) {
             return landingMapRef;
         }
         landingMapRef = null;
-        // The landing map exists before we run, so the prototype-hook trick
-        // wouldn't have stamped it — walk container properties instead.
         const containers = [document.getElementById('pr-sites-select-map'), ...document.querySelectorAll('.leaflet-container')];
         for (const container of containers) {
             if (!container) continue;
             const candidates = [container.__aim_map__, container._leaflet_map, container._leaflet];
             for (const c of candidates) {
-                if (looksLikeLeafletMap(c)) { landingMapRef = c; return c; }
+                if (looksLikeLeafletMap(c)) return stampFoundMap(c, 'container property');
             }
             for (const k in container) {
                 try {
                     const v = container[k];
-                    if (looksLikeLeafletMap(v)) { landingMapRef = v; return v; }
+                    if (looksLikeLeafletMap(v)) return stampFoundMap(v, `container.${k}`);
                 } catch (e) {}
             }
         }
+        // Angular scope route
+        try {
+            const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+            const ng = w.angular;
+            if (ng && typeof ng.element === 'function') {
+                let root = null;
+                try {
+                    const inj = ng.element(w.document.body).injector();
+                    if (inj && typeof inj.get === 'function') root = inj.get('$rootScope');
+                } catch (e) {}
+                if (!root) {
+                    try {
+                        const sc = ng.element(containers[0] || w.document.body).scope();
+                        root = sc && sc.$root;
+                    } catch (e) {}
+                }
+                if (root) {
+                    if (looksLikeLeafletMap(root.current_map)) return stampFoundMap(root.current_map, '$rootScope.current_map');
+                    const hit = ngWalkForMap(root);
+                    if (hit) return stampFoundMap(hit.map, `angular scope key "${hit.key}"`);
+                }
+            }
+        } catch (e) { console.warn(`${TAG} angular map route threw:`, e); }
         return null;
     }
+
+    // Belt-and-braces: with the page's L patched, an existing map stamps
+    // itself onto its container on its next internal method call (pan/zoom/
+    // tile work). Idempotent with the other AIM scripts' copies of this
+    // hook (all guard on !container.__aim_map__).
+    let leafletProtoPatched = false;
+    function patchLeafletProto() {
+        if (leafletProtoPatched) return true;
+        try {
+            const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+            const L = w.L;
+            if (!L || !L.Map || !L.Map.prototype) return false;
+            ['getPane', 'addLayer', 'invalidateSize', 'setView', 'panTo', '_animateZoom', 'fire'].forEach(method => {
+                if (typeof L.Map.prototype[method] !== 'function') return;
+                const orig = L.Map.prototype[method];
+                L.Map.prototype[method] = function (...args) {
+                    try {
+                        if (this && this._container && !this._container.__aim_map__) {
+                            this._container.__aim_map__ = this;
+                        }
+                    } catch (e) {}
+                    return orig.apply(this, args);
+                };
+            });
+            leafletProtoPatched = true;
+            console.log(`${TAG} patched page L.Map prototype`);
+            return true;
+        } catch (e) {
+            console.warn(`${TAG} L.Map patch failed:`, e);
+            return false;
+        }
+    }
+
+    // One-line diagnosis of every discovery path — logged when drawing
+    // gives up, and callable from the console as __aimFleetMapDebug()
+    function landingMapDebug() {
+        const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+        const c = document.getElementById('pr-sites-select-map');
+        const d = { container: !!c, pageL: !!w.L, pageLVersion: (w.L && w.L.version) || null, angular: !!w.angular };
+        d.ngVersion = (w.angular && w.angular.version && w.angular.version.full) || null;
+        try { d.injector = !!w.angular.element(w.document.body).injector(); } catch (e) { d.injector = false; }
+        try {
+            const root = w.angular.element(w.document.body).injector().get('$rootScope');
+            d.rootCurrentMap = looksLikeLeafletMap(root.current_map);
+            d.rootMapishKeys = Object.keys(root).filter(k => k.charAt(0) !== '$' && /map/i.test(k)).slice(0, 10);
+        } catch (e) { d.rootCurrentMap = 'n/a'; }
+        d.found = !!getLandingMap();
+        return d;
+    }
+    try {
+        ((typeof unsafeWindow !== 'undefined') ? unsafeWindow : window).__aimFleetMapDebug = () => {
+            const d = landingMapDebug();
+            console.log(`${TAG} map debug:`, JSON.stringify(d));
+            return d;
+        };
+    } catch (e) {}
 
     const FT_PANE = 'aim-ft-pins';
     const SETUP_PANE = 'aim-ft-setups';
@@ -924,7 +1042,7 @@
             const L = getL();
             if (!map || !L) {
                 if (n < 30) setTimeout(() => tryDraw(n + 1), 700);
-                else console.warn(`${TAG} landing map never found — sweep pins not drawn (tables still work)`);
+                else console.warn(`${TAG} landing map never found — sweep pins not drawn (tables still work). Discovery paths:`, JSON.stringify(landingMapDebug()), '— run __aimFleetMapDebug() in the console and report the line');
                 return;
             }
             ensureFtPane(map);
@@ -1578,6 +1696,12 @@
     // Init — the landing page is an SPA destination; poll for its marker
     // ------------------------------------------------------------------
     setupControlChannel();
+    if (!patchLeafletProto()) {
+        let patchTries = 0;
+        const patchTimer = setInterval(() => {
+            if (patchLeafletProto() || ++patchTries >= 60) clearInterval(patchTimer);
+        }, 500);
+    }
     const start = () => {
         syncButton();
         setInterval(syncButton, 2000);

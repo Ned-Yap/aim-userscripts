@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-09 — ⚠ Fleet Tools v0.6: find the landing map through Angular — pins + setups were drawing nothing (latest — dev only, feature #250)
+
+Live test: nothing drew on the landing map at any zoom. Root cause: the landing page is the legacy Angular shell, and v0.5 only walked the map container's properties — Leaflet never stores the map there, and unlike the site iframes nothing on this page had stamped it. v0.6 adds the proven Data View discovery routes: `$rootScope.current_map` via `angular.element(document.body).injector()` (works with Angular debug info off), a bounded walk of the whole scope tree, and an L.Map prototype patch so any map stamps its container on its next internal call. If every route misses, the give-up warning now prints a one-line diagnosis of each path, and `__aimFleetMapDebug()` can be run in the console any time. A deeper console recon snippet is banked at ShortKeys/AIM_Landing_Map_Probe.js — it reports where a map instance actually lives (scope paths, globals) and test-draws a magenta circle as proof.
+
 ## 2026-09-09 — ⚠ Fleet Tools v0.5: site setups drawn on the landing map (latest — dev only, feature #250)
 
 The landing map now shows actual site-setup geometry, not just conflict pins: zoom in to level 12+ and the sites in view draw their FFZs (green), flight paths (cyan), and assets (white) — native palette so it reads instantly. Built to the "see everything but not break the system" rule: geometry is zoom-gated (world view stays pins-only), viewport-culled via the snapshot-index bboxes, hard-capped at the 40 nearest sites, and redrawn incrementally as you pan/zoom (sites leaving the view are removed). The Show class checkboxes, client chips, and ⊘ turned-off sites all filter the drawn geometry live, and entities come from the session cache — sites the sweep already fetched draw instantly. New "Site setups (zoom in)" toggle next to "Conflict pins" (both on by default).
