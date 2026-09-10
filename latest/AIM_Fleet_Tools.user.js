@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.20
+// @version      0.21
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.20';
+    const SCRIPT_VERSION = '0.21';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -2107,6 +2107,7 @@
     async function runXref() {
         if (xrefState && xrefState.running) return;
         const seq = ++xrefSeq;
+        if (!kmlLayerById(xrefSrcSel) && kmlLayers.length) xrefSrcSel = kmlLayers[0].id;   // lone-option selects never fire 'change'
         const src = kmlLayerById(xrefSrcSel);
         if (!src) { setStatus('pick a source KML layer first'); return; }
         const b1m = ftCfg.xrefB1 / FT_PER_M;
@@ -2454,6 +2455,11 @@
 
     function renderXrefSection() {
         if (!openSections.xref) return '';
+        // A lone <select> option never fires 'change', so the state must
+        // default to what the dropdown displays — also self-heals when the
+        // chosen layer's id changed (💾 save) or the layer was removed
+        if (!kmlLayerById(xrefSrcSel)) xrefSrcSel = kmlLayers.length ? kmlLayers[0].id : '';
+        if (xrefTgtSel !== 'sites' && !kmlLayerById(xrefTgtSel)) xrefTgtSel = 'sites';
         const sel = 'background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:2px 4px;font:inherit;max-width:180px;';
         const num = 'width:52px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;padding:1px 3px;';
         const srcOpts = kmlLayers.map(ly => `<option value="${ly.id}" ${xrefSrcSel === ly.id ? 'selected' : ''}>${escapeHtml(ly.name)}</option>`).join('');

@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-10 — 📐 Fleet Tools v0.21: Run cross-ref works with a single KML loaded (latest — dev only, feature #255)
+
+With only one KML layer, ▶ Run cross-ref silently did nothing: the source dropdown displayed the layer, but a lone option never fires a change event, so the internal selection stayed empty. The selection now defaults to the first layer (and self-heals if the chosen layer was renamed by 💾 or removed).
+
 ## 2026-09-10 — 📐 Fleet Tools v0.20: no more slivers at band transitions (latest — dev only, feature #255)
 
 Tiny raw-color gaps still showed exactly where the cross-ref color changed (red→amber→blue): at each transition the outgoing run ended one sample early. Adjacent runs now share their boundary point, so band colors join seamlessly.
