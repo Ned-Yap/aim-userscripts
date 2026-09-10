@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.11
+// @version      0.12
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.11';
+    const SCRIPT_VERSION = '0.12';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -1178,13 +1178,14 @@
             return `${Math.round(p.x * 10) / 10},${Math.round(p.y * 10) / 10}`;
         };
         try {
-            // --- site setups (zoom-gated, class-filtered at render time) ---
+            // --- site setups (zoom-gated, class-filtered at render time).
+            // No site-name labels: the v0.10 labels were a diagnostic for
+            // the orphan-site leak; with /sites/ scoping (v0.11) Percepto's
+            // own site bubbles are the naming layer. ---
             let sHtml = '';
-            let lblHtml = '';
             if (ftCfg.drawSetups && zoom >= SETUP_MIN_ZOOM) {
                 Object.keys(setupGeomBySite).forEach(id => {
-                    const rec = setupGeomBySite[id];
-                    rec.geoms.forEach(g => {
+                    setupGeomBySite[id].forEach(g => {
                         if (!ftCfg.view[g.cls]) return;
                         const st = SETUP_STYLE[g.cls];
                         let d = '';
@@ -1196,17 +1197,9 @@
                         sHtml += `<path d="${d}" fill="${g.closed ? st.color : 'none'}" fill-opacity="${g.closed ? st.fill : 0}"`
                             + ` stroke="${st.color}" stroke-width="${st.weight}" stroke-opacity="0.9" stroke-linejoin="round"/>`;
                     });
-                    // Site name label at the geometry center — the ONLY way
-                    // to tell whose geometry is whose when duplicate/test
-                    // sites draw copied bits on top of the real ones
-                    if (rec.label) {
-                        const xy = map.latLngToLayerPoint([rec.label.lat, rec.label.lng]);
-                        lblHtml += `<text x="${xy.x}" y="${xy.y}" text-anchor="middle" font-family="monospace" font-size="12" font-weight="bold"`
-                            + ` fill="#10241a" stroke="#d8ffe8" stroke-width="3.5" paint-order="stroke" opacity="0.95">${escapeHtml(rec.label.name)}</text>`;
-                    }
                 });
             }
-            ovSetupsG.innerHTML = sHtml + lblHtml;
+            ovSetupsG.innerHTML = sHtml;
             // --- conflict pins ---
             let pHtml = '';
             const now = Date.now();
@@ -1403,15 +1396,7 @@
                         if (g) geoms.push(g);
                     } catch (e3) { console.warn(`${TAG} setup geometry failed for entity ${e && e.id}:`, e3); }
                 });
-                let label = null;
-                const box = nbIndex.bboxes[id];
-                if (box && !box.empty) {
-                    label = { lat: (box.minLat + box.maxLat) / 2, lng: (box.minLng + box.maxLng) / 2 };
-                } else if (geoms.length && geoms[0].parts[0] && geoms[0].parts[0][0]) {
-                    label = { lat: geoms[0].parts[0][0][0], lng: geoms[0].parts[0][0][1] };
-                }
-                if (label) label.name = `${siteName(id)} #${id}`;
-                setupGeomBySite[id] = { label, geoms };
+                setupGeomBySite[id] = geoms;
                 renderOverlay();
             }
         };
