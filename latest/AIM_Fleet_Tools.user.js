@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.12
+// @version      0.13
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.12';
+    const SCRIPT_VERSION = '0.13';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -97,6 +97,7 @@
         return {
             thresholdFt: 200, marginFt: 500, classes: { ffz: true, fp: true, asset: true },
             capPerPair: 200, onlyProduction: false, showOnMap: true, drawSetups: true,
+            basemap: 'default', faaChart: false, faaOpacity: 0.75,
             // Display-only view filters (never re-run the sweep): which
             // conflict classes to SHOW, and which clients are toggled off.
             view: { ffz: true, fp: true, asset: true },
@@ -113,6 +114,9 @@
             if (typeof s.onlyProduction === 'boolean') d.onlyProduction = s.onlyProduction;
             if (typeof s.showOnMap === 'boolean') d.showOnMap = s.showOnMap;
             if (typeof s.drawSetups === 'boolean') d.drawSetups = s.drawSetups;
+            if (typeof s.basemap === 'string') d.basemap = s.basemap;
+            if (typeof s.faaChart === 'boolean') d.faaChart = s.faaChart;
+            if (typeof s.faaOpacity === 'number') d.faaOpacity = s.faaOpacity;
             if (s.view) NB_CLASSES.forEach(c => {
                 if (typeof s.view[c.key] === 'boolean') d.view[c.key] = s.view[c.key];
             });
@@ -1149,8 +1153,13 @@
             if (ovMap !== map) {
                 map.on('zoomend viewreset moveend', onMapViewChanged);
                 ovMap = map;
-                // First refresh without waiting for a user interaction
-                setTimeout(scheduleSetupRefresh, 100);
+                // First refresh without waiting for a user interaction —
+                // and re-apply the chosen basemap/chart to the fresh map
+                setTimeout(() => {
+                    scheduleSetupRefresh();
+                    if (ftCfg.basemap !== 'default') applyBasemap();
+                    updateFaaTiles();
+                }, 150);
             }
             console.log(`${TAG} overlay attached to the landing map (raw SVG, no foreign Leaflet layers)`);
             return true;
@@ -1163,6 +1172,7 @@
     function onMapViewChanged() {
         renderOverlay();          // re-project everything (zoom moves layer coords)
         scheduleSetupRefresh();   // viewport culling + fetch of newly-visible sites
+        updateFaaTiles();         // FAA chart tile grid follows the view
     }
 
     // Projects and rebuilds the whole overlay from current data. Bounded by
@@ -1200,8 +1210,12 @@
                 });
             }
             ovSetupsG.innerHTML = sHtml;
-            // --- conflict pins ---
+            // --- conflict dots (secondary conflict locations), then pins ---
             let pHtml = '';
+            dotData.forEach(dd => {
+                const xy = map.latLngToLayerPoint([dd.lat, dd.lng]);
+                pHtml += `<circle cx="${xy.x}" cy="${xy.y}" r="3" fill="${dd.color}" fill-opacity="0.9" stroke="#10141c" stroke-width="1"/>`;
+            });
             const now = Date.now();
             pinData.forEach(p => {
                 const xy = map.latLngToLayerPoint([p.lat, p.lng]);
@@ -1219,7 +1233,8 @@
         }
     }
 
-    let pinData = [];                        // [{key, lat, lng, color}] — drawn by renderOverlay
+    let pinData = [];                        // [{key, lat, lng, color}] — one big pin per pair (closest conflict)
+    let dotData = [];                        // [{lat, lng, color}] — small dot at EVERY other recorded conflict
     let pinFlash = { key: null, until: 0 };  // 🎯 highlight, applied at render time
     let pinsKey = null;                      // what the current pins represent — stops redraw loops
 
@@ -1233,6 +1248,7 @@
     let pinsGiveUpLogged = false;
     function drawSweepPins() {
         pinData = [];
+        dotData = [];
         if (onLandingPage() && ftCfg.showOnMap && lastSweep && lastSweep.at) {
             // Closest pairs win the pin budget — a cap keeps a 677-pair
             // sweep from stuffing the landing map with SVG.
@@ -1247,6 +1263,17 @@
                 lat: c.lat, lng: c.lng,
                 color: c.overlap ? '#ff3d00' : '#ffa030',
             }));
+            // Small dot at every OTHER recorded conflict of the visible
+            // pairs — so "no marker here" always means "not a cross-site
+            // conflict", never "the pair's pin landed elsewhere"
+            const DOT_CAP = 600;
+            for (const { p } of list) {
+                if (dotData.length >= DOT_CAP) break;
+                const all = visibleConflicts(p);
+                for (let i = 1; i < all.length && dotData.length < DOT_CAP; i++) {
+                    dotData.push({ lat: all[i].lat, lng: all[i].lng, color: all[i].overlap ? '#ff3d00' : '#ffa030' });
+                }
+            }
         }
         const ok = renderOverlay();
         // No map yet → leave pinsKey null so the 2s landing poll retries
@@ -1268,6 +1295,142 @@
             renderOverlay();
             setTimeout(renderOverlay, 1700);   // un-flash even without map events
         } catch (e) { console.warn(`${TAG} zoom-to-pair failed:`, e); }
+    }
+
+    // ==================================================================
+    // 🗺 Map section (v0.13): basemap + FAA sectional on the landing map.
+    // Both built cross-copy safe — the wedge lesson from v0.8 stands:
+    //   Basemap = re-point Percepto's OWN tile layer via ITS setUrl (their
+    //   object, their method; no foreign layers). "Default" restores the
+    //   original URL.
+    //   FAA chart = raw <img> tile pane we own (same philosophy as the SVG
+    //   overlay), positioned via latLngToLayerPoint. Tile URLs + z8–12
+    //   bounds proven in Map Styler.
+    // ==================================================================
+    const BASEMAPS = {
+        default: { label: 'Percepto default' },
+        esri: { label: 'Esri World Imagery', url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', maxNative: 19 },
+        usgs: { label: 'USGS NAIP imagery', url: 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}', maxNative: 16 },
+        dark: { label: 'Dark map (Esri Gray)', url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', maxNative: 16 },
+        light: { label: 'Light map (Esri Gray)', url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', maxNative: 16 },
+        osm: { label: 'OpenStreetMap', url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', maxNative: 19 },
+    };
+    let baseLayerRef = null;
+    let baseOrig = null;   // original {url, maxNativeZoom} of Percepto's tile layer (this map instance)
+
+    function findBaseTileLayer(map) {
+        try {
+            const layers = map._layers || {};
+            for (const k of Object.keys(layers)) {
+                const l = layers[k];
+                if (l && typeof l.setUrl === 'function' && typeof l._url === 'string' && /\{[xyz]\}/.test(l._url)) return l;
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    function applyBasemap() {
+        const map = getLandingMap();
+        if (!map) return false;
+        const l = (baseLayerRef && baseLayerRef._map === map) ? baseLayerRef : findBaseTileLayer(map);
+        if (!l) {
+            console.warn(`${TAG} basemap: no url tile layer found on the landing map`);
+            return false;
+        }
+        if (l !== baseLayerRef) { baseLayerRef = l; baseOrig = null; }
+        if (!baseOrig) baseOrig = { url: l._url, maxNativeZoom: l.options && l.options.maxNativeZoom };
+        const bm = BASEMAPS[ftCfg.basemap] || BASEMAPS.default;
+        try {
+            if (l.options) l.options.maxNativeZoom = bm.url ? bm.maxNative : baseOrig.maxNativeZoom;
+            l.setUrl(bm.url || baseOrig.url);
+            console.log(`${TAG} basemap → ${bm.label}`);
+            return true;
+        } catch (e) {
+            console.warn(`${TAG} basemap switch failed:`, e);
+            return false;
+        }
+    }
+
+    // ---- FAA VFR sectional as a raw tile pane ----
+    const FAA_SRC = { url: 'https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/VFR_Sectional/MapServer/tile/{z}/{y}/{x}', min: 8, max: 12 };
+    const FAA_PANE = 'aim-ft-faa';
+    const FAA_TILE_CAP = 140;
+    let faaTiles = {};       // 'z/x/y' → img element
+    let faaPaneRef = null;
+    let faaCapWarned = false;
+
+    function lng2tile(lng, z) { return Math.floor((lng + 180) / 360 * Math.pow(2, z)); }
+    function lat2tile(lat, z) {
+        const r = lat * Math.PI / 180;
+        return Math.floor((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * Math.pow(2, z));
+    }
+    function tile2lng(x, z) { return x / Math.pow(2, z) * 360 - 180; }
+    function tile2lat(y, z) {
+        const n = Math.PI - 2 * Math.PI * y / Math.pow(2, z);
+        return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+    }
+
+    function clearFaaTiles() {
+        Object.keys(faaTiles).forEach(k => { try { faaTiles[k].remove(); } catch (e) {} });
+        faaTiles = {};
+    }
+
+    function updateFaaTiles() {
+        if (!onLandingPage()) return;
+        const map = getLandingMap();
+        if (!map) return;
+        if (!ftCfg.faaChart) { clearFaaTiles(); return; }
+        try {
+            if (!faaPaneRef || !faaPaneRef.parentElement) {
+                faaPaneRef = map.getPane(FAA_PANE) || map.createPane(FAA_PANE);
+                if (!faaPaneRef) return;
+                // just above the basemap tilePane (200), under overlays (400)
+                faaPaneRef.style.zIndex = 210;
+                faaPaneRef.style.pointerEvents = 'none';
+            }
+            const mz = Math.round(map.getZoom ? map.getZoom() : 0);
+            if (mz < FAA_SRC.min) { clearFaaTiles(); return; }   // world zoom → hundreds of tiles for an unreadable chart
+            const z = Math.min(FAA_SRC.max, mz);
+            const b = map.getBounds().pad(0.05);
+            const x0 = lng2tile(b.getWest(), z), x1 = lng2tile(b.getEast(), z);
+            const y0 = lat2tile(b.getNorth(), z), y1 = lat2tile(b.getSouth(), z);
+            const need = new Set();
+            const count = (x1 - x0 + 1) * (y1 - y0 + 1);
+            if (count > FAA_TILE_CAP) {
+                if (!faaCapWarned) { faaCapWarned = true; console.warn(`${TAG} FAA chart: ${count} tiles in view exceeds cap ${FAA_TILE_CAP} — zoom in`); }
+                clearFaaTiles();
+                return;
+            }
+            const nMax = Math.pow(2, z) - 1;
+            for (let x = x0; x <= x1; x++) {
+                for (let y = Math.max(0, y0); y <= Math.min(nMax, y1); y++) {
+                    const key = `${z}/${x}/${y}`;
+                    need.add(key);
+                    let img = faaTiles[key];
+                    if (!img) {
+                        img = document.createElement('img');
+                        img.src = FAA_SRC.url.replace('{z}', z).replace('{x}', x).replace('{y}', y);
+                        img.style.cssText = 'position:absolute;pointer-events:none;user-select:none;';
+                        img.draggable = false;
+                        img.addEventListener('error', () => { img.style.display = 'none'; });   // ocean/no-coverage tiles 404 — fine
+                        faaPaneRef.appendChild(img);
+                        faaTiles[key] = img;
+                    }
+                    // Position by projecting the tile's corners — handles the
+                    // z-clamp upscale (map zoom > 12) automatically
+                    const p1 = map.latLngToLayerPoint([tile2lat(y, z), tile2lng(x, z)]);
+                    const p2 = map.latLngToLayerPoint([tile2lat(y + 1, z), tile2lng(x + 1, z)]);
+                    img.style.left = `${p1.x}px`;
+                    img.style.top = `${p1.y}px`;
+                    img.style.width = `${p2.x - p1.x + 0.5}px`;
+                    img.style.height = `${p2.y - p1.y + 0.5}px`;
+                    img.style.opacity = ftCfg.faaOpacity;
+                }
+            }
+            Object.keys(faaTiles).forEach(k => {
+                if (!need.has(k)) { try { faaTiles[k].remove(); } catch (e) {} delete faaTiles[k]; }
+            });
+        } catch (e) { console.warn(`${TAG} FAA chart update failed:`, e); }
     }
 
     // ------------------------------------------------------------------
@@ -1441,7 +1604,7 @@
     // ==================================================================
     let buttonEl = null;
     let panelEl = null;
-    let openSections = { sweep: true, metrics: false };
+    let openSections = { sweep: true, map: true, metrics: false };
     let expandedPair = null;   // "aId:bId"
 
     function onLandingPage() {
@@ -1456,9 +1619,12 @@
             // SPA nav destroyed the landing map (and our overlay with it) —
             // drop the dead refs so a return to landing rebuilds from scratch
             pinData = [];
+            dotData = [];
             pinsKey = null;
             setupGeomBySite = {};
             ovSvg = null; ovSetupsG = null; ovPinsG = null; ovMap = null;
+            baseLayerRef = null; baseOrig = null;
+            faaTiles = {}; faaPaneRef = null;
             landingMapRef = null;
             return;
         }
@@ -1609,6 +1775,19 @@
         return rows.join('');
     }
 
+    function renderMapSection() {
+        if (!openSections.map) return '';
+        const opts = Object.keys(BASEMAPS).map(k =>
+            `<option value="${k}" ${ftCfg.basemap === k ? 'selected' : ''}>${BASEMAPS[k].label}</option>`).join('');
+        return '<div style="padding:6px 10px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + `<label>Basemap <select data-ft-basemap style="background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:2px 4px;font:inherit;">${opts}</select></label>`
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="FAA VFR sectional chart overlay — tiles exist at zoom 8–12 (upscaled beyond)">`
+            + `<input type="checkbox" data-ft-flag="faaChart" ${ftCfg.faaChart ? 'checked' : ''}> 🛩 FAA sectional</label>`
+            + `<label>opacity <input type="number" data-ft-num="faaOpacity" value="${ftCfg.faaOpacity}" min="0.1" max="1" step="0.05" style="width:52px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:2px 4px;font:inherit;"></label>`
+            + '</div>'
+            + '<div style="padding:4px 10px;color:#666;border-bottom:1px solid #222834;">Applies to this landing map only — site maps keep their Map Styler controls. Full airspace checks (obstacles/LAANC/TFR) are site-scoped in the Asset Inspector.</div>';
+    }
+
     function renderMetricsSection() {
         if (!openSections.metrics) return '';
         const rows = buildMetricsRows();
@@ -1642,6 +1821,8 @@
         body.innerHTML = ''
             + sectionHeader('sweep', '⚠', 'Overlap Sweep', `${ENV_LABEL} · thr ${ftCfg.thresholdFt} ft`)
             + renderSweepSection()
+            + sectionHeader('map', '🗺', 'Map', 'basemap + airspace chart')
+            + renderMapSection()
             + sectionHeader('metrics', '📊', 'Fleet Metrics', 'per-site entity counts (bones)')
             + renderMetricsSection();
     }
@@ -1774,6 +1955,18 @@
                 }
             });
             panelEl.addEventListener('change', (ev) => {
+                const bmSel = ev.target.closest('select[data-ft-basemap]');
+                if (bmSel) {
+                    const v = String(bmSel.value);
+                    if (BASEMAPS[v] && v !== ftCfg.basemap) {
+                        ftCfg.basemap = v;
+                        saveCfg();
+                        setStatus(applyBasemap()
+                            ? `basemap → ${BASEMAPS[v].label}`
+                            : 'basemap switch failed — could not find the map\'s tile layer (see console)');
+                    }
+                    return;
+                }
                 const num = ev.target.closest('input[data-ft-num]');
                 if (num) {
                     const prop = num.getAttribute('data-ft-num');
@@ -1781,7 +1974,12 @@
                     if (!isNaN(v) && v !== ftCfg[prop]) {
                         ftCfg[prop] = v;
                         saveCfg();
-                        setStatus(`${prop === 'thresholdFt' ? 'threshold' : 'prefilter margin'} = ${v} ft — takes effect on the next sweep`);
+                        if (prop === 'faaOpacity') {
+                            updateFaaTiles();
+                            setStatus(`FAA chart opacity = ${v}`);
+                        } else {
+                            setStatus(`${prop === 'thresholdFt' ? 'threshold' : 'prefilter margin'} = ${v} ft — takes effect on the next sweep`);
+                        }
                     }
                     return;
                 }
@@ -1796,6 +1994,9 @@
                     } else if (prop === 'drawSetups') {
                         setStatus(flag.checked ? `site setups ON — zoom the map in to level ${SETUP_MIN_ZOOM}+ to see them` : 'site setups OFF');
                         refreshSetupLayers();
+                    } else if (prop === 'faaChart') {
+                        setStatus(flag.checked ? `FAA sectional ON — chart tiles exist at zoom ${FAA_SRC.min}–${FAA_SRC.max}` : 'FAA sectional OFF');
+                        updateFaaTiles();
                     } else {
                         setStatus(`${prop === 'onlyProduction' ? '"Production only"' : prop} ${flag.checked ? 'ON' : 'OFF'} — takes effect on the next sweep`);
                     }
