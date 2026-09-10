@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.22
+// @version      0.23
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.22';
+    const SCRIPT_VERSION = '0.23';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -1939,7 +1939,9 @@
 
     async function kmlRepoList(force) {
         if (!cachedToken) throw new Error('GitHub token needed (AIM Controls gear)');
-        const r = await fetchWithTimeout(`${GH_API}/repos/${DATA_REPO}/contents/${KML_DIR}?ref=${DATA_BRANCH}`, { headers: ghHdr() }, 25000);
+        // no-store: api.github.com responses are browser-cached ~60s — a
+        // stale directory listing made a freshly saved layer invisible
+        const r = await fetchWithTimeout(`${GH_API}/repos/${DATA_REPO}/contents/${KML_DIR}?ref=${DATA_BRANCH}`, { headers: ghHdr(), cache: 'no-store' }, 25000);
         if (r.status === 404) { gmSet(KEY_KML_LIST, '[]'); return []; }   // folder not created yet
         if (!r.ok) throw new Error(`list HTTP ${r.status}`);
         const j = await r.json();
@@ -1969,7 +1971,7 @@
             // no sha → create-only; GitHub 422s instead of overwriting
             body: JSON.stringify({ message: `[AIM Fleet] add KML layer ${name}`, content: btoa(bin), branch: DATA_BRANCH }),
         }, 60000);
-        if (r.status === 422) throw new Error('a layer with this name already exists in the repo');
+        if (r.status === 422) throw new Error('a layer with this name already exists in the repo — use ⟳ in KML Layers to load it, or rename your file');
         if (r.status !== 200 && r.status !== 201) throw new Error(`PUT HTTP ${r.status}`);
         return (await r.json()).content.sha;
     }
@@ -2014,6 +2016,36 @@
         }
         renderPanel();
         if (kmlLayers.length) console.log(`${TAG} KML layers: ${kmlLayers.length} in repo`);
+    }
+
+    // Force re-list + MERGE into the open layer set — adds repo layers
+    // this session doesn't know (saved elsewhere / lost to a stale cache),
+    // refreshes shas, drops repo rows whose file is gone. The recovery
+    // path for "saved it but it doesn't show".
+    async function kmlRefreshRepo() {
+        try {
+            setStatus('refreshing KML list from GitHub…');
+            const list = await kmlRepoList(true);
+            const seen = new Set();
+            let added = 0;
+            list.forEach(f => {
+                const id = `repo:${f.name}`;
+                seen.add(id);
+                const existing = kmlLayerById(id);
+                if (existing) { existing.sha = f.sha; return; }
+                kmlLayers.push({ id, name: f.name.replace(/\.(kml|geojson|json)$/i, ''), repoName: f.name, source: 'repo', sha: f.sha, features: null });
+                added++;
+            });
+            const before = kmlLayers.length;
+            kmlLayers = kmlLayers.filter(ly => ly.source !== 'repo' || seen.has(ly.id));
+            const dropped = before - kmlLayers.length;
+            setStatus(`KML list refreshed — ${list.length} in repo${added ? `, ${added} new` : ''}${dropped ? `, ${dropped} removed` : ''}`);
+            renderPanel();
+            renderOverlay();
+        } catch (e) {
+            console.warn(`${TAG} KML refresh failed:`, e);
+            setStatus(`KML refresh failed — ${String(e && e.message || e)}`);
+        }
     }
 
     async function kmlHandleFiles(files) {
@@ -2397,7 +2429,13 @@
             delete kmlStyles[ly.id];
             saveKmlStyles();
             Object.assign(ly, { id: newId, source: 'repo', repoName: fname, sha });
-            kmlRepoList(true).catch(() => {});
+            // GitHub's listing lags fresh commits — append to the cached
+            // list directly instead of trusting an immediate re-list
+            const cached = loadJson(KEY_KML_LIST, []) || [];
+            if (!cached.some(x => x.name === fname)) {
+                cached.push({ name: fname, sha });
+                gmSet(KEY_KML_LIST, JSON.stringify(cached));
+            }
             setStatus(`"${ly.name}" saved to GitHub — persistent for every session ✓`);
         } catch (e) { setStatus(`save failed — ${String(e && e.message || e)}`); }
         renderPanel();
@@ -2439,6 +2477,7 @@
         const rows = [];
         rows.push('<div style="padding:6px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
             + '<span data-ft="kml-upload" style="cursor:pointer;color:#5fff5f;font-weight:bold">⬆ Load KML…</span>'
+            + '<span data-ft="kml-refresh" style="cursor:pointer;color:#7adfe6" title="Re-list saved layers from GitHub (fixes a saved layer not showing)">⟳</span>'
             + '<span style="color:#666">session-only until 💾 · ☁ = in GitHub · .kml / .geojson · KMZ: unzip first</span>'
             + '<input id="aim-ft-kml-file" type="file" multiple accept=".kml,.geojson,.json" style="display:none">'
             + `<input id="aim-ft-kml-search" type="text" placeholder="Search layers/features…" value="${escapeHtml(kmlSearch)}" style="flex:1;min-width:90px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:2px 6px;font:inherit;outline:none;">`
@@ -2819,6 +2858,7 @@
                     const cmd = act.getAttribute('data-ft');
                     if (cmd === 'close') panelEl.style.display = 'none';
                     else if (cmd === 'kml-upload') { const fi = panelEl.querySelector('#aim-ft-kml-file'); if (fi) fi.click(); }
+                    else if (cmd === 'kml-refresh') kmlRefreshRepo();
                     else if (cmd === 'xr-run') runXref();
                     else if (cmd === 'xr-abort') { xrefSeq++; if (xrefState) xrefState.running = false; setStatus('cross-ref aborted'); renderPanel(); }
                     else if (cmd === 'xr-copy') copyText(buildXrefReport(), 'cross-ref report copied');

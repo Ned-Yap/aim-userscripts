@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-10 — 📎 Fleet Tools v0.23: saved KML layers can't get lost anymore + ⟳ refresh (latest — dev only, feature #255)
+
+Live hit: a 💾-saved layer ("Supply Pipelines") vanished from the list after a reload — re-saving said "already exists", proving the save had worked and the LISTING was the problem. Three fixes: GitHub's API responses are browser-cached ~60s, so the layer list now fetches with no-store; after a save the layer is appended to the cached list directly instead of trusting GitHub's eventually-consistent immediate re-list (which could erase it); and a new **⟳** button in KML Layers re-lists and MERGES — pulling in saved layers this session doesn't know about (from other sessions too), refreshing shas, and dropping rows whose file is gone. The "already exists" error now points at ⟳. **Your missing Supply Pipelines layer: update, open the panel, click ⟳ — it'll appear.**
+
 ## 2026-09-10 — 🏷 Fleet Tools v0.22: site-name labels — dark & slim, toggleable (latest — dev only, feature #255)
 
 Percepto's white site-name bubbles were bulky and glaring against dark basemaps. New **Site labels** control in the 🗺 Map section: **Dark & slim** (default — translucent dark chip, bright cyan text, slimmer, long well names ellipsized), **Percepto default**, or **Hidden**. Pure CSS restyle of `.pr-site-marker` — labels stay clickable for entering sites.
