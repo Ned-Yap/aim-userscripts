@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-10 — 🏷 Fleet Tools v0.22: site-name labels — dark & slim, toggleable (latest — dev only, feature #255)
+
+Percepto's white site-name bubbles were bulky and glaring against dark basemaps. New **Site labels** control in the 🗺 Map section: **Dark & slim** (default — translucent dark chip, bright cyan text, slimmer, long well names ellipsized), **Percepto default**, or **Hidden**. Pure CSS restyle of `.pr-site-marker` — labels stay clickable for entering sites.
+
 ## 2026-09-10 — 📐 Fleet Tools v0.21: Run cross-ref works with a single KML loaded (latest — dev only, feature #255)
 
 With only one KML layer, ▶ Run cross-ref silently did nothing: the source dropdown displayed the layer, but a lone option never fires a change event, so the internal selection stayed empty. The selection now defaults to the first layer (and self-heals if the chosen layer was renamed by 💾 or removed).

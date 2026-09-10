@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.21
+// @version      0.22
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.21';
+    const SCRIPT_VERSION = '0.22';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -99,6 +99,7 @@
             capPerPair: 200, onlyProduction: false, showOnMap: true, drawSetups: true,
             basemap: 'default', faaChart: false, faaOpacity: 0.75,
             xrefB1: 50, xrefB2: 200,
+            siteLabels: 'dark',
             // Display-only view filters (never re-run the sweep): which
             // conflict classes to SHOW, and which clients are toggled off.
             view: { ffz: true, fp: true, asset: true },
@@ -120,6 +121,7 @@
             if (typeof s.faaOpacity === 'number') d.faaOpacity = s.faaOpacity;
             if (typeof s.xrefB1 === 'number') d.xrefB1 = s.xrefB1;
             if (typeof s.xrefB2 === 'number') d.xrefB2 = s.xrefB2;
+            if (typeof s.siteLabels === 'string') d.siteLabels = s.siteLabels;
             if (s.view) NB_CLASSES.forEach(c => {
                 if (typeof s.view[c.key] === 'boolean') d.view[c.key] = s.view[c.key];
             });
@@ -1572,6 +1574,31 @@
         } catch (e) { console.warn(`${TAG} raw tiles (${eng.paneName}) update failed:`, e); }
     }
 
+    // ---- Percepto site-name labels (.pr-site-marker — recon'd via the
+    // AIM Inspector) — pure CSS overrides, toggleable ----
+    const LABEL_CSS = {
+        // dark translucent chip, bright text, slimmed + ellipsized so long
+        // well names stop being 360px white banners
+        dark: '.pr-site-marker{background:rgba(14,18,26,0.55)!important;color:#6ee7ff!important;'
+            + 'border:1px solid rgba(110,231,255,0.28)!important;border-radius:4px!important;'
+            + 'padding:1px 7px!important;font-size:11px!important;line-height:1.35!important;font-weight:600!important;'
+            + 'max-width:230px!important;overflow:hidden!important;text-overflow:ellipsis!important;white-space:nowrap!important;'
+            + 'box-shadow:none!important;}',
+        hidden: '.pr-site-marker{display:none!important;}',
+        default: '',
+    };
+    let labelStyleEl = null;
+    function applySiteLabels() {
+        try {
+            if (!labelStyleEl || !labelStyleEl.parentElement) {
+                labelStyleEl = document.createElement('style');
+                labelStyleEl.id = 'aim-ft-label-css';
+                (document.head || document.documentElement).appendChild(labelStyleEl);
+            }
+            labelStyleEl.textContent = LABEL_CSS[ftCfg.siteLabels] || '';
+        } catch (e) { console.warn(`${TAG} site-label CSS failed:`, e); }
+    }
+
     function applyBasemap() {
         const bm = BASEMAPS[ftCfg.basemap];
         const cover = !!(bm && bm.url);
@@ -2678,6 +2705,11 @@
             + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="FAA VFR sectional chart overlay — tiles exist at zoom 8–12 (upscaled beyond)">`
             + `<input type="checkbox" data-ft-flag="faaChart" ${ftCfg.faaChart ? 'checked' : ''}> 🛩 FAA sectional</label>`
             + `<label>opacity <input type="number" data-ft-num="faaOpacity" value="${ftCfg.faaOpacity}" min="0.1" max="1" step="0.05" style="width:52px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:2px 4px;font:inherit;"></label>`
+            + `<label>Site labels <select data-ft-labels style="background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:2px 4px;font:inherit;">`
+            + `<option value="dark" ${ftCfg.siteLabels === 'dark' ? 'selected' : ''}>Dark &amp; slim</option>`
+            + `<option value="default" ${ftCfg.siteLabels === 'default' ? 'selected' : ''}>Percepto default</option>`
+            + `<option value="hidden" ${ftCfg.siteLabels === 'hidden' ? 'selected' : ''}>Hidden</option>`
+            + '</select></label>'
             + '</div>'
             + '<div style="padding:4px 10px;color:#666;border-bottom:1px solid #222834;">Applies to this landing map only — site maps keep their Map Styler controls. Full airspace checks (obstacles/LAANC/TFR) are site-scoped in the Asset Inspector.</div>';
     }
@@ -2933,6 +2965,17 @@
                     renderPanel();
                     return;
                 }
+                const lblSel = ev.target.closest('select[data-ft-labels]');
+                if (lblSel) {
+                    const v = String(lblSel.value);
+                    if (LABEL_CSS[v] !== undefined && v !== ftCfg.siteLabels) {
+                        ftCfg.siteLabels = v;
+                        saveCfg();
+                        applySiteLabels();
+                        setStatus(`site labels → ${v === 'dark' ? 'dark & slim' : v}`);
+                    }
+                    return;
+                }
                 const bmSel = ev.target.closest('select[data-ft-basemap]');
                 if (bmSel) {
                     const v = String(bmSel.value);
@@ -3049,6 +3092,7 @@
     }
     const start = () => {
         syncButton();
+        applySiteLabels();   // .pr-site-marker only exists on the landing page — global CSS is harmless elsewhere
         setInterval(syncButton, 2000);
         window.addEventListener('hashchange', () => setTimeout(syncButton, 300));
     };
