@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.15
+// @version      0.16
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.15';
+    const SCRIPT_VERSION = '0.16';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -1174,6 +1174,7 @@
             if (ovMap !== map) {
                 map.on('zoomend viewreset', onMapZoomChanged);
                 map.on('moveend', onMapMoved);
+                map.on('move', onMapMoving);
                 ovMap = map;
                 // First refresh without waiting for a user interaction —
                 // and re-apply the chosen basemap/chart to the fresh map
@@ -1214,6 +1215,17 @@
     function onMapMoved() {
         scheduleSetupRefresh();   // viewport culling + fetch of newly-visible sites
         applyBasemap();           // extend/prune tile grids into the new view
+        updateFaaTiles();
+    }
+    // During an active drag, top up the tile grids every 150ms so a long
+    // pan never outruns the cover (moveend alone left gaps → default-map
+    // flash in dark mode). Cheap: add/prune imgs only, no SVG work.
+    let dragTileAt = 0;
+    function onMapMoving() {
+        const now = Date.now();
+        if (now - dragTileAt < 150) return;
+        dragTileAt = now;
+        applyBasemap();
         updateFaaTiles();
     }
 
@@ -1356,13 +1368,15 @@
     //   overlay), positioned via latLngToLayerPoint. Tile URLs + z8–12
     //   bounds proven in Map Styler.
     // ==================================================================
+    // bg = ground color shown where cover tiles haven't loaded yet — a
+    // matching tone instead of the default map flashing through (v0.16)
     const BASEMAPS = {
         default: { label: 'Percepto default' },
-        esri: { label: 'Esri World Imagery', url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', maxNative: 19 },
-        usgs: { label: 'USGS NAIP imagery', url: 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}', maxNative: 16 },
-        dark: { label: 'Dark map (Esri Gray)', url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', maxNative: 16 },
-        light: { label: 'Light map (Esri Gray)', url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', maxNative: 16 },
-        osm: { label: 'OpenStreetMap', url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', maxNative: 19 },
+        esri: { label: 'Esri World Imagery', url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', maxNative: 19, bg: '#1c2318' },
+        usgs: { label: 'USGS NAIP imagery', url: 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}', maxNative: 16, bg: '#1c2318' },
+        dark: { label: 'Dark map (Esri Gray)', url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', maxNative: 16, bg: '#161616' },
+        light: { label: 'Light map (Esri Gray)', url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', maxNative: 16, bg: '#d9d9d9' },
+        osm: { label: 'OpenStreetMap', url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', maxNative: 19, bg: '#f2efe9' },
     };
     // Raw tile engines — a pane of absolutely-positioned <img> tiles we
     // fully own (the FAA-chart pattern, generalized). v0.13 tried setUrl on
@@ -1372,7 +1386,7 @@
     // "Percepto default" simply clears it. Guaranteed to work: same engine
     // as the proven FAA chart.
     function rawTileEngine(paneName, zIndex) {
-        return { paneName, zIndex, tiles: {}, el: null, srcUrl: null, capWarned: false };
+        return { paneName, zIndex, tiles: {}, el: null, srcUrl: null, capWarned: false, lastOpacity: 1 };
     }
     const baseEng = rawTileEngine('aim-ft-base', 205);   // just above tilePane (200)
     const faaEng = rawTileEngine('aim-ft-faa', 210);     // chart above the basemap cover
@@ -1400,12 +1414,15 @@
             const mz = Math.round(map.getZoom ? map.getZoom() : 0);
             if (src.min != null && mz < src.min) { engClear(eng); return; }   // chart illegible below its native range
             const z = Math.max(0, Math.min(src.max, mz));
-            const b = map.getBounds().pad(0.05);
+            // src.pad prefetches beyond the viewport (the basemap cover uses
+            // a big pad so pans stay covered instead of flashing the default)
+            const b = map.getBounds().pad(src.pad != null ? src.pad : 0.05);
             const x0 = lng2tile(b.getWest(), z), x1 = lng2tile(b.getEast(), z);
             const y0 = lat2tile(b.getNorth(), z), y1 = lat2tile(b.getSouth(), z);
+            const cap = src.cap != null ? src.cap : RAW_TILE_CAP;
             const count = (x1 - x0 + 1) * (y1 - y0 + 1);
-            if (count > RAW_TILE_CAP) {
-                if (!eng.capWarned) { eng.capWarned = true; console.warn(`${TAG} ${eng.paneName}: ${count} tiles in view exceeds cap ${RAW_TILE_CAP}`); }
+            if (count > cap) {
+                if (!eng.capWarned) { eng.capWarned = true; console.warn(`${TAG} ${eng.paneName}: ${count} tiles in view exceeds cap ${cap}`); }
                 engClear(eng);
                 return;
             }
@@ -1418,9 +1435,12 @@
                     let img = eng.tiles[key];
                     if (!img) {
                         img = document.createElement('img');
+                        img.__loaded = false;
                         img.src = src.url.replace('{z}', z).replace('{x}', x).replace('{y}', y);
-                        img.style.cssText = 'position:absolute;pointer-events:none;user-select:none;';
+                        // fade in on load instead of popping over the ground
+                        img.style.cssText = 'position:absolute;pointer-events:none;user-select:none;opacity:0;transition:opacity .15s;';
                         img.draggable = false;
+                        img.addEventListener('load', () => { img.__loaded = true; img.style.opacity = eng.lastOpacity; });
                         img.addEventListener('error', () => { img.style.display = 'none'; });   // no-coverage tiles 404 — fine
                         eng.el.appendChild(img);
                         eng.tiles[key] = img;
@@ -1433,7 +1453,8 @@
                     img.style.top = `${p1.y}px`;
                     img.style.width = `${p2.x - p1.x + 0.5}px`;
                     img.style.height = `${p2.y - p1.y + 0.5}px`;
-                    img.style.opacity = opacity;
+                    eng.lastOpacity = opacity;
+                    if (img.__loaded) img.style.opacity = opacity;
                 }
             }
             Object.keys(eng.tiles).forEach(k => {
@@ -1444,13 +1465,29 @@
 
     function applyBasemap() {
         const bm = BASEMAPS[ftCfg.basemap];
-        engUpdate(baseEng, bm && bm.url ? { url: bm.url, max: bm.maxNative } : null, 1);
+        const cover = !!(bm && bm.url);
+        // Big pad: prefetch half a viewport past every edge so normal pans
+        // stay covered instead of flashing the default map underneath
+        engUpdate(baseEng, cover ? { url: bm.url, max: bm.maxNative, pad: 0.5, cap: 420 } : null, 1);
+        // While a cover is active, hide Percepto's own tiles and tint the
+        // container to match — whatever peeks through during a fast pan is
+        // a matching ground, not the bright default map. Style-only touches
+        // on their panes (never layer objects), fully reversed on 'default'.
+        const map = getLandingMap();
+        if (map) {
+            try {
+                const tp = map.getPane && map.getPane('tilePane');
+                if (tp) tp.style.visibility = cover ? 'hidden' : '';
+                const c = map.getContainer && map.getContainer();
+                if (c) c.style.background = cover ? (bm.bg || '#202020') : '';
+            } catch (e) {}
+        }
         return true;
     }
     function updateFaaTiles() { engUpdate(faaEng, ftCfg.faaChart ? FAA_SRC : null, ftCfg.faaOpacity); }
 
     // ---- FAA VFR sectional as a raw tile pane ----
-    const FAA_SRC = { url: 'https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/VFR_Sectional/MapServer/tile/{z}/{y}/{x}', min: 8, max: 12 };
+    const FAA_SRC = { url: 'https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/VFR_Sectional/MapServer/tile/{z}/{y}/{x}', min: 8, max: 12, pad: 0.2, cap: 220 };
 
     function lng2tile(lng, z) { return Math.floor((lng + 180) / 360 * Math.pow(2, z)); }
     function lat2tile(lat, z) {

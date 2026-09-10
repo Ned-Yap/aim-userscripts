@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-09 — 🌙 Fleet Tools v0.16: no more default-map flash while panning a cover basemap (latest — dev only, feature #250)
+
+Panning in Dark (or any non-default) basemap flashed the normal map in newly exposed areas until the cover caught up. Three-part fix: the cover now prefetches half a viewport beyond every edge, tops itself up every 150ms **during** the drag (not just at pan end), and — decisively — Percepto's own tile pane is hidden while a cover is active with the map ground tinted to match the chosen basemap, so anything that still peeks through is a matching dark tone rather than the bright default. Cover and FAA tiles also fade in over 150ms instead of popping. All style-only touches, fully reversed by "Percepto default".
+
 ## 2026-09-09 — ⚡ Fleet Tools v0.15: landing-map perf pass (latest — dev only, feature #250)
 
 Four fixes for the reported lag, no behavior changes: **(1)** the overlay SVG no longer rebuilds on pans — panning moves the pane via CSS with layer coordinates unchanged, so re-projection now happens only on zoom/viewreset (dragging around a dense area was paying a full rebuild of thousands of elements for nothing). **(2)** Dense sites render as one merged path per class per site (≤3 SVG elements each) instead of one per entity — thousands of nodes down to ~a hundred at the 40-site cap. **(3)** Renders coalesce through requestAnimationFrame, so the burst of progressively-loading sites when you first zoom in rebuilds once per frame instead of once per site. **(4)** The visible-pairs filtering (677 pairs × conflict lists) is memoized per sweep+filter state — the 2-second watchdog now does a string compare instead of re-filtering everything forever.
