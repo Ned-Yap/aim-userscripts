@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.18
+// @version      0.19
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.18';
+    const SCRIPT_VERSION = '0.19';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -1315,10 +1315,15 @@
             let xHtml = '';
             const xr = xrefState && xrefState.result;
             if (xr) {
+                // ONE merged path per band — thousands of runs, 3 SVG nodes
+                const dBand = { 0: '', 1: '', 2: '' };
                 xr.runs.forEach(run => {
                     let d = '';
                     run.pts.forEach((pt, i) => { d += (i ? 'L' : 'M') + P(pt[0], pt[1]); });
-                    if (d) xHtml += `<path d="${d}" fill="none" stroke="${XREF_COLORS[run.band]}" stroke-width="4" stroke-opacity="0.95" stroke-linecap="round"/>`;
+                    dBand[run.band] += d;
+                });
+                [0, 2, 1].forEach(b => {   // draw red first, blue on top
+                    if (dBand[b]) xHtml += `<path d="${dBand[b]}" fill="none" stroke="${XREF_COLORS[b]}" stroke-width="4" stroke-opacity="0.95" stroke-linecap="round"/>`;
                 });
                 xr.pointMarks.forEach(pm => {
                     const xy = map.latLngToLayerPoint([pm.lat, pm.lng]);
@@ -1845,6 +1850,63 @@
         return { features, vertexCount, bbox: { minLat, minLng, maxLat, maxLng } };
     }
 
+    // GeoJSON (v0.19) — clients export .geojson as often as .kml.
+    // Coordinates are [lng, lat]; outer rings only (holes noted in reports).
+    function parseGeojsonText(text) {
+        let j;
+        try { j = JSON.parse(text); } catch (e) { throw new Error('not valid JSON'); }
+        const features = [];
+        let vertexCount = 0;
+        let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+        const conv = (coords) => coords.map(c => {
+            const lat = Number(c[1]), lng = Number(c[0]);
+            if (lat < minLat) minLat = lat;
+            if (lat > maxLat) maxLat = lat;
+            if (lng < minLng) minLng = lng;
+            if (lng > maxLng) maxLng = lng;
+            return [lat, lng];
+        }).filter(p => isFinite(p[0]) && isFinite(p[1]));
+        const addGeom = (g, name) => {
+            if (!g || !g.type) return;
+            if (g.type === 'Point') {
+                const p = conv([g.coordinates]);
+                if (p.length) { features.push({ name, type: 'point', pts: p }); vertexCount++; }
+            } else if (g.type === 'MultiPoint') {
+                (g.coordinates || []).forEach(c => addGeom({ type: 'Point', coordinates: c }, name));
+            } else if (g.type === 'LineString') {
+                const pts = conv(g.coordinates || []);
+                if (pts.length > 1) { features.push({ name, type: 'line', pts }); vertexCount += pts.length; }
+            } else if (g.type === 'MultiLineString') {
+                (g.coordinates || []).forEach(cs => addGeom({ type: 'LineString', coordinates: cs }, name));
+            } else if (g.type === 'Polygon') {
+                const pts = conv((g.coordinates || [])[0] || []);   // outer ring
+                if (pts.length > 2) { features.push({ name, type: 'poly', pts }); vertexCount += pts.length; }
+            } else if (g.type === 'MultiPolygon') {
+                (g.coordinates || []).forEach(rings => addGeom({ type: 'Polygon', coordinates: rings }, name));
+            } else if (g.type === 'GeometryCollection') {
+                (g.geometries || []).forEach(gg => addGeom(gg, name));
+            }
+        };
+        const featName = (f) => {
+            const pr = f.properties || {};
+            for (const k of ['name', 'Name', 'NAME', 'label', 'id', 'ID', 'LineID', 'FacilityID']) {
+                if (pr[k] != null && String(pr[k]).trim()) return String(pr[k]).trim();
+            }
+            return '';
+        };
+        if (j.type === 'FeatureCollection') (j.features || []).forEach(f => f && addGeom(f.geometry, featName(f)));
+        else if (j.type === 'Feature') addGeom(j.geometry, featName(j));
+        else addGeom(j, '');
+        if (!features.length) throw new Error('no usable GeoJSON geometries found');
+        return { features, vertexCount, bbox: { minLat, minLng, maxLat, maxLng } };
+    }
+
+    // Dispatcher: JSON-looking text → GeoJSON, else KML/XML
+    function parseGeoText(text) {
+        const head = String(text).slice(0, 200).trim();
+        return (head.startsWith('{') || head.startsWith('[')) ? parseGeojsonText(text) : parseKmlText(text);
+    }
+
     // ---- data-repo I/O (plain fetch — api.github.com sends CORS headers) ----
     function ghHdr() { return { 'Authorization': `Bearer ${cachedToken}`, 'Accept': 'application/vnd.github+json' }; }
 
@@ -1855,7 +1917,7 @@
         if (!r.ok) throw new Error(`list HTTP ${r.status}`);
         const j = await r.json();
         const list = (Array.isArray(j) ? j : [])
-            .filter(f => f && f.type === 'file' && /\.kml$/i.test(f.name))
+            .filter(f => f && f.type === 'file' && /\.(kml|geojson|json)$/i.test(f.name))
             .map(f => ({ name: f.name, sha: f.sha }));
         gmSet(KEY_KML_LIST, JSON.stringify(list));
         return list;
@@ -1897,7 +1959,7 @@
     async function kmlEnsureLoaded(ly) {
         if (ly.features) return ly;
         const text = await kmlRepoFetchText(ly.repoName);
-        const parsed = parseKmlText(text);
+        const parsed = parseGeoText(text);
         Object.assign(ly, parsed);
         return ly;
     }
@@ -1914,7 +1976,7 @@
         (list || []).forEach(f => {
             const id = `repo:${f.name}`;
             if (kmlLayerById(id)) return;
-            kmlLayers.push({ id, name: f.name.replace(/\.kml$/i, ''), repoName: f.name, source: 'repo', sha: f.sha, features: null });
+            kmlLayers.push({ id, name: f.name.replace(/\.(kml|geojson|json)$/i, ''), repoName: f.name, source: 'repo', sha: f.sha, features: null });
         });
         renderPanel();
         for (const ly of kmlLayers) {
@@ -1932,10 +1994,12 @@
             try {
                 if (/\.kmz$/i.test(f.name)) { setStatus(`"${f.name}" is a KMZ — unzip it to .kml first`); continue; }
                 const text = await f.text();
-                const parsed = parseKmlText(text);
+                const parsed = parseGeoText(text);
                 const id = `sess:${Date.now()}:${Math.random().toString(36).slice(2, 6)}`;
+                const extM = f.name.match(/\.(kml|geojson|json)$/i);
                 kmlLayers.push(Object.assign({
-                    id, name: f.name.replace(/\.kml$/i, ''), source: 'session', rawText: text,
+                    id, name: f.name.replace(/\.(kml|geojson|json)$/i, ''), source: 'session', rawText: text,
+                    ext: extM ? extM[0].toLowerCase() : '.kml',
                 }, parsed));
                 kmlStyleFor(id);
                 saveKmlStyles();
@@ -1959,26 +2023,63 @@
     // Segment-to-segment/point-in-polygon math (engraved), cooperative
     // yields, results drawn as colored runs on the map + copyable report.
     // ==================================================================
-    const XREF_COLORS = { 1: '#2bff6f', 2: '#ffd130', 0: '#ff5252' };   // ≤b1, ≤b2, beyond
+    // ≤b1 BLUE (green would vanish against FFZs — user call), ≤b2 amber, beyond red
+    const XREF_COLORS = { 1: '#3d7bff', 2: '#ffd130', 0: '#ff5252' };
     let xrefState = null;   // {running, result, srcId, tgt}
     let xrefSeq = 0;
     let xrefSrcSel = '';    // UI selections (session)
     let xrefTgtSel = 'sites';
 
-    function xrefDistToEnv(x, y, env, pad) {
-        let best = Infinity;
-        for (const pg of env.polys) {
-            if (x < pg.minX - pad || x > pg.maxX + pad || y < pg.minY - pad || y > pg.maxY + pad) continue;
-            if (pointInRingXY(x, y, pg.xs, pg.ys)) return 0;
-            for (let i = 0, j = pg.xs.length - 1; i < pg.xs.length; j = i++) {
-                const c = nbSegPtClosest(x, y, pg.xs[j], pg.ys[j], pg.xs[i], pg.ys[i]);
-                if (c.d < best) best = c.d;
+    // Uniform-grid spatial index over the envelope (v0.19) — a county-
+    // scale source (~200k samples) against a 10k-item envelope would be
+    // billions of bbox tests brute-force. Cell ≥ pad ⇒ a sample's own
+    // cell ± 1 ring is guaranteed to hold every candidate within pad.
+    function xrefBuildGrid(env, cellM) {
+        const grid = new Map();
+        const put = (kind, item) => {
+            const gx0 = Math.floor(item.minX / cellM), gx1 = Math.floor(item.maxX / cellM);
+            const gy0 = Math.floor(item.minY / cellM), gy1 = Math.floor(item.maxY / cellM);
+            for (let gx = gx0; gx <= gx1; gx++) {
+                for (let gy = gy0; gy <= gy1; gy++) {
+                    const k = gx + ':' + gy;
+                    let cell = grid.get(k);
+                    if (!cell) { cell = { segs: [], polys: [] }; grid.set(k, cell); }
+                    cell[kind].push(item);
+                }
             }
-        }
-        for (const s of env.segs) {
-            if (x < s.minX - pad || x > s.maxX + pad || y < s.minY - pad || y > s.maxY + pad) continue;
-            const c = nbSegPtClosest(x, y, s.ax, s.ay, s.bx, s.by);
-            if (c.d < best) best = c.d;
+        };
+        env.segs.forEach(s => put('segs', s));
+        env.polys.forEach(p => put('polys', p));
+        return grid;
+    }
+
+    let xrefQueryId = 0;
+    function xrefDistGrid(x, y, grid, cellM, pad) {
+        let best = Infinity;
+        const qid = ++xrefQueryId;   // dedupe items spanning several cells
+        const gx = Math.floor(x / cellM), gy = Math.floor(y / cellM);
+        for (let dx = -1; dx <= 1; dx++) {
+            for (let dy = -1; dy <= 1; dy++) {
+                const cell = grid.get((gx + dx) + ':' + (gy + dy));
+                if (!cell) continue;
+                for (const pg of cell.polys) {
+                    if (pg.__q === qid) continue;
+                    pg.__q = qid;
+                    if (x < pg.minX - pad || x > pg.maxX + pad || y < pg.minY - pad || y > pg.maxY + pad) continue;
+                    if (pointInRingXY(x, y, pg.xs, pg.ys)) return 0;
+                    for (let i = 0, j = pg.xs.length - 1; i < pg.xs.length; j = i++) {
+                        const c = nbSegPtClosest(x, y, pg.xs[j], pg.ys[j], pg.xs[i], pg.ys[i]);
+                        if (c.d < best) best = c.d;
+                    }
+                }
+                for (const s of cell.segs) {
+                    if (s.__q === qid) continue;
+                    s.__q = qid;
+                    if (x < s.minX - pad || x > s.maxX + pad || y < s.minY - pad || y > s.maxY + pad) continue;
+                    const c = nbSegPtClosest(x, y, s.ax, s.ay, s.bx, s.by);
+                    if (c.d < best) best = c.d;
+                }
+            }
         }
         return best;
     }
@@ -2094,63 +2195,88 @@
                     totalLenM += Math.hypot(b.x - a.x, b.y - a.y);
                 }
             });
-            const step = Math.min(30, Math.max(3, totalLenM / 60000));
+            // ~33 ft max step (was ~100 ft on county-scale sources — too
+            // coarse next to a 50 ft band; the grid index pays for it)
+            const step = Math.min(10, Math.max(3, totalLenM / 250000));
             const pad = b2m + 1;
+            const cellM = Math.max(150, pad);
+            const grid = xrefBuildGrid(env, cellM);
             const bandLenM = { 0: 0, 1: 0, 2: 0 };
-            const runs = [];
+            const runs = [];   // EVERY run is kept and drawn — v0.18 dropped
+                               // short/overflow runs, leaving gaps on the map
             const pointHits = { 0: 0, 1: 0, 2: 0 };
             const pointMarks = [];
             let ops = 0;
-            const classify = (d) => (Math.round(d * FT_PER_M) < ftCfg.xrefB1 ? 1 : (Math.round(d * FT_PER_M) < ftCfg.xrefB2 ? 2 : 0));
+            let doneLenM = 0;
+            const b1ft = ftCfg.xrefB1, b2ft = ftCfg.xrefB2;
+            const classify = (d) => {
+                const ft = Math.round(d * FT_PER_M);
+                return ft < b1ft ? 1 : (ft < b2ft ? 2 : 0);
+            };
+            const finishRun = (run) => {
+                if (!run) return;
+                if (run.pts.length > 320) {   // decimate drawing pts, keep shape
+                    const keep = [];
+                    const stride = Math.ceil(run.pts.length / 300);
+                    for (let i = 0; i < run.pts.length; i += stride) keep.push(run.pts[i]);
+                    keep.push(run.pts[run.pts.length - 1]);
+                    run.pts = keep;
+                }
+                runs.push(run);
+            };
             for (const f of src.features) {
                 if (seq !== xrefSeq) return;
                 if (f.type === 'point') {
                     const q = proj.toXY({ lat: f.pts[0][0], lng: f.pts[0][1] });
-                    const band = classify(xrefDistToEnv(q.x, q.y, env, pad));
+                    const band = classify(xrefDistGrid(q.x, q.y, grid, cellM, pad));
                     pointHits[band]++;
                     if (pointMarks.length < 500) pointMarks.push({ lat: f.pts[0][0], lng: f.pts[0][1], band });
                     continue;
                 }
                 const xy = f.pts.map(p => proj.toXY({ lat: p[0], lng: p[1] }));
                 const segN = f.type === 'poly' ? xy.length : xy.length - 1;
-                let run = null;
-                const closeRun = () => {
-                    if (run && run.lenM > step) runs.push(run);
-                    run = null;
-                };
+                let run = null;   // continues ACROSS segments — a feature's
+                                  // polyline is one continuous line
                 for (let i = 0; i < segN; i++) {
                     const A = xy[i], B = xy[(i + 1) % xy.length];
                     const Pa = f.pts[i], Pb = f.pts[(i + 1) % f.pts.length];
                     const segLen = Math.hypot(B.x - A.x, B.y - A.y);
                     if (!segLen) continue;
                     const n = Math.max(1, Math.ceil(segLen / step));
-                    for (let k = 0; k <= n; k++) {
+                    // continuation segments skip k=0 (same point as the
+                    // previous segment's last sample)
+                    for (let k = (run && i > 0) ? 1 : 0; k <= n; k++) {
                         const t = k / n;
-                        const d = xrefDistToEnv(A.x + (B.x - A.x) * t, A.y + (B.y - A.y) * t, env, pad);
+                        const d = xrefDistGrid(A.x + (B.x - A.x) * t, A.y + (B.y - A.y) * t, grid, cellM, pad);
                         const band = classify(d);
                         const lat = Pa[0] + (Pb[0] - Pa[0]) * t, lng = Pa[1] + (Pb[1] - Pa[1]) * t;
-                        if (k > 0) bandLenM[band] += segLen / n;
+                        if (k > 0) { bandLenM[band] += segLen / n; doneLenM += segLen / n; }
                         if (!run || run.band !== band) {
-                            closeRun();
+                            finishRun(run);
                             run = { band, featName: f.name, pts: [[lat, lng]], lenM: 0 };
                         } else {
                             run.lenM += segLen / n;
-                            if (run.pts.length < 1200) run.pts.push([lat, lng]);
+                            run.pts.push([lat, lng]);
                         }
-                        if (++ops >= 4000) { ops = 0; setStatus(`cross-ref: classifying… (${Math.round(bandLenM[0] + bandLenM[1] + bandLenM[2])} m done)`); await ftYield(); if (seq !== xrefSeq) return; }
+                        if (++ops >= 3000) {
+                            ops = 0;
+                            setStatus(`cross-ref: classifying… ${Math.min(99, Math.round(doneLenM / totalLenM * 100))}%`);
+                            await ftYield();
+                            if (seq !== xrefSeq) return;
+                        }
                     }
-                    closeRun();   // per-segment close keeps runs simple; adjacent same-band segs merge visually anyway
                 }
-                closeRun();
+                finishRun(run);
             }
-            runs.sort((a, b) => b.lenM - a.lenM);
+            const topRuns = [...runs].sort((a, b) => b.lenM - a.lenM).slice(0, 60);
             const result = {
                 at: Date.now(),
                 srcName: src.name, tgtLabel, sitesUsed,
                 b1: ftCfg.xrefB1, b2: ftCfg.xrefB2,
                 stepFt: Math.round(step * FT_PER_M),
                 totalM: totalLenM, bandLenM,
-                runs: runs.slice(0, 1500),
+                runs,              // complete — drawn as 3 merged band paths
+                topRuns,           // longest first — panel list + report
                 runsTotal: runs.length,
                 pointHits, pointMarks,
                 pointsTotal: src.features.filter(f => f.type === 'point').length,
@@ -2195,7 +2321,7 @@
         }
         lines.push('');
         lines.push(`Longest stretches (${Math.min(40, r.runsTotal)} of ${r.runsTotal}):`);
-        r.runs.slice(0, 40).forEach((run, i) => {
+        (r.topRuns || r.runs).slice(0, 40).forEach((run, i) => {
             const tag = run.band === 1 ? `≤${r.b1}ft` : (run.band === 2 ? `≤${r.b2}ft` : `>${r.b2}ft`);
             const mid = run.pts[Math.floor(run.pts.length / 2)];
             lines.push(`  ${i + 1}. [${tag}] ${fmtMi(run.lenM)}${run.featName ? ` — ${run.featName}` : ''} @ ${mid[0].toFixed(6)}, ${mid[1].toFixed(6)}`);
@@ -2232,7 +2358,7 @@
         if (!cachedToken) { setStatus('GitHub token needed (AIM Controls gear)'); return; }
         try {
             setStatus(`saving "${ly.name}" to GitHub…`);
-            const fname = ly.name.replace(/[^\w\- .]/g, '_') + '.kml';
+            const fname = ly.name.replace(/[^\w\- .]/g, '_') + (ly.ext || '.kml');
             const sha = await kmlRepoPut(fname, ly.rawText);
             const newId = `repo:${fname}`;
             kmlStyles[newId] = kmlStyleFor(ly.id);   // carry the style over
@@ -2281,8 +2407,8 @@
         const rows = [];
         rows.push('<div style="padding:6px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
             + '<span data-ft="kml-upload" style="cursor:pointer;color:#5fff5f;font-weight:bold">⬆ Load KML…</span>'
-            + '<span style="color:#666">session-only until 💾 · ☁ = in GitHub · KMZ: unzip first</span>'
-            + '<input id="aim-ft-kml-file" type="file" multiple accept=".kml" style="display:none">'
+            + '<span style="color:#666">session-only until 💾 · ☁ = in GitHub · .kml / .geojson · KMZ: unzip first</span>'
+            + '<input id="aim-ft-kml-file" type="file" multiple accept=".kml,.geojson,.json" style="display:none">'
             + `<input id="aim-ft-kml-search" type="text" placeholder="Search layers/features…" value="${escapeHtml(kmlSearch)}" style="flex:1;min-width:90px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:2px 6px;font:inherit;outline:none;">`
             + '</div>');
         if (!kmlLayers.length) {
@@ -2356,7 +2482,7 @@
                 + (r.pointsTotal ? `<br><span style="color:#aaa">points: ≤${r.b1}ft ${r.pointHits[1]} · ${r.b1}–${r.b2}ft ${r.pointHits[2]} · beyond ${r.pointHits[0]} of ${r.pointsTotal}</span>` : '')
                 + '</div>');
             rows.push('<div style="max-height:28vh;overflow-y:auto;">'
-                + r.runs.slice(0, 30).map((run, i) =>
+                + (r.topRuns || r.runs).slice(0, 30).map((run, i) =>
                     `<div class="aim-ft-row" data-xr-fly="${i}" style="padding:2px 10px;cursor:pointer;border-bottom:1px solid #1d2430;">`
                     + `<span style="color:${XREF_COLORS[run.band]};font-weight:bold">${run.band === 1 ? `≤${r.b1}ft` : (run.band === 2 ? `≤${r.b2}ft` : `>${r.b2}ft`)}</span> `
                     + `${fmtMi(run.lenM)}${run.featName ? ` <span style="color:#888">— ${escapeHtml(run.featName)}</span>` : ''} 🎯</div>`).join('')
@@ -2735,7 +2861,7 @@
                 if (kDel) { const ly = kmlLayerById(kDel.getAttribute('data-kml-del')); if (ly) kmlDelete(ly); return; }
                 const xFly = ev.target.closest('[data-xr-fly]');
                 if (xFly && xrefState && xrefState.result) {
-                    const run = xrefState.result.runs[Number(xFly.getAttribute('data-xr-fly'))];
+                    const run = (xrefState.result.topRuns || xrefState.result.runs)[Number(xFly.getAttribute('data-xr-fly'))];
                     if (run) flyToBbox(ptsBbox(run.pts));
                     return;
                 }
