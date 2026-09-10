@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-10 — 📐 Fleet Tools v0.20: no more slivers at band transitions (latest — dev only, feature #255)
+
+Tiny raw-color gaps still showed exactly where the cross-ref color changed (red→amber→blue): at each transition the outgoing run ended one sample early. Adjacent runs now share their boundary point, so band colors join seamlessly.
+
 ## 2026-09-10 — 📐 Fleet Tools v0.19: cross-ref draws every stretch, samples 3× finer, band 1 is now blue + GeoJSON support (latest — dev only, feature #255)
 
 First live run (1,274 mi of water lines) exposed three things. **Gaps:** stretches showed the raw layer color instead of a band color — the run builder closed runs at every segment, dropped short ones, and only drew the 1,500 longest, so thousands of correctly-classified stretches never rendered. Runs now continue across segments, every run is kept, and all of them draw as just three merged band paths — full coverage, still 3 SVG nodes. **Accuracy:** county-scale sources were being sampled every ~100 ft against a 50 ft band; a spatial grid index over the target envelope makes ~33 ft sampling affordable (with live % progress). **Colors:** ≤ band 1 is now BLUE — green vanished against FFZs. Bonus: **.geojson / .json files now load natively** (FeatureCollections, Multi* geometries, GeometryCollection; feature names from properties), uploadable and 💾-persistable alongside KML.
