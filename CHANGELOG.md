@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-09 — ⚠ Fleet Tools v0.14: basemap switching actually switches (latest — dev only, feature #250)
+
+The v0.13 basemap path (re-pointing Percepto's own tile layer via setUrl) didn't take on the live map — react-leaflet re-asserts its layer's URL. FAA sectional worked because it uses our own raw tile pane, so the basemap now uses the exact same engine: a non-default basemap draws as a cover pane just above Percepto's tiles ("Percepto default" clears it). One generic raw-tile engine now powers both the basemap cover and the FAA chart — same slippy math, same caps, same cleanup.
+
 ## 2026-09-09 — ⚠ Fleet Tools v0.13: 🗺 Map section (basemap + FAA sectional) + dots at every conflict (latest — dev only, feature #250)
 
 Two additions. **🗺 Map section** in the Fleet panel: a basemap picker (Percepto default / Esri World Imagery / USGS NAIP / Dark / Light / OSM) that re-points Percepto's own tile layer — no foreign Leaflet layers, so the v0.8 wedge can't recur — and a **🛩 FAA VFR sectional** overlay with opacity control, drawn as a raw tile pane (chart tiles exist at zoom 8–12, same source Map Styler uses). These live in the Fleet panel rather than the AIM Control Panel because Map Styler's layer machinery can't safely drive this bundled-Leaflet React map; site maps keep their normal CP controls, and full airspace checks (obstacles/LAANC/TFR) remain site-scoped in the Asset Inspector. **Conflict dots:** the map used to show one pin per conflicting site pair (at the pair's closest conflict), so secondary conflict spots looked unflagged. Now every other recorded cross-site conflict of the visible pairs gets a small dot (capped 600, closest pairs first) — the rule on the map becomes: big pin = pair's closest conflict, small dot = another cross-site conflict, nothing = same-site contact, which is normal (an FP touching its own FFZ is site design, not a violation).
