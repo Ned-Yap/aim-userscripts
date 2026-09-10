@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-09 — ⚠ Fleet Tools v0.10: site-name labels on drawn setups (latest — dev only, feature #250)
+
+The v0.9 overlay held up live (map pans, geometry draws) — but overlapping duplicate/test sites make the picture ambiguous: a giant FFZ blob over the Midkiff area looked like the renderer was "merging" Exxon 01 and 07, when it is almost certainly a third site's copied geometry drawn on top (each entity is its own SVG path — rings cannot join across sites). Every drawn site now shows a **site-name label** (name + #id, halo-outlined text at its geometry center), so mystery geometry names its owner at a glance — then one ⊘ in the panel or a client-chip toggle removes that site from the map and the sweep.
+
 ## 2026-09-09 — 🚑 Fleet Tools v0.9: raw-SVG overlay — foreign Leaflet layers were wedging the landing map (latest — dev only, feature #250)
 
 v0.8 found the map (react fiber walk, 20 fibers) but flagged it as a BUNDLED Leaflet copy — and adding 600 layer objects built from the global Leaflet broke it for real: frozen panning, tiles gone. **If your landing map is stuck: hard-reload the page — nothing persists.** v0.9 removes Leaflet layer objects from the landing map entirely: pins and site setups now draw into a single raw `<svg>` in our own pane, positioned with nothing but the map's public API (`createPane`, `latLngToLayerPoint`, `getZoom`, `on`) — cross-copy safe by construction and immune to Percepto bundling changes. Panning moves the pane natively; zoom re-projects on `zoomend`. Everything else is unchanged: same pins, same class/client filters (class toggles now re-render instantly without refetching), same caps, same 🎯 fly-to with flash, progressive site-by-site draw as geometry loads.
