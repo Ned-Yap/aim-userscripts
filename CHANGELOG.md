@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-10 — ✂ Mission Bank Tools v2.96: multi-well pads — equipment inside an _ID ring folds in (latest — dev only)
+
+v2.95's normalization fixed every pad that *has* an _ID polygon (live test: 41 → 35 groups, all _ID pads absorbed their equipment). The remaining equipment rows are wells with no _ID polygon of their own — typically two wells sharing one physical pad where only the pad polygon carries "_ID" (3415AH_ID 477 exists; "3416AH Well Head" has no 3416AH_ID). Names can never connect those, so a **geometric pass** now finishes the job: any asset the name pass left behind whose centroid sits **inside an _ID asset's ring** folds into that pad (tightest containing ring wins). Only _ID polygons attract — loose equipment never merges with other loose equipment, and sites without _ID assets are untouched. The `[padfold]` log now breaks out `by name · nested inside an _ID ring · no _ID owner`.
+
 ## 2026-09-10 — ✂ Mission Bank Tools v2.95: hardened _ID name matching + split triage log (latest — dev only)
 
 v2.94's fold verified correct on clean names but can be defeated by invisible characters real site data carries (non-breaking spaces, zero-width chars, doubled spaces) — visually identical names that fail string comparison. All _ID matching (✂/🧩 asset fold + 🖊 lasso mission routing) now normalizes names hard before comparing. The console also gains a triage line when a split still produces non-_ID groups: `[✂] N pad group(s) · M without an _ID main pad: "…"` — those named pads either have no _ID asset polygon or their names drift from it.

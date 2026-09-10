@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.95
+// @version      2.96
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.95';
+    const SCRIPT_VERSION = '2.96';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5633,22 +5633,45 @@
     }
     function mbBuildPadFold(assets) {
         const fold = new Map();   // asset.id → host (_ID pad) asset
-        let orphans = 0;
+        let nameFolds = 0, geoFolds = 0, orphans = 0;
         try {
+            const isId = (a) => /_id\s*\d+/i.test(a.name || '');
             const idAssets = assets
-                .filter(a => /_id\s*\d+/i.test(a.name || ''))
+                .filter(isId)
                 .map(a => ({ a, root: mbNormName(a.name).replace(/[\s_]*_id\s*\d+.*$/i, '') }))
                 .filter(x => x.root.length >= 4)
                 .sort((x, y) => y.root.length - x.root.length);
-            if (idAssets.length) assets.forEach(a => {
-                if (/_id\s*\d+/i.test(a.name || '')) return;
-                const want = mbNormName(a.name);
-                const own = idAssets.find(x => want === x.root || want.startsWith(x.root + ' ') || want.startsWith(x.root + '_'));
-                if (own) fold.set(a.id, own.a);
-                else orphans++;
-            });
+            if (idAssets.length) {
+                // pass 1 — by NAME: equipment extends an _ID asset's root
+                assets.forEach(a => {
+                    if (isId(a)) return;
+                    const want = mbNormName(a.name);
+                    const own = idAssets.find(x => want === x.root || want.startsWith(x.root + ' ') || want.startsWith(x.root + '_'));
+                    if (own) fold.set(a.id, own.a);
+                });
+                nameFolds = fold.size;
+                // v2.96: pass 2 — by GEOMETRY: multi-well pads ("3416AH Well
+                // Head" shares a physical pad with 3415AH; only the pad
+                // polygon carries "_ID", so no name can connect them). Any
+                // asset the name pass left behind whose centroid sits INSIDE
+                // an _ID asset's ring folds into that pad — tightest
+                // containing _ID ring wins. Hosts are _ID-named ONLY: loose
+                // equipment never merges with other loose equipment, and a
+                // site with no _ID assets folds nothing.
+                const ringArea = (ring) => { let s2 = 0; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) s2 += (ring[j].lng + ring[i].lng) * (ring[j].lat - ring[i].lat); return Math.abs(s2); };
+                const hosts = idAssets.map(x => ({ a: x.a, area: ringArea(x.a.ring) }));
+                assets.forEach(a => {
+                    if (isId(a) || fold.has(a.id)) return;
+                    const c = genCentroid(a.ring);
+                    let best = null;
+                    hosts.forEach(h => { if (h.a !== a && genPointInPoly(c, h.a.ring) && (!best || h.area < best.area)) best = h; });
+                    if (best) fold.set(a.id, best.a);
+                });
+                geoFolds = fold.size - nameFolds;
+                orphans = assets.filter(a => !isId(a) && !fold.has(a.id)).length;
+            }
         } catch (e) { console.warn(`${TAG} [padfold] fold build failed — every asset stays its own pad`, e); }
-        if (fold.size) console.log(`${TAG} [padfold] legacy nested-asset site: ${fold.size} equipment polygon(s) fold into their _ID main pad · ${orphans} asset(s) have no _ID owner (stay their own pad)`);
+        if (fold.size) console.log(`${TAG} [padfold] legacy nested-asset site: ${fold.size} polygon(s) fold into their _ID main pad (${nameFolds} by name · ${geoFolds} nested inside an _ID ring) · ${orphans} asset(s) have no _ID owner (stay their own pad)`);
         return (a) => (a && fold.get(a.id)) || a;
     }
     function mcvDetect(ent, missions) {
