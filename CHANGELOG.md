@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-09 — 🚑 Fleet Tools v0.9: raw-SVG overlay — foreign Leaflet layers were wedging the landing map (latest — dev only, feature #250)
+
+v0.8 found the map (react fiber walk, 20 fibers) but flagged it as a BUNDLED Leaflet copy — and adding 600 layer objects built from the global Leaflet broke it for real: frozen panning, tiles gone. **If your landing map is stuck: hard-reload the page — nothing persists.** v0.9 removes Leaflet layer objects from the landing map entirely: pins and site setups now draw into a single raw `<svg>` in our own pane, positioned with nothing but the map's public API (`createPane`, `latLngToLayerPoint`, `getZoom`, `on`) — cross-copy safe by construction and immune to Percepto bundling changes. Panning moves the pane natively; zoom re-projects on `zoomend`. Everything else is unchanged: same pins, same class/client filters (class toggles now re-render instantly without refetching), same caps, same 🎯 fly-to with flash, progressive site-by-site draw as geometry loads.
+
 ## 2026-09-09 — ⚠ Fleet Tools v0.8: the landing map is REACT — fiber-walk discovery (latest — dev only, feature #250)
 
 The deep map probe settled it: the sites-select map container carries `__reactFiber$` props — the landing map is React-rendered inside a thin Angular shell (the whole Angular tree is 7 scopes of chrome), which is why every Angular route and the global L.Map patch came up empty. v0.8 adds the proven React fiber walk as the primary deep route: climb from the container's fiber to its root, then walk the tree checking stateNode / props / state and each hook's state, one level into every object — catches react-leaflet's `stateNode.leafletElement`, context `{map}`, and `useRef({current: map})` shapes alike. On find, the console logs the route plus whether the map is an instance of the global `L.Map` (if not, it's a bundled Leaflet copy — flag anything odd about how the drawn layers look). `__aimFleetMapDebug()` now reports `reactFiber` and `fibersWalked`; the probe snippet gained the same fiber walk with component-name paths.

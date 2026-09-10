@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.8
+// @version      0.9
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.8';
+    const SCRIPT_VERSION = '0.9';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -829,16 +829,10 @@
     // Sweep results draw on it as conflict pins: red = OVERLAP pair,
     // orange = near-miss pair; 🎯 on a pair row flies the map there.
     // ==================================================================
-    function getL() {
-        // With @grant, the sandbox's own L draws invisibly — always prefer
-        // the page's real L on unsafeWindow (engraved lesson, AIM Issues).
-        try {
-            const realWin = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
-            if (realWin && realWin.L) return realWin.L;
-            if (window.L) return window.L;
-        } catch (e) {}
-        return null;
-    }
+    // NOTE (v0.9): there is deliberately NO getL()/Leaflet-layer drawing
+    // here — the landing map is a bundled Leaflet copy, and adding layers
+    // built from the global L wedged it (frozen pan, no tiles). All drawing
+    // goes through the raw SVG overlay below, public map API only.
 
     function looksLikeLeafletMap(v) {
         // Full method set required — do NOT relax (partial matches latch
@@ -1113,35 +1107,118 @@
         };
     } catch (e) {}
 
-    const FT_PANE = 'aim-ft-pins';
-    const SETUP_PANE = 'aim-ft-setups';
-    function ensureFtPane(map) {
-        if (!map || map._aim_ft_pane) return;
+    // ------------------------------------------------------------------
+    // Raw SVG overlay (v0.9). The landing map is a BUNDLED Leaflet copy
+    // (react fiber walk found it; NOT an instance of the global L.Map) —
+    // v0.8 added global-L layer objects to it and WEDGED the map (frozen
+    // pan, no tiles: foreign layers broke its event pipeline). So no
+    // Leaflet layer objects at all: one pane + one <svg> we own, drawn
+    // with only the map's PUBLIC API (createPane / latLngToLayerPoint /
+    // getZoom / on) — cross-copy safe by construction. Layer points are
+    // pane-local pixel coords, so an svg pinned at 0,0 with
+    // overflow:visible needs no transforms: panning moves the pane for
+    // free, and we re-project on zoomend/viewreset.
+    // ------------------------------------------------------------------
+    const OVERLAY_PANE = 'aim-ft-overlay';
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    let ovSvg = null;
+    let ovSetupsG = null;
+    let ovPinsG = null;
+    let ovMap = null;
+
+    function ensureOverlay(map) {
+        if (ovMap === map && ovSvg && ovSvg.parentElement) return true;
         try {
-            if (typeof map.createPane !== 'function') return;
-            // Above the landing map's site-name markers (600) so a conflict
-            // pin is never buried under a "Multiple sites" bubble.
-            const p = map.createPane(FT_PANE);
-            if (p) { p.style.zIndex = 640; p.style.pointerEvents = 'none'; }
-            // Site-setup geometry sits under the pins
-            const sp = map.createPane(SETUP_PANE);
-            if (sp) { sp.style.zIndex = 630; sp.style.pointerEvents = 'none'; }
-            map._aim_ft_pane = true;
-        } catch (e) { console.warn(`${TAG} ensureFtPane failed:`, e); }
+            if (typeof map.createPane !== 'function' || typeof map.getPane !== 'function' || typeof map.on !== 'function') return false;
+            let pane = map.getPane(OVERLAY_PANE);
+            if (!pane) {
+                pane = map.createPane(OVERLAY_PANE);
+                // Above the site-name markers (600) so pins never bury
+                if (pane) { pane.style.zIndex = 635; pane.style.pointerEvents = 'none'; }
+            }
+            if (!pane) return false;
+            ovSvg = document.createElementNS(SVG_NS, 'svg');
+            ovSvg.setAttribute('width', '1');
+            ovSvg.setAttribute('height', '1');
+            ovSvg.style.cssText = 'position:absolute;left:0;top:0;overflow:visible;pointer-events:none;';
+            ovSetupsG = document.createElementNS(SVG_NS, 'g');   // geometry under…
+            ovPinsG = document.createElementNS(SVG_NS, 'g');     // …conflict pins
+            ovSvg.appendChild(ovSetupsG);
+            ovSvg.appendChild(ovPinsG);
+            pane.appendChild(ovSvg);
+            if (ovMap !== map) {
+                map.on('zoomend viewreset moveend', onMapViewChanged);
+                ovMap = map;
+                // First refresh without waiting for a user interaction
+                setTimeout(scheduleSetupRefresh, 100);
+            }
+            console.log(`${TAG} overlay attached to the landing map (raw SVG, no foreign Leaflet layers)`);
+            return true;
+        } catch (e) {
+            console.warn(`${TAG} ensureOverlay failed:`, e);
+            return false;
+        }
     }
 
-    let mapPinLayers = [];
-    const pinByPairKey = {};   // "aId:bId" → halo layer (for flash-on-zoom)
-    let pinsKey = null;        // what the current pins represent — stops redraw loops
-    let pinDrawSeq = 0;
+    function onMapViewChanged() {
+        renderOverlay();          // re-project everything (zoom moves layer coords)
+        scheduleSetupRefresh();   // viewport culling + fetch of newly-visible sites
+    }
 
-    function clearSweepPins() {
+    // Projects and rebuilds the whole overlay from current data. Bounded by
+    // the pin cap (300) + setup site cap (40), so a full rebuild is a few ms.
+    function renderOverlay() {
+        if (!onLandingPage()) return false;
         const map = getLandingMap();
-        mapPinLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
-        mapPinLayers = [];
-        Object.keys(pinByPairKey).forEach(k => delete pinByPairKey[k]);
-        pinsKey = null;
+        if (!map || !ensureOverlay(map)) return false;
+        let zoom = 0;
+        try { zoom = map.getZoom ? map.getZoom() : 0; } catch (e) {}
+        const P = (lat, lng) => {
+            const p = map.latLngToLayerPoint([lat, lng]);
+            return `${Math.round(p.x * 10) / 10},${Math.round(p.y * 10) / 10}`;
+        };
+        try {
+            // --- site setups (zoom-gated, class-filtered at render time) ---
+            let sHtml = '';
+            if (ftCfg.drawSetups && zoom >= SETUP_MIN_ZOOM) {
+                Object.keys(setupGeomBySite).forEach(id => {
+                    setupGeomBySite[id].forEach(g => {
+                        if (!ftCfg.view[g.cls]) return;
+                        const st = SETUP_STYLE[g.cls];
+                        let d = '';
+                        g.parts.forEach(part => {
+                            part.forEach((pt, i) => { d += (i ? 'L' : 'M') + P(pt[0], pt[1]); });
+                            if (g.closed) d += 'Z';
+                        });
+                        if (!d) return;
+                        sHtml += `<path d="${d}" fill="${g.closed ? st.color : 'none'}" fill-opacity="${g.closed ? st.fill : 0}"`
+                            + ` stroke="${st.color}" stroke-width="${st.weight}" stroke-opacity="0.9" stroke-linejoin="round"/>`;
+                    });
+                });
+            }
+            ovSetupsG.innerHTML = sHtml;
+            // --- conflict pins ---
+            let pHtml = '';
+            const now = Date.now();
+            pinData.forEach(p => {
+                const xy = map.latLngToLayerPoint([p.lat, p.lng]);
+                const hot = pinFlash.key === p.key && now < pinFlash.until;
+                pHtml += `<g data-pinkey="${p.key}">`
+                    + `<circle cx="${xy.x}" cy="${xy.y}" r="11" fill="${p.color}" fill-opacity="${hot ? 0.35 : 0.15}" stroke="${p.color}" stroke-width="${hot ? 6 : 2}" stroke-opacity="${hot ? 1 : 0.75}"/>`
+                    + `<circle cx="${xy.x}" cy="${xy.y}" r="3.5" fill="${p.color}"/>`
+                    + '</g>';
+            });
+            ovPinsG.innerHTML = pHtml;
+            return true;
+        } catch (e) {
+            console.warn(`${TAG} renderOverlay failed:`, e);
+            return false;
+        }
     }
+
+    let pinData = [];                        // [{key, lat, lng, color}] — drawn by renderOverlay
+    let pinFlash = { key: null, until: 0 };  // 🎯 highlight, applied at render time
+    let pinsKey = null;                      // what the current pins represent — stops redraw loops
 
     function sweepPinsKey() {
         if (!lastSweep || !lastSweep.at) return 'none';
@@ -1150,21 +1227,10 @@
             + `:${Object.keys(ftCfg.clientsOff).sort().join(',')}`;
     }
 
-    function drawSweepPins(attempt) {
-        const seq = ++pinDrawSeq;
-        clearSweepPins();
-        if (!onLandingPage()) return;   // pinsKey stays null → redrawn on return to landing
-        if (!ftCfg.showOnMap || !lastSweep || !lastSweep.at) { pinsKey = sweepPinsKey(); return; }
-        const tryDraw = (n) => {
-            if (seq !== pinDrawSeq) return;
-            const map = getLandingMap();
-            const L = getL();
-            if (!map || !L) {
-                if (n < 30) setTimeout(() => tryDraw(n + 1), 700);
-                else console.warn(`${TAG} landing map never found — sweep pins not drawn (tables still work). Discovery paths:`, JSON.stringify(landingMapDebug()), '— run __aimFleetMapDebug() in the console and report the line');
-                return;
-            }
-            ensureFtPane(map);
+    let pinsGiveUpLogged = false;
+    function drawSweepPins() {
+        pinData = [];
+        if (onLandingPage() && ftCfg.showOnMap && lastSweep && lastSweep.at) {
             // Closest pairs win the pin budget — a cap keeps a 677-pair
             // sweep from stuffing the landing map with SVG.
             const PIN_CAP = 300;
@@ -1173,30 +1239,19 @@
                 .filter(x => x.c)
                 .sort((a, b) => a.c.ft - b.c.ft);
             if (list.length > PIN_CAP) console.log(`${TAG} ${list.length} visible pairs — drawing the ${PIN_CAP} closest pins (filter to see the rest)`);
-            let drawn = 0;
-            list.slice(0, PIN_CAP).forEach(({ p, c }) => {
-                const color = c.overlap ? '#ff3d00' : '#ffa030';
-                try {
-                    const halo = L.circleMarker([c.lat, c.lng], {
-                        radius: 11, color, weight: 2, opacity: 0.75,
-                        fillColor: color, fillOpacity: 0.15,
-                        interactive: false, bubblingMouseEvents: false, pane: FT_PANE,
-                    });
-                    const core = L.circleMarker([c.lat, c.lng], {
-                        radius: 3.5, color, weight: 1, opacity: 1,
-                        fillColor: color, fillOpacity: 1,
-                        interactive: false, bubblingMouseEvents: false, pane: FT_PANE,
-                    });
-                    halo.addTo(map); core.addTo(map);
-                    mapPinLayers.push(halo, core);
-                    pinByPairKey[`${p.aId}:${p.bId}`] = halo;
-                    drawn++;
-                } catch (e) { console.warn(`${TAG} pin draw failed for pair ${p.aId}:${p.bId}:`, e); }
-            });
-            pinsKey = sweepPinsKey();
-            if (drawn) console.log(`${TAG} drew ${drawn} conflict pin(s) on the landing map`);
-        };
-        tryDraw(attempt || 0);
+            pinData = list.slice(0, PIN_CAP).map(({ p, c }) => ({
+                key: `${p.aId}:${p.bId}`,
+                lat: c.lat, lng: c.lng,
+                color: c.overlap ? '#ff3d00' : '#ffa030',
+            }));
+        }
+        const ok = renderOverlay();
+        // No map yet → leave pinsKey null so the 2s landing poll retries
+        pinsKey = ok ? sweepPinsKey() : null;
+        if (!ok && onLandingPage() && pinData.length && !pinsGiveUpLogged) {
+            pinsGiveUpLogged = true;
+            console.warn(`${TAG} landing map not found yet — overlay pending (tables work). Discovery:`, JSON.stringify(landingMapDebug()), '— run __aimFleetMapDebug() if this persists');
+        }
     }
 
     function zoomToPair(key) {
@@ -1206,11 +1261,9 @@
         if (!c || !map) return;
         try {
             map.setView([c.lat, c.lng], Math.max(map.getZoom ? map.getZoom() : 4, 15));
-            const halo = pinByPairKey[key];
-            if (halo) {
-                halo.setStyle({ weight: 6, opacity: 1 });
-                setTimeout(() => { try { halo.setStyle({ weight: 2, opacity: 0.75 }); } catch (e) {} }, 1400);
-            }
+            pinFlash = { key, until: Date.now() + 1600 };
+            renderOverlay();
+            setTimeout(renderOverlay, 1700);   // un-flash even without map events
         } catch (e) { console.warn(`${TAG} zoom-to-pair failed:`, e); }
     }
 
@@ -1233,42 +1286,30 @@
         fp: { color: '#00e5ff', weight: 2, fill: 0 },
         asset: { color: '#ffffff', weight: 1.5, fill: 0.06 },
     };
-    let setupLayersBySite = {};   // id → [layers]
-    let setupHookedMap = null;
+    let setupGeomBySite = {};   // id → [{cls, closed, parts:[[[lat,lng],…],…]}] — rendered by renderOverlay
     let setupSeq = 0;
     let setupRefreshTimer = null;
 
-    function clearSetupLayers() {
-        const map = getLandingMap();
-        Object.keys(setupLayersBySite).forEach(id => {
-            (setupLayersBySite[id] || []).forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
-        });
-        setupLayersBySite = {};
-    }
-
-    function buildSetupLayers(e, L) {
+    // Entity → plain geometry records (lat/lng only, ALL classes kept —
+    // the class Show filter applies at render time, so toggling a class
+    // never refetches anything).
+    function nbEntityToGeom(e) {
         const cls = NB_TYPE_TO_CLASS[e.type];
-        if (!cls || !ftCfg.view[cls]) return [];
-        const st = SETUP_STYLE[cls];
-        const base = {
-            color: st.color, weight: st.weight, opacity: 0.9,
-            interactive: false, bubblingMouseEvents: false, pane: SETUP_PANE,
-        };
+        if (!cls) return null;
         if (e.type === 15) {
-            const segs = (Array.isArray(e.arcs) ? e.arcs : [])
+            const parts = (Array.isArray(e.arcs) ? e.arcs : [])
                 .filter(a => a && a.point_a && a.point_b
                     && typeof a.point_a.lat === 'number' && typeof a.point_b.lat === 'number')
                 .map(a => [[a.point_a.lat, a.point_a.lng], [a.point_b.lat, a.point_b.lng]]);
-            if (segs.length) return [L.polyline(segs, base)];
-            const cs = entityCoords(e);
-            if (cs && cs.length > 1) return [L.polyline(cs.map(p => [p.lat, p.lng]), base)];
-            return [];
+            if (!parts.length) {
+                const cs = (entityCoords(e) || []).filter(pt => pt && typeof pt.lat === 'number');
+                if (cs.length > 1) parts.push(cs.map(pt => [pt.lat, pt.lng]));
+            }
+            return parts.length ? { cls, closed: false, parts } : null;
         }
-        const cs = entityCoords(e);
-        if (!cs || cs.length < 3) return [];
-        return [L.polygon(cs.map(p => [p.lat, p.lng]), Object.assign({}, base, {
-            fillColor: st.color, fillOpacity: st.fill,
-        }))];
+        const cs = (entityCoords(e) || []).filter(pt => pt && typeof pt.lat === 'number');
+        if (cs.length < 3) return null;
+        return { cls, closed: true, parts: [cs.map(pt => [pt.lat, pt.lng])] };
     }
 
     function bboxIntersects(b, west, south, east, north) {
@@ -1284,17 +1325,11 @@
         const seq = ++setupSeq;
         if (!onLandingPage()) return;
         const map = getLandingMap();
-        const L = getL();
-        if (!map || !L) return;
-        if (setupHookedMap !== map) {
-            try {
-                map.on('moveend zoomend', scheduleSetupRefresh);
-                setupHookedMap = map;
-            } catch (e) { console.warn(`${TAG} setup map hook failed:`, e); }
-        }
-        ensureFtPane(map);
+        if (!map) return;
         if (!ftCfg.drawSetups || (map.getZoom ? map.getZoom() : 0) < SETUP_MIN_ZOOM) {
-            clearSetupLayers();
+            // Keep the geometry cache (cheap) — renderOverlay's zoom gate
+            // already hides it; nothing to fetch below the gate.
+            renderOverlay();
             return;
         }
         // Names drive the client filter — load them if the panel never did
@@ -1326,14 +1361,14 @@
         }
         const keep = new Set(wanted.slice(0, SETUP_SITE_CAP).map(w => w.id));
         // Drop sites that left the view / got filtered out
-        Object.keys(setupLayersBySite).forEach(id => {
-            if (!keep.has(id)) {
-                setupLayersBySite[id].forEach(l => { try { map.removeLayer(l); } catch (e) {} });
-                delete setupLayersBySite[id];
-            }
+        let changed = false;
+        Object.keys(setupGeomBySite).forEach(id => {
+            if (!keep.has(id)) { delete setupGeomBySite[id]; changed = true; }
         });
-        // Draw the missing ones, nearest first, gently concurrent
-        const queue = [...keep].filter(id => !setupLayersBySite[id]);
+        if (changed) renderOverlay();
+        // Fetch + add the missing ones, nearest first, gently concurrent —
+        // each finished site renders immediately (progressive draw)
+        const queue = [...keep].filter(id => !setupGeomBySite[id]);
         if (!queue.length) return;
         const worker = async () => {
             while (queue.length) {
@@ -1346,17 +1381,15 @@
                     continue;
                 }
                 if (seq !== setupSeq) return;
-                const layers = [];
+                const geoms = [];
                 ents.forEach(e => {
                     try {
-                        buildSetupLayers(e, L).forEach(l => {
-                            l.addTo(map);
-                            try { if (l._path) l._path.style.pointerEvents = 'none'; } catch (e2) {}
-                            layers.push(l);
-                        });
-                    } catch (e3) { console.warn(`${TAG} setup draw failed for entity ${e && e.id}:`, e3); }
+                        const g = nbEntityToGeom(e);
+                        if (g) geoms.push(g);
+                    } catch (e3) { console.warn(`${TAG} setup geometry failed for entity ${e && e.id}:`, e3); }
                 });
-                setupLayersBySite[id] = layers;
+                setupGeomBySite[id] = geoms;
+                renderOverlay();
             }
         };
         await Promise.all(Array.from({ length: Math.min(SETUP_FETCH_CONCURRENCY, queue.length) }, worker));
@@ -1409,12 +1442,12 @@
         if (!want) {
             if (buttonEl) buttonEl.style.display = 'none';
             if (panelEl && !sweepRunning) panelEl.style.display = 'none';
-            // SPA nav destroyed the landing map with our pins on it — drop
-            // the dead refs so a return to landing redraws from scratch
-            if (mapPinLayers.length) { mapPinLayers = []; Object.keys(pinByPairKey).forEach(k => delete pinByPairKey[k]); }
+            // SPA nav destroyed the landing map (and our overlay with it) —
+            // drop the dead refs so a return to landing rebuilds from scratch
+            pinData = [];
             pinsKey = null;
-            setupLayersBySite = {};
-            setupHookedMap = null;
+            setupGeomBySite = {};
+            ovSvg = null; ovSetupsG = null; ovPinsG = null; ovMap = null;
             landingMapRef = null;
             return;
         }
@@ -1435,9 +1468,9 @@
         // Keep the map pins current: covers the first draw of a GM-cached
         // sweep on page load AND the redraw after returning from a site
         if (pinsKey !== sweepPinsKey()) drawSweepPins();
-        // Hook the landing map for setup drawing once it exists — after
-        // that, moveend/zoomend drive the refreshes
-        if (ftCfg.drawSetups && !setupHookedMap) scheduleSetupRefresh();
+        // Once the overlay hooks the map, its own view events drive the
+        // setup refreshes; until then keep nudging
+        if (ftCfg.drawSetups && !ovMap) scheduleSetupRefresh();
     }
 
     function sectionHeader(key, icon, label, extra) {
@@ -1763,10 +1796,10 @@
                         ftCfg.view[key] = !!vf.checked;
                         saveCfg();
                         renderPanel();
+                        // Classes filter at RENDER time (geometry cache
+                        // keeps all classes) — drawSweepPins re-renders the
+                        // whole overlay, pins and setups alike
                         drawSweepPins();
-                        // drawn geometry is a per-class subset — rebuild it
-                        clearSetupLayers();
-                        scheduleSetupRefresh();
                     }
                     return;
                 }
