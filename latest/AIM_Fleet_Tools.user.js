@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.17
+// @version      0.18
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.17';
+    const SCRIPT_VERSION = '0.18';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -98,6 +98,7 @@
             thresholdFt: 200, marginFt: 500, classes: { ffz: true, fp: true, asset: true },
             capPerPair: 200, onlyProduction: false, showOnMap: true, drawSetups: true,
             basemap: 'default', faaChart: false, faaOpacity: 0.75,
+            xrefB1: 50, xrefB2: 200,
             // Display-only view filters (never re-run the sweep): which
             // conflict classes to SHOW, and which clients are toggled off.
             view: { ffz: true, fp: true, asset: true },
@@ -117,6 +118,8 @@
             if (typeof s.basemap === 'string') d.basemap = s.basemap;
             if (typeof s.faaChart === 'boolean') d.faaChart = s.faaChart;
             if (typeof s.faaOpacity === 'number') d.faaOpacity = s.faaOpacity;
+            if (typeof s.xrefB1 === 'number') d.xrefB1 = s.xrefB1;
+            if (typeof s.xrefB2 === 'number') d.xrefB2 = s.xrefB2;
             if (s.view) NB_CLASSES.forEach(c => {
                 if (typeof s.view[c.key] === 'boolean') d.view[c.key] = s.view[c.key];
             });
@@ -157,6 +160,7 @@
                     cachedToken = t;
                     gmSet(KEY_TOKEN, t);
                     console.log(`${TAG} GitHub token received from AIM Controls`);
+                    setTimeout(() => { try { kmlBoot(); } catch (e) {} }, 300);   // persistent KML layers can list now
                 } else if (!t) {
                     cachedToken = '';
                     gmSet(KEY_TOKEN, '');
@@ -1148,6 +1152,8 @@
     const SVG_NS = 'http://www.w3.org/2000/svg';
     let ovSvg = null;
     let ovSetupsG = null;
+    let ovKmlG = null;
+    let ovXrefG = null;
     let ovPinsG = null;
     let ovMap = null;
 
@@ -1166,9 +1172,13 @@
             ovSvg.setAttribute('width', '1');
             ovSvg.setAttribute('height', '1');
             ovSvg.style.cssText = 'position:absolute;left:0;top:0;overflow:visible;pointer-events:none;';
-            ovSetupsG = document.createElementNS(SVG_NS, 'g');   // geometry under…
-            ovPinsG = document.createElementNS(SVG_NS, 'g');     // …conflict pins
+            ovSetupsG = document.createElementNS(SVG_NS, 'g');   // site geometry (bottom)
+            ovKmlG = document.createElementNS(SVG_NS, 'g');      // KML layers
+            ovXrefG = document.createElementNS(SVG_NS, 'g');     // cross-ref runs
+            ovPinsG = document.createElementNS(SVG_NS, 'g');     // conflict pins (top)
             ovSvg.appendChild(ovSetupsG);
+            ovSvg.appendChild(ovKmlG);
+            ovSvg.appendChild(ovXrefG);
             ovSvg.appendChild(ovPinsG);
             pane.appendChild(ovSvg);
             if (ovMap !== map) {
@@ -1275,6 +1285,47 @@
                 });
             }
             ovSetupsG.innerHTML = sHtml;
+            // --- KML layers (merged: one path for lines + one for polys
+            // per layer, points as circles capped at 800/layer) ---
+            let kHtml = '';
+            kmlLayers.forEach(ly => {
+                if (!ly.features) return;
+                const st = kmlStyleFor(ly.id);
+                if (!st.show) return;
+                let dLine = '', dPoly = '', ptsHtml = '';
+                let ptCount = 0;
+                ly.features.forEach(f => {
+                    if (f.type === 'point') {
+                        if (ptCount++ >= 800) return;
+                        const xy = map.latLngToLayerPoint(f.pts[0]);
+                        ptsHtml += `<circle cx="${xy.x}" cy="${xy.y}" r="${Math.max(2.5, st.width + 1.5)}" fill="${st.color}" fill-opacity="${st.opacity}" stroke="#10141c" stroke-width="1"/>`;
+                        return;
+                    }
+                    let d = '';
+                    f.pts.forEach((pt, i) => { d += (i ? 'L' : 'M') + P(pt[0], pt[1]); });
+                    if (f.type === 'poly') dPoly += d + 'Z';
+                    else dLine += d;
+                });
+                if (dPoly) kHtml += `<path d="${dPoly}" fill="${st.fill ? st.color : 'none'}" fill-opacity="${st.fill ? 0.12 : 0}" stroke="${st.color}" stroke-width="${st.width}" stroke-opacity="${st.opacity}" stroke-linejoin="round"/>`;
+                if (dLine) kHtml += `<path d="${dLine}" fill="none" stroke="${st.color}" stroke-width="${st.width}" stroke-opacity="${st.opacity}" stroke-linejoin="round" stroke-linecap="round"/>`;
+                kHtml += ptsHtml;
+            });
+            ovKmlG.innerHTML = kHtml;
+            // --- cross-ref runs (band-colored) + point marks ---
+            let xHtml = '';
+            const xr = xrefState && xrefState.result;
+            if (xr) {
+                xr.runs.forEach(run => {
+                    let d = '';
+                    run.pts.forEach((pt, i) => { d += (i ? 'L' : 'M') + P(pt[0], pt[1]); });
+                    if (d) xHtml += `<path d="${d}" fill="none" stroke="${XREF_COLORS[run.band]}" stroke-width="4" stroke-opacity="0.95" stroke-linecap="round"/>`;
+                });
+                xr.pointMarks.forEach(pm => {
+                    const xy = map.latLngToLayerPoint([pm.lat, pm.lng]);
+                    xHtml += `<circle cx="${xy.x}" cy="${xy.y}" r="5" fill="${XREF_COLORS[pm.band]}" fill-opacity="0.9" stroke="#10141c" stroke-width="1"/>`;
+                });
+            }
+            ovXrefG.innerHTML = xHtml;
             // --- conflict dots (secondary conflict locations), then pins ---
             let pHtml = '';
             dotData.forEach(dd => {
@@ -1721,11 +1772,599 @@
     }
 
     // ==================================================================
+    // 📎 KML layers (v0.18) — Google-Earth-style overlay layers on the
+    // landing map. Session layers live in memory only; 💾 promotes one to
+    // the PRIVATE data repo (fleet-kml/<name>.kml, create-only PUT) so it
+    // persists for every session. Show/style prefs are per-user in GM.
+    // Rendered through the raw SVG overlay (never Leaflet layer objects).
+    // ==================================================================
+    const KML_DIR = 'fleet-kml';
+    const KEY_KML_STYLES = 'aim-ft-kml-styles';
+    const KEY_KML_LIST = 'aim-ft-kml-list';
+    const KML_PALETTE = ['#ffd54f', '#4fc3f7', '#ff8a65', '#aed581', '#ba68c8', '#4db6ac', '#f06292', '#90a4ae'];
+    let kmlLayers = [];          // [{id, name, source:'session'|'repo', sha?, rawText?, features, vertexCount, bbox, style}]
+    let kmlStyles = loadJson(KEY_KML_STYLES, {});
+    let kmlBootDone = false;
+    let kmlDeleteArm = null;     // {id, at} — double-click arm for repo deletes
+
+    function saveKmlStyles() { gmSet(KEY_KML_STYLES, JSON.stringify(kmlStyles)); }
+    function kmlLayerById(id) { return kmlLayers.find(l => l.id === id); }
+    function kmlStyleFor(id) {
+        if (!kmlStyles[id]) {
+            kmlStyles[id] = {
+                show: true, color: KML_PALETTE[Object.keys(kmlStyles).length % KML_PALETTE.length],
+                width: 2.5, opacity: 0.9, fill: true,
+            };
+        }
+        return kmlStyles[id];
+    }
+
+    // ---- parsing (DOMParser; CSS type selectors ignore the KML namespace) ----
+    function parseKmlText(text) {
+        const doc = new DOMParser().parseFromString(text, 'text/xml');
+        if (doc.querySelector('parsererror')) throw new Error('not valid KML/XML (KMZ? unzip to .kml first)');
+        const features = [];
+        let vertexCount = 0;
+        let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+        const parseCoords = (node) => {
+            const out = [];
+            String(node.textContent || '').trim().split(/\s+/).forEach(tok => {
+                const p = tok.split(',');
+                const lng = Number(p[0]), lat = Number(p[1]);
+                if (isFinite(lat) && isFinite(lng)) {
+                    out.push([lat, lng]);
+                    if (lat < minLat) minLat = lat;
+                    if (lat > maxLat) maxLat = lat;
+                    if (lng < minLng) minLng = lng;
+                    if (lng > maxLng) maxLng = lng;
+                }
+            });
+            return out;
+        };
+        doc.querySelectorAll('Placemark').forEach(pm => {
+            let fname = '';
+            try { const n = pm.querySelector(':scope > name'); fname = (n && n.textContent.trim()) || ''; } catch (e) {}
+            pm.querySelectorAll('Point > coordinates').forEach(c => {
+                const pts = parseCoords(c);
+                if (pts.length) { features.push({ name: fname, type: 'point', pts: [pts[0]] }); vertexCount++; }
+            });
+            pm.querySelectorAll('LineString > coordinates').forEach(c => {
+                const pts = parseCoords(c);
+                if (pts.length > 1) { features.push({ name: fname, type: 'line', pts }); vertexCount += pts.length; }
+            });
+            pm.querySelectorAll('Polygon').forEach(pg => {
+                // outer ring only (inner holes ignored — noted in the report)
+                const outer = pg.querySelector('outerBoundaryIs coordinates');
+                if (outer) {
+                    const pts = parseCoords(outer);
+                    if (pts.length > 2) { features.push({ name: fname, type: 'poly', pts }); vertexCount += pts.length; }
+                }
+            });
+        });
+        if (!features.length) throw new Error('no Point/LineString/Polygon placemarks found');
+        return { features, vertexCount, bbox: { minLat, minLng, maxLat, maxLng } };
+    }
+
+    // ---- data-repo I/O (plain fetch — api.github.com sends CORS headers) ----
+    function ghHdr() { return { 'Authorization': `Bearer ${cachedToken}`, 'Accept': 'application/vnd.github+json' }; }
+
+    async function kmlRepoList(force) {
+        if (!cachedToken) throw new Error('GitHub token needed (AIM Controls gear)');
+        const r = await fetchWithTimeout(`${GH_API}/repos/${DATA_REPO}/contents/${KML_DIR}?ref=${DATA_BRANCH}`, { headers: ghHdr() }, 25000);
+        if (r.status === 404) { gmSet(KEY_KML_LIST, '[]'); return []; }   // folder not created yet
+        if (!r.ok) throw new Error(`list HTTP ${r.status}`);
+        const j = await r.json();
+        const list = (Array.isArray(j) ? j : [])
+            .filter(f => f && f.type === 'file' && /\.kml$/i.test(f.name))
+            .map(f => ({ name: f.name, sha: f.sha }));
+        gmSet(KEY_KML_LIST, JSON.stringify(list));
+        return list;
+    }
+
+    async function kmlRepoFetchText(name) {
+        const r = await fetchWithTimeout(
+            `${GH_API}/repos/${DATA_REPO}/contents/${KML_DIR}/${encodeURIComponent(name)}?ref=${DATA_BRANCH}`,
+            { headers: { 'Authorization': `Bearer ${cachedToken}`, 'Accept': 'application/vnd.github.raw' } }, 60000);
+        if (!r.ok) throw new Error(`fetch HTTP ${r.status}`);
+        return r.text();
+    }
+
+    async function kmlRepoPut(name, text) {
+        // UTF-8-safe chunked base64 (the proven Site Diff KML-copy pattern)
+        const bytes = new TextEncoder().encode(text);
+        let bin = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        const r = await fetchWithTimeout(`${GH_API}/repos/${DATA_REPO}/contents/${KML_DIR}/${encodeURIComponent(name)}`, {
+            method: 'PUT',
+            headers: Object.assign({ 'Content-Type': 'application/json' }, ghHdr()),
+            // no sha → create-only; GitHub 422s instead of overwriting
+            body: JSON.stringify({ message: `[AIM Fleet] add KML layer ${name}`, content: btoa(bin), branch: DATA_BRANCH }),
+        }, 60000);
+        if (r.status === 422) throw new Error('a layer with this name already exists in the repo');
+        if (r.status !== 200 && r.status !== 201) throw new Error(`PUT HTTP ${r.status}`);
+        return (await r.json()).content.sha;
+    }
+
+    async function kmlRepoDelete(name, sha) {
+        const r = await fetchWithTimeout(`${GH_API}/repos/${DATA_REPO}/contents/${KML_DIR}/${encodeURIComponent(name)}`, {
+            method: 'DELETE',
+            headers: Object.assign({ 'Content-Type': 'application/json' }, ghHdr()),
+            body: JSON.stringify({ message: `[AIM Fleet] delete KML layer ${name}`, sha, branch: DATA_BRANCH }),
+        }, 60000);
+        if (!r.ok) throw new Error(`DELETE HTTP ${r.status}`);
+    }
+
+    async function kmlEnsureLoaded(ly) {
+        if (ly.features) return ly;
+        const text = await kmlRepoFetchText(ly.repoName);
+        const parsed = parseKmlText(text);
+        Object.assign(ly, parsed);
+        return ly;
+    }
+
+    // Boot: list repo layers (GM cache first for instant rows), auto-load
+    // the ones whose per-user style says show. Idempotent; retried when
+    // the token arrives and when the panel opens.
+    async function kmlBoot() {
+        if (kmlBootDone || !cachedToken) return;
+        kmlBootDone = true;
+        let list = loadJson(KEY_KML_LIST, null);
+        try { list = await kmlRepoList(false); }
+        catch (e) { console.warn(`${TAG} KML repo list failed (using cached):`, e); }
+        (list || []).forEach(f => {
+            const id = `repo:${f.name}`;
+            if (kmlLayerById(id)) return;
+            kmlLayers.push({ id, name: f.name.replace(/\.kml$/i, ''), repoName: f.name, source: 'repo', sha: f.sha, features: null });
+        });
+        renderPanel();
+        for (const ly of kmlLayers) {
+            if (ly.source === 'repo' && !ly.features && kmlStyleFor(ly.id).show) {
+                try { await kmlEnsureLoaded(ly); renderOverlay(); }
+                catch (e) { console.warn(`${TAG} KML layer "${ly.name}" load failed:`, e); }
+            }
+        }
+        renderPanel();
+        if (kmlLayers.length) console.log(`${TAG} KML layers: ${kmlLayers.length} in repo`);
+    }
+
+    async function kmlHandleFiles(files) {
+        for (const f of files) {
+            try {
+                if (/\.kmz$/i.test(f.name)) { setStatus(`"${f.name}" is a KMZ — unzip it to .kml first`); continue; }
+                const text = await f.text();
+                const parsed = parseKmlText(text);
+                const id = `sess:${Date.now()}:${Math.random().toString(36).slice(2, 6)}`;
+                kmlLayers.push(Object.assign({
+                    id, name: f.name.replace(/\.kml$/i, ''), source: 'session', rawText: text,
+                }, parsed));
+                kmlStyleFor(id);
+                saveKmlStyles();
+                console.log(`${TAG} KML "${f.name}": ${parsed.features.length} feature(s), ${parsed.vertexCount} vertices (session layer)`);
+                setStatus(`loaded "${f.name}" — ${parsed.features.length} feature(s) (session only; 💾 to keep it)`);
+            } catch (e) {
+                console.warn(`${TAG} KML parse failed for ${f.name}:`, e);
+                setStatus(`"${f.name}" failed: ${String(e && e.message || e)}`);
+            }
+        }
+        renderPanel();
+        renderOverlay();
+    }
+
+    // ==================================================================
+    // 📐 Cross-reference (v0.18) — the reason this exists: how much of a
+    // client's water-line KML can be inspected from EXISTING sites
+    // without building new areas. Samples the source layer's geometry and
+    // classifies every sample by distance to the target (site FFZs+FPs,
+    // or another KML layer) into bands (≤50 ft, ≤200 ft default).
+    // Segment-to-segment/point-in-polygon math (engraved), cooperative
+    // yields, results drawn as colored runs on the map + copyable report.
+    // ==================================================================
+    const XREF_COLORS = { 1: '#2bff6f', 2: '#ffd130', 0: '#ff5252' };   // ≤b1, ≤b2, beyond
+    let xrefState = null;   // {running, result, srcId, tgt}
+    let xrefSeq = 0;
+    let xrefSrcSel = '';    // UI selections (session)
+    let xrefTgtSel = 'sites';
+
+    function xrefDistToEnv(x, y, env, pad) {
+        let best = Infinity;
+        for (const pg of env.polys) {
+            if (x < pg.minX - pad || x > pg.maxX + pad || y < pg.minY - pad || y > pg.maxY + pad) continue;
+            if (pointInRingXY(x, y, pg.xs, pg.ys)) return 0;
+            for (let i = 0, j = pg.xs.length - 1; i < pg.xs.length; j = i++) {
+                const c = nbSegPtClosest(x, y, pg.xs[j], pg.ys[j], pg.xs[i], pg.ys[i]);
+                if (c.d < best) best = c.d;
+            }
+        }
+        for (const s of env.segs) {
+            if (x < s.minX - pad || x > s.maxX + pad || y < s.minY - pad || y > s.maxY + pad) continue;
+            const c = nbSegPtClosest(x, y, s.ax, s.ay, s.bx, s.by);
+            if (c.d < best) best = c.d;
+        }
+        return best;
+    }
+
+    function xrefEnvAddSeg(env, A, B) {
+        env.segs.push({
+            ax: A.x, ay: A.y, bx: B.x, by: B.y,
+            minX: Math.min(A.x, B.x), maxX: Math.max(A.x, B.x),
+            minY: Math.min(A.y, B.y), maxY: Math.max(A.y, B.y),
+        });
+    }
+    function xrefEnvAddRing(env, ptsXY) {
+        const xs = [], ys = [];
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        ptsXY.forEach(q => {
+            xs.push(q.x); ys.push(q.y);
+            if (q.x < minX) minX = q.x;
+            if (q.x > maxX) maxX = q.x;
+            if (q.y < minY) minY = q.y;
+            if (q.y > maxY) maxY = q.y;
+        });
+        if (xs.length > 2) env.polys.push({ xs, ys, minX, maxX, minY, maxY });
+    }
+
+    async function runXref() {
+        if (xrefState && xrefState.running) return;
+        const seq = ++xrefSeq;
+        const src = kmlLayerById(xrefSrcSel);
+        if (!src) { setStatus('pick a source KML layer first'); return; }
+        const b1m = ftCfg.xrefB1 / FT_PER_M;
+        const b2m = ftCfg.xrefB2 / FT_PER_M;
+        if (!(b2m > b1m)) { setStatus('band 2 must be larger than band 1'); return; }
+        xrefState = { running: true, result: null };
+        renderPanel();
+        try {
+            await kmlEnsureLoaded(src);
+            if (seq !== xrefSeq) return;
+            const proj = projector((src.bbox.minLat + src.bbox.maxLat) / 2);
+            const notes = ['polygon inner holes ignored', 'lengths are sampling approximations'];
+
+            // ---- target envelope ----
+            const env = { segs: [], polys: [] };
+            let tgtLabel;
+            let sitesUsed = 0;
+            if (xrefTgtSel === 'sites') {
+                tgtLabel = 'site FFZs + FPs';
+                const sites = await fetchRawSites(false);
+                if (seq !== xrefSeq) return;
+                const marginFt = 500;   // index bboxes may be slightly stale
+                const cands = Object.keys(nbIndex.bboxes).filter(id => {
+                    if (!sites[id]) return false;           // access authority (engraved)
+                    if (ftIgnore[id]) return false;         // duplicate/OFFLINE copies don't count as coverage
+                    if (ftCfg.onlyProduction && siteStatus(id) && siteStatus(id) !== 'Production') return false;
+                    const b = nbIndex.bboxes[id];
+                    return b && !b.empty && bboxGapFt(b, src.bbox) <= ftCfg.xrefB2 + marginFt;
+                });
+                if (!cands.length) notes.push('NO sites within range of this layer');
+                for (let i = 0; i < cands.length; i++) {
+                    if (seq !== xrefSeq) return;
+                    setStatus(`cross-ref: fetching site ${cands[i]} (${i + 1}/${cands.length})…`);
+                    let ents;
+                    try { ents = await fetchSiteEntities(cands[i], false); }
+                    catch (e) { notes.push(`site ${siteName(cands[i])} (#${cands[i]}) fetch failed — not counted as coverage`); continue; }
+                    sitesUsed++;
+                    ents.forEach(e => {
+                        if (e.type === 15 && Array.isArray(e.arcs)) {
+                            e.arcs.forEach(a => {
+                                if (a && a.point_a && a.point_b && typeof a.point_a.lat === 'number' && typeof a.point_b.lat === 'number') {
+                                    xrefEnvAddSeg(env, proj.toXY(a.point_a), proj.toXY(a.point_b));
+                                }
+                            });
+                        } else if (e.type === 16) {
+                            const cs = (entityCoords(e) || []).filter(p => p && typeof p.lat === 'number');
+                            if (cs.length > 2) xrefEnvAddRing(env, cs.map(p => proj.toXY(p)));
+                        }
+                    });
+                }
+            } else {
+                const tgt = kmlLayerById(xrefTgtSel);
+                if (!tgt) { setStatus('target layer not found'); xrefState.running = false; renderPanel(); return; }
+                await kmlEnsureLoaded(tgt);
+                if (seq !== xrefSeq) return;
+                tgtLabel = `KML "${tgt.name}"`;
+                tgt.features.forEach(f => {
+                    const xy = f.pts.map(p => proj.toXY({ lat: p[0], lng: p[1] }));
+                    if (f.type === 'poly') {
+                        xrefEnvAddRing(env, xy);
+                    } else if (f.type === 'line') {
+                        for (let i = 1; i < xy.length; i++) xrefEnvAddSeg(env, xy[i - 1], xy[i]);
+                    } else {
+                        xrefEnvAddSeg(env, xy[0], xy[0]);   // point = degenerate segment
+                    }
+                });
+            }
+            if (!env.segs.length && !env.polys.length) {
+                xrefState = { running: false, result: null };
+                setStatus('cross-ref: target has no usable geometry in range');
+                renderPanel();
+                return;
+            }
+
+            // ---- sample + classify the source ----
+            setStatus('cross-ref: sampling source geometry…');
+            // adaptive step: ~10 ft on small layers, coarser on huge ones
+            // (cap ~60k samples so county-scale networks stay responsive)
+            let totalLenM = 0;
+            src.features.forEach(f => {
+                if (f.type === 'point') return;
+                const xy = f.pts.map(p => proj.toXY({ lat: p[0], lng: p[1] }));
+                const n = f.type === 'poly' ? xy.length : xy.length - 1;
+                for (let i = 0; i < n; i++) {
+                    const a = xy[i], b = xy[(i + 1) % xy.length];
+                    totalLenM += Math.hypot(b.x - a.x, b.y - a.y);
+                }
+            });
+            const step = Math.min(30, Math.max(3, totalLenM / 60000));
+            const pad = b2m + 1;
+            const bandLenM = { 0: 0, 1: 0, 2: 0 };
+            const runs = [];
+            const pointHits = { 0: 0, 1: 0, 2: 0 };
+            const pointMarks = [];
+            let ops = 0;
+            const classify = (d) => (Math.round(d * FT_PER_M) < ftCfg.xrefB1 ? 1 : (Math.round(d * FT_PER_M) < ftCfg.xrefB2 ? 2 : 0));
+            for (const f of src.features) {
+                if (seq !== xrefSeq) return;
+                if (f.type === 'point') {
+                    const q = proj.toXY({ lat: f.pts[0][0], lng: f.pts[0][1] });
+                    const band = classify(xrefDistToEnv(q.x, q.y, env, pad));
+                    pointHits[band]++;
+                    if (pointMarks.length < 500) pointMarks.push({ lat: f.pts[0][0], lng: f.pts[0][1], band });
+                    continue;
+                }
+                const xy = f.pts.map(p => proj.toXY({ lat: p[0], lng: p[1] }));
+                const segN = f.type === 'poly' ? xy.length : xy.length - 1;
+                let run = null;
+                const closeRun = () => {
+                    if (run && run.lenM > step) runs.push(run);
+                    run = null;
+                };
+                for (let i = 0; i < segN; i++) {
+                    const A = xy[i], B = xy[(i + 1) % xy.length];
+                    const Pa = f.pts[i], Pb = f.pts[(i + 1) % f.pts.length];
+                    const segLen = Math.hypot(B.x - A.x, B.y - A.y);
+                    if (!segLen) continue;
+                    const n = Math.max(1, Math.ceil(segLen / step));
+                    for (let k = 0; k <= n; k++) {
+                        const t = k / n;
+                        const d = xrefDistToEnv(A.x + (B.x - A.x) * t, A.y + (B.y - A.y) * t, env, pad);
+                        const band = classify(d);
+                        const lat = Pa[0] + (Pb[0] - Pa[0]) * t, lng = Pa[1] + (Pb[1] - Pa[1]) * t;
+                        if (k > 0) bandLenM[band] += segLen / n;
+                        if (!run || run.band !== band) {
+                            closeRun();
+                            run = { band, featName: f.name, pts: [[lat, lng]], lenM: 0 };
+                        } else {
+                            run.lenM += segLen / n;
+                            if (run.pts.length < 1200) run.pts.push([lat, lng]);
+                        }
+                        if (++ops >= 4000) { ops = 0; setStatus(`cross-ref: classifying… (${Math.round(bandLenM[0] + bandLenM[1] + bandLenM[2])} m done)`); await ftYield(); if (seq !== xrefSeq) return; }
+                    }
+                    closeRun();   // per-segment close keeps runs simple; adjacent same-band segs merge visually anyway
+                }
+                closeRun();
+            }
+            runs.sort((a, b) => b.lenM - a.lenM);
+            const result = {
+                at: Date.now(),
+                srcName: src.name, tgtLabel, sitesUsed,
+                b1: ftCfg.xrefB1, b2: ftCfg.xrefB2,
+                stepFt: Math.round(step * FT_PER_M),
+                totalM: totalLenM, bandLenM,
+                runs: runs.slice(0, 1500),
+                runsTotal: runs.length,
+                pointHits, pointMarks,
+                pointsTotal: src.features.filter(f => f.type === 'point').length,
+                notes,
+            };
+            xrefState = { running: false, result };
+            console.log(`${TAG} cross-ref done:`, buildXrefReport().split('\n').slice(0, 8).join(' | '));
+            setStatus(`cross-ref done — ≤${result.b1} ft: ${fmtMi(bandLenM[1])} · ≤${result.b2} ft: ${fmtMi(bandLenM[1] + bandLenM[2])} of ${fmtMi(totalLenM)}`);
+            renderPanel();
+            renderOverlay();
+        } catch (e) {
+            console.warn(`${TAG} cross-ref failed:`, e);
+            xrefState = { running: false, result: null, error: String(e && e.message || e) };
+            setStatus(`cross-ref failed — ${String(e && e.message || e)}`);
+            renderPanel();
+        }
+    }
+
+    function fmtMi(m) {
+        const ft = m * FT_PER_M;
+        return ft >= 5280 ? `${(ft / 5280).toFixed(2)} mi` : `${Math.round(ft).toLocaleString()} ft`;
+    }
+    function pct(part, whole) { return whole > 0 ? `${(part / whole * 100).toFixed(1)}%` : '—'; }
+
+    function buildXrefReport() {
+        const r = xrefState && xrefState.result;
+        if (!r) return 'AIM Fleet Tools — no cross-reference run yet';
+        const L = r.bandLenM;
+        const lines = [];
+        lines.push(`AIM Fleet Tools — KML cross-reference [${ENV_LABEL}]`);
+        lines.push(`Source: "${r.srcName}" · Target: ${r.tgtLabel}${r.sitesUsed ? ` (${r.sitesUsed} site(s) in range)` : ''}`);
+        lines.push(`Ran ${new Date(r.at).toLocaleString()} · bands ≤${r.b1} ft / ≤${r.b2} ft · sampled every ~${r.stepFt} ft`);
+        lines.push('');
+        lines.push(`Line length total: ${fmtMi(r.totalM)}`);
+        lines.push(`  ≤${r.b1} ft of target:      ${fmtMi(L[1])} (${pct(L[1], r.totalM)})`);
+        lines.push(`  ${r.b1}–${r.b2} ft:            ${fmtMi(L[2])} (${pct(L[2], r.totalM)})`);
+        lines.push(`  ≤${r.b2} ft CUMULATIVE:    ${fmtMi(L[1] + L[2])} (${pct(L[1] + L[2], r.totalM)})   ← inspectable from existing coverage`);
+        lines.push(`  beyond ${r.b2} ft:          ${fmtMi(L[0])} (${pct(L[0], r.totalM)})   ← needs new site area`);
+        if (r.pointsTotal) {
+            lines.push('');
+            lines.push(`Points: ${r.pointsTotal} total — ≤${r.b1} ft: ${r.pointHits[1]} · ${r.b1}–${r.b2} ft: ${r.pointHits[2]} · beyond: ${r.pointHits[0]}`);
+        }
+        lines.push('');
+        lines.push(`Longest stretches (${Math.min(40, r.runsTotal)} of ${r.runsTotal}):`);
+        r.runs.slice(0, 40).forEach((run, i) => {
+            const tag = run.band === 1 ? `≤${r.b1}ft` : (run.band === 2 ? `≤${r.b2}ft` : `>${r.b2}ft`);
+            const mid = run.pts[Math.floor(run.pts.length / 2)];
+            lines.push(`  ${i + 1}. [${tag}] ${fmtMi(run.lenM)}${run.featName ? ` — ${run.featName}` : ''} @ ${mid[0].toFixed(6)}, ${mid[1].toFixed(6)}`);
+        });
+        r.notes.forEach(n => lines.push(`Note: ${n}`));
+        return lines.join('\n');
+    }
+
+    // ==================================================================
     // UI — floating button on the landing page + sectioned panel
     // ==================================================================
     let buttonEl = null;
     let panelEl = null;
-    let openSections = { sweep: true, map: true, metrics: false };
+    let openSections = { sweep: true, map: true, kml: true, xref: true, metrics: false };
+    let kmlSearch = '';
+
+    function flyToBbox(b) {
+        const map = getLandingMap();
+        if (!map || !b || !isFinite(b.minLat)) return;
+        try { map.fitBounds([[b.minLat, b.minLng], [b.maxLat, b.maxLng]]); } catch (e) { console.warn(`${TAG} fitBounds failed:`, e); }
+    }
+    function ptsBbox(pts) {
+        let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+        pts.forEach(p => {
+            if (p[0] < minLat) minLat = p[0];
+            if (p[0] > maxLat) maxLat = p[0];
+            if (p[1] < minLng) minLng = p[1];
+            if (p[1] > maxLng) maxLng = p[1];
+        });
+        return { minLat, minLng, maxLat, maxLng };
+    }
+
+    async function kmlSaveToRepo(ly) {
+        if (!cachedToken) { setStatus('GitHub token needed (AIM Controls gear)'); return; }
+        try {
+            setStatus(`saving "${ly.name}" to GitHub…`);
+            const fname = ly.name.replace(/[^\w\- .]/g, '_') + '.kml';
+            const sha = await kmlRepoPut(fname, ly.rawText);
+            const newId = `repo:${fname}`;
+            kmlStyles[newId] = kmlStyleFor(ly.id);   // carry the style over
+            delete kmlStyles[ly.id];
+            saveKmlStyles();
+            Object.assign(ly, { id: newId, source: 'repo', repoName: fname, sha });
+            kmlRepoList(true).catch(() => {});
+            setStatus(`"${ly.name}" saved to GitHub — persistent for every session ✓`);
+        } catch (e) { setStatus(`save failed — ${String(e && e.message || e)}`); }
+        renderPanel();
+    }
+
+    async function kmlDelete(ly) {
+        if (ly.source === 'session') {
+            kmlLayers = kmlLayers.filter(l => l.id !== ly.id);
+            delete kmlStyles[ly.id];
+            saveKmlStyles();
+            renderPanel();
+            renderOverlay();
+            return;
+        }
+        // Repo delete is destructive — double-click ARM (project convention)
+        if (!kmlDeleteArm || kmlDeleteArm.id !== ly.id || Date.now() - kmlDeleteArm.at > 5000) {
+            kmlDeleteArm = { id: ly.id, at: Date.now() };
+            renderPanel();
+            setStatus(`click ✕ again within 5s to DELETE "${ly.name}" from GitHub for everyone`);
+            setTimeout(() => { if (kmlDeleteArm && Date.now() - kmlDeleteArm.at >= 5000) { kmlDeleteArm = null; renderPanel(); } }, 5200);
+            return;
+        }
+        kmlDeleteArm = null;
+        try {
+            const list = await kmlRepoList(true);   // fresh sha
+            const f = list.find(x => x.name === ly.repoName);
+            if (f) await kmlRepoDelete(ly.repoName, f.sha);
+            kmlLayers = kmlLayers.filter(l => l.id !== ly.id);
+            delete kmlStyles[ly.id];
+            saveKmlStyles();
+            setStatus(`deleted "${ly.name}" from GitHub`);
+        } catch (e) { setStatus(`delete failed — ${String(e && e.message || e)}`); }
+        renderPanel();
+        renderOverlay();
+    }
+
+    function renderKmlSection() {
+        if (!openSections.kml) return '';
+        const rows = [];
+        rows.push('<div style="padding:6px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + '<span data-ft="kml-upload" style="cursor:pointer;color:#5fff5f;font-weight:bold">⬆ Load KML…</span>'
+            + '<span style="color:#666">session-only until 💾 · ☁ = in GitHub · KMZ: unzip first</span>'
+            + '<input id="aim-ft-kml-file" type="file" multiple accept=".kml" style="display:none">'
+            + `<input id="aim-ft-kml-search" type="text" placeholder="Search layers/features…" value="${escapeHtml(kmlSearch)}" style="flex:1;min-width:90px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:2px 6px;font:inherit;outline:none;">`
+            + '</div>');
+        if (!kmlLayers.length) {
+            rows.push('<div style="padding:6px 10px;color:#888">No KML layers yet.' + (cachedToken ? '' : ' <span style="color:#ffa030">(GitHub token needed to see saved layers)</span>') + '</div>');
+        }
+        const q = kmlSearch.trim().toLowerCase();
+        const featHits = [];
+        const num = 'width:46px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;padding:1px 3px;';
+        kmlLayers.forEach(ly => {
+            const nameHit = !q || ly.name.toLowerCase().includes(q);
+            if (q && ly.features) {
+                ly.features.forEach((f, fi) => {
+                    if (featHits.length < 20 && f.name && f.name.toLowerCase().includes(q)) featHits.push({ ly, f, fi });
+                });
+            }
+            if (!nameHit) return;
+            const st = kmlStyleFor(ly.id);
+            const meta = ly.features ? `${ly.features.length}f · ${ly.vertexCount}v` : 'not loaded';
+            const armed = kmlDeleteArm && kmlDeleteArm.id === ly.id && Date.now() - kmlDeleteArm.at < 5000;
+            rows.push(`<div style="padding:3px 10px;border-bottom:1px solid #1d2430;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">`
+                + `<input type="checkbox" data-kml-show="${ly.id}" ${st.show ? 'checked' : ''} title="show/hide on the map">`
+                + `<input type="color" data-kml-color="${ly.id}" value="${st.color}" title="layer color" style="width:26px;height:18px;padding:0;border:none;background:none;cursor:pointer;">`
+                + `<span style="flex:1;min-width:80px;">${escapeHtml(ly.name)} <span style="color:#666">${ly.source === 'repo' ? '☁' : 'session'} · ${escapeHtml(meta)}</span></span>`
+                + `<label style="color:#888" title="line width">w <input type="number" data-kml-width="${ly.id}" value="${st.width}" min="0.5" max="10" step="0.5" style="${num}"></label>`
+                + `<label style="color:#888" title="fill polygons"><input type="checkbox" data-kml-fill="${ly.id}" ${st.fill ? 'checked' : ''}> fill</label>`
+                + `<label style="color:#888" title="opacity">op <input type="number" data-kml-op="${ly.id}" value="${st.opacity}" min="0.1" max="1" step="0.1" style="${num}"></label>`
+                + `<span data-kml-fly="${ly.id}" style="cursor:pointer" title="fly to this layer">🎯</span>`
+                + (ly.source === 'session' ? `<span data-kml-save="${ly.id}" style="cursor:pointer;color:#7adfe6" title="Save to GitHub — persistent, shared across sessions">💾</span>` : '')
+                + `<span data-kml-del="${ly.id}" style="cursor:pointer;color:#ff5252" title="${ly.source === 'repo' ? 'Delete from GitHub (click twice to confirm)' : 'Remove this session layer'}">${armed ? '⚠ sure?' : '✕'}</span>`
+                + '</div>');
+        });
+        featHits.forEach(h => {
+            rows.push(`<div style="padding:2px 10px 2px 30px;border-bottom:1px solid #1d2430;color:#aaa;">`
+                + `↳ ${escapeHtml(h.f.name)} <span style="color:#666">(${escapeHtml(h.ly.name)} · ${h.f.type})</span> `
+                + `<span data-kml-flyf="${h.ly.id}|${h.fi}" style="cursor:pointer">🎯</span></div>`);
+        });
+        return rows.join('');
+    }
+
+    function renderXrefSection() {
+        if (!openSections.xref) return '';
+        const sel = 'background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:2px 4px;font:inherit;max-width:180px;';
+        const num = 'width:52px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;padding:1px 3px;';
+        const srcOpts = kmlLayers.map(ly => `<option value="${ly.id}" ${xrefSrcSel === ly.id ? 'selected' : ''}>${escapeHtml(ly.name)}</option>`).join('');
+        const tgtOpts = `<option value="sites" ${xrefTgtSel === 'sites' ? 'selected' : ''}>Site FFZs + FPs (existing coverage)</option>`
+            + kmlLayers.filter(ly => ly.id !== xrefSrcSel).map(ly => `<option value="${ly.id}" ${xrefTgtSel === ly.id ? 'selected' : ''}>KML: ${escapeHtml(ly.name)}</option>`).join('');
+        const running = xrefState && xrefState.running;
+        const rows = [];
+        rows.push('<div style="padding:6px 10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + `<label>Source <select data-xr="src" style="${sel}">${srcOpts || '<option value="">(load a KML first)</option>'}</select></label>`
+            + `<label>vs <select data-xr="tgt" style="${sel}">${tgtOpts}</select></label>`
+            + `<label title="inner band">≤<input type="number" data-ft-num="xrefB1" value="${ftCfg.xrefB1}" min="5" max="1000" step="5" style="${num}"> ft</label>`
+            + `<label title="outer band">≤<input type="number" data-ft-num="xrefB2" value="${ftCfg.xrefB2}" min="10" max="5000" step="10" style="${num}"> ft</label>`
+            + (running
+                ? '<span data-ft="xr-abort" style="cursor:pointer;color:#ff5252;font-weight:bold">■ Abort</span>'
+                : '<span data-ft="xr-run" style="cursor:pointer;color:#5fff5f;font-weight:bold">▶ Run cross-ref</span>')
+            + '<span data-ft="xr-copy" style="cursor:pointer;color:#7adfe6">📋 Copy report</span>'
+            + '<span data-ft="xr-clear" style="cursor:pointer;color:#888">Clear</span>'
+            + '</div>');
+        if (xrefState && xrefState.error) rows.push(`<div style="padding:4px 10px;color:#ff5252">${escapeHtml(xrefState.error)}</div>`);
+        if (running) rows.push('<div style="padding:6px 10px;color:#8899bb">Running… (progress in the status line up top)</div>');
+        const r = xrefState && xrefState.result;
+        if (r) {
+            const L = r.bandLenM;
+            rows.push(`<div style="padding:4px 10px;border-bottom:1px solid #222834;">`
+                + `"${escapeHtml(r.srcName)}" vs ${escapeHtml(r.tgtLabel)}${r.sitesUsed ? ` <span style="color:#888">(${r.sitesUsed} sites in range)</span>` : ''} — total ${fmtMi(r.totalM)}<br>`
+                + `<span style="color:${XREF_COLORS[1]}">■ ≤${r.b1} ft: ${fmtMi(L[1])} (${pct(L[1], r.totalM)})</span> · `
+                + `<span style="color:${XREF_COLORS[2]}">■ ${r.b1}–${r.b2} ft: ${fmtMi(L[2])} (${pct(L[2], r.totalM)})</span> · `
+                + `<span style="color:${XREF_COLORS[0]}">■ beyond: ${fmtMi(L[0])} (${pct(L[0], r.totalM)})</span><br>`
+                + `<b style="color:#5fff5f">≤${r.b2} ft cumulative: ${fmtMi(L[1] + L[2])} (${pct(L[1] + L[2], r.totalM)})</b> <span style="color:#888">— inspectable from existing coverage</span>`
+                + (r.pointsTotal ? `<br><span style="color:#aaa">points: ≤${r.b1}ft ${r.pointHits[1]} · ${r.b1}–${r.b2}ft ${r.pointHits[2]} · beyond ${r.pointHits[0]} of ${r.pointsTotal}</span>` : '')
+                + '</div>');
+            rows.push('<div style="max-height:28vh;overflow-y:auto;">'
+                + r.runs.slice(0, 30).map((run, i) =>
+                    `<div class="aim-ft-row" data-xr-fly="${i}" style="padding:2px 10px;cursor:pointer;border-bottom:1px solid #1d2430;">`
+                    + `<span style="color:${XREF_COLORS[run.band]};font-weight:bold">${run.band === 1 ? `≤${r.b1}ft` : (run.band === 2 ? `≤${r.b2}ft` : `>${r.b2}ft`)}</span> `
+                    + `${fmtMi(run.lenM)}${run.featName ? ` <span style="color:#888">— ${escapeHtml(run.featName)}</span>` : ''} 🎯</div>`).join('')
+                + (r.runsTotal > 30 ? `<div style="color:#888;padding:2px 10px">…${r.runsTotal - 30} more stretches in 📋 Copy report</div>` : '')
+                + '</div>');
+        }
+        return rows.join('');
+    }
     let expandedPair = null;   // "aId:bId"
 
     function onLandingPage() {
@@ -1743,7 +2382,7 @@
             dotData = [];
             pinsKey = null;
             setupGeomBySite = {};
-            ovSvg = null; ovSetupsG = null; ovPinsG = null; ovMap = null;
+            ovSvg = null; ovSetupsG = null; ovKmlG = null; ovXrefG = null; ovPinsG = null; ovMap = null;
             engReset(baseEng); engReset(faaEng);
             landingMapRef = null;
             return;
@@ -1942,6 +2581,10 @@
             + renderSweepSection()
             + sectionHeader('map', '🗺', 'Map', 'basemap + airspace chart')
             + renderMapSection()
+            + sectionHeader('kml', '📎', 'KML Layers', `${kmlLayers.length} layer(s)`)
+            + renderKmlSection()
+            + sectionHeader('xref', '📐', 'Cross-reference', 'KML vs sites / KML vs KML')
+            + renderXrefSection()
             + sectionHeader('metrics', '📊', 'Fleet Metrics', 'per-site entity counts (bones)')
             + renderMetricsSection();
     }
@@ -1975,7 +2618,7 @@
 
             // Delegated — the body is rebuilt on every render, the root never is
             panelEl.addEventListener('click', (ev) => {
-                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-ft-view]')) return;   // checkbox → change handler
+                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color]')) return;   // checkbox/color → change handler
                 const clAll = ev.target.closest('[data-ft-clients]');
                 if (clAll) {
                     if (clAll.getAttribute('data-ft-clients') === 'all') {
@@ -2007,6 +2650,11 @@
                 if (act) {
                     const cmd = act.getAttribute('data-ft');
                     if (cmd === 'close') panelEl.style.display = 'none';
+                    else if (cmd === 'kml-upload') { const fi = panelEl.querySelector('#aim-ft-kml-file'); if (fi) fi.click(); }
+                    else if (cmd === 'xr-run') runXref();
+                    else if (cmd === 'xr-abort') { xrefSeq++; if (xrefState) xrefState.running = false; setStatus('cross-ref aborted'); renderPanel(); }
+                    else if (cmd === 'xr-copy') copyText(buildXrefReport(), 'cross-ref report copied');
+                    else if (cmd === 'xr-clear') { xrefSeq++; xrefState = null; renderPanel(); renderOverlay(); }
                     else if (cmd === 'run') runSweep();
                     else if (cmd === 'abort') abortSweep();
                     else if (cmd === 'copy') copyText(buildSweepReport(), 'report copied to clipboard');
@@ -2066,6 +2714,31 @@
                     scheduleSetupRefresh();
                     return;
                 }
+                const kFly = ev.target.closest('[data-kml-fly]');
+                if (kFly) {
+                    const ly = kmlLayerById(kFly.getAttribute('data-kml-fly'));
+                    if (ly && ly.bbox) flyToBbox(ly.bbox);
+                    else if (ly && !ly.features) kmlEnsureLoaded(ly).then(() => { flyToBbox(ly.bbox); renderOverlay(); renderPanel(); }).catch(e => setStatus(`load failed — ${e.message}`));
+                    return;
+                }
+                const kFlyF = ev.target.closest('[data-kml-flyf]');
+                if (kFlyF) {
+                    const [lid, fi] = kFlyF.getAttribute('data-kml-flyf').split('|');
+                    const ly = kmlLayerById(lid);
+                    const f = ly && ly.features && ly.features[Number(fi)];
+                    if (f) flyToBbox(ptsBbox(f.pts));
+                    return;
+                }
+                const kSave = ev.target.closest('[data-kml-save]');
+                if (kSave) { const ly = kmlLayerById(kSave.getAttribute('data-kml-save')); if (ly) kmlSaveToRepo(ly); return; }
+                const kDel = ev.target.closest('[data-kml-del]');
+                if (kDel) { const ly = kmlLayerById(kDel.getAttribute('data-kml-del')); if (ly) kmlDelete(ly); return; }
+                const xFly = ev.target.closest('[data-xr-fly]');
+                if (xFly && xrefState && xrefState.result) {
+                    const run = xrefState.result.runs[Number(xFly.getAttribute('data-xr-fly'))];
+                    if (run) flyToBbox(ptsBbox(run.pts));
+                    return;
+                }
                 const pair = ev.target.closest('[data-ft-pair]');
                 if (pair) {
                     const key = pair.getAttribute('data-ft-pair');
@@ -2073,7 +2746,57 @@
                     renderPanel();
                 }
             });
+            // Live search — re-render but keep the search box focused
+            panelEl.addEventListener('input', (ev) => {
+                if (ev.target.id !== 'aim-ft-kml-search') return;
+                kmlSearch = ev.target.value;
+                renderPanel();
+                const box = panelEl.querySelector('#aim-ft-kml-search');
+                if (box) {
+                    box.focus();
+                    try { box.setSelectionRange(box.value.length, box.value.length); } catch (e) {}
+                }
+            });
             panelEl.addEventListener('change', (ev) => {
+                if (ev.target.id === 'aim-ft-kml-file') {
+                    const files = [...(ev.target.files || [])];
+                    ev.target.value = '';
+                    if (files.length) kmlHandleFiles(files);
+                    return;
+                }
+                const kmlAttr = ['data-kml-show', 'data-kml-fill', 'data-kml-color', 'data-kml-width', 'data-kml-op']
+                    .find(a => ev.target.hasAttribute && ev.target.hasAttribute(a));
+                if (kmlAttr) {
+                    const ly = kmlLayerById(ev.target.getAttribute(kmlAttr));
+                    if (!ly) return;
+                    const st = kmlStyleFor(ly.id);
+                    if (kmlAttr === 'data-kml-show') {
+                        st.show = !!ev.target.checked;
+                        if (st.show && !ly.features) {
+                            setStatus(`loading "${ly.name}"…`);
+                            kmlEnsureLoaded(ly)
+                                .then(() => { setStatus(`"${ly.name}" loaded`); renderOverlay(); renderPanel(); })
+                                .catch(e => setStatus(`load failed — ${String(e && e.message || e)}`));
+                        }
+                    } else if (kmlAttr === 'data-kml-fill') st.fill = !!ev.target.checked;
+                    else if (kmlAttr === 'data-kml-color') st.color = String(ev.target.value);
+                    else {
+                        const v = Number(ev.target.value);
+                        if (isNaN(v)) return;
+                        if (kmlAttr === 'data-kml-width') st.width = v;
+                        else st.opacity = v;
+                    }
+                    saveKmlStyles();
+                    renderOverlay();
+                    return;
+                }
+                const xrSel = ev.target.closest('select[data-xr]');
+                if (xrSel) {
+                    if (xrSel.getAttribute('data-xr') === 'src') xrefSrcSel = String(xrSel.value);
+                    else xrefTgtSel = String(xrSel.value);
+                    renderPanel();
+                    return;
+                }
                 const bmSel = ev.target.closest('select[data-ft-basemap]');
                 if (bmSel) {
                     const v = String(bmSel.value);
@@ -2097,7 +2820,8 @@
                             updateFaaTiles();
                             setStatus(`FAA chart opacity = ${v}`);
                         } else {
-                            setStatus(`${prop === 'thresholdFt' ? 'threshold' : 'prefilter margin'} = ${v} ft — takes effect on the next sweep`);
+                            const labels = { thresholdFt: 'threshold', marginFt: 'prefilter margin', xrefB1: 'cross-ref band 1', xrefB2: 'cross-ref band 2' };
+                            setStatus(`${labels[prop] || prop} = ${v} ft — takes effect on the next ${prop.startsWith('xref') ? 'cross-ref run' : 'sweep'}`);
                         }
                     }
                     return;
@@ -2165,6 +2889,7 @@
             });
         }
         panelEl.style.display = 'flex';
+        kmlBoot();   // idempotent — lists persistent KML layers once the token exists
         // Names for stored results/ignore chips on a fresh page load
         if (!rawSites) {
             fetchRawSites(false).then(() => renderPanel())
@@ -2193,5 +2918,8 @@
     };
     if (document.body) start();
     else document.addEventListener('DOMContentLoaded', start, { once: true });
+    // Persistent KML layers with show=true should appear without opening
+    // the panel — boot once the token has had a moment to arrive
+    setTimeout(() => { try { kmlBoot(); } catch (e) {} }, 2500);
     console.log(`${TAG} v${SCRIPT_VERSION} ready (${ENV_LABEL}${onLandingPage() ? ', landing page' : ''})`);
 })();
