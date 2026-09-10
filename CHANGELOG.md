@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-09 — ⚠ Fleet Tools v0.8: the landing map is REACT — fiber-walk discovery (latest — dev only, feature #250)
+
+The deep map probe settled it: the sites-select map container carries `__reactFiber$` props — the landing map is React-rendered inside a thin Angular shell (the whole Angular tree is 7 scopes of chrome), which is why every Angular route and the global L.Map patch came up empty. v0.8 adds the proven React fiber walk as the primary deep route: climb from the container's fiber to its root, then walk the tree checking stateNode / props / state and each hook's state, one level into every object — catches react-leaflet's `stateNode.leafletElement`, context `{map}`, and `useRef({current: map})` shapes alike. On find, the console logs the route plus whether the map is an instance of the global `L.Map` (if not, it's a bundled Leaflet copy — flag anything odd about how the drawn layers look). `__aimFleetMapDebug()` now reports `reactFiber` and `fibersWalked`; the probe snippet gained the same fiber walk with component-name paths.
+
 ## 2026-09-09 — ⚠ Fleet Tools v0.7: map discovery digs into Angular controllers ($ctrl.map) (latest — dev only, feature #250)
 
 v0.6's debug run showed both Leaflet (1.3.1) and Angular (1.8.3, injector reachable) alive, `$rootScope.current_map` absent — and exposed the walker's blind spot: it skipped every `$`-prefixed scope key, but Angular components (pr-sites-select is one) publish their controller as **`$ctrl`**, and controller-as maps live one level down (`$ctrl.map`). v0.7 inspects `$ctrl`-style keys, peeks one level inside controller objects, walks up to 2500 scopes (445-site page = big tree), and adds a bounded window-globals sweep as a final route — heavy routes throttled to once per 3s until found. When the map is found the console also says whether it's an instance of the global `L.Map` (a bundled Leaflet copy would explain drawing quirks). The deep console probe (ShortKeys/AIM_Landing_Map_Probe.js) got the same controller-peek upgrade.

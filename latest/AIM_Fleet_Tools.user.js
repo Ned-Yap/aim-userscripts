@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.7
+// @version      0.8
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.7';
+    const SCRIPT_VERSION = '0.8';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -921,6 +921,68 @@
         return null;
     }
 
+    // v0.8: the landing map container carries __reactFiber$ props (live
+    // probe 2026-09-09) — the sites-select map is REACT-rendered inside the
+    // Angular shell (only 7 Angular scopes exist; the shell is chrome).
+    // So the map lives in React fiber state, reachable by the proven
+    // fiber-walk technique: climb from the container's fiber to its root,
+    // then BFS child/sibling checking stateNode / memoizedProps /
+    // memoizedState (+ the hooks chain, one level into each object —
+    // catches react-leaflet v2 stateNode.leafletElement, v3+ context
+    // {map}, and useRef {current: map} alike).
+    let lastFiberInspected = 0;
+    function reactFiberWalkForMap(container) {
+        let startFiber = null;
+        for (const k in container) {
+            if (k.startsWith('__reactFiber$')) { startFiber = container[k]; break; }
+        }
+        if (!startFiber) return null;
+        const checkObj = (o) => {
+            if (!o || typeof o !== 'object') return null;
+            if (looksLikeLeafletMap(o)) return o;
+            if (o.nodeType) return null;   // DOM nodes: direct check only
+            try {
+                const keys = Object.keys(o);
+                if (keys.length <= 60) {
+                    for (const k of keys) {
+                        try { const v = o[k]; if (looksLikeLeafletMap(v)) return v; } catch (e) {}
+                    }
+                }
+            } catch (e) {}
+            return null;
+        };
+        let top = startFiber;
+        for (let i = 0; i < 60 && top.return; i++) top = top.return;
+        const queue = [top];
+        const seen = new Set();
+        let inspected = 0;
+        while (queue.length && inspected < 4000) {
+            const f = queue.shift();
+            if (!f || seen.has(f)) continue;
+            seen.add(f);
+            inspected++;
+            try {
+                for (const slot of [f.stateNode, f.memoizedProps, f.memoizedState]) {
+                    const hit = checkObj(slot);
+                    if (hit) { lastFiberInspected = inspected; return hit; }
+                }
+                // hooks chain (function components): each hook's state can
+                // hold the map (useState/useRef/useContext)
+                let hook = f.memoizedState;
+                let h = 0;
+                while (hook && typeof hook === 'object' && 'memoizedState' in hook && h++ < 40) {
+                    const hit = checkObj(hook.memoizedState);
+                    if (hit) { lastFiberInspected = inspected; return hit; }
+                    hook = hook.next;
+                }
+            } catch (e) {}
+            if (f.child) queue.push(f.child);
+            if (f.sibling) queue.push(f.sibling);
+        }
+        lastFiberInspected = inspected;
+        return null;
+    }
+
     function getLandingMap() {
         if (landingMapRef && landingMapRef._container && document.body.contains(landingMapRef._container)) {
             return landingMapRef;
@@ -940,11 +1002,19 @@
                 } catch (e) {}
             }
         }
-        // Heavy routes below (scope-tree walk + window sweep) — at most
-        // once per 3s so the 2s discovery poll stays cheap until found
+        // Heavy routes below (fiber walk + scope-tree walk + window sweep)
+        // — at most once per 3s so the discovery poll stays cheap
         const now = Date.now();
         if (now - lastDeepSearchAt < 3000) return null;
         lastDeepSearchAt = now;
+        // React fiber route — the landing map's actual home
+        for (const container of containers) {
+            if (!container) continue;
+            try {
+                const hit = reactFiberWalkForMap(container);
+                if (hit) return stampFoundMap(hit, `react fiber walk (${lastFiberInspected} fibers)`);
+            } catch (e) { console.warn(`${TAG} react fiber route threw:`, e); }
+        }
         // Angular scope route
         try {
             const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
@@ -1024,9 +1094,15 @@
             d.rootCurrentMap = !!looksLikeLeafletMap(root.current_map);
             d.rootMapishKeys = Object.keys(root).filter(k => k.charAt(0) !== '$' && /map/i.test(k)).slice(0, 10);
         } catch (e) { d.rootCurrentMap = 'n/a'; }
+        try {
+            const mc = document.getElementById('pr-sites-select-map');
+            d.reactFiber = !!(mc && Object.keys(mc).some(k => k.startsWith('__reactFiber$')));
+        } catch (e) { d.reactFiber = 'n/a'; }
+        lastDeepSearchAt = 0;   // debug call always gets a full search
         d.found = !!getLandingMap();
         d.foundVia = mapFoundVia;
         d.scopesWalked = lastWalkInspected;
+        d.fibersWalked = lastFiberInspected;
         return d;
     }
     try {
