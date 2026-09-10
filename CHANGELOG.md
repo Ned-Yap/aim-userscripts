@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-10 — 🖊 Mission Bank Tools v2.92 + Site Setup Tools v4.273: legacy nested-asset sites — "_ID ####" pad missions own their equipment (latest — dev only)
+
+Legacy sites keep old per-equipment micro missions ("TXL 35 Unit 2 3806BH Well Head", 7 steps) alongside the real pad mission ("TXL 35 Unit 2 3806BH_ID 468"), with equipment polygons nested inside the pad polygon — so the 🖊 Lasso exact-matched every nested asset to its micro and split a pad's coverage across a pile of tiny missions. New doctrine: **"_ID ####" in a mission name marks THE PAD** — that mission owns every asset whose name extends its root, and lassoed assets route to it ahead of the name ladder (longest root wins, one row per mission, worst-case range kept). Assets **no** _ID mission owns still fall through to the normal ladder, so pads that only ever had equipment micros keep flying them. The result popup gains a cyan **"Folded into pad missions (N)"** list showing exactly which assets collapsed into which _ID mission — review it: if a folded micro (e.g. a Flare mission) should still fly separately, M2-add it in the merge editor. Also: the pad-root ladder rung and the Asset Inspector's 🔍 Find in Missions mirror now accept the glued "…3806BH**_ID** 468" suffix (no space) as a boundary.
+
 ## 2026-09-10 — ⭐ NEW SCRIPT IN PROD: AIM Fleet Tools v0.24 — fleet map, overlap sweep, KML layers & coverage analysis
 
 The landing page (sites-select, before entering any site) now has a toolkit. **Install once** — new scripts don't auto-appear: `https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Fleet_Tools.user.js` (auto-updates afterward). The **⚠ Fleet Tools** button (bottom-right) opens a sectioned panel:

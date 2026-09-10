@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.91
+// @version      2.92
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.91';
+    const SCRIPT_VERSION = '2.92';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5388,30 +5388,66 @@
         const inLoop = (a) => genPointInPoly(genCentroid(a.ring), ring) || a.ring.some(p => genPointInPoly(p, ring));
         const inside = (ent.assets || []).filter(a => a.ring && a.ring.length >= 3 && inLoop(a));
         if (!inside.length) { showToast('🖊 No pads inside the loop.', '#ff9800', 3500); return; }
-        const rows = [], skipped = [];
+        const rows = [], skipped = [], folded = [];
         const skip = (a, reason) => skipped.push({ name: a.name, reason, pt: genCentroid(a.ring) });
         // v2.91: several asset polygons can resolve to the SAME mission now
         // that the pad-root ladder rung maps "<Pad> <Equipment>" polygons to
         // their pad's mission — collapse them to one row per mission, keeping
         // the farthest polygon so battery math stays worst-case.
         const rowByMission = new Map();
+        // v2.92: LEGACY nested-asset sites — equipment polygons ("TXL 35
+        // Unit 2 3806BH Well Head") sit INSIDE the pad polygon ("TXL 35
+        // Unit 2 3806BH_ID 468") and old per-equipment micro missions still
+        // exist alongside the real pad mission, so the ladder exact-matched
+        // each nested asset to its micro and SPLIT the pad's coverage.
+        // Doctrine (user, 2026-09-10): "_ID ####" in a mission name marks
+        // THE PAD — an _ID mission owns every asset whose name extends its
+        // root, and those assets route to it ahead of the ladder. Longest
+        // root wins; assets NO _ID mission owns fall through to the ladder,
+        // so pads that only ever had equipment micros keep flying them.
+        const idMissions = (missions || [])
+            .filter(m => m && typeof m.name === 'string' && /_id\s*\d+/i.test(m.name))
+            .map(m => ({ m, root: m.name.trim().toLowerCase().replace(/[\s_]*_id\s*\d+.*$/i, '') }))
+            .filter(x => x.root.length >= 4)
+            .sort((x, y) => y.root.length - x.root.length);
+        const idOwners = (name) => {
+            const want = String(name || '').trim().toLowerCase();
+            const hits = idMissions.filter(x => want === x.root || want.startsWith(x.root + ' ') || want.startsWith(x.root + '_'));
+            if (!hits.length) return null;
+            return hits.filter(x => x.root.length === hits[0].root.length).map(x => x.m);
+        };
         inside.forEach(a => {
-            const cands = rankMatchMissions(a.name, missions);
+            const cands = idOwners(a.name) || rankMatchMissions(a.name, missions);
             if (!cands.length) { skip(a, 'no mission with this name'); return; }
             if (cands.length > 1) { skip(a, `${cands.length} mission matches (add it via M2)`); return; }
+            const mission = cands[0];
+            const isFold = mission.name.trim().toLowerCase() !== String(a.name || '').trim().toLowerCase();
             const r = byAsset.get(a.id);
+            const rOk = !!(r && r.status === 'ok' && r.verified && !r.disagree);
+            const prev = rowByMission.get(mission.id);
+            if (prev) {
+                // pad already staged — this polygon only sharpens the range
+                if (rOk && r.worstFt > prev.ft && r.worstFt <= cfg.tulipRadiusFt) { prev.asset = a; prev.ft = r.worstFt; prev.tulip = prev.ft > cfg.tattuRadiusFt; }
+                if (isFold) folded.push({ name: a.name, mission: mission.name });
+                return;
+            }
             if (!r || r.status !== 'ok') { skip(a, r ? (r.status === 'no-ffz' ? 'no FFZ' : 'no legal route') : 'no range data'); return; }
             if (!r.verified || r.disagree) { skip(a, 'range unverified (see console)'); return; }
             if (r.worstFt > cfg.tulipRadiusFt) { skip(a, `over ${(cfg.tulipRadiusFt / 1000).toFixed(0)}k ft`); return; }
-            const prev = rowByMission.get(cands[0].id);
-            if (prev) {
-                if (r.worstFt > prev.ft) { prev.asset = a; prev.ft = r.worstFt; prev.tulip = prev.ft > cfg.tattuRadiusFt; }
-                return;
-            }
-            const row = { asset: a, mission: cands[0], ft: r.worstFt, tulip: r.worstFt > cfg.tattuRadiusFt };
-            rowByMission.set(cands[0].id, row);
+            const row = { asset: a, mission, ft: r.worstFt, tulip: r.worstFt > cfg.tattuRadiusFt };
+            rowByMission.set(mission.id, row);
             rows.push(row);
+            if (isFold) folded.push({ name: a.name, mission: mission.name });
         });
+        // Sweep: a skipped asset whose _ID owner mission DID get staged is
+        // not a problem — its pad is covered (the pad polygon carried the
+        // mission through the range gates). Reclassify as a fold so the map
+        // doesn't ✕ a covered pad.
+        for (let i = skipped.length - 1; i >= 0; i--) {
+            const own = idOwners(skipped[i].name);
+            const cover = own && own.length === 1 && rowByMission.get(own[0].id);
+            if (cover) { folded.push({ name: skipped[i].name, mission: own[0].name }); skipped.splice(i, 1); }
+        }
         // Pre-order = bearing sweep around base with the seam at the largest
         // angular gap — the human "walk the loop" order. It feeds the
         // optimizer as a seed AND is the tie-break when the simulator sees
@@ -5450,10 +5486,10 @@
         const offN = (pw && pw.ok) ? pw.offCount() : 0;
         if (offN) console.warn(`${TAG} [lasso] ${offN} pad-pair legs estimated off-graph (straight ×1.25)`);
         if (!variants.length) { showToast(`🖊 ${inside.length} pads in loop, none usable — ${skipped.length} skipped (see the popup).`, '#ff9800', 4500); }
-        lassoShowResults(variants, skipped, missions, ent, offN);
-        console.log(`${TAG} [lasso] ${inside.length} pads in loop → ${rows.length} usable (${tulips.length} Tulip) · ${skipped.length} skipped`);
+        lassoShowResults(variants, skipped, missions, ent, offN, folded);
+        console.log(`${TAG} [lasso] ${inside.length} pads in loop → ${rows.length} usable (${tulips.length} Tulip) · ${folded.length} folded into pad missions · ${skipped.length} skipped`);
     }
-    function lassoShowResults(variants, skipped, missions, ent, offN) {
+    function lassoShowResults(variants, skipped, missions, ent, offN, folded) {
         lassoCloseResults();
         // Red ✕ on every skipped pad — a pad inside the loop with no number
         // must explain itself on the map, not just in the list (v2.33).
@@ -5498,6 +5534,7 @@
             ${variants.map(vBtn).join('') || '<div style="color:#888;font-size:11px;">No stageable missions.</div>'}
             ${offN ? `<div style="margin-top:5px;color:#ffb74d;font-size:10px;">⚠ ${offN} pad-pair leg(s) estimated off-graph — order may be imperfect (see console)</div>` : ''}
             ${skipped.length ? `<div style="margin-top:6px;color:#ff9800;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Skipped (${skipped.length}) — marked ✕ on the map</div>${skipped.map(s => `<div style="color:#caa;font-size:10px;">${escapeHtml(s.name)} — ${escapeHtml(s.reason)}</div>`).join('')}` : ''}
+            ${(folded && folded.length) ? `<div style="margin-top:6px;color:#7adfe6;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Folded into pad missions (${folded.length})</div>${folded.map(f => `<div style="color:#678;font-size:10px;">${escapeHtml(f.name)} → ${escapeHtml(f.mission)}</div>`).join('')}` : ''}
             <div style="color:#789;font-size:10px;margin-top:6px;">Stage a variant → inspect the numbered badges → 🔗 Create. Panel stays open so you can stage the other one after.</div>`;
         document.body.appendChild(el);
         el.querySelector('[data-lasso-close]').onclick = lassoCloseResults;
@@ -8697,11 +8734,13 @@
         // that root or continues it at a token boundary — the boundary keeps
         // "1701AH" from matching "1701H". Longest root wins; the 5-char
         // floor stops a lone short token from matching a whole lease.
+        // v2.92: legacy sites glue the pad-id suffix on with NO space
+        // ("TXL 35 Unit 2 3806BH_ID 468") — accept "_id" as a boundary too.
         const toks = want.split(/\s+/);
         for (let drop = 1; drop <= 3 && toks.length - drop >= 1; drop++) {
             const root = toks.slice(0, toks.length - drop).join(' ');
             if (root.length < 5) break;
-            c = all.filter(m => norm(m) === root || norm(m).startsWith(root + ' '));
+            c = all.filter(m => norm(m) === root || norm(m).startsWith(root + ' ') || norm(m).startsWith(root + '_id'));
             if (c.length) return c;
         }
         return [];
