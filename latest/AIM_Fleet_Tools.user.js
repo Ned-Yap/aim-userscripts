@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.23
+// @version      0.24
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.23';
+    const SCRIPT_VERSION = '0.24';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -2184,8 +2184,13 @@
             const env = { segs: [], polys: [] };
             let tgtLabel;
             let sitesUsed = 0;
-            if (xrefTgtSel === 'sites') {
-                tgtLabel = 'site FFZs + FPs';
+            if (String(xrefTgtSel).startsWith('sites')) {
+                // Scope matters operationally: mission steps only run INSIDE
+                // FFZs — FFZ-only coverage = what is actually inspectable
+                const useFfz = xrefTgtSel !== 'sites-fp';
+                const useFp = xrefTgtSel !== 'sites-ffz';
+                tgtLabel = xrefTgtSel === 'sites-ffz' ? 'site FFZs ONLY (mission-step airspace)'
+                    : (xrefTgtSel === 'sites-fp' ? 'site FPs ONLY' : 'site FFZs + FPs');
                 const sites = await fetchRawSites(false);
                 if (seq !== xrefSeq) return;
                 const marginFt = 500;   // index bboxes may be slightly stale
@@ -2205,13 +2210,13 @@
                     catch (e) { notes.push(`site ${siteName(cands[i])} (#${cands[i]}) fetch failed — not counted as coverage`); continue; }
                     sitesUsed++;
                     ents.forEach(e => {
-                        if (e.type === 15 && Array.isArray(e.arcs)) {
+                        if (useFp && e.type === 15 && Array.isArray(e.arcs)) {
                             e.arcs.forEach(a => {
                                 if (a && a.point_a && a.point_b && typeof a.point_a.lat === 'number' && typeof a.point_b.lat === 'number') {
                                     xrefEnvAddSeg(env, proj.toXY(a.point_a), proj.toXY(a.point_b));
                                 }
                             });
-                        } else if (e.type === 16) {
+                        } else if (useFfz && e.type === 16) {
                             const cs = (entityCoords(e) || []).filter(p => p && typeof p.lat === 'number');
                             if (cs.length > 2) xrefEnvAddRing(env, cs.map(p => proj.toXY(p)));
                         }
@@ -2525,11 +2530,13 @@
         // default to what the dropdown displays — also self-heals when the
         // chosen layer's id changed (💾 save) or the layer was removed
         if (!kmlLayerById(xrefSrcSel)) xrefSrcSel = kmlLayers.length ? kmlLayers[0].id : '';
-        if (xrefTgtSel !== 'sites' && !kmlLayerById(xrefTgtSel)) xrefTgtSel = 'sites';
+        if (!String(xrefTgtSel).startsWith('sites') && !kmlLayerById(xrefTgtSel)) xrefTgtSel = 'sites';
         const sel = 'background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:2px 4px;font:inherit;max-width:180px;';
         const num = 'width:52px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;padding:1px 3px;';
         const srcOpts = kmlLayers.map(ly => `<option value="${ly.id}" ${xrefSrcSel === ly.id ? 'selected' : ''}>${escapeHtml(ly.name)}</option>`).join('');
         const tgtOpts = `<option value="sites" ${xrefTgtSel === 'sites' ? 'selected' : ''}>Site FFZs + FPs (existing coverage)</option>`
+            + `<option value="sites-ffz" ${xrefTgtSel === 'sites-ffz' ? 'selected' : ''}>Site FFZs ONLY (mission-step airspace)</option>`
+            + `<option value="sites-fp" ${xrefTgtSel === 'sites-fp' ? 'selected' : ''}>Site FPs ONLY</option>`
             + kmlLayers.filter(ly => ly.id !== xrefSrcSel).map(ly => `<option value="${ly.id}" ${xrefTgtSel === ly.id ? 'selected' : ''}>KML: ${escapeHtml(ly.name)}</option>`).join('');
         const running = xrefState && xrefState.running;
         const rows = [];
