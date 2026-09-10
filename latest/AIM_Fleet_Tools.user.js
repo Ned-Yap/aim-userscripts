@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.14
+// @version      0.15
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.14';
+    const SCRIPT_VERSION = '0.15';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -768,17 +768,38 @@
     function visibleConflicts(p) {
         return (p.conflicts || []).filter(conflictInView);
     }
-    function pairInView(p) {
-        if (ftIgnore[p.aId] || ftIgnore[p.bId]) return false;
-        // Hidden only when BOTH sides' clients are off — a single enabled
-        // client still shows its cross-client conflicts (the dangerous kind)
-        if (ftCfg.clientsOff[clientOf(p.aName)] && ftCfg.clientsOff[clientOf(p.bName)]) return false;
-        return visibleConflicts(p).length > 0;
+    // Memoized view (v0.15 perf): filtering 677 pairs × their conflict
+    // lists is too expensive to re-run on every 2s poll / render — compute
+    // once per (sweep, filters) state, invalidated by the stamp.
+    let viewCache = { stamp: null, pairs: [], list: [] };
+    function viewStamp() {
+        return `${(lastSweep && lastSweep.at) || 0}`
+            + `|${NB_CLASSES.map(c => +ftCfg.view[c.key]).join('')}`
+            + `|${Object.keys(ftCfg.clientsOff).sort().join(',')}`
+            + `|${Object.keys(ftIgnore).sort().join(',')}`;
     }
-    function visiblePairs() {
-        if (!lastSweep || !lastSweep.pairs) return [];
-        return lastSweep.pairs.filter(pairInView);
+    function visibleView() {
+        const stamp = viewStamp();
+        if (viewCache.stamp === stamp) return viewCache;
+        const pairs = [];
+        const list = [];   // [{p, vc}] sorted by filtered closest distance
+        if (lastSweep && lastSweep.pairs) {
+            lastSweep.pairs.forEach(p => {
+                if (ftIgnore[p.aId] || ftIgnore[p.bId]) return;
+                // Hidden only when BOTH sides' clients are off — one enabled
+                // client still shows its cross-client conflicts
+                if (ftCfg.clientsOff[clientOf(p.aName)] && ftCfg.clientsOff[clientOf(p.bName)]) return;
+                const vc = visibleConflicts(p);
+                if (!vc.length) return;
+                pairs.push(p);
+                list.push({ p, vc });
+            });
+            list.sort((a, b) => a.vc[0].ft - b.vc[0].ft || b.vc.length - a.vc.length);
+        }
+        viewCache = { stamp, pairs, list };
+        return viewCache;
     }
+    function visiblePairs() { return visibleView().pairs; }
 
     function buildSweepReport() {
         const lines = [];
@@ -1151,7 +1172,8 @@
             ovSvg.appendChild(ovPinsG);
             pane.appendChild(ovSvg);
             if (ovMap !== map) {
-                map.on('zoomend viewreset moveend', onMapViewChanged);
+                map.on('zoomend viewreset', onMapZoomChanged);
+                map.on('moveend', onMapMoved);
                 ovMap = map;
                 // First refresh without waiting for a user interaction —
                 // and re-apply the chosen basemap/chart to the fresh map
@@ -1169,11 +1191,30 @@
         }
     }
 
-    function onMapViewChanged() {
-        renderOverlay();          // re-project everything (zoom moves layer coords)
+    // rAF-coalesced render (v0.15 perf): bursts (progressive site fetches,
+    // pinch zooms) collapse into one rebuild per frame
+    let renderQueued = false;
+    function requestRender() {
+        if (renderQueued) return;
+        renderQueued = true;
+        try {
+            requestAnimationFrame(() => { renderQueued = false; renderOverlay(); });
+        } catch (e) { renderQueued = false; renderOverlay(); }
+    }
+
+    // v0.15 perf split: pure pans move the pane via CSS — layer coords are
+    // UNCHANGED, so the SVG needs no re-projection. Only zoom/viewreset
+    // (which re-anchor the layer origin) rebuild the SVG.
+    function onMapZoomChanged() {
+        requestRender();          // layer coords changed — re-project
+        scheduleSetupRefresh();
+        applyBasemap();
+        updateFaaTiles();
+    }
+    function onMapMoved() {
         scheduleSetupRefresh();   // viewport culling + fetch of newly-visible sites
-        applyBasemap();           // basemap cover + FAA chart tile grids
-        updateFaaTiles();         // follow the view
+        applyBasemap();           // extend/prune tile grids into the new view
+        updateFaaTiles();
     }
 
     // Projects and rebuilds the whole overlay from current data. Bounded by
@@ -1195,17 +1236,28 @@
             // own site bubbles are the naming layer. ---
             let sHtml = '';
             if (ftCfg.drawSetups && zoom >= SETUP_MIN_ZOOM) {
+                // v0.15 perf: ONE merged <path> per class per site (multi-
+                // subpath d) instead of one element per entity — dense sites
+                // drop from thousands of SVG nodes to ≤3 per site. Same
+                // class = same color; overlapping rings union via nonzero
+                // fill, visually identical.
                 Object.keys(setupGeomBySite).forEach(id => {
+                    const dByCls = { ffz: '', fp: '', asset: '' };
                     setupGeomBySite[id].forEach(g => {
                         if (!ftCfg.view[g.cls]) return;
-                        const st = SETUP_STYLE[g.cls];
                         let d = '';
                         g.parts.forEach(part => {
                             part.forEach((pt, i) => { d += (i ? 'L' : 'M') + P(pt[0], pt[1]); });
                             if (g.closed) d += 'Z';
                         });
+                        dByCls[g.cls] += d;
+                    });
+                    NB_CLASSES.forEach(c => {
+                        const d = dByCls[c.key];
                         if (!d) return;
-                        sHtml += `<path d="${d}" fill="${g.closed ? st.color : 'none'}" fill-opacity="${g.closed ? st.fill : 0}"`
+                        const st = SETUP_STYLE[c.key];
+                        const closed = c.key !== 'fp';
+                        sHtml += `<path d="${d}" fill="${closed ? st.color : 'none'}" fill-opacity="${closed ? st.fill : 0}"`
                             + ` stroke="${st.color}" stroke-width="${st.weight}" stroke-opacity="0.9" stroke-linejoin="round"/>`;
                     });
                 });
@@ -1254,25 +1306,21 @@
             // Closest pairs win the pin budget — a cap keeps a 677-pair
             // sweep from stuffing the landing map with SVG.
             const PIN_CAP = 300;
-            const list = visiblePairs()
-                .map(p => ({ p, c: visibleConflicts(p)[0] }))
-                .filter(x => x.c)
-                .sort((a, b) => a.c.ft - b.c.ft);
+            const list = visibleView().list;   // memoized, pre-sorted, carries vc
             if (list.length > PIN_CAP) console.log(`${TAG} ${list.length} visible pairs — drawing the ${PIN_CAP} closest pins (filter to see the rest)`);
-            pinData = list.slice(0, PIN_CAP).map(({ p, c }) => ({
+            pinData = list.slice(0, PIN_CAP).map(({ p, vc }) => ({
                 key: `${p.aId}:${p.bId}`,
-                lat: c.lat, lng: c.lng,
-                color: c.overlap ? '#ff3d00' : '#ffa030',
+                lat: vc[0].lat, lng: vc[0].lng,
+                color: vc[0].overlap ? '#ff3d00' : '#ffa030',
             }));
             // Small dot at every OTHER recorded conflict of the visible
             // pairs — so "no marker here" always means "not a cross-site
             // conflict", never "the pair's pin landed elsewhere"
             const DOT_CAP = 600;
-            for (const { p } of list) {
+            for (const { vc } of list) {
                 if (dotData.length >= DOT_CAP) break;
-                const all = visibleConflicts(p);
-                for (let i = 1; i < all.length && dotData.length < DOT_CAP; i++) {
-                    dotData.push({ lat: all[i].lat, lng: all[i].lng, color: all[i].overlap ? '#ff3d00' : '#ffa030' });
+                for (let i = 1; i < vc.length && dotData.length < DOT_CAP; i++) {
+                    dotData.push({ lat: vc[i].lat, lng: vc[i].lng, color: vc[i].overlap ? '#ff3d00' : '#ffa030' });
                 }
             }
         }
@@ -1519,7 +1567,7 @@
         Object.keys(setupGeomBySite).forEach(id => {
             if (!keep.has(id)) { delete setupGeomBySite[id]; changed = true; }
         });
-        if (changed) renderOverlay();
+        if (changed) requestRender();
         // Fetch + add the missing ones, nearest first, gently concurrent —
         // each finished site renders immediately (progressive draw)
         const queue = [...keep].filter(id => !setupGeomBySite[id]);
@@ -1543,7 +1591,7 @@
                     } catch (e3) { console.warn(`${TAG} setup geometry failed for entity ${e && e.id}:`, e3); }
                 });
                 setupGeomBySite[id] = geoms;
-                renderOverlay();
+                requestRender();   // coalesced — a burst of finished sites renders once per frame
             }
         };
         await Promise.all(Array.from({ length: Math.min(SETUP_FETCH_CONCURRENCY, queue.length) }, worker));
@@ -1719,8 +1767,7 @@
         // pair rows — sorted by the FILTERED closest distance, hard-capped
         // so a 677-pair sweep can never flood the DOM
         const ROW_CAP = 400;
-        const viewList = vis.map(p => ({ p, vc: visibleConflicts(p) }))
-            .sort((a, b) => a.vc[0].ft - b.vc[0].ft || b.vc.length - a.vc.length);
+        const viewList = visibleView().list;   // memoized, pre-sorted
         viewList.slice(0, ROW_CAP).forEach(({ p, vc }) => {
             const key = `${p.aId}:${p.bId}`;
             const open = expandedPair === key;

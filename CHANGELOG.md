@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-09 — ⚡ Fleet Tools v0.15: landing-map perf pass (latest — dev only, feature #250)
+
+Four fixes for the reported lag, no behavior changes: **(1)** the overlay SVG no longer rebuilds on pans — panning moves the pane via CSS with layer coordinates unchanged, so re-projection now happens only on zoom/viewreset (dragging around a dense area was paying a full rebuild of thousands of elements for nothing). **(2)** Dense sites render as one merged path per class per site (≤3 SVG elements each) instead of one per entity — thousands of nodes down to ~a hundred at the 40-site cap. **(3)** Renders coalesce through requestAnimationFrame, so the burst of progressively-loading sites when you first zoom in rebuilds once per frame instead of once per site. **(4)** The visible-pairs filtering (677 pairs × conflict lists) is memoized per sweep+filter state — the 2-second watchdog now does a string compare instead of re-filtering everything forever.
+
 ## 2026-09-09 — ⚠ Fleet Tools v0.14: basemap switching actually switches (latest — dev only, feature #250)
 
 The v0.13 basemap path (re-pointing Percepto's own tile layer via setUrl) didn't take on the live map — react-leaflet re-asserts its layer's URL. FAA sectional worked because it uses our own raw tile pane, so the basemap now uses the exact same engine: a non-default basemap draws as a cover pane just above Percepto's tiles ("Percepto default" clears it). One generic raw-tile engine now powers both the basemap cover and the FAA chart — same slippy math, same caps, same cleanup.
