@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-10 — ⭐ NEW SCRIPT IN PROD: AIM Fleet Tools v0.24 — fleet map, overlap sweep, KML layers & coverage analysis
+
+The landing page (sites-select, before entering any site) now has a toolkit. **Install once** — new scripts don't auto-appear: `https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Fleet_Tools.user.js` (auto-updates afterward). The **⚠ Fleet Tools** button (bottom-right) opens a sectioned panel:
+- **⚠ Overlap Sweep** — checks every pair of sites for FFZs/flight paths/assets within a threshold (200 ft default); conflicting pairs with per-conflict detail, pins + dots on the world map, per-site ⊘ for duplicate/backup site copies, filters by entity class and client.
+- **🗺 Map** — basemap switcher (Esri imagery / NAIP / Dark / Light / OSM), 🛩 FAA VFR sectional overlay, and slimmer dark site-name labels (toggleable).
+- **📎 KML Layers** — load .kml/.geojson files (power lines, water lines, assets…) as toggleable, styleable layers; 💾 saves a layer to the shared private repo so it's there for everyone, every session; search with fly-to.
+- **📐 Cross-reference** — measure a KML layer against site FFZs+FPs (or FFZs-only = mission-step airspace, FPs-only, or another KML): color-coded bands on the map (blue ≤50 ft, amber ≤200 ft, red beyond) + a report with miles/percentages — e.g. how much of a client's water-line network is inspectable from existing sites without building new areas.
+- **📊 Fleet Metrics** — per-site FFZ/FP/asset counts with CSV export.
+Requires the GitHub PAT (AIM Controls gear) for the site index, KML persistence, and sweep prefiltering — same token as the shielding KMLs.
+
 ## 2026-09-10 — 📐 Fleet Tools v0.24: cross-ref target scoping — FFZs only / FPs only (latest — dev only, feature #255)
 
 The target dropdown now offers three site modes: **Site FFZs + FPs** (raw proximity, as before), **Site FFZs ONLY (mission-step airspace)** — the operational number, since mission steps can only run inside FFZs, so this is the share of the water lines that's *actually* inspectable today — and **Site FPs ONLY**. The result header and 📋 report name the scope so numbers can't be confused.
