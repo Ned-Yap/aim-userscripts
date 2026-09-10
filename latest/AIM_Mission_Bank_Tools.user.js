@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.94
+// @version      2.95
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.94';
+    const SCRIPT_VERSION = '2.95';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5407,11 +5407,11 @@
         // so pads that only ever had equipment micros keep flying them.
         const idMissions = (missions || [])
             .filter(m => m && typeof m.name === 'string' && /_id\s*\d+/i.test(m.name))
-            .map(m => ({ m, root: m.name.trim().toLowerCase().replace(/[\s_]*_id\s*\d+.*$/i, '') }))
+            .map(m => ({ m, root: mbNormName(m.name).replace(/[\s_]*_id\s*\d+.*$/i, '') }))
             .filter(x => x.root.length >= 4)
             .sort((x, y) => y.root.length - x.root.length);
         const idOwners = (name) => {
-            const want = String(name || '').trim().toLowerCase();
+            const want = mbNormName(name);
             const hits = idMissions.filter(x => want === x.root || want.startsWith(x.root + ' ') || want.startsWith(x.root + '_'));
             if (!hits.length) return null;
             return hits.filter(x => x.root.length === hits[0].root.length).map(x => x.m);
@@ -5624,22 +5624,31 @@
     // stop minting one micro per Gas Lift Header. NAME rule only (no
     // geometry): equipment with no _ID owner keeps being its own pad, and
     // modern sites (no _ID assets) fold nothing. Returns a resolver.
+    // v2.95: names are normalized hard before comparing — real site data has
+    // carried invisible poison (NBSP, zero-width chars, doubled spaces) that
+    // makes visually-identical names fail startsWith. Same normalizer feeds
+    // the lasso's _ID mission routing.
+    function mbNormName(s) {
+        return String(s || '').replace(/[​‌‍﻿]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+    }
     function mbBuildPadFold(assets) {
         const fold = new Map();   // asset.id → host (_ID pad) asset
+        let orphans = 0;
         try {
             const idAssets = assets
                 .filter(a => /_id\s*\d+/i.test(a.name || ''))
-                .map(a => ({ a, root: String(a.name).trim().toLowerCase().replace(/[\s_]*_id\s*\d+.*$/i, '') }))
+                .map(a => ({ a, root: mbNormName(a.name).replace(/[\s_]*_id\s*\d+.*$/i, '') }))
                 .filter(x => x.root.length >= 4)
                 .sort((x, y) => y.root.length - x.root.length);
             if (idAssets.length) assets.forEach(a => {
                 if (/_id\s*\d+/i.test(a.name || '')) return;
-                const want = String(a.name || '').trim().toLowerCase();
+                const want = mbNormName(a.name);
                 const own = idAssets.find(x => want === x.root || want.startsWith(x.root + ' ') || want.startsWith(x.root + '_'));
                 if (own) fold.set(a.id, own.a);
+                else orphans++;
             });
         } catch (e) { console.warn(`${TAG} [padfold] fold build failed — every asset stays its own pad`, e); }
-        if (fold.size) console.log(`${TAG} [padfold] legacy nested-asset site: ${fold.size} equipment polygon(s) fold into their _ID main pad`);
+        if (fold.size) console.log(`${TAG} [padfold] legacy nested-asset site: ${fold.size} equipment polygon(s) fold into their _ID main pad · ${orphans} asset(s) have no _ID owner (stay their own pad)`);
         return (a) => (a && fold.get(a.id)) || a;
     }
     function mcvDetect(ent, missions) {
@@ -5988,7 +5997,16 @@
             const g = byPad.get(u.pad.id);
             u.steps.forEach(s => { g.steps.push(s); if (s.type === 1) g.navs++; else if (s.type === 6) g.snaps++; });
         });
-        return { groups: order.map(id => byPad.get(id)), preamble, dropped, droppedSteps, unitCount: units.length };
+        const groups = order.map(id => byPad.get(id));
+        // v2.95: triage line for "why is this STILL a Well Head micro" — on a
+        // site that has _ID pads, name every group that didn't land on one:
+        // either that pad has no _ID asset polygon, or its names drift
+        // ("&" vs "and", different lease wording).
+        const noId = groups.filter(g => !/_id\s*\d+/i.test(g.asset.name || ''));
+        if (noId.length && assets.some(a => /_id\s*\d+/i.test(a.name || ''))) {
+            console.log(`${TAG} [✂] ${groups.length} pad group(s) · ${noId.length} without an _ID main pad: ${noId.map(g => `"${g.asset.name}"`).join(' · ')}`);
+        }
+        return { groups, preamble, dropped, droppedSteps, unitCount: units.length };
     }
     function mcvOpenSplit(missionId) {
         const old = document.getElementById(MCV_SPLIT_PANEL_ID);

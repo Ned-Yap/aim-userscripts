@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-10 — ✂ Mission Bank Tools v2.95: hardened _ID name matching + split triage log (latest — dev only)
+
+v2.94's fold verified correct on clean names but can be defeated by invisible characters real site data carries (non-breaking spaces, zero-width chars, doubled spaces) — visually identical names that fail string comparison. All _ID matching (✂/🧩 asset fold + 🖊 lasso mission routing) now normalizes names hard before comparing. The console also gains a triage line when a split still produces non-_ID groups: `[✂] N pad group(s) · M without an _ID main pad: "…"` — those named pads either have no _ID asset polygon or their names drift from it.
+
 ## 2026-09-10 — ✂🧩 Mission Bank Tools v2.94: Split + macro detection respect "_ID ####" main pads (latest — dev only)
 
 The ✂ Split (and 🧩 macro/solo detection behind it) had the same legacy-site disease as the lasso: steps landing on a nested equipment polygon ("TXL 27 Unit 4 3405BH Gas Lift Header") were attributed to that polygon, so a split minted one micro per header/well head instead of one per pad. Now an equipment **asset** whose name extends an "_ID ####" asset's root folds into that main pad everywhere steps are attributed — split groups merge into the _ID pad (micro named after it), and micro missions that touch a pad plus its nested equipment finally count as **solo** missions again, so the split panel's "pad already has its micro" default-untick works on these sites. Name rule only, no geometry guessing: equipment with no _ID owner keeps being its own pad, and modern sites are untouched.
