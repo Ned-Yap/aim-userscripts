@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.10
+// @version      0.11
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.10';
+    const SCRIPT_VERSION = '0.11';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -1342,11 +1342,15 @@
             renderOverlay();
             return;
         }
-        // Names drive the client filter — load them if the panel never did
+        // /sites/ is the ACCESS AUTHORITY, not just the name source: the
+        // snapshot index can hold sites the user no longer has access to
+        // (historic Site Watch runs — live-hit 2026-09-09: orphan sites 807/
+        // 1227/1310 drew on the map). Fail closed: no list → nothing draws.
         if (!rawSites) {
-            try { await fetchRawSites(false); } catch (e) { console.warn(`${TAG} /sites/ fetch failed (client filter inactive):`, e); }
+            try { await fetchRawSites(false); } catch (e) { console.warn(`${TAG} /sites/ fetch failed — setups NOT drawn (cannot verify site access):`, e); }
             if (seq !== setupSeq) return;
         }
+        if (!rawSites) return;
         let west, south, east, north, ctr;
         try {
             const b = map.getBounds().pad(0.15);
@@ -1356,6 +1360,7 @@
         // Sites in view, filters applied, nearest-to-center first
         const wanted = [];
         Object.keys(nbIndex.bboxes).forEach(id => {
+            if (!rawSites[id]) return;   // snapshot-only orphan — not the user's site
             const box = nbIndex.bboxes[id];
             if (!box || box.empty) return;
             if (ftIgnore[id]) return;
@@ -1419,6 +1424,9 @@
     function buildMetricsRows() {
         const rows = [];
         Object.keys(nbIndex.bboxes).forEach(id => {
+            // Snapshot-only orphans (sites outside the user's current
+            // /sites/ list) are access we no longer have — never shown
+            if (rawSites && !rawSites[id]) return;
             const b = nbIndex.bboxes[id];
             const raw = rawSites && rawSites[id] && rawSites[id].raw;
             rows.push({
@@ -1623,10 +1631,11 @@
             return '<div style="padding:8px 10px;color:#888">Index is empty — run ⟳ Update index (or a sweep) first.</div>';
         }
         const out = [];
+        const orphans = rawSites ? Object.keys(nbIndex.bboxes).filter(id => !rawSites[id]).length : 0;
         out.push('<div style="padding:6px 10px;display:flex;gap:14px;border-bottom:1px solid #222834;">'
             + '<span data-ft="metrics-refresh" style="cursor:pointer;color:#7adfe6">⟳ Refresh names/clients</span>'
             + '<span data-ft="metrics-csv" style="cursor:pointer;color:#7adfe6">📋 Copy CSV</span>'
-            + `<span style="color:#888">${rows.length} indexed site(s)</span></div>`);
+            + `<span style="color:#888">${rows.length} indexed site(s)${orphans ? ` · ${orphans} snapshot-only (no access) hidden` : ''}</span></div>`);
         const hasClient = rows.some(r => r.client);
         const hasStatus = rows.some(r => r.status);
         out.push('<div style="max-height:40vh;overflow-y:auto;">'

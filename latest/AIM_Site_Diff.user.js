@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Diff
 // @namespace    http://tampermonkey.net/
-// @version      0.82
+// @version      0.83
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @description  Site comparison suite: shadow-site ghost overlay (per-type show/color/opacity), swipe divider, significant-change diff (→ AIM Issues), and Phase 3a Import — create-only copy of shadow entities (assets etc.) onto the current site with dry-run preview + verify. v0.70: cross-SERVER shadows. v0.80 (#250 layer 2): neighboring-site overlay — shows every other site's FFZs/FPs/assets within a display radius (Site Watch snapshot bboxes prefilter, live /map_objects/ for the math) and flags cross-site conflicts under the threshold (segment-to-segment, default 200 ft).
@@ -142,7 +142,7 @@
     }
 
     const SCRIPT_ID = 'aim-site-diff';
-    const SCRIPT_VERSION = '0.82';
+    const SCRIPT_VERSION = '0.83';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const PANE_NAME = 'aim-site-diff-pane';
     const HL_PANE_NAME = 'aim-site-diff-hl';
@@ -3179,20 +3179,31 @@
             if (seq !== nbScanSeq) return;
             nbState.notes.push(...notes);
 
+            // /sites/ is the ACCESS AUTHORITY: the snapshot index can hold
+            // sites the user no longer has access to (historic Site Watch
+            // runs — Fleet Tools live-hit this 2026-09-09 with orphan sites
+            // drawing on the landing map). Fail closed: no site list → no
+            // scan, and index candidates must be in the list.
+            const siteList = await fetchSiteList(THIS_SERVER, false);
+            if (seq !== nbScanSeq) return;
+            if (!siteList) throw new Error('site list unavailable — cannot verify site access, scan aborted');
+            const accessible = new Set(siteList.map(s => s.id));
+
             const maxFt = Math.max(nbCfg.radiusFt, nbCfg.thresholdFt);
             const candidates = [];
+            let orphanSkipped = 0;
             Object.keys(nbIndex.bboxes).forEach(id => {
                 if (id === String(scanSite)) return;
+                if (!accessible.has(id)) { orphanSkipped++; return; }   // snapshot-only orphan
                 const b = nbIndex.bboxes[id];
                 if (!b || b.empty) return;
                 if (bboxGapFt(myBox, b) <= maxFt) candidates.push({ id, src: 'snapshot' });
             });
+            if (orphanSkipped) nbState.notes.push(`${orphanSkipped} snapshot-only site(s) outside your /sites/ access ignored`);
 
             // Sites with NO snapshot: center fallback + generous margin; no
             // center either → UNCHECKED, listed in the report.
-            const siteList = await fetchSiteList(THIS_SERVER, false);
-            if (seq !== nbScanSeq) return;
-            if (siteList) {
+            {
                 const noSnap = siteList.filter(s => s.id !== String(scanSite) && !nbIndex.bboxes[s.id]);
                 if (noSnap.length) {
                     const raw = await nbFetchRawSites();
@@ -3209,8 +3220,6 @@
                         }
                     });
                 }
-            } else {
-                nbState.notes.push('site list unavailable — snapshot-less sites could not be checked or counted');
             }
 
             // Turned-off sites (panel checkbox) sit out this scan entirely —

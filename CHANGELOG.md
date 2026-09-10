@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-09 — 🔒 Fleet Tools v0.11 + Site Diff v0.83: sites outside your access can no longer appear (feature #250)
+
+Live find: the map showed setups labeled "site 807 / site 1227 / site 1310" — sites NOT in the user's `/sites/` list. The Site Watch snapshot index keeps snapshots from historic runs, including sites whose access has since been removed, and three consumers iterated the raw index: Fleet Tools' setup drawer, Fleet Tools' 📊 metrics table, and Site Diff's neighbor scan. All three now treat the live `/sites/` list as the access authority and **fail closed**: a site id not in your current list is never drawn, listed, or scanned (Fleet setups draw nothing at all if the site list can't be fetched; Site Diff aborts the scan with a clear error). Skipped snapshot-only orphans are counted — metrics header shows "N snapshot-only (no access) hidden", Site Diff notes them in the ⬡ panel/report. The sweep itself was always `/sites/`-scoped and is unaffected.
+
 ## 2026-09-09 — ⚠ Fleet Tools v0.10: site-name labels on drawn setups (latest — dev only, feature #250)
 
 The v0.9 overlay held up live (map pans, geometry draws) — but overlapping duplicate/test sites make the picture ambiguous: a giant FFZ blob over the Midkiff area looked like the renderer was "merging" Exxon 01 and 07, when it is almost certainly a third site's copied geometry drawn on top (each entity is its own SVG path — rings cannot join across sites). Every drawn site now shows a **site-name label** (name + #id, halo-outlined text at its geometry center), so mystery geometry names its owner at a glance — then one ⊘ in the panel or a client-chip toggle removes that site from the map and the sweep.
