@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-09 — ⚠ Fleet Tools v0.7: map discovery digs into Angular controllers ($ctrl.map) (latest — dev only, feature #250)
+
+v0.6's debug run showed both Leaflet (1.3.1) and Angular (1.8.3, injector reachable) alive, `$rootScope.current_map` absent — and exposed the walker's blind spot: it skipped every `$`-prefixed scope key, but Angular components (pr-sites-select is one) publish their controller as **`$ctrl`**, and controller-as maps live one level down (`$ctrl.map`). v0.7 inspects `$ctrl`-style keys, peeks one level inside controller objects, walks up to 2500 scopes (445-site page = big tree), and adds a bounded window-globals sweep as a final route — heavy routes throttled to once per 3s until found. When the map is found the console also says whether it's an instance of the global `L.Map` (a bundled Leaflet copy would explain drawing quirks). The deep console probe (ShortKeys/AIM_Landing_Map_Probe.js) got the same controller-peek upgrade.
+
 ## 2026-09-09 — ⚠ Fleet Tools v0.6: find the landing map through Angular — pins + setups were drawing nothing (latest — dev only, feature #250)
 
 Live test: nothing drew on the landing map at any zoom. Root cause: the landing page is the legacy Angular shell, and v0.5 only walked the map container's properties — Leaflet never stores the map there, and unlike the site iframes nothing on this page had stamped it. v0.6 adds the proven Data View discovery routes: `$rootScope.current_map` via `angular.element(document.body).injector()` (works with Angular debug info off), a bounded walk of the whole scope tree, and an L.Map prototype patch so any map stamps its container on its next internal call. If every route misses, the give-up warning now prints a one-line diagnosis of each path, and `__aimFleetMapDebug()` can be run in the console any time. A deeper console recon snippet is banked at ShortKeys/AIM_Landing_Map_Probe.js — it reports where a map instance actually lives (scope paths, globals) and test-draws a magenta circle as proof.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.6
+// @version      0.7
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.6';
+    const SCRIPT_VERSION = '0.7';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -853,13 +853,21 @@
 
     let landingMapRef = null;
     let mapFoundLogged = false;
+    let lastDeepSearchAt = 0;
 
+    let mapFoundVia = null;
     function stampFoundMap(map, via) {
         landingMapRef = map;
+        mapFoundVia = via;
         try { const c = map.getContainer(); if (c && !c.__aim_map__) c.__aim_map__ = map; } catch (e) {}
         if (!mapFoundLogged) {
             mapFoundLogged = true;
-            console.log(`${TAG} landing map found via ${via}`);
+            let inst = '';
+            try {
+                const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+                if (w.L && w.L.Map) inst = map instanceof w.L.Map ? ' (instance of global L.Map ✓)' : ' (⚠ NOT an instance of global L.Map — bundled Leaflet copy, drawing may misbehave)';
+            } catch (e) {}
+            console.log(`${TAG} landing map found via ${via}${inst}`);
         }
         return map;
     }
@@ -872,24 +880,44 @@
     // an Angular scope ($rootScope.current_map on data_view) — reach it
     // through angular.element(...).injector() (works even with debug info
     // off, unlike .scope()).
+    let lastWalkInspected = 0;
     function ngWalkForMap(root) {
+        // v0.7: the v0.6 walk skipped EVERY $-prefixed key — but Angular
+        // components (pr-sites-select is one) publish their controller as
+        // $ctrl, and controller-as maps live ONE LEVEL DOWN ($ctrl.map).
+        // Now: skip only $$-internals + scope plumbing, and peek one level
+        // into plain objects (controllers) on each scope.
+        const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+        const SKIP = { $parent: 1, $root: 1, $id: 1 };
         const queue = [root];
         const seen = new Set();
         let inspected = 0;
-        while (queue.length && inspected < 400) {
+        while (queue.length && inspected < 2500) {
             const s = queue.shift();
             if (!s || seen.has(s.$id)) continue;
             seen.add(s.$id);
             inspected++;
             for (const k in s) {
-                if (!Object.prototype.hasOwnProperty.call(s, k) || k.charAt(0) === '$') continue;
-                try { if (looksLikeLeafletMap(s[k])) return { map: s[k], key: k }; } catch (e) {}
+                if (!Object.prototype.hasOwnProperty.call(s, k)) continue;
+                if (k.startsWith('$$') || SKIP[k]) continue;
+                try {
+                    const v = s[k];
+                    if (looksLikeLeafletMap(v)) { lastWalkInspected = inspected; return { map: v, key: k }; }
+                    if (v && typeof v === 'object' && !Array.isArray(v) && !v.nodeType && v !== w) {
+                        for (const k2 of Object.keys(v)) {
+                            try {
+                                if (looksLikeLeafletMap(v[k2])) { lastWalkInspected = inspected; return { map: v[k2], key: `${k}.${k2}` }; }
+                            } catch (e2) {}
+                        }
+                    }
+                } catch (e) {}
             }
             if (s.$$childHead) {
                 let c = s.$$childHead;
                 while (c) { queue.push(c); c = c.$$nextSibling; }
             }
         }
+        lastWalkInspected = inspected;
         return null;
     }
 
@@ -912,6 +940,11 @@
                 } catch (e) {}
             }
         }
+        // Heavy routes below (scope-tree walk + window sweep) — at most
+        // once per 3s so the 2s discovery poll stays cheap until found
+        const now = Date.now();
+        if (now - lastDeepSearchAt < 3000) return null;
+        lastDeepSearchAt = now;
         // Angular scope route
         try {
             const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
@@ -935,6 +968,14 @@
                 }
             }
         } catch (e) { console.warn(`${TAG} angular map route threw:`, e); }
+        // Last route: a window global holding the map (bounded sweep)
+        try {
+            const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+            const names = Object.getOwnPropertyNames(w).slice(0, 4000);
+            for (const k of names) {
+                try { if (looksLikeLeafletMap(w[k])) return stampFoundMap(w[k], `window.${k}`); } catch (e) {}
+            }
+        } catch (e) {}
         return null;
     }
 
@@ -980,10 +1021,12 @@
         try { d.injector = !!w.angular.element(w.document.body).injector(); } catch (e) { d.injector = false; }
         try {
             const root = w.angular.element(w.document.body).injector().get('$rootScope');
-            d.rootCurrentMap = looksLikeLeafletMap(root.current_map);
+            d.rootCurrentMap = !!looksLikeLeafletMap(root.current_map);
             d.rootMapishKeys = Object.keys(root).filter(k => k.charAt(0) !== '$' && /map/i.test(k)).slice(0, 10);
         } catch (e) { d.rootCurrentMap = 'n/a'; }
         d.found = !!getLandingMap();
+        d.foundVia = mapFoundVia;
+        d.scopesWalked = lastWalkInspected;
         return d;
     }
     try {
