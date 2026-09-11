@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.98
+// @version      2.99
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.98';
+    const SCRIPT_VERSION = '2.99';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -7734,12 +7734,15 @@
         } catch (e2) { return; }
         const tolM = 9;   // ~30 ft aim slack around a ring
         const inPad = a2 => a2 && a2.ring && a2.ring.length >= 3 && mbPointToPolygonMeters(ll.lat, ll.lng, a2.ring) <= tolM;
-        const member = moState.order.find(inPad) || moState.removed.find(inPad);
+        // v2.99: tightest containing ring wins — a big boundary polygon
+        // used to steal the gesture from the pad actually clicked.
+        const tightest = (list) => { let b = null, ba = Infinity; (list || []).forEach(a2 => { if (!inPad(a2)) return; const ar = mbRingArea(a2.ring); if (ar < ba) { b = a2; ba = ar; } }); return b; };
+        const member = tightest(moState.order.concat(moState.removed));
         if (member) { eat(); moPadGesture(member.id, !!e.ctrlKey, e.clientX + 8, e.clientY + 8); return; }
         const data = mcv.data;
-        const outsider = ((data && data.det.assets) || []).find(a2 => inPad(a2)
-            && !moState.mc.pads.some(p2 => p2.id === a2.id)
-            && !moState.order.some(p2 => p2.id === a2.id));
+        const outsider = tightest(((data && data.det.assets) || []).filter(a2 =>
+            !moState.mc.pads.some(p2 => p2.id === a2.id)
+            && !moState.order.some(p2 => p2.id === a2.id)));
         if (outsider) { eat(); moAddPad(outsider); }
     }
     // one pad, one gesture (v2.89): Ctrl+M2 = remove (or restore if already
@@ -8925,7 +8928,15 @@
         let ll;
         try { ll = map.mouseEventToLatLng(e); } catch (err) { return; }
         const pt = { lat: ll.lat, lng: ll.lng };
-        const hit = (pcm.assets || []).find(a => a && a.ring && a.ring.length >= 3 && genPointInPoly(pt, a.ring));
+        // v2.99: TIGHTEST containing polygon wins the click — first-in-array
+        // let a big boundary polygon ("STRAIN SAT CGLS_ID 23869") steal M2s
+        // aimed at pads it overlaps, refusing them as "already in the list".
+        let hit = null, hitArea = Infinity;
+        (pcm.assets || []).forEach(a => {
+            if (!a || !a.ring || a.ring.length < 3 || !genPointInPoly(pt, a.ring)) return;
+            const ar = mbRingArea(a.ring);
+            if (ar < hitArea) { hit = a; hitArea = ar; }
+        });
         if (!hit) return;   // not on a pad — let native / other AIM handlers run
         e.preventDefault(); e.stopPropagation();
         if (pcm.filterType && pcmBaseType(hit) !== pcm.filterType) {
