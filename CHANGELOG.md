@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-10 — 🔗 Mission Bank Tools v2.99: M2 clicks land on the pad you actually clicked (latest — dev only)
+
+The Merge-by-pad-clicks M2 (and the reorder panel's M2 gestures) resolved a click to the **first** polygon in list order that contained it — so a big boundary asset ("STRAIN SAT CGLS_ID 23869") stole clicks aimed at pads it overlaps and refused them with "Pad …'s mission is already in the list" even though the clicked pad's mission wasn't in the merge at all. Both hit-tests now pick the **tightest** containing polygon, matching the v2.97 step-attribution rule.
+
 ## 2026-09-10 — 🧩 Mission Bank Tools v2.98: pad-sized polygons never fold — closes every pad-merge path (latest — dev only)
 
 v2.97's container guard still let two cases collapse a facility mission into "one pad": a **bare** nested pad (no equipment polygons inside it, so the container guard can't recognize it) could be swallowed by geometry, and a sibling pad whose name **extends the boundary's root** could be swallowed by the name rule (which had no guards at all). One principle now closes both: anything **pad-sized (≥ ~1200 m², ≈115 ft square) or containing another asset never folds — by either pass**. Equipment is tens of square meters; pads are thousands. Verified in simulation across all four site shapes: bare nested pads ✓, name-extending sibling pads ✓, multi-well `_ID` equipment folding unchanged ✓, modern sites untouched ✓.
