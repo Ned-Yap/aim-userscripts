@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.99
+// @version      3.00
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.99';
+    const SCRIPT_VERSION = '3.00';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -9024,6 +9024,10 @@
                 <button data-pcm-eff title="Reorder the current picks furthest → closest from the base station" style="padding:3px 8px;background:rgba(255,213,79,0.15);border:1px solid rgba(255,213,79,0.5);color:#ffd54f;border-radius:4px;cursor:pointer;font-size:10px;">⚡ Far→near</button>
                 ${recipeOpts ? `<select data-pcm-recipe title="Load a saved merge to view its order or re-edit it" style="background:#0e1218;color:#cde;border:1px solid #2a3340;border-radius:4px;font-size:10px;padding:2px 3px;max-width:170px;"><option value="">✏ saved merges…</option>${recipeOpts}</select>` : ''}
             </div>
+            <div style="padding:6px 10px;border-bottom:1px solid #2a2f38;">
+                <input data-pcm-search type="text" placeholder="🔍 Add ANY mission by name — Enter adds the top hit" style="width:100%;box-sizing:border-box;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:4px;padding:4px 7px;font-size:11px;" />
+                <div data-pcm-search-res style="max-height:150px;overflow:auto;margin-top:3px;"></div>
+            </div>
             ${pcm.pendingChoice ? `<div style="padding:6px 10px;border-bottom:1px solid #3a3320;background:rgba(255,213,79,0.07);">
                 <div style="font-size:11px;color:#ffd54f;margin-bottom:4px;">Pad "${escapeHtml(pcm.pendingChoice.asset.name)}" matches ${pcm.pendingChoice.candidates.length} missions — pick one:</div>
                 ${pcm.pendingChoice.candidates.map((m, i) => `<button data-pcm-cand="${i}" style="display:block;width:100%;text-align:left;margin:2px 0;padding:3px 8px;background:#0e1218;border:1px solid #3a4350;border-radius:4px;color:#e6e6e6;cursor:pointer;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(m.name)} <span style="color:#9ad;">· ${pcmStepCount(m)} steps</span></button>`).join('')}
@@ -9081,6 +9085,46 @@
             const r = pcmSiteRecipes(getCurrentSiteID())[Number(recipeSel.value)];
             if (r) pcmLoadRecipe(r);
         };
+        // v3.00: manual mission search — add ANY mission to the merge by
+        // name, no pad click required (born of a boundary polygon eating
+        // M2s; the map never gets to gatekeep the merge again). Synthetic
+        // asset anchored at the mission's first located step keeps the
+        // numbered badge, Far→near ordering, and saved-merge recipes alive.
+        const searchEl = el.querySelector('[data-pcm-search]');
+        const searchRes = el.querySelector('[data-pcm-search-res]');
+        const pcmSearchHits = (q) => (pcm.missions || [])
+            .filter(m => m && typeof m.name === 'string' && mbNormName(m.name).indexOf(q) >= 0 && !pcm.picks.some(p => p.mission.id === m.id))
+            .slice(0, 12);
+        const pcmSearchAdd = (m) => {
+            let loc = null;
+            (m.instructions || []).some(s => { if (s && s.location && typeof s.location.lat === 'number') { loc = s.location; return true; } return false; });
+            const d = 0.00003;
+            const asset = { id: 'm:' + m.id, name: m.name, ring: loc ? [
+                { lat: loc.lat - d, lng: loc.lng - d }, { lat: loc.lat - d, lng: loc.lng + d },
+                { lat: loc.lat + d, lng: loc.lng + d }, { lat: loc.lat + d, lng: loc.lng - d }] : null };
+            pcm.picks.push({ asset, mission: m });
+            pcmRefresh();
+        };
+        if (searchEl && searchRes) {
+            const renderSearch = () => {
+                const q = mbNormName(searchEl.value);
+                if (!q) { searchRes.innerHTML = ''; return; }
+                const hits = pcmSearchHits(q);
+                searchRes.innerHTML = hits.length
+                    ? hits.map((m, i) => `<button data-pcm-sr="${i}" style="display:block;width:100%;box-sizing:border-box;text-align:left;margin:1px 0;padding:3px 8px;background:#0e1218;border:1px solid #2a3340;border-radius:4px;color:#e6e6e6;cursor:pointer;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(m.name)} <span style="color:#9ad;">· ${pcmStepCount(m)} steps</span></button>`).join('')
+                    : '<div style="color:#888;font-size:10px;padding:2px 4px;">no unpicked mission matches</div>';
+                searchRes.querySelectorAll('[data-pcm-sr]').forEach((b, i) => { b.onclick = () => pcmSearchAdd(hits[i]); });
+            };
+            searchEl.oninput = renderSearch;
+            searchEl.onkeydown = (ev) => {
+                ev.stopPropagation();
+                if (ev.key === 'Enter') {
+                    const q = mbNormName(searchEl.value);
+                    const first = q && pcmSearchHits(q)[0];
+                    if (first) pcmSearchAdd(first);
+                }
+            };
+        }
         el.querySelector('[data-pcm-go]').onclick = () => pcmCommit();
         const nameEl = el.querySelector('[data-pcm-name]');
         nameEl.oninput = () => { pcm.customName = nameEl.value; };

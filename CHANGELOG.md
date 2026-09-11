@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-10 — 🔍 Mission Bank Tools v3.00: add ANY mission to a merge by name (latest — dev only)
+
+The 🔗 Merge-by-pad-clicks panel gets a **search box**: type any part of a mission name, click a result (or press Enter for the top hit) and it's appended to the merge — **no pad click required**, so no polygon, hit-test, or naming convention can ever gatekeep a merge again. Search-added missions get a numbered badge at their first located step and work with Far→near ordering, drag-reorder, and saved merges like any picked pad.
+
 ## 2026-09-10 — 🔗 Mission Bank Tools v2.99: M2 clicks land on the pad you actually clicked (latest — dev only)
 
 The Merge-by-pad-clicks M2 (and the reorder panel's M2 gestures) resolved a click to the **first** polygon in list order that contained it — so a big boundary asset ("STRAIN SAT CGLS_ID 23869") stole clicks aimed at pads it overlaps and refused them with "Pad …'s mission is already in the list" even though the clicked pad's mission wasn't in the merge at all. Both hit-tests now pick the **tightest** containing polygon, matching the v2.97 step-attribution rule.
