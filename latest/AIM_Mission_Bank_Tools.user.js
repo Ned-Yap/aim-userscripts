@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.96
+// @version      2.97
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.96';
+    const SCRIPT_VERSION = '2.97';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5631,6 +5631,13 @@
     function mbNormName(s) {
         return String(s || '').replace(/[​‌‍﻿]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
     }
+    // Shoelace on raw lat/lng — only ever COMPARED against other rings on the
+    // same site, so the degree distortion cancels out.
+    function mbRingArea(ring) {
+        let s2 = 0;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) s2 += (ring[j].lng + ring[i].lng) * (ring[j].lat - ring[i].lat);
+        return Math.abs(s2);
+    }
     function mbBuildPadFold(assets) {
         const fold = new Map();   // asset.id → host (_ID pad) asset
         let nameFolds = 0, geoFolds = 0, orphans = 0;
@@ -5658,27 +5665,42 @@
                 // containing _ID ring wins. Hosts are _ID-named ONLY: loose
                 // equipment never merges with other loose equipment, and a
                 // site with no _ID assets folds nothing.
-                const ringArea = (ring) => { let s2 = 0; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) s2 += (ring[j].lng + ring[i].lng) * (ring[j].lat - ring[i].lat); return Math.abs(s2); };
-                const hosts = idAssets.map(x => ({ a: x.a, area: ringArea(x.a.ring) }));
-                assets.forEach(a => {
-                    if (isId(a) || fold.has(a.id)) return;
-                    const c = genCentroid(a.ring);
+                // v2.97: geometry folds EQUIPMENT, never a nested PAD. A
+                // facility site can wrap two whole pads in one big _ID
+                // boundary polygon ("2 Facilities_ID CGLS…"); folding those
+                // made the mission read as one pad (solo, no ✂). Two guards:
+                // a CONTAINER (an asset holding another asset's centroid) is
+                // a pad and never folds — pads hold equipment, equipment
+                // holds nothing — and the child must be under 25% of the
+                // host's area. Fold target = TIGHTEST containing asset (a
+                // nested pad beats the outer boundary); still gated to sites
+                // that have _ID assets at all.
+                const hosts = assets.map(a => ({ a, area: mbRingArea(a.ring), c: genCentroid(a.ring) }));
+                const isContainer = hosts.map(h => hosts.some(o => o.a !== h.a && genPointInPoly(o.c, h.a.ring)));
+                assets.forEach((a, ai) => {
+                    if (isId(a) || fold.has(a.id) || isContainer[ai]) return;
+                    const c = hosts[ai].c, myArea = hosts[ai].area;
                     let best = null;
-                    hosts.forEach(h => { if (h.a !== a && genPointInPoly(c, h.a.ring) && (!best || h.area < best.area)) best = h; });
+                    hosts.forEach(h => { if (h.a !== a && myArea < h.area * 0.25 && genPointInPoly(c, h.a.ring) && (!best || h.area < best.area)) best = h; });
                     if (best) fold.set(a.id, best.a);
                 });
                 geoFolds = fold.size - nameFolds;
                 orphans = assets.filter(a => !isId(a) && !fold.has(a.id)).length;
             }
         } catch (e) { console.warn(`${TAG} [padfold] fold build failed — every asset stays its own pad`, e); }
-        if (fold.size) console.log(`${TAG} [padfold] legacy nested-asset site: ${fold.size} polygon(s) fold into their _ID main pad (${nameFolds} by name · ${geoFolds} nested inside an _ID ring) · ${orphans} asset(s) have no _ID owner (stay their own pad)`);
-        return (a) => (a && fold.get(a.id)) || a;
+        if (fold.size) console.log(`${TAG} [padfold] legacy nested-asset site: ${fold.size} polygon(s) fold into their main pad (${nameFolds} by name · ${geoFolds} nested) · ${orphans} asset(s) have no owner (stay their own pad)`);
+        // v2.97: follow chains (equipment → nested pad → …), capped.
+        return (a) => { let x = a, hops = 0; while (x && fold.has(x.id) && hops++ < 4) x = fold.get(x.id); return x; };
     }
     function mcvDetect(ent, missions) {
         const assets = (ent.assets || []).filter(a => a.ring && a.ring.length >= 3);
         const padFold = mbBuildPadFold(assets);
         const tolM = 46;   // 150 ft
         const boxes = assets.map(a => agRingBbox(a.ring, tolM + 5));
+        // v2.97: nested rings tie at d=0 — the TIGHTEST polygon must win, or
+        // a big boundary polygon wrapping two pads swallows every step
+        // (array order used to decide, making such missions read as solo).
+        const areas = assets.map(a => mbRingArea(a.ring));
         const macros = [];
         const solos = [];
         const covered = new Set();
@@ -5702,7 +5724,7 @@
                         const bb = boxes[ai];
                         if (p.lat < bb.s || p.lat > bb.n || p.lng < bb.w || p.lng > bb.e) continue;
                         const d = mbPointToPolygonMeters(p.lat, p.lng, assets[ai].ring);
-                        if (d <= tolM && (!best || d < best.d)) best = { a: assets[ai], d };
+                        if (d <= tolM && (!best || d < best.d || (d === best.d && areas[ai] < best.area))) best = { a: assets[ai], d, area: areas[ai] };
                     }
                     if (best) best.a = padFold(best.a);   // v2.94: equipment → its _ID main pad
                     if (best) {
@@ -5966,13 +5988,14 @@
         const ffzs = (ent && ent.ffzs) || [];
         const tolM = 46;   // 150 ft
         const boxes = assets.map(a => agRingBbox(a.ring, tolM + 5));
+        const areas = assets.map(a => mbRingArea(a.ring));   // v2.97: tightest ring wins d=0 ties
         const padOf = (p) => {
             let best = null;
             for (let i = 0; i < assets.length; i++) {
                 const bb = boxes[i];
                 if (p.lat < bb.s || p.lat > bb.n || p.lng < bb.w || p.lng > bb.e) continue;
                 const d = mbPointToPolygonMeters(p.lat, p.lng, assets[i].ring);
-                if (d <= tolM && (!best || d < best.d)) best = { a: assets[i], d };
+                if (d <= tolM && (!best || d < best.d || (d === best.d && areas[i] < best.area))) best = { a: assets[i], d, area: areas[i] };
             }
             return best ? padFold(best.a) : null;
         };

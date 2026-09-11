@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-10 — 🧩 Mission Bank Tools v2.97: nested pad-in-pad missions detect as macros again (latest — dev only)
+
+A mission like "2 Facilities_ID CGLS_ID 23869" — two facility pads wrapped in one big _ID boundary polygon — read as ONE pad (solo), so 🧩 never offered ✂. Two causes fixed: (1) when a step sits inside nested rings the **tightest polygon now wins** the tie (array order used to decide, letting the boundary swallow every step); (2) the geometric fold gained pad guards — an asset that **contains other assets** is a pad and never folds, and a child must be under 25% of its host's area — so nested facility pads survive while equipment still folds (now into the tightest containing asset, so equipment on a nested pad joins that pad, not the outer boundary). Both site shapes verified in simulation: the facility mission detects its two pads (macro → splittable per facility), and multi-well `_ID` folding is unchanged.
+
 ## 2026-09-10 — ✂ Mission Bank Tools v2.96: multi-well pads — equipment inside an _ID ring folds in (latest — dev only)
 
 v2.95's normalization fixed every pad that *has* an _ID polygon (live test: 41 → 35 groups, all _ID pads absorbed their equipment). The remaining equipment rows are wells with no _ID polygon of their own — typically two wells sharing one physical pad where only the pad polygon carries "_ID" (3415AH_ID 477 exists; "3416AH Well Head" has no 3416AH_ID). Names can never connect those, so a **geometric pass** now finishes the job: any asset the name pass left behind whose centroid sits **inside an _ID asset's ring** folds into that pad (tightest containing ring wins). Only _ID polygons attract — loose equipment never merges with other loose equipment, and sites without _ID assets are untouched. The `[padfold]` log now breaks out `by name · nested inside an _ID ring · no _ID owner`.
