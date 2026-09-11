@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-10 — 🧩 Mission Bank Tools v2.98: pad-sized polygons never fold — closes every pad-merge path (latest — dev only)
+
+v2.97's container guard still let two cases collapse a facility mission into "one pad": a **bare** nested pad (no equipment polygons inside it, so the container guard can't recognize it) could be swallowed by geometry, and a sibling pad whose name **extends the boundary's root** could be swallowed by the name rule (which had no guards at all). One principle now closes both: anything **pad-sized (≥ ~1200 m², ≈115 ft square) or containing another asset never folds — by either pass**. Equipment is tens of square meters; pads are thousands. Verified in simulation across all four site shapes: bare nested pads ✓, name-extending sibling pads ✓, multi-well `_ID` equipment folding unchanged ✓, modern sites untouched ✓.
+
 ## 2026-09-10 — 🧩 Mission Bank Tools v2.97: nested pad-in-pad missions detect as macros again (latest — dev only)
 
 A mission like "2 Facilities_ID CGLS_ID 23869" — two facility pads wrapped in one big _ID boundary polygon — read as ONE pad (solo), so 🧩 never offered ✂. Two causes fixed: (1) when a step sits inside nested rings the **tightest polygon now wins** the tie (array order used to decide, letting the boundary swallow every step); (2) the geometric fold gained pad guards — an asset that **contains other assets** is a pad and never folds, and a child must be under 25% of its host's area — so nested facility pads survive while equipment still folds (now into the tightest containing asset, so equipment on a nested pad joins that pad, not the outer boundary). Both site shapes verified in simulation: the facility mission detects its two pads (macro → splittable per facility), and multi-well `_ID` folding is unchanged.

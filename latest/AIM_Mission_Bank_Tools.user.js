@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.97
+// @version      2.98
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.97';
+    const SCRIPT_VERSION = '2.98';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -5649,9 +5649,19 @@
                 .filter(x => x.root.length >= 4)
                 .sort((x, y) => y.root.length - x.root.length);
             if (idAssets.length) {
+                const hosts = assets.map(a => ({ a, area: mbRingArea(a.ring), c: genCentroid(a.ring) }));
+                const isContainer = hosts.map(h => hosts.some(o => o.a !== h.a && genPointInPoly(o.c, h.a.ring)));
+                // v2.98: PAD-SIZED never folds — by ANY pass. The container
+                // guard misses a bare nested pad (no equipment polygons to
+                // contain), and a sibling pad can extend the boundary's name
+                // root, so both passes now refuse anything pad-like:
+                // container of other assets, OR ≥ ~1200 m² (≈115 ft square).
+                // Equipment is tens of m²; pads are thousands.
+                const m2 = (h) => { const k = 111320; return (h.area / 2) * k * k * Math.abs(Math.cos((h.c.lat || 0) * Math.PI / 180)); };
+                const padLike = hosts.map((h, i) => isContainer[i] || m2(h) >= 1200);
                 // pass 1 — by NAME: equipment extends an _ID asset's root
-                assets.forEach(a => {
-                    if (isId(a)) return;
+                assets.forEach((a, ai) => {
+                    if (isId(a) || padLike[ai]) return;
                     const want = mbNormName(a.name);
                     const own = idAssets.find(x => want === x.root || want.startsWith(x.root + ' ') || want.startsWith(x.root + '_'));
                     if (own) fold.set(a.id, own.a);
@@ -5668,17 +5678,13 @@
                 // v2.97: geometry folds EQUIPMENT, never a nested PAD. A
                 // facility site can wrap two whole pads in one big _ID
                 // boundary polygon ("2 Facilities_ID CGLS…"); folding those
-                // made the mission read as one pad (solo, no ✂). Two guards:
-                // a CONTAINER (an asset holding another asset's centroid) is
-                // a pad and never folds — pads hold equipment, equipment
-                // holds nothing — and the child must be under 25% of the
-                // host's area. Fold target = TIGHTEST containing asset (a
-                // nested pad beats the outer boundary); still gated to sites
-                // that have _ID assets at all.
-                const hosts = assets.map(a => ({ a, area: mbRingArea(a.ring), c: genCentroid(a.ring) }));
-                const isContainer = hosts.map(h => hosts.some(o => o.a !== h.a && genPointInPoly(o.c, h.a.ring)));
+                // made the mission read as one pad (solo, no ✂). Guards:
+                // padLike (container OR pad-sized, above) never folds, and
+                // the child must be under 25% of the host's area. Fold
+                // target = TIGHTEST containing asset (a nested pad beats the
+                // outer boundary); still gated to sites with _ID assets.
                 assets.forEach((a, ai) => {
-                    if (isId(a) || fold.has(a.id) || isContainer[ai]) return;
+                    if (isId(a) || fold.has(a.id) || padLike[ai]) return;
                     const c = hosts[ai].c, myArea = hosts[ai].area;
                     let best = null;
                     hosts.forEach(h => { if (h.a !== a && myArea < h.area * 0.25 && genPointInPoly(c, h.a.ring) && (!best || h.area < best.area)) best = h; });
