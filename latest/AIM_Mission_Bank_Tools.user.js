@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.00
+// @version      3.01
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.00';
+    const SCRIPT_VERSION = '3.01';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -8762,8 +8762,8 @@
         const b = pcm.base;
         if (!b) { showToast('No base station found on this site — can\'t compute distance order.', '#ff9800', 3500); return; }
         const dist = (p) => {
-            if (!p.asset || !Array.isArray(p.asset.ring) || !p.asset.ring.length) return 0;
-            const c = genCentroid(p.asset.ring);
+            const c = pcmPickPoint(p);   // v3.01: mission's first stop, not the asset centroid
+            if (!c) return 0;
             const dLat = (c.lat - b.lat) * 111320;
             const dLng = (c.lng - b.lng) * 111320 * Math.cos(b.lat * Math.PI / 180);
             return Math.hypot(dLat, dLng);
@@ -8809,6 +8809,23 @@
     }
 
     function pcmStepCount(m) { return mbMissionBody(m).length; }
+
+    // v3.01: where a pick lives on the map = the MISSION's first flight stop
+    // (first located body step). The asset centroid lied whenever the pick's
+    // asset was a big boundary polygon (badge "8" landed at the boundary's
+    // centroid, nowhere near the facility it flies) — and a ring-less
+    // search/recipe pick had no badge at all. Asset centroid is the fallback.
+    function pcmPickPoint(p) {
+        let c = null;
+        try {
+            mbMissionBody(p.mission).some(s => {
+                if (s && s.location && typeof s.location.lat === 'number') { c = { lat: s.location.lat, lng: s.location.lng }; return true; }
+                return false;
+            });
+        } catch (e) {}
+        if (!c && p.asset && Array.isArray(p.asset.ring) && p.asset.ring.length) c = genCentroid(p.asset.ring);
+        return c;
+    }
 
     function pcmFindMission(name) {
         const c = pcmFindMissionCandidates(name);
@@ -8970,8 +8987,8 @@
         const L = composerGetL(), map = getLeafletMap();
         if (!L || !map) return;
         pcm.picks.forEach((p, i) => {
-            if (!p.asset || !Array.isArray(p.asset.ring) || !p.asset.ring.length) return;   // recipe-loaded pick whose asset is gone
-            const c = genCentroid(p.asset.ring);
+            const c = pcmPickPoint(p);   // v3.01: mission's first stop, not the asset centroid
+            if (!c) return;
             const icon = L.divIcon({
                 className: 'aim-mb-pcm-badge',
                 // interactive marker + data-pcm-idx → M2 on the badge itself opens the renumber popup

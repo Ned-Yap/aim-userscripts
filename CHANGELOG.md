@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-10 — 🔗 Mission Bank Tools v3.01: merge badges sit where the mission actually flies (latest — dev only)
+
+A pick's numbered badge (and its ⚡ Far→near distance) was placed at the matched **asset polygon's centroid** — so a mission matched via a big boundary polygon put its badge at the boundary's center, nowhere near the facility it flies (the "where is badge 8?!" bug), and ring-less picks (loaded recipes) had no badge at all. Badges now sit at the **mission's first flight stop** (first located step), with the asset centroid as fallback — the number is always on the pad the drone actually visits.
+
 ## 2026-09-10 — 🔍 Mission Bank Tools v3.00: add ANY mission to a merge by name (latest — dev only)
 
 The 🔗 Merge-by-pad-clicks panel gets a **search box**: type any part of a mission name, click a result (or press Enter for the top hit) and it's appended to the merge — **no pad click required**, so no polygon, hit-test, or naming convention can ever gatekeep a merge again. Search-added missions get a numbered badge at their first located step and work with Far→near ordering, drag-reorder, and saved merges like any picked pad.
