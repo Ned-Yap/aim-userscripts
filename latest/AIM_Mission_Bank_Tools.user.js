@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.01
+// @version      3.02
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.01';
+    const SCRIPT_VERSION = '3.02';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -273,6 +273,7 @@
     // Control Panel state
     let controlChannel = null;
     let controlPanelDetected = false;
+    let dgSeenAt = 0;             // last time Delete Guard REGISTERed on the control channel (bulk-delete ceremony)
     let masterEnabled = true;
 
     // Data cache: { [siteID]: { missions: [...], fetchedAt: timestamp } }
@@ -325,6 +326,7 @@
         controlChannel.onmessage = (ev) => {
             controlPanelDetected = true;
             const msg = ev.data || {};
+            if (msg.type === 'REGISTER' && msg.scriptId === 'aim-delete-guard') dgSeenAt = Date.now();
             if (msg.type === 'REQUEST_REGISTRATIONS') {
                 registerWithControlPanel();
                 registerMissionSop();
@@ -11712,53 +11714,269 @@
         setTimeout(() => document.addEventListener('mousedown', outside, true), 0);
     }
 
-    // Bulk DELETE the selected missions (permanent — via ctx.deleteApp). Serialized,
-    // with a clear confirmation listing what will be removed.
-    function openBulkDeletePopover(anchor) {
+    // ---- 🗑 BULK DELETE ceremony (v3.02 / v2.92) — the ONLY mission-delete
+    // path in this script. Same rails as the Asset Importer's delete mode:
+    // fresh fetch (plan reflects the live server), full JSON backup download
+    // BEFORE anything arms, Delete Guard detection (refuses without it unless
+    // the override is ticked), ack checkbox + slide-and-HOLD-5s, serialized
+    // ctx.deleteApp with ✋ Abort, verify-by-refetch, ↩ Undo batch that
+    // re-creates from our own bank via the proven saveApp({id:null}) path.
+    // Built after the 2026-09-10 "North Side - Assets" loss on site 1461.
+    const BULK_DEL_MODAL_ID = 'aim-mb-bulk-del-modal';
+    const BULK_DEL_GAP_MS = 150;
+    let bulkDelLastBank = null;  // { siteID, when, missions[] } — ↩ Undo source (this session)
+    function mbDetectDeleteGuard() {
+        return new Promise(resolve => {
+            if (Date.now() - dgSeenAt < 15000) { resolve(true); return; }
+            try { if (controlChannel) controlChannel.postMessage({ type: 'REQUEST_REGISTRATIONS' }); } catch (e) {}
+            setTimeout(() => resolve(Date.now() - dgSeenAt < 15000), 1300);
+        });
+    }
+    function bulkDelNormStep(s) {
+        return {
+            type: s.type,
+            value1: s.value1 === undefined ? null : s.value1,
+            value2: s.value2 === undefined ? null : s.value2,
+            location: s.location ? JSON.parse(JSON.stringify(s.location)) : null,
+            extra_options: s.extra_options ? JSON.parse(JSON.stringify(s.extra_options)) : {},
+            polygon_points: s.polygon_points ? JSON.parse(JSON.stringify(s.polygon_points)) : null,
+            snapshot_points: s.snapshot_points ? JSON.parse(JSON.stringify(s.snapshot_points)) : null,
+        };
+    }
+    function bulkDelDownload(name, text) {
+        const blob = new Blob([text], { type: 'application/json' });
+        const blobUrl = URL.createObjectURL(blob);
+        let downloaded = false;
+        for (const doc of [(window.top || window).document, document]) {
+            if (downloaded) break;
+            try {
+                const a = doc.createElement('a');
+                a.href = blobUrl; a.download = name;
+                (doc.body || document.body).appendChild(a); a.click(); a.remove();
+                downloaded = true;
+            } catch (e) { console.warn(`${TAG} [delete] backup download attempt failed in a frame:`, e); }
+        }
+        setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 5000);
+        return downloaded;
+    }
+    async function openBulkDeletePopover(anchor) {
         try { closeOpenMenus(); } catch (e) {}
         const sid = getCurrentSiteID();
-        const ms = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
-        const selected = ms.filter(m => panelState.selectedIds.has(m.id));
-        if (!selected.length) { showToast('Select missions first (row checkboxes), then 🗑 Delete.', '#ff9800', 3500); return; }
+        if (!sid) { showToast('No site loaded.', '#ff5252', 3000); return; }
+        const cached = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
+        const selectedIds = new Set(cached.filter(m => panelState.selectedIds.has(m.id)).map(m => String(m.id)));
+        if (!selectedIds.size) { showToast('Select missions first (row checkboxes), then 🗑 Delete.', '#ff9800', 3500); return; }
         const ctx = findMissionAppCtx();
-        if (!ctx || typeof ctx.deleteApp !== 'function') { showToast('Delete: mission context not found — be on the Mission Bank page.', '#ff5252', 4000); return; }
-        const menu = document.createElement('div');
-        menu.className = 'aim-mb-bulk-del-pop';
-        menu.style.cssText = 'position:fixed;z-index:2147483647;width:360px;max-height:72vh;display:flex;flex-direction:column;background:#1a1113;border:1px solid #ff5252;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
-        menu.innerHTML = `
-            <div style="padding:9px 12px;background:rgba(255,82,82,0.12);border-bottom:1px solid rgba(255,82,82,0.35);font-weight:800;color:#ff9a9a;font-size:13px;">🗑 Delete missions · ${selected.length} selected</div>
-            <div style="padding:8px 12px;font-size:11px;color:#f2b8b8;border-bottom:1px solid #3a2a2a;"><b>Permanently deletes</b> these from the server — can’t be undone.</div>
-            <div style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;min-height:60px;">${selected.slice(0, 400).map(m => `<div style="padding:2px 0;border-bottom:1px solid #2a1e1e;color:#e6c8c8;">${escapeHtml(m.name || ('#' + m.id))}</div>`).join('')}</div>
-            <div style="padding:9px 12px;border-top:1px solid #3a2a2a;display:flex;align-items:center;gap:8px;">
-                <span data-del-status style="flex:1;font-size:11px;color:#f2b8b8;"></span>
-                <button data-del-cancel class="aim-mb-tbtn" style="padding:5px 10px;">Cancel</button>
-                <button data-del-go style="padding:5px 12px;background:#ff5252;border:none;color:#2a0a0a;border-radius:6px;cursor:pointer;font-weight:800;">Delete ${selected.length}</button>
-            </div>`;
-        document.body.appendChild(menu);
-        try { positionFloatingMenu(menu, anchor); } catch (e) { const r = anchor.getBoundingClientRect(); menu.style.left = r.left + 'px'; menu.style.top = (r.bottom + 4) + 'px'; }
-        const close = () => { menu.remove(); document.removeEventListener('mousedown', outside, true); };
-        const outside = (e) => { if (!menu.contains(e.target) && e.target !== anchor) close(); };
-        menu.querySelector('[data-del-cancel]').onclick = close;
-        const statusEl = menu.querySelector('[data-del-status]');
-        const goBtn = menu.querySelector('[data-del-go]');
-        goBtn.onclick = async () => {
-            goBtn.disabled = true; menu.querySelector('[data-del-cancel]').disabled = true;
-            const deleted = [];
-            for (let i = 0; i < selected.length; i++) {
-                statusEl.textContent = `Deleting ${i + 1}/${selected.length}…`;
-                try { await ctx.deleteApp(selected[i].id); deleted.push(selected[i].id); panelState.selectedIds.delete(selected[i].id); }
-                catch (e) { console.warn(`${TAG} [delete] failed "${selected[i].name}"`, e); }
+        if (!ctx || typeof ctx.deleteApp !== 'function' || typeof ctx.saveApp !== 'function') { showToast('Delete: mission context not found — be on the Mission Bank page.', '#ff5252', 4000); return; }
+        const old = document.getElementById(BULK_DEL_MODAL_ID);
+        if (old) old.remove();
+        const modal = document.createElement('div');
+        modal.id = BULK_DEL_MODAL_ID;
+        modal.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2147483647;'
+            + 'width:620px;max-width:94vw;max-height:84vh;overflow-y:auto;background:#1a1214;color:#e6e6e6;'
+            + 'border:2px solid #ff5555;border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,0.75);'
+            + 'font:12px/1.5 "Lato","Segoe UI",sans-serif;padding:0;';
+        modal.innerHTML = ''
+            + '<div style="padding:9px 14px;border-bottom:1px solid #552;color:#ff5555;font-weight:800;font-size:14px;">'
+            + `🗑 DELETE MISSIONS — this removes missions from the LIVE site ${escapeHtml(String(sid))}`
+            + '<span data-bd-close style="float:right;cursor:pointer;color:#888">✕</span></div>'
+            + '<div data-bd-body style="padding:10px 14px;"><span style="color:#aaa">Preparing…</span></div>';
+        document.body.appendChild(modal);
+        let running = false;
+        const abortFlag = { abort: false };
+        modal.querySelector('[data-bd-close]').addEventListener('click', () => {
+            if (running) { showToast('Run in progress — use ✋ Abort first', '#ff9800', 3000); return; }
+            modal.remove();
+        });
+        const body = () => modal.querySelector('[data-bd-body]');
+        try {
+            body().innerHTML = '<span style="color:#aaa">Fetching fresh missions from the server…</span>';
+            const fresh = await mbFetchMissionsFull(sid);
+            const rows = fresh.filter(m => selectedIds.has(String(m.id)));
+            const gone = selectedIds.size - rows.length;
+            if (!rows.length) { body().innerHTML = '<span style="color:#ffa030">None of the selected missions exist on the server any more — refresh the panel.</span>'; return; }
+            body().innerHTML = '<span style="color:#aaa">Checking for Delete Guard…</span>';
+            const dgPresent = await mbDetectDeleteGuard();
+            body().innerHTML = '<span style="color:#aaa">Downloading backup…</span>';
+            const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+            const backupName = `site${sid}_missions_predelete_backup_${stamp}.json`;
+            const snap = { site: sid, savedAt: new Date().toISOString(), reason: 'pre-bulk-delete', count: rows.length, missions: rows };
+            let backupOk = false;
+            try { backupOk = bulkDelDownload(backupName, JSON.stringify(snap)); } catch (e) { console.warn(`${TAG} [delete] backup download failed:`, e); }
+            const listHtml = rows.map(m => `<div style="padding:3px 6px;border-bottom:1px solid #2a1a1a;display:flex;gap:8px;">`
+                + `<span style="flex:1;color:#fff;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(String(m.name || ('#' + m.id)))}</span>`
+                + `<span style="color:#9ad;white-space:nowrap;">#${escapeHtml(String(m.id))} · ${(m.instructions || []).length} steps</span></div>`).join('');
+            const dgNote = dgPresent
+                ? '<span style="color:#5fff5f">🕘 Delete Guard detected — every mission is banked to its 72h undo ring before the DELETE goes out</span>'
+                : '<span style="color:#ff5555;font-weight:800">⛔ Delete Guard NOT detected — no automatic undo ring. Blocked by default.</span>';
+            const bkNote = backupOk
+                ? `<span style="color:#5fff5f">💾 backup saved: ${escapeHtml(backupName)}</span> <span style="color:#888">— ↩ Undo batch re-creates from this bank (NEW ids)</span>`
+                : '<span style="color:#ff5555;font-weight:800">⚠ backup download FAILED — only Delete Guard protects you</span>';
+            body().innerHTML = ''
+                + `<div style="margin-bottom:8px;">Deleting <b style="color:#ff5555">${rows.length} mission(s)</b> from site <b>${escapeHtml(String(sid))}</b>`
+                + (gone ? `<br><span style="color:#ffa030">${gone} selected mission(s) already gone from the server — skipped</span>` : '')
+                + `<br>${dgNote}<br>${bkNote}</div>`
+                + `<div style="max-height:30vh;overflow-y:auto;border:1px solid #2a1a1a;margin-bottom:10px;">${listHtml}</div>`
+                + (dgPresent ? '' : '<label style="display:flex;gap:8px;align-items:center;margin-bottom:6px;cursor:pointer;color:#ff8a80;">'
+                    + '<input type="checkbox" data-bd-override> OVERRIDE: delete WITHOUT Delete Guard (only my backup file + ↩ Undo batch protect me)</label>')
+                + '<label style="display:flex;gap:8px;align-items:center;margin-bottom:10px;cursor:pointer;">'
+                + `<input type="checkbox" data-bd-ack> I understand these ${rows.length} mission(s) will be PERMANENTLY DELETED from this site</label>`
+                + '<div data-bd-slider-wrap style="opacity:0.45;pointer-events:none;">'
+                + '<div style="color:#ff5555;font-weight:800;margin-bottom:4px;">Slide to the end and HOLD for 5 seconds:</div>'
+                + '<div data-bd-track style="position:relative;height:38px;background:linear-gradient(90deg,#3a1518,#7a1f24);border:1px solid #ff5555;border-radius:19px;user-select:none;touch-action:none;">'
+                + '<div data-bd-knob style="position:absolute;top:2px;left:2px;width:34px;height:34px;background:#ff5555;border-radius:50%;cursor:grab;display:flex;align-items:center;justify-content:center;font-size:16px;">🗑</div>'
+                + '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#ffb3b3;pointer-events:none;">slide ➜</div>'
+                + '</div></div>'
+                + '<div data-bd-countdown style="display:none;margin-top:10px;padding:10px;background:#7a1f24;border-radius:6px;color:#fff;font-weight:800;font-size:15px;text-align:center;"></div>'
+                + '<div data-bd-status style="margin-top:8px;min-height:18px;color:#aaa;"></div>'
+                + '<div data-bd-actions style="margin-top:8px;display:flex;gap:14px;flex-wrap:wrap;"></div>';
+            const ack = body().querySelector('[data-bd-ack]');
+            const ovr = body().querySelector('[data-bd-override]');
+            const sliderWrap = body().querySelector('[data-bd-slider-wrap]');
+            const armed = () => ack.checked && (dgPresent || (ovr && ovr.checked));
+            const syncArm = () => {
+                const on = armed();
+                sliderWrap.style.opacity = on ? '1' : '0.45';
+                sliderWrap.style.pointerEvents = on ? 'auto' : 'none';
+            };
+            ack.addEventListener('change', syncArm);
+            if (ovr) ovr.addEventListener('change', syncArm);
+            const track = body().querySelector('[data-bd-track]');
+            const knob = body().querySelector('[data-bd-knob]');
+            const countdownEl = body().querySelector('[data-bd-countdown]');
+            const statusEl = body().querySelector('[data-bd-status]');
+            const actionsEl = body().querySelector('[data-bd-actions]');
+            let holdTimer = null, holdLeft = 0, dragging = false, fired = false;
+            const setKnob = (px) => {
+                const max = track.clientWidth - knob.offsetWidth - 4;
+                const x = Math.max(2, Math.min(max + 2, px));
+                knob.style.left = x + 'px';
+                return (x - 2) / max;
+            };
+            const cancelHold = () => { if (holdTimer) { clearInterval(holdTimer); holdTimer = null; } countdownEl.style.display = 'none'; };
+            const resetKnob = () => { cancelHold(); knob.style.left = '2px'; };
+            const ui = {
+                status: (msg, color) => { statusEl.innerHTML = `<span style="color:${color || '#aaa'}">${msg}</span>`; },
+                runStarted: () => {
+                    running = true;
+                    sliderWrap.style.display = 'none';
+                    ack.disabled = true;
+                    actionsEl.innerHTML = '<span data-bd-abort style="cursor:pointer;color:#ffa030;font-weight:800">✋ Abort (finishes the in-flight delete, keeps the rest)</span>';
+                    actionsEl.querySelector('[data-bd-abort]').addEventListener('click', () => { abortFlag.abort = true; ui.status('aborting after the in-flight delete…', '#ffa030'); });
+                },
+                finished: (report) => {
+                    running = false;
+                    const good = !report.failed.length && !report.verifyProblems.length && !report.aborted;
+                    ui.status(`Done — <b>${report.deleted.length} deleted</b>`
+                        + (report.failed.length ? `, <span style="color:#ff5555">${report.failed.length} FAILED</span>` : '')
+                        + (report.aborted ? ', <span style="color:#ffa030">ABORTED early</span>' : '')
+                        + (report.verifyProblems.length ? `, <span style="color:#ff5555">${report.verifyProblems.length} verify problem(s)</span>` : ', all verified gone ✓'),
+                        good ? '#5fff5f' : (report.deleted.length ? '#ffa030' : '#ff5555'));
+                    actionsEl.innerHTML = (report.deleted.length ? '<span data-bd-undo style="cursor:pointer;color:#ffb347;font-weight:800">↩ Undo this batch (re-create from bank — NEW ids)</span>' : '')
+                        + `<span style="color:#888">backup: ${escapeHtml(backupName)}${dgPresent ? ' · Delete Guard 🕘 Restore also has each one' : ' · NO Delete Guard this time'}</span>`;
+                    const u = actionsEl.querySelector('[data-bd-undo]');
+                    if (u) u.addEventListener('click', () => { bulkDelUndoBatch(ctx, ui); });
+                },
+            };
+            knob.addEventListener('pointerdown', (ev) => { if (fired || running) return; dragging = true; knob.setPointerCapture(ev.pointerId); ev.preventDefault(); });
+            knob.addEventListener('pointermove', (ev) => {
+                if (!dragging || fired) return;
+                const r = track.getBoundingClientRect();
+                const frac = setKnob(ev.clientX - r.left - knob.offsetWidth / 2);
+                if (frac >= 0.95) {
+                    if (!holdTimer) {
+                        holdLeft = 5;
+                        countdownEl.style.display = 'block';
+                        countdownEl.textContent = `⚠ DELETING ${rows.length} MISSION(S) FROM SITE ${sid} IN ${holdLeft}s — RELEASE TO CANCEL`;
+                        holdTimer = setInterval(() => {
+                            holdLeft--;
+                            if (holdLeft <= 0) {
+                                cancelHold(); fired = true; dragging = false;
+                                bulkDelExecute(ctx, sid, rows, snap, abortFlag, ui);
+                                return;
+                            }
+                            countdownEl.textContent = `⚠ DELETING ${rows.length} MISSION(S) FROM SITE ${sid} IN ${holdLeft}s — RELEASE TO CANCEL`;
+                        }, 1000);
+                    }
+                } else cancelHold();
+            });
+            const release = () => { if (fired) return; dragging = false; resetKnob(); };
+            knob.addEventListener('pointerup', release);
+            knob.addEventListener('pointercancel', release);
+        } catch (e) {
+            console.warn(`${TAG} [delete] modal prepare failed:`, e);
+            body().innerHTML = `<span style="color:#ff5555">Prepare failed — ${escapeHtml(String(e && e.message || e))}. Nothing was deleted.</span>`;
+        }
+    }
+    async function bulkDelExecute(ctx, sid, rows, snap, abortFlag, ui) {
+        ui.runStarted();
+        const results = { deleted: [], failed: [], aborted: false, verifyProblems: [] };
+        for (let i = 0; i < rows.length; i++) {
+            if (abortFlag.abort) { results.aborted = true; break; }
+            const m = rows[i];
+            ui.status(`deleting ${i + 1}/${rows.length} — "${escapeHtml(String(m.name || m.id))}"…`);
+            try {
+                await ctx.deleteApp(m.id);
+                results.deleted.push({ id: m.id, name: m.name });
+                panelState.selectedIds.delete(m.id);
+            } catch (e) {
+                console.warn(`${TAG} [delete] failed "${m.name}":`, e);
+                results.failed.push({ id: m.id, name: m.name, reason: String(e && e.message || e) });
             }
-            const delSet = new Set(deleted);
-            if (missionsBySite[sid]) missionsBySite[sid].missions = missionsBySite[sid].missions.filter(m => !delSet.has(m.id));
-            close();
-            renderTableView();
-            try { refreshMissionList(); } catch (e) {}
-            const fail = selected.length - deleted.length;
-            showToast(`🗑 Deleted ${deleted.length}${fail ? ` · ${fail} failed (see console)` : ''}. Reload to refresh native Mission Bank.`, deleted.length ? '#5fff5f' : '#ff5252', 6000);
-            console.log(`${TAG} [delete] removed ${deleted.length}, failed ${fail}`);
-        };
-        setTimeout(() => document.addEventListener('mousedown', outside, true), 0);
+            await new Promise(r => setTimeout(r, BULK_DEL_GAP_MS));
+        }
+        ui.status('verifying against a fresh fetch…');
+        try {
+            await new Promise(r => setTimeout(r, 800));
+            const after = await mbFetchMissionsFull(sid);
+            const still = new Set(after.map(x => String(x.id)));
+            results.deleted = results.deleted.filter(d => {
+                if (still.has(String(d.id))) { results.verifyProblems.push(`"${d.name}" (#${d.id}) still present after delete`); return false; }
+                return true;
+            });
+            if (missionsBySite[sid]) missionsBySite[sid].missions = after;
+        } catch (e) {
+            console.warn(`${TAG} [delete] verify fetch failed:`, e);
+            results.verifyProblems.push('verify fetch failed — check the site manually');
+            const delSet = new Set(results.deleted.map(d => String(d.id)));
+            if (missionsBySite[sid]) missionsBySite[sid].missions = missionsBySite[sid].missions.filter(m => !delSet.has(String(m.id)));
+        }
+        const deletedIds = new Set(results.deleted.map(d => String(d.id)));
+        bulkDelLastBank = { siteID: sid, when: new Date().toISOString(), missions: snap.missions.filter(m => deletedIds.has(String(m.id))) };
+        try { renderTableView(); } catch (e) {}
+        try { refreshMissionList(); } catch (e) {}
+        console.log(`${TAG} [delete] bulk delete done: ${results.deleted.length} deleted, ${results.failed.length} failed${results.aborted ? ' (ABORTED)' : ''}`, results);
+        ui.finished(results);
+    }
+    // ↩ Undo batch: create-only re-save of the banked missions via the proven
+    // saveApp({id:null}) path. NEW ids; a name that already exists is skipped.
+    async function bulkDelUndoBatch(ctx, ui) {
+        const bank = bulkDelLastBank;
+        if (!bank || !bank.missions.length) { showToast('No delete batch banked this session — use Delete Guard’s 🕘 Restore panel instead', '#ff9800', 4500); return; }
+        if (String(bank.siteID) !== String(getCurrentSiteID())) { showToast('Banked batch belongs to another site', '#ff5252', 3500); return; }
+        if (!window.confirm(`Re-create the ${bank.missions.length} deleted mission(s) from the bank? They come back with NEW ids.`)) return;
+        let existing = new Set();
+        try { existing = new Set((await mbFetchMissionsFull(bank.siteID)).map(m => String(m.name || '').trim().toLowerCase())); }
+        catch (e) { console.warn(`${TAG} [delete] undo pre-fetch failed:`, e); }
+        let ok = 0, fail = 0, skipped = 0;
+        const restored = [];
+        for (const m of bank.missions) {
+            const nm = String(m.name || '').trim();
+            if (existing.has(nm.toLowerCase())) { skipped++; console.log(`${TAG} [delete] undo: "${nm}" already exists — skipped`); continue; }
+            ui.status(`re-creating "${escapeHtml(nm)}"…`, '#ffb347');
+            try {
+                await ctx.saveApp({ id: null, type: m.type || 1, instructions: (m.instructions || []).map(bulkDelNormStep), data_report_object_arr: [] }, nm);
+                ok++; restored.push(String(m.id));
+            } catch (e) { fail++; console.warn(`${TAG} [delete] undo re-create "${nm}" failed:`, e); }
+            await new Promise(r => setTimeout(r, BULK_DEL_GAP_MS));
+        }
+        const restoredSet = new Set(restored);
+        bank.missions = bank.missions.filter(m => !restoredSet.has(String(m.id)));   // failed ones stay retryable
+        if (!bank.missions.length) bulkDelLastBank = null;
+        try { fetchMissions(bank.siteID, () => { try { renderTableView(); } catch (e) {} }, () => {}); } catch (e) {}
+        try { refreshMissionList(); } catch (e) {}
+        ui.status(`↩ Undo batch: <b>${ok}</b> re-created${skipped ? `, ${skipped} skipped (name already exists)` : ''}${fail ? `, <span style="color:#ff6060">${fail} FAILED (kept banked — retry)</span>` : ''} · NEW ids · data report must be re-set on each · reload to see them natively`, fail ? '#ffb347' : '#5fff5f');
+        showToast(fail ? `Undo: ${ok} re-created, ${fail} FAILED` : `↩ ${ok} mission(s) re-created`, fail ? '#ff9800' : '#5fff5f', 5000);
     }
 
     // ── ⧉ Duplicate missions (v2.51–v2.52, features.csv #237) ───────────────

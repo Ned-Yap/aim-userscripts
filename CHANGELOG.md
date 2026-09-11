@@ -6,6 +6,13 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-11 — 🕘 Delete Guard v1.3 + 🗑 Mission Bank Tools v2.92 (prod) / v3.02 (latest): missions are now protected like entities
+
+Built after a mission ("North Side - Assets", site 1461) vanished with no trace and no undo. Two changes:
+
+- **Delete Guard v1.3 — missions join the undo ring.** Every `DELETE /available_app/<id>/` from ANY source (native Mission Bank trash can, MBT bulk delete, anything else) is intercepted: the full mission JSON is banked into the same 72h history first, and a delete whose backup fails is BLOCKED. The 🕘 panel lists missions (yellow "Mission", step count) with one-click **Restore**, which recreates the mission with a NEW id using Percepto's exact save body (the guard learns that body from any real mission save — if it has never seen one, Restore tells you to Save any mission once, then retry). Turn nothing on: it is part of the existing master toggle.
+- **Mission Bank Tools — 🗑 Delete is now a full ceremony** (same rails as the Asset Importer's delete mode): fresh server fetch of the selected missions, **backup JSON download BEFORE anything arms**, Delete Guard detection (refuses without it unless you tick an explicit override), an "I understand" checkbox, then **slide to the end and HOLD for 5 seconds** (release = cancel), serialized deletes with ✋ Abort, verify-by-refetch, and an **↩ Undo this batch** button that recreates the deleted missions from the bank. The quick confirm popover is gone — there is no fast path to delete a mission any more.
+
 ## 2026-09-10 — 🔗 Mission Bank Tools v3.01: merge badges sit where the mission actually flies (latest — dev only)
 
 A pick's numbered badge (and its ⚡ Far→near distance) was placed at the matched **asset polygon's centroid** — so a mission matched via a big boundary polygon put its badge at the boundary's center, nowhere near the facility it flies (the "where is badge 8?!" bug), and ring-less picks (loaded recipes) had no badge at all. Badges now sit at the **mission's first flight stop** (first located step), with the asset centroid as fallback — the number is always on the pad the drone actually visits.
