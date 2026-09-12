@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.26
+// @version      0.27
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.26';
+    const SCRIPT_VERSION = '0.27';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -2371,7 +2371,7 @@
     // ==================================================================
     let buttonEl = null;
     let panelEl = null;
-    let openSections = { issues: true, sweep: true, map: true, kml: true, xref: true, metrics: false };
+    let openSections = { issues: true, data: true, sweep: true, map: true, kml: true, xref: true, metrics: false };
     // v0.25 (#257): 🚩 Fleet Issues front door. AIM Issues owns the engine +
     // panel (one copy of the merge/Slack/role rules); we ask it for a summary
     // and open it over tab-local DOM events on `document` (NOT the
@@ -3272,15 +3272,398 @@
         return out.join('');
     }
 
+    // ==================================================================
+    // 📦 FLEET DATA (v0.27, feature #259 phase 5a) — pick any sites, browse
+    // their LIVE data in-tool (site setup entities / missions / mission log)
+    // and export the selection as ONE zip (per-site JSON + CSV, combined
+    // CSVs). Everything is cookie-authed same-origin reads; nothing writes
+    // to Percepto. The mission-log archive (data repo) is the next step.
+    // ==================================================================
+    const FD_LOG_ONLY = 'id,mission_group_id,uploader_status,uploader_planned_images_count,drone_name,when,image_count,created_by_username,app_name,type,state,videos,landed,landing_files,tracking_files,landing_is_failed,duration,mission_data_reports,map_status,map_type,is_media_mission';
+    const FD_STATE = { 0: 'Pending', 1: 'In Progress', 2: 'Completed', 3: 'Aborted', 4: 'Failed', 5: 'Cancelled' };
+    const FD_TYPE = { 3: 'Asset', 4: 'NFZ', 8: 'Base', 15: 'FP', 16: 'FFZ', 19: 'Marker', 98: 'SafeZone' };
+    const FD_CACHE_MS = 10 * 60 * 1000;
+    const FD_TRACK_CAP = 200;
+    const fdSelected = new Set();
+    let fdFilter = '';
+    let fdDatasets = { setup: true, missions: true, log: true, tracks: false };
+    let fdRange = '90d';           // 30d | 90d | 12m | 18m | custom
+    let fdStart = '', fdEnd = '';  // custom yyyy-mm-dd
+    let fdBrowse = null;           // { sid, tab: 'setup'|'missions'|'log', search, loading, error }
+    let fdWide = false;
+    let fdRun = null;              // { done, total, msg, abort }
+    const fdCache = { setup: {}, missions: {}, log: {} };   // sid → { at, ... }
+    let fdCollapsedClients = new Set();
+
+    const fdYmd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;   // LOCAL date — toISOString would shift a day
+    function fdRangeDates() {
+        const end = new Date();
+        const start = new Date();
+        if (fdRange === 'custom' && (fdStart || fdEnd)) {
+            const e = fdEnd ? new Date(fdEnd + 'T23:59:59') : end;
+            const s = fdStart ? new Date(fdStart + 'T00:00:00') : new Date((isNaN(e) ? end : e).getTime() - 90 * 86400000);
+            return { start: isNaN(s) ? start : s, end: isNaN(e) ? end : e };
+        }
+        if (fdRange === '30d') start.setDate(start.getDate() - 30);
+        else if (fdRange === '12m') start.setMonth(start.getMonth() - 12);
+        else if (fdRange === '18m') start.setMonth(start.getMonth() - 18);
+        else start.setDate(start.getDate() - 90);
+        return { start, end };
+    }
+    function fdRangeLabel() {
+        const r = fdRangeDates();
+        return `${fdYmd(r.start)} → ${fdYmd(r.end)}`;
+    }
+    async function fdGetJson(url, ms) {
+        const resp = await fetchWithTimeout(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } }, ms || 30000);
+        if (resp.status === 401 || resp.status === 403) throw new Error('not logged in (401/403)');
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const ct = resp.headers.get('content-type') || '';
+        const text = await resp.text();
+        if (!/json/i.test(ct)) { if (/<form|login|sign\s*in|password/i.test(text)) throw new Error('login page returned — session expired?'); throw new Error('non-JSON response'); }
+        return JSON.parse(text);
+    }
+    async function fdFetchSetup(sid, force) {
+        const c = fdCache.setup[sid];
+        if (c && !force && Date.now() - c.at < FD_CACHE_MS) return c;
+        const raw = await fdGetJson(`/map_objects/?getPoiMapObjectsAsList=true&site_id=${encodeURIComponent(sid)}`);
+        const entities = extractList(raw);
+        const out = { at: Date.now(), entities, raw };
+        fdCache.setup[sid] = out;
+        return out;
+    }
+    async function fdFetchMissions(sid, force) {
+        const c = fdCache.missions[sid];
+        if (c && !force && Date.now() - c.at < FD_CACHE_MS) return c;
+        const raw = await fdGetJson(`/available_app/?site_id=${encodeURIComponent(sid)}&type=1`);
+        const list = extractList(raw);
+        const out = { at: Date.now(), list, raw };
+        fdCache.missions[sid] = out;
+        return out;
+    }
+    // Paged mission log (same walk MBT uses): newest page first, then
+    // last_mission_id cursors backward until total is reached.
+    function fdLogKey() { const r = fdRangeDates(); return `${fdYmd(r.start)}|${fdYmd(r.end)}`; }
+    async function fdFetchLog(sid, force, onPage, isAborted) {
+        const { start, end } = fdRangeDates();
+        const key = fdLogKey();
+        const c = fdCache.log[sid];
+        if (c && !force && c.key === key && Date.now() - c.at < FD_CACHE_MS) return c;
+        const fmt = fdYmd;
+        const all = []; let total = null; let lastId = -1; let pages = 0;
+        for (;;) {
+            if (isAborted && isAborted()) throw new Error('aborted');
+            if (++pages > 400) break;   // ~8000 flights safety cap
+            const params = { site_id: Number(sid), drones: [], missionTypes: [], missionId: [], users: [], state: null, takeoffCompleted: false, start: fmt(start), end: fmt(end), last_mission_id: lastId };
+            const j = await fdGetJson(`/missions/?site_id=${encodeURIComponent(sid)}&params=${encodeURIComponent(JSON.stringify(params))}&only=${encodeURIComponent(FD_LOG_ONLY)}`, 40000);
+            const past = (j && j.past_missions) || [];
+            if (total == null && typeof j.total_mission_count === 'number') total = j.total_mission_count;
+            all.push(...past);
+            if (onPage) onPage(all.length, total);
+            const lastMid = past.length ? past[past.length - 1].id : null;
+            const more = past.length > 0 && (total == null || all.length < total) && lastMid != null && lastMid !== lastId;
+            if (!more) break;
+            lastId = lastMid;
+        }
+        const out = { at: Date.now(), key, rows: all, total: total != null ? total : all.length, start: fmt(start), end: fmt(end) };
+        fdCache.log[sid] = out;
+        return out;
+    }
+    async function fdFetchTrack(missionId) {
+        return fdGetJson(`/mission_positions/${encodeURIComponent(missionId)}/`, 60000);
+    }
+
+    // ---- row shapers + CSV ----
+    const fdCsvEsc = (v) => { const s = v == null ? '' : String(v); return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+    function fdCsv(cols, rows) {
+        return [cols.map(c => fdCsvEsc(c.label)).join(',')].concat(rows.map(r => cols.map(c => fdCsvEsc(c.get(r))).join(','))).join('\n');
+    }
+    function fdAltFt(e) {
+        if (e.type === 16 || e.type === 4) { const r = e.restrictions; if (r && typeof r.minAlt === 'number') return `${Math.round(r.minAlt * FT_PER_M)}–${Math.round((r.maxAlt || r.minAlt) * FT_PER_M)}`; }
+        if (e.type === 15 && Array.isArray(e.arcs) && e.arcs.length) {
+            let lo = Infinity, hi = -Infinity; e.arcs.forEach(a => { if (a && typeof a.min_alt === 'number') { lo = Math.min(lo, a.min_alt); hi = Math.max(hi, a.max_alt || a.min_alt); } });
+            if (isFinite(lo)) return `${Math.round(lo * FT_PER_M)}–${Math.round(hi * FT_PER_M)}`;
+        }
+        return '';
+    }
+    const FD_SETUP_COLS = [
+        { label: 'Site ID', get: r => r._sid }, { label: 'Site', get: r => r._site },
+        { label: 'ID', get: e => e.id }, { label: 'Name', get: e => e.name || '' }, { label: 'Type', get: e => FD_TYPE[e.type] || `type ${e.type}` },
+        { label: 'Subtype', get: e => (e.custom && e.custom.poi_type_str) || e.general_marker_type || '' },
+        { label: 'Validated', get: e => e.validated ? 'yes' : 'no' }, { label: 'Unshielded', get: e => e.is_unshielded ? 'yes' : '' },
+        { label: 'Alt ft (MSL)', get: fdAltFt }, { label: 'Vertices', get: e => (entityCoords(e) || []).length || (Array.isArray(e.arcs) ? e.arcs.length + 1 : 0) },
+        { label: 'Lat', get: e => { const c = entityCoords(e); return c && c[0] ? c[0].lat : ''; } }, { label: 'Lng', get: e => { const c = entityCoords(e); return c && c[0] ? c[0].lng : ''; } },
+        { label: 'Description', get: e => e.description || '' },
+    ];
+    const FD_MISSION_COLS = [
+        { label: 'Site ID', get: r => r._sid }, { label: 'Site', get: r => r._site },
+        { label: 'ID', get: m => m.id }, { label: 'Name', get: m => m.name || '' }, { label: 'Active', get: m => m.is_active === false ? 'no' : 'yes' },
+        { label: 'Steps', get: m => (m.instructions || []).length }, { label: 'Snapshots', get: m => (m.instructions || []).filter(i => i && i.type_name === 'snapshot').length },
+        { label: 'Step mix', get: m => { const c = {}; (m.instructions || []).forEach(i => { if (i && i.type_name) c[i.type_name] = (c[i.type_name] || 0) + 1; }); return Object.entries(c).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(' · '); } },
+        { label: 'Description', get: m => m.description || '' },
+    ];
+    const fdWhenCT = (iso) => { if (!iso) return ''; try { return new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(iso)); } catch (e) { return iso; } };
+    const fdDur = (ms) => { const s = Math.round((Number(ms) || 0) / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+    const FD_LOG_COLS = [
+        { label: 'Site ID', get: r => r._sid }, { label: 'Site', get: r => r._site },
+        { label: 'Mission ID', get: m => m.id }, { label: 'Group', get: m => m.mission_group_id != null ? m.mission_group_id : '' }, { label: 'Name', get: m => m.app_name || '' },
+        { label: 'When (UTC)', get: m => m.when || '' }, { label: 'When (CT)', get: m => fdWhenCT(m.when) },
+        { label: 'Duration', get: m => fdDur(m.duration) }, { label: 'Duration s', get: m => Math.round((Number(m.duration) || 0) / 1000) },
+        { label: 'Drone', get: m => m.drone_name || '' }, { label: 'State', get: m => m.state != null ? (FD_STATE[m.state] || `State ${m.state}`) : '' },
+        { label: 'Landed', get: m => m.landed || '' }, { label: 'Landing failed', get: m => m.landing_is_failed ? 'yes' : '' },
+        { label: 'Images', get: m => m.image_count != null ? m.image_count : '' }, { label: 'Videos', get: m => Array.isArray(m.videos) ? m.videos.length : '' },
+        { label: 'Created by', get: m => m.created_by_username || '' }, { label: 'Media mission', get: m => m.is_media_mission ? 'yes' : '' },
+    ];
+    function fdTag(rows, sid) { const name = siteName(sid); return rows.map(r => Object.assign(Object.create(r), { _sid: sid, _site: name })); }
+
+    // ---- store-only ZIP writer (no dependency) ----
+    const FD_CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c >>> 0; } return t; })();
+    function fdCrc32(bytes) { let c = 0xFFFFFFFF; for (let i = 0; i < bytes.length; i++) c = FD_CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+    function fdDosTime(d) { return { time: ((d.getHours() & 31) << 11) | ((d.getMinutes() & 63) << 5) | ((d.getSeconds() >> 1) & 31), date: (((d.getFullYear() - 1980) & 127) << 9) | (((d.getMonth() + 1) & 15) << 5) | (d.getDate() & 31) }; }
+    function fdZip(files) {   // files: [{ name, text|bytes }]
+        const enc = new TextEncoder();
+        const parts = [], central = [];
+        let offset = 0;
+        const now = fdDosTime(new Date());
+        const u16 = (v) => [v & 255, (v >>> 8) & 255], u32 = (v) => [v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255];
+        files.forEach(f => {
+            const name = enc.encode(f.name);
+            const data = f.bytes || enc.encode(f.text || '');
+            const crc = fdCrc32(data);
+            const local = new Uint8Array([...u32(0x04034b50), ...u16(20), ...u16(0x0800), ...u16(0), ...u16(now.time), ...u16(now.date), ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(name.length), ...u16(0), ...name]);
+            parts.push(local, data);
+            central.push(new Uint8Array([...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(0x0800), ...u16(0), ...u16(now.time), ...u16(now.date), ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(name.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(offset), ...name]));
+            offset += local.length + data.length;
+        });
+        const cdSize = central.reduce((n, c) => n + c.length, 0);
+        const eocd = new Uint8Array([...u32(0x06054b50), ...u16(0), ...u16(0), ...u16(files.length), ...u16(files.length), ...u32(cdSize), ...u32(offset), ...u16(0)]);
+        return new Blob(parts.concat(central, [eocd]), { type: 'application/zip' });
+    }
+    function fdDownload(blob, name) {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob); a.download = name;
+        document.body.appendChild(a); a.click();
+        setTimeout(() => { try { URL.revokeObjectURL(a.href); a.remove(); } catch (e) {} }, 4000);
+    }
+    const fdSafe = (s) => String(s || '').replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').trim().slice(0, 60);
+
+    // ---- export runner ----
+    async function fdExport() {
+        const sids = Array.from(fdSelected);
+        if (!sids.length) { setStatus('pick at least one site first'); return; }
+        if (fdRun) return;
+        const ds = fdDatasets;
+        if (!ds.setup && !ds.missions && !ds.log) { setStatus('tick at least one dataset'); return; }
+        if (ds.tracks && !ds.log) { setStatus('GPS tracks need "Mission log" ticked (tracks are fetched per flown flight)'); return; }
+        fdRun = { done: 0, total: sids.length, msg: 'starting…', abort: false };
+        renderPanel();
+        const files = [];
+        const allSetup = [], allMissions = [], allLog = [];
+        const failures = [];
+        let tracks = 0;
+        const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
+        try {
+            for (const sid of sids) {
+                if (fdRun.abort) break;
+                const folder = `${fdSafe(siteName(sid))} (${sid})`;
+                fdRun.msg = `${siteName(sid)} — site setup`; renderPanel();
+                if (ds.setup) {
+                    try {
+                        const s = await fdFetchSetup(sid);
+                        files.push({ name: `${folder}/site-setup.json`, text: JSON.stringify(s.entities, null, 1) });
+                        allSetup.push(...fdTag(s.entities, sid));
+                    } catch (e) { failures.push(`${siteName(sid)}: setup — ${e.message || e}`); }
+                }
+                if (ds.missions && !fdRun.abort) {
+                    fdRun.msg = `${siteName(sid)} — missions`; renderPanel();
+                    try {
+                        const m = await fdFetchMissions(sid);
+                        files.push({ name: `${folder}/missions.json`, text: JSON.stringify(m.list, null, 1) });
+                        allMissions.push(...fdTag(m.list, sid));
+                    } catch (e) { failures.push(`${siteName(sid)}: missions — ${e.message || e}`); }
+                }
+                if (ds.log && !fdRun.abort) {
+                    try {
+                        const l = await fdFetchLog(sid, false, (n, t) => { fdRun.msg = `${siteName(sid)} — mission log ${n}${t != null ? '/' + t : ''}`; setStatus(fdRun.msg); }, () => !!(fdRun && fdRun.abort));
+                        files.push({ name: `${folder}/mission-log.json`, text: JSON.stringify(l.rows, null, 1) });
+                        files.push({ name: `${folder}/mission-log.csv`, text: fdCsv(FD_LOG_COLS, fdTag(l.rows, sid)) });
+                        allLog.push(...fdTag(l.rows, sid));
+                        if (ds.tracks) {
+                            const flown = l.rows.filter(r => r && r.id && r.state === 2).slice(0, Math.max(0, FD_TRACK_CAP - tracks));
+                            for (const r of flown) {
+                                if (fdRun.abort) break;
+                                fdRun.msg = `${siteName(sid)} — track ${r.id}`; setStatus(fdRun.msg);
+                                try { const t = await fdFetchTrack(r.id); files.push({ name: `${folder}/tracks/${r.id}.json`, text: JSON.stringify(t) }); tracks++; }
+                                catch (e) { failures.push(`${siteName(sid)}: track ${r.id} — ${e.message || e}`); }
+                            }
+                        }
+                    } catch (e) { if (String(e.message) !== 'aborted') failures.push(`${siteName(sid)}: mission log — ${e.message || e}`); }
+                }
+                fdRun.done++;
+                renderPanel();
+                await ftYield();
+            }
+            if (allSetup.length) files.push({ name: 'ALL-site-setups.csv', text: fdCsv(FD_SETUP_COLS, allSetup) });
+            if (allMissions.length) files.push({ name: 'ALL-missions.csv', text: fdCsv(FD_MISSION_COLS, allMissions) });
+            if (allLog.length) files.push({ name: `ALL-mission-log ${fdRangeLabel().replace(/ → /g, ' to ')}.csv`, text: fdCsv(FD_LOG_COLS, allLog) });
+            files.push({ name: 'README.txt', text: [
+                `AIM Fleet Tools v${SCRIPT_VERSION} — fleet data export ${new Date().toLocaleString()} (${location.hostname})`,
+                `Sites: ${sids.length}${fdRun.abort ? ' (ABORTED — partial)' : ''}`,
+                `Datasets: ${['setup', 'missions', 'log', 'tracks'].filter(k => ds[k]).join(', ')}${ds.log ? ` · mission-log window ${fdRangeLabel()}` : ''}`,
+                `Rows: setup entities ${allSetup.length} · missions ${allMissions.length} · flights ${allLog.length}${ds.tracks ? ` · tracks ${tracks}` : ''}`,
+                failures.length ? `\nFAILED:\n${failures.map(f => '  - ' + f).join('\n')}` : '\nNo failures.',
+                '\nPer-site folders hold the raw JSON (setup = /map_objects/, missions = /available_app/, mission-log = /missions/). ALL-*.csv combine every picked site.',
+            ].join('\n') });
+            const blob = fdZip(files);
+            fdDownload(blob, `AIM-fleet-data ${stamp} (${sids.length} sites).zip`);
+            setStatus(`export ready — ${files.length} file(s), ${(blob.size / 1048576).toFixed(1)} MB${failures.length ? ` · ${failures.length} failure(s) (see README.txt / console)` : ''}${fdRun.abort ? ' · ABORTED (partial)' : ''}`);
+            if (failures.length) console.warn(`${TAG} fleet data export failures:`, failures);
+        } catch (e) {
+            console.error(`${TAG} fleet data export failed:`, e);
+            setStatus(`export failed — ${String(e && e.message || e)}`);
+        } finally {
+            fdRun = null;
+            renderPanel();
+        }
+    }
+
+    // ---- browse (live, in-tool) ----
+    async function fdOpenBrowse(sid, tab) {
+        const b = { sid, tab: tab || (fdBrowse && fdBrowse.tab) || 'setup', search: '', loading: true, error: '' };
+        fdBrowse = b;
+        renderPanel();
+        // Every write below is gated on `fdBrowse === b`: a slow walk for a
+        // site the user has since clicked away from must not paint its
+        // progress/error over the newer view.
+        try {
+            if (b.tab === 'setup') await fdFetchSetup(sid);
+            else if (b.tab === 'missions') await fdFetchMissions(sid);
+            else await fdFetchLog(sid, false, (n, t) => { if (fdBrowse === b) { b.progress = `${n}${t != null ? '/' + t : ''}`; renderPanel(); } });
+        } catch (e) { if (fdBrowse === b) b.error = String(e && e.message || e); console.warn(`${TAG} browse fetch failed:`, e); }
+        if (fdBrowse !== b) return;
+        b.loading = false; b.progress = '';
+        renderPanel();
+    }
+    function fdBrowseRows() {
+        if (!fdBrowse) return { cols: [], rows: [] };
+        const sid = fdBrowse.sid;
+        let cols, rows;
+        if (fdBrowse.tab === 'setup') { cols = FD_SETUP_COLS; rows = fdCache.setup[sid] ? fdTag(fdCache.setup[sid].entities, sid) : []; }
+        else if (fdBrowse.tab === 'missions') { cols = FD_MISSION_COLS; rows = fdCache.missions[sid] ? fdTag(fdCache.missions[sid].list, sid) : []; }
+        else { const c = fdCache.log[sid]; cols = FD_LOG_COLS; rows = (c && c.key === fdLogKey()) ? fdTag(c.rows, sid) : []; }
+        const q = (fdBrowse.search || '').trim().toLowerCase();
+        if (q) rows = rows.filter(r => cols.some(c => String(c.get(r) == null ? '' : c.get(r)).toLowerCase().includes(q)));
+        return { cols: cols.slice(2), rows };   // hide the Site ID / Site columns in-tool
+    }
+    function renderDataSection() {
+        if (!openSections.data) return '';
+        const out = [];
+        const sites = rawSites ? Object.keys(rawSites) : [];
+        if (!sites.length) {
+            out.push('<div style="padding:8px 10px;color:#888">Loading your site list… <span data-ft="fd-sites" style="cursor:pointer;color:#7adfe6">⟳ retry</span></div>');
+            return out.join('');
+        }
+        const q = fdFilter.trim().toLowerCase();
+        const byClient = {};
+        sites.forEach(id => {
+            const nm = siteName(id), cl = (rawSites[id].raw && siteEntryClient(rawSites[id].raw)) || clientOf(nm) || 'Other';
+            if (q && !(nm.toLowerCase().includes(q) || cl.toLowerCase().includes(q) || id === q)) return;
+            (byClient[cl] = byClient[cl] || []).push(id);
+        });
+        const clients = Object.keys(byClient).sort();
+        const shownIds = clients.flatMap(c => byClient[c]);
+        // picker
+        out.push('<div style="padding:6px 10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + `<input type="text" data-fd-filter value="${escapeHtml(fdFilter)}" placeholder="filter sites / clients…" style="width:200px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:2px 6px;font:inherit;">`
+            + `<span data-ft="fd-selall" style="cursor:pointer;color:#7adfe6">☑ select shown (${shownIds.length})</span>`
+            + '<span data-ft="fd-clear" style="cursor:pointer;color:#888">clear</span>'
+            + `<span style="color:${fdSelected.size ? '#5fff5f' : '#888'};font-weight:bold">${fdSelected.size} selected</span>`
+            + `<span data-ft="fd-wide" style="cursor:pointer;color:#7adfe6;margin-left:auto">${fdWide ? '⤡ Normal width' : '⤢ Wide'}</span>`
+            + '</div>');
+        out.push('<div id="aim-fd-list" style="max-height:170px;overflow:auto;border-bottom:1px solid #222834;">'
+            + clients.map(cl => {
+                const ids = byClient[cl].sort((a, b) => siteName(a).localeCompare(siteName(b)));
+                const nSel = ids.filter(id => fdSelected.has(id)).length;
+                const collapsed = fdCollapsedClients.has(cl);
+                return `<div data-fd-client="${escapeHtml(cl)}" style="padding:3px 10px;background:#1a2029;color:#7adfe6;cursor:pointer;user-select:none;display:flex;gap:8px;align-items:center">`
+                    + `<input type="checkbox" data-fd-clientsel="${escapeHtml(cl)}" ${nSel === ids.length ? 'checked' : ''} title="select / clear this client" style="margin:0">`
+                    + `<span>${collapsed ? '▸' : '▾'} ${escapeHtml(cl)}</span><span style="color:#888;font-weight:normal">${nSel}/${ids.length}</span></div>`
+                    + (collapsed ? '' : ids.map(id => `<label style="display:flex;gap:6px;align-items:center;padding:1px 10px 1px 26px;cursor:pointer;${fdSelected.has(id) ? 'background:#16262a;' : ''}">`
+                        + `<input type="checkbox" data-fd-site="${id}" ${fdSelected.has(id) ? 'checked' : ''} style="margin:0">`
+                        + `<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(siteName(id))} <span style="color:#555">#${id}</span>${statusTag(siteStatus(id)) ? ` <span style="color:#ffa030">${escapeHtml(siteStatus(id))}</span>` : ''}</span>`
+                        + `<span data-fd-chip="${id}" title="browse this site's data" style="color:#5fb3ff;cursor:pointer">🔍</span></label>`).join(''));
+            }).join('')
+            + '</div>');
+        // datasets + export
+        const cb = (k, label, title) => `<label title="${escapeHtml(title || '')}" style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="checkbox" data-fd-dataset="${k}" ${fdDatasets[k] ? 'checked' : ''} ${fdRun ? 'disabled' : ''}> ${label}</label>`;
+        out.push('<div style="padding:6px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + '<span style="color:#888">Export:</span>' + cb('setup', 'Site setup', 'Full /map_objects/ JSON per site + combined entity CSV') + cb('missions', 'Missions', 'Full mission JSON per site + combined CSV') + cb('log', 'Mission log', 'Flown flights per site (JSON + CSV) + combined CSV') + cb('tracks', 'GPS tracks', `Flown GPS track per completed flight (cap ${FD_TRACK_CAP} — heavy)`)
+            + `<select data-fd-range ${fdRun ? 'disabled' : ''} style="background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;">${[['30d', 'last 30 days'], ['90d', 'last 90 days'], ['12m', 'last 12 months'], ['18m', 'last 18 months'], ['custom', 'custom…']].map(([k, l]) => `<option value="${k}" ${fdRange === k ? 'selected' : ''}>${l}</option>`).join('')}</select>`
+            + (fdRange === 'custom' ? `<input type="date" data-fd-date="start" value="${escapeHtml(fdStart)}" style="background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;"> → <input type="date" data-fd-date="end" value="${escapeHtml(fdEnd)}" style="background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;">` : `<span style="color:#666">${fdRangeLabel()}</span>`)
+            + '</div>');
+        out.push('<div style="padding:6px 10px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + (fdRun
+                ? `<span data-ft="fd-abort" style="cursor:pointer;color:#ff5252;font-weight:bold">■ Abort</span><span style="color:#ffa030">⏳ ${fdRun.done}/${fdRun.total} sites · ${escapeHtml(fdRun.msg)}</span>`
+                : `<span data-ft="fd-export" style="cursor:pointer;color:${fdSelected.size ? '#5fff5f' : '#555'};font-weight:bold">⬇ Export ${fdSelected.size} site(s) as ZIP</span>`)
+            + '<span style="color:#666">per-site JSON + CSV, combined ALL-*.csv, README — nothing is written to Percepto</span>'
+            + '</div>');
+        // browse
+        if (fdBrowse) {
+            const b = fdBrowse;
+            const tabs = [['setup', '🗺 Site setup'], ['missions', '🧭 Missions'], ['log', '🛫 Mission log']];
+            const { cols, rows } = fdBrowseRows();
+            const cached = b.tab === 'setup' ? fdCache.setup[b.sid] : b.tab === 'missions' ? fdCache.missions[b.sid]
+                : (fdCache.log[b.sid] && fdCache.log[b.sid].key === fdLogKey() ? fdCache.log[b.sid] : null);
+            out.push(`<div style="padding:6px 10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;background:#10141a">`
+                + `<span style="color:#7adfe6;font-weight:bold">🔍 ${escapeHtml(siteName(b.sid))}</span><span style="color:#555">#${b.sid}</span>`
+                + tabs.map(([k, l]) => `<span data-fd-tab="${k}" style="cursor:pointer;padding:2px 8px;border-radius:10px;border:1px solid ${b.tab === k ? '#7adfe6' : '#2a3140'};color:${b.tab === k ? '#7adfe6' : '#aaa'};background:${b.tab === k ? '#1a2e33' : 'transparent'}">${l}</span>`).join('')
+                + `<input type="text" data-fd-search value="${escapeHtml(b.search || '')}" placeholder="search rows…" style="width:160px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:2px 6px;font:inherit;">`
+                + `<span data-ft="fd-copy" style="cursor:pointer;color:#7adfe6">📋 Copy CSV (${rows.length})</span>`
+                + `<span data-ft="fd-reload" style="cursor:pointer;color:#7adfe6" title="re-fetch this tab from Percepto">⟳</span>`
+                + `<span data-ft-link="${b.sid}" style="cursor:pointer;color:#5fb3ff">↗ open</span>`
+                + `<span data-ft="fd-browse-close" style="cursor:pointer;color:#888;margin-left:auto">✕</span></div>`);
+            if (b.loading) out.push(`<div style="padding:8px 10px;color:#ffa030">⏳ loading ${b.tab === 'log' ? `mission log ${fdRangeLabel()}${b.progress ? ' · ' + b.progress : ''}` : b.tab}…</div>`);
+            else if (b.error) out.push(`<div style="padding:8px 10px;color:#ff5252">⚠ ${escapeHtml(b.error)}</div>`);
+            else if (!rows.length) out.push(`<div style="padding:8px 10px;color:#888">${cached ? 'No rows' + (b.search ? ' match the search' : '') + '.' : (b.tab === 'log' ? 'Window changed — press ⟳ to load the mission log for ' + escapeHtml(fdRangeLabel()) + '.' : 'Nothing loaded yet.')}</div>`);
+            else {
+                const CAP = 1500;
+                out.push(`<div style="padding:2px 10px;color:#666">${rows.length} row(s)${b.tab === 'log' && cached ? ` · window ${fdRangeLabel()} · server total ${cached.total}` : ''}${cached ? ` · fetched ${Math.round((Date.now() - cached.at) / 60000)} min ago` : ''}${rows.length > CAP ? ` · showing first ${CAP} (CSV has all)` : ''}</div>`);
+                out.push(`<div style="max-height:${fdWide ? '55vh' : '40vh'};overflow:auto;"><table style="border-collapse:collapse;width:100%;font:inherit;white-space:nowrap;">`
+                    + '<thead><tr style="color:#7adfe6;text-align:left;position:sticky;top:0;background:#14181f;z-index:1">' + cols.map(c => `<th style="padding:3px 8px;border-bottom:1px solid #2a3140">${escapeHtml(c.label)}</th>`).join('') + '</tr></thead><tbody>'
+                    + rows.slice(0, CAP).map(r => '<tr class="aim-ft-row" style="border-bottom:1px solid #1d2430">' + cols.map(c => { const v = c.get(r); const s = v == null ? '' : String(v); return `<td style="padding:2px 8px;max-width:260px;overflow:hidden;text-overflow:ellipsis" title="${escapeHtml(s)}">${escapeHtml(s)}</td>`; }).join('') + '</tr>').join('')
+                    + '</tbody></table></div>');
+            }
+        } else {
+            out.push('<div style="padding:6px 10px;color:#666">Click 🔍 next to any site to browse its live site setup, missions, or mission log here without opening it.</div>');
+        }
+        return out.join('');
+    }
+
+    function fdRenderKeepScroll() {
+        const list = panelEl && panelEl.querySelector('#aim-fd-list');
+        const st = list ? list.scrollTop : 0;
+        renderPanel();
+        const again = panelEl && panelEl.querySelector('#aim-fd-list');
+        if (again) again.scrollTop = st;
+    }
+    function fdClientOfId(id) { const raw = rawSites && rawSites[id] && rawSites[id].raw; return (raw && siteEntryClient(raw)) || clientOf(siteName(id)) || 'Other'; }
+    function fdClientIds(cl) { return rawSites ? Object.keys(rawSites).filter(id => fdClientOfId(id) === cl) : []; }
+    function fdVisibleSiteIds() {
+        const q = fdFilter.trim().toLowerCase();
+        return rawSites ? Object.keys(rawSites).filter(id => !q || siteName(id).toLowerCase().includes(q) || fdClientOfId(id).toLowerCase().includes(q) || id === q) : [];
+    }
+
     function renderPanel() {
         if (!panelEl) return;
         const body = panelEl.querySelector('#aim-ft-body');
         if (!body) return;
         const isum = issuesSummary;
-        panelEl.style.width = (mtWide && openSections.metrics) ? '96vw' : '640px';
+        panelEl.style.width = ((mtWide && openSections.metrics) || (fdWide && openSections.data)) ? '96vw' : '640px';
         body.innerHTML = ''
             + sectionHeader('issues', '🚩', 'Fleet Issues', isum && isum.hasToken ? `${isum.open} open · ${isum.pending} pending${isum.myPending ? ` · ⚡ ${isum.myPending} for you` : ''}` : 'all sites in one panel')
             + renderIssuesSection()
+            + sectionHeader('data', '📦', 'Fleet Data', `${fdSelected.size} site(s) picked · browse + export`)
+            + renderDataSection()
             + sectionHeader('sweep', '⚠', 'Overlap Sweep', `${ENV_LABEL} · thr ${ftCfg.thresholdFt} ft`)
             + renderSweepSection()
             + sectionHeader('map', '🗺', 'Map', 'basemap + airspace chart')
@@ -3322,7 +3705,7 @@
 
             // Delegated — the body is rebuilt on every render, the root never is
             panelEl.addEventListener('click', (ev) => {
-                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color]')) return;   // checkbox/color → change handler
+                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],input[data-fd-dataset],select[data-fd-range],input[data-fd-date]')) return;   // checkbox/color/select → change handler
                 const clAll = ev.target.closest('[data-ft-clients]');
                 if (clAll) {
                     if (clAll.getAttribute('data-ft-clients') === 'all') {
@@ -3366,6 +3749,15 @@
                     else if (cmd === 'abort') abortSweep();
                     else if (cmd === 'copy') copyText(buildSweepReport(), 'report copied to clipboard');
                     else if (cmd === 'metrics-csv') copyText(buildMetricsCsv(), 'metrics CSV copied to clipboard');
+                    else if (cmd === 'fd-export') fdExport();
+                    else if (cmd === 'fd-abort') { if (fdRun) { fdRun.abort = true; setStatus('aborting export after the current request…'); } }
+                    else if (cmd === 'fd-selall') { fdVisibleSiteIds().forEach(id => fdSelected.add(id)); renderPanel(); }
+                    else if (cmd === 'fd-clear') { fdSelected.clear(); renderPanel(); }
+                    else if (cmd === 'fd-wide') { fdWide = !fdWide; renderPanel(); }
+                    else if (cmd === 'fd-browse-close') { fdBrowse = null; renderPanel(); }
+                    else if (cmd === 'fd-copy') { const { cols, rows } = fdBrowseRows(); copyText(fdCsv(cols, rows), `${rows.length} row(s) copied as CSV`); }
+                    else if (cmd === 'fd-reload') { if (fdBrowse) { const b = fdBrowse; if (b.tab === 'setup') delete fdCache.setup[b.sid]; else if (b.tab === 'missions') delete fdCache.missions[b.sid]; else delete fdCache.log[b.sid]; fdOpenBrowse(b.sid, b.tab); } }
+                    else if (cmd === 'fd-sites') { fetchRawSites(true).then(() => renderPanel()).catch(e => { console.warn(`${TAG} /sites/ fetch failed:`, e); setStatus('site list fetch failed — see console'); }); }
                     else if (cmd === 'metrics-sheets') copyHtmlToClipboard(buildMetricsSheetsHtml(), buildMetricsCsv(), 'metrics table copied — paste into Google Sheets / Excel');
                     else if (cmd === 'metrics-wide') { mtWide = !mtWide; renderPanel(); }
                     else if (cmd === 'metrics-build') {
@@ -3394,6 +3786,12 @@
                     }
                     return;
                 }
+                const fdChip = ev.target.closest('[data-fd-chip]');
+                if (fdChip) { ev.preventDefault(); fdOpenBrowse(fdChip.getAttribute('data-fd-chip')); return; }
+                const fdTab = ev.target.closest('[data-fd-tab]');
+                if (fdTab) { if (fdBrowse) fdOpenBrowse(fdBrowse.sid, fdTab.getAttribute('data-fd-tab')); return; }
+                const fdCl = ev.target.closest('[data-fd-client]');
+                if (fdCl) { const c = fdCl.getAttribute('data-fd-client'); if (fdCollapsedClients.has(c)) fdCollapsedClients.delete(c); else fdCollapsedClients.add(c); fdRenderKeepScroll(); return; }
                 const mtset = ev.target.closest('[data-ft-mtset]');
                 if (mtset) { mtSet = mtset.getAttribute('data-ft-mtset'); if (!MT_SETS[mtSet]) mtSet = 'overview'; renderPanel(); return; }
                 const mtsort = ev.target.closest('[data-ft-mtsort]');
@@ -3482,6 +3880,14 @@
             });
             // Live search — re-render but keep the search box focused
             panelEl.addEventListener('input', (ev) => {
+                const fdIn = ev.target.hasAttribute && (ev.target.hasAttribute('data-fd-filter') ? 'data-fd-filter' : ev.target.hasAttribute('data-fd-search') ? 'data-fd-search' : null);
+                if (fdIn) {
+                    if (fdIn === 'data-fd-filter') fdFilter = ev.target.value; else if (fdBrowse) fdBrowse.search = ev.target.value;
+                    renderPanel();
+                    const box = panelEl.querySelector(`input[${fdIn}]`);
+                    if (box) { box.focus(); try { box.setSelectionRange(box.value.length, box.value.length); } catch (e) {} }
+                    return;
+                }
                 if (ev.target.hasAttribute && ev.target.hasAttribute('data-ft-mtfilter')) {
                     mtFilter = ev.target.value;
                     renderPanel();
@@ -3499,6 +3905,21 @@
                 }
             });
             panelEl.addEventListener('change', (ev) => {
+                const t = ev.target;
+                if (t.hasAttribute && t.hasAttribute('data-fd-site')) { const id = t.getAttribute('data-fd-site'); if (t.checked) fdSelected.add(id); else fdSelected.delete(id); fdRenderKeepScroll(); return; }
+                // 6. client select-all acts on the SHOWN rows of that client (what the header count shows)
+                if (t.hasAttribute && t.hasAttribute('data-fd-clientsel')) { const cl = t.getAttribute('data-fd-clientsel'); const ids = fdVisibleSiteIds().filter(id => fdClientOfId(id) === cl); ids.forEach(id => { if (t.checked) fdSelected.add(id); else fdSelected.delete(id); }); fdRenderKeepScroll(); return; }
+                if (t.hasAttribute && t.hasAttribute('data-fd-dataset')) { fdDatasets[t.getAttribute('data-fd-dataset')] = !!t.checked; renderPanel(); return; }
+                if (t.hasAttribute && t.hasAttribute('data-fd-range')) { fdRange = String(t.value); if (fdBrowse && fdBrowse.tab === 'log' && fdRange !== 'custom') fdOpenBrowse(fdBrowse.sid, 'log'); else renderPanel(); return; }
+                if (t.hasAttribute && t.hasAttribute('data-fd-date')) {
+                    const which = t.getAttribute('data-fd-date');
+                    if (which === 'start') fdStart = String(t.value); else fdEnd = String(t.value);
+                    // Chrome fires change per typed digit — keep the field focused across the re-render.
+                    renderPanel();
+                    const again = panelEl.querySelector(`input[data-fd-date="${which}"]`);
+                    if (again) { try { again.focus(); } catch (e) {} }
+                    return;
+                }
                 if (ev.target.id === 'aim-ft-kml-file') {
                     const files = [...(ev.target.files || [])];
                     ev.target.value = '';

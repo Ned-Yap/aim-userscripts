@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-12 — 📦 Fleet Data: AIM Fleet Tools v0.27 — browse and export any sites' data without opening them (latest — dev only, feature #259)
+
+New **📦 Fleet Data** section (right under Fleet Issues):
+- **Pick sites** from a client-grouped checkbox list with a filter box, select-shown / clear, and per-client select-all.
+- **🔍 Browse in-tool** — click 🔍 next to any site to see its LIVE data right in the panel, no site open: **Site setup** (every entity: type, subtype, validated, unshielded, altitude band, vertices, position, description), **Missions** (steps, snapshots, step mix), **Mission log** (flown flights for the chosen window: time in CT, duration, drone, state, landing, images, pilot). Search box, **📋 Copy CSV**, ⟳ re-fetch, ↗ open.
+- **⬇ Export as ZIP** — tick Site setup / Missions / Mission log / GPS tracks, pick the mission-log window (30 d, 90 d, 12 months, 18 months, or custom dates) and export every picked site into one download: a folder per site with the raw JSON (site-setup.json, missions.json, mission-log.json + .csv, optional tracks/<flight>.json), plus combined **ALL-site-setups.csv**, **ALL-missions.csv**, **ALL-mission-log.csv** across the whole selection and a README listing what was fetched and any failures. Progress + ■ Abort (partial ZIP still downloads). Everything is read-only against Percepto.
+Mission logs are fetched live each time for now; the data-repo archive that makes repeat 18-month pulls instant is the next step.
+
 ## 2026-09-12 — 📊 Fleet Metrics: AIM Fleet Tools v0.26 — every site's setup + mission numbers in one table (latest — dev only, feature #259)
 
 The 📊 Fleet Metrics section grows from "three counts per site" into the fleet reporting table. **▶ Build metrics** reads every site's Site Watch snapshot once (setup + missions; only changed sites re-download afterwards, same sha-diff as the overlap index) and then shows:
