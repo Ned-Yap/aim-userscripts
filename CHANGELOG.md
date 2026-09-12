@@ -6,6 +6,13 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-12 — 🌐 Fleet Issues Phase 2: AIM Issues v1.42 — bulk actions, saved views, 📊 summary (latest — dev only)
+
+- **☑ Bulk actions.** Every fleet row has a checkbox (and each site group a select-all). Selecting anything shows an action bar: ✓ Approve · ✗ Reject · ✓ Resolve / Propose fix · ⊘ Ignore / Propose ignore · ↺ Re-open · 🎯 Priority · 👤 Assign · 💬 Comment · 🗑 Delete (♻ Reinstate in the Deleted view). The confirm box preflights every selected issue against the same rules the modal uses and lists exactly what will be skipped and why (not pending, needs an approver, already that priority…), takes one note for the batch, then applies sequentially: each issue gets its own history entry and Slack thread reply, each site gets ONE GitHub commit. Delete needs a second confirming click. A results screen shows applied / skipped / commits and any Slack or commit failure.
+- **Saved views.** A VIEW selector replaces the two view buttons: Needs attention · ⚡ Pending my review · 👤 My queue · ⏳ Stale ≥ 14 d · 🎯 High priority · ? Unseen activity · All statuses, plus 💾 save the current chips + search as your own named view (🗑 to delete it). Any manual chip change flips the selector to "Custom".
+- **⏳ Stale filter** chip with an editable day threshold.
+- **📊 Summary** (header button): open / pending / high / unseen tiles, resolved in the last 7 and 30 days, median time-to-resolve (last 90 d and all time), open+pending age buckets, the pending-review queue per category with who can approve it, people (created / assigned-open / resolved), and a per-site table (click a row to solo that site in the panel). **Copy → Sheets** (formatted tables) and **📋 Copy text**. On demand only — nothing is posted to Slack.
+
 ## 2026-09-12 — ⭐ PROMOTED TO PROD: AIM Issues v1.41 + AIM Fleet Tools v0.25 — 🌐 Fleet Issues
 
 Coworkers jump AIM Issues v1.40 → v1.41 and Fleet Tools v0.24 → v0.25 on the next Tampermonkey update check. **Every site's issues in one panel:** on the landing page open ⚠ Fleet Tools → 🚩 Fleet Issues → *Open Fleet Issues*; inside a site, right-click 🚩 → **🌐 All sites**. Review, approve/reject, comment, assign, set priority, delete/reinstate and Copy → Sheets across all your sites without entering each one — same status modal, same rules, same Slack threads. Full detail in the dev-only entry just below. Live-verified same day (landing comment + approve fix with Slack; in-site 🌐 + 🎯).

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.41
+// @version      1.42
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -68,7 +68,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.41';
+    const SCRIPT_VERSION = '1.42';
 
     // Server model (v1.36): prod and QA are separate databases — the same
     // numeric site ID is two different sites. QA issues live in their own
@@ -604,6 +604,13 @@
     // path; fleet site → its own per-site serialized PUT (commitFleetSite).
     function commitCtx(ctx, reason) {
         if (!ctx) return Promise.resolve(false);
+        // v1.42: inside a bulk batch, record the site instead of PUTting —
+        // runBulk commits each touched site ONCE afterwards.
+        if (bulkBatch) {
+            bulkBatch.touched.set(String(ctx.sid), ctx);
+            bulkBatch.reasons.push(reason);
+            return Promise.resolve(true);
+        }
         if (ctx.isSite) return commitIssuesToGitHub(reason);
         return commitFleetSite(ctx, reason);
     }
@@ -3553,7 +3560,7 @@
             showToast('Issue deleted — pushing to GitHub…', 2500);
             commitCtx(ctx, `tombstone issue by @${by}`);
             // v1.05: log the deletion in the issue's Slack thread.
-            postSlackDelete(issue, by);
+            fireSlack(() => postSlackDelete(issue, by));
         } else {
             showToast('Issue deleted locally (no GitHub token).', 3000);
         }
@@ -3609,7 +3616,7 @@
         if (cachedToken) {
             showToast('Issue reinstated — pushing to GitHub…', 2500);
             commitCtx(ctx, `reinstate issue by @${by}`);
-            postSlackReinstate(issue, by);
+            fireSlack(() => postSlackReinstate(issue, by));
         } else {
             showToast('Issue reinstated locally (no GitHub token).', 3000);
         }
@@ -4950,7 +4957,7 @@
             showToast(`Status → ${targetLabel} — pushing to GitHub…`, 2500);
             commitCtx(ctx, `@${by}: ${fromStatus} → ${transition.to}`);
             // v1.03: threaded Slack reply with role-aware @-mentions.
-            postSlackTransition(issue, fromStatus, transition, trimmedNote, by);
+            fireSlack(() => postSlackTransition(issue, fromStatus, transition, trimmedNote, by));
         } else {
             showToast(`Status → ${targetLabel} (local only).`, 2500);
         }
@@ -4990,7 +4997,7 @@
             showToast(`Comment added — pushing to GitHub…`, 2500);
             commitCtx(ctx, `@${by}: comment`);
             // v1.03: threaded Slack reply. v1.10: + @-mentions from picker.
-            postSlackComment(issue, trimmedNote, by, notifyLogins);
+            fireSlack(() => postSlackComment(issue, trimmedNote, by, notifyLogins));
         } else {
             showToast('Comment added (local only).', 2500);
         }
@@ -5029,7 +5036,7 @@
         if (cachedToken && !wasLocalOnly) {
             showToast(to ? `Assigned to @${to} — pushing…` : 'Unassigned — pushing…', 2500);
             commitCtx(ctx, `@${by}: assign → ${to || 'none'}`);
-            postSlackAssignment(issue, from, to, by);
+            fireSlack(() => postSlackAssignment(issue, from, to, by));
         } else {
             showToast(to ? `Assigned to @${to} (local only).` : 'Unassigned (local only).', 2500);
         }
@@ -5077,7 +5084,7 @@
         if (cachedToken && !wasLocalOnly) {
             showToast(to === 'unshielded' ? 'Marked as Unshielded Route — pushing…' : 'Converted to normal issue — pushing…', 2500);
             commitCtx(ctx, `@${by}: category → ${to}`);
-            postSlackCategoryChange(issue, from, to, by);
+            fireSlack(() => postSlackCategoryChange(issue, from, to, by));
         } else {
             showToast(to === 'unshielded' ? 'Marked as Unshielded Route (local only).' : 'Converted to normal issue (local only).', 2500);
         }
@@ -6231,6 +6238,10 @@
     let fleetOnlyUnseen = false;     // ? unseen activity
     let fleetShowDeleted = false;    // approver-only tombstone view
     const fleetCollapsedSites = new Set();
+    // v1.42: bulk selection (issue ids) + stale filter
+    const fleetSelected = new Set();
+    let fleetOnlyStale = false;
+    let fleetStaleDays = 14;
 
     function fleetCacheReadAll() {
         try {
@@ -6371,6 +6382,7 @@
             fleetStore.clear();
             next.forEach((v, k) => fleetStore.set(k, v));
             fleetLoadedAt = Date.now();
+            Array.from(fleetSelected).forEach(id => { if (!resolveIssue(id)) fleetSelected.delete(id); });
             console.log(`${TAG} fleet loaded: ${fleetStore.size} site(s) · ${fetched} fetched · ${reused} cached · ${failed} failed · ${fleetHiddenNoAccess} hidden (no access)`);
             if (failed) fleetLoadError = `${failed} site file(s) failed to download — showing cached copies where available`;
         } catch (e) {
@@ -6544,6 +6556,8 @@
     function closeFleetPanel() {
         if (fleetPanelEl) { try { fleetPanelEl.remove(); } catch (e) {} }
         fleetPanelEl = null;
+        closeBulkModal();
+        closeFleetSummary();
     }
 
     function fleetIssueMatches(issue, ctx) {
@@ -6554,6 +6568,7 @@
         if (fleetOnlyMyReview && !((st === 'pending_fix' || st === 'pending_ignore') && isApproverFor(issue))) return false;
         if (fleetOnlyMine && (issue.assignee || null) !== (cachedUsername || null)) return false;
         if (fleetOnlyUnseen && !unseenHistoryFor(issue).length) return false;
+        if (fleetOnlyStale && (Date.now() - new Date(lastEventAt(issue)).getTime()) < fleetStaleDays * 86400000) return false;
         const q = fleetSearch.trim().toLowerCase();
         if (!q) return true;
         if ((issue.note || '').toLowerCase().includes(q)) return true;
@@ -6641,14 +6656,25 @@
             isAnyApprover() ? chip('aim-fleet-quick', 'data-quick="review"', fleetOnlyMyReview, '#5fff5f', '⚡ Needs my review', totalMyPending, '#06210f', 'Only pending proposals YOU can approve', true) : '',
             cachedUsername ? chip('aim-fleet-quick', 'data-quick="mine"', fleetOnlyMine, '#5fb3ff', '👤 Assigned to me', totalMine, '#0a1a2a', 'Only issues assigned to you', true) : '',
             chip('aim-fleet-quick', 'data-quick="unseen"', fleetOnlyUnseen, '#00FF7F', '? Unseen activity', totalUnseen, '#003318', 'Only issues with activity you have not viewed yet', true),
+            chip('aim-fleet-quick', 'data-quick="stale"', fleetOnlyStale, '#ffa726', `⏳ Stale ≥ ${fleetStaleDays} d`,
+                allLive.filter(i => (i.status === 'open' || i.status === 'ready-for-review' || (i.status || '').startsWith('pending')) && (Date.now() - new Date(lastEventAt(i)).getTime()) >= fleetStaleDays * 86400000).length,
+                '#2a1a00', 'Only issues with no activity for at least this many days (set the days in the box)', true)
+            + `<input id="aim-issues-fleet-staledays" type="number" min="1" max="365" value="${fleetStaleDays}" title="Stale threshold in days" style="width:44px;background:#0e1115;color:#fff;border:1px solid rgba(255,167,38,0.4);border-radius:3px;font:inherit;font-size:10px;padding:2px 4px">`,
             isAnyApprover() ? chip('aim-fleet-quick', 'data-quick="deleted"', showingDeleted, '#ff8585', '🗑 Deleted', totalDeleted, '#2a0d0d', 'Show tombstoned issues (reinstate from the modal)', true) : '',
         ].join('');
-        const isAttention = fleetFilters.has('open') && !fleetFilters.has('resolved') && !fleetFilters.has('ignored');
+        // v1.42: saved views (built-in + user) in a select; any manual chip
+        // change flips the select to "Custom" until a view is picked again.
+        const userViews = fleetUserViews();
+        const viewOpts = fleetBuiltinViews().map(v => `<option value="b:${v.key}" ${fleetActiveViewKey === v.key ? 'selected' : ''}>${escHtml(v.name)}</option>`).join('')
+            + (userViews.length ? `<optgroup label="My views">${userViews.map((v, i) => `<option value="u:${i}" ${fleetActiveViewKey === 'u:' + i ? 'selected' : ''}>💾 ${escHtml(v.name)}</option>`).join('')}</optgroup>` : '')
+            + `<option value="custom" ${fleetActiveViewKey === 'custom' ? 'selected' : ''} disabled>Custom…</option>`;
+        const isUserView = fleetActiveViewKey.startsWith('u:');
         const viewBtns = `
-            <button class="aim-fleet-view" data-view="attention" title="Open + pending (the default)"
-                style="padding:4px 10px;border-radius:4px;font:inherit;font-size:11px;font-weight:700;cursor:pointer;border:1px solid rgba(122,223,230,0.5);background:${isAttention ? '#1a3a40' : 'transparent'};color:#7adfe6">Needs attention</button>
-            <button class="aim-fleet-view" data-view="all" title="Every status"
-                style="padding:4px 10px;border-radius:4px;font:inherit;font-size:11px;font-weight:700;cursor:pointer;border:1px solid rgba(122,223,230,0.5);background:${fleetFilters.size === PANEL_STATUS_ORDER.length ? '#1a3a40' : 'transparent'};color:#7adfe6">All</button>`;
+            <span style="color:#888;font-size:10px;font-weight:600">VIEW:</span>
+            <select id="aim-issues-fleet-viewsel" title="Saved views — pick one, or adjust the chips and 💾 save your own"
+                style="padding:4px 6px;border-radius:4px;font:inherit;font-size:11px;font-weight:700;cursor:pointer;border:1px solid rgba(122,223,230,0.5);background:#1a3a40;color:#7adfe6">${viewOpts}</select>
+            <button id="aim-issues-fleet-viewsave" title="Save the current chips / search as a named view" style="padding:4px 8px;border-radius:4px;font:inherit;font-size:11px;cursor:pointer;border:1px solid rgba(122,223,230,0.35);background:transparent;color:#7adfe6">💾</button>
+            ${isUserView ? `<button id="aim-issues-fleet-viewdel" title="Delete this saved view" style="padding:4px 8px;border-radius:4px;font:inherit;font-size:11px;cursor:pointer;border:1px solid rgba(255,133,133,0.35);background:transparent;color:#ff8585">🗑</button>` : ''}`;
 
         // Left rail
         const railRows = [`<div class="aim-fleet-site" data-sid="" style="padding:7px 10px;cursor:pointer;border-bottom:1px solid rgba(255,255,255,0.06);
@@ -6693,10 +6719,13 @@
                                    <button class="aim-fleet-act" data-act="reject" data-id="${issue.id}" title="Reject → back to Open (note required)" style="padding:3px 8px;background:#5a2222;color:#ff8585;border:1px solid #ff4d4d;border-radius:4px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">✗</button>` : ''}
                     <button class="aim-fleet-act" data-act="comment" data-id="${issue.id}" title="Add a comment" style="padding:3px 8px;background:#1a2333;color:#a8c4ff;border:1px solid #a8c4ff66;border-radius:4px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">💬</button>
                     <button class="aim-fleet-act" data-act="site" data-id="${issue.id}" data-sid="${escHtml(String(ctx.sid))}" title="${ctx.isSite ? 'Zoom to this issue on the map' : 'Open the site in a new tab, zoomed to this issue'}" style="padding:3px 8px;background:#13294a;color:#5fb3ff;border:1px solid #5fb3ff66;border-radius:4px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">${ctx.isSite ? '🎯' : '↗'}</button>`;
+                const sel = fleetSelected.has(issue.id);
                 return `<div class="aim-fleet-row" data-id="${issue.id}" title="Click to open the issue"
                     style="padding:7px 12px;border-bottom:1px solid rgba(255,255,255,0.06);cursor:pointer;
-                           display:grid;grid-template-columns:96px 1fr 120px 110px auto;gap:8px;align-items:center;
+                           display:grid;grid-template-columns:20px 96px 1fr 120px 110px auto;gap:8px;align-items:center;
+                           background:${sel ? 'rgba(122,223,230,0.08)' : 'transparent'};
                            opacity:${(issue.status === 'resolved' || issue.status === 'ignored') ? 0.6 : 1}">
+                    <input type="checkbox" class="aim-fleet-sel" data-id="${issue.id}" ${sel ? 'checked' : ''} title="Select for a bulk action" style="cursor:pointer;margin:0">
                     <div>
                         <span style="display:inline-block;padding:2px 6px;border-radius:8px;background:${meta.color};color:${DARK.has(issue.status) ? '#000' : '#fff'};font-size:10px;font-weight:700">${meta.text}</span>
                         ${priM ? `<div style="margin-top:2px"><span style="display:inline-block;padding:1px 5px;border-radius:6px;background:${priM.color};color:${priM.textColor};font-size:9px;font-weight:700">🎯 ${priM.text}</span></div>` : ''}
@@ -6718,6 +6747,7 @@
                 const head = `<div class="aim-fleet-group" data-sid="${escHtml(String(p.ctx.sid))}"
                     style="padding:6px 12px;background:#181b21;border-bottom:1px solid rgba(255,255,255,0.08);border-top:1px solid rgba(255,255,255,0.04);
                            display:flex;align-items:center;gap:8px;cursor:pointer;position:sticky;top:0;z-index:1">
+                    <input type="checkbox" class="aim-fleet-selsite" data-sid="${escHtml(String(p.ctx.sid))}" ${p.visible.length && p.visible.every(i => fleetSelected.has(i.id)) ? 'checked' : ''} title="Select / clear every shown issue on this site" style="cursor:pointer;margin:0">
                     <span style="color:#7adfe6;font-size:10px">${collapsed ? '▶' : '▼'}</span>
                     <span style="font-weight:700;color:${p.ctx.isSite ? '#5fff5f' : '#7adfe6'}">${escHtml(p.ctx.name || ('site ' + p.ctx.sid))}</span>
                     <span style="color:#666;font-size:10px">#${escHtml(String(p.ctx.sid))}${p.ctx.isSite ? ' · this site' : ''}</span>
@@ -6742,6 +6772,8 @@
                 <span style="color:#666;font-size:10px">· loaded ${escHtml(loadedAgo)}${fleetLoading ? ' · ⏳ refreshing…' : ''}</span>
                 ${fleetLoadError && fleetStore.size ? `<span style="color:#ffa030;font-size:10px" title="${escHtml(fleetLoadError)}">⚠ partial</span>` : ''}
                 <span style="margin-left:auto;display:flex;gap:6px">
+                    <button id="aim-issues-fleet-summary" title="Fleet-wide summary: per-site counts, aging, pending queue, resolution stats — with Sheets / text export"
+                        style="padding:4px 10px;background:#1a3a40;color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:4px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">📊 Summary</button>
                     <button id="aim-issues-fleet-export" ${visibleAll.length ? '' : 'disabled'} title="Copy the ${visibleAll.length} visible issue(s) as a formatted table — paste into Google Sheets / Excel"
                         style="padding:4px 10px;background:#3a3f48;color:#ffd54f;border:1px solid rgba(255,213,79,0.4);border-radius:4px;cursor:pointer;font:inherit;font-size:11px;font-weight:700;opacity:${visibleAll.length ? 1 : 0.4}">📊 Copy → Sheets (${visibleAll.length})</button>
                     <button id="aim-issues-fleet-refresh" ${fleetLoading ? 'disabled' : ''} title="Re-check every site file on GitHub (only changed files download)"
@@ -6759,12 +6791,19 @@
                 <input id="aim-issues-fleet-search" type="text" placeholder="Search notes / sites / people / history…" value="${escHtml(fleetSearch)}"
                     style="margin-left:auto;min-width:220px;flex:1;max-width:340px;padding:5px 10px;background:#0e1115;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:4px;font:inherit;font-size:12px;box-sizing:border-box">
             </div>
+            ${fleetSelected.size ? `<div id="aim-issues-fleet-bulkbar" style="padding:6px 14px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;border-bottom:1px solid rgba(122,223,230,0.35);background:#16262a">
+                <span style="color:#7adfe6;font-weight:700;font-size:12px">☑ ${fleetSelected.size} selected</span>
+                <button class="aim-fleet-bulk" data-op="all" title="Select every shown issue" style="padding:3px 8px;background:transparent;color:#aaa;border:1px solid #555;border-radius:4px;cursor:pointer;font:inherit;font-size:10px">all shown (${visibleAll.length})</button>
+                <button class="aim-fleet-bulk" data-op="none" title="Clear the selection" style="padding:3px 8px;background:transparent;color:#aaa;border:1px solid #555;border-radius:4px;cursor:pointer;font:inherit;font-size:10px">clear</button>
+                <span style="width:1px;height:18px;background:rgba(255,255,255,0.12);margin:0 4px"></span>
+                ${(showingDeleted ? ['reinstate'] : ['approve', 'reject', 'resolve', 'ignore', 'reopen', 'priority', 'assign', 'comment', 'delete']).map(k => { const o = BULK_OPS[k]; return `<button class="aim-fleet-bulk" data-op="${k}" title="${escHtml(o.help)}" style="padding:4px 9px;background:${o.color};color:${o.fg};border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">${o.label}</button>`; }).join('')}
+            </div>` : ''}
             <div style="display:flex;flex:1;min-height:0">
                 <div id="aim-issues-fleet-rail" style="width:200px;flex-shrink:0;overflow:auto;border-right:1px solid rgba(255,255,255,0.08);background:#1a1d23">${railRows.join('')}</div>
                 <div id="aim-issues-fleet-rows" style="flex:1;overflow:auto;min-width:0">${rowsHtml}</div>
             </div>
             <div style="padding:5px 14px;background:#14171b;border-top:1px solid rgba(255,255,255,0.06);color:#666;font-size:10px;font-style:italic;flex-shrink:0">
-                Row: open issue · ✓ approve · ✗ reject · 💬 comment · ↗ open in site (new tab) · rail: click a site to solo · M2 chip: solo
+                Row: open issue · ☑ select for bulk · ✓ approve · ✗ reject · 💬 comment · ↗ open in site (new tab) · rail: click a site to solo · M2 chip: solo
             </div>
             <div id="aim-issues-fleet-resize" title="Drag to resize"
                  style="position:absolute;bottom:0;right:0;width:18px;height:18px;cursor:nwse-resize;
@@ -6787,23 +6826,74 @@
         const search = P.querySelector('#aim-issues-fleet-search');
         if (search) {
             let t = null;
-            search.oninput = () => { fleetSearch = search.value; clearTimeout(t); t = setTimeout(() => { if (fleetPanelEl) renderFleetPanel(); }, 150); };
+            search.oninput = () => { fleetSearch = search.value; fleetActiveViewKey = 'custom'; clearTimeout(t); t = setTimeout(() => { if (fleetPanelEl) renderFleetPanel(); }, 150); };
         }
-        P.querySelectorAll('.aim-fleet-view').forEach(b => {
-            b.onclick = () => {
-                fleetFilters = new Set(b.dataset.view === 'all' ? PANEL_STATUS_ORDER : FLEET_ATTENTION_STATUSES);
+        const summaryBtn = P.querySelector('#aim-issues-fleet-summary');
+        if (summaryBtn) summaryBtn.onclick = () => { try { openFleetSummary(); } catch (e) { console.error(`${TAG} fleet summary threw:`, e); showToast('Summary failed — see console.', 3000); } };
+        const viewSel = P.querySelector('#aim-issues-fleet-viewsel');
+        if (viewSel) viewSel.onchange = () => {
+            const v = viewSel.value;
+            if (v.startsWith('b:')) { const bv = fleetBuiltinViews().find(x => x.key === v.slice(2)); if (bv) { fleetApplyView({ ...bv.view }); fleetActiveViewKey = bv.key; } }
+            else if (v.startsWith('u:')) { const uv = fleetUserViews()[Number(v.slice(2))]; if (uv) { fleetApplyView(uv.view); fleetActiveViewKey = v; } }
+            renderFleetPanel();
+        };
+        const viewSave = P.querySelector('#aim-issues-fleet-viewsave');
+        if (viewSave) viewSave.onclick = () => {
+            const name = (prompt('Name this view (the current chips + search are saved):', '') || '').trim();
+            if (!name) return;
+            const list = fleetUserViews().filter(v => v.name !== name);
+            list.push({ name, view: fleetCurrentView() });
+            fleetSaveUserViews(list);
+            fleetActiveViewKey = 'u:' + (list.length - 1);
+            showToast(`View "${name}" saved.`, 2500);
+            renderFleetPanel();
+        };
+        const viewDel = P.querySelector('#aim-issues-fleet-viewdel');
+        if (viewDel) viewDel.onclick = () => {
+            const i = Number(fleetActiveViewKey.slice(2));
+            const list = fleetUserViews(); const v = list[i];
+            if (!v) return;
+            if (!confirm(`Delete saved view "${v.name}"?`)) return;
+            list.splice(i, 1); fleetSaveUserViews(list); fleetActiveViewKey = 'custom';
+            renderFleetPanel();
+        };
+        const staleDays = P.querySelector('#aim-issues-fleet-staledays');
+        if (staleDays) {
+            staleDays.onclick = (e) => e.stopPropagation();
+            staleDays.onchange = (e) => { e.stopPropagation(); const v = Number(staleDays.value); if (v > 0) fleetStaleDays = v; fleetActiveViewKey = 'custom'; renderFleetPanel(); };
+        }
+        // v1.42: selection + bulk bar
+        P.querySelectorAll('.aim-fleet-sel').forEach(cb => {
+            cb.onclick = (e) => { e.stopPropagation(); if (cb.checked) fleetSelected.add(cb.dataset.id); else fleetSelected.delete(cb.dataset.id); renderFleetPanel(); };
+        });
+        P.querySelectorAll('.aim-fleet-selsite').forEach(cb => {
+            cb.onclick = (e) => {
+                e.stopPropagation();
+                const p = shown.find(x => String(x.ctx.sid) === cb.dataset.sid);
+                if (!p) return;
+                p.visible.forEach(i => { if (cb.checked) fleetSelected.add(i.id); else fleetSelected.delete(i.id); });
                 renderFleetPanel();
+            };
+        });
+        P.querySelectorAll('.aim-fleet-bulk').forEach(b => {
+            b.onclick = (e) => {
+                e.stopPropagation();
+                const op = b.dataset.op;
+                if (op === 'all') { visibleAll.forEach(v => fleetSelected.add(v.issue.id)); renderFleetPanel(); return; }
+                if (op === 'none') { fleetSelected.clear(); renderFleetPanel(); return; }
+                openBulkModal(op);
             };
         });
         const wireChips = (cls, key, set, all) => {
             P.querySelectorAll(cls).forEach(c => {
                 const v = c.dataset[key];
-                c.onclick = () => { if (set.has(v)) set.delete(v); else set.add(v); renderFleetPanel(); };
+                c.onclick = () => { if (set.has(v)) set.delete(v); else set.add(v); fleetActiveViewKey = 'custom'; renderFleetPanel(); };
                 c.oncontextmenu = (e) => {
                     e.preventDefault(); e.stopPropagation();
                     const solo = set.size === 1 && set.has(v);
                     set.clear();
                     if (solo) all.forEach(x => set.add(x)); else set.add(v);
+                    fleetActiveViewKey = 'custom';
                     renderFleetPanel();
                 };
             });
@@ -6817,7 +6907,9 @@
                 if (q === 'review') fleetOnlyMyReview = !fleetOnlyMyReview;
                 else if (q === 'mine') fleetOnlyMine = !fleetOnlyMine;
                 else if (q === 'unseen') fleetOnlyUnseen = !fleetOnlyUnseen;
-                else if (q === 'deleted') fleetShowDeleted = !fleetShowDeleted;
+                else if (q === 'stale') fleetOnlyStale = !fleetOnlyStale;
+                else if (q === 'deleted') { fleetShowDeleted = !fleetShowDeleted; fleetSelected.clear(); }
+                fleetActiveViewKey = 'custom';
                 // "Needs my review" implies the pending statuses are visible.
                 if (q === 'review' && fleetOnlyMyReview) { fleetFilters.add('pending_fix'); fleetFilters.add('pending_ignore'); }
                 renderFleetPanel();
@@ -6832,7 +6924,7 @@
         });
         P.querySelectorAll('.aim-fleet-group').forEach(g => {
             g.onclick = (e) => {
-                if (e.target.closest('.aim-fleet-act')) return;
+                if (e.target.closest('.aim-fleet-act, .aim-fleet-selsite')) return;
                 const sid = g.dataset.sid;
                 if (fleetCollapsedSites.has(sid)) fleetCollapsedSites.delete(sid); else fleetCollapsedSites.add(sid);
                 renderFleetPanel();
@@ -6840,7 +6932,7 @@
         });
         P.querySelectorAll('.aim-fleet-row').forEach(r => {
             r.onclick = (e) => {
-                if (e.target.closest('.aim-fleet-act')) return;
+                if (e.target.closest('.aim-fleet-act, .aim-fleet-sel')) return;
                 const issue = resolveIssue(r.dataset.id);
                 if (!issue) { showToast('Issue not found — refresh the fleet list.', 3000); return; }
                 const ctx = ctxForIssue(issue.id);
@@ -6906,6 +6998,457 @@
             const s2 = P.querySelector('#aim-issues-fleet-search');
             if (s2) { s2.focus(); if (selS !== null) { try { s2.setSelectionRange(selS, selE); } catch (e) {} } }
         }
+    }
+
+    // ============================================================
+    // v1.42 — FLEET ISSUES Phase 2: bulk actions · saved views · summary.
+    // ============================================================
+
+    // ---- Bulk batch: defer commits (one per site) + queue Slack posts ----
+    // While `bulkBatch` is set, commitCtx() records the touched contexts
+    // instead of PUTting, and fireSlack() queues the poster instead of
+    // running it. runBulk() then commits each touched site ONCE, runs the
+    // Slack queue sequentially (each post advances the watermark through
+    // the same deferral), and flushes once more so the watermarks land.
+    let bulkBatch = null;   // { touched: Map<sid, ctx>, slack: Fn[], reasons: string[] }
+    function fireSlack(fn) {
+        if (bulkBatch) { bulkBatch.slack.push(fn); return; }
+        try { const r = fn(); if (r && r.catch) r.catch(e => console.warn(`${TAG} slack poster threw:`, e)); }
+        catch (e) { console.warn(`${TAG} slack poster threw:`, e); }
+    }
+    async function flushBulkCommits(touchedMap, label) {
+        const touched = Array.from(touchedMap.values());
+        touchedMap.clear();
+        let ok = 0; const failed = [];
+        for (const ctx of touched) {
+            try {
+                // A commit already in flight for this site would make the
+                // call return false (queued follow-up) — wait for it instead
+                // of reporting a false failure. Capped at ~30 s.
+                let waited = 0;
+                while ((ctx.isSite ? pendingCommit : ctx.committing) && waited < 30000) {
+                    await new Promise(r => setTimeout(r, 150)); waited += 150;
+                }
+                const res = ctx.isSite ? await commitIssuesToGitHub(label) : await commitFleetSite(ctx, label);
+                if (res) ok++; else failed.push(String(ctx.name || ctx.sid));
+            } catch (e) { failed.push(String(ctx.name || ctx.sid)); console.warn(`${TAG} bulk commit threw for site ${ctx.sid}:`, e); }
+        }
+        return { ok, failed };
+    }
+
+    // Which bulk ops exist, and how each applies to ONE issue. `plan(issue)`
+    // returns { ok:true, transition? } or { ok:false, why }. Transitions are
+    // resolved through STATUS_TRANSITIONS + the user's per-issue role, so a
+    // bulk op can never do what the modal wouldn't allow.
+    function bulkTransitionFor(issue, to) {
+        if (issue.deleted) return { ok: false, why: 'deleted' };
+        const st = issue.status || 'open';
+        const t = (STATUS_TRANSITIONS[st] || []).find(x => x.to === to);
+        if (!t) return { ok: false, why: `no ${(STATUS_LABEL[to] || { text: to }).text.toLowerCase()} path from ${(STATUS_LABEL[st] || { text: st }).text}` };
+        if (t.roles && !t.roles.includes(roleFor(issue))) return { ok: false, why: `${t.label.replace(/^[^A-Za-z]+/, '')} needs an approver` };
+        return { ok: true, transition: t };
+    }
+    const BULK_OPS = {
+        approve:  { label: '✓ Approve', color: '#5fff5f', fg: '#06210f', help: 'Approve pending proposals (fix → resolved, ignore → ignored)',
+                    plan: (i) => (i.status === 'pending_fix') ? bulkTransitionFor(i, 'resolved')
+                              : (i.status === 'pending_ignore') ? bulkTransitionFor(i, 'ignored')
+                              : { ok: false, why: 'not pending' } },
+        reject:   { label: '✗ Reject', color: '#ff4d4d', fg: '#fff', help: 'Reject pending proposals → back to Open (note required)',
+                    plan: (i) => (i.status === 'pending_fix' || i.status === 'pending_ignore') ? bulkTransitionFor(i, 'open') : { ok: false, why: 'not pending' } },
+        resolve:  { label: '✓ Resolve / Propose fix', color: '#FFD700', fg: '#000', help: 'Approvers resolve directly; CSMs propose a fix (note required)',
+                    plan: (i) => { const d = bulkTransitionFor(i, 'resolved'); return d.ok ? d : bulkTransitionFor(i, 'pending_fix'); } },
+        ignore:   { label: '⊘ Ignore / Propose ignore', color: '#788cb4', fg: '#fff', help: 'Approvers ignore directly; CSMs propose ignore (note required)',
+                    plan: (i) => { const d = bulkTransitionFor(i, 'ignored'); return d.ok ? d : bulkTransitionFor(i, 'pending_ignore'); } },
+        reopen:   { label: '↺ Re-open', color: '#ff8585', fg: '#2a0d0d', help: 'Re-open resolved / ignored issues (note required)',
+                    plan: (i) => (i.status === 'resolved' || i.status === 'ignored') ? bulkTransitionFor(i, 'open') : { ok: false, why: 'not resolved/ignored' } },
+        priority: { label: '🎯 Priority', color: '#ffa726', fg: '#000', help: 'Set the same priority on every selected issue', needsPick: 'priority',
+                    plan: (i, args) => i.deleted ? { ok: false, why: 'deleted' } : ((i.priority || null) === (args.priority || null)) ? { ok: false, why: 'already that priority' } : { ok: true } },
+        assign:   { label: '👤 Assign', color: '#5fb3ff', fg: '#0a1a2a', help: 'Assign every selected issue to one person', needsPick: 'assignee',
+                    plan: (i, args) => i.deleted ? { ok: false, why: 'deleted' } : ((i.assignee || null) === (args.assignee || null)) ? { ok: false, why: 'already assigned so' } : { ok: true } },
+        comment:  { label: '💬 Comment', color: '#a8c4ff', fg: '#000', help: 'Post the same comment on every selected issue (note required)', noteRequired: true,
+                    plan: (i) => i.deleted ? { ok: false, why: 'deleted' } : { ok: true } },
+        delete:   { label: '🗑 Delete', color: '#5a2222', fg: '#ff8585', help: 'Tombstone (reinstatable by an approver)', danger: true,
+                    plan: (i) => (i.deleted ? { ok: false, why: 'already deleted' }
+                        : (isApproverFor(i) || (i.createdBy && i.createdBy === cachedUsername) || i.createdBy === 'local-only') ? { ok: true }
+                        : { ok: false, why: `only @${i.createdBy} or an approver` }) },
+        reinstate:{ label: '♻ Reinstate', color: '#5fff5f', fg: '#06210f', help: 'Restore deleted issues (approver only)',
+                    plan: (i) => (!i.deleted ? { ok: false, why: 'not deleted' } : isApproverFor(i) ? { ok: true } : { ok: false, why: 'approver only' }) },
+    };
+
+    // Apply one bulk op to the selected ids. Sequential, same per-issue
+    // functions the modal uses (history entry + role gates + Slack reply
+    // per issue), one GitHub commit per site. Returns a summary.
+    async function runBulk(opKey, ids, args, onProgress) {
+        const op = BULK_OPS[opKey];
+        if (!op) throw new Error(`unknown bulk op ${opKey}`);
+        const note = (args.note || '').trim();
+        const applied = [], skipped = [];
+        bulkBatch = { touched: new Map(), slack: [], reasons: [] };
+        try {
+            let n = 0;
+            for (const id of ids) {
+                n++;
+                if (onProgress) onProgress(n, ids.length);
+                const issue = resolveIssue(id);
+                if (!issue) { skipped.push({ id, why: 'not found (refresh?)' }); continue; }
+                if (issue.deleted && opKey !== 'reinstate') { skipped.push({ id, why: 'deleted', issue }); continue; }
+                const plan = op.plan(issue, args);
+                if (!plan.ok) { skipped.push({ id, why: plan.why, issue }); continue; }
+                let ok = false;
+                try {
+                    if (plan.transition) {
+                        if (plan.transition.noteRequired && !note) { skipped.push({ id, why: 'note required', issue }); continue; }
+                        ok = applyTransition(id, plan.transition, note);
+                    } else if (opKey === 'priority') ok = applyPriorityChange(id, args.priority || null, note);
+                    else if (opKey === 'assign') ok = applyAssignment(id, args.assignee || null);
+                    else if (opKey === 'comment') ok = applyComment(id, note, args.notify || []);
+                    else if (opKey === 'delete') { deleteIssue(id); ok = !!(resolveIssue(id) || {}).deleted || !resolveIssue(id); }
+                    else if (opKey === 'reinstate') { reinstateIssue(id); ok = !(resolveIssue(id) || {}).deleted; }
+                } catch (e) {
+                    console.error(`${TAG} bulk ${opKey} threw on ${id}:`, e);
+                    skipped.push({ id, why: `error: ${e.message || e}`, issue }); continue;
+                }
+                if (ok) applied.push({ id, issue }); else skipped.push({ id, why: 'refused by the action', issue });
+                await new Promise(r => setTimeout(r, 0));   // keep the UI breathing
+            }
+            const label = `bulk ${opKey} by @${cachedUsername || 'local-only'} (${applied.length})`;
+            const c1 = await flushBulkCommits(bulkBatch.touched, label);
+            // Slack: sequential so thread order matches the action order. The
+            // posters' watermark/thread commits are deferred into the batch.
+            let slackErrors = 0;
+            const slackQueue = bulkBatch.slack; bulkBatch.slack = [];
+            for (const fn of slackQueue) {
+                try { await fn(); } catch (e) { slackErrors++; console.warn(`${TAG} bulk slack post threw:`, e); }
+            }
+            // Final flush with the batch CLEARED first — anything that commits
+            // while these PUTs are in flight (a click behind the progress card)
+            // must go straight through, not into a map nobody flushes.
+            const last = bulkBatch; bulkBatch = null;
+            const c2 = await flushBulkCommits(last.touched, `${label} — slack watermarks`);
+            return { applied, skipped, commits: c1.ok + c2.ok, commitFailed: c1.failed.concat(c2.failed), slackErrors };
+        } finally {
+            bulkBatch = null;
+            fleetEmitSummary();
+            if (fleetPanelEl) renderFleetPanel();
+        }
+    }
+
+    // Bulk confirm/progress modal. Preflights every selected issue against the
+    // op so the user sees exactly what will and won't happen before applying.
+    let bulkModalEl = null;
+    function closeBulkModal() { if (bulkModalEl) { try { bulkModalEl.remove(); } catch (e) {} } bulkModalEl = null; }
+    function openBulkModal(opKey) {
+        closeBulkModal();
+        const op = BULK_OPS[opKey];
+        if (!op) return;
+        const ids = Array.from(fleetSelected).filter(id => resolveIssue(id));
+        if (!ids.length) { showToast('Nothing selected.', 2500); return; }
+        const args = { note: '', priority: 'high', assignee: cachedUsername || null, notify: [] };
+        const card = document.createElement('div');
+        card.id = 'aim-issues-bulk-modal';
+        card.style.cssText = `position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:560px;max-width:94vw;max-height:84vh;
+            background:#1f2228;border:1px solid ${op.color}88;border-radius:10px;color:#e6e6e6;z-index:99600;
+            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;box-shadow:0 8px 32px rgba(0,0,0,0.7);
+            display:flex;flex-direction:column;overflow:hidden`;
+        ['mousedown','pointerdown','wheel','dblclick','click','contextmenu','touchstart'].forEach(evt => card.addEventListener(evt, e => e.stopPropagation(), false));
+        document.body.appendChild(card);
+        bulkModalEl = card;
+        let running = false;
+        const render = () => {
+            const plans = ids.map(id => { const issue = resolveIssue(id); const plan = issue ? op.plan(issue, args) : { ok: false, why: 'not found' }; return { id, issue, plan }; });
+            const eligible = plans.filter(p => p.plan.ok);
+            const skippedP = plans.filter(p => !p.plan.ok);
+            const noteRequired = !!op.noteRequired || eligible.some(p => p.plan.transition && p.plan.transition.noteRequired);
+            const bySite = new Map();
+            eligible.forEach(p => { const c = ctxForIssue(p.id); const k = c ? (c.name || c.sid) : '?'; bySite.set(k, (bySite.get(k) || 0) + 1); });
+            const roster = new Set(slackEnabled() ? Object.keys(slackConfig.users || {}) : []);
+            if (cachedUsername) roster.add(cachedUsername);
+            const pickHtml = op.needsPick === 'priority'
+                ? `<div style="margin:10px 0 4px;color:#aaa;font-size:11px">Priority</div><div style="display:flex;gap:6px;flex-wrap:wrap">${['high','medium','low',null].map(p => { const m = p ? priorityMeta(p) : { text: 'None', color: '#888', textColor: '#fff' }; const on = (args.priority || null) === p; return `<button class="aim-bulk-pick" data-priority="${p || ''}" style="padding:4px 10px;border-radius:14px;border:1.5px solid ${m.color};background:${on ? m.color : 'transparent'};color:${on ? m.textColor : m.color};cursor:pointer;font:inherit;font-size:11px;font-weight:700">${m.text}</button>`; }).join('')}</div>`
+                : op.needsPick === 'assignee'
+                ? `<div style="margin:10px 0 4px;color:#aaa;font-size:11px">Assignee</div><div style="display:flex;gap:5px;flex-wrap:wrap">${Array.from(roster).sort().map(u => { const on = args.assignee === u; return `<button class="aim-bulk-pick" data-assignee="${escHtml(u)}" style="padding:4px 9px;border-radius:12px;border:1.5px solid #5fb3ff;background:${on ? '#5fb3ff' : 'transparent'};color:${on ? '#0a1a2a' : '#5fb3ff'};cursor:pointer;font:inherit;font-size:10px;font-weight:700">${u === cachedUsername ? '⭐ ' : ''}@${escHtml(u)}</button>`; }).join('')}<button class="aim-bulk-pick" data-assignee="" style="padding:4px 9px;border-radius:12px;border:1.5px solid #777;background:${args.assignee ? 'transparent' : '#555'};color:${args.assignee ? '#888' : '#fff'};cursor:pointer;font:inherit;font-size:10px;font-weight:700">Unassign</button></div>`
+                : '';
+            const notifyHtml = (opKey === 'comment' && roster.size) ? `<div style="margin:8px 0 4px;color:#aaa;font-size:11px">Tag on Slack (optional)</div><div style="display:flex;gap:5px;flex-wrap:wrap">${Array.from(roster).sort().filter(u => u !== cachedUsername).map(u => { const on = args.notify.includes(u); return `<button class="aim-bulk-notify" data-login="${escHtml(u)}" style="padding:4px 9px;border-radius:12px;border:1.5px solid #5fb3ff;background:${on ? '#5fb3ff' : 'transparent'};color:${on ? '#0a1a2a' : '#5fb3ff'};cursor:pointer;font:inherit;font-size:10px;font-weight:700">@${escHtml(u)}</button>`; }).join('')}</div>` : '';
+            const skippedHtml = skippedP.length ? `<details style="margin-top:8px"><summary style="color:#ffa030;cursor:pointer;font-size:11px">${skippedP.length} will be skipped</summary><div style="max-height:120px;overflow:auto;font-size:11px;color:#bbb;margin-top:4px">${skippedP.map(p => `<div>• ${escHtml((p.issue && p.issue.note || p.id).slice(0, 60))} — <span style="color:#ffa030">${escHtml(p.plan.why)}</span></div>`).join('')}</div></details>` : '';
+            card.innerHTML = `
+                <div style="padding:10px 14px;background:#14171b;border-bottom:1px solid rgba(255,255,255,0.1);display:flex;align-items:center;gap:10px">
+                    <span style="font-weight:700;color:${op.color === '#5a2222' ? '#ff8585' : op.color}">${op.label}</span>
+                    <span style="color:#888;font-size:11px">· ${ids.length} selected</span>
+                    <button id="aim-bulk-close" style="margin-left:auto;padding:3px 9px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">✕</button>
+                </div>
+                <div id="aim-bulk-body" style="padding:12px 14px;overflow:auto;flex:1;min-height:0">
+                    <div style="color:#bbb;font-size:12px">${escHtml(op.help)}.</div>
+                    <div style="margin-top:8px;font-size:12px"><b style="color:#5fff5f">${eligible.length}</b> will be applied across <b>${bySite.size}</b> site${bySite.size === 1 ? '' : 's'}
+                        <span style="color:#888;font-size:11px">(${Array.from(bySite.entries()).map(([k, v]) => `${escHtml(String(k))} ${v}`).join(' · ')})</span></div>
+                    ${skippedHtml}
+                    ${pickHtml}
+                    ${notifyHtml}
+                    ${(opKey === 'delete' || opKey === 'reinstate' || opKey === 'assign') ? '' : `
+                    <div style="margin:10px 0 4px;color:#aaa;font-size:11px">Note ${noteRequired ? '<span style="color:#ff8585">(required)</span>' : '<span style="color:#888">(optional)</span>'} — the same note goes on every issue</div>
+                    <textarea id="aim-bulk-note" style="width:100%;min-height:64px;background:#0e1115;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:4px;padding:6px 8px;font:inherit;font-size:12px;resize:vertical;box-sizing:border-box">${escHtml(args.note)}</textarea>`}
+                    <div id="aim-bulk-err" style="color:#ff8585;font-size:11px;min-height:14px;margin-top:4px"></div>
+                    <div style="color:#666;font-size:10px;font-style:italic;margin-top:6px">Each issue gets its own history entry and Slack reply; each site gets one GitHub commit.</div>
+                </div>
+                <div style="padding:10px 14px;background:#14171b;border-top:1px solid rgba(255,255,255,0.06);display:flex;gap:8px;justify-content:flex-end">
+                    <button id="aim-bulk-cancel" style="padding:7px 14px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit">Cancel</button>
+                    <button id="aim-bulk-go" ${eligible.length ? '' : 'disabled'} style="padding:7px 14px;background:${op.color};color:${op.fg};border:none;border-radius:4px;cursor:pointer;font:inherit;font-weight:700;opacity:${eligible.length ? 1 : 0.4}">${op.danger ? '⚠ ' : ''}Apply to ${eligible.length}</button>
+                </div>`;
+            card.querySelector('#aim-bulk-close').onclick = closeBulkModal;
+            card.querySelector('#aim-bulk-cancel').onclick = closeBulkModal;
+            const noteEl = card.querySelector('#aim-bulk-note');
+            if (noteEl) noteEl.oninput = () => { args.note = noteEl.value; };
+            card.querySelectorAll('.aim-bulk-pick').forEach(b => b.onclick = () => {
+                if (b.dataset.priority !== undefined) args.priority = b.dataset.priority || null;
+                if (b.dataset.assignee !== undefined) args.assignee = b.dataset.assignee || null;
+                render();
+            });
+            card.querySelectorAll('.aim-bulk-notify').forEach(b => b.onclick = () => {
+                const l = b.dataset.login; const i = args.notify.indexOf(l);
+                if (i >= 0) args.notify.splice(i, 1); else args.notify.push(l);
+                render();
+            });
+            const go = card.querySelector('#aim-bulk-go');
+            if (go && !go.disabled) go.onclick = async () => {
+                if (running) return;
+                if (noteRequired && !(args.note || '').trim()) { card.querySelector('#aim-bulk-err').textContent = 'A note is required for this action.'; if (noteEl) noteEl.focus(); return; }
+                if (op.danger && go.dataset.armed !== '1') { go.dataset.armed = '1'; go.textContent = `⚠ Click again to ${op.label.replace(/^[^A-Za-z]+/, '').toLowerCase()} ${eligible.length}`; setTimeout(() => { if (go.dataset.armed === '1') { go.dataset.armed = '0'; go.textContent = `⚠ Apply to ${eligible.length}`; } }, 5000); return; }
+                running = true;
+                const body = card.querySelector('#aim-bulk-body');
+                const foot = go.parentElement;
+                foot.innerHTML = '';
+                body.innerHTML = `<div style="padding:20px;text-align:center;color:#a8c4ff">⏳ Applying… <span id="aim-bulk-prog">0/${eligible.length}</span></div>`;
+                const eligibleIds = eligible.map(p => p.id);
+                let res;
+                try {
+                    res = await runBulk(opKey, eligibleIds, args, (n, t) => { const p = card.querySelector('#aim-bulk-prog'); if (p) p.textContent = `${n}/${t}`; });
+                } catch (e) {
+                    console.error(`${TAG} runBulk threw:`, e);
+                    body.innerHTML = `<div style="padding:20px;color:#ff8585">⚠ Bulk action failed: ${escHtml(String(e.message || e))}. Check the console; refresh the fleet list to see what landed.</div>`;
+                    foot.innerHTML = '<button id="aim-bulk-done" style="padding:7px 14px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit">Close</button>';
+                    card.querySelector('#aim-bulk-done').onclick = closeBulkModal;
+                    return;
+                }
+                eligibleIds.forEach(id => fleetSelected.delete(id));
+                const skippedRows = res.skipped.map(s => `<div>• ${escHtml(((s.issue && s.issue.note) || s.id).slice(0, 60))} — <span style="color:#ffa030">${escHtml(s.why)}</span></div>`).join('');
+                body.innerHTML = `
+                    <div style="font-size:13px"><b style="color:#5fff5f">${res.applied.length}</b> applied · <b style="color:${res.skipped.length ? '#ffa030' : '#888'}">${res.skipped.length}</b> skipped · <b>${res.commits}</b> site commit${res.commits === 1 ? '' : 's'}${res.slackErrors ? ` · <span style="color:#ff8585">${res.slackErrors} Slack post(s) failed</span>` : ''}</div>
+                    ${res.commitFailed.length ? `<div style="color:#ff8585;font-size:12px;margin-top:6px">⚠ Commit FAILED for: ${escHtml(res.commitFailed.join(', '))} — the edits are held locally; use ↻ Refresh then retry.</div>` : ''}
+                    ${skippedRows ? `<div style="margin-top:8px;font-size:11px;color:#bbb">${skippedRows}</div>` : ''}`;
+                foot.innerHTML = '<button id="aim-bulk-done" style="padding:7px 14px;background:#5fff5f;color:#06210f;border:none;border-radius:4px;cursor:pointer;font:inherit;font-weight:700">Done</button>';
+                card.querySelector('#aim-bulk-done').onclick = closeBulkModal;
+                if (fleetPanelEl) renderFleetPanel();
+            };
+        };
+        render();
+        setTimeout(() => { const n = card.querySelector('#aim-bulk-note'); if (n) n.focus(); }, 30);
+    }
+
+    // ---- Saved views ----
+    const FLEET_VIEWS_KEY = 'aim-issues-fleet-views';
+    function fleetCurrentView() {
+        return {
+            statuses: Array.from(fleetFilters), priorities: Array.from(fleetPriorityFilters), categories: Array.from(fleetCategoryFilters),
+            myReview: fleetOnlyMyReview, mine: fleetOnlyMine, unseen: fleetOnlyUnseen, stale: fleetOnlyStale, staleDays: fleetStaleDays,
+            deleted: fleetShowDeleted, search: fleetSearch,
+        };
+    }
+    function fleetApplyView(v) {
+        if (!v) return;
+        if (!!v.deleted !== fleetShowDeleted) fleetSelected.clear();   // live vs tombstone selections never mix
+        fleetFilters = new Set(Array.isArray(v.statuses) && v.statuses.length ? v.statuses : FLEET_ATTENTION_STATUSES);
+        fleetPriorityFilters = new Set(Array.isArray(v.priorities) && v.priorities.length ? v.priorities : ['high', 'medium', 'low', 'none']);
+        fleetCategoryFilters = new Set(Array.isArray(v.categories) && v.categories.length ? v.categories : ['issue', 'unshielded']);
+        fleetOnlyMyReview = !!v.myReview; fleetOnlyMine = !!v.mine; fleetOnlyUnseen = !!v.unseen;
+        fleetOnlyStale = !!v.stale; if (Number.isFinite(Number(v.staleDays)) && Number(v.staleDays) > 0) fleetStaleDays = Number(v.staleDays);
+        fleetShowDeleted = !!v.deleted; fleetSearch = String(v.search || '');
+    }
+    // Function, not a const: PANEL_STATUS_ORDER is declared further down the
+    // IIFE and a top-level const here would hit its TDZ at load.
+    function fleetBuiltinViews() { return [
+        { key: 'attention', name: 'Needs attention', view: { statuses: FLEET_ATTENTION_STATUSES } },
+        { key: 'review',    name: '⚡ Pending my review', view: { statuses: ['pending_fix', 'pending_ignore'], myReview: true } },
+        { key: 'mine',      name: '👤 My queue', view: { statuses: FLEET_ATTENTION_STATUSES, mine: true } },
+        { key: 'stale',     name: '⏳ Stale ≥ 14 d', view: { statuses: FLEET_ATTENTION_STATUSES, stale: true, staleDays: 14 } },
+        { key: 'high',      name: '🎯 High priority', view: { statuses: FLEET_ATTENTION_STATUSES, priorities: ['high'] } },
+        { key: 'unseen',    name: '? Unseen activity', view: { statuses: PANEL_STATUS_ORDER, unseen: true } },
+        { key: 'all',       name: 'All statuses', view: { statuses: PANEL_STATUS_ORDER } },
+    ]; }
+    function fleetUserViews() {
+        try { const raw = gmGet(FLEET_VIEWS_KEY, ''); const a = raw ? JSON.parse(raw) : []; return Array.isArray(a) ? a : []; }
+        catch (e) { console.warn(`${TAG} saved views unreadable:`, e); return []; }
+    }
+    function fleetSaveUserViews(list) { try { gmSet(FLEET_VIEWS_KEY, JSON.stringify(list)); } catch (e) { console.warn(`${TAG} saved views write failed:`, e); } }
+    let fleetActiveViewKey = 'attention';
+
+    // ---- 📊 Fleet issues summary ----
+    function fleetSummaryStats() {
+        const now = Date.now();
+        const day = 86400000;
+        const contexts = fleetContexts();
+        const sites = [];
+        const people = new Map();   // login → { created, assigned, resolved }
+        let allLive = [];
+        const bucket = { '<7d': 0, '7–30d': 0, '30–90d': 0, '>90d': 0 };
+        const pendingByCat = { issue: 0, unshielded: 0 };
+        let resolvedWeek = 0, resolvedMonth = 0;
+        const ttr90 = [], ttrAll = [];
+        contexts.forEach(ctx => {
+            const live = liveIssues(ctx.issues).filter(i => i.source !== 'validator');
+            allLive = allLive.concat(live);
+            const row = { sid: String(ctx.sid), name: ctx.name || ('site ' + ctx.sid), open: 0, pending: 0, resolved: 0, ignored: 0, total: live.length, oldestOpenDays: 0, unseen: 0, high: 0 };
+            live.forEach(i => {
+                const st = i.status || 'open';
+                if (st === 'open' || st === 'ready-for-review') row.open++;
+                else if (st === 'pending_fix' || st === 'pending_ignore') { row.pending++; pendingByCat[issueCategory(i)]++; }
+                else if (st === 'resolved') row.resolved++;
+                else if (st === 'ignored') row.ignored++;
+                if (i.priority === 'high' && (st === 'open' || st.startsWith('pending'))) row.high++;
+                if (unseenHistoryFor(i).length) row.unseen++;
+                const ageDays = (now - new Date(i.createdAt).getTime()) / day;
+                if (st === 'open' || st === 'ready-for-review' || st.startsWith('pending')) {
+                    row.oldestOpenDays = Math.max(row.oldestOpenDays, Math.floor(ageDays));
+                    if (ageDays < 7) bucket['<7d']++; else if (ageDays < 30) bucket['7–30d']++; else if (ageDays < 90) bucket['30–90d']++; else bucket['>90d']++;
+                }
+                const by = i.createdBy || '?';
+                const pc = people.get(by) || { created: 0, assigned: 0, resolved: 0 }; pc.created++; people.set(by, pc);
+                if (i.assignee && (st === 'open' || st.startsWith('pending'))) { const pa = people.get(i.assignee) || { created: 0, assigned: 0, resolved: 0 }; pa.assigned++; people.set(i.assignee, pa); }
+                // First terminal transition = time-to-resolve.
+                const h = i.history || [];
+                const term = h.find(e => e && e.fromStatus && e.fromStatus !== e.toStatus && (e.toStatus === 'resolved' || e.toStatus === 'ignored') && !e.kind);
+                if (term) {
+                    const tAt = new Date(term.at).getTime();
+                    const ttr = (tAt - new Date(i.createdAt).getTime()) / day;
+                    if (Number.isFinite(ttr) && ttr >= 0) { ttrAll.push(ttr); if (now - tAt < 90 * day) ttr90.push(ttr); }
+                    const pr = people.get(term.by || '?') || { created: 0, assigned: 0, resolved: 0 }; pr.resolved++; people.set(term.by || '?', pr);
+                }
+                h.forEach(e => {
+                    if (!e || e.kind || !e.fromStatus || e.fromStatus === e.toStatus) return;
+                    if (e.toStatus !== 'resolved' && e.toStatus !== 'ignored') return;
+                    const t = new Date(e.at).getTime();
+                    if (now - t < 7 * day) resolvedWeek++;
+                    if (now - t < 30 * day) resolvedMonth++;
+                });
+            });
+            sites.push(row);
+        });
+        sites.sort((a, b) => (b.open + b.pending) - (a.open + a.pending) || b.total - a.total || a.name.localeCompare(b.name));
+        const median = (arr) => { if (!arr.length) return null; const s = arr.slice().sort((a, b) => a - b); const m = Math.floor(s.length / 2); return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+        const totals = sites.reduce((t, r) => ({ open: t.open + r.open, pending: t.pending + r.pending, resolved: t.resolved + r.resolved, ignored: t.ignored + r.ignored, total: t.total + r.total, high: t.high + r.high, unseen: t.unseen + r.unseen }), { open: 0, pending: 0, resolved: 0, ignored: 0, total: 0, high: 0, unseen: 0 });
+        const approversFor = { issue: approversList.slice(), unshielded: approversList.concat(categoryApprovers.unshielded || []) };
+        return { sites, totals, bucket, pendingByCat, approversFor, resolvedWeek, resolvedMonth, medianTtr90: median(ttr90), medianTtrAll: median(ttrAll), nTtr90: ttr90.length, nTtrAll: ttrAll.length,
+                 people: Array.from(people.entries()).map(([login, c]) => ({ login, ...c })).sort((a, b) => (b.assigned + b.created) - (a.assigned + a.created)), hiddenNoAccess: fleetHiddenNoAccess, at: new Date() };
+    }
+    function fleetSummaryText(S) {
+        const d1 = (v) => v == null ? '—' : (v < 1 ? `${Math.round(v * 24)} h` : `${v.toFixed(1)} d`);
+        const L = [];
+        L.push(`AIM Fleet Issues summary — ${S.at.toLocaleString()} (${location.hostname})`);
+        L.push(`Sites: ${S.sites.length}${S.hiddenNoAccess ? ` (+${S.hiddenNoAccess} hidden, no access)` : ''} · live issues: ${S.totals.total} · OPEN ${S.totals.open} · PENDING ${S.totals.pending} · resolved ${S.totals.resolved} · ignored ${S.totals.ignored} · high-priority open ${S.totals.high}`);
+        L.push(`Resolved/ignored: last 7 d ${S.resolvedWeek} · last 30 d ${S.resolvedMonth} · median time-to-resolve: ${d1(S.medianTtr90)} (last 90 d, n=${S.nTtr90}) / ${d1(S.medianTtrAll)} (all, n=${S.nTtrAll})`);
+        L.push(`Open+pending age: <7 d ${S.bucket['<7d']} · 7–30 d ${S.bucket['7–30d']} · 30–90 d ${S.bucket['30–90d']} · >90 d ${S.bucket['>90d']}`);
+        L.push(`Pending review: issues ${S.pendingByCat.issue} (approvers: ${S.approversFor.issue.join(', ') || '—'}) · unshielded ${S.pendingByCat.unshielded} (approvers: ${S.approversFor.unshielded.join(', ') || '—'})`);
+        L.push('');
+        L.push('Site | Open | Pending | Resolved | Ignored | Total | Oldest open | High | Unseen');
+        S.sites.forEach(r => L.push(`${r.name} (#${r.sid}) | ${r.open} | ${r.pending} | ${r.resolved} | ${r.ignored} | ${r.total} | ${r.oldestOpenDays ? r.oldestOpenDays + ' d' : '—'} | ${r.high} | ${r.unseen}`));
+        L.push('');
+        L.push('People (created / assigned-open / resolved):');
+        S.people.slice(0, 20).forEach(p => L.push(`  @${p.login}: ${p.created} / ${p.assigned} / ${p.resolved}`));
+        return L.join('\n');
+    }
+    function fleetSummaryHtml(S) {
+        const td = (v, extra) => `<td style="padding:5px 8px;border:1px solid #444;vertical-align:top;${extra || ''}">${v}</td>`;
+        const th = (v) => `<th style="background:#14171b;color:#fff;padding:6px 8px;border:1px solid #444;text-align:left">${v}</th>`;
+        const d1 = (v) => v == null ? '—' : (v < 1 ? `${Math.round(v * 24)} h` : `${v.toFixed(1)} d`);
+        const out = [];
+        out.push(`<p><b>AIM Fleet Issues summary</b> — ${escHtml(S.at.toLocaleString())}</p>`);
+        out.push('<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px"><tr>' + ['Live', 'Open', 'Pending', 'Resolved', 'Ignored', 'High open', 'Resolved 7 d', 'Resolved 30 d', 'Median TTR 90 d', 'Median TTR all', '<7 d', '7–30 d', '30–90 d', '>90 d'].map(th).join('') + '</tr><tr>'
+            + [S.totals.total, S.totals.open, S.totals.pending, S.totals.resolved, S.totals.ignored, S.totals.high, S.resolvedWeek, S.resolvedMonth, d1(S.medianTtr90), d1(S.medianTtrAll), S.bucket['<7d'], S.bucket['7–30d'], S.bucket['30–90d'], S.bucket['>90d']].map(v => td(escHtml(String(v)))).join('') + '</tr></table><br>');
+        out.push('<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px"><tr>' + ['Site', 'Site ID', 'Open', 'Pending', 'Resolved', 'Ignored', 'Total', 'Oldest open (d)', 'High open', 'Unseen'].map(th).join('') + '</tr>');
+        S.sites.forEach(r => {
+            const url = `${location.origin}/#/site/${encodeURIComponent(r.sid)}/control-panel/site-setup`;
+            out.push('<tr>' + td(`<a href="${url}" style="color:#1a73e8">${escHtml(r.name)}</a>`) + td(escHtml(r.sid)) + td(r.open, r.open ? 'background:#ff4d4d;color:#fff;font-weight:bold' : '') + td(r.pending, r.pending ? 'background:#8000FF;color:#fff;font-weight:bold' : '') + td(r.resolved) + td(r.ignored) + td(r.total) + td(r.oldestOpenDays || '') + td(r.high) + td(r.unseen) + '</tr>');
+        });
+        out.push('<tr>' + td('<b>Fleet</b>') + td('') + td(`<b>${S.totals.open}</b>`) + td(`<b>${S.totals.pending}</b>`) + td(`<b>${S.totals.resolved}</b>`) + td(`<b>${S.totals.ignored}</b>`) + td(`<b>${S.totals.total}</b>`) + td('') + td(`<b>${S.totals.high}</b>`) + td(`<b>${S.totals.unseen}</b>`) + '</tr></table><br>');
+        out.push('<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px"><tr>' + ['Person', 'Created', 'Assigned (open)', 'Resolved'].map(th).join('') + '</tr>' + S.people.map(p => '<tr>' + td('@' + escHtml(p.login)) + td(p.created) + td(p.assigned) + td(p.resolved) + '</tr>').join('') + '</table>');
+        return out.join('');
+    }
+    let fleetSummaryEl = null;
+    let fleetSummaryKeyH = null;
+    function closeFleetSummary() {
+        if (fleetSummaryEl) { try { fleetSummaryEl.remove(); } catch (e) {} }
+        fleetSummaryEl = null;
+        if (fleetSummaryKeyH) { try { document.removeEventListener('keydown', fleetSummaryKeyH, true); } catch (e) {} fleetSummaryKeyH = null; }
+    }
+    function openFleetSummary() {
+        closeFleetSummary();
+        const S = fleetSummaryStats();
+        const d1 = (v) => v == null ? '—' : (v < 1 ? `${Math.round(v * 24)} h` : `${v.toFixed(1)} d`);
+        const card = document.createElement('div');
+        card.id = 'aim-issues-fleet-summary';
+        card.style.cssText = `position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:860px;max-width:95vw;max-height:88vh;
+            background:#1f2228;border:1px solid rgba(122,223,230,0.55);border-radius:10px;color:#e6e6e6;z-index:99550;
+            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;box-shadow:0 8px 32px rgba(0,0,0,0.7);display:flex;flex-direction:column;overflow:hidden`;
+        ['mousedown','pointerdown','wheel','dblclick','click','contextmenu','touchstart'].forEach(evt => card.addEventListener(evt, e => e.stopPropagation(), false));
+        const stat = (label, v, color) => `<div style="background:#14171b;border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:8px 10px;min-width:96px"><div style="color:#888;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">${label}</div><div style="color:${color || '#e6e6e6'};font-size:20px;font-weight:700">${v}</div></div>`;
+        const bar = (label, n, total, color) => `<div style="display:flex;align-items:center;gap:8px;font-size:11px;margin:2px 0"><span style="width:60px;color:#aaa">${label}</span><div style="flex:1;height:10px;background:#0e1115;border-radius:5px;overflow:hidden"><div style="width:${total ? Math.round(100 * n / total) : 0}%;height:100%;background:${color}"></div></div><span style="width:30px;text-align:right;font-weight:700">${n}</span></div>`;
+        const openPending = S.totals.open + S.totals.pending;
+        card.innerHTML = `
+            <div style="padding:10px 14px;background:#14171b;border-bottom:1px solid rgba(255,255,255,0.1);display:flex;align-items:center;gap:10px">
+                <span style="font-size:16px">📊</span><span style="font-weight:700;color:#7adfe6">Fleet Issues summary</span>
+                <span style="color:#888;font-size:11px">· ${S.sites.length} site${S.sites.length === 1 ? '' : 's'}${S.hiddenNoAccess ? ` · ${S.hiddenNoAccess} hidden (no access)` : ''} · ${escHtml(S.at.toLocaleString())}</span>
+                <span style="margin-left:auto;display:flex;gap:6px">
+                    <button id="aim-fsum-sheets" style="padding:4px 10px;background:#3a3f48;color:#ffd54f;border:1px solid rgba(255,213,79,0.4);border-radius:4px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">📊 Copy → Sheets</button>
+                    <button id="aim-fsum-text" style="padding:4px 10px;background:#3a3f48;color:#a8c4ff;border:1px solid rgba(168,196,255,0.3);border-radius:4px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">📋 Copy text</button>
+                    <button id="aim-fsum-close" style="padding:4px 10px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">✕</button>
+                </span>
+            </div>
+            <div style="padding:12px 14px;overflow:auto;flex:1;min-height:0">
+                <div style="display:flex;gap:8px;flex-wrap:wrap">
+                    ${stat('Open', S.totals.open, '#ff4d4d')}${stat('Pending', S.totals.pending, '#b478ff')}${stat('High open', S.totals.high, '#ffa726')}${stat('Unseen', S.totals.unseen, '#00FF7F')}
+                    ${stat('Resolved 7 d', S.resolvedWeek, '#5fff5f')}${stat('Resolved 30 d', S.resolvedMonth, '#5fff5f')}${stat('Median TTR 90 d', d1(S.medianTtr90), '#7adfe6')}${stat('Median TTR all', d1(S.medianTtrAll), '#7adfe6')}
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:12px">
+                    <div style="background:#14171b;border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:8px 10px">
+                        <div style="color:#7adfe6;font-weight:700;font-size:11px;margin-bottom:4px">OPEN + PENDING BY AGE (${openPending})</div>
+                        ${bar('< 7 d', S.bucket['<7d'], openPending, '#5fff5f')}${bar('7–30 d', S.bucket['7–30d'], openPending, '#ffd54f')}${bar('30–90 d', S.bucket['30–90d'], openPending, '#ffa726')}${bar('> 90 d', S.bucket['>90d'], openPending, '#ff4d4d')}
+                    </div>
+                    <div style="background:#14171b;border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:8px 10px">
+                        <div style="color:#7adfe6;font-weight:700;font-size:11px;margin-bottom:4px">PENDING REVIEW QUEUE</div>
+                        <div style="font-size:11px">🚩 Issues: <b>${S.pendingByCat.issue}</b> <span style="color:#888">→ ${S.approversFor.issue.map(a => '@' + escHtml(a)).join(', ') || '—'}</span></div>
+                        <div style="font-size:11px;margin-top:3px">🛡✕ Unshielded: <b>${S.pendingByCat.unshielded}</b> <span style="color:#888">→ ${S.approversFor.unshielded.map(a => '@' + escHtml(a)).join(', ') || '—'}</span></div>
+                        <div style="color:#7adfe6;font-weight:700;font-size:11px;margin:8px 0 4px">PEOPLE <span style="color:#888;font-weight:400">created · assigned open · resolved</span></div>
+                        ${S.people.slice(0, 8).map(p => `<div style="font-size:11px">@${escHtml(p.login)}: ${p.created} · <span style="color:#5fb3ff">${p.assigned}</span> · <span style="color:#5fff5f">${p.resolved}</span></div>`).join('') || '<div style="color:#888;font-size:11px">—</div>'}
+                    </div>
+                </div>
+                <div style="margin-top:12px;overflow:auto">
+                    <table style="width:100%;border-collapse:collapse;font-size:11px">
+                        <tr style="color:#888;text-align:left"><th style="padding:4px 6px">Site</th><th style="padding:4px 6px">Open</th><th style="padding:4px 6px">Pending</th><th style="padding:4px 6px">Resolved</th><th style="padding:4px 6px">Ignored</th><th style="padding:4px 6px">Total</th><th style="padding:4px 6px">Oldest open</th><th style="padding:4px 6px">High</th><th style="padding:4px 6px">?</th></tr>
+                        ${S.sites.map(r => `<tr class="aim-fsum-row" data-sid="${escHtml(r.sid)}" style="cursor:pointer;border-top:1px solid rgba(255,255,255,0.06)" title="Click to solo this site in the fleet panel">
+                            <td style="padding:4px 6px;color:#7adfe6">${escHtml(r.name)} <span style="color:#666">#${escHtml(r.sid)}</span></td>
+                            <td style="padding:4px 6px;font-weight:700;color:${r.open ? '#ff4d4d' : '#666'}">${r.open}</td>
+                            <td style="padding:4px 6px;font-weight:700;color:${r.pending ? '#b478ff' : '#666'}">${r.pending}</td>
+                            <td style="padding:4px 6px;color:#aaa">${r.resolved}</td><td style="padding:4px 6px;color:#aaa">${r.ignored}</td><td style="padding:4px 6px">${r.total}</td>
+                            <td style="padding:4px 6px;color:${r.oldestOpenDays > 30 ? '#ffa726' : '#aaa'}">${r.oldestOpenDays ? r.oldestOpenDays + ' d' : '—'}</td>
+                            <td style="padding:4px 6px;color:${r.high ? '#ffa726' : '#666'}">${r.high}</td><td style="padding:4px 6px;color:${r.unseen ? '#00FF7F' : '#666'}">${r.unseen}</td></tr>`).join('')}
+                    </table>
+                </div>
+            </div>`;
+        document.body.appendChild(card);
+        fleetSummaryEl = card;
+        card.querySelector('#aim-fsum-close').onclick = closeFleetSummary;
+        card.querySelector('#aim-fsum-text').onclick = () => copyTextToClipboard(fleetSummaryText(S)).then(() => showToast('Summary copied as text.', 2500)).catch(() => showToast('Copy failed.', 2500));
+        card.querySelector('#aim-fsum-sheets').onclick = async () => {
+            const html = fleetSummaryHtml(S), text = fleetSummaryText(S);
+            try {
+                if (navigator.clipboard && window.ClipboardItem) {
+                    await navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([html], { type: 'text/html' }), 'text/plain': new Blob([text], { type: 'text/plain' }) })]);
+                    showToast('Summary copied — paste into Google Sheets / Excel.', 3000); return;
+                }
+            } catch (e) { console.warn(`${TAG} summary clipboard write failed, falling back to text:`, e); }
+            copyTextToClipboard(text).then(() => showToast('Copied as plain text (HTML clipboard unavailable).', 3000)).catch(() => showToast('Copy failed.', 2500));
+        };
+        card.querySelectorAll('.aim-fsum-row').forEach(r => r.onclick = () => { fleetSoloSid = r.dataset.sid; closeFleetSummary(); if (!fleetPanelEl) openFleetPanel(); else renderFleetPanel(); });
+        fleetSummaryKeyH = (e) => { if (e.key === 'Escape' && fleetSummaryEl) { e.preventDefault(); closeFleetSummary(); } };
+        document.addEventListener('keydown', fleetSummaryKeyH, true);
     }
 
     // ------- Issues panel (v0.15 — Phase 5 floating panel) -------
