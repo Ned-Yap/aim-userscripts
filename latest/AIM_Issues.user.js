@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.40
+// @version      1.41
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -48,6 +48,14 @@
 // M1 copy / M2 sidebar paste, Sheets HTML clipboard, priority field,
 // floating draggable status modal.
 //
+// v1.41 (#257 Fleet Issues): every site's issues in one 🌐 Fleet panel —
+// landing page (opened from Fleet Tools via the tab-local DOM event
+// 'aim-fleet:open-issues') or in-site (🌐 button in the Issues panel header).
+// Same status modal, same role gates, same merge/Slack rules: mutations
+// resolve a per-site CONTEXT from the issue id (ctxForIssue) and commit that
+// site's file (commitFleetSite). TOP-frame gates are now topDefers() — TOP
+// only stays passive while a site (and therefore the iframe) is loaded.
+//
 // Log tag: [AIM ISSUES]
 //
 // Map-tools placement: PLE's ⚡ asserts itself as LAST child via its own
@@ -60,7 +68,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.40';
+    const SCRIPT_VERSION = '1.41';
 
     // Server model (v1.36): prod and QA are separate databases — the same
     // numeric site ID is two different sites. QA issues live in their own
@@ -70,6 +78,14 @@
     const envSiteKey = (sid) => IS_QA ? `qa-${sid}` : String(sid);
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
+    // v1.41 (fleet issues, #257): the frame-ownership rule. Inside a site the
+    // react-pages IFRAME owns every network side effect (sync, Slack, config
+    // fetches) and TOP stays passive — that's the pre-v1.41 `if (IS_TOP)
+    // return` everywhere. On the LANDING page there is no iframe at all, so
+    // TOP must do the work itself (the fleet issues panel lives there). One
+    // predicate replaces the bare IS_TOP gates: TOP defers only while a
+    // site is loaded.
+    function topDefers() { return IS_TOP && !!siteID; }
 
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-issues';
@@ -94,6 +110,10 @@
     const APPROVERS_KEY = 'aim-issues-approvers';   // cached approver list
     const CAT_APPROVERS_KEY = 'aim-issues-cat-approvers';  // v1.31: cached per-category approver map
     const SLACK_CONFIG_KEY = 'aim-issues-slack-config'; // cached slack-config.json
+    // v1.41: fleet issues cache — { [sid]: { sha, issues, name } } for every
+    // site file in the data repo, keyed per environment (QA files are qa-<id>).
+    // sha-diffed against the issues/ listing so only changed files re-download.
+    const FLEET_CACHE_KEY = 'aim-issues-fleet-cache' + (IS_QA ? '-qa' : '');
 
     // ------- v1.00 approver oversight + activity-indicator constants -------
     //
@@ -125,7 +145,7 @@
     }
     function markIssueSeen(issueId) {
         if (!issueId) return;
-        const issue = currentSiteIssues.find(i => i.id === issueId);
+        const issue = resolveIssue(issueId);   // v1.41: site OR fleet copy
         if (!issue) return;
         const lastAt = lastEventAt(issue);
         const t = new Date(lastAt || 0).getTime();
@@ -321,6 +341,17 @@
         return isApproverFor(issue) ? 'approver' : 'csm';
     }
     const shaBySite = {};                                // {[siteID]: 'sha-from-last-GET-or-PUT'}
+    // v1.41 (#257): fleet store — one context per site loaded by the fleet
+    // issues panel: { sid, name, issues, sha, access, committing, commitAgain }.
+    // The CURRENT site is never duplicated here: ctxForSid(siteID) aliases the
+    // live currentSiteIssues so in-site edits and fleet edits share one list.
+    const fleetStore = new Map();
+    let fleetSites = null;          // Map<sid, {name, status, client}> from /sites/ (null = not loaded)
+    let fleetLoadedAt = 0;
+    let fleetLoading = false;
+    let fleetLoadError = '';
+    let fleetHiddenNoAccess = 0;    // issue files whose site is NOT in the user's /sites/ list
+    let fleetPanelEl = null;
     // syncStatus drives the small dot on the 🚩 button:
     //   'no-token' (grey)  — no PAT yet, local-only
     //   'syncing'  (orange-pulse) — GET or PUT in flight
@@ -528,9 +559,70 @@
         }
     }
 
+    // ------- v1.41: issue context resolution (site vs fleet) -------
+    // Every mutation used to read the ambient globals (siteID /
+    // currentSiteIssues). They now resolve a CONTEXT from the issue id, so
+    // the same applyTransition/applyComment/... work on any site's issues
+    // loaded by the fleet panel. Issue ids are globally unique
+    // (iss_<ms>_<rand6>), and the current site is never held twice.
+    function siteCtx() {
+        return {
+            sid: siteID, name: siteName, isSite: true,
+            get issues() { return currentSiteIssues; },
+            set issues(v) { currentSiteIssues = v; },
+        };
+    }
+    function ctxForSid(sid) {
+        if (!sid) return null;
+        if (siteID && String(sid) === String(siteID) && !IS_TOP) return siteCtx();
+        // TOP frame inside a site: the iframe owns the live list; the fleet
+        // copy (if loaded) is the best we have there.
+        if (siteID && String(sid) === String(siteID) && IS_TOP && !fleetStore.has(String(sid))) return siteCtx();
+        return fleetStore.get(String(sid)) || null;
+    }
+    function ctxForIssue(issueId) {
+        if (!issueId) return null;
+        if (currentSiteIssues.some(i => i && i.id === issueId)) return siteCtx();
+        for (const ctx of fleetStore.values()) {
+            if ((ctx.issues || []).some(i => i && i.id === issueId)) return ctx;
+        }
+        return null;
+    }
+    function resolveIssue(issueId) {
+        const ctx = ctxForIssue(issueId);
+        return ctx ? (ctx.issues || []).find(i => i && i.id === issueId) || null : null;
+    }
+    // Persist a context locally: the current site → localStorage (as before);
+    // a fleet site → the GM fleet cache entry (so a reload shows the edit
+    // even before the next GitHub refresh).
+    function persistCtx(ctx) {
+        if (!ctx) return;
+        if (ctx.isSite) { saveIssuesToStorage(siteID, currentSiteIssues); return; }
+        fleetCacheWrite(ctx);
+    }
+    // Commit a context to GitHub. Current site → the serialized single-site
+    // path; fleet site → its own per-site serialized PUT (commitFleetSite).
+    function commitCtx(ctx, reason) {
+        if (!ctx) return Promise.resolve(false);
+        if (ctx.isSite) return commitIssuesToGitHub(reason);
+        return commitFleetSite(ctx, reason);
+    }
+    // Re-render whatever surfaces show this context. Map layers only exist
+    // for the current site; the fleet panel refreshes for every context.
+    function rerenderCtx(ctx, issue) {
+        if (ctx && ctx.isSite && issue) renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
+        renderButtonState();
+        if (fleetPanelEl) renderFleetPanel();
+    }
+
     function setCurrentSite(newId) {
         if (newId === siteID) return;
         siteID = newId;
+        // v1.41: fleet housekeeping. TOP entering a site hands the UI to the
+        // iframe (close our fleet panel/modal there); every frame re-marks
+        // which fleet context aliases the live current-site list.
+        if (IS_TOP && newId && fleetPanelEl) { closeFleetPanel(); closeStatusModal(); }
+        fleetStore.forEach(c => { c.isCurrentAlias = !!(newId && String(c.sid) === String(newId) && !IS_TOP); });
         readFocusParam();   // v1.06: a deep-link nav may carry ?aim_issue=<id>
         // v0.20: refresh friendly site name. Retries below in case the
         // .site-select widget isn't mounted yet on initial load.
@@ -611,12 +703,18 @@
             // v1.03: and the Slack notification config (bot token + map)
             fetchSlackConfig();
             if (siteID) refetchIssues();
-            else { syncStatus = 'ok'; renderButtonState(); }
+            else {
+                syncStatus = 'ok'; renderButtonState();
+                // v1.41: landing page (TOP, no site) — warm the fleet list so
+                // the Fleet Tools badge + panel are instant.
+                if (IS_TOP) fleetLoad(false);
+            }
+            if (fleetPanelEl && !fleetLoading) fleetLoad(false);
         });
     }
 
     async function fetchGithubUsername() {
-        if (IS_TOP) return;        // IFRAME owns sync to avoid duplicate API calls
+        if (topDefers()) return;   // IFRAME owns sync inside a site (v1.41: TOP works on the landing page)
         if (!cachedToken) return;
         try {
             const resp = await ghRequest({
@@ -649,7 +747,7 @@
     // Missing file = no approvers; everyone uses CSM flow. Cached in GM
     // storage so refresh-without-network preserves role across reloads.
     async function fetchApproversList() {
-        if (IS_TOP) return;
+        if (topDefers()) return;
         if (!cachedToken) return;
         try {
             const url = `${GITHUB_API_BASE}/repos/${ISSUES_REPO}/contents/${encodeURIComponent(APPROVERS_PATH)}?ref=${ISSUES_BRANCH}`;
@@ -689,6 +787,7 @@
             console.log(`${TAG} approvers loaded (${list.length}): ${list.join(', ')}${catNote ? ` · category approvers — ${catNote}` : ''} — you are ${isApprover() ? 'an APPROVER ✓' : (isAnyApprover() ? 'a CATEGORY APPROVER ✓' : 'a CSM')}`);
             // Refresh UI that depends on role
             if (panelEl) renderIssuesPanel();
+            if (fleetPanelEl) renderFleetPanel();
             renderButtonState();
         } catch (e) {
             console.warn(`${TAG} fetchApproversList threw:`, e);
@@ -702,7 +801,7 @@
     // Missing file = Slack notifications off (everything degrades to no-post).
     // Cached in GM so a refresh-without-network keeps it available.
     async function fetchSlackConfig() {
-        if (IS_TOP) return;            // IFRAME owns sync, same as approvers
+        if (topDefers()) return;       // IFRAME owns sync inside a site, same as approvers
         if (!cachedToken) return;
         try {
             const url = `${GITHUB_API_BASE}/repos/${ISSUES_REPO}/contents/${encodeURIComponent(SLACK_CONFIG_PATH)}?ref=${ISSUES_BRANCH}`;
@@ -793,7 +892,7 @@
     // success, null on any failure. IFRAME-only (mirrors the sync owner) so
     // a single action fires exactly one post. Never throws.
     async function slackPost(text, threadTs) {
-        if (IS_TOP) return null;     // IFRAME owns the current-site flow
+        if (topDefers()) return null;   // IFRAME owns the flow inside a site
         return slackPostRaw(text, threadTs);
     }
     // v1.22: frame-agnostic post core. slackPost keeps the IS_TOP guard for
@@ -848,8 +947,11 @@
     // v1.22: sidOverride/nameOverride let the global stale sweep (TOP frame,
     // no open site) build a label for ANY site, not just the current one.
     function siteLabelForSlack(issueId, sidOverride, nameOverride) {
-        const sid = sidOverride || siteID;
-        const name = (sidOverride ? nameOverride : siteName);
+        // v1.41: no override → the issue's own context (fleet panel acts on
+        // OTHER sites' issues, whose sid/name aren't the ambient globals).
+        const c = (!sidOverride && issueId) ? ctxForIssue(issueId) : null;
+        const sid = sidOverride || (c && c.sid) || siteID;
+        const name = sidOverride ? nameOverride : (c ? (c.name || '') : siteName);
         const label = name ? slackEsc(name) : `site ${sid}`;
         const q = issueId ? `?aim_issue=${encodeURIComponent(issueId)}` : '';
         return `<${location.origin}/${q}#/site/${sid}/control-panel/site-setup|${label}>`;
@@ -905,7 +1007,7 @@
     // Edit an existing message in place (chat.update). Works with chat:write —
     // no extra scope. IFRAME-only, never throws.
     async function slackUpdate(ts, text) {
-        if (IS_TOP) return false;     // IFRAME owns the current-site flow
+        if (topDefers()) return false;   // IFRAME owns the flow inside a site
         return slackUpdateRaw(ts, text);
     }
     // v1.22: frame-agnostic chat.update core, mirrors slackPostRaw. The global
@@ -947,13 +1049,14 @@
             const mentionLogins = (notifyLogins || []).filter(l => l && l !== issue.createdBy);
             // Stamp the notify list on the live issue first so the parent text
             // (and any later chat.update) reproduces the same cc line.
-            const live = currentSiteIssues.find(i => i.id === issue.id) || issue;
+            const ctx = ctxForIssue(issue.id) || siteCtx();
+            const live = resolveIssue(issue.id) || issue;
             live.slackNotify = mentionLogins;
             const ts = await slackPost(slackParentText(live, null), null);
             if (ts) {
                 live.slackThreadTs = ts;
-                saveIssuesToStorage(siteID, currentSiteIssues);
-                commitIssuesToGitHub(`attach slack thread to ${issue.id.slice(0, 14)}`);
+                persistCtx(ctx);
+                commitCtx(ctx, `attach slack thread to ${issue.id.slice(0, 14)}`);
                 // v1.08: thread = immutable history. Post sequentially so
                 // order is guaranteed: (1) original report, (2) affected
                 // entities, then transitions append after.
@@ -979,14 +1082,15 @@
         try {
             const ts = await slackPost(slackParentText(issue, null), null);
             if (!ts) return null;
-            const live = currentSiteIssues.find(i => i.id === issue.id) || issue;
+            const ctx = ctxForIssue(issue.id) || siteCtx();
+            const live = resolveIssue(issue.id) || issue;
             live.slackThreadTs = ts;
             if (issue !== live) issue.slackThreadTs = ts;   // caller's ref too
-            saveIssuesToStorage(siteID, currentSiteIssues);   // strips validator
+            persistCtx(ctx);   // strips validator
             // v1.19: validator findings are ephemeral — the ts lives in memory
             // only (session-scoped). Don't churn a GitHub commit for them.
             if (live.source !== 'validator') {
-                commitIssuesToGitHub(`adopt slack thread for ${issue.id.slice(0, 14)}`);
+                commitCtx(ctx, `adopt slack thread for ${issue.id.slice(0, 14)}`);
             }
             await postSlackOriginalRequest(live, ts);
             await postSlackAffectedEntities(live, ts);
@@ -1112,7 +1216,7 @@
             if (note) lines.push(`>${slackEsc(note)}`);
             if (mention) lines.push(`cc ${mention}`);
             const text = issue.slackThreadTs ? lines.join('\n')
-                       : `${lines.join('\n')}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack()})_`;
+                       : `${lines.join('\n')}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack(issue.id)})_`;
             // v1.27: capture the result. slackPost returns the message ts on
             // success, null on any API failure (bad token, not_in_channel,
             // rate limit — all of which slackPost logs). Surface a failure to
@@ -1150,7 +1254,7 @@
                 head = `👤 ${actor} *assigned* this to ${slackMention(to) || ('@' + slackEsc(to))}`;
             }
             const text = issue.slackThreadTs ? head
-                       : `${head}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack()})_`;
+                       : `${head}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack(issue.id)})_`;
             await slackPost(text, issue.slackThreadTs || null);
             if (issue.slackThreadTs) await slackUpdate(issue.slackThreadTs, slackParentText(issue));
             markSlackPosted(issue);   // v1.29: advance watermark on success
@@ -1182,7 +1286,7 @@
             let head = `💬 ${actor}: ${body}`;
             if (cc) head += `\ncc ${cc}`;
             const text = issue.slackThreadTs ? head
-                       : `${head}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack()})_`;
+                       : `${head}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack(issue.id)})_`;
             await slackPost(text, issue.slackThreadTs || null);
             markSlackPosted(issue);
         } catch (e) {
@@ -1201,7 +1305,7 @@
                 ? `🛡 ${actor} marked this as an *Unshielded Route*`
                 : `🚩 ${actor} converted this back to a *normal issue*`;
             const text = issue.slackThreadTs ? head
-                       : `${head}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack()})_`;
+                       : `${head}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack(issue.id)})_`;
             await slackPost(text, issue.slackThreadTs || null);
             if (issue.slackThreadTs) await slackUpdate(issue.slackThreadTs, slackParentText(issue));
             markSlackPosted(issue);
@@ -1225,7 +1329,7 @@
             const head = `✏ ${actor} *reshaped* this issue's area (${nVerts}-point ${slackEsc(issue.shape || 'polygon')}) — now affects ${affected.length} entit${affected.length === 1 ? 'y' : 'ies'}`
                 + (note ? ` — _${slackEsc(note)}_` : '');
             const text = issue.slackThreadTs ? head
-                       : `${head}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack()})_`;
+                       : `${head}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack(issue.id)})_`;
             await slackPost(text, issue.slackThreadTs || null);
             markSlackPosted(issue);
         } catch (e) {
@@ -1249,13 +1353,14 @@
     // other sessions don't re-backfill what we just posted.
     function markSlackPosted(issue) {
         if (!issue) return;
-        const live = currentSiteIssues.find(i => i.id === issue.id) || issue;
+        const ctx = ctxForIssue(issue.id) || siteCtx();   // v1.41: fleet-aware
+        const live = resolveIssue(issue.id) || issue;
         if (!live || live.source === 'validator' || live.createdBy === 'local-only') return;
         const len = Array.isArray(live.history) ? live.history.length : 0;
         if ((live.slackPostedHistoryLen || 0) >= len) return;   // already current
         live.slackPostedHistoryLen = len;
-        saveIssuesToStorage(siteID, currentSiteIssues);
-        if (cachedToken) commitIssuesToGitHub(`slack watermark ${live.id.slice(0, 14)}→${len}`);
+        persistCtx(ctx);
+        if (cachedToken) commitCtx(ctx, `slack watermark ${live.id.slice(0, 14)}→${len}`);
     }
 
     // Plain Slack-mrkdwn one-liner describing a history entry (for catch-up).
@@ -1303,7 +1408,7 @@
     // to caught-up, and backfills any issue whose history ran ahead of Slack.
     let slackReconciledSite = null;
     async function reconcileSlackOnOpen() {
-        if (IS_TOP) return;                 // IFRAME owns Slack
+        if (topDefers()) return;            // IFRAME owns Slack inside a site
         if (!siteID || !cachedToken) return;
         if (slackReconciledSite === siteID) return;
         if (!slackEnabled()) { try { await fetchSlackConfig(); } catch (e) {} }
@@ -1337,7 +1442,7 @@
     // thread if missing). Recovers a notification that silently failed before
     // the watermark existed (e.g. the 06-23 miss).
     function resendIssueToSlack(id) {
-        const issue = currentSiteIssues.find(i => i.id === id);
+        const issue = resolveIssue(id);   // v1.41: site or fleet copy
         if (!issue) return;
         if (!isApproverFor(issue)) { showToast('Only an approver can resend to Slack.', 4000); return; }
         if (issue.createdBy === 'local-only' || issue.source === 'validator') {
@@ -3381,7 +3486,8 @@
     // re-asserted here as a belt-and-suspenders defence in case a future
     // entry point forgets it.
     function deleteIssue(id) {
-        const issue = currentSiteIssues.find(i => i.id === id);
+        const ctx = ctxForIssue(id);   // v1.41: site or fleet context
+        const issue = ctx ? ctx.issues.find(i => i.id === id) : null;
         if (!issue) return;
         const isCreator = !!(issue.createdBy && cachedUsername && issue.createdBy === cachedUsername);
         // v0.7: anyone can delete a local-only issue regardless of token
@@ -3397,15 +3503,18 @@
             showToast(`Only @${issue.createdBy} or an approver can delete this issue.`, 4500);
             return;
         }
-        // Drop visual layers
-        const map = getLeafletMap();
-        const layers = issueLayers.get(id);
-        if (layers && map) {
-            try { if (layers.polygon) map.removeLayer(layers.polygon); } catch (e) {}
-            try { if (layers.marker)  map.removeLayer(layers.marker);  } catch (e) {}
+        // Drop visual layers (current site only — fleet issues of other
+        // sites have no layers on this map)
+        if (ctx.isSite) {
+            const map = getLeafletMap();
+            const layers = issueLayers.get(id);
+            if (layers && map) {
+                try { if (layers.polygon) map.removeLayer(layers.polygon); } catch (e) {}
+                try { if (layers.marker)  map.removeLayer(layers.marker);  } catch (e) {}
+            }
+            issueLayers.delete(id);
+            hiddenIds.delete(id);
         }
-        issueLayers.delete(id);
-        hiddenIds.delete(id);
 
         // v0.25: TOMBSTONE for synced issues. Removing-and-committing didn't
         // survive: Tab 2 (with the issue still present in its stale local
@@ -3414,9 +3523,9 @@
         // via delete-wins. Local-only issues never sync so we just yank
         // them outright (no tombstone needed).
         if (isLocalOnly) {
-            currentSiteIssues = currentSiteIssues.filter(i => i.id !== id);
-            saveIssuesToStorage(siteID, currentSiteIssues);
-            renderButtonState();
+            ctx.issues = ctx.issues.filter(i => i.id !== id);
+            persistCtx(ctx);
+            rerenderCtx(ctx, null);
             console.log(`${TAG} deleted local-only issue ${id}`);
             showToast('Local-only issue deleted (not synced to GitHub).', 3000);
             return;
@@ -3437,12 +3546,12 @@
             toStatus: 'deleted',
             note: '(deleted)',
         });
-        saveIssuesToStorage(siteID, currentSiteIssues);
-        renderButtonState();
+        persistCtx(ctx);
+        rerenderCtx(ctx, null);
         console.log(`${TAG} tombstoned issue ${id} by @${by}`);
         if (cachedToken) {
             showToast('Issue deleted — pushing to GitHub…', 2500);
-            commitIssuesToGitHub(`tombstone issue by @${by}`);
+            commitCtx(ctx, `tombstone issue by @${by}`);
             // v1.05: log the deletion in the issue's Slack thread.
             postSlackDelete(issue, by);
         } else {
@@ -3456,7 +3565,8 @@
     // wins), this SURVIVES sync against a coworker's still-tombstoned copy —
     // unlike a naive deleted=false, which the old delete-wins merge re-killed.
     function reinstateIssue(id) {
-        const issue = currentSiteIssues.find(i => i.id === id);
+        const ctx = ctxForIssue(id);   // v1.41: site or fleet context
+        const issue = ctx ? ctx.issues.find(i => i.id === id) : null;
         if (!issue) return;
         // Belt-and-suspenders — the UI only shows the button to approvers, but
         // re-assert here in case a future entry point forgets.
@@ -3490,15 +3600,15 @@
             toStatus: restoreStatus,
             note: '(reinstated)',
         });
-        saveIssuesToStorage(siteID, currentSiteIssues);
+        persistCtx(ctx);
         // Redraw map layers (the issue is live again) + refresh panel/badge.
-        renderAllIssues();
-        renderButtonState();
-        renderIssuesPanel();
+        if (ctx.isSite) renderAllIssues();
+        rerenderCtx(ctx, null);
+        if (panelEl) renderIssuesPanel();
         console.log(`${TAG} reinstated issue ${id} by @${by} → ${restoreStatus}`);
         if (cachedToken) {
             showToast('Issue reinstated — pushing to GitHub…', 2500);
-            commitIssuesToGitHub(`reinstate issue by @${by}`);
+            commitCtx(ctx, `reinstate issue by @${by}`);
             postSlackReinstate(issue, by);
         } else {
             showToast('Issue reinstated locally (no GitHub token).', 3000);
@@ -3828,6 +3938,11 @@
     // polygon (v1.28: true overlap, not just a vertex landing inside).
     function affectedEntitiesFor(issue) {
         if (!issue || !Array.isArray(issue.polygon) || issue.polygon.length < 3) return [];
+        // v1.41: a fleet issue belongs to ANOTHER site — its polygon must never
+        // be tested against this site's entities (overlapping sites, #250,
+        // would produce real false hits that then post to Slack).
+        const owner = ctxForIssue(issue.id);
+        if (owner && !owner.isSite) return [];
         if (issueAffectedCache.has(issue.id)) return issueAffectedCache.get(issue.id);
         const out = [];
         if (!mapObjects || mapObjects.siteID !== siteID || !Array.isArray(mapObjects.entities)) {
@@ -3990,7 +4105,9 @@
     // colors + inline line breaks. Pattern matches Asset Inspector's
     // copyStatsAsSheet (latest/, line 7388).
 
-    function buildIssuesHtmlForSheets(issues, siteId, siteName_) {
+    // v1.41: `siteOf(issue)` → {sid, name} lets the fleet panel export a
+    // multi-site table; omitted = single site (siteId / siteName_ as before).
+    function buildIssuesHtmlForSheets(issues, siteId, siteName_, siteOf) {
         // Inline-styled table — Sheets/Excel honor most inline CSS.
         // v0.28: + Priority + Comment Count columns
         const headers = [
@@ -4061,14 +4178,16 @@
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${affectedList || '<i style="color:#888">(none)</i>'}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;font-size:11px">${histText}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;font-family:monospace;font-size:10px;color:#888">${escHtml(issue.id)}</td>`);
-            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${escHtml(siteId)}</td>`);
+            const sInfo = siteOf ? (siteOf(issue) || {}) : { sid: siteId, name: siteName_ };
+            const rowSid = sInfo.sid || '', rowSiteName = sInfo.name || '';
+            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${escHtml(rowSid)}</td>`);
             // v0.29: Site Name is a link to the site-setup URL. Sheets +
             // Excel both honor <a href> in pasted HTML — cell becomes
             // clickable, displays the name as link text.
-            const siteUrl = siteId ? `${location.origin}/#/site/${encodeURIComponent(siteId)}/control-panel/site-setup` : '';
-            const siteNameCell = (siteName_ && siteUrl)
-                ? `<a href="${siteUrl}" style="color:#1a73e8;text-decoration:underline">${escHtml(siteName_)}</a>`
-                : escHtml(siteName_ || '');
+            const siteUrl = rowSid ? `${location.origin}/#/site/${encodeURIComponent(rowSid)}/control-panel/site-setup` : '';
+            const siteNameCell = (rowSiteName && siteUrl)
+                ? `<a href="${siteUrl}" style="color:#1a73e8;text-decoration:underline">${escHtml(rowSiteName)}</a>`
+                : escHtml(rowSiteName || '');
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${siteNameCell}</td>`);
             out.push('</tr>');
         });
@@ -4076,7 +4195,7 @@
         return out.join('');
     }
 
-    function buildIssuesTsv(issues, siteId, siteName_) {
+    function buildIssuesTsv(issues, siteId, siteName_, siteOf) {
         const headers = [
             'Status', 'Priority', 'Note', 'Created', 'By', 'Assignee',
             'Last Event', 'Last Event When', 'Last Event By',
@@ -4128,20 +4247,20 @@
                 affectedList,
                 histText,
                 issue.id,
-                siteId,
-                siteName_ || '',
+                siteOf ? ((siteOf(issue) || {}).sid || '') : siteId,
+                siteOf ? ((siteOf(issue) || {}).name || '') : (siteName_ || ''),
             ].map(safe).join('\t'));
         });
         return lines.join('\n');
     }
 
-    async function copyIssuesToSheets(issues, siteId, siteName_) {
+    async function copyIssuesToSheets(issues, siteId, siteName_, siteOf) {
         if (!issues || issues.length === 0) {
             showToast('Nothing to export — no issues match current filters.', 3000);
             return;
         }
-        const html = buildIssuesHtmlForSheets(issues, siteId, siteName_);
-        const tsv = buildIssuesTsv(issues, siteId, siteName_);
+        const html = buildIssuesHtmlForSheets(issues, siteId, siteName_, siteOf);
+        const tsv = buildIssuesTsv(issues, siteId, siteName_, siteOf);
         try {
             if (navigator.clipboard && window.ClipboardItem) {
                 const item = new ClipboardItem({
@@ -4799,7 +4918,8 @@
     }
 
     function applyTransition(issueId, transition, note) {
-        const issue = currentSiteIssues.find(i => i.id === issueId);
+        const ctx = ctxForIssue(issueId);   // v1.41: site or fleet context
+        const issue = ctx ? ctx.issues.find(i => i.id === issueId) : null;
         if (!issue) return false;
         const fromStatus = issue.status;
         if (!STATUS_TRANSITIONS[fromStatus] || !STATUS_TRANSITIONS[fromStatus].some(t => t.to === transition.to)) {
@@ -4821,15 +4941,14 @@
             note: trimmedNote,
         });
         issue.status = transition.to;
-        saveIssuesToStorage(siteID, currentSiteIssues);
-        renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
-        renderButtonState();
+        persistCtx(ctx);
+        rerenderCtx(ctx, issue);
         console.log(`${TAG} transition ${issueId}: ${fromStatus} → ${transition.to} by @${by}${trimmedNote ? ` (note: ${trimmedNote.slice(0, 80)})` : ''}`);
         const wasLocalOnly = (issue.createdBy === 'local-only');
         const targetLabel = (STATUS_LABEL[transition.to] || { text: transition.to.toUpperCase() }).text;
         if (cachedToken && !wasLocalOnly) {
             showToast(`Status → ${targetLabel} — pushing to GitHub…`, 2500);
-            commitIssuesToGitHub(`@${by}: ${fromStatus} → ${transition.to}`);
+            commitCtx(ctx, `@${by}: ${fromStatus} → ${transition.to}`);
             // v1.03: threaded Slack reply with role-aware @-mentions.
             postSlackTransition(issue, fromStatus, transition, trimmedNote, by);
         } else {
@@ -4839,14 +4958,16 @@
     }
 
     function escHtml(s) {
-        return (s || '').replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+        // v1.41: also escapes " so site names are safe inside title="…" attributes.
+        return (s || '').replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
     }
 
     // v0.28: comments. Don't change status — just append a history entry
     // where fromStatus === toStatus. Required note. Same audit / sync
     // pipeline as transitions.
     function applyComment(issueId, note, notifyLogins) {
-        const issue = currentSiteIssues.find(i => i.id === issueId);
+        const ctx = ctxForIssue(issueId);   // v1.41: site or fleet context
+        const issue = ctx ? ctx.issues.find(i => i.id === issueId) : null;
         if (!issue) return false;
         const trimmedNote = (note || '').trim();
         if (!trimmedNote) return false;
@@ -4861,13 +4982,13 @@
             kind: 'comment',
             note: trimmedNote,
         });
-        saveIssuesToStorage(siteID, currentSiteIssues);
-        renderButtonState();
+        persistCtx(ctx);
+        rerenderCtx(ctx, null);
         console.log(`${TAG} comment on ${issueId} by @${by}: ${trimmedNote.slice(0, 80)}`);
         const wasLocalOnly = (issue.createdBy === 'local-only');
         if (cachedToken && !wasLocalOnly) {
             showToast(`Comment added — pushing to GitHub…`, 2500);
-            commitIssuesToGitHub(`@${by}: comment`);
+            commitCtx(ctx, `@${by}: comment`);
             // v1.03: threaded Slack reply. v1.10: + @-mentions from picker.
             postSlackComment(issue, trimmedNote, by, notifyLogins);
         } else {
@@ -4880,7 +5001,8 @@
     // with kind='assign' + fromAssignee/toAssignee. Anyone can (re)assign.
     // null assignee = unassigned. Mirrors applyComment's sync + Slack pattern.
     function applyAssignment(issueId, newAssignee) {
-        const issue = currentSiteIssues.find(i => i.id === issueId);
+        const ctx = ctxForIssue(issueId);   // v1.41: site or fleet context
+        const issue = ctx ? ctx.issues.find(i => i.id === issueId) : null;
         if (!issue) return false;
         const from = issue.assignee || null;
         const to = newAssignee || null;
@@ -4899,15 +5021,14 @@
             note: '',
         });
         issue.assignee = to;
-        saveIssuesToStorage(siteID, currentSiteIssues);
-        renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
-        renderButtonState();
+        persistCtx(ctx);
+        rerenderCtx(ctx, issue);
         if (panelEl) renderIssuesPanel();
         console.log(`${TAG} assign ${issueId}: ${from || '(none)'} → ${to || '(none)'} by @${by}`);
         const wasLocalOnly = (issue.createdBy === 'local-only');
         if (cachedToken && !wasLocalOnly) {
             showToast(to ? `Assigned to @${to} — pushing…` : 'Unassigned — pushing…', 2500);
-            commitIssuesToGitHub(`@${by}: assign → ${to || 'none'}`);
+            commitCtx(ctx, `@${by}: assign → ${to || 'none'}`);
             postSlackAssignment(issue, from, to, by);
         } else {
             showToast(to ? `Assigned to @${to} (local only).` : 'Unassigned (local only).', 2500);
@@ -4921,7 +5042,8 @@
     // conversion survives distributed sync. Gate matches delete (creator /
     // local-only / per-issue approver); re-asserted here belt-and-suspenders.
     function applyCategoryChange(issueId, newCategory) {
-        const issue = currentSiteIssues.find(i => i.id === issueId);
+        const ctx = ctxForIssue(issueId);   // v1.41: site or fleet context
+        const issue = ctx ? ctx.issues.find(i => i.id === issueId) : null;
         if (!issue) return false;
         const from = issueCategory(issue);
         const to = (newCategory === 'unshielded') ? 'unshielded' : 'issue';
@@ -4947,15 +5069,14 @@
         });
         if (to === 'unshielded') issue.category = 'unshielded';
         else delete issue.category;
-        saveIssuesToStorage(siteID, currentSiteIssues);
-        renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
-        renderButtonState();
+        persistCtx(ctx);
+        rerenderCtx(ctx, issue);
         if (panelEl) renderIssuesPanel();
         console.log(`${TAG} category ${issueId}: ${from} → ${to} by @${by}`);
         const wasLocalOnly = (issue.createdBy === 'local-only');
         if (cachedToken && !wasLocalOnly) {
             showToast(to === 'unshielded' ? 'Marked as Unshielded Route — pushing…' : 'Converted to normal issue — pushing…', 2500);
-            commitIssuesToGitHub(`@${by}: category → ${to}`);
+            commitCtx(ctx, `@${by}: category → ${to}`);
             postSlackCategoryChange(issue, from, to, by);
         } else {
             showToast(to === 'unshielded' ? 'Marked as Unshielded Route (local only).' : 'Converted to normal issue (local only).', 2500);
@@ -4966,7 +5087,8 @@
     // v0.28: priority change. Doesn't change status. Audited via a history
     // entry with kind='priority' + fromPriority/toPriority fields.
     function applyPriorityChange(issueId, newPriority, optionalNote) {
-        const issue = currentSiteIssues.find(i => i.id === issueId);
+        const ctx = ctxForIssue(issueId);   // v1.41: site or fleet context
+        const issue = ctx ? ctx.issues.find(i => i.id === issueId) : null;
         if (!issue) return false;
         const fromPriority = issue.priority || null;
         if (fromPriority === newPriority) return false;  // no-op
@@ -4984,16 +5106,15 @@
             note: (optionalNote || '').trim(),
         });
         issue.priority = newPriority;
-        saveIssuesToStorage(siteID, currentSiteIssues);
-        renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
-        renderButtonState();
+        persistCtx(ctx);
+        rerenderCtx(ctx, issue);
         const fromLabel = fromPriority ? priorityMeta(fromPriority).text : 'NONE';
         const toLabel = newPriority ? priorityMeta(newPriority).text : 'NONE';
         console.log(`${TAG} priority ${issueId}: ${fromLabel} → ${toLabel} by @${by}`);
         const wasLocalOnly = (issue.createdBy === 'local-only');
         if (cachedToken && !wasLocalOnly) {
             showToast(`Priority → ${toLabel} — pushing to GitHub…`, 2500);
-            commitIssuesToGitHub(`@${by}: priority ${fromLabel} → ${toLabel}`);
+            commitCtx(ctx, `@${by}: priority ${fromLabel} → ${toLabel}`);
         } else {
             showToast(`Priority → ${toLabel} (local only).`, 2500);
         }
@@ -5008,8 +5129,16 @@
     //      + Confirm/Cancel; transition buttons row hidden
     //
     // re-renders the modal innerHTML on state change.
-    function openStatusModal(issue) {
+    // v1.41: `opts.arm` pre-arms an action from the fleet panel's inline
+    // buttons: { to: 'resolved' } (a transition target) or { kind: 'comment' }.
+    function openStatusModal(issue, opts) {
         closeStatusModal();
+        opts = opts || {};
+        // v1.41: which context owns this issue — the fleet panel opens the
+        // same modal for OTHER sites' issues. Map-bound actions (reshape,
+        // move icon, zoom) are hidden for those; everything else is identical.
+        const modalCtx = ctxForIssue(issue.id) || siteCtx();
+        const isSiteIssue = !!modalCtx.isSite;
         // v0.30: no more overlay. The modal is a floating window so it
         // doesn't darken the map and the user can move it out of the way
         // while reviewing the issue. Default position bottom-right;
@@ -5044,6 +5173,11 @@
         // Local UI state — armed transition (null = pick a transition;
         // non-null = note prompt for that transition).
         let armed = null;
+        if (opts.arm && opts.arm.kind === 'comment') armed = { kind: 'comment' };
+        else if (opts.arm && opts.arm.to) {
+            const t = (STATUS_TRANSITIONS[issue.status || 'open'] || []).find(x => x.to === opts.arm.to);
+            if (t) armed = t;
+        }
         let pendingNote = '';     // preserved across re-renders if user typed something
         const pendingCommentNotify = new Set();  // v1.10: logins to @-mention on a comment
         // v0.30: history sort direction. v1.11: default newest first (true).
@@ -5056,7 +5190,7 @@
             // drag operation.
             if (statusModalDragInFlight) return;
             // Re-resolve issue from current state in case it changed
-            const liveIssue = currentSiteIssues.find(i => i.id === issue.id) || issue;
+            const liveIssue = resolveIssue(issue.id) || issue;
             const safeNote = escHtml(liveIssue.note);
             const status = liveIssue.status || 'open';
             const statusMeta = STATUS_LABEL[status] || { text: status.toUpperCase(), color: '#ff8585' };
@@ -5114,8 +5248,10 @@
             // IS the current state (latest reshape / latest icon move). An
             // undo appends a compensating entry, so it syncs like any edit
             // and is itself undoable.
-            const reshapeUndo = canEditGeometry ? reshapeUndoTarget(liveIssue) : null;
-            const markerUndo = canEditGeometry ? markerMoveUndoTarget(liveIssue) : null;
+            // v1.41: geometry undos go through the site-only applyReshape /
+            // applyMarkerMove — hidden for fleet-opened issues like Reshape.
+            const reshapeUndo = (canEditGeometry && isSiteIssue) ? reshapeUndoTarget(liveIssue) : null;
+            const markerUndo = (canEditGeometry && isSiteIssue) ? markerMoveUndoTarget(liveIssue) : null;
             const undoBtnHtml = (kind) => `<button class="aim-issues-hist-undo" data-undo="${kind}"
                 title="${kind === 'reshape'
                     ? 'Restore the shape this reshape replaced. Adds an undo entry — history is never removed.'
@@ -5200,7 +5336,9 @@
             // creator, local-only, or approver — on live, non-validator
             // issues (validator shapes are regenerated on each run).
             // v1.38: shared with the ↩ Undo chips as canEditGeometry.
-            const canReshape = canEditGeometry;
+            // v1.41: reshape / move icon need THIS site's map — hidden when
+            // the modal was opened from the fleet panel for another site.
+            const canReshape = canEditGeometry && isSiteIssue;
             const reshapeBtnHtml = canReshape
                 ? `<button id="aim-issues-modal-reshape"
                        title="Redraw this issue's shape — the current shape shows grey dashed while you draw the replacement"
@@ -5222,7 +5360,7 @@
             // v1.31: category convert — same gate as reshape. Toggles between
             // normal Issue and Unshielded Route (one-click migration for
             // sections that were flagged as plain issues pre-v1.31).
-            const canConvert = canReshape;
+            const canConvert = canEditGeometry;   // v1.41: no map needed — allowed from the fleet panel
             const isUnsh = isUnshielded(liveIssue);
             const convertBtnHtml = canConvert
                 ? `<button id="aim-issues-modal-convert"
@@ -5428,7 +5566,9 @@
                     ${a.subtype ? `<span style="color:#888;font-size:9px">(${escHtml(a.subtype)})</span>` : ''}
                 </div>
             `).join('');
-            const entitiesNote = !mapObjects
+            const entitiesNote = !isSiteIssue
+                ? `<span style="color:#888;font-style:italic">Affected entities are detected when this site is open — use ↗ Open in site.</span>`
+                : !mapObjects
                 ? `<span style="color:#888;font-style:italic">loading entities…</span>`
                 : (affected.length === 0
                     ? `<span style="color:#888;font-style:italic">No Percepto entities detected under this polygon.</span>`
@@ -5522,13 +5662,21 @@
                         ${confLabel}
                     </button>
                 </div>`;
-            } else if (canDelete || canReinstate || canResend || canReshape || canConvert) {
+            } else if (canDelete || canReinstate || canResend || canReshape || canConvert || !isSiteIssue) {
                 // deleteBtnHtml carries margin-right:auto, pushing the
                 // non-destructive actions (convert/reshape/resend) to the
                 // right edge; if there's no delete button, they still align
                 // right via the spacer.
                 const spacer = deleteBtnHtml ? '' : '<span style="margin-right:auto"></span>';
-                footerHtml = `<div style="${footerBase}">${deleteBtnHtml}${reinstateBtnHtml}${spacer}${convertBtnHtml}${reshapeBtnHtml}${moveIconBtnHtml}${resendBtnHtml}</div>`;
+                // v1.41: fleet-opened issue → ↗ Open in site (new tab, deep-linked)
+                const openSiteBtnHtml = !isSiteIssue
+                    ? `<button id="aim-issues-modal-opensite"
+                           title="Open site ${escHtml(String(modalCtx.sid))} in a new tab, zoomed to this issue"
+                           style="padding:7px 14px;background:#13294a;color:#5fb3ff;border:1px solid #5fb3ff;border-radius:4px;cursor:pointer;font:inherit;font-weight:700">
+                           ↗ Open in site
+                       </button>`
+                    : '';
+                footerHtml = `<div style="${footerBase}">${deleteBtnHtml}${reinstateBtnHtml}${spacer}${openSiteBtnHtml}${convertBtnHtml}${reshapeBtnHtml}${moveIconBtnHtml}${resendBtnHtml}</div>`;
             }
             card.innerHTML = `
                 <div id="aim-issues-modal-header"
@@ -5537,6 +5685,7 @@
                      title="Drag to move the popup">
                     <span style="color:#aaa;font-size:14px;font-weight:600">Issue ·</span>
                     <span style="color:${statusMeta.color};font-weight:700;font-size:14px">${statusMeta.text}</span>
+                    ${!isSiteIssue ? `<span title="Site ${escHtml(String(modalCtx.sid))}" style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:9px;background:#1a2029;color:#7adfe6;font-size:9px;font-weight:700;border:1px solid rgba(122,223,230,0.45);letter-spacing:0.3px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">🌐 ${escHtml(modalCtx.name || ('site ' + modalCtx.sid))}</span>` : ''}
                     ${isUnshielded(liveIssue) ? `<span title="Unshielded Route — stays visible on the map when approved" style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:9px;background:#241536;color:${CATEGORY_META.unshielded.color};font-size:9px;font-weight:700;border:1px solid ${CATEGORY_META.unshielded.color}77;letter-spacing:0.3px">🛡✕ UNSHIELDED</span>` : ''}
                     ${headerPri}
                     ${roleChip}
@@ -5699,7 +5848,7 @@
                     const now = Date.now();
                     if (now - lastToggle < 350) return;
                     lastToggle = now;
-                    const issueObj = currentSiteIssues.find(i => i.id === liveIssue.id) || liveIssue;
+                    const issueObj = resolveIssue(liveIssue.id) || liveIssue;
                     const turningOn = !issueObj.slackNotifyOptIn;
                     issueObj.slackNotifyOptIn = turningOn;
                     if (turningOn) {
@@ -5924,7 +6073,7 @@
                     // Re-resolve by id — a background sync may have replaced
                     // the issue object since this render (merges build new
                     // objects; mutating a stale ref would be lost on save).
-                    const live = currentSiteIssues.find(i => i.id === liveIssue.id);
+                    const live = resolveIssue(liveIssue.id);
                     if (!live || live.deleted) { showToast('Issue vanished in a sync — nothing changed.', 3500); return; }
                     const kind = btn.getAttribute('data-undo');
                     if (kind === 'reshape') {
@@ -5947,6 +6096,11 @@
                     applyCategoryChange(liveIssue.id, isUnshielded(liveIssue) ? 'issue' : 'unshielded');
                     render();
                 };
+            }
+            // v1.41: ↗ Open in site — deep link (same URL shape Slack uses).
+            const openSiteBtn = card.querySelector('#aim-issues-modal-opensite');
+            if (openSiteBtn) {
+                openSiteBtn.onclick = () => openIssueInSite(modalCtx.sid, liveIssue.id);
             }
         }
 
@@ -6011,8 +6165,9 @@
         // clears immediately.
         try {
             markIssueSeen(issue.id);
-            renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
+            if (isSiteIssue) renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
             if (panelEl) renderIssuesPanel();
+            if (fleetPanelEl) renderFleetPanel();
         } catch (e) { console.warn(`${TAG} mark-seen on modal open threw:`, e); }
         // v0.30: Esc on document (no overlay anymore). Use capture so
         // we beat any other Esc handlers.
@@ -6041,6 +6196,716 @@
             try { statusModalEl.remove(); } catch (e) {}
         }
         statusModalEl = null;
+    }
+
+    // ============================================================
+    // v1.41 — FLEET ISSUES (#257). Every site's issues in one panel,
+    // reviewable/actionable without entering the site. Lives here (not in
+    // Fleet Tools) so there is ONE copy of the merge rules, the Slack
+    // watermark, the role gates and the status modal. Fleet Tools is the
+    // landing-page front door (tab-local DOM events on `document`).
+    //
+    // Loading: ONE issues/ listing (sha per file) → GM cache diff → only
+    // changed files re-download → intersect with live /sites/ (names +
+    // access; sites the user can't see are hidden + COUNTED, never silently
+    // dropped; no /sites/ at all = fail closed). The current site is never
+    // duplicated: ctxForSid(siteID) aliases the live list.
+    //
+    // Writing: same apply* mutations as in-site, resolved by issue id to a
+    // per-site context; commitFleetSite PUTs that site's file (serialized
+    // per site, 409/422 → refetch + union-merge + one retry). Slack goes
+    // through the same posters (siteLabelForSlack resolves the site from
+    // the issue's context).
+    // ============================================================
+    const FLEET_LAYOUT_KEY = 'aim-issues-fleet-layout';
+    const FLEET_ATTENTION_STATUSES = ['open', 'pending_fix', 'pending_ignore', 'ready-for-review'];
+    let fleetLayout = null;
+    let fleetDragInFlight = false;
+    let fleetFilters = new Set(FLEET_ATTENTION_STATUSES);   // default view = "Needs attention"
+    let fleetPriorityFilters = new Set(['high', 'medium', 'low', 'none']);
+    let fleetCategoryFilters = new Set(['issue', 'unshielded']);
+    let fleetSearch = '';
+    let fleetSoloSid = null;         // left-rail solo (null = all sites)
+    let fleetOnlyMyReview = false;   // ⚡ pendings I can approve
+    let fleetOnlyMine = false;       // 👤 assigned to me
+    let fleetOnlyUnseen = false;     // ? unseen activity
+    let fleetShowDeleted = false;    // approver-only tombstone view
+    const fleetCollapsedSites = new Set();
+
+    function fleetCacheReadAll() {
+        try {
+            const raw = gmGet(FLEET_CACHE_KEY, '');
+            if (!raw) return {};
+            const obj = JSON.parse(raw);
+            return (obj && typeof obj === 'object') ? obj : {};
+        } catch (e) { console.warn(`${TAG} fleet cache unreadable — starting fresh:`, e); return {}; }
+    }
+    function fleetCacheWriteAll(obj) {
+        try { gmSet(FLEET_CACHE_KEY, JSON.stringify(obj)); }
+        catch (e) { console.warn(`${TAG} fleet cache write failed:`, e); }
+    }
+    // Persist one context's issues into the cache (after a local mutation or
+    // a successful PUT). Validator/local-only never reach a fleet ctx, but
+    // filter anyway so the cache mirrors the file.
+    function fleetCacheWrite(ctx) {
+        if (!ctx || ctx.isSite) return;
+        const all = fleetCacheReadAll();
+        all[String(ctx.sid)] = {
+            sha: ctx.sha || null,
+            name: ctx.name || '',
+            issues: (ctx.issues || []).filter(i => i && i.createdBy !== 'local-only' && i.source !== 'validator'),
+        };
+        fleetCacheWriteAll(all);
+    }
+
+    // /sites/ → Map<sid, {name, status}>. Same tolerant parsing as
+    // fetchSiteNames (which the old stale sweep used) but keeps status.
+    async function fetchSitesFull() {
+        const resp = await fetch('/sites/', { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });
+        if (!resp.ok) throw new Error(`/sites/ HTTP ${resp.status}`);
+        const ct = resp.headers.get('content-type') || '';
+        if (!/json/i.test(ct)) throw new Error('/sites/ returned non-JSON (logged out?)');
+        const data = await resp.json();
+        let list = Array.isArray(data) ? data : null;
+        if (!list && data && typeof data === 'object') {
+            for (const k of ['results', 'objects', 'data', 'sites', 'items']) {
+                if (Array.isArray(data[k])) { list = data[k]; break; }
+            }
+        }
+        const map = new Map();
+        (list || []).forEach(s => {
+            const id = String(s.id != null ? s.id : (s.site_id != null ? s.site_id : (s.pk != null ? s.pk : '')));
+            const name = String(s.name || s.site_name || s.title || '').trim();
+            if (id) map.set(id, { name: name || `site ${id}`, status: String(s.status || '') });
+        });
+        return map;
+    }
+
+    // issues/ listing → [{sid, sha}] for THIS environment's files only.
+    async function listIssueFilesWithSha() {
+        const url = `${GITHUB_API_BASE}/repos/${ISSUES_REPO}/contents/issues?ref=${ISSUES_BRANCH}`;
+        const resp = await ghRequest({
+            method: 'GET', url,
+            headers: { 'Authorization': `Bearer ${cachedToken}`, 'Accept': 'application/vnd.github+json' },
+            timeout: 20000,
+        });
+        if (resp.status === 404) return [];
+        if (resp.status !== 200) throw new Error(`list issues/ HTTP ${resp.status}`);
+        const arr = JSON.parse(resp.responseText);
+        if (!Array.isArray(arr)) return [];
+        const fileRe = IS_QA ? /^qa-(\d+)-issues\.json$/ : /^(\d+)-issues\.json$/;
+        const out = [];
+        for (const f of arr) {
+            const m = f && f.name && f.name.match(fileRe);
+            if (m) out.push({ sid: m[1], sha: f.sha || null });
+        }
+        return out;
+    }
+
+    // Load (or refresh) every site's issues. `force` re-downloads everything
+    // regardless of sha. Safe to call repeatedly; concurrent calls coalesce.
+    async function fleetLoad(force) {
+        if (fleetLoading) return;
+        if (!cachedToken) { fleetLoadError = 'No GitHub token — save your PAT in AIM Controls.'; fleetEmitSummary(); if (fleetPanelEl) renderFleetPanel(); return; }
+        fleetLoading = true;
+        fleetLoadError = '';
+        if (fleetPanelEl) renderFleetPanel();
+        try {
+            // 1. Access authority — fail closed without it.
+            let sites;
+            try { sites = await fetchSitesFull(); }
+            catch (e) { throw new Error(`could not verify site access (${e.message || e}) — nothing shown`); }
+            fleetSites = sites;
+            // 2. File listing (sha per site file).
+            const files = await listIssueFilesWithSha();
+            const cache = fleetCacheReadAll();
+            const next = new Map();
+            let fetched = 0, reused = 0, failed = 0;
+            fleetHiddenNoAccess = 0;
+            for (const f of files) {
+                const sid = String(f.sid);
+                const site = sites.get(sid);
+                if (!site) { fleetHiddenNoAccess++; continue; }   // not the user's site — hidden + counted
+                const isCurrent = siteID && sid === String(siteID) && !IS_TOP;
+                const cached = cache[sid];
+                let issues = null, sha = f.sha;
+                if (!force && cached && cached.sha && cached.sha === f.sha && Array.isArray(cached.issues)) {
+                    issues = cached.issues; reused++;
+                } else {
+                    try {
+                        const remote = await fetchRemoteIssues(sid);
+                        if (remote) { issues = remote.issues; sha = remote.sha; fetched++; }
+                        else issues = [];
+                    } catch (e) {
+                        failed++;
+                        console.warn(`${TAG} fleet: site ${sid} fetch failed:`, e);
+                        if (cached && Array.isArray(cached.issues)) { issues = cached.issues; sha = cached.sha; }
+                        else continue;
+                    }
+                }
+                // An existing fleet ctx is REUSED in place (never replaced):
+                // commitFleetSite holds a reference to it across an in-flight
+                // PUT and clears `committing` on THAT object — a fresh object
+                // would keep committing:true forever and never PUT again.
+                // Its issues are always union-merged onto the fresh copy so an
+                // un-synced edit (failed/in-flight commit) is never dropped —
+                // same reason refetchIssues merges local+remote in-site.
+                const prev = fleetStore.get(sid);
+                const merged = (prev && !prev.isSite) ? mergeIssueLists(prev.issues, issues) : issues;
+                if (prev && !prev.isSite) {
+                    Object.assign(prev, { name: site.name, status: site.status, issues: merged, isCurrentAlias: !!isCurrent });
+                    if (!prev.committing) prev.sha = sha;   // mid-PUT: the PUT response owns the sha
+                    next.set(sid, prev);
+                } else {
+                    next.set(sid, {
+                        sid, name: site.name, status: site.status, isSite: false,
+                        issues: merged, sha, committing: false, commitAgain: false,
+                        isCurrentAlias: !!isCurrent,
+                    });
+                }
+                cache[sid] = { sha, name: site.name, issues: merged.filter(i => i && i.createdBy !== 'local-only' && i.source !== 'validator') };
+            }
+            // Drop cache entries for files that no longer exist.
+            Object.keys(cache).forEach(k => { if (!files.some(f => String(f.sid) === k)) delete cache[k]; });
+            fleetCacheWriteAll(cache);
+            fleetStore.clear();
+            next.forEach((v, k) => fleetStore.set(k, v));
+            fleetLoadedAt = Date.now();
+            console.log(`${TAG} fleet loaded: ${fleetStore.size} site(s) · ${fetched} fetched · ${reused} cached · ${failed} failed · ${fleetHiddenNoAccess} hidden (no access)`);
+            if (failed) fleetLoadError = `${failed} site file(s) failed to download — showing cached copies where available`;
+        } catch (e) {
+            fleetLoadError = String(e && e.message || e);
+            console.error(`${TAG} fleet load failed:`, e);
+        } finally {
+            fleetLoading = false;
+            fleetEmitSummary();
+            if (fleetPanelEl) renderFleetPanel();
+        }
+    }
+
+    // Per-site serialized PUT for a fleet context. Mirrors
+    // commitIssuesToGitHub's guarantees: one in-flight PUT per site, a
+    // follow-up if edits landed mid-flight, 409/422 → refetch + union-merge +
+    // one retry, and the new sha banked on success.
+    async function commitFleetSite(ctx, reason, isRetry) {
+        if (!ctx || ctx.isSite || !cachedToken) return false;
+        if (ctx.committing) { ctx.commitAgain = true; return false; }
+        ctx.committing = true;
+        setSyncStatus('syncing');
+        const sid = String(ctx.sid);
+        try {
+            const issuesToSync = (ctx.issues || []).filter(i => i && i.createdBy !== 'local-only' && i.source !== 'validator');
+            const url = `${GITHUB_API_BASE}/repos/${ISSUES_REPO}/contents/${encodeURIComponent(ISSUES_PATH(sid))}`;
+            const body = {
+                message: `[AIM site ${sid}] issues: ${reason || 'fleet update'}`,
+                content: textToB64(JSON.stringify({ version: 1, siteID: sid, issues: issuesToSync }, null, 2)),
+                branch: ISSUES_BRANCH,
+            };
+            if (ctx.sha) body.sha = ctx.sha;
+            const resp = await ghRequest({
+                method: 'PUT', url,
+                headers: { 'Authorization': `Bearer ${cachedToken}`, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' },
+                data: JSON.stringify(body),
+                timeout: 25000,
+            });
+            if (resp.status === 200 || resp.status === 201) {
+                const ret = JSON.parse(resp.responseText);
+                if (ret && ret.content && ret.content.sha) ctx.sha = ret.content.sha;
+                fleetCacheWrite(ctx);
+                setSyncStatus('ok');
+                showToast(`✓ Site ${ctx.name || sid} synced to GitHub.`, 2500);
+                return true;
+            }
+            if ((resp.status === 409 || resp.status === 422) && !isRetry) {
+                console.warn(`${TAG} fleet commit conflict on site ${sid} (HTTP ${resp.status}) — refetch + merge + retry`);
+                const remote = await fetchRemoteIssues(sid);
+                if (remote) { ctx.issues = mergeIssueLists(ctx.issues, remote.issues); ctx.sha = remote.sha; }
+                else ctx.sha = null;
+                ctx.committing = false;
+                if (fleetPanelEl) renderFleetPanel();
+                return commitFleetSite(ctx, reason, true);
+            }
+            setSyncStatus('error');
+            if (resp.status === 401 || resp.status === 403) showToast('GitHub denied write — PAT needs contents:write on aim-userscripts-data.', 8000);
+            else showToast(`Commit failed for site ${sid}: HTTP ${resp.status}.`, 4500);
+            console.warn(`${TAG} fleet commit site ${sid} HTTP ${resp.status}:`, (resp.responseText || '').slice(0, 600));
+            return false;
+        } catch (e) {
+            setSyncStatus('error');
+            showToast(`Commit failed for site ${sid}: ${e.message || 'network error'}.`, 4500);
+            console.error(`${TAG} fleet commit threw:`, e);
+            return false;
+        } finally {
+            ctx.committing = false;
+            if (ctx.commitAgain) {
+                ctx.commitAgain = false;
+                setTimeout(() => commitFleetSite(ctx, 'follow-up after concurrent change'), 100);
+            }
+        }
+    }
+
+    // Deep link — same URL shape the Slack messages carry; AIM Issues in the
+    // target tab zooms to + opens the issue via maybeFocusPendingIssue.
+    function issueDeepLink(sid, issueId) {
+        const q = issueId ? `?aim_issue=${encodeURIComponent(issueId)}` : '';
+        return `${location.origin}/${q}#/site/${encodeURIComponent(String(sid))}/control-panel/site-setup`;
+    }
+    function openIssueInSite(sid, issueId) {
+        const href = issueDeepLink(sid, issueId);
+        let opened = false;
+        if (typeof GM_openInTab === 'function') {
+            try { GM_openInTab(href, { active: true, insert: true, setParent: true }); opened = true; } catch (e) {}
+        }
+        if (!opened) { try { opened = !!(window.top || window).open(href, '_blank'); } catch (e) {} }
+        if (opened) showToast('Opening site in a new tab…', 1500);
+        else copyTextToClipboard(href).then(() => showToast('Site link copied — paste it in your browser.', 3500))
+                                      .catch(() => showToast('Could not open the site link.', 3000));
+    }
+
+    // ---- Fleet Tools bridge (tab-local DOM events; NOT BroadcastChannel) ----
+    function fleetSummary() {
+        let open = 0, pending = 0, myPending = 0, unseen = 0, total = 0;
+        fleetStore.forEach(ctx => {
+            liveIssues(ctx.issues).forEach(i => {
+                if (i.source === 'validator') return;
+                total++;
+                if (i.status === 'open' || i.status === 'ready-for-review') open++;
+                if (i.status === 'pending_fix' || i.status === 'pending_ignore') {
+                    pending++;
+                    if (isApproverFor(i)) myPending++;
+                }
+                if (unseenHistoryFor(i).length) unseen++;
+            });
+        });
+        return {
+            open, pending, myPending: isAnyApprover() ? myPending : 0, unseen, total,
+            sites: fleetStore.size, hiddenNoAccess: fleetHiddenNoAccess,
+            loadedAt: fleetLoadedAt, loading: fleetLoading, error: fleetLoadError,
+            hasToken: !!cachedToken, version: SCRIPT_VERSION,
+        };
+    }
+    function fleetEmitSummary() {
+        try { document.dispatchEvent(new CustomEvent('aim-fleet:issues-summary', { detail: fleetSummary() })); }
+        catch (e) { console.warn(`${TAG} fleet summary event threw:`, e); }
+    }
+    function setupFleetBridge() {
+        document.addEventListener('aim-fleet:open-issues', () => {
+            try { openFleetPanel(); } catch (e) { console.error(`${TAG} open fleet panel threw:`, e); }
+        });
+        document.addEventListener('aim-fleet:issues-request', () => {
+            fleetEmitSummary();
+            if (!fleetLoadedAt && !fleetLoading && cachedToken) fleetLoad(false);
+        });
+    }
+
+    // ---- Fleet panel ----
+    function loadFleetLayout() {
+        try { const raw = localStorage.getItem(FLEET_LAYOUT_KEY); const o = raw ? JSON.parse(raw) : null; return (o && typeof o === 'object') ? o : null; }
+        catch (e) { return null; }
+    }
+    function saveFleetLayout(l) { try { localStorage.setItem(FLEET_LAYOUT_KEY, JSON.stringify(l)); } catch (e) {} }
+    function clampFleetLayout(l) {
+        const minW = 640, minH = 320;
+        const vw = window.innerWidth, vh = window.innerHeight;
+        const out = { ...l };
+        out.width  = Math.max(minW, Math.min(out.width  || 980, vw - 20));
+        out.height = Math.max(minH, Math.min(out.height || 660, vh - 20));
+        out.left = Math.max(10 - out.width + 80, Math.min(out.left, vw - 80));
+        out.top  = Math.max(10, Math.min(out.top, vh - 40));
+        return out;
+    }
+    function openFleetPanel() {
+        if (fleetPanelEl) { renderFleetPanel(); return; }
+        const stored = loadFleetLayout();
+        fleetLayout = clampFleetLayout(stored || {
+            left: Math.max(10, Math.round((window.innerWidth - 980) / 2)),
+            top: 50, width: 980, height: Math.min(680, window.innerHeight - 80),
+        });
+        const panel = document.createElement('div');
+        panel.id = 'aim-issues-fleet-panel';
+        panel.style.cssText = `
+            position:fixed;left:${fleetLayout.left}px;top:${fleetLayout.top}px;
+            width:${fleetLayout.width}px;height:${fleetLayout.height}px;
+            background:#1f2228;border:1px solid rgba(122,223,230,0.55);border-radius:10px;
+            box-shadow:0 8px 32px rgba(0,0,0,0.6);z-index:99100;color:#e6e6e6;
+            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;
+            display:flex;flex-direction:column;overflow:hidden;
+        `;
+        ['mousedown','pointerdown','wheel','dblclick','click','contextmenu','touchstart'].forEach(evt => {
+            panel.addEventListener(evt, (e) => e.stopPropagation(), false);
+        });
+        document.body.appendChild(panel);
+        fleetPanelEl = panel;
+        renderFleetPanel();
+        console.log(`${TAG} fleet panel opened`);
+        if (!fleetLoadedAt && !fleetLoading) fleetLoad(false);
+        else if (fleetLoadedAt && Date.now() - fleetLoadedAt > 5 * 60000) fleetLoad(false);   // stale → refresh in place
+    }
+    function closeFleetPanel() {
+        if (fleetPanelEl) { try { fleetPanelEl.remove(); } catch (e) {} }
+        fleetPanelEl = null;
+    }
+
+    function fleetIssueMatches(issue, ctx) {
+        const st = issue.status || 'open';
+        if (!fleetFilters.has(st)) return false;
+        if (!fleetCategoryFilters.has(issueCategory(issue))) return false;
+        if (!fleetPriorityFilters.has(issue.priority || 'none')) return false;
+        if (fleetOnlyMyReview && !((st === 'pending_fix' || st === 'pending_ignore') && isApproverFor(issue))) return false;
+        if (fleetOnlyMine && (issue.assignee || null) !== (cachedUsername || null)) return false;
+        if (fleetOnlyUnseen && !unseenHistoryFor(issue).length) return false;
+        const q = fleetSearch.trim().toLowerCase();
+        if (!q) return true;
+        if ((issue.note || '').toLowerCase().includes(q)) return true;
+        if ((issue.createdBy || '').toLowerCase().includes(q)) return true;
+        if ((issue.assignee || '').toLowerCase().includes(q)) return true;
+        if ((ctx.name || '').toLowerCase().includes(q) || String(ctx.sid) === q) return true;
+        if (issue.id.toLowerCase() === q) return true;
+        return (issue.history || []).some(h => (h.note || '').toLowerCase().includes(q) || (h.by || '').toLowerCase() === q);
+    }
+
+    // Every fleet context INCLUDING the current site (aliased to the live
+    // list so in-site edits show without a refetch).
+    function fleetContexts() {
+        const out = [];
+        fleetStore.forEach(ctx => {
+            if (ctx.isCurrentAlias && !IS_TOP) out.push({ ...siteCtx(), name: ctx.name || siteName, status: ctx.status, fleetSha: ctx.sha });
+            else out.push(ctx);
+        });
+        return out;
+    }
+
+    function renderFleetPanel() {
+        if (!fleetPanelEl || fleetDragInFlight) return;
+        const ae = document.activeElement;
+        const wasSearchFocused = ae && ae.id === 'aim-issues-fleet-search';
+        const selS = wasSearchFocused ? ae.selectionStart : null, selE = wasSearchFocused ? ae.selectionEnd : null;
+
+        const contexts = fleetContexts();
+        const showingDeleted = fleetShowDeleted && isAnyApprover();
+        const perSite = contexts.map(ctx => {
+            const live = liveIssues(ctx.issues).filter(i => i.source !== 'validator');
+            const deleted = (ctx.issues || []).filter(i => i && i.deleted && i.source !== 'validator');
+            const base = showingDeleted ? deleted : live;
+            const visible = base.filter(i => fleetIssueMatches(i, ctx))
+                .sort((a, b) => new Date(lastEventAt(b)).getTime() - new Date(lastEventAt(a)).getTime());
+            const open = live.filter(i => i.status === 'open' || i.status === 'ready-for-review').length;
+            const pending = live.filter(i => i.status === 'pending_fix' || i.status === 'pending_ignore').length;
+            const myPending = isAnyApprover() ? live.filter(i => (i.status === 'pending_fix' || i.status === 'pending_ignore') && isApproverFor(i)).length : 0;
+            const unseen = live.filter(i => unseenHistoryFor(i).length > 0).length;
+            const mine = cachedUsername ? live.filter(i => (i.assignee || null) === cachedUsername).length : 0;
+            return { ctx, live, deleted, visible, open, pending, myPending, unseen, mine };
+        });
+        // Left rail order: my review queue first, then open count, then name.
+        perSite.sort((a, b) => (b.myPending - a.myPending) || (b.open - a.open) || (b.pending - a.pending)
+            || String(a.ctx.name || '').localeCompare(String(b.ctx.name || '')));
+        const allLive = perSite.flatMap(p => p.live);
+        const counts = { open: 0, pending_fix: 0, pending_ignore: 0, 'ready-for-review': 0, resolved: 0, ignored: 0 };
+        allLive.forEach(i => { const s = i.status || 'open'; if (counts[s] !== undefined) counts[s]++; });
+        const catCounts = { issue: 0, unshielded: 0 };
+        allLive.forEach(i => { catCounts[issueCategory(i)]++; });
+        const priCounts = { high: 0, medium: 0, low: 0, none: 0 };
+        allLive.forEach(i => { const k = i.priority || 'none'; if (priCounts[k] !== undefined) priCounts[k]++; });
+        const totalMyPending = perSite.reduce((n, p) => n + p.myPending, 0);
+        const totalUnseen = perSite.reduce((n, p) => n + p.unseen, 0);
+        const totalMine = perSite.reduce((n, p) => n + p.mine, 0);
+        const totalDeleted = perSite.reduce((n, p) => n + p.deleted.length, 0);
+        const shown = perSite.filter(p => !fleetSoloSid || String(p.ctx.sid) === String(fleetSoloSid));
+        const visibleAll = shown.flatMap(p => p.visible.map(i => ({ issue: i, ctx: p.ctx })));
+
+        const DARK = new Set(['pending_fix', 'ready-for-review', 'resolved']);
+        const chip = (cls, data, active, color, label, n, fg, title, dashed) =>
+            `<button class="${cls}" ${data} title="${escHtml(title || '')}"
+                style="padding:4px 9px;border-radius:13px;font:inherit;font-size:11px;font-weight:700;
+                       border:1.5px ${dashed ? 'dashed' : 'solid'} ${color};background:${active ? color : 'transparent'};
+                       color:${active ? fg : color};cursor:pointer;opacity:${active ? 1 : 0.55};
+                       display:inline-flex;align-items:center;gap:5px">
+                <span>${label}</span>
+                <span style="background:rgba(0,0,0,0.25);padding:1px 5px;border-radius:8px;font-size:10px">${n}</span>
+            </button>`;
+        const statusChips = PANEL_STATUS_ORDER.map(st => {
+            const m = STATUS_LABEL[st] || { text: st.toUpperCase(), color: '#888' };
+            if (st === 'ready-for-review' && !counts[st]) return '';
+            return chip('aim-fleet-chip', `data-status="${st}"`, fleetFilters.has(st), m.color, m.text, counts[st] || 0,
+                DARK.has(st) ? '#000' : '#fff', `M1 toggle · M2 solo ${m.text.toLowerCase()}`);
+        }).join('');
+        const catChips = [
+            { key: 'issue', label: '🚩 Issues', color: '#ff8585', fg: '#2a0d0d' },
+            { key: 'unshielded', label: '🛡✕ Unshielded', color: CATEGORY_META.unshielded.color, fg: '#1a0d26' },
+        ].map(c => chip('aim-fleet-catchip', `data-category="${c.key}"`, fleetCategoryFilters.has(c.key), c.color, c.label, catCounts[c.key], c.fg, 'M1 toggle · M2 solo')).join('');
+        const priChips = ['high', 'medium', 'low', 'none'].map(p => {
+            const m = p === 'none' ? { text: 'NONE', color: '#888', textColor: '#fff' } : priorityMeta(p);
+            return chip('aim-fleet-prichip', `data-priority="${p}"`, fleetPriorityFilters.has(p), m.color, `${p === 'none' ? '—' : '🎯'} ${m.text}`, priCounts[p], m.textColor, 'M1 toggle · M2 solo');
+        }).join('');
+        const quickChips = [
+            isAnyApprover() ? chip('aim-fleet-quick', 'data-quick="review"', fleetOnlyMyReview, '#5fff5f', '⚡ Needs my review', totalMyPending, '#06210f', 'Only pending proposals YOU can approve', true) : '',
+            cachedUsername ? chip('aim-fleet-quick', 'data-quick="mine"', fleetOnlyMine, '#5fb3ff', '👤 Assigned to me', totalMine, '#0a1a2a', 'Only issues assigned to you', true) : '',
+            chip('aim-fleet-quick', 'data-quick="unseen"', fleetOnlyUnseen, '#00FF7F', '? Unseen activity', totalUnseen, '#003318', 'Only issues with activity you have not viewed yet', true),
+            isAnyApprover() ? chip('aim-fleet-quick', 'data-quick="deleted"', showingDeleted, '#ff8585', '🗑 Deleted', totalDeleted, '#2a0d0d', 'Show tombstoned issues (reinstate from the modal)', true) : '',
+        ].join('');
+        const isAttention = fleetFilters.has('open') && !fleetFilters.has('resolved') && !fleetFilters.has('ignored');
+        const viewBtns = `
+            <button class="aim-fleet-view" data-view="attention" title="Open + pending (the default)"
+                style="padding:4px 10px;border-radius:4px;font:inherit;font-size:11px;font-weight:700;cursor:pointer;border:1px solid rgba(122,223,230,0.5);background:${isAttention ? '#1a3a40' : 'transparent'};color:#7adfe6">Needs attention</button>
+            <button class="aim-fleet-view" data-view="all" title="Every status"
+                style="padding:4px 10px;border-radius:4px;font:inherit;font-size:11px;font-weight:700;cursor:pointer;border:1px solid rgba(122,223,230,0.5);background:${fleetFilters.size === PANEL_STATUS_ORDER.length ? '#1a3a40' : 'transparent'};color:#7adfe6">All</button>`;
+
+        // Left rail
+        const railRows = [`<div class="aim-fleet-site" data-sid="" style="padding:7px 10px;cursor:pointer;border-bottom:1px solid rgba(255,255,255,0.06);
+                background:${!fleetSoloSid ? 'rgba(122,223,230,0.12)' : 'transparent'};font-weight:700;color:#7adfe6">
+                🌐 All sites <span style="color:#888;font-weight:400;font-size:10px">(${perSite.length})</span></div>`]
+            .concat(perSite.map(p => {
+                const solo = fleetSoloSid && String(p.ctx.sid) === String(fleetSoloSid);
+                const badges = [
+                    p.myPending ? `<span title="pending your review" style="background:#ffa726;color:#000;padding:0 5px;border-radius:7px;font-size:9px;font-weight:700">⚡${p.myPending}</span>` : (p.pending ? `<span title="pending review" style="background:#8000FF;color:#fff;padding:0 5px;border-radius:7px;font-size:9px;font-weight:700">${p.pending}</span>` : ''),
+                    p.open ? `<span title="open" style="background:#ff4d4d;color:#fff;padding:0 5px;border-radius:7px;font-size:9px;font-weight:700">${p.open}</span>` : '',
+                    p.unseen ? `<span class="aim-issues-activity-dot" title="${p.unseen} with unseen activity" style="display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;border-radius:50%;background:#00FF7F;color:#000;font-size:9px;font-weight:900">?</span>` : '',
+                ].join(' ');
+                const dim = !p.open && !p.pending;
+                return `<div class="aim-fleet-site" data-sid="${escHtml(String(p.ctx.sid))}" title="Site ${escHtml(String(p.ctx.sid))} · ${p.live.length} live issue(s) · click to solo"
+                    style="padding:6px 10px;cursor:pointer;border-bottom:1px solid rgba(255,255,255,0.05);display:flex;align-items:center;gap:6px;
+                           background:${solo ? 'rgba(122,223,230,0.12)' : 'transparent'};opacity:${dim ? 0.6 : 1}">
+                    <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:${p.ctx.isSite ? '#5fff5f' : '#e6e6e6'}">${escHtml(p.ctx.name || ('site ' + p.ctx.sid))}</span>
+                    ${badges}
+                </div>`;
+            }));
+
+        // Rows (grouped by site unless soloed)
+        let rowsHtml = '';
+        if (!cachedToken) {
+            rowsHtml = `<div style="padding:30px;color:#888;text-align:center;font-style:italic">No GitHub token — save your PAT in AIM Controls (gear) to load fleet issues.</div>`;
+        } else if (fleetLoadError && !fleetStore.size) {
+            rowsHtml = `<div style="padding:30px;color:#ff8585;text-align:center">⚠ ${escHtml(fleetLoadError)}</div>`;
+        } else if (fleetLoading && !fleetStore.size) {
+            rowsHtml = `<div style="padding:30px;color:#888;text-align:center;font-style:italic">⏳ Loading every site's issues…</div>`;
+        } else if (!visibleAll.length) {
+            rowsHtml = `<div style="padding:30px;color:#888;text-align:center;font-style:italic">${allLive.length ? 'No issues match the current filters.' : 'No issues anywhere yet.'}</div>`;
+        } else {
+            const rowHtml = (issue, ctx) => {
+                const meta = STATUS_LABEL[issue.status || 'open'] || { text: 'OPEN', color: '#ff4d4d' };
+                const priM = issue.priority ? priorityMeta(issue.priority) : null;
+                const unseen = unseenHistoryFor(issue);
+                const isPending = issue.status === 'pending_fix' || issue.status === 'pending_ignore';
+                const canReview = isPending && isApproverFor(issue) && !issue.deleted;
+                const approveTo = issue.status === 'pending_fix' ? 'resolved' : 'ignored';
+                const actions = issue.deleted ? '' : `
+                    ${canReview ? `<button class="aim-fleet-act" data-act="approve" data-id="${issue.id}" title="Approve this proposal" style="padding:3px 8px;background:#10331f;color:#5fff5f;border:1px solid #5fff5f;border-radius:4px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">✓</button>
+                                   <button class="aim-fleet-act" data-act="reject" data-id="${issue.id}" title="Reject → back to Open (note required)" style="padding:3px 8px;background:#5a2222;color:#ff8585;border:1px solid #ff4d4d;border-radius:4px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">✗</button>` : ''}
+                    <button class="aim-fleet-act" data-act="comment" data-id="${issue.id}" title="Add a comment" style="padding:3px 8px;background:#1a2333;color:#a8c4ff;border:1px solid #a8c4ff66;border-radius:4px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">💬</button>
+                    <button class="aim-fleet-act" data-act="site" data-id="${issue.id}" data-sid="${escHtml(String(ctx.sid))}" title="${ctx.isSite ? 'Zoom to this issue on the map' : 'Open the site in a new tab, zoomed to this issue'}" style="padding:3px 8px;background:#13294a;color:#5fb3ff;border:1px solid #5fb3ff66;border-radius:4px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">${ctx.isSite ? '🎯' : '↗'}</button>`;
+                return `<div class="aim-fleet-row" data-id="${issue.id}" title="Click to open the issue"
+                    style="padding:7px 12px;border-bottom:1px solid rgba(255,255,255,0.06);cursor:pointer;
+                           display:grid;grid-template-columns:96px 1fr 120px 110px auto;gap:8px;align-items:center;
+                           opacity:${(issue.status === 'resolved' || issue.status === 'ignored') ? 0.6 : 1}">
+                    <div>
+                        <span style="display:inline-block;padding:2px 6px;border-radius:8px;background:${meta.color};color:${DARK.has(issue.status) ? '#000' : '#fff'};font-size:10px;font-weight:700">${meta.text}</span>
+                        ${priM ? `<div style="margin-top:2px"><span style="display:inline-block;padding:1px 5px;border-radius:6px;background:${priM.color};color:${priM.textColor};font-size:9px;font-weight:700">🎯 ${priM.text}</span></div>` : ''}
+                        ${isUnshielded(issue) ? `<div style="margin-top:2px"><span style="display:inline-block;padding:1px 5px;border-radius:6px;background:${CATEGORY_META.unshielded.color};color:#1a0d26;font-size:9px;font-weight:700">🛡✕</span></div>` : ''}
+                        ${issue.deleted ? `<div style="font-size:9px;color:#ff8585;margin-top:2px;font-weight:700">🗑 DELETED</div>` : ''}
+                    </div>
+                    <div style="color:#e6e6e6;font-size:12px;line-height:1.35;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;${issue.deleted ? 'text-decoration:line-through;color:#999' : ''}">${escHtml(issue.note)}</div>
+                    <div style="color:#a8c4ff;font-size:11px;font-weight:600;overflow:hidden">
+                        ${escHtml(lastEventLabel(issue))}${unseen.length ? `<span class="aim-issues-activity-dot" title="${unseen.length} unseen event(s) — open to dismiss" style="display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:50%;background:#00FF7F;color:#000;font-size:10px;font-weight:900;margin-left:5px;vertical-align:middle">?</span>` : ''}
+                        <div style="color:#888;font-weight:400;font-size:10px">${relativeAge(lastEventAt(issue))}</div>
+                    </div>
+                    <div style="color:#a8c4ff;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">@${escHtml(issue.createdBy || '?')}
+                        ${issue.assignee ? `<div style="color:#5fb3ff;font-size:10px">👤 ${escHtml(issue.assignee)}</div>` : ''}</div>
+                    <div style="display:flex;gap:4px;white-space:nowrap">${actions}</div>
+                </div>`;
+            };
+            rowsHtml = shown.filter(p => p.visible.length).map(p => {
+                const collapsed = fleetCollapsedSites.has(String(p.ctx.sid)) && !fleetSoloSid;
+                const head = `<div class="aim-fleet-group" data-sid="${escHtml(String(p.ctx.sid))}"
+                    style="padding:6px 12px;background:#181b21;border-bottom:1px solid rgba(255,255,255,0.08);border-top:1px solid rgba(255,255,255,0.04);
+                           display:flex;align-items:center;gap:8px;cursor:pointer;position:sticky;top:0;z-index:1">
+                    <span style="color:#7adfe6;font-size:10px">${collapsed ? '▶' : '▼'}</span>
+                    <span style="font-weight:700;color:${p.ctx.isSite ? '#5fff5f' : '#7adfe6'}">${escHtml(p.ctx.name || ('site ' + p.ctx.sid))}</span>
+                    <span style="color:#666;font-size:10px">#${escHtml(String(p.ctx.sid))}${p.ctx.isSite ? ' · this site' : ''}</span>
+                    <span style="color:#888;font-size:10px">· ${p.visible.length} shown · ${p.open} open · ${p.pending} pending</span>
+                    <button class="aim-fleet-act" data-act="opensite" data-sid="${escHtml(String(p.ctx.sid))}" title="Open this site's Site Setup in a new tab"
+                        style="margin-left:auto;padding:2px 8px;background:transparent;color:#5fb3ff;border:1px solid #5fb3ff55;border-radius:4px;cursor:pointer;font:inherit;font-size:10px;font-weight:700">↗ site</button>
+                </div>`;
+                return head + (collapsed ? '' : p.visible.map(i => rowHtml(i, p.ctx)).join(''));
+            }).join('');
+        }
+
+        const loadedAgo = fleetLoadedAt ? relativeAge(new Date(fleetLoadedAt).toISOString()) : 'never';
+        const syncDot = ({ 'no-token': '#777', 'syncing': '#ffb347', 'ok': '#5fff5f', 'pending': '#ffb347', 'error': '#ff4d4d' })[syncStatus] || '#777';
+        fleetPanelEl.innerHTML = `
+            <div id="aim-issues-fleet-header" style="padding:9px 14px;background:#14171b;border-bottom:1px solid rgba(255,255,255,0.10);
+                        display:flex;align-items:center;gap:10px;cursor:move;user-select:none;flex-shrink:0" title="Drag to move">
+                <span style="font-size:16px">🌐</span>
+                <span style="font-weight:700;color:#7adfe6">Fleet Issues</span>
+                <span style="color:#888;font-size:11px">· ${perSite.length} site${perSite.length === 1 ? '' : 's'} · ${allLive.length} live</span>
+                ${fleetHiddenNoAccess ? `<span style="color:#ffa030;font-size:10px" title="Issue files exist for sites that are not in your /sites/ list — hidden, never silently dropped">· ${fleetHiddenNoAccess} hidden (no access)</span>` : ''}
+                <span style="display:inline-flex;align-items:center;gap:4px;font-size:11px"><span style="display:inline-block;width:8px;height:8px;border-radius:4px;background:${syncDot}"></span><span style="color:#aaa">${cachedUsername ? '@' + escHtml(cachedUsername) : 'no token'}</span></span>
+                <span style="color:#666;font-size:10px">· loaded ${escHtml(loadedAgo)}${fleetLoading ? ' · ⏳ refreshing…' : ''}</span>
+                ${fleetLoadError && fleetStore.size ? `<span style="color:#ffa030;font-size:10px" title="${escHtml(fleetLoadError)}">⚠ partial</span>` : ''}
+                <span style="margin-left:auto;display:flex;gap:6px">
+                    <button id="aim-issues-fleet-export" ${visibleAll.length ? '' : 'disabled'} title="Copy the ${visibleAll.length} visible issue(s) as a formatted table — paste into Google Sheets / Excel"
+                        style="padding:4px 10px;background:#3a3f48;color:#ffd54f;border:1px solid rgba(255,213,79,0.4);border-radius:4px;cursor:pointer;font:inherit;font-size:11px;font-weight:700;opacity:${visibleAll.length ? 1 : 0.4}">📊 Copy → Sheets (${visibleAll.length})</button>
+                    <button id="aim-issues-fleet-refresh" ${fleetLoading ? 'disabled' : ''} title="Re-check every site file on GitHub (only changed files download)"
+                        style="padding:4px 10px;background:#3a3f48;color:#a8c4ff;border:1px solid rgba(168,196,255,0.3);border-radius:4px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">↻ Refresh</button>
+                    <button id="aim-issues-fleet-close" title="Close" style="padding:4px 10px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">✕</button>
+                </span>
+            </div>
+            <div style="padding:8px 14px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;border-bottom:1px solid rgba(255,255,255,0.06);background:#181b21">
+                ${viewBtns}<span style="width:1px;height:18px;background:rgba(255,255,255,0.12);margin:0 4px"></span>
+                ${statusChips}<span style="width:1px;height:18px;background:rgba(255,255,255,0.12);margin:0 4px"></span>${catChips}
+            </div>
+            <div style="padding:6px 14px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;border-bottom:1px solid rgba(255,255,255,0.06);background:#181b21">
+                ${quickChips}<span style="width:1px;height:18px;background:rgba(255,255,255,0.12);margin:0 4px"></span>
+                <span style="color:#888;font-size:10px;font-weight:600">PRIORITY:</span>${priChips}
+                <input id="aim-issues-fleet-search" type="text" placeholder="Search notes / sites / people / history…" value="${escHtml(fleetSearch)}"
+                    style="margin-left:auto;min-width:220px;flex:1;max-width:340px;padding:5px 10px;background:#0e1115;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:4px;font:inherit;font-size:12px;box-sizing:border-box">
+            </div>
+            <div style="display:flex;flex:1;min-height:0">
+                <div id="aim-issues-fleet-rail" style="width:200px;flex-shrink:0;overflow:auto;border-right:1px solid rgba(255,255,255,0.08);background:#1a1d23">${railRows.join('')}</div>
+                <div id="aim-issues-fleet-rows" style="flex:1;overflow:auto;min-width:0">${rowsHtml}</div>
+            </div>
+            <div style="padding:5px 14px;background:#14171b;border-top:1px solid rgba(255,255,255,0.06);color:#666;font-size:10px;font-style:italic;flex-shrink:0">
+                Row: open issue · ✓ approve · ✗ reject · 💬 comment · ↗ open in site (new tab) · rail: click a site to solo · M2 chip: solo
+            </div>
+            <div id="aim-issues-fleet-resize" title="Drag to resize"
+                 style="position:absolute;bottom:0;right:0;width:18px;height:18px;cursor:nwse-resize;
+                        background:linear-gradient(135deg,transparent 0%,transparent 45%,rgba(122,223,230,0.55) 45%,rgba(122,223,230,0.55) 60%,transparent 60%,transparent 75%,rgba(122,223,230,0.55) 75%,rgba(122,223,230,0.55) 90%,transparent 90%);"></div>
+        `;
+
+        // ---- wiring ----
+        const P = fleetPanelEl;
+        P.querySelector('#aim-issues-fleet-close').onclick = closeFleetPanel;
+        P.querySelector('#aim-issues-fleet-refresh').onclick = () => fleetLoad(true);
+        const exportBtn = P.querySelector('#aim-issues-fleet-export');
+        if (exportBtn && !exportBtn.disabled) {
+            exportBtn.onclick = () => {
+                const bySid = new Map(); visibleAll.forEach(v => bySid.set(v.issue.id, v.ctx));
+                copyIssuesToSheets(visibleAll.map(v => v.issue), '', '', (issue) => {
+                    const c = bySid.get(issue.id); return { sid: c ? String(c.sid) : '', name: c ? (c.name || '') : '' };
+                });
+            };
+        }
+        const search = P.querySelector('#aim-issues-fleet-search');
+        if (search) {
+            let t = null;
+            search.oninput = () => { fleetSearch = search.value; clearTimeout(t); t = setTimeout(() => { if (fleetPanelEl) renderFleetPanel(); }, 150); };
+        }
+        P.querySelectorAll('.aim-fleet-view').forEach(b => {
+            b.onclick = () => {
+                fleetFilters = new Set(b.dataset.view === 'all' ? PANEL_STATUS_ORDER : FLEET_ATTENTION_STATUSES);
+                renderFleetPanel();
+            };
+        });
+        const wireChips = (cls, key, set, all) => {
+            P.querySelectorAll(cls).forEach(c => {
+                const v = c.dataset[key];
+                c.onclick = () => { if (set.has(v)) set.delete(v); else set.add(v); renderFleetPanel(); };
+                c.oncontextmenu = (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    const solo = set.size === 1 && set.has(v);
+                    set.clear();
+                    if (solo) all.forEach(x => set.add(x)); else set.add(v);
+                    renderFleetPanel();
+                };
+            });
+        };
+        wireChips('.aim-fleet-chip', 'status', fleetFilters, PANEL_STATUS_ORDER);
+        wireChips('.aim-fleet-catchip', 'category', fleetCategoryFilters, ['issue', 'unshielded']);
+        wireChips('.aim-fleet-prichip', 'priority', fleetPriorityFilters, ['high', 'medium', 'low', 'none']);
+        P.querySelectorAll('.aim-fleet-quick').forEach(c => {
+            c.onclick = () => {
+                const q = c.dataset.quick;
+                if (q === 'review') fleetOnlyMyReview = !fleetOnlyMyReview;
+                else if (q === 'mine') fleetOnlyMine = !fleetOnlyMine;
+                else if (q === 'unseen') fleetOnlyUnseen = !fleetOnlyUnseen;
+                else if (q === 'deleted') fleetShowDeleted = !fleetShowDeleted;
+                // "Needs my review" implies the pending statuses are visible.
+                if (q === 'review' && fleetOnlyMyReview) { fleetFilters.add('pending_fix'); fleetFilters.add('pending_ignore'); }
+                renderFleetPanel();
+            };
+        });
+        P.querySelectorAll('.aim-fleet-site').forEach(r => {
+            r.onclick = () => {
+                const sid = r.dataset.sid || null;
+                fleetSoloSid = (sid && String(fleetSoloSid) !== String(sid)) ? sid : null;
+                renderFleetPanel();
+            };
+        });
+        P.querySelectorAll('.aim-fleet-group').forEach(g => {
+            g.onclick = (e) => {
+                if (e.target.closest('.aim-fleet-act')) return;
+                const sid = g.dataset.sid;
+                if (fleetCollapsedSites.has(sid)) fleetCollapsedSites.delete(sid); else fleetCollapsedSites.add(sid);
+                renderFleetPanel();
+            };
+        });
+        P.querySelectorAll('.aim-fleet-row').forEach(r => {
+            r.onclick = (e) => {
+                if (e.target.closest('.aim-fleet-act')) return;
+                const issue = resolveIssue(r.dataset.id);
+                if (!issue) { showToast('Issue not found — refresh the fleet list.', 3000); return; }
+                const ctx = ctxForIssue(issue.id);
+                if (ctx && ctx.isSite) zoomToIssue(issue);
+                openStatusModal(issue);
+            };
+        });
+        P.querySelectorAll('.aim-fleet-act').forEach(b => {
+            b.onclick = (e) => {
+                e.stopPropagation();
+                const act = b.dataset.act;
+                if (act === 'opensite') { openIssueInSite(b.dataset.sid, null); return; }
+                const issue = resolveIssue(b.dataset.id);
+                if (!issue) { showToast('Issue not found — refresh the fleet list.', 3000); return; }
+                const ctx = ctxForIssue(issue.id);
+                if (act === 'site') {
+                    if (ctx && ctx.isSite) { zoomToIssue(issue); openStatusModal(issue); }
+                    else openIssueInSite(b.dataset.sid, issue.id);
+                } else if (act === 'approve') {
+                    openStatusModal(issue, { arm: { to: issue.status === 'pending_fix' ? 'resolved' : 'ignored' } });
+                } else if (act === 'reject') {
+                    openStatusModal(issue, { arm: { to: 'open' } });
+                } else if (act === 'comment') {
+                    openStatusModal(issue, { arm: { kind: 'comment' } });
+                }
+            };
+        });
+        // drag + resize
+        const header = P.querySelector('#aim-issues-fleet-header');
+        const handle = P.querySelector('#aim-issues-fleet-resize');
+        const startDrag = (downEvent, mode) => {
+            fleetDragInFlight = true;
+            const sx = downEvent.clientX, sy = downEvent.clientY;
+            const s0 = { ...fleetLayout };
+            const onMove = (ev) => {
+                const dx = ev.clientX - sx, dy = ev.clientY - sy;
+                const next = mode === 'move' ? { ...fleetLayout, left: s0.left + dx, top: s0.top + dy }
+                                             : { ...fleetLayout, width: s0.width + dx, height: s0.height + dy };
+                fleetLayout = clampFleetLayout(next);
+                P.style.left = `${fleetLayout.left}px`; P.style.top = `${fleetLayout.top}px`;
+                P.style.width = `${fleetLayout.width}px`; P.style.height = `${fleetLayout.height}px`;
+            };
+            const onUp = () => {
+                document.removeEventListener('mousemove', onMove, true);
+                document.removeEventListener('mouseup', onUp, true);
+                fleetDragInFlight = false;
+                saveFleetLayout(fleetLayout);
+                renderFleetPanel();
+            };
+            document.addEventListener('mousemove', onMove, true);
+            document.addEventListener('mouseup', onUp, true);
+        };
+        if (header) header.addEventListener('mousedown', (e) => {
+            if (e.target.closest('button, input')) return;
+            if (e.button !== 0) return;
+            e.preventDefault(); e.stopPropagation(); startDrag(e, 'move');
+        });
+        if (handle) handle.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return;
+            e.preventDefault(); e.stopPropagation(); startDrag(e, 'resize');
+        });
+        if (wasSearchFocused) {
+            const s2 = P.querySelector('#aim-issues-fleet-search');
+            if (s2) { s2.focus(); if (selS !== null) { try { s2.setSelectionRange(selS, selE); } catch (e) {} } }
+        }
     }
 
     // ------- Issues panel (v0.15 — Phase 5 floating panel) -------
@@ -6468,8 +7333,13 @@
                     <span style="display:inline-block;width:8px;height:8px;border-radius:4px;background:${syncDot}"></span>
                     <span style="color:#aaa">${escHtml(syncWord)}</span>
                 </span>
+                <button id="aim-issues-panel-fleet" title="🌐 Fleet Issues — every site's issues in one panel (review, approve, comment without entering each site)"
+                    style="margin-left:auto;padding:4px 10px;background:#1a3a40;color:#7adfe6;
+                           border:1px solid rgba(122,223,230,0.5);border-radius:4px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">
+                    🌐 All sites
+                </button>
                 <button id="aim-issues-panel-close" title="Close panel"
-                    style="margin-left:auto;padding:4px 10px;background:#3a3f48;color:#e6e6e6;
+                    style="padding:4px 10px;background:#3a3f48;color:#e6e6e6;
                            border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">
                     ✕
                 </button>
@@ -6535,6 +7405,8 @@
 
         // Wire handlers
         panelEl.querySelector('#aim-issues-panel-close').onclick = closeIssuesPanel;
+        const fleetBtn = panelEl.querySelector('#aim-issues-panel-fleet');   // v1.41
+        if (fleetBtn) fleetBtn.onclick = () => openFleetPanel();
 
         const unhideBtn = panelEl.querySelector('#aim-issues-panel-unhide');
         if (unhideBtn) {
@@ -7024,13 +7896,20 @@
         // (re)fetches the username.
         if (cachedToken) {
             syncStatus = cachedUsername ? 'ok' : 'syncing';
-            // Refresh username in the background — handles PAT rotation.
-            fetchGithubUsername();
-            // v1.00: refresh approver list in the background — handles
-            // boss-just-added-me scenario without requiring a script reload.
-            fetchApproversList();
-            // v1.03: same for the Slack notification config.
-            fetchSlackConfig();
+            // v1.41: siteID isn't read until setCurrentSite below, so topDefers()
+            // can't gate these yet — check the hash directly so TOP-inside-a-site
+            // keeps deferring the config GETs to the iframe as before (seeding
+            // siteID here would make setCurrentSite early-return).
+            const topInSite = IS_TOP && !!readSiteIdFromHash();
+            if (!topInSite) {
+                // Refresh username in the background — handles PAT rotation.
+                fetchGithubUsername();
+                // v1.00: refresh approver list in the background — handles
+                // boss-just-added-me scenario without requiring a script reload.
+                fetchApproversList();
+                // v1.03: same for the Slack notification config.
+                fetchSlackConfig();
+            }
         } else {
             syncStatus = 'no-token';
         }
@@ -7052,11 +7931,16 @@
             }, 500);
         }
 
+        setupFleetBridge();   // v1.41: 'aim-fleet:*' DOM events (Fleet Tools front door)
         if (IS_TOP) {
-            // TOP frame: register with Control Panel only — no UI here.
-            console.log(`${TAG} v${SCRIPT_VERSION} ready (TOP — no UI in this frame)`);
+            // TOP frame: no in-site UI here (the iframe owns it). v1.41: on the
+            // LANDING page TOP is the only frame — it hosts the fleet issues
+            // panel + status modal, so styles + a warm fleet load are needed.
+            injectStyles();
             setCurrentSite(readSiteIdFromHash());
             attachHashListener();
+            if (!siteID && cachedToken) setTimeout(() => fleetLoad(false), 1500);
+            console.log(`${TAG} v${SCRIPT_VERSION} ready (TOP — ${siteID ? 'no UI in this frame' : 'landing page: fleet issues available'})`);
             return;
         }
         injectStyles();

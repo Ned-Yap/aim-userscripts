@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-12 — 🌐 Fleet Issues (Phase 1): AIM Issues v1.41 + Fleet Tools v0.25 (latest — dev only)
+
+Every site's issues in ONE panel — review, approve, reject, comment, assign, set priority, delete/reinstate and export without entering each site ([#257](https://github.com/Ned-Yap/aim-userscripts-issues) in features.csv).
+
+- **AIM Issues v1.41 — 🌐 Fleet panel.** Opens from the landing page (Fleet Tools → 🚩 Fleet Issues → *Open Fleet Issues*) or from inside any site (Issues panel header → **🌐 All sites**). Default view is **Needs attention** (open + pending) grouped by site, newest activity first; a left rail lists every site with open / ⚡ pending-my-review / ? unseen badges (click to solo); the same status, priority and category chips as the site panel plus ⚡ Needs my review, 👤 Assigned to me, ? Unseen activity and (approvers) 🗑 Deleted; search covers notes, sites, people, ids and history. Each row has inline **✓ approve / ✗ reject** (approvers, pending rows), **💬 comment** and **↗ open in site** (new tab, zoomed to the issue — 🎯 zooms on the map when it's the site you're in). Clicking a row opens the **same status modal** you already know — every action, gate and history entry is identical; reshape/move-icon are hidden for other sites (they need that site's map) and a ↗ Open in site button appears instead. **📊 Copy → Sheets** exports the visible fleet table with Site ID / Site Name columns.
+- **Under the hood:** loads every site file with one `issues/` listing, re-downloads only files whose sha changed (GM cache), and hides — but counts — files for sites you don't have access to. Edits go through the exact same merge / Slack-watermark / role rules: each mutation now resolves the issue's site context and commits that site's file (serialized per site, conflict → refetch + union-merge + one retry). TOP-frame gates became "defer only while a site is loaded", so the landing page (no iframe) can sync, post to Slack and load approvers/config itself.
+- **Fleet Tools v0.25 — 🚩 Fleet Issues section** at the top of the panel with live open / pending / ⚡ my-review / ? unseen counts and a 🚩 badge on the floating button. Talks to AIM Issues over tab-local DOM events (never the cross-tab channel).
+
+Not yet: bulk actions, saved views, the issues summary report (Phase 2), in-site hub button/hotkey + landing-map pins (Phase 3), Fleet Metrics (Phases 4–5). Design: `ShortKeys/AIM_Fleet_Hub_Design.md`.
+
 ## 2026-09-11 — 🕘 Delete Guard v1.3 + 🗑 Mission Bank Tools v2.92 (prod) / v3.02 (latest): missions are now protected like entities
 
 Built after a mission ("North Side - Assets", site 1461) vanished with no trace and no undo. Two changes:

@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.24
+// @version      0.25
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.24';
+    const SCRIPT_VERSION = '0.25';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -2404,7 +2404,65 @@
     // ==================================================================
     let buttonEl = null;
     let panelEl = null;
-    let openSections = { sweep: true, map: true, kml: true, xref: true, metrics: false };
+    let openSections = { issues: true, sweep: true, map: true, kml: true, xref: true, metrics: false };
+    // v0.25 (#257): 🚩 Fleet Issues front door. AIM Issues owns the engine +
+    // panel (one copy of the merge/Slack/role rules); we ask it for a summary
+    // and open it over tab-local DOM events on `document` (NOT the
+    // BroadcastChannel — that reaches every tab).
+    let issuesSummary = null;        // last 'aim-fleet:issues-summary' detail
+    let issuesRequestedAt = 0;
+    function setupIssuesBridge() {
+        document.addEventListener('aim-fleet:issues-summary', (ev) => {
+            issuesSummary = (ev && ev.detail) || null;
+            renderPanel();
+            syncButtonBadge();
+        });
+    }
+    function requestIssuesSummary() {
+        issuesRequestedAt = Date.now();
+        try { document.dispatchEvent(new CustomEvent('aim-fleet:issues-request')); }
+        catch (e) { console.warn(`${TAG} issues-request event threw:`, e); }
+    }
+    function openFleetIssues() {
+        try { document.dispatchEvent(new CustomEvent('aim-fleet:open-issues')); }
+        catch (e) { console.warn(`${TAG} open-issues event threw:`, e); }
+        if (!issuesSummary) setTimeout(() => { if (!issuesSummary) setStatus('AIM Issues v1.41+ not detected — install/update it to use Fleet Issues'); }, 1500);
+    }
+    function syncButtonBadge() {
+        if (!buttonEl) return;
+        const s = issuesSummary;
+        const n = s ? (s.myPending || s.open + s.pending) : 0;
+        buttonEl.textContent = '⚠ Fleet Tools' + (n ? ` · 🚩${n}` : '');
+    }
+    function renderIssuesSection() {
+        if (!openSections.issues) return '';
+        const s = issuesSummary;
+        const out = [];
+        out.push('<div style="padding:6px 10px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + '<span data-ft="issues-open" style="cursor:pointer;color:#5fff5f;font-weight:bold">🌐 Open Fleet Issues</span>'
+            + '<span data-ft="issues-refresh" style="cursor:pointer;color:#7adfe6" title="Ask AIM Issues for a fresh summary">⟳</span>'
+            + '</div>');
+        if (!s) {
+            const waiting = issuesRequestedAt && Date.now() - issuesRequestedAt < 2500;
+            out.push(`<div style="padding:8px 10px;color:#888">${waiting ? 'Asking AIM Issues…' : 'No answer from AIM Issues — it needs v1.41+ installed and enabled (Tampermonkey → Check for updates).'}</div>`);
+            return out.join('');
+        }
+        if (!s.hasToken) {
+            out.push('<div style="padding:8px 10px;color:#ffa030">No GitHub token — save your PAT in AIM Controls (gear inside any site) to load issues.</div>');
+            return out.join('');
+        }
+        const pill = (label, n, bg, fg, title) => `<span title="${escapeHtml(title || '')}" style="display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:10px;background:${bg};color:${fg};font-weight:bold">${label} ${n}</span>`;
+        out.push('<div style="padding:8px 10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">'
+            + pill('OPEN', s.open, '#ff4d4d', '#fff', 'open issues across all your sites')
+            + pill('PENDING', s.pending, '#8000FF', '#fff', 'proposals awaiting an approver')
+            + (s.myPending ? pill('⚡ MY REVIEW', s.myPending, '#ffa726', '#000', 'pending proposals YOU can approve') : '')
+            + (s.unseen ? pill('? UNSEEN', s.unseen, '#00FF7F', '#003318', 'issues with activity you have not viewed') : '')
+            + `<span style="color:#888">${s.total} live · ${s.sites} site(s)${s.hiddenNoAccess ? ` · ${s.hiddenNoAccess} hidden (no access)` : ''}${s.loading ? ' · ⏳ loading…' : ''}</span>`
+            + '</div>');
+        if (s.error) out.push(`<div style="padding:0 10px 8px 10px;color:#ffa030">⚠ ${escapeHtml(s.error)}</div>`);
+        out.push('<div style="padding:0 10px 8px 10px;color:#666">Review, approve, comment and bulk-clear every site\'s issues from one panel — AIM Issues v' + escapeHtml(String(s.version || '')) + '.</div>');
+        return out.join('');
+    }
     let kmlSearch = '';
 
     function flyToBbox(b) {
@@ -2608,7 +2666,9 @@
             buttonEl.addEventListener('click', () => { openPanel(); });
             document.body.appendChild(buttonEl);
             console.log(`${TAG} landing page detected — Fleet Tools button placed`);
+            requestIssuesSummary();   // v0.25: badge on the button
         }
+        syncButtonBadge();
         buttonEl.style.display = 'block';
         // Keep the map pins current: covers the first draw of a GM-cached
         // sweep on page load AND the redraw after returning from a site
@@ -2790,7 +2850,10 @@
         if (!panelEl) return;
         const body = panelEl.querySelector('#aim-ft-body');
         if (!body) return;
+        const isum = issuesSummary;
         body.innerHTML = ''
+            + sectionHeader('issues', '🚩', 'Fleet Issues', isum && isum.hasToken ? `${isum.open} open · ${isum.pending} pending${isum.myPending ? ` · ⚡ ${isum.myPending} for you` : ''}` : 'all sites in one panel')
+            + renderIssuesSection()
             + sectionHeader('sweep', '⚠', 'Overlap Sweep', `${ENV_LABEL} · thr ${ftCfg.thresholdFt} ft`)
             + renderSweepSection()
             + sectionHeader('map', '🗺', 'Map', 'basemap + airspace chart')
@@ -2864,6 +2927,8 @@
                 if (act) {
                     const cmd = act.getAttribute('data-ft');
                     if (cmd === 'close') panelEl.style.display = 'none';
+                    else if (cmd === 'issues-open') openFleetIssues();
+                    else if (cmd === 'issues-refresh') { requestIssuesSummary(); renderPanel(); }
                     else if (cmd === 'kml-upload') { const fi = panelEl.querySelector('#aim-ft-kml-file'); if (fi) fi.click(); }
                     else if (cmd === 'kml-refresh') kmlRefreshRepo();
                     else if (cmd === 'xr-run') runXref();
@@ -3115,6 +3180,7 @@
             });
         }
         panelEl.style.display = 'flex';
+        requestIssuesSummary();   // v0.25: 🚩 Fleet Issues counts (AIM Issues answers over a DOM event)
         kmlBoot();   // idempotent — lists persistent KML layers once the token exists
         // Names for stored results/ignore chips on a fresh page load
         if (!rawSites) {
@@ -3131,6 +3197,7 @@
     // Init — the landing page is an SPA destination; poll for its marker
     // ------------------------------------------------------------------
     setupControlChannel();
+    setupIssuesBridge();   // v0.25: listen for AIM Issues' fleet summary
     if (!patchLeafletProto()) {
         let patchTries = 0;
         const patchTimer = setInterval(() => {
