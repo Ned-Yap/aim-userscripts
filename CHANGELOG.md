@@ -6,7 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
-## 2026-09-12 — 🌐 Fleet Issues (Phase 1): AIM Issues v1.41 + Fleet Tools v0.25 (latest — dev only)
+## 2026-09-12 — ⭐ PROMOTED TO PROD: AIM Issues v1.41 + AIM Fleet Tools v0.25 — 🌐 Fleet Issues
+
+Coworkers jump AIM Issues v1.40 → v1.41 and Fleet Tools v0.24 → v0.25 on the next Tampermonkey update check. **Every site's issues in one panel:** on the landing page open ⚠ Fleet Tools → 🚩 Fleet Issues → *Open Fleet Issues*; inside a site, right-click 🚩 → **🌐 All sites**. Review, approve/reject, comment, assign, set priority, delete/reinstate and Copy → Sheets across all your sites without entering each one — same status modal, same rules, same Slack threads. Full detail in the dev-only entry just below. Live-verified same day (landing comment + approve fix with Slack; in-site 🌐 + 🎯).
+
+## 2026-09-12 — 🌐 Fleet Issues (Phase 1): AIM Issues v1.41 + Fleet Tools v0.25 (now in prod — see above)
 
 Every site's issues in ONE panel — review, approve, reject, comment, assign, set priority, delete/reinstate and export without entering each site ([#257](https://github.com/Ned-Yap/aim-userscripts-issues) in features.csv).
 
