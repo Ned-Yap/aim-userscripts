@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.25
+// @version      0.26
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.25';
+    const SCRIPT_VERSION = '0.26';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -444,8 +444,8 @@
             }
             throw e;
         }
-        if (tree.truncated) notes.push('data-repo tree listing was truncated by GitHub — some sites may be missing from the index');
-        Object.keys(nbIndex.shas).forEach(id => {
+        if (tree.truncated) notes.push('data-repo tree listing was truncated by GitHub — some sites may be missing from the index (cached ones kept)');
+        if (!tree.truncated) Object.keys(nbIndex.shas).forEach(id => {   // v0.26: a truncated listing must not evict cached sites
             if (!tree.shas[id]) { delete nbIndex.shas[id]; delete nbIndex.bboxes[id]; }
         });
         const changed = Object.keys(tree.shas).filter(id => nbIndex.shas[id] !== tree.shas[id] || !nbIndex.bboxes[id]);
@@ -1771,39 +1771,6 @@
     }
 
     // ==================================================================
-    // 📊 Fleet Metrics (bones) — per-site counts straight from the index
-    // ==================================================================
-    function buildMetricsRows() {
-        const rows = [];
-        Object.keys(nbIndex.bboxes).forEach(id => {
-            // Snapshot-only orphans (sites outside the user's current
-            // /sites/ list) are access we no longer have — never shown
-            if (rawSites && !rawSites[id]) return;
-            const b = nbIndex.bboxes[id];
-            const raw = rawSites && rawSites[id] && rawSites[id].raw;
-            rows.push({
-                id, name: siteName(id),
-                client: (raw && siteEntryClient(raw)) || '',
-                status: siteStatus(id),
-                ffz: b && !b.empty ? b.ffz : 0,
-                fp: b && !b.empty ? b.fp : 0,
-                asset: b && !b.empty ? b.asset : 0,
-                empty: !!(b && b.empty),
-            });
-        });
-        rows.sort((a, b) => (a.client || '￿').localeCompare(b.client || '￿') || a.name.localeCompare(b.name));
-        return rows;
-    }
-
-    function buildMetricsCsv() {
-        const rows = buildMetricsRows();
-        const esc = (v) => `"${String(v).replace(/"/g, '""')}"`;
-        const lines = ['site_id,site_name,client,status,ffz,fp,assets'];
-        rows.forEach(r => lines.push([r.id, esc(r.name), esc(r.client), esc(r.status), r.ffz, r.fp, r.asset].join(',')));
-        return lines.join('\n');
-    }
-
-    // ==================================================================
     // 📎 KML layers (v0.18) — Google-Earth-style overlay layers on the
     // landing map. Session layers live in memory only; 💾 promotes one to
     // the PRIVATE data repo (fleet-kml/<name>.kml, create-only PUT) so it
@@ -2820,28 +2787,487 @@
             + '<div style="padding:4px 10px;color:#666;border-bottom:1px solid #222834;">Applies to this landing map only — site maps keep their Map Styler controls. Full airspace checks (obstacles/LAANC/TFR) are site-scoped in the Asset Inspector.</div>';
     }
 
+    // ==================================================================
+    // 📊 FLEET METRICS (v0.26, feature #259 phase 4) — every site's setup
+    // + mission numbers in one table, computed from the Site Watch
+    // snapshots (site-watch/<id>/latest.json.gz = raw /map_objects/,
+    // mission-latest.json.gz = mission fingerprints). Same incremental
+    // pattern as the bbox index: ONE git Trees call diffs shas, only
+    // changed snapshots re-download. Own GM store so the sweep's bbox
+    // index stays untouched. Freshness = Site Watch's cadence.
+    // ==================================================================
+    const KEY_METRICS = 'aim-ft-metrics' + ENV_SUFFIX;
+    const MT_SNAP_RE = new RegExp(`^${NB_WATCH_DIR}/(\\d+)/latest\\.json\\.gz$`);
+    const MT_MISSION_RE = new RegExp(`^${NB_WATCH_DIR}/(\\d+)/mission-latest\\.json\\.gz$`);
+    const MT_M_PER_MI = 1609.344;
+    const MT_M2_PER_ACRE = 4046.8564224;
+    let mtIndex = loadJson(KEY_METRICS, { shas: {}, mshas: {}, sites: {}, missions: {}, builtAt: 0, checkedAt: 0 });
+    if (!mtIndex.shas || !mtIndex.sites) mtIndex = { shas: {}, mshas: {}, sites: {}, missions: {}, builtAt: 0, checkedAt: 0 };
+    if (!mtIndex.mshas) mtIndex.mshas = {};
+    if (!mtIndex.missions) mtIndex.missions = {};
+    function saveMetricsIndex() { gmSet(KEY_METRICS, JSON.stringify(mtIndex)); }
+    let mtBuilding = false;
+    let mtSet = 'overview';       // active column set
+    let mtSort = { key: 'name', dir: 1 };
+    let mtFilter = '';
+    let mtWide = false;
+    const mtExpanded = new Set();
+
+    // ---- asset subtype parser (copied VERBATIM from the Asset Inspector's
+    // parseAssetSubtype/prettyKey so fleet numbers match the SUM panel) ----
+    const MT_STATE_WORDS = ['unreachable', 'unshielded', 'empty', 'inactive', 'hy'];
+    const MT_STATE_WORDSET = new Set(MT_STATE_WORDS);
+    function mtPrettyKey(raw) {
+        return String(raw).split(/\s+/).map(word =>
+            word.split('-').map(part => {
+                if (!part) return part;
+                if (part.length <= 3 && part === part.toUpperCase()) return part;
+                return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase();
+            }).join('-')
+        ).join(' ');
+    }
+    function mtParseSubtype(sub) {
+        const parts = String(sub || '').trim().split(' - ').map(s => s.trim()).filter(Boolean);
+        const mods = [];
+        while (parts.length > 1 && MT_STATE_WORDSET.has(parts[parts.length - 1].toLowerCase())) mods.push(parts.pop().toLowerCase());
+        let state = 'Normal';
+        for (const w of MT_STATE_WORDS) { if (mods.indexOf(w) !== -1) { state = (w === 'hy') ? 'HY' : mtPrettyKey(w); break; } }
+        const typeKey = parts.length ? mtPrettyKey(parts.join(' - ')) : '';
+        return { typeKey, state };
+    }
+    // Planar polygon area (m²) from [{lat,lng}] — equirectangular at the ring's latitude.
+    function mtRingAreaM2(coords) {
+        if (!Array.isArray(coords) || coords.length < 3) return 0;
+        const lat0 = coords.reduce((s, p) => s + (p.lat || 0), 0) / coords.length;
+        const mLat = 111320, mLng = 111320 * Math.cos(lat0 * Math.PI / 180);
+        let a = 0;
+        for (let i = 0, n = coords.length; i < n; i++) {
+            const p = coords[i], q = coords[(i + 1) % n];
+            if (!p || !q || typeof p.lat !== 'number' || typeof q.lat !== 'number') return 0;
+            a += (p.lng * mLng) * (q.lat * mLat) - (q.lng * mLng) * (p.lat * mLat);
+        }
+        return Math.abs(a) / 2;
+    }
+    function mtInc(map, key, n) { if (!key) return; map[key] = (map[key] || 0) + (n == null ? 1 : n); }
+
+    function computeSetupMetrics(entities) {
+        const m = {
+            n: 0, counts: { asset: 0, ffz: 0, fp: 0, nfz: 0, gm: 0, base: 0, safe: 0, other: 0 },
+            valid: { asset: [0, 0], ffz: [0, 0], fp: [0, 0], nfz: [0, 0], gm: [0, 0] },   // [validated, not]
+            unshielded: 0, notes: 0,
+            equip: {}, states: { Normal: 0, HY: 0, Empty: 0, Inactive: 0, Unshielded: 0, Unreachable: 0 }, cats: {},
+            ffzAcres: 0, ffzBandFtSum: 0, ffzBandN: 0, nfzAcres: 0,
+            fpArcs: 0, fpM: 0, fpBandFtSum: 0, fpBandN: 0,
+            gmTypes: {}, baseActive: 0,
+        };
+        const V = (k, e) => { m.valid[k][e.validated ? 0 : 1]++; };
+        (entities || []).forEach(e => {
+            if (!e || typeof e.type !== 'number') return;
+            m.n++;
+            if (e.is_unshielded) m.unshielded++;
+            if (typeof e.description === 'string' && e.description.trim() && e.type !== 3) m.notes++;
+            const c = entityCoords(e);
+            switch (e.type) {
+                case 3: {
+                    m.counts.asset++; V('asset', e);
+                    const sub = e.custom && typeof e.custom.poi_type_str === 'string' ? e.custom.poi_type_str : '';
+                    const p = mtParseSubtype(sub);
+                    if (p.typeKey) mtInc(m.equip, p.typeKey);
+                    mtInc(m.states, p.state);
+                    if (p.state === 'Unshielded' && !e.is_unshielded) m.unshielded++;
+                    const cat = typeof e.description === 'string' && /Cat:\s*([^|]+)/i.exec(e.description);
+                    if (cat) mtInc(m.cats, cat[1].trim());
+                    break;
+                }
+                case 16: {
+                    m.counts.ffz++; V('ffz', e);
+                    m.ffzAcres += mtRingAreaM2(c) / MT_M2_PER_ACRE;
+                    const r = e.restrictions;
+                    if (r && typeof r.minAlt === 'number' && typeof r.maxAlt === 'number') { m.ffzBandFtSum += (r.maxAlt - r.minAlt) * FT_PER_M; m.ffzBandN++; }
+                    break;
+                }
+                case 4: { m.counts.nfz++; V('nfz', e); m.nfzAcres += mtRingAreaM2(c) / MT_M2_PER_ACRE; break; }
+                case 15: {
+                    m.counts.fp++; V('fp', e);
+                    (Array.isArray(e.arcs) ? e.arcs : []).forEach(a => {
+                        if (!a) return;
+                        m.fpArcs++;
+                        if (typeof a.distance === 'number') m.fpM += a.distance;
+                        if (typeof a.min_alt === 'number' && typeof a.max_alt === 'number') { m.fpBandFtSum += (a.max_alt - a.min_alt) * FT_PER_M; m.fpBandN++; }
+                    });
+                    break;
+                }
+                case 19: { m.counts.gm++; V('gm', e); mtInc(m.gmTypes, String(e.general_marker_type || 'general')); break; }
+                case 8:  { m.counts.base++; if (e.custom && e.custom.active) m.baseActive++; break; }
+                case 98: { m.counts.safe++; break; }
+                default: m.counts.other++;
+            }
+        });
+        m.ffzAcres = Math.round(m.ffzAcres * 10) / 10;
+        m.nfzAcres = Math.round(m.nfzAcres * 10) / 10;
+        m.fpM = Math.round(m.fpM);
+        return m;
+    }
+    function computeMissionMetrics(list) {
+        const m = { n: 0, active: 0, inactive: 0, steps: 0, distM: 0, durS: 0, stepTypes: {}, snapshots: 0, orbits: 0, areaMaps: 0, gem: 0, withDist: 0 };
+        (Array.isArray(list) ? list : []).forEach(x => {
+            if (!x) return;
+            m.n++;
+            if (x.active === false) m.inactive++; else m.active++;
+            m.steps += Number(x.steps) || 0;
+            if (typeof x.distance === 'number' && x.distance > 0) { m.distM += x.distance; m.withDist++; }
+            if (typeof x.duration === 'number' && x.duration > 0) m.durS += x.duration;
+            const tc = x.typeCounts || {};
+            Object.keys(tc).forEach(k => mtInc(m.stepTypes, k, Number(tc[k]) || 0));
+            m.snapshots += Number(tc.snapshot) || 0;
+            m.orbits += Number(tc['orbit inspection']) || 0;
+            m.areaMaps += (Number(tc['area mapping']) || 0) + (Number(tc['area scan']) || 0);
+            if ((Number(tc.gemMode) || 0) > 0) m.gem++;
+        });
+        m.distM = Math.round(m.distM);
+        return m;
+    }
+
+    async function mtGhTree() {
+        const r = await fetchWithTimeout(
+            `${GH_API}/repos/${DATA_REPO}/git/trees/${DATA_BRANCH}?recursive=1`,
+            { headers: { 'Authorization': `Bearer ${cachedToken}`, 'Accept': 'application/vnd.github+json' } }, 30000);
+        if (!r.ok) throw new Error(`tree HTTP ${r.status}`);
+        const j = await r.json();
+        if (!Array.isArray(j.tree)) throw new Error('unexpected tree shape');
+        const setup = {}, mission = {};
+        j.tree.forEach(f => {
+            if (!f || f.type !== 'blob') return;
+            let mm = MT_SNAP_RE.exec(f.path); if (mm) { setup[mm[1]] = f.sha; return; }
+            mm = MT_MISSION_RE.exec(f.path); if (mm) mission[mm[1]] = f.sha;
+        });
+        return { setup, mission, truncated: !!j.truncated };
+    }
+    async function mtFetchGz(path) {
+        const r = await fetchWithTimeout(
+            `${GH_API}/repos/${DATA_REPO}/contents/${path}?ref=${DATA_BRANCH}`,
+            { headers: { 'Authorization': `Bearer ${cachedToken}`, 'Accept': 'application/vnd.github.raw' } }, 60000);
+        if (!r.ok) throw new Error(`GET ${path} HTTP ${r.status}`);
+        const bytes = new Uint8Array(await r.arrayBuffer());
+        return JSON.parse(await nbGunzipToText(bytes));
+    }
+
+    // Build / refresh the metrics index. `force` re-checks every sha; the
+    // full first build is ~450 setup + ~440 mission downloads (a few minutes).
+    async function ensureMetricsIndex(progress, force) {
+        const notes = [];
+        if (!cachedToken) {
+            try { if (controlChannel) controlChannel.postMessage({ type: 'REQUEST_TOKEN' }); } catch (e) {}
+            await new Promise(r => setTimeout(r, 800));
+        }
+        if (!cachedToken) throw new Error('GitHub token needed to build fleet metrics — set the PAT in AIM Controls (gear), then re-run');
+        const have = Object.keys(mtIndex.sites).length > 0;
+        const fresh = (Date.now() - (mtIndex.checkedAt || 0)) < NB_INDEX_RECHECK_MS;
+        if (have && fresh && !force) return notes;
+        let tree;
+        try { tree = await mtGhTree(); }
+        catch (e) { if (have) { notes.push(`snapshot listing failed (${String(e && e.message || e)}) — using cached metrics`); return notes; } throw e; }
+        if (tree.truncated) notes.push('data-repo tree listing was truncated by GitHub — some sites may be missing (cached ones kept)');
+        if (!tree.truncated) {   // only a COMPLETE listing may evict vanished sites
+            Object.keys(mtIndex.shas).forEach(id => { if (!tree.setup[id]) { delete mtIndex.shas[id]; delete mtIndex.sites[id]; } });
+            Object.keys(mtIndex.mshas).forEach(id => { if (!tree.mission[id]) { delete mtIndex.mshas[id]; delete mtIndex.missions[id]; } });
+        }
+        const jobs = [];
+        Object.keys(tree.setup).forEach(id => { if (mtIndex.shas[id] !== tree.setup[id] || !mtIndex.sites[id]) jobs.push({ id, kind: 'setup', sha: tree.setup[id] }); });
+        Object.keys(tree.mission).forEach(id => { if (mtIndex.mshas[id] !== tree.mission[id] || !mtIndex.missions[id]) jobs.push({ id, kind: 'mission', sha: tree.mission[id] }); });
+        const total = jobs.length;
+        if (total) {
+            console.log(`${TAG} metrics index: ${total} snapshot(s) to (re)fetch`);
+            let done = 0, failed = 0, cursor = 0;
+            const worker = async () => {
+                while (cursor < jobs.length) {
+                    const j = jobs[cursor++];
+                    try {
+                        if (j.kind === 'setup') {
+                            const parsed = await mtFetchGz(`${NB_WATCH_DIR}/${j.id}/latest.json.gz`);
+                            const v = validateBackupEntities(parsed);
+                            mtIndex.sites[j.id] = Object.assign(computeSetupMetrics(v.error ? [] : v.entities), { at: Date.now(), empty: !!v.error });
+                            mtIndex.shas[j.id] = j.sha;
+                        } else {
+                            const parsed = await mtFetchGz(`${NB_WATCH_DIR}/${j.id}/mission-latest.json.gz`);
+                            mtIndex.missions[j.id] = Object.assign(computeMissionMetrics(extractList(parsed)), { at: Date.now() });
+                            mtIndex.mshas[j.id] = j.sha;
+                        }
+                    } catch (e) {
+                        failed++;
+                        console.warn(`${TAG} metrics index: ${j.kind} fetch failed for site ${j.id}:`, e);
+                    }
+                    done++;
+                    if (progress) progress(done, total);
+                    if (done % 25 === 0) { saveMetricsIndex(); await ftYield(); }
+                }
+            };
+            await Promise.all(Array.from({ length: Math.min(NB_FETCH_CONCURRENCY, jobs.length) }, worker));
+            if (failed) notes.push(`${failed} snapshot fetch(es) failed — those sites keep their previous numbers (or show as missing)`);
+            mtIndex.builtAt = Date.now();
+        }
+        mtIndex.checkedAt = Date.now();
+        saveMetricsIndex();
+        return notes;
+    }
+
+    // ---- rows + column sets ----
+    const MT_COLS = {
+        name:      { label: 'Site', get: r => r.name, text: true },
+        client:    { label: 'Client', get: r => r.client, text: true },
+        status:    { label: 'Status', get: r => r.status, text: true },
+        snapAge:   { label: 'Indexed', get: r => r.snapAgeD, fmt: v => v == null ? '—' : `${v} d`, title: 'Days since this site\'s numbers were (re)computed from its Site Watch snapshot' },
+        entities:  { label: 'Entities', get: r => r.s && r.s.n },
+        assets:    { label: 'Assets', get: r => r.s && r.s.counts.asset },
+        ffz:       { label: 'FFZ', get: r => r.s && r.s.counts.ffz },
+        fp:        { label: 'FP', get: r => r.s && r.s.counts.fp },
+        nfz:       { label: 'NFZ', get: r => r.s && r.s.counts.nfz },
+        gm:        { label: 'Markers', get: r => r.s && r.s.counts.gm },
+        base:      { label: 'Base', get: r => r.s && r.s.counts.base },
+        safe:      { label: 'Safe', get: r => r.s && r.s.counts.safe },
+        ffzAcres:  { label: 'FFZ acres', get: r => r.s && r.s.ffzAcres, fmt: v => v == null ? '—' : v.toFixed(1), total: 'sum' },
+        ffzBand:   { label: 'FFZ band ft', get: r => r.s && r.s.ffzBandN ? Math.round(r.s.ffzBandFtSum / r.s.ffzBandN) : null, title: 'Average FFZ altitude band (max − min)', total: 'avg' },
+        nfzAcres:  { label: 'NFZ acres', get: r => r.s && r.s.nfzAcres, fmt: v => v == null ? '—' : v.toFixed(1), total: 'sum' },
+        fpArcs:    { label: 'FP arcs', get: r => r.s && r.s.fpArcs },
+        fpMi:      { label: 'FP mi', get: r => r.s && r.s.fpM / MT_M_PER_MI, fmt: v => v == null ? '—' : v.toFixed(2), total: 'sum' },
+        fpBand:    { label: 'FP band ft', get: r => r.s && r.s.fpBandN ? Math.round(r.s.fpBandFtSum / r.s.fpBandN) : null, title: 'Average flight-path arc altitude band', total: 'avg' },
+        gmTypes:   { label: 'Marker types', get: r => r.s ? mtTop(r.s.gmTypes, 4) : '', text: true },
+        unsh:      { label: 'Unshielded', get: r => r.s && r.s.unshielded },
+        notes:     { label: 'Notes', get: r => r.s && r.s.notes, title: 'Non-asset entities with a description' },
+        equip:     { label: 'Equipment', get: r => r.s ? mtTop(r.s.equip, 5) : '', text: true },
+        cats:      { label: 'Categories', get: r => r.s ? mtTop(r.s.cats, 5) : '', text: true, title: '"Cat:" from asset descriptions (Exxon taxonomy)' },
+        stNormal:  { label: 'Normal', get: r => r.s && r.s.states.Normal },
+        stHY:      { label: 'HY', get: r => r.s && r.s.states.HY },
+        stEmpty:   { label: 'Empty', get: r => r.s && r.s.states.Empty },
+        stInact:   { label: 'Inactive', get: r => r.s && r.s.states.Inactive },
+        stUnsh:    { label: 'Unshld', get: r => r.s && r.s.states.Unshielded },
+        stUnreach: { label: 'Unreach', get: r => r.s && r.s.states.Unreachable },
+        vAsset:    { label: 'Assets ✓/✗', get: r => r.s && r.s.valid.asset, fmt: mtPair, sortVal: v => v ? v[0] : null, total: 'pair' },
+        vFfz:      { label: 'FFZ ✓/✗', get: r => r.s && r.s.valid.ffz, fmt: mtPair, sortVal: v => v ? v[0] : null, total: 'pair' },
+        vFp:       { label: 'FP ✓/✗', get: r => r.s && r.s.valid.fp, fmt: mtPair, sortVal: v => v ? v[0] : null, total: 'pair' },
+        vNfz:      { label: 'NFZ ✓/✗', get: r => r.s && r.s.valid.nfz, fmt: mtPair, sortVal: v => v ? v[0] : null, total: 'pair' },
+        vGm:       { label: 'Markers ✓/✗', get: r => r.s && r.s.valid.gm, fmt: mtPair, sortVal: v => v ? v[0] : null, total: 'pair' },
+        vPct:      { label: 'Validated %', get: r => r.validPct, fmt: v => v == null ? '—' : `${Math.round(v)}%`, title: 'Pilot-validated share of assets + FFZ + FP + NFZ', total: 'vpct' },
+        missions:  { label: 'Missions', get: r => r.m && r.m.n },
+        mActive:   { label: 'Active', get: r => r.m && r.m.active },
+        mInactive: { label: 'Inactive', get: r => r.m && r.m.inactive },
+        steps:     { label: 'Steps', get: r => r.m && r.m.steps },
+        avgSteps:  { label: 'Avg steps', get: r => r.m && r.m.n ? Math.round(r.m.steps / r.m.n) : null, total: 'avg' },
+        snaps:     { label: 'Snapshots', get: r => r.m && r.m.snapshots, title: 'Snapshot steps across all missions' },
+        orbits:    { label: 'Orbits', get: r => r.m && r.m.orbits },
+        areaMaps:  { label: 'Area maps', get: r => r.m && r.m.areaMaps },
+        gem:       { label: 'GEM missions', get: r => r.m && r.m.gem, title: 'Missions with at least one GEM (gas) step' },
+        mMi:       { label: 'Planned mi', get: r => r.m && r.m.distM / MT_M_PER_MI, fmt: v => v == null ? '—' : v.toFixed(1), total: 'sum' },
+        mHrs:      { label: 'Planned h', get: r => r.m && r.m.durS / 3600, fmt: v => v == null ? '—' : v.toFixed(1), total: 'sum' },
+        avgMi:     { label: 'Avg mi', get: r => r.m && r.m.withDist ? r.m.distM / r.m.withDist / MT_M_PER_MI : null, fmt: v => v == null ? '—' : v.toFixed(2), total: 'avg' },
+        stepTypes: { label: 'Step mix', get: r => r.m ? mtTop(r.m.stepTypes, 5) : '', text: true },
+    };
+    const MT_SETS = {
+        overview:   { label: 'Overview',   cols: ['name', 'client', 'status', 'assets', 'ffz', 'fp', 'nfz', 'gm', 'fpMi', 'missions', 'steps', 'vPct', 'snapAge'] },
+        setup:      { label: 'Site setup', cols: ['name', 'entities', 'assets', 'ffz', 'ffzAcres', 'ffzBand', 'fp', 'fpArcs', 'fpMi', 'fpBand', 'nfz', 'nfzAcres', 'gm', 'gmTypes', 'base', 'safe', 'unsh', 'notes'] },
+        assets:     { label: 'Assets',     cols: ['name', 'assets', 'equip', 'cats', 'stNormal', 'stHY', 'stEmpty', 'stInact', 'stUnsh', 'stUnreach'] },
+        missions:   { label: 'Missions',   cols: ['name', 'missions', 'mActive', 'mInactive', 'steps', 'avgSteps', 'snaps', 'orbits', 'areaMaps', 'gem', 'mMi', 'mHrs', 'avgMi', 'stepTypes'] },
+        validation: { label: 'Validation', cols: ['name', 'vAsset', 'vFfz', 'vFp', 'vNfz', 'vGm', 'vPct', 'unsh'] },
+        all:        { label: 'All columns', cols: Object.keys(MT_COLS) },
+    };
+    function mtPair(v) { return v ? `<span style="color:#5fff5f">${v[0]}</span>/<span style="color:${v[1] ? '#ff8585' : '#666'}">${v[1]}</span>` : '—'; }
+    function mtTop(map, n) {
+        return Object.entries(map || {}).sort((a, b) => b[1] - a[1]).slice(0, n).map(([k, v]) => `${k} ${v}`).join(' · ');
+    }
+    function buildMetricsRows() {
+        const rows = [];
+        const ids = new Set(Object.keys(mtIndex.sites).concat(Object.keys(mtIndex.missions)));
+        ids.forEach(id => {
+            if (rawSites && !rawSites[id]) return;   // snapshot-only orphan (no access) — hidden, counted by caller
+            const s = mtIndex.sites[id] && !mtIndex.sites[id].empty ? mtIndex.sites[id] : null;
+            const m = mtIndex.missions[id] || null;
+            const raw = rawSites && rawSites[id] && rawSites[id].raw;
+            let validPct = null;
+            if (s) {
+                const y = s.valid.asset[0] + s.valid.ffz[0] + s.valid.fp[0] + s.valid.nfz[0];
+                const t = y + s.valid.asset[1] + s.valid.ffz[1] + s.valid.fp[1] + s.valid.nfz[1];
+                validPct = t ? Math.round(100 * y / t) : null;
+            }
+            rows.push({
+                id, name: siteName(id), client: (raw && siteEntryClient(raw)) || clientOf(siteName(id)) || '', status: siteStatus(id),
+                s, m, validPct, snapAgeD: s ? Math.floor((Date.now() - (s.at || 0)) / 86400000) : null,
+            });
+        });
+        return rows;
+    }
+    function mtSortRows(rows) {
+        const col = MT_COLS[mtSort.key] || MT_COLS.name;
+        const val = (r) => { const v = col.get(r); return col.sortVal ? col.sortVal(v) : v; };
+        return rows.slice().sort((a, b) => {
+            const va = val(a), vb = val(b);
+            if (col.text) return String(va || '').localeCompare(String(vb || '')) * mtSort.dir || a.name.localeCompare(b.name);
+            const na = (va == null || va === '') ? -Infinity : Number(va), nb = (vb == null || vb === '') ? -Infinity : Number(vb);
+            return (na - nb) * mtSort.dir || a.name.localeCompare(b.name);
+        });
+    }
+    function mtFilteredRows() {
+        let rows = buildMetricsRows();
+        if (ftCfg.onlyProduction) rows = rows.filter(r => !r.status || r.status === 'Production');
+        const q = mtFilter.trim().toLowerCase();
+        if (q) rows = rows.filter(r => r.name.toLowerCase().includes(q) || (r.client || '').toLowerCase().includes(q) || r.id === q || (r.status || '').toLowerCase().includes(q));
+        return mtSortRows(rows);
+    }
+    function mtTotals(rows, cols) {
+        const out = {};
+        cols.forEach(k => {
+            const c = MT_COLS[k];
+            if (c.text || k === 'snapAge') { out[k] = ''; return; }
+            if (c.total === 'pair') { const t = [0, 0]; rows.forEach(r => { const v = c.get(r); if (v) { t[0] += v[0]; t[1] += v[1]; } }); out[k] = mtPair(t); return; }
+            if (c.total === 'vpct') {   // entity-weighted, matches the fleet tile
+                let y = 0, t = 0;
+                rows.forEach(r => { if (!r.s) return; ['asset', 'ffz', 'fp', 'nfz'].forEach(q => { y += r.s.valid[q][0]; t += r.s.valid[q][0] + r.s.valid[q][1]; }); });
+                out[k] = t ? `${Math.round(100 * y / t)}%` : '—'; return;
+            }
+            const vals = rows.map(r => c.get(r)).filter(v => typeof v === 'number' && isFinite(v));
+            if (!vals.length) { out[k] = '—'; return; }
+            const sum = vals.reduce((a, b) => a + b, 0);
+            const v = c.total === 'avg' ? sum / vals.length : sum;
+            out[k] = c.fmt ? c.fmt(c.total === 'avg' ? v : v) : String(Math.round(v));
+            if (c.total === 'avg' && !c.fmt) out[k] = String(Math.round(v));
+        });
+        return out;
+    }
+    function mtCell(col, r) {
+        const v = col.get(r);
+        if (col.fmt) return col.fmt(v);
+        if (v == null || v === '') return '<span style="color:#555">—</span>';
+        if (col.text) return escapeHtml(String(v));
+        return typeof v === 'number' ? String(Math.round(v * 100) / 100) : escapeHtml(String(v));
+    }
+    function mtCellText(col, r) {
+        const v = col.get(r);
+        if (v == null || v === '') return '';
+        if (Array.isArray(v)) return `${v[0]}/${v[1]}`;
+        if (typeof v === 'number') return String(Math.round(v * 100) / 100);
+        return String(v);
+    }
+    function buildMetricsCsv() {
+        const rows = mtFilteredRows();
+        const cols = MT_SETS.all.cols;
+        const esc = (v) => `"${String(v).replace(/"/g, '""')}"`;
+        const lines = ['site_id,' + cols.map(k => esc(MT_COLS[k].label)).join(',')];
+        rows.forEach(r => lines.push([r.id].concat(cols.map(k => esc(mtCellText(MT_COLS[k], r)))).join(',')));
+        return lines.join('\n');
+    }
+    function buildMetricsSheetsHtml() {
+        const rows = mtFilteredRows();
+        const cols = MT_SETS[mtSet].cols;
+        const th = (v) => `<th style="background:#14171b;color:#fff;padding:6px 8px;border:1px solid #444;text-align:left">${escapeHtml(v)}</th>`;
+        const td = (v) => `<td style="padding:5px 8px;border:1px solid #444">${v}</td>`;
+        const out = [`<p><b>AIM Fleet Metrics — ${escapeHtml(MT_SETS[mtSet].label)}</b> — ${escapeHtml(new Date().toLocaleString())} — ${rows.length} site(s)</p>`];
+        out.push('<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px"><tr>' + th('Site ID') + cols.map(k => th(MT_COLS[k].label)).join('') + '</tr>');
+        rows.forEach(r => out.push('<tr>' + td(r.id) + cols.map(k => k === 'name' ? td(`<a href="${siteSetupUrl(r.id)}" style="color:#1a73e8">${escapeHtml(r.name)}</a>`) : td(escapeHtml(mtCellText(MT_COLS[k], r)))).join('') + '</tr>'));
+        const tot = mtTotals(rows, cols);
+        out.push('<tr>' + td('<b>Fleet</b>') + cols.map(k => td(`<b>${k === 'name' ? `${rows.length} sites` : String(tot[k]).replace(/<[^>]+>/g, '')}</b>`)).join('') + '</tr></table>');
+        return out.join('');
+    }
+    function copyHtmlToClipboard(html, text, doneMsg) {
+        (async () => {
+            try {
+                if (navigator.clipboard && window.ClipboardItem) {
+                    await navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([html], { type: 'text/html' }), 'text/plain': new Blob([text], { type: 'text/plain' }) })]);
+                    setStatus(doneMsg); return;
+                }
+            } catch (e) { console.warn(`${TAG} rich clipboard failed, falling back to text:`, e); }
+            copyText(text, doneMsg + ' (plain text)');
+        })();
+    }
+    function mtFleetTotalsBlock(rows) {
+        const S = { sites: rows.length, assets: 0, ffz: 0, fp: 0, nfz: 0, gm: 0, fpMi: 0, missions: 0, steps: 0, mMi: 0, mHrs: 0, vy: 0, vt: 0, equip: {}, states: {}, withSetup: 0, withMissions: 0 };
+        rows.forEach(r => {
+            if (r.s) {
+                S.withSetup++; S.assets += r.s.counts.asset; S.ffz += r.s.counts.ffz; S.fp += r.s.counts.fp; S.nfz += r.s.counts.nfz; S.gm += r.s.counts.gm; S.fpMi += r.s.fpM / MT_M_PER_MI;
+                Object.entries(r.s.equip).forEach(([k, v]) => mtInc(S.equip, k, v));
+                Object.entries(r.s.states).forEach(([k, v]) => mtInc(S.states, k, v));
+                ['asset', 'ffz', 'fp', 'nfz'].forEach(k => { S.vy += r.s.valid[k][0]; S.vt += r.s.valid[k][0] + r.s.valid[k][1]; });
+            }
+            if (r.m) { S.withMissions++; S.missions += r.m.n; S.steps += r.m.steps; S.mMi += r.m.distM / MT_M_PER_MI; S.mHrs += r.m.durS / 3600; }
+        });
+        const tile = (l, v, c) => `<div style="background:#0e1218;border:1px solid #2a3140;border-radius:5px;padding:5px 9px;min-width:70px"><div style="color:#888;font-size:10px">${l}</div><div style="color:${c || '#ddd'};font-weight:bold;font-size:15px">${v}</div></div>`;
+        const stateColor = { Normal: '#5fff5f', HY: '#00e5ff', Empty: '#ffd54f', Inactive: '#ff9800', Unshielded: '#ff5722', Unreachable: '#a855f7' };
+        const eq = Object.entries(S.equip).sort((a, b) => b[1] - a[1]).slice(0, 10);
+        const st = Object.entries(S.states).filter(x => x[1]).sort((a, b) => b[1] - a[1]);
+        const eqMax = eq.length ? eq[0][1] : 1;
+        return '<div style="padding:6px 10px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid #222834;">'
+            + tile('Sites', `${S.sites}`, '#7adfe6') + tile('Assets', S.assets, '#fff') + tile('FFZ', S.ffz, '#5fff5f') + tile('FP', S.fp, '#1ca0de') + tile('NFZ', S.nfz, '#ff5555') + tile('Markers', S.gm, '#c084fc')
+            + tile('FP miles', S.fpMi.toFixed(0), '#1ca0de') + tile('Missions', S.missions, '#ffd54f') + tile('Steps', S.steps, '#ffd54f') + tile('Planned mi', S.mMi.toFixed(0), '#ffd54f') + tile('Planned h', S.mHrs.toFixed(0), '#ffd54f')
+            + tile('Validated', S.vt ? `${Math.round(100 * S.vy / S.vt)}%` : '—', '#5fff5f')
+            + '</div>'
+            + '<div style="padding:4px 10px 6px;display:grid;grid-template-columns:1fr 1fr;gap:10px;border-bottom:1px solid #222834;">'
+            + `<div><div style="color:#7adfe6;font-weight:bold;font-size:11px">EQUIPMENT (fleet, top 10)</div>${eq.map(([k, v]) => `<div style="display:flex;align-items:center;gap:6px;font-size:11px"><span style="width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#aaa">${escapeHtml(k)}</span><div style="flex:1;height:8px;background:#0e1218;border-radius:4px;overflow:hidden"><div style="width:${Math.round(100 * v / eqMax)}%;height:100%;background:#7adfe6"></div></div><span style="width:40px;text-align:right">${v}</span></div>`).join('') || '<span style="color:#666">—</span>'}</div>`
+            + `<div><div style="color:#7adfe6;font-weight:bold;font-size:11px">ASSET STATES (fleet)</div>${st.map(([k, v]) => `<div style="display:flex;align-items:center;gap:6px;font-size:11px"><span style="width:150px;color:${stateColor[k] || '#aaa'}">${escapeHtml(k)}</span><div style="flex:1;height:8px;background:#0e1218;border-radius:4px;overflow:hidden"><div style="width:${Math.round(100 * v / (S.assets || 1))}%;height:100%;background:${stateColor[k] || '#aaa'}"></div></div><span style="width:40px;text-align:right">${v}</span></div>`).join('') || '<span style="color:#666">—</span>'}`
+            + `<div style="color:#666;font-size:10px;margin-top:4px">${S.withSetup} site(s) with a setup snapshot · ${S.withMissions} with a mission snapshot · ${S.sites - S.withSetup} without</div></div>`
+            + '</div>';
+    }
+    function mtDetailBlock(r) {
+        const s = r.s, m = r.m;
+        const list = (map, n) => Object.entries(map || {}).sort((a, b) => b[1] - a[1]).slice(0, n || 30).map(([k, v]) => `<span style="display:inline-block;margin:1px 6px 1px 0;color:#aaa">${escapeHtml(k)} <b style="color:#ddd">${v}</b></span>`).join('') || '<span style="color:#666">—</span>';
+        return `<tr><td colspan="99" style="padding:6px 12px 8px 24px;background:#10141a;border-bottom:1px solid #1d2430;font-size:11px">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+                <div>
+                    <div style="color:#7adfe6;font-weight:bold">SITE SETUP ${s ? `<span style="color:#666;font-weight:normal">· indexed ${r.snapAgeD} d ago</span>` : '<span style="color:#ffa030;font-weight:normal">· no snapshot</span>'}</div>
+                    ${s ? `<div>Entities <b>${s.n}</b> · assets <b>${s.counts.asset}</b> · FFZ <b>${s.counts.ffz}</b> (${s.ffzAcres} ac) · FP <b>${s.counts.fp}</b> (${s.fpArcs} arcs, ${(s.fpM / MT_M_PER_MI).toFixed(2)} mi) · NFZ <b>${s.counts.nfz}</b> (${s.nfzAcres} ac) · markers <b>${s.counts.gm}</b> · base <b>${s.counts.base}</b>${s.baseActive ? ' (active)' : ''} · safe <b>${s.counts.safe}</b> · unshielded <b>${s.unshielded}</b></div>
+                    <div style="margin-top:3px"><span style="color:#888">Equipment:</span> ${list(s.equip)}</div>
+                    <div style="margin-top:2px"><span style="color:#888">States:</span> ${list(s.states)}</div>
+                    ${Object.keys(s.cats).length ? `<div style="margin-top:2px"><span style="color:#888">Categories:</span> ${list(s.cats)}</div>` : ''}
+                    <div style="margin-top:2px"><span style="color:#888">Marker types:</span> ${list(s.gmTypes)}</div>
+                    <div style="margin-top:2px"><span style="color:#888">Validated ✓/✗:</span> assets ${mtPair(s.valid.asset)} · FFZ ${mtPair(s.valid.ffz)} · FP ${mtPair(s.valid.fp)} · NFZ ${mtPair(s.valid.nfz)} · markers ${mtPair(s.valid.gm)}</div>` : ''}
+                </div>
+                <div>
+                    <div style="color:#7adfe6;font-weight:bold">MISSIONS ${m ? `<span style="color:#666;font-weight:normal">· indexed ${Math.floor((Date.now() - (m.at || 0)) / 86400000)} d ago</span>` : '<span style="color:#ffa030;font-weight:normal">· no mission snapshot (Site Watch “watch missions” off?)</span>'}</div>
+                    ${m ? `<div>Missions <b>${m.n}</b> (${m.active} active, ${m.inactive} inactive) · steps <b>${m.steps}</b> (avg ${m.n ? Math.round(m.steps / m.n) : 0}) · planned <b>${(m.distM / MT_M_PER_MI).toFixed(1)} mi</b> / <b>${(m.durS / 3600).toFixed(1)} h</b> · snapshots <b>${m.snapshots}</b> · orbits <b>${m.orbits}</b> · area maps <b>${m.areaMaps}</b> · GEM missions <b>${m.gem}</b></div>
+                    <div style="margin-top:3px"><span style="color:#888">Step mix:</span> ${list(m.stepTypes)}</div>` : ''}
+                </div>
+            </div>
+            <div style="margin-top:6px"><span data-ft-link="${r.id}" style="cursor:pointer;color:#5fb3ff">↗ open site setup</span></div>
+        </td></tr>`;
+    }
+
     function renderMetricsSection() {
         if (!openSections.metrics) return '';
-        const rows = buildMetricsRows();
-        if (!rows.length) {
-            return '<div style="padding:8px 10px;color:#888">Index is empty — run ⟳ Update index (or a sweep) first.</div>';
-        }
         const out = [];
-        const orphans = rawSites ? Object.keys(nbIndex.bboxes).filter(id => !rawSites[id]).length : 0;
-        out.push('<div style="padding:6px 10px;display:flex;gap:14px;border-bottom:1px solid #222834;">'
-            + '<span data-ft="metrics-refresh" style="cursor:pointer;color:#7adfe6">⟳ Refresh names/clients</span>'
-            + '<span data-ft="metrics-csv" style="cursor:pointer;color:#7adfe6">📋 Copy CSV</span>'
-            + `<span style="color:#888">${rows.length} indexed site(s)${orphans ? ` · ${orphans} snapshot-only (no access) hidden` : ''}</span></div>`);
-        const hasClient = rows.some(r => r.client);
-        const hasStatus = rows.some(r => r.status);
-        out.push('<div style="max-height:40vh;overflow-y:auto;">'
-            + '<table style="border-collapse:collapse;width:100%;font:inherit;">'
-            + `<thead><tr style="color:#7adfe6;text-align:left;"><th style="padding:2px 8px;">Site</th>${hasClient ? '<th style="padding:2px 8px;">Client</th>' : ''}${hasStatus ? '<th style="padding:2px 8px;">Status</th>' : ''}<th style="padding:2px 8px;">FFZ</th><th style="padding:2px 8px;">FP</th><th style="padding:2px 8px;">Assets</th></tr></thead><tbody>`
-            + rows.map(r => `<tr style="border-bottom:1px solid #1d2430;${r.empty ? 'color:#666;' : ''}">`
-                + `<td style="padding:2px 8px;">${escapeHtml(r.name)} <span style="color:#666">#${r.id}</span></td>`
-                + (hasClient ? `<td style="padding:2px 8px;color:#aaa">${escapeHtml(r.client)}</td>` : '')
-                + (hasStatus ? `<td style="padding:2px 8px;color:${statusTag(r.status) ? '#ffa030' : '#888'}">${escapeHtml(r.status || '—')}</td>` : '')
-                + `<td style="padding:2px 8px;">${r.ffz}</td><td style="padding:2px 8px;">${r.fp}</td><td style="padding:2px 8px;">${r.asset}</td></tr>`).join('')
+        const total = Object.keys(mtIndex.sites).length;
+        const orphans = rawSites ? Object.keys(mtIndex.sites).filter(id => !rawSites[id]).length : 0;
+        out.push('<div style="padding:6px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + (mtBuilding ? '<span style="color:#ffa030">⏳ building…</span>'
+                : `<span data-ft="metrics-build" style="cursor:pointer;color:#5fff5f;font-weight:bold" title="Check every Site Watch snapshot sha and (re)compute changed sites — first run downloads everything (a few minutes)">${total ? '⟳ Update metrics' : '▶ Build metrics'}</span>`)
+            + '<span data-ft="metrics-refresh" style="cursor:pointer;color:#7adfe6" title="Re-fetch /sites/ names, clients, statuses">⟳ Names</span>'
+            + '<span data-ft="metrics-sheets" style="cursor:pointer;color:#ffd54f">📊 Copy → Sheets</span>'
+            + '<span data-ft="metrics-csv" style="cursor:pointer;color:#7adfe6">📋 Copy CSV (all columns)</span>'
+            + `<span data-ft="metrics-wide" style="cursor:pointer;color:#7adfe6" title="Toggle a wide panel for the table">${mtWide ? '⤡ Normal width' : '⤢ Wide'}</span>`
+            + `<span style="color:#888">${total} site(s) indexed${orphans ? ` · ${orphans} no-access hidden` : ''}${mtIndex.builtAt ? ` · built ${new Date(mtIndex.builtAt).toLocaleString()}` : ''}</span>`
+            + '</div>');
+        if (!total) {
+            out.push('<div style="padding:8px 10px;color:#888">No metrics yet — ▶ Build metrics reads every site’s Site Watch snapshot (setup + missions) once, then only changed sites re-download.</div>');
+            return out.join('');
+        }
+        const rows = mtFilteredRows();
+        out.push(mtFleetTotalsBlock(rows));
+        out.push('<div style="padding:6px 10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + Object.keys(MT_SETS).map(k => `<span data-ft-mtset="${k}" style="cursor:pointer;padding:2px 8px;border-radius:10px;border:1px solid ${mtSet === k ? '#7adfe6' : '#2a3140'};color:${mtSet === k ? '#7adfe6' : '#aaa'};background:${mtSet === k ? '#1a2e33' : 'transparent'}">${MT_SETS[k].label}</span>`).join('')
+            + `<input type="text" data-ft-mtfilter value="${escapeHtml(mtFilter)}" placeholder="filter site / client / status…" style="margin-left:auto;width:200px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:2px 6px;font:inherit;">`
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Only sites whose /sites/ status is Production"><input type="checkbox" data-ft-flag="onlyProduction" ${ftCfg.onlyProduction ? 'checked' : ''}> Production only</label>`
+            + '</div>');
+        const cols = MT_SETS[mtSet].cols;
+        const tot = mtTotals(rows, cols);
+        const arrow = (k) => mtSort.key === k ? (mtSort.dir > 0 ? ' ▲' : ' ▼') : '';
+        out.push(`<div style="max-height:${mtWide ? '60vh' : '45vh'};overflow:auto;">`
+            + '<table style="border-collapse:collapse;width:100%;font:inherit;white-space:nowrap;">'
+            + '<thead><tr style="color:#7adfe6;text-align:left;position:sticky;top:0;background:#14181f;z-index:1">'
+            + cols.map(k => `<th data-ft-mtsort="${k}" title="${escapeHtml(MT_COLS[k].title || 'click to sort')}" style="padding:3px 8px;cursor:pointer;user-select:none;border-bottom:1px solid #2a3140">${escapeHtml(MT_COLS[k].label)}${arrow(k)}</th>`).join('')
+            + '</tr></thead><tbody>'
+            + rows.map(r => `<tr class="aim-ft-row" data-ft-mtrow="${r.id}" style="border-bottom:1px solid #1d2430;cursor:pointer;${!r.s && !r.m ? 'color:#666;' : ''}">`
+                + cols.map(k => k === 'name'
+                    ? `<td style="padding:2px 8px;"><span style="color:#666">${mtExpanded.has(r.id) ? '▾' : '▸'}</span> ${escapeHtml(r.name)} <span style="color:#555">#${r.id}</span></td>`
+                    : `<td style="padding:2px 8px;${MT_COLS[k].text ? 'max-width:220px;overflow:hidden;text-overflow:ellipsis;' : ''}${k === 'status' && statusTag(r.status) ? 'color:#ffa030' : ''}">${mtCell(MT_COLS[k], r)}</td>`).join('')
+                + '</tr>' + (mtExpanded.has(r.id) ? mtDetailBlock(r) : '')).join('')
+            + `<tr style="border-top:2px solid #2a3140;color:#7adfe6;font-weight:bold;position:sticky;bottom:0;background:#14181f">`
+            + cols.map(k => `<td style="padding:3px 8px;">${k === 'name' ? `Fleet (${rows.length})` : tot[k]}</td>`).join('') + '</tr>'
             + '</tbody></table></div>');
         return out.join('');
     }
@@ -2851,6 +3277,7 @@
         const body = panelEl.querySelector('#aim-ft-body');
         if (!body) return;
         const isum = issuesSummary;
+        panelEl.style.width = (mtWide && openSections.metrics) ? '96vw' : '640px';
         body.innerHTML = ''
             + sectionHeader('issues', '🚩', 'Fleet Issues', isum && isum.hasToken ? `${isum.open} open · ${isum.pending} pending${isum.myPending ? ` · ⚡ ${isum.myPending} for you` : ''}` : 'all sites in one panel')
             + renderIssuesSection()
@@ -2862,7 +3289,7 @@
             + renderKmlSection()
             + sectionHeader('xref', '📐', 'Cross-reference', 'KML vs sites / KML vs KML')
             + renderXrefSection()
-            + sectionHeader('metrics', '📊', 'Fleet Metrics', 'per-site entity counts (bones)')
+            + sectionHeader('metrics', '📊', 'Fleet Metrics', Object.keys(mtIndex.sites).length ? `${Object.keys(mtIndex.sites).length} sites · setups + missions` : 'setups + missions from Site Watch snapshots')
             + renderMetricsSection();
     }
 
@@ -2939,6 +3366,19 @@
                     else if (cmd === 'abort') abortSweep();
                     else if (cmd === 'copy') copyText(buildSweepReport(), 'report copied to clipboard');
                     else if (cmd === 'metrics-csv') copyText(buildMetricsCsv(), 'metrics CSV copied to clipboard');
+                    else if (cmd === 'metrics-sheets') copyHtmlToClipboard(buildMetricsSheetsHtml(), buildMetricsCsv(), 'metrics table copied — paste into Google Sheets / Excel');
+                    else if (cmd === 'metrics-wide') { mtWide = !mtWide; renderPanel(); }
+                    else if (cmd === 'metrics-build') {
+                        if (mtBuilding) return;
+                        mtBuilding = true;
+                        renderPanel();
+                        const t0 = Date.now();
+                        Promise.all([fetchRawSites(false).catch(e => { console.warn(`${TAG} /sites/ fetch failed:`, e); return null; }),
+                                     ensureMetricsIndex((done, total) => setStatus(`building fleet metrics… ${done}/${total} snapshot(s)`), true)])
+                            .then(([, notes]) => { setStatus(`fleet metrics ready — ${Object.keys(mtIndex.sites).length} site(s) in ${Math.round((Date.now() - t0) / 1000)} s${notes.length ? ' · ' + notes.join(' · ') : ''}`); })
+                            .catch(e => { console.warn(`${TAG} metrics build failed:`, e); setStatus(`metrics build failed — ${String(e && e.message || e)}`); })
+                            .finally(() => { mtBuilding = false; renderPanel(); });
+                    }
                     else if (cmd === 'metrics-refresh') {
                         fetchRawSites(true).then(() => renderPanel())
                             .catch(e => { console.warn(`${TAG} /sites/ refresh failed:`, e); setStatus('site list refresh failed — see console'); });
@@ -2953,6 +3393,20 @@
                             .finally(() => { sweepRunning = false; renderPanel(); });
                     }
                     return;
+                }
+                const mtset = ev.target.closest('[data-ft-mtset]');
+                if (mtset) { mtSet = mtset.getAttribute('data-ft-mtset'); if (!MT_SETS[mtSet]) mtSet = 'overview'; renderPanel(); return; }
+                const mtsort = ev.target.closest('[data-ft-mtsort]');
+                if (mtsort) {
+                    const k = mtsort.getAttribute('data-ft-mtsort');
+                    if (mtSort.key === k) mtSort.dir = -mtSort.dir; else mtSort = { key: k, dir: MT_COLS[k] && MT_COLS[k].text ? 1 : -1 };
+                    renderPanel(); return;
+                }
+                const mtrow = ev.target.closest('[data-ft-mtrow]');
+                if (mtrow && !ev.target.closest('[data-ft-link]')) {
+                    const id = mtrow.getAttribute('data-ft-mtrow');
+                    if (mtExpanded.has(id)) mtExpanded.delete(id); else mtExpanded.add(id);
+                    renderPanel(); return;
                 }
                 const zoom = ev.target.closest('[data-ft-zoom]');
                 if (zoom) {
@@ -3028,6 +3482,13 @@
             });
             // Live search — re-render but keep the search box focused
             panelEl.addEventListener('input', (ev) => {
+                if (ev.target.hasAttribute && ev.target.hasAttribute('data-ft-mtfilter')) {
+                    mtFilter = ev.target.value;
+                    renderPanel();
+                    const box = panelEl.querySelector('input[data-ft-mtfilter]');
+                    if (box) { box.focus(); try { box.setSelectionRange(box.value.length, box.value.length); } catch (e) {} }
+                    return;
+                }
                 if (ev.target.id !== 'aim-ft-kml-search') return;
                 kmlSearch = ev.target.value;
                 renderPanel();
@@ -3133,6 +3594,7 @@
                         updateFaaTiles();
                     } else {
                         setStatus(`${prop === 'onlyProduction' ? '"Production only"' : prop} ${flag.checked ? 'ON' : 'OFF'} — takes effect on the next sweep`);
+                        if (prop === 'onlyProduction') renderPanel();
                     }
                     return;
                 }

@@ -6,6 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-12 — 📊 Fleet Metrics: AIM Fleet Tools v0.26 — every site's setup + mission numbers in one table (latest — dev only, feature #259)
+
+The 📊 Fleet Metrics section grows from "three counts per site" into the fleet reporting table. **▶ Build metrics** reads every site's Site Watch snapshot once (setup + missions; only changed sites re-download afterwards, same sha-diff as the overlap index) and then shows:
+- **Fleet totals** tiles (sites, assets, FFZ, FP, NFZ, markers, FP miles, missions, steps, planned miles / hours, validated %) plus fleet-wide **equipment** and **asset state** bars.
+- **Column sets**: Overview · Site setup (entities, FFZ acres + altitude band, FP arcs + miles + band, NFZ acres, marker types, base, safe zones, unshielded, notes) · Assets (equipment, categories, Normal / HY / Empty / Inactive / Unshielded / Unreachable) · Missions (count, active/inactive, steps, avg steps, snapshots, orbits, area maps, GEM missions, planned mi / h, step mix) · Validation (pilot-validated ✓/✗ per entity type, validated %) · All.
+- Click any header to sort, filter by site / client / status, Production-only toggle, a **Fleet** totals row, and click a site row to expand its full detail (equipment list, states, categories, marker types, validation, mission step mix, ↗ open site setup).
+- **📊 Copy → Sheets** (formatted, current column set) and **📋 Copy CSV** (every column). **⤢ Wide** widens the panel for the table.
+Numbers are as fresh as the Site Watch snapshot (age shown per site); sites without a snapshot are listed without numbers. Mission logs (flown history) are the next phase.
+
 ## 2026-09-12 — 🌐 Fleet Issues Phase 2: AIM Issues v1.42 — bulk actions, saved views, 📊 summary (latest — dev only)
 
 - **☑ Bulk actions.** Every fleet row has a checkbox (and each site group a select-all). Selecting anything shows an action bar: ✓ Approve · ✗ Reject · ✓ Resolve / Propose fix · ⊘ Ignore / Propose ignore · ↺ Re-open · 🎯 Priority · 👤 Assign · 💬 Comment · 🗑 Delete (♻ Reinstate in the Deleted view). The confirm box preflights every selected issue against the same rules the modal uses and lists exactly what will be skipped and why (not pending, needs an approver, already that priority…), takes one note for the batch, then applies sequentially: each issue gets its own history entry and Slack thread reply, each site gets ONE GitHub commit. Delete needs a second confirming click. A results screen shows applied / skipped / commits and any Slack or commit failure.
