@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-14 — Site Setup Tools latest v4.277: SpiderWeb — sloped zones raise their ceiling for the handoff, direct base legs, crowded edges spill (dev only)
+
+- A sloped zone whose 196 ft ceiling sat too low for a landing arc to share 3 m now raises its ceiling only as far as needed, never above the "zone ceil max" (200 ft). The report marks those zones. All hard handoff failures on the Cobra dup are gone.
+- The way-home pass can add a direct leg from a zone to the nearest base when no web leg shortens a long detour; zones next to the base no longer show a meaningless stretch ratio.
+- When too many legs land on one short edge, the extra legs move to the next best edge instead of being flagged "crowded". Only leg ends under 10 ft apart remain a hard gate.
+
 ## 2026-09-14 — Site Setup Tools latest v4.276: SpiderWeb — merged zones, hubs off the fences, no stub landings (dev only)
 
 - **Fix:** a leg could end in a run of identical stair arcs with a 25 ft stub before the zone. The landing-arc logic retried the whole tail at every sample once it failed; it now tries once, then the last two arcs are re-split so the landing arc is as long as the ground allows.

@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.276
+// @version      4.277
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.276';
+    const SCRIPT_VERSION = '4.277';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -9368,7 +9368,7 @@
     }
 
     // ============================================================
-    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.276) — PREVIEW ONLY
+    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.277) — PREVIEW ONLY
     // Design doc: ShortKeys/AIM_Unshielded_SpiderWeb_Design.md.
     // FFZ per asset (mitered outset, touching buffers unioned), straight
     // point-to-point FPs at a 54 m floor / +20 ft band with AUTOMATIC DEM
@@ -9382,6 +9382,7 @@
     const SWB_PANEL_ID = 'aim-swb-panel';
     const SWB_DEFAULTS = {
         ffzFloorAglFt: 125, ffzCeilAglFt: 196,   // zone band above highest / lowest ground in the footprint
+        ffzCeilMaxAglFt: 200,                     // a sloped zone's ceiling may rise to this (never above) when a landing arc cannot otherwise share 3 m with the zone
         fpFloorM: 54,                            // arc floor above the HIGHEST ground under the arc (integer m)
         fpBandFt: 20,                            // arc ceiling = floor + band
         overlapM: 3,                             // target overlap between connected arcs (2 = red)
@@ -9680,16 +9681,18 @@
             gates.push({ label: 'every arc band ≥ 2 m', ok: redArcs === 0, detail: `${redArcs} thin` });
             const handoffFail = result.legs.filter(l => l.flags.some(f => /HANDOFF FAIL/.test(f))).length;
             const handoffSoft = result.legs.filter(l => l.flags.some(f => /^handoff with/.test(f))).length;
-            gates.push({ label: 'FP ↔ zone handoff ≥ 2 m', ok: handoffFail === 0, detail: `${handoffFail} fail · ${handoffSoft} under the ${th.overlapM} m target` });
+            const raised = result.zones.filter(z => z.ceilRaised).length;
+            gates.push({ label: 'FP ↔ zone handoff ≥ 2 m', ok: handoffFail === 0, detail: `${handoffFail} fail · ${handoffSoft} under the ${th.overlapM} m target · ${raised} zone ceiling(s) raised toward ${th.ffzCeilMaxAglFt} ft` });
             const manySteps = result.legs.filter(l => l.flags.some(f => /^many steps/.test(f))).length;
             gates.push({ label: 'legs under 40 steps', ok: manySteps === 0, soft: true, detail: `${manySteps} leg(s) over` });
             const tiny = result.legs.filter(l => l.flags.some(f => /^tiny leg/.test(f))).length;
             gates.push({ label: 'no legs under 30 ft', ok: tiny === 0, soft: true, detail: `${tiny} tiny leg(s)` });
             const cliffs = result.legs.filter(l => l.flags.some(f => /cliff/.test(f))).length;
             gates.push({ label: 'no cliff steps', ok: cliffs === 0, soft: true, detail: `${cliffs} leg(s)` });
-            const crowded = result.zones.filter(z => z.flags.some(f => /crowded|^ENDPOINTS/.test(f))).length;
+            const under10 = result.zones.filter(z => z.flags.some(f => /^ENDPOINTS/.test(f))).length;
+            const crowded = result.zones.filter(z => z.flags.some(f => /crowded/.test(f))).length;
             const softGap = result.zones.filter(z => z.flags.some(f => /^endpoints/.test(f))).length;
-            gates.push({ label: 'endpoint spacing ≥ 10 ft', ok: crowded === 0, detail: `${crowded} crowded/under 10 ft · ${softGap} under the ${th.endpointGapFt} ft target` });
+            gates.push({ label: 'endpoint spacing ≥ 10 ft', ok: under10 === 0, detail: `${under10} under 10 ft · ${crowded} crowded edge(s) · ${softGap} under the ${th.endpointGapFt} ft target` });
             const noDem = result.zones.filter(z => z.flags.some(f => /DEM/.test(f))).length + result.legs.filter(l => l.flags.some(f => /DEM/.test(f))).length;
             gates.push({ label: 'DEM coverage', ok: noDem === 0, detail: `${noDem} item(s) without ground` });
             result.gates = gates;
@@ -9800,6 +9803,7 @@
                 z.gMinFt = gMin; z.gMaxFt = gMax;
                 z.floorM = M(gMax + th.ffzFloorAglFt);
                 z.ceilM = M(gMin + th.ffzCeilAglFt);
+                z.ceilRaised = false;
                 if (z.ceilM - z.floorM < th.overlapM) z.flags.push(`zone band only ${((z.ceilM - z.floorM) * M_TO_FT).toFixed(0)} ft (relief ${(gMax - gMin).toFixed(0)} ft inside footprint)`);
             }
         });
@@ -9808,10 +9812,11 @@
         const gapM = M(th.endpointGapFt), cornerM = M(th.cornerGapFt);
         const SIN15 = Math.sin(15 * Math.PI / 180);
         const outNormal = (ring, P, Q) => { const dx = Q.x - P.x, dy = Q.y - P.y, L = Math.hypot(dx, dy) || 1; const ccw = swbRingArea(ring) > 0; return ccw ? { nx: dy / L, ny: -dx / L } : { nx: -dy / L, ny: dx / L }; };
-        const zoneEndpoint = (zn, toward) => {
+        const zoneEndpoint = (zn, toward, exclude) => {
             const ring = zn.zone.xy, n = ring.length;
             let best = null, fallback = null;
             for (let i = 0; i < n; i++) {
+                if (exclude && exclude.has(i)) continue;
                 const P = ring[i], Q = ring[(i + 1) % n];
                 const dx = Q.x - P.x, dy = Q.y - P.y, L = Math.hypot(dx, dy) || 1, L2 = L * L;
                 let u = ((toward.x - P.x) * dx + (toward.y - P.y) * dy) / L2;
@@ -9897,7 +9902,15 @@
                         const d = dist[o] + e.len;
                         if (d < bestD) { bestD = d; best = k; }
                     });
-                    if (best) { web.add(best); stretchAdded++; changed = true; }
+                    if (best) { web.add(best); stretchAdded++; changed = true; continue; }
+                    // no Delaunay leg helps — a direct leg to the nearest base, if clear
+                    let bb = null, bd = Infinity;
+                    baseIdx.forEach(b => { const d = Math.hypot(nodes[i].x - nodes[b].x, nodes[i].y - nodes[b].y); if (d < bd) { bd = d; bb = b; } });
+                    if (bb === null || bd >= dist[i]) continue;
+                    const k = ekey(i, bb);
+                    if (edges.has(k) || legBlocked(i, bb)) continue;
+                    edges.set(k, { a: Math.min(i, bb), b: Math.max(i, bb), len: bd, tris: [], blocked: false, direct: true });
+                    web.add(k); stretchAdded++; changed = true;
                 }
                 if (!changed) break;
             }
@@ -10051,9 +10064,10 @@
             return { a: l.a, b: l.b, ea, eb, flags: [], arcs: [] };
         });
         // spacing per zone edge: ≥ endpointGap between endpoints, ≥ cornerGap off the corners
-        zones.forEach(z => {
+        const spaceZone = (z, zi, spill) => {
             const slots = [];   // { leg, side:'ea'|'eb', edge, pos(m) }
             legs.forEach(l => { if (l.ea && allNodes[l.a].zone === z) slots.push({ leg: l, side: 'ea', ep: l.ea }); if (l.eb && allNodes[l.b].zone === z) slots.push({ leg: l, side: 'eb', ep: l.eb }); });
+            let spilled = false;
             const byEdge = new Map();
             slots.forEach(s => { if (!byEdge.has(s.ep.edge)) byEdge.set(s.ep.edge, []); byEdge.get(s.ep.edge).push(s); });
             byEdge.forEach((list, ei) => {
@@ -10063,12 +10077,24 @@
                 list.sort((p, q) => p.pos - q.pos);
                 const lo = Math.min(cornerM, L / 2), hi = Math.max(L - cornerM, L / 2);
                 const need = (list.length - 1) * gapM;
-                if (hi - lo < need) { z.flags.push(`crowded edge ${ei + 1} (${list.length} legs on ${(L * M_TO_FT).toFixed(0)} ft)`); list.forEach(s => s.leg.flags.push('crowded edge')); }
+                if (hi - lo < need) {
+                    if (spill) {
+                        // too many legs for this edge: move the ones whose far end is least aligned with it to another edge
+                        const cap = Math.max(1, Math.floor((hi - lo) / gapM) + 1);
+                        const zn = allNodes[zi];
+                        const scored = list.map(s0 => { const other = s0.side === 'ea' ? allNodes[s0.leg.b] : allNodes[s0.leg.a]; const o = other.kind === 'zone' ? epPoint(other, s0.side === 'ea' ? s0.leg.eb : s0.leg.ea) : other; return { s0, other: o, d: Math.hypot(o.x - (P.x + Q.x) / 2, o.y - (P.y + Q.y) / 2) }; });
+                        scored.sort((p, q) => p.d - q.d);
+                        scored.slice(cap).forEach(({ s0, other }) => { const ep2 = zoneEndpoint(zn, other, new Set([ei])); if (ep2) { s0.ep.edge = ep2.edge; s0.ep.u = ep2.u; s0.moved = true; } });
+                        spilled = true; return;   // re-space from scratch
+                    }
+                    z.flags.push(`crowded edge ${ei + 1} (${list.length} legs on ${(L * M_TO_FT).toFixed(0)} ft)`); list.forEach(s => s.leg.flags.push('crowded edge'));
+                }
                 // forward pass then backward pass keeps order + gaps + bounds
                 for (let i = 0; i < list.length; i++) list[i].pos = Math.max(list[i].pos, lo + i * gapM, i ? list[i - 1].pos + gapM : -Infinity);
                 for (let i = list.length - 1; i >= 0; i--) list[i].pos = Math.min(list[i].pos, hi - (list.length - 1 - i) * gapM, i < list.length - 1 ? list[i + 1].pos - gapM : Infinity);
                 list.forEach(s => { s.ep.u = Math.max(0, Math.min(1, s.pos / L)); });
             });
+            if (spilled) return true;
             // endpoints on DIFFERENT edges can still sit < gap apart across a corner — push both away from it
             const xyOf = (s0) => { const P = z.xy[s0.ep.edge], Q = z.xy[(s0.ep.edge + 1) % z.xy.length]; return { x: P.x + (Q.x - P.x) * s0.ep.u, y: P.y + (Q.y - P.y) * s0.ep.u, L: Math.hypot(Q.x - P.x, Q.y - P.y) || 1 }; };
             for (let pass = 0; pass < 20; pass++) {
@@ -10099,7 +10125,9 @@
                 if (d < 10 / M_TO_FT) z.flags.push(`ENDPOINTS ${(d * M_TO_FT).toFixed(0)} ft apart (hard minimum 10)`);
                 else if (d < gapM - 0.05) z.flags.push(`endpoints ${(d * M_TO_FT).toFixed(0)} ft apart (target ${th.endpointGapFt})`);
             }
-        });
+            return false;
+        };
+        zones.forEach((z, zi) => { for (let k = 0; k < 3; k++) { if (!spaceZone(z, zi, k < 2)) break; } });
         // resolve endpoint → xy, 1 ft inside the zone
         const epXY = (zn, ep) => {
             const ring = zn.zone.xy, P = ring[ep.edge], Q = ring[(ep.edge + 1) % ring.length];
@@ -10229,10 +10257,16 @@
             if (arcs.length > 40) l.flags.push(`many steps (${arcs.length})`);
             if (zB && arcs.length > 1) { const last = arcs[arcs.length - 1]; const lenLast = cum[last.e] - cum[last.s]; if (lenLast < approachM * 0.5 && cum[n - 1] > approachM * 2) l.flags.push(`steep approach: landing arc only ${(lenLast * M_TO_FT).toFixed(0)} ft (ground near the zone forces it)`); }
             if (l.lenM * M_TO_FT < 30) l.flags.push(`tiny leg (${(l.lenM * M_TO_FT).toFixed(0)} ft) — zones nearly touch, consider merging`);
-            // zone handoff: the arc touching each zone must share the zone band — 2 m is the hard line, overlapM the target
+            // zone handoff: the arc touching each zone must share the zone band — 2 m is the hard line, overlapM the target.
+            // A sloped zone (ceiling = lowest ground + 196 ft) may raise its ceiling toward ffzCeilMaxAglFt, never above.
             [[zA, arcs[0]], [zB, arcs[arcs.length - 1]]].forEach(([z, arc]) => {
                 if (!z || !arc) return;
-                const ov = zoneOv(z, arc.floorM, arc.ceilM);
+                let ov = zoneOv(z, arc.floorM, arc.ceilM);
+                if (ov < ovM && z.ceilM !== null && z.gMinFt != null) {
+                    const maxCeil = M(z.gMinFt + th.ffzCeilMaxAglFt);
+                    const want = Math.min(maxCeil, arc.floorM + ovM);
+                    if (want > z.ceilM + 1e-6) { z.ceilM = want; z.ceilRaised = true; ov = zoneOv(z, arc.floorM, arc.ceilM); }
+                }
                 if (ov < 2) l.flags.push(`HANDOFF FAIL: arc shares only ${ov.toFixed(1)} m with zone "${z.name}" (zone ${(z.floorM * M_TO_FT).toFixed(0)}–${(z.ceilM * M_TO_FT).toFixed(0)} ft, arc ${arc.floorM}–${arc.ceilM} m)`);
                 else if (ov < ovM) l.flags.push(`handoff with zone "${z.name}" only ${ov.toFixed(1)} m (target ${ovM})`);
             });
@@ -10348,7 +10382,7 @@
         if (st.dropped.length) { out.push(`dropped assets (${st.dropped.length}):`); st.dropped.forEach(d => out.push(`  ${d.name} — ${d.why}${d.distFt != null ? ` (${d.distFt.toLocaleString()} ft)` : ''}`)); }
         if (st.skippedEmpty.length) out.push(`EMPTY assets skipped (${st.skippedEmpty.length}): ${st.skippedEmpty.join(', ')}`);
         out.push('zones:');
-        st.zones.forEach(z => out.push(`  ${z.name} · ${z.assets.length} asset(s) · floor ${z.floorM === null ? '?' : (z.floorM * M_TO_FT).toFixed(0)} / ceil ${z.ceilM === null ? '?' : (z.ceilM * M_TO_FT).toFixed(0)} ft MSL · ground ${z.gMinFt == null ? '?' : Math.round(z.gMinFt)}–${z.gMaxFt == null ? '?' : Math.round(z.gMaxFt)} ft · to base ${z.rtbM === null ? 'UNREACHABLE' : Math.round(z.rtbM * M_TO_FT).toLocaleString() + ' ft'} (${z.rtbM === null ? '—' : (z.rtbM / (z.straightM || 1)).toFixed(2)}× straight)${z.flags.length ? ' ⚠ ' + z.flags.join('; ') : ''}`));
+        st.zones.forEach(z => out.push(`  ${z.name} · ${z.assets.length} asset(s) · floor ${z.floorM === null ? '?' : (z.floorM * M_TO_FT).toFixed(0)} / ceil ${z.ceilM === null ? '?' : (z.ceilM * M_TO_FT).toFixed(0)} ft MSL${z.ceilRaised ? ' (ceiling raised for handoff)' : ''} · ground ${z.gMinFt == null ? '?' : Math.round(z.gMinFt)}–${z.gMaxFt == null ? '?' : Math.round(z.gMaxFt)} ft · to base ${z.rtbM === null ? 'UNREACHABLE' : Math.round(z.rtbM * M_TO_FT).toLocaleString() + ' ft'} (${z.rtbM === null ? '—' : z.straightM <= 150 ? 'next to base' : (z.rtbM / z.straightM).toFixed(2) + '× straight'})${z.flags.length ? ' ⚠ ' + z.flags.join('; ') : ''}`));
         out.push('legs:');
         st.legs.forEach(l => out.push(`  ${l.nameA} → ${l.nameB} · ${Math.round(l.lenM * M_TO_FT).toLocaleString()} ft · ${l.arcs.length} arc(s) · ${l.arcs.map(a => a.floorM === null ? '?' : `${a.floorM}–${a.ceilM}`).join(' | ')} m MSL${l.flags.length ? ' ⚠ ' + l.flags.join('; ') : ''}`));
         st.hubs.forEach((h, i) => out.push(`hub ${i + 1}: ${h.spokes.length} spokes · ${h.ll.lat.toFixed(6)}, ${h.ll.lng.toFixed(6)} · band ${h.bandOk ? 'OK' : 'CONFLICT'}`));
@@ -10367,8 +10401,8 @@
         let body = '';
         if (st) {
             const gateHtml = st.gates.map(g => `<div style="color:${g.ok ? '#7dffae' : (g.soft ? '#ffb020' : '#ff6b6b')}">${g.ok ? '✔' : (g.soft ? '⚠' : '✖')} ${esc(g.label)}${g.detail ? ` <span style="opacity:0.7">— ${esc(g.detail)}</span>` : ''}</div>`).join('');
-            const worst = st.zones.filter(z => z.rtbM !== null).sort((a, b) => (b.rtbM / (b.straightM || 1)) - (a.rtbM / (a.straightM || 1))).slice(0, 5);
-            const worstHtml = worst.map(z => `<div><strong>${esc(z.name)}</strong> · ${Math.round(z.rtbM * M_TO_FT).toLocaleString()} ft to base · ${(z.rtbM / (z.straightM || 1)).toFixed(2)}× straight</div>`).join('');
+            const worst = st.zones.filter(z => z.rtbM !== null && z.straightM > 150).sort((a, b) => (b.rtbM / (b.straightM || 1)) - (a.rtbM / (a.straightM || 1))).slice(0, 5);
+            const worstHtml = worst.map(z => `<div><strong>${esc(z.name)}</strong> · ${Math.round(z.rtbM * M_TO_FT).toLocaleString()} ft to base · ${z.straightM <= 150 ? 'next to base' : (z.rtbM / z.straightM).toFixed(2) + '× straight'}</div>`).join('');
             const flagged = st.legs.filter(l => l.flags.length);
             const flagHtml = flagged.slice(0, 12).map(l => `<div style="color:#ffb020">⚠ ${esc(l.nameA)} → ${esc(l.nameB)}: ${esc(l.flags.join('; '))}</div>`).join('') + (flagged.length > 12 ? `<div style="opacity:0.7">…and ${flagged.length - 12} more flagged legs (in the report)</div>` : '');
             const zflag = st.zones.filter(z => z.flags.length);
@@ -10407,6 +10441,7 @@
                 ${num('overlapM', 'overlap m', 0.5, 'Target overlap between connected arcs; steps every (band − overlap) of relief')}
                 ${num('droneMaxAglFt', 'drone max AGL', 5, 'Relief inside one arc is capped so the drone (flying the floor) never exceeds this over the low ground')}
                 ${num('outsetFt', 'outset ft', 1, 'Asset ring → zone')}
+                ${num('ffzCeilMaxAglFt', 'zone ceil max', 1, 'A sloped zone may raise its ceiling to this (never above) when a landing arc needs the overlap')}
                 ${num('endpointGapFt', 'endpoint gap ft', 1, 'Minimum spacing between leg ends on one zone edge')}
                 ${num('stretchMax', 'stretch ×', 0.05, 'Restore a pruned leg when a zone\'s way home exceeds this × straight line')}
                 ${num('hubMaxRtbLossPct', 'hub RTB loss %', 0.5, 'A hub may lengthen the summed return-to-base distance by at most this (when it shortens total FP length)')}
@@ -10825,6 +10860,7 @@
                 { id: 'droneMaxAglFt', label: 'Drone must stay under (caps relief per arc)', type: 'number', min: 100, max: 400, step: 5, default: SWB_DEFAULTS.droneMaxAglFt, unit: 'ft AGL' },
                 { id: 'ffzFloorAglFt', label: 'Zone floor above highest ground in footprint', type: 'number', min: 30, max: 300, step: 5, default: SWB_DEFAULTS.ffzFloorAglFt, unit: 'ft' },
                 { id: 'ffzCeilAglFt', label: 'Zone ceiling above lowest ground in footprint', type: 'number', min: 50, max: 400, step: 1, default: SWB_DEFAULTS.ffzCeilAglFt, unit: 'ft' },
+                { id: 'ffzCeilMaxAglFt', label: 'Sloped zone ceiling may rise to (for the handoff), never above', type: 'number', min: 50, max: 400, step: 1, default: SWB_DEFAULTS.ffzCeilMaxAglFt, unit: 'ft' },
                 { id: 'outsetFt', label: 'Zone outset from the asset ring', type: 'number', min: 10, max: 100, step: 1, default: SWB_DEFAULTS.outsetFt, unit: 'ft' },
                 { id: 'endpointGapFt', label: 'Minimum gap between leg ends on one zone', type: 'number', min: 10, max: 100, step: 1, default: SWB_DEFAULTS.endpointGapFt, unit: 'ft' },
                 { id: 'cornerGapFt', label: 'Leg ends stay this far from zone corners', type: 'number', min: 0, max: 100, step: 1, default: SWB_DEFAULTS.cornerGapFt, unit: 'ft' },
