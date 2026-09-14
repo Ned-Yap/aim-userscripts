@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.281
+// @version      4.282
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.281';
+    const SCRIPT_VERSION = '4.282';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -9368,7 +9368,7 @@
     }
 
     // ============================================================
-    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.281) — PREVIEW ONLY
+    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.282) — PREVIEW ONLY
     // Design doc: ShortKeys/AIM_Unshielded_SpiderWeb_Design.md.
     // FFZ per asset (mitered outset, touching buffers unioned), straight
     // point-to-point FPs at a 54 m floor / +20 ft band with AUTOMATIC DEM
@@ -10051,7 +10051,8 @@
                     h.spokes = h.spokes.filter(v => v !== z);
                     const r = sumRtb(hubs, web, hubLinks);
                     const spokeLen = Math.hypot(h.x - nodes[z].x, h.y - nodes[z].y);
-                    if (r.unreachable > cur.unreachable || (r.sum - cur.sum) > Math.max(0, th.hubGainRatio) * spokeLen) h.spokes = keep;
+                    const ratio = nodes[z].zone.bases ? Math.max(0, th.baseLegGainRatio) : Math.max(0, th.hubGainRatio);   // a hub's spoke to a base is priced like a direct base leg
+                    if (r.unreachable > cur.unreachable || (r.sum - cur.sum) > ratio * spokeLen || (nodes[z].zone.bases && r.sum > cur.sum)) h.spokes = keep;
                     else { cur = r; pruned++; }
                 }
             }

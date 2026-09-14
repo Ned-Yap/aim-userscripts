@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-14 — Site Setup Tools latest v4.282: SpiderWeb — a hub's spoke to a base is priced like a direct base leg (dev only)
+
+- A hub keeps its spoke to a base zone whenever it shortens the summed way home at all (the "base leg ratio", default 0), instead of having to earn a foot of way-home per foot of spoke like a pad spoke does. Hubs near a base now connect to it.
+
 ## 2026-09-14 — Site Setup Tools latest v4.281: SpiderWeb — hubs are placed before the base star (dev only)
 
 - **Fix:** hubs near a base never connected to it. The direct-to-base legs were added first, so by the time a hub was scored every pad around it already had its own straight leg home and the hub's base spoke was pruned as worthless. Hubs are now placed first, may spoke to a base zone up to 8,000 ft away, and the way-home pass only adds direct legs where the web is still long afterwards. Hub-to-hub links use the same gain ratio as spokes.
