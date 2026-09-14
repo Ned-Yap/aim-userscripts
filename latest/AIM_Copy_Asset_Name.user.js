@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.282
+// @version      4.284
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.282';
+    const SCRIPT_VERSION = '4.284';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -9368,7 +9368,7 @@
     }
 
     // ============================================================
-    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.282) — PREVIEW ONLY
+    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.284) — PREVIEW ONLY
     // Design doc: ShortKeys/AIM_Unshielded_SpiderWeb_Design.md.
     // FFZ per asset (mitered outset, touching buffers unioned), straight
     // point-to-point FPs at a 54 m floor / +20 ft band with AUTOMATIC DEM
@@ -9392,7 +9392,7 @@
         hubMaxRtbLossPct: 3,                     // a hub may lengthen the summed return-to-base distance by at most this much
         battery: 'tulip', sampleFt: 25, marginFt: 500, hubs: true,
         hubRadiusFt: 3500, hubMaxSpokes: 10,      // a hub star reaches zones within this radius, at most this many
-        hubBaseReachFt: 8000,                     // a hub may spoke straight to a base zone within this (longer) reach
+        hubBaseReachFt: 10000,                    // a hub may spoke straight to a base zone within this (longer) reach
         hubGainRatio: 1,                          // a hub must save this many ft of summed way-home per ft of new flight path (0 = any saving)
         legGainRatio: 0,                          // same test for legs restored by the way-home pass (0 = fix any long detour)
         baseLegGainRatio: 0,                      // same test for direct zone→base legs (0 = the base star: any zone with a long detour gets a straight shot home)
@@ -9699,6 +9699,8 @@
             gates.push({ label: 'endpoint spacing ≥ 10 ft', ok: under10 === 0, detail: `${under10} under 10 ft · ${crowded} crowded edge(s) · ${softGap} under the ${th.endpointGapFt} ft target` });
             const noDem = result.zones.filter(z => z.flags.some(f => /DEM/.test(f))).length + result.legs.filter(l => l.flags.some(f => /DEM/.test(f))).length;
             gates.push({ label: 'DEM coverage', ok: noDem === 0, detail: `${noDem} item(s) without ground` });
+            const crossing = result.legs.filter(l => l.flags.some(f => /^CROSSES/.test(f))).length;
+            gates.push({ label: 'no leg cuts through a zone', ok: crossing === 0, detail: `${crossing} leg(s)` });
             result.gates = gates;
             swbState = result;
             swbDrawPreview();
@@ -9950,7 +9952,7 @@
                         const score = gain - ratio * c.len;
                         if (!best || score > best.score) best = { k: c.k, score };
                     }
-                    if (best) { web.add(best.k); stretchAdded++; changed = true; }
+                    if (best) { web.add(best.k); edges.get(best.k).added = true; stretchAdded++; changed = true; }
                 }
                 if (!changed) break;
             }
@@ -10011,7 +10013,9 @@
                     nodes.forEach((nd, i) => { const d = Math.hypot(nd.x - c.x, nd.y - c.y); if (d <= R || (nd.zone.bases && d <= RB)) near.push({ i, d }); });
                     near.sort((p, q) => p.d - q.d);
                     const members = [];
-                    for (const m of near) { if (members.length >= K) break; if (nodeBlocked(c, m.i)) continue; members.push(m.i); }
+                    // base zones join whenever the spoke is clear — they do not count against the spoke cap
+                    near.forEach(m => { if (nodes[m.i].zone.bases && !nodeBlocked(c, m.i)) members.push(m.i); });
+                    for (const m of near) { if (members.length >= K + (members.filter(i => nodes[i].zone.bases).length)) break; if (members.includes(m.i) || nodeBlocked(c, m.i)) continue; members.push(m.i); }
                     if (members.filter(i => nodes[i].kind === 'zone').length < 3) { c.used = true; continue; }
                     const mset = new Set(members);
                     const removed = []; web.forEach(k => { const e = edges.get(k); if (mset.has(e.a) && mset.has(e.b)) removed.push(k); });
@@ -10083,7 +10087,7 @@
         const hubNodes = hubs.map((h, hi) => ({ kind: 'hub', x: h.x, y: h.y, hub: h, hi }));
         const allNodes = nodes.concat(hubNodes);
         const legsRaw = [];   // { a, b } indices into allNodes
-        web.forEach(k => { const e = edges.get(k); legsRaw.push({ a: e.a, b: e.b }); });
+        web.forEach(k => { const e = edges.get(k); legsRaw.push({ a: e.a, b: e.b, added: !!e.added }); });
         hubs.forEach((h, hi) => h.spokes.forEach(z => legsRaw.push({ a: nodes.length + hi, b: z })));
         hubLinks.forEach(([i, j]) => legsRaw.push({ a: nodes.length + i, b: nodes.length + j }));
         // endpoint on a zone for a leg toward `toward`: the ring point CLOSEST to the target among the
@@ -10103,7 +10107,7 @@
                 if (same(ea, ea2) && same(eb, eb2)) break;
                 ea = ea2; eb = eb2;
             }
-            return { a: l.a, b: l.b, ea, eb, flags: [], arcs: [] };
+            return { a: l.a, b: l.b, ea, eb, flags: [], arcs: [], added: !!l.added };
         });
         // spacing per zone edge: ≥ endpointGap between endpoints, ≥ cornerGap off the corners
         const spaceZone = (z, zi, spill) => {
@@ -10184,6 +10188,17 @@
             l.pb = l.eb ? epXY(B, l.eb) : { x: B.x, y: B.y };
             l.lenM = Math.hypot(l.pb.x - l.pa.x, l.pb.y - l.pa.y);
         });
+        // final geometry check: a leg must not cut through a zone it does not end on (endpoints moved since the
+        // topology test). Way-home extras that do are dropped; anything else is flagged hard.
+        let droppedCross = 0;
+        for (let i = legs.length - 1; i >= 0; i--) {
+            const l = legs[i], A = allNodes[l.a], B = allNodes[l.b];
+            const hit = zones.find(z => { if ((A.kind === 'zone' && A.zone === z) || (B.kind === 'zone' && B.zone === z)) return false; if (swbPip(l.pa, z.xy) || swbPip(l.pb, z.xy)) return false; return swbSegHitsRing(l.pa, l.pb, z.xy); });
+            if (!hit) continue;
+            if (l.added) { legs.splice(i, 1); droppedCross++; }
+            else l.flags.push(`CROSSES zone "${hit.name}"`);
+        }
+        if (droppedCross) logL(`${droppedCross} way-home leg(s) dropped: final line cut through a zone`);
         await swbYield();
         // ---- 6. stairs: walk the DEM along each leg ----
         const bandM = M(th.fpBandFt), ovM = th.overlapM, floorAdd = th.fpFloorM;

@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-14 — Site Setup Tools latest v4.284: SpiderWeb — base zones always join a hub star, final crossing check (dev only)
+
+- A base zone joins any hub star whose spoke to it is clear, without counting against the spoke cap, and the default hub-to-base reach is 10,000 ft. Hubs with a straight, unobstructed line to a base now connect to it; hubs whose line would cut through a neighbouring pad do not, which is the rule for every leg.
+- After leg ends are placed, every leg is re-checked against the zones it does not end on. A way-home extra that would cut through a pad is dropped; anything else is a hard gate.
+
 ## 2026-09-14 — Site Setup Tools latest v4.282: SpiderWeb — a hub's spoke to a base is priced like a direct base leg (dev only)
 
 - A hub keeps its spoke to a base zone whenever it shortens the summed way home at all (the "base leg ratio", default 0), instead of having to earn a foot of way-home per foot of spoke like a pad spoke does. Hubs near a base now connect to it.
