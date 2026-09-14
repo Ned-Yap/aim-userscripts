@@ -69,6 +69,10 @@ The `changes.csv` audit log crossed GitHub's 1 MB Contents-API cliff on 2026-08-
 - **Raw-read diagnostics**: the >1 MB fallback now logs status / length / head so a future failure explains itself.
 - Data repo: rotated the oversized file to `changes-archive-2026-08.csv` by hand (commit `f0c381ce`); appends resume on the next cycle with no reinstall needed. Rows between 2026-08-18 and today exist only in the per-site snapshot rings.
 
+## 2026-09-14 — 📐 Cross-ref: point layers report point counts: AIM Fleet Tools v0.29 (latest — dev only)
+
+A point-only source (risers, wells, assets) has no line length, so the summary read "total 0 ft" with the real answer tucked into the points line. Point layers now lead with **counts and percentages** per band (Tattu / Tulip-only / beyond, cumulative reachable), the per-base table shows **points per base** (bases with none in range are folded into one line), the 📋 report matches, and the "Longest stretches" section is skipped when there are no lines. Mixed line + point layers keep the length view with points alongside.
+
 ## 2026-09-14 — 📐 Cross-reference from base stations: AIM Fleet Tools v0.28 (latest — dev only)
 
 New cross-ref target **"Base stations — straight-line range (Tattu / Tulip, no shielding)"**. Pick a KML network (water lines, assets, anything) and the engine measures every stretch by one-way straight-line distance from the nearest site **base station** (type 8 in each site's setup): blue = within **Tattu** range (≤14,000 ft), amber = **Tulip** only (14,000–18,000 ft), red = beyond both. Both ranges are editable when this target is selected (their own settings — the 50/200 ft coverage bands are untouched). Result panel + 📋 report show the three bands, the **cumulative reachable-without-shielding** number, and a **per-base table** (site, Tattu miles, Tulip-only miles, reachable total, points) with ↗ links. Sites in range whose setup has no base station are listed as skipped, never silently counted. Site geometry is fetched live, so the base positions are current.

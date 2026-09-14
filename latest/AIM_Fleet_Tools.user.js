@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.28
+// @version      0.29
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.28';
+    const SCRIPT_VERSION = '0.29';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -2409,7 +2409,9 @@
             };
             xrefState = { running: false, result };
             console.log(`${TAG} cross-ref done:`, buildXrefReport().split('\n').slice(0, 8).join(' | '));
-            setStatus(`cross-ref done — ≤${result.b1} ft: ${fmtMi(bandLenM[1])} · ≤${result.b2} ft: ${fmtMi(bandLenM[1] + bandLenM[2])} of ${fmtMi(totalLenM)}`);
+            setStatus(totalLenM > 0
+                ? `cross-ref done — ≤${result.b1} ft: ${fmtMi(bandLenM[1])} · ≤${result.b2} ft: ${fmtMi(bandLenM[1] + bandLenM[2])} of ${fmtMi(totalLenM)}`
+                : `cross-ref done — ≤${result.b1} ft: ${pointHits[1]} · ≤${result.b2} ft: ${pointHits[1] + pointHits[2]} of ${result.pointsTotal} points`);
             renderPanel();
             renderOverlay();
         } catch (e) {
@@ -2435,6 +2437,34 @@
         lines.push(`Source: "${r.srcName}" · Target: ${r.tgtLabel}${r.sitesUsed ? ` (${r.sitesUsed} site(s) in range)` : ''}`);
         lines.push(`Ran ${new Date(r.at).toLocaleString()} · bands ≤${r.b1} ft / ≤${r.b2} ft · sampled every ~${r.stepFt} ft`);
         lines.push('');
+        const P = r.pointHits || { 0: 0, 1: 0, 2: 0 };
+        const pointsOnly = !!r.pointsTotal && !(r.totalM > 0);
+        if (pointsOnly) {
+            // Point layer (risers, assets, wells…): counts ARE the result.
+            const tot = r.pointsTotal;
+            lines.push(`Points total: ${tot}`);
+            if (r.mode === 'bases') {
+                lines.push(`  Tattu range (≤${r.b1.toLocaleString()} ft from a base):   ${P[1]} (${pct(P[1], tot)})`);
+                lines.push(`  Tulip only (${r.b1.toLocaleString()}–${r.b2.toLocaleString()} ft):        ${P[2]} (${pct(P[2], tot)})`);
+                lines.push(`  ≤${r.b2.toLocaleString()} ft CUMULATIVE:            ${P[1] + P[2]} (${pct(P[1] + P[2], tot)})   ← reachable straight-line from a base (no shielding needed)`);
+                lines.push(`  beyond Tulip range:              ${P[0]} (${pct(P[0], tot)})   ← needs shielding / a new base`);
+                lines.push(`Bases: ${r.basesUsed} across ${r.sitesUsed} site(s) fetched${r.sitesNoBase ? ` · ${r.sitesNoBase} site(s) skipped (no base in setup)` : ''} · distance = one-way straight line from the base`);
+            } else {
+                lines.push(`  ≤${r.b1} ft of target:      ${P[1]} (${pct(P[1], tot)})`);
+                lines.push(`  ${r.b1}–${r.b2} ft:            ${P[2]} (${pct(P[2], tot)})`);
+                lines.push(`  ≤${r.b2} ft CUMULATIVE:    ${P[1] + P[2]} (${pct(P[1] + P[2], tot)})   ← inspectable from existing coverage`);
+                lines.push(`  beyond ${r.b2} ft:          ${P[0]} (${pct(P[0], tot)})   ← needs new site area`);
+            }
+            if (r.mode === 'bases' && r.perBase && r.perBase.length) {
+                lines.push('');
+                lines.push('Per base (site | Tattu pts | Tulip-only pts | reachable pts):');
+                r.perBase.filter(b => b.pts[1] + b.pts[2] > 0).forEach(b => lines.push(`  ${b.name} (#${b.sid})${b.bases > 1 ? ` ×${b.bases} bases` : ''} | ${b.pts[1]} | ${b.pts[2]} | ${b.pts[1] + b.pts[2]}`));
+                const zero = r.perBase.filter(b => b.pts[1] + b.pts[2] === 0).length;
+                if (zero) lines.push(`  (+${zero} base(s) with no points in range)`);
+            }
+            r.notes.forEach(nn => lines.push(`Note: ${nn}`));
+            return lines.join('\n');
+        }
         lines.push(`Line length total: ${fmtMi(r.totalM)}`);
         if (r.mode === 'bases') {
             lines.push(`  Tattu range (≤${r.b1.toLocaleString()} ft from a base):   ${fmtMi(L[1])} (${pct(L[1], r.totalM)})`);
@@ -2457,6 +2487,7 @@
             lines.push('');
             lines.push(`Points: ${r.pointsTotal} total — ≤${r.b1} ft: ${r.pointHits[1]} · ${r.b1}–${r.b2} ft: ${r.pointHits[2]} · beyond: ${r.pointHits[0]}`);
         }
+        if (r.runsTotal) {
         lines.push('');
         lines.push(`Longest stretches (${Math.min(40, r.runsTotal)} of ${r.runsTotal}):`);
         (r.topRuns || r.runs).slice(0, 40).forEach((run, i) => {
@@ -2464,6 +2495,7 @@
             const mid = run.pts[Math.floor(run.pts.length / 2)];
             lines.push(`  ${i + 1}. [${tag}] ${fmtMi(run.lenM)}${run.featName ? ` — ${run.featName}` : ''} @ ${mid[0].toFixed(6)}, ${mid[1].toFixed(6)}`);
         });
+        }
         r.notes.forEach(n => lines.push(`Note: ${n}`));
         return lines.join('\n');
     }
@@ -2690,7 +2722,16 @@
             const bases = r.mode === 'bases';
             const lbl1 = bases ? `Tattu ≤${r.b1.toLocaleString()} ft` : `≤${r.b1} ft`;
             const lbl2 = bases ? `Tulip only ${r.b1.toLocaleString()}–${r.b2.toLocaleString()} ft` : `${r.b1}–${r.b2} ft`;
-            rows.push(`<div style="padding:4px 10px;border-bottom:1px solid #222834;">`
+            const P = r.pointHits || { 0: 0, 1: 0, 2: 0 };
+            const pointsOnly = !!r.pointsTotal && !(r.totalM > 0);   // point layer → counts are the result
+            if (pointsOnly) rows.push(`<div style="padding:4px 10px;border-bottom:1px solid #222834;">`
+                + `"${escapeHtml(r.srcName)}" vs ${escapeHtml(r.tgtLabel)}${r.sitesUsed ? ` <span style="color:#888">(${bases ? `${r.basesUsed} base(s), ` : ''}${r.sitesUsed} sites in range${r.sitesNoBase ? `, ${r.sitesNoBase} without a base` : ''})</span>` : ''} — <b>${r.pointsTotal} points</b><br>`
+                + `<span style="color:${XREF_COLORS[1]}">■ ${lbl1}: ${P[1]} (${pct(P[1], r.pointsTotal)})</span> · `
+                + `<span style="color:${XREF_COLORS[2]}">■ ${lbl2}: ${P[2]} (${pct(P[2], r.pointsTotal)})</span> · `
+                + `<span style="color:${XREF_COLORS[0]}">■ beyond: ${P[0]} (${pct(P[0], r.pointsTotal)})</span><br>`
+                + `<b style="color:#5fff5f">≤${r.b2.toLocaleString()} ft cumulative: ${P[1] + P[2]} points (${pct(P[1] + P[2], r.pointsTotal)})</b> <span style="color:#888">— ${bases ? 'reachable straight-line from a base, no shielding needed' : 'inspectable from existing coverage'}</span>`
+                + '</div>');
+            else rows.push(`<div style="padding:4px 10px;border-bottom:1px solid #222834;">`
                 + `"${escapeHtml(r.srcName)}" vs ${escapeHtml(r.tgtLabel)}${r.sitesUsed ? ` <span style="color:#888">(${bases ? `${r.basesUsed} base(s), ` : ''}${r.sitesUsed} sites in range${r.sitesNoBase ? `, ${r.sitesNoBase} without a base` : ''})</span>` : ''} — total ${fmtMi(r.totalM)}<br>`
                 + `<span style="color:${XREF_COLORS[1]}">■ ${lbl1}: ${fmtMi(L[1])} (${pct(L[1], r.totalM)})</span> · `
                 + `<span style="color:${XREF_COLORS[2]}">■ ${lbl2}: ${fmtMi(L[2])} (${pct(L[2], r.totalM)})</span> · `
@@ -2699,10 +2740,17 @@
                 + (r.pointsTotal ? `<br><span style="color:#aaa">points: ${lbl1} ${r.pointHits[1]} · ${lbl2} ${r.pointHits[2]} · beyond ${r.pointHits[0]} of ${r.pointsTotal}</span>` : '')
                 + '</div>');
             if (bases && r.perBase && r.perBase.length) {
+                const list = pointsOnly ? r.perBase.filter(b => b.pts[1] + b.pts[2] > 0) : r.perBase;
+                const zero = r.perBase.length - list.length;
+                const cell = (v, extra) => `<td style="padding:2px 8px;${extra || ''}">${v}</td>`;
                 rows.push('<div style="max-height:22vh;overflow-y:auto;border-bottom:1px solid #222834;"><table style="border-collapse:collapse;width:100%;font:inherit;">'
-                    + `<thead><tr style="color:#7adfe6;text-align:left;position:sticky;top:0;background:#14181f"><th style="padding:2px 8px">Base (site)</th><th style="padding:2px 8px;color:${XREF_COLORS[1]}">Tattu</th><th style="padding:2px 8px;color:${XREF_COLORS[2]}">Tulip only</th><th style="padding:2px 8px;color:#5fff5f">Reachable</th><th style="padding:2px 8px">Points</th></tr></thead><tbody>`
-                    + r.perBase.map(b => `<tr style="border-bottom:1px solid #1d2430"><td style="padding:2px 8px">${escapeHtml(b.name)} <span style="color:#555">#${b.sid}</span>${b.bases > 1 ? ` <span style="color:#888">×${b.bases}</span>` : ''} <span data-ft-link="${b.sid}" style="cursor:pointer;color:#5fb3ff">↗</span></td>`
-                        + `<td style="padding:2px 8px">${fmtMi(b.lenM[1])}</td><td style="padding:2px 8px">${fmtMi(b.lenM[2])}</td><td style="padding:2px 8px;font-weight:bold">${fmtMi(b.lenM[1] + b.lenM[2])}</td><td style="padding:2px 8px;color:#aaa">${b.pts[1]}/${b.pts[2]}</td></tr>`).join('')
+                    + `<thead><tr style="color:#7adfe6;text-align:left;position:sticky;top:0;background:#14181f"><th style="padding:2px 8px">Base (site)</th><th style="padding:2px 8px;color:${XREF_COLORS[1]}">Tattu</th><th style="padding:2px 8px;color:${XREF_COLORS[2]}">Tulip only</th><th style="padding:2px 8px;color:#5fff5f">Reachable</th>${pointsOnly ? '' : '<th style="padding:2px 8px">Points</th>'}</tr></thead><tbody>`
+                    + list.map(b => `<tr style="border-bottom:1px solid #1d2430"><td style="padding:2px 8px">${escapeHtml(b.name)} <span style="color:#555">#${b.sid}</span>${b.bases > 1 ? ` <span style="color:#888">×${b.bases}</span>` : ''} <span data-ft-link="${b.sid}" style="cursor:pointer;color:#5fb3ff">↗</span></td>`
+                        + (pointsOnly
+                            ? cell(`${b.pts[1]} pts`) + cell(`${b.pts[2]} pts`) + cell(`${b.pts[1] + b.pts[2]} pts`, 'font-weight:bold')
+                            : cell(fmtMi(b.lenM[1])) + cell(fmtMi(b.lenM[2])) + cell(fmtMi(b.lenM[1] + b.lenM[2]), 'font-weight:bold') + cell(`${b.pts[1]}/${b.pts[2]}`, 'color:#aaa'))
+                        + '</tr>').join('')
+                    + (zero ? `<tr><td colspan="5" style="padding:2px 8px;color:#666">+${zero} base(s) with no points in range</td></tr>` : '')
                     + '</tbody></table></div>');
             }
             rows.push('<div style="max-height:28vh;overflow-y:auto;">'
