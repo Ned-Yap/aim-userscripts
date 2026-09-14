@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Nav
 // @namespace    http://tampermonkey.net/
-// @version      0.11
+// @version      0.12
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Map_Nav.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Map_Nav.user.js
 // @description  Keyboard nav for the Percepto map. WASD pan / Q-E zoom out-in (always-on). ALT for sprint (3x). SPACE = zoom-to-fit entire site setup. 🧭 map-tools button = go to a pasted GPS coordinate (pan/zoom + pulse marker). Other Shift/Ctrl + nav keys pass through to existing macros (Shift+D Delete etc.) and browser shortcuts. For zoom-into-area use Leaflet's native Shift+drag box-zoom. Input-guarded so typing is unaffected.
@@ -48,10 +48,15 @@
 //   - Shift/Ctrl checked PER EVENT (e.shiftKey / e.ctrlKey) — if true
 //     on a motion-key event, we return early without preventDefault,
 //     leaving the macro / browser shortcut path untouched.
-//   - Space → fitMapToSiteSetup: walks map.eachLayer for any layer with
-//     getLatLng or getLatLngs (Percepto's markers + polygons), unions
-//     bounds, fitBounds with padding. When invoked from TOP, forwarded
-//     to iframe via AIM_MAP_NAV_FORWARD channel for state consistency.
+//   - Space → fitMapToSiteSetup: fetches the site's own entity list
+//     (GET /map_objects/ for the site id in the URL), unions every
+//     entity coordinate, fitBounds with padding. v0.12 — the old
+//     map.eachLayer walk unioned EVERY Leaflet layer, so AIM overlays
+//     (neighbor-site outlines, fleet KMLs, airspace/RRC/boundary
+//     vectors, stray markers) dragged the fit miles off the site. Layer
+//     walk survives only as a logged fallback. Runs in whichever frame
+//     caught the key (getLeafletMap reaches the iframe map from TOP) —
+//     no BroadcastChannel forward, so it is tab-local.
 //   - blur clears state so tab-away doesn't strand a panning map.
 //
 // Leaflet detection: walks .leaflet-container elements in the local
@@ -67,7 +72,7 @@
     'use strict';
 
     const TAG = '[AIM NAV]';
-    const SCRIPT_VERSION = '0.11';
+    const SCRIPT_VERSION = '0.12';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -229,52 +234,140 @@
     }
 
     // ------- Zoom-to-fit (Space) -------
-    // Walk every Leaflet layer with location data; union their bounds;
-    // fitBounds with padding. Skips tile layers (no getLatLng/getLatLngs).
-    // KML lines rendered as raw SVG (Map Styler does this) won't show up
-    // here — Percepto's own markers/polygons usually cover the site
-    // extent though, so this is a reasonable proxy for "entire site setup".
-    function fitMapToSiteSetup() {
-        const map = getLeafletMap();
-        if (!map) return false;
-        let L;
-        try { L = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).L; }
-        catch (e) { return false; }
-        if (!L || typeof L.latLngBounds !== 'function') return false;
+    // v0.12: bounds come from the SITE'S OWN ENTITY LIST (GET /map_objects/
+    // for the current site id), not from a walk of every Leaflet layer.
+    // The layer walk unioned everything on the map — AIM overlays
+    // (neighbor-site outlines, fleet KML layers, airspace / RRC /
+    // boundary vectors, stray markers) dragged the bounds miles off the
+    // site, so Space landed on a "completely different area". The entity
+    // list is exactly the site setup and nothing else. The layer walk
+    // survives only as a fallback (no site id / fetch failed) and says
+    // so in the console.
+    const SITE_ID_RE = /#\/site\/(\d+)\//;
+    const MAP_OBJECTS_URL = '/map_objects/?getPoiMapObjectsAsList=true&site_id=';
+    const FIT_CACHE_MS = 30 * 1000;   // repeated Space presses reuse the fetch
+    let fitCache = { siteID: null, bounds: null, at: 0 };
 
-        const bounds = L.latLngBounds([]);
-        const flattenLatLngs = (arr, out) => {
-            if (!arr) return;
-            if (Array.isArray(arr)) { arr.forEach(x => flattenLatLngs(x, out)); return; }
-            if (arr && typeof arr.lat === 'number' && typeof arr.lng === 'number') out.push(arr);
-        };
+    function getSiteID() {
+        let hash = '';
+        try { hash = (window.top || window).location.hash || ''; } catch (e) {}
+        if (!hash) { try { hash = location.hash || ''; } catch (e) {} }
+        const m = hash.match(SITE_ID_RE);
+        return m ? m[1] : null;
+    }
 
-        try {
-            map.eachLayer(layer => {
-                try {
-                    if (typeof layer.getLatLng === 'function') {
-                        const ll = layer.getLatLng();
-                        if (ll && typeof ll.lat === 'number') bounds.extend(ll);
-                    } else if (typeof layer.getLatLngs === 'function') {
-                        const out = [];
-                        flattenLatLngs(layer.getLatLngs(), out);
-                        out.forEach(p => bounds.extend(p));
-                    }
-                } catch (e) {}
-            });
-        } catch (e) {
-            console.warn(`${TAG} fitMapToSiteSetup: eachLayer failed:`, e);
-            return false;
-        }
-
-        if (!bounds.isValid()) {
-            console.log(`${TAG} fitMapToSiteSetup: no valid bounds (no markers/polygons on map yet?)`);
-            return false;
-        }
-        try {
-            map.fitBounds(bounds, { padding: [FIT_PADDING_PX, FIT_PADDING_PX], animate: true, maxZoom: 20 });
+    // Plain south/west/north/east accumulator — no dependency on window.L,
+    // so TOP (which has no Leaflet global; the map lives in the iframe)
+    // can fit directly. map.fitBounds accepts the [[s,w],[n,e]] array form.
+    function makeBoundsAcc() {
+        const b = { s: Infinity, w: Infinity, n: -Infinity, e: -Infinity, count: 0, entities: 0 };
+        b.extend = (lat, lng) => {
+            if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+            if (lat < b.s) b.s = lat;
+            if (lat > b.n) b.n = lat;
+            if (lng < b.w) b.w = lng;
+            if (lng > b.e) b.e = lng;
+            b.count++;
             return true;
-        } catch (e) { return false; }
+        };
+        b.valid = () => b.count > 0;
+        b.toArray = () => [[b.s, b.w], [b.n, b.e]];
+        b.describe = () => `${b.count} pts → [${b.s.toFixed(5)}, ${b.w.toFixed(5)}] – [${b.n.toFixed(5)}, ${b.e.toFixed(5)}]`;
+        return b;
+    }
+
+    // Every entity type (asset 3, base 8, FP 15, FFZ 16, GM 19, safe 98, …)
+    // carries coords[] of {lat,lng}; flight paths also carry arcs[] with
+    // point_a / point_b. Union all of them.
+    function boundsFromEntities(list) {
+        const b = makeBoundsAcc();
+        list.forEach(e => {
+            if (!e) return;
+            let hit = false;
+            if (Array.isArray(e.coords)) {
+                e.coords.forEach(c => { if (c && b.extend(c.lat, c.lng)) hit = true; });
+            }
+            if (Array.isArray(e.arcs)) {
+                e.arcs.forEach(a => {
+                    if (!a) return;
+                    [a.point_a, a.point_b].forEach(p => { if (p && b.extend(p.lat, p.lng)) hit = true; });
+                });
+            }
+            if (hit) b.entities++;
+        });
+        return b;
+    }
+
+    async function fetchSiteBounds(siteID) {
+        if (fitCache.siteID === siteID && fitCache.bounds && (Date.now() - fitCache.at) < FIT_CACHE_MS) {
+            return fitCache.bounds;
+        }
+        const r = await fetch(MAP_OBJECTS_URL + encodeURIComponent(siteID), { credentials: 'same-origin' });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const data = await r.json();
+        if (!Array.isArray(data)) throw new Error('response not an array');
+        const b = boundsFromEntities(data);
+        if (!b.valid()) throw new Error(`site ${siteID}: ${data.length} entities but no coordinates`);
+        fitCache = { siteID, bounds: b, at: Date.now() };
+        return b;
+    }
+
+    // Legacy fallback: union every Leaflet layer with location data.
+    // Skips tile layers (no getLatLng/getLatLngs). Can include non-site
+    // overlays — that is exactly the v0.11 bug, hence fallback-only.
+    function boundsFromLayers(map) {
+        const b = makeBoundsAcc();
+        const flatten = (arr) => {
+            if (!arr) return;
+            if (Array.isArray(arr)) { arr.forEach(flatten); return; }
+            if (typeof arr.lat === 'number' && typeof arr.lng === 'number') b.extend(arr.lat, arr.lng);
+        };
+        map.eachLayer(layer => {
+            try {
+                if (typeof layer.getLatLng === 'function') {
+                    const ll = layer.getLatLng();
+                    if (ll) b.extend(ll.lat, ll.lng);
+                } else if (typeof layer.getLatLngs === 'function') {
+                    flatten(layer.getLatLngs());
+                }
+            } catch (e) {}
+        });
+        return b;
+    }
+
+    function applyFit(map, b, source) {
+        try {
+            map.fitBounds(b.toArray(), { padding: [FIT_PADDING_PX, FIT_PADDING_PX], animate: true, maxZoom: 20 });
+            console.log(`${TAG} zoom-to-fit (${source}): ${b.describe()}`);
+            return true;
+        } catch (e) {
+            console.warn(`${TAG} zoom-to-fit: fitBounds threw:`, e);
+            return false;
+        }
+    }
+
+    async function fitMapToSiteSetup() {
+        const map = getLeafletMap();
+        if (!map) { console.warn(`${TAG} zoom-to-fit: no Leaflet map found`); return false; }
+        const siteID = getSiteID();
+        if (siteID) {
+            try {
+                const b = await fetchSiteBounds(siteID);
+                return applyFit(map, b, `site ${siteID}, ${b.entities} entities`);
+            } catch (e) {
+                console.warn(`${TAG} zoom-to-fit: entity fetch failed for site ${siteID}, falling back to layer walk:`, e);
+            }
+        } else {
+            console.warn(`${TAG} zoom-to-fit: no site id in URL, falling back to layer walk`);
+        }
+        let b;
+        try { b = boundsFromLayers(map); }
+        catch (e) { console.warn(`${TAG} zoom-to-fit: layer walk failed:`, e); return false; }
+        if (!b.valid()) {
+            console.log(`${TAG} zoom-to-fit: no layers with coordinates on map yet`);
+            return false;
+        }
+        return applyFit(map, b, 'layer walk — may include non-site overlays');
     }
 
     // ------- 🧭 Go to coordinate (v0.11) -------
@@ -513,16 +606,14 @@
         if (e.shiftKey || e.ctrlKey || e.metaKey) return;
 
         // Space → zoom-to-fit entire site setup. One-shot, not held.
-        // v0.6: forward from TOP to iframe for consistency (also avoids
-        // any iframe-vs-TOP state divergence on which layers are present).
+        // v0.12: handled in whichever frame caught the key — getLeafletMap
+        // reaches the iframe's map from TOP, and the bounds come from the
+        // API (not layer state), so there is no frame divergence to avoid.
+        // No BroadcastChannel forward: that hit every open tab.
         if (e.code === 'Space') {
             if (!spaceEnabled) return;
             try { e.preventDefault(); e.stopPropagation(); } catch (err) {}
-            if (IS_TOP && navChannel) {
-                try { navChannel.postMessage({ type: 'SPACE_FIT' }); } catch (err) {}
-            } else {
-                fitMapToSiteSetup();
-            }
+            fitMapToSiteSetup().catch(err => console.warn(`${TAG} zoom-to-fit failed:`, err));
             return;
         }
 
@@ -612,25 +703,6 @@
 
     setupControlPanel();
     registerWithControlPanel();
-
-    // ------- Cross-frame forwarding -------
-    // When TOP catches Space (zoom-to-fit), forward to iframe so the
-    // iframe handles using its own map state. v0.6 originally added
-    // this for Shift+Space's cursor-zoom (TOP's cursor tracker goes
-    // stale once the cursor enters the iframe area). v0.7 dropped
-    // Shift+Space entirely in favor of Leaflet's native Shift+drag
-    // box-zoom, but kept the channel for plain Space to keep behavior
-    // consistent regardless of which frame has focus.
-    const NAV_FORWARD_CHANNEL = 'AIM_MAP_NAV_FORWARD';
-    let navChannel = null;
-    try { navChannel = new BroadcastChannel(NAV_FORWARD_CHANNEL); }
-    catch (e) { console.warn(`${TAG} nav forward channel unavailable:`, e); }
-    if (navChannel && !IS_TOP) {
-        navChannel.onmessage = (ev) => {
-            const m = ev.data || {};
-            if (m.type === 'SPACE_FIT') fitMapToSiteSetup();
-        };
-    }
 
     console.log(`${TAG} v${SCRIPT_VERSION} ready (${FRAME}) — WASD pan · Q/E zoom · Alt sprint · Space = fit site · 🧭 go-to-coordinate · Shift/Ctrl pass through (use Shift+drag for box-zoom)`);
 })();

@@ -6,6 +6,13 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-14 — Map Nav v0.12 → PROD: Space zoom-to-fit lands on the site again
+
+- **Fix:** pressing Space jumped the map to a completely different area instead of framing the site. The fit unioned *every* Leaflet layer on the map, so any far-off overlay (neighbor-site outlines, fleet KML layers, airspace / RRC / boundary vectors, a stray marker) dragged the bounds miles away. Space now reads the site's own entity list from Percepto (`/map_objects/` for the site id in the URL) and fits exactly those — assets, FFZs, flight paths, markers, base and safe zones. The old layer walk only runs as a fallback when there is no site id or the fetch fails, and the console says which path was used.
+- Space is now tab-local: the TOP frame fits the map directly instead of broadcasting to every open tab.
+
+---
+
 ## 2026-09-14 — 🚨 Site Watch v0.25 — failure alerts by Slack DM (latest — dev only)
 
 Silent failures are over. Site Watch now DMs you on Slack (same bot + `users` mapping the Simulate DM uses, never the channel) when:
