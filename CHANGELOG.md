@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-14 — Site Setup Tools latest v4.275: SpiderWeb — legs leave from the nearest outside edge, star hubs, cleaner zones (dev only)
+
+- **Fix:** a leg could start on the far side of its own zone and cut straight through it. Cluster zones shaped like an L put the vertex-average "centre" outside the polygon, so the exit edge was picked from a point that was not inside. Zones now use a true interior anchor, and every leg end is the ring point nearest the far end that the leg actually departs from at 15° or more, re-aimed at the other leg end rather than the neighbour's centre.
+- **Hubs rebuilt as stars:** a hub now reaches every zone (and base) within a radius, replaces the legs between its members, and is accepted only when the summed way home to base falls enough per foot of new path (or a small loss buys less total path). Hub-to-hub links added where they shorten the sum. Radius, most spokes, gain ratio and loss cap are all in the panel and the Control Panel card.
+- Zones lose the small inward notches the union left at pad joints, and offsets of L-shaped pads now push outward on every edge.
+- The arc that lands on a zone is at least 100 ft long when the ground allows, so the last stair step is not a stub right before the edge.
+- Leg ends on adjacent edges keep the 15 ft gap around a corner; anything spacing cannot fix is reported (under 10 ft is a hard gate).
+
 ## 2026-09-14 — Site Setup Tools latest v4.274: 🕸 Unshielded SpiderWeb generator (preview) — dev only
 
 - **New (latest only, feature #261):** a `🕸 SpiderWeb` button on the SUM toolbar (Full mode) stages an unshielded site as a spider web — an FFZ around every non-EMPTY asset (16 ft mitered outset, touching buffers unioned), straight flight-path legs between zones that stop 1 ft inside the zone edge, and open-field hubs for the shortest way back to base. Legs sit at a 54 m floor (177 ft) over the highest ground under each arc with a 20 ft band, and get automatic stair steps from the 3DEP DEM so connected arcs always share ≥ 3 m and the drone never exceeds 200 ft AGL over a dip. Zones beyond the battery's one-way limit (Tulip 18k / Tattu 14k ft of web distance) are dropped and listed. MSL (mountain-terrain) sites only; nothing is written in this version — preview + report + gates. Own Control Panel card `SpiderWeb generator`.

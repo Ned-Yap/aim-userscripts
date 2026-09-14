@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.274
+// @version      4.275
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.274';
+    const SCRIPT_VERSION = '4.275';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -9368,7 +9368,7 @@
     }
 
     // ============================================================
-    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274) — PREVIEW ONLY
+    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.275) — PREVIEW ONLY
     // Design doc: ShortKeys/AIM_Unshielded_SpiderWeb_Design.md.
     // FFZ per asset (mitered outset, touching buffers unioned), straight
     // point-to-point FPs at a 54 m floor / +20 ft band with AUTOMATIC DEM
@@ -9390,6 +9390,10 @@
         stretchMax: 1.3,                         // web distance to base ÷ straight line — add a leg back above this
         hubMaxRtbLossPct: 3,                     // a hub may lengthen the summed return-to-base distance by at most this much
         battery: 'tulip', sampleFt: 25, marginFt: 500, hubs: true,
+        hubRadiusFt: 3500, hubMaxSpokes: 10,      // a hub star reaches zones within this radius, at most this many
+        hubGainRatio: 1,                          // a hub must save this many ft of summed way-home per ft of new flight path (0 = any saving)
+        approachFt: 100,                          // the arc that lands on a zone is at least this long when the ground allows
+        notchFt: 5,                               // fill inward notches in unioned zones up to this depth
     };
     let swbThresholds = loadSwbThresholds();
     let swbMasterEnabled = true;
@@ -9447,7 +9451,7 @@
         }
         return inside;
     }
-    function swbRingArea(r) { let a = 0; for (let i = 0, j = r.length - 1; i < r.length; j = i++) a += (r[j].x + r[i].x) * (r[j].y - r[i].y); return a / 2; }
+    function swbRingArea(r) { let a = 0; for (let i = 0, j = r.length - 1; i < r.length; j = i++) a += r[j].x * r[i].y - r[i].x * r[j].y; return a / 2; }   // standard shoelace: CCW positive
     function swbRingSelfX(r) {
         const n = r.length;
         for (let i = 0; i < n; i++) for (let j = i + 2; j < n; j++) {
@@ -9469,6 +9473,60 @@
     function swbSegHitsRing(a, b, ring) {
         for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) if (swbSegsCross(a, b, ring[j], ring[i])) return true;
         return swbPip({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, ring);
+    }
+    // Interior anchor: the inside grid point farthest from the ring (vertex means fall OUTSIDE L-shaped clusters).
+    function swbInteriorPoint(ring) {
+        let mx = 0, my = 0; ring.forEach(p => { mx += p.x; my += p.y; }); mx /= ring.length; my /= ring.length;
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        ring.forEach(p => { if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x; if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y; });
+        const edgeDist = (q) => { let m = Infinity; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) { const P = ring[j], Q = ring[i]; const dx = Q.x - P.x, dy = Q.y - P.y; const L2 = dx * dx + dy * dy || 1; let t = ((q.x - P.x) * dx + (q.y - P.y) * dy) / L2; t = Math.max(0, Math.min(1, t)); const d = Math.hypot(q.x - (P.x + t * dx), q.y - (P.y + t * dy)); if (d < m) m = d; } return m; };
+        let best = swbPip({ x: mx, y: my }, ring) ? { x: mx, y: my, d: edgeDist({ x: mx, y: my }) } : null;
+        const N = 14;
+        for (let i = 1; i < N; i++) for (let j = 1; j < N; j++) {
+            const q = { x: minX + (maxX - minX) * i / N, y: minY + (maxY - minY) * j / N };
+            if (!swbPip(q, ring)) continue;
+            const d = edgeDist(q);
+            if (!best || d > best.d) best = { x: q.x, y: q.y, d };
+        }
+        return best ? { x: best.x, y: best.y } : { x: mx, y: my };
+    }
+    // Mitered outward offset of a simple ring (xy) by offM. Normals come from the ring
+    // orientation, so concave (L-shaped) pads offset correctly on every edge; miters are
+    // capped at 4×off (bevel) so a sharp spike cannot shoot out.
+    function swbOffsetRing(ring, offM) {
+        const n = ring.length; if (n < 3) return ring.slice();
+        const ccw = swbRingArea(ring) > 0;
+        const nrm = [];
+        for (let i = 0; i < n; i++) { const P = ring[i], Q = ring[(i + 1) % n]; const dx = Q.x - P.x, dy = Q.y - P.y, L = Math.hypot(dx, dy) || 1; nrm.push(ccw ? { nx: dy / L, ny: -dx / L } : { nx: -dy / L, ny: dx / L }); }
+        const out = [];
+        for (let i = 0; i < n; i++) {
+            const V = ring[i], nPrev = nrm[(i - 1 + n) % n], nCur = nrm[i];
+            const a0 = { x: V.x + nPrev.nx * offM, y: V.y + nPrev.ny * offM }, a1 = { x: V.x + nCur.nx * offM, y: V.y + nCur.ny * offM };
+            const P = ring[(i - 1 + n) % n], Q = ring[(i + 1) % n];
+            const d0 = { x: V.x - P.x, y: V.y - P.y }, d1 = { x: Q.x - V.x, y: Q.y - V.y };
+            const X = lineX(a0, d0, a1, d1);
+            if (X && Math.hypot(X.x - V.x, X.y - V.y) <= offM * 4) out.push(X); else { out.push(a0); out.push(a1); }
+        }
+        return out;
+    }
+    // Fill inward notches (concave vertices within tol of the chord across them) and drop collinear
+    // vertices. Filling a notch only GROWS the polygon, so the standoff to the asset never shrinks.
+    function swbFillNotches(ring, tolM) {
+        let r = ring.slice();
+        const orient = Math.sign(swbRingArea(r)) || 1;
+        for (let pass = 0; pass < 20 && r.length > 4; pass++) {
+            let removed = false;
+            for (let i = 0; i < r.length && r.length > 4; i++) {
+                const P = r[(i - 1 + r.length) % r.length], V = r[i], Q = r[(i + 1) % r.length];
+                const cr = swbCross(P, V, Q);
+                const L = Math.hypot(Q.x - P.x, Q.y - P.y) || 1;
+                const dev = Math.abs(cr) / L;   // distance of V from chord P→Q
+                const concave = Math.sign(cr) === -orient;
+                if (dev < 0.1 || (concave && dev <= tolM)) { r.splice(i, 1); i--; removed = true; }
+            }
+            if (!removed) break;
+        }
+        return r;
     }
     // Geometric median (Weiszfeld) — Fermat point for 3, hub position for k.
     function swbGeoMedian(pts) {
@@ -9511,16 +9569,17 @@
         }
         return tris.filter(t => t.v.every(v => v < n)).map(t => t.v);
     }
-    // Multi-source Dijkstra over an adjacency list [{to, w}] — O(n²), n ≤ ~400.
+    // Multi-source Dijkstra over an adjacency list [{to, w}] with a binary heap (hub search runs it thousands of times).
     function swbDijkstra(n, adj, sources) {
-        const dist = new Float64Array(n).fill(Infinity), done = new Uint8Array(n);
-        sources.forEach(s => { dist[s] = 0; });
-        for (let it = 0; it < n; it++) {
-            let u = -1, best = Infinity;
-            for (let i = 0; i < n; i++) if (!done[i] && dist[i] < best) { best = dist[i]; u = i; }
-            if (u < 0) break;
-            done[u] = 1;
-            for (const e of adj[u]) { const nd = dist[u] + e.w; if (nd < dist[e.to]) dist[e.to] = nd; }
+        const dist = new Float64Array(n).fill(Infinity);
+        const hk = [], hv = [];   // heap of (key, vertex)
+        const push = (k, v) => { hk.push(k); hv.push(v); let i = hk.length - 1; while (i > 0) { const p = (i - 1) >> 1; if (hk[p] <= hk[i]) break; [hk[p], hk[i]] = [hk[i], hk[p]]; [hv[p], hv[i]] = [hv[i], hv[p]]; i = p; } };
+        const pop = () => { const k = hk[0], v = hv[0]; const lk = hk.pop(), lv = hv.pop(); if (hk.length) { hk[0] = lk; hv[0] = lv; let i = 0; for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < hk.length && hk[l] < hk[m]) m = l; if (r < hk.length && hk[r] < hk[m]) m = r; if (m === i) break; [hk[m], hk[i]] = [hk[i], hk[m]]; [hv[m], hv[i]] = [hv[i], hv[m]]; i = m; } } return [k, v]; };
+        sources.forEach(s0 => { if (s0 >= 0 && s0 < n) { dist[s0] = 0; push(0, s0); } });
+        while (hk.length) {
+            const [k, u] = pop();
+            if (k > dist[u]) continue;
+            for (const e of adj[u]) { const nd = k + e.w; if (nd < dist[e.to]) { dist[e.to] = nd; push(nd, e.to); } }
         }
         return dist;
     }
@@ -9626,8 +9685,9 @@
             gates.push({ label: 'no legs under 30 ft', ok: tiny === 0, soft: true, detail: `${tiny} tiny leg(s)` });
             const cliffs = result.legs.filter(l => l.flags.some(f => /cliff/.test(f))).length;
             gates.push({ label: 'no cliff steps', ok: cliffs === 0, soft: true, detail: `${cliffs} leg(s)` });
-            const crowded = result.zones.filter(z => z.flags.some(f => /crowded/.test(f))).length;
-            gates.push({ label: 'endpoint spacing', ok: crowded === 0, soft: true, detail: `${crowded} crowded edge(s)` });
+            const crowded = result.zones.filter(z => z.flags.some(f => /crowded|^ENDPOINTS/.test(f))).length;
+            const softGap = result.zones.filter(z => z.flags.some(f => /^endpoints/.test(f))).length;
+            gates.push({ label: 'endpoint spacing ≥ 10 ft', ok: crowded === 0, detail: `${crowded} crowded/under 10 ft · ${softGap} under the ${th.endpointGapFt} ft target` });
             const noDem = result.zones.filter(z => z.flags.some(f => /DEM/.test(f))).length + result.legs.filter(l => l.flags.some(f => /DEM/.test(f))).length;
             gates.push({ label: 'DEM coverage', ok: noDem === 0, detail: `${noDem} item(s) without ground` });
             result.gates = gates;
@@ -9656,10 +9716,9 @@
             let ring = entityCoords(a);
             const xy = ring.map(toXY);
             if (swbRingSelfX(xy)) ring = swbHullXY(xy).map(toLL);   // bowtie storage (corner, wellhead, corners…) → hull
-            let off = assetOffsetRing(ring, outsetM);
-            const a0 = Math.abs(swbRingArea(ring.map(toXY))), a1 = Math.abs(swbRingArea(off.map(toXY)));
-            if (!(a1 > a0)) { off = assetOffsetRing(ring.slice().reverse(), outsetM); }   // winding guard — offset must GROW
-            if (swbRingSelfX(off.map(toXY))) off = swbHullXY(off.map(toXY)).map(toLL);
+            let offXY = swbOffsetRing(ring.map(toXY), outsetM);
+            if (swbRingSelfX(offXY)) { try { const u = PC ? PC.union([[offXY.map(p => [p.x, p.y])]]) : null; if (u && u[0] && u[0][0]) offXY = u[0][0].slice(0, -1).map(c => ({ x: c[0], y: c[1] })); else offXY = swbHullXY(offXY); } catch (e) { offXY = swbHullXY(offXY); } }
+            const off = offXY.map(toLL);
             offRings.push({ asset: a, ring: off });
         });
         let zones = [];
@@ -9680,7 +9739,7 @@
         if (!zones.length) zones = offRings.map(o => ({ points: o.ring, assets: [o.asset] }));
         if (holesDropped) logL(`${holesDropped} interior hole(s) dropped from unioned zones`);
         // assign assets to zones by centroid pip
-        zones.forEach(z => { z.xy = z.points.map(toXY); z.assets = z.assets || []; });
+        zones.forEach(z => { const raw = z.points.map(toXY); z.xy = swbFillNotches(raw, M(th.notchFt)); if (z.xy.length !== raw.length) z.points = z.xy.map(toLL); z.assets = z.assets || []; });
         assets.forEach(a => {
             const c = toXY(ringCentroid(entityCoords(a)));
             const z = zones.find(zz => swbPip(c, zz.xy));
@@ -9691,7 +9750,7 @@
         zones.forEach((z, i) => {
             z.idx = i;
             z.name = z.assets.length === 1 ? z.assets[0].name : `${z.assets[0].name} +${z.assets.length - 1}`;
-            let cx = 0, cy = 0; z.xy.forEach(p => { cx += p.x; cy += p.y; }); z.cx = cx / z.xy.length; z.cy = cy / z.xy.length;
+            const anchor = swbInteriorPoint(z.xy); z.cx = anchor.x; z.cy = anchor.y;
             z.flags = [];
             // zone band from the ground inside the footprint (ring verts + centroid + grid)
             let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
@@ -9712,6 +9771,45 @@
         });
         await swbYield();
         // ---- 2. nodes + Delaunay ----
+        const gapM = M(th.endpointGapFt), cornerM = M(th.cornerGapFt);
+        const SIN15 = Math.sin(15 * Math.PI / 180);
+        const outNormal = (ring, P, Q) => { const dx = Q.x - P.x, dy = Q.y - P.y, L = Math.hypot(dx, dy) || 1; const ccw = swbRingArea(ring) > 0; return ccw ? { nx: dy / L, ny: -dx / L } : { nx: -dy / L, ny: dx / L }; };
+        const zoneEndpoint = (zn, toward) => {
+            const ring = zn.zone.xy, n = ring.length;
+            let best = null, fallback = null;
+            for (let i = 0; i < n; i++) {
+                const P = ring[i], Q = ring[(i + 1) % n];
+                const dx = Q.x - P.x, dy = Q.y - P.y, L = Math.hypot(dx, dy) || 1, L2 = L * L;
+                let u = ((toward.x - P.x) * dx + (toward.y - P.y) * dy) / L2;
+                const uMin = Math.min(cornerM / L, 0.5), uMax = Math.max(1 - cornerM / L, 0.5);
+                u = Math.max(uMin, Math.min(uMax, u));
+                const px = P.x + u * dx, py = P.y + u * dy;
+                const d = Math.hypot(toward.x - px, toward.y - py) || 1;
+                const { nx, ny } = outNormal(ring, P, Q);
+                const outward = ((toward.x - px) * nx + (toward.y - py) * ny) / d;   // sin of the angle off the edge
+                const cand = { d, edge: i, u };
+                // the departing segment must not re-enter the zone (L-shaped clusters wrap around a corner)
+                const clear = outward >= SIN15 && !swbSegHitsRing({ x: px + nx * 0.6, y: py + ny * 0.6 }, toward, ring);
+                if (clear && (!best || d < best.d)) best = cand;
+                if (!fallback || d < fallback.d) fallback = cand;
+            }
+            if (best) return best;
+            // fallback: the edge the ray from the interior anchor to the target leaves through
+            const A = { x: zn.x, y: zn.y };
+            let ray = null;
+            for (let i = 0; i < n; i++) {
+                const P = ring[i], Q = ring[(i + 1) % n];
+                const r = { x: toward.x - A.x, y: toward.y - A.y }, sg = { x: Q.x - P.x, y: Q.y - P.y };
+                const den = r.x * sg.y - r.y * sg.x; if (Math.abs(den) < 1e-9) continue;
+                const t = ((P.x - A.x) * sg.y - (P.y - A.y) * sg.x) / den, u = ((P.x - A.x) * r.y - (P.y - A.y) * r.x) / den;
+                if (t <= 0 || u < 0 || u > 1) continue;
+                if (!ray || t > ray.t) ray = { t, u, edge: i };
+            }
+            return ray ? { edge: ray.edge, u: ray.u } : fallback;
+        };
+        // landing point (xy) of a leg from `from` onto zone node `zn` — used for crossing tests
+        const landXY = (zn, from) => { const ep = zoneEndpoint(zn, from); const ring = zn.zone.xy, P = ring[ep.edge], Q = ring[(ep.edge + 1) % ring.length]; return { x: P.x + (Q.x - P.x) * ep.u, y: P.y + (Q.y - P.y) * ep.u }; };
+
         const nodes = zones.map(z => ({ kind: 'zone', x: z.cx, y: z.cy, zone: z }));
         bases.forEach(b => { const q = toXY(b.pt); nodes.push({ kind: 'base', x: q.x, y: q.y, base: b }); });
         const nZ = zones.length;
@@ -9723,8 +9821,12 @@
         // crossing test: a leg may not cut through a zone it does not end on, nor an NFZ
         const legBlocked = (a, b) => {
             const A = nodes[a], B = nodes[b];
-            for (const z of zones) { if ((A.kind === 'zone' && A.zone === z) || (B.kind === 'zone' && B.zone === z)) continue; if (swbPip(A, z.xy) || swbPip(B, z.xy)) continue; if (swbSegHitsRing(A, B, z.xy)) return true; }
-            for (const r of nfzXY) if (swbSegHitsRing(A, B, r)) return true;
+            // a base sitting inside a zone is already connected to it — no leg
+            if (A.kind === 'zone' && B.kind !== 'zone' && swbPip(B, A.zone.xy)) return true;
+            if (B.kind === 'zone' && A.kind !== 'zone' && swbPip(A, B.zone.xy)) return true;
+            const pa = A.kind === 'zone' ? landXY(A, B) : A, pb = B.kind === 'zone' ? landXY(B, A) : B;
+            for (const z of zones) { if ((A.kind === 'zone' && A.zone === z) || (B.kind === 'zone' && B.zone === z)) continue; if (swbPip(A, z.xy) || swbPip(B, z.xy)) continue; if (swbSegHitsRing(pa, pb, z.xy)) return true; }
+            for (const r of nfzXY) if (swbSegHitsRing(pa, pb, r)) return true;
             return false;
         };
         edges.forEach(e => { e.blocked = legBlocked(e.a, e.b); });
@@ -9742,97 +9844,133 @@
         // ---- 3. stretch pass: add pruned Delaunay legs back where the return path is long ----
         const baseIdx = nodes.map((n, i) => n.kind === 'base' ? i : -1).filter(i => i >= 0);
         const adjOf = (keys) => { const adj = nodes.map(() => []); keys.forEach(k => { const e = edges.get(k); adj[e.a].push({ to: e.b, w: e.len }); adj[e.b].push({ to: e.a, w: e.len }); }); return adj; };
-        const straightM = nodes.map(n => { const pts = n.kind === 'zone' ? n.zone.xy : [n]; let m = Infinity; baseIdx.forEach(b => pts.forEach(p => { const d = Math.hypot(p.x - nodes[b].x, p.y - nodes[b].y); if (d < m) m = d; })); return m; });
+        const straightM = nodes.map(n => { const pts = n.kind === 'zone' ? n.zone.xy : [n]; let m = Infinity; baseIdx.forEach(b => pts.forEach(p => { const d = Math.hypot(p.x - nodes[b].x, p.y - nodes[b].y); if (d < m) m = d; })); return Math.max(m, 150); });   // 150 m floor: a zone next to (or around) the base has no meaningful ratio
         let stretchAdded = 0;
-        for (let pass = 0; pass < 6; pass++) {
-            const dist = swbDijkstra(nodes.length, adjOf(web), baseIdx);
-            let changed = false;
-            for (let i = 0; i < nZ; i++) {
-                if (!Number.isFinite(dist[i]) || dist[i] <= straightM[i] * th.stretchMax) continue;
-                let best = null, bestD = dist[i];
-                edges.forEach((e, k) => {
-                    if (web.has(k) || e.blocked || (e.a !== i && e.b !== i)) return;
-                    const o = e.a === i ? e.b : e.a;
-                    const d = dist[o] + e.len;
-                    if (d < bestD) { bestD = d; best = k; }
-                });
-                if (best) { web.add(best); stretchAdded++; changed = true; }
-            }
-            if (!changed) break;
-        }
-        if (stretchAdded) logL(`stretch pass: ${stretchAdded} leg(s) restored (return path > ${th.stretchMax}× straight line)`);
-        await swbYield();
-        // ---- 4. hubs (Steiner points), accepted by summed return-to-base distance ----
-        const hubs = [];   // { x, y, zones: [nodeIdx…] }
-        const hubLegs = new Set();   // `h<i>:<node>`
-        const sumRtb = (adjExtra) => {
-            const n = nodes.length + hubs.length;
-            const adj = adjOf(web); hubs.forEach(() => adj.push([]));
-            hubs.forEach((h, hi) => { const hid = nodes.length + hi; h.zones.forEach(z => { const w = Math.hypot(h.x - nodes[z].x, h.y - nodes[z].y); adj[hid].push({ to: z, w }); adj[z].push({ to: hid, w }); }); });
-            if (adjExtra) adjExtra(adj);
-            const d = swbDijkstra(n, adj, baseIdx);
-            let s = 0, len = 0, unreachable = 0;
-            for (let i = 0; i < nZ; i++) { if (Number.isFinite(d[i])) s += d[i]; else unreachable++; }
-            web.forEach(k => { len += edges.get(k).len; });
-            hubs.forEach(h => h.zones.forEach(z => { len += Math.hypot(h.x - nodes[z].x, h.y - nodes[z].y); }));
-            return { sum: s, len, unreachable, dist: d };
-        };
-        if (th.hubs) {
-            const hubBlocked = (h, z) => { const Z = nodes[z]; for (const zz of zones) { if (Z.kind === 'zone' && Z.zone === zz) continue; if (swbPip(h, zz.xy)) return true; if (swbSegHitsRing(h, Z, zz.xy)) return true; } for (const r of nfzXY) if (swbSegHitsRing(h, Z, r)) return true; return false; };
-            let base0 = sumRtb();
-            // candidate triangles whose 3 legs are all in the web, sorted by Steiner saving
-            const cands = [];
-            tris.forEach(t => {
-                const ks = [ekey(t[0], t[1]), ekey(t[1], t[2]), ekey(t[2], t[0])];
-                if (!ks.every(k => web.has(k))) return;
-                if (t.some(v => nodes[v].kind === 'base')) return;   // keep base legs direct
-                const P = t.map(v => nodes[v]);
-                // Fermat point only exists strictly inside when every angle < 120°
-                for (let i = 0; i < 3; i++) { const a = P[i], b = P[(i + 1) % 3], c = P[(i + 2) % 3]; const v1 = { x: b.x - a.x, y: b.y - a.y }, v2 = { x: c.x - a.x, y: c.y - a.y }; const ang = Math.acos((v1.x * v2.x + v1.y * v2.y) / ((Math.hypot(v1.x, v1.y) * Math.hypot(v2.x, v2.y)) || 1)); if (ang >= Math.PI * 2 / 3) return; }
-                const h = swbGeoMedian(P);
-                const star = P.reduce((s, p) => s + Math.hypot(h.x - p.x, h.y - p.y), 0);
-                const mesh = ks.reduce((s, k) => s + edges.get(k).len, 0);
-                if (star >= mesh) return;
-                cands.push({ t: t.slice(), ks, h, save: mesh - star });
-            });
-            cands.sort((p, q) => q.save - p.save);
-            let accepted = 0, rejected = 0;
-            for (const c of cands) {
-                if (!c.ks.every(k => web.has(k))) continue;   // an edge already consumed by another hub
-                if (c.t.some(z => hubBlocked(c.h, z))) { rejected++; continue; }
-                c.ks.forEach(k => web.delete(k));
-                hubs.push({ x: c.h.x, y: c.h.y, zones: c.t.slice() });
-                const r = sumRtb();
-                if (r.unreachable > base0.unreachable || r.sum > base0.sum * (1 + th.hubMaxRtbLossPct / 100) || r.len >= base0.len) {
-                    hubs.pop(); c.ks.forEach(k => web.add(k)); rejected++;
-                } else { base0 = r; accepted++; }
-            }
-            // merge: fold an adjacent zone into an existing hub when the summed return distance allows
-            let merged = 0;
-            for (let pass = 0; pass < 4; pass++) {
+        const stretchPass = (hubArr, links) => {
+            for (let pass = 0; pass < 6; pass++) {
+                const nH = hubArr.length;
+                const adj = adjOf(web); for (let i = 0; i < nH; i++) adj.push([]);
+                hubArr.forEach((h, hi) => { const hid = nodes.length + hi; h.spokes.forEach(z => { const w = Math.hypot(h.x - nodes[z].x, h.y - nodes[z].y); adj[hid].push({ to: z, w }); adj[z].push({ to: hid, w }); }); });
+                links.forEach(([a, b]) => { const A = hubArr[a], B = hubArr[b]; const w = Math.hypot(A.x - B.x, A.y - B.y); adj[nodes.length + a].push({ to: nodes.length + b, w }); adj[nodes.length + b].push({ to: nodes.length + a, w }); });
+                const dist = swbDijkstra(nodes.length + nH, adj, baseIdx);
                 let changed = false;
-                for (const h of hubs) {
-                    const zset = new Set(h.zones);
-                    // zones connected by a web leg to ≥ 2 of the hub's zones are fold candidates
-                    const cnt = new Map();
-                    web.forEach(k => { const e = edges.get(k); if (zset.has(e.a) && !zset.has(e.b) && nodes[e.b].kind === 'zone') cnt.set(e.b, (cnt.get(e.b) || 0) + 1); if (zset.has(e.b) && !zset.has(e.a) && nodes[e.a].kind === 'zone') cnt.set(e.a, (cnt.get(e.a) || 0) + 1); });
-                    for (const [z, n] of cnt) {
-                        if (n < 2) continue;
-                        const removed = []; web.forEach(k => { const e = edges.get(k); if ((zset.has(e.a) && e.b === z) || (zset.has(e.b) && e.a === z)) removed.push(k); });
-                        const old = { x: h.x, y: h.y, zones: h.zones.slice() };
-                        removed.forEach(k => web.delete(k));
-                        h.zones.push(z);
-                        const nh = swbGeoMedian(h.zones.map(i => nodes[i])); h.x = nh.x; h.y = nh.y;
-                        const blocked = h.zones.some(zz => hubBlocked(h, zz));
-                        const r = blocked ? null : sumRtb();
-                        if (!r || r.unreachable > base0.unreachable || r.sum > base0.sum * (1 + th.hubMaxRtbLossPct / 100) || r.len >= base0.len) {
-                            h.x = old.x; h.y = old.y; h.zones = old.zones; removed.forEach(k => web.add(k));
-                        } else { base0 = r; merged++; changed = true; zset.add(z); }
-                    }
+                for (let i = 0; i < nZ; i++) {
+                    if (!Number.isFinite(dist[i]) || dist[i] <= straightM[i] * th.stretchMax) continue;
+                    let best = null, bestD = dist[i];
+                    edges.forEach((e, k) => {
+                        if (web.has(k) || e.blocked || (e.a !== i && e.b !== i)) return;
+                        const o = e.a === i ? e.b : e.a;
+                        const d = dist[o] + e.len;
+                        if (d < bestD) { bestD = d; best = k; }
+                    });
+                    if (best) { web.add(best); stretchAdded++; changed = true; }
                 }
                 if (!changed) break;
             }
-            logL(`hubs: ${accepted} accepted, ${rejected} rejected, ${merged} zone(s) folded into hubs (Σ RTB loss cap ${th.hubMaxRtbLossPct}%)`);
+        };
+        stretchPass([], []);
+        if (stretchAdded) logL(`stretch pass: ${stretchAdded} leg(s) restored (return path > ${th.stretchMax}× straight line)`);
+        await swbYield();
+        // ---- 4. hubs: star candidates scored by the summed return-to-base distance ----
+        // A hub = open-field point with spokes to every zone (and base) within hubRadiusFt whose
+        // spoke crosses nothing; the web legs between its members are replaced by the star.
+        // Accepted when Σ(zone→base) FALLS, or rises ≤ hubMaxRtbLossPct while total FP length falls.
+        // Hubs may also link straight to a base or to another hub when that shortens the sum.
+        const hubs = [];        // { x, y, spokes: [node idx…] }
+        const hubLinks = [];    // [hi, hj]
+        const nodeBlocked = (P, ni) => { const Z = nodes[ni]; const pz = Z.kind === 'zone' ? landXY(Z, P) : Z; for (const zz of zones) { if (Z.kind === 'zone' && Z.zone === zz) continue; if (swbPip(P, zz.xy)) return true; if (Z.kind !== 'zone' && swbPip(Z, zz.xy)) continue; if (swbSegHitsRing(P, pz, zz.xy)) return true; } for (const r of nfzXY) if (swbSegHitsRing(P, pz, r)) return true; return false; };
+        const ptBlocked = (P, Q) => { for (const zz of zones) { if (swbSegHitsRing(P, Q, zz.xy)) return true; } for (const r of nfzXY) if (swbSegHitsRing(P, Q, r)) return true; return false; };
+        const sumRtb = (hubArr, webSet, links) => {
+            const nH = hubArr.length, n = nodes.length + nH;
+            const adj = adjOf(webSet); for (let i = 0; i < nH; i++) adj.push([]);
+            let len = 0; webSet.forEach(k => { len += edges.get(k).len; });
+            hubArr.forEach((h, hi) => { const hid = nodes.length + hi; h.spokes.forEach(z => { const w = Math.hypot(h.x - nodes[z].x, h.y - nodes[z].y); adj[hid].push({ to: z, w }); adj[z].push({ to: hid, w }); len += w; }); });
+            links.forEach(([a, b]) => { const A = hubArr[a], B = hubArr[b]; const w = Math.hypot(A.x - B.x, A.y - B.y); adj[nodes.length + a].push({ to: nodes.length + b, w }); adj[nodes.length + b].push({ to: nodes.length + a, w }); len += w; });
+            const d = swbDijkstra(n, adj, baseIdx);
+            let sum = 0, unreachable = 0;
+            for (let i = 0; i < nZ; i++) { if (Number.isFinite(d[i])) sum += d[i]; else unreachable++; }
+            return { sum, len, unreachable };
+        };
+        let hubStats = 'off';
+        if (th.hubs) {
+            const R = M(th.hubRadiusFt), K = Math.max(3, th.hubMaxSpokes | 0);
+            // candidates: Fermat points + circumcenters of zone-only Delaunay triangles, deduped on a 300 ft grid
+            const seen = new Set(), cands = [];
+            const pushCand = (p) => { if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return; const k = `${Math.round(p.x / 90)}:${Math.round(p.y / 90)}`; if (seen.has(k)) return; if (zones.some(z => swbPip(p, z.xy))) return; seen.add(k); cands.push({ x: p.x, y: p.y }); };
+            tris.forEach(t => {
+                if (t.some(v => nodes[v].kind === 'base')) return;
+                const P = t.map(v => nodes[v]);
+                pushCand(swbGeoMedian(P));
+                const a = P[0], b = P[1], c = P[2];
+                const d = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+                if (Math.abs(d) > 1e-9) {
+                    const ux = ((a.x * a.x + a.y * a.y) * (b.y - c.y) + (b.x * b.x + b.y * b.y) * (c.y - a.y) + (c.x * c.x + c.y * c.y) * (a.y - b.y)) / d;
+                    const uy = ((a.x * a.x + a.y * a.y) * (c.x - b.x) + (b.x * b.x + b.y * b.y) * (a.x - c.x) + (c.x * c.x + c.y * c.y) * (b.x - a.x)) / d;
+                    const cc = { x: ux, y: uy };
+                    if (Math.min(...P.map(p => Math.hypot(p.x - cc.x, p.y - cc.y))) < R) pushCand(cc);
+                }
+            });
+            let cur = sumRtb(hubs, web, hubLinks);
+            let accepted = 0, evaluated = 0;
+            const memberSets = new Map();
+            for (let round = 0; round < 40; round++) {
+                const picks = [];
+                for (const c of cands) {
+                    if (c.used) continue;
+                    if (hubs.some(h => Math.hypot(h.x - c.x, h.y - c.y) < 600 / M_TO_FT)) { c.used = true; continue; }
+                    // members: nearest zones (and bases) within R whose spoke is clear
+                    const near = [];
+                    nodes.forEach((nd, i) => { const d = Math.hypot(nd.x - c.x, nd.y - c.y); if (d <= R) near.push({ i, d }); });
+                    near.sort((p, q) => p.d - q.d);
+                    const members = [];
+                    for (const m of near) { if (members.length >= K) break; if (nodeBlocked(c, m.i)) continue; members.push(m.i); }
+                    if (members.filter(i => nodes[i].kind === 'zone').length < 3) { c.used = true; continue; }
+                    const mset = new Set(members);
+                    const removed = []; web.forEach(k => { const e = edges.get(k); if (mset.has(e.a) && mset.has(e.b)) removed.push(k); });
+                    const trialWeb = new Set(web); removed.forEach(k => trialWeb.delete(k));
+                    const trialHubs = hubs.concat([{ x: c.x, y: c.y, spokes: members }]);
+                    const r = sumRtb(trialHubs, trialWeb, hubLinks); evaluated++;
+                    if (r.unreachable > cur.unreachable) continue;
+                    const dSum = r.sum - cur.sum, dLen = r.len - cur.len;
+                    // saves way-home (enough per foot of new path), or trades a small loss for less total path
+                    const ok = (dSum < 0 && (dLen <= 0 || -dSum >= th.hubGainRatio * dLen)) || (dSum <= cur.sum * th.hubMaxRtbLossPct / 100 && dLen < 0);
+                    if (!ok) continue;
+                    const score = dSum + 0.25 * dLen;   // prefer the biggest RTB gain, length as tiebreak
+                    picks.push({ c, members, removed, r, score });
+                }
+                if (!picks.length) break;
+                // batch: accept the best, then any others that share no member with this round's accepts (re-scored next round)
+                picks.sort((p, q) => p.score - q.score);
+                const taken = new Set();
+                let n0 = 0;
+                for (const p of picks) {
+                    if (p.members.some(m => taken.has(m))) continue;
+                    if (n0 > 0) { const chk = sumRtb(hubs.concat([{ x: p.c.x, y: p.c.y, spokes: p.members }]), (() => { const w = new Set(web); p.removed.forEach(k => w.delete(k)); return w; })(), hubLinks); const dS = chk.sum - cur.sum, dL = chk.len - cur.len; if (chk.unreachable > cur.unreachable || !((dS < 0 && (dL <= 0 || -dS >= th.hubGainRatio * dL)) || (dS <= cur.sum * th.hubMaxRtbLossPct / 100 && dL < 0))) continue; p.r = chk; }
+                    p.removed.forEach(k => web.delete(k));
+                    hubs.push({ x: p.c.x, y: p.c.y, spokes: p.members });
+                    p.c.used = true; cur = p.r; accepted++; n0++;
+                    p.members.forEach(m => taken.add(m));
+                }
+                await swbYield();
+            }
+            // hub→hub links that shorten the way home
+            let linksAdded = 0;
+            for (let pass = 0; pass < 3; pass++) {
+                let changed = false;
+                for (let i = 0; i < hubs.length; i++) for (let j = i + 1; j < hubs.length; j++) {
+                    if (hubLinks.some(([a, b]) => (a === i && b === j))) continue;
+                    const A = hubs[i], B = hubs[j];
+                    if (Math.hypot(A.x - B.x, A.y - B.y) > 2 * R || ptBlocked(A, B)) continue;
+                    const trial = hubLinks.concat([[i, j]]);
+                    const r = sumRtb(hubs, web, trial);
+                    if (r.sum < cur.sum * 0.995 && r.unreachable <= cur.unreachable) { hubLinks.push([i, j]); cur = r; linksAdded++; changed = true; }
+                }
+                if (!changed) break;
+            }
+            const before = stretchAdded; stretchPass(hubs, hubLinks);
+            if (stretchAdded > before) logL(`stretch pass after hubs: ${stretchAdded - before} leg(s) restored`);
+            hubStats = `${accepted} hubs from ${evaluated} evaluations, ${linksAdded} hub↔hub link(s), Σ way-home ${(cur.sum * M_TO_FT / 5280).toFixed(1)} mi`;
+            logL(`hubs: ${hubStats}`);
         }
         await swbYield();
         // ---- 5. legs with endpoints on zone edges ----
@@ -9840,32 +9978,28 @@
         const allNodes = nodes.concat(hubNodes);
         const legsRaw = [];   // { a, b } indices into allNodes
         web.forEach(k => { const e = edges.get(k); legsRaw.push({ a: e.a, b: e.b }); });
-        hubs.forEach((h, hi) => h.zones.forEach(z => legsRaw.push({ a: nodes.length + hi, b: z })));
-        // endpoint on a zone for a leg leaving toward `toward`
-        const zoneEndpoint = (zn, toward) => {
-            const ring = zn.zone.xy, n = ring.length;
-            const A = { x: zn.x, y: zn.y };
-            let best = null;
-            for (let i = 0; i < n; i++) {
-                const P = ring[i], Q = ring[(i + 1) % n];
-                // ray A→toward vs edge P→Q
-                const r = { x: toward.x - A.x, y: toward.y - A.y }, s = { x: Q.x - P.x, y: Q.y - P.y };
-                const den = r.x * s.y - r.y * s.x; if (Math.abs(den) < 1e-9) continue;
-                const t = ((P.x - A.x) * s.y - (P.y - A.y) * s.x) / den, u = ((P.x - A.x) * r.y - (P.y - A.y) * r.x) / den;
-                if (t <= 0 || u < 0 || u > 1) continue;
-                if (!best || t > best.t) best = { t, u, edge: i };   // farthest crossing = the real exit of a concave cluster
-            }
-            if (!best) { const i = 0; return { edge: i, u: 0.5 }; }
-            return { edge: best.edge, u: best.u };
-        };
+        hubs.forEach((h, hi) => h.spokes.forEach(z => legsRaw.push({ a: nodes.length + hi, b: z })));
+        hubLinks.forEach(([i, j]) => legsRaw.push({ a: nodes.length + i, b: nodes.length + j }));
+        // endpoint on a zone for a leg toward `toward`: the ring point CLOSEST to the target among the
+        // edges the leg actually leaves through (direction ≥ 15° off the edge, pointing outward) — so the
+        // leg departs from the nearest outside edge and never grazes or cuts through its own zone
+        const epPoint = (zn, ep) => { const ring = zn.zone.xy, P = ring[ep.edge], Q = ring[(ep.edge + 1) % ring.length]; return { x: P.x + (Q.x - P.x) * ep.u, y: P.y + (Q.y - P.y) * ep.u }; };
         const legs = legsRaw.map(l => {
             const A = allNodes[l.a], B = allNodes[l.b];
-            const ea = A.kind === 'zone' ? zoneEndpoint(A, B) : null;
-            const eb = B.kind === 'zone' ? zoneEndpoint(B, A) : null;
+            let ea = A.kind === 'zone' ? zoneEndpoint(A, B) : null;
+            let eb = B.kind === 'zone' ? zoneEndpoint(B, A) : null;
+            // a big neighbour's anchor can sit far from where the leg really lands — re-aim at the other end's point
+            for (let it = 0; it < 3; it++) {
+                const pa = ea ? epPoint(A, ea) : A, pb = eb ? epPoint(B, eb) : B;
+                const ea2 = A.kind === 'zone' ? zoneEndpoint(A, pb) : null;
+                const eb2 = B.kind === 'zone' ? zoneEndpoint(B, pa) : null;
+                const same = (p, q) => (!p && !q) || (p && q && p.edge === q.edge && Math.abs(p.u - q.u) < 1e-6);
+                if (same(ea, ea2) && same(eb, eb2)) break;
+                ea = ea2; eb = eb2;
+            }
             return { a: l.a, b: l.b, ea, eb, flags: [], arcs: [] };
         });
         // spacing per zone edge: ≥ endpointGap between endpoints, ≥ cornerGap off the corners
-        const gapM = M(th.endpointGapFt), cornerM = M(th.cornerGapFt);
         zones.forEach(z => {
             const slots = [];   // { leg, side:'ea'|'eb', edge, pos(m) }
             legs.forEach(l => { if (l.ea && allNodes[l.a].zone === z) slots.push({ leg: l, side: 'ea', ep: l.ea }); if (l.eb && allNodes[l.b].zone === z) slots.push({ leg: l, side: 'eb', ep: l.eb }); });
@@ -9884,16 +10018,44 @@
                 for (let i = list.length - 1; i >= 0; i--) list[i].pos = Math.min(list[i].pos, hi - (list.length - 1 - i) * gapM, i < list.length - 1 ? list[i + 1].pos - gapM : Infinity);
                 list.forEach(s => { s.ep.u = Math.max(0, Math.min(1, s.pos / L)); });
             });
+            // endpoints on DIFFERENT edges can still sit < gap apart across a corner — push both away from it
+            const xyOf = (s0) => { const P = z.xy[s0.ep.edge], Q = z.xy[(s0.ep.edge + 1) % z.xy.length]; return { x: P.x + (Q.x - P.x) * s0.ep.u, y: P.y + (Q.y - P.y) * s0.ep.u, L: Math.hypot(Q.x - P.x, Q.y - P.y) || 1 }; };
+            for (let pass = 0; pass < 20; pass++) {
+                let moved = false;
+                for (let i = 0; i < slots.length; i++) for (let j = i + 1; j < slots.length; j++) {
+                    const a = slots[i], b = slots[j];
+                    if (a.ep.edge === b.ep.edge) continue;
+                    const pa = xyOf(a), pb = xyOf(b);
+                    const d = Math.hypot(pa.x - pb.x, pa.y - pb.y);
+                    if (d >= gapM) continue;
+                    const need = (gapM - d) + 0.5;   // over-correct: edges meet at an angle, so the gain per move is less than the move
+                    // move each away from the shared corner along its own edge
+                    [[a, pa], [b, pb]].forEach(([s0, p0]) => {
+                        const n = z.xy.length, next = (s0.ep.edge + 1) % n, prev = (s0.ep.edge - 1 + n) % n;
+                        const other = s0 === a ? b : a;
+                        const towardEnd = other.ep.edge === next;   // shared corner is at u=1 → move toward u=0
+                        const du = need / p0.L;
+                        s0.ep.u = towardEnd ? Math.max(Math.min(cornerM / p0.L, 0.5), s0.ep.u - du) : Math.min(Math.max(1 - cornerM / p0.L, 0.5), s0.ep.u + du);
+                    });
+                    moved = true;
+                }
+                if (!moved) break;
+            }
+            // report what spacing could not fix: < 10 ft is a hard problem, < gap a soft one
+            for (let i = 0; i < slots.length; i++) for (let j = i + 1; j < slots.length; j++) {
+                const pa = xyOf(slots[i]), pb = xyOf(slots[j]);
+                const d = Math.hypot(pa.x - pb.x, pa.y - pb.y);
+                if (d < 10 / M_TO_FT) z.flags.push(`ENDPOINTS ${(d * M_TO_FT).toFixed(0)} ft apart (hard minimum 10)`);
+                else if (d < gapM - 0.05) z.flags.push(`endpoints ${(d * M_TO_FT).toFixed(0)} ft apart (target ${th.endpointGapFt})`);
+            }
         });
         // resolve endpoint → xy, 1 ft inside the zone
         const epXY = (zn, ep) => {
             const ring = zn.zone.xy, P = ring[ep.edge], Q = ring[(ep.edge + 1) % ring.length];
             const x = P.x + (Q.x - P.x) * ep.u, y = P.y + (Q.y - P.y) * ep.u;
-            const L = Math.hypot(Q.x - P.x, Q.y - P.y) || 1;
-            let nx = -(Q.y - P.y) / L, ny = (Q.x - P.x) / L;   // left normal
+            const o = outNormal(ring, P, Q);
             const inM = 1 / M_TO_FT;
-            if (!swbPip({ x: x + nx * 0.5, y: y + ny * 0.5 }, ring)) { nx = -nx; ny = -ny; }
-            return { x: x + nx * inM, y: y + ny * inM };
+            return { x: x - o.nx * inM, y: y - o.ny * inM };
         };
         legs.forEach(l => {
             const A = allNodes[l.a], B = allNodes[l.b];
@@ -9947,6 +10109,10 @@
             let s = 0, prevFloor = null, guard = 0;
             const rA = zoneRange(zA), rB = zoneRange(zB);
             n = pts.length;
+            // approach index: the last sample that still leaves ≥ approachFt to the end
+            const cum = [0]; for (let i = 1; i < n; i++) cum.push(cum[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y));
+            const approachM = M(th.approachFt);
+            let appIdx = n - 1; while (appIdx > 0 && cum[n - 1] - cum[appIdx] < approachM) appIdx--;
             while (s < n - 1 && guard++ < 5000) {
                 let e = s + 1, maxG = Math.max(g[s], g[e]), minG = Math.min(g[s], g[e]);
                 const range = (mx, mn, terminal) => {
@@ -9965,6 +10131,13 @@
                     if (prevFloor !== null && Math.abs(r[0] - prevFloor) > stepMax) l.flags.push(`cliff ${(Math.hypot(pts[s].x - pts[0].x, pts[s].y - pts[0].y) * M_TO_FT).toFixed(0)} ft along the leg (floor jumps ${Math.abs(r[0] - prevFloor)} m between samples)`);
                 }
                 while (e + 1 <= n - 1) {
+                    if (e + 1 > appIdx && e + 1 < n - 1 && zB) {
+                        // entering the approach: take the whole tail as the landing arc if it complies, else stop here
+                        let tmax = maxG, tmin = minG; for (let k = e + 1; k < n; k++) { if (g[k] > tmax) tmax = g[k]; if (g[k] < tmin) tmin = g[k]; }
+                        const tr = range(tmax, tmin, true);
+                        if (tr[0] <= tr[1]) { e = n - 1; maxG = tmax; minG = tmin; r = tr; }
+                        break;
+                    }
                     const nmax = Math.max(maxG, g[e + 1]), nmin = Math.min(minG, g[e + 1]);
                     const nr = range(nmax, nmin, e + 1 === n - 1);
                     if (nr[0] > nr[1]) break;
@@ -9979,6 +10152,7 @@
                 prevFloor = fl; s = e;
             }
             if (arcs.length > 40) l.flags.push(`many steps (${arcs.length})`);
+            if (zB && arcs.length > 1) { const last = arcs[arcs.length - 1]; const lenLast = cum[last.e] - cum[last.s]; if (lenLast < approachM * 0.5 && cum[n - 1] > approachM * 2) l.flags.push(`steep approach: landing arc only ${(lenLast * M_TO_FT).toFixed(0)} ft (ground near the zone forces it)`); }
             if (l.lenM * M_TO_FT < 30) l.flags.push(`tiny leg (${(l.lenM * M_TO_FT).toFixed(0)} ft) — zones nearly touch, consider merging`);
             // zone handoff: the arc touching each zone must share the zone band — 2 m is the hard line, overlapM the target
             [[zA, arcs[0]], [zB, arcs[arcs.length - 1]]].forEach(([z, arc]) => {
@@ -9997,7 +10171,7 @@
             const hid = nodes.length + hi;
             let lo = -Infinity, hiB = Infinity;
             legs.forEach(l => { if (l.a !== hid && l.b !== hid) return; if (!l.arcs.length || l.arcs[0].floorM === null) return; const arc = l.a === hid ? l.arcs[0] : l.arcs[l.arcs.length - 1]; lo = Math.max(lo, arc.floorM); hiB = Math.min(hiB, arc.ceilM); });
-            h.bandOk = (hiB - lo) >= ovM; h.bandM = [lo, hiB];
+            h.bandOk = (hiB - lo) >= ovM; h.bandM = [lo, hiB]; h.zones = h.spokes;
             if (!h.bandOk) legs.forEach(l => { if (l.a === hid || l.b === hid) l.flags.push(`hub ${hi + 1} bands do not share ${ovM} m`); });
         });
         await swbYield();
@@ -10026,6 +10200,8 @@
             link(u, v, l.lenM);
         });
         ownerEps.forEach(list => { for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) { const a = epNodes[list[i]], b = epNodes[list[j]]; link(list[i], list[j], Math.hypot(a.x - b.x, a.y - b.y)); } });
+        // a base inside a zone is reachable from that zone's endpoints across the zone
+        baseIdx.forEach(b => { const B = nodes[b]; zones.forEach((z, zi) => { if (!swbPip(B, z.xy)) return; (ownerEps.get(ownerKey(zi)) || []).forEach(e => { const q = epNodes[e]; link(pointNode.get(b), e, Math.hypot(q.x - B.x, q.y - B.y)); }); }); });
         const srcs = baseIdx.map(b => pointNode.get(b));
         const dist = swbDijkstra(epNodes.length, adj, srcs);
         zones.forEach((z, i) => {
@@ -10100,7 +10276,7 @@
         st.zones.forEach(z => out.push(`  ${z.name} · ${z.assets.length} asset(s) · floor ${z.floorM === null ? '?' : (z.floorM * M_TO_FT).toFixed(0)} / ceil ${z.ceilM === null ? '?' : (z.ceilM * M_TO_FT).toFixed(0)} ft MSL · ground ${z.gMinFt == null ? '?' : Math.round(z.gMinFt)}–${z.gMaxFt == null ? '?' : Math.round(z.gMaxFt)} ft · to base ${z.rtbM === null ? 'UNREACHABLE' : Math.round(z.rtbM * M_TO_FT).toLocaleString() + ' ft'} (${z.rtbM === null ? '—' : (z.rtbM / (z.straightM || 1)).toFixed(2)}× straight)${z.flags.length ? ' ⚠ ' + z.flags.join('; ') : ''}`));
         out.push('legs:');
         st.legs.forEach(l => out.push(`  ${l.nameA} → ${l.nameB} · ${Math.round(l.lenM * M_TO_FT).toLocaleString()} ft · ${l.arcs.length} arc(s) · ${l.arcs.map(a => a.floorM === null ? '?' : `${a.floorM}–${a.ceilM}`).join(' | ')} m MSL${l.flags.length ? ' ⚠ ' + l.flags.join('; ') : ''}`));
-        st.hubs.forEach((h, i) => out.push(`hub ${i + 1}: ${h.zones.length} spokes · ${h.ll.lat.toFixed(6)}, ${h.ll.lng.toFixed(6)} · band ${h.bandOk ? 'OK' : 'CONFLICT'}`));
+        st.hubs.forEach((h, i) => out.push(`hub ${i + 1}: ${h.spokes.length} spokes · ${h.ll.lat.toFixed(6)}, ${h.ll.lng.toFixed(6)} · band ${h.bandOk ? 'OK' : 'CONFLICT'}`));
         out.push('run log:'); st.runLog.forEach(s => out.push(`  ${s}`));
         return out.join('\n');
     }
@@ -10158,7 +10334,11 @@
                 ${num('outsetFt', 'outset ft', 1, 'Asset ring → zone')}
                 ${num('endpointGapFt', 'endpoint gap ft', 1, 'Minimum spacing between leg ends on one zone edge')}
                 ${num('stretchMax', 'stretch ×', 0.05, 'Restore a pruned leg when a zone\'s way home exceeds this × straight line')}
-                ${num('hubMaxRtbLossPct', 'hub RTB loss %', 0.5, 'A hub may lengthen the summed return-to-base distance by at most this')}
+                ${num('hubMaxRtbLossPct', 'hub RTB loss %', 0.5, 'A hub may lengthen the summed return-to-base distance by at most this (when it shortens total FP length)')}
+                ${num('hubRadiusFt', 'hub radius ft', 100, 'A hub star reaches zones within this radius')}
+                ${num('hubGainRatio', 'hub gain ratio', 0.5, 'A hub must save this many ft of summed way-home per ft of new flight path (0 = any saving)')}
+                ${num('hubMaxSpokes', 'max spokes', 1, 'Most spokes on one hub')}
+                ${num('approachFt', 'approach ft', 10, 'Landing arc is at least this long when the ground allows')}
                 <label style="display:flex;align-items:center;gap:4px;">battery<select data-swb-p="battery" style="background:#0d131d;color:#dfe9f0;border:1px solid rgba(43,140,255,0.4);border-radius:4px;font:inherit;"><option value="tulip" ${th.battery === 'tulip' ? 'selected' : ''}>Tulip</option><option value="tattu" ${th.battery === 'tattu' ? 'selected' : ''}>Tattu</option></select></label>
                 <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input data-swb-p="hubs" type="checkbox" ${th.hubs ? 'checked' : ''}>hubs</label>
             </div>
@@ -10574,6 +10754,11 @@
                 { id: 'stretchMax', label: 'Restore a leg when the way home exceeds × straight line', type: 'number', min: 1, max: 3, step: 0.05, default: SWB_DEFAULTS.stretchMax },
                 { id: 'hubMaxRtbLossPct', label: 'Hubs may lengthen the summed way home by up to', type: 'number', min: 0, max: 25, step: 0.5, default: SWB_DEFAULTS.hubMaxRtbLossPct, unit: '%' },
                 { id: 'hubs', label: 'Propose hubs', type: 'boolean', default: SWB_DEFAULTS.hubs },
+                { id: 'hubRadiusFt', label: 'Hub star radius', type: 'number', min: 500, max: 10000, step: 100, default: SWB_DEFAULTS.hubRadiusFt, unit: 'ft' },
+                { id: 'hubMaxSpokes', label: 'Most spokes on one hub', type: 'number', min: 3, max: 20, step: 1, default: SWB_DEFAULTS.hubMaxSpokes },
+                { id: 'hubGainRatio', label: 'Hub must save … ft of summed way-home per ft of new path (0 = any)', type: 'number', min: 0, max: 20, step: 0.5, default: SWB_DEFAULTS.hubGainRatio },
+                { id: 'approachFt', label: 'Minimum landing arc length', type: 'number', min: 25, max: 500, step: 5, default: SWB_DEFAULTS.approachFt, unit: 'ft' },
+                { id: 'notchFt', label: 'Fill inward notches in unioned zones up to', type: 'number', min: 0, max: 30, step: 1, default: SWB_DEFAULTS.notchFt, unit: 'ft' },
                 { id: 'battery', label: 'Battery for the one-way distance gate', type: 'select', options: [ { value: 'tulip', label: 'Tulip' }, { value: 'tattu', label: 'Tattu' } ], default: SWB_DEFAULTS.battery },
                 { id: 'sampleFt', label: 'DEM sample spacing along legs', type: 'number', min: 10, max: 100, step: 5, default: SWB_DEFAULTS.sampleFt, unit: 'ft' },
                 { id: 'marginFt', label: 'DEM margin around the site', type: 'number', min: 100, max: 5280, step: 50, default: SWB_DEFAULTS.marginFt, unit: 'ft' },
