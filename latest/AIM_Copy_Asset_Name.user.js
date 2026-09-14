@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.278
+// @version      4.279
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.278';
+    const SCRIPT_VERSION = '4.279';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -9368,7 +9368,7 @@
     }
 
     // ============================================================
-    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.278) — PREVIEW ONLY
+    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.279) — PREVIEW ONLY
     // Design doc: ShortKeys/AIM_Unshielded_SpiderWeb_Design.md.
     // FFZ per asset (mitered outset, touching buffers unioned), straight
     // point-to-point FPs at a 54 m floor / +20 ft band with AUTOMATIC DEM
@@ -9393,6 +9393,8 @@
         battery: 'tulip', sampleFt: 25, marginFt: 500, hubs: true,
         hubRadiusFt: 3500, hubMaxSpokes: 10,      // a hub star reaches zones within this radius, at most this many
         hubGainRatio: 1,                          // a hub must save this many ft of summed way-home per ft of new flight path (0 = any saving)
+        legGainRatio: 0,                          // same test for legs restored by the way-home pass (0 = fix any long detour)
+        baseLegGainRatio: 0,                      // same test for direct zone→base legs (0 = the base star: any zone with a long detour gets a straight shot home)
         approachFt: 100,                          // the arc that lands on a zone is at least this long when the ground allows
         notchFt: 5,                               // fill inward notches in unioned zones up to this depth
         mergeGapFt: 30,                           // zones closer than this are merged into one (bridged), instead of a tiny leg
@@ -9916,13 +9918,15 @@
                     if (bb !== null && bd < dist[i]) { const k = ekey(i, bb); if (!edges.has(k)) { if (!legBlocked(i, bb)) cands.push({ k, len: bd, direct: bb }); } else if (!web.has(k) && !edges.get(k).blocked) cands.push({ k, len: bd }); }
                     let best = null;
                     for (const c of cands) {
+                        const isBase = c.direct !== undefined || (edges.has(c.k) && nodes[edges.get(c.k).a].kind === 'base' || nodes[edges.get(c.k).b].kind === 'base');
+                        const ratio = Math.max(0, isBase ? th.baseLegGainRatio : th.legGainRatio);
                         if (c.direct !== undefined && !edges.has(c.k)) edges.set(c.k, { a: Math.min(i, c.direct), b: Math.max(i, c.direct), len: c.len, tris: [], blocked: false, direct: true });
                         web.add(c.k);
                         const d2 = swbDijkstra(nAll, buildAdj(web), baseIdx);
                         web.delete(c.k);
                         const gain = sum0 - sumOf(d2);
-                        if (gain < Math.max(0, th.hubGainRatio) * c.len) continue;
-                        const score = gain - th.hubGainRatio * c.len;
+                        if (gain <= 0 || gain < ratio * c.len) continue;
+                        const score = gain - ratio * c.len;
                         if (!best || score > best.score) best = { k: c.k, score };
                     }
                     if (best) { web.add(best.k); stretchAdded++; changed = true; }
@@ -9931,7 +9935,7 @@
             }
         };
         stretchPass([], []);
-        if (stretchAdded) logL(`way-home pass: ${stretchAdded} leg(s) added (path > ${th.stretchMax}× straight, each earning ≥ ${th.hubGainRatio} ft of summed way-home per ft)`);
+        if (stretchAdded) logL(`way-home pass: ${stretchAdded} leg(s) added (path > ${th.stretchMax}× straight; leg ratio ${th.legGainRatio}, base-leg ratio ${th.baseLegGainRatio})`);
         await swbYield();
         // ---- 4. hubs: star candidates scored by the summed return-to-base distance ----
         // A hub = open-field point with spokes to every zone (and base) within hubRadiusFt whose
@@ -10461,7 +10465,9 @@
                 ${num('stretchMax', 'stretch ×', 0.05, 'Restore a pruned leg when a zone\'s way home exceeds this × straight line')}
                 ${num('hubMaxRtbLossPct', 'hub RTB loss %', 0.5, 'A hub may lengthen the summed return-to-base distance by at most this (when it shortens total FP length)')}
                 ${num('hubRadiusFt', 'hub radius ft', 100, 'A hub star reaches zones within this radius')}
-                ${num('hubGainRatio', 'gain ratio', 0.5, 'Any added path (hub spoke, restored leg, direct base leg) must save this many ft of summed way-home per ft (0 = any saving)')}
+                ${num('hubGainRatio', 'hub gain ratio', 0.5, 'A hub (and each spoke) must save this many ft of summed way-home per ft of new path (0 = any saving)')}
+                ${num('legGainRatio', 'leg gain ratio', 0.5, 'A leg restored to fix a long detour must save this many ft of summed way-home per ft (0 = fix any detour)')}
+                ${num('baseLegGainRatio', 'base leg ratio', 0.5, 'A direct zone→base leg must save this many ft of summed way-home per ft (0 = the base star)')}
                 ${num('hubMaxSpokes', 'max spokes', 1, 'Most spokes on one hub')}
                 ${num('approachFt', 'approach ft', 10, 'Landing arc is at least this long when the ground allows')}
                 ${num('mergeGapFt', 'merge gap ft', 5, 'Zones closer than this merge into one')}
@@ -10884,7 +10890,9 @@
                 { id: 'hubs', label: 'Propose hubs', type: 'boolean', default: SWB_DEFAULTS.hubs },
                 { id: 'hubRadiusFt', label: 'Hub star radius', type: 'number', min: 500, max: 10000, step: 100, default: SWB_DEFAULTS.hubRadiusFt, unit: 'ft' },
                 { id: 'hubMaxSpokes', label: 'Most spokes on one hub', type: 'number', min: 3, max: 20, step: 1, default: SWB_DEFAULTS.hubMaxSpokes },
-                { id: 'hubGainRatio', label: 'Added path (hub spokes, restored legs, direct base legs) must save … ft of summed way-home per ft (0 = any)', type: 'number', min: 0, max: 20, step: 0.5, default: SWB_DEFAULTS.hubGainRatio },
+                { id: 'hubGainRatio', label: 'Hub spokes must save … ft of summed way-home per ft (0 = any)', type: 'number', min: 0, max: 20, step: 0.5, default: SWB_DEFAULTS.hubGainRatio },
+                { id: 'legGainRatio', label: 'Restored legs must save … ft per ft (0 = fix any long detour)', type: 'number', min: 0, max: 20, step: 0.5, default: SWB_DEFAULTS.legGainRatio },
+                { id: 'baseLegGainRatio', label: 'Direct base legs must save … ft per ft (0 = the base star)', type: 'number', min: 0, max: 20, step: 0.5, default: SWB_DEFAULTS.baseLegGainRatio },
                 { id: 'approachFt', label: 'Minimum landing arc length', type: 'number', min: 25, max: 500, step: 5, default: SWB_DEFAULTS.approachFt, unit: 'ft' },
                 { id: 'notchFt', label: 'Fill inward notches in unioned zones up to', type: 'number', min: 0, max: 30, step: 1, default: SWB_DEFAULTS.notchFt, unit: 'ft' },
                 { id: 'mergeGapFt', label: 'Merge zones closer than', type: 'number', min: 0, max: 200, step: 5, default: SWB_DEFAULTS.mergeGapFt, unit: 'ft' },

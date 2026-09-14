@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-14 — Site Setup Tools latest v4.279: SpiderWeb — the base star is back by default (dev only)
+
+- The pricing that v4.278 put on restored legs and direct base legs is now two separate knobs, "leg gain ratio" and "base leg ratio", both defaulting to 0. That reproduces the v4.277 look: any zone with a long way home gets a straight shot to base. Turn the base leg ratio up to thin the star. Hubs keep their own ratio.
+
 ## 2026-09-14 — Site Setup Tools latest v4.278: SpiderWeb — every added leg has to earn its length (dev only)
 
 - **Fix:** v4.277's direct-to-base legs fired for every far zone with a long detour, which drew a starburst of two-mile legs into the north base (83 → 102 mi of path). Restored legs and direct base legs now pass the same test as hub spokes: the summed way home must fall by at least the gain ratio times the new leg's length. The panel field is now simply "gain ratio".
