@@ -69,6 +69,10 @@ The `changes.csv` audit log crossed GitHub's 1 MB Contents-API cliff on 2026-08-
 - **Raw-read diagnostics**: the >1 MB fallback now logs status / length / head so a future failure explains itself.
 - Data repo: rotated the oversized file to `changes-archive-2026-08.csv` by hand (commit `f0c381ce`); appends resume on the next cycle with no reinstall needed. Rows between 2026-08-18 and today exist only in the per-site snapshot rings.
 
+## 2026-09-14 — 📐 Cross-ref site scope: AIM Fleet Tools v0.30 (latest — dev only)
+
+New **sites:** box on the cross-ref row (shown for the site and base-station targets): type one or more comma-separated words and only sites whose **name contains** one of them count as coverage / bases — e.g. `Exxon` limits a base-station range check to the Exxon sites. Empty = every site you can access. The result label records the scope.
+
 ## 2026-09-14 — 📐 Cross-ref: point layers report point counts: AIM Fleet Tools v0.29 (latest — dev only)
 
 A point-only source (risers, wells, assets) has no line length, so the summary read "total 0 ft" with the real answer tucked into the points line. Point layers now lead with **counts and percentages** per band (Tattu / Tulip-only / beyond, cumulative reachable), the per-base table shows **points per base** (bases with none in range are folded into one line), the 📋 report matches, and the "Longest stretches" section is skipped when there are no lines. Mixed line + point layers keep the length view with points alongside.

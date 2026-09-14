@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.29
+// @version      0.30
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.29';
+    const SCRIPT_VERSION = '0.30';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -2060,6 +2060,15 @@
     let xrefSeq = 0;
     let xrefSrcSel = '';    // UI selections (session)
     let xrefTgtSel = 'sites';
+    // v0.30: site scope — only sites whose name contains one of these
+    // comma-separated terms count as targets/bases (e.g. "Exxon"). Empty = all.
+    let xrefSiteFilter = '';
+    function xrefSiteMatches(id) {
+        const terms = xrefSiteFilter.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
+        if (!terms.length) return true;
+        const nm = siteName(id).toLowerCase();
+        return terms.some(t => nm.includes(t));
+    }
 
     // Uniform-grid spatial index over the envelope (v0.19) — a county-
     // scale source (~200k samples) against a 10k-item envelope would be
@@ -2196,6 +2205,7 @@
                 const marginFt = 3000;   // the base may sit outside the setup bbox
                 const cands = Object.keys(sites).filter(id => {
                     if (ftIgnore[id]) return false;
+                    if (!xrefSiteMatches(id)) return false;   // v0.30: site scope
                     if (ftCfg.onlyProduction && siteStatus(id) && siteStatus(id) !== 'Production') return false;
                     const b = nbIndex.bboxes[id];
                     if (b && !b.empty) return bboxGapFt(b, src.bbox) <= B2FT + marginFt;
@@ -2238,6 +2248,7 @@
                 const cands = Object.keys(nbIndex.bboxes).filter(id => {
                     if (!sites[id]) return false;           // access authority (engraved)
                     if (ftIgnore[id]) return false;         // duplicate/OFFLINE copies don't count as coverage
+                    if (!xrefSiteMatches(id)) return false; // v0.30: site scope
                     if (ftCfg.onlyProduction && siteStatus(id) && siteStatus(id) !== 'Production') return false;
                     const b = nbIndex.bboxes[id];
                     return b && !b.empty && bboxGapFt(b, src.bbox) <= ftCfg.xrefB2 + marginFt;
@@ -2391,6 +2402,7 @@
                 finishRun(run);
             }
             const topRuns = [...runs].sort((a, b) => b.lenM - a.lenM).slice(0, 60);
+            if (xrefSiteFilter.trim() && String(xrefTgtSel).startsWith('sites') || (isBases && xrefSiteFilter.trim())) tgtLabel += ` · sites matching "${xrefSiteFilter.trim()}"`;
             const perBaseList = Object.values(perBase).sort((a, b) => (b.lenM[1] + b.lenM[2]) - (a.lenM[1] + a.lenM[2]) || (b.pts[1] + b.pts[2]) - (a.pts[1] + a.pts[2]));
             const result = {
                 at: Date.now(),
@@ -2703,6 +2715,8 @@
         rows.push('<div style="padding:6px 10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
             + `<label>Source <select data-xr="src" style="${sel}">${srcOpts || '<option value="">(load a KML first)</option>'}</select></label>`
             + `<label>vs <select data-xr="tgt" style="${sel}">${tgtOpts}</select></label>`
+            + (xrefTgtSel !== 'bases' && !String(xrefTgtSel).startsWith('sites') ? ''
+                : `<label title="Only sites whose NAME contains one of these comma-separated words count (e.g. Exxon, Diamondback). Empty = every site you can access.">sites: <input type="text" id="aim-ft-xr-sites" value="${escapeHtml(xrefSiteFilter)}" placeholder="all (e.g. Exxon)" style="width:110px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;padding:1px 4px;"></label>`)
             + (xrefTgtSel === 'bases'
                 ? `<label title="Tattu one-way range from the base">Tattu ≤<input type="number" data-ft-num="xrefBaseB1" value="${ftCfg.xrefBaseB1}" min="1000" max="60000" step="500" style="${num};width:64px"> ft</label>`
                   + `<label title="Tulip one-way range from the base">Tulip ≤<input type="number" data-ft-num="xrefBaseB2" value="${ftCfg.xrefBaseB2}" min="1000" max="80000" step="500" style="${num};width:64px"> ft</label>`
@@ -4044,6 +4058,7 @@
             });
             // Live search — re-render but keep the search box focused
             panelEl.addEventListener('input', (ev) => {
+                if (ev.target.id === 'aim-ft-xr-sites') { xrefSiteFilter = ev.target.value; return; }   // read at run time; no re-render needed
                 const fdIn = ev.target.hasAttribute && (ev.target.hasAttribute('data-fd-filter') ? 'data-fd-filter' : ev.target.hasAttribute('data-fd-search') ? 'data-fd-search' : null);
                 if (fdIn) {
                     if (fdIn === 'data-fd-filter') fdFilter = ev.target.value; else if (fdBrowse) fdBrowse.search = ev.target.value;
