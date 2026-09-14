@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.273
+// @version      4.274
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.273';
+    const SCRIPT_VERSION = '4.274';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -9368,6 +9368,844 @@
     }
 
     // ============================================================
+    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274) — PREVIEW ONLY
+    // Design doc: ShortKeys/AIM_Unshielded_SpiderWeb_Design.md.
+    // FFZ per asset (mitered outset, touching buffers unioned), straight
+    // point-to-point FPs at a 54 m floor / +20 ft band with AUTOMATIC DEM
+    // stairs (step = band − overlap), Steiner hubs for return-to-base,
+    // battery gate on web distance to base. MSL (mountain_terrain) sites
+    // only. This version STAGES + PREVIEWS + REPORTS — no writes.
+    // Prefix: swb*. Tag lines: `${TAG} spiderweb: …`.
+    // ============================================================
+    const SWB_SCRIPT_ID = 'aim-spiderweb';
+    const SWB_THRESH_KEY = 'aim-ai-spiderweb-thresholds';
+    const SWB_PANEL_ID = 'aim-swb-panel';
+    const SWB_DEFAULTS = {
+        ffzFloorAglFt: 125, ffzCeilAglFt: 196,   // zone band above highest / lowest ground in the footprint
+        fpFloorM: 54,                            // arc floor above the HIGHEST ground under the arc (integer m)
+        fpBandFt: 20,                            // arc ceiling = floor + band
+        overlapM: 3,                             // target overlap between connected arcs (2 = red)
+        droneMaxAglFt: 200,                      // the drone flies the floor — relief inside one arc is capped so it never exceeds this
+        outsetFt: 16, endpointGapFt: 15, cornerGapFt: 10,
+        stretchMax: 1.3,                         // web distance to base ÷ straight line — add a leg back above this
+        hubMaxRtbLossPct: 3,                     // a hub may lengthen the summed return-to-base distance by at most this much
+        battery: 'tulip', sampleFt: 25, marginFt: 500, hubs: true,
+    };
+    let swbThresholds = loadSwbThresholds();
+    let swbMasterEnabled = true;
+    let swbState = null;       // last staged result
+    let swbLayers = [];        // preview layers on the map
+    let swbDem = null;         // { key, dem } session raster cache
+    let swbRunning = false;
+
+    function loadSwbThresholds() {
+        const out = { ...SWB_DEFAULTS };
+        try {
+            const raw = elevGmGet(SWB_THRESH_KEY, null);
+            const st = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : null;
+            if (st && typeof st === 'object') Object.keys(SWB_DEFAULTS).forEach(k => { if (typeof st[k] === typeof SWB_DEFAULTS[k]) out[k] = st[k]; });
+        } catch (e) { console.warn(`${TAG} spiderweb: thresholds unreadable — defaults used`, e); }
+        return out;
+    }
+    function saveSwbThresholdKey(key, value) {
+        try {
+            let stored = {};
+            try { const raw = elevGmGet(SWB_THRESH_KEY, null); if (raw) stored = (typeof raw === 'string' ? JSON.parse(raw) : raw) || {}; } catch (e) { stored = {}; }
+            stored[key] = value;
+            elevGmSet(SWB_THRESH_KEY, JSON.stringify(stored));
+        } catch (e) { console.warn(`${TAG} spiderweb: could not persist ${key}`, e); }
+    }
+    function handleSpiderwebToggle(msg) {
+        const id = msg.toggleId;
+        if (id === 'swb-master') {
+            const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            if (v === swbMasterEnabled) return;
+            swbMasterEnabled = v;
+            if (!v) { swbClear(); swbClosePanel(); }
+            return;
+        }
+        if (Object.prototype.hasOwnProperty.call(swbThresholds, id)) {
+            const v = (typeof SWB_DEFAULTS[id] === 'boolean') ? !!(msg.value !== undefined ? msg.value : msg.enabled) : msg.value;
+            if (typeof v !== typeof SWB_DEFAULTS[id] || v === swbThresholds[id]) return;
+            swbThresholds[id] = v;
+            saveSwbThresholdKey(id, v);
+        }
+    }
+
+    // ---------- small geometry (local metres, x east / y north) ----------
+    const swbYield = () => new Promise(res => setTimeout(res, 0));
+    function swbCross(o, a, b) { return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x); }
+    function swbSegsCross(a, b, c, d) {
+        const d1 = swbCross(c, d, a), d2 = swbCross(c, d, b), d3 = swbCross(a, b, c), d4 = swbCross(a, b, d);
+        return ((d1 > 0) !== (d2 > 0)) && ((d3 > 0) !== (d4 > 0)) && d1 !== 0 && d2 !== 0 && d3 !== 0 && d4 !== 0;
+    }
+    function swbPip(p, ring) {
+        let inside = false;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+            const xi = ring[i].x, yi = ring[i].y, xj = ring[j].x, yj = ring[j].y;
+            if (((yi > p.y) !== (yj > p.y)) && (p.x < (xj - xi) * (p.y - yi) / (yj - yi) + xi)) inside = !inside;
+        }
+        return inside;
+    }
+    function swbRingArea(r) { let a = 0; for (let i = 0, j = r.length - 1; i < r.length; j = i++) a += (r[j].x + r[i].x) * (r[j].y - r[i].y); return a / 2; }
+    function swbRingSelfX(r) {
+        const n = r.length;
+        for (let i = 0; i < n; i++) for (let j = i + 2; j < n; j++) {
+            if (i === 0 && j === n - 1) continue;
+            if (swbSegsCross(r[i], r[(i + 1) % n], r[j], r[(j + 1) % n])) return true;
+        }
+        return false;
+    }
+    function swbHullXY(pts) {
+        const P = pts.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+        if (P.length < 3) return P;
+        const lower = [], upper = [];
+        for (const p of P) { while (lower.length >= 2 && swbCross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop(); lower.push(p); }
+        for (let i = P.length - 1; i >= 0; i--) { const p = P[i]; while (upper.length >= 2 && swbCross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop(); upper.push(p); }
+        lower.pop(); upper.pop();
+        return lower.concat(upper);
+    }
+    // Segment a→b vs ring: crosses any edge, or lies fully inside.
+    function swbSegHitsRing(a, b, ring) {
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) if (swbSegsCross(a, b, ring[j], ring[i])) return true;
+        return swbPip({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, ring);
+    }
+    // Geometric median (Weiszfeld) — Fermat point for 3, hub position for k.
+    function swbGeoMedian(pts) {
+        let x = 0, y = 0; pts.forEach(p => { x += p.x; y += p.y; }); x /= pts.length; y /= pts.length;
+        for (let it = 0; it < 60; it++) {
+            let sx = 0, sy = 0, sw = 0;
+            for (const p of pts) { const d = Math.hypot(p.x - x, p.y - y) || 1e-6; sx += p.x / d; sy += p.y / d; sw += 1 / d; }
+            const nx = sx / sw, ny = sy / sw;
+            const mv = Math.hypot(nx - x, ny - y); x = nx; y = ny;
+            if (mv < 0.05) break;
+        }
+        return { x, y };
+    }
+    // Bowyer–Watson Delaunay on {x,y} points → triangles as index triples.
+    function swbDelaunay(pts) {
+        const n = pts.length;
+        if (n < 3) return [];
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        pts.forEach(p => { if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x; if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y; });
+        const dmax = Math.max(maxX - minX, maxY - minY) || 1, mx = (minX + maxX) / 2, my = (minY + maxY) / 2;
+        const P = pts.map(p => ({ x: p.x, y: p.y }));
+        P.push({ x: mx - 20 * dmax, y: my - dmax }, { x: mx, y: my + 20 * dmax }, { x: mx + 20 * dmax, y: my - dmax });
+        const circum = (i, j, k) => {
+            const a = P[i], b = P[j], c = P[k];
+            const d = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+            if (Math.abs(d) < 1e-12) return null;
+            const ux = ((a.x * a.x + a.y * a.y) * (b.y - c.y) + (b.x * b.x + b.y * b.y) * (c.y - a.y) + (c.x * c.x + c.y * c.y) * (a.y - b.y)) / d;
+            const uy = ((a.x * a.x + a.y * a.y) * (c.x - b.x) + (b.x * b.x + b.y * b.y) * (a.x - c.x) + (c.x * c.x + c.y * c.y) * (b.x - a.x)) / d;
+            return { x: ux, y: uy, r2: (a.x - ux) ** 2 + (a.y - uy) ** 2 };
+        };
+        let tris = [{ v: [n, n + 1, n + 2], c: circum(n, n + 1, n + 2) }];
+        for (let i = 0; i < n; i++) {
+            const p = P[i];
+            const bad = [], keep = [];
+            for (const t of tris) { if (t.c && ((p.x - t.c.x) ** 2 + (p.y - t.c.y) ** 2) < t.c.r2) bad.push(t); else keep.push(t); }
+            const edgeCount = new Map();
+            bad.forEach(t => { for (let e = 0; e < 3; e++) { const a = t.v[e], b = t.v[(e + 1) % 3]; const k = a < b ? `${a}:${b}` : `${b}:${a}`; edgeCount.set(k, (edgeCount.get(k) || 0) + 1); } });
+            bad.forEach(t => { for (let e = 0; e < 3; e++) { const a = t.v[e], b = t.v[(e + 1) % 3]; const k = a < b ? `${a}:${b}` : `${b}:${a}`; if (edgeCount.get(k) === 1) keep.push({ v: [a, b, i], c: circum(a, b, i) }); } });
+            tris = keep;
+        }
+        return tris.filter(t => t.v.every(v => v < n)).map(t => t.v);
+    }
+    // Multi-source Dijkstra over an adjacency list [{to, w}] — O(n²), n ≤ ~400.
+    function swbDijkstra(n, adj, sources) {
+        const dist = new Float64Array(n).fill(Infinity), done = new Uint8Array(n);
+        sources.forEach(s => { dist[s] = 0; });
+        for (let it = 0; it < n; it++) {
+            let u = -1, best = Infinity;
+            for (let i = 0; i < n; i++) if (!done[i] && dist[i] < best) { best = dist[i]; u = i; }
+            if (u < 0) break;
+            done[u] = 1;
+            for (const e of adj[u]) { const nd = dist[u] + e.w; if (nd < dist[e.to]) dist[e.to] = nd; }
+        }
+        return dist;
+    }
+    // Ground (ft) from the 3DEP raster at a lat/lng; null outside / no-data.
+    function swbGroundFt(dem, lat, lng) {
+        const bd = dem.bounds;
+        if (lat < bd.south || lat > bd.north || lng < bd.west || lng > bd.east) return null;
+        const x = Math.floor((terMercX(lng) - dem.mercX1) / (dem.mercX2 - dem.mercX1) * dem.w);
+        const y = Math.floor((dem.mercY2 - terMercY(lat)) / (dem.mercY2 - dem.mercY1) * dem.h);
+        if (x < 0 || x >= dem.w || y < 0 || y >= dem.h) return null;
+        const v = dem.vals[y * dem.w + x];
+        return Number.isFinite(v) ? v : null;
+    }
+
+    // ---------- stage ----------
+    async function swbStage() {
+        if (swbRunning) { showToast('SpiderWeb already running…'); return; }
+        if (!swbMasterEnabled) { showToast('SpiderWeb is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+        if (LITE) { showToast('SpiderWeb generator is a CSM (Full mode) tool', 'rgba(255,96,96,0.55)'); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
+        swbRunning = true;
+        const t0 = performance.now();
+        const log = [];
+        const logL = (s) => { log.push(s); console.log(`${TAG} spiderweb: ${s}`); };
+        try {
+            const th = { ...swbThresholds };
+            const mode = await siteAltMode(sid);
+            if (!mode || mode.mode !== 'msl') {
+                const why = mode && mode.mode === 'agl' ? 'this is an AGL site (mountain_terrain off)' : 'altitude mode unknown (site config unreadable)';
+                showToast(`SpiderWeb refused — ${why}. MSL (mountain-terrain) sites only.`, 'rgba(255,96,96,0.55)');
+                logL(`refused: ${why}`);
+                return;
+            }
+            showToast('🕸 SpiderWeb: reading site…');
+            await Promise.resolve(fetchMapObjects(sid, true));
+            const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+            const stateOf = (e) => { const s = (e.custom && e.custom.poi_type_str) || e.poi_type_str || ''; return s.split(' - ').slice(1).map(x => x.trim().toLowerCase()); };
+            const assetsAll = ents.filter(e => e.type === 3 && entityCoords(e) && entityCoords(e).length >= 3);
+            const skippedEmpty = assetsAll.filter(e => stateOf(e).some(m => m.includes('empty')));
+            let assets = assetsAll.filter(e => !skippedEmpty.includes(e));
+            const resolved = resolveBases(sid, ents);
+            const bases = resolved.bases.map(b => ({ name: b.name, pt: gmPoint(b), id: b.id }));
+            if (!assets.length) { showToast('No non-EMPTY assets on this site', 'rgba(255,96,96,0.55)'); return; }
+            if (!bases.length) { showToast('No base found — need a type-8 base or a GM named "…base…"', 'rgba(255,96,96,0.55)'); return; }
+            logL(`site ${sid}: ${assetsAll.length} assets (${skippedEmpty.length} EMPTY skipped), ${bases.length} base(s): ${bases.map(b => b.name).join(', ')}`);
+            const nfzRings = ents.filter(e => e.type === 4 && entityCoords(e) && entityCoords(e).length >= 3).map(e => entityCoords(e));
+            // Local projector at the asset centroid.
+            let cLat = 0, cLng = 0, cN = 0;
+            assets.forEach(a => { const c = ringCentroid(entityCoords(a)); cLat += c.lat; cLng += c.lng; cN++; });
+            const proj = genProjector(cLat / cN, cLng / cN);
+            const toXY = (p) => proj.fwd(p);
+            const toLL = (q) => proj.inv(q);
+            // DEM raster over assets + bases + margin (session-cached per site/bbox/cell).
+            let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+            const bump = (p) => { if (p.lat < minLat) minLat = p.lat; if (p.lat > maxLat) maxLat = p.lat; if (p.lng < minLng) minLng = p.lng; if (p.lng > maxLng) maxLng = p.lng; };
+            assets.forEach(a => entityCoords(a).forEach(bump)); bases.forEach(b => bump(b.pt));
+            const mLat = th.marginFt / 364000, mLng = th.marginFt / (364000 * Math.cos(((minLat + maxLat) / 2) * Math.PI / 180));
+            const west = minLng - mLng, south = minLat - mLat, east = maxLng + mLng, north = maxLat + mLat;
+            const demKey = `${sid}|${west.toFixed(6)},${south.toFixed(6)},${east.toFixed(6)},${north.toFixed(6)}|${terThresholds.cellFt}`;
+            let dem;
+            if (swbDem && swbDem.key === demKey) dem = swbDem.dem;
+            else { showToast('🕸 SpiderWeb: fetching DEM…'); dem = await terFetchDem(west, south, east, north); swbDem = { key: demKey, dem }; }
+            logL(`DEM ${dem.w}×${dem.h} (${Math.round(dem.cellXft)} ft cells)`);
+            const gAt = (ll) => swbGroundFt(dem, ll.lat, ll.lng);
+            const gXY = (q) => gAt(toLL(q));
+
+            const bt = loadBatteryThresholds();
+            const limitFt = th.battery === 'tattu' ? bt.tattuMaxFt : bt.tulipMaxFt;
+            const excluded = new Set();   // asset ids dropped by the battery gate
+            const dropped = [];           // { name, distFt, why }
+            let result = null;
+            for (let round = 0; round < 6; round++) {
+                const use = assets.filter(a => !excluded.has(a.id));
+                showToast(`🕸 SpiderWeb: building web (${use.length} assets)…`);
+                result = await swbBuildWeb(use, bases, nfzRings, th, { toXY, toLL, gXY, gAt, logL });
+                // Battery gate: web distance from base to each zone (real leg lengths).
+                const over = result.zones.filter(z => !z.dropped && (z.rtbM === null || z.rtbM * M_TO_FT > limitFt));
+                if (!over.length) break;
+                over.forEach(z => {
+                    z.assets.forEach(a => excluded.add(a.id));
+                    dropped.push({ name: z.name, distFt: z.rtbM === null ? null : Math.round(z.rtbM * M_TO_FT), why: z.rtbM === null ? 'unreachable from base' : `beyond ${th.battery} one-way limit (${limitFt.toLocaleString()} ft)` });
+                });
+                logL(`battery gate round ${round + 1}: ${over.length} zone(s) dropped, rebuilding`);
+                await swbYield();
+            }
+            result.dropped = dropped;
+            result.skippedEmpty = skippedEmpty.map(e => e.name);
+            result.bases = bases; result.sid = sid; result.limitFt = limitFt; result.thresholds = th;
+            result.runLog = log;
+            // Gates (preview-only build — informational until Commit exists).
+            const gates = [];
+            gates.push({ label: 'MSL site', ok: true });
+            gates.push({ label: 'web connected to base', ok: result.zones.every(z => z.rtbM !== null), detail: `${result.zones.filter(z => z.rtbM === null).length} unreachable` });
+            const redArcs = result.legs.reduce((n, l) => n + l.arcs.filter(a => a.ceilM - a.floorM < 2).length, 0);
+            gates.push({ label: 'every arc band ≥ 2 m', ok: redArcs === 0, detail: `${redArcs} thin` });
+            const handoffFail = result.legs.filter(l => l.flags.some(f => /HANDOFF FAIL/.test(f))).length;
+            const handoffSoft = result.legs.filter(l => l.flags.some(f => /^handoff with/.test(f))).length;
+            gates.push({ label: 'FP ↔ zone handoff ≥ 2 m', ok: handoffFail === 0, detail: `${handoffFail} fail · ${handoffSoft} under the ${th.overlapM} m target` });
+            const manySteps = result.legs.filter(l => l.flags.some(f => /^many steps/.test(f))).length;
+            gates.push({ label: 'legs under 40 steps', ok: manySteps === 0, soft: true, detail: `${manySteps} leg(s) over` });
+            const tiny = result.legs.filter(l => l.flags.some(f => /^tiny leg/.test(f))).length;
+            gates.push({ label: 'no legs under 30 ft', ok: tiny === 0, soft: true, detail: `${tiny} tiny leg(s)` });
+            const cliffs = result.legs.filter(l => l.flags.some(f => /cliff/.test(f))).length;
+            gates.push({ label: 'no cliff steps', ok: cliffs === 0, soft: true, detail: `${cliffs} leg(s)` });
+            const crowded = result.zones.filter(z => z.flags.some(f => /crowded/.test(f))).length;
+            gates.push({ label: 'endpoint spacing', ok: crowded === 0, soft: true, detail: `${crowded} crowded edge(s)` });
+            const noDem = result.zones.filter(z => z.flags.some(f => /DEM/.test(f))).length + result.legs.filter(l => l.flags.some(f => /DEM/.test(f))).length;
+            gates.push({ label: 'DEM coverage', ok: noDem === 0, detail: `${noDem} item(s) without ground` });
+            result.gates = gates;
+            swbState = result;
+            swbDrawPreview();
+            swbRenderPanel();
+            const ms = Math.round(performance.now() - t0);
+            logL(`staged: ${result.zones.length} zones / ${result.legs.length} legs / ${result.hubs.length} hubs / ${result.totalArcs} arcs / ${result.totalVerts} vertices / ${(result.totalLenM * M_TO_FT / 5280).toFixed(1)} mi FP in ${ms} ms`);
+            showToast(`🕸 SpiderWeb staged: ${result.zones.length} zones, ${result.legs.length} legs, ${result.hubs.length} hubs`);
+        } catch (e) {
+            console.error(`${TAG} spiderweb: stage failed`, e);
+            showToast(`SpiderWeb failed — ${e && e.message ? e.message : e}`, 'rgba(255,96,96,0.55)');
+        } finally { swbRunning = false; }
+    }
+
+    // Build one web from the given assets. Returns zones/legs/hubs with
+    // real leg lengths + per-zone web distance to base (rtbM).
+    async function swbBuildWeb(assets, bases, nfzRings, th, ctx) {
+        const { toXY, toLL, gXY, gAt, logL } = ctx;
+        const M = (ft) => ft / M_TO_FT;
+        const outsetM = M(th.outsetFt);
+        // ---- 1. zones: mitered outset per asset, union touching buffers ----
+        const PC = terBPC();
+        const offRings = [];
+        assets.forEach(a => {
+            let ring = entityCoords(a);
+            const xy = ring.map(toXY);
+            if (swbRingSelfX(xy)) ring = swbHullXY(xy).map(toLL);   // bowtie storage (corner, wellhead, corners…) → hull
+            let off = assetOffsetRing(ring, outsetM);
+            const a0 = Math.abs(swbRingArea(ring.map(toXY))), a1 = Math.abs(swbRingArea(off.map(toXY)));
+            if (!(a1 > a0)) { off = assetOffsetRing(ring.slice().reverse(), outsetM); }   // winding guard — offset must GROW
+            if (swbRingSelfX(off.map(toXY))) off = swbHullXY(off.map(toXY)).map(toLL);
+            offRings.push({ asset: a, ring: off });
+        });
+        let zones = [];
+        let holesDropped = 0;
+        if (PC && offRings.length) {
+            const geoms = offRings.map(o => [o.ring.map(p => [p.lng, p.lat])]);
+            let uni = null;
+            try { uni = PC.union(...geoms); } catch (e) { logL(`polygon-clipping union threw (${e && e.message}) — zones fall back to per-asset buffers`); }
+            if (uni) {
+                uni.forEach(poly => {
+                    if (!poly || !poly[0] || poly[0].length < 4) return;
+                    if (poly.length > 1) holesDropped += poly.length - 1;
+                    const outer = poly[0].slice(0, -1).map(c => ({ lat: c[1], lng: c[0] }));
+                    zones.push({ points: outer, assets: [] });
+                });
+            }
+        }
+        if (!zones.length) zones = offRings.map(o => ({ points: o.ring, assets: [o.asset] }));
+        if (holesDropped) logL(`${holesDropped} interior hole(s) dropped from unioned zones`);
+        // assign assets to zones by centroid pip
+        zones.forEach(z => { z.xy = z.points.map(toXY); z.assets = z.assets || []; });
+        assets.forEach(a => {
+            const c = toXY(ringCentroid(entityCoords(a)));
+            const z = zones.find(zz => swbPip(c, zz.xy));
+            if (z) { if (!z.assets.includes(a)) z.assets.push(a); }
+            else logL(`⚠ asset "${a.name}" is inside no zone after union`);
+        });
+        zones = zones.filter(z => z.assets.length);
+        zones.forEach((z, i) => {
+            z.idx = i;
+            z.name = z.assets.length === 1 ? z.assets[0].name : `${z.assets[0].name} +${z.assets.length - 1}`;
+            let cx = 0, cy = 0; z.xy.forEach(p => { cx += p.x; cy += p.y; }); z.cx = cx / z.xy.length; z.cy = cy / z.xy.length;
+            z.flags = [];
+            // zone band from the ground inside the footprint (ring verts + centroid + grid)
+            let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+            z.xy.forEach(p => { if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x; if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y; });
+            const samples = z.xy.slice(); samples.push({ x: z.cx, y: z.cy });
+            const stepM = Math.max(8, Math.min(30, (maxX - minX) / 6));
+            for (let x = minX; x <= maxX; x += stepM) for (let y = minY; y <= maxY; y += stepM) { const q = { x, y }; if (swbPip(q, z.xy)) samples.push(q); }
+            let gMin = Infinity, gMax = -Infinity, missing = 0;
+            samples.forEach(q => { const g = gXY(q); if (g === null) missing++; else { if (g < gMin) gMin = g; if (g > gMax) gMax = g; } });
+            if (!Number.isFinite(gMin)) { z.flags.push('no DEM under zone'); z.floorM = null; z.ceilM = null; }
+            else {
+                if (missing) z.flags.push(`${missing} DEM gap(s)`);
+                z.gMinFt = gMin; z.gMaxFt = gMax;
+                z.floorM = M(gMax + th.ffzFloorAglFt);
+                z.ceilM = M(gMin + th.ffzCeilAglFt);
+                if (z.ceilM - z.floorM < th.overlapM) z.flags.push(`zone band only ${((z.ceilM - z.floorM) * M_TO_FT).toFixed(0)} ft (relief ${(gMax - gMin).toFixed(0)} ft inside footprint)`);
+            }
+        });
+        await swbYield();
+        // ---- 2. nodes + Delaunay ----
+        const nodes = zones.map(z => ({ kind: 'zone', x: z.cx, y: z.cy, zone: z }));
+        bases.forEach(b => { const q = toXY(b.pt); nodes.push({ kind: 'base', x: q.x, y: q.y, base: b }); });
+        const nZ = zones.length;
+        const nfzXY = nfzRings.map(r => r.map(toXY));
+        const tris = swbDelaunay(nodes);
+        const ekey = (a, b) => a < b ? `${a}:${b}` : `${b}:${a}`;
+        const edges = new Map();   // key → { a, b, len, tris: [] }
+        tris.forEach((t, ti) => { for (let e = 0; e < 3; e++) { const a = t[e], b = t[(e + 1) % 3]; const k = ekey(a, b); if (!edges.has(k)) edges.set(k, { a: Math.min(a, b), b: Math.max(a, b), len: Math.hypot(nodes[a].x - nodes[b].x, nodes[a].y - nodes[b].y), tris: [] }); edges.get(k).tris.push(ti); } });
+        // crossing test: a leg may not cut through a zone it does not end on, nor an NFZ
+        const legBlocked = (a, b) => {
+            const A = nodes[a], B = nodes[b];
+            for (const z of zones) { if ((A.kind === 'zone' && A.zone === z) || (B.kind === 'zone' && B.zone === z)) continue; if (swbPip(A, z.xy) || swbPip(B, z.xy)) continue; if (swbSegHitsRing(A, B, z.xy)) return true; }
+            for (const r of nfzXY) if (swbSegHitsRing(A, B, r)) return true;
+            return false;
+        };
+        edges.forEach(e => { e.blocked = legBlocked(e.a, e.b); });
+        // MST (Kruskal) over unblocked edges keeps the web connected
+        const parent = nodes.map((_, i) => i);
+        const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+        const sortedE = [...edges.values()].filter(e => !e.blocked).sort((p, q) => p.len - q.len);
+        const web = new Set();
+        sortedE.forEach(e => { const ra = find(e.a), rb = find(e.b); if (ra !== rb) { parent[ra] = rb; e.mst = true; web.add(ekey(e.a, e.b)); } });
+        // Urquhart: drop the longest side of every triangle (unless MST)
+        const longest = new Set();
+        tris.forEach(t => { let bk = null, bl = -1; for (let e = 0; e < 3; e++) { const k = ekey(t[e], t[(e + 1) % 3]); const L = edges.get(k).len; if (L > bl) { bl = L; bk = k; } } longest.add(bk); });
+        edges.forEach((e, k) => { if (!e.blocked && !longest.has(k)) web.add(k); });
+        await swbYield();
+        // ---- 3. stretch pass: add pruned Delaunay legs back where the return path is long ----
+        const baseIdx = nodes.map((n, i) => n.kind === 'base' ? i : -1).filter(i => i >= 0);
+        const adjOf = (keys) => { const adj = nodes.map(() => []); keys.forEach(k => { const e = edges.get(k); adj[e.a].push({ to: e.b, w: e.len }); adj[e.b].push({ to: e.a, w: e.len }); }); return adj; };
+        const straightM = nodes.map(n => { const pts = n.kind === 'zone' ? n.zone.xy : [n]; let m = Infinity; baseIdx.forEach(b => pts.forEach(p => { const d = Math.hypot(p.x - nodes[b].x, p.y - nodes[b].y); if (d < m) m = d; })); return m; });
+        let stretchAdded = 0;
+        for (let pass = 0; pass < 6; pass++) {
+            const dist = swbDijkstra(nodes.length, adjOf(web), baseIdx);
+            let changed = false;
+            for (let i = 0; i < nZ; i++) {
+                if (!Number.isFinite(dist[i]) || dist[i] <= straightM[i] * th.stretchMax) continue;
+                let best = null, bestD = dist[i];
+                edges.forEach((e, k) => {
+                    if (web.has(k) || e.blocked || (e.a !== i && e.b !== i)) return;
+                    const o = e.a === i ? e.b : e.a;
+                    const d = dist[o] + e.len;
+                    if (d < bestD) { bestD = d; best = k; }
+                });
+                if (best) { web.add(best); stretchAdded++; changed = true; }
+            }
+            if (!changed) break;
+        }
+        if (stretchAdded) logL(`stretch pass: ${stretchAdded} leg(s) restored (return path > ${th.stretchMax}× straight line)`);
+        await swbYield();
+        // ---- 4. hubs (Steiner points), accepted by summed return-to-base distance ----
+        const hubs = [];   // { x, y, zones: [nodeIdx…] }
+        const hubLegs = new Set();   // `h<i>:<node>`
+        const sumRtb = (adjExtra) => {
+            const n = nodes.length + hubs.length;
+            const adj = adjOf(web); hubs.forEach(() => adj.push([]));
+            hubs.forEach((h, hi) => { const hid = nodes.length + hi; h.zones.forEach(z => { const w = Math.hypot(h.x - nodes[z].x, h.y - nodes[z].y); adj[hid].push({ to: z, w }); adj[z].push({ to: hid, w }); }); });
+            if (adjExtra) adjExtra(adj);
+            const d = swbDijkstra(n, adj, baseIdx);
+            let s = 0, len = 0, unreachable = 0;
+            for (let i = 0; i < nZ; i++) { if (Number.isFinite(d[i])) s += d[i]; else unreachable++; }
+            web.forEach(k => { len += edges.get(k).len; });
+            hubs.forEach(h => h.zones.forEach(z => { len += Math.hypot(h.x - nodes[z].x, h.y - nodes[z].y); }));
+            return { sum: s, len, unreachable, dist: d };
+        };
+        if (th.hubs) {
+            const hubBlocked = (h, z) => { const Z = nodes[z]; for (const zz of zones) { if (Z.kind === 'zone' && Z.zone === zz) continue; if (swbPip(h, zz.xy)) return true; if (swbSegHitsRing(h, Z, zz.xy)) return true; } for (const r of nfzXY) if (swbSegHitsRing(h, Z, r)) return true; return false; };
+            let base0 = sumRtb();
+            // candidate triangles whose 3 legs are all in the web, sorted by Steiner saving
+            const cands = [];
+            tris.forEach(t => {
+                const ks = [ekey(t[0], t[1]), ekey(t[1], t[2]), ekey(t[2], t[0])];
+                if (!ks.every(k => web.has(k))) return;
+                if (t.some(v => nodes[v].kind === 'base')) return;   // keep base legs direct
+                const P = t.map(v => nodes[v]);
+                // Fermat point only exists strictly inside when every angle < 120°
+                for (let i = 0; i < 3; i++) { const a = P[i], b = P[(i + 1) % 3], c = P[(i + 2) % 3]; const v1 = { x: b.x - a.x, y: b.y - a.y }, v2 = { x: c.x - a.x, y: c.y - a.y }; const ang = Math.acos((v1.x * v2.x + v1.y * v2.y) / ((Math.hypot(v1.x, v1.y) * Math.hypot(v2.x, v2.y)) || 1)); if (ang >= Math.PI * 2 / 3) return; }
+                const h = swbGeoMedian(P);
+                const star = P.reduce((s, p) => s + Math.hypot(h.x - p.x, h.y - p.y), 0);
+                const mesh = ks.reduce((s, k) => s + edges.get(k).len, 0);
+                if (star >= mesh) return;
+                cands.push({ t: t.slice(), ks, h, save: mesh - star });
+            });
+            cands.sort((p, q) => q.save - p.save);
+            let accepted = 0, rejected = 0;
+            for (const c of cands) {
+                if (!c.ks.every(k => web.has(k))) continue;   // an edge already consumed by another hub
+                if (c.t.some(z => hubBlocked(c.h, z))) { rejected++; continue; }
+                c.ks.forEach(k => web.delete(k));
+                hubs.push({ x: c.h.x, y: c.h.y, zones: c.t.slice() });
+                const r = sumRtb();
+                if (r.unreachable > base0.unreachable || r.sum > base0.sum * (1 + th.hubMaxRtbLossPct / 100) || r.len >= base0.len) {
+                    hubs.pop(); c.ks.forEach(k => web.add(k)); rejected++;
+                } else { base0 = r; accepted++; }
+            }
+            // merge: fold an adjacent zone into an existing hub when the summed return distance allows
+            let merged = 0;
+            for (let pass = 0; pass < 4; pass++) {
+                let changed = false;
+                for (const h of hubs) {
+                    const zset = new Set(h.zones);
+                    // zones connected by a web leg to ≥ 2 of the hub's zones are fold candidates
+                    const cnt = new Map();
+                    web.forEach(k => { const e = edges.get(k); if (zset.has(e.a) && !zset.has(e.b) && nodes[e.b].kind === 'zone') cnt.set(e.b, (cnt.get(e.b) || 0) + 1); if (zset.has(e.b) && !zset.has(e.a) && nodes[e.a].kind === 'zone') cnt.set(e.a, (cnt.get(e.a) || 0) + 1); });
+                    for (const [z, n] of cnt) {
+                        if (n < 2) continue;
+                        const removed = []; web.forEach(k => { const e = edges.get(k); if ((zset.has(e.a) && e.b === z) || (zset.has(e.b) && e.a === z)) removed.push(k); });
+                        const old = { x: h.x, y: h.y, zones: h.zones.slice() };
+                        removed.forEach(k => web.delete(k));
+                        h.zones.push(z);
+                        const nh = swbGeoMedian(h.zones.map(i => nodes[i])); h.x = nh.x; h.y = nh.y;
+                        const blocked = h.zones.some(zz => hubBlocked(h, zz));
+                        const r = blocked ? null : sumRtb();
+                        if (!r || r.unreachable > base0.unreachable || r.sum > base0.sum * (1 + th.hubMaxRtbLossPct / 100) || r.len >= base0.len) {
+                            h.x = old.x; h.y = old.y; h.zones = old.zones; removed.forEach(k => web.add(k));
+                        } else { base0 = r; merged++; changed = true; zset.add(z); }
+                    }
+                }
+                if (!changed) break;
+            }
+            logL(`hubs: ${accepted} accepted, ${rejected} rejected, ${merged} zone(s) folded into hubs (Σ RTB loss cap ${th.hubMaxRtbLossPct}%)`);
+        }
+        await swbYield();
+        // ---- 5. legs with endpoints on zone edges ----
+        const hubNodes = hubs.map((h, hi) => ({ kind: 'hub', x: h.x, y: h.y, hub: h, hi }));
+        const allNodes = nodes.concat(hubNodes);
+        const legsRaw = [];   // { a, b } indices into allNodes
+        web.forEach(k => { const e = edges.get(k); legsRaw.push({ a: e.a, b: e.b }); });
+        hubs.forEach((h, hi) => h.zones.forEach(z => legsRaw.push({ a: nodes.length + hi, b: z })));
+        // endpoint on a zone for a leg leaving toward `toward`
+        const zoneEndpoint = (zn, toward) => {
+            const ring = zn.zone.xy, n = ring.length;
+            const A = { x: zn.x, y: zn.y };
+            let best = null;
+            for (let i = 0; i < n; i++) {
+                const P = ring[i], Q = ring[(i + 1) % n];
+                // ray A→toward vs edge P→Q
+                const r = { x: toward.x - A.x, y: toward.y - A.y }, s = { x: Q.x - P.x, y: Q.y - P.y };
+                const den = r.x * s.y - r.y * s.x; if (Math.abs(den) < 1e-9) continue;
+                const t = ((P.x - A.x) * s.y - (P.y - A.y) * s.x) / den, u = ((P.x - A.x) * r.y - (P.y - A.y) * r.x) / den;
+                if (t <= 0 || u < 0 || u > 1) continue;
+                if (!best || t > best.t) best = { t, u, edge: i };   // farthest crossing = the real exit of a concave cluster
+            }
+            if (!best) { const i = 0; return { edge: i, u: 0.5 }; }
+            return { edge: best.edge, u: best.u };
+        };
+        const legs = legsRaw.map(l => {
+            const A = allNodes[l.a], B = allNodes[l.b];
+            const ea = A.kind === 'zone' ? zoneEndpoint(A, B) : null;
+            const eb = B.kind === 'zone' ? zoneEndpoint(B, A) : null;
+            return { a: l.a, b: l.b, ea, eb, flags: [], arcs: [] };
+        });
+        // spacing per zone edge: ≥ endpointGap between endpoints, ≥ cornerGap off the corners
+        const gapM = M(th.endpointGapFt), cornerM = M(th.cornerGapFt);
+        zones.forEach(z => {
+            const slots = [];   // { leg, side:'ea'|'eb', edge, pos(m) }
+            legs.forEach(l => { if (l.ea && allNodes[l.a].zone === z) slots.push({ leg: l, side: 'ea', ep: l.ea }); if (l.eb && allNodes[l.b].zone === z) slots.push({ leg: l, side: 'eb', ep: l.eb }); });
+            const byEdge = new Map();
+            slots.forEach(s => { if (!byEdge.has(s.ep.edge)) byEdge.set(s.ep.edge, []); byEdge.get(s.ep.edge).push(s); });
+            byEdge.forEach((list, ei) => {
+                const P = z.xy[ei], Q = z.xy[(ei + 1) % z.xy.length];
+                const L = Math.hypot(Q.x - P.x, Q.y - P.y);
+                list.forEach(s => { s.pos = s.ep.u * L; });
+                list.sort((p, q) => p.pos - q.pos);
+                const lo = Math.min(cornerM, L / 2), hi = Math.max(L - cornerM, L / 2);
+                const need = (list.length - 1) * gapM;
+                if (hi - lo < need) { z.flags.push(`crowded edge ${ei + 1} (${list.length} legs on ${(L * M_TO_FT).toFixed(0)} ft)`); list.forEach(s => s.leg.flags.push('crowded edge')); }
+                // forward pass then backward pass keeps order + gaps + bounds
+                for (let i = 0; i < list.length; i++) list[i].pos = Math.max(list[i].pos, lo + i * gapM, i ? list[i - 1].pos + gapM : -Infinity);
+                for (let i = list.length - 1; i >= 0; i--) list[i].pos = Math.min(list[i].pos, hi - (list.length - 1 - i) * gapM, i < list.length - 1 ? list[i + 1].pos - gapM : Infinity);
+                list.forEach(s => { s.ep.u = Math.max(0, Math.min(1, s.pos / L)); });
+            });
+        });
+        // resolve endpoint → xy, 1 ft inside the zone
+        const epXY = (zn, ep) => {
+            const ring = zn.zone.xy, P = ring[ep.edge], Q = ring[(ep.edge + 1) % ring.length];
+            const x = P.x + (Q.x - P.x) * ep.u, y = P.y + (Q.y - P.y) * ep.u;
+            const L = Math.hypot(Q.x - P.x, Q.y - P.y) || 1;
+            let nx = -(Q.y - P.y) / L, ny = (Q.x - P.x) / L;   // left normal
+            const inM = 1 / M_TO_FT;
+            if (!swbPip({ x: x + nx * 0.5, y: y + ny * 0.5 }, ring)) { nx = -nx; ny = -ny; }
+            return { x: x + nx * inM, y: y + ny * inM };
+        };
+        legs.forEach(l => {
+            const A = allNodes[l.a], B = allNodes[l.b];
+            l.pa = l.ea ? epXY(A, l.ea) : { x: A.x, y: A.y };
+            l.pb = l.eb ? epXY(B, l.eb) : { x: B.x, y: B.y };
+            l.lenM = Math.hypot(l.pb.x - l.pa.x, l.pb.y - l.pa.y);
+        });
+        await swbYield();
+        // ---- 6. stairs: walk the DEM along each leg ----
+        const bandM = M(th.fpBandFt), ovM = th.overlapM, floorAdd = th.fpFloorM;
+        const reliefMaxM = Math.max(0.5, M(th.droneMaxAglFt) - floorAdd - 1);   // −1 m rounding slack: the drone (at the floor) must stay under droneMaxAgl over the LOWEST ground of the arc
+        const stepMax = bandM - ovM;                                             // consecutive floors may differ by at most band − overlap
+        const sampleM = M(th.sampleFt);
+        let totalArcs = 0, totalVerts = 0, totalLenM = 0;
+        legs.forEach((l, li) => {
+            const A = allNodes[l.a], B = allNodes[l.b];
+            let n = Math.max(2, Math.ceil(l.lenM / sampleM) + 1);
+            const pts = [], g = [];
+            let demGaps = 0, lastG = null;
+            for (let i = 0; i < n; i++) {
+                const t = i / (n - 1);
+                const q = { x: l.pa.x + (l.pb.x - l.pa.x) * t, y: l.pa.y + (l.pb.y - l.pa.y) * t };
+                pts.push(q);
+                let gv = gXY(q);
+                if (gv === null) { demGaps++; gv = lastG; } else lastG = gv;
+                g.push(gv === null ? null : gv / M_TO_FT);
+            }
+            for (let i = 0; i < n; i++) if (g[i] === null) { for (let j = i + 1; j < n; j++) if (g[j] !== null) { g[i] = g[j]; break; } }
+            if (g.some(v => v === null)) { l.flags.push('no DEM under leg'); l.arcs = [{ s: 0, e: n - 1, floorM: null, ceilM: null }]; l.verts = [pts[0], pts[n - 1]]; l.vertsLL = l.verts.map(toLL); totalLenM += l.lenM; return; }
+            if (demGaps) l.flags.push(`${demGaps} DEM gap(s)`);
+            // densify across cliffs: where one sample interval climbs more than a step, interpolate
+            // extra samples (the raster is bilinear, so linear ground between samples is faithful)
+            for (let i = 0; i < pts.length - 1; i++) {
+                const k = Math.ceil(Math.abs(g[i + 1] - g[i]) / Math.max(0.5, bandM - ovM - 1));   // −1 m: integer floors can round a 3 m rise into a 4 m jump
+                if (k <= 1) continue;
+                const ins = [], gin = [];
+                for (let j = 1; j < k; j++) { const t = j / k; ins.push({ x: pts[i].x + (pts[i + 1].x - pts[i].x) * t, y: pts[i].y + (pts[i + 1].y - pts[i].y) * t }); gin.push(g[i] + (g[i + 1] - g[i]) * t); }
+                pts.splice(i + 1, 0, ...ins); g.splice(i + 1, 0, ...gin); i += ins.length;
+            }
+            const zA = A.kind === 'zone' ? A.zone : null, zB = B.kind === 'zone' ? B.zone : null;
+            const zoneOv = (z, fl, ce) => (!z || z.floorM === null) ? Infinity : (Math.min(ce, z.ceilM) - Math.max(fl, z.floorM));
+            const fitsZone = (z, fl, ce) => zoneOv(z, fl, ce) >= ovM;
+            // Interval walker: an arc's floor may sit anywhere in [ceil(maxG+floorAdd), floor(minG+droneMax)]
+            // (never below 54 m over the highest ground; the drone at the floor never over droneMax AGL
+            // over the lowest ground) AND within ±stepMax of the previous arc's floor (= overlap ≥ overlapM).
+            // Extend while that intersection is non-empty; pick the floor nearest to where the ground is
+            // heading so the next arc has room — rolling ground no longer forces a step every 3 m.
+            const droneMaxM = M(th.droneMaxAglFt);
+            const zoneRange = (z) => (!z || z.floorM === null) ? null : [Math.ceil(z.floorM + ovM - bandM), Math.floor(z.ceilM - ovM)];   // floors that give ≥ overlapM with the zone band
+            const arcs = [];
+            let s = 0, prevFloor = null, guard = 0;
+            const rA = zoneRange(zA), rB = zoneRange(zB);
+            n = pts.length;
+            while (s < n - 1 && guard++ < 5000) {
+                let e = s + 1, maxG = Math.max(g[s], g[e]), minG = Math.min(g[s], g[e]);
+                const range = (mx, mn, terminal) => {
+                    // hi keeps one step of head-room under the drone cap so a descent after this arc can
+                    // still step down 3 m at a time (without it the greedy walk runs into a wall on downslopes)
+                    let lo = Math.ceil(mx + floorAdd), hi = Math.floor(mn + droneMaxM - stepMax);
+                    if (prevFloor !== null) { lo = Math.max(lo, Math.ceil(prevFloor - stepMax)); hi = Math.min(hi, Math.floor(prevFloor + stepMax)); }
+                    if (s === 0 && rA) { lo = Math.max(lo, rA[0]); hi = Math.min(hi, rA[1]); }
+                    if (terminal && rB) { lo = Math.max(lo, rB[0]); hi = Math.min(hi, rB[1]); }
+                    return [lo, hi];
+                };
+                let r = range(maxG, minG, e === n - 1);
+                if (r[0] > r[1]) {
+                    // even the shortest arc cannot comply — cliff, or a zone band the floor cannot reach
+                    r = [Math.ceil(maxG + floorAdd), Math.ceil(maxG + floorAdd)];
+                    if (prevFloor !== null && Math.abs(r[0] - prevFloor) > stepMax) l.flags.push(`cliff ${(Math.hypot(pts[s].x - pts[0].x, pts[s].y - pts[0].y) * M_TO_FT).toFixed(0)} ft along the leg (floor jumps ${Math.abs(r[0] - prevFloor)} m between samples)`);
+                }
+                while (e + 1 <= n - 1) {
+                    const nmax = Math.max(maxG, g[e + 1]), nmin = Math.min(minG, g[e + 1]);
+                    const nr = range(nmax, nmin, e + 1 === n - 1);
+                    if (nr[0] > nr[1]) break;
+                    e++; maxG = nmax; minG = nmin; r = nr;
+                }
+                // floor choice inside the interval: aim at the ground ahead (next window's minimum floor)
+                const ahead = g[Math.min(n - 1, e + 2)];
+                const target = Math.ceil(Math.max(ahead, g[e]) + floorAdd);
+                const fl = Math.max(r[0], Math.min(r[1], target));
+                const ce = Math.floor(fl + bandM);
+                arcs.push({ s, e, floorM: fl, ceilM: ce, maxGm: maxG, minGm: minG });
+                prevFloor = fl; s = e;
+            }
+            if (arcs.length > 40) l.flags.push(`many steps (${arcs.length})`);
+            if (l.lenM * M_TO_FT < 30) l.flags.push(`tiny leg (${(l.lenM * M_TO_FT).toFixed(0)} ft) — zones nearly touch, consider merging`);
+            // zone handoff: the arc touching each zone must share the zone band — 2 m is the hard line, overlapM the target
+            [[zA, arcs[0]], [zB, arcs[arcs.length - 1]]].forEach(([z, arc]) => {
+                if (!z || !arc) return;
+                const ov = zoneOv(z, arc.floorM, arc.ceilM);
+                if (ov < 2) l.flags.push(`HANDOFF FAIL: arc shares only ${ov.toFixed(1)} m with zone "${z.name}" (zone ${(z.floorM * M_TO_FT).toFixed(0)}–${(z.ceilM * M_TO_FT).toFixed(0)} ft, arc ${arc.floorM}–${arc.ceilM} m)`);
+                else if (ov < ovM) l.flags.push(`handoff with zone "${z.name}" only ${ov.toFixed(1)} m (target ${ovM})`);
+            });
+            l.arcs = arcs;
+            l.verts = [pts[0]].concat(arcs.map(a => pts[a.e]));
+            l.vertsLL = l.verts.map(toLL);
+            totalArcs += arcs.length; totalVerts += l.verts.length; totalLenM += l.lenM;
+        });
+        // hub band check: every spoke's arc at the hub must share ≥ overlap
+        hubs.forEach((h, hi) => {
+            const hid = nodes.length + hi;
+            let lo = -Infinity, hiB = Infinity;
+            legs.forEach(l => { if (l.a !== hid && l.b !== hid) return; if (!l.arcs.length || l.arcs[0].floorM === null) return; const arc = l.a === hid ? l.arcs[0] : l.arcs[l.arcs.length - 1]; lo = Math.max(lo, arc.floorM); hiB = Math.min(hiB, arc.ceilM); });
+            h.bandOk = (hiB - lo) >= ovM; h.bandM = [lo, hiB];
+            if (!h.bandOk) legs.forEach(l => { if (l.a === hid || l.b === hid) l.flags.push(`hub ${hi + 1} bands do not share ${ovM} m`); });
+        });
+        await swbYield();
+        // ---- 7. web distance to base per zone — endpoint graph: legs edge-to-edge,
+        //         plus the transit inside each zone between its own endpoints ----
+        const epNodes = [];   // { x, y, zone|hub|base index }
+        const epIdx = (key, x, y, owner) => { epNodes.push({ x, y, owner }); return epNodes.length - 1; };
+        const ownerEps = new Map();   // owner key → [ep index]
+        const ownerKey = (i) => `${allNodes[i].kind}:${i}`;
+        legs.forEach(l => {
+            const A = allNodes[l.a], B = allNodes[l.b];
+            const ia = A.kind === 'zone' ? epIdx(null, l.pa.x, l.pa.y, l.a) : null;
+            const ib = B.kind === 'zone' ? epIdx(null, l.pb.x, l.pb.y, l.b) : null;
+            l.epA = ia; l.epB = ib;
+            if (ia !== null) { const k = ownerKey(l.a); if (!ownerEps.has(k)) ownerEps.set(k, []); ownerEps.get(k).push(ia); }
+            if (ib !== null) { const k = ownerKey(l.b); if (!ownerEps.has(k)) ownerEps.set(k, []); ownerEps.get(k).push(ib); }
+        });
+        // hubs + bases are single points
+        const pointNode = new Map();
+        allNodes.forEach((nd, i) => { if (nd.kind !== 'zone') pointNode.set(i, epIdx(null, nd.x, nd.y, i)); });
+        const adj = epNodes.map(() => []);
+        const link = (u, v, w) => { adj[u].push({ to: v, w }); adj[v].push({ to: u, w }); };
+        legs.forEach(l => {
+            const u = l.epA !== null ? l.epA : pointNode.get(l.a);
+            const v = l.epB !== null ? l.epB : pointNode.get(l.b);
+            link(u, v, l.lenM);
+        });
+        ownerEps.forEach(list => { for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) { const a = epNodes[list[i]], b = epNodes[list[j]]; link(list[i], list[j], Math.hypot(a.x - b.x, a.y - b.y)); } });
+        const srcs = baseIdx.map(b => pointNode.get(b));
+        const dist = swbDijkstra(epNodes.length, adj, srcs);
+        zones.forEach((z, i) => {
+            const list = ownerEps.get(ownerKey(i)) || [];
+            let best = Infinity; list.forEach(e => { if (dist[e] < best) best = dist[e]; });
+            z.rtbM = Number.isFinite(best) ? best : null; z.straightM = straightM[i]; z.dropped = false;
+        });
+        hubs.forEach((h, hi) => { h.ll = toLL(h); const e = pointNode.get(nodes.length + hi); h.rtbM = Number.isFinite(dist[e]) ? dist[e] : null; });
+        legs.forEach(l => { l.kindA = allNodes[l.a].kind; l.kindB = allNodes[l.b].kind; l.nameA = swbNodeName(allNodes[l.a], hubs); l.nameB = swbNodeName(allNodes[l.b], hubs); });
+        return { zones, legs, hubs, nodes: allNodes, totalArcs, totalVerts, totalLenM, stretchAdded };
+    }
+    function swbNodeName(n, hubs) {
+        if (n.kind === 'zone') return n.zone.name;
+        if (n.kind === 'base') return `Base: ${n.base.name}`;
+        return `Hub ${(n.hi != null ? n.hi : hubs.indexOf(n.hub)) + 1}`;
+    }
+
+    // ---------- preview ----------
+    function swbClear() {
+        const map = getLeafletMap();
+        let failed = 0;
+        swbLayers.forEach(l => { try { if (typeof l.remove === 'function') l.remove(); else if (map) map.removeLayer(l); } catch (e) { failed++; } });
+        if (failed) console.warn(`${TAG} spiderweb: ${failed} preview layer(s) could not be removed`);
+        swbLayers = [];
+        swbState = null;
+    }
+    function swbDrawPreview() {
+        const st = swbState;
+        const L = getLeafletL(), map = getLeafletMap();
+        if (!st || !L || !map) return;
+        swbLayers.forEach(l => { try { l.remove(); } catch (e) {} });
+        swbLayers = [];
+        const add = (layer) => { try { layer.addTo(map); swbLayers.push(layer); } catch (e) {} };
+        st.zones.forEach(z => {
+            const bad = z.flags.length > 0;
+            add(L.polygon(z.points.map(q => [q.lat, q.lng]), { color: bad ? '#ffb020' : '#5fff5f', weight: 2, opacity: 0.95, fillColor: bad ? '#ffb020' : '#5fff5f', fillOpacity: 0.08, interactive: false }));
+        });
+        st.legs.forEach(l => {
+            if (!l.vertsLL) return;
+            const bad = l.flags.length > 0;
+            add(L.polyline(l.vertsLL.map(q => [q.lat, q.lng]), { color: bad ? '#ff8c1a' : '#2b8cff', weight: 3, opacity: 0.95, interactive: false }));
+            l.vertsLL.forEach((q, i) => {
+                const end = i === 0 || i === l.vertsLL.length - 1;
+                add(L.circleMarker([q.lat, q.lng], { radius: end ? 4 : 3, color: end ? '#00e5ff' : '#ffffff', weight: 1.5, fillColor: end ? '#0d131d' : '#ffffff', fillOpacity: 1, interactive: false }));
+            });
+        });
+        st.hubs.forEach(h => add(L.circleMarker([h.ll.lat, h.ll.lng], { radius: 7, color: h.bandOk ? '#ff35d0' : '#ff2020', weight: 2, fillColor: '#ff35d0', fillOpacity: 0.9, interactive: false })));
+        st.bases.forEach(b => add(L.circleMarker([b.pt.lat, b.pt.lng], { radius: 8, color: '#ffe14d', weight: 3, fillColor: '#0d131d', fillOpacity: 1, interactive: false })));
+        const ents = ((mapObjectsBySite[st.sid] || {}).entities) || [];
+        st.dropped.forEach(d => {
+            const names = d.name.split(' +')[0];
+            const e = ents.find(x => x.type === 3 && x.name === names);
+            const cs = e && entityCoords(e);
+            if (cs && cs.length >= 3) add(L.polygon(cs.map(q => [q.lat, q.lng]), { color: '#ff5555', weight: 2, opacity: 0.9, dashArray: '3,5', fill: false, interactive: false }));
+        });
+    }
+
+    // ---------- panel ----------
+    function swbClosePanel() { const el = document.getElementById(SWB_PANEL_ID); if (el) el.remove(); }
+    function swbReportText() {
+        const st = swbState; if (!st) return '';
+        const th = st.thresholds;
+        const out = [];
+        out.push(`AIM SpiderWeb generator v${SCRIPT_VERSION} — site ${st.sid} — ${new Date().toISOString()}`);
+        out.push(`floor ${th.fpFloorM} m (+${(th.fpFloorM * M_TO_FT).toFixed(1)} ft) / band ${th.fpBandFt} ft / overlap ${th.overlapM} m / outset ${th.outsetFt} ft / battery ${th.battery} ${st.limitFt.toLocaleString()} ft`);
+        out.push(`zones ${st.zones.length} · legs ${st.legs.length} · hubs ${st.hubs.length} · arcs ${st.totalArcs} · vertices ${st.totalVerts} · FP length ${(st.totalLenM * M_TO_FT / 5280).toFixed(2)} mi`);
+        out.push(`bases: ${st.bases.map(b => b.name).join(', ')}`);
+        st.gates.forEach(g => out.push(`${g.ok ? 'OK  ' : (g.soft ? 'WARN' : 'FAIL')} ${g.label}${g.detail ? ' — ' + g.detail : ''}`));
+        if (st.dropped.length) { out.push(`dropped assets (${st.dropped.length}):`); st.dropped.forEach(d => out.push(`  ${d.name} — ${d.why}${d.distFt != null ? ` (${d.distFt.toLocaleString()} ft)` : ''}`)); }
+        if (st.skippedEmpty.length) out.push(`EMPTY assets skipped (${st.skippedEmpty.length}): ${st.skippedEmpty.join(', ')}`);
+        out.push('zones:');
+        st.zones.forEach(z => out.push(`  ${z.name} · ${z.assets.length} asset(s) · floor ${z.floorM === null ? '?' : (z.floorM * M_TO_FT).toFixed(0)} / ceil ${z.ceilM === null ? '?' : (z.ceilM * M_TO_FT).toFixed(0)} ft MSL · ground ${z.gMinFt == null ? '?' : Math.round(z.gMinFt)}–${z.gMaxFt == null ? '?' : Math.round(z.gMaxFt)} ft · to base ${z.rtbM === null ? 'UNREACHABLE' : Math.round(z.rtbM * M_TO_FT).toLocaleString() + ' ft'} (${z.rtbM === null ? '—' : (z.rtbM / (z.straightM || 1)).toFixed(2)}× straight)${z.flags.length ? ' ⚠ ' + z.flags.join('; ') : ''}`));
+        out.push('legs:');
+        st.legs.forEach(l => out.push(`  ${l.nameA} → ${l.nameB} · ${Math.round(l.lenM * M_TO_FT).toLocaleString()} ft · ${l.arcs.length} arc(s) · ${l.arcs.map(a => a.floorM === null ? '?' : `${a.floorM}–${a.ceilM}`).join(' | ')} m MSL${l.flags.length ? ' ⚠ ' + l.flags.join('; ') : ''}`));
+        st.hubs.forEach((h, i) => out.push(`hub ${i + 1}: ${h.zones.length} spokes · ${h.ll.lat.toFixed(6)}, ${h.ll.lng.toFixed(6)} · band ${h.bandOk ? 'OK' : 'CONFLICT'}`));
+        out.push('run log:'); st.runLog.forEach(s => out.push(`  ${s}`));
+        return out.join('\n');
+    }
+    function swbRenderPanel() {
+        swbClosePanel();
+        const st = swbState;
+        const th = swbThresholds;
+        const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+        const num = (id, label, step, title) => `<label title="${esc(title || '')}" style="display:flex;align-items:center;gap:4px;">${label}<input data-swb-p="${id}" type="number" value="${th[id]}" step="${step}" style="width:58px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(43,140,255,0.4);border-radius:4px;padding:2px 4px;font:inherit;"></label>`;
+        const wrap = document.createElement('div');
+        wrap.id = SWB_PANEL_ID;
+        wrap.style.cssText = 'position:fixed;top:70px;right:56px;width:500px;max-height:78vh;z-index:2147483000;background:rgba(16,22,32,0.96);border:1px solid rgba(43,140,255,0.5);border-radius:10px;color:#dfe9f0;font:12px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,0.55);display:flex;flex-direction:column;';
+        let body = '';
+        if (st) {
+            const gateHtml = st.gates.map(g => `<div style="color:${g.ok ? '#7dffae' : (g.soft ? '#ffb020' : '#ff6b6b')}">${g.ok ? '✔' : (g.soft ? '⚠' : '✖')} ${esc(g.label)}${g.detail ? ` <span style="opacity:0.7">— ${esc(g.detail)}</span>` : ''}</div>`).join('');
+            const worst = st.zones.filter(z => z.rtbM !== null).sort((a, b) => (b.rtbM / (b.straightM || 1)) - (a.rtbM / (a.straightM || 1))).slice(0, 5);
+            const worstHtml = worst.map(z => `<div><strong>${esc(z.name)}</strong> · ${Math.round(z.rtbM * M_TO_FT).toLocaleString()} ft to base · ${(z.rtbM / (z.straightM || 1)).toFixed(2)}× straight</div>`).join('');
+            const flagged = st.legs.filter(l => l.flags.length);
+            const flagHtml = flagged.slice(0, 12).map(l => `<div style="color:#ffb020">⚠ ${esc(l.nameA)} → ${esc(l.nameB)}: ${esc(l.flags.join('; '))}</div>`).join('') + (flagged.length > 12 ? `<div style="opacity:0.7">…and ${flagged.length - 12} more flagged legs (in the report)</div>` : '');
+            const zflag = st.zones.filter(z => z.flags.length);
+            const zflagHtml = zflag.slice(0, 8).map(z => `<div style="color:#ffb020">⚠ ${esc(z.name)}: ${esc(z.flags.join('; '))}</div>`).join('') + (zflag.length > 8 ? `<div style="opacity:0.7">…and ${zflag.length - 8} more flagged zones</div>` : '');
+            const dropHtml = st.dropped.length ? `<div style="margin-top:6px;color:#ff6b6b;font-weight:600;">Dropped (${st.dropped.length})</div>` + st.dropped.slice(0, 15).map(d => `<div style="color:#ff9b9b">${esc(d.name)} — ${esc(d.why)}${d.distFt != null ? ` (${d.distFt.toLocaleString()} ft)` : ''}</div>`).join('') + (st.dropped.length > 15 ? `<div style="opacity:0.7">…and ${st.dropped.length - 15} more</div>` : '') : '';
+            const maxSteps = st.legs.reduce((m, l) => Math.max(m, l.arcs.length), 0);
+            body = `
+                <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px 10px;margin-bottom:6px;">
+                    <div><span style="opacity:0.7">zones</span><br><strong style="font-size:15px;color:#5fff5f">${st.zones.length}</strong></div>
+                    <div><span style="opacity:0.7">legs</span><br><strong style="font-size:15px;color:#2b8cff">${st.legs.length}</strong></div>
+                    <div><span style="opacity:0.7">hubs</span><br><strong style="font-size:15px;color:#ff35d0">${st.hubs.length}</strong></div>
+                    <div><span style="opacity:0.7">FP length</span><br><strong style="font-size:15px">${(st.totalLenM * M_TO_FT / 5280).toFixed(1)} mi</strong></div>
+                    <div><span style="opacity:0.7">arcs</span><br><strong>${st.totalArcs}</strong></div>
+                    <div><span style="opacity:0.7">vertices</span><br><strong>${st.totalVerts}</strong></div>
+                    <div><span style="opacity:0.7">most steps / leg</span><br><strong>${maxSteps}</strong></div>
+                    <div><span style="opacity:0.7">bases</span><br><strong>${st.bases.length}</strong></div>
+                </div>
+                <div style="margin:4px 0;">${gateHtml}</div>
+                <div style="margin-top:6px;color:#2b8cff;font-weight:600;">Longest way home (stretch)</div>${worstHtml}
+                ${flagHtml || zflagHtml ? `<div style="margin-top:6px;color:#ffb020;font-weight:600;">Flags</div>${zflagHtml}${flagHtml}` : ''}
+                ${dropHtml}
+                <div style="margin-top:8px;opacity:0.7;">Preview only — nothing is written. Cyan dots = leg ends on zone edges · white dots = stair steps · magenta = hubs · yellow = base · orange = flagged · red dashed = dropped assets.</div>`;
+        } else {
+            body = `<div style="opacity:0.8">Stage a web for the current site. MSL (mountain-terrain) sites only. Every non-EMPTY asset gets a zone; legs are straight, stop on the zone edge, and get automatic stair steps from the DEM. Nothing is written in this version.</div>`;
+        }
+        wrap.innerHTML = `
+            <div data-swb-drag style="cursor:move;padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid rgba(43,140,255,0.3);">
+                <span style="color:#2b8cff;font-weight:700;">🕸 SpiderWeb generator</span>
+                <span style="opacity:0.6;">v${SCRIPT_VERSION}</span>
+                <span style="flex:1"></span>
+                <button data-swb-close style="background:none;border:none;color:#dfe9f0;font-size:16px;cursor:pointer;line-height:1;">✕</button>
+            </div>
+            <div style="padding:8px 12px;display:flex;flex-wrap:wrap;gap:6px 12px;border-bottom:1px solid rgba(43,140,255,0.2);font-size:11px;">
+                ${num('fpFloorM', 'FP floor m', 1, 'Arc floor above the HIGHEST ground under the arc, integer metres (54 = 177.2 ft)')}
+                ${num('fpBandFt', 'band ft', 1, 'Arc ceiling = floor + band')}
+                ${num('overlapM', 'overlap m', 0.5, 'Target overlap between connected arcs; steps every (band − overlap) of relief')}
+                ${num('droneMaxAglFt', 'drone max AGL', 5, 'Relief inside one arc is capped so the drone (flying the floor) never exceeds this over the low ground')}
+                ${num('outsetFt', 'outset ft', 1, 'Asset ring → zone')}
+                ${num('endpointGapFt', 'endpoint gap ft', 1, 'Minimum spacing between leg ends on one zone edge')}
+                ${num('stretchMax', 'stretch ×', 0.05, 'Restore a pruned leg when a zone\'s way home exceeds this × straight line')}
+                ${num('hubMaxRtbLossPct', 'hub RTB loss %', 0.5, 'A hub may lengthen the summed return-to-base distance by at most this')}
+                <label style="display:flex;align-items:center;gap:4px;">battery<select data-swb-p="battery" style="background:#0d131d;color:#dfe9f0;border:1px solid rgba(43,140,255,0.4);border-radius:4px;font:inherit;"><option value="tulip" ${th.battery === 'tulip' ? 'selected' : ''}>Tulip</option><option value="tattu" ${th.battery === 'tattu' ? 'selected' : ''}>Tattu</option></select></label>
+                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input data-swb-p="hubs" type="checkbox" ${th.hubs ? 'checked' : ''}>hubs</label>
+            </div>
+            <div style="padding:6px 12px;display:flex;gap:8px;align-items:center;border-bottom:1px solid rgba(43,140,255,0.2);">
+                <button data-swb-stage style="background:rgba(43,140,255,0.15);border:1px solid rgba(43,140,255,0.55);color:#8ec2ff;border-radius:5px;padding:3px 12px;cursor:pointer;font-weight:600;">🕸 Stage</button>
+                <button data-swb-clear style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.25);color:#dfe9f0;border-radius:5px;padding:3px 10px;cursor:pointer;">Clear</button>
+                <button data-swb-copy ${st ? '' : 'disabled'} style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.25);color:#dfe9f0;border-radius:5px;padding:3px 10px;cursor:pointer;">Copy report</button>
+            </div>
+            <div style="padding:8px 12px;overflow:auto;flex:1;">${body}</div>`;
+        // drag
+        const hdr = wrap.querySelector('[data-swb-drag]');
+        let drag = null;
+        hdr.addEventListener('mousedown', (ev) => { if (ev.target.closest('button')) return; drag = { dx: ev.clientX - wrap.offsetLeft, dy: ev.clientY - wrap.offsetTop }; ev.preventDefault(); });
+        document.addEventListener('mousemove', (ev) => { if (!drag) return; wrap.style.left = `${ev.clientX - drag.dx}px`; wrap.style.top = `${ev.clientY - drag.dy}px`; wrap.style.right = 'auto'; });
+        document.addEventListener('mouseup', () => { drag = null; });
+        wrap.addEventListener('click', (ev) => {
+            if (ev.target.closest('[data-swb-close]')) { swbClosePanel(); return; }
+            if (ev.target.closest('[data-swb-stage]')) { swbReadPanelParams(wrap); swbStage(); return; }
+            if (ev.target.closest('[data-swb-clear]')) { swbClear(); swbRenderPanel(); return; }
+            if (ev.target.closest('[data-swb-copy]')) {
+                const txt = swbReportText();
+                try { navigator.clipboard.writeText(txt).then(() => showToast('SpiderWeb report copied'), () => showToast('Copy failed', 'rgba(255,96,96,0.55)')); }
+                catch (e) { showToast('Copy failed', 'rgba(255,96,96,0.55)'); }
+            }
+        });
+        wrap.addEventListener('change', (ev) => { if (ev.target.matches('[data-swb-p]')) swbReadPanelParams(wrap); });
+        document.body.appendChild(wrap);
+    }
+    function swbReadPanelParams(wrap) {
+        wrap.querySelectorAll('[data-swb-p]').forEach(inp => {
+            const id = inp.getAttribute('data-swb-p');
+            if (!Object.prototype.hasOwnProperty.call(SWB_DEFAULTS, id)) return;
+            let v;
+            if (typeof SWB_DEFAULTS[id] === 'boolean') v = !!inp.checked;
+            else if (typeof SWB_DEFAULTS[id] === 'number') { v = parseFloat(inp.value); if (!Number.isFinite(v)) return; }
+            else v = String(inp.value);
+            if (v === swbThresholds[id]) return;
+            swbThresholds[id] = v;
+            saveSwbThresholdKey(id, v);
+        });
+    }
+    function swbOpen() {
+        if (!swbMasterEnabled) { showToast('SpiderWeb is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+        swbRenderPanel();
+    }
+
+    // ============================================================
     // Control Panel integration
     // ============================================================
     function setupControlPanel() {
@@ -9478,6 +10316,15 @@
             }
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === TER_SCRIPT_ID) {
                 handleTerrainToggle(msg);
+            }
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SWB_SCRIPT_ID) {
+                handleSpiderwebToggle(msg);
+            }
+            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SWB_SCRIPT_ID && CONTEXT === 'IFRAME') {
+                if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;
+                if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
+                if (msg.actionId === 'swb-open') swbOpen();
+                else if (msg.actionId === 'swb-clear') { swbClear(); if (document.getElementById(SWB_PANEL_ID)) swbRenderPanel(); }
             }
             else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === TER_SCRIPT_ID && CONTEXT === 'IFRAME') {
                 // Cross-tab guard: BroadcastChannel delivers to EVERY open tab — only
@@ -9705,6 +10552,33 @@
                 { id: 'opacity', label: 'Overlay opacity', type: 'number', min: 0.1, max: 1, step: 0.05, default: TER_THRESH_DEFAULTS.opacity },
                 { id: 'ter-run', label: '⛰ Run profiler', type: 'button', action: 'ter-run' },
                 { id: 'ter-clear', label: 'Clear overlay + panel', type: 'button', action: 'ter-clear' },
+            ],
+            hotkeys: [],
+        });
+        // v4.274: 🕸 Unshielded SpiderWeb generator — own card (feature #261).
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: SWB_SCRIPT_ID, name: 'SpiderWeb generator',
+            description: 'Unshielded site as a spider web: an FFZ around every non-EMPTY asset, straight high flight paths between zones with automatic DEM stair steps, hubs for the shortest way back to base. MSL sites only. Preview + report only in this version.',
+            version: SCRIPT_VERSION, group: 'Site Setup', scope: 'site-setup', priority: 35,
+            toggles: [
+                { id: 'swb-master', label: 'Enable SpiderWeb generator', type: 'boolean', default: true, master: true },
+                { id: 'fpFloorM', label: 'FP floor above highest ground under the arc', type: 'number', min: 20, max: 120, step: 1, default: SWB_DEFAULTS.fpFloorM, unit: 'm' },
+                { id: 'fpBandFt', label: 'FP band (ceiling = floor + band)', type: 'number', min: 7, max: 100, step: 1, default: SWB_DEFAULTS.fpBandFt, unit: 'ft' },
+                { id: 'overlapM', label: 'Overlap between connected arcs (steps every band − overlap)', type: 'number', min: 1, max: 10, step: 0.5, default: SWB_DEFAULTS.overlapM, unit: 'm' },
+                { id: 'droneMaxAglFt', label: 'Drone must stay under (caps relief per arc)', type: 'number', min: 100, max: 400, step: 5, default: SWB_DEFAULTS.droneMaxAglFt, unit: 'ft AGL' },
+                { id: 'ffzFloorAglFt', label: 'Zone floor above highest ground in footprint', type: 'number', min: 30, max: 300, step: 5, default: SWB_DEFAULTS.ffzFloorAglFt, unit: 'ft' },
+                { id: 'ffzCeilAglFt', label: 'Zone ceiling above lowest ground in footprint', type: 'number', min: 50, max: 400, step: 1, default: SWB_DEFAULTS.ffzCeilAglFt, unit: 'ft' },
+                { id: 'outsetFt', label: 'Zone outset from the asset ring', type: 'number', min: 10, max: 100, step: 1, default: SWB_DEFAULTS.outsetFt, unit: 'ft' },
+                { id: 'endpointGapFt', label: 'Minimum gap between leg ends on one zone', type: 'number', min: 10, max: 100, step: 1, default: SWB_DEFAULTS.endpointGapFt, unit: 'ft' },
+                { id: 'cornerGapFt', label: 'Leg ends stay this far from zone corners', type: 'number', min: 0, max: 100, step: 1, default: SWB_DEFAULTS.cornerGapFt, unit: 'ft' },
+                { id: 'stretchMax', label: 'Restore a leg when the way home exceeds × straight line', type: 'number', min: 1, max: 3, step: 0.05, default: SWB_DEFAULTS.stretchMax },
+                { id: 'hubMaxRtbLossPct', label: 'Hubs may lengthen the summed way home by up to', type: 'number', min: 0, max: 25, step: 0.5, default: SWB_DEFAULTS.hubMaxRtbLossPct, unit: '%' },
+                { id: 'hubs', label: 'Propose hubs', type: 'boolean', default: SWB_DEFAULTS.hubs },
+                { id: 'battery', label: 'Battery for the one-way distance gate', type: 'select', options: [ { value: 'tulip', label: 'Tulip' }, { value: 'tattu', label: 'Tattu' } ], default: SWB_DEFAULTS.battery },
+                { id: 'sampleFt', label: 'DEM sample spacing along legs', type: 'number', min: 10, max: 100, step: 5, default: SWB_DEFAULTS.sampleFt, unit: 'ft' },
+                { id: 'marginFt', label: 'DEM margin around the site', type: 'number', min: 100, max: 5280, step: 50, default: SWB_DEFAULTS.marginFt, unit: 'ft' },
+                { id: 'swb-open', label: 'Open SpiderWeb panel', type: 'button', action: 'swb-open' },
+                { id: 'swb-clear', label: 'Clear SpiderWeb preview', type: 'button', action: 'swb-clear' },
             ],
             hotkeys: [],
         });
@@ -22382,6 +23256,17 @@
             terrainProfilerRun();
         };
         optsRow.appendChild(terProfBtn);
+
+        // "🕸 SpiderWeb" button — Unshielded SpiderWeb generator (feature #261):
+        // FFZ per asset + high point-to-point FPs with DEM stairs + hubs.
+        // Preview-only in v4.274 but a CSM build tool → Full mode only.
+        const swbBtn = document.createElement('button');
+        swbBtn.type = 'button';
+        swbBtn.textContent = '🕸 SpiderWeb';
+        swbBtn.title = 'Unshielded SpiderWeb generator — zone around every asset, straight high flight paths with automatic stair steps, hubs for the shortest way back to base (MSL sites; preview + report)';
+        swbBtn.style.cssText = 'background:rgba(43,140,255,0.13);color:#8ec2ff;border:1px solid rgba(43,140,255,0.45);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+        swbBtn.onclick = (ev) => { ev.stopPropagation(); swbOpen(); };
+        if (!LITE) optsRow.appendChild(swbBtn);
 
         // "Generate" button — opens the Site Setup Generator modal
         // (auto-build the foundation: A1 = inspection FFZs). Inverse of

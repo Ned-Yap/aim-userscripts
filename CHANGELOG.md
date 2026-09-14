@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-14 — Site Setup Tools latest v4.274: 🕸 Unshielded SpiderWeb generator (preview) — dev only
+
+- **New (latest only, feature #261):** a `🕸 SpiderWeb` button on the SUM toolbar (Full mode) stages an unshielded site as a spider web — an FFZ around every non-EMPTY asset (16 ft mitered outset, touching buffers unioned), straight flight-path legs between zones that stop 1 ft inside the zone edge, and open-field hubs for the shortest way back to base. Legs sit at a 54 m floor (177 ft) over the highest ground under each arc with a 20 ft band, and get automatic stair steps from the 3DEP DEM so connected arcs always share ≥ 3 m and the drone never exceeds 200 ft AGL over a dip. Zones beyond the battery's one-way limit (Tulip 18k / Tattu 14k ft of web distance) are dropped and listed. MSL (mountain-terrain) sites only; nothing is written in this version — preview + report + gates. Own Control Panel card `SpiderWeb generator`.
+
 ## 2026-09-14 — Map Nav v0.12 → PROD: Space zoom-to-fit lands on the site again
 
 - **Fix:** pressing Space jumped the map to a completely different area instead of framing the site. The fit unioned *every* Leaflet layer on the map, so any far-off overlay (neighbor-site outlines, fleet KML layers, airspace / RRC / boundary vectors, a stray marker) dragged the bounds miles away. Space now reads the site's own entity list from Percepto (`/map_objects/` for the site id in the URL) and fits exactly those — assets, FFZs, flight paths, markers, base and safe zones. The old layer walk only runs as a fallback when there is no site id or the fetch fails, and the console says which path was used.
