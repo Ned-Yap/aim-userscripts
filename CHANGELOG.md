@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-14 — 🚨 Site Watch v0.25 — failure alerts by Slack DM (latest — dev only)
+
+Silent failures are over. Site Watch now DMs you on Slack (same bot + `users` mapping the Simulate DM uses, never the channel) when:
+- a `changes.csv` append fails (rows dropped), plus a recovery DM once appends work again with the dropped-row total;
+- a snapshot / baseline commit to the data repo fails;
+- a watch cycle crashes;
+- the leader tab is logged in but has not started a cycle for 2 h (stalled scheduler — the old lease-deadlock class).
+
+One DM per failure type per 6 h; a failed DM retries in 30 min. New Control Panel button **Send test alert (Slack DM)** to verify the route (needs your PAT + your GitHub login in `slack-config.json` users).
+
 ## 2026-09-14 — 🛡 Site Watch v0.24 — audit log auto-rotation (latest — dev only)
 
 The `changes.csv` audit log crossed GitHub's 1 MB Contents-API cliff on 2026-08-18 and every append since then failed silently (snapshots kept committing, change rows were dropped) — the same failure as 2026-07-20. Fixed for good:

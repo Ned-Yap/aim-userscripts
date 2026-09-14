@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.24
+// @version      0.25
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON (and optionally its missions) on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Daily Slack digest. Configurable in the AIM Control Panel ("Site Watch").
@@ -41,6 +41,13 @@
 //     hashes a login page as data, just pauses and resumes Monday); timestamp
 //     scheduler with wake catch-up (sleep just delays, never corrupts);
 //     single-tab leader lease (only one tab polls even with many open).
+//
+//   - FAILURE ALERTS (v0.25): any data-loss failure (changes.csv append,
+//     snapshot/baseline commit, cycle crash) and a stalled scheduler (leader
+//     tab with no cycle for 2 h while logged in) DMs the user on Slack via the
+//     same bot + slack-config.json `users` mapping the Simulate DM uses. One DM
+//     per failure type per 6 h; a recovery DM when the audit log heals.
+//     Control Panel button "Send test alert (Slack DM)" verifies the route.
 //
 // Hotkeys: none. Log tag: [AIM WATCH]. Runs in TOP frame only.
 //
@@ -91,7 +98,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.24';
+    const SCRIPT_VERSION = '0.25';
 
     // Server model (v0.21): prod and QA are separate databases with their own
     // site lists — the same numeric ID is two different sites. A QA leader
@@ -111,6 +118,9 @@
     // Rotate changes.csv to changes-archive-YYYY-MM.csv once an append would push
     // it past this — well under GitHub's 1,048,576-byte Contents-API cliff.
     const CSV_ROTATE_BYTES = 900 * 1024;
+    const ALERT_REPEAT_MS = 6 * 3600e3;      // one Slack DM per alert key per 6 h
+    const ALERT_RETRY_MS = 30 * 60e3;        // if the DM itself fails, retry in 30 min
+    const STALL_MS = 2 * 3600e3;             // leader with no cycle for this long = stalled scheduler
     const TOKEN_KEY = 'aim-github-token';   // shared with Map Styler / AIM Issues
 
     // ---- this script's own GM storage keys ----
@@ -186,6 +196,7 @@
         const st = (s && s.sites) ? s : { sites: {} };
         if (!st.missions) st.missions = {};     // 2nd source (missions); migrate older state
         if (!st.csv) st.csv = {};               // v0.24: audit-log append health (lastOkAt/lastFailAt/lastError/droppedRows)
+        if (!st.alerts) st.alerts = {};         // v0.25: alertKey → last DM timestamp (dedupe)
         return st;
     }
     function persistState() { gmSet(STATE_KEY, state); }
@@ -1069,6 +1080,32 @@
         return mySlackId;
     }
 
+    // ---- Failure alerts (v0.25) ----
+    // Slack DM to the user (never the channel — channel policy is AIM Issues
+    // lifecycle events only). Deduped per key; console-only when no DM route.
+    let lastCycleAt = 0;   // watchdog input — set on every cycle the leader tab starts
+    async function alertMe(key, text) {
+        const now = Date.now();
+        state.alerts = state.alerts || {};
+        if (now - (state.alerts[key] || 0) < ALERT_REPEAT_MS) return false;
+        console.error(`${TAG} 🚨 ALERT [${key}] ${text}`);
+        state.alerts[key] = now; persistState();   // stamp first — never hammer Slack from a hot loop
+        try {
+            const dm = await resolveMySlackId();
+            if (!dm) {
+                console.warn(TAG, 'alert: no Slack DM route (needs PAT + slack-config.json users mapping) — console only');
+                return false;
+            }
+            const ts = await slackPost(`🚨 *Site Watch alert — ${key}*\n${text}\n_${location.host} · ${new Date().toLocaleString()} · ${SCRIPT_VERSION}_`, null, dm);
+            if (!ts) { state.alerts[key] = now - ALERT_REPEAT_MS + ALERT_RETRY_MS; persistState(); console.warn(TAG, 'alert DM failed — will retry in 30 min'); }
+            return !!ts;
+        } catch (e) {
+            state.alerts[key] = now - ALERT_REPEAT_MS + ALERT_RETRY_MS; persistState();
+            console.warn(TAG, 'alertMe threw', e); return false;
+        }
+    }
+    function errText(e) { return String(e && e.message || e).slice(0, 300); }
+
     // ---- PT clock (DST-correct via Intl) ----
     function ptParts() {
         const now = new Date();
@@ -1419,7 +1456,7 @@
             try {
                 const gz = bytesToB64(await gzipToBytes(rawNorm));
                 await ghPut(latestPath(id), gz, `[site-watch] baseline site ${id}`, await safeGetSha(latestPath(id)));
-            } catch (e) { console.error(TAG, `baseline commit site ${id} failed`, e); }
+            } catch (e) { console.error(TAG, `baseline commit site ${id} failed`, e); alertMe('github-commit-failed', `baseline commit for site ${id} failed: \`${errText(e)}\``); }
             scheduleNext(st, 'cold');
             return 'baseline';
         }
@@ -1466,7 +1503,7 @@
             st.slot = slot;
             const sp = snapPath(id, slot);
             await ghPut(sp, gz, `[site-watch] snapshot site ${id} ${ts}`, await safeGetSha(sp));
-        } catch (e) { console.error(TAG, `site ${id} snapshot commit failed`, e); }
+        } catch (e) { console.error(TAG, `site ${id} snapshot commit failed`, e); alertMe('github-commit-failed', `snapshot commit for site ${id} failed: \`${errText(e)}\``); }
 
         st.hash = hash;
         st.state = 'hot';
@@ -1497,7 +1534,7 @@
             try {
                 const gz = bytesToB64(await gzipToBytes(norm));
                 await ghPut(mLatestPath(id), gz, `[site-watch] baseline missions ${id}`, await safeGetSha(mLatestPath(id)));
-            } catch (e) { console.error(TAG, `mission baseline commit site ${id} failed`, e); }
+            } catch (e) { console.error(TAG, `mission baseline commit site ${id} failed`, e); alertMe('github-commit-failed', `mission baseline commit for site ${id} failed: \`${errText(e)}\``); }
             scheduleNext(st, 'cold');
             return 'baseline';
         }
@@ -1541,7 +1578,7 @@
             st.slot = slot;
             const sp = mSnapPath(id, slot);
             await ghPut(sp, gz, `[site-watch] mission snapshot site ${id} ${ts}`, await safeGetSha(sp));
-        } catch (e) { console.error(TAG, `site ${id} mission snapshot commit failed`, e); }
+        } catch (e) { console.error(TAG, `site ${id} mission snapshot commit failed`, e); alertMe('github-commit-failed', `mission snapshot commit for site ${id} failed: \`${errText(e)}\``); }
 
         st.hash = hash;
         st.state = 'hot';
@@ -1556,6 +1593,7 @@
         if (!cachedToken) { console.warn(`${TAG} no GitHub token yet — open the Control Panel and save your PAT`); return; }
         if (!claimLeader()) { console.log(`${TAG} another tab is the active watcher — standing by (use "Check all due now" to take over)`); return; }
         cycleRunning = true;
+        lastCycleAt = Date.now();
         try {
             const now = Date.now();
             if (!siteList.length || (now - siteListFetchedAt) > cfg.siteListRefreshHours * 3600e3) {
@@ -1614,7 +1652,13 @@
             if (pendingCsv.length) {
                 try {
                     await appendCsvRows(pendingCsv, `[site-watch] ${pendingCsv.length} change row(s)`);
+                    const wasBroken = !!(state.csv.lastFailAt && state.csv.lastFailAt > (state.csv.lastOkAt || 0));
                     state.csv.lastOkAt = Date.now(); state.csv.lastError = null;
+                    if (wasBroken) {
+                        const dropped = state.csv.droppedRows || 0;
+                        alertMe('csv-append-recovered', `changes.csv appends are working again (${pendingCsv.length} row(s) just written). ${dropped} row(s) were dropped during the outage — they survive only in the per-site snapshot rings.`);
+                        state.csv.droppedRows = 0;
+                    }
                 } catch (e) {
                     // Rows are dropped (still in the per-site snapshots). Record it
                     // so showStatus can shout — the daily digest is gone, so this
@@ -1623,6 +1667,7 @@
                     state.csv.lastError = String(e && e.message || e);
                     state.csv.droppedRows = (state.csv.droppedRows || 0) + pendingCsv.length;
                     console.error(TAG, `CSV append failed — ${pendingCsv.length} row(s) DROPPED (total dropped ${state.csv.droppedRows})`, e);
+                    alertMe('csv-append-failed', `changes.csv append FAILED — ${pendingCsv.length} row(s) dropped this cycle, ${state.csv.droppedRows} since the last success.\n\`${errText(e)}\`\nAudit log is NOT recording. Rows survive in per-site snapshots. Run "Show status" in the Control Panel.`);
                 }
             }
             persistState();
@@ -1641,6 +1686,7 @@
             // digest is manual-only via the "Post Slack digest now" button.
         } catch (e) {
             console.error(TAG, 'cycle error', e);
+            alertMe('cycle-error', `a watch cycle crashed (${trigger}): \`${errText(e)}\``);
         } finally {
             cycleRunning = false;
         }
@@ -1658,6 +1704,7 @@
         { id: 'check-now', label: 'Check all due now', type: 'button', action: 'check-now' },
         { id: 'simulate', label: 'Simulate a change (console preview)', type: 'button', action: 'simulate' },
         { id: 'status', label: 'Show status (console)', type: 'button', action: 'status' },
+        { id: 'test-alert', label: 'Send test alert (Slack DM)', type: 'button', action: 'test-alert' },
         { id: 'post-digest-now', label: 'Post Slack digest now (last 24h, manual only)', type: 'button', action: 'post-digest-now' },
         { id: 'reset-baselines', label: 'Reset all baselines (re-learn)', type: 'button', action: 'reset-baselines' },
     ];
@@ -1801,6 +1848,11 @@
         if (actionId === 'check-now') { console.log(`${TAG} manual check requested`); stealLeader(); runCycle('manual'); }
         else if (actionId === 'status') { showStatus(); }
         else if (actionId === 'simulate') { simulateDigest(); }
+        else if (actionId === 'test-alert') {
+            delete (state.alerts || {})['test'];   // never deduped — it's a manual check
+            alertMe('test', 'this is a test — the Site Watch failure-alert route works. Real alerts fire on changes.csv append failures, GitHub commit failures, cycle crashes, and a stalled scheduler.')
+                .then(ok => console.log(`${TAG} test alert → ${ok ? 'DM sent' : 'NOT sent (see warning above)'}`));
+        }
         else if (actionId === 'post-digest-now') {
             // Test/preview: post a digest of the last 24h WITHOUT touching the
             // daily schedule cutoff, so it never interferes with the real 6pm run.
@@ -1829,7 +1881,7 @@
         }
     }
     function doResetBaselines(reason) {
-        state = { sites: {}, missions: {}, csv: {} };
+        state = { sites: {}, missions: {}, csv: {}, alerts: {} };
         persistState();
         console.log(`${TAG} baselines reset (${reason})`);
     }
@@ -1879,6 +1931,12 @@
         else claimLeader();
         // v0.23: automatic daily digest removed (channel policy 2026-08-27) —
         // the heartbeat no longer fires maybeDailyDigest.
+        // v0.25 watchdog: this tab is leader, logged in, and hasn't started a
+        // cycle in STALL_MS although runCycle fires every WAKE_MS → the
+        // scheduler is wedged (the v0.3 lease-deadlock class). Shout.
+        if (amLeader && !pausedForAuth && lastCycleAt && (Date.now() - lastCycleAt) > STALL_MS) {
+            alertMe('scheduler-stalled', `leader tab has not run a cycle for ${Math.round((Date.now() - lastCycleAt) / 60000)} min (expected every ${Math.round(WAKE_MS / 60000)} min). Click "Check all due now" or refresh the tab.`);
+        }
     }, HEARTBEAT_MS);
     // Free the lease on refresh/close so the next load takes over immediately.
     window.addEventListener('pagehide', releaseLeader);
