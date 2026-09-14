@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-14 — Site Setup Tools latest v4.278: SpiderWeb — every added leg has to earn its length (dev only)
+
+- **Fix:** v4.277's direct-to-base legs fired for every far zone with a long detour, which drew a starburst of two-mile legs into the north base (83 → 102 mi of path). Restored legs and direct base legs now pass the same test as hub spokes: the summed way home must fall by at least the gain ratio times the new leg's length. The panel field is now simply "gain ratio".
+
 ## 2026-09-14 — Site Setup Tools latest v4.277: SpiderWeb — sloped zones raise their ceiling for the handoff, direct base legs, crowded edges spill (dev only)
 
 - A sloped zone whose 196 ft ceiling sat too low for a landing arc to share 3 m now raises its ceiling only as far as needed, never above the "zone ceil max" (200 ft). The report marks those zones. All hard handoff failures on the Cobra dup are gone.

@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.277
+// @version      4.278
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.277';
+    const SCRIPT_VERSION = '4.278';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -9368,7 +9368,7 @@
     }
 
     // ============================================================
-    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.277) — PREVIEW ONLY
+    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.278) — PREVIEW ONLY
     // Design doc: ShortKeys/AIM_Unshielded_SpiderWeb_Design.md.
     // FFZ per asset (mitered outset, touching buffers unioned), straight
     // point-to-point FPs at a 54 m floor / +20 ft band with AUTOMATIC DEM
@@ -9885,38 +9885,53 @@
         const adjOf = (keys) => { const adj = nodes.map(() => []); keys.forEach(k => { const e = edges.get(k); adj[e.a].push({ to: e.b, w: e.len }); adj[e.b].push({ to: e.a, w: e.len }); }); return adj; };
         const straightM = nodes.map(n => { const pts = n.kind === 'zone' ? n.zone.xy : [n]; let m = Infinity; baseIdx.forEach(b => pts.forEach(p => { const d = Math.hypot(p.x - nodes[b].x, p.y - nodes[b].y); if (d < m) m = d; })); return Math.max(m, 150); });   // 150 m floor: a zone next to (or around) the base has no meaningful ratio
         let stretchAdded = 0;
+        // Way-home pass: for every zone whose web path to base is > stretchMax × straight, try the best
+        // pruned Delaunay leg and a direct leg to the nearest base; add the one that earns its length —
+        // Σ(zone→base) must fall by ≥ hubGainRatio ft per ft of new path (same economics as hubs), so a
+        // two-mile spoke never appears just to shave one zone's detour.
         const stretchPass = (hubArr, links) => {
-            for (let pass = 0; pass < 6; pass++) {
+            const buildAdj = (webSet) => {
                 const nH = hubArr.length;
-                const adj = adjOf(web); for (let i = 0; i < nH; i++) adj.push([]);
+                const adj = adjOf(webSet); for (let i = 0; i < nH; i++) adj.push([]);
                 hubArr.forEach((h, hi) => { const hid = nodes.length + hi; h.spokes.forEach(z => { const w = Math.hypot(h.x - nodes[z].x, h.y - nodes[z].y); adj[hid].push({ to: z, w }); adj[z].push({ to: hid, w }); }); });
                 links.forEach(([a, b]) => { const A = hubArr[a], B = hubArr[b]; const w = Math.hypot(A.x - B.x, A.y - B.y); adj[nodes.length + a].push({ to: nodes.length + b, w }); adj[nodes.length + b].push({ to: nodes.length + a, w }); });
-                const dist = swbDijkstra(nodes.length + nH, adj, baseIdx);
+                return adj;
+            };
+            const sumOf = (d) => { let t = 0; for (let i = 0; i < nZ; i++) if (Number.isFinite(d[i])) t += d[i]; return t; };
+            for (let pass = 0; pass < 6; pass++) {
+                const nAll = nodes.length + hubArr.length;
+                const dist = swbDijkstra(nAll, buildAdj(web), baseIdx);
+                const sum0 = sumOf(dist);
                 let changed = false;
                 for (let i = 0; i < nZ; i++) {
                     if (!Number.isFinite(dist[i]) || dist[i] <= straightM[i] * th.stretchMax) continue;
-                    let best = null, bestD = dist[i];
+                    const cands = [];
                     edges.forEach((e, k) => {
                         if (web.has(k) || e.blocked || (e.a !== i && e.b !== i)) return;
                         const o = e.a === i ? e.b : e.a;
-                        const d = dist[o] + e.len;
-                        if (d < bestD) { bestD = d; best = k; }
+                        if (dist[o] + e.len < dist[i]) cands.push({ k, len: e.len });
                     });
-                    if (best) { web.add(best); stretchAdded++; changed = true; continue; }
-                    // no Delaunay leg helps — a direct leg to the nearest base, if clear
                     let bb = null, bd = Infinity;
                     baseIdx.forEach(b => { const d = Math.hypot(nodes[i].x - nodes[b].x, nodes[i].y - nodes[b].y); if (d < bd) { bd = d; bb = b; } });
-                    if (bb === null || bd >= dist[i]) continue;
-                    const k = ekey(i, bb);
-                    if (edges.has(k) || legBlocked(i, bb)) continue;
-                    edges.set(k, { a: Math.min(i, bb), b: Math.max(i, bb), len: bd, tris: [], blocked: false, direct: true });
-                    web.add(k); stretchAdded++; changed = true;
+                    if (bb !== null && bd < dist[i]) { const k = ekey(i, bb); if (!edges.has(k)) { if (!legBlocked(i, bb)) cands.push({ k, len: bd, direct: bb }); } else if (!web.has(k) && !edges.get(k).blocked) cands.push({ k, len: bd }); }
+                    let best = null;
+                    for (const c of cands) {
+                        if (c.direct !== undefined && !edges.has(c.k)) edges.set(c.k, { a: Math.min(i, c.direct), b: Math.max(i, c.direct), len: c.len, tris: [], blocked: false, direct: true });
+                        web.add(c.k);
+                        const d2 = swbDijkstra(nAll, buildAdj(web), baseIdx);
+                        web.delete(c.k);
+                        const gain = sum0 - sumOf(d2);
+                        if (gain < Math.max(0, th.hubGainRatio) * c.len) continue;
+                        const score = gain - th.hubGainRatio * c.len;
+                        if (!best || score > best.score) best = { k: c.k, score };
+                    }
+                    if (best) { web.add(best.k); stretchAdded++; changed = true; }
                 }
                 if (!changed) break;
             }
         };
         stretchPass([], []);
-        if (stretchAdded) logL(`stretch pass: ${stretchAdded} leg(s) restored (return path > ${th.stretchMax}× straight line)`);
+        if (stretchAdded) logL(`way-home pass: ${stretchAdded} leg(s) added (path > ${th.stretchMax}× straight, each earning ≥ ${th.hubGainRatio} ft of summed way-home per ft)`);
         await swbYield();
         // ---- 4. hubs: star candidates scored by the summed return-to-base distance ----
         // A hub = open-field point with spokes to every zone (and base) within hubRadiusFt whose
@@ -10032,7 +10047,7 @@
                 if (!changed) break;
             }
             const before = stretchAdded; stretchPass(hubs, hubLinks);
-            if (stretchAdded > before) logL(`stretch pass after hubs: ${stretchAdded - before} leg(s) restored`);
+            if (stretchAdded > before) logL(`way-home pass after hubs: ${stretchAdded - before} leg(s) added`);
             hubStats = `${accepted} hubs from ${evaluated} evaluations, ${linksAdded} hub↔hub link(s), Σ way-home ${(cur.sum * M_TO_FT / 5280).toFixed(1)} mi`;
             logL(`hubs: ${hubStats}`);
         }
@@ -10446,7 +10461,7 @@
                 ${num('stretchMax', 'stretch ×', 0.05, 'Restore a pruned leg when a zone\'s way home exceeds this × straight line')}
                 ${num('hubMaxRtbLossPct', 'hub RTB loss %', 0.5, 'A hub may lengthen the summed return-to-base distance by at most this (when it shortens total FP length)')}
                 ${num('hubRadiusFt', 'hub radius ft', 100, 'A hub star reaches zones within this radius')}
-                ${num('hubGainRatio', 'hub gain ratio', 0.5, 'A hub must save this many ft of summed way-home per ft of new flight path (0 = any saving)')}
+                ${num('hubGainRatio', 'gain ratio', 0.5, 'Any added path (hub spoke, restored leg, direct base leg) must save this many ft of summed way-home per ft (0 = any saving)')}
                 ${num('hubMaxSpokes', 'max spokes', 1, 'Most spokes on one hub')}
                 ${num('approachFt', 'approach ft', 10, 'Landing arc is at least this long when the ground allows')}
                 ${num('mergeGapFt', 'merge gap ft', 5, 'Zones closer than this merge into one')}
@@ -10869,7 +10884,7 @@
                 { id: 'hubs', label: 'Propose hubs', type: 'boolean', default: SWB_DEFAULTS.hubs },
                 { id: 'hubRadiusFt', label: 'Hub star radius', type: 'number', min: 500, max: 10000, step: 100, default: SWB_DEFAULTS.hubRadiusFt, unit: 'ft' },
                 { id: 'hubMaxSpokes', label: 'Most spokes on one hub', type: 'number', min: 3, max: 20, step: 1, default: SWB_DEFAULTS.hubMaxSpokes },
-                { id: 'hubGainRatio', label: 'Hub must save … ft of summed way-home per ft of new path (0 = any)', type: 'number', min: 0, max: 20, step: 0.5, default: SWB_DEFAULTS.hubGainRatio },
+                { id: 'hubGainRatio', label: 'Added path (hub spokes, restored legs, direct base legs) must save … ft of summed way-home per ft (0 = any)', type: 'number', min: 0, max: 20, step: 0.5, default: SWB_DEFAULTS.hubGainRatio },
                 { id: 'approachFt', label: 'Minimum landing arc length', type: 'number', min: 25, max: 500, step: 5, default: SWB_DEFAULTS.approachFt, unit: 'ft' },
                 { id: 'notchFt', label: 'Fill inward notches in unioned zones up to', type: 'number', min: 0, max: 30, step: 1, default: SWB_DEFAULTS.notchFt, unit: 'ft' },
                 { id: 'mergeGapFt', label: 'Merge zones closer than', type: 'number', min: 0, max: 200, step: 5, default: SWB_DEFAULTS.mergeGapFt, unit: 'ft' },
