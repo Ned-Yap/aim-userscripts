@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.284
+// @version      4.285
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.284';
+    const SCRIPT_VERSION = '4.285';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -9368,7 +9368,7 @@
     }
 
     // ============================================================
-    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.284) — PREVIEW ONLY
+    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.285) — PREVIEW ONLY
     // Design doc: ShortKeys/AIM_Unshielded_SpiderWeb_Design.md.
     // FFZ per asset (mitered outset, touching buffers unioned), straight
     // point-to-point FPs at a 54 m floor / +20 ft band with AUTOMATIC DEM
@@ -9393,7 +9393,9 @@
         battery: 'tulip', sampleFt: 25, marginFt: 500, hubs: true,
         hubRadiusFt: 3500, hubMaxSpokes: 10,      // a hub star reaches zones within this radius, at most this many
         hubBaseReachFt: 10000,                    // a hub may spoke straight to a base zone within this (longer) reach
-        hubGainRatio: 1,                          // a hub must save this many ft of summed way-home per ft of new flight path (0 = any saving)
+        hubGainRatio: 0.25,                       // a hub must save this many ft of summed way-home per ft of new flight path (0 = any saving; 0.25 = dense web)
+        junctions: true,                          // where two legs cross, share a waypoint so the drone can switch legs there
+        junctionMinFt: 60,                        // no junction closer than this to a leg end (would leave a stub)
         legGainRatio: 0,                          // same test for legs restored by the way-home pass (0 = fix any long detour)
         baseLegGainRatio: 0,                      // same test for direct zone→base legs (0 = the base star: any zone with a long detour gets a straight shot home)
         approachFt: 100,                          // the arc that lands on a zone is at least this long when the ground allows
@@ -9701,12 +9703,14 @@
             gates.push({ label: 'DEM coverage', ok: noDem === 0, detail: `${noDem} item(s) without ground` });
             const crossing = result.legs.filter(l => l.flags.some(f => /^CROSSES/.test(f))).length;
             gates.push({ label: 'no leg cuts through a zone', ok: crossing === 0, detail: `${crossing} leg(s)` });
+            const jBad = (result.junctions || []).filter(J => J.bandOk === false).length;
+            gates.push({ label: 'junction bands agree', ok: jBad === 0, detail: `${jBad} junction(s) without ${th.overlapM} m shared` });
             result.gates = gates;
             swbState = result;
             swbDrawPreview();
             swbRenderPanel();
             const ms = Math.round(performance.now() - t0);
-            logL(`staged: ${result.zones.length} zones / ${result.legs.length} legs / ${result.hubs.length} hubs / ${result.totalArcs} arcs / ${result.totalVerts} vertices / ${(result.totalLenM * M_TO_FT / 5280).toFixed(1)} mi FP in ${ms} ms`);
+            logL(`staged: ${result.zones.length} zones / ${result.legs.length} legs / ${result.hubs.length} hubs / ${(result.junctions || []).length} junctions / ${result.totalArcs} arcs / ${result.totalVerts} vertices / ${(result.totalLenM * M_TO_FT / 5280).toFixed(1)} mi FP in ${ms} ms`);
             showToast(`🕸 SpiderWeb staged: ${result.zones.length} zones, ${result.legs.length} legs, ${result.hubs.length} hubs`);
         } catch (e) {
             console.error(`${TAG} spiderweb: stage failed`, e);
@@ -10199,6 +10203,43 @@
             else l.flags.push(`CROSSES zone "${hit.name}"`);
         }
         if (droppedCross) logL(`${droppedCross} way-home leg(s) dropped: final line cut through a zone`);
+        // ---- 5b. junctions: where two legs cross, both get a shared waypoint there (a switch point for the
+        //          drone — a spider web, not lines passing over each other) ----
+        const junctions = [];   // { x, y, node }
+        if (th.junctions) {
+            const minM = M(th.junctionMinFt), snapM = 30 / M_TO_FT;
+            let made = 0;
+            for (let pass = 0; pass < 6; pass++) {
+                let found = false;
+                outer: for (let i = 0; i < legs.length; i++) for (let j = i + 1; j < legs.length; j++) {
+                    const L1 = legs[i], L2 = legs[j];
+                    if (L1.a === L2.a || L1.a === L2.b || L1.b === L2.a || L1.b === L2.b) continue;   // share a node already
+                    if (!swbSegsCross(L1.pa, L1.pb, L2.pa, L2.pb)) continue;
+                    const d1 = { x: L1.pb.x - L1.pa.x, y: L1.pb.y - L1.pa.y }, d2 = { x: L2.pb.x - L2.pa.x, y: L2.pb.y - L2.pa.y };
+                    const X = lineX(L1.pa, d1, L2.pa, d2);
+                    if (!X) continue;
+                    const near = (p) => Math.hypot(p.x - X.x, p.y - X.y) < minM;
+                    if (near(L1.pa) || near(L1.pb) || near(L2.pa) || near(L2.pb)) continue;   // would leave a stub — leave uncrossed
+                    // reuse a junction within 30 ft, else create one
+                    let J = junctions.find(q => Math.hypot(q.x - X.x, q.y - X.y) < snapM);
+                    if (!J) { J = { x: X.x, y: X.y, node: allNodes.length }; allNodes.push({ kind: 'junction', x: X.x, y: X.y, ji: junctions.length }); junctions.push(J); }
+                    const split = (L) => {
+                        const first = { a: L.a, b: J.node, ea: L.ea, eb: null, pa: L.pa, pb: { x: J.x, y: J.y }, flags: [], arcs: [], added: L.added };
+                        const second = { a: J.node, b: L.b, ea: null, eb: L.eb, pa: { x: J.x, y: J.y }, pb: L.pb, flags: [], arcs: [], added: L.added };
+                        [first, second].forEach(q => { q.lenM = Math.hypot(q.pb.x - q.pa.x, q.pb.y - q.pa.y); });
+                        return [first, second];
+                    };
+                    const s1 = split(L1), s2 = split(L2);
+                    legs.splice(j, 1); legs.splice(i, 1);
+                    legs.push(...s1, ...s2);
+                    made++; found = true; break outer;
+                }
+                if (!found) break;
+                pass = -1;   // keep scanning until no crossing remains (bounded by the leg count)
+                if (made > 2000) { logL('junctions: stopped at 2000 splits'); break; }
+            }
+            if (made) logL(`${made} crossing(s) turned into junctions (${junctions.length} junction points)`);
+        }
         await swbYield();
         // ---- 6. stairs: walk the DEM along each leg ----
         const bandM = M(th.fpBandFt), ovM = th.overlapM, floorAdd = th.fpFloorM;
@@ -10333,6 +10374,12 @@
             totalArcs += arcs.length; totalVerts += l.verts.length; totalLenM += l.lenM;
         });
         // hub band check: every spoke's arc at the hub must share ≥ overlap
+        junctions.forEach((J, ji) => {
+            let lo = -Infinity, hiB = Infinity, n = 0;
+            legs.forEach(l => { if (l.a !== J.node && l.b !== J.node) return; if (!l.arcs.length || l.arcs[0].floorM === null) return; const arc = l.a === J.node ? l.arcs[0] : l.arcs[l.arcs.length - 1]; lo = Math.max(lo, arc.floorM); hiB = Math.min(hiB, arc.ceilM); n++; });
+            J.bandOk = n === 0 || (hiB - lo) >= ovM; J.bandM = [lo, hiB];
+            if (!J.bandOk) legs.forEach(l => { if (l.a === J.node || l.b === J.node) l.flags.push(`junction ${ji + 1} bands do not share ${ovM} m`); });
+        });
         hubs.forEach((h, hi) => {
             const hid = nodes.length + hi;
             let lo = -Infinity, hiB = Infinity;
@@ -10377,12 +10424,14 @@
             z.rtbM = Number.isFinite(best) ? best : null; z.straightM = straightM[i]; z.dropped = false;
         });
         hubs.forEach((h, hi) => { h.ll = toLL(h); const e = pointNode.get(nodes.length + hi); h.rtbM = Number.isFinite(dist[e]) ? dist[e] : null; });
+        junctions.forEach(J => { J.ll = toLL(J); });
         legs.forEach(l => { l.kindA = allNodes[l.a].kind; l.kindB = allNodes[l.b].kind; l.nameA = swbNodeName(allNodes[l.a], hubs); l.nameB = swbNodeName(allNodes[l.b], hubs); });
-        return { zones, legs, hubs, nodes: allNodes, totalArcs, totalVerts, totalLenM, stretchAdded };
+        return { zones, legs, hubs, junctions, nodes: allNodes, totalArcs, totalVerts, totalLenM, stretchAdded };
     }
     function swbNodeName(n, hubs) {
         if (n.kind === 'zone') return n.zone.name;
         if (n.kind === 'base') return `Base: ${n.base.name}`;
+        if (n.kind === 'junction') return `Junction ${n.ji + 1}`;
         return `Hub ${(n.hi != null ? n.hi : hubs.indexOf(n.hub)) + 1}`;
     }
 
@@ -10417,6 +10466,7 @@
             });
         });
         st.hubs.forEach(h => add(L.circleMarker([h.ll.lat, h.ll.lng], { radius: 7, color: h.bandOk ? '#ff35d0' : '#ff2020', weight: 2, fillColor: '#ff35d0', fillOpacity: 0.9, interactive: false })));
+        (st.junctions || []).forEach(J => add(L.circleMarker([J.ll.lat, J.ll.lng], { radius: 5, color: J.bandOk === false ? '#ff2020' : '#ff35d0', weight: 2, fillColor: '#0d131d', fillOpacity: 1, interactive: false })));
         st.bases.forEach(b => add(L.circleMarker([b.pt.lat, b.pt.lng], { radius: 8, color: '#ffe14d', weight: 3, fillColor: '#0d131d', fillOpacity: 1, interactive: false })));
         const ents = ((mapObjectsBySite[st.sid] || {}).entities) || [];
         st.dropped.forEach(d => {
@@ -10435,7 +10485,7 @@
         const out = [];
         out.push(`AIM SpiderWeb generator v${SCRIPT_VERSION} — site ${st.sid} — ${new Date().toISOString()}`);
         out.push(`floor ${th.fpFloorM} m (+${(th.fpFloorM * M_TO_FT).toFixed(1)} ft) / band ${th.fpBandFt} ft / overlap ${th.overlapM} m / outset ${th.outsetFt} ft / battery ${th.battery} ${st.limitFt.toLocaleString()} ft`);
-        out.push(`zones ${st.zones.length} · legs ${st.legs.length} · hubs ${st.hubs.length} · arcs ${st.totalArcs} · vertices ${st.totalVerts} · FP length ${(st.totalLenM * M_TO_FT / 5280).toFixed(2)} mi`);
+        out.push(`zones ${st.zones.length} · legs ${st.legs.length} · hubs ${st.hubs.length} · junctions ${(st.junctions || []).length} · arcs ${st.totalArcs} · vertices ${st.totalVerts} · FP length ${(st.totalLenM * M_TO_FT / 5280).toFixed(2)} mi`);
         out.push(`bases: ${st.bases.map(b => b.name).join(', ')} — base zones: ${st.zones.filter(z => z.bases).map(z => z.name).join(', ')}`);
         st.gates.forEach(g => out.push(`${g.ok ? 'OK  ' : (g.soft ? 'WARN' : 'FAIL')} ${g.label}${g.detail ? ' — ' + g.detail : ''}`));
         if (st.dropped.length) { out.push(`dropped assets (${st.dropped.length}):`); st.dropped.forEach(d => out.push(`  ${d.name} — ${d.why}${d.distFt != null ? ` (${d.distFt.toLocaleString()} ft)` : ''}`)); }
@@ -10472,7 +10522,7 @@
                 <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px 10px;margin-bottom:6px;">
                     <div><span style="opacity:0.7">zones</span><br><strong style="font-size:15px;color:#5fff5f">${st.zones.length}</strong></div>
                     <div><span style="opacity:0.7">legs</span><br><strong style="font-size:15px;color:#2b8cff">${st.legs.length}</strong></div>
-                    <div><span style="opacity:0.7">hubs</span><br><strong style="font-size:15px;color:#ff35d0">${st.hubs.length}</strong></div>
+                    <div><span style="opacity:0.7">hubs · junctions</span><br><strong style="font-size:15px;color:#ff35d0">${st.hubs.length}</strong> <span style="opacity:0.7">·</span> <strong style="font-size:15px;color:#ff35d0">${(st.junctions || []).length}</strong></div>
                     <div><span style="opacity:0.7">FP length</span><br><strong style="font-size:15px">${(st.totalLenM * M_TO_FT / 5280).toFixed(1)} mi</strong></div>
                     <div><span style="opacity:0.7">arcs</span><br><strong>${st.totalArcs}</strong></div>
                     <div><span style="opacity:0.7">vertices</span><br><strong>${st.totalVerts}</strong></div>
@@ -10483,7 +10533,7 @@
                 <div style="margin-top:6px;color:#2b8cff;font-weight:600;">Longest way home (stretch)</div>${worstHtml}
                 ${flagHtml || zflagHtml ? `<div style="margin-top:6px;color:#ffb020;font-weight:600;">Flags</div>${zflagHtml}${flagHtml}` : ''}
                 ${dropHtml}
-                <div style="margin-top:8px;opacity:0.7;">Preview only — nothing is written. Cyan dots = leg ends on zone edges · white dots = stair steps · magenta = hubs · yellow = base · orange = flagged · red dashed = dropped assets.</div>`;
+                <div style="margin-top:8px;opacity:0.7;">Preview only — nothing is written. Cyan dots = leg ends on zone edges · white dots = stair steps · magenta = hubs (filled) and junctions (rings) · yellow = base zones · orange = flagged · red dashed = dropped assets.</div>`;
         } else {
             body = `<div style="opacity:0.8">Stage a web for the current site. MSL (mountain-terrain) sites only. Every non-EMPTY asset gets a zone; legs are straight, stop on the zone edge, and get automatic stair steps from the DEM. Nothing is written in this version.</div>`;
         }
@@ -10516,6 +10566,7 @@
                 ${num('baseZoneFt', 'base zone ft', 10, 'A base outside every zone gets a square zone of this side')}
                 <label style="display:flex;align-items:center;gap:4px;">battery<select data-swb-p="battery" style="background:#0d131d;color:#dfe9f0;border:1px solid rgba(43,140,255,0.4);border-radius:4px;font:inherit;"><option value="tulip" ${th.battery === 'tulip' ? 'selected' : ''}>Tulip</option><option value="tattu" ${th.battery === 'tattu' ? 'selected' : ''}>Tattu</option></select></label>
                 <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input data-swb-p="hubs" type="checkbox" ${th.hubs ? 'checked' : ''}>hubs</label>
+                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input data-swb-p="junctions" type="checkbox" ${th.junctions ? 'checked' : ''}>junctions at crossings</label>
             </div>
             <div style="padding:6px 12px;display:flex;gap:8px;align-items:center;border-bottom:1px solid rgba(43,140,255,0.2);">
                 <button data-swb-stage style="background:rgba(43,140,255,0.15);border:1px solid rgba(43,140,255,0.55);color:#8ec2ff;border-radius:5px;padding:3px 12px;cursor:pointer;font-weight:600;">🕸 Stage</button>
@@ -10930,6 +10981,8 @@
                 { id: 'stretchMax', label: 'Restore a leg when the way home exceeds × straight line', type: 'number', min: 1, max: 3, step: 0.05, default: SWB_DEFAULTS.stretchMax },
                 { id: 'hubMaxRtbLossPct', label: 'Hubs may lengthen the summed way home by up to', type: 'number', min: 0, max: 25, step: 0.5, default: SWB_DEFAULTS.hubMaxRtbLossPct, unit: '%' },
                 { id: 'hubs', label: 'Propose hubs', type: 'boolean', default: SWB_DEFAULTS.hubs },
+                { id: 'junctions', label: 'Shared waypoint where two legs cross', type: 'boolean', default: SWB_DEFAULTS.junctions },
+                { id: 'junctionMinFt', label: 'No junction closer than … to a leg end', type: 'number', min: 20, max: 300, step: 10, default: SWB_DEFAULTS.junctionMinFt, unit: 'ft' },
                 { id: 'hubRadiusFt', label: 'Hub star radius', type: 'number', min: 500, max: 10000, step: 100, default: SWB_DEFAULTS.hubRadiusFt, unit: 'ft' },
                 { id: 'hubMaxSpokes', label: 'Most spokes on one hub', type: 'number', min: 3, max: 20, step: 1, default: SWB_DEFAULTS.hubMaxSpokes },
                 { id: 'hubBaseReachFt', label: 'Hub may spoke straight to a base zone within', type: 'number', min: 500, max: 20000, step: 100, default: SWB_DEFAULTS.hubBaseReachFt, unit: 'ft' },

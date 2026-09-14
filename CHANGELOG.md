@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-14 — Site Setup Tools latest v4.285: SpiderWeb — denser web: more hubs by default, junctions where legs cross (dev only)
+
+- The hub gain ratio now defaults to 0.25. On the Cobra dup that is 34 hubs with 13 spokes straight to a base instead of 15 hubs with 3, at the same 80 miles of path and a shorter summed way home.
+- **Junctions at crossings:** where two legs cross, both now get a shared waypoint there, so the drone can switch legs at the crossing. Junctions draw as magenta rings; hubs stay filled. A new gate checks that every junction's arcs share the 3 m band. No junction is made within 60 ft of a leg end.
+
 ## 2026-09-14 — Site Setup Tools latest v4.284: SpiderWeb — base zones always join a hub star, final crossing check (dev only)
 
 - A base zone joins any hub star whose spoke to it is clear, without counting against the spoke cap, and the default hub-to-base reach is 10,000 ft. Hubs with a straight, unobstructed line to a base now connect to it; hubs whose line would cut through a neighbouring pad do not, which is the rule for every leg.
