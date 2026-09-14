@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.27
+// @version      0.28
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.27';
+    const SCRIPT_VERSION = '0.28';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -99,6 +99,9 @@
             capPerPair: 200, onlyProduction: false, showOnMap: true, drawSetups: true,
             basemap: 'default', faaChart: false, faaOpacity: 0.75,
             xrefB1: 50, xrefB2: 200,
+            // v0.28: straight-line range bands for the "Base stations" target
+            // (one-way distance from a site's base): Tattu / Tulip batteries.
+            xrefBaseB1: 14000, xrefBaseB2: 18000,
             siteLabels: 'dark',
             // Display-only view filters (never re-run the sweep): which
             // conflict classes to SHOW, and which clients are toggled off.
@@ -121,6 +124,8 @@
             if (typeof s.faaOpacity === 'number') d.faaOpacity = s.faaOpacity;
             if (typeof s.xrefB1 === 'number') d.xrefB1 = s.xrefB1;
             if (typeof s.xrefB2 === 'number') d.xrefB2 = s.xrefB2;
+            if (typeof s.xrefBaseB1 === 'number') d.xrefBaseB1 = s.xrefBaseB1;
+            if (typeof s.xrefBaseB2 === 'number') d.xrefBaseB2 = s.xrefBaseB2;
             if (typeof s.siteLabels === 'string') d.siteLabels = s.siteLabels;
             if (s.view) NB_CLASSES.forEach(c => {
                 if (typeof s.view[c.key] === 'boolean') d.view[c.key] = s.view[c.key];
@@ -2110,11 +2115,34 @@
         return best;
     }
 
-    function xrefEnvAddSeg(env, A, B) {
+    // v0.28: like xrefDistGrid but also returns WHICH segment was nearest
+    // (its `tag`) — the base-station target attributes every stretch to a
+    // site. Segments only (that envelope has no polygons).
+    function xrefNearestSegGrid(x, y, grid, cellM, pad) {
+        let best = Infinity, tag = null;
+        const qid = ++xrefQueryId;
+        const gx = Math.floor(x / cellM), gy = Math.floor(y / cellM);
+        for (let dx = -1; dx <= 1; dx++) {
+            for (let dy = -1; dy <= 1; dy++) {
+                const cell = grid.get((gx + dx) + ':' + (gy + dy));
+                if (!cell) continue;
+                for (const s of cell.segs) {
+                    if (s.__q === qid) continue;
+                    s.__q = qid;
+                    if (x < s.minX - pad || x > s.maxX + pad || y < s.minY - pad || y > s.maxY + pad) continue;
+                    const c = nbSegPtClosest(x, y, s.ax, s.ay, s.bx, s.by);
+                    if (c.d < best) { best = c.d; tag = s.tag; }
+                }
+            }
+        }
+        return { d: best, tag };
+    }
+    function xrefEnvAddSeg(env, A, B, tag) {
         env.segs.push({
             ax: A.x, ay: A.y, bx: B.x, by: B.y,
             minX: Math.min(A.x, B.x), maxX: Math.max(A.x, B.x),
             minY: Math.min(A.y, B.y), maxY: Math.max(A.y, B.y),
+            tag: tag || null,
         });
     }
     function xrefEnvAddRing(env, ptsXY) {
@@ -2136,9 +2164,14 @@
         if (!kmlLayerById(xrefSrcSel) && kmlLayers.length) xrefSrcSel = kmlLayers[0].id;   // lone-option selects never fire 'change'
         const src = kmlLayerById(xrefSrcSel);
         if (!src) { setStatus('pick a source KML layer first'); return; }
-        const b1m = ftCfg.xrefB1 / FT_PER_M;
-        const b2m = ftCfg.xrefB2 / FT_PER_M;
+        // v0.28: the base-station target uses its own (much larger) bands
+        const isBases = xrefTgtSel === 'bases';
+        const B1FT = isBases ? ftCfg.xrefBaseB1 : ftCfg.xrefB1;
+        const B2FT = isBases ? ftCfg.xrefBaseB2 : ftCfg.xrefB2;
+        const b1m = B1FT / FT_PER_M;
+        const b2m = B2FT / FT_PER_M;
         if (!(b2m > b1m)) { setStatus('band 2 must be larger than band 1'); return; }
+        const perBase = {};   // sid → { name, lenM:{1,2,0}, pts:{1,2,0} } (bases mode)
         xrefState = { running: true, result: null };
         renderPanel();
         try {
@@ -2151,7 +2184,48 @@
             const env = { segs: [], polys: [] };
             let tgtLabel;
             let sitesUsed = 0;
-            if (String(xrefTgtSel).startsWith('sites')) {
+            let basesUsed = 0;
+            const sitesNoBase = [];
+            if (isBases) {
+                // Straight-line (one-way) distance from each site's BASE
+                // STATION (type 8 in /map_objects/) — "what can we reach from
+                // base without shielding": ≤ Tattu range / ≤ Tulip range.
+                tgtLabel = `base stations — straight-line range (Tattu ≤${B1FT.toLocaleString()} ft / Tulip ≤${B2FT.toLocaleString()} ft)`;
+                const sites = await fetchRawSites(false);
+                if (seq !== xrefSeq) return;
+                const marginFt = 3000;   // the base may sit outside the setup bbox
+                const cands = Object.keys(sites).filter(id => {
+                    if (ftIgnore[id]) return false;
+                    if (ftCfg.onlyProduction && siteStatus(id) && siteStatus(id) !== 'Production') return false;
+                    const b = nbIndex.bboxes[id];
+                    if (b && !b.empty) return bboxGapFt(b, src.bbox) <= B2FT + marginFt;
+                    const c = siteEntryCenter(sites[id].raw);
+                    if (!c) return false;   // no snapshot AND no center — cannot place it
+                    const pb = { minLat: c.lat, maxLat: c.lat, minLng: c.lng, maxLng: c.lng };
+                    return bboxGapFt(pb, src.bbox) <= B2FT + marginFt + 5280;   // center-only: extra mile of slack
+                });
+                if (!cands.length) notes.push('NO sites within range of this layer');
+                for (let i = 0; i < cands.length; i++) {
+                    if (seq !== xrefSeq) return;
+                    setStatus(`cross-ref: fetching site ${cands[i]} for its base station (${i + 1}/${cands.length})…`);
+                    let ents;
+                    try { ents = await fetchSiteEntities(cands[i], false); }
+                    catch (e) { notes.push(`site ${siteName(cands[i])} (#${cands[i]}) fetch failed — no base counted`); continue; }
+                    sitesUsed++;
+                    let found = 0;
+                    ents.forEach(e => {
+                        if (!e || e.type !== 8) return;
+                        const c = (entityCoords(e) || [])[0];
+                        if (!c || typeof c.lat !== 'number' || typeof c.lng !== 'number') return;
+                        const q = proj.toXY(c);
+                        xrefEnvAddSeg(env, q, q, String(cands[i]));   // point = degenerate segment, tagged by site
+                        found++;
+                    });
+                    if (found) { basesUsed += found; perBase[cands[i]] = { sid: cands[i], name: siteName(cands[i]), bases: found, lenM: { 0: 0, 1: 0, 2: 0 }, pts: { 0: 0, 1: 0, 2: 0 } }; }
+                    else sitesNoBase.push(siteName(cands[i]));
+                }
+                if (sitesNoBase.length) notes.push(`${sitesNoBase.length} site(s) in range have NO base station in their setup and were skipped: ${sitesNoBase.slice(0, 8).join(', ')}${sitesNoBase.length > 8 ? '…' : ''}`);
+            } else if (String(xrefTgtSel).startsWith('sites')) {
                 // Scope matters operationally: mission steps only run INSIDE
                 // FFZs — FFZ-only coverage = what is actually inspectable
                 const useFfz = xrefTgtSel !== 'sites-fp';
@@ -2240,10 +2314,18 @@
             const pointMarks = [];
             let ops = 0;
             let doneLenM = 0;
-            const b1ft = ftCfg.xrefB1, b2ft = ftCfg.xrefB2;
+            const b1ft = B1FT, b2ft = B2FT;
             const classify = (d) => {
                 const ft = Math.round(d * FT_PER_M);
                 return ft < b1ft ? 1 : (ft < b2ft ? 2 : 0);
+            };
+            // bases mode: distance + WHICH base, so lengths roll up per site
+            let lastTag = null;
+            const dist = (x, y) => {
+                if (!isBases) return xrefDistGrid(x, y, grid, cellM, pad);
+                const r = xrefNearestSegGrid(x, y, grid, cellM, pad);
+                lastTag = r.tag;
+                return r.d;
             };
             const finishRun = (run) => {
                 if (!run) return;
@@ -2260,8 +2342,9 @@
                 if (seq !== xrefSeq) return;
                 if (f.type === 'point') {
                     const q = proj.toXY({ lat: f.pts[0][0], lng: f.pts[0][1] });
-                    const band = classify(xrefDistGrid(q.x, q.y, grid, cellM, pad));
+                    const band = classify(dist(q.x, q.y));
                     pointHits[band]++;
+                    if (isBases && band && lastTag && perBase[lastTag]) perBase[lastTag].pts[band]++;
                     if (pointMarks.length < 500) pointMarks.push({ lat: f.pts[0][0], lng: f.pts[0][1], band });
                     continue;
                 }
@@ -2279,10 +2362,13 @@
                     // previous segment's last sample)
                     for (let k = (run && i > 0) ? 1 : 0; k <= n; k++) {
                         const t = k / n;
-                        const d = xrefDistGrid(A.x + (B.x - A.x) * t, A.y + (B.y - A.y) * t, grid, cellM, pad);
+                        const d = dist(A.x + (B.x - A.x) * t, A.y + (B.y - A.y) * t);
                         const band = classify(d);
                         const lat = Pa[0] + (Pb[0] - Pa[0]) * t, lng = Pa[1] + (Pb[1] - Pa[1]) * t;
-                        if (k > 0) { bandLenM[band] += segLen / n; doneLenM += segLen / n; }
+                        if (k > 0) {
+                            bandLenM[band] += segLen / n; doneLenM += segLen / n;
+                            if (isBases && band && lastTag && perBase[lastTag]) perBase[lastTag].lenM[band] += segLen / n;
+                        }
                         if (!run || run.band !== band) {
                             // extend the outgoing run to the transition point
                             // so adjacent bands SHARE their boundary — without
@@ -2305,10 +2391,13 @@
                 finishRun(run);
             }
             const topRuns = [...runs].sort((a, b) => b.lenM - a.lenM).slice(0, 60);
+            const perBaseList = Object.values(perBase).sort((a, b) => (b.lenM[1] + b.lenM[2]) - (a.lenM[1] + a.lenM[2]) || (b.pts[1] + b.pts[2]) - (a.pts[1] + a.pts[2]));
             const result = {
                 at: Date.now(),
                 srcName: src.name, tgtLabel, sitesUsed,
-                b1: ftCfg.xrefB1, b2: ftCfg.xrefB2,
+                mode: isBases ? 'bases' : 'coverage',
+                basesUsed, sitesNoBase: sitesNoBase.length, perBase: perBaseList,
+                b1: B1FT, b2: B2FT,
                 stepFt: Math.round(step * FT_PER_M),
                 totalM: totalLenM, bandLenM,
                 runs,              // complete — drawn as 3 merged band paths
@@ -2347,10 +2436,23 @@
         lines.push(`Ran ${new Date(r.at).toLocaleString()} · bands ≤${r.b1} ft / ≤${r.b2} ft · sampled every ~${r.stepFt} ft`);
         lines.push('');
         lines.push(`Line length total: ${fmtMi(r.totalM)}`);
-        lines.push(`  ≤${r.b1} ft of target:      ${fmtMi(L[1])} (${pct(L[1], r.totalM)})`);
-        lines.push(`  ${r.b1}–${r.b2} ft:            ${fmtMi(L[2])} (${pct(L[2], r.totalM)})`);
-        lines.push(`  ≤${r.b2} ft CUMULATIVE:    ${fmtMi(L[1] + L[2])} (${pct(L[1] + L[2], r.totalM)})   ← inspectable from existing coverage`);
-        lines.push(`  beyond ${r.b2} ft:          ${fmtMi(L[0])} (${pct(L[0], r.totalM)})   ← needs new site area`);
+        if (r.mode === 'bases') {
+            lines.push(`  Tattu range (≤${r.b1.toLocaleString()} ft from a base):   ${fmtMi(L[1])} (${pct(L[1], r.totalM)})`);
+            lines.push(`  Tulip only (${r.b1.toLocaleString()}–${r.b2.toLocaleString()} ft):        ${fmtMi(L[2])} (${pct(L[2], r.totalM)})`);
+            lines.push(`  ≤${r.b2.toLocaleString()} ft CUMULATIVE:            ${fmtMi(L[1] + L[2])} (${pct(L[1] + L[2], r.totalM)})   ← reachable straight-line from a base (no shielding needed)`);
+            lines.push(`  beyond Tulip range:              ${fmtMi(L[0])} (${pct(L[0], r.totalM)})   ← needs shielding / a new base`);
+            lines.push(`Bases: ${r.basesUsed} across ${r.sitesUsed} site(s) fetched${r.sitesNoBase ? ` · ${r.sitesNoBase} site(s) skipped (no base in setup)` : ''} · distance = one-way straight line from the base`);
+        } else {
+            lines.push(`  ≤${r.b1} ft of target:      ${fmtMi(L[1])} (${pct(L[1], r.totalM)})`);
+            lines.push(`  ${r.b1}–${r.b2} ft:            ${fmtMi(L[2])} (${pct(L[2], r.totalM)})`);
+            lines.push(`  ≤${r.b2} ft CUMULATIVE:    ${fmtMi(L[1] + L[2])} (${pct(L[1] + L[2], r.totalM)})   ← inspectable from existing coverage`);
+            lines.push(`  beyond ${r.b2} ft:          ${fmtMi(L[0])} (${pct(L[0], r.totalM)})   ← needs new site area`);
+        }
+        if (r.mode === 'bases' && r.perBase && r.perBase.length) {
+            lines.push('');
+            lines.push('Per base (site | Tattu | Tulip-only | reachable total | points Tattu/Tulip):');
+            r.perBase.forEach(b => lines.push(`  ${b.name} (#${b.sid})${b.bases > 1 ? ` ×${b.bases} bases` : ''} | ${fmtMi(b.lenM[1])} | ${fmtMi(b.lenM[2])} | ${fmtMi(b.lenM[1] + b.lenM[2])} | ${b.pts[1]}/${b.pts[2]}`));
+        }
         if (r.pointsTotal) {
             lines.push('');
             lines.push(`Points: ${r.pointsTotal} total — ≤${r.b1} ft: ${r.pointHits[1]} · ${r.b1}–${r.b2} ft: ${r.pointHits[2]} · beyond: ${r.pointHits[0]}`);
@@ -2555,21 +2657,25 @@
         // default to what the dropdown displays — also self-heals when the
         // chosen layer's id changed (💾 save) or the layer was removed
         if (!kmlLayerById(xrefSrcSel)) xrefSrcSel = kmlLayers.length ? kmlLayers[0].id : '';
-        if (!String(xrefTgtSel).startsWith('sites') && !kmlLayerById(xrefTgtSel)) xrefTgtSel = 'sites';
+        if (!String(xrefTgtSel).startsWith('sites') && xrefTgtSel !== 'bases' && !kmlLayerById(xrefTgtSel)) xrefTgtSel = 'sites';
         const sel = 'background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:2px 4px;font:inherit;max-width:180px;';
         const num = 'width:52px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;padding:1px 3px;';
         const srcOpts = kmlLayers.map(ly => `<option value="${ly.id}" ${xrefSrcSel === ly.id ? 'selected' : ''}>${escapeHtml(ly.name)}</option>`).join('');
         const tgtOpts = `<option value="sites" ${xrefTgtSel === 'sites' ? 'selected' : ''}>Site FFZs + FPs (existing coverage)</option>`
             + `<option value="sites-ffz" ${xrefTgtSel === 'sites-ffz' ? 'selected' : ''}>Site FFZs ONLY (mission-step airspace)</option>`
             + `<option value="sites-fp" ${xrefTgtSel === 'sites-fp' ? 'selected' : ''}>Site FPs ONLY</option>`
+            + `<option value="bases" ${xrefTgtSel === 'bases' ? 'selected' : ''}>Base stations — straight-line range (Tattu / Tulip, no shielding)</option>`
             + kmlLayers.filter(ly => ly.id !== xrefSrcSel).map(ly => `<option value="${ly.id}" ${xrefTgtSel === ly.id ? 'selected' : ''}>KML: ${escapeHtml(ly.name)}</option>`).join('');
         const running = xrefState && xrefState.running;
         const rows = [];
         rows.push('<div style="padding:6px 10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
             + `<label>Source <select data-xr="src" style="${sel}">${srcOpts || '<option value="">(load a KML first)</option>'}</select></label>`
             + `<label>vs <select data-xr="tgt" style="${sel}">${tgtOpts}</select></label>`
-            + `<label title="inner band">≤<input type="number" data-ft-num="xrefB1" value="${ftCfg.xrefB1}" min="5" max="1000" step="5" style="${num}"> ft</label>`
-            + `<label title="outer band">≤<input type="number" data-ft-num="xrefB2" value="${ftCfg.xrefB2}" min="10" max="5000" step="10" style="${num}"> ft</label>`
+            + (xrefTgtSel === 'bases'
+                ? `<label title="Tattu one-way range from the base">Tattu ≤<input type="number" data-ft-num="xrefBaseB1" value="${ftCfg.xrefBaseB1}" min="1000" max="60000" step="500" style="${num};width:64px"> ft</label>`
+                  + `<label title="Tulip one-way range from the base">Tulip ≤<input type="number" data-ft-num="xrefBaseB2" value="${ftCfg.xrefBaseB2}" min="1000" max="80000" step="500" style="${num};width:64px"> ft</label>`
+                : `<label title="inner band">≤<input type="number" data-ft-num="xrefB1" value="${ftCfg.xrefB1}" min="5" max="1000" step="5" style="${num}"> ft</label>`
+                  + `<label title="outer band">≤<input type="number" data-ft-num="xrefB2" value="${ftCfg.xrefB2}" min="10" max="5000" step="10" style="${num}"> ft</label>`)
             + (running
                 ? '<span data-ft="xr-abort" style="cursor:pointer;color:#ff5252;font-weight:bold">■ Abort</span>'
                 : '<span data-ft="xr-run" style="cursor:pointer;color:#5fff5f;font-weight:bold">▶ Run cross-ref</span>')
@@ -2581,14 +2687,24 @@
         const r = xrefState && xrefState.result;
         if (r) {
             const L = r.bandLenM;
+            const bases = r.mode === 'bases';
+            const lbl1 = bases ? `Tattu ≤${r.b1.toLocaleString()} ft` : `≤${r.b1} ft`;
+            const lbl2 = bases ? `Tulip only ${r.b1.toLocaleString()}–${r.b2.toLocaleString()} ft` : `${r.b1}–${r.b2} ft`;
             rows.push(`<div style="padding:4px 10px;border-bottom:1px solid #222834;">`
-                + `"${escapeHtml(r.srcName)}" vs ${escapeHtml(r.tgtLabel)}${r.sitesUsed ? ` <span style="color:#888">(${r.sitesUsed} sites in range)</span>` : ''} — total ${fmtMi(r.totalM)}<br>`
-                + `<span style="color:${XREF_COLORS[1]}">■ ≤${r.b1} ft: ${fmtMi(L[1])} (${pct(L[1], r.totalM)})</span> · `
-                + `<span style="color:${XREF_COLORS[2]}">■ ${r.b1}–${r.b2} ft: ${fmtMi(L[2])} (${pct(L[2], r.totalM)})</span> · `
+                + `"${escapeHtml(r.srcName)}" vs ${escapeHtml(r.tgtLabel)}${r.sitesUsed ? ` <span style="color:#888">(${bases ? `${r.basesUsed} base(s), ` : ''}${r.sitesUsed} sites in range${r.sitesNoBase ? `, ${r.sitesNoBase} without a base` : ''})</span>` : ''} — total ${fmtMi(r.totalM)}<br>`
+                + `<span style="color:${XREF_COLORS[1]}">■ ${lbl1}: ${fmtMi(L[1])} (${pct(L[1], r.totalM)})</span> · `
+                + `<span style="color:${XREF_COLORS[2]}">■ ${lbl2}: ${fmtMi(L[2])} (${pct(L[2], r.totalM)})</span> · `
                 + `<span style="color:${XREF_COLORS[0]}">■ beyond: ${fmtMi(L[0])} (${pct(L[0], r.totalM)})</span><br>`
-                + `<b style="color:#5fff5f">≤${r.b2} ft cumulative: ${fmtMi(L[1] + L[2])} (${pct(L[1] + L[2], r.totalM)})</b> <span style="color:#888">— inspectable from existing coverage</span>`
-                + (r.pointsTotal ? `<br><span style="color:#aaa">points: ≤${r.b1}ft ${r.pointHits[1]} · ${r.b1}–${r.b2}ft ${r.pointHits[2]} · beyond ${r.pointHits[0]} of ${r.pointsTotal}</span>` : '')
+                + `<b style="color:#5fff5f">≤${r.b2.toLocaleString()} ft cumulative: ${fmtMi(L[1] + L[2])} (${pct(L[1] + L[2], r.totalM)})</b> <span style="color:#888">— ${bases ? 'reachable straight-line from a base, no shielding needed' : 'inspectable from existing coverage'}</span>`
+                + (r.pointsTotal ? `<br><span style="color:#aaa">points: ${lbl1} ${r.pointHits[1]} · ${lbl2} ${r.pointHits[2]} · beyond ${r.pointHits[0]} of ${r.pointsTotal}</span>` : '')
                 + '</div>');
+            if (bases && r.perBase && r.perBase.length) {
+                rows.push('<div style="max-height:22vh;overflow-y:auto;border-bottom:1px solid #222834;"><table style="border-collapse:collapse;width:100%;font:inherit;">'
+                    + `<thead><tr style="color:#7adfe6;text-align:left;position:sticky;top:0;background:#14181f"><th style="padding:2px 8px">Base (site)</th><th style="padding:2px 8px;color:${XREF_COLORS[1]}">Tattu</th><th style="padding:2px 8px;color:${XREF_COLORS[2]}">Tulip only</th><th style="padding:2px 8px;color:#5fff5f">Reachable</th><th style="padding:2px 8px">Points</th></tr></thead><tbody>`
+                    + r.perBase.map(b => `<tr style="border-bottom:1px solid #1d2430"><td style="padding:2px 8px">${escapeHtml(b.name)} <span style="color:#555">#${b.sid}</span>${b.bases > 1 ? ` <span style="color:#888">×${b.bases}</span>` : ''} <span data-ft-link="${b.sid}" style="cursor:pointer;color:#5fb3ff">↗</span></td>`
+                        + `<td style="padding:2px 8px">${fmtMi(b.lenM[1])}</td><td style="padding:2px 8px">${fmtMi(b.lenM[2])}</td><td style="padding:2px 8px;font-weight:bold">${fmtMi(b.lenM[1] + b.lenM[2])}</td><td style="padding:2px 8px;color:#aaa">${b.pts[1]}/${b.pts[2]}</td></tr>`).join('')
+                    + '</tbody></table></div>');
+            }
             rows.push('<div style="max-height:28vh;overflow-y:auto;">'
                 + (r.topRuns || r.runs).slice(0, 30).map((run, i) =>
                     `<div class="aim-ft-row" data-xr-fly="${i}" style="padding:2px 10px;cursor:pointer;border-bottom:1px solid #1d2430;">`
@@ -3993,7 +4109,7 @@
                             updateFaaTiles();
                             setStatus(`FAA chart opacity = ${v}`);
                         } else {
-                            const labels = { thresholdFt: 'threshold', marginFt: 'prefilter margin', xrefB1: 'cross-ref band 1', xrefB2: 'cross-ref band 2' };
+                            const labels = { thresholdFt: 'threshold', marginFt: 'prefilter margin', xrefB1: 'cross-ref band 1', xrefB2: 'cross-ref band 2', xrefBaseB1: 'Tattu range', xrefBaseB2: 'Tulip range' };
                             setStatus(`${labels[prop] || prop} = ${v} ft — takes effect on the next ${prop.startsWith('xref') ? 'cross-ref run' : 'sweep'}`);
                         }
                     }
