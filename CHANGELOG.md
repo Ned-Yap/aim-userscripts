@@ -6,6 +6,13 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-14 — Site Setup Tools latest v4.276: SpiderWeb — merged zones, hubs off the fences, no stub landings (dev only)
+
+- **Fix:** a leg could end in a run of identical stair arcs with a 25 ft stub before the zone. The landing-arc logic retried the whole tail at every sample once it failed; it now tries once, then the last two arcs are re-split so the landing arc is as long as the ground allows.
+- Zones closer than 30 ft merge into one (a small bridge is unioned between the two nearest points), so the 4 to 25 ft legs between nearly touching pads are gone.
+- Hubs keep 150 ft clear of every zone edge, and each star drops the spokes that do not earn their length.
+- Consecutive arcs with the same band merge, so no step vertex sits where nothing changes.
+
 ## 2026-09-14 — Site Setup Tools latest v4.275: SpiderWeb — legs leave from the nearest outside edge, star hubs, cleaner zones (dev only)
 
 - **Fix:** a leg could start on the far side of its own zone and cut straight through it. Cluster zones shaped like an L put the vertex-average "centre" outside the polygon, so the exit edge was picked from a point that was not inside. Zones now use a true interior anchor, and every leg end is the ring point nearest the far end that the leg actually departs from at 15° or more, re-aimed at the other leg end rather than the neighbour's centre.

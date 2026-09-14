@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.275
+// @version      4.276
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.275';
+    const SCRIPT_VERSION = '4.276';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -9368,7 +9368,7 @@
     }
 
     // ============================================================
-    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.275) — PREVIEW ONLY
+    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.276) — PREVIEW ONLY
     // Design doc: ShortKeys/AIM_Unshielded_SpiderWeb_Design.md.
     // FFZ per asset (mitered outset, touching buffers unioned), straight
     // point-to-point FPs at a 54 m floor / +20 ft band with AUTOMATIC DEM
@@ -9394,6 +9394,8 @@
         hubGainRatio: 1,                          // a hub must save this many ft of summed way-home per ft of new flight path (0 = any saving)
         approachFt: 100,                          // the arc that lands on a zone is at least this long when the ground allows
         notchFt: 5,                               // fill inward notches in unioned zones up to this depth
+        mergeGapFt: 30,                           // zones closer than this are merged into one (bridged), instead of a tiny leg
+        hubClearFt: 150,                          // a hub sits at least this far from any zone edge
     };
     let swbThresholds = loadSwbThresholds();
     let swbMasterEnabled = true;
@@ -9738,6 +9740,38 @@
         }
         if (!zones.length) zones = offRings.map(o => ({ points: o.ring, assets: [o.asset] }));
         if (holesDropped) logL(`${holesDropped} interior hole(s) dropped from unioned zones`);
+        // merge zones that nearly touch (a leg of a few feet between them is useless): bridge the gap with a
+        // small rectangle between the two nearest points and union the three
+        if (PC && th.mergeGapFt > 0) {
+            const mergeM = M(th.mergeGapFt), bridgeW = 2 * outsetM;
+            let merges = 0;
+            for (let pass = 0; pass < 30; pass++) {
+                let did = false;
+                const xy = zones.map(z => z.points.map(toXY));
+                const bb = xy.map(r => { let a = Infinity, b = -Infinity, c = Infinity, d = -Infinity; r.forEach(p => { if (p.x < a) a = p.x; if (p.x > b) b = p.x; if (p.y < c) c = p.y; if (p.y > d) d = p.y; }); return [a, b, c, d]; });
+                outer: for (let i = 0; i < zones.length; i++) for (let j = i + 1; j < zones.length; j++) {
+                    if (bb[i][0] > bb[j][1] + mergeM || bb[j][0] > bb[i][1] + mergeM || bb[i][2] > bb[j][3] + mergeM || bb[j][2] > bb[i][3] + mergeM) continue;
+                    // nearest point pair (vertex → edge both ways)
+                    let best = null;
+                    const scan = (A, B, flip) => { A.forEach(p => { for (let k = 0, m = B.length - 1; k < B.length; m = k++) { const P = B[m], Q = B[k]; const dx = Q.x - P.x, dy = Q.y - P.y; const L2 = dx * dx + dy * dy || 1; let t = ((p.x - P.x) * dx + (p.y - P.y) * dy) / L2; t = Math.max(0, Math.min(1, t)); const q = { x: P.x + t * dx, y: P.y + t * dy }; const d = Math.hypot(p.x - q.x, p.y - q.y); if (!best || d < best.d) best = flip ? { d, p: q, q: p } : { d, p, q }; } }); };
+                    scan(xy[i], xy[j], false); scan(xy[j], xy[i], true);
+                    if (!best || best.d > mergeM) continue;
+                    const dxu = (best.q.x - best.p.x) / (best.d || 1), dyu = (best.q.y - best.p.y) / (best.d || 1);
+                    const nx = -dyu * bridgeW / 2, ny = dxu * bridgeW / 2, ext = 1.5;
+                    const p0 = { x: best.p.x - dxu * ext, y: best.p.y - dyu * ext }, q0 = { x: best.q.x + dxu * ext, y: best.q.y + dyu * ext };
+                    const rect = [[p0.x + nx, p0.y + ny], [q0.x + nx, q0.y + ny], [q0.x - nx, q0.y - ny], [p0.x - nx, p0.y - ny]];
+                    let u = null;
+                    try { u = PC.union([xy[i].map(p => [p.x, p.y])], [xy[j].map(p => [p.x, p.y])], [rect]); } catch (e) { logL(`zone merge union threw (${e && e.message})`); continue; }
+                    if (!u || !u.length) continue;
+                    let big = u[0]; u.forEach(poly => { if (Math.abs(swbRingArea(poly[0].map(c => ({ x: c[0], y: c[1] })))) > Math.abs(swbRingArea(big[0].map(c => ({ x: c[0], y: c[1] }))))) big = poly; });
+                    const merged = { points: big[0].slice(0, -1).map(c => toLL({ x: c[0], y: c[1] })), assets: (zones[i].assets || []).concat(zones[j].assets || []) };
+                    zones.splice(j, 1); zones.splice(i, 1); zones.push(merged);
+                    merges++; did = true; break outer;
+                }
+                if (!did) break;
+            }
+            if (merges) logL(`${merges} near-touching zone pair(s) merged (gap < ${th.mergeGapFt} ft)`);
+        }
         // assign assets to zones by centroid pip
         zones.forEach(z => { const raw = z.points.map(toXY); z.xy = swbFillNotches(raw, M(th.notchFt)); if (z.xy.length !== raw.length) z.points = z.xy.map(toLL); z.assets = z.assets || []; });
         assets.forEach(a => {
@@ -9896,7 +9930,9 @@
             const R = M(th.hubRadiusFt), K = Math.max(3, th.hubMaxSpokes | 0);
             // candidates: Fermat points + circumcenters of zone-only Delaunay triangles, deduped on a 300 ft grid
             const seen = new Set(), cands = [];
-            const pushCand = (p) => { if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return; const k = `${Math.round(p.x / 90)}:${Math.round(p.y / 90)}`; if (seen.has(k)) return; if (zones.some(z => swbPip(p, z.xy))) return; seen.add(k); cands.push({ x: p.x, y: p.y }); };
+            const clearM = M(th.hubClearFt);
+            const ringDist = (p, ring) => { let m = Infinity; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) { const P = ring[j], Q = ring[i]; const dx = Q.x - P.x, dy = Q.y - P.y; const L2 = dx * dx + dy * dy || 1; let t = ((p.x - P.x) * dx + (p.y - P.y) * dy) / L2; t = Math.max(0, Math.min(1, t)); const d = Math.hypot(p.x - (P.x + t * dx), p.y - (P.y + t * dy)); if (d < m) m = d; } return m; };
+            const pushCand = (p) => { if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return; const k = `${Math.round(p.x / 90)}:${Math.round(p.y / 90)}`; if (seen.has(k)) return; if (zones.some(z => swbPip(p, z.xy) || ringDist(p, z.xy) < clearM)) return; seen.add(k); cands.push({ x: p.x, y: p.y }); };
             tris.forEach(t => {
                 if (t.some(v => nodes[v].kind === 'base')) return;
                 const P = t.map(v => nodes[v]);
@@ -9953,6 +9989,21 @@
                 }
                 await swbYield();
             }
+            // spoke pruning: a spoke stays only if removing it would cost more way-home than it is worth
+            let pruned = 0;
+            for (const h of hubs) {
+                const order = h.spokes.slice().sort((a, b) => Math.hypot(h.x - nodes[b].x, h.y - nodes[b].y) - Math.hypot(h.x - nodes[a].x, h.y - nodes[a].y));
+                for (const z of order) {
+                    if (h.spokes.length <= 3) break;
+                    const keep = h.spokes.slice();
+                    h.spokes = h.spokes.filter(v => v !== z);
+                    const r = sumRtb(hubs, web, hubLinks);
+                    const spokeLen = Math.hypot(h.x - nodes[z].x, h.y - nodes[z].y);
+                    if (r.unreachable > cur.unreachable || (r.sum - cur.sum) > Math.max(0, th.hubGainRatio) * spokeLen) h.spokes = keep;
+                    else { cur = r; pruned++; }
+                }
+            }
+            if (pruned) logL(`hubs: ${pruned} spoke(s) pruned (did not earn their length)`);
             // hub→hub links that shorten the way home
             let linksAdded = 0;
             for (let pass = 0; pass < 3; pass++) {
@@ -10130,13 +10181,15 @@
                     r = [Math.ceil(maxG + floorAdd), Math.ceil(maxG + floorAdd)];
                     if (prevFloor !== null && Math.abs(r[0] - prevFloor) > stepMax) l.flags.push(`cliff ${(Math.hypot(pts[s].x - pts[0].x, pts[s].y - pts[0].y) * M_TO_FT).toFixed(0)} ft along the leg (floor jumps ${Math.abs(r[0] - prevFloor)} m between samples)`);
                 }
+                let tailTried = false;
                 while (e + 1 <= n - 1) {
-                    if (e + 1 > appIdx && e + 1 < n - 1 && zB) {
-                        // entering the approach: take the whole tail as the landing arc if it complies, else stop here
+                    if (!tailTried && e + 1 > appIdx && e + 1 < n - 1 && zB) {
+                        // entering the approach: take the whole tail as the landing arc if it complies; otherwise
+                        // keep walking normally (the terminal constraint applies to whatever arc reaches the end)
+                        tailTried = true;
                         let tmax = maxG, tmin = minG; for (let k = e + 1; k < n; k++) { if (g[k] > tmax) tmax = g[k]; if (g[k] < tmin) tmin = g[k]; }
                         const tr = range(tmax, tmin, true);
-                        if (tr[0] <= tr[1]) { e = n - 1; maxG = tmax; minG = tmin; r = tr; }
-                        break;
+                        if (tr[0] <= tr[1]) { e = n - 1; maxG = tmax; minG = tmin; r = tr; break; }
                     }
                     const nmax = Math.max(maxG, g[e + 1]), nmin = Math.min(minG, g[e + 1]);
                     const nr = range(nmax, nmin, e + 1 === n - 1);
@@ -10151,6 +10204,28 @@
                 arcs.push({ s, e, floorM: fl, ceilM: ce, maxGm: maxG, minGm: minG });
                 prevFloor = fl; s = e;
             }
+            // landing arc too short? re-split the last two arcs so the landing arc is as long as the ground allows
+            if (zB && arcs.length >= 2) {
+                const b = arcs[arcs.length - 1], a = arcs[arcs.length - 2];
+                if (cum[b.e] - cum[b.s] < approachM * 0.5) {
+                    const prev = arcs.length >= 3 ? arcs[arcs.length - 3].floorM : null;
+                    const rangeAt = (s0, e0, pf, terminal) => { let mx = -Infinity, mn = Infinity; for (let k = s0; k <= e0; k++) { if (g[k] > mx) mx = g[k]; if (g[k] < mn) mn = g[k]; } let lo = Math.ceil(mx + floorAdd), hi = Math.floor(mn + droneMaxM - stepMax); if (pf !== null) { lo = Math.max(lo, Math.ceil(pf - stepMax)); hi = Math.min(hi, Math.floor(pf + stepMax)); } if (s0 === 0 && rA) { lo = Math.max(lo, rA[0]); hi = Math.min(hi, rA[1]); } if (terminal && rB) { lo = Math.max(lo, rB[0]); hi = Math.min(hi, rB[1]); } return [lo, hi, mx, mn]; };
+                    for (let k = a.s + 1; k < b.s; k++) {
+                        const r1 = rangeAt(a.s, k, prev, false); if (r1[0] > r1[1]) continue;
+                        // pick the first-arc floor that gives the landing arc the most room: try the whole interval
+                        let done = false;
+                        for (let f1 = r1[1]; f1 >= r1[0] && !done; f1--) {
+                            const r2 = rangeAt(k, n - 1, f1, true); if (r2[0] > r2[1]) continue;
+                            const f2 = Math.max(r2[0], Math.min(r2[1], r2[0]));
+                            arcs.splice(arcs.length - 2, 2, { s: a.s, e: k, floorM: f1, ceilM: Math.floor(f1 + bandM), maxGm: r1[2], minGm: r1[3] }, { s: k, e: n - 1, floorM: f2, ceilM: Math.floor(f2 + bandM), maxGm: r2[2], minGm: r2[3] });
+                            done = true;
+                        }
+                        if (done) break;
+                    }
+                }
+            }
+            // merge consecutive arcs with the same band — a step vertex between them is pointless
+            for (let i = arcs.length - 1; i > 0; i--) { const a = arcs[i - 1], b = arcs[i]; if (a.floorM === b.floorM && a.ceilM === b.ceilM) { a.e = b.e; a.maxGm = Math.max(a.maxGm, b.maxGm); a.minGm = Math.min(a.minGm, b.minGm); arcs.splice(i, 1); } }
             if (arcs.length > 40) l.flags.push(`many steps (${arcs.length})`);
             if (zB && arcs.length > 1) { const last = arcs[arcs.length - 1]; const lenLast = cum[last.e] - cum[last.s]; if (lenLast < approachM * 0.5 && cum[n - 1] > approachM * 2) l.flags.push(`steep approach: landing arc only ${(lenLast * M_TO_FT).toFixed(0)} ft (ground near the zone forces it)`); }
             if (l.lenM * M_TO_FT < 30) l.flags.push(`tiny leg (${(l.lenM * M_TO_FT).toFixed(0)} ft) — zones nearly touch, consider merging`);
@@ -10339,6 +10414,8 @@
                 ${num('hubGainRatio', 'hub gain ratio', 0.5, 'A hub must save this many ft of summed way-home per ft of new flight path (0 = any saving)')}
                 ${num('hubMaxSpokes', 'max spokes', 1, 'Most spokes on one hub')}
                 ${num('approachFt', 'approach ft', 10, 'Landing arc is at least this long when the ground allows')}
+                ${num('mergeGapFt', 'merge gap ft', 5, 'Zones closer than this merge into one')}
+                ${num('hubClearFt', 'hub clear ft', 10, 'A hub sits at least this far from any zone edge')}
                 <label style="display:flex;align-items:center;gap:4px;">battery<select data-swb-p="battery" style="background:#0d131d;color:#dfe9f0;border:1px solid rgba(43,140,255,0.4);border-radius:4px;font:inherit;"><option value="tulip" ${th.battery === 'tulip' ? 'selected' : ''}>Tulip</option><option value="tattu" ${th.battery === 'tattu' ? 'selected' : ''}>Tattu</option></select></label>
                 <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input data-swb-p="hubs" type="checkbox" ${th.hubs ? 'checked' : ''}>hubs</label>
             </div>
@@ -10759,6 +10836,8 @@
                 { id: 'hubGainRatio', label: 'Hub must save … ft of summed way-home per ft of new path (0 = any)', type: 'number', min: 0, max: 20, step: 0.5, default: SWB_DEFAULTS.hubGainRatio },
                 { id: 'approachFt', label: 'Minimum landing arc length', type: 'number', min: 25, max: 500, step: 5, default: SWB_DEFAULTS.approachFt, unit: 'ft' },
                 { id: 'notchFt', label: 'Fill inward notches in unioned zones up to', type: 'number', min: 0, max: 30, step: 1, default: SWB_DEFAULTS.notchFt, unit: 'ft' },
+                { id: 'mergeGapFt', label: 'Merge zones closer than', type: 'number', min: 0, max: 200, step: 5, default: SWB_DEFAULTS.mergeGapFt, unit: 'ft' },
+                { id: 'hubClearFt', label: 'Hub clearance from any zone edge', type: 'number', min: 0, max: 1000, step: 10, default: SWB_DEFAULTS.hubClearFt, unit: 'ft' },
                 { id: 'battery', label: 'Battery for the one-way distance gate', type: 'select', options: [ { value: 'tulip', label: 'Tulip' }, { value: 'tattu', label: 'Tattu' } ], default: SWB_DEFAULTS.battery },
                 { id: 'sampleFt', label: 'DEM sample spacing along legs', type: 'number', min: 10, max: 100, step: 5, default: SWB_DEFAULTS.sampleFt, unit: 'ft' },
                 { id: 'marginFt', label: 'DEM margin around the site', type: 'number', min: 100, max: 5280, step: 50, default: SWB_DEFAULTS.marginFt, unit: 'ft' },
