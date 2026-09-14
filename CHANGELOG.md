@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-14 — Site Setup Tools latest v4.281: SpiderWeb — hubs are placed before the base star (dev only)
+
+- **Fix:** hubs near a base never connected to it. The direct-to-base legs were added first, so by the time a hub was scored every pad around it already had its own straight leg home and the hub's base spoke was pruned as worthless. Hubs are now placed first, may spoke to a base zone up to 8,000 ft away, and the way-home pass only adds direct legs where the web is still long afterwards. Hub-to-hub links use the same gain ratio as spokes.
+
 ## 2026-09-14 — Site Setup Tools latest v4.280: SpiderWeb — legs connect to the base's freezone, not the base point (dev only)
 
 - **Fix:** every leg to a base ended on the base marker itself, cutting through the base pad's freezone with all the legs stacked on one point. The zone that contains a base is now that base's zone: legs land on its edges with normal spacing and the drone reaches the base across the zone. A base outside every zone gets a 120 ft square zone of its own. Base zones draw in yellow.
