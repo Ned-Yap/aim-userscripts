@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-14 — Site Setup Tools latest v4.280: SpiderWeb — legs connect to the base's freezone, not the base point (dev only)
+
+- **Fix:** every leg to a base ended on the base marker itself, cutting through the base pad's freezone with all the legs stacked on one point. The zone that contains a base is now that base's zone: legs land on its edges with normal spacing and the drone reaches the base across the zone. A base outside every zone gets a 120 ft square zone of its own. Base zones draw in yellow.
+- On a base zone the exit point is chosen for the drone's real path, base to edge to target, so a leg leaving a pad whose base sits on its west side no longer departs from the middle of the south edge.
+
 ## 2026-09-14 — Site Setup Tools latest v4.279: SpiderWeb — the base star is back by default (dev only)
 
 - The pricing that v4.278 put on restored legs and direct base legs is now two separate knobs, "leg gain ratio" and "base leg ratio", both defaulting to 0. That reproduces the v4.277 look: any zone with a long way home gets a straight shot to base. Turn the base leg ratio up to thin the star. Hubs keep their own ratio.

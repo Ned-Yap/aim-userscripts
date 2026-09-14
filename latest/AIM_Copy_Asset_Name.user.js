@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.279
+// @version      4.280
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.279';
+    const SCRIPT_VERSION = '4.280';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -9368,7 +9368,7 @@
     }
 
     // ============================================================
-    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.279) — PREVIEW ONLY
+    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.280) — PREVIEW ONLY
     // Design doc: ShortKeys/AIM_Unshielded_SpiderWeb_Design.md.
     // FFZ per asset (mitered outset, touching buffers unioned), straight
     // point-to-point FPs at a 54 m floor / +20 ft band with AUTOMATIC DEM
@@ -9399,6 +9399,7 @@
         notchFt: 5,                               // fill inward notches in unioned zones up to this depth
         mergeGapFt: 30,                           // zones closer than this are merged into one (bridged), instead of a tiny leg
         hubClearFt: 150,                          // a hub sits at least this far from any zone edge
+        baseZoneFt: 120,                          // a base outside every zone gets its own square zone of this side
     };
     let swbThresholds = loadSwbThresholds();
     let swbMasterEnabled = true;
@@ -9786,9 +9787,25 @@
             else logL(`⚠ asset "${a.name}" is inside no zone after union`);
         });
         zones = zones.filter(z => z.assets.length);
+        // Bases live inside freezones: the zone that contains a base becomes that base's zone (legs land on ITS
+        // edges, the base is reached across the zone). A base outside every zone gets a square zone of its own.
+        const baseXY = bases.map(b => toXY(b.pt));
+        bases.forEach((b, bi) => {
+            const q = baseXY[bi];
+            let z = zones.find(zz => swbPip(q, zz.points.map(toXY)));
+            if (!z) {
+                const h = M(th.baseZoneFt) / 2;
+                z = { points: [{ x: q.x - h, y: q.y - h }, { x: q.x + h, y: q.y - h }, { x: q.x + h, y: q.y + h }, { x: q.x - h, y: q.y + h }].map(toLL), assets: [], generated: true };
+                zones.push(z);
+                logL(`base "${b.name}" is outside every zone — generated a ${th.baseZoneFt} ft base zone`);
+            }
+            if (!z.bases) z.bases = [];
+            z.bases.push({ base: b, xy: q });
+        });
         zones.forEach((z, i) => {
             z.idx = i;
-            z.name = z.assets.length === 1 ? z.assets[0].name : `${z.assets[0].name} +${z.assets.length - 1}`;
+            z.name = z.assets.length === 0 ? `Base zone ${(z.bases || []).map(b => b.base.name.trim()).join(' + ')}` : z.assets.length === 1 ? z.assets[0].name : `${z.assets[0].name} +${z.assets.length - 1}`;
+            if (z.bases) z.name = z.assets.length ? `${z.name} (base)` : z.name;
             const anchor = swbInteriorPoint(z.xy); z.cx = anchor.x; z.cy = anchor.y;
             z.flags = [];
             // zone band from the ground inside the footprint (ring verts + centroid + grid)
@@ -9816,6 +9833,7 @@
         const outNormal = (ring, P, Q) => { const dx = Q.x - P.x, dy = Q.y - P.y, L = Math.hypot(dx, dy) || 1; const ccw = swbRingArea(ring) > 0; return ccw ? { nx: dy / L, ny: -dx / L } : { nx: -dy / L, ny: dx / L }; };
         const zoneEndpoint = (zn, toward, exclude) => {
             const ring = zn.zone.xy, n = ring.length;
+            const anchors = (zn.zone.bases || []).map(b => b.xy);   // base zone: minimise base→edge→target, not edge→target
             let best = null, fallback = null;
             for (let i = 0; i < n; i++) {
                 if (exclude && exclude.has(i)) continue;
@@ -9824,10 +9842,16 @@
                 let u = ((toward.x - P.x) * dx + (toward.y - P.y) * dy) / L2;
                 const uMin = Math.min(cornerM / L, 0.5), uMax = Math.max(1 - cornerM / L, 0.5);
                 u = Math.max(uMin, Math.min(uMax, u));
+                if (anchors.length) {   // base zone: pick the u along this edge that minimises base→p + p→target
+                    let bu = u, bd = Infinity;
+                    for (let k = 0; k <= 40; k++) { const uu = uMin + (uMax - uMin) * k / 40; const qx = P.x + uu * dx, qy = P.y + uu * dy; const dd = Math.hypot(toward.x - qx, toward.y - qy) + Math.min(...anchors.map(a => Math.hypot(a.x - qx, a.y - qy))); if (dd < bd) { bd = dd; bu = uu; } }
+                    u = bu;
+                }
                 const px = P.x + u * dx, py = P.y + u * dy;
-                const d = Math.hypot(toward.x - px, toward.y - py) || 1;
+                const dRaw = Math.hypot(toward.x - px, toward.y - py) || 1;
+                const d = dRaw + (anchors.length ? Math.min(...anchors.map(a => Math.hypot(a.x - px, a.y - py))) : 0);
                 const { nx, ny } = outNormal(ring, P, Q);
-                const outward = ((toward.x - px) * nx + (toward.y - py) * ny) / d;   // sin of the angle off the edge
+                const outward = ((toward.x - px) * nx + (toward.y - py) * ny) / dRaw;   // sin of the angle off the edge
                 const cand = { d, edge: i, u };
                 // the departing segment must not re-enter the zone (L-shaped clusters wrap around a corner)
                 const clear = outward >= SIN15 && !swbSegHitsRing({ x: px + nx * 0.6, y: py + ny * 0.6 }, toward, ring);
@@ -9852,7 +9876,6 @@
         const landXY = (zn, from) => { const ep = zoneEndpoint(zn, from); const ring = zn.zone.xy, P = ring[ep.edge], Q = ring[(ep.edge + 1) % ring.length]; return { x: P.x + (Q.x - P.x) * ep.u, y: P.y + (Q.y - P.y) * ep.u }; };
 
         const nodes = zones.map(z => ({ kind: 'zone', x: z.cx, y: z.cy, zone: z }));
-        bases.forEach(b => { const q = toXY(b.pt); nodes.push({ kind: 'base', x: q.x, y: q.y, base: b }); });
         const nZ = zones.length;
         const nfzXY = nfzRings.map(r => r.map(toXY));
         const tris = swbDelaunay(nodes);
@@ -9862,9 +9885,6 @@
         // crossing test: a leg may not cut through a zone it does not end on, nor an NFZ
         const legBlocked = (a, b) => {
             const A = nodes[a], B = nodes[b];
-            // a base sitting inside a zone is already connected to it — no leg
-            if (A.kind === 'zone' && B.kind !== 'zone' && swbPip(B, A.zone.xy)) return true;
-            if (B.kind === 'zone' && A.kind !== 'zone' && swbPip(A, B.zone.xy)) return true;
             const pa = A.kind === 'zone' ? landXY(A, B) : A, pb = B.kind === 'zone' ? landXY(B, A) : B;
             for (const z of zones) { if ((A.kind === 'zone' && A.zone === z) || (B.kind === 'zone' && B.zone === z)) continue; if (swbPip(A, z.xy) || swbPip(B, z.xy)) continue; if (swbSegHitsRing(pa, pb, z.xy)) return true; }
             for (const r of nfzXY) if (swbSegHitsRing(pa, pb, r)) return true;
@@ -9883,9 +9903,9 @@
         edges.forEach((e, k) => { if (!e.blocked && !longest.has(k)) web.add(k); });
         await swbYield();
         // ---- 3. stretch pass: add pruned Delaunay legs back where the return path is long ----
-        const baseIdx = nodes.map((n, i) => n.kind === 'base' ? i : -1).filter(i => i >= 0);
+        const baseIdx = nodes.map((n, i) => n.zone.bases ? i : -1).filter(i => i >= 0);   // base ZONES are the way-home sources
         const adjOf = (keys) => { const adj = nodes.map(() => []); keys.forEach(k => { const e = edges.get(k); adj[e.a].push({ to: e.b, w: e.len }); adj[e.b].push({ to: e.a, w: e.len }); }); return adj; };
-        const straightM = nodes.map(n => { const pts = n.kind === 'zone' ? n.zone.xy : [n]; let m = Infinity; baseIdx.forEach(b => pts.forEach(p => { const d = Math.hypot(p.x - nodes[b].x, p.y - nodes[b].y); if (d < m) m = d; })); return Math.max(m, 150); });   // 150 m floor: a zone next to (or around) the base has no meaningful ratio
+        const straightM = nodes.map(n => { let m = Infinity; baseXY.forEach(q => n.zone.xy.forEach(p => { const d = Math.hypot(p.x - q.x, p.y - q.y); if (d < m) m = d; })); return Math.max(m, 150); });   // ring → nearest base point; 150 m floor: a zone next to (or around) the base has no meaningful ratio
         let stretchAdded = 0;
         // Way-home pass: for every zone whose web path to base is > stretchMax × straight, try the best
         // pruned Delaunay leg and a direct leg to the nearest base; add the one that earns its length —
@@ -9966,7 +9986,6 @@
             const ringDist = (p, ring) => { let m = Infinity; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) { const P = ring[j], Q = ring[i]; const dx = Q.x - P.x, dy = Q.y - P.y; const L2 = dx * dx + dy * dy || 1; let t = ((p.x - P.x) * dx + (p.y - P.y) * dy) / L2; t = Math.max(0, Math.min(1, t)); const d = Math.hypot(p.x - (P.x + t * dx), p.y - (P.y + t * dy)); if (d < m) m = d; } return m; };
             const pushCand = (p) => { if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return; const k = `${Math.round(p.x / 90)}:${Math.round(p.y / 90)}`; if (seen.has(k)) return; if (zones.some(z => swbPip(p, z.xy) || ringDist(p, z.xy) < clearM)) return; seen.add(k); cands.push({ x: p.x, y: p.y }); };
             tris.forEach(t => {
-                if (t.some(v => nodes[v].kind === 'base')) return;
                 const P = t.map(v => nodes[v]);
                 pushCand(swbGeoMedian(P));
                 const a = P[0], b = P[1], c = P[2];
@@ -10329,8 +10348,9 @@
         });
         ownerEps.forEach(list => { for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) { const a = epNodes[list[i]], b = epNodes[list[j]]; link(list[i], list[j], Math.hypot(a.x - b.x, a.y - b.y)); } });
         // a base inside a zone is reachable from that zone's endpoints across the zone
-        baseIdx.forEach(b => { const B = nodes[b]; zones.forEach((z, zi) => { if (!swbPip(B, z.xy)) return; (ownerEps.get(ownerKey(zi)) || []).forEach(e => { const q = epNodes[e]; link(pointNode.get(b), e, Math.hypot(q.x - B.x, q.y - B.y)); }); }); });
-        const srcs = baseIdx.map(b => pointNode.get(b));
+        const srcs = [];
+        zones.forEach((z, zi) => { (z.bases || []).forEach(b => { const bn = epIdx(null, b.xy.x, b.xy.y, zi); adj.push([]); srcs.push(bn); (ownerEps.get(ownerKey(zi)) || []).forEach(e => { const q = epNodes[e]; link(bn, e, Math.hypot(q.x - b.xy.x, q.y - b.xy.y)); }); }); });
+        if (!srcs.length) logL('⚠ no base point reached the endpoint graph');
         const dist = swbDijkstra(epNodes.length, adj, srcs);
         zones.forEach((z, i) => {
             const list = ownerEps.get(ownerKey(i)) || [];
@@ -10365,7 +10385,8 @@
         const add = (layer) => { try { layer.addTo(map); swbLayers.push(layer); } catch (e) {} };
         st.zones.forEach(z => {
             const bad = z.flags.length > 0;
-            add(L.polygon(z.points.map(q => [q.lat, q.lng]), { color: bad ? '#ffb020' : '#5fff5f', weight: 2, opacity: 0.95, fillColor: bad ? '#ffb020' : '#5fff5f', fillOpacity: 0.08, interactive: false }));
+            const col = z.bases ? '#ffe14d' : (bad ? '#ffb020' : '#5fff5f');
+            add(L.polygon(z.points.map(q => [q.lat, q.lng]), { color: col, weight: z.bases ? 3 : 2, opacity: 0.95, fillColor: col, fillOpacity: 0.08, interactive: false }));
         });
         st.legs.forEach(l => {
             if (!l.vertsLL) return;
@@ -10396,7 +10417,7 @@
         out.push(`AIM SpiderWeb generator v${SCRIPT_VERSION} — site ${st.sid} — ${new Date().toISOString()}`);
         out.push(`floor ${th.fpFloorM} m (+${(th.fpFloorM * M_TO_FT).toFixed(1)} ft) / band ${th.fpBandFt} ft / overlap ${th.overlapM} m / outset ${th.outsetFt} ft / battery ${th.battery} ${st.limitFt.toLocaleString()} ft`);
         out.push(`zones ${st.zones.length} · legs ${st.legs.length} · hubs ${st.hubs.length} · arcs ${st.totalArcs} · vertices ${st.totalVerts} · FP length ${(st.totalLenM * M_TO_FT / 5280).toFixed(2)} mi`);
-        out.push(`bases: ${st.bases.map(b => b.name).join(', ')}`);
+        out.push(`bases: ${st.bases.map(b => b.name).join(', ')} — base zones: ${st.zones.filter(z => z.bases).map(z => z.name).join(', ')}`);
         st.gates.forEach(g => out.push(`${g.ok ? 'OK  ' : (g.soft ? 'WARN' : 'FAIL')} ${g.label}${g.detail ? ' — ' + g.detail : ''}`));
         if (st.dropped.length) { out.push(`dropped assets (${st.dropped.length}):`); st.dropped.forEach(d => out.push(`  ${d.name} — ${d.why}${d.distFt != null ? ` (${d.distFt.toLocaleString()} ft)` : ''}`)); }
         if (st.skippedEmpty.length) out.push(`EMPTY assets skipped (${st.skippedEmpty.length}): ${st.skippedEmpty.join(', ')}`);
@@ -10472,6 +10493,7 @@
                 ${num('approachFt', 'approach ft', 10, 'Landing arc is at least this long when the ground allows')}
                 ${num('mergeGapFt', 'merge gap ft', 5, 'Zones closer than this merge into one')}
                 ${num('hubClearFt', 'hub clear ft', 10, 'A hub sits at least this far from any zone edge')}
+                ${num('baseZoneFt', 'base zone ft', 10, 'A base outside every zone gets a square zone of this side')}
                 <label style="display:flex;align-items:center;gap:4px;">battery<select data-swb-p="battery" style="background:#0d131d;color:#dfe9f0;border:1px solid rgba(43,140,255,0.4);border-radius:4px;font:inherit;"><option value="tulip" ${th.battery === 'tulip' ? 'selected' : ''}>Tulip</option><option value="tattu" ${th.battery === 'tattu' ? 'selected' : ''}>Tattu</option></select></label>
                 <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input data-swb-p="hubs" type="checkbox" ${th.hubs ? 'checked' : ''}>hubs</label>
             </div>
@@ -10897,6 +10919,7 @@
                 { id: 'notchFt', label: 'Fill inward notches in unioned zones up to', type: 'number', min: 0, max: 30, step: 1, default: SWB_DEFAULTS.notchFt, unit: 'ft' },
                 { id: 'mergeGapFt', label: 'Merge zones closer than', type: 'number', min: 0, max: 200, step: 5, default: SWB_DEFAULTS.mergeGapFt, unit: 'ft' },
                 { id: 'hubClearFt', label: 'Hub clearance from any zone edge', type: 'number', min: 0, max: 1000, step: 10, default: SWB_DEFAULTS.hubClearFt, unit: 'ft' },
+                { id: 'baseZoneFt', label: 'Base outside every zone → square base zone of this side', type: 'number', min: 40, max: 600, step: 10, default: SWB_DEFAULTS.baseZoneFt, unit: 'ft' },
                 { id: 'battery', label: 'Battery for the one-way distance gate', type: 'select', options: [ { value: 'tulip', label: 'Tulip' }, { value: 'tattu', label: 'Tattu' } ], default: SWB_DEFAULTS.battery },
                 { id: 'sampleFt', label: 'DEM sample spacing along legs', type: 'number', min: 10, max: 100, step: 5, default: SWB_DEFAULTS.sampleFt, unit: 'ft' },
                 { id: 'marginFt', label: 'DEM margin around the site', type: 'number', min: 100, max: 5280, step: 50, default: SWB_DEFAULTS.marginFt, unit: 'ft' },
