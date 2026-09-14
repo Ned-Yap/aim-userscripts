@@ -82,6 +82,11 @@ The `changes.csv` audit log crossed GitHub's 1 MB Contents-API cliff on 2026-08-
 - **Raw-read diagnostics**: the >1 MB fallback now logs status / length / head so a future failure explains itself.
 - Data repo: rotated the oversized file to `changes-archive-2026-08.csv` by hand (commit `f0c381ce`); appends resume on the next cycle with no reinstall needed. Rows between 2026-08-18 and today exist only in the per-site snapshot rings.
 
+## 2026-09-14 — 📐 Cross-ref report card + collapsed start: AIM Fleet Tools v0.31 (latest — dev only)
+
+- **📊 Report** button on the cross-ref row opens a clean report card (same style as the Fleet Issues summary): headline tiles (network size, reachable / inspectable share, Tattu, Tulip-only, beyond), band bars, a **per-base table** with reach bars and ↗ links, the longest stretches with 🎯 fly-to, and the run notes. **Copy → Sheets** (three formatted tables) and **Copy text**. Esc closes. The section itself now shows just the two-line headline.
+- **Fleet Tools opens with every section collapsed** — expand what you need.
+
 ## 2026-09-14 — 📐 Cross-ref site scope: AIM Fleet Tools v0.30 (latest — dev only)
 
 New **sites:** box on the cross-ref row (shown for the site and base-station targets): type one or more comma-separated words and only sites whose **name contains** one of them count as coverage / bases — e.g. `Exxon` limits a base-station range check to the Exxon sites. Empty = every site you can access. The result label records the scope.

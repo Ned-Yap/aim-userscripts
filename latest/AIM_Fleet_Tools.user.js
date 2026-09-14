@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.30
+// @version      0.31
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.30';
+    const SCRIPT_VERSION = '0.31';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -2440,6 +2440,111 @@
     }
     function pct(part, whole) { return whole > 0 ? `${(part / whole * 100).toFixed(1)}%` : '—'; }
 
+    // ---- v0.31: 📊 cross-ref report card (popup, like the Fleet Issues summary) ----
+    let xrefCardEl = null, xrefCardKeyH = null;
+    function closeXrefCard() {
+        if (xrefCardEl) { try { xrefCardEl.remove(); } catch (e) {} }
+        xrefCardEl = null;
+        if (xrefCardKeyH) { try { document.removeEventListener('keydown', xrefCardKeyH, true); } catch (e) {} xrefCardKeyH = null; }
+    }
+    function xrefSheetsHtml(r) {
+        const bases = r.mode === 'bases';
+        const P = r.pointHits || { 0: 0, 1: 0, 2: 0 };
+        const pointsOnly = !!r.pointsTotal && !(r.totalM > 0);
+        const th = (v) => `<th style="background:#14171b;color:#fff;padding:6px 8px;border:1px solid #444;text-align:left">${escapeHtml(v)}</th>`;
+        const td = (v) => `<td style="padding:5px 8px;border:1px solid #444">${v}</td>`;
+        const miN = (m) => (m * FT_PER_M / 5280).toFixed(2);
+        const l1 = bases ? `Tattu ≤${r.b1.toLocaleString()} ft` : `≤${r.b1} ft`, l2 = bases ? `Tulip only ${r.b1.toLocaleString()}–${r.b2.toLocaleString()} ft` : `${r.b1}–${r.b2} ft`;
+        const out = [`<p><b>AIM Fleet Tools — cross-reference</b> — "${escapeHtml(r.srcName)}" vs ${escapeHtml(r.tgtLabel)} — ${escapeHtml(new Date(r.at).toLocaleString())}</p>`];
+        out.push('<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px"><tr>' + [pointsOnly ? 'Points' : 'Total mi', l1, l2, `≤${r.b2.toLocaleString()} ft cumulative`, 'Beyond', 'Sites in range', bases ? 'Bases' : ''].filter(Boolean).map(th).join('') + '</tr><tr>'
+            + (pointsOnly ? [r.pointsTotal, `${P[1]} (${pct(P[1], r.pointsTotal)})`, `${P[2]} (${pct(P[2], r.pointsTotal)})`, `${P[1] + P[2]} (${pct(P[1] + P[2], r.pointsTotal)})`, `${P[0]} (${pct(P[0], r.pointsTotal)})`]
+                : [miN(r.totalM), `${miN(r.bandLenM[1])} (${pct(r.bandLenM[1], r.totalM)})`, `${miN(r.bandLenM[2])} (${pct(r.bandLenM[2], r.totalM)})`, `${miN(r.bandLenM[1] + r.bandLenM[2])} (${pct(r.bandLenM[1] + r.bandLenM[2], r.totalM)})`, `${miN(r.bandLenM[0])} (${pct(r.bandLenM[0], r.totalM)})`])
+              .concat([r.sitesUsed, bases ? r.basesUsed : null]).filter(v => v !== null).map(v => td(escapeHtml(String(v)))).join('') + '</tr></table><br>');
+        if (bases && r.perBase && r.perBase.length) {
+            out.push('<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px"><tr>' + ['Base (site)', 'Site ID', pointsOnly ? 'Tattu pts' : 'Tattu mi', pointsOnly ? 'Tulip-only pts' : 'Tulip-only mi', pointsOnly ? 'Reachable pts' : 'Reachable mi', pointsOnly ? '' : 'Points Tattu/Tulip'].filter(Boolean).map(th).join('') + '</tr>');
+            r.perBase.forEach(b => out.push('<tr>' + td(`<a href="${siteSetupUrl(b.sid)}" style="color:#1a73e8">${escapeHtml(b.name)}</a>${b.bases > 1 ? ` ×${b.bases}` : ''}`) + td(b.sid)
+                + (pointsOnly ? td(b.pts[1]) + td(b.pts[2]) + td(b.pts[1] + b.pts[2]) : td(miN(b.lenM[1])) + td(miN(b.lenM[2])) + td(miN(b.lenM[1] + b.lenM[2])) + td(`${b.pts[1]}/${b.pts[2]}`)) + '</tr>'));
+            out.push('</table><br>');
+        }
+        if (r.runsTotal) {
+            out.push('<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px"><tr>' + ['#', 'Band', 'Length mi', 'Feature', 'Lat', 'Lng'].map(th).join('') + '</tr>');
+            (r.topRuns || r.runs).slice(0, 40).forEach((run, i) => { const mid = run.pts[Math.floor(run.pts.length / 2)]; out.push('<tr>' + td(i + 1) + td(run.band === 1 ? l1 : run.band === 2 ? l2 : 'beyond') + td(miN(run.lenM)) + td(escapeHtml(run.featName || '')) + td(mid[0].toFixed(6)) + td(mid[1].toFixed(6)) + '</tr>'); });
+            out.push('</table>');
+        }
+        return out.join('');
+    }
+    function openXrefCard() {
+        closeXrefCard();
+        const r = xrefState && xrefState.result;
+        if (!r) { setStatus('no cross-reference run yet'); return; }
+        const bases = r.mode === 'bases';
+        const P = r.pointHits || { 0: 0, 1: 0, 2: 0 };
+        const pointsOnly = !!r.pointsTotal && !(r.totalM > 0);
+        const l1 = bases ? `Tattu ≤${r.b1.toLocaleString()} ft` : `≤${r.b1} ft`, l2 = bases ? `Tulip only ${r.b1.toLocaleString()}–${r.b2.toLocaleString()} ft` : `${r.b1}–${r.b2} ft`;
+        const L = r.bandLenM;
+        const total = pointsOnly ? r.pointsTotal : r.totalM;
+        const v = (k) => pointsOnly ? P[k] : L[k];
+        const fmtV = (x) => pointsOnly ? `${x} pts` : fmtMi(x);
+        const tile = (label, val, sub, color) => `<div style="background:#14171b;border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:8px 12px;min-width:120px"><div style="color:#888;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">${label}</div><div style="color:${color || '#e6e6e6'};font-size:20px;font-weight:700">${val}</div>${sub ? `<div style="color:#888;font-size:11px">${sub}</div>` : ''}</div>`;
+        const bar = (label, val, color) => `<div style="display:flex;align-items:center;gap:8px;font-size:12px;margin:3px 0"><span style="width:230px;color:${color}">${label}</span><div style="flex:1;height:12px;background:#0e1115;border-radius:6px;overflow:hidden"><div style="width:${total ? Math.round(100 * val / total) : 0}%;height:100%;background:${color}"></div></div><span style="width:150px;text-align:right;font-weight:700">${fmtV(val)} <span style="color:#888;font-weight:400">${pct(val, total)}</span></span></div>`;
+        const card = document.createElement('div');
+        card.id = 'aim-ft-xref-card';
+        card.style.cssText = `position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:900px;max-width:95vw;max-height:88vh;background:#1f2228;border:1px solid rgba(122,223,230,0.55);border-radius:10px;color:#e6e6e6;z-index:2147480002;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;box-shadow:0 8px 32px rgba(0,0,0,0.7);display:flex;flex-direction:column;overflow:hidden`;
+        const perBaseHtml = (bases && r.perBase && r.perBase.length) ? (() => {
+            const list = pointsOnly ? r.perBase.filter(b => b.pts[1] + b.pts[2] > 0) : r.perBase.filter(b => b.lenM[1] + b.lenM[2] > 0 || b.pts[1] + b.pts[2] > 0);
+            const zero = r.perBase.length - list.length;
+            const max = Math.max(1, ...list.map(b => pointsOnly ? b.pts[1] + b.pts[2] : b.lenM[1] + b.lenM[2]));
+            return `<div style="margin-top:14px"><div style="color:#7adfe6;font-weight:700;font-size:11px;margin-bottom:4px">PER BASE — what each site's base can reach ${pointsOnly ? '(points)' : '(miles)'}</div>
+                <table style="width:100%;border-collapse:collapse;font-size:12px"><tr style="color:#888;text-align:left"><th style="padding:4px 6px">Base (site)</th><th style="padding:4px 6px;color:${XREF_COLORS[1]}">Tattu</th><th style="padding:4px 6px;color:${XREF_COLORS[2]}">Tulip only</th><th style="padding:4px 6px;color:#5fff5f">Reachable</th><th style="padding:4px 6px;width:30%"></th>${pointsOnly ? '' : '<th style="padding:4px 6px">Points</th>'}</tr>
+                ${list.map(b => { const reach = pointsOnly ? b.pts[1] + b.pts[2] : b.lenM[1] + b.lenM[2]; const f = pointsOnly ? (x) => `${x}` : fmtMi; return `<tr style="border-top:1px solid rgba(255,255,255,0.06)"><td style="padding:4px 6px">${escapeHtml(b.name)} <span style="color:#555">#${b.sid}</span>${b.bases > 1 ? ` <span style="color:#888">×${b.bases}</span>` : ''} <span data-ft-link="${b.sid}" style="cursor:pointer;color:#5fb3ff">↗</span></td><td style="padding:4px 6px">${f(pointsOnly ? b.pts[1] : b.lenM[1])}</td><td style="padding:4px 6px">${f(pointsOnly ? b.pts[2] : b.lenM[2])}</td><td style="padding:4px 6px;font-weight:700;color:#5fff5f">${f(reach)}</td><td style="padding:4px 6px"><div style="height:8px;background:#0e1115;border-radius:4px;overflow:hidden"><div style="width:${Math.round(100 * reach / max)}%;height:100%;background:#5fff5f"></div></div></td>${pointsOnly ? '' : `<td style="padding:4px 6px;color:#aaa">${b.pts[1]}/${b.pts[2]}</td>`}</tr>`; }).join('')}
+                ${zero ? `<tr><td colspan="6" style="padding:4px 6px;color:#666">+${zero} base(s) with nothing in range</td></tr>` : ''}</table></div>`;
+        })() : '';
+        const runsHtml = r.runsTotal ? `<div style="margin-top:14px"><div style="color:#7adfe6;font-weight:700;font-size:11px;margin-bottom:4px">LONGEST STRETCHES <span style="color:#888;font-weight:400">(${Math.min(20, r.runsTotal)} of ${r.runsTotal} · click 🎯 to fly there)</span></div>
+            ${(r.topRuns || r.runs).slice(0, 20).map((run, i) => `<div data-xrs-fly="${i}" style="display:flex;gap:10px;align-items:center;padding:3px 6px;border-top:1px solid rgba(255,255,255,0.05);cursor:pointer"><span style="width:180px;color:${XREF_COLORS[run.band]};font-weight:700">${run.band === 1 ? l1 : run.band === 2 ? l2 : 'beyond'}</span><span style="width:80px;font-weight:700">${fmtMi(run.lenM)}</span><span style="flex:1;color:#aaa;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(run.featName || '')}</span><span>🎯</span></div>`).join('')}</div>` : '';
+        card.innerHTML = `
+            <div style="padding:10px 14px;background:#14171b;border-bottom:1px solid rgba(255,255,255,0.1);display:flex;align-items:center;gap:10px">
+                <span style="font-size:16px">📐</span><span style="font-weight:700;color:#7adfe6">Cross-reference report</span>
+                <span style="color:#888;font-size:11px">· ${escapeHtml(new Date(r.at).toLocaleString())}</span>
+                <span style="margin-left:auto;display:flex;gap:6px">
+                    <button id="aim-xrc-sheets" style="padding:4px 10px;background:#3a3f48;color:#ffd54f;border:1px solid rgba(255,213,79,0.4);border-radius:4px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">📊 Copy → Sheets</button>
+                    <button id="aim-xrc-text" style="padding:4px 10px;background:#3a3f48;color:#a8c4ff;border:1px solid rgba(168,196,255,0.3);border-radius:4px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">📋 Copy text</button>
+                    <button id="aim-xrc-close" style="padding:4px 10px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">✕</button>
+                </span>
+            </div>
+            <div style="padding:12px 14px;overflow:auto;flex:1;min-height:0">
+                <div style="font-size:13px;line-height:1.5"><b>"${escapeHtml(r.srcName)}"</b> <span style="color:#888">vs</span> ${escapeHtml(r.tgtLabel)}<br>
+                    <span style="color:#888;font-size:11px">${r.sitesUsed ? `${bases ? `${r.basesUsed} base(s) across ` : ''}${r.sitesUsed} site(s) in range${r.sitesNoBase ? ` · ${r.sitesNoBase} skipped (no base in setup)` : ''} · ` : ''}${bases ? 'one-way straight-line distance from the base' : 'distance to the nearest target geometry'} · sampled every ~${r.stepFt} ft</span></div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+                    ${tile(pointsOnly ? 'Points' : 'Network', pointsOnly ? r.pointsTotal : fmtMi(r.totalM), pointsOnly ? 'in the source layer' : 'total line length', '#e6e6e6')}
+                    ${tile(bases ? 'Reachable · no shielding' : 'Inspectable', fmtV(v(1) + v(2)), `${pct(v(1) + v(2), total)} within ${r.b2.toLocaleString()} ft`, '#5fff5f')}
+                    ${tile(bases ? 'Tattu' : `≤ ${r.b1} ft`, fmtV(v(1)), pct(v(1), total), XREF_COLORS[1])}
+                    ${tile(bases ? 'Tulip only' : `${r.b1}–${r.b2} ft`, fmtV(v(2)), pct(v(2), total), XREF_COLORS[2])}
+                    ${tile('Beyond', fmtV(v(0)), `${pct(v(0), total)} · ${bases ? 'needs shielding / new base' : 'needs new site area'}`, XREF_COLORS[0])}
+                </div>
+                <div style="margin-top:14px;background:#14171b;border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:8px 12px">
+                    ${bar(l1, v(1), XREF_COLORS[1])}${bar(l2, v(2), XREF_COLORS[2])}${bar('beyond', v(0), XREF_COLORS[0])}
+                    ${(!pointsOnly && r.pointsTotal) ? `<div style="color:#888;font-size:11px;margin-top:6px">Points in the layer: ${l1} ${P[1]} · ${l2} ${P[2]} · beyond ${P[0]} of ${r.pointsTotal}</div>` : ''}
+                </div>
+                ${perBaseHtml}
+                ${runsHtml}
+                ${r.notes.length ? `<div style="margin-top:12px;color:#888;font-size:11px">${r.notes.map(x => `• ${escapeHtml(x)}`).join('<br>')}</div>` : ''}
+            </div>`;
+        ['mousedown', 'pointerdown', 'wheel', 'dblclick', 'contextmenu', 'touchstart'].forEach(evt => card.addEventListener(evt, e => e.stopPropagation(), false));
+        document.body.appendChild(card);
+        xrefCardEl = card;
+        card.querySelector('#aim-xrc-close').onclick = closeXrefCard;
+        card.querySelector('#aim-xrc-text').onclick = () => copyText(buildXrefReport(), 'report copied as text');
+        card.querySelector('#aim-xrc-sheets').onclick = () => copyHtmlToClipboard(xrefSheetsHtml(r), buildXrefReport(), 'report copied — paste into Google Sheets / Excel');
+        card.addEventListener('click', (ev) => {
+            const fly = ev.target.closest('[data-xrs-fly]');
+            if (fly) { const run = (r.topRuns || r.runs)[Number(fly.getAttribute('data-xrs-fly'))]; if (run) flyToBbox(ptsBbox(run.pts)); return; }
+            const link = ev.target.closest('[data-ft-link]');
+            if (link) window.open(siteSetupUrl(link.getAttribute('data-ft-link')), '_blank');
+        });
+        xrefCardKeyH = (e) => { if (e.key === 'Escape' && xrefCardEl) { e.preventDefault(); closeXrefCard(); } };
+        document.addEventListener('keydown', xrefCardKeyH, true);
+    }
+
     function buildXrefReport() {
         const r = xrefState && xrefState.result;
         if (!r) return 'AIM Fleet Tools — no cross-reference run yet';
@@ -2517,7 +2622,8 @@
     // ==================================================================
     let buttonEl = null;
     let panelEl = null;
-    let openSections = { issues: true, data: true, sweep: true, map: true, kml: true, xref: true, metrics: false };
+    // v0.31: every section starts COLLAPSED (user request) — open what you need.
+    let openSections = { issues: false, data: false, sweep: false, map: false, kml: false, xref: false, metrics: false };
     // v0.25 (#257): 🚩 Fleet Issues front door. AIM Issues owns the engine +
     // panel (one copy of the merge/Slack/role rules); we ask it for a summary
     // and open it over tab-local DOM events on `document` (NOT the
@@ -2725,54 +2831,28 @@
             + (running
                 ? '<span data-ft="xr-abort" style="cursor:pointer;color:#ff5252;font-weight:bold">■ Abort</span>'
                 : '<span data-ft="xr-run" style="cursor:pointer;color:#5fff5f;font-weight:bold">▶ Run cross-ref</span>')
-            + '<span data-ft="xr-copy" style="cursor:pointer;color:#7adfe6">📋 Copy report</span>'
+            + (xrefState && xrefState.result ? '<span data-ft="xr-card" style="cursor:pointer;color:#ffd54f;font-weight:bold">📊 Report</span>' : '')
+            + '<span data-ft="xr-copy" style="cursor:pointer;color:#7adfe6">📋 Copy text</span>'
             + '<span data-ft="xr-clear" style="cursor:pointer;color:#888">Clear</span>'
             + '</div>');
         if (xrefState && xrefState.error) rows.push(`<div style="padding:4px 10px;color:#ff5252">${escapeHtml(xrefState.error)}</div>`);
         if (running) rows.push('<div style="padding:6px 10px;color:#8899bb">Running… (progress in the status line up top)</div>');
         const r = xrefState && xrefState.result;
         if (r) {
-            const L = r.bandLenM;
+            // v0.31: compact headline only — the 📊 Report card carries the detail
             const bases = r.mode === 'bases';
-            const lbl1 = bases ? `Tattu ≤${r.b1.toLocaleString()} ft` : `≤${r.b1} ft`;
-            const lbl2 = bases ? `Tulip only ${r.b1.toLocaleString()}–${r.b2.toLocaleString()} ft` : `${r.b1}–${r.b2} ft`;
             const P = r.pointHits || { 0: 0, 1: 0, 2: 0 };
-            const pointsOnly = !!r.pointsTotal && !(r.totalM > 0);   // point layer → counts are the result
-            if (pointsOnly) rows.push(`<div style="padding:4px 10px;border-bottom:1px solid #222834;">`
-                + `"${escapeHtml(r.srcName)}" vs ${escapeHtml(r.tgtLabel)}${r.sitesUsed ? ` <span style="color:#888">(${bases ? `${r.basesUsed} base(s), ` : ''}${r.sitesUsed} sites in range${r.sitesNoBase ? `, ${r.sitesNoBase} without a base` : ''})</span>` : ''} — <b>${r.pointsTotal} points</b><br>`
-                + `<span style="color:${XREF_COLORS[1]}">■ ${lbl1}: ${P[1]} (${pct(P[1], r.pointsTotal)})</span> · `
-                + `<span style="color:${XREF_COLORS[2]}">■ ${lbl2}: ${P[2]} (${pct(P[2], r.pointsTotal)})</span> · `
-                + `<span style="color:${XREF_COLORS[0]}">■ beyond: ${P[0]} (${pct(P[0], r.pointsTotal)})</span><br>`
-                + `<b style="color:#5fff5f">≤${r.b2.toLocaleString()} ft cumulative: ${P[1] + P[2]} points (${pct(P[1] + P[2], r.pointsTotal)})</b> <span style="color:#888">— ${bases ? 'reachable straight-line from a base, no shielding needed' : 'inspectable from existing coverage'}</span>`
-                + '</div>');
-            else rows.push(`<div style="padding:4px 10px;border-bottom:1px solid #222834;">`
-                + `"${escapeHtml(r.srcName)}" vs ${escapeHtml(r.tgtLabel)}${r.sitesUsed ? ` <span style="color:#888">(${bases ? `${r.basesUsed} base(s), ` : ''}${r.sitesUsed} sites in range${r.sitesNoBase ? `, ${r.sitesNoBase} without a base` : ''})</span>` : ''} — total ${fmtMi(r.totalM)}<br>`
-                + `<span style="color:${XREF_COLORS[1]}">■ ${lbl1}: ${fmtMi(L[1])} (${pct(L[1], r.totalM)})</span> · `
-                + `<span style="color:${XREF_COLORS[2]}">■ ${lbl2}: ${fmtMi(L[2])} (${pct(L[2], r.totalM)})</span> · `
-                + `<span style="color:${XREF_COLORS[0]}">■ beyond: ${fmtMi(L[0])} (${pct(L[0], r.totalM)})</span><br>`
-                + `<b style="color:#5fff5f">≤${r.b2.toLocaleString()} ft cumulative: ${fmtMi(L[1] + L[2])} (${pct(L[1] + L[2], r.totalM)})</b> <span style="color:#888">— ${bases ? 'reachable straight-line from a base, no shielding needed' : 'inspectable from existing coverage'}</span>`
-                + (r.pointsTotal ? `<br><span style="color:#aaa">points: ${lbl1} ${r.pointHits[1]} · ${lbl2} ${r.pointHits[2]} · beyond ${r.pointHits[0]} of ${r.pointsTotal}</span>` : '')
-                + '</div>');
-            if (bases && r.perBase && r.perBase.length) {
-                const list = pointsOnly ? r.perBase.filter(b => b.pts[1] + b.pts[2] > 0) : r.perBase;
-                const zero = r.perBase.length - list.length;
-                const cell = (v, extra) => `<td style="padding:2px 8px;${extra || ''}">${v}</td>`;
-                rows.push('<div style="max-height:22vh;overflow-y:auto;border-bottom:1px solid #222834;"><table style="border-collapse:collapse;width:100%;font:inherit;">'
-                    + `<thead><tr style="color:#7adfe6;text-align:left;position:sticky;top:0;background:#14181f"><th style="padding:2px 8px">Base (site)</th><th style="padding:2px 8px;color:${XREF_COLORS[1]}">Tattu</th><th style="padding:2px 8px;color:${XREF_COLORS[2]}">Tulip only</th><th style="padding:2px 8px;color:#5fff5f">Reachable</th>${pointsOnly ? '' : '<th style="padding:2px 8px">Points</th>'}</tr></thead><tbody>`
-                    + list.map(b => `<tr style="border-bottom:1px solid #1d2430"><td style="padding:2px 8px">${escapeHtml(b.name)} <span style="color:#555">#${b.sid}</span>${b.bases > 1 ? ` <span style="color:#888">×${b.bases}</span>` : ''} <span data-ft-link="${b.sid}" style="cursor:pointer;color:#5fb3ff">↗</span></td>`
-                        + (pointsOnly
-                            ? cell(`${b.pts[1]} pts`) + cell(`${b.pts[2]} pts`) + cell(`${b.pts[1] + b.pts[2]} pts`, 'font-weight:bold')
-                            : cell(fmtMi(b.lenM[1])) + cell(fmtMi(b.lenM[2])) + cell(fmtMi(b.lenM[1] + b.lenM[2]), 'font-weight:bold') + cell(`${b.pts[1]}/${b.pts[2]}`, 'color:#aaa'))
-                        + '</tr>').join('')
-                    + (zero ? `<tr><td colspan="5" style="padding:2px 8px;color:#666">+${zero} base(s) with no points in range</td></tr>` : '')
-                    + '</tbody></table></div>');
-            }
-            rows.push('<div style="max-height:28vh;overflow-y:auto;">'
-                + (r.topRuns || r.runs).slice(0, 30).map((run, i) =>
-                    `<div class="aim-ft-row" data-xr-fly="${i}" style="padding:2px 10px;cursor:pointer;border-bottom:1px solid #1d2430;">`
-                    + `<span style="color:${XREF_COLORS[run.band]};font-weight:bold">${run.band === 1 ? `≤${r.b1}ft` : (run.band === 2 ? `≤${r.b2}ft` : `>${r.b2}ft`)}</span> `
-                    + `${fmtMi(run.lenM)}${run.featName ? ` <span style="color:#888">— ${escapeHtml(run.featName)}</span>` : ''} 🎯</div>`).join('')
-                + (r.runsTotal > 30 ? `<div style="color:#888;padding:2px 10px">…${r.runsTotal - 30} more stretches in 📋 Copy report</div>` : '')
+            const pointsOnly = !!r.pointsTotal && !(r.totalM > 0);
+            const L = r.bandLenM;
+            const total = pointsOnly ? r.pointsTotal : r.totalM;
+            const v = (k) => pointsOnly ? P[k] : L[k];
+            const f = (x) => pointsOnly ? `${x} pts` : fmtMi(x);
+            const l1 = bases ? 'Tattu' : `≤${r.b1} ft`, l2 = bases ? 'Tulip only' : `${r.b1}–${r.b2} ft`;
+            rows.push(`<div style="padding:6px 10px;border-bottom:1px solid #222834;line-height:1.6">`
+                + `<div>"${escapeHtml(r.srcName)}" <span style="color:#888">vs</span> ${escapeHtml(r.tgtLabel)} <span style="color:#888">· ${pointsOnly ? `${r.pointsTotal} points` : fmtMi(r.totalM)}${r.sitesUsed ? ` · ${r.sitesUsed} sites` : ''}</span></div>`
+                + `<div><b style="color:#5fff5f;font-size:14px">${f(v(1) + v(2))} (${pct(v(1) + v(2), total)})</b> <span style="color:#888">${bases ? 'reachable from a base without shielding' : 'inspectable from existing coverage'}</span>`
+                + ` — <span style="color:${XREF_COLORS[1]}">${l1} ${f(v(1))}</span> · <span style="color:${XREF_COLORS[2]}">${l2} ${f(v(2))}</span> · <span style="color:${XREF_COLORS[0]}">beyond ${f(v(0))}</span></div>`
+                + `<div style="color:#888">📊 Report = the full breakdown${bases ? ' per base' : ''}${r.runsTotal ? ' + longest stretches (🎯 fly-to)' : ''} · the map shows every stretch colour-coded</div>`
                 + '</div>');
         }
         return rows.join('');
@@ -3922,7 +4002,8 @@
                     else if (cmd === 'xr-run') runXref();
                     else if (cmd === 'xr-abort') { xrefSeq++; if (xrefState) xrefState.running = false; setStatus('cross-ref aborted'); renderPanel(); }
                     else if (cmd === 'xr-copy') copyText(buildXrefReport(), 'cross-ref report copied');
-                    else if (cmd === 'xr-clear') { xrefSeq++; xrefState = null; renderPanel(); renderOverlay(); }
+                    else if (cmd === 'xr-card') openXrefCard();
+                    else if (cmd === 'xr-clear') { xrefSeq++; xrefState = null; closeXrefCard(); renderPanel(); renderOverlay(); }
                     else if (cmd === 'run') runSweep();
                     else if (cmd === 'abort') abortSweep();
                     else if (cmd === 'copy') copyText(buildSweepReport(), 'report copied to clipboard');
