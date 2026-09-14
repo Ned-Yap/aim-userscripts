@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.23
+// @version      0.24
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON (and optionally its missions) on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Daily Slack digest. Configurable in the AIM Control Panel ("Site Watch").
@@ -46,6 +46,11 @@
 //
 // GitHub layout (private repo Ned-Yap/aim-userscripts-data, branch main):
 //   site-watch/changes.csv                  — running audit log (append-only)
+//   site-watch/changes-archive-YYYY-MM.csv  — AUTO-ROTATED (v0.24): GitHub's
+//     Contents API blanks base64 content above 1 MB and the in-browser raw-read
+//     fallback has failed BOTH times the file crossed it (2026-07-20, 2026-08-18
+//     → weeks of silently dropped rows). appendCsvRows now rotates the file to
+//     an archive at ~900 KB BEFORE it can reach the cliff.
 //   site-watch/<siteID>/latest.json.gz      — current baseline (for diffing)
 //   site-watch/<siteID>/snap-001..010.json.gz — rotating 10-deep history ring
 //   NOTE: git history retains every committed blob, so run `git gc`/squash on
@@ -86,7 +91,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.23';
+    const SCRIPT_VERSION = '0.24';
 
     // Server model (v0.21): prod and QA are separate databases with their own
     // site lists — the same numeric ID is two different sites. A QA leader
@@ -103,6 +108,9 @@
     const WATCH_DIR = IS_QA ? 'site-watch-qa' : 'site-watch';
     const CSV_PATH = `${WATCH_DIR}/changes.csv`;
     const CSV_HEADER = 'timestamp_utc,site_id,site_name,change,entity_type,entity_name,object_id,field,was,is';
+    // Rotate changes.csv to changes-archive-YYYY-MM.csv once an append would push
+    // it past this — well under GitHub's 1,048,576-byte Contents-API cliff.
+    const CSV_ROTATE_BYTES = 900 * 1024;
     const TOKEN_KEY = 'aim-github-token';   // shared with Map Styler / AIM Issues
 
     // ---- this script's own GM storage keys ----
@@ -177,6 +185,7 @@
         const s = gmGet(STATE_KEY, null);
         const st = (s && s.sites) ? s : { sites: {} };
         if (!st.missions) st.missions = {};     // 2nd source (missions); migrate older state
+        if (!st.csv) st.csv = {};               // v0.24: audit-log append health (lastOkAt/lastFailAt/lastError/droppedRows)
         return st;
     }
     function persistState() { gmSet(STATE_KEY, state); }
@@ -323,7 +332,12 @@
         });
         if (resp.status === 404) return null;
         if (resp.status !== 200) throw new Error(`GET(raw) ${path} HTTP ${resp.status}`);
-        return resp.responseText || '';
+        const text = resp.responseText || '';
+        // Diagnostic: this path failed silently in-browser both times the CSV
+        // crossed 1 MB (worked from curl). If it's ever exercised again, leave
+        // enough in the console to explain why.
+        console.warn(TAG, `raw read ${path}: HTTP ${resp.status}, ${text.length} chars, head "${text.slice(0, 40)}", finalUrl ${resp.finalUrl || '?'}`);
+        return text;
     }
     async function safeGetSha(path) {
         try { const m = await ghGetMeta(path); return m ? m.sha : undefined; }
@@ -377,6 +391,18 @@
         return { text, sha: meta.sha };
     }
 
+    function utf8Bytes(text) { return new TextEncoder().encode(text).length; }
+    // First free archive name for this month: changes-archive-YYYY-MM.csv, then
+    // -2, -3… if that month already rotated (a genuine 404 = free).
+    async function nextArchivePath() {
+        const ym = new Date().toISOString().slice(0, 7);
+        for (let n = 1; n <= 20; n++) {
+            const p = `${WATCH_DIR}/changes-archive-${ym}${n > 1 ? '-' + n : ''}.csv`;
+            if (!(await ghGetMeta(p))) return p;
+        }
+        throw new Error(`no free archive name for ${ym} after 20 tries`);
+    }
+
     // CSV append: re-reads fresh content each attempt so concurrent appends
     // never drop rows, and NEVER recreates an existing file from scratch (a bad
     // read retries, then aborts with history intact rather than wiping it).
@@ -394,7 +420,19 @@
                 await sleep(800);
                 continue;
             }
-            const content = base + rowStrings.join('\n') + '\n';
+            let content = base + rowStrings.join('\n') + '\n';
+            // AUTO-ROTATE (v0.24): if this append would push the file toward the
+            // 1 MB Contents-API cliff, archive the CURRENT content first (create-
+            // only PUT, must succeed) and then write header + new rows as the
+            // fresh changes.csv against the existing sha. If the archive write
+            // fails we throw and touch nothing — history stays intact.
+            if (sha && utf8Bytes(content) > CSV_ROTATE_BYTES) {
+                const archivePath = await nextArchivePath();
+                console.log(TAG, `changes.csv at ${utf8Bytes(base)} B — rotating to ${archivePath} before append`);
+                await ghPut(archivePath, textToB64(base), `[site-watch] rotate changes.csv → ${archivePath.split('/').pop()} (${utf8Bytes(base)} B)`);
+                content = CSV_HEADER + '\n' + rowStrings.join('\n') + '\n';
+                message = `${message} (fresh changes.csv after rotation)`;
+            }
             const url = `${GITHUB_API_BASE}/repos/${DATA_REPO}/contents/${ghPath(CSV_PATH)}`;
             const body = { message, content: textToB64(content), branch: DATA_BRANCH };
             if (sha) body.sha = sha;
@@ -1301,6 +1339,15 @@
             `%c${TAG} STATUS — ${ids.length}/${siteList.length} checked · %c${hot.length} HOT%c · ${cold.length} cold · ${dueNow} due now · paused=${pausedForAuth} · leader=${amLeader}`,
             'color:#5fd0ff;font-weight:700', 'color:#ff8c42;font-weight:800', 'color:#5fd0ff;font-weight:700'
         );
+        const csv = state.csv || {};
+        if (csv.lastFailAt && (csv.lastFailAt > (csv.lastOkAt || 0))) {
+            console.log(
+                `%c⛔ AUDIT LOG BROKEN — last changes.csv append FAILED ${new Date(csv.lastFailAt).toLocaleString()} (${csv.droppedRows || 0} row(s) dropped so far): ${csv.lastError || '?'}`,
+                'color:#ff6b6b;font-weight:800'
+            );
+        } else if (csv.lastOkAt) {
+            console.log(`%c   audit log OK — last changes.csv append ${new Date(csv.lastOkAt).toLocaleString()}`, 'color:#8a8f98');
+        }
         if (hot.length) {
             console.log(`%c🔥 HOT (${hot.length}) — recently changed, re-checked every ${cfg.hotHours}h:`, 'color:#ff8c42;font-weight:800');
             hot.forEach(r => console.log(
@@ -1565,8 +1612,18 @@
                 await sleep(cfg.throttleMs);
             }
             if (pendingCsv.length) {
-                try { await appendCsvRows(pendingCsv, `[site-watch] ${pendingCsv.length} change row(s)`); }
-                catch (e) { console.error(TAG, 'CSV append failed', e); }
+                try {
+                    await appendCsvRows(pendingCsv, `[site-watch] ${pendingCsv.length} change row(s)`);
+                    state.csv.lastOkAt = Date.now(); state.csv.lastError = null;
+                } catch (e) {
+                    // Rows are dropped (still in the per-site snapshots). Record it
+                    // so showStatus can shout — the daily digest is gone, so this
+                    // was invisible for weeks in 2026-07 and 2026-08.
+                    state.csv.lastFailAt = Date.now();
+                    state.csv.lastError = String(e && e.message || e);
+                    state.csv.droppedRows = (state.csv.droppedRows || 0) + pendingCsv.length;
+                    console.error(TAG, `CSV append failed — ${pendingCsv.length} row(s) DROPPED (total dropped ${state.csv.droppedRows})`, e);
+                }
             }
             persistState();
             const doneAt = Date.now();
@@ -1772,7 +1829,7 @@
         }
     }
     function doResetBaselines(reason) {
-        state = { sites: {}, missions: {} };
+        state = { sites: {}, missions: {}, csv: {} };
         persistState();
         console.log(`${TAG} baselines reset (${reason})`);
     }

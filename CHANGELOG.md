@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-14 — 🛡 Site Watch v0.24 — audit log auto-rotation (latest — dev only)
+
+The `changes.csv` audit log crossed GitHub's 1 MB Contents-API cliff on 2026-08-18 and every append since then failed silently (snapshots kept committing, change rows were dropped) — the same failure as 2026-07-20. Fixed for good:
+- **Auto-rotation**: an append that would push `changes.csv` past ~900 KB first archives the current file to `changes-archive-YYYY-MM.csv` (create-only, must succeed) and then starts a fresh log with the new rows. History is never overwritten.
+- **Append health in Show status**: a red `⛔ AUDIT LOG BROKEN` line with the last error and total dropped rows whenever the most recent append failed (the daily digest is gone, so nothing else would surface this).
+- **Raw-read diagnostics**: the >1 MB fallback now logs status / length / head so a future failure explains itself.
+- Data repo: rotated the oversized file to `changes-archive-2026-08.csv` by hand (commit `f0c381ce`); appends resume on the next cycle with no reinstall needed. Rows between 2026-08-18 and today exist only in the per-site snapshot rings.
+
 ## 2026-09-12 — 📦 Fleet Data: AIM Fleet Tools v0.27 — browse and export any sites' data without opening them (latest — dev only, feature #259)
 
 New **📦 Fleet Data** section (right under Fleet Issues):
