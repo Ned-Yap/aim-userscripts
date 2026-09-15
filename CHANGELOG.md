@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-14 — Site Setup Tools latest v4.289: SpiderWeb — retired panel ids are ignored (dev only)
+
+- **Fix:** the Control Panel echoes every value it ever stored for a script, registered or not. The retired "hubGainRatio" id kept arriving with the old 1 and was accepted because the name matched, undoing two migrations in a row. Retired ids are now dropped, the migration runs again, and the run log states the ratios actually used.
+
 ## 2026-09-14 — Site Setup Tools latest v4.288: SpiderWeb — stored hub gain ratio of 1 is forced to 0.1 (dev only)
 
 - The v4.286 migration was undone by the Control Panel writing its own copy of the old value back. This one runs regardless of the earlier flag: a stored ratio of 1 (or the interim 0.25) becomes 0.1 on load, so hubs appear on the full mesh without pressing Defaults.

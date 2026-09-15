@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.288
+// @version      4.289
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.288';
+    const SCRIPT_VERSION = '4.289';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -9368,7 +9368,7 @@
     }
 
     // ============================================================
-    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.288) — PREVIEW ONLY
+    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.289) — PREVIEW ONLY
     // Design doc: ShortKeys/AIM_Unshielded_SpiderWeb_Design.md.
     // FFZ per asset (mitered outset, touching buffers unioned), straight
     // point-to-point FPs at a 54 m floor / +20 ft band with AUTOMATIC DEM
@@ -9423,10 +9423,10 @@
             // v4.288 migration (tunedV 3): the hub gain ratio default moved 1 → 0.1 (dense web). A stored 1 was
             // the old default, and the v4.286 migration (tunedV 2) was undone by the Control Panel echoing its own
             // stored 1 back — so this one runs again regardless of the earlier flag.
-            if (st && !(st.tunedV >= 3)) {
+            if (st && !(st.tunedV >= 4)) {
                 if (out.hubGainRatio === 1 || out.hubGainRatio === 0.25) out.hubGainRatio = SWB_DEFAULTS.hubGainRatio;
-                try { const s2 = Object.assign({}, st, { hubGainRatio: out.hubGainRatio, tunedV: 3 }); elevGmSet(SWB_THRESH_KEY, JSON.stringify(s2)); } catch (e) {}
-                console.log(`${TAG} spiderweb: thresholds migrated (tunedV 3) — hub gain ratio ${out.hubGainRatio}`);
+                try { const s2 = Object.assign({}, st, { hubGainRatio: out.hubGainRatio, tunedV: 4 }); elevGmSet(SWB_THRESH_KEY, JSON.stringify(s2)); } catch (e) {}
+                console.log(`${TAG} spiderweb: thresholds migrated (tunedV 4) — hub gain ratio ${out.hubGainRatio}`);
             }
         } catch (e) { console.warn(`${TAG} spiderweb: thresholds unreadable — defaults used`, e); }
         return out;
@@ -9442,7 +9442,11 @@
     // Control Panel ids that were renamed: the panel echoes ITS stored value per id on every load,
     // so a renamed id is the only way a new default reaches users who touched the old one.
     const SWB_CP_ALIAS = { hubGainRatio2: 'hubGainRatio' };
+    // Retired ids: the panel still echoes every value it EVER stored for this script, registered or not —
+    // a retired id must be dropped on the floor or it writes the old value back over the migration.
+    const SWB_RETIRED_IDS = new Set(['hubGainRatio']);
     function handleSpiderwebToggle(msg) {
+        if (SWB_RETIRED_IDS.has(msg.toggleId)) return;
         const id = SWB_CP_ALIAS[msg.toggleId] || msg.toggleId;
         if (id === 'swb-master') {
             const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
@@ -9648,7 +9652,7 @@
             const bases = resolved.bases.map(b => ({ name: b.name, pt: gmPoint(b), id: b.id }));
             if (!assets.length) { showToast('No non-EMPTY assets on this site', 'rgba(255,96,96,0.55)'); return; }
             if (!bases.length) { showToast('No base found — need a type-8 base or a GM named "…base…"', 'rgba(255,96,96,0.55)'); return; }
-            logL(`site ${sid}: ${assetsAll.length} assets (${skippedEmpty.length} EMPTY skipped), ${bases.length} base(s): ${bases.map(b => b.name).join(', ')}`);
+            logL(`site ${sid}: ${assetsAll.length} assets (${skippedEmpty.length} EMPTY skipped), ${bases.length} base(s): ${bases.map(b => b.name).join(', ')} · web ${th.webDensity} · hub ratio ${th.hubGainRatio} · leg ratio ${th.legGainRatio} · base-leg ratio ${th.baseLegGainRatio}`);
             const nfzRings = ents.filter(e => e.type === 4 && entityCoords(e) && entityCoords(e).length >= 3).map(e => entityCoords(e));
             // Local projector at the asset centroid.
             let cLat = 0, cLng = 0, cN = 0;
@@ -10609,7 +10613,7 @@
             if (ev.target.closest('[data-swb-close]')) { swbClosePanel(); return; }
             if (ev.target.closest('[data-swb-stage]')) { swbReadPanelParams(wrap); swbStage(); return; }
             if (ev.target.closest('[data-swb-clear]')) { swbClear(); swbRenderPanel(); return; }
-            if (ev.target.closest('[data-swb-defaults]')) { swbThresholds = { ...SWB_DEFAULTS }; try { elevGmSet(SWB_THRESH_KEY, JSON.stringify({ ...SWB_DEFAULTS, tunedV: 3 })); } catch (e) {} showToast('SpiderWeb settings reset to defaults'); swbRenderPanel(); return; }
+            if (ev.target.closest('[data-swb-defaults]')) { swbThresholds = { ...SWB_DEFAULTS }; try { elevGmSet(SWB_THRESH_KEY, JSON.stringify({ ...SWB_DEFAULTS, tunedV: 4 })); } catch (e) {} showToast('SpiderWeb settings reset to defaults'); swbRenderPanel(); return; }
             if (ev.target.closest('[data-swb-copy]')) {
                 const txt = swbReportText();
                 try { navigator.clipboard.writeText(txt).then(() => showToast('SpiderWeb report copied'), () => showToast('Copy failed', 'rgba(255,96,96,0.55)')); }
