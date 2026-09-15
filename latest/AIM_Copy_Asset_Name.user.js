@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.290
+// @version      4.291
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.290';
+    const SCRIPT_VERSION = '4.291';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -9368,7 +9368,7 @@
     }
 
     // ============================================================
-    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.290)
+    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.291)
     // Design doc: ShortKeys/AIM_Unshielded_SpiderWeb_Design.md.
     // FFZ per asset (mitered outset, touching buffers unioned), straight
     // point-to-point FPs at a 54 m floor / +20 ft band with AUTOMATIC DEM
@@ -10527,7 +10527,14 @@
         out.push('run log:'); st.runLog.forEach(s => out.push(`  ${s}`));
         return out.join('\n');
     }
+    let swbRenderTimer = null;
+    function swbRenderPanelSoon() {   // throttled re-render for log-heavy phases (commit): at most ~3/s
+        if (swbRenderTimer) return;
+        swbRenderTimer = setTimeout(() => { swbRenderTimer = null; swbRenderPanel(); }, 350);
+    }
     function swbRenderPanel() {
+        const prev = document.getElementById(SWB_PANEL_ID);
+        const keep = prev ? { left: prev.style.left, top: prev.style.top, right: prev.style.right, scroll: (prev.querySelector('[data-swb-body]') || {}).scrollTop || 0 } : null;
         swbClosePanel();
         const st = swbState;
         const th = swbThresholds;
@@ -10570,7 +10577,7 @@
                         <button data-swb-commit ${st.committing ? 'disabled' : ''} style="background:rgba(255,225,77,0.13);border:1px solid rgba(255,225,77,0.5);color:#ffe14d;border-radius:5px;padding:2px 10px;cursor:pointer;font-weight:600;">${st.dryRun === false ? '🚀 Commit (click twice)' : '🧪 Dry run'}</button>
                         <button data-swb-undo ${(st.createdIds && st.createdIds.length && !st.committing) ? '' : 'disabled'} style="background:rgba(255,96,96,0.12);border:1px solid rgba(255,96,96,0.45);color:#ff9b9b;border-radius:5px;padding:2px 10px;cursor:pointer;">↶ Undo run (click twice)${st.createdIds && st.createdIds.length ? ` · ${st.createdIds.length}` : ''}</button>
                     </div>
-                    ${(st.commitLog && st.commitLog.length) ? `<div style="margin-top:6px;max-height:180px;overflow:auto;font-family:ui-monospace,Menlo,monospace;font-size:10.5px;line-height:1.35;background:rgba(0,0,0,0.25);border-radius:5px;padding:4px 6px;">${st.commitLog.slice(-40).map(x => `<div>${esc(x)}</div>`).join('')}</div>` : ''}
+                    ${(st.commitLog && st.commitLog.length) ? `<div data-swb-log style="margin-top:6px;max-height:180px;overflow:auto;font-family:ui-monospace,Menlo,monospace;font-size:10.5px;line-height:1.35;background:rgba(0,0,0,0.25);border-radius:5px;padding:4px 6px;">${st.commitLog.slice(-40).map(x => `<div>${esc(x)}</div>`).join('')}</div>` : ''}
                 </div>
                 <div style="margin-top:8px;opacity:0.7;">Preview until committed. Cyan dots = leg ends on zone edges · white dots = stair steps · magenta = hubs (filled) and junctions (rings) · yellow = base zones · orange = flagged · red dashed = dropped assets.</div>`;
         } else {
@@ -10616,7 +10623,7 @@
                 <button data-swb-copy ${st ? '' : 'disabled'} style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.25);color:#dfe9f0;border-radius:5px;padding:3px 10px;cursor:pointer;">Copy report</button>
                 <button data-swb-defaults title="Reset every SpiderWeb setting to the current defaults" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.25);color:#dfe9f0;border-radius:5px;padding:3px 10px;cursor:pointer;">↺ Defaults</button>
             </div>
-            <div style="padding:8px 12px;overflow:auto;flex:1;">${body}</div>`;
+            <div data-swb-body style="padding:8px 12px;overflow:auto;flex:1;">${body}</div>`;
         // drag
         const hdr = wrap.querySelector('[data-swb-drag]');
         let drag = null;
@@ -10648,6 +10655,13 @@
         });
         wrap.addEventListener('change', (ev) => { if (ev.target.matches('[data-swb-p]')) swbReadPanelParams(wrap); if (ev.target.matches('[data-swb-dry]') && swbState) { swbState.dryRun = !!ev.target.checked; swbRenderPanel(); } });
         document.body.appendChild(wrap);
+        if (keep) {
+            if (keep.left) { wrap.style.left = keep.left; wrap.style.top = keep.top; wrap.style.right = keep.right; }
+            const bodyEl = wrap.querySelector('[data-swb-body]');
+            if (bodyEl) bodyEl.scrollTop = keep.scroll;
+        }
+        const logEl = wrap.querySelector('[data-swb-log]');
+        if (logEl) logEl.scrollTop = logEl.scrollHeight;   // newest line stays in view
     }
     function swbReadPanelParams(wrap) {
         wrap.querySelectorAll('[data-swb-p]').forEach(inp => {
@@ -10788,7 +10802,7 @@
         if (!dryRun && !csrf) { showToast('No CSRF token — make one native save/edit anywhere in Percepto first, then retry', 'rgba(255,96,96,0.55)'); return; }
         st.committing = true;
         st.commitLog = [];
-        const logL = (m) => { st.commitLog.push(m); console.log(`${TAG} spiderweb commit: ${m}`); swbRenderPanel(); };
+        const logL = (m) => { st.commitLog.push(m); console.log(`${TAG} spiderweb commit: ${m}`); swbRenderPanelSoon(); };
         try {
             logL(dryRun ? 'DRY RUN — nothing is written' : 'COMMIT — writing to Percepto');
             let siteCfg = null;

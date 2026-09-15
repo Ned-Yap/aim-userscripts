@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-14 — Site Setup Tools latest v4.291: SpiderWeb panel keeps its scroll while a commit logs (dev only)
+
+- The panel rebuilt itself on every commit log line and jumped back to the top. It now keeps its scroll position and drag position across rebuilds, pins the commit log to its newest line, and rebuilds at most about three times a second while a run is logging.
+
 ## 2026-09-14 — Site Setup Tools latest v4.290: SpiderWeb — Commit (dev only)
 
 - **New:** the SpiderWeb panel can now write the staged web to Percepto. Dry run is on by default and only builds and counts the bodies. Untick it and click Commit twice to write: one FFZ per zone first, verified by a fresh fetch, then the flight paths. Legs that meet at a hub or a junction share a waypoint, so each connected group of legs is written as one flight-path entity with a branching arc list; a warning lists any entity over 150 points.
