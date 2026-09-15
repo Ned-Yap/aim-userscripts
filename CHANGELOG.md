@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-14 — Site Setup Tools latest v4.290: SpiderWeb — Commit (dev only)
+
+- **New:** the SpiderWeb panel can now write the staged web to Percepto. Dry run is on by default and only builds and counts the bodies. Untick it and click Commit twice to write: one FFZ per zone first, verified by a fresh fetch, then the flight paths. Legs that meet at a hub or a junction share a waypoint, so each connected group of legs is written as one flight-path entity with a branching arc list; a warning lists any entity over 150 points.
+- Before writing, every vertex is re-checked against Percepto's own DEM and any floor its ground says is too low is raised (never lowered). A backup of every body is downloaded and stashed before the first POST, a 403 aborts the run, already-created names are skipped on re-run, and "↶ Undo run" deletes exactly the entities this run created, flight paths first.
+
 ## 2026-09-14 — Site Setup Tools latest v4.289: SpiderWeb — retired panel ids are ignored (dev only)
 
 - **Fix:** the Control Panel echoes every value it ever stored for a script, registered or not. The retired "hubGainRatio" id kept arriving with the old 1 and was accepted because the name matched, undoing two migrations in a row. Retired ids are now dropped, the migration runs again, and the run log states the ratios actually used.

@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.289
+// @version      4.290
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.289';
+    const SCRIPT_VERSION = '4.290';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -9368,13 +9368,13 @@
     }
 
     // ============================================================
-    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.289) — PREVIEW ONLY
+    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.290)
     // Design doc: ShortKeys/AIM_Unshielded_SpiderWeb_Design.md.
     // FFZ per asset (mitered outset, touching buffers unioned), straight
     // point-to-point FPs at a 54 m floor / +20 ft band with AUTOMATIC DEM
     // stairs (step = band − overlap), Steiner hubs for return-to-base,
     // battery gate on web distance to base. MSL (mountain_terrain) sites
-    // only. This version STAGES + PREVIEWS + REPORTS — no writes.
+    // only. Stage + preview + report, then Commit (create-only, dry run by default, undo by id).
     // Prefix: swb*. Tag lines: `${TAG} spiderweb: …`.
     // ============================================================
     const SWB_SCRIPT_ID = 'aim-spiderweb';
@@ -9405,6 +9405,8 @@
         notchFt: 5,                               // fill inward notches in unioned zones up to this depth
         mergeGapFt: 30,                           // zones closer than this are merged into one (bridged), instead of a tiny leg
         hubClearFt: 150,                          // a hub sits at least this far from any zone edge
+        regroundPercepto: true,                   // commit: re-check every written vertex against Percepto's own DEM (floors only go UP)
+        entityPtsWarn: 150,                       // commit: warn when one flight-path entity carries more points than this
         baseZoneFt: 120,                          // a base outside every zone gets its own square zone of this side
     };
     let swbThresholds = loadSwbThresholds();
@@ -9724,6 +9726,8 @@
             const jBad = (result.junctions || []).filter(J => J.bandOk === false).length;
             gates.push({ label: 'junction bands agree', ok: jBad === 0, detail: `${jBad} junction(s) without ${th.overlapM} m shared` });
             result.gates = gates;
+            if (swbState && swbState.createdIds && swbState.createdIds.length && swbState.sid === sid) { result.createdIds = swbState.createdIds; result.commitLog = swbState.commitLog; }
+            result.dryRun = swbState && swbState.dryRun === false ? false : true;
             swbState = result;
             swbDrawPreview();
             swbRenderPanel();
@@ -10558,7 +10562,17 @@
                 <div style="margin-top:6px;color:#2b8cff;font-weight:600;">Longest way home (stretch)</div>${worstHtml}
                 ${flagHtml || zflagHtml ? `<div style="margin-top:6px;color:#ffb020;font-weight:600;">Flags</div>${zflagHtml}${flagHtml}` : ''}
                 ${dropHtml}
-                <div style="margin-top:8px;opacity:0.7;">Preview only — nothing is written. Cyan dots = leg ends on zone edges · white dots = stair steps · magenta = hubs (filled) and junctions (rings) · yellow = base zones · orange = flagged · red dashed = dropped assets.</div>`;
+                <div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(43,140,255,0.25);">
+                    <div style="color:#ffe14d;font-weight:600;margin-bottom:4px;">🚀 Commit (create-only)</div>
+                    <div style="display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;font-size:11px;">
+                        <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input data-swb-dry type="checkbox" ${st.dryRun === false ? '' : 'checked'}>dry run</label>
+                        <label style="display:flex;align-items:center;gap:4px;cursor:pointer;" title="Re-check every written vertex against Percepto's own DEM; floors only go up"><input data-swb-p="regroundPercepto" type="checkbox" ${th.regroundPercepto ? 'checked' : ''}>Percepto DEM check</label>
+                        <button data-swb-commit ${st.committing ? 'disabled' : ''} style="background:rgba(255,225,77,0.13);border:1px solid rgba(255,225,77,0.5);color:#ffe14d;border-radius:5px;padding:2px 10px;cursor:pointer;font-weight:600;">${st.dryRun === false ? '🚀 Commit (click twice)' : '🧪 Dry run'}</button>
+                        <button data-swb-undo ${(st.createdIds && st.createdIds.length && !st.committing) ? '' : 'disabled'} style="background:rgba(255,96,96,0.12);border:1px solid rgba(255,96,96,0.45);color:#ff9b9b;border-radius:5px;padding:2px 10px;cursor:pointer;">↶ Undo run (click twice)${st.createdIds && st.createdIds.length ? ` · ${st.createdIds.length}` : ''}</button>
+                    </div>
+                    ${(st.commitLog && st.commitLog.length) ? `<div style="margin-top:6px;max-height:180px;overflow:auto;font-family:ui-monospace,Menlo,monospace;font-size:10.5px;line-height:1.35;background:rgba(0,0,0,0.25);border-radius:5px;padding:4px 6px;">${st.commitLog.slice(-40).map(x => `<div>${esc(x)}</div>`).join('')}</div>` : ''}
+                </div>
+                <div style="margin-top:8px;opacity:0.7;">Preview until committed. Cyan dots = leg ends on zone edges · white dots = stair steps · magenta = hubs (filled) and junctions (rings) · yellow = base zones · orange = flagged · red dashed = dropped assets.</div>`;
         } else {
             body = `<div style="opacity:0.8">Stage a web for the current site. MSL (mountain-terrain) sites only. Every non-EMPTY asset gets a zone; legs are straight, stop on the zone edge, and get automatic stair steps from the DEM. Nothing is written in this version.</div>`;
         }
@@ -10613,6 +10627,18 @@
             if (ev.target.closest('[data-swb-close]')) { swbClosePanel(); return; }
             if (ev.target.closest('[data-swb-stage]')) { swbReadPanelParams(wrap); swbStage(); return; }
             if (ev.target.closest('[data-swb-clear]')) { swbClear(); swbRenderPanel(); return; }
+            if (ev.target.closest('[data-swb-commit]')) {
+                const st2 = swbState; if (!st2) return;
+                if (st2.dryRun !== false) { swbCommit(true); return; }
+                const now = Date.now();
+                if (now - swbCommitArm > 1600) { swbCommitArm = now; showToast('Click Commit again within 1.6 s to WRITE to Percepto', 'rgba(255,225,77,0.55)'); return; }
+                swbCommitArm = 0; swbCommit(false); return;
+            }
+            if (ev.target.closest('[data-swb-undo]')) {
+                const now = Date.now();
+                if (now - swbUndoArm > 1600) { swbUndoArm = now; showToast('Click Undo again within 1.6 s to delete this run\'s entities', 'rgba(255,96,96,0.55)'); return; }
+                swbUndoArm = 0; swbUndo(); return;
+            }
             if (ev.target.closest('[data-swb-defaults]')) { swbThresholds = { ...SWB_DEFAULTS }; try { elevGmSet(SWB_THRESH_KEY, JSON.stringify({ ...SWB_DEFAULTS, tunedV: 4 })); } catch (e) {} showToast('SpiderWeb settings reset to defaults'); swbRenderPanel(); return; }
             if (ev.target.closest('[data-swb-copy]')) {
                 const txt = swbReportText();
@@ -10620,7 +10646,7 @@
                 catch (e) { showToast('Copy failed', 'rgba(255,96,96,0.55)'); }
             }
         });
-        wrap.addEventListener('change', (ev) => { if (ev.target.matches('[data-swb-p]')) swbReadPanelParams(wrap); });
+        wrap.addEventListener('change', (ev) => { if (ev.target.matches('[data-swb-p]')) swbReadPanelParams(wrap); if (ev.target.matches('[data-swb-dry]') && swbState) { swbState.dryRun = !!ev.target.checked; swbRenderPanel(); } });
         document.body.appendChild(wrap);
     }
     function swbReadPanelParams(wrap) {
@@ -10636,6 +10662,217 @@
             saveSwbThresholdKey(id, v);
         });
     }
+
+    // ---------- commit (create-only, dry run by default) ----------
+    // FFZ per zone (type 16). Flight paths: legs that meet at a hub or a junction share a waypoint, and
+    // Percepto connects arcs by shared waypoint INSIDE one entity, so every connected group of legs becomes
+    // one type-15 entity with a branching arc list (arcs reference point_a/point_b, not list order).
+    function swbFpComponents(st) {
+        const legs = st.legs.filter(l => l.vertsLL && l.arcs.length && l.arcs[0].floorM !== null);
+        const parent = legs.map((_, i) => i);
+        const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+        const byNode = new Map();
+        legs.forEach((l, i) => [l.a, l.b].forEach(n => { const nd = st.nodes[n]; if (!nd || nd.kind === 'zone') return; if (!byNode.has(n)) byNode.set(n, []); byNode.get(n).push(i); }));
+        byNode.forEach(list => { for (let k = 1; k < list.length; k++) { const a = find(list[0]), b = find(list[k]); if (a !== b) parent[a] = b; } });
+        const comps = new Map();
+        legs.forEach((l, i) => { const r = find(i); if (!comps.has(r)) comps.set(r, []); comps.get(r).push(l); });
+        return [...comps.values()];
+    }
+    function swbBuildWrites(st, sid, siteCfg, ents, log) {
+        const tmplFfz = ents.find(e => e.type === 16 && entityCoords(e));
+        const tmplFp = ents.find(e => e.type === 15 && Array.isArray(e.arcs) && e.arcs.length);
+        let tmplFfzBody = null, tmplFpBody = null;
+        if (tmplFfz) { try { tmplFfzBody = buildWriteBody(tmplFfz, siteCfg); } catch (e) { console.warn(`${TAG} spiderweb: FFZ template failed:`, e); } }
+        if (tmplFp) { try { tmplFpBody = buildWriteBody(tmplFp, siteCfg); } catch (e) { console.warn(`${TAG} spiderweb: FP template failed:`, e); } }
+        const tmplArc = tmplFpBody && Array.isArray(tmplFpBody.arcs) && tmplFpBody.arcs[0] ? tmplFpBody.arcs[0] : null;
+        const existingNames = (t) => new Set(ents.filter(e => e.type === t && e.name).map(e => e.name));
+        const usedF = existingNames(16), usedP = existingNames(15);
+        const priorF = new Set(usedF), priorP = new Set(usedP);
+        const uniq = (base2, used, fb) => { base2 = genCleanName(base2) || fb; if (!used.has(base2)) { used.add(base2); return base2; } let i = 2, n2; do { n2 = `${base2}_${i++}`; } while (used.has(n2)); used.add(n2); return n2; };
+        const mtBool = !!(siteCfg && siteCfg.mountain_terrain);
+        const ffzWrites = [], fpWrites = [], warnings = [];
+        let resumed = 0;
+        st.zones.forEach(z => {
+            if (z.floorM === null || z.ceilM === null) { warnings.push(`zone "${z.name}" has no band (no DEM) — not written`); return; }
+            const nm = genCleanName(`DRAFT SW ${z.name}`);
+            if (priorF.has(nm)) { resumed++; z.createdName = nm; return; }
+            const body = genCreateBody({ name: nm, points: z.points, restrictions: { minAlt: z.floorM, maxAlt: z.ceilM } }, sid, siteCfg, tmplFfzBody);
+            body.name = uniq(body.name, usedF, 'FFZ');
+            z.createdName = body.name;
+            ffzWrites.push({ zone: z, body });
+        });
+        const comps = swbFpComponents(st);
+        const keyOf = (p) => `${p.lat.toFixed(7)},${p.lng.toFixed(7)}`;
+        let webN = 0, maxPts = 0;
+        comps.forEach(comp => {
+            const points = [], idx = new Map();
+            const pidx = (p) => { const k = keyOf(p); if (!idx.has(k)) { idx.set(k, points.length); points.push({ lat: p.lat, lng: p.lng }); } return idx.get(k); };
+            const arcs = [];
+            const emergM = (tmplArc && Number.isFinite(tmplArc.min_emergency_alt)) ? tmplArc.min_emergency_alt : 12;
+            comp.forEach(l => {
+                for (let i = 0; i < l.arcs.length; i++) {
+                    const a = points[pidx(l.vertsLL[i])], c = points[pidx(l.vertsLL[i + 1])];
+                    let arc = {};
+                    if (tmplArc) { arc = JSON.parse(JSON.stringify(tmplArc)); delete arc.id; delete arc.mapobject; }
+                    arc.point_a = a; arc.point_b = c; arc.points = [a, c];
+                    arc.min_alt = Math.round(l.arcs[i].floorM); arc.max_alt = Math.round(l.arcs[i].ceilM);
+                    if (arc.max_alt - arc.min_alt < 2) arc.max_alt = arc.min_alt + 2;
+                    arc.min_emergency_alt = emergM;
+                    arc.distance = approxMeters(a.lat, a.lng, c.lat, c.lng);
+                    if (typeof arc.wait_until_approved !== 'boolean') arc.wait_until_approved = false;
+                    arcs.push(arc);
+                }
+            });
+            try { bridgeArcContinuity(arcs); } catch (e) { console.warn(`${TAG} spiderweb: arc continuity threw:`, e); }
+            const nm = comp.length === 1 ? genCleanName(`DRAFT SW ${comp[0].nameA} - ${comp[0].nameB}`) : genCleanName(`DRAFT SW Web ${++webN}`);
+            if (priorP.has(nm)) { resumed++; return; }
+            let b;
+            if (tmplFpBody) { b = JSON.parse(JSON.stringify(tmplFpBody)); delete b.id; }
+            else b = { type: 15, description: '', custom: {}, params: {}, asset_waypoints: null, constantly_present_asset_name: false, general_marker_type: '', marker_height: 0, is_unshielded: false, restrictions: null };
+            b.type = 15; b.name = uniq(nm, usedP, 'FP'); b.description = ''; b.site_id = sid; b.validated = false; b.mountain_terrain_site = mtBool;
+            b.points = points; b.arcs = arcs;
+            if (points.length > maxPts) maxPts = points.length;
+            if (points.length > swbThresholds.entityPtsWarn) warnings.push(`"${b.name}" carries ${points.length} points / ${arcs.length} arcs (${comp.length} legs joined by hubs/junctions) — large for the native editor`);
+            fpWrites.push({ comp, body: b });
+        });
+        if (!tmplFp && fpWrites.length) warnings.push('site has no existing FP to clone as a template — minimal bodies used (if the server rejects them, draw one FP natively and re-run)');
+        if (log) log(`bodies: ${ffzWrites.length} FFZ, ${fpWrites.length} FP entities from ${comps.length} leg group(s) (largest ${maxPts} points)${resumed ? `, ${resumed} already on site by name (resume)` : ''}`);
+        return { ffzWrites, fpWrites, resumed, warnings };
+    }
+    // Percepto's DEM wins at every written vertex (err UP only): raise any arc/zone floor that its own
+    // ground says is too low. Ceilings follow the floor; connected-arc overlap is re-secured afterwards.
+    async function swbRegroundPercepto(st, log) {
+        const th = st.thresholds;
+        const keyOf = (p) => `${p.lat.toFixed(7)},${p.lng.toFixed(7)}`;
+        const pts = new Map();
+        st.legs.forEach(l => (l.vertsLL || []).forEach(p => pts.set(keyOf(p), p)));
+        st.zones.forEach(z => z.points.forEach(p => pts.set(keyOf(p), p)));
+        const list = [...pts.values()];
+        log(`Percepto DEM check: ${list.length} vertices…`);
+        let done = 0;
+        const vals = await bulkFetchElevations(list, (d, n) => { done = d; if (d % 200 === 0) showToast(`🕸 Percepto DEM ${d}/${n}`); });
+        const gm = new Map(); list.forEach((p, i) => { if (Number.isFinite(vals[i])) gm.set(keyOf(p), vals[i]); });
+        let arcsUp = 0, maxUp = 0, zonesUp = 0, missing = list.length - gm.size;
+        const floorAdd = th.fpFloorM, bandM = th.fpBandFt / M_TO_FT;
+        st.legs.forEach(l => {
+            if (!l.vertsLL || !l.arcs.length) return;
+            l.arcs.forEach((a, i) => {
+                if (a.floorM === null) return;
+                const gA = gm.get(keyOf(l.vertsLL[i])), gB = gm.get(keyOf(l.vertsLL[i + 1]));
+                const g = Math.max(gA == null ? -Infinity : gA, gB == null ? -Infinity : gB);
+                if (!Number.isFinite(g)) return;
+                const need = Math.ceil(g + floorAdd);
+                if (need > a.floorM) { const d = need - a.floorM; a.floorM = need; a.ceilM = Math.floor(need + bandM); arcsUp++; if (d > maxUp) maxUp = d; a.regroundM = d; }
+            });
+        });
+        st.zones.forEach(z => {
+            if (z.floorM === null) return;
+            let g = -Infinity; z.points.forEach(p => { const v = gm.get(keyOf(p)); if (v != null && v > g) g = v; });
+            if (!Number.isFinite(g)) return;
+            const need = g + th.ffzFloorAglFt / M_TO_FT;
+            if (need > z.floorM + 0.05) { z.floorM = need; if (z.ceilM - z.floorM < 2) z.ceilM = z.floorM + 2; zonesUp++; }
+        });
+        log(`Percepto DEM: ${arcsUp} arc floor(s) raised (max +${maxUp} m), ${zonesUp} zone floor(s) raised${missing ? `, ${missing} vertex(es) without a Percepto value (3DEP kept)` : ''}`);
+    }
+    let swbCommitArm = 0, swbUndoArm = 0;
+    async function swbCommit(dryRun) {
+        if (!dryRun && liteBlockedWrite('commit spiderweb')) return;
+        const st = swbState;
+        if (!st) { showToast('Nothing staged', 'rgba(255,96,96,0.55)'); return; }
+        if (st.committing) { showToast('Commit already running…'); return; }
+        const sid = getCurrentSiteID();
+        if (!sid || sid !== st.sid) { showToast('Site changed since staging — re-stage', 'rgba(255,96,96,0.55)'); return; }
+        const hardFail = (st.gates || []).filter(g => !g.ok && !g.soft);
+        if (hardFail.length) { showToast(`Gates not passed — ${hardFail[0].label}`, 'rgba(255,96,96,0.55)'); return; }
+        const csrf = dryRun ? null : getCsrfToken();
+        if (!dryRun && !csrf) { showToast('No CSRF token — make one native save/edit anywhere in Percepto first, then retry', 'rgba(255,96,96,0.55)'); return; }
+        st.committing = true;
+        st.commitLog = [];
+        const logL = (m) => { st.commitLog.push(m); console.log(`${TAG} spiderweb commit: ${m}`); swbRenderPanel(); };
+        try {
+            logL(dryRun ? 'DRY RUN — nothing is written' : 'COMMIT — writing to Percepto');
+            let siteCfg = null;
+            try { siteCfg = await fetchSiteConfig(sid); } catch (e) { console.warn(`${TAG} spiderweb: site-cfg fetch failed:`, e); }
+            // SAFETY-CRITICAL: MSL sites only (see siteAltMode). false = AGL site where these MSL floors
+            // would be read as thousands of feet above ground.
+            const mtFlag = siteCfg && typeof siteCfg.mountain_terrain === 'boolean' ? siteCfg.mountain_terrain : null;
+            if (mtFlag !== true) { logL(`ABORT: ${mtFlag === false ? 'AGL site (Mountain terrain OFF) — SpiderWeb floors are MSL-only' : 'site altitude mode unknown (GET /sites/<id>/ failed)'}`); showToast('Aborted — see panel log', 'rgba(255,96,96,0.55)'); return; }
+            await fetchMapObjects(sid, true);
+            const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+            if (!dryRun && swbThresholds.regroundPercepto) { try { await swbRegroundPercepto(st, logL); } catch (e) { logL(`⚠ Percepto DEM check failed (${e && e.message || e}) — 3DEP floors kept`); } }
+            const w = swbBuildWrites(st, sid, siteCfg, ents, logL);
+            w.warnings.forEach(x => logL(`⚠ ${x}`));
+            st.lastWrites = w;
+            if (dryRun) {
+                const arcsN = w.fpWrites.reduce((n, x) => n + x.body.arcs.length, 0);
+                logL(`would write ${w.ffzWrites.length} FFZ + ${w.fpWrites.length} FP (${arcsN} arcs). Untick "dry run" and click Commit twice to write.`);
+                return;
+            }
+            const backup = { site: sid, at: new Date().toISOString(), ffzs: w.ffzWrites.map(x => x.body), fps: w.fpWrites.map(x => x.body) };
+            try { localStorage.setItem(`aim_swb_backup:${sid}`, JSON.stringify(backup)); } catch (e) { logL('⚠ localStorage backup stash failed (quota?) — download is the only copy'); }
+            try { downloadJSONFile(`spiderweb-${sid}-${Date.now()}.json`, JSON.stringify(backup, null, 1)); } catch (e) { logL('backup download failed (stash in localStorage still written)'); }
+            const created = st.createdIds = st.createdIds || [];
+            const post = async (body) => {
+                const r = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
+                const txt = await r.text();
+                let json = null; try { json = JSON.parse(txt); } catch (e) { json = null; }
+                const saved = json && json.map_objects;
+                if (r.status === 403) throw Object.assign(new Error('403 forbidden — write permission lost, ABORTING run'), { fatal: true });
+                if (r.status === 200 && saved && saved.id != null) return saved.id;
+                throw new Error(`server ${r.status} ${(txt || '').slice(0, 120)}`);
+            };
+            const verify = async (label, list) => {
+                await fetchMapObjects(sid, true);
+                const after = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+                const byId = new Set(after.map(e => e.id));
+                const missing = list.filter(c => !byId.has(c.id));
+                if (missing.length) logL(`⚠ verify: ${missing.length} created ${label}(s) NOT found on re-fetch`); else if (list.length) logL(`verify ✓ all ${list.length} ${label}(s) present on fresh fetch`);
+                return !missing.length;
+            };
+            const runStep = async (label, type, writes, describe) => {
+                let ok = 0, fail = 0; const made = [];
+                for (const w2 of writes) {
+                    try { const id = await post(w2.body); const rec = { id, name: w2.body.name, type }; created.push(rec); made.push(rec); ok++; logL(`✓ ${label} "${w2.body.name}" → #${id}${describe ? ' ' + describe(w2) : ''}`); }
+                    catch (e) { fail++; logL(`✗ ${label} "${w2.body.name}": ${e.message}`); if (e.fatal) throw e; }
+                }
+                const v = await verify(label, made);
+                return { ok, fail, verified: v };
+            };
+            const f = await runStep('FFZ', 16, w.ffzWrites, (x) => `(${(x.zone.floorM * M_TO_FT).toFixed(0)}–${(x.zone.ceilM * M_TO_FT).toFixed(0)} ft MSL)`);
+            if (f.fail || !f.verified) { logL(`STOP after FFZs — ${f.fail} failed${f.verified ? '' : ', verify incomplete'}. Fix + re-run Commit (already-created zones are skipped by name).`); return; }
+            const p = await runStep('FP', 15, w.fpWrites, (x) => `(${x.body.points.length} pts, ${x.body.arcs.length} arcs)`);
+            if (p.fail || !p.verified) { logL(`STOP after FPs — ${p.fail} failed. Re-run Commit to resume.`); return; }
+            logL(`DONE: ${f.ok} FFZ · ${p.ok} FP created. Reload the page to see them in Percepto's own map; ↶ Undo removes exactly these.`);
+            showToast(`🕸 SpiderWeb committed ✓ ${f.ok} FFZ + ${p.ok} FP`);
+        } catch (e) {
+            logL(`RUN ABORTED: ${e && e.message ? e.message : e}`);
+            showToast('Commit aborted — see panel log', 'rgba(255,96,96,0.55)');
+        } finally { st.committing = false; swbRenderPanel(); }
+    }
+    async function swbUndo() {
+        const st = swbState;
+        if (!st || !st.createdIds || !st.createdIds.length) { showToast('Nothing to undo', 'rgba(255,96,96,0.55)'); return; }
+        if (liteBlockedWrite('undo spiderweb commit')) return;
+        const csrf = getCsrfToken();
+        if (!csrf) { showToast('No CSRF token', 'rgba(255,96,96,0.55)'); return; }
+        const sid = getCurrentSiteID();
+        st.commitLog = st.commitLog || [];
+        const logL = (m) => { st.commitLog.push(m); console.log(`${TAG} spiderweb undo: ${m}`); };
+        const order = st.createdIds.slice().sort((a, b) => (a.type === 15 ? 0 : 1) - (b.type === 15 ? 0 : 1));   // FPs first
+        let ok = 0, fail = 0;
+        for (const c of order) {
+            try {
+                const r = await fetch(`/map_objects/${c.id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
+                if (r.status === 200 || r.status === 204) ok++; else { fail++; logL(`undo ✗ ${c.name} (#${c.id}): server ${r.status}`); }
+            } catch (e) { fail++; logL(`undo ✗ ${c.name}: ${e && e.message || e}`); }
+        }
+        logL(`UNDO: deleted ${ok}/${order.length}${fail ? ` · ${fail} failed` : ''}`);
+        st.createdIds = [];
+        try { await fetchMapObjects(sid, true); } catch (e) { console.warn(`${TAG} spiderweb: refetch after undo failed:`, e); }
+        showToast(fail ? `Undo: ${ok} deleted, ${fail} failed` : `Undo ✓ ${ok} deleted`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+        swbRenderPanel();
+    }
+
     function swbOpen() {
         if (!swbMasterEnabled) { showToast('SpiderWeb is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
         swbRenderPanel();
@@ -11030,6 +11267,8 @@
                 { id: 'battery', label: 'Battery for the one-way distance gate', type: 'select', options: [ { value: 'tulip', label: 'Tulip' }, { value: 'tattu', label: 'Tattu' } ], default: SWB_DEFAULTS.battery },
                 { id: 'sampleFt', label: 'DEM sample spacing along legs', type: 'number', min: 10, max: 100, step: 5, default: SWB_DEFAULTS.sampleFt, unit: 'ft' },
                 { id: 'marginFt', label: 'DEM margin around the site', type: 'number', min: 100, max: 5280, step: 50, default: SWB_DEFAULTS.marginFt, unit: 'ft' },
+                { id: 'regroundPercepto', label: 'Commit: re-check every vertex against Percepto DEM (floors only rise)', type: 'boolean', default: SWB_DEFAULTS.regroundPercepto },
+                { id: 'entityPtsWarn', label: 'Commit: warn when one FP entity exceeds … points', type: 'number', min: 20, max: 1000, step: 10, default: SWB_DEFAULTS.entityPtsWarn },
                 { id: 'swb-open', label: 'Open SpiderWeb panel', type: 'button', action: 'swb-open' },
                 { id: 'swb-clear', label: 'Clear SpiderWeb preview', type: 'button', action: 'swb-clear' },
             ],
