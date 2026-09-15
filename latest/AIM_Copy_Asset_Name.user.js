@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.291
+// @version      4.292
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.291';
+    const SCRIPT_VERSION = '4.292';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -9368,7 +9368,7 @@
     }
 
     // ============================================================
-    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.291)
+    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.292)
     // Design doc: ShortKeys/AIM_Unshielded_SpiderWeb_Design.md.
     // FFZ per asset (mitered outset, touching buffers unioned), straight
     // point-to-point FPs at a 54 m floor / +20 ft band with AUTOMATIC DEM
@@ -10742,7 +10742,12 @@
             if (priorP.has(nm)) { resumed++; return; }
             let b;
             if (tmplFpBody) { b = JSON.parse(JSON.stringify(tmplFpBody)); delete b.id; }
-            else b = { type: 15, description: '', custom: {}, params: {}, asset_waypoints: null, constantly_present_asset_name: false, general_marker_type: '', marker_height: 0, is_unshielded: false, restrictions: null };
+            // No template on the site: mirror a NATIVE flight path exactly (site 1583 dump) — `restrictions` is an
+            // empty ARRAY on a flight path and `asset_waypoints` is not sent at all. `restrictions: null` +
+            // `asset_waypoints: null` was rejected with a generic 400 on the first live commit (2026-09-14).
+            else b = { type: 15, description: '', custom: {}, params: {}, constantly_present_asset_name: false, general_marker_type: '', marker_height: 0, is_unshielded: false, restrictions: [] };
+            if (b.asset_waypoints === null) delete b.asset_waypoints;
+            if (b.restrictions === null || b.restrictions === undefined) b.restrictions = [];
             b.type = 15; b.name = uniq(nm, usedP, 'FP'); b.description = ''; b.site_id = sid; b.validated = false; b.mountain_terrain_site = mtBool;
             b.points = points; b.arcs = arcs;
             if (points.length > maxPts) maxPts = points.length;

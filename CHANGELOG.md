@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-14 — Site Setup Tools latest v4.292: SpiderWeb — flight-path body matches the native shape (dev only)
+
+- **Fix:** on a site with no flight path to clone, every FP create was refused with a generic 400 (the first live commit wrote all 179 zones, then 0 of 455 paths). A native flight path carries `restrictions: []` and no `asset_waypoints` field; the fallback body sent both as null. It now mirrors the native shape. Re-running Commit skips the zones already on the site by name and writes the paths.
+
 ## 2026-09-14 — Site Setup Tools latest v4.291: SpiderWeb panel keeps its scroll while a commit logs (dev only)
 
 - The panel rebuilt itself on every commit log line and jumped back to the top. It now keeps its scroll position and drag position across rebuilds, pins the commit log to its newest line, and rebuilds at most about three times a second while a run is logging.
