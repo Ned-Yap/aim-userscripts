@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-14 — Site Setup Tools latest v4.288: SpiderWeb — stored hub gain ratio of 1 is forced to 0.1 (dev only)
+
+- The v4.286 migration was undone by the Control Panel writing its own copy of the old value back. This one runs regardless of the earlier flag: a stored ratio of 1 (or the interim 0.25) becomes 0.1 on load, so hubs appear on the full mesh without pressing Defaults.
+
 ## 2026-09-14 — Site Setup Tools latest v4.287: SpiderWeb — hub gain ratio really moves to 0.1, Defaults button (dev only)
 
 - **Fix:** the Control Panel echoes its own saved copy of every field on load, so the hub gain ratio stayed at 1 for anyone who had touched it, and the full mesh came up with zero hubs. The field is re-registered under a new id so the new default applies. A "↺ Defaults" button in the SpiderWeb panel resets every setting.

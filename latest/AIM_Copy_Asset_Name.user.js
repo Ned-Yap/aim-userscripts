@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.287
+// @version      4.288
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.287';
+    const SCRIPT_VERSION = '4.288';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -9368,7 +9368,7 @@
     }
 
     // ============================================================
-    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.287) — PREVIEW ONLY
+    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.288) — PREVIEW ONLY
     // Design doc: ShortKeys/AIM_Unshielded_SpiderWeb_Design.md.
     // FFZ per asset (mitered outset, touching buffers unioned), straight
     // point-to-point FPs at a 54 m floor / +20 ft band with AUTOMATIC DEM
@@ -9420,11 +9420,13 @@
             const raw = elevGmGet(SWB_THRESH_KEY, null);
             const st = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : null;
             if (st && typeof st === 'object') Object.keys(SWB_DEFAULTS).forEach(k => { if (typeof st[k] === typeof SWB_DEFAULTS[k]) out[k] = st[k]; });
-            // v4.286 migration: the hub gain ratio default moved 1 → 0.25 (dense web); a stored 1 was the old default
-            if (st && !(st.tunedV >= 2)) {
-                if (out.hubGainRatio === 1) out.hubGainRatio = SWB_DEFAULTS.hubGainRatio;
-                try { const s2 = Object.assign({}, st, { hubGainRatio: out.hubGainRatio, tunedV: 2 }); elevGmSet(SWB_THRESH_KEY, JSON.stringify(s2)); } catch (e) {}
-                console.log(`${TAG} spiderweb: thresholds migrated (tunedV 2) — hub gain ratio ${out.hubGainRatio}`);
+            // v4.288 migration (tunedV 3): the hub gain ratio default moved 1 → 0.1 (dense web). A stored 1 was
+            // the old default, and the v4.286 migration (tunedV 2) was undone by the Control Panel echoing its own
+            // stored 1 back — so this one runs again regardless of the earlier flag.
+            if (st && !(st.tunedV >= 3)) {
+                if (out.hubGainRatio === 1 || out.hubGainRatio === 0.25) out.hubGainRatio = SWB_DEFAULTS.hubGainRatio;
+                try { const s2 = Object.assign({}, st, { hubGainRatio: out.hubGainRatio, tunedV: 3 }); elevGmSet(SWB_THRESH_KEY, JSON.stringify(s2)); } catch (e) {}
+                console.log(`${TAG} spiderweb: thresholds migrated (tunedV 3) — hub gain ratio ${out.hubGainRatio}`);
             }
         } catch (e) { console.warn(`${TAG} spiderweb: thresholds unreadable — defaults used`, e); }
         return out;
@@ -10607,7 +10609,7 @@
             if (ev.target.closest('[data-swb-close]')) { swbClosePanel(); return; }
             if (ev.target.closest('[data-swb-stage]')) { swbReadPanelParams(wrap); swbStage(); return; }
             if (ev.target.closest('[data-swb-clear]')) { swbClear(); swbRenderPanel(); return; }
-            if (ev.target.closest('[data-swb-defaults]')) { swbThresholds = { ...SWB_DEFAULTS }; try { elevGmSet(SWB_THRESH_KEY, JSON.stringify({ ...SWB_DEFAULTS, tunedV: 2 })); } catch (e) {} showToast('SpiderWeb settings reset to defaults'); swbRenderPanel(); return; }
+            if (ev.target.closest('[data-swb-defaults]')) { swbThresholds = { ...SWB_DEFAULTS }; try { elevGmSet(SWB_THRESH_KEY, JSON.stringify({ ...SWB_DEFAULTS, tunedV: 3 })); } catch (e) {} showToast('SpiderWeb settings reset to defaults'); swbRenderPanel(); return; }
             if (ev.target.closest('[data-swb-copy]')) {
                 const txt = swbReportText();
                 try { navigator.clipboard.writeText(txt).then(() => showToast('SpiderWeb report copied'), () => showToast('Copy failed', 'rgba(255,96,96,0.55)')); }
