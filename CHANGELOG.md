@@ -6,6 +6,13 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-15 — Site Setup Tools latest v4.296: SpiderWeb base star reaches across open ground (dev only)
+
+- New "base star" pass: any zone within 12,000 ft of a base gets a straight spoke home when that spoke shortens its way home by ≥ 5 % and its new pieces cross at most 3 existing legs. The spoke is **threaded through the pads in its way** (base → neighbouring pad → target) instead of being refused as "cuts through a zone", which is why the open ground west of the Elias base had no legs before. Panel/Control Panel fields: base star ft, star gain %, star max cross (0 ft = off).
+- Cobra 01 dup + Base 1: 5 spoke pieces (HUGHES-PARKER 56, HUGHES-PARKER 56 2, JENSEN 52 1 +1 via ELIAS 172; TREE FROG 47 EAST C; NICHOLS 50 2), 618 legs / 677 arcs / 1,295 vertices, longest way home 1.18× → 1.15×, all gates green.
+
+---
+
 ## 2026-09-15 — Site Setup Tools latest v4.295: SpiderWeb purge cannot double-start (dev only)
 
 - "Remove all DRAFT SW" could be started twice and the second loop logged 404s for ids the first had already deleted. It now refuses to start while running, treats 404 as already gone, and reports how many DRAFT SW entities remain on the site when it finishes.

@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.295
+// @version      4.296
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.295';
+    const SCRIPT_VERSION = '4.296';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -9368,7 +9368,7 @@
     }
 
     // ============================================================
-    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.295)
+    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.296)
     // Design doc: ShortKeys/AIM_Unshielded_SpiderWeb_Design.md.
     // FFZ per asset (mitered outset, touching buffers unioned), straight
     // point-to-point FPs at a 54 m floor / +20 ft band with AUTOMATIC DEM
@@ -9403,6 +9403,9 @@
         snapNodeFt: 100,                          // a leg passing within this of a hub/junction is routed THROUGH it (kills near-parallel duplicates)
         legGainRatio: 0,                          // same test for legs restored by the way-home pass (0 = fix any long detour)
         baseLegGainRatio: 0,                      // same test for direct zone→base legs (0 = the base star: any zone with a long detour gets a straight shot home)
+        baseStarFt: 12000,                        // base star reach: a zone within this of a base gets a straight spoke home, threaded THROUGH any pad in the way … (0 = off)
+        baseStarGainPct: 5,                       // … when the spoke shortens that zone's way home by at least this much
+        baseStarMaxCross: 3,                      // … and its new pieces cross at most this many existing legs (each crossing becomes a junction = a stop)
         approachFt: 100,                          // the arc that lands on a zone is at least this long when the ground allows
         notchFt: 5,                               // fill inward notches in unioned zones up to this depth
         mergeGapFt: 30,                           // zones closer than this are merged into one (bridged), instead of a tiny leg
@@ -9606,8 +9609,9 @@
         return tris.filter(t => t.v.every(v => v < n)).map(t => t.v);
     }
     // Multi-source Dijkstra over an adjacency list [{to, w}] with a binary heap (hub search runs it thousands of times).
-    function swbDijkstra(n, adj, sources) {
+    function swbDijkstra(n, adj, sources, hopsOut) {   // hopsOut (optional Int32Array): legs on the shortest path (fewest legs among equal-length paths)
         const dist = new Float64Array(n).fill(Infinity);
+        if (hopsOut) hopsOut.fill(0);
         const hk = [], hv = [];   // heap of (key, vertex)
         const push = (k, v) => { hk.push(k); hv.push(v); let i = hk.length - 1; while (i > 0) { const p = (i - 1) >> 1; if (hk[p] <= hk[i]) break; [hk[p], hk[i]] = [hk[i], hk[p]]; [hv[p], hv[i]] = [hv[i], hv[p]]; i = p; } };
         const pop = () => { const k = hk[0], v = hv[0]; const lk = hk.pop(), lv = hv.pop(); if (hk.length) { hk[0] = lk; hv[0] = lv; let i = 0; for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < hk.length && hk[l] < hk[m]) m = l; if (r < hk.length && hk[r] < hk[m]) m = r; if (m === i) break; [hk[m], hk[i]] = [hk[i], hk[m]]; [hv[m], hv[i]] = [hv[i], hv[m]]; i = m; } } return [k, v]; };
@@ -9615,7 +9619,7 @@
         while (hk.length) {
             const [k, u] = pop();
             if (k > dist[u]) continue;
-            for (const e of adj[u]) { const nd = k + e.w; if (nd < dist[e.to]) { dist[e.to] = nd; push(nd, e.to); } }
+            for (const e of adj[u]) { const nd = k + e.w; if (nd < dist[e.to]) { dist[e.to] = nd; if (hopsOut) hopsOut[e.to] = hopsOut[u] + 1; push(nd, e.to); } else if (hopsOut && nd === dist[e.to] && hopsOut[u] + 1 < hopsOut[e.to]) hopsOut[e.to] = hopsOut[u] + 1; }
         }
         return dist;
     }
@@ -10023,14 +10027,15 @@
         // pruned Delaunay leg and a direct leg to the nearest base; add the one that earns its length —
         // Σ(zone→base) must fall by ≥ hubGainRatio ft per ft of new path (same economics as hubs), so a
         // two-mile spoke never appears just to shave one zone's detour.
+        const buildAdjWith = (hubArr, links, webSet) => {   // adjacency over zones + hubs (spokes + hub↔hub links) for a given leg set
+            const nH = hubArr.length;
+            const adj = adjOf(webSet); for (let i = 0; i < nH; i++) adj.push([]);
+            hubArr.forEach((h, hi) => { const hid = nodes.length + hi; h.spokes.forEach(z => { const w = Math.hypot(h.x - nodes[z].x, h.y - nodes[z].y); adj[hid].push({ to: z, w }); adj[z].push({ to: hid, w }); }); });
+            links.forEach(([a, b]) => { const A = hubArr[a], B = hubArr[b]; const w = Math.hypot(A.x - B.x, A.y - B.y); adj[nodes.length + a].push({ to: nodes.length + b, w }); adj[nodes.length + b].push({ to: nodes.length + a, w }); });
+            return adj;
+        };
         const stretchPass = (hubArr, links) => {
-            const buildAdj = (webSet) => {
-                const nH = hubArr.length;
-                const adj = adjOf(webSet); for (let i = 0; i < nH; i++) adj.push([]);
-                hubArr.forEach((h, hi) => { const hid = nodes.length + hi; h.spokes.forEach(z => { const w = Math.hypot(h.x - nodes[z].x, h.y - nodes[z].y); adj[hid].push({ to: z, w }); adj[z].push({ to: hid, w }); }); });
-                links.forEach(([a, b]) => { const A = hubArr[a], B = hubArr[b]; const w = Math.hypot(A.x - B.x, A.y - B.y); adj[nodes.length + a].push({ to: nodes.length + b, w }); adj[nodes.length + b].push({ to: nodes.length + a, w }); });
-                return adj;
-            };
+            const buildAdj = (webSet) => buildAdjWith(hubArr, links, webSet);
             const sumOf = (d) => { let t = 0; for (let i = 0; i < nZ; i++) if (Number.isFinite(d[i])) t += d[i]; return t; };
             for (let pass = 0; pass < 6; pass++) {
                 const nAll = nodes.length + hubArr.length;
@@ -10192,6 +10197,82 @@
         stretchPass(hubs, hubLinks);
         if (stretchAdded) logL(`way-home pass: ${stretchAdded} leg(s) added (path > ${th.stretchMax}× straight; leg ratio ${th.legGainRatio}, base-leg ratio ${th.baseLegGainRatio})`);
         await swbYield();
+        // ---- 4c. base star reach (user 2026-09-15: "yellow is where I'd like to see segments" — open ground west of
+        // the base had no spokes: every zone there was under stretchMax, and the straight line from the base cut
+        // through the pads beside the base, so it was "blocked"). A spoke is now THREADED: the straight line
+        // base→zone is split at every zone it cuts (in order along the line), the pieces that do not exist yet
+        // are added (each must be clear), and the chain is accepted when it shortens that zone's way home by
+        // ≥ baseStarGainPct, detours ≤ 15 % over straight and its new pieces cross ≤ baseStarMaxCross legs.
+        // Best gain first; distances refreshed after every add so a spoke also serves the zones behind it. ----
+        let starAdded = 0;
+        if (th.baseStarFt > 0 && baseIdx.length) {
+            const reachM = M(th.baseStarFt), minGain = Math.max(0, th.baseStarGainPct) / 100, maxCross = Math.max(0, Math.round(th.baseStarMaxCross));
+            const nAll = nodes.length + hubs.length;
+            const zoneNode = new Map(); for (let i = 0; i < nZ; i++) zoneNode.set(nodes[i].zone, i);
+            const blockedCache = new Map();
+            const pieceBlocked = (u, v) => { const k = ekey(u, v); if (edges.has(k)) return edges.get(k).blocked; if (!blockedCache.has(k)) blockedCache.set(k, legBlocked(u, v)); return blockedCache.get(k); };
+            const orient = (p, q, r) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+            const properCross = (a, b, c, d) => orient(a, b, c) * orient(a, b, d) < 0 && orient(c, d, a) * orient(c, d, b) < 0;
+            const crossings = (u, v) => {   // existing legs + hub spokes a new piece would cut (none incident to either end)
+                const A = nodes[u], B = nodes[v]; let c = 0;
+                web.forEach(k => { const e = edges.get(k); if (e.a === u || e.b === u || e.a === v || e.b === v) return; if (properCross(A, B, nodes[e.a], nodes[e.b])) c++; });
+                hubs.forEach(h => h.spokes.forEach(z => { if (z === u || z === v) return; if (properCross(A, B, h, nodes[z])) c++; }));
+                return c;
+            };
+            const cutsOf = (u, v) => {   // zones a piece u→v cuts (neither end's own zone), ordered along the piece
+                const A = nodes[u], B = nodes[v]; const pa = landXY(A, B), pb = landXY(B, A);
+                const dx = pb.x - pa.x, dy = pb.y - pa.y, L2 = dx * dx + dy * dy || 1;
+                const cuts = [];
+                zones.forEach(z => { if (z === A.zone || z === B.zone || !zoneNode.has(z)) return; if (!swbSegHitsRing(pa, pb, z.xy)) return; let t = 0; z.xy.forEach(q => { t += ((q.x - pa.x) * dx + (q.y - pa.y) * dy) / L2; }); cuts.push({ n: zoneNode.get(z), t: t / z.xy.length }); });
+                return cuts.sort((p, q) => p.t - q.t).map(c => c.n);
+            };
+            const chainFor = (i, b) => {   // base → … → zone i, threading every blocked piece through the zones it cuts (refined until every piece is clear)
+                let chain = [b, i];
+                for (let iter = 0; iter < 6; iter++) {
+                    let changed = false;
+                    for (let s = 1; s < chain.length; s++) {
+                        const u = chain[s - 1], v = chain[s];
+                        if (web.has(ekey(u, v)) || !pieceBlocked(u, v)) continue;
+                        const cuts = cutsOf(u, v).filter(n => !chain.includes(n));
+                        if (!cuts.length) return null;                 // blocked by an NFZ or an end inside a zone — no thread through
+                        chain.splice(s, 0, ...cuts); changed = true; s += cuts.length;
+                        if (chain.length > 7) return null;             // more than 5 pads in the way = a corridor, not a spoke
+                    }
+                    if (!changed) return chain;
+                }
+                return null;
+            };
+            for (let round = 0; round < 80; round++) {
+                const dist = swbDijkstra(nAll, buildAdjWith(hubs, hubLinks, web), baseIdx);
+                let best = null;
+                for (let i = 0; i < nZ; i++) {
+                    if (nodes[i].zone.bases || !Number.isFinite(dist[i]) || dist[i] <= 0) continue;
+                    for (const b of baseIdx) {
+                        const straight = Math.hypot(nodes[i].x - nodes[b].x, nodes[i].y - nodes[b].y);
+                        if (straight > reachM || straight >= dist[i] * (1 - minGain)) continue;   // cheap bound: even a straight spoke would not earn the gain
+                        const chain = chainFor(i, b); if (!chain) continue;
+                        let chainLen = 0, cr = 0, ok = true; const fresh = [];
+                        for (let s = 1; s < chain.length && ok; s++) {
+                            const u = chain[s - 1], v = chain[s], k = ekey(u, v);
+                            const len = Math.hypot(nodes[u].x - nodes[v].x, nodes[u].y - nodes[v].y); chainLen += len;
+                            if (web.has(k)) continue;
+                            if (pieceBlocked(u, v)) { ok = false; break; }
+                            cr += crossings(u, v); if (cr > maxCross) { ok = false; break; }
+                            fresh.push({ u, v, k, len });
+                        }
+                        if (!ok || !fresh.length || chainLen > straight * 1.15) continue;
+                        const gain = (dist[i] - chainLen) / dist[i]; if (gain < minGain) continue;
+                        if (!best || gain > best.gain) best = { i, b, chain, fresh, gain, cr, chainLen };
+                    }
+                }
+                if (!best) break;
+                best.fresh.forEach(f => { if (!edges.has(f.k)) edges.set(f.k, { a: Math.min(f.u, f.v), b: Math.max(f.u, f.v), len: f.len, tris: [], blocked: false, direct: true }); const e = edges.get(f.k); e.added = true; e.star = true; web.add(f.k); });
+                starAdded += best.fresh.length;
+                logL(`base star: ${nodes[best.i].zone.name} ← ${best.chain.slice(0, -1).map(n => nodes[n].zone.name).join(' ← ')} · ${Math.round(best.chainLen * M_TO_FT).toLocaleString()} ft · way home −${Math.round(best.gain * 100)} % · ${best.fresh.length} new piece(s) crossing ${best.cr} leg(s)`);
+            }
+            logL(`base star: ${starAdded} spoke piece(s) added (zones within ${th.baseStarFt} ft of a base, way home shortened ≥ ${th.baseStarGainPct} %, ≤ ${maxCross} crossings)`);
+            await swbYield();
+        }
         // ---- 5. legs with endpoints on zone edges ----
         const hubNodes = hubs.map((h, hi) => ({ kind: 'hub', x: h.x, y: h.y, hub: h, hi }));
         const allNodes = nodes.concat(hubNodes);
@@ -10796,6 +10877,9 @@
                 ${num('hubGainRatio', 'hub gain ratio', 0.5, 'A hub (and each spoke) must save this many ft of summed way-home per ft of new path (0 = any saving)')}
                 ${num('legGainRatio', 'leg gain ratio', 0.5, 'A leg restored to fix a long detour must save this many ft of summed way-home per ft (0 = fix any detour)')}
                 ${num('baseLegGainRatio', 'base leg ratio', 0.5, 'A direct zone→base leg must save this many ft of summed way-home per ft (0 = the base star)')}
+                ${num('baseStarFt', 'base star ft', 500, 'A zone within this of a base gets a straight spoke home, threaded through any pad in the way (0 = off)')}
+                ${num('baseStarGainPct', 'star gain %', 1, '… when the spoke shortens that zone\'s way home by at least this much')}
+                ${num('baseStarMaxCross', 'star max cross', 1, '… and its new pieces cross at most this many existing legs (each crossing becomes a junction)')}
                 ${num('hubMaxSpokes', 'max spokes', 1, 'Most spokes on one hub')}
                 ${num('approachFt', 'approach ft', 10, 'Landing arc is at least this long when the ground allows')}
                 ${num('snapNodeFt', 'snap node ft', 10, 'A leg passing within this of a hub or junction is routed through it; 0 = off')}
@@ -11508,6 +11592,9 @@
                 { id: 'hubGainRatio2', label: 'Hub spokes must save … ft of summed way-home per ft (0 = any)', type: 'number', min: 0, max: 20, step: 0.05, default: SWB_DEFAULTS.hubGainRatio },
                 { id: 'legGainRatio', label: 'Restored legs must save … ft per ft (0 = fix any long detour)', type: 'number', min: 0, max: 20, step: 0.5, default: SWB_DEFAULTS.legGainRatio },
                 { id: 'baseLegGainRatio', label: 'Direct base legs must save … ft per ft (0 = the base star)', type: 'number', min: 0, max: 20, step: 0.5, default: SWB_DEFAULTS.baseLegGainRatio },
+                { id: 'baseStarFt', label: 'Base star reach: a zone within … of a base gets a straight spoke home, threaded through pads in the way (0 = off)', type: 'number', min: 0, max: 20000, step: 500, default: SWB_DEFAULTS.baseStarFt, unit: 'ft' },
+                { id: 'baseStarGainPct', label: '… when it shortens that zone\'s way home by at least', type: 'number', min: 0, max: 50, step: 1, default: SWB_DEFAULTS.baseStarGainPct, unit: '%' },
+                { id: 'baseStarMaxCross', label: '… and its new pieces cross at most … existing legs', type: 'number', min: 0, max: 10, step: 1, default: SWB_DEFAULTS.baseStarMaxCross },
                 { id: 'approachFt', label: 'Minimum landing arc length', type: 'number', min: 25, max: 500, step: 5, default: SWB_DEFAULTS.approachFt, unit: 'ft' },
                 { id: 'notchFt', label: 'Fill inward notches in unioned zones up to', type: 'number', min: 0, max: 30, step: 1, default: SWB_DEFAULTS.notchFt, unit: 'ft' },
                 { id: 'mergeGapFt', label: 'Merge zones closer than', type: 'number', min: 0, max: 200, step: 5, default: SWB_DEFAULTS.mergeGapFt, unit: 'ft' },
