@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-14 — Site Setup Tools latest v4.286: SpiderWeb — full mesh by default, hubs add to the mesh, saved hub ratio migrated (dev only)
+
+- **Web density** is now a choice, and the default is "full mesh": every neighbouring pair of zones in the triangulation gets a leg (under a 6,000 ft cap) instead of the long side of each triangle being dropped. On the Cobra dup that is 615 legs instead of 289.
+- Hubs now add spokes on top of the mesh instead of replacing the legs between their member pads ("hubs keep mesh legs", on by default). The hub gain ratio default is 0.1, and a saved ratio of 1 from earlier builds is migrated once so the denser default actually takes effect.
+
 ## 2026-09-14 — Site Setup Tools latest v4.285: SpiderWeb — denser web: more hubs by default, junctions where legs cross (dev only)
 
 - The hub gain ratio now defaults to 0.25. On the Cobra dup that is 34 hubs with 13 spokes straight to a base instead of 15 hubs with 3, at the same 80 miles of path and a shorter summed way home.

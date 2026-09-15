@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.285
+// @version      4.286
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.285';
+    const SCRIPT_VERSION = '4.286';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -9368,7 +9368,7 @@
     }
 
     // ============================================================
-    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.285) — PREVIEW ONLY
+    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.286) — PREVIEW ONLY
     // Design doc: ShortKeys/AIM_Unshielded_SpiderWeb_Design.md.
     // FFZ per asset (mitered outset, touching buffers unioned), straight
     // point-to-point FPs at a 54 m floor / +20 ft band with AUTOMATIC DEM
@@ -9393,7 +9393,10 @@
         battery: 'tulip', sampleFt: 25, marginFt: 500, hubs: true,
         hubRadiusFt: 3500, hubMaxSpokes: 10,      // a hub star reaches zones within this radius, at most this many
         hubBaseReachFt: 10000,                    // a hub may spoke straight to a base zone within this (longer) reach
-        hubGainRatio: 0.25,                       // a hub must save this many ft of summed way-home per ft of new flight path (0 = any saving; 0.25 = dense web)
+        hubGainRatio: 0.1,                        // a hub must save this many ft of summed way-home per ft of new flight path (0 = any saving; 0.1 = dense web)
+        webDensity: 'full',                       // 'full' = every neighbour leg (Delaunay) under maxLegFt; 'urquhart' = drop the long side of each triangle
+        maxLegFt: 6000,                           // full mesh: neighbour legs longer than this are dropped (spanning-tree legs always stay)
+        hubKeepLegs: true,                        // hubs ADD spokes on top of the mesh (false = a star replaces the legs between its members)
         junctions: true,                          // where two legs cross, share a waypoint so the drone can switch legs there
         junctionMinFt: 60,                        // no junction closer than this to a leg end (would leave a stub)
         legGainRatio: 0,                          // same test for legs restored by the way-home pass (0 = fix any long detour)
@@ -9417,6 +9420,12 @@
             const raw = elevGmGet(SWB_THRESH_KEY, null);
             const st = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : null;
             if (st && typeof st === 'object') Object.keys(SWB_DEFAULTS).forEach(k => { if (typeof st[k] === typeof SWB_DEFAULTS[k]) out[k] = st[k]; });
+            // v4.286 migration: the hub gain ratio default moved 1 → 0.25 (dense web); a stored 1 was the old default
+            if (st && !(st.tunedV >= 2)) {
+                if (out.hubGainRatio === 1) out.hubGainRatio = SWB_DEFAULTS.hubGainRatio;
+                try { const s2 = Object.assign({}, st, { hubGainRatio: out.hubGainRatio, tunedV: 2 }); elevGmSet(SWB_THRESH_KEY, JSON.stringify(s2)); } catch (e) {}
+                console.log(`${TAG} spiderweb: thresholds migrated (tunedV 2) — hub gain ratio ${out.hubGainRatio}`);
+            }
         } catch (e) { console.warn(`${TAG} spiderweb: thresholds unreadable — defaults used`, e); }
         return out;
     }
@@ -9904,10 +9913,17 @@
         const sortedE = [...edges.values()].filter(e => !e.blocked).sort((p, q) => p.len - q.len);
         const web = new Set();
         sortedE.forEach(e => { const ra = find(e.a), rb = find(e.b); if (ra !== rb) { parent[ra] = rb; e.mst = true; web.add(ekey(e.a, e.b)); } });
-        // Urquhart: drop the longest side of every triangle (unless MST)
-        const longest = new Set();
-        tris.forEach(t => { let bk = null, bl = -1; for (let e = 0; e < 3; e++) { const k = ekey(t[e], t[(e + 1) % 3]); const L = edges.get(k).len; if (L > bl) { bl = L; bk = k; } } longest.add(bk); });
-        edges.forEach((e, k) => { if (!e.blocked && !longest.has(k)) web.add(k); });
+        if (th.webDensity === 'full') {
+            // full mesh: every neighbour leg (Delaunay) that is clear and not longer than maxLegFt
+            const maxLegM = M(th.maxLegFt);
+            edges.forEach((e, k) => { if (!e.blocked && (e.len <= maxLegM || e.mst)) web.add(k); });
+        } else {
+            // Urquhart: drop the longest side of every triangle (unless MST)
+            const longest = new Set();
+            tris.forEach(t => { let bk = null, bl = -1; for (let e = 0; e < 3; e++) { const k = ekey(t[e], t[(e + 1) % 3]); const L = edges.get(k).len; if (L > bl) { bl = L; bk = k; } } longest.add(bk); });
+            edges.forEach((e, k) => { if (!e.blocked && !longest.has(k)) web.add(k); });
+        }
+        logL(`web: ${web.size} neighbour legs (${th.webDensity === 'full' ? 'full mesh ≤ ' + th.maxLegFt + ' ft' : 'Urquhart'})`);
         await swbYield();
         // ---- 3. stretch pass: add pruned Delaunay legs back where the return path is long ----
         const baseIdx = nodes.map((n, i) => n.zone.bases ? i : -1).filter(i => i >= 0);   // base ZONES are the way-home sources
@@ -10022,7 +10038,7 @@
                     for (const m of near) { if (members.length >= K + (members.filter(i => nodes[i].zone.bases).length)) break; if (members.includes(m.i) || nodeBlocked(c, m.i)) continue; members.push(m.i); }
                     if (members.filter(i => nodes[i].kind === 'zone').length < 3) { c.used = true; continue; }
                     const mset = new Set(members);
-                    const removed = []; web.forEach(k => { const e = edges.get(k); if (mset.has(e.a) && mset.has(e.b)) removed.push(k); });
+                    const removed = []; if (!th.hubKeepLegs) web.forEach(k => { const e = edges.get(k); if (mset.has(e.a) && mset.has(e.b)) removed.push(k); });
                     const trialWeb = new Set(web); removed.forEach(k => trialWeb.delete(k));
                     const trialHubs = hubs.concat([{ x: c.x, y: c.y, spokes: members }]);
                     const r = sumRtb(trialHubs, trialWeb, hubLinks); evaluated++;
@@ -10554,6 +10570,9 @@
                 ${num('endpointGapFt', 'endpoint gap ft', 1, 'Minimum spacing between leg ends on one zone edge')}
                 ${num('stretchMax', 'stretch ×', 0.05, 'Restore a pruned leg when a zone\'s way home exceeds this × straight line')}
                 ${num('hubMaxRtbLossPct', 'hub RTB loss %', 0.5, 'A hub may lengthen the summed return-to-base distance by at most this (when it shortens total FP length)')}
+                <label style="display:flex;align-items:center;gap:4px;">web<select data-swb-p="webDensity" style="background:#0d131d;color:#dfe9f0;border:1px solid rgba(43,140,255,0.4);border-radius:4px;font:inherit;"><option value="full" ${th.webDensity === 'full' ? 'selected' : ''}>full mesh</option><option value="urquhart" ${th.webDensity === 'urquhart' ? 'selected' : ''}>thinned</option></select></label>
+                ${num('maxLegFt', 'max leg ft', 100, 'Full mesh: neighbour legs longer than this are dropped')}
+                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input data-swb-p="hubKeepLegs" type="checkbox" ${th.hubKeepLegs ? 'checked' : ''}>hubs keep mesh legs</label>
                 ${num('hubRadiusFt', 'hub radius ft', 100, 'A hub star reaches zones within this radius')}
                 ${num('hubBaseReachFt', 'hub→base reach ft', 100, 'A hub may spoke straight to a base zone within this reach')}
                 ${num('hubGainRatio', 'hub gain ratio', 0.5, 'A hub (and each spoke) must save this many ft of summed way-home per ft of new path (0 = any saving)')}
@@ -10980,6 +10999,9 @@
                 { id: 'cornerGapFt', label: 'Leg ends stay this far from zone corners', type: 'number', min: 0, max: 100, step: 1, default: SWB_DEFAULTS.cornerGapFt, unit: 'ft' },
                 { id: 'stretchMax', label: 'Restore a leg when the way home exceeds × straight line', type: 'number', min: 1, max: 3, step: 0.05, default: SWB_DEFAULTS.stretchMax },
                 { id: 'hubMaxRtbLossPct', label: 'Hubs may lengthen the summed way home by up to', type: 'number', min: 0, max: 25, step: 0.5, default: SWB_DEFAULTS.hubMaxRtbLossPct, unit: '%' },
+                { id: 'webDensity', label: 'Web density', type: 'select', options: [ { value: 'full', label: 'Full mesh (every neighbour leg under the cap)' }, { value: 'urquhart', label: 'Thinned (drop the long side of each triangle)' } ], default: SWB_DEFAULTS.webDensity },
+                { id: 'maxLegFt', label: 'Full mesh: drop neighbour legs longer than', type: 'number', min: 1000, max: 20000, step: 250, default: SWB_DEFAULTS.maxLegFt, unit: 'ft' },
+                { id: 'hubKeepLegs', label: 'Hubs add spokes on top of the mesh (off = a star replaces the legs between its members)', type: 'boolean', default: SWB_DEFAULTS.hubKeepLegs },
                 { id: 'hubs', label: 'Propose hubs', type: 'boolean', default: SWB_DEFAULTS.hubs },
                 { id: 'junctions', label: 'Shared waypoint where two legs cross', type: 'boolean', default: SWB_DEFAULTS.junctions },
                 { id: 'junctionMinFt', label: 'No junction closer than … to a leg end', type: 'number', min: 20, max: 300, step: 10, default: SWB_DEFAULTS.junctionMinFt, unit: 'ft' },
