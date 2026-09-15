@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-15 — Site Setup Tools latest v4.294: SpiderWeb — 52 m floor, 2 m overlap, corridor cleanup (dev only)
+
+- New defaults: FP floor 52 m (170.6 ft), band 26 ft, overlap 2 m. Two metres is now both the target and the hard line; the panel and Control Panel refuse anything lower. Stored old defaults migrate once.
+- **Corridor cleanup:** a leg that skims within 100 ft of a zone it does not end on is rerouted through that zone. On the Cobra dup every one of the eight halves already existed as a neighbour leg, so the net effect is one line where two ran side by side. Any near-parallel pair that survives is flagged under a new soft gate.
+- Result on the Cobra dup: 663 arcs on 605 legs (was 976 on 613), 551 legs a single straight arc, no parallel corridors left.
+
 ## 2026-09-15 — Site Setup Tools latest v4.293: SpiderWeb — fewest-vertex stairs, corridor merge, purge button (dev only)
 
 - **Exact stair walker.** The greedy stair walk is replaced by an exact search that finds the fewest arcs a leg can legally have (54 m over the highest ground, drone under 200 ft over the lowest, 3 m overlap, zone handoff). On the Cobra dup that is 976 arcs instead of 1,028 at the same settings; with a 51 m floor and 30 ft band it is 669. The old "descent head room" rule, which was inflating step counts, is gone.

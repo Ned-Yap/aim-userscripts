@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.293
+// @version      4.294
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.293';
+    const SCRIPT_VERSION = '4.294';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -9368,7 +9368,7 @@
     }
 
     // ============================================================
-    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.293)
+    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.294)
     // Design doc: ShortKeys/AIM_Unshielded_SpiderWeb_Design.md.
     // FFZ per asset (mitered outset, touching buffers unioned), straight
     // point-to-point FPs at a 54 m floor / +20 ft band with AUTOMATIC DEM
@@ -9383,9 +9383,10 @@
     const SWB_DEFAULTS = {
         ffzFloorAglFt: 125, ffzCeilAglFt: 196,   // zone band above highest / lowest ground in the footprint
         ffzCeilMaxAglFt: 200,                     // a sloped zone's ceiling may rise to this (never above) when a landing arc cannot otherwise share 3 m with the zone
-        fpFloorM: 54,                            // arc floor above the HIGHEST ground under the arc (integer m)
-        fpBandFt: 20,                            // arc ceiling = floor + band
-        overlapM: 3,                             // target overlap between connected arcs (2 = red)
+        fpFloorM: 52,                            // arc floor above the HIGHEST ground under the arc (integer m) — 52 m = 170.6 ft (user 2026-09-15)
+        fpBandFt: 26,                            // arc ceiling = floor + band (52 m + 26 ft = 196.6 ft over the arc's high ground)
+        overlapM: 2,                             // overlap between connected arcs — 2 m is the target AND the hard line (user 2026-09-15)
+        corridorFt: 100,                          // a leg skimming a zone it does not end on within this is routed THROUGH that zone (one line, not two)
         droneMaxAglFt: 200,                      // the drone flies the floor — relief inside one arc is capped so it never exceeds this
         outsetFt: 16, endpointGapFt: 15, cornerGapFt: 10,
         stretchMax: 1.3,                         // web distance to base ÷ straight line — add a leg back above this
@@ -9426,10 +9427,14 @@
             // v4.288 migration (tunedV 3): the hub gain ratio default moved 1 → 0.1 (dense web). A stored 1 was
             // the old default, and the v4.286 migration (tunedV 2) was undone by the Control Panel echoing its own
             // stored 1 back — so this one runs again regardless of the earlier flag.
-            if (st && !(st.tunedV >= 4)) {
+            if (st && !(st.tunedV >= 5)) {
                 if (out.hubGainRatio === 1 || out.hubGainRatio === 0.25) out.hubGainRatio = SWB_DEFAULTS.hubGainRatio;
-                try { const s2 = Object.assign({}, st, { hubGainRatio: out.hubGainRatio, tunedV: 4 }); elevGmSet(SWB_THRESH_KEY, JSON.stringify(s2)); } catch (e) {}
-                console.log(`${TAG} spiderweb: thresholds migrated (tunedV 4) — hub gain ratio ${out.hubGainRatio}`);
+                // v4.294 (user 2026-09-15): floor 54 → 52 m, band 20 → 26 ft, overlap 3 → 2 m — only stored OLD DEFAULTS move
+                if (out.fpFloorM === 54) out.fpFloorM = SWB_DEFAULTS.fpFloorM;
+                if (out.fpBandFt === 20) out.fpBandFt = SWB_DEFAULTS.fpBandFt;
+                if (out.overlapM === 3) out.overlapM = SWB_DEFAULTS.overlapM;
+                try { const s2 = Object.assign({}, st, { hubGainRatio: out.hubGainRatio, fpFloorM: out.fpFloorM, fpBandFt: out.fpBandFt, overlapM: out.overlapM, tunedV: 5 }); elevGmSet(SWB_THRESH_KEY, JSON.stringify(s2)); } catch (e) {}
+                console.log(`${TAG} spiderweb: thresholds migrated (tunedV 5) — floor ${out.fpFloorM} m, band ${out.fpBandFt} ft, overlap ${out.overlapM} m, hub ratio ${out.hubGainRatio}`);
             }
         } catch (e) { console.warn(`${TAG} spiderweb: thresholds unreadable — defaults used`, e); }
         return out;
@@ -9444,10 +9449,10 @@
     }
     // Control Panel ids that were renamed: the panel echoes ITS stored value per id on every load,
     // so a renamed id is the only way a new default reaches users who touched the old one.
-    const SWB_CP_ALIAS = { hubGainRatio2: 'hubGainRatio' };
+    const SWB_CP_ALIAS = { hubGainRatio2: 'hubGainRatio', fpFloorM2: 'fpFloorM', fpBandFt2: 'fpBandFt', overlapM2: 'overlapM' };
     // Retired ids: the panel still echoes every value it EVER stored for this script, registered or not —
     // a retired id must be dropped on the floor or it writes the old value back over the migration.
-    const SWB_RETIRED_IDS = new Set(['hubGainRatio']);
+    const SWB_RETIRED_IDS = new Set(['hubGainRatio', 'fpFloorM', 'fpBandFt', 'overlapM']);
     function handleSpiderwebToggle(msg) {
         if (SWB_RETIRED_IDS.has(msg.toggleId)) return;
         const id = SWB_CP_ALIAS[msg.toggleId] || msg.toggleId;
@@ -9459,7 +9464,8 @@
             return;
         }
         if (Object.prototype.hasOwnProperty.call(swbThresholds, id)) {
-            const v = (typeof SWB_DEFAULTS[id] === 'boolean') ? !!(msg.value !== undefined ? msg.value : msg.enabled) : msg.value;
+            let v = (typeof SWB_DEFAULTS[id] === 'boolean') ? !!(msg.value !== undefined ? msg.value : msg.enabled) : msg.value;
+            if (id === 'overlapM' && typeof v === 'number' && v < 2) v = 2;
             if (typeof v !== typeof SWB_DEFAULTS[id] || v === swbThresholds[id]) return;
             swbThresholds[id] = v;
             saveSwbThresholdKey(id, v);
@@ -9779,6 +9785,8 @@
             gates.push({ label: 'FP ↔ zone handoff ≥ 2 m', ok: handoffFail === 0, detail: `${handoffFail} fail · ${handoffSoft} under the ${th.overlapM} m target · ${raised} zone ceiling(s) raised toward ${th.ffzCeilMaxAglFt} ft` });
             const manySteps = result.legs.filter(l => l.flags.some(f => /^many steps/.test(f))).length;
             gates.push({ label: 'legs under 40 steps', ok: manySteps === 0, soft: true, detail: `${manySteps} leg(s) over` });
+            const par = result.legs.filter(l => l.flags.some(f => /^parallel to/.test(f))).length;
+            gates.push({ label: 'no parallel corridors', ok: par === 0, soft: true, detail: `${par} leg(s) share a corridor` });
             const tiny = result.legs.filter(l => l.flags.some(f => /^tiny leg/.test(f))).length;
             gates.push({ label: 'no legs under 30 ft', ok: tiny === 0, soft: true, detail: `${tiny} tiny leg(s)` });
             const cliffs = result.legs.filter(l => l.flags.some(f => /cliff/.test(f))).length;
@@ -10191,6 +10199,40 @@
         web.forEach(k => { const e = edges.get(k); legsRaw.push({ a: e.a, b: e.b, added: !!e.added }); });
         hubs.forEach((h, hi) => h.spokes.forEach(z => legsRaw.push({ a: nodes.length + hi, b: z })));
         hubLinks.forEach(([i, j]) => legsRaw.push({ a: nodes.length + i, b: nodes.length + j }));
+        // ---- 4c. corridor cleanup: a leg that skims a zone it does not end on (within corridorFt) becomes
+        //          two legs THROUGH that zone; the halves usually already exist as neighbour legs, so the net
+        //          effect is one line where there were two running side by side ----
+        if (th.corridorFt > 0) {
+            const corrM = M(th.corridorFt);
+            const pk = (a, b) => a < b ? `${a}:${b}` : `${b}:${a}`;
+            const have = new Set(legsRaw.map(l => pk(l.a, l.b)));
+            const segRingDist = (P, Q, ring) => { let m = Infinity; const dx = Q.x - P.x, dy = Q.y - P.y, L2 = dx * dx + dy * dy || 1; ring.forEach(v => { let t = ((v.x - P.x) * dx + (v.y - P.y) * dy) / L2; if (t < 0.05 || t > 0.95) return; const d = Math.hypot(v.x - (P.x + t * dx), v.y - (P.y + t * dy)); if (d < m) m = d; }); return m; };
+            let rerouted = 0, added = 0;
+            for (let pass = 0; pass < 3; pass++) {
+                let changed = false;
+                for (let i = 0; i < legsRaw.length; i++) {
+                    const l = legsRaw[i];
+                    const A = allNodes[l.a], B = allNodes[l.b];
+                    const P = A.kind === 'zone' ? landXY(A, B) : A, Q = B.kind === 'zone' ? landXY(B, A) : B;
+                    let best = null;
+                    zones.forEach((z, zi) => {
+                        if ((A.kind === 'zone' && A.zone === z) || (B.kind === 'zone' && B.zone === z)) return;
+                        const d = segRingDist(P, Q, z.xy);
+                        if (d <= corrM && (!best || d < best.d)) best = { zi, d };
+                    });
+                    if (!best) continue;
+                    const zi = best.zi, Z = nodes[zi];
+                    const detour = (Math.hypot(Z.x - A.x, Z.y - A.y) + Math.hypot(B.x - Z.x, B.y - Z.y)) / (Math.hypot(B.x - A.x, B.y - A.y) || 1);
+                    if (detour > 1.15) continue;
+                    const blk = (x, y) => (x < nodes.length && y < nodes.length) ? legBlocked(x, y) : ptBlocked(allNodes[x], allNodes[y]);
+                    if (blk(l.a, zi) || blk(zi, l.b)) continue;
+                    legsRaw.splice(i, 1); have.delete(pk(l.a, l.b)); i--; rerouted++; changed = true;
+                    [[l.a, zi], [zi, l.b]].forEach(([x, y]) => { const k = pk(x, y); if (!have.has(k)) { have.add(k); legsRaw.push({ a: x, b: y }); added++; } });
+                }
+                if (!changed) break;
+            }
+            if (rerouted) logL(`corridor cleanup: ${rerouted} leg(s) rerouted through a zone they skimmed (≤ ${th.corridorFt} ft), ${added} new half(s), ${rerouted * 2 - added} already existed`);
+        }
         // endpoint on a zone for a leg toward `toward`: the ring point CLOSEST to the target among the
         // edges the leg actually leaves through (direction ≥ 15° off the edge, pointing outward) — so the
         // leg departs from the nearest outside edge and never grazes or cuts through its own zone
@@ -10376,6 +10418,26 @@
             if (snapped) logL(`${snapped} leg(s) routed through a nearby hub/junction (≤ ${th.snapNodeFt} ft), ${dropped} duplicate half(s) dropped`);
         }
         await swbYield();
+        // ---- 5d. parallel corridor check: two legs with no shared node, nearly parallel, within corridorFt
+        //          over a real stretch → flagged (soft gate) ----
+        if (th.corridorFt > 0) {
+            const corrM = M(th.corridorFt);
+            let pairs = 0;
+            for (let i = 0; i < legs.length; i++) for (let j = i + 1; j < legs.length; j++) {
+                const L1 = legs[i], L2 = legs[j];
+                if (L1.a === L2.a || L1.a === L2.b || L1.b === L2.a || L1.b === L2.b) continue;
+                const d1 = { x: L1.pb.x - L1.pa.x, y: L1.pb.y - L1.pa.y }, d2 = { x: L2.pb.x - L2.pa.x, y: L2.pb.y - L2.pa.y };
+                const n1 = Math.hypot(d1.x, d1.y) || 1, n2 = Math.hypot(d2.x, d2.y) || 1;
+                const cosA = Math.abs((d1.x * d2.x + d1.y * d2.y) / (n1 * n2));
+                if (cosA < Math.cos(8 * Math.PI / 180)) continue;
+                const [S, T] = n1 <= n2 ? [L1, L2] : [L2, L1];
+                const dx = T.pb.x - T.pa.x, dy = T.pb.y - T.pa.y, L2s = dx * dx + dy * dy || 1;
+                let close = 0, tot = 0;
+                for (let k = 0; k <= 6; k++) { const q = { x: S.pa.x + (S.pb.x - S.pa.x) * k / 6, y: S.pa.y + (S.pb.y - S.pa.y) * k / 6 }; const t = ((q.x - T.pa.x) * dx + (q.y - T.pa.y) * dy) / L2s; if (t < 0 || t > 1) continue; tot++; const d = Math.hypot(q.x - (T.pa.x + t * dx), q.y - (T.pa.y + t * dy)); if (d <= corrM) close++; }
+                if (tot >= 3 && close >= 3 && Math.min(n1, n2) * (close / 7) > M(300)) { pairs++; L1.flags.push(`parallel to ${L2.nameA || '?'}→${L2.nameB || '?'} within ${th.corridorFt} ft`); L2.flags.push(`parallel to ${L1.nameA || '?'}→${L1.nameB || '?'} within ${th.corridorFt} ft`); }
+            }
+            if (pairs) logL(`⚠ ${pairs} near-parallel leg pair(s) still share a corridor (flagged)`);
+        }
         // ---- 6. stairs: walk the DEM along each leg ----
         const bandM = M(th.fpBandFt), ovM = th.overlapM, floorAdd = th.fpFloorM;
         const reliefMaxM = Math.max(0.5, M(th.droneMaxAglFt) - floorAdd - 1);   // −1 m rounding slack: the drone (at the floor) must stay under droneMaxAgl over the LOWEST ground of the arc
@@ -10718,7 +10780,8 @@
             <div style="padding:8px 12px;display:flex;flex-wrap:wrap;gap:6px 12px;border-bottom:1px solid rgba(43,140,255,0.2);font-size:11px;">
                 ${num('fpFloorM', 'FP floor m', 1, 'Arc floor above the HIGHEST ground under the arc, integer metres (54 = 177.2 ft)')}
                 ${num('fpBandFt', 'band ft', 1, 'Arc ceiling = floor + band')}
-                ${num('overlapM', 'overlap m', 0.5, 'Target overlap between connected arcs; steps every (band − overlap) of relief')}
+                ${num('overlapM', 'overlap m', 0.5, 'Overlap between connected arcs — target AND hard line (never below 2 m); steps every (band − overlap) of relief')}
+                ${num('corridorFt', 'corridor ft', 10, 'A leg skimming a zone it does not end on within this is routed through that zone; 0 = off')}
                 ${num('droneMaxAglFt', 'drone max AGL', 5, 'Relief inside one arc is capped so the drone (flying the floor) never exceeds this over the low ground')}
                 ${num('outsetFt', 'outset ft', 1, 'Asset ring → zone')}
                 ${num('ffzCeilMaxAglFt', 'zone ceil max', 1, 'A sloped zone may raise its ceiling to this (never above) when a landing arc needs the overlap')}
@@ -10777,7 +10840,7 @@
                 if (now - swbUndoArm > 1600) { swbUndoArm = now; showToast('Click Undo again within 1.6 s to delete this run\'s entities', 'rgba(255,96,96,0.55)'); return; }
                 swbUndoArm = 0; swbUndo(); return;
             }
-            if (ev.target.closest('[data-swb-defaults]')) { swbThresholds = { ...SWB_DEFAULTS }; try { elevGmSet(SWB_THRESH_KEY, JSON.stringify({ ...SWB_DEFAULTS, tunedV: 4 })); } catch (e) {} showToast('SpiderWeb settings reset to defaults'); swbRenderPanel(); return; }
+            if (ev.target.closest('[data-swb-defaults]')) { swbThresholds = { ...SWB_DEFAULTS }; try { elevGmSet(SWB_THRESH_KEY, JSON.stringify({ ...SWB_DEFAULTS, tunedV: 5 })); } catch (e) {} showToast('SpiderWeb settings reset to defaults'); swbRenderPanel(); return; }
             if (ev.target.closest('[data-swb-copy]')) {
                 const txt = swbReportText();
                 try { navigator.clipboard.writeText(txt).then(() => showToast('SpiderWeb report copied'), () => showToast('Copy failed', 'rgba(255,96,96,0.55)')); }
@@ -10800,7 +10863,7 @@
             if (!Object.prototype.hasOwnProperty.call(SWB_DEFAULTS, id)) return;
             let v;
             if (typeof SWB_DEFAULTS[id] === 'boolean') v = !!inp.checked;
-            else if (typeof SWB_DEFAULTS[id] === 'number') { v = parseFloat(inp.value); if (!Number.isFinite(v)) return; }
+            else if (typeof SWB_DEFAULTS[id] === 'number') { v = parseFloat(inp.value); if (!Number.isFinite(v)) return; if (id === 'overlapM' && v < 2) { v = 2; inp.value = '2'; showToast('Overlap cannot go below 2 m'); } }
             else v = String(inp.value);
             if (v === swbThresholds[id]) return;
             swbThresholds[id] = v;
@@ -11413,9 +11476,10 @@
             version: SCRIPT_VERSION, group: 'Site Setup', scope: 'site-setup', priority: 35,
             toggles: [
                 { id: 'swb-master', label: 'Enable SpiderWeb generator', type: 'boolean', default: true, master: true },
-                { id: 'fpFloorM', label: 'FP floor above highest ground under the arc', type: 'number', min: 20, max: 120, step: 1, default: SWB_DEFAULTS.fpFloorM, unit: 'm' },
-                { id: 'fpBandFt', label: 'FP band (ceiling = floor + band)', type: 'number', min: 7, max: 100, step: 1, default: SWB_DEFAULTS.fpBandFt, unit: 'ft' },
-                { id: 'overlapM', label: 'Overlap between connected arcs (steps every band − overlap)', type: 'number', min: 1, max: 10, step: 0.5, default: SWB_DEFAULTS.overlapM, unit: 'm' },
+                { id: 'fpFloorM2', label: 'FP floor above highest ground under the arc', type: 'number', min: 20, max: 120, step: 1, default: SWB_DEFAULTS.fpFloorM, unit: 'm' },
+                { id: 'fpBandFt2', label: 'FP band (ceiling = floor + band)', type: 'number', min: 7, max: 100, step: 1, default: SWB_DEFAULTS.fpBandFt, unit: 'ft' },
+                { id: 'overlapM2', label: 'Overlap between connected arcs — target and hard line (steps every band − overlap)', type: 'number', min: 2, max: 10, step: 0.5, default: SWB_DEFAULTS.overlapM, unit: 'm' },
+                { id: 'corridorFt', label: 'Route a leg through a zone it skims within … of (one line, not two; 0 = off)', type: 'number', min: 0, max: 500, step: 10, default: SWB_DEFAULTS.corridorFt, unit: 'ft' },
                 { id: 'droneMaxAglFt', label: 'Drone must stay under (caps relief per arc)', type: 'number', min: 100, max: 400, step: 5, default: SWB_DEFAULTS.droneMaxAglFt, unit: 'ft AGL' },
                 { id: 'ffzFloorAglFt', label: 'Zone floor above highest ground in footprint', type: 'number', min: 30, max: 300, step: 5, default: SWB_DEFAULTS.ffzFloorAglFt, unit: 'ft' },
                 { id: 'ffzCeilAglFt', label: 'Zone ceiling above lowest ground in footprint', type: 'number', min: 50, max: 400, step: 1, default: SWB_DEFAULTS.ffzCeilAglFt, unit: 'ft' },
