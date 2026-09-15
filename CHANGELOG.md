@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-15 — Site Setup Tools latest v4.295: SpiderWeb purge cannot double-start (dev only)
+
+- "Remove all DRAFT SW" could be started twice and the second loop logged 404s for ids the first had already deleted. It now refuses to start while running, treats 404 as already gone, and reports how many DRAFT SW entities remain on the site when it finishes.
+
 ## 2026-09-15 — Site Setup Tools latest v4.294: SpiderWeb — 52 m floor, 2 m overlap, corridor cleanup (dev only)
 
 - New defaults: FP floor 52 m (170.6 ft), band 26 ft, overlap 2 m. Two metres is now both the target and the hard line; the panel and Control Panel refuse anything lower. Stored old defaults migrate once.

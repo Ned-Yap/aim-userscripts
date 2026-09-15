@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.294
+// @version      4.295
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.294';
+    const SCRIPT_VERSION = '4.295';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -9368,7 +9368,7 @@
     }
 
     // ============================================================
-    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.294)
+    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.295)
     // Design doc: ShortKeys/AIM_Unshielded_SpiderWeb_Design.md.
     // FFZ per asset (mitered outset, touching buffers unioned), straight
     // point-to-point FPs at a 54 m floor / +20 ft band with AUTOMATIC DEM
@@ -11062,9 +11062,12 @@
             showToast('Commit aborted — see panel log', 'rgba(255,96,96,0.55)');
         } finally { st.committing = false; swbRenderPanel(); }
     }
-    let swbPurgeArm = 0;
+    let swbPurgeArm = 0, swbPurging = false;
     async function swbRemoveDrafts() {
         if (liteBlockedWrite('remove DRAFT SW entities')) return;
+        if (swbPurging) { showToast('Purge already running…'); return; }
+        swbPurging = true;
+        try {
         const csrf = getCsrfToken();
         if (!csrf) { showToast('No CSRF token', 'rgba(255,96,96,0.55)'); return; }
         const sid = getCurrentSiteID(); if (!sid) return;
@@ -11081,14 +11084,17 @@
         for (const e of order) {
             try {
                 const r = await fetch(`/map_objects/${e.id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
-                if (r.status === 200 || r.status === 204) ok++; else { fail++; logL(`✗ ${e.name} (#${e.id}): server ${r.status}`); if (r.status === 403) break; }
+                if (r.status === 200 || r.status === 204 || r.status === 404) ok++;   // 404 = already gone
+                else { fail++; logL(`✗ ${e.name} (#${e.id}): server ${r.status}`); if (r.status === 403) break; }
             } catch (err) { fail++; logL(`✗ ${e.name}: ${err && err.message || err}`); }
         }
         st.createdIds = [];
         try { await fetchMapObjects(sid, true); } catch (e) {}
-        logL(`PURGE done: ${ok} deleted${fail ? `, ${fail} failed` : ''}`);
-        showToast(fail ? `Purge: ${ok} deleted, ${fail} failed` : `Purge ✓ ${ok} DRAFT SW entities deleted`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+        const left = (((mapObjectsBySite[sid] || {}).entities) || []).filter(e => (e.type === 15 || e.type === 16) && typeof e.name === 'string' && /^DRAFT SW\b/.test(e.name)).length;
+        logL(`PURGE done: ${ok} deleted${fail ? `, ${fail} failed` : ''} · ${left} DRAFT SW entit${left === 1 ? 'y' : 'ies'} left on the site`);
+        showToast(fail ? `Purge: ${ok} deleted, ${fail} failed` : `Purge ✓ ${ok} deleted · ${left} left`, fail ? 'rgba(255,96,96,0.55)' : undefined);
         swbRenderPanel();
+        } finally { swbPurging = false; }
     }
     async function swbUndo() {
         const st = swbState;
