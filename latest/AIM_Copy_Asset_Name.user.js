@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.286
+// @version      4.287
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.286';
+    const SCRIPT_VERSION = '4.287';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -9368,7 +9368,7 @@
     }
 
     // ============================================================
-    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.286) — PREVIEW ONLY
+    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.287) — PREVIEW ONLY
     // Design doc: ShortKeys/AIM_Unshielded_SpiderWeb_Design.md.
     // FFZ per asset (mitered outset, touching buffers unioned), straight
     // point-to-point FPs at a 54 m floor / +20 ft band with AUTOMATIC DEM
@@ -9437,8 +9437,11 @@
             elevGmSet(SWB_THRESH_KEY, JSON.stringify(stored));
         } catch (e) { console.warn(`${TAG} spiderweb: could not persist ${key}`, e); }
     }
+    // Control Panel ids that were renamed: the panel echoes ITS stored value per id on every load,
+    // so a renamed id is the only way a new default reaches users who touched the old one.
+    const SWB_CP_ALIAS = { hubGainRatio2: 'hubGainRatio' };
     function handleSpiderwebToggle(msg) {
-        const id = msg.toggleId;
+        const id = SWB_CP_ALIAS[msg.toggleId] || msg.toggleId;
         if (id === 'swb-master') {
             const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
             if (v === swbMasterEnabled) return;
@@ -10591,6 +10594,7 @@
                 <button data-swb-stage style="background:rgba(43,140,255,0.15);border:1px solid rgba(43,140,255,0.55);color:#8ec2ff;border-radius:5px;padding:3px 12px;cursor:pointer;font-weight:600;">🕸 Stage</button>
                 <button data-swb-clear style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.25);color:#dfe9f0;border-radius:5px;padding:3px 10px;cursor:pointer;">Clear</button>
                 <button data-swb-copy ${st ? '' : 'disabled'} style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.25);color:#dfe9f0;border-radius:5px;padding:3px 10px;cursor:pointer;">Copy report</button>
+                <button data-swb-defaults title="Reset every SpiderWeb setting to the current defaults" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.25);color:#dfe9f0;border-radius:5px;padding:3px 10px;cursor:pointer;">↺ Defaults</button>
             </div>
             <div style="padding:8px 12px;overflow:auto;flex:1;">${body}</div>`;
         // drag
@@ -10603,6 +10607,7 @@
             if (ev.target.closest('[data-swb-close]')) { swbClosePanel(); return; }
             if (ev.target.closest('[data-swb-stage]')) { swbReadPanelParams(wrap); swbStage(); return; }
             if (ev.target.closest('[data-swb-clear]')) { swbClear(); swbRenderPanel(); return; }
+            if (ev.target.closest('[data-swb-defaults]')) { swbThresholds = { ...SWB_DEFAULTS }; try { elevGmSet(SWB_THRESH_KEY, JSON.stringify({ ...SWB_DEFAULTS, tunedV: 2 })); } catch (e) {} showToast('SpiderWeb settings reset to defaults'); swbRenderPanel(); return; }
             if (ev.target.closest('[data-swb-copy]')) {
                 const txt = swbReportText();
                 try { navigator.clipboard.writeText(txt).then(() => showToast('SpiderWeb report copied'), () => showToast('Copy failed', 'rgba(255,96,96,0.55)')); }
@@ -11008,7 +11013,7 @@
                 { id: 'hubRadiusFt', label: 'Hub star radius', type: 'number', min: 500, max: 10000, step: 100, default: SWB_DEFAULTS.hubRadiusFt, unit: 'ft' },
                 { id: 'hubMaxSpokes', label: 'Most spokes on one hub', type: 'number', min: 3, max: 20, step: 1, default: SWB_DEFAULTS.hubMaxSpokes },
                 { id: 'hubBaseReachFt', label: 'Hub may spoke straight to a base zone within', type: 'number', min: 500, max: 20000, step: 100, default: SWB_DEFAULTS.hubBaseReachFt, unit: 'ft' },
-                { id: 'hubGainRatio', label: 'Hub spokes must save … ft of summed way-home per ft (0 = any)', type: 'number', min: 0, max: 20, step: 0.5, default: SWB_DEFAULTS.hubGainRatio },
+                { id: 'hubGainRatio2', label: 'Hub spokes must save … ft of summed way-home per ft (0 = any)', type: 'number', min: 0, max: 20, step: 0.05, default: SWB_DEFAULTS.hubGainRatio },
                 { id: 'legGainRatio', label: 'Restored legs must save … ft per ft (0 = fix any long detour)', type: 'number', min: 0, max: 20, step: 0.5, default: SWB_DEFAULTS.legGainRatio },
                 { id: 'baseLegGainRatio', label: 'Direct base legs must save … ft per ft (0 = the base star)', type: 'number', min: 0, max: 20, step: 0.5, default: SWB_DEFAULTS.baseLegGainRatio },
                 { id: 'approachFt', label: 'Minimum landing arc length', type: 'number', min: 25, max: 500, step: 5, default: SWB_DEFAULTS.approachFt, unit: 'ft' },

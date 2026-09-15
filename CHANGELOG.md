@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-14 — Site Setup Tools latest v4.287: SpiderWeb — hub gain ratio really moves to 0.1, Defaults button (dev only)
+
+- **Fix:** the Control Panel echoes its own saved copy of every field on load, so the hub gain ratio stayed at 1 for anyone who had touched it, and the full mesh came up with zero hubs. The field is re-registered under a new id so the new default applies. A "↺ Defaults" button in the SpiderWeb panel resets every setting.
+
 ## 2026-09-14 — Site Setup Tools latest v4.286: SpiderWeb — full mesh by default, hubs add to the mesh, saved hub ratio migrated (dev only)
 
 - **Web density** is now a choice, and the default is "full mesh": every neighbouring pair of zones in the triangulation gets a leg (under a 6,000 ft cap) instead of the long side of each triangle being dropped. On the Cobra dup that is 615 legs instead of 289.
