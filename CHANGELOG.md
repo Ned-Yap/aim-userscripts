@@ -6,6 +6,13 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-15 — Site Setup Tools latest v4.293: SpiderWeb — fewest-vertex stairs, corridor merge, purge button (dev only)
+
+- **Exact stair walker.** The greedy stair walk is replaced by an exact search that finds the fewest arcs a leg can legally have (54 m over the highest ground, drone under 200 ft over the lowest, 3 m overlap, zone handoff). On the Cobra dup that is 976 arcs instead of 1,028 at the same settings; with a 51 m floor and 30 ft band it is 669. The old "descent head room" rule, which was inflating step counts, is gone.
+- **Near-parallel legs merge.** A leg that passes within 100 ft of a hub or junction is now routed through it and the duplicate half is dropped, so two legs no longer ride the same corridor into a pad with separate stairs.
+- Every arc meeting at a hub or junction now shares a pinned floor window, so the "junction bands agree" gate holds by construction.
+- **🗑 Remove all DRAFT SW** button: deletes every entity on the site whose name starts with DRAFT SW, flight paths first, through Delete Guard. Works after a reload when Undo no longer knows this run's ids.
+
 ## 2026-09-14 — Site Setup Tools latest v4.292: SpiderWeb — flight-path body matches the native shape (dev only)
 
 - **Fix:** on a site with no flight path to clone, every FP create was refused with a generic 400 (the first live commit wrote all 179 zones, then 0 of 455 paths). A native flight path carries `restrictions: []` and no `asset_waypoints` field; the fallback body sent both as null. It now mirrors the native shape. Re-running Commit skips the zones already on the site by name and writes the paths.

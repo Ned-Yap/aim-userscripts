@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.292
+// @version      4.293
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.292';
+    const SCRIPT_VERSION = '4.293';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -9368,7 +9368,7 @@
     }
 
     // ============================================================
-    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.292)
+    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.293)
     // Design doc: ShortKeys/AIM_Unshielded_SpiderWeb_Design.md.
     // FFZ per asset (mitered outset, touching buffers unioned), straight
     // point-to-point FPs at a 54 m floor / +20 ft band with AUTOMATIC DEM
@@ -9399,6 +9399,7 @@
         hubKeepLegs: true,                        // hubs ADD spokes on top of the mesh (false = a star replaces the legs between its members)
         junctions: true,                          // where two legs cross, share a waypoint so the drone can switch legs there
         junctionMinFt: 60,                        // no junction closer than this to a leg end (would leave a stub)
+        snapNodeFt: 100,                          // a leg passing within this of a hub/junction is routed THROUGH it (kills near-parallel duplicates)
         legGainRatio: 0,                          // same test for legs restored by the way-home pass (0 = fix any long detour)
         baseLegGainRatio: 0,                      // same test for direct zone→base legs (0 = the base star: any zone with a long detour gets a straight shot home)
         approachFt: 100,                          // the arc that lands on a zone is at least this long when the ground allows
@@ -9621,6 +9622,73 @@
         if (x < 0 || x >= dem.w || y < 0 || y >= dem.h) return null;
         const v = dem.vals[y * dem.w + x];
         return Number.isFinite(v) ? v : null;
+    }
+
+
+    // Exact minimum-arc stairs: for each candidate integer floor f the set of samples an arc at f may
+    // cover is {g : f - cap <= g <= f - floorAdd}; an arc is a run of such samples. Ending an arc as far
+    // as possible never hurts (a later start has fewer samples to satisfy), so the only real choice is the
+    // floor of each arc — a DP over (sample, floor) with |Δfloor| <= step finds the fewest arcs exactly.
+    // Returns arcs [{s,e,floorM,ceilM,maxGm,minGm}] or null when no compliant stair exists.
+    function swbWalkDP(g, floorAdd, bandM, stepM, capM, rA, rB, appIdx, useApproach) {
+        const n = g.length;
+        if (n < 2) return null;
+        let gmin = Infinity, gmax = -Infinity;
+        for (const v of g) { if (v < gmin) gmin = v; if (v > gmax) gmax = v; }
+        const fLo = Math.ceil(gmin + floorAdd), fHi = Math.floor(gmax + capM);
+        if (fHi < fLo) return null;
+        const F = fHi - fLo + 1;
+        const stepI = Math.floor(stepM + 1e-9);
+        // reach[f][i] = farthest sample e such that every sample in [i..e] is valid at floor f (e >= i)
+        const reach = new Array(F);
+        for (let k = 0; k < F; k++) {
+            const f = fLo + k, lo = f - capM, hi = f - floorAdd;
+            const r = new Int32Array(n);
+            let run = -1;
+            for (let i = n - 1; i >= 0; i--) { const ok = g[i] >= lo - 1e-9 && g[i] <= hi + 1e-9; if (!ok) { run = -1; r[i] = -1; } else { if (run < 0) run = i; r[i] = run; } }
+            reach[k] = r;
+        }
+        const inRange = (f, r) => !r || (f >= r[0] && f <= r[1]);
+        const INF = 1e9;
+        const dp = new Int32Array(n * F).fill(INF), par = new Int32Array(n * F).fill(-1);
+        const idx = (i, k) => i * F + k;
+        const tryArc = (i, k, cost, from) => {
+            const e0 = reach[k][i];
+            if (e0 < i + 1) return;
+            const f = fLo + k;
+            const ends = [];
+            if (e0 >= n - 1) { if (inRange(f, rB)) ends.push(n - 1); }
+            else ends.push(e0);
+            if (useApproach && appIdx > i && e0 > appIdx) ends.push(appIdx);   // stop at the approach line so the landing arc is long
+            for (const e of ends) {
+                if (useApproach && e > appIdx && e < n - 1) continue;         // no boundary inside the approach
+                if (e === n - 1 && !inRange(f, rB)) continue;
+                const j = idx(e, k);
+                if (cost < dp[j]) { dp[j] = cost; par[j] = from; }
+            }
+        };
+        for (let k = 0; k < F; k++) if (inRange(fLo + k, rA)) tryArc(0, k, 1, -1);
+        for (let i = 1; i < n - 1; i++) {
+            for (let k = 0; k < F; k++) {
+                const c = dp[idx(i, k)]; if (c >= INF) continue;
+                for (let k2 = Math.max(0, k - stepI); k2 <= Math.min(F - 1, k + stepI); k2++) tryArc(i, k2, c + 1, idx(i, k));
+            }
+        }
+        let best = -1, bestC = INF;
+        for (let k = 0; k < F; k++) { const c = dp[idx(n - 1, k)]; if (c < bestC) { bestC = c; best = idx(n - 1, k); } }
+        if (best < 0) return null;
+        const chain = [];
+        for (let j = best; j >= 0; j = par[j]) chain.push(j);
+        chain.reverse();
+        const arcs = [];
+        let s0 = 0;
+        for (const j of chain) {
+            const e = Math.floor(j / F), f = fLo + (j % F);
+            let mx = -Infinity, mn = Infinity; for (let t = s0; t <= e; t++) { if (g[t] > mx) mx = g[t]; if (g[t] < mn) mn = g[t]; }
+            arcs.push({ s: s0, e, floorM: f, ceilM: Math.floor(f + bandM), maxGm: mx, minGm: mn });
+            s0 = e;
+        }
+        return arcs;
     }
 
     // ---------- stage ----------
@@ -10269,13 +10337,61 @@
             }
             if (made) logL(`${made} crossing(s) turned into junctions (${junctions.length} junction points)`);
         }
+        // ---- 5c. near-node snap: a leg that passes within snapNodeFt of a hub or junction (not its own end)
+        //          is routed through that node; the duplicate half that already exists is dropped ----
+        if (th.snapNodeFt > 0) {
+            const snapM = M(th.snapNodeFt);
+            const pairKey = (a, b) => a < b ? `${a}:${b}` : `${b}:${a}`;
+            let snapped = 0, dropped = 0;
+            for (let pass = 0; pass < 4; pass++) {
+                let changed = false;
+                const have = new Set(legs.map(l => pairKey(l.a, l.b)));
+                for (let i = 0; i < legs.length; i++) {
+                    const L = legs[i];
+                    const dx = L.pb.x - L.pa.x, dy = L.pb.y - L.pa.y, L2 = dx * dx + dy * dy || 1;
+                    let best = null;
+                    const minEndM = M(th.junctionMinFt);
+                    allNodes.forEach((nd, ni) => {
+                        if (nd.kind === 'zone' || ni === L.a || ni === L.b) return;
+                        if (L.snapped && L.snapped.has(ni)) return;                      // never re-split at a node an ancestor already used (two nodes near each other ping-pong otherwise)
+                        const t = ((nd.x - L.pa.x) * dx + (nd.y - L.pa.y) * dy) / L2;
+                        if (t < 0.03 || t > 0.97) return;
+                        const d = Math.hypot(nd.x - (L.pa.x + t * dx), nd.y - (L.pa.y + t * dy));
+                        if (d > snapM) return;
+                        if (Math.hypot(nd.x - L.pa.x, nd.y - L.pa.y) < minEndM || Math.hypot(nd.x - L.pb.x, nd.y - L.pb.y) < minEndM) return;   // would leave a stub
+                        if (!best || d < best.d) best = { ni, d, t };
+                    });
+                    if (!best) continue;
+                    if (snapped > legs.length * 3) { logL('⚠ snap pass stopped (split cap)'); break; }
+                    const nd = allNodes[best.ni];
+                    const first = { a: L.a, b: best.ni, ea: L.ea, eb: null, pa: L.pa, pb: { x: nd.x, y: nd.y }, flags: [], arcs: [], added: L.added };
+                    const second = { a: best.ni, b: L.b, ea: null, eb: L.eb, pa: { x: nd.x, y: nd.y }, pb: L.pb, flags: [], arcs: [], added: L.added };
+                    [first, second].forEach(q => { q.lenM = Math.hypot(q.pb.x - q.pa.x, q.pb.y - q.pa.y); q.snapped = new Set(L.snapped || []); q.snapped.add(best.ni); });
+                    legs.splice(i, 1); have.delete(pairKey(L.a, L.b));
+                    [first, second].forEach(q => { const k = pairKey(q.a, q.b); if (have.has(k)) { dropped++; return; } have.add(k); legs.push(q); });
+                    snapped++; changed = true; i--;
+                }
+                if (!changed) break;
+            }
+            if (snapped) logL(`${snapped} leg(s) routed through a nearby hub/junction (≤ ${th.snapNodeFt} ft), ${dropped} duplicate half(s) dropped`);
+        }
         await swbYield();
         // ---- 6. stairs: walk the DEM along each leg ----
         const bandM = M(th.fpBandFt), ovM = th.overlapM, floorAdd = th.fpFloorM;
         const reliefMaxM = Math.max(0.5, M(th.droneMaxAglFt) - floorAdd - 1);   // −1 m rounding slack: the drone (at the floor) must stay under droneMaxAgl over the LOWEST ground of the arc
-        const stepMax = bandM - ovM;                                             // consecutive floors may differ by at most band − overlap
+        const stepMax = bandM - ovM;
+        const capM = M(th.droneMaxAglFt);   // drone (at the floor) may sit at most this far above the lowest ground under an arc                                             // consecutive floors may differ by at most band − overlap
         const sampleM = M(th.sampleFt);
         let totalArcs = 0, totalVerts = 0, totalLenM = 0;
+        // hubs and junctions: every arc meeting there must share ≥ overlap — pin a floor window of width
+        // (band − overlap) at the node, starting at the lowest legal floor over the node's own ground
+        const nodeRange = new Map();
+        allNodes.forEach((nd, i) => {
+            if (nd.kind === 'zone') return;
+            const gN = gXY(nd); if (gN === null) return;
+            const lo = Math.ceil(gN / M_TO_FT + floorAdd), hi = Math.min(Math.floor(gN / M_TO_FT + capM), lo + Math.floor(bandM - ovM + 1e-9));
+            if (hi >= lo) nodeRange.set(i, [lo, hi]);
+        });
         legs.forEach((l, li) => {
             const A = allNodes[l.a], B = allNodes[l.b];
             let n = Math.max(2, Math.ceil(l.lenM / sampleM) + 1);
@@ -10311,14 +10427,22 @@
             // heading so the next arc has room — rolling ground no longer forces a step every 3 m.
             const droneMaxM = M(th.droneMaxAglFt);
             const zoneRange = (z) => (!z || z.floorM === null) ? null : [Math.ceil(z.floorM + ovM - bandM), Math.floor(z.ceilM - ovM)];   // floors that give ≥ overlapM with the zone band
-            const arcs = [];
-            let s = 0, prevFloor = null, guard = 0;
-            const rA = zoneRange(zA), rB = zoneRange(zB);
+            const rA = zA ? zoneRange(zA) : (nodeRange.get(l.a) || null), rB = zB ? zoneRange(zB) : (nodeRange.get(l.b) || null);
             n = pts.length;
             // approach index: the last sample that still leaves ≥ approachFt to the end
             const cum = [0]; for (let i = 1; i < n; i++) cum.push(cum[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y));
             const approachM = M(th.approachFt);
             let appIdx = n - 1; while (appIdx > 0 && cum[n - 1] - cum[appIdx] < approachM) appIdx--;
+            // exact minimum-arc stairs first; the greedy interval walk below only runs as a fallback
+            // ladder: handoff at the 3 m target with the approach rule → without it → handoff at the 2 m hard line → without approach
+            const zoneRange2 = (z) => (!z || z.floorM === null) ? null : [Math.ceil(z.floorM + 2 - bandM), Math.floor(z.ceilM - 2)];
+            const rA2 = zA ? zoneRange2(zA) : rA, rB2 = zB ? zoneRange2(zB) : rB;
+            let arcs = swbWalkDP(g, floorAdd, bandM, bandM - ovM, capM, rA, rB, appIdx, true)
+                || swbWalkDP(g, floorAdd, bandM, bandM - ovM, capM, rA, rB, appIdx, false)
+                || swbWalkDP(g, floorAdd, bandM, bandM - ovM, capM, rA2, rB2, appIdx, true)
+                || swbWalkDP(g, floorAdd, bandM, bandM - ovM, capM, rA2, rB2, appIdx, false);
+            if (!arcs) { arcs = []; l.flags.push('no exact stair found — greedy fallback'); }
+            let s = arcs.length ? n - 1 : 0, prevFloor = null, guard = 0;
             while (s < n - 1 && guard++ < 5000) {
                 let e = s + 1, maxG = Math.max(g[s], g[e]), minG = Math.min(g[s], g[e]);
                 const range = (mx, mn, terminal) => {
@@ -10575,13 +10699,14 @@
                         <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input data-swb-dry type="checkbox" ${st.dryRun === false ? '' : 'checked'}>dry run</label>
                         <label style="display:flex;align-items:center;gap:4px;cursor:pointer;" title="Re-check every written vertex against Percepto's own DEM; floors only go up"><input data-swb-p="regroundPercepto" type="checkbox" ${th.regroundPercepto ? 'checked' : ''}>Percepto DEM check</label>
                         <button data-swb-commit ${st.committing ? 'disabled' : ''} style="background:rgba(255,225,77,0.13);border:1px solid rgba(255,225,77,0.5);color:#ffe14d;border-radius:5px;padding:2px 10px;cursor:pointer;font-weight:600;">${st.dryRun === false ? '🚀 Commit (click twice)' : '🧪 Dry run'}</button>
+                        <button data-swb-purge title="Delete EVERY entity on this site whose name starts with DRAFT SW (flight paths first). Delete Guard banks each one." style="background:rgba(255,96,96,0.12);border:1px solid rgba(255,96,96,0.45);color:#ff9b9b;border-radius:5px;padding:2px 10px;cursor:pointer;">🗑 Remove all DRAFT SW (click twice)</button>
                         <button data-swb-undo ${(st.createdIds && st.createdIds.length && !st.committing) ? '' : 'disabled'} style="background:rgba(255,96,96,0.12);border:1px solid rgba(255,96,96,0.45);color:#ff9b9b;border-radius:5px;padding:2px 10px;cursor:pointer;">↶ Undo run (click twice)${st.createdIds && st.createdIds.length ? ` · ${st.createdIds.length}` : ''}</button>
                     </div>
                     ${(st.commitLog && st.commitLog.length) ? `<div data-swb-log style="margin-top:6px;max-height:180px;overflow:auto;font-family:ui-monospace,Menlo,monospace;font-size:10.5px;line-height:1.35;background:rgba(0,0,0,0.25);border-radius:5px;padding:4px 6px;">${st.commitLog.slice(-40).map(x => `<div>${esc(x)}</div>`).join('')}</div>` : ''}
                 </div>
                 <div style="margin-top:8px;opacity:0.7;">Preview until committed. Cyan dots = leg ends on zone edges · white dots = stair steps · magenta = hubs (filled) and junctions (rings) · yellow = base zones · orange = flagged · red dashed = dropped assets.</div>`;
         } else {
-            body = `<div style="opacity:0.8">Stage a web for the current site. MSL (mountain-terrain) sites only. Every non-EMPTY asset gets a zone; legs are straight, stop on the zone edge, and get automatic stair steps from the DEM. Nothing is written in this version.</div>`;
+            body = `<div style="margin-bottom:8px;"><button data-swb-purge style="background:rgba(255,96,96,0.12);border:1px solid rgba(255,96,96,0.45);color:#ff9b9b;border-radius:5px;padding:2px 10px;cursor:pointer;">🗑 Remove all DRAFT SW on this site (click twice)</button></div><div style="opacity:0.8">Stage a web for the current site. MSL (mountain-terrain) sites only. Every non-EMPTY asset gets a zone; legs are straight, stop on the zone edge, and get automatic stair steps from the DEM. Nothing is written in this version.</div>`;
         }
         wrap.innerHTML = `
             <div data-swb-drag style="cursor:move;padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid rgba(43,140,255,0.3);">
@@ -10610,6 +10735,7 @@
                 ${num('baseLegGainRatio', 'base leg ratio', 0.5, 'A direct zone→base leg must save this many ft of summed way-home per ft (0 = the base star)')}
                 ${num('hubMaxSpokes', 'max spokes', 1, 'Most spokes on one hub')}
                 ${num('approachFt', 'approach ft', 10, 'Landing arc is at least this long when the ground allows')}
+                ${num('snapNodeFt', 'snap node ft', 10, 'A leg passing within this of a hub or junction is routed through it; 0 = off')}
                 ${num('mergeGapFt', 'merge gap ft', 5, 'Zones closer than this merge into one')}
                 ${num('hubClearFt', 'hub clear ft', 10, 'A hub sits at least this far from any zone edge')}
                 ${num('baseZoneFt', 'base zone ft', 10, 'A base outside every zone gets a square zone of this side')}
@@ -10640,6 +10766,11 @@
                 const now = Date.now();
                 if (now - swbCommitArm > 1600) { swbCommitArm = now; showToast('Click Commit again within 1.6 s to WRITE to Percepto', 'rgba(255,225,77,0.55)'); return; }
                 swbCommitArm = 0; swbCommit(false); return;
+            }
+            if (ev.target.closest('[data-swb-purge]')) {
+                const now = Date.now();
+                if (now - swbPurgeArm > 1600) { swbPurgeArm = now; showToast('Click again within 1.6 s to delete every DRAFT SW entity on this site', 'rgba(255,96,96,0.55)'); return; }
+                swbPurgeArm = 0; swbRemoveDrafts(); return;
             }
             if (ev.target.closest('[data-swb-undo]')) {
                 const now = Date.now();
@@ -10867,6 +10998,34 @@
             logL(`RUN ABORTED: ${e && e.message ? e.message : e}`);
             showToast('Commit aborted — see panel log', 'rgba(255,96,96,0.55)');
         } finally { st.committing = false; swbRenderPanel(); }
+    }
+    let swbPurgeArm = 0;
+    async function swbRemoveDrafts() {
+        if (liteBlockedWrite('remove DRAFT SW entities')) return;
+        const csrf = getCsrfToken();
+        if (!csrf) { showToast('No CSRF token', 'rgba(255,96,96,0.55)'); return; }
+        const sid = getCurrentSiteID(); if (!sid) return;
+        await fetchMapObjects(sid, true);
+        const ents = ((mapObjectsBySite[sid] || {}).entities) || [];
+        const drafts = ents.filter(e => (e.type === 15 || e.type === 16) && typeof e.name === 'string' && /^DRAFT SW\b/.test(e.name));
+        if (!drafts.length) { showToast('No DRAFT SW entities on this site'); return; }
+        const st = swbState || (swbState = { sid, zones: [], legs: [], hubs: [], junctions: [], gates: [], dropped: [], skippedEmpty: [], bases: [], runLog: [], thresholds: { ...swbThresholds }, limitFt: 0, totalArcs: 0, totalVerts: 0, totalLenM: 0, nodes: [] });
+        st.commitLog = st.commitLog || [];
+        const logL = (m) => { st.commitLog.push(m); console.log(`${TAG} spiderweb purge: ${m}`); swbRenderPanelSoon(); };
+        const order = drafts.slice().sort((a, b) => (a.type === 15 ? 0 : 1) - (b.type === 15 ? 0 : 1));
+        logL(`PURGE: deleting ${order.filter(e => e.type === 15).length} FP + ${order.filter(e => e.type === 16).length} FFZ named DRAFT SW … (Delete Guard banks each)`);
+        let ok = 0, fail = 0;
+        for (const e of order) {
+            try {
+                const r = await fetch(`/map_objects/${e.id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
+                if (r.status === 200 || r.status === 204) ok++; else { fail++; logL(`✗ ${e.name} (#${e.id}): server ${r.status}`); if (r.status === 403) break; }
+            } catch (err) { fail++; logL(`✗ ${e.name}: ${err && err.message || err}`); }
+        }
+        st.createdIds = [];
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        logL(`PURGE done: ${ok} deleted${fail ? `, ${fail} failed` : ''}`);
+        showToast(fail ? `Purge: ${ok} deleted, ${fail} failed` : `Purge ✓ ${ok} DRAFT SW entities deleted`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+        swbRenderPanel();
     }
     async function swbUndo() {
         const st = swbState;
@@ -11272,6 +11431,7 @@
                 { id: 'hubs', label: 'Propose hubs', type: 'boolean', default: SWB_DEFAULTS.hubs },
                 { id: 'junctions', label: 'Shared waypoint where two legs cross', type: 'boolean', default: SWB_DEFAULTS.junctions },
                 { id: 'junctionMinFt', label: 'No junction closer than … to a leg end', type: 'number', min: 20, max: 300, step: 10, default: SWB_DEFAULTS.junctionMinFt, unit: 'ft' },
+                { id: 'snapNodeFt', label: 'Route a leg through a hub/junction it passes within … of (0 = off)', type: 'number', min: 0, max: 500, step: 10, default: SWB_DEFAULTS.snapNodeFt, unit: 'ft' },
                 { id: 'hubRadiusFt', label: 'Hub star radius', type: 'number', min: 500, max: 10000, step: 100, default: SWB_DEFAULTS.hubRadiusFt, unit: 'ft' },
                 { id: 'hubMaxSpokes', label: 'Most spokes on one hub', type: 'number', min: 3, max: 20, step: 1, default: SWB_DEFAULTS.hubMaxSpokes },
                 { id: 'hubBaseReachFt', label: 'Hub may spoke straight to a base zone within', type: 'number', min: 500, max: 20000, step: 100, default: SWB_DEFAULTS.hubBaseReachFt, unit: 'ft' },
