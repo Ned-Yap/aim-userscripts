@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.31
+// @version      0.32
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.31';
+    const SCRIPT_VERSION = '0.32';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -3824,7 +3824,7 @@
         const q = fdFilter.trim().toLowerCase();
         const byClient = {};
         sites.forEach(id => {
-            const nm = siteName(id), cl = (rawSites[id].raw && siteEntryClient(rawSites[id].raw)) || clientOf(nm) || 'Other';
+            const nm = siteName(id), cl = fdClientOfId(id);   // single source of truth for the client key (header, select-all, KML folders)
             if (q && !(nm.toLowerCase().includes(q) || cl.toLowerCase().includes(q) || id === q)) return;
             (byClient[cl] = byClient[cl] || []).push(id);
         });
@@ -3865,6 +3865,7 @@
                 : `<span data-ft="fd-export" style="cursor:pointer;color:${fdSelected.size ? '#5fff5f' : '#555'};font-weight:bold">⬇ Export ${fdSelected.size} site(s) as ZIP</span>`)
             + '<span style="color:#666">per-site JSON + CSV, combined ALL-*.csv, README — nothing is written to Percepto</span>'
             + '</div>');
+        out.push(renderKmlExportRow());   // v0.32: ⭕ site circles / 🗺 site setups KML
         // browse
         if (fdBrowse) {
             const b = fdBrowse;
@@ -3904,7 +3905,289 @@
         const again = panelEl && panelEl.querySelector('#aim-fd-list');
         if (again) again.scrollTop = st;
     }
-    function fdClientOfId(id) { const raw = rawSites && rawSites[id] && rawSites[id].raw; return (raw && siteEntryClient(raw)) || clientOf(siteName(id)) || 'Other'; }
+    // ==================================================================
+    // 🗺 FLEET KML EXPORTS (v0.32) — from the Fleet Data site picker:
+    //   ⭕ Site circles: one ground circle per site that ENCLOSES every
+    //      entity of its setup (minimum enclosing circle + pad) → one KML,
+    //      folder per client.
+    //   🗺 Site setups: every picked site's full setup in ONE KML with the
+    //      Site Setup Analyzer's folder layout + styles (2D or 3D), nested
+    //      client → site → entity-type folders.
+    // Live /map_objects/ per site (fdFetchSetup, 10-min cache), read-only.
+    // ==================================================================
+    const KX_FT_TO_M = 0.3048;
+    let kxCirclePadFt = 100;
+    let kxMode = '2D';
+    let kxInclude = { assets: true, ffzs: true, fps: true, nfzs: true, markers: true, base: true, safe: true };
+
+    // Client grouping for the picker: "Exxon 40 - Atkins…" → "Exxon",
+    // "Diamondback Cobra 01" → "Diamondback Cobra", "CHS - McPherson" → "CHS".
+    // (clientOf() keeps the raw "Exxon 40" prefix — the sweep's chips rely on it.)
+    function clientGroupOf(name) {
+        let s = String(name || '').trim();
+        const i = s.indexOf(' - ');
+        if (i > 0) s = s.slice(0, i);
+        const toks = s.split(/\s+/).filter(Boolean);
+        while (toks.length > 1 && /\d/.test(toks[toks.length - 1])) toks.pop();
+        return toks.join(' ') || '(unnamed)';
+    }
+
+    const xmlEsc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[c]));
+    const kxCoords = (pts, alt) => (pts || []).filter(p => p && typeof p.lat === 'number' && typeof p.lng === 'number').map(p => `${p.lng},${p.lat},${alt != null ? alt : 0}`).join(' ');
+    function kxCloseRing(pts) {
+        if (!Array.isArray(pts) || pts.length < 2) return pts || [];
+        const a = pts[0], z = pts[pts.length - 1];
+        return (a.lat === z.lat && a.lng === z.lng) ? pts : pts.concat([a]);
+    }
+    function kxCircleRing(lat, lng, radiusM, n) {
+        const mLat = 111320, mLng = 111320 * Math.cos(lat * Math.PI / 180) || 1e-9;
+        const pts = [];
+        for (let i = 0; i <= n; i++) {
+            const t = (i / n) * 2 * Math.PI;
+            pts.push({ lat: lat + radiusM * Math.cos(t) / mLat, lng: lng + radiusM * Math.sin(t) / mLng });
+        }
+        return pts;
+    }
+    // Every geometry point of a setup (rings, arcs, points).
+    function kxAllPoints(entities) {
+        const out = [];
+        (entities || []).forEach(e => {
+            if (!e) return;
+            (entityCoords(e) || []).forEach(p => { if (p && typeof p.lat === 'number' && typeof p.lng === 'number') out.push(p); });
+            if (Array.isArray(e.arcs)) e.arcs.forEach(a => { if (a) { if (a.point_a && typeof a.point_a.lat === 'number') out.push(a.point_a); if (a.point_b && typeof a.point_b.lat === 'number') out.push(a.point_b); } });
+        });
+        return out;
+    }
+    // Minimum enclosing circle (Bădoiu–Clarkson iteration on a local
+    // equirectangular plane) — within ~1% of optimal, always encloses.
+    function kxEnclosingCircle(points) {
+        if (!points.length) return null;
+        const lat0 = points.reduce((s, p) => s + p.lat, 0) / points.length;
+        const mLat = 111320, mLng = 111320 * Math.cos(lat0 * Math.PI / 180) || 1e-9;
+        const xy = points.map(p => ({ x: (p.lng) * mLng, y: p.lat * mLat }));
+        let cx = xy.reduce((s, p) => s + p.x, 0) / xy.length, cy = xy.reduce((s, p) => s + p.y, 0) / xy.length;
+        const far = () => { let b = 0, d = 0; for (let i = 0; i < xy.length; i++) { const dd = Math.hypot(xy[i].x - cx, xy[i].y - cy); if (dd > d) { d = dd; b = i; } } return { i: b, d }; };
+        for (let k = 1; k <= 200; k++) { const f = far(); cx += (xy[f.i].x - cx) / (k + 1); cy += (xy[f.i].y - cy) / (k + 1); }
+        const r = far().d;   // radius = distance to the farthest point from the final centre → guaranteed to enclose
+        return { lat: cy / mLat, lng: cx / mLng, radiusM: r };
+    }
+
+    function kxStyles(mode) {
+        const m3 = mode === '3D';
+        const noFill = '<PolyStyle><fill>0</fill></PolyStyle>';
+        return [
+            '<Style id="asset_style"><LineStyle><color>ffb469ff</color><width>4</width></LineStyle>' + noFill + '</Style>',
+            '<Style id="asset_unshielded_style"><LineStyle><color>ff00a5ff</color><width>4</width></LineStyle>' + noFill + '</Style>',
+            '<Style id="asset_unreachable_style"><LineStyle><color>ffffaf5f</color><width>4</width></LineStyle>' + noFill + '</Style>',
+            '<Style id="asset_empty_style"><LineStyle><color>59ffffff</color><width>4</width></LineStyle>' + noFill + '</Style>',
+            `<Style id="freezone_style"><LineStyle><color>ff00ff00</color><width>2</width></LineStyle><PolyStyle>${m3 ? '<color>3300ff00</color>' : '<fill>0</fill>'}</PolyStyle></Style>`,
+            `<Style id="nofly_style"><LineStyle><color>ff0000ff</color><width>2</width></LineStyle><PolyStyle>${m3 ? '<color>330000ff</color>' : '<fill>0</fill>'}</PolyStyle></Style>`,
+            '<Style id="flightpath_style"><LineStyle><color>ffffff00</color><width>3</width></LineStyle>' + noFill + '</Style>',
+            '<Style id="generalmarker-general_style"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/paddle/purple-circle.png</href></Icon></IconStyle></Style>',
+            '<Style id="generalmarker-tower_style"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/shapes/flag.png</href></Icon></IconStyle></Style>',
+            '<Style id="generalmarker-hazard_style"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/shapes/caution.png</href></Icon></IconStyle></Style>',
+            '<Style id="basestation_style"><IconStyle><color>ff4fd5ff</color><Icon><href>http://maps.google.com/mapfiles/kml/shapes/heliport.png</href></Icon></IconStyle></Style>',
+            '<Style id="safezone_style"><IconStyle><color>ffb59eff</color><Icon><href>http://maps.google.com/mapfiles/kml/shapes/parking_lot.png</href></Icon></IconStyle></Style>',
+            '<Style id="sitecircle_style"><LineStyle><color>ffe6df7a</color><width>3</width></LineStyle><PolyStyle><color>22e6df7a</color></PolyStyle></Style>',
+            '<Style id="sitecenter_style"><IconStyle><scale>0.7</scale><color>ffe6df7a</color><Icon><href>http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png</href></Icon></IconStyle></Style>',
+        ].join('\n');
+    }
+    function kxAssetStyle(e) {
+        const sub = (e.custom && e.custom.poi_type_str) || '';
+        const mods = sub.split(' - ').slice(1).map(s => s.trim().toLowerCase());
+        const has = (m) => mods.some(x => x.includes(m));
+        if (e.is_unshielded || has('unshielded')) return 'asset_unshielded_style';
+        if (has('unreachable')) return 'asset_unreachable_style';
+        if (has('empty')) return 'asset_empty_style';
+        return 'asset_style';
+    }
+    function kxDesc(e, siteLabel) {
+        const L = [`<b>${xmlEsc(e.name || '')}</b>`, `Site: ${xmlEsc(siteLabel)}`, `Type: ${xmlEsc(FD_TYPE[e.type] || ('type ' + e.type))}`];
+        const sub = (e.custom && e.custom.poi_type_str) || e.general_marker_type || '';
+        if (sub) L.push(`Subtype: ${xmlEsc(sub)}`);
+        if (e.validated != null) L.push(`Validated: ${e.validated ? 'yes' : 'no'}`);
+        if (e.is_unshielded) L.push('Unshielded: yes');
+        const alt = fdAltFt(e); if (alt) L.push(`Altitude band: ${alt} ft MSL`);
+        if (e.description) L.push(xmlEsc(e.description));
+        L.push(`ID: ${e.id}`);
+        return `<![CDATA[${L.join('<br>')}]]>`;
+    }
+    function kxPolygon(ring, mode, extrude, altM, altMode) {
+        return `<Polygon>${extrude ? '<extrude>1</extrude>' : ''}<altitudeMode>${altMode}</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kxCoords(ring, altM)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
+    }
+    function kxAssetGeom(e, mode) {
+        const c = entityCoords(e) || [];
+        if (c.length < 3) return c[0] ? `<Point><altitudeMode>clampToGround</altitudeMode><coordinates>${kxCoords([c[0]])}</coordinates></Point>` : '';
+        const ring = kxCloseRing(c);
+        return mode === '3D' ? kxPolygon(ring, mode, true, 20 * KX_FT_TO_M, 'relativeToGround') : kxPolygon(ring, mode, false, 0, 'clampToGround');
+    }
+    function kxFfzGeom(e, mode) {
+        const c = entityCoords(e) || [];
+        if (c.length < 3) return '';
+        const ring = kxCloseRing(c);
+        if (mode === '3D') {
+            const r = e.restrictions || {};
+            if (r.minAlt == null) return '';
+            const minA = r.minAlt, maxA = r.maxAlt != null ? r.maxAlt : minA + 37;
+            const faces = [kxPolygon(ring, mode, false, minA, 'absolute'), kxPolygon(ring, mode, false, maxA, 'absolute')];
+            for (let i = 0; i < c.length; i++) {
+                const p1 = c[i], p2 = c[(i + 1) % c.length];
+                faces.push(`<Polygon><altitudeMode>absolute</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${p1.lng},${p1.lat},${minA} ${p2.lng},${p2.lat},${minA} ${p2.lng},${p2.lat},${maxA} ${p1.lng},${p1.lat},${maxA} ${p1.lng},${p1.lat},${minA}</coordinates></LinearRing></outerBoundaryIs></Polygon>`);
+            }
+            return `<MultiGeometry>${faces.join('')}</MultiGeometry>`;
+        }
+        return kxPolygon(ring, mode, false, 0, 'clampToGround');
+    }
+    function kxNfzGeom(e, mode) {
+        const c = entityCoords(e) || [];
+        if (c.length < 3) return '';
+        const ring = kxCloseRing(c);
+        return mode === '3D' ? kxPolygon(ring, mode, true, 400 * KX_FT_TO_M, 'relativeToGround') : kxPolygon(ring, mode, false, 0, 'clampToGround');
+    }
+    function kxArcGeom(a, mode) {
+        if (!a || !a.point_a || !a.point_b) return '';
+        const p1 = a.point_a, p2 = a.point_b;
+        if (mode === '3D' && typeof a.min_alt === 'number' && typeof a.max_alt === 'number') {
+            return `<MultiGeometry><Polygon><altitudeMode>absolute</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${p1.lng},${p1.lat},${a.min_alt} ${p2.lng},${p2.lat},${a.min_alt} ${p2.lng},${p2.lat},${a.max_alt} ${p1.lng},${p1.lat},${a.max_alt} ${p1.lng},${p1.lat},${a.min_alt}</coordinates></LinearRing></outerBoundaryIs></Polygon></MultiGeometry>`;
+        }
+        return `<LineString><altitudeMode>clampToGround</altitudeMode><coordinates>${kxCoords([p1, p2], 0)}</coordinates></LineString>`;
+    }
+    function kxPointGeom(e, mode) {
+        const c = (entityCoords(e) || [])[0];
+        if (!c) return '';
+        if (mode === '3D' && typeof e.marker_height === 'number' && e.marker_height > 0) return `<Point><extrude>1</extrude><altitudeMode>relativeToGround</altitudeMode><coordinates>${c.lng},${c.lat},${e.marker_height}</coordinates></Point>`;
+        return `<Point><altitudeMode>clampToGround</altitudeMode><coordinates>${c.lng},${c.lat},0</coordinates></Point>`;
+    }
+    // One site's setup as the Analyzer's folder set (returned as XML fragments).
+    function kxSiteFolders(entities, siteLabel, mode, inc) {
+        const by = { 3: [], 4: [], 8: [], 15: [], 16: [], 98: [], gm: { general: [], tower: [], hazard: [] } };
+        (entities || []).forEach(e => {
+            if (!e || typeof e.type !== 'number') return;
+            if (e.type === 19) { const t = String(e.general_marker_type || 'general').toLowerCase(); (by.gm[t] || by.gm.general).push(e); }
+            else if (by[e.type]) by[e.type].push(e);
+        });
+        const pm = (e, style, geom) => geom ? `<Placemark id="pm_${e.id}"><name>${xmlEsc(e.name)}</name><description>${kxDesc(e, siteLabel)}</description><styleUrl>#${style}</styleUrl>${geom}</Placemark>` : '';
+        const out = [];
+        const folder = (name, items) => { const body = items.filter(Boolean).join(''); if (body) out.push(`<Folder><name>${xmlEsc(name)}</name>${body}</Folder>`); };
+        if (inc.assets) folder('Asset', by[3].map(e => pm(e, kxAssetStyle(e), kxAssetGeom(e, mode))));
+        if (inc.fps && by[15].length) {
+            const fps = by[15].map(e => {
+                const arcs = (Array.isArray(e.arcs) ? e.arcs : []).map((a, i) => { const g = kxArcGeom(a, mode); return g ? `<Placemark id="arc_${a.id != null ? a.id : e.id + '_' + i}"><name>${xmlEsc(mode === '3D' ? `${e.name} - Segment ${a.id != null ? a.id : i + 1}` : e.name)}</name><description><![CDATA[${xmlEsc(e.name)} · ${xmlEsc(siteLabel)}<br>Arc ${i + 1}: ${typeof a.min_alt === 'number' ? Math.round(a.min_alt * FT_PER_M) + '–' + Math.round((a.max_alt || a.min_alt) * FT_PER_M) + ' ft MSL' : ''}${typeof a.distance === 'number' ? ' · ' + Math.round(a.distance * FT_PER_M) + ' ft' : ''}]]></description><styleUrl>#flightpath_style</styleUrl>${g}</Placemark>` : ''; }).join('');
+                return arcs ? `<Folder id="fp_${e.id}"><name>${xmlEsc(e.name)}</name>${arcs}</Folder>` : '';
+            });
+            folder('Flight Path', fps);
+        }
+        if (inc.ffzs) folder('Freezone', by[16].map(e => pm(e, 'freezone_style', kxFfzGeom(e, mode))));
+        if (inc.nfzs) folder('No-fly', by[4].map(e => pm(e, 'nofly_style', kxNfzGeom(e, mode))));
+        if (inc.markers) {
+            folder('General Marker - General', by.gm.general.map(e => pm(e, 'generalmarker-general_style', kxPointGeom(e, mode))));
+            folder('General Marker - Tower', by.gm.tower.map(e => pm(e, 'generalmarker-tower_style', kxPointGeom(e, mode))));
+            folder('General Marker - Hazard', by.gm.hazard.map(e => pm(e, 'generalmarker-hazard_style', kxPointGeom(e, mode))));
+        }
+        if (inc.base) folder('Base Station', by[8].map(e => pm(e, 'basestation_style', kxPointGeom(e, mode))));
+        if (inc.safe) folder('Safe Zone', by[98].map(e => pm(e, 'safezone_style', kxPointGeom(e, mode))));
+        return out.join('');
+    }
+
+    // Fetch every picked site's setup (sequential, cached) with progress/abort.
+    async function kxCollect(sids, label) {
+        const got = new Map(); const failed = [];
+        for (let i = 0; i < sids.length; i++) {
+            if (fdRun && fdRun.abort) break;
+            const sid = sids[i];
+            fdRun.done = i; fdRun.msg = `${label} — ${siteName(sid)} (${i + 1}/${sids.length})`; setStatus(fdRun.msg);
+            try { got.set(sid, (await fdFetchSetup(sid)).entities); }
+            catch (e) { failed.push(`${siteName(sid)}: ${e.message || e}`); }
+            if (i % 5 === 4) { renderPanel(); await ftYield(); }
+        }
+        return { got, failed };
+    }
+    function kxGroupByClient(sids) {
+        const g = new Map();
+        sids.forEach(sid => { const c = fdClientOfId(sid); if (!g.has(c)) g.set(c, []); g.get(c).push(sid); });
+        return Array.from(g.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+    }
+    async function kxExportCircles() {
+        const sids = Array.from(fdSelected);
+        if (!sids.length) { setStatus('pick at least one site first'); return; }
+        if (fdRun) return;
+        fdRun = { done: 0, total: sids.length, msg: 'starting…', abort: false };
+        renderPanel();
+        try {
+            const { got, failed } = await kxCollect(sids, 'site circles');
+            const padM = Math.max(0, Number(kxCirclePadFt) || 0) * KX_FT_TO_M;
+            const xml = ['<?xml version="1.0" encoding="UTF-8"?>', '<kml xmlns="http://www.opengis.net/kml/2.2">', `<Document><name>AIM site circles (${got.size} sites, +${Math.round(padM * FT_PER_M)} ft pad)</name>`,
+                `<description><![CDATA[Generated by AIM Fleet Tools v${SCRIPT_VERSION} · ${new Date().toISOString().slice(0, 10)}<br>One circle per site enclosing every entity of its Site Setup (minimum enclosing circle + pad).]]></description>`, kxStyles('2D')];
+            const rows = []; let empty = 0;
+            kxGroupByClient(Array.from(got.keys())).forEach(([client, ids]) => {
+                xml.push(`<Folder><name>${xmlEsc(client)}</name>`);
+                ids.sort((a, b) => siteName(a).localeCompare(siteName(b))).forEach(sid => {
+                    const ents = got.get(sid);
+                    const mec = kxEnclosingCircle(kxAllPoints(ents));
+                    if (!mec) { empty++; return; }
+                    const rM = mec.radiusM + padM;
+                    const ring = kxCircleRing(mec.lat, mec.lng, rM, 72);
+                    const nm = siteName(sid);
+                    const ext = `<ExtendedData><Data name="site_id"><value>${sid}</value></Data><Data name="site_name"><value>${xmlEsc(nm)}</value></Data><Data name="client"><value>${xmlEsc(client)}</value></Data><Data name="radius_ft"><value>${Math.round(rM * FT_PER_M)}</value></Data><Data name="center_lat"><value>${mec.lat.toFixed(6)}</value></Data><Data name="center_lng"><value>${mec.lng.toFixed(6)}</value></Data><Data name="entities"><value>${(ents || []).length}</value></Data></ExtendedData>`;
+                    xml.push(`<Placemark id="circle_${sid}"><name>${xmlEsc(nm)}</name><description><![CDATA[<b>${xmlEsc(nm)}</b> (#${sid})<br>Radius ${Math.round(rM * FT_PER_M).toLocaleString()} ft (${(rM * FT_PER_M / 5280).toFixed(2)} mi) incl. ${Math.round(padM * FT_PER_M)} ft pad<br>Center ${mec.lat.toFixed(6)}, ${mec.lng.toFixed(6)}<br>${(ents || []).length} entities · ${xmlEsc(siteStatus(sid) || '')}]]></description><styleUrl>#sitecircle_style</styleUrl>${ext}${kxPolygon(ring, '2D', false, 0, 'clampToGround')}</Placemark>`);
+                    xml.push(`<Placemark id="center_${sid}"><name>${xmlEsc(nm)} — center</name><styleUrl>#sitecenter_style</styleUrl><Point><altitudeMode>clampToGround</altitudeMode><coordinates>${mec.lng},${mec.lat},0</coordinates></Point></Placemark>`);
+                    rows.push([sid, nm, client, Math.round(rM * FT_PER_M), mec.lat.toFixed(6), mec.lng.toFixed(6), (ents || []).length]);
+                });
+                xml.push('</Folder>');
+            });
+            xml.push('</Document></kml>');
+            const stamp = new Date().toISOString().slice(0, 10);
+            fdDownload(new Blob([xml.join('\n')], { type: 'application/vnd.google-earth.kml+xml' }), `AIM-site-circles ${stamp} (${rows.length} sites).kml`);
+            setStatus(`site circles KML downloaded — ${rows.length} circle(s)${empty ? ` · ${empty} site(s) had no geometry` : ''}${failed.length ? ` · ${failed.length} fetch failure(s) (console)` : ''}${fdRun.abort ? ' · ABORTED (partial)' : ''}`);
+            if (failed.length) console.warn(`${TAG} site circles: failures`, failed);
+        } catch (e) { console.error(`${TAG} site circles failed:`, e); setStatus(`site circles failed — ${String(e && e.message || e)}`); }
+        finally { fdRun = null; renderPanel(); }
+    }
+    async function kxExportSetups() {
+        const sids = Array.from(fdSelected);
+        if (!sids.length) { setStatus('pick at least one site first'); return; }
+        if (fdRun) return;
+        fdRun = { done: 0, total: sids.length, msg: 'starting…', abort: false };
+        renderPanel();
+        try {
+            const { got, failed } = await kxCollect(sids, `site setups ${kxMode}`);
+            const xml = ['<?xml version="1.0" encoding="UTF-8"?>', '<kml xmlns="http://www.opengis.net/kml/2.2">', `<Document><name>AIM site setups (${got.size} sites, ${kxMode})</name>`,
+                `<description><![CDATA[Generated by AIM Fleet Tools v${SCRIPT_VERSION} · ${new Date().toISOString().slice(0, 10)}<br>Layout matches the Site Setup Analyzer export: client → site → entity-type folders.]]></description>`, kxStyles(kxMode)];
+            let placed = 0;
+            kxGroupByClient(Array.from(got.keys())).forEach(([client, ids]) => {
+                xml.push(`<Folder><name>${xmlEsc(client)}</name>`);
+                ids.sort((a, b) => siteName(a).localeCompare(siteName(b))).forEach(sid => {
+                    const nm = siteName(sid);
+                    const body = kxSiteFolders(got.get(sid), `${nm} (#${sid})`, kxMode, kxInclude);
+                    if (!body) return;
+                    placed++;
+                    xml.push(`<Folder id="site_${sid}"><name>${xmlEsc(nm)}</name><description><![CDATA[Site #${sid} · ${(got.get(sid) || []).length} entities · ${xmlEsc(siteStatus(sid) || '')}]]></description>${body}</Folder>`);
+                });
+                xml.push('</Folder>');
+            });
+            xml.push('</Document></kml>');
+            const text = xml.join('\n');
+            const stamp = new Date().toISOString().slice(0, 10);
+            fdDownload(new Blob([text], { type: 'application/vnd.google-earth.kml+xml' }), `AIM-site-setups ${stamp} ${kxMode} (${placed} sites).kml`);
+            setStatus(`site setups KML downloaded — ${placed} site(s), ${(text.length / 1048576).toFixed(1)} MB${failed.length ? ` · ${failed.length} fetch failure(s) (console)` : ''}${fdRun.abort ? ' · ABORTED (partial)' : ''}`);
+            if (failed.length) console.warn(`${TAG} site setups KML: failures`, failed);
+        } catch (e) { console.error(`${TAG} site setups KML failed:`, e); setStatus(`site setups KML failed — ${String(e && e.message || e)}`); }
+        finally { fdRun = null; renderPanel(); }
+    }
+    function renderKmlExportRow() {
+        const inc = (k, l) => `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="checkbox" data-kx-inc="${k}" ${kxInclude[k] ? 'checked' : ''} ${fdRun ? 'disabled' : ''}> ${l}</label>`;
+        return '<div style="padding:6px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + '<span style="color:#888">KML:</span>'
+            + `<span data-ft="kx-circles" title="One ground circle per picked site, enclosing every entity of its setup (+ pad)" style="cursor:pointer;color:${fdSelected.size && !fdRun ? '#5fff5f' : '#555'};font-weight:bold">⭕ Site circles</span>`
+            + `<label title="Extra radius added to each enclosing circle">pad <input type="number" data-kx-pad value="${kxCirclePadFt}" min="0" max="10000" step="50" ${fdRun ? 'disabled' : ''} style="width:60px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;padding:1px 3px;"> ft</label>`
+            + '<span style="width:1px;height:16px;background:#2a3140"></span>'
+            + `<span data-ft="kx-setups" title="Every picked site's full setup in one KML (Site Setup Analyzer layout: client → site → type folders)" style="cursor:pointer;color:${fdSelected.size && !fdRun ? '#5fff5f' : '#555'};font-weight:bold">🗺 Site setups</span>`
+            + `<select data-kx-mode ${fdRun ? 'disabled' : ''} style="background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;"><option value="2D" ${kxMode === '2D' ? 'selected' : ''}>2D (ground)</option><option value="3D" ${kxMode === '3D' ? 'selected' : ''}>3D (altitude boxes)</option></select>`
+            + inc('assets', 'Assets') + inc('ffzs', 'FFZ') + inc('fps', 'FP') + inc('nfzs', 'NFZ') + inc('markers', 'Markers') + inc('base', 'Base') + inc('safe', 'Safe')
+            + '</div>';
+    }
+
+    function fdClientOfId(id) { const raw = rawSites && rawSites[id] && rawSites[id].raw; return (raw && siteEntryClient(raw)) || clientGroupOf(siteName(id)) || 'Other'; }
     function fdClientIds(cl) { return rawSites ? Object.keys(rawSites).filter(id => fdClientOfId(id) === cl) : []; }
     function fdVisibleSiteIds() {
         const q = fdFilter.trim().toLowerCase();
@@ -3963,7 +4246,7 @@
 
             // Delegated — the body is rebuilt on every render, the root never is
             panelEl.addEventListener('click', (ev) => {
-                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],input[data-fd-dataset],select[data-fd-range],input[data-fd-date]')) return;   // checkbox/color/select → change handler
+                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad]')) return;   // checkbox/color/select → change handler
                 const clAll = ev.target.closest('[data-ft-clients]');
                 if (clAll) {
                     if (clAll.getAttribute('data-ft-clients') === 'all') {
@@ -4009,6 +4292,8 @@
                     else if (cmd === 'copy') copyText(buildSweepReport(), 'report copied to clipboard');
                     else if (cmd === 'metrics-csv') copyText(buildMetricsCsv(), 'metrics CSV copied to clipboard');
                     else if (cmd === 'fd-export') fdExport();
+                    else if (cmd === 'kx-circles') kxExportCircles();
+                    else if (cmd === 'kx-setups') kxExportSetups();
                     else if (cmd === 'fd-abort') { if (fdRun) { fdRun.abort = true; setStatus('aborting export after the current request…'); } }
                     else if (cmd === 'fd-selall') { fdVisibleSiteIds().forEach(id => fdSelected.add(id)); renderPanel(); }
                     else if (cmd === 'fd-clear') { fdSelected.clear(); renderPanel(); }
@@ -4169,6 +4454,9 @@
                 if (t.hasAttribute && t.hasAttribute('data-fd-site')) { const id = t.getAttribute('data-fd-site'); if (t.checked) fdSelected.add(id); else fdSelected.delete(id); fdRenderKeepScroll(); return; }
                 // 6. client select-all acts on the SHOWN rows of that client (what the header count shows)
                 if (t.hasAttribute && t.hasAttribute('data-fd-clientsel')) { const cl = t.getAttribute('data-fd-clientsel'); const ids = fdVisibleSiteIds().filter(id => fdClientOfId(id) === cl); ids.forEach(id => { if (t.checked) fdSelected.add(id); else fdSelected.delete(id); }); fdRenderKeepScroll(); return; }
+                if (t.hasAttribute && t.hasAttribute('data-kx-inc')) { kxInclude[t.getAttribute('data-kx-inc')] = !!t.checked; return; }
+                if (t.hasAttribute && t.hasAttribute('data-kx-mode')) { kxMode = t.value === '3D' ? '3D' : '2D'; return; }
+                if (t.hasAttribute && t.hasAttribute('data-kx-pad')) { if (t.value.trim() === '') return; const v = Number(t.value); if (isFinite(v) && v >= 0) kxCirclePadFt = v; return; }
                 if (t.hasAttribute && t.hasAttribute('data-fd-dataset')) { fdDatasets[t.getAttribute('data-fd-dataset')] = !!t.checked; renderPanel(); return; }
                 if (t.hasAttribute && t.hasAttribute('data-fd-range')) { fdRange = String(t.value); if (fdBrowse && fdBrowse.tab === 'log' && fdRange !== 'custom') fdOpenBrowse(fdBrowse.sid, 'log'); else renderPanel(); return; }
                 if (t.hasAttribute && t.hasAttribute('data-fd-date')) {

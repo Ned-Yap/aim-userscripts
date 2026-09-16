@@ -141,6 +141,13 @@ The `changes.csv` audit log crossed GitHub's 1 MB Contents-API cliff on 2026-08-
 - **Raw-read diagnostics**: the >1 MB fallback now logs status / length / head so a future failure explains itself.
 - Data repo: rotated the oversized file to `changes-archive-2026-08.csv` by hand (commit `f0c381ce`); appends resume on the next cycle with no reinstall needed. Rows between 2026-08-18 and today exist only in the per-site snapshot rings.
 
+## 2026-09-16 — 🗺 Fleet KML exports: AIM Fleet Tools v0.32 — site circles + all site setups in one KML (latest — dev only, feature #264)
+
+In **📦 Fleet Data**, pick sites (one client, several, or all — the picker now groups "Exxon 40", "Exxon 33"… under one **Exxon** header with a select-all box) and use the new **KML** row:
+- **⭕ Site circles** — one ground circle per picked site that encloses **every** entity of its setup (minimum enclosing circle, plus an editable pad, default 100 ft), with a centre pin, a folder per client, and radius / centre / site id in each placemark's data. One .kml for the whole selection.
+- **🗺 Site setups** — every picked site's full setup in **one** .kml, laid out exactly like the Site Setup Analyzer export (Asset / Flight Path / Freezone / No-fly / General Marker · General · Tower · Hazard / Base Station / Safe Zone folders, same colours), nested client → site → type. 2D (ground) or 3D (FFZ altitude boxes, FP walls, 400 ft NFZ columns), and tick which entity types to include.
+Both read each site's setup live (progress + ■ Abort, partial file still downloads).
+
 ## 2026-09-14 — 📐 Cross-ref report card + collapsed start: AIM Fleet Tools v0.31 (latest — dev only)
 
 - **📊 Report** button on the cross-ref row opens a clean report card (same style as the Fleet Issues summary): headline tiles (network size, reachable / inspectable share, Tattu, Tulip-only, beyond), band bars, a **per-base table** with reach bars and ↗ links, the longest stretches with 🎯 fly-to, and the run notes. **Copy → Sheets** (three formatted tables) and **Copy text**. Esc closes. The section itself now shows just the two-line headline.
