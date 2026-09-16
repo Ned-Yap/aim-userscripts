@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-16 — NEW: AIM Video Validation latest v0.1 (dev only) + Control Panel latest v1.45
+
+- **AIM Video Validation v0.1** — first tool set for first-flight video validation on the Mission Playback page (`…/control-panel/past-mission/<id>`). Read-only:
+  - Snapshot strip reordered **oldest → newest** (first shot on the left) with **S# badges** per thumbnail (S3 RGB / S3 T / S3 G share a number; red badge = no plan step was active at the shutter; dashed outline = re-take of an already-shot step).
+  - **Click a thumbnail → the video is seeked to that shot** (3 s lead-in, editable) so ▶ resumes right where the picture was taken; the ▶ corner button on a tile jumps straight back to the video at that moment. `[` / `]` = previous / next shot.
+  - **Playhead highlight** — while the video plays, the thumbnail(s) of the shot being taken get a cyan outline and scroll into view.
+  - **Shot card** under the strip: planned vs actual **heading / camera angle / drone altitude** and drone-vs-nav distance for the selected shot (GPS snapshots derive heading + angle from nav → aim point; in-place snapshots read them from the step), assets in frame, previous-capture link, colour-coded Δ.
+  - Joins the flown path's `app_instruction` to the embedded plan, so every picture knows its snapshot step exactly. Design: `ShortKeys/AIM_Video_Validation_Design.md`.
+- **Control Panel v1.45** — new `playback` URL scope (Mission Playback page) so scope-`playback` cards show only there.
+
 ## 2026-09-15 — Site Setup Tools latest v4.296: SpiderWeb base star reaches across open ground (dev only)
 
 - New "base star" pass: any zone within 12,000 ft of a base gets a straight spoke home when that spoke shortens its way home by ≥ 5 % and its new pieces cross at most 3 existing legs. The spoke is **threaded through the pads in its way** (base → neighbouring pad → target) instead of being refused as "cuts through a zone", which is why the open ground west of the Elias base had no legs before. Panel/Control Panel fields: base star ft, star gain %, star max cross (0 ft = off).
