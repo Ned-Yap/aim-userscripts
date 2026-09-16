@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-16 — AIM Video Validation latest v0.3: badges really stick, ‹ › arrows + counter follow our order, [ ] work without a panel update (dev only)
+
+- Percepto's re-render keeps the tile element but wipes its contents, so v0.2's per-tile stamp still missed it. Now a tile is re-stamped whenever its badge is gone.
+- Percepto's ‹ › arrows in the still viewer and the "8 / 14" counter walked the original newest-first list. Both now follow the oldest-first order (arrows are redirected, counter rewritten).
+- `[` / `]` step the still viewer image by image when it is open, otherwise seek the video shot by shot. They now also work when the Control Panel in the tab predates the `playback` scope (direct fallback with dedupe).
+
 ## 2026-09-16 — AIM Video Validation latest v0.2: badges survive thumbnail clicks (dev only)
 
 - Percepto re-renders the strip tiles when you click one; v0.1's badges, ▶ buttons and ordering vanished on the re-rendered tiles. Now every tile carries its own stamp and is re-stamped the moment it is rebuilt. RGB now sorts before thermal within a shot.

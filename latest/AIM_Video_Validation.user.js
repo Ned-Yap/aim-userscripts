@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.2
+// @version      0.3
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -21,13 +21,14 @@
 // flown mission (images + flown path + embedded plan) and (1) reorders the snapshot strip oldest-first
 // with S# badges, (2) seeks the video to a snapshot's shutter time on click / ▶, (3) highlights the
 // shot under the playhead, (4) shows a shot card: planned vs actual heading / camera angle / altitude.
-// Hotkeys: [ / ] — previous / next shot (via Control Panel router; direct fallback when no panel).
+// Hotkeys: [ / ] — previous / next shot (still viewer open → previous / next image in OUR order; else video by shot).
+//          Routed by the Control Panel (scope 'playback', CP ≥ 1.45) with a direct fallback until the panel proves it routes them.
 // Log tag: [AIM VV]
 (function() {
     'use strict';
 
     const SCRIPT_ID = 'aim-video-validation';
-    const SCRIPT_VERSION = '0.2';
+    const SCRIPT_VERSION = '0.3';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -309,13 +310,17 @@
         // Stamp key = everything that changes what a tile should look like. Percepto re-renders
         // tiles (new elements) when you click one, so "already stamped" must be checked PER TILE.
         const stamp = model.mid + ':' + settings.stripOrder + ':' + settings.badges + ':' + model.numberingGlobal;
-        const stale = tiles.some(t => t.dataset.aimVvStamp !== stamp);
+        // Percepto's re-render WIPES a tile's children (our badge + ▶) but keeps the element, so the
+        // stamp alone is not enough — a matched tile must still hold its badge.
+        const stale = tiles.some(t => t.dataset.aimVvStamp !== stamp
+            || (settings.badges && t.dataset.aimVvKey && !t.querySelector('.aim-vv-badge')));
         if (!force && !stale) return;
         let matched = 0;
         tiles.forEach((tile, i) => {
             const rec = tileImage(tile);
             tile.classList.add('aim-vv-tile');
             tile.dataset.aimVvStamp = stamp;
+            if (rec) tile.dataset.aimVvKey = rec.key; else delete tile.dataset.aimVvKey;
             // Order: video tile (no image record) pinned first, then shutter order (RGB, T, G within a pair).
             if (settings.stripOrder) {
                 tile.style.order = rec ? String(rec.rank) : '0';
@@ -360,7 +365,7 @@
             tile.style.order = '';
             tile.classList.remove('aim-vv-tile', 'aim-vv-tile--active');
             tile.querySelectorAll('.aim-vv-badge, .aim-vv-seek').forEach(el => el.remove());
-            delete tile.dataset.aimVvStamp;
+            delete tile.dataset.aimVvStamp; delete tile.dataset.aimVvKey;
         });
     }
 
@@ -441,6 +446,57 @@
     }
 
     // ---------------------------------------------------------------
+    // Still viewer (Percepto shows the clicked image in .mp-media): its ‹ › arrows and the
+    // "8 / 14" counter walk Percepto's newest-first list. We redirect both to OUR order.
+    // ---------------------------------------------------------------
+    function stillImg() { return document.querySelector('.mp-media__image'); }
+    function currentStillRec() {
+        const im = stillImg();
+        if (!im || !model) return null;
+        const k = imgKey(im.currentSrc || im.src);
+        return model.images.find(r => r.key === k) || null;
+    }
+    function tileFor(rec) {
+        const grid = stripGrid(); if (!grid || !rec) return null;
+        return Array.from(grid.children).find(t => t.dataset.aimVvKey === rec.key || tileImage(t) === rec) || null;
+    }
+    function showStill(rec) {
+        const t = tileFor(rec);
+        if (!t) { warn('no tile for', rec && rec.name); return; }
+        try { t.click(); } catch (e) { warn('tile click failed:', e); }
+        if (settings.clickSeek) seekToShot(rec, false); else selectShot(rec);
+        try { t.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (e) { /* cosmetic */ }
+    }
+    function stepStill(dir) {
+        const cur = currentStillRec();
+        if (!cur) return false;
+        const next = model.images.find(r => r.rank === cur.rank + dir);
+        if (!next) { log('no ' + (dir > 0 ? 'next' : 'previous') + ' image'); return true; }
+        showStill(next);
+        return true;
+    }
+    function fixCounter() {
+        const c = document.querySelector('.mp-media__counter');
+        const cur = currentStillRec();
+        if (!c || !cur || !settings.stripOrder) return;
+        const want = cur.rank + ' / ' + model.images.length;
+        if (c.textContent.trim() !== want) { c.textContent = want; c.title = 'AIM order (oldest first)'; }
+    }
+    // Percepto's ‹ › buttons: decide direction by position (left/right of the media pane),
+    // swallow the native handler, step in our order instead.
+    function onNavArrowClick(e) {
+        if (!model || !settings.master || !settings.stripOrder) return;
+        const btn = e.target.closest && e.target.closest('.pr-image-nav-btn');
+        if (!btn) return;
+        const media = btn.closest('.mp-media') || document.querySelector('.mp-media');
+        if (!media) return;
+        const r = btn.getBoundingClientRect(), m = media.getBoundingClientRect();
+        const dir = (r.left + r.width / 2) < (m.left + m.width / 2) ? -1 : 1;
+        e.preventDefault(); e.stopPropagation();
+        stepStill(dir);
+    }
+
+    // ---------------------------------------------------------------
     // Shot card
     // ---------------------------------------------------------------
     let cardEl = null;
@@ -499,6 +555,7 @@
     // ---------------------------------------------------------------
     function onGridClick(e) {
         if (!model || !settings.master) return;
+        if (e.target.closest && e.target.closest('.pr-image-nav-btn')) { onNavArrowClick(e); return; }
         const grid = stripGrid(); if (!grid || !grid.contains(e.target)) return;
         const seek = e.target.closest('.aim-vv-seek');
         if (seek) {
@@ -525,7 +582,7 @@
 
     function scheduleStamp() {
         if (stampTimer) return;
-        stampTimer = setTimeout(() => { stampTimer = null; try { stampStrip(false); } catch (e) { warn('stamp failed:', e); } }, 150);
+        stampTimer = setTimeout(() => { stampTimer = null; try { stampStrip(false); fixCounter(); } catch (e) { warn('stamp failed:', e); } }, 150);
     }
 
     function activate(ids) {
@@ -558,7 +615,7 @@
         const root = playbackRoot();
         if (!ids || !root) { if (current) { log('left playback — tearing down'); deactivate(); } return; }
         if (!current || current.mid !== ids.mid) { if (current) deactivate(); activate(ids); return; }
-        if (model) { hookVideo(); scheduleStamp(); ensureCard(); }
+        if (model) { hookVideo(); scheduleStamp(); ensureCard(); try { fixCounter(); } catch (e) { warn('counter:', e); } }
     }
 
     // ---------------------------------------------------------------
@@ -598,8 +655,11 @@
                 if (msg.tabId ? msg.tabId !== TAB_ID : document.hidden) return;   // tab-local, fail closed
                 const id = msg.hotkeyId || msg.actionId;
                 if (!settings.master || !model) return;
-                if (id === 'prev-shot') stepShot(-1);
-                else if (id === 'next-shot') stepShot(1);
+                if (id === 'prev-shot' || id === 'next-shot') {
+                    cpRoutesMyKeys = true;                           // proven: the panel knows our scope → fallback stands down
+                    if (Date.now() - lastDirectKeyAt < 250) return;  // the fallback already handled this keypress
+                    hotkeyStep(id === 'next-shot' ? 1 : -1);
+                }
                 else if (id === 'reload') { const ids = current; deactivate(); if (ids) activate(ids); }
             }
         };
@@ -631,15 +691,26 @@
         } catch (e) { warn('register failed:', e); }
     }
 
-    // Fallback hotkeys when no Control Panel is installed (universal input guard).
+    // [ / ]: step the still viewer when it is open (image by image, our order), else step the video by shot.
+    function hotkeyStep(dir) {
+        if (stillImg()) { if (stepStill(dir)) return; }
+        stepShot(dir);
+    }
+    // Direct hotkeys. Active until the Control Panel PROVES it routes our keys (a HOTKEY_FIRED for us):
+    // a panel older than v1.45 has no 'playback' scope and silently drops them. Dedupe covers the
+    // overlap when both paths handle the same keypress. Universal input guard.
+    let cpRoutesMyKeys = false;
+    let lastDirectKeyAt = 0;
     function fallbackKeys(e) {
-        if (controlPanelDetected || !settings.master || !model || IS_TOP) return;
+        if (cpRoutesMyKeys || !settings.master || !model || IS_TOP) return;
         if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
         if (e.key !== '[' && e.key !== ']') return;
         const t = e.target;
         if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable ||
             (t.className && /ant-input|ant-select/.test(String(t.className))) || t.getAttribute('role') === 'textbox')) return;
-        stepShot(e.key === ']' ? 1 : -1);
+        lastDirectKeyAt = Date.now();
+        e.preventDefault();
+        hotkeyStep(e.key === ']' ? 1 : -1);
     }
 
     // ---------------------------------------------------------------
