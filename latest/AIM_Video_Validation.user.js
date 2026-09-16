@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.1
+// @version      0.2
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -27,7 +27,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-video-validation';
-    const SCRIPT_VERSION = '0.1';
+    const SCRIPT_VERSION = '0.2';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -174,7 +174,9 @@
                 rec.delta = computeDelta(m, rec);
                 m.images.push(rec);
             });
-            m.images.sort((a, b) => (a.shutter || 0) - (b.shutter || 0) || a.kind.localeCompare(b.kind));
+            const KIND_RANK = { RGB: 0, T: 1, G: 2 };
+            m.images.sort((a, b) => (a.shutter || 0) - (b.shutter || 0) || (KIND_RANK[a.kind] || 0) - (KIND_RANK[b.kind] || 0));
+            m.images.forEach((im, i) => { im.rank = i + 1; });   // CSS order value (video tile = 0)
             // Shots = images sharing a shutter time (RGB + thermal [+ GEM] of one snapshot).
             let cur = null;
             m.images.forEach(im => {
@@ -293,28 +295,30 @@
     }
 
     function stripGrid() { return document.querySelector('.mp-thumbnails__grid'); }
+    let activeKeys = [];   // image keys of the shot under the playhead (declared before stampStrip uses it)
     function tileImage(tile) {
         const im = tile.querySelector('img');
         if (!im || !model) return null;
         const k = imgKey(im.currentSrc || im.src);
         return model.images.find(r => r.key === k) || null;
     }
-    let lastStampSig = '';
     function stampStrip(force) {
         const grid = stripGrid();
         if (!grid || !model) return;
         const tiles = Array.from(grid.children);
-        const sig = tiles.length + ':' + settings.stripOrder + ':' + settings.badges + ':' + model.mid + ':' + model.numberingGlobal;
-        if (!force && sig === lastStampSig && grid.dataset.aimVv === '1') return;
-        lastStampSig = sig;
-        grid.dataset.aimVv = '1';
+        // Stamp key = everything that changes what a tile should look like. Percepto re-renders
+        // tiles (new elements) when you click one, so "already stamped" must be checked PER TILE.
+        const stamp = model.mid + ':' + settings.stripOrder + ':' + settings.badges + ':' + model.numberingGlobal;
+        const stale = tiles.some(t => t.dataset.aimVvStamp !== stamp);
+        if (!force && !stale) return;
         let matched = 0;
         tiles.forEach((tile, i) => {
             const rec = tileImage(tile);
             tile.classList.add('aim-vv-tile');
-            // Order: video tile (no image record) pinned first, then shutter order.
+            tile.dataset.aimVvStamp = stamp;
+            // Order: video tile (no image record) pinned first, then shutter order (RGB, T, G within a pair).
             if (settings.stripOrder) {
-                tile.style.order = rec && rec.shutter != null ? String(Math.round(rec.shutter / 100) % 2000000000) : '-1';
+                tile.style.order = rec ? String(rec.rank) : '0';
             } else {
                 tile.style.order = '';
             }
@@ -340,12 +344,14 @@
                 }
             } else { if (badge) badge.remove(); if (seek) seek.remove(); }
         });
-        // First stamp → scroll to the start so S1 is in view.
-        if (force !== 'silent') {
+        // Re-rendered tiles lost the playhead outline too — re-apply it.
+        const keys = activeKeys; activeKeys = []; markActiveTiles(keys);
+        // First stamp (explicit) → scroll to the start so S1 is in view.
+        if (force === true) {
             const scroller = grid.closest('.mp-thumbnails') || grid;
             try { (grid.scrollWidth > grid.clientWidth ? grid : scroller).scrollLeft = 0; } catch (e) { /* cosmetic */ }
         }
-        log('strip stamped: ' + tiles.length + ' tiles, ' + matched + ' matched to images' + (settings.stripOrder ? ' (oldest first)' : ''));
+        log('strip stamped' + (force === true ? '' : ' (re-render)') + ': ' + tiles.length + ' tiles, ' + matched + ' matched to images' + (settings.stripOrder ? ' (oldest first)' : ''));
     }
     function unstampStrip() {
         const grid = stripGrid();
@@ -354,9 +360,8 @@
             tile.style.order = '';
             tile.classList.remove('aim-vv-tile', 'aim-vv-tile--active');
             tile.querySelectorAll('.aim-vv-badge, .aim-vv-seek').forEach(el => el.remove());
+            delete tile.dataset.aimVvStamp;
         });
-        delete grid.dataset.aimVv;
-        lastStampSig = '';
     }
 
     // ---------------------------------------------------------------
@@ -383,7 +388,6 @@
         }
         selectShot(rec);
     }
-    let activeKeys = [];
     function markActiveTiles(keys) {
         const grid = stripGrid();
         if (!grid) return;

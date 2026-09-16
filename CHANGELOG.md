@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-16 — AIM Video Validation latest v0.2: badges survive thumbnail clicks (dev only)
+
+- Percepto re-renders the strip tiles when you click one; v0.1's badges, ▶ buttons and ordering vanished on the re-rendered tiles. Now every tile carries its own stamp and is re-stamped the moment it is rebuilt. RGB now sorts before thermal within a shot.
+
 ## 2026-09-16 — NEW: AIM Video Validation latest v0.1 (dev only) + Control Panel latest v1.45
 
 - **AIM Video Validation v0.1** — first tool set for first-flight video validation on the Mission Playback page (`…/control-panel/past-mission/<id>`). Read-only:
