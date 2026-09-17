@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.39
+// @version      0.40
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.39';
+    const SCRIPT_VERSION = '0.40';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -350,7 +350,7 @@
         if (!step || step.type_name !== 'snapshot') return null;
         const nav = parentNav(m, step);
         const eo = step.extra_options || {};
-        const navAlt = nav ? (nav.extra_options && nav.extra_options.abs_alt != null ? nav.extra_options.abs_alt : nav.value1) : null;
+        const navAlt = nav ? ((typeof nav.value1 === 'number') ? nav.value1 : (nav.extra_options && nav.extra_options.abs_alt != null ? nav.extra_options.abs_alt : null)) : null;
         if (step.location && typeof step.location.lat === 'number') {
             const aimAlt = (typeof step.value1 === 'number') ? step.value1 : null;
             const pose = { type: 'gps', aim: step.location, aimAlt, nav, navAlt, heading: null, pitchDeg: null, alt: navAlt };
@@ -362,7 +362,9 @@
             }
             return pose;
         }
-        return { type: 'inplace', nav, navAlt, heading: (typeof eo.heading === 'number') ? eo.heading : null, pitchDeg: gimbalToDeg(eo.pitch), alt: (typeof eo.abs_alt === 'number') ? eo.abs_alt : navAlt };
+        // In-place: the drone stands at the nav, so its altitude is the NAV's value1 (abs_alt on the snapshot is a stale
+        // derived field — on EL SE S5 it was 54 ft below what the nav commands and the drone flew).
+        return { type: 'inplace', nav, navAlt, heading: (typeof eo.heading === 'number') ? eo.heading : null, pitchDeg: gimbalToDeg(eo.pitch), alt: (typeof nav?.value1 === 'number') ? nav.value1 : ((typeof eo.abs_alt === 'number') ? eo.abs_alt : navAlt) };
     }
     function computeDelta(m, im) {
         const step = im.step;
@@ -1275,7 +1277,7 @@
     }
     function lookPointFor(nav, step, ground) {
         const e = step.extra_options || {};
-        const alt = typeof e.abs_alt === 'number' ? e.abs_alt : (typeof nav.value1 === 'number' ? nav.value1 : null);
+        const alt = typeof nav.value1 === 'number' ? nav.value1 : (typeof e.abs_alt === 'number' ? e.abs_alt : null);
         const pitch = gimbalToDeg(e.pitch);
         if (alt == null || pitch == null || typeof e.heading !== 'number' || !nav.location) return null;
         const capM = (Number(settings.rayCapFt) || 500) * FT;
@@ -1593,7 +1595,7 @@
         const g = groundAt(src.nav.location); if (g == null) return null;
         const lp = lookPointFor(src.nav, src.step, g); if (!lp) return null;
         const e = src.step.extra_options || {};
-        const alt = typeof e.abs_alt === 'number' ? e.abs_alt : src.nav.value1;
+        const alt = typeof src.nav.value1 === 'number' ? src.nav.value1 : e.abs_alt;
         const aimAlt = lp.capped ? alt - lp.dist * Math.tan(Math.abs(gimbalToDeg(e.pitch)) * RAD) : g;
         step._aim = { lat: lp.ll.lat, lng: lp.ll.lng, alt: aimAlt, capped: lp.capped };
         return step._aim;
@@ -1605,7 +1607,7 @@
     }
     function retilt(step, nav, aim) {
         const e = eo(step);
-        const alt = typeof e.abs_alt === 'number' ? e.abs_alt : nav.value1;
+        const alt = typeof nav.value1 === 'number' ? nav.value1 : e.abs_alt;
         const h = distM(nav.location, aim); if (!(h > 0.5) || alt == null) return;
         e.pitch = gimbalFromDeg(-Math.atan2(alt - aim.alt, h) / RAD);
         e.heading = Math.round(bearingDeg(nav.location, aim)) % 360;

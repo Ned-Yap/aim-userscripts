@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Video Validation v0.40 (prod + dev): planned altitude is the nav's altitude
+
+- The planned drone altitude for an in-place snapshot was read from the snapshot's stored "abs_alt", which can be stale (54 ft low on the test mission). The drone flies the nav's altitude, so that is what the shot card, the planned look-points (pink squares), re-aiming and Convert now use. Fixes a false red "+52 ft" on a shot that was 1 ft off, and pink squares landing well short of the cyan actual look-points.
+
 ## 2026-09-17 — AIM Video Validation v0.39 (prod + dev): HOTFIX — v0.38 could lock the tab
 
 - v0.38's actual look-points retried terrain lookups that had failed, on every redraw, which looped the page until it froze. Failed lookups are no longer retried, and overlay redraws now have a circuit breaker (more than 8 in a second stops them for 10 s with a console warning). Update immediately if you installed v0.38.
