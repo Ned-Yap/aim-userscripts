@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.8
+// @version      0.9
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -28,7 +28,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-video-validation';
-    const SCRIPT_VERSION = '0.8';
+    const SCRIPT_VERSION = '0.9';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -275,7 +275,8 @@
         styleEl = document.createElement('style');
         styleEl.id = 'aim-vv-style';
         styleEl.textContent = `
-            .aim-vv-tile { position: relative; }
+            [data-aim-vv-stamp] { position: relative; }          /* tile anchor — React rewrites className, never data-* */
+            [data-aim-vv-active="1"] { outline: 2px solid #5fe3ff; outline-offset: -2px; }
             .aim-vv-nav { position: absolute; bottom: 14px; z-index: 20; width: 34px; height: 34px; border-radius: 50%;
                 border: 1px solid rgba(95,227,255,.7); background: rgba(10,14,18,.8); color: #5fe3ff; font: 700 22px/30px monospace; cursor: pointer; }
             .aim-vv-nav:hover { background: #5fe3ff; color: #04222a; }
@@ -293,7 +294,6 @@
                 font: 700 11px/16px monospace; width: 18px; height: 18px; text-align: center; border-radius: 3px;
                 background: rgba(0,0,0,.65); color: #5fe3ff; border: 1px solid rgba(95,227,255,.6); }
             .aim-vv-seek:hover { background: #5fe3ff; color: #04222a; }
-            .aim-vv-tile--active { outline: 2px solid #5fe3ff; outline-offset: -2px; }
             .aim-vv-card { margin: 6px 0 4px; padding: 6px 8px; border: 1px solid rgba(95,227,255,.35); border-radius: 4px;
                 background: rgba(10,14,18,.85); color: #e6e6e6; font: 11px/1.4 monospace; }
             .aim-vv-card b { color: #5fe3ff; }
@@ -366,7 +366,6 @@
         let matched = 0;
         tiles.forEach((tile, i) => {
             const rec = tileImage(tile);
-            tile.classList.add('aim-vv-tile');
             tile.dataset.aimVvStamp = stamp;
             tile.dataset.aimVvSrc = srcKeyOf(tile);
             if (rec) tile.dataset.aimVvKey = rec.key; else delete tile.dataset.aimVvKey;
@@ -454,9 +453,8 @@
         if (!grid) return;
         stripTiles(grid).forEach(tile => {
             orderEl(grid, tile).style.order = '';
-            tile.classList.remove('aim-vv-tile', 'aim-vv-tile--active');
             tile.querySelectorAll('.aim-vv-badge, .aim-vv-seek').forEach(el => el.remove());
-            delete tile.dataset.aimVvStamp; delete tile.dataset.aimVvKey; delete tile.dataset.aimVvSrc;
+            delete tile.dataset.aimVvStamp; delete tile.dataset.aimVvKey; delete tile.dataset.aimVvSrc; delete tile.dataset.aimVvActive;
         });
     }
 
@@ -491,7 +489,8 @@
         activeKeys = keys;
         stripTiles(grid).forEach(tile => {
             const rec = tileImage(tile);
-            tile.classList.toggle('aim-vv-tile--active', !!(rec && keys.includes(rec.key)));
+            const on = !!(rec && keys.includes(rec.key));
+            if (on) tile.dataset.aimVvActive = '1'; else delete tile.dataset.aimVvActive;
         });
     }
     let hookedVideo = null;

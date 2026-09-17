@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-16 — AIM Video Validation latest v0.9: the opened tile keeps its badge — for real this time (dev only)
+
+- Root cause found with the v0.8 probe: when a thumbnail becomes the active one, React rewrites the tile's class list, which stripped our anchor class; the badge then positioned itself against the strip and ended up under the video tile's play icon. Tiles are now anchored and highlighted through data attributes, which React never touches.
+
 ## 2026-09-16 — AIM Video Validation latest v0.7: badges stay visible on the opened tile, Percepto arrows hidden, readable group view (dev only)
 
 - The opened thumbnail's badge and ▶ were never removed — Percepto paints a selection overlay above them. They now sit above it.
