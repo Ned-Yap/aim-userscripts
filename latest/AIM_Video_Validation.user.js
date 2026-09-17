@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.47
+// @version      0.48
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.47';
+    const SCRIPT_VERSION = '0.48';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -482,6 +482,7 @@
             .aim-vv-edit__foot { border-top: 1px solid rgba(255,255,255,.12); padding-top: 4px; margin-top: 6px; }
             .aim-vv-review { position: fixed; inset: 0; z-index: 100000; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; }
             .aim-vv-review__box { max-width: 900px; max-height: 80vh; overflow: auto; background: #12151a; color: #e6e6e6; border: 1px solid rgba(95,227,255,.5); border-radius: 6px; padding: 12px 14px; font: 12px/1.45 monospace; }
+            .aim-vv-cardhost canvas { display: block; max-width: 100%; height: auto; border-radius: 6px; }
             .aim-vv-review table { border-collapse: collapse; margin: 6px 0; } .aim-vv-review td { padding: 2px 10px 2px 0; white-space: nowrap; border-bottom: 1px solid rgba(255,255,255,.06); }
             .aim-vv-review b { color: #5fe3ff; } .aim-vv-review .dim { color: #888; } .aim-vv-review .warn { color: #ffb347; }
             .aim-vv-toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 100001; background: rgba(10,14,18,.95); color: #e6e6e6; border: 1px solid rgba(95,227,255,.6); border-radius: 4px; padding: 8px 14px; font: 12px/1.4 monospace; display: none; max-width: 70vw; }
@@ -2328,17 +2329,138 @@
         });
         return L.join('\n');
     }
+    // ---- summary CARD (canvas) — screenshot-ready, copy as image / save PNG ----
+    // spec: { title, subtitle, lines[], chips[{label, value, color}], items[{badge, color, text, sub}], footer }
+    function renderCard(spec) {
+        const W = 980, PAD = 28, SCALE = 2;
+        const font = (w, px) => w + ' ' + px + 'px ' + 'Consolas, "Cascadia Mono", "JetBrains Mono", Menlo, monospace';
+        const c = document.createElement('canvas'); const ctx = c.getContext('2d');
+        // measure pass
+        const wrap = (text, px, maxW, weight) => { ctx.font = font(weight || '400', px); const words = String(text).split(' '); const out = []; let line = ''; words.forEach(w => { const t = line ? line + ' ' + w : w; if (ctx.measureText(t).width > maxW && line) { out.push(line); line = w; } else line = t; }); if (line) out.push(line); return out; };
+        const rows = [];
+        let y = PAD;
+        rows.push({ t: 'title', y, h: 34 }); y += 40;
+        wrap(spec.subtitle || '', 15, W - 2 * PAD).forEach(l => { rows.push({ t: 'sub', y, text: l }); y += 22; });
+        (spec.lines || []).forEach(l => { wrap(l, 14, W - 2 * PAD).forEach(x => { rows.push({ t: 'line', y, text: x }); y += 20; }); });
+        y += 8;
+        if (spec.chips && spec.chips.length) { rows.push({ t: 'chips', y }); y += 54; }
+        y += 6;
+        (spec.items || []).forEach(it => {
+            const ls = wrap(it.text, 15, W - 2 * PAD - 70, '600');
+            const subs = it.sub ? wrap(it.sub, 13, W - 2 * PAD - 70) : [];
+            rows.push({ t: 'item', y, it, ls, subs, h: 12 + ls.length * 22 + subs.length * 18 });
+            y += 12 + ls.length * 22 + subs.length * 18 + 8;
+        });
+        y += 10;
+        rows.push({ t: 'footer', y }); y += 26;
+        const H = y + PAD - 10;
+        c.width = W * SCALE; c.height = H * SCALE; c.style.width = W + 'px'; c.style.height = H + 'px';
+        ctx.scale(SCALE, SCALE);
+        // paint
+        ctx.fillStyle = '#0e1116'; ctx.fillRect(0, 0, W, H);
+        ctx.strokeStyle = 'rgba(95,227,255,.35)'; ctx.lineWidth = 1; ctx.strokeRect(0.5, 0.5, W - 1, H - 1);
+        ctx.fillStyle = '#5fe3ff'; ctx.fillRect(0, 0, W, 4);
+        rows.forEach(r => {
+            if (r.t === 'title') { ctx.fillStyle = '#5fe3ff'; ctx.font = font('700', 24); ctx.fillText(spec.title, PAD, r.y + 24); }
+            else if (r.t === 'sub') { ctx.fillStyle = '#cfd3da'; ctx.font = font('400', 15); ctx.fillText(r.text, PAD, r.y + 15); }
+            else if (r.t === 'line') { ctx.fillStyle = '#8a8f99'; ctx.font = font('400', 14); ctx.fillText(r.text, PAD, r.y + 14); }
+            else if (r.t === 'chips') {
+                let x = PAD;
+                spec.chips.forEach(ch => {
+                    ctx.font = font('700', 22); const vw = ctx.measureText(String(ch.value)).width; ctx.font = font('400', 12); const lw = ctx.measureText(ch.label).width;
+                    const w = Math.max(vw, lw) + 28;
+                    ctx.fillStyle = 'rgba(255,255,255,.04)'; ctx.strokeStyle = ch.color || 'rgba(255,255,255,.18)'; ctx.lineWidth = 1.5;
+                    roundRect(ctx, x, r.y, w, 46, 8); ctx.fill(); ctx.stroke();
+                    ctx.fillStyle = ch.color || '#e6e6e6'; ctx.font = font('700', 22); ctx.fillText(String(ch.value), x + 14, r.y + 24);
+                    ctx.fillStyle = '#8a8f99'; ctx.font = font('400', 12); ctx.fillText(ch.label, x + 14, r.y + 40);
+                    x += w + 10;
+                });
+            }
+            else if (r.t === 'item') {
+                const it = r.it;
+                ctx.fillStyle = 'rgba(255,255,255,.03)'; roundRect(ctx, PAD, r.y, W - 2 * PAD, r.h, 6); ctx.fill();
+                ctx.fillStyle = it.color || '#ff7ad9'; roundRect(ctx, PAD + 10, r.y + 10, 44, 24, 5); ctx.fill();
+                ctx.fillStyle = '#04222a'; ctx.font = font('800', 13); const bw = ctx.measureText(it.badge).width; ctx.fillText(it.badge, PAD + 10 + (44 - bw) / 2, r.y + 27);
+                ctx.fillStyle = '#e6e6e6'; ctx.font = font('600', 15); r.ls.forEach((l, i) => ctx.fillText(l, PAD + 66, r.y + 26 + i * 22));
+                ctx.fillStyle = '#8a8f99'; ctx.font = font('400', 13); r.subs.forEach((l, i) => ctx.fillText(l, PAD + 66, r.y + 26 + r.ls.length * 22 + i * 18 - 2));
+            }
+            else if (r.t === 'footer') { ctx.fillStyle = '#5b6068'; ctx.font = font('400', 12); ctx.fillText(spec.footer || '', PAD, r.y + 12); }
+        });
+        return c;
+    }
+    function roundRect(ctx, x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
+    function canvasToBlob(c) { return new Promise((res, rej) => { try { c.toBlob(b => b ? res(b) : rej(new Error('toBlob failed')), 'image/png'); } catch (e) { rej(e); } }); }
+    function copyCanvasImage(c) {
+        return canvasToBlob(c).then(blob => {
+            const CI = pageWin.ClipboardItem || window.ClipboardItem;
+            if (!CI || !navigator.clipboard || !navigator.clipboard.write) throw new Error('image clipboard not available in this browser — use Save PNG');
+            return navigator.clipboard.write([new CI({ 'image/png': blob })]);
+        }).then(() => toast('Image copied — paste it into the ticket', false)).catch(e => { warn('copy image:', e); toast('Could not copy the image: ' + e.message, true); });
+    }
+    function saveCanvasPng(c, name) {
+        canvasToBlob(c).then(blob => { const doc = pageWin.top.document; const a = doc.createElement('a'); a.href = pageWin.top.URL.createObjectURL(blob); a.download = name; doc.body.appendChild(a); a.click(); setTimeout(() => { try { pageWin.top.URL.revokeObjectURL(a.href); a.remove(); } catch (e) {} }, 2000); }).catch(e => { warn('save png:', e); toast('Could not save: ' + e.message, true); });
+    }
+    function checkerCardSpec(res) {
+        const h = flightHeader(); const bad = res.rows.filter(r => r.flags.length);
+        return {
+            title: 'Flight check · ' + (h.mission || ''),
+            subtitle: 'flight ' + h.flightId + (h.group != null && h.group >= 0 ? ' · group ' + h.group : '') + ' · ' + new Date(h.when).toLocaleString() + (h.drone ? ' · ' + h.drone : ''),
+            lines: ['this flight ' + h.flightSteps + ' steps / ' + h.flightSnaps + ' snapshots · whole mission ' + h.missionSteps + ' steps / ' + h.missionSnaps + ' snapshots'],
+            chips: [{ label: 'shots', value: res.summary.shots, color: '#5fe3ff' }, { label: 'need attention', value: bad.length, color: bad.length ? '#ffb347' : '#5fff5f' }, { label: 're-takes', value: res.summary.retakes, color: res.summary.retakes ? '#ffb347' : null }, { label: 'no picture', value: res.summary.missing.length, color: res.summary.missing.length ? '#ff5f5f' : null }],
+            items: bad.length ? bad.map(r => ({ badge: r.s, color: r.flags.some(f => f.startsWith('no snapshot') || f.startsWith('re-take')) ? '#ffb347' : '#ff7ad9', text: shotSentence(r).replace(/^\S+ at \S+ — /, ''), sub: 'at ' + r.shutter + (r.asset ? ' · ' + r.asset : '') + ' · heading ' + tri(r.hdg, '°') + ' · camera ' + tri(r.cam, '°') + ' · alt ' + tri([r.alt[0] != null ? r.alt[0] * M_TO_FT : null, r.alt[1] != null ? r.alt[1] * M_TO_FT : null, r.alt[2] != null ? r.alt[2] * M_TO_FT : null], ' ft') + ' (planned / actual / Δ)' })) : [{ badge: 'OK', color: '#5fff5f', text: 'All shots within limits.', sub: 'heading ≤ ' + res.summary.thr.hdg + '° · camera ≤ ' + res.summary.thr.cam + '° · altitude ≤ ' + res.summary.thr.alt + ' ft · off-station ≤ ' + res.summary.thr.pos + ' ft · look-point ≤ ' + res.summary.thr.look + ' ft' }],
+            footer: h.url + ' · AIM Video Validation',
+        };
+    }
+    function changeSentences(reps) {
+        // Group each save's field changes by step → one line per step in words.
+        const out = [];
+        reps.forEach((r, i) => {
+            const byStep = {};
+            (r.changes || []).forEach(c => { (byStep[c.label] = byStep[c.label] || []).push(c); });
+            Object.keys(byStep).forEach(label => {
+                const cs = byStep[label]; const parts = [];
+                cs.forEach(c => {
+                    if (c.kind === 'deleted') parts.push('deleted');
+                    else if (c.kind === 'added') parts.push('added');
+                    else if (c.field === 'position') parts.push('moved ' + (c.note || '') + (c.after ? '' : ''));
+                    else if (c.field === 'heading') parts.push('heading ' + c.before + ' → ' + c.after);
+                    else if (c.field === 'camera angle') parts.push('camera ' + c.before + ' → ' + c.after);
+                    else if (c.field === 'drone alt') parts.push('altitude ' + c.before + ' → ' + c.after);
+                    else if (c.field === 'target alt') parts.push('target alt ' + c.before + ' → ' + c.after);
+                    else if (c.field === 'abs alt') { /* derived — skip in the summary */ }
+                    else parts.push(c.field + ' ' + c.before + ' → ' + c.after);
+                });
+                if (parts.length) out.push({ badge: label, color: /^N/.test(label) ? '#5fa8ff' : '#ff7ad9', text: parts.join(' · '), sub: 'save ' + (i + 1) + ' at ' + new Date(r.at).toLocaleTimeString() + ' · ' + (r.actions || []).map(a => a.what + (a.step ? ' ' + a.step : '')).join(', ') + (r.verify && r.verify.ok ? ' · verified' : ' · VERIFY MISMATCH') });
+            });
+        });
+        return out;
+    }
+    function sessionCardSpec(reps) {
+        const h = flightHeader();
+        const items = changeSentences(reps);
+        return {
+            title: 'Mission changes · ' + (h.mission || ''),
+            subtitle: 'flight ' + h.flightId + (h.group != null && h.group >= 0 ? ' · group ' + h.group : '') + ' · ' + new Date().toLocaleString(),
+            lines: ['this flight ' + h.flightSteps + ' steps / ' + h.flightSnaps + ' snapshots · whole mission ' + h.missionSteps + ' steps / ' + h.missionSnaps + ' snapshots · live app ' + h.appId],
+            chips: [{ label: 'saves', value: reps.length, color: '#5fe3ff' }, { label: 'steps changed', value: items.length, color: items.length ? '#ffb347' : null }, { label: 'field changes', value: reps.reduce((n, r) => n + (r.changes || []).length, 0) }],
+            items: items.length ? items : [{ badge: '—', color: '#8a8f99', text: 'No changes applied on this page yet.' }],
+            footer: h.url + ' · AIM Video Validation',
+        };
+    }
     function copyText(txt, label) {
         const done = () => toast('Copied ' + label + ' to the clipboard', false);
         try { navigator.clipboard.writeText(txt).then(done, () => { fallbackCopy(txt); done(); }); } catch (e) { fallbackCopy(txt); done(); }
     }
-    function openReportBox(title, sub, tableHtml, plain, jira, summaryHtml, summaryJira) {
+    function openReportBox(spec, tableHtml, plain, jira, summaryJira, pngName) {
         if (reportEl) reportEl.remove();
         reportEl = document.createElement('div'); reportEl.className = 'aim-vv-review';
-        reportEl.innerHTML = '<div class="aim-vv-review__box" style="max-width:96vw"><div><b>' + esc(title) + '</b></div><div class="dim" style="margin:4px 0 8px">' + esc(sub) + '</div>'
-            + (summaryHtml ? summaryHtml + '<details style="margin-top:8px"><summary class="dim" style="cursor:pointer">full table (numbers)</summary>' + tableHtml + '</details>' : tableHtml)
-            + '<div class="aim-vv-edit__row" style="margin-top:8px">' + (summaryJira ? '<button type="button" data-aim-vv-rep="summary">Copy summary for JIRA</button>' : '') + '<button type="button" data-aim-vv-rep="jira">Copy ' + (summaryJira ? 'full table' : '') + ' for JIRA</button><button type="button" data-aim-vv-rep="plain">Copy as text</button><button type="button" data-aim-vv-rep="close">Close</button></div></div>';
-        reportEl.__plain = plain; reportEl.__jira = jira; reportEl.__summary = summaryJira;
+        const card = renderCard(spec);
+        reportEl.innerHTML = '<div class="aim-vv-review__box" style="max-width:96vw;padding:10px">'
+            + '<div class="aim-vv-edit__row" style="margin:0 0 8px"><button type="button" data-aim-vv-rep="img">📷 Copy as image</button><button type="button" data-aim-vv-rep="png">⬇ Save PNG</button>' + (summaryJira ? '<button type="button" data-aim-vv-rep="summary">Copy as text</button>' : '<button type="button" data-aim-vv-rep="plain">Copy as text</button>') + '<button type="button" data-aim-vv-rep="close">Close</button></div>'
+            + '<div class="aim-vv-cardhost"></div>'
+            + '<details style="margin-top:8px"><summary class="dim" style="cursor:pointer">details table (numbers) · copy for JIRA</summary>' + tableHtml + '<div class="aim-vv-edit__row" style="margin-top:6px"><button type="button" data-aim-vv-rep="jira">Copy table (JIRA markup)</button><button type="button" data-aim-vv-rep="plain">Copy table (text)</button></div></details></div>';
+        reportEl.querySelector('.aim-vv-cardhost').appendChild(card);
+        reportEl.__plain = plain; reportEl.__jira = jira; reportEl.__summary = summaryJira; reportEl.__card = card; reportEl.__png = pngName || 'aim-video-validation.png';
         document.body.appendChild(reportEl);
     }
     function onReportClick(e) {
@@ -2348,6 +2470,8 @@
         if (what === 'close') { reportEl.remove(); reportEl = null; }
         else if (what === 'jira') copyText(reportEl.__jira, 'the JIRA table');
         else if (what === 'summary') copyText(reportEl.__summary, 'the summary');
+        else if (what === 'img') copyCanvasImage(reportEl.__card);
+        else if (what === 'png') saveCanvasPng(reportEl.__card, reportEl.__png);
         else if (what === 'plain') copyText(reportEl.__plain, 'the report');
     }
     function openChecker() {
@@ -2364,14 +2488,14 @@
         const bad = res.rows.filter(r => r.flags.length);
         const summaryHtml = '<div>' + res.summary.shots + ' shots · <b>' + bad.length + '</b> need' + (bad.length === 1 ? 's' : '') + ' attention · ' + res.summary.retakes + ' re-take' + (res.summary.retakes === 1 ? '' : 's') + (res.summary.missing.length ? ' · <span class="warn">no picture for ' + esc(res.summary.missing.join(', ')) + '</span>' : '') + '</div>'
             + (bad.length ? '<ul style="margin:6px 0 0 18px;padding:0">' + bad.map(r => '<li>' + esc(shotSentence(r)) + '</li>').join('') + '</ul>' : '<div class="ok" style="margin-top:6px">All shots within limits.</div>');
-        openReportBox('Flight check — ' + (h.mission || '') + ' · flight ' + h.flightId, 'this flight ' + h.flightSteps + ' steps (' + h.flightSnaps + ' snapshots) · whole mission ' + h.missionSteps + ' steps (' + h.missionSnaps + ' snapshots) · thresholds in the Control Panel', table, checkerText(res, false), checkerText(res, true), summaryHtml, checkerSummary(res, true));
+        openReportBox(checkerCardSpec(res), table, checkerText(res, false), checkerText(res, true), checkerSummary(res, false), 'vv-flight-check-' + h.flightId + '.png');
     }
     function openSessionReport() {
         if (!model) { toast('No mission loaded', true); return; }
         const h = flightHeader(); const reps = sessionReports.filter(r => String(r.mid) === String(model.mid));
         const rows = reps.map((r, i) => (r.changes || []).map(c => '<tr><td class="dim">' + (i + 1) + ' · ' + esc(new Date(r.at).toLocaleTimeString()) + '</td><td><b>' + esc(c.label) + '</b></td><td>' + esc(c.kind + (c.field ? ' · ' + c.field : '')) + '</td><td>' + esc(c.before != null ? c.before : '') + '</td><td>' + esc(c.after != null ? c.after : '') + '</td><td class="dim">' + esc(c.note || '') + '</td><td class="dim">' + esc((r.actions || []).map(a => a.what + (a.step ? ' ' + a.step : '')).join(', ')) + '</td></tr>').join('')).join('');
         const table = reps.length ? '<table><tr class="dim"><td>save</td><td>step</td><td>change</td><td>before</td><td>after</td><td>note</td><td>action</td></tr>' + rows + '</table>' : '<div class="dim">No changes applied on this page yet — Apply something first.</div>';
-        openReportBox('Mission changes this session — ' + (h.mission || '') + ' · flight ' + h.flightId, reps.length + ' save(s) · ' + reps.reduce((n, r) => n + (r.changes || []).length, 0) + ' field change(s) · this flight ' + h.flightSteps + ' steps (' + h.flightSnaps + ' snapshots) · whole mission ' + h.missionSteps + ' steps (' + h.missionSnaps + ' snapshots)', table, sessionText(false), sessionText(true));
+        openReportBox(sessionCardSpec(reps), table, sessionText(false), sessionText(true), null, 'vv-changes-' + h.flightId + '.png');
     }
     // ---- toast ----
     let toastEl = null;
