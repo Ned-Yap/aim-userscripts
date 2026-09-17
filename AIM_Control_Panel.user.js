@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.44
+// @version      1.45
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -58,7 +58,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.44';
+    const VERSION = '1.45';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -115,6 +115,8 @@
     //                      (used by Bulk Mission Adder so it never renders
     //                      in the panel anywhere — that page has no map,
     //                      so the panel never displays there either)
+    //   - 'playback'     → only on /#/site/<id>/control-panel/past-mission/<mid>
+    //                      (Mission Playback — Video Validation lives here)
     //   - undefined      → "always visible" (default; backward compatible)
     //
     // Scripts whose scope doesn't match the current URL are:
@@ -146,6 +148,10 @@
         // exists here, so the TOP frame injects a floating gear instead
         // (see syncFloatingButton).
         if (/#\/site\/\d+\/live_drone\//.test(hash)) return 'live-drone';
+        // v1.45 — Mission Playback (past-mission viewer). Same react-pages
+        // iframe + .map-tools as Site Setup, so the docked gear just works;
+        // scope:'playback' scripts (Video Validation) show only here.
+        if (/#\/site\/\d+\/control-panel\/past-mission\//.test(hash)) return 'playback';
         // v1.37 — Data View (legacy Angular app, single frame, map in TOP,
         // no .map-tools). Gets the same floating gear as live-drone so
         // unscoped scripts (Map Styler etc.) stay reachable there.

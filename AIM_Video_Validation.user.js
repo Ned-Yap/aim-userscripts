@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Latest - AIM Video Validation
+// @name         AIM Video Validation
 // @namespace    http://tampermonkey.net/
 // @version      0.31
-// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
-// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
+// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
+// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
 // @author       Payden
 // @match        *://percepto.app/*

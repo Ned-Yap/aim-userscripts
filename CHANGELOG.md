@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — ⭐ NEW IN PROD: AIM Video Validation v0.31 · Control Panel v1.45
+
+- **AIM Video Validation** is now available to everyone (install link in the README / install guide). On a Mission Playback page (`Mission Log → a flown mission`) it gives you: the snapshot strip in the order the pictures were taken with S# badges; click a thumbnail (or its ▶) to jump the video to that shot; the shot being taken is outlined while the video plays; a shot card with planned vs actual heading / camera angle / drone altitude and how far the drone stood from its nav; the plan's N# / S# steps drawn on the map with each in-place snapshot at its planned look-point, plus every picture's actual position, heading and ground footprint; a whole-mission-group view (per-flight colours, whole-mission numbering) with a flight list that opens the other flights in new tabs; a time bar with ±10 s / ±30 s skip and a jump-to-time box; `[` / `]` step between shots. Colours and line weights are in the Control Panel card.
+- The **Adjust panel** (nudge a snapshot's aim, move its nav, adopt the pilot's actual shot, convert to a GPS aim point, duplicate / delete a snapshot block, then save with backup + verification) ships **off by default** and labelled experimental — the save path has not yet been exercised on a live mission. Turn it on in the Control Panel only if you know what you're doing; every save backs the mission up first and can be restored from the panel.
+- **Control Panel v1.45** — knows the Mission Playback page, so the Video Validation card shows only there.
+
 ## 2026-09-17 — AIM Video Validation latest v0.30: no more aim creep (dev only)
 
 - Each in-place snapshot now remembers its original aim point once and every nav move, closer / farther and alt ± re-aims at that same point; recomputing it from the rounded heading and gimbal units after each step let it creep. Shallow shots that hit the distance cap re-aim too instead of sliding with the nav. Turning or tilting the camera on purpose, Adopt and Reset clear the remembered aim.
