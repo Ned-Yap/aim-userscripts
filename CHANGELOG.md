@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Video Validation v0.35 (prod + dev): saves target the live mission by its own id
+
+- A flown mission's record carries a frozen per-flight copy of the plan with its own app id; the live mission the Mission Bank edits has a different id. Saves now resolve the live mission from the site's mission list by name (and, when several missions share a name, by matching the flown plan's structure and geometry), write to that id, and say so in the Adjust panel and the Review box.
+
 ## 2026-09-17 — AIM Video Validation v0.33 (prod + dev): edits work against the LIVE mission — first real save verified
 
 - First live Apply on a throwaway mission succeeded (nav moved, snapshot re-aimed, robot types and reports intact). It also revealed that a flown mission's record carries the plan **as flown** (frozen), while the Mission Bank shows the live plan. The map keeps showing the flown plan (that is what the pictures were taken with), but the write side now reads, guards, backs up and verifies against the live mission from the site's mission list. ↩ Restore last backup works again (it had nothing to diff against). If the live plan differs from what flew, the Adjust panel says which steps, and edits start from the live values; if it has been restructured (different step count/types) editing is disabled with a message.

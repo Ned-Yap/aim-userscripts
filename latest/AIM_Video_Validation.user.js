@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.34
+// @version      0.35
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.34';
+    const SCRIPT_VERSION = '0.35';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -175,7 +175,7 @@
             m.plan.forEach(s => { m.byId[s.id] = s; });
             // The mission record embeds the plan AS FLOWN (frozen). Edits must read/verify against the LIVE app.
             const appId = mission.app && mission.app.id;
-            const livePromise = appId ? fetchLiveApp(sid, appId, mission.app.name || mission.name).then(a => { attachLive(m, a); }).catch(e => { warn('live app read failed (edits disabled):', e.message); m.live = null; m.liveError = e.message; }) : Promise.resolve();
+            const livePromise = appId ? fetchLiveApp(sid, appId, mission.app.name || mission.name, m.plan).then(a => { attachLive(m, a); }).catch(e => { warn('live app read failed (edits disabled):', e.message); m.live = null; m.liveError = e.message; }) : Promise.resolve();
             m._livePromise = livePromise;
             const v = (Array.isArray(videos) ? videos[0] : videos) || {};
             m.video = { t0: v.drone_record_start_time ? new Date(v.drone_record_start_time).getTime() : null, rec: v };
@@ -233,26 +233,33 @@
 
     // The LIVE app: GET /available_app/<id>/ is 404 on this server; the site's mission list (what the Mission Bank
     // reads) carries every app with full instructions. One list read, pick ours by id.
-    function fetchLiveApp(sid, appId, name) {
-        const norm = (arr) => Array.isArray(arr) ? arr : (arr && (arr.results || arr.apps)) || [];
-        const byId = (list) => list.find(a => a && Number(a.id) === Number(appId)) || null;
+    // A flown mission's record embeds a FROZEN per-flight copy of the app (its own id, e.g. 181518); the live app the
+    // Mission Bank edits has a different id (e.g. 183822) and is not in the site list under the frozen id. Resolve the
+    // live app by name, disambiguating same-name missions by structure and geometry against the flown plan.
+    // (GET /available_app/<id>/ is 404 and the list needs type=1 — without it the server answers 400.)
+    function fetchLiveApp(sid, appId, name, flownPlan) {
         return getJSON('/available_app/?site_id=' + encodeURIComponent(sid) + '&type=1').then(arr => {
-            const list = norm(arr);
-            const hit = byId(list);
-            if (hit) return hit;
-            log('live app ' + appId + ' not in the type=1 list (' + list.length + ') — trying the unfiltered list');
-            return getJSON('/available_app/?site_id=' + encodeURIComponent(sid)).then(arr2 => {
-                const list2 = norm(arr2);
-                const hit2 = byId(list2);
-                if (hit2) return hit2;
-                // Last resort: exact name match — only if it is unique, and flag the id difference loudly.
-                const named = name ? list2.filter(a => a && a.name === name) : [];
-                if (named.length === 1) { warn('live app found by NAME "' + name + '" with a DIFFERENT id (' + named[0].id + ' vs flown record ' + appId + ') — the flown record is a per-flight copy; saves will target ' + named[0].id); named[0].__aimVvIdMismatch = appId; return named[0]; }
-                throw new Error('app ' + appId + ' not in the site mission list (' + list.length + ' type=1 / ' + list2.length + ' total; ' + named.length + ' name match' + (named.length === 1 ? '' : 'es') + ')');
-            });
-        }).then(app => {
-            if (!Array.isArray(app.instructions)) throw new Error('app ' + app.id + ' has no instructions in the list response');
-            return app;
+            const list = Array.isArray(arr) ? arr : (arr && (arr.results || arr.apps)) || [];
+            const direct = list.find(a => a && Number(a.id) === Number(appId));
+            if (direct) { direct.__aimVvHow = 'by id'; return direct; }
+            const named = list.filter(a => a && a.name === name);
+            if (!named.length) throw new Error('no live mission named "' + name + '" in the site list (' + list.length + ' missions; flown record app ' + appId + ')');
+            let pick = named[0], how = 'by name';
+            if (named.length > 1) {
+                const flown = flownPlan || [];
+                const aligned = named.filter(a => Array.isArray(a.instructions) && a.instructions.length === flown.length && a.instructions.slice().sort((x, y) => x.index_in_app - y.index_in_app).every((st, i) => st.type === flown[i].type));
+                const pool = aligned.length ? aligned : named;
+                // Geometry: total distance between located steps of the candidate and the flown plan (smaller = closer copy).
+                const score = (a) => { const ins = (a.instructions || []).slice().sort((x, y) => x.index_in_app - y.index_in_app); let d = 0, n = 0; ins.forEach((st, i) => { const f = flown[i]; if (st && f && st.location && f.location) { d += distM(st.location, f.location) || 0; n++; } }); return n ? d / n : Infinity; };
+                pool.sort((a, b) => score(a) - score(b));
+                pick = pool[0];
+                how = 'by name (' + named.length + ' same-name missions; ' + (aligned.length ? aligned.length + ' structurally matching, ' : '') + 'closest geometry ' + (isFinite(score(pick)) ? score(pick).toFixed(1) + ' m/step' : 'n/a') + ')';
+                warn('live app for "' + name + '": ' + named.length + ' missions share the name — picked ' + pick.id + ' ' + how);
+            }
+            pick.__aimVvHow = how;
+            if (Number(pick.id) !== Number(appId)) log('live app = ' + pick.id + ' (flown record carries frozen copy ' + appId + ') — resolved ' + how);
+            if (!Array.isArray(pick.instructions)) throw new Error('live app ' + pick.id + ' has no instructions in the list response');
+            return pick;
         });
     }
     // Map the live app onto the flown plan positionally (ids are per-copy; the POST never sends them anyway).
@@ -1653,6 +1660,7 @@
         let html = '';
         const blocked = editsBlocked();
         if (blocked) { html = '<div><b>Adjust</b> <span class="warn">— editing unavailable: ' + esc(blocked) + '</span></div>'; if (el.innerHTML !== html) el.innerHTML = html; return; }
+        if (model.liveApp && Number(model.liveApp.id) !== Number(model.mission.app && model.mission.app.id)) html += '<div class="dim">live mission app <b>' + esc(model.liveApp.id) + '</b> (this flight\'s record is a frozen copy, ' + esc(model.mission.app.id) + ') · resolved ' + esc(model.liveApp.__aimVvHow || '') + '</div>';
         if (model.liveDiff && model.liveDiff.length) html += '<div class="warn">⚠ the live plan differs from what flew on ' + model.liveDiff.length + ' step(s) (' + esc(model.liveDiff.map(id => (model.numbering[id] || {}).n || '#' + model.byId[id].index_in_app).join(', ')) + ') — the map shows the FLOWN plan; edits start from the LIVE values</div>';
         if (!step) {
             html += '<div><b>Adjust</b> <span class="dim">— select a snapshot (click a thumbnail) to edit its step' + (shot && shot.step ? ' · active step is a ' + esc(shot.step.type_name) + ', not a snapshot' : '') + '</span></div>';
@@ -1887,7 +1895,7 @@
         el.innerHTML = '<div class="aim-vv-review__box"><div><b>Review changes to mission "' + esc(model.mission.name || model.mission.app_name) + '"</b> <span class="dim">(app ' + esc(model.mission.app && model.mission.app.id) + (grp != null && grp >= 0 ? ' · affects every future flight of group ' + esc(grp) : ' · not part of a mission group') + ')</span></div>' + actions
             + '<table><tr class="dim"><td>step</td><td>change</td><td>before</td><td>after</td><td></td></tr>' + rows + '</table>'
             + '<div class="dim" style="margin:6px 0">Rails: the plan is re-read and compared first · a full JSON backup is saved (script storage + download) · ONE save · re-read and verified · a before/after report is saved + downloaded.</div>'
-            + (function() { try { const app = model.liveApp || model.mission.app; const r = resolveSelectedRobot(app); if (!r.value) blockers.push('Cannot resolve selected_robot: ' + r.from); const rep = Array.isArray(app.data_report_object_arr) ? app.data_report_object_arr.map(x => x && (x.name || x.id)).join(', ') : 'none'; return '<div class="dim">will send: name "' + esc(app.name) + '" · type ' + esc(app.type) + ' · site_id ' + esc(app.site) + ' · app_id ' + esc(app.id) + ' · selected_robot <b>' + esc(r.value || '?') + '</b> <span class="dim">(' + esc(r.from) + ')</span> · reports: ' + esc(rep) + ' · ' + edEnsureWork().length + ' instructions</div>'; } catch (e) { blockers.push('preflight failed: ' + e.message); return ''; } })()
+            + (function() { try { const app = model.liveApp || model.mission.app; const r = resolveSelectedRobot(app); if (!r.value) blockers.push('Cannot resolve selected_robot: ' + r.from); const rep = Array.isArray(app.data_report_object_arr) ? app.data_report_object_arr.map(x => x && (x.name || x.id)).join(', ') : 'none'; return '<div class="dim">will send: name "' + esc(app.name) + '" · type ' + esc(app.type) + ' · site_id ' + esc(app.site) + ' · app_id <b>' + esc(app.id) + '</b>' + (app.__aimVvHow ? ' <span class="dim">(live app, ' + esc(app.__aimVvHow) + ')</span>' : '') + ' · selected_robot <b>' + esc(r.value || '?') + '</b> <span class="dim">(' + esc(r.from) + ')</span> · reports: ' + esc(rep) + ' · ' + edEnsureWork().length + ' instructions</div>'; } catch (e) { blockers.push('preflight failed: ' + e.message); return ''; } })()
             + (blockers.length ? '<div class="warn">' + blockers.map(esc).join('<br>') + '</div>' : '')
             + '<div class="aim-vv-edit__row"><button type="button" data-aim-vv-rv="apply" ' + (blockers.length ? 'disabled' : '') + '>Apply ' + diff.length + ' change' + (diff.length === 1 ? '' : 's') + '</button><button type="button" data-aim-vv-rv="cancel">Cancel</button><span class="aim-vv-review__status dim"></span></div></div>';
         document.body.appendChild(el); ed.reviewEl = el;
@@ -1950,7 +1958,7 @@
             const blocked = editsBlocked(); if (blocked) throw new Error(blocked);
             const appId = model.mission.app && model.mission.app.id;
             status('re-reading the live mission…');
-            const freshApp = await fetchLiveApp(sid, appId, model.liveApp && model.liveApp.name);
+            const freshApp = await fetchLiveApp(sid, appId, model.liveApp && model.liveApp.name, model.plan);
             if (Number(freshApp.id) !== Number(model.liveApp && model.liveApp.id)) throw new Error('live app id changed between load (' + (model.liveApp && model.liveApp.id) + ') and now (' + freshApp.id + ')');
             const freshIns = (freshApp.instructions || []).slice().sort((a, b2) => a.index_in_app - b2.index_in_app);
             const loadedIns = model.live || [];
@@ -1968,7 +1976,7 @@
             const txt = await r.text().catch(() => '');
             if (!r.ok) { warn('save failed HTTP ' + r.status + ': ' + txt.slice(0, 500)); warn('failing body:', built.body); throw new Error('save HTTP ' + r.status); }
             status('verifying (live mission)…');
-            const afterApp = await fetchLiveApp(sid, appId, freshApp.name);
+            const afterApp = await fetchLiveApp(sid, appId, freshApp.name, model.plan);
             const after = { app: afterApp };
             const afterIns = (afterApp.instructions || []).slice().sort((a, b2) => a.index_in_app - b2.index_in_app);
             const mism = [];
