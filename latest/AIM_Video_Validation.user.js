@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.27
+// @version      0.28
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -29,7 +29,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-video-validation';
-    const SCRIPT_VERSION = '0.27';
+    const SCRIPT_VERSION = '0.28';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -367,6 +367,7 @@
             .aim-vv-group__head { margin-bottom: 4px; }
             .aim-vv-group__toggle { color: #5fe3ff; margin-left: 8px; }
             .aim-vv-group__hint { margin-bottom: 4px; }
+            .aim-vv-group__scroll { max-height: 190px; overflow-y: auto; }
             .aim-vv-group__list { border-collapse: collapse; width: 100%; }
             .aim-vv-group__list td { padding: 1px 8px 1px 0; white-space: nowrap; }
             .aim-vv-group__list a { color: #5fe3ff; text-decoration: none; }
@@ -616,9 +617,11 @@
         updateBarNow();
         let best = null, bestD = Infinity;
         model.shots.forEach(sh => { if (sh.videoOff == null) return; const d = Math.abs(sh.videoOff - t); if (d < bestD) { bestD = d; best = sh; } });
-        // "Current" = the shot whose shutter is within the window, preferring the most recent one already taken.
+        // "Current" = the shot whose shutter is within the window: the most recent one already taken, or the one
+        // about to be taken (inside the lead-in we seek to before a shot).
+        const lead = (Number(settings.leadInS) || 0) + 1.5;
         let current = null;
-        model.shots.forEach(sh => { if (sh.videoOff != null && sh.videoOff <= t + 1.5 && t - sh.videoOff <= SHOT_MATCH_WINDOW_S) current = sh; });
+        model.shots.forEach(sh => { if (sh.videoOff != null && sh.videoOff <= t + lead && t - sh.videoOff <= SHOT_MATCH_WINDOW_S) current = sh; });
         if (!current && best && bestD <= 1.5) current = best;
         markActiveTiles(current ? current.images.map(i => i.key) : []);
         if (current !== lastPlayheadShot) {
@@ -1166,7 +1169,9 @@
     let activeOverlayKey = null;
     function markActiveOverlay() {
         if (!model) return;
-        const sh = lastPlayheadShot || (selectedRec && model.shots.find(x => x.images.includes(selectedRec))) || null;
+        const v = videoEl();
+        const selShot = selectedRec && model.shots.find(x => x.images.includes(selectedRec));
+        const sh = (v && !v.paused) ? (lastPlayheadShot || selShot || null) : (selShot || lastPlayheadShot || null);
         const key = sh ? (sh.primary.key + '|' + (sh.step ? sh.step.id : '')) : null;
         if (key === activeOverlayKey && ov.layers.length) return;
         activeOverlayKey = key;
@@ -1282,7 +1287,7 @@
             + ' <a href="#" data-aim-vv="' + (ov.group ? 'toggle-group' : 'load-group') + '" class="aim-vv-group__toggle">'
             + (ov.groupLoading ? 'loading flights…' : (ov.group ? (settings.overlayGroup ? 'this flight only' : 'whole mission on map') : 'whole mission on map')) + '</a></div>'
             + (groupOn ? '<div class="dim aim-vv-group__hint">colors = flight that flew each step · grey = not flown yet · labels at close zoom</div>' : '');
-        html += '<table class="aim-vv-group__list">' + rows.map((r, i) => {
+        html += '<div class="aim-vv-group__scroll"><table class="aim-vv-group__list">' + rows.map((r, i) => {
             const m = r.meta, g = r.g;
             const color = g ? g.color : (r.self ? '#5fe3ff' : '#8a8f99');
             const steps = g ? (g.minIdx != null ? g.minIdx + '–' + g.maxIdx : (g.error ? 'error' : '∅')) : '';
@@ -1296,8 +1301,12 @@
                 + '<td class="dim">' + (m.image_count != null ? m.image_count + ' img' : '') + '</td>'
                 + '<td class="dim">' + (steps ? 'steps ' + steps : (ov.groupLoading ? '…' : '')) + '</td>'
                 + '</tr>';
-        }).join('') + '</table>';
-        if (groupPanelEl.innerHTML !== html) groupPanelEl.innerHTML = html;   // called every tick — only touch the DOM on change
+        }).join('') + '</table></div>';
+        if (groupPanelEl.innerHTML !== html) {   // called every tick — only touch the DOM on change, keep the scroll position
+            const sc = groupPanelEl.querySelector('.aim-vv-group__scroll'); const top = sc ? sc.scrollTop : 0;
+            groupPanelEl.innerHTML = html;
+            const sc2 = groupPanelEl.querySelector('.aim-vv-group__scroll'); if (sc2 && top) sc2.scrollTop = top;
+        }
     }
     function onLegendClick(e) {
         const a = e.target.closest && e.target.closest('[data-aim-vv]');
@@ -1409,12 +1418,38 @@
         if (isGps(step)) { step.value1 = +(((typeof step.value1 === 'number') ? step.value1 : 0) + dDeg).toFixed(2); return; }   // GPS: dDeg used as metres of target alt
         const e = eo(step); e.pitch = gimbalFromDeg((gimbalToDeg(e.pitch) != null ? gimbalToDeg(e.pitch) : 0) + dDeg);
     }
+    // In-place snapshots aim at a ground point implied by heading + angle + height. "Closer / farther" and "alt ±" keep
+    // THAT point fixed: the nav moves (or climbs) and the camera re-tilts to stay on it. The look-point distance changes.
+    function inplaceLook(step) {
+        const nav = wkNavOf(step); if (!nav || !nav.location) return null;
+        const g = groundAt(nav.location); if (g == null) return null;
+        const lp = lookPointFor(nav, step, g); if (!lp) return null;
+        return { nav, ground: g, lp };
+    }
+    function retilt(step, nav, ground, aim) {
+        const e = eo(step);
+        const alt = typeof e.abs_alt === 'number' ? e.abs_alt : nav.value1;
+        const h = distM(nav.location, aim); if (!(h > 0.5) || alt == null) return;
+        e.pitch = gimbalFromDeg(-Math.atan2(alt - ground, h) / RAD);
+        e.heading = Math.round(bearingDeg(nav.location, aim)) % 360;
+    }
     function edRange(step, dM) {            // closer(-) / farther(+)
         const nav = wkNavOf(step); if (!nav || !nav.location) return;
         if (isGps(step)) { const brg = bearingDeg(nav.location, step.location); step.location = moveLL(step.location, Math.abs(dM), dM > 0 ? brg : brg + 180); return; }
-        const h = wkPose(step).heading; nav.location = moveLL(nav.location, Math.abs(dM), dM < 0 ? h : h + 180);   // closer = nav moves TOWARD the heading
+        const look = inplaceLook(step);
+        const h = wkPose(step).heading;
+        if (!look || look.lp.capped) { nav.location = moveLL(nav.location, Math.abs(dM), dM < 0 ? h : h + 180); return; }   // no terrain / grazing shot: plain move
+        const aim = look.lp.ll;
+        const newDist = Math.max(3, look.lp.dist + dM);
+        nav.location = moveLL(aim, newDist, (h + 180) % 360);   // back off from the aim point along the reverse heading
+        retilt(step, nav, look.ground, aim);
     }
-    function edAlt(step, dM) { const nav = wkNavOf(step); if (nav && typeof nav.value1 === 'number') setNavAlt(nav, nav.value1 + dM); }
+    function edAlt(step, dM) {
+        const nav = wkNavOf(step); if (!nav || typeof nav.value1 !== 'number') return;
+        const look = !isGps(step) ? inplaceLook(step) : null;
+        setNavAlt(nav, nav.value1 + dM);
+        if (look && !look.lp.capped) retilt(step, nav, look.ground, look.lp.ll);
+    }
     function edAdopt(step, shot) {
         const im = shot.primary; const nav = wkNavOf(step); if (!im || !nav) return;
         if (im.location) nav.location = { lat: +im.location.lat, lng: +im.location.lng };
@@ -1537,10 +1572,10 @@
                 + btn('turn', 'right ▶', gps ? 'Move the aim point ' + sf + ' ft to the right' : 'Turn the heading ' + sd + '° right', 'data-n="1"')
                 + btn('tilt', '▲ up', gps ? 'Raise the target altitude ' + sa + ' ft' : 'Tilt the camera ' + sp + '° up', 'data-n="1"')
                 + btn('tilt', '▼ down', gps ? 'Lower the target altitude ' + sa + ' ft' : 'Tilt the camera ' + sp + '° down', 'data-n="-1"')
-                + btn('range', 'closer', gps ? 'Move the aim point ' + sf + ' ft toward the nav' : 'Move the nav ' + sf + ' ft toward the heading', 'data-n="-1"')
-                + btn('range', 'farther', gps ? 'Move the aim point ' + sf + ' ft away from the nav' : 'Move the nav ' + sf + ' ft away', 'data-n="1"')
-                + btn('alt', 'alt −', 'Drone (nav) altitude −' + sa + ' ft', 'data-n="-1"')
-                + btn('alt', 'alt +', 'Drone (nav) altitude +' + sa + ' ft', 'data-n="1"') + '</div>';
+                + btn('range', 'closer', gps ? 'Move the aim point ' + sf + ' ft toward the nav' : 'Bring the nav ' + sf + ' ft toward what it is looking at (camera re-tilts to stay on it)', 'data-n="-1"')
+                + btn('range', 'farther', gps ? 'Move the aim point ' + sf + ' ft away from the nav' : 'Back the nav ' + sf + ' ft away from what it is looking at (camera re-tilts)', 'data-n="1"')
+                + btn('alt', 'alt −', 'Drone (nav) altitude −' + sa + ' ft' + (gps ? '' : ' (camera re-tilts to keep the look-point)'), 'data-n="-1"')
+                + btn('alt', 'alt +', 'Drone (nav) altitude +' + sa + ' ft' + (gps ? '' : ' (camera re-tilts to keep the look-point)'), 'data-n="1"') + '</div>';
             html += '<div class="aim-vv-edit__row"><span class="dim">now</span> heading ' + sc('heading', pose.heading != null ? pose.heading.toFixed(0) + '°' : '–', gps ? 'aim point sideways, 1 ft per step' : 'heading') + ' · camera ' + sc('camera', pose.pitchDeg != null ? pose.pitchDeg.toFixed(0) + '°' : '–', gps ? 'target altitude' : 'camera angle') + ' · drone alt ' + sc('alt', fmtAlt(nav ? nav.value1 : null), 'drone (nav) altitude')
                 + (gps ? ' · target alt ' + sc('target-alt', fmtAlt(step.value1), 'target altitude') + ' · range ' + sc('range', fmtDist(pose.range), 'aim point closer / farther') : ' · look-point ' + sc('range', (function() { const g = nav && nav.location ? groundAt(nav.location) : null; const lp = (nav && g != null) ? lookPointFor(nav, step, g) : null; return lp ? fmtDist(lp.dist) + (lp.capped ? ' (capped)' : '') : '?'; })(), 'distance from the nav to where the camera points (terrain at the nav) — drag: nav closer / farther along the heading'))
                 + '</div>';

@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Video Validation latest v0.28: selection sticks, closer/farther keep the aim, scrolling flight list (dev only)
+
+- Clicking a thumbnail no longer loses its map highlight to the previous shot: while the video is paused the selected shot wins, and a shot inside the seek lead-in counts as current.
+- In-place snapshots: **closer / farther** and **alt ±** now keep the camera on the same ground point (the nav moves or climbs and the camera re-tilts), so the look-point distance changes as expected.
+- The mission-group flight list scrolls inside its panel once it passes about eight flights.
+
 ## 2026-09-17 — AIM Video Validation latest v0.27: pose-aware shot join, look-point range, nav drag offsets (dev only)
 
 - A picture is matched to its snapshot step by the flown log AND its actual heading / camera angle: when the log's step is already taken or disagrees with the picture, a later unclaimed snapshot in this flight whose planned pose matches within 12° wins. Fixes 235004's 14:08 picture reading as an "S6 re-take" — it is S7, shot between two log entries. The console says when this happens.
