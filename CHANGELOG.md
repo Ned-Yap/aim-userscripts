@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Fleet Tools latest v0.34 (dev only): Flight Checks copy for Sheets
+
+- "copy CSV" replaced by **copy for Sheets** (the current view) and **all shots for Sheets** (one row per picture across every flight, with planned / actual / Δ as separate numeric columns): both write a real table to the clipboard so Google Sheets / Excel paste into cells with the header row. JIRA table copy unchanged.
+
 ## 2026-09-17 — AIM Fleet Tools latest v0.33 (dev only): 🎥 Flight Checks — planned vs actual across sites
 
 - New **Flight Checks** section on the landing-page Fleet Tools panel. Pick sites in 📦 Fleet Data, set the window (default last 7 days) and ▶ Check flights: every flown flight with pictures is scored against its plan the way Video Validation scores one playback page (heading / camera angle / drone altitude / drone-vs-nav, re-takes, snapshot steps with no picture, unplanned shots), from two small reads per flight — no flown-track download. A flown flight never changes, so each flight is scored once and cached in script storage; later runs only fetch new flights.

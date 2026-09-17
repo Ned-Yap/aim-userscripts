@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.33
+// @version      0.34
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.33';
+    const SCRIPT_VERSION = '0.34';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -2809,7 +2809,29 @@
         const fl = (fcResults ? fcResults.flights : []).slice().sort((a, b) => fcSortKey === 'when' ? String(b.when || '').localeCompare(String(a.when || '')) : (b.flagged / Math.max(1, b.shots)) - (a.flagged / Math.max(1, a.shots)) || b.flagged - a.flagged);
         return { cols: ['flight', 'mission', 'site', 'drone', 'when', 'shots', 'flagged', 're-takes', 'no picture', 'unplanned', 'mean |Δhdg|', 'mean |Δcam|', 'mean Δalt', 'mean off-station', 'playback'], rows: fl.map(f => [f.mid, f.name, f.site, f.drone, f.when ? new Date(f.when).toLocaleString() : '', f.shots, f.flagged, f.retakes, (f.missing || []).length, f.unplanned || 0, fcN(f.dHdg, 1, '°'), fcN(f.dCam, 1, '°'), fcS(f.dAlt, 0, ' ft'), fcN(f.dPos, 0, ' ft'), fcPlaybackUrl(f)]), flights: fl };
     }
-    function fcCsv() { const t = fcTable(); return [t.cols.map(fdCsvEsc).join(',')].concat(t.rows.map(r => r.map(fdCsvEsc).join(','))).join('\n'); }
+    // Copy for Google Sheets / Excel: an HTML table (pastes into cells, header kept) + a tab-separated plain-text fallback.
+    function fcCopySheets(cols, rows, label) {
+        const esc = (v) => escapeHtml(String(v == null ? '' : v));
+        const html = '<table><thead><tr>' + cols.map(c => '<th>' + esc(c) + '</th>').join('') + '</tr></thead><tbody>' + rows.map(r => '<tr>' + r.map(v => '<td>' + esc(v) + '</td>').join('') + '</tr>').join('') + '</tbody></table>';
+        const tsv = [cols.join('\t')].concat(rows.map(r => r.map(v => String(v == null ? '' : v).replace(/[\t\n\r]+/g, ' ')).join('\t'))).join('\n');
+        const done = () => setStatus(label + ' copied — paste into Sheets (Ctrl+V)');
+        try {
+            const CI = window.ClipboardItem;
+            if (CI && navigator.clipboard && navigator.clipboard.write) {
+                navigator.clipboard.write([new CI({ 'text/html': new Blob([html], { type: 'text/html' }), 'text/plain': new Blob([tsv], { type: 'text/plain' }) })]).then(done).catch(e => { console.warn(`${TAG} rich copy failed, falling back to text:`, e); copyText(tsv, label + ' copied (tab-separated)'); });
+                return;
+            }
+        } catch (e) { console.warn(`${TAG} rich copy unavailable:`, e); }
+        copyText(tsv, label + ' copied (tab-separated)');
+    }
+    function fcCopyView() { const t = fcTable(); fcCopySheets(t.cols, t.rows, 'flight-check ' + fcTab + ' table'); }
+    function fcCopyAllShots() {
+        const cols = ['flight', 'mission', 'site', 'drone', 'when', 'shot', 'step', 'shutter', 'kinds', 'asset', 'planned heading', 'actual heading', 'Δ heading', 'planned camera', 'actual camera', 'Δ camera', 'planned alt ft', 'actual alt ft', 'Δ alt ft', 'drone vs nav ft', 'direction', 'flags', 'image', 'playback'];
+        const n = (v, d) => v == null || !isFinite(v) ? '' : +(+v).toFixed(d == null ? 0 : d);
+        const rows = [];
+        (fcResults ? fcResults.flights : []).forEach(f => f.rows.forEach(r => rows.push([f.mid, f.name, f.site, f.drone, f.when ? new Date(f.when).toLocaleString() : '', r.s, r.idx != null ? r.idx : '', new Date(r.t).toLocaleString(), r.kinds, r.asset || '', n(r.hdg[0]), n(r.hdg[1]), n(r.hdg[2]), n(r.cam[0]), n(r.cam[1]), n(r.cam[2]), n(r.alt[0]), n(r.alt[1]), n(r.alt[2]), n(r.pos), r.dir || '', r.flags.join('; ') || 'ok', r.name || '', fcPlaybackUrl(f)])));
+        fcCopySheets(cols, rows, 'all shots (' + rows.length + ' rows)');
+    }
     function fcJira() { const t = fcTable(); return ['||' + t.cols.join('||') + '||'].concat(t.rows.map(r => '|' + r.map(x => String(x == null ? '' : x).replace(/\|/g, '/')).join('|') + '|')).join('\n'); }
     function renderFcSection() {
         if (!openSections.fc) return '';
@@ -2831,7 +2853,7 @@
             + chip(R.flights.length, 'flights', '#7adfe6') + chip(shots, 'shots') + chip(shots ? Math.round(100 * (shots - flagged) / shots) + '%' : '–', 'within limits', flagged ? '#ffb347' : '#5fff5f') + chip(flagged, 'flagged', flagged ? '#ffb347' : null) + chip(R.flights.reduce((n, f) => n + f.retakes, 0), 're-takes') + chip(R.flights.reduce((n, f) => n + (f.missing || []).length, 0), 'no picture') + chip(R.flights.reduce((n, f) => n + (f.unplanned || 0), 0), 'unplanned')
             + (R.errors && R.errors.length ? `<div style="color:#ff7a7a">${R.errors.length} error(s): ${R.errors.slice(0, 3).map(escapeHtml).join(' · ')}${R.errors.length > 3 ? ' …' : ''}</div>` : '')
             + '<div style="margin-top:4px">' + ['flights', 'drones', 'missions', 'sites'].map(t => `<span data-ft="fc-tab-${t}" style="cursor:pointer;margin-right:12px;${fcTab === t ? 'color:#7adfe6;font-weight:bold;border-bottom:1px solid #7adfe6' : 'color:#888'}">by ${t.replace(/s$/, '')}</span>`).join('')
-            + `<span data-ft="fc-csv" style="cursor:pointer;color:#888;margin-left:14px">📋 copy CSV</span> <span data-ft="fc-jira" style="cursor:pointer;color:#888;margin-left:10px">📋 copy JIRA table</span>`
+            + `<span data-ft="fc-csv" style="cursor:pointer;color:#888;margin-left:14px" title="HTML table + tab-separated text: pastes into cells">📋 copy for Sheets</span> <span data-ft="fc-shots" style="cursor:pointer;color:#888;margin-left:10px" title="every shot of every flight, one row each — the detail sheet">📋 all shots for Sheets</span> <span data-ft="fc-jira" style="cursor:pointer;color:#888;margin-left:10px">📋 JIRA table</span>`
             + (fcTab === 'flights' ? ` <span data-ft="fc-sort" style="cursor:pointer;color:#888;margin-left:10px">sort: ${fcSortKey === 'when' ? 'newest' : 'worst first'}</span>` : '') + '</div></div>';
         const t = fcTable(); const cfgT = fcCfg();
         const cell = (v) => `<td style="padding:2px 6px;white-space:nowrap;border-bottom:1px solid #1e2430">${escapeHtml(String(v == null ? '' : v))}</td>`;
@@ -4537,7 +4559,8 @@
                     else if (cmd === 'fc-run') runFlightChecks();
                     else if (cmd === 'fc-abort') { if (fcRun) { fcRun.abort = true; setStatus('aborting flight checks after the current requests…'); } }
                     else if (cmd === 'fc-clear') { fcCache = { ver: FC_CORE_VER, flights: {} }; fcSaveCache(); fcResults = null; renderPanel(); }
-                    else if (cmd === 'fc-csv') copyText(fcCsv(), 'flight-check CSV copied');
+                    else if (cmd === 'fc-csv') fcCopyView();
+                    else if (cmd === 'fc-shots') fcCopyAllShots();
                     else if (cmd === 'fc-jira') copyText(fcJira(), 'flight-check JIRA table copied');
                     else if (cmd === 'fc-sort') { fcSortKey = fcSortKey === 'when' ? 'flagged' : 'when'; renderPanel(); }
                     else if (cmd && cmd.startsWith('fc-tab-')) { fcTab = cmd.slice(7); fcOpenFlight = null; renderPanel(); }
