@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.32
+// @version      0.33
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.32';
+    const SCRIPT_VERSION = '0.33';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -170,9 +170,13 @@
             }),
             getJSON('/mission_positions/' + mid + '/'),
         ]).then(([mission, videos, images, pos]) => {
-            const m = { sid, mid, mission, images: [], shots: [], byId: {}, numbering: {} };
+            const m = { sid, mid, mission, images: [], shots: [], byId: {}, numbering: {}, live: null, liveById: {}, liveDiff: null };
             m.plan = (mission.app && Array.isArray(mission.app.instructions)) ? mission.app.instructions.slice().sort((a, b) => a.index_in_app - b.index_in_app) : [];
             m.plan.forEach(s => { m.byId[s.id] = s; });
+            // The mission record embeds the plan AS FLOWN (frozen). Edits must read/verify against the LIVE app.
+            const appId = mission.app && mission.app.id;
+            const livePromise = appId ? fetchLiveApp(sid, appId).then(a => { attachLive(m, a); }).catch(e => { warn('live app read failed (edits disabled):', e.message); m.live = null; m.liveError = e.message; }) : Promise.resolve();
+            m._livePromise = livePromise;
             const v = (Array.isArray(videos) ? videos[0] : videos) || {};
             m.video = { t0: v.drone_record_start_time ? new Date(v.drone_record_start_time).getTime() : null, rec: v };
             if (!m.video.t0) warn('video record has no drone_record_start_time — falling back to first flown fix');
@@ -220,11 +224,44 @@
             // Extra shots on an already-shot step (pilot re-take) get flagged.
             const seen = {};
             m.shots.forEach(sh => { const id = sh.step && sh.step.id; if (id != null) { sh.retake = !!seen[id]; seen[id] = true; } });
+            return livePromise.then(() => m);
+        }).then(m => {
             log('model ready: plan ' + m.plan.length + ' steps, slice ' + (m.slice ? m.slice.minIdx + '–' + m.slice.maxIdx : 'n/a') + ', images ' + m.images.length + ', shots ' + m.shots.length + ', fixes ' + m.fixes.length + ', t0 ' + (m.video.t0 ? new Date(m.video.t0).toISOString() : 'n/a'));
             return m;
         });
     }
 
+    // The LIVE app: GET /available_app/<id>/ is 404 on this server; the site's mission list (what the Mission Bank
+    // reads) carries every app with full instructions. One list read, pick ours by id.
+    function fetchLiveApp(sid, appId) {
+        return getJSON('/available_app/?site_id=' + encodeURIComponent(sid) + '&type=1').then(arr => {
+            const list = Array.isArray(arr) ? arr : (arr && (arr.results || arr.apps)) || [];
+            const app = list.find(a => a && Number(a.id) === Number(appId));
+            if (!app) throw new Error('app ' + appId + ' not in the site mission list (' + list.length + ' missions)');
+            if (!Array.isArray(app.instructions)) throw new Error('app ' + appId + ' has no instructions in the list response');
+            return app;
+        });
+    }
+    // Map the live app onto the flown plan positionally (ids are per-copy; the POST never sends them anyway).
+    // Same count + same type per index → edits work, "before" = live values, differences are reported.
+    function attachLive(m, app) {
+        const live = (app && Array.isArray(app.instructions)) ? app.instructions.slice().sort((a, b) => a.index_in_app - b.index_in_app) : [];
+        m.liveApp = app; m.live = live; m.liveById = {}; m.liveDiff = [];
+        if (live.length !== m.plan.length || live.some((st, i) => st.type !== m.plan[i].type)) {
+            m.liveAligned = false;
+            warn('live plan differs STRUCTURALLY from the flown plan (' + live.length + ' vs ' + m.plan.length + ' steps) — edits disabled on this page');
+            return;
+        }
+        m.liveAligned = true;
+        live.forEach((st, i) => {
+            const flown = m.plan[i];
+            const copy = deepCopy(st); copy.id = flown.id; copy.index_in_app = flown.index_in_app; copy.type_name = flown.type_name;
+            m.liveById[flown.id] = copy;
+            if (stepSig(flown) !== stepSig(copy)) m.liveDiff.push(flown.id);
+        });
+        if (m.liveDiff.length) log('live plan differs from the flown plan on ' + m.liveDiff.length + ' step(s): ' + m.liveDiff.map(id => (m.numbering[id] || {}).n || '#' + m.byId[id].index_in_app).join(', ') + ' — edits start from the LIVE values');
+        else log('live plan = flown plan (' + live.length + ' steps)');
+    }
     // Numbering: S#/N# per flight (slice) by default; whole-plan when `global`.
     function computeNumbering(m, global) {
         m.numbering = {};
@@ -1378,11 +1415,19 @@
     }
 
     // ---- working copy ----
-    function edEnsureWork() { if (!ed.work && model) ed.work = deepCopy(model.plan); return ed.work; }
-    function edResetWork() { ed.work = model ? deepCopy(model.plan) : null; ed.log = []; drawGhosts(); renderEdit(); }
+    function liveBase() { return (model && model.liveAligned) ? model.plan.map(st => model.liveById[st.id]) : (model ? model.plan : []); }
+    function edEnsureWork() { if (!ed.work && model) ed.work = deepCopy(liveBase()); return ed.work; }
+    function edResetWork() { ed.work = model ? deepCopy(liveBase()) : null; ed.log = []; drawGhosts(); renderEdit(); }
+    function editsBlocked() {
+        if (!model) return 'no mission loaded';
+        if (model.liveError) return 'could not read the live mission (' + model.liveError + ')';
+        if (!model.live) return 'live mission not loaded';
+        if (!model.liveAligned) return 'the mission has been restructured since this flight (' + model.live.length + ' steps now vs ' + model.plan.length + ' flown) — edit it in the Mission Bank';
+        return null;
+    }
     function wk(id) { return edEnsureWork().find(x => x.id === id) || null; }
     function wkNavOf(step) { const w = edEnsureWork(); for (let k = w.indexOf(step) - 1; k >= 0; k--) if (w[k].type_name === 'navigate') return w[k]; return null; }
-    function origOf(id) { return model.byId[id] || null; }
+    function origOf(id) { return (model.liveAligned && model.liveById[id]) || model.byId[id] || null; }
     function stepLabel(step) { const n = model.numbering[step.id]; return n ? n.n : (step.type_name + ' #' + (step.index_in_app != null ? step.index_in_app : '+')); }
     function isGps(step) { return !!(step.location && typeof step.location.lat === 'number'); }
     function eo(step) { if (!step.extra_options) step.extra_options = {}; return step.extra_options; }
@@ -1527,7 +1572,7 @@
         return clone[0];
     }
     // ---- diff ----
-    const F = (v) => (typeof v === 'number' ? +v.toFixed(2) : v);
+    function F(v) { return typeof v === 'number' ? +v.toFixed(2) : v; }
     function stepSig(st) { return JSON.stringify({ t: st.type, l: st.location ? [+(+st.location.lat).toFixed(7), +(+st.location.lng).toFixed(7)] : null, v1: F(st.value1), v2: F(st.value2), e: st.extra_options || {} }); }
     function fieldDiffs(a, b) {
         const out = [];
@@ -1542,7 +1587,7 @@
     }
     function edDiff() {
         const w = edEnsureWork(); const out = [];
-        model.plan.forEach(o => {
+        liveBase().forEach(o => {
             const n = w.find(x => x.id === o.id);
             if (!n) { out.push({ id: o.id, label: stepLabel(o), kind: 'deleted', type: o.type_name }); return; }
             if (stepSig(o) !== stepSig(n)) fieldDiffs(o, n).forEach(d => out.push(Object.assign({ id: o.id, label: stepLabel(o), kind: 'changed', type: o.type_name }, d)));
@@ -1593,6 +1638,9 @@
         const diff = edDiff();
         const btn = (act, txt, title, extra) => '<button type="button" data-aim-vv-ed="' + act + '" ' + (extra || '') + ' title="' + esc(title || '') + '">' + txt + '</button>';
         let html = '';
+        const blocked = editsBlocked();
+        if (blocked) { html = '<div><b>Adjust</b> <span class="warn">— editing unavailable: ' + esc(blocked) + '</span></div>'; if (el.innerHTML !== html) el.innerHTML = html; return; }
+        if (model.liveDiff && model.liveDiff.length) html += '<div class="warn">⚠ the live plan differs from what flew on ' + model.liveDiff.length + ' step(s) (' + esc(model.liveDiff.map(id => (model.numbering[id] || {}).n || '#' + model.byId[id].index_in_app).join(', ')) + ') — the map shows the FLOWN plan; edits start from the LIVE values</div>';
         if (!step) {
             html += '<div><b>Adjust</b> <span class="dim">— select a snapshot (click a thumbnail) to edit its step' + (shot && shot.step ? ' · active step is a ' + esc(shot.step.type_name) + ', not a snapshot' : '') + '</span></div>';
         } else {
@@ -1815,6 +1863,7 @@
         if (ed.reviewEl) ed.reviewEl.remove();
         const shape = loadShape(), csrf = getCsrf(), lite = isLite();
         const blockers = [];
+        const blk = editsBlocked(); if (blk) blockers.push(blk);
         if (lite) blockers.push('Lite mode — writes are blocked (CSM access needed)');
         if (!shape || !shape.sample) blockers.push('No learned save shape: open any mission in the Mission Bank, click Save once (unchanged is fine), reload this page');
         if (!csrf) blockers.push('No CSRF token seen in this tab yet');
@@ -1825,7 +1874,7 @@
         el.innerHTML = '<div class="aim-vv-review__box"><div><b>Review changes to mission "' + esc(model.mission.name || model.mission.app_name) + '"</b> <span class="dim">(app ' + esc(model.mission.app && model.mission.app.id) + (grp != null && grp >= 0 ? ' · affects every future flight of group ' + esc(grp) : ' · not part of a mission group') + ')</span></div>' + actions
             + '<table><tr class="dim"><td>step</td><td>change</td><td>before</td><td>after</td><td></td></tr>' + rows + '</table>'
             + '<div class="dim" style="margin:6px 0">Rails: the plan is re-read and compared first · a full JSON backup is saved (script storage + download) · ONE save · re-read and verified · a before/after report is saved + downloaded.</div>'
-            + (function() { try { const app = model.mission.app; const r = resolveSelectedRobot(app); if (!r.value) blockers.push('Cannot resolve selected_robot: ' + r.from); const rep = Array.isArray(app.data_report_object_arr) ? app.data_report_object_arr.map(x => x && (x.name || x.id)).join(', ') : 'none'; return '<div class="dim">will send: name "' + esc(app.name) + '" · type ' + esc(app.type) + ' · site_id ' + esc(app.site) + ' · app_id ' + esc(app.id) + ' · selected_robot <b>' + esc(r.value || '?') + '</b> <span class="dim">(' + esc(r.from) + ')</span> · reports: ' + esc(rep) + ' · ' + edEnsureWork().length + ' instructions</div>'; } catch (e) { blockers.push('preflight failed: ' + e.message); return ''; } })()
+            + (function() { try { const app = model.liveApp || model.mission.app; const r = resolveSelectedRobot(app); if (!r.value) blockers.push('Cannot resolve selected_robot: ' + r.from); const rep = Array.isArray(app.data_report_object_arr) ? app.data_report_object_arr.map(x => x && (x.name || x.id)).join(', ') : 'none'; return '<div class="dim">will send: name "' + esc(app.name) + '" · type ' + esc(app.type) + ' · site_id ' + esc(app.site) + ' · app_id ' + esc(app.id) + ' · selected_robot <b>' + esc(r.value || '?') + '</b> <span class="dim">(' + esc(r.from) + ')</span> · reports: ' + esc(rep) + ' · ' + edEnsureWork().length + ' instructions</div>'; } catch (e) { blockers.push('preflight failed: ' + e.message); return ''; } })()
             + (blockers.length ? '<div class="warn">' + blockers.map(esc).join('<br>') + '</div>' : '')
             + '<div class="aim-vv-edit__row"><button type="button" data-aim-vv-rv="apply" ' + (blockers.length ? 'disabled' : '') + '>Apply ' + diff.length + ' change' + (diff.length === 1 ? '' : 's') + '</button><button type="button" data-aim-vv-rv="cancel">Cancel</button><span class="aim-vv-review__status dim"></span></div></div>';
         document.body.appendChild(el); ed.reviewEl = el;
@@ -1885,23 +1934,29 @@
         try {
             const shape = loadShape(), csrf = getCsrf();
             if (isLite() || !shape || !shape.sample || !csrf || !diff.length) throw new Error('blocked (lite / shape / csrf / empty)');
-            status('re-reading the mission…');
-            const fresh = await getJSON('/missions/' + mid + '/');
-            const freshIns = (fresh.app && fresh.app.instructions || []).slice().sort((a, b2) => a.index_in_app - b2.index_in_app);
-            if (planSig(freshIns) !== planSig(model.plan)) throw new Error('the mission changed since this page loaded — reload and redo the edits');
+            const blocked = editsBlocked(); if (blocked) throw new Error(blocked);
+            const appId = model.mission.app && model.mission.app.id;
+            status('re-reading the live mission…');
+            const freshApp = await fetchLiveApp(sid, appId);
+            const freshIns = (freshApp.instructions || []).slice().sort((a, b2) => a.index_in_app - b2.index_in_app);
+            const loadedIns = model.live || [];
+            if (freshIns.length !== loadedIns.length || freshIns.some((st, i) => stepSig(st) !== stepSig(loadedIns[i]))) throw new Error('the live mission changed since this page loaded — reload and redo the edits');
             const at = new Date().toISOString(), stamp = at.replace(/[:.]/g, '-');
             status('backing up…');
-            const backup = { at, mid, sid, appId: fresh.app.id, name: fresh.app.name, app: fresh.app };
+            const backup = { at, mid, sid, appId: freshApp.id, name: freshApp.name, app: freshApp };
             gmPush(BACKUPS_KEY, backup, 20); download('vv-backup-' + mid + '-' + stamp + '.json', backup);
-            const built = buildBody(fresh.app, ed.work, shape);
+            const fresh = { app: freshApp };
+            const built = buildBody(freshApp, ed.work, shape);
+            log('save base = live app ' + appId + ' (' + freshIns.length + ' steps)');
             log('save body: ' + built.body.instructions.length + ' instructions · keys ' + Object.keys(built.body).join(',') + (built.fromSample.length ? ' · from learned sample (unchanged): ' + built.fromSample.join(',') : ''));
             status('saving…');
             const r = await fetch('/available_app/', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf }, body: JSON.stringify(built.body) });
             const txt = await r.text().catch(() => '');
             if (!r.ok) { warn('save failed HTTP ' + r.status + ': ' + txt.slice(0, 500)); warn('failing body:', built.body); throw new Error('save HTTP ' + r.status); }
-            status('verifying…');
-            const after = await getJSON('/missions/' + mid + '/');
-            const afterIns = (after.app && after.app.instructions || []).slice().sort((a, b2) => a.index_in_app - b2.index_in_app);
+            status('verifying (live mission)…');
+            const afterApp = await fetchLiveApp(sid, appId);
+            const after = { app: afterApp };
+            const afterIns = (afterApp.instructions || []).slice().sort((a, b2) => a.index_in_app - b2.index_in_app);
             const mism = [];
             const rtBefore = JSON.stringify(fresh.app.robot_type_names || []), rtAfter = JSON.stringify(after.app.robot_type_names || []);
             if (rtBefore !== rtAfter) mism.push('ROBOT TYPES CHANGED: ' + rtBefore + ' → ' + rtAfter + ' (selected_robot semantics — restore the backup)');

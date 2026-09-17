@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Video Validation v0.33 (prod + dev): edits work against the LIVE mission — first real save verified
+
+- First live Apply on a throwaway mission succeeded (nav moved, snapshot re-aimed, robot types and reports intact). It also revealed that a flown mission's record carries the plan **as flown** (frozen), while the Mission Bank shows the live plan. The map keeps showing the flown plan (that is what the pictures were taken with), but the write side now reads, guards, backs up and verifies against the live mission from the site's mission list. ↩ Restore last backup works again (it had nothing to diff against). If the live plan differs from what flew, the Adjust panel says which steps, and edits start from the live values; if it has been restructured (different step count/types) editing is disabled with a message.
+
 ## 2026-09-17 — AIM Video Validation v0.32 (prod + dev): the review names the actions behind the changes
 
 - The Review box now lists every action you took, in order (e.g. "1. Convert → GPS aim point S5 · 2. Place on map N5"), above the field-by-field table, and the Adjust footer shows the action count and the last action. Pending edits persist across shot selections until Discard or Apply, which made a forgotten Convert look like a nav move with eight side effects. The saved report carries the action list too. Missions outside a group no longer say "group -1".
