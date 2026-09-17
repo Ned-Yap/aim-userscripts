@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-16 — AIM Video Validation latest v0.14: compact Mission Data list (dev only)
+
+- Percepto's Mission Data fields collapse to a small label / value list on the left, the flight panel gets more room on the right, and long values (the creator's email) wrap instead of being covered.
+
 ## 2026-09-16 — AIM Video Validation latest v0.13: Mission Data split with a stacked flight list (dev only)
 
 - The Mission Data block is now two columns: Percepto's fields on the left, and on the right a **flight list for the whole mission group** — one row per flight with its color, order, mission id (opens in a new tab), date/time, duration, image count and, once loaded, the plan steps it flew. "Whole mission on map" / "this flight only" lives at the top of that panel. The old one-line legend under the shot card is gone.

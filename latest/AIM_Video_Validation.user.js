@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.13
+// @version      0.14
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -29,7 +29,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-video-validation';
-    const SCRIPT_VERSION = '0.13';
+    const SCRIPT_VERSION = '0.14';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -311,8 +311,14 @@
             .aim-vv-card .ok { color: #5fff5f; } .aim-vv-card .warn { color: #ffb347; } .aim-vv-card .bad { color: #ff5f5f; }
             .aim-vv-card .dim { color: #888; }
             .aim-vv-legend { margin-top: 0; }
-            .mp-data.aim-vv-split, .aim-vv-split { display: grid !important; grid-template-columns: minmax(0, 1fr) minmax(320px, 46%); column-gap: 24px; align-items: start; }
+            .mp-data.aim-vv-split, .aim-vv-split { display: grid !important; grid-template-columns: minmax(0, 1fr) minmax(380px, 54%); column-gap: 20px; align-items: start; padding-top: 6px !important; padding-bottom: 6px !important; }
             .aim-vv-split > :not(.aim-vv-group) { grid-column: 1; }
+            /* Compact list view of Percepto's Mission Data: title = 1st child, field grid = 2nd child, each field = value + label. */
+            .aim-vv-split > :not(.aim-vv-group):first-child { font-size: 12px !important; line-height: 1.4 !important; margin: 0 0 4px !important; padding: 0 !important; letter-spacing: .04em; color: #aaa; }
+            .aim-vv-split > :not(.aim-vv-group):nth-child(2) { display: flex !important; flex-direction: column; gap: 1px; margin: 0 !important; padding: 0 !important; }
+            .aim-vv-split > :not(.aim-vv-group):nth-child(2) > * { display: flex !important; flex-direction: row-reverse; justify-content: flex-end; align-items: baseline; gap: 10px; margin: 0 !important; padding: 0 !important; min-width: 0; }
+            .aim-vv-split > :not(.aim-vv-group):nth-child(2) > * > * { font-size: 12px !important; line-height: 1.45 !important; margin: 0 !important; padding: 0 !important; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+            .aim-vv-split > :not(.aim-vv-group):nth-child(2) > * > :last-child { color: #888 !important; font-weight: 400; flex: 0 0 96px; }
             .aim-vv-group { grid-column: 2; grid-row: 1 / span 20; align-self: start; font: 11px/1.45 monospace; color: #e6e6e6;
                 padding: 8px 10px; border: 1px solid rgba(95,227,255,.35); border-radius: 4px; background: rgba(10,14,18,.85); }
             .aim-vv-group b { color: #5fe3ff; } .aim-vv-group .dim { color: #888; } .aim-vv-group .bad { color: #ff5f5f; }
