@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.21
+// @version      0.22
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -29,7 +29,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-video-validation';
-    const SCRIPT_VERSION = '0.21';
+    const SCRIPT_VERSION = '0.22';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -77,7 +77,8 @@
         overlayGroup: false,   // whole mission group, color per flight, whole-mission numbering
         timeBar: true,         // skip / jump-to-time bar under the player
         edit: true,            // Adjust panel (Phase 2)
-        stepDeg: 5, stepPitch: 2, stepFt: 10, stepAltFt: 10, rayCapFt: 500,
+        stepDeg: 1, stepPitch: 1, stepFt: 1, stepAltFt: 1, rayCapFt: 500,
+        flownDashed: true,     // restyle Percepto's flown-path line: dashed white
     };
     let settings = Object.assign({}, DEFAULTS);
     try { settings = Object.assign({}, DEFAULTS, GM_getValue(SETTINGS_KEY, {}) || {}); }
@@ -294,16 +295,20 @@
             .aim-vv-nav--prev { left: 18px; } .aim-vv-nav--next { right: 18px; }
             .aim-vv-nav--off { opacity: .25; cursor: default; }
             html.aim-vv-own-nav .mp-media .pr-image-nav-btn { display: none !important; }
-            .aim-vv-badge { position: absolute; left: 3px; top: 3px; z-index: 100; pointer-events: none;
-                font: 800 10px/14px monospace; padding: 0 4px; border-radius: 3px; color: #04222a;
-                background: #ff7ad9; box-shadow: 0 1px 3px rgba(0,0,0,.6); }
-            .aim-vv-badge--t { background: #ffb347; }
-            .aim-vv-badge--g { background: #b0ff5f; }
+            .aim-vv-badge { position: absolute; left: 2px; top: 2px; z-index: 100; pointer-events: none;
+                font: 800 9px/12px monospace; padding: 0 3px; border-radius: 6px; color: #04222a;
+                background: rgba(255,122,217,.9); box-shadow: 0 1px 2px rgba(0,0,0,.6); }
+            .aim-vv-badge--t { background: rgba(255,179,71,.9); }
+            .aim-vv-badge--g { background: rgba(176,255,95,.9); }
             .aim-vv-badge--none { background: #ff5f5f; color: #fff; }
             .aim-vv-badge--retake { outline: 2px dashed #fff; }
-            .aim-vv-seek { position: absolute; right: 3px; bottom: 3px; z-index: 100; cursor: pointer;
-                font: 700 11px/16px monospace; width: 18px; height: 18px; text-align: center; border-radius: 3px;
-                background: rgba(0,0,0,.65); color: #5fe3ff; border: 1px solid rgba(95,227,255,.6); }
+            .aim-vv-seek { position: absolute; right: 2px; bottom: 2px; z-index: 100; cursor: pointer; opacity: .55;
+                font: 700 9px/13px monospace; width: 14px; height: 14px; text-align: center; border-radius: 50%;
+                background: rgba(0,0,0,.7); color: #5fe3ff; border: 1px solid rgba(95,227,255,.6); }
+            [data-aim-vv-stamp]:hover .aim-vv-seek { opacity: 1; }
+            .aim-vv-scrub { cursor: ew-resize; border-bottom: 1px dashed rgba(95,227,255,.5); user-select: none; }
+            body.aim-vv-scrubbing { cursor: ew-resize !important; user-select: none; }
+            .aim-vv-split > :not(.aim-vv-group):nth-child(2) > * { cursor: copy; }
             .aim-vv-seek:hover { background: #5fe3ff; color: #04222a; }
             .aim-vv-card { margin: 6px 0 4px; padding: 6px 8px; border: 1px solid rgba(95,227,255,.35); border-radius: 4px;
                 background: rgba(10,14,18,.85); color: #e6e6e6; font: 11px/1.4 monospace; }
@@ -345,7 +350,7 @@
             .aim-vv-ov-dot { width: 10px; height: 10px; border-radius: 50%; border: 1px solid rgba(0,0,0,.6); margin: 4px; }
             .aim-vv-ov-dot--small { width: 6px; height: 6px; margin: 2px; opacity: .7; }
             .aim-vv-ov-flag { font-size: 13px; line-height: 16px; text-shadow: 0 1px 2px #000; }
-            .aim-vv-ov-actual { width: 12px; height: 12px; border-radius: 50%; background: #5fe3ff; border: 2px solid #04222a; box-shadow: 0 0 0 1px #5fe3ff; }
+            .aim-vv-ov-actual { width: 16px; height: 16px; border-radius: 50%; background: rgba(95,227,255,.15); border: 2px solid #5fe3ff; box-sizing: border-box; }
             .aim-vv-ov-actual--retake { border-style: dashed; border-color: #fff; }
             .aim-vv-ov-ghost { width: 22px; height: 22px; border-radius: 50%; border: 2px dashed #fff; background: rgba(0,0,0,.35); color: #fff; font: 800 9px/18px monospace; text-align: center; }
             .aim-vv-edit__row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 4px; }
@@ -438,8 +443,8 @@
                 const shot = model.shots.find(s => s.images.includes(rec));
                 const label = num ? num.n : (rec.step ? rec.step.type_name.slice(0, 4) : '?');
                 badge.className = 'aim-vv-badge' + (rec.kind === 'T' ? ' aim-vv-badge--t' : rec.kind === 'G' ? ' aim-vv-badge--g' : '') + (num ? '' : ' aim-vv-badge--none') + (shot && shot.retake ? ' aim-vv-badge--retake' : '');
-                badge.textContent = label + ' ' + rec.kind;
-                badge.title = (num ? num.n + ' · ' : '') + 'shutter ' + mmss(rec.videoOff) + (shot && shot.retake ? ' · re-take of an already-shot step' : '');
+                badge.textContent = label;
+                badge.title = (num ? num.n + ' · ' : '') + (rec.kind === 'T' ? 'thermal' : rec.kind === 'G' ? 'GEM' : 'RGB') + ' · shutter ' + mmss(rec.videoOff) + (shot && shot.retake ? ' · re-take of an already-shot step' : '');
                 if (!seek) {
                     seek = document.createElement('div');
                     seek.className = 'aim-vv-seek';
@@ -728,7 +733,7 @@
             + '<button type="button" data-aim-vv-bar="go" title="Jump to the typed time">Go</button>'
             + '<button type="button" data-aim-vv-bar="skip" data-s="10" data-s2="30" title="Left-click +10 s · right-click +30 s">10s ›</button>'
             + '<button type="button" data-aim-vv-bar="next-shot" title="Next shot  ( ] )">shot ⏭</button>'
-            + '<span class="aim-vv-bar-now dim"></span>';
+            + '<span class="aim-vv-bar-now dim aim-vv-scrub" data-aim-vv-scrub="time" title="drag ↔ to scrub (1 s per step, Shift ×5)"></span>';
         media.insertAdjacentElement('afterend', barEl);
         const inp = barEl.querySelector('.aim-vv-time');
         inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); barGo(); } else if (e.key === 'Escape') { inp.blur(); } });
@@ -994,8 +999,8 @@
                 }
                 if (typeof im.drone_heading === 'number') addLayer(map, L.polyline([[im.location.lat, im.location.lng], offsetLatLng(im.location, 14, im.drone_heading)], lineOpts({ color: COLOR_ACTUAL, weight: 2, opacity: 0.9 })));
                 try {
-                    const icon = L.divIcon({ className: 'aim-vv-ov', html: '<div class="aim-vv-ov-actual' + (sh.retake ? ' aim-vv-ov-actual--retake' : '') + '"></div>', iconSize: [12, 12], iconAnchor: [6, 6] });
-                    const mk = L.marker([im.location.lat, im.location.lng], { icon, interactive: true, zIndexOffset: 600 });
+                    const icon = L.divIcon({ className: 'aim-vv-ov', html: '<div class="aim-vv-ov-actual' + (sh.retake ? ' aim-vv-ov-actual--retake' : '') + '"></div>', iconSize: [16, 16], iconAnchor: [8, 8] });
+                    const mk = L.marker([im.location.lat, im.location.lng], { icon, interactive: true, zIndexOffset: 300 });   // under the N#/S# labels
                     if (!addLayer(map, mk)) return;
                     ov.shotMarkers[im.key] = mk;
                     const d = sh.delta || {};
@@ -1020,6 +1025,19 @@
         if (!groupOn) return;
         const gate = (ov.map && typeof ov.map.getZoom === 'function' ? ov.map.getZoom() : 18) >= 17;
         if (gate !== ov.labelZoomGate) drawOverlay();
+    }
+    // Percepto draws the flown path as one huge polyline; restyle it dashed white (it re-applies on tick).
+    let flownLayer = null;
+    function styleFlownPath() {
+        const map = findMap(); if (!map) return;
+        if (!flownLayer || !map.hasLayer(flownLayer)) {
+            flownLayer = null; let best = 0;
+            Object.values(map._layers || {}).forEach(l => { if (typeof l.getLatLngs === 'function' && !(l.options && l.options.className && /aim-/.test(l.options.className))) { const n = JSON.stringify(l.getLatLngs()).split('"lat"').length - 1; if (n > best && n > 500) { best = n; flownLayer = l; } } });
+            if (!flownLayer) return;
+        }
+        const want = settings.flownDashed ? { color: '#ffffff', dashArray: '6,8', opacity: 0.9 } : (flownLayer.__aimVvOrig || null);
+        if (!flownLayer.__aimVvOrig) flownLayer.__aimVvOrig = { color: flownLayer.options.color, dashArray: flownLayer.options.dashArray || null, opacity: flownLayer.options.opacity };
+        if (want && (flownLayer.options.color !== want.color || (flownLayer.options.dashArray || null) !== (want.dashArray || null))) { try { flownLayer.setStyle(want); } catch (e) { warn('flown path style:', e); } }
     }
     let activeOverlayKey = null;
     function markActiveOverlay() {
@@ -1252,7 +1270,15 @@
     }
     // Picture-relative edits. Amounts: deg for turn/tilt, metres for moves/alt.
     function edTurn(step, dDeg) {           // left(-) / right(+)
-        if (isGps(step)) { const nav = wkNavOf(step); if (!nav) return; const brg = bearingDeg(nav.location, step.location); step.location = moveLL(step.location, Math.abs(dDeg), brg + (dDeg > 0 ? 90 : -90)); return; }   // GPS: dDeg used as metres sideways
+        if (isGps(step)) {
+            // GPS: dDeg is metres of sideways movement at the aim point — applied as a ROTATION around the nav
+            // so the range never changes (stepping sideways in a straight line walks the point outward).
+            const nav = wkNavOf(step); if (!nav || !nav.location) return;
+            const r = distM(nav.location, step.location); if (!(r > 0.5)) return;
+            const brg = bearingDeg(nav.location, step.location) + (dDeg / r) / RAD;
+            step.location = moveLL(nav.location, r, brg);
+            return;
+        }
         const e = eo(step); e.heading = ((((typeof e.heading === 'number' ? e.heading : 0) + dDeg) % 360) + 360) % 360;
     }
     function edTilt(step, dDeg) {           // up(+) / down(-) in picture terms → camera angle
@@ -1375,7 +1401,7 @@
             html += '<div><b>Adjust</b> <span class="dim">— select a snapshot (click a thumbnail) to edit its step' + (shot && shot.step ? ' · active step is a ' + esc(shot.step.type_name) + ', not a snapshot' : '') + '</span></div>';
         } else {
             const pose = wkPose(step), nav = pose.nav, gps = isGps(step);
-            const sd = Number(settings.stepDeg) || 5, sp = Number(settings.stepPitch) || 2, sf = Number(settings.stepFt) || 10, sa = Number(settings.stepAltFt) || 10;
+            const sd = Number(settings.stepDeg) || 1, sp = Number(settings.stepPitch) || 1, sf = Number(settings.stepFt) || 1, sa = Number(settings.stepAltFt) || 1;
             html += '<div><b>Adjust ' + esc(stepLabel(step)) + '</b> <span class="dim">· ' + (gps ? 'GPS aim point' : 'in-place') + ' · nav ' + (nav ? esc(stepLabel(nav)) : '–') + ' · Shift-click = ×5</span></div>';
             html += '<div class="aim-vv-edit__row"><span class="dim">picture</span>'
                 + btn('turn', '◀ left', gps ? 'Move the aim point ' + sf + ' ft to the left of the nav→aim line' : 'Turn the heading ' + sd + '° left', 'data-n="-1"')
@@ -1386,8 +1412,9 @@
                 + btn('range', 'farther', gps ? 'Move the aim point ' + sf + ' ft away from the nav' : 'Move the nav ' + sf + ' ft away', 'data-n="1"')
                 + btn('alt', 'alt −', 'Drone (nav) altitude −' + sa + ' ft', 'data-n="-1"')
                 + btn('alt', 'alt +', 'Drone (nav) altitude +' + sa + ' ft', 'data-n="1"') + '</div>';
-            html += '<div class="aim-vv-edit__row"><span class="dim">now</span> heading <b>' + (pose.heading != null ? pose.heading.toFixed(0) + '°' : '–') + '</b> · camera <b>' + (pose.pitchDeg != null ? pose.pitchDeg.toFixed(0) + '°' : '–') + '</b> · drone alt <b>' + fmtAlt(nav ? nav.value1 : null) + '</b>'
-                + (gps ? ' · target alt <b>' + fmtAlt(step.value1) + '</b> · range <b>' + fmtDist(pose.range) + '</b>' : '')
+            const sc = (kind, txt, title) => '<b data-aim-vv-scrub="' + kind + '" class="aim-vv-scrub" title="' + esc(title) + ' — drag ↔ to change (Shift ×5)">' + txt + '</b>';
+            html += '<div class="aim-vv-edit__row"><span class="dim">now</span> heading ' + sc('heading', pose.heading != null ? pose.heading.toFixed(0) + '°' : '–', gps ? 'aim point sideways, 1 ft per step' : 'heading') + ' · camera ' + sc('camera', pose.pitchDeg != null ? pose.pitchDeg.toFixed(0) + '°' : '–', gps ? 'target altitude' : 'camera angle') + ' · drone alt ' + sc('alt', fmtAlt(nav ? nav.value1 : null), 'drone (nav) altitude')
+                + (gps ? ' · target alt ' + sc('target-alt', fmtAlt(step.value1), 'target altitude') + ' · range ' + sc('range', fmtDist(pose.range), 'aim point closer / farther') : ' · range ' + sc('range', '↔', 'nav closer / farther along the heading'))
                 + (nav && nav.location ? ' · nav <span class="dim">' + nav.location.lat.toFixed(6) + ', ' + nav.location.lng.toFixed(6) + '</span>' : '') + '</div>';
             html += '<div class="aim-vv-edit__row"><span class="dim">from flight</span>'
                 + btn('adopt', 'Adopt actual shot', 'Move the nav to where the drone stood and copy the actual heading / camera angle / altitude into the step')
@@ -1405,6 +1432,50 @@
             + (!getCsrf() ? ' <span class="warn">no CSRF token seen yet</span>' : '') + '</div>';
         if (el.innerHTML !== html) el.innerHTML = html;
     }
+    // Drag-to-change: mousedown on a [data-aim-vv-scrub] element, drag horizontally; every SCRUB_PX = one unit (Shift ×5).
+    const SCRUB_PX = 6;
+    let scrub = null;
+    function onScrubDown(e) {
+        const el = e.target.closest && e.target.closest('[data-aim-vv-scrub]');
+        if (!el || e.button !== 0) return;
+        e.preventDefault(); e.stopPropagation();
+        scrub = { el, kind: el.dataset.aimVvScrub, x0: e.clientX, acc: 0 };
+        document.body.classList.add('aim-vv-scrubbing');
+    }
+    function onScrubMove(e) {
+        if (!scrub) return;
+        const dx = e.clientX - scrub.x0;
+        const units = Math.trunc(dx / SCRUB_PX) - scrub.acc;
+        if (!units) return;
+        scrub.acc += units;
+        const n = units * (e.shiftKey ? 5 : 1);
+        try { scrubApply(scrub.kind, n); } catch (err) { warn('scrub failed:', err); }
+    }
+    function onScrubUp() { if (scrub) { scrub = null; document.body.classList.remove('aim-vv-scrubbing'); } }
+    function scrubApply(kind, n) {
+        if (kind === 'time') { const v = videoEl(); if (v) { showPlayer(); seekVideo(v.currentTime + n, false); updateBarNow(); } return; }
+        const shot = currentShotForEdit();
+        const step = shot && shot.step && shot.step.type_name === 'snapshot' ? wk(shot.step.id) : null;
+        if (!step) return;
+        if (kind === 'heading') edTurn(step, isGps(step) ? n * FT : n);           // GPS: 1 unit = 1 ft sideways (as rotation)
+        else if (kind === 'camera') edTilt(step, isGps(step) ? n * FT : n);      // GPS: 1 unit = 1 ft of target alt
+        else if (kind === 'alt') edAlt(step, n * FT);
+        else if (kind === 'range') edRange(step, n * FT);
+        else if (kind === 'target-alt') { if (isGps(step)) step.value1 = +((step.value1 || 0) + n * FT).toFixed(2); }
+        drawGhosts(); renderEdit();
+    }
+    function onCopyClick(e) {
+        if (!groupHost || !groupHost.classList.contains('aim-vv-split')) return;
+        const grid = groupHost.children[1]; if (!grid || !grid.contains(e.target)) return;
+        const field = Array.from(grid.children).find(f => f.contains(e.target)); if (!field) return;
+        const value = field.children[0]; const label = field.children[1];
+        const txt = value ? value.textContent.trim() : '';
+        if (!txt) return;
+        e.preventDefault(); e.stopPropagation();
+        const done = () => toast('Copied ' + (label ? label.textContent.trim() : '') + ': ' + txt, false);
+        try { navigator.clipboard.writeText(txt).then(done, () => { fallbackCopy(txt); done(); }); } catch (err) { fallbackCopy(txt); done(); }
+    }
+    function fallbackCopy(txt) { try { const ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); } catch (e) { warn('copy failed:', e); } }
     function onEditClick(e) {
         const b = e.target.closest && e.target.closest('[data-aim-vv-ed]');
         if (!b || !model) return;
@@ -1413,7 +1484,7 @@
         const act = b.dataset.aimVvEd; const mult = e.shiftKey ? 5 : 1; const n = Number(b.dataset.n || 1) * mult;
         const shot = currentShotForEdit();
         const step = shot && shot.step && shot.step.type_name === 'snapshot' ? wk(shot.step.id) : null;
-        const sd = Number(settings.stepDeg) || 5, sp = Number(settings.stepPitch) || 2, sf = (Number(settings.stepFt) || 10) * FT, sa = (Number(settings.stepAltFt) || 10) * FT;
+        const sd = Number(settings.stepDeg) || 1, sp = Number(settings.stepPitch) || 1, sf = (Number(settings.stepFt) || 1) * FT, sa = (Number(settings.stepAltFt) || 1) * FT;
         try {
             if (act === 'review') { openReview(); return; }
             if (act === 'discard') { edResetWork(); toast('Pending changes discarded', false); return; }
@@ -1473,8 +1544,10 @@
     // Resolve it from THIS mission: the app's robot type names first, then the drone that flew it. Null = cannot write.
     function resolveSelectedRobot(app) {
         const enumLike = (v) => typeof v === 'string' && /^[A-Z][A-Z0-9_]+$/.test(v) ? v : null;
-        const fromApp = Array.isArray(app.robot_type_names) ? app.robot_type_names.map(enumLike).find(Boolean) : null;
-        if (fromApp) return { value: fromApp, from: 'app.robot_type_names' };
+        const names = Array.isArray(app.robot_type_names) ? app.robot_type_names.map(enumLike).filter(Boolean) : [];
+        const flew = model && model.mission.drone && enumLike(model.mission.drone.robot_type_name);
+        if (flew && (names.includes(flew) || !names.length)) return { value: flew, from: 'drone that flew it' + (names.length > 1 ? ' (app lists ' + names.join('/') + ')' : '') };
+        if (names.length) return { value: names[0], from: 'app.robot_type_names' + (names.length > 1 ? ' (' + names.join('/') + ')' : '') + (flew ? ' — flown by ' + flew + ' which the app does not list' : '') };
         const fromRt = Array.isArray(app.robot_type) ? app.robot_type.map(x => enumLike(x && (x.name || x.robot_type_name || x))).find(Boolean) : null;
         if (fromRt) return { value: fromRt, from: 'app.robot_type' };
         const fromDrone = model && model.mission.drone && enumLike(model.mission.drone.robot_type_name);
@@ -1600,6 +1673,7 @@
         current = null; model = null; loading = null;
         try { unstampStrip(); } catch (e) { warn('unstamp failed:', e); }
         try { clearOverlay(); } catch (e) { warn('overlay clear failed:', e); }
+        try { if (flownLayer && flownLayer.__aimVvOrig) flownLayer.setStyle(flownLayer.__aimVvOrig); } catch (e) {} flownLayer = null;
         try { ed.ghosts.forEach(l => { try { ov.map && ov.map.removeLayer(l); } catch (e2) {} }); } catch (e) {}
         ed.ghosts = []; ed.work = null; ed.open = false; ed.busy = false;
         if (ed.panelEl) { try { ed.panelEl.remove(); } catch (e) {} ed.panelEl = null; }
@@ -1626,6 +1700,7 @@
         if (model) {
             hookVideo(); scheduleStamp(); ensureCard(); ensureBar(); renderLegend(); updateBarNow();
             try { fixCounter(); ensureNavButtons(); } catch (e) { warn('counter/nav:', e); }
+            try { styleFlownPath(); } catch (e) { warn('flown style:', e); }
             if (settings.overlay && !ov.layers.length) drawOverlay();          // map appeared after load
             else if (ov.map && ov.map._container && !document.body.contains(ov.map._container)) drawOverlay();   // map rebuilt
             markActiveOverlay();
@@ -1640,7 +1715,7 @@
     function applyToggle(id, val) {
         const map = { 'master': 'master', 'strip-order': 'stripOrder', 'badges': 'badges', 'click-seek': 'clickSeek', 'lead-in': 'leadInS', 'shot-card': 'shotCard', 'units': 'units',
             'overlay': 'overlay', 'overlay-actual': 'overlayActual', 'overlay-labels': 'overlayLabels', 'overlay-group': 'overlayGroup', 'time-bar': 'timeBar',
-            'edit': 'edit', 'step-deg': 'stepDeg', 'step-pitch': 'stepPitch', 'step-ft': 'stepFt', 'step-alt-ft': 'stepAltFt', 'ray-cap-ft': 'rayCapFt' };
+            'edit': 'edit', 'step-deg': 'stepDeg', 'step-pitch': 'stepPitch', 'step-ft': 'stepFt', 'step-alt-ft': 'stepAltFt', 'ray-cap-ft': 'rayCapFt', 'flown-dashed': 'flownDashed' };
         const key = map[id]; if (!key) return;
         let v = val;
         if (key === 'leadInS') { v = parseFloat(val); if (!isFinite(v) || v < 0 || v > 60) return; }
@@ -1656,6 +1731,7 @@
             if (key === 'units' && selectedRec) renderCard(selectedRec, 'selected');
             if (key === 'overlay' || key === 'overlayActual' || key === 'overlayLabels') drawOverlay();
             if (key === 'timeBar') ensureBar();
+            if (key === 'flownDashed') styleFlownPath();
             if (key === 'edit' || key.startsWith('step') || key === 'rayCapFt') { if (!settings.edit) ed.open = false; renderEdit(); }
             if (key === 'overlayGroup') setGroupMode(v);
         }
@@ -1704,10 +1780,10 @@
                     { id: 'time-bar', label: 'Time bar under the player (±10/30 s, jump to time)', type: 'boolean', default: DEFAULTS.timeBar },
                     { id: 'hdr-edit', type: 'header', label: 'Editing (writes the mission — dev only)' },
                     { id: 'edit', label: 'Adjust panel (nudge / adopt / convert / delete / duplicate)', type: 'boolean', default: DEFAULTS.edit },
-                    { id: 'step-deg', label: 'Turn step (degrees)', type: 'number', default: DEFAULTS.stepDeg, min: 1, max: 90 },
-                    { id: 'step-pitch', label: 'Camera tilt step (degrees)', type: 'number', default: DEFAULTS.stepPitch, min: 1, max: 45 },
-                    { id: 'step-ft', label: 'Move step (ft)', type: 'number', default: DEFAULTS.stepFt, min: 1, max: 500 },
-                    { id: 'step-alt-ft', label: 'Altitude step (ft)', type: 'number', default: DEFAULTS.stepAltFt, min: 1, max: 200 },
+                    { id: 'step-deg', label: 'Turn step (degrees; Shift ×5)', type: 'number', default: DEFAULTS.stepDeg, min: 0.5, max: 90 },
+                    { id: 'step-pitch', label: 'Camera tilt step (degrees; Shift ×5)', type: 'number', default: DEFAULTS.stepPitch, min: 0.5, max: 45 },
+                    { id: 'step-ft', label: 'Move step (ft; Shift ×5)', type: 'number', default: DEFAULTS.stepFt, min: 0.5, max: 500 },
+                    { id: 'step-alt-ft', label: 'Altitude step (ft; Shift ×5)', type: 'number', default: DEFAULTS.stepAltFt, min: 0.5, max: 200 },
                     { id: 'ray-cap-ft', label: 'Convert → GPS: max ray distance (ft)', type: 'number', default: DEFAULTS.rayCapFt, min: 50, max: 5000 },
                     { id: 'units', label: 'Units', type: 'select', default: DEFAULTS.units, options: [{ value: 'ft', label: 'ft' }, { value: 'm', label: 'm' }] },
                     { id: 'hdr-map', type: 'header', label: 'Map overlay' },
@@ -1715,6 +1791,7 @@
                     { id: 'overlay-actual', label: 'Actual shot poses (cyan: drone, heading, footprint)', type: 'boolean', default: DEFAULTS.overlayActual },
                     { id: 'overlay-labels', label: 'Number labels (off = plain dots)', type: 'boolean', default: DEFAULTS.overlayLabels },
                     { id: 'overlay-group', label: 'Whole mission group (color per flight, whole-mission numbering)', type: 'boolean', default: DEFAULTS.overlayGroup },
+                    { id: 'flown-dashed', label: 'Flown path: dashed white (instead of Percepto\'s color)', type: 'boolean', default: DEFAULTS.flownDashed },
                     { id: 'reload', label: 'Reload mission data', type: 'button' },
                 ],
                 hotkeys: [
@@ -1758,6 +1835,10 @@
         document.addEventListener('click', onLegendClick, true);
         document.addEventListener('click', onBarClick, true);
         document.addEventListener('click', onEditClick, true);
+        document.addEventListener('click', onCopyClick, true);
+        document.addEventListener('mousedown', onScrubDown, true);
+        document.addEventListener('mousemove', onScrubMove, true);
+        document.addEventListener('mouseup', onScrubUp, true);
         document.addEventListener('click', onReviewClick, true);
         document.addEventListener('click', (e) => { const t = e.target.closest && e.target.closest('[data-aim-vv-ed-toggle]'); if (!t || !model) return; e.preventDefault(); e.stopPropagation(); ed.open = !ed.open; if (ed.open) edEnsureWork(); renderEdit(); if (selectedRec) renderCard(selectedRec, 'selected'); }, true);
         installCsrfSniffer();

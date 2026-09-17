@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Video Validation latest v0.22: finer steps, drag-to-change, copy-to-clipboard, cleaner map + strip (dev only)
+
+- Adjust steps default to 1° / 1 ft, Shift-click = ×5 (Control Panel to change).
+- **Drag to change:** the heading / camera / altitude / range values in the Adjust panel and the time readout in the time bar have a ↔ cursor — press and drag left/right to change them live (Shift ×5), ghosts follow.
+- Left/right on a GPS aim point now rotates it around the nav at constant range (it used to creep outward when alternating).
+- Mission Data values copy to the clipboard on click.
+- Map: the flown path is drawn dashed white (toggle in the Control Panel); actual-shot markers are hollow cyan rings drawn under the N#/S# labels so they never hide a number.
+- Strip: badges shrink to just the S# in the corner (thermal = orange, GEM = green, RGB = pink); the ▶ is a small corner dot that brightens on hover.
+- `selected_robot` in the save body is the drone type that flew the mission when the app lists several.
+
 ## 2026-09-17 — AIM Video Validation latest v0.21: save body matched to Percepto's real shape, layout at narrow widths (dev only)
 
 - The save body now matches the learned shape field for field: `selected_robot` is resolved from the mission's own robot type (shown in the Review box before Apply; the write is refused if it cannot be resolved), reports are sent as objects like Percepto does.
