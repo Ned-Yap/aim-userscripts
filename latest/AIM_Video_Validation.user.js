@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.29
+// @version      0.30
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -29,7 +29,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-video-validation';
-    const SCRIPT_VERSION = '0.29';
+    const SCRIPT_VERSION = '0.30';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -1414,24 +1414,42 @@
             return;
         }
         const e = eo(step); e.heading = ((((typeof e.heading === 'number' ? e.heading : 0) + dDeg) % 360) + 360) % 360;
+        delete step._aim;   // turning the camera is a deliberate change of aim
     }
     function edTilt(step, dDeg) {           // up(+) / down(-) in picture terms → camera angle
         if (isGps(step)) { step.value1 = +(((typeof step.value1 === 'number') ? step.value1 : 0) + dDeg).toFixed(2); return; }   // GPS: dDeg used as metres of target alt
         const e = eo(step); e.pitch = gimbalFromDeg((gimbalToDeg(e.pitch) != null ? gimbalToDeg(e.pitch) : 0) + dDeg);
+        delete step._aim;   // tilting the camera is a deliberate change of aim
     }
     // In-place snapshots aim at a ground point implied by heading + angle + height. "Closer / farther" and "alt ±" keep
     // THAT point fixed: the nav moves (or climbs) and the camera re-tilts to stay on it. The look-point distance changes.
+    // The AIM of an in-place snapshot is fixed ONCE from its ORIGINAL pose (original nav position, heading, angle,
+    // terrain under the original nav) and every later move re-aims at that same point. Recomputing it from the rounded
+    // heading / gimbal units after each move let the aim creep a little per step. Capped (grazing) shots get an aim at
+    // the cap distance at the ray's altitude there, so they re-aim too instead of sliding with the nav.
+    function ensureAim(step) {
+        if (step._aim) return step._aim;
+        const nav = wkNavOf(step); if (!nav || !nav.location) return null;
+        const oNav = origOf(nav.id) || nav, oStep = origOf(step.id) || step;
+        const src = (oNav.location && (oStep.extra_options || {}).heading != null) ? { nav: oNav, step: oStep } : { nav, step };
+        const g = groundAt(src.nav.location); if (g == null) return null;
+        const lp = lookPointFor(src.nav, src.step, g); if (!lp) return null;
+        const e = src.step.extra_options || {};
+        const alt = typeof e.abs_alt === 'number' ? e.abs_alt : src.nav.value1;
+        const aimAlt = lp.capped ? alt - lp.dist * Math.tan(Math.abs(gimbalToDeg(e.pitch)) * RAD) : g;
+        step._aim = { lat: lp.ll.lat, lng: lp.ll.lng, alt: aimAlt, capped: lp.capped };
+        return step._aim;
+    }
     function inplaceLook(step) {
         const nav = wkNavOf(step); if (!nav || !nav.location) return null;
-        const g = groundAt(nav.location); if (g == null) return null;
-        const lp = lookPointFor(nav, step, g); if (!lp) return null;
-        return { nav, ground: g, lp };
+        const aim = ensureAim(step); if (!aim) return null;
+        return { nav, aim, dist: distM(nav.location, aim) };
     }
-    function retilt(step, nav, ground, aim) {
+    function retilt(step, nav, aim) {
         const e = eo(step);
         const alt = typeof e.abs_alt === 'number' ? e.abs_alt : nav.value1;
         const h = distM(nav.location, aim); if (!(h > 0.5) || alt == null) return;
-        e.pitch = gimbalFromDeg(-Math.atan2(alt - ground, h) / RAD);
+        e.pitch = gimbalFromDeg(-Math.atan2(alt - aim.alt, h) / RAD);
         e.heading = Math.round(bearingDeg(nav.location, aim)) % 360;
     }
     // Move a nav; when "keep aim" is on, every in-place snapshot on it re-aims (heading + camera angle) at the ground
@@ -1440,27 +1458,25 @@
         if (!nav || !nav.location) return;
         const w = edEnsureWork(); const i = w.indexOf(nav);
         const snaps = []; for (let k = i + 1; k < w.length && w[k].type_name !== 'navigate'; k++) if (w[k].type_name === 'snapshot' && !isGps(w[k])) snaps.push(w[k]);
-        const g = settings.navKeepAim ? groundAt(nav.location) : null;
-        const aims = (g != null) ? snaps.map(st => { const lp = lookPointFor(nav, st, g); return lp && !lp.capped ? lp.ll : null; }) : [];
+        const aims = settings.navKeepAim ? snaps.map(st => ensureAim(st)) : [];
         nav.location = { lat: +(+newLL.lat).toFixed(8), lng: +(+newLL.lng).toFixed(8) };
-        if (g != null) snaps.forEach((st, k) => { if (aims[k]) retilt(st, nav, g, aims[k]); });
+        snaps.forEach((st, k) => { if (aims[k]) retilt(st, nav, aims[k]); });
     }
     function edRange(step, dM) {            // closer(-) / farther(+)
         const nav = wkNavOf(step); if (!nav || !nav.location) return;
         if (isGps(step)) { const brg = bearingDeg(nav.location, step.location); step.location = moveLL(step.location, Math.abs(dM), dM > 0 ? brg : brg + 180); return; }
         const look = inplaceLook(step);
         const h = wkPose(step).heading;
-        if (!look || look.lp.capped) { nav.location = moveLL(nav.location, Math.abs(dM), dM < 0 ? h : h + 180); return; }   // no terrain / grazing shot: plain move
-        const aim = look.lp.ll;
-        const newDist = Math.max(3, look.lp.dist + dM);
-        nav.location = moveLL(aim, newDist, (h + 180) % 360);   // back off from the aim point along the reverse heading
-        retilt(step, nav, look.ground, aim);
+        if (!look) { nav.location = moveLL(nav.location, Math.abs(dM), dM < 0 ? h : h + 180); return; }   // no terrain: plain move
+        const newDist = Math.max(3, look.dist + dM);
+        nav.location = moveLL(look.aim, newDist, (bearingDeg(look.aim, nav.location)) % 360);   // back off from the aim point along the current line
+        retilt(step, nav, look.aim);
     }
     function edAlt(step, dM) {
         const nav = wkNavOf(step); if (!nav || typeof nav.value1 !== 'number') return;
         const look = !isGps(step) ? inplaceLook(step) : null;
         setNavAlt(nav, nav.value1 + dM);
-        if (look && !look.lp.capped) retilt(step, nav, look.ground, look.lp.ll);
+        if (look) retilt(step, nav, look.aim);
     }
     function edAdopt(step, shot) {
         const im = shot.primary; const nav = wkNavOf(step); if (!im || !nav) return;
@@ -1543,7 +1559,7 @@
             let ll = null;
             let lookLine = null;
             if (st.type_name === 'navigate' && st.location) ll = st.location;
-            else if (st.type_name === 'snapshot') { const nav = wkNavOf(st); if (isGps(st)) ll = st.location; else { const dp = nav ? inplaceDrawPos(nav, st) : null; if (dp) { ll = { lat: dp.ll[0], lng: dp.ll[1] }; lookLine = [[nav.location.lat, nav.location.lng], dp.ll]; } else ll = nav && nav.location; } }
+            else if (st.type_name === 'snapshot') { const nav = wkNavOf(st); if (isGps(st)) ll = st.location; else if (st._aim && nav && nav.location) { ll = { lat: st._aim.lat, lng: st._aim.lng }; lookLine = [[nav.location.lat, nav.location.lng], [st._aim.lat, st._aim.lng]]; } else { const dp = nav ? inplaceDrawPos(nav, st) : null; if (dp) { ll = { lat: dp.ll[0], lng: dp.ll[1] }; lookLine = [[nav.location.lat, nav.location.lng], dp.ll]; } else ll = nav && nav.location; } }
             if (!ll) return;
             if (lookLine) add(L.polyline(lookLine, lineOpts({ color: '#fff', weight: 1.5, opacity: 0.8, dashArray: '2,5' })));
             const col = st.type_name === 'navigate' ? COLOR_NAV : COLOR_SNAP;
@@ -1589,7 +1605,7 @@
                 + btn('alt', 'alt −', 'Drone (nav) altitude −' + sa + ' ft' + (gps ? '' : ' (camera re-tilts to keep the look-point)'), 'data-n="-1"')
                 + btn('alt', 'alt +', 'Drone (nav) altitude +' + sa + ' ft' + (gps ? '' : ' (camera re-tilts to keep the look-point)'), 'data-n="1"') + '</div>';
             html += '<div class="aim-vv-edit__row"><span class="dim">now</span> heading ' + sc('heading', pose.heading != null ? pose.heading.toFixed(0) + '°' : '–', gps ? 'aim point sideways, 1 ft per step' : 'heading') + ' · camera ' + sc('camera', pose.pitchDeg != null ? pose.pitchDeg.toFixed(0) + '°' : '–', gps ? 'target altitude' : 'camera angle') + ' · drone alt ' + sc('alt', fmtAlt(nav ? nav.value1 : null), 'drone (nav) altitude')
-                + (gps ? ' · target alt ' + sc('target-alt', fmtAlt(step.value1), 'target altitude') + ' · range ' + sc('range', fmtDist(pose.range), 'aim point closer / farther') : ' · look-point ' + sc('range', (function() { const g = nav && nav.location ? groundAt(nav.location) : null; const lp = (nav && g != null) ? lookPointFor(nav, step, g) : null; return lp ? fmtDist(lp.dist) + (lp.capped ? ' (capped)' : '') : '?'; })(), 'distance from the nav to where the camera points (terrain at the nav) — drag: nav closer / farther along the heading'))
+                + (gps ? ' · target alt ' + sc('target-alt', fmtAlt(step.value1), 'target altitude') + ' · range ' + sc('range', fmtDist(pose.range), 'aim point closer / farther') : ' · look-point ' + sc('range', (function() { const lk = inplaceLook(step); if (lk) return fmtDist(lk.dist) + (lk.aim.capped ? ' (capped)' : ''); const g = nav && nav.location ? groundAt(nav.location) : null; const lp = (nav && g != null) ? lookPointFor(nav, step, g) : null; return lp ? fmtDist(lp.dist) + (lp.capped ? ' (capped)' : '') : '?'; })(), 'distance from the nav to where the camera points (terrain at the nav) — drag: nav closer / farther along the heading'))
                 + '</div>';
             if (nav) {
                 html += '<div class="aim-vv-edit__row"><span class="dim">nav ' + esc(stepLabel(nav)) + '</span>'
@@ -1690,7 +1706,7 @@
         set('camera', pose.pitchDeg != null ? pose.pitchDeg.toFixed(0) + '°' : '–');
         set('alt', fmtAlt(nav ? nav.value1 : null));
         if (isGps(step)) { set('target-alt', fmtAlt(step.value1)); set('range', fmtDist(pose.range)); }
-        else if (nav && nav.location) { const g = groundAt(nav.location); const lp = g != null ? lookPointFor(nav, step, g) : null; set('range', lp ? fmtDist(lp.dist) + (lp.capped ? ' (capped)' : '') : '?'); }
+        else if (nav && nav.location) { const lk = inplaceLook(step); set('range', lk ? fmtDist(lk.dist) + (lk.aim.capped ? ' (capped)' : '') : '?'); }
         const o = nav && origOf(nav.id);
         if (o && o.location && nav.location) {
             const ns = distM(o.location, { lat: nav.location.lat, lng: o.location.lng }) * (nav.location.lat >= o.location.lat ? 1 : -1);
@@ -1753,11 +1769,11 @@
             else if (act === 'tilt') edTilt(step, isGps(step) ? n * sa : n * sp);
             else if (act === 'range') edRange(step, n * sf);
             else if (act === 'alt') edAlt(step, n * sa);
-            else if (act === 'adopt') edAdopt(step, shot);
+            else if (act === 'adopt') { edAdopt(step, shot); delete step._aim; }
             else if (act === 'convert') { ed.busy = true; edConvertGps(step, shot).then(() => { ed.busy = false; drawGhosts(); renderEdit(); }); return; }
             else if (act === 'dup') { const c = edDuplicateBlock(step); toast(c ? 'Block duplicated after ' + stepLabel(step) : 'Could not duplicate', !c); }
             else if (act === 'del') { edDeleteBlock(step); toast('Block ' + stepLabel(step) + ' marked for deletion', false); }
-            else if (act === 'reset-step') { const o = origOf(step.id); const nav = wkNavOf(step); const on = nav && origOf(nav.id); if (o) Object.assign(step, deepCopy(o)); if (on) Object.assign(nav, deepCopy(on)); }
+            else if (act === 'reset-step') { const o = origOf(step.id); const nav = wkNavOf(step); const on = nav && origOf(nav.id); if (o) Object.assign(step, deepCopy(o)); if (on) Object.assign(nav, deepCopy(on)); delete step._aim; }
             drawGhosts(); renderEdit();
         } catch (err) { warn('edit action failed:', err); toast('Edit failed: ' + err.message, true); }
     }
