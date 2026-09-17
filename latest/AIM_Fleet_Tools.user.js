@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.37
+// @version      0.38
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.37';
+    const SCRIPT_VERSION = '0.38';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -2632,7 +2632,7 @@
     // Views: by flight · by drone (hardware bias → IT) · by mission (build
     // problem → CSM) · by site. Thresholds editable here, persisted in cfg.
     // ==================================================================
-    const FC_CORE_VER = 1;
+    const FC_CORE_VER = 2;   // v2: sequence alignment join (position is an OUTPUT), per-flight S# numbering
     const FC_KEY = 'aim-ft-fc-cache';
     const FC_CAP = 3000;
     const FC_DEF = { hdg: 10, cam: 5, altFt: 25, posFt: 30, days: 7, gateDeg: 20, navFt: 200 };
@@ -2671,48 +2671,83 @@
         return { gps: false, nav, alt, heading: typeof e.heading === 'number' ? e.heading : null, pitch: fcGimbalDeg(e.pitch) };
     }
     // [#267 shared core] score one flight: plan (sorted instructions) + image records → shots, flags, summary.
+    // JOIN = local sequence alignment (Smith–Waterman) of the pictures (time order) against the plan's snapshots
+    // (step order). Match cost = how well the picture's heading + camera angle fit the planned pose, with only a
+    // WEAK position prior — so a drone 278 ft off station still lands on its own step and the distance is reported,
+    // instead of being quietly matched to whatever nav happened to be nearby (the v1 mistake). Gaps = planned
+    // snapshots with no picture (missing) or pictures with no step (unplanned); a leftover picture whose pose fits
+    // the neighbouring matched step is a re-take.
     function fcScore(plan, images, cfg, meta) {
         const snaps = []; plan.forEach((st, i) => { if (st.type_name === 'snapshot') { const pose = fcPlannedPose(plan, i); if (pose) snaps.push({ st, i, pose }); } });
-        // shots = images grouped by shutter (RGB + thermal [+ GEM] of one snapshot); primary = RGB else first
         const imgs = images.map(im => Object.assign({}, im, { shutter: fcNameTime(im.name) || (im.created_at ? new Date(im.created_at).getTime() : 0), kind: im.type === 'THERMAL' || im.thermal ? 'T' : (im.type === 'GEM' ? 'G' : 'RGB') })).sort((a, b) => a.shutter - b.shutter);
         const shots = []; let cur = null;
         imgs.forEach(im => { if (!cur || Math.abs(im.shutter - cur.shutter) > 1500) { cur = { shutter: im.shutter, images: [], primary: im }; shots.push(cur); } cur.images.push(im); if (im.kind === 'RGB') cur.primary = im; });
-        const claimed = {}; const rows = []; let minIdx = Infinity, maxIdx = -Infinity;
-        shots.forEach(sh => {
-            const im = sh.primary; const flags = [];
-            let best = null, bestScore = cfg.gateDeg;
-            if (im.location && typeof im.drone_heading === 'number') {
-                snaps.forEach(c => {
-                    const dNav = fcDistM(c.pose.nav.location, im.location); if (dNav == null || dNav * FC_M2FT > cfg.navFt) return;
-                    const dh = Math.abs(fcHdgDelta(c.pose.heading, im.drone_heading) || 0);
-                    const dp = (c.pose.pitch != null && typeof im.camera_pitch === 'number') ? Math.abs(im.camera_pitch - c.pose.pitch) : 0;
-                    const sc = dh + dp + (dNav * FC_M2FT) / 10 + (claimed[c.st.id] ? 8 : 0);   // an already-claimed step must fit clearly better
-                    if (sc < bestScore) { bestScore = sc; best = c; }
-                });
-            }
-            const r = { t: new Date(sh.shutter).toISOString(), kinds: sh.images.map(x => x.kind).join('+'), name: im.name, asset: (im.assets || []).map(a => a.name).filter(Boolean).join(', '), flags, hdg: [null, im.drone_heading, null], cam: [null, im.camera_pitch, null], alt: [null, typeof im.alt === 'number' ? im.alt * FC_M2FT : null, null], pos: null, dir: '' };
-            if (best) {
-                const p = best.pose; r.s = 'S' + (snaps.indexOf(best) + 1); r.idx = best.st.index_in_app; r.stepId = best.st.id;
-                minIdx = Math.min(minIdx, best.st.index_in_app); maxIdx = Math.max(maxIdx, best.st.index_in_app);
+        // pose fit of shot a vs planned snapshot b: 0 = perfect; degrees of combined heading + camera error, plus a
+        // weak position term (≤ 3 "degrees" at 300 ft) that only breaks ties between look-alike snapshots.
+        const fit = (sh, c) => {
+            const im = sh.primary; if (!im.location || typeof im.drone_heading !== 'number') return 99;
+            const dh = Math.abs(fcHdgDelta(c.pose.heading, im.drone_heading) || 0);
+            const dp = (c.pose.pitch != null && typeof im.camera_pitch === 'number') ? Math.abs(im.camera_pitch - c.pose.pitch) : 0;
+            const dNav = fcDistM(c.pose.nav.location, im.location); const posTerm = dNav == null ? 3 : Math.min(3, (dNav * FC_M2FT) / 100);
+            return dh + dp + posTerm;
+        };
+        const GATE = Number(cfg.gateDeg) || 20;
+        const matchScore = (sh, c) => GATE - fit(sh, c);         // positive = plausible match, negative = not
+        const GAP_SNAP = -4, GAP_SHOT = -5;                        // skip a planned snapshot / skip a picture
+        const n = shots.length, m = snaps.length;
+        const H = []; const T = [];
+        for (let i = 0; i <= n; i++) { H.push(new Float64Array(m + 1)); T.push(new Uint8Array(m + 1)); }
+        let best = 0, bi = 0, bj = 0;
+        for (let i = 1; i <= n; i++) for (let j = 1; j <= m; j++) {
+            const d = H[i - 1][j - 1] + matchScore(shots[i - 1], snaps[j - 1]);
+            const u = H[i - 1][j] + GAP_SHOT, l = H[i][j - 1] + GAP_SNAP;
+            let v = 0, t = 0;
+            if (d > v) { v = d; t = 1; } if (u > v) { v = u; t = 2; } if (l > v) { v = l; t = 3; }
+            H[i][j] = v; T[i][j] = t;
+            if (v > best) { best = v; bi = i; bj = j; }
+        }
+        const assign = new Array(n).fill(null);   // shot index → snap index
+        let i = bi, j = bj;
+        while (i > 0 && j > 0 && H[i][j] > 0) { const t = T[i][j]; if (t === 1) { assign[i - 1] = j - 1; i--; j--; } else if (t === 2) i--; else j--; }
+        // re-takes: an unassigned picture whose pose fits an already-assigned neighbouring step
+        const usedSnap = {}; assign.forEach(a => { if (a != null) usedSnap[a] = true; });
+        assign.forEach((a, k) => {
+            if (a != null) return;
+            const cand = [k - 1, k + 1].map(x => assign[x]).filter(x => x != null);
+            let pick = null, pf = 8;
+            cand.forEach(ci => { const f = fit(shots[k], snaps[ci]); if (f < pf) { pf = f; pick = ci; } });
+            if (pick != null) { assign[k] = pick; shots[k].retake = true; }
+        });
+        const matchedIdx = assign.filter(a => a != null).map(a => snaps[a].st.index_in_app);
+        const minIdx = matchedIdx.length ? Math.min.apply(null, matchedIdx) : null, maxIdx = matchedIdx.length ? Math.max.apply(null, matchedIdx) : null;
+        // per-flight S# = ordinal among the plan's snapshots inside this flight's slice (matches Video Validation)
+        const inSlice = snaps.filter(c => minIdx != null && c.st.index_in_app >= minIdx && c.st.index_in_app <= maxIdx);
+        const sNum = {}; inSlice.forEach((c, k) => { sNum[c.st.id] = 'S' + (k + 1); });
+        const seen = {}; const rows = [];
+        shots.forEach((sh, k) => {
+            const im = sh.primary; const flags = []; const a = assign[k];
+            const r = { t: new Date(sh.shutter).toISOString(), kinds: sh.images.map(x => x.kind).join('+'), name: im.name, asset: (im.assets || []).map(x => x.name).filter(Boolean).join(', '), flags, hdg: [null, im.drone_heading, null], cam: [null, im.camera_pitch, null], alt: [null, typeof im.alt === 'number' ? im.alt * FC_M2FT : null, null], pos: null, dir: '' };
+            if (a != null) {
+                const c = snaps[a], p = c.pose; r.s = sNum[c.st.id] || 'S?'; r.idx = c.st.index_in_app; r.stepId = c.st.id;
                 r.hdg = [p.heading, im.drone_heading, fcHdgDelta(p.heading, im.drone_heading)];
                 r.cam = [p.pitch, im.camera_pitch, (p.pitch != null && typeof im.camera_pitch === 'number') ? im.camera_pitch - p.pitch : null];
                 r.alt = [p.alt != null ? p.alt * FC_M2FT : null, typeof im.alt === 'number' ? im.alt * FC_M2FT : null, (p.alt != null && typeof im.alt === 'number') ? (im.alt - p.alt) * FC_M2FT : null];
-                const dNav = fcDistM(p.nav.location, im.location); r.pos = dNav != null ? dNav * FC_M2FT : null; r.dir = (r.pos != null && r.pos >= 3) ? fcCompass(fcBearing(p.nav.location, im.location)) : '';
-                if (claimed[best.st.id]) flags.push('re-take'); claimed[best.st.id] = (claimed[best.st.id] || 0) + 1;
+                const dNav = im.location ? fcDistM(p.nav.location, im.location) : null; r.pos = dNav != null ? dNav * FC_M2FT : null; r.dir = (r.pos != null && r.pos >= 3) ? fcCompass(fcBearing(p.nav.location, im.location)) : '';
+                if (sh.retake || seen[c.st.id]) flags.push('re-take'); seen[c.st.id] = (seen[c.st.id] || 0) + 1;
                 if (r.hdg[2] != null && Math.abs(r.hdg[2]) > cfg.hdg) flags.push('heading ' + (r.hdg[2] > 0 ? '+' : '') + r.hdg[2].toFixed(0) + '°');
                 if (r.cam[2] != null && Math.abs(r.cam[2]) > cfg.cam) flags.push('camera ' + (r.cam[2] > 0 ? '+' : '') + r.cam[2].toFixed(0) + '°');
                 if (r.alt[2] != null && Math.abs(r.alt[2]) > cfg.altFt) flags.push('altitude ' + (r.alt[2] > 0 ? '+' : '') + r.alt[2].toFixed(0) + ' ft');
                 if (r.pos != null && r.pos > cfg.posFt) flags.push('off station ' + r.pos.toFixed(0) + ' ft ' + r.dir);
-            } else { r.s = '?'; flags.push('unplanned shot (no planned snapshot matches nearby)'); }
+            } else { r.s = '?'; flags.push('unplanned shot (fits no planned snapshot in sequence)'); }
             rows.push(r);
         });
-        const missing = isFinite(minIdx) ? snaps.filter(c => c.st.index_in_app >= minIdx && c.st.index_in_app <= maxIdx && !claimed[c.st.id]).map(c => 'S' + (snaps.indexOf(c) + 1)) : [];
-        const m = (arr) => { const v = arr.filter(x => x != null && isFinite(x)); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
+        const missing = inSlice.filter(c => !seen[c.st.id]).map(c => sNum[c.st.id]);
+        const mean = (arr) => { const v = arr.filter(x => x != null && isFinite(x)); return v.length ? v.reduce((x, y) => x + y, 0) / v.length : null; };
         const matched = rows.filter(r => r.stepId != null);
         return Object.assign({}, meta, {
             coreVer: FC_CORE_VER, at: Date.now(), shots: rows.length, flagged: rows.filter(r => r.flags.length).length, retakes: rows.filter(r => r.flags.includes('re-take')).length, unplanned: rows.filter(r => r.s === '?').length,
-            missing, slice: isFinite(minIdx) ? [minIdx, maxIdx] : null, planSteps: plan.length, planSnaps: snaps.length,
-            dHdg: m(matched.map(r => Math.abs(r.hdg[2]))), dCam: m(matched.map(r => Math.abs(r.cam[2]))), dAlt: m(matched.map(r => r.alt[2])), dPos: m(matched.map(r => r.pos)),
+            missing, slice: minIdx != null ? [minIdx, maxIdx] : null, planSteps: plan.length, planSnaps: snaps.length, flightSnaps: inSlice.length, alignScore: best,
+            dHdg: mean(matched.map(r => Math.abs(r.hdg[2]))), dCam: mean(matched.map(r => Math.abs(r.cam[2]))), dAlt: mean(matched.map(r => r.alt[2])), dPos: mean(matched.map(r => r.pos)),
             rows,
         });
     }
@@ -2978,7 +3013,7 @@
         let h = '<div style="padding:8px 10px;border-bottom:1px solid #222834">'
             + `<div style="color:#888;margin-bottom:6px">Scope = the sites picked in 📦 Fleet Data (<b style="color:#ddd">${fdSelected.size}</b> picked) · flights with pictures in the last ${inp('days', '', 'days', 44)}</div>`
             + '<div style="margin-bottom:6px">Flag a shot when: ' + inp('hdg', 'heading >', '°') + inp('cam', 'camera >', '°') + inp('altFt', 'altitude >', 'ft') + inp('posFt', 'off-station >', 'ft') + '</div>'
-            + '<div style="color:#666;margin-bottom:6px">match a picture to a planned snapshot when its nav is within ' + inp('navFt', '', 'ft', 56) + ' and the pose fits within ' + inp('gateDeg', '', '° (heading + camera + position penalty)', 44) + '</div>'
+            + '<div style="color:#666;margin-bottom:6px">pictures are aligned to the plan\'s snapshot sequence by heading + camera angle; a match needs a pose fit within ' + inp('gateDeg', '', '° (heading + camera, plus ≤3 for position)', 44) + ' — position is measured, never assumed</div>'
             + (fcRun
                 ? `<span style="color:#7adfe6">${fcRun.msg}</span> <span data-ft="fc-abort" style="cursor:pointer;color:#ff7a7a;margin-left:10px">✕ abort</span>${fcRun.total ? `<div style="height:5px;background:#222834;border-radius:3px;margin-top:6px"><div style="height:5px;width:${Math.round(100 * fcRun.done / Math.max(1, fcRun.total))}%;background:#7adfe6;border-radius:3px"></div></div>` : ''}`
                 : `<span data-ft="fc-run" style="cursor:pointer;color:#7adfe6;border:1px solid #2a3140;padding:2px 8px;border-radius:3px">▶ Check flights</span>`
@@ -3002,7 +3037,7 @@
                 const r = t.rows[i]; const open = fcOpenFlight === f.mid;
                 h += `<tr class="aim-ft-row" data-fc-flight="${f.mid}" style="cursor:pointer;${f.flagged ? 'background:rgba(255,179,71,.05)' : ''}">` + cell((open ? '▾ ' : '▸ ') + f.mid) + cell(r[1]) + cell(r[2]) + cell(r[3]) + cell(r[4]) + cell(r[5]) + `<td style="padding:2px 6px;color:${f.flagged ? '#ffb347' : '#5fff5f'}">${f.flagged}</td>` + cell(r[7]) + cell(r[8]) + cell(r[9]) + `<td style="padding:2px 6px;color:${fcColor(f.dHdg, cfgT.hdg)}">${r[10]}</td><td style="padding:2px 6px;color:${fcColor(f.dCam, cfgT.cam)}">${r[11]}</td><td style="padding:2px 6px;color:${fcColor(f.dAlt, cfgT.altFt)}">${r[12]}</td><td style="padding:2px 6px;color:${fcColor(f.dPos, cfgT.posFt)}">${r[13]}</td></tr>`;
                 if (open) {
-                    h += `<tr><td colspan="14" style="padding:4px 6px 8px 22px;background:#101419"><div style="margin-bottom:4px"><a href="${fcPlaybackUrl(f)}" target="_blank" rel="noopener" style="color:#7adfe6">🎞 open playback ↗</a> <span style="color:#666">· plan ${f.planSteps} steps / ${f.planSnaps} snapshots${f.slice ? ` · this flight steps ${f.slice[0]}–${f.slice[1]}` : ''}${f.missing && f.missing.length ? ` · <span style="color:#ff7a7a">no picture: ${f.missing.join(', ')}</span>` : ''}</span></div>`
+                    h += `<tr><td colspan="14" style="padding:4px 6px 8px 22px;background:#101419"><div style="margin-bottom:4px"><a href="${fcPlaybackUrl(f)}" target="_blank" rel="noopener" style="color:#7adfe6">🎞 open playback ↗</a> <span style="color:#666">· whole mission ${f.planSteps} steps / ${f.planSnaps} snapshots${f.slice ? ` · this flight steps ${f.slice[0]}–${f.slice[1]} (${f.flightSnaps || '?'} snapshots)` : ''}${f.missing && f.missing.length ? ` · <span style="color:#ff7a7a">no picture: ${f.missing.join(', ')}</span>` : ''}</span></div>`
                         + '<table style="border-collapse:collapse;font:11px/1.4 monospace"><tr style="color:#888"><th style="text-align:left;padding:1px 6px">shot</th><th style="text-align:left;padding:1px 6px">step</th><th style="text-align:left;padding:1px 6px">shutter</th><th style="text-align:left;padding:1px 6px">heading p/a/Δ</th><th style="text-align:left;padding:1px 6px">camera p/a/Δ</th><th style="text-align:left;padding:1px 6px">alt ft p/a/Δ</th><th style="text-align:left;padding:1px 6px">drone vs nav</th><th style="text-align:left;padding:1px 6px">asset</th><th style="text-align:left;padding:1px 6px">flags</th></tr>'
                         + f.rows.map(r => `<tr>${cell(r.s)}${cell(r.idx != null ? '#' + r.idx : '')}${cell(new Date(r.t).toLocaleTimeString())}${cell(fcN(r.hdg[0]) + '° / ' + fcN(r.hdg[1]) + '° / ' + fcS(r.hdg[2], 0, '°'))}${cell(fcN(r.cam[0]) + '° / ' + fcN(r.cam[1]) + '° / ' + fcS(r.cam[2], 0, '°'))}${cell(fcN(r.alt[0]) + ' / ' + fcN(r.alt[1]) + ' / ' + fcS(r.alt[2]))}${cell(r.pos != null ? fcN(r.pos) + ' ft ' + r.dir : '–')}${cell(r.asset || '–')}<td style="padding:2px 6px;color:${r.flags.length ? '#ffb347' : '#5fff5f'}">${escapeHtml(r.flags.length ? r.flags.join('; ') : 'ok')}</td></tr>`).join('') + '</table></td></tr>';
                 }

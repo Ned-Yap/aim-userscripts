@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Fleet Tools latest v0.38 (dev only): Flight Checks join rebuilt — position is measured, not assumed
+
+- The first join only considered planned snapshots whose nav was within 200 ft of the drone, so a drone 278 ft off station could never be matched to its real step and was silently matched to a neighbouring nav (the source of the "109 ft SW" rows). Pictures are now aligned to the plan's snapshot sequence by heading + camera angle (sequence alignment, position only as a tie-breaker), so the distance from the intended nav is reported however large it is. Cached results are recomputed automatically.
+- Snapshot numbers are now per flight (S1… within the flight's slice), matching the playback page, and every row still carries the plan step number (#166).
+
 ## 2026-09-17 — AIM Fleet Tools latest v0.36 (dev only): Flight Checks one-page summary
 
 - New **summary** view (now the default after a run): headline numbers, then only the flights with a real problem, one line each in words ("20 of 27 shots off station ~109 ft SW — drone position, not the plan", "5 planned snapshots produced no picture"), worst first, capped at 25; then drones with a pattern across flights (position / altitude bias — for IT) and missions that misbehave on more than one drone (build — for the CSM). Copy for Sheets gives just that page; JIRA copy gives it as text.
