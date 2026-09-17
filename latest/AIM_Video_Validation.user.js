@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.25
+// @version      0.26
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -29,7 +29,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-video-validation';
-    const SCRIPT_VERSION = '0.25';
+    const SCRIPT_VERSION = '0.26';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -81,7 +81,8 @@
         flownDashed: true,     // restyle Percepto's flown-path line
         flownColor: '#ffffff',
         lookPoints: true,      // planned look-point for every in-place snapshot (ray to terrain at planned heading/angle)
-        navColor: '#5fa8ff', snapColor: '#ff7ad9', actualColor: '#5fe3ff', lineWeight: 2.5,
+        navColor: '#5fa8ff', snapColor: '#ff7ad9', actualColor: '#5fe3ff',
+        navLineW: 2, snapLineW: 2.5, actualLineW: 1.5, flownLineW: 3,
     };
     let settings = Object.assign({}, DEFAULTS);
     try { settings = Object.assign({}, DEFAULTS, GM_getValue(SETTINGS_KEY, {}) || {}); }
@@ -367,6 +368,9 @@
             .aim-vv-edit button.aim-vv-danger { color: #ff7a7a; border-color: rgba(255,95,95,.6); }
             .aim-vv-edit button.aim-vv-danger:hover { background: #ff5f5f; color: #fff; }
             .aim-vv-review button[disabled] { opacity: .4; cursor: default; }
+            .aim-vv-edit .aim-vv-latlng { width: 190px; background: #0f1216; color: #e6e6e6; border: 1px solid #444; border-radius: 3px; padding: 2px 6px; font: inherit; }
+            .aim-vv-edit button.aim-vv-armed { background: #5fe3ff; color: #04222a; }
+            .leaflet-container.aim-vv-placing, .leaflet-container.aim-vv-placing * { cursor: crosshair !important; }
             .aim-vv-edit__foot { border-top: 1px solid rgba(255,255,255,.12); padding-top: 4px; margin-top: 6px; }
             .aim-vv-review { position: fixed; inset: 0; z-index: 100000; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; }
             .aim-vv-review__box { max-width: 900px; max-height: 80vh; overflow: auto; background: #12151a; color: #e6e6e6; border: 1px solid rgba(95,227,255,.5); border-radius: 6px; padding: 12px 14px; font: 12px/1.45 monospace; }
@@ -872,8 +876,8 @@
     const COLOR_OTHER = '#8a8f99';
     // Overlay colors / line weight are Control Panel settings (read live so a picker change redraws with the new values).
     let COLOR_NAV = '#5fa8ff', COLOR_SNAP = '#ff7ad9', COLOR_ACTUAL = '#5fe3ff';
-    let LINE_W = 2.5;
-    function syncOverlayStyle() { COLOR_NAV = settings.navColor || '#5fa8ff'; COLOR_SNAP = settings.snapColor || '#ff7ad9'; COLOR_ACTUAL = settings.actualColor || '#5fe3ff'; LINE_W = Number(settings.lineWeight) || 2.5; }
+    let W_NAV = 2, W_SNAP = 2.5, W_ACT = 1.5;
+    function syncOverlayStyle() { COLOR_NAV = settings.navColor || '#5fa8ff'; COLOR_SNAP = settings.snapColor || '#ff7ad9'; COLOR_ACTUAL = settings.actualColor || '#5fe3ff'; W_NAV = Number(settings.navLineW) || 2; W_SNAP = Number(settings.snapLineW) || 2.5; W_ACT = Number(settings.actualLineW) || 1.5; }
 
     function looksLikeLeafletMap(v) {
         return !!v && typeof v === 'object' && typeof v.latLngToLayerPoint === 'function' && typeof v.latLngToContainerPoint === 'function'
@@ -941,7 +945,14 @@
         }
         drawOverlaySync(L, map);
     }
-    function groundAt(ll) { const v = demCache[(+ll.lat).toFixed(5) + ',' + (+ll.lng).toFixed(5)]; return v === undefined ? null : v; }
+    function groundAt(ll) {
+        const v = demCache[(+ll.lat).toFixed(5) + ',' + (+ll.lng).toFixed(5)];
+        if (v !== undefined) return v;
+        // A nav moved in the working copy has no exact lookup yet — use the nearest cached terrain within 300 m (preview only).
+        let best = null, bd = 300;
+        Object.keys(demCache).forEach(k => { const g = demCache[k]; if (g == null) return; const [la, ln] = k.split(',').map(Number); const d = distM(ll, { lat: la, lng: ln }); if (d < bd) { bd = d; best = g; } });
+        return best;
+    }
     // Where an in-place snapshot is DRAWN: its look-point when terrain is known and look-points are on, else beside the nav.
     function inplaceDrawPos(nav, st) {
         if (settings.lookPoints && nav && nav.location) { const g = groundAt(nav.location); if (g != null) { const lp = lookPointFor(nav, st, g); if (lp) return { ll: [lp.ll.lat, lp.ll.lng], look: lp }; } }
@@ -970,7 +981,7 @@
             if (st.type_name === 'navigate' && st.location) { curNav = st; navPts.push([st.location.lat, st.location.lng]); }
         });
         syncOverlayStyle();
-        if (navPts.length >= 2) addLayer(map, L.polyline(navPts, lineOpts({ color: COLOR_NAV, weight: LINE_W * 0.8, opacity: 0.6, dashArray: '6,8' })));
+        if (navPts.length >= 2) addLayer(map, L.polyline(navPts, lineOpts({ color: COLOR_NAV, weight: W_NAV, opacity: 0.6, dashArray: '6,8' })));
         let nav = null;
         steps.forEach(st => {
             if (st.type_name === 'navigate') { nav = st; return; }
@@ -978,12 +989,12 @@
             if (dense && unflown(st)) return;
             const col = colorFor(st, COLOR_SNAP);
             if (st.location && typeof st.location.lat === 'number') {
-                addLayer(map, L.polyline([[nav.location.lat, nav.location.lng], [st.location.lat, st.location.lng]], lineOpts({ color: col, weight: LINE_W, opacity: 0.85, dashArray: '4,6' })));
+                addLayer(map, L.polyline([[nav.location.lat, nav.location.lng], [st.location.lat, st.location.lng]], lineOpts({ color: col, weight: W_SNAP, opacity: 0.85, dashArray: '4,6' })));
             } else {
                 const eo = st.extra_options || {};
                 const dp = inplaceDrawPos(nav, st);
-                if (dp) addLayer(map, L.polyline([[nav.location.lat, nav.location.lng], dp.ll], lineOpts({ color: col, weight: LINE_W, opacity: 0.85, dashArray: '4,6' })));
-                else if (typeof eo.heading === 'number') addLayer(map, L.polyline([[nav.location.lat, nav.location.lng], offsetLatLng(nav.location, 18, eo.heading)], lineOpts({ color: col, weight: LINE_W + 0.5, opacity: 0.9 })));
+                if (dp) addLayer(map, L.polyline([[nav.location.lat, nav.location.lng], dp.ll], lineOpts({ color: col, weight: W_SNAP, opacity: 0.85, dashArray: '4,6' })));
+                else if (typeof eo.heading === 'number') addLayer(map, L.polyline([[nav.location.lat, nav.location.lng], offsetLatLng(nav.location, 18, eo.heading)], lineOpts({ color: col, weight: W_SNAP + 0.5, opacity: 0.9 })));
             }
         });
 
@@ -1041,9 +1052,9 @@
                 const im = sh.primary; if (!im || !im.location) return;
                 const num = sh.step && model.numbering[sh.step.id];
                 if (Array.isArray(im.fov_polygon) && im.fov_polygon.length >= 3) {
-                    addLayer(map, L.polygon(im.fov_polygon.map(p => [p.lat, p.lng]), lineOpts({ color: COLOR_ACTUAL, weight: Math.max(1, LINE_W * 0.6), opacity: 0.8, fillColor: COLOR_ACTUAL, fillOpacity: 0.08 })));
+                    addLayer(map, L.polygon(im.fov_polygon.map(p => [p.lat, p.lng]), lineOpts({ color: COLOR_ACTUAL, weight: W_ACT, opacity: 0.8, fillColor: COLOR_ACTUAL, fillOpacity: 0.08 })));
                 }
-                if (typeof im.drone_heading === 'number') addLayer(map, L.polyline([[im.location.lat, im.location.lng], offsetLatLng(im.location, 14, im.drone_heading)], lineOpts({ color: COLOR_ACTUAL, weight: LINE_W, opacity: 0.9 })));
+                if (typeof im.drone_heading === 'number') addLayer(map, L.polyline([[im.location.lat, im.location.lng], offsetLatLng(im.location, 14, im.drone_heading)], lineOpts({ color: COLOR_ACTUAL, weight: W_ACT + 0.5, opacity: 0.9 })));
                 try {
                     const icon = L.divIcon({ className: 'aim-vv-ov', html: '<div class="aim-vv-ov-actual' + (sh.retake ? ' aim-vv-ov-actual--retake' : '') + '" style="border-color:' + (sh.retake ? '#fff' : COLOR_ACTUAL) + ';background:' + COLOR_ACTUAL + '26"></div>', iconSize: [16, 16], iconAnchor: [8, 8] });
                     const mk = L.marker([im.location.lat, im.location.lng], { icon, interactive: true, zIndexOffset: 300 });   // under the N#/S# labels
@@ -1117,10 +1128,12 @@
     }
     let flownRuleEl = null, flownRuleColor = null;
     function ensureFlownRule(color) {
-        if (flownRuleEl && document.head.contains(flownRuleEl) && flownRuleColor === color) return;
+        const sig = color + '|' + (Number(settings.flownLineW) || 3);
+        if (flownRuleEl && document.head.contains(flownRuleEl) && flownRuleColor === sig) return;
         if (!flownRuleEl || !document.head.contains(flownRuleEl)) { flownRuleEl = document.createElement('style'); flownRuleEl.id = 'aim-vv-flown-style'; document.head.appendChild(flownRuleEl); }
-        flownRuleColor = color;
-        flownRuleEl.textContent = 'path.aim-vv-flown { stroke: ' + color + ' !important; stroke-dasharray: 6 8 !important; stroke-opacity: .9 !important; }';
+        flownRuleColor = sig;
+        const w = Number(settings.flownLineW) || 3;
+        flownRuleEl.textContent = 'path.aim-vv-flown { stroke: ' + color + ' !important; stroke-width: ' + w + 'px !important; stroke-dasharray: 6 8 !important; stroke-opacity: .9 !important; }';
     }
     let activeOverlayKey = null;
     function markActiveOverlay() {
@@ -1502,7 +1515,15 @@
             const sc = (kind, txt, title) => '<b data-aim-vv-scrub="' + kind + '" class="aim-vv-scrub" title="' + esc(title) + ' — drag ↔ to change (Shift ×5)">' + txt + '</b>';
             html += '<div class="aim-vv-edit__row"><span class="dim">now</span> heading ' + sc('heading', pose.heading != null ? pose.heading.toFixed(0) + '°' : '–', gps ? 'aim point sideways, 1 ft per step' : 'heading') + ' · camera ' + sc('camera', pose.pitchDeg != null ? pose.pitchDeg.toFixed(0) + '°' : '–', gps ? 'target altitude' : 'camera angle') + ' · drone alt ' + sc('alt', fmtAlt(nav ? nav.value1 : null), 'drone (nav) altitude')
                 + (gps ? ' · target alt ' + sc('target-alt', fmtAlt(step.value1), 'target altitude') + ' · range ' + sc('range', fmtDist(pose.range), 'aim point closer / farther') : ' · range ' + sc('range', '↔', 'nav closer / farther along the heading'))
-                + (nav && nav.location ? ' · nav <span class="dim">' + nav.location.lat.toFixed(6) + ', ' + nav.location.lng.toFixed(6) + '</span>' : '') + '</div>';
+                + '</div>';
+            if (nav) {
+                html += '<div class="aim-vv-edit__row"><span class="dim">nav ' + esc(stepLabel(nav)) + '</span>'
+                    + btn('nav-move', '▲ N', 'Move the nav ' + sf + ' ft north', 'data-b="0"') + btn('nav-move', '▼ S', 'Move the nav ' + sf + ' ft south', 'data-b="180"')
+                    + btn('nav-move', '◀ W', 'Move the nav ' + sf + ' ft west', 'data-b="270"') + btn('nav-move', 'E ▶', 'Move the nav ' + sf + ' ft east', 'data-b="90"')
+                    + btn('nav-place', ed.placing ? '📍 click the map… (Esc cancels)' : '📍 Place on map', 'Next click on the map sets this nav\'s position', ed.placing ? 'class="aim-vv-armed"' : '')
+                    + '<input type="text" class="aim-vv-latlng" data-aim-vv-latlng="1" value="' + esc(nav.location ? nav.location.lat.toFixed(6) + ', ' + nav.location.lng.toFixed(6) : '') + '" title="lat, lng — Enter to apply" spellcheck="false">'
+                    + btn('nav-set', 'Set', 'Apply the typed lat, lng') + '</div>';
+            }
             html += '<div class="aim-vv-edit__row"><span class="dim">from flight</span>'
                 + btn('adopt', 'Adopt actual shot', 'Move the nav to where the drone stood and copy the actual heading / camera angle / altitude into the step')
                 + (gps ? '' : btn('convert', 'Convert → GPS aim point', 'Cast the actual camera ray to the ground (cap ' + (settings.rayCapFt || 500) + ' ft) and make that the aim point'))
@@ -1617,6 +1638,19 @@
             if (act === 'review') { openReview(); return; }
             if (act === 'discard') { edResetWork(); toast('Pending changes discarded', false); return; }
             if (act === 'close') { ed.open = false; ensureEditPanel(); return; }
+            if (act === 'nav-move' && step) { const nav = wkNavOf(step); if (nav && nav.location) { nav.location = moveLL(nav.location, Math.abs(n) * (Number(settings.stepFt) || 1) * FT, Number(b.dataset.b)); } }
+            else if (act === 'nav-place' && step) { setPlacing(ed.placing ? null : { navId: wkNavOf(step) && wkNavOf(step).id }); }
+            else if (act === 'nav-set' && step) {
+                const nav = wkNavOf(step); const inp = ed.panelEl && ed.panelEl.querySelector('[data-aim-vv-latlng]');
+                const m = inp && inp.value.match(/(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)/);
+                if (!nav || !m) { toast('Type "lat, lng"', true); return; }
+                const lat = +m[1], lng = +m[2];
+                if (!(Math.abs(lat) <= 90 && Math.abs(lng) <= 180)) { toast('lat/lng out of range', true); return; }
+                if (nav.location && distM(nav.location, { lat, lng }) > 2000) { toast('That is ' + fmtDist(distM(nav.location, { lat, lng })) + ' away — refusing (>2000 m)', true); return; }
+                nav.location = { lat: +lat.toFixed(8), lng: +lng.toFixed(8) };
+            }
+            if (act === 'nav-move' || act === 'nav-set') { drawGhosts(); renderEdit(); return; }
+            if (act === 'nav-place') { renderEdit(); return; }
             if (act === 'restore') {
                 const bk = lastBackupFor(model.mid); if (!bk || !bk.app) { toast('No backup for this mission', true); return; }
                 const ins = (bk.app.instructions || []).slice().sort((a, b2) => a.index_in_app - b2.index_in_app).map(deepCopy);
@@ -1639,6 +1673,29 @@
             drawGhosts(); renderEdit();
         } catch (err) { warn('edit action failed:', err); toast('Edit failed: ' + err.message, true); }
     }
+    // ---- place a nav by clicking the map ----
+    function setPlacing(p) {
+        ed.placing = p;
+        const c = document.querySelector('.leaflet-container');
+        if (c) c.classList.toggle('aim-vv-placing', !!p);
+        if (p) toast('Click the map to place the nav · Esc cancels', false);
+    }
+    function onMapPlaceClick(e) {
+        if (!ed.placing || !model) return;
+        const c = e.target.closest && e.target.closest('.leaflet-container'); if (!c) return;
+        const map = findMap(); if (!map) return;
+        e.preventDefault(); e.stopPropagation();
+        let ll = null;
+        try { ll = map.mouseEventToLatLng(e); } catch (err) { warn('place: latlng failed:', err); }
+        const nav = ed.placing.navId != null ? wk(ed.placing.navId) : null;
+        setPlacing(null);
+        if (!ll || !nav) { renderEdit(); return; }
+        if (nav.location && distM(nav.location, ll) > 2000) { toast('That is ' + fmtDist(distM(nav.location, ll)) + ' from the nav — refusing (>2000 m)', true); renderEdit(); return; }
+        nav.location = { lat: +ll.lat.toFixed(8), lng: +ll.lng.toFixed(8) };
+        drawGhosts(); renderEdit();
+        toast('Nav ' + stepLabel(nav) + ' moved — review to apply', false);
+    }
+    function onPlaceKey(e) { if (e.key === 'Escape' && ed.placing) { setPlacing(null); renderEdit(); } }
     // ---- review + apply ----
     function openReview() {
         const diff = edDiff();
@@ -1816,7 +1873,7 @@
         try { clearOverlay(); } catch (e) { warn('overlay clear failed:', e); }
         try { if (flownLayer && flownLayer.__aimVvOrig) { flownLayer.setStyle(flownLayer.__aimVvOrig); if (flownLayer._path) flownLayer._path.classList.remove('aim-vv-flown'); } } catch (e) {} flownLayer = null;
         try { ed.ghosts.forEach(l => { try { ov.map && ov.map.removeLayer(l); } catch (e2) {} }); } catch (e) {}
-        ed.ghosts = []; ed.work = null; ed.open = false; ed.busy = false;
+        ed.ghosts = []; ed.work = null; ed.open = false; ed.busy = false; if (ed.placing) setPlacing(null);
         if (ed.panelEl) { try { ed.panelEl.remove(); } catch (e) {} ed.panelEl = null; }
         if (ed.reviewEl) { try { ed.reviewEl.remove(); } catch (e) {} ed.reviewEl = null; }
         try { if (ov.zoomHooked && ov.zoomHookedMap) ov.zoomHookedMap.off('zoomend', onOverlayZoom); } catch (e) { /* map gone */ }
@@ -1858,14 +1915,15 @@
             'overlay': 'overlay', 'overlay-actual': 'overlayActual', 'overlay-labels': 'overlayLabels', 'overlay-group': 'overlayGroup', 'time-bar': 'timeBar',
             'edit': 'edit', 'turn-step': 'stepDeg', 'tilt-step': 'stepPitch', 'move-step': 'stepFt', 'alt-step': 'stepAltFt', 'ray-cap-ft': 'rayCapFt',
             'flown-dashed': 'flownDashed', 'flown-color': 'flownColor', 'look-points': 'lookPoints',
-            'nav-color': 'navColor', 'snap-color': 'snapColor', 'actual-color': 'actualColor', 'line-weight': 'lineWeight' };
+            'nav-color': 'navColor', 'snap-color': 'snapColor', 'actual-color': 'actualColor',
+            'nav-line-w': 'navLineW', 'snap-line-w': 'snapLineW', 'actual-line-w': 'actualLineW', 'flown-line-w': 'flownLineW' };
         const key = map[id]; if (!key) return;
         let v = val;
         if (key === 'leadInS') { v = parseFloat(val); if (!isFinite(v) || v < 0 || v > 60) return; }
         else if (['stepDeg', 'stepPitch', 'stepFt', 'stepAltFt', 'rayCapFt'].includes(key)) { v = parseFloat(val); if (!isFinite(v) || v <= 0) return; }
         else if (key === 'units') { v = (val === 'm') ? 'm' : 'ft'; }
         else if (key === 'flownColor' || key === 'navColor' || key === 'snapColor' || key === 'actualColor') { v = /^#[0-9a-f]{6}$/i.test(String(val)) ? String(val) : DEFAULTS[key]; }
-        else if (key === 'lineWeight') { v = parseFloat(val); if (!isFinite(v) || v < 0.5 || v > 12) return; }
+        else if (/LineW$/.test(key)) { v = parseFloat(val); if (!isFinite(v) || v < 0.5 || v > 12) return; }
         else v = !!val;
         if (settings[key] === v) return;   // idempotent — CP echoes from both frames
         settings[key] = v; saveSettings();
@@ -1878,7 +1936,7 @@
             if (key === 'timeBar') ensureBar();
             if (key === 'flownDashed' || key === 'flownColor') styleFlownPath(true);
             if (key === 'lookPoints') drawOverlay();
-            if (key === 'navColor' || key === 'snapColor' || key === 'actualColor' || key === 'lineWeight') { syncOverlayStyle(); drawOverlay(); stampStrip(true); }
+            if (key === 'navColor' || key === 'snapColor' || key === 'actualColor' || /LineW$/.test(key)) { syncOverlayStyle(); drawOverlay(); stampStrip(true); styleFlownPath(true); }
             if (key === 'edit' || key.startsWith('step') || key === 'rayCapFt') { if (!settings.edit) ed.open = false; renderEdit(); }
             if (key === 'overlayGroup') setGroupMode(v);
         }
@@ -1944,7 +2002,10 @@
                     { id: 'nav-color', label: 'Nav color (N#)', type: 'color', default: DEFAULTS.navColor },
                     { id: 'snap-color', label: 'Snapshot color (S#, sightlines)', type: 'color', default: DEFAULTS.snapColor },
                     { id: 'actual-color', label: 'Actual shot color (rings, footprints)', type: 'color', default: DEFAULTS.actualColor },
-                    { id: 'line-weight', label: 'Overlay line weight (px)', type: 'number', default: DEFAULTS.lineWeight, min: 0.5, max: 12 },
+                    { id: 'nav-line-w', label: 'Nav→nav line weight (px)', type: 'number', default: DEFAULTS.navLineW, min: 0.5, max: 12 },
+                    { id: 'snap-line-w', label: 'Sightline weight (nav→snapshot, px)', type: 'number', default: DEFAULTS.snapLineW, min: 0.5, max: 12 },
+                    { id: 'actual-line-w', label: 'Actual shot weight (footprint, heading tick, px)', type: 'number', default: DEFAULTS.actualLineW, min: 0.5, max: 12 },
+                    { id: 'flown-line-w', label: 'Flown path weight (px)', type: 'number', default: DEFAULTS.flownLineW, min: 0.5, max: 12 },
                     { id: 'reload', label: 'Reload mission data', type: 'button' },
                 ],
                 hotkeys: [
@@ -1988,6 +2049,9 @@
         document.addEventListener('click', onLegendClick, true);
         document.addEventListener('click', onBarClick, true);
         document.addEventListener('click', onEditClick, true);
+        document.addEventListener('click', onMapPlaceClick, true);
+        window.addEventListener('keydown', onPlaceKey, true);
+        document.addEventListener('keydown', (e) => { const t = e.target; if (t && t.matches && t.matches('[data-aim-vv-latlng]')) { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); const b = ed.panelEl && ed.panelEl.querySelector('[data-aim-vv-ed="nav-set"]'); if (b) b.click(); } } }, true);
         document.addEventListener('click', onCopyClick, true);
         document.addEventListener('mousedown', onScrubDown, true);
         document.addEventListener('mousemove', onScrubMove, true);

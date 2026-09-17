@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Video Validation latest v0.26: nav editing, per-line weights, flown path steady (dev only)
+
+- **Nav editing** in the Adjust panel: ▲N ▼S ◀W E▶ nudges (move step, Shift ×5), a `lat, lng` box with Set / Enter, and **📍 Place on map** — the next click on the map moves the nav (Esc cancels, crosshair cursor). The in-place look-points and GPS sightlines follow the moved nav in the ghost preview. Moves over 2,000 m are refused.
+- Separate line weights for nav→nav, sightlines, actual shots and the flown path (Control Panel).
+- The flown path's width is pinned along with its color, so it no longer pulses thick/thin under the Map Styler.
+
 ## 2026-09-17 — AIM Video Validation latest v0.25: drag-to-change keeps going, no cursor grab on click, overlay colors + weight (dev only)
 
 - A plain click on a draggable number no longer hides the cursor; the drag only engages after the pointer moves, and it keeps stepping for as long as you hold (it used to stop after the first step).
