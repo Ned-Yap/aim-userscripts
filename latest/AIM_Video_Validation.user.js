@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.50
+// @version      0.51
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.50';
+    const SCRIPT_VERSION = '0.51';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -2332,9 +2332,16 @@
     // ---- summary CARD (canvas) — screenshot-ready, copy as image / save PNG ----
     // spec: { title, subtitle, lines[], chips[{label, value, color}], items[{badge, color, text, sub}], footer }
     function renderSummaryCard(spec) {
-        const W = 980, PAD = 28, SCALE = 2;
+        const PAD = 28, SCALE = 2;
         const font = (w, px) => w + ' ' + px + 'px ' + 'Consolas, "Cascadia Mono", "JetBrains Mono", Menlo, monospace';
         const c = document.createElement('canvas'); const ctx = c.getContext('2d');
+        // Card width: 980, or wider (up to 1500) when the table needs it at 12 px — shrink the font only after that.
+        let W = 980;
+        if (spec.table && spec.table.rows && spec.table.rows.length) {
+            ctx.font = font('400', 12);
+            const nat = spec.table.head.reduce((sum, h, ci) => sum + Math.max(ctx.measureText(String(h)).width, ...spec.table.rows.map(r => ctx.measureText(String(r[ci] == null ? '' : r[ci])).width)) + 14, 0);
+            W = Math.min(1500, Math.max(980, Math.ceil(nat + 2 * PAD + 8)));
+        }
         // measure pass
         const wrap = (text, px, maxW, weight) => { ctx.font = font(weight || '400', px); const words = String(text).split(' '); const out = []; let line = ''; words.forEach(w => { const t = line ? line + ' ' + w : w; if (ctx.measureText(t).width > maxW && line) { out.push(line); line = w; } else line = t; }); if (line) out.push(line); return out; };
         const rows = [];
@@ -2360,7 +2367,8 @@
             fit(px); if (total > avail) { px = 11; fit(px); } if (total > avail) { px = 10; fit(px); }
             if (total > avail) { const k = avail / total; widths = widths.map(w => w * k); }
             const rh = px + 9;
-            tbl = { y: y + 6, px, widths, rh, h: (spec.table.rows.length + 1) * rh + 8 };
+            const groupH = spec.table.groups ? rh : 0;
+            tbl = { y: y + 6, px, widths, rh, groupH, h: (spec.table.rows.length + 1) * rh + groupH + 8 };
             y += 6 + tbl.h + 10;
         }
         y += 10;
@@ -2399,16 +2407,20 @@
             else if (r.t === 'footer') { ctx.fillStyle = '#5b6068'; ctx.font = font('400', 12); ctx.fillText(spec.footer || '', PAD, r.y + 12); }
         });
         if (tbl) {
-            const x0 = PAD + 4; let yy = tbl.y;
-            const cell = (txt, ci, x, yb, bold, color) => { ctx.font = font(bold ? '700' : '400', tbl.px); ctx.fillStyle = color; let t = String(txt == null ? '' : txt); const maxW = tbl.widths[ci] - 10; if (ctx.measureText(t).width > maxW) { while (t.length > 1 && ctx.measureText(t + '…').width > maxW) t = t.slice(0, -1); t += '…'; } ctx.fillText(t, x + 5, yb); };
-            ctx.fillStyle = 'rgba(95,227,255,.10)'; ctx.fillRect(x0, yy, tbl.widths.reduce((a, b) => a + b, 0), tbl.rh);
+            const x0 = PAD + 4; let yy = tbl.y; const totalW = tbl.widths.reduce((a, b) => a + b, 0);
+            const cell = (txt, ci, x, yb, bold, color, w) => { ctx.font = font(bold ? '700' : '400', tbl.px); ctx.fillStyle = color; let t = String(txt == null ? '' : txt); const maxW = (w || tbl.widths[ci]) - 10; if (ctx.measureText(t).width > maxW) { while (t.length > 1 && ctx.measureText(t + '…').width > maxW) t = t.slice(0, -1); t += '…'; } ctx.fillText(t, x + 5, yb); };
+            if (spec.table.groups) {   // group header row: [{label, span}] — spans drawn as a bracketed band
+                let gx = x0, ci = 0;
+                spec.table.groups.forEach(g => { const gw = tbl.widths.slice(ci, ci + g.span).reduce((a, b) => a + b, 0); if (g.label) { ctx.fillStyle = 'rgba(95,227,255,.06)'; ctx.fillRect(gx + 1, yy, gw - 2, tbl.rh - 2); cell(g.label, ci, gx, yy + tbl.rh - 6, true, '#cfd3da', gw); } gx += gw; ci += g.span; });
+                yy += tbl.groupH;
+            }
+            ctx.fillStyle = 'rgba(95,227,255,.10)'; ctx.fillRect(x0, yy, totalW, tbl.rh);
             let x = x0; spec.table.head.forEach((h, ci) => { cell(h, ci, x, yy + tbl.rh - 6, true, '#5fe3ff'); x += tbl.widths[ci]; }); yy += tbl.rh;
             spec.table.rows.forEach((r, ri) => {
-                if (ri % 2) { ctx.fillStyle = 'rgba(255,255,255,.03)'; ctx.fillRect(x0, yy, tbl.widths.reduce((a, b) => a + b, 0), tbl.rh); }
-                const flagged = spec.table.flagged && spec.table.flagged[ri];
-                let xx = x0; r.forEach((v, ci) => { cell(v, ci, xx, yy + tbl.rh - 6, false, flagged && ci === r.length - 1 ? '#ffb347' : '#d7dbe2'); xx += tbl.widths[ci]; }); yy += tbl.rh;
+                if (ri % 2) { ctx.fillStyle = 'rgba(255,255,255,.03)'; ctx.fillRect(x0, yy, totalW, tbl.rh); }
+                let xx = x0; r.forEach((v, ci) => { const col = (spec.table.color && spec.table.color(ri, ci, v)) || '#d7dbe2'; cell(v, ci, xx, yy + tbl.rh - 6, col !== '#d7dbe2', col); xx += tbl.widths[ci]; }); yy += tbl.rh;
             });
-            ctx.strokeStyle = 'rgba(255,255,255,.12)'; ctx.lineWidth = 1; ctx.strokeRect(x0 + 0.5, tbl.y + 0.5, tbl.widths.reduce((a, b) => a + b, 0), (spec.table.rows.length + 1) * tbl.rh);
+            ctx.strokeStyle = 'rgba(255,255,255,.12)'; ctx.lineWidth = 1; ctx.strokeRect(x0 + 0.5, tbl.y + 0.5, totalW, (spec.table.rows.length + 1) * tbl.rh + tbl.groupH);
         }
         return c;
     }
@@ -2430,12 +2442,34 @@
             subtitle: 'flight ' + h.flightId + (h.group != null && h.group >= 0 ? ' · group ' + h.group : '') + ' · ' + new Date(h.when).toLocaleString() + (h.drone ? ' · ' + h.drone : ''),
             lines: ['this flight ' + h.flightSteps + ' steps / ' + h.flightSnaps + ' snapshots · whole mission ' + h.missionSteps + ' steps / ' + h.missionSnaps + ' snapshots'],
             chips: [{ label: 'shots', value: res.summary.shots, color: '#5fe3ff' }, { label: 'need attention', value: bad.length, color: bad.length ? '#ffb347' : '#5fff5f' }, { label: 're-takes', value: res.summary.retakes, color: res.summary.retakes ? '#ffb347' : null }, { label: 'no picture', value: res.summary.missing.length, color: res.summary.missing.length ? '#ff5f5f' : null }],
-            items: bad.length ? bad.map(r => ({ badge: r.s, color: r.flags.some(f => f.startsWith('no snapshot') || f.startsWith('re-take')) ? '#ffb347' : '#ff7ad9', text: shotSentence(r).replace(/^\S+ at \S+ — /, ''), sub: 'at ' + r.shutter + (r.asset ? ' · ' + r.asset : '') + ' · heading ' + tri(r.hdg, '°') + ' · camera ' + tri(r.cam, '°') + ' · alt ' + tri([r.alt[0] != null ? r.alt[0] * M_TO_FT : null, r.alt[1] != null ? r.alt[1] * M_TO_FT : null, r.alt[2] != null ? r.alt[2] * M_TO_FT : null], ' ft') + ' (planned / actual / Δ)' })) : [{ badge: 'OK', color: '#5fff5f', text: 'All shots within limits.', sub: 'heading ≤ ' + res.summary.thr.hdg + '° · camera ≤ ' + res.summary.thr.cam + '° · altitude ≤ ' + res.summary.thr.alt + ' ft · off-station ≤ ' + res.summary.thr.pos + ' ft · look-point ≤ ' + res.summary.thr.look + ' ft' }],
+            items: bad.length ? bad.map(r => ({ badge: r.s, color: r.flags.some(f => f.startsWith('no snapshot') || f.startsWith('re-take')) ? '#ffb347' : '#ff7ad9', text: shotSentence(r).replace(/^\S+ at \S+ — /, ''), sub: 'at ' + r.shutter + (r.asset ? ' · ' + r.asset : '') })) : [{ badge: 'OK', color: '#5fff5f', text: 'All shots within limits.', sub: 'heading ≤ ' + res.summary.thr.hdg + '° · camera ≤ ' + res.summary.thr.cam + '° · altitude ≤ ' + res.summary.thr.alt + ' ft · off-station ≤ ' + res.summary.thr.pos + ' ft · look-point ≤ ' + res.summary.thr.look + ' ft' }],
             footer: h.url + ' · AIM Video Validation',
-            table: { head: ['shot', 'step', 'shutter', 'heading p/a/Δ', 'camera p/a/Δ', 'drone alt ft p/a/Δ', 'drone vs nav', 'look-point gap', 'asset', 'flags'],
-                rows: res.rows.map(r => [r.s, r.step != null ? '#' + r.step : '', r.shutter, tri(r.hdg, '°'), tri(r.cam, '°'), tri([r.alt[0] != null ? r.alt[0] * M_TO_FT : null, r.alt[1] != null ? r.alt[1] * M_TO_FT : null, r.alt[2] != null ? r.alt[2] * M_TO_FT : null], ''), r.pos != null ? (r.pos * M_TO_FT).toFixed(0) + ' ft ' + (r.posDir || '') : '–', r.look != null ? r.look.toFixed(0) + ' ft' : '–', r.asset || '–', r.flags.length ? r.flags.join('; ') : 'ok']),
-                flagged: res.rows.map(r => r.flags.length > 0) },
+            table: checkerTable(res),
         };
+    }
+    // Details table with planned / actual / Δ as real columns; Δ, off-station and look-point gap colored vs thresholds.
+    function checkerTable(res) {
+        const thr = res.summary.thr;
+        const n = (v, d) => v == null || !isFinite(v) ? '–' : (+v).toFixed(d || 0);
+        const ft = (v) => v == null ? null : v * M_TO_FT;
+        const rows = res.rows.map(r => [r.s, r.step != null ? '#' + r.step : '', r.shutter,
+            n(r.hdg[0]) + '°', n(r.hdg[1]) + '°', fmtSigned(r.hdg[2], '°'),
+            n(r.cam[0]) + '°', n(r.cam[1]) + '°', fmtSigned(r.cam[2], '°'),
+            n(ft(r.alt[0])), n(ft(r.alt[1])), fmtSigned(ft(r.alt[2]), ''),
+            r.pos != null ? n(ft(r.pos)) + ' ft ' + (r.posDir || '') : '–', r.look != null ? n(r.look) + ' ft' : '–', r.asset || '–', r.flags.length ? r.flags.join('; ') : 'ok']);
+        const grade = (v, t) => { if (v == null || !isFinite(v) || !t) return null; const a = Math.abs(v); return a > 2 * t ? '#ff5f5f' : a > t ? '#ffb347' : '#5fff5f'; };
+        const color = (ri, ci) => {
+            const r = res.rows[ri];
+            if (ci === 5) return grade(r.hdg[2], thr.hdg);
+            if (ci === 8) return grade(r.cam[2], thr.cam);
+            if (ci === 11) return grade(ft(r.alt[2]), thr.alt);
+            if (ci === 12) return grade(ft(r.pos), thr.pos);
+            if (ci === 13) return grade(r.look, thr.look);
+            if (ci === 15) return r.flags.length ? '#ffb347' : '#5fff5f';
+            return null;
+        };
+        return { groups: [{ label: '', span: 3 }, { label: 'heading', span: 3 }, { label: 'camera angle', span: 3 }, { label: 'drone altitude (ft)', span: 3 }, { label: '', span: 4 }],
+            head: ['shot', 'step', 'shutter', 'planned', 'actual', 'Δ', 'planned', 'actual', 'Δ', 'planned', 'actual', 'Δ', 'drone vs nav', 'look-point gap', 'asset', 'flags'], rows, color };
     }
     function changeSentences(reps) {
         // Group each save's field changes by step → one line per step in words.
@@ -2471,7 +2505,7 @@
             chips: [{ label: 'saves', value: reps.length, color: '#5fe3ff' }, { label: 'steps changed', value: items.length, color: items.length ? '#ffb347' : null }, { label: 'field changes', value: reps.reduce((n, r) => n + (r.changes || []).length, 0) }],
             items: items.length ? items : [{ badge: '—', color: '#8a8f99', text: 'No changes applied on this page yet.' }],
             footer: h.url + ' · AIM Video Validation',
-            table: reps.length ? { head: ['save', 'step', 'change', 'before', 'after', 'note'], rows: [].concat(...reps.map((r, i) => (r.changes || []).map(c => [String(i + 1) + ' · ' + new Date(r.at).toLocaleTimeString(), c.label, c.kind + (c.field ? ' · ' + c.field : ''), c.before != null ? c.before : '', c.after != null ? c.after : '', c.note || '']))) } : null,
+            table: reps.length ? { head: ['save', 'step', 'change', 'before', 'after', 'note'], rows: [].concat(...reps.map((r, i) => (r.changes || []).map(c => [String(i + 1) + ' · ' + new Date(r.at).toLocaleTimeString(), c.label, c.kind + (c.field ? ' · ' + c.field : ''), c.before != null ? c.before : '', c.after != null ? c.after : '', c.note || '']))), color: (ri, ci) => ci === 3 ? '#8a8f99' : ci === 4 ? '#5fe3ff' : null } : null,
         };
     }
     function copyText(txt, label) {
