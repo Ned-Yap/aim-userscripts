@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.33
+// @version      0.34
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.33';
+    const SCRIPT_VERSION = '0.34';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -175,7 +175,7 @@
             m.plan.forEach(s => { m.byId[s.id] = s; });
             // The mission record embeds the plan AS FLOWN (frozen). Edits must read/verify against the LIVE app.
             const appId = mission.app && mission.app.id;
-            const livePromise = appId ? fetchLiveApp(sid, appId).then(a => { attachLive(m, a); }).catch(e => { warn('live app read failed (edits disabled):', e.message); m.live = null; m.liveError = e.message; }) : Promise.resolve();
+            const livePromise = appId ? fetchLiveApp(sid, appId, mission.app.name || mission.name).then(a => { attachLive(m, a); }).catch(e => { warn('live app read failed (edits disabled):', e.message); m.live = null; m.liveError = e.message; }) : Promise.resolve();
             m._livePromise = livePromise;
             const v = (Array.isArray(videos) ? videos[0] : videos) || {};
             m.video = { t0: v.drone_record_start_time ? new Date(v.drone_record_start_time).getTime() : null, rec: v };
@@ -233,12 +233,25 @@
 
     // The LIVE app: GET /available_app/<id>/ is 404 on this server; the site's mission list (what the Mission Bank
     // reads) carries every app with full instructions. One list read, pick ours by id.
-    function fetchLiveApp(sid, appId) {
+    function fetchLiveApp(sid, appId, name) {
+        const norm = (arr) => Array.isArray(arr) ? arr : (arr && (arr.results || arr.apps)) || [];
+        const byId = (list) => list.find(a => a && Number(a.id) === Number(appId)) || null;
         return getJSON('/available_app/?site_id=' + encodeURIComponent(sid) + '&type=1').then(arr => {
-            const list = Array.isArray(arr) ? arr : (arr && (arr.results || arr.apps)) || [];
-            const app = list.find(a => a && Number(a.id) === Number(appId));
-            if (!app) throw new Error('app ' + appId + ' not in the site mission list (' + list.length + ' missions)');
-            if (!Array.isArray(app.instructions)) throw new Error('app ' + appId + ' has no instructions in the list response');
+            const list = norm(arr);
+            const hit = byId(list);
+            if (hit) return hit;
+            log('live app ' + appId + ' not in the type=1 list (' + list.length + ') — trying the unfiltered list');
+            return getJSON('/available_app/?site_id=' + encodeURIComponent(sid)).then(arr2 => {
+                const list2 = norm(arr2);
+                const hit2 = byId(list2);
+                if (hit2) return hit2;
+                // Last resort: exact name match — only if it is unique, and flag the id difference loudly.
+                const named = name ? list2.filter(a => a && a.name === name) : [];
+                if (named.length === 1) { warn('live app found by NAME "' + name + '" with a DIFFERENT id (' + named[0].id + ' vs flown record ' + appId + ') — the flown record is a per-flight copy; saves will target ' + named[0].id); named[0].__aimVvIdMismatch = appId; return named[0]; }
+                throw new Error('app ' + appId + ' not in the site mission list (' + list.length + ' type=1 / ' + list2.length + ' total; ' + named.length + ' name match' + (named.length === 1 ? '' : 'es') + ')');
+            });
+        }).then(app => {
+            if (!Array.isArray(app.instructions)) throw new Error('app ' + app.id + ' has no instructions in the list response');
             return app;
         });
     }
@@ -1937,7 +1950,8 @@
             const blocked = editsBlocked(); if (blocked) throw new Error(blocked);
             const appId = model.mission.app && model.mission.app.id;
             status('re-reading the live mission…');
-            const freshApp = await fetchLiveApp(sid, appId);
+            const freshApp = await fetchLiveApp(sid, appId, model.liveApp && model.liveApp.name);
+            if (Number(freshApp.id) !== Number(model.liveApp && model.liveApp.id)) throw new Error('live app id changed between load (' + (model.liveApp && model.liveApp.id) + ') and now (' + freshApp.id + ')');
             const freshIns = (freshApp.instructions || []).slice().sort((a, b2) => a.index_in_app - b2.index_in_app);
             const loadedIns = model.live || [];
             if (freshIns.length !== loadedIns.length || freshIns.some((st, i) => stepSig(st) !== stepSig(loadedIns[i]))) throw new Error('the live mission changed since this page loaded — reload and redo the edits');
@@ -1954,7 +1968,7 @@
             const txt = await r.text().catch(() => '');
             if (!r.ok) { warn('save failed HTTP ' + r.status + ': ' + txt.slice(0, 500)); warn('failing body:', built.body); throw new Error('save HTTP ' + r.status); }
             status('verifying (live mission)…');
-            const afterApp = await fetchLiveApp(sid, appId);
+            const afterApp = await fetchLiveApp(sid, appId, freshApp.name);
             const after = { app: afterApp };
             const afterIns = (afterApp.instructions || []).slice().sort((a, b2) => a.index_in_app - b2.index_in_app);
             const mism = [];
