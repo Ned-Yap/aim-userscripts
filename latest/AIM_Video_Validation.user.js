@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.37
+// @version      0.38
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.37';
+    const SCRIPT_VERSION = '0.38';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -85,6 +85,9 @@
         flownDashed: true,     // restyle Percepto's flown-path line
         flownColor: '#ffffff',
         lookPoints: true,      // planned look-point for every in-place snapshot (ray to terrain at planned heading/angle)
+        follow: true,          // selecting a snapshot pans/zooms the map to it
+        followZoom: 19,        // max zoom when following
+        actualLookPoints: true,// cyan ring where the ACTUAL camera ray met the ground (from the picture's real pose)
         liveDiffOverlay: true, // yellow markers where the CURRENT saved plan differs from what flew
         liveColor: '#ffe95f',
         navKeepAim: true,      // moving a nav re-aims its in-place snapshots at their look-points
@@ -453,6 +456,7 @@
             .aim-vv-ov-actual--retake { border-style: dashed; border-color: #fff; }
             .aim-vv-ov-look { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #ff7ad9; box-sizing: border-box; background: rgba(255,122,217,.18); }
             .aim-vv-ov-look::after { content: ''; position: absolute; left: 5px; top: 5px; width: 4px; height: 4px; border-radius: 50%; background: #ff7ad9; }
+            .aim-vv-ov-alook { width: 14px; height: 14px; border-radius: 50%; border: 2px dashed #5fe3ff; box-sizing: border-box; background: rgba(95,227,255,.12); }
             .aim-vv-ov-live { width: 22px; height: 22px; border-radius: 4px; border: 2px solid #ffe95f; background: rgba(0,0,0,.55); color: #ffe95f; font: 800 9px/18px monospace; text-align: center; }
             .aim-vv-ov-ghost { width: 22px; height: 22px; border-radius: 50%; border: 2px dashed #fff; background: rgba(0,0,0,.35); color: #fff; font: 800 9px/18px monospace; text-align: center; }
             .aim-vv-edit__row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 4px; }
@@ -899,7 +903,28 @@
         host.insertAdjacentElement('afterend', cardEl);
         return cardEl;
     }
-    function selectShot(rec) { selectedRec = rec; renderCard(rec, 'selected'); markActiveOverlay(); }
+    function selectShot(rec) { selectedRec = rec; renderCard(rec, 'selected'); markActiveOverlay(); followShot(rec); }
+    // Pan/zoom the map to the selected shot: its step marker (planned), the drone's actual position and the planned nav.
+    let lastFollowedKey = null;
+    function followShot(rec) {
+        if (!settings.follow || !rec || !model) return;
+        if (rec.key === lastFollowedKey) return;   // same shot re-selected (thermal twin, playhead) — don't fight the user's pan
+        const map = findMap(), L = getL(); if (!map || !L) return;
+        const pts = [];
+        if (rec.location) pts.push([rec.location.lat, rec.location.lng]);
+        const st = rec.step;
+        if (st) {
+            const mk = ov.stepMarkers[st.id]; if (mk) { const p = mk.getLatLng(); pts.push([p.lat, p.lng]); }
+            const nav = parentNav(model, st); if (nav && nav.location) pts.push([nav.location.lat, nav.location.lng]);
+        }
+        if (!pts.length) return;
+        lastFollowedKey = rec.key;
+        try {
+            const maxZoom = Number(settings.followZoom) || 19;
+            if (pts.length === 1) map.setView(pts[0], Math.max(map.getZoom(), maxZoom - 1), { animate: true });
+            else map.fitBounds(L.latLngBounds(pts), { padding: [60, 60], maxZoom, animate: true });
+        } catch (e) { warn('follow failed:', e); }
+    }
     function cls(v, warnAt, badAt) { if (v == null) return 'dim'; const a = Math.abs(v); return a >= badAt ? 'bad' : a >= warnAt ? 'warn' : 'ok'; }
     function renderCard(rec, why) {
         const el = ensureCard();
@@ -1020,7 +1045,7 @@
         for (const g of ov.group) if (g.minIdx != null && idx >= g.minIdx && idx <= g.maxIdx) return g;
         return null;
     }
-    let overlayToken = 0;
+    let overlayToken = 0, actualLookToken = 0;
     function drawOverlay() {
         clearOverlay();
         if (!model || !settings.master || !settings.overlay) return;
@@ -1143,6 +1168,26 @@
             } catch (e) { warn('overlay marker failed:', e); }
         });
 
+        // Actual look-point: where the REAL camera ray (drone position / heading / angle from the picture) met the ground.
+        // Terrain under the drone comes from the same cache the planned look-points use (fetched lazily, redraw when it lands).
+        if (settings.overlayActual && settings.actualLookPoints) {
+            const need = model.shots.map(sh => sh.primary).filter(im => im && im.location && typeof im.drone_heading === 'number' && typeof im.camera_pitch === 'number' && groundAt(im.location) == null);
+            if (need.length) { const tok = ++actualLookToken, ot = overlayToken; Promise.all(need.map(im => demCached(im.location))).then(() => { if (tok === actualLookToken && ot === overlayToken) drawOverlay(); }); }
+            model.shots.forEach(sh => {
+                const im = sh.primary; if (!im || !im.location || typeof im.drone_heading !== 'number' || typeof im.camera_pitch !== 'number') return;
+                const g = groundAt(im.location); if (g == null) return;
+                const alt = typeof im.alt === 'number' ? im.alt : null; if (alt == null) return;
+                const capM = (Number(settings.rayCapFt) || 500) * FT, down = Math.tan(Math.abs(im.camera_pitch) * RAD);
+                let dist = down > 0.01 ? (alt - g) / down : Infinity; let capped = false; if (!(dist > 0) || dist > capM) { dist = capM; capped = true; }
+                const aim = moveLL(im.location, dist, im.drone_heading);
+                const num = sh.step && model.numbering[sh.step.id];
+                try {
+                    const mk = L.marker([aim.lat, aim.lng], { icon: L.divIcon({ className: 'aim-vv-ov', html: '<div class="aim-vv-ov-alook" style="border-color:' + COLOR_ACTUAL + '"></div>', iconSize: [14, 14], iconAnchor: [7, 7] }), interactive: true, zIndexOffset: 280 });
+                    mk.bindTooltip('<b>' + esc(num ? num.n : '?') + '</b> ACTUAL look-point · ' + fmtDist(dist) + ' out' + (capped ? ' (capped — shallow angle)' : '') + ' · from the real position, ' + im.drone_heading + '° / ' + im.camera_pitch + '°, ' + fmtAlt(alt - g) + ' above terrain', { direction: 'top', offset: [0, -8], opacity: 0.95 });
+                    if (addLayer(map, mk)) { const pm = ov.stepMarkers[sh.step && sh.step.id]; if (pm) { const pp = pm.getLatLng(); if (distM(pp, aim) > 1) addLayer(map, L.polyline([[pp.lat, pp.lng], [aim.lat, aim.lng]], lineOpts({ color: COLOR_ACTUAL, weight: 1, opacity: 0.6, dashArray: '2,4' }))); } }
+                } catch (e) { warn('actual look-point failed:', e); }
+            });
+        }
         // Actual shot poses from the image records: drone dot + heading tick + ground footprint.
         if (settings.overlayActual) {
             model.shots.forEach(sh => {
@@ -2177,6 +2222,7 @@
             'edit': 'edit', 'turn-step': 'stepDeg', 'tilt-step': 'stepPitch', 'move-step': 'stepFt', 'alt-step': 'stepAltFt', 'ray-cap-ft': 'rayCapFt',
             'flown-dashed': 'flownDashed', 'flown-color': 'flownColor', 'look-points': 'lookPoints',
             'nav-color': 'navColor', 'snap-color': 'snapColor', 'actual-color': 'actualColor', 'live-diff': 'liveDiffOverlay', 'live-color': 'liveColor',
+            'follow': 'follow', 'follow-zoom': 'followZoom', 'actual-look': 'actualLookPoints',
             'nav-line-w': 'navLineW', 'snap-line-w': 'snapLineW', 'actual-line-w': 'actualLineW', 'flown-line-w': 'flownLineW' };
         const key = map[id]; if (!key) return;
         let v = val;
@@ -2185,6 +2231,7 @@
         else if (key === 'units') { v = (val === 'm') ? 'm' : 'ft'; }
         else if (key === 'flownColor' || key === 'navColor' || key === 'snapColor' || key === 'actualColor' || key === 'liveColor') { v = /^#[0-9a-f]{6}$/i.test(String(val)) ? String(val) : DEFAULTS[key]; }
         else if (/LineW$/.test(key)) { v = parseFloat(val); if (!isFinite(v) || v < 0.5 || v > 12) return; }
+        else if (key === 'followZoom') { v = parseFloat(val); if (!isFinite(v) || v < 14 || v > 22) return; }
         else v = !!val;
         if (settings[key] === v) return;   // idempotent — CP echoes from both frames
         settings[key] = v; saveSettings();
@@ -2196,7 +2243,7 @@
             if (key === 'overlay' || key === 'overlayActual' || key === 'overlayLabels') drawOverlay();
             if (key === 'timeBar') ensureBar();
             if (key === 'flownDashed' || key === 'flownColor') styleFlownPath(true);
-            if (key === 'lookPoints' || key === 'liveDiffOverlay' || key === 'liveColor') drawOverlay();
+            if (key === 'lookPoints' || key === 'liveDiffOverlay' || key === 'liveColor' || key === 'actualLookPoints') drawOverlay();
             if (key === 'navColor' || key === 'snapColor' || key === 'actualColor' || /LineW$/.test(key)) { syncOverlayStyle(); drawOverlay(); stampStrip(true); styleFlownPath(true); }
             if (key === 'edit' || key.startsWith('step') || key === 'rayCapFt') { if (!settings.edit) ed.open = false; renderEdit(); }
             if (key === 'overlayGroup') setGroupMode(v);
@@ -2260,6 +2307,9 @@
                     { id: 'flown-dashed', label: 'Flown path: restyle (dashed)', type: 'boolean', default: DEFAULTS.flownDashed },
                     { id: 'flown-color', label: 'Flown path color', type: 'color', default: DEFAULTS.flownColor },
                     { id: 'look-points', label: 'Planned look-points for in-place snapshots (ray to terrain)', type: 'boolean', default: DEFAULTS.lookPoints },
+                    { id: 'follow', label: 'Selecting a snapshot pans / zooms the map to it', type: 'boolean', default: DEFAULTS.follow },
+                    { id: 'follow-zoom', label: 'Follow: max zoom level', type: 'number', default: DEFAULTS.followZoom, min: 14, max: 22 },
+                    { id: 'actual-look', label: 'Actual look-points (cyan ring where the real camera ray met the ground)', type: 'boolean', default: DEFAULTS.actualLookPoints },
                     { id: 'live-diff', label: 'Show the CURRENT saved plan where it differs from what flew (yellow)', type: 'boolean', default: DEFAULTS.liveDiffOverlay },
                     { id: 'live-color', label: 'Saved-plan (differs) color', type: 'color', default: DEFAULTS.liveColor },
                     { id: 'nav-color', label: 'Nav color (N#)', type: 'color', default: DEFAULTS.navColor },

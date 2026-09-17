@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Video Validation v0.38 (prod + dev): map follows the selected shot; actual look-points
+
+- Selecting a snapshot (thumbnail, ▶, `[` / `]`, map marker) pans and zooms the map to it — the planned step, the drone's real position and its nav all in view (max zoom 19, both in the Control Panel). Re-selecting the same shot leaves your pan alone.
+- **Actual look-points:** a dashed cyan ring where the picture's real position, heading and camera angle put the camera's centre on the ground, with a thin link to the planned pink square. Far apart = the drone did not take the shot the plan described (e.g. flew higher / flatter). Convert → GPS lands on this ring.
+
 ## 2026-09-17 — AIM Video Validation v0.37 (prod + dev): restore picker
 
 - The Adjust panel's restore row now lets you choose what to go back to: **the plan exactly as it flew**, any of this mission's saved backups (newest first, each labelled with the action it preceded), or **a backup file** you downloaded. The chosen state loads into the working copy and goes through the usual Review → Apply. The console line about a live/flown difference now names the fields.
