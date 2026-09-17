@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.41
+// @version      0.42
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.41';
+    const SCRIPT_VERSION = '0.42';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -461,10 +461,10 @@
             .aim-vv-ov-look { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #ff7ad9; box-sizing: border-box; background: rgba(255,122,217,.18); }
             .aim-vv-ov-look::after { content: ''; position: absolute; left: 5px; top: 5px; width: 4px; height: 4px; border-radius: 50%; background: #ff7ad9; }
             .aim-vv-ov-alook { width: 14px; height: 14px; border-radius: 50%; border: 2px dashed #5fe3ff; box-sizing: border-box; background: rgba(95,227,255,.12); }
-            .aim-vv-lg { position: absolute; left: 10px; bottom: 28px; z-index: 1200; background: rgba(10,14,18,.88); color: #e6e6e6; border: 1px solid rgba(95,227,255,.4); border-radius: 5px; padding: 5px 8px; font: 11px/1.5 monospace; max-width: 340px; pointer-events: auto; }
+            .aim-vv-lg { position: absolute; right: 10px; bottom: 34px; z-index: 1200; background: rgba(10,14,18,.9); color: #e6e6e6; border: 1px solid rgba(95,227,255,.4); border-radius: 5px; padding: 5px 8px; font: 11px/1.5 monospace; max-width: min(380px, 60%); pointer-events: auto; }
             .aim-vv-lg--closed { padding: 2px 8px; }
             .aim-vv-lg__head { cursor: pointer; user-select: none; } .aim-vv-lg b { color: #5fe3ff; } .aim-vv-lg .dim { color: #888; }
-            .aim-vv-lg__row { white-space: nowrap; } .aim-vv-lg__sw { display: inline-block; width: 20px; text-align: center; margin-right: 4px; }
+            .aim-vv-lg__row { white-space: normal; } .aim-vv-lg__sw { display: inline-block; width: 20px; text-align: center; margin-right: 4px; }
             .aim-vv-ov-live { width: 22px; height: 22px; border-radius: 4px; border: 2px solid #ffe95f; background: rgba(0,0,0,.55); color: #ffe95f; font: 800 9px/18px monospace; text-align: center; }
             .aim-vv-ov-ghost { width: 22px; height: 22px; border-radius: 50%; border: 2px dashed #fff; background: rgba(0,0,0,.35); color: #fff; font: 800 9px/18px monospace; text-align: center; }
             .aim-vv-edit__row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 4px; }
