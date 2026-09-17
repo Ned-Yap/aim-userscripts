@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.35
+// @version      0.36
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.35';
+    const SCRIPT_VERSION = '0.36';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -85,6 +85,8 @@
         flownDashed: true,     // restyle Percepto's flown-path line
         flownColor: '#ffffff',
         lookPoints: true,      // planned look-point for every in-place snapshot (ray to terrain at planned heading/angle)
+        liveDiffOverlay: true, // yellow markers where the CURRENT saved plan differs from what flew
+        liveColor: '#ffe95f',
         navKeepAim: true,      // moving a nav re-aims its in-place snapshots at their look-points
         navColor: '#5fa8ff', snapColor: '#ff7ad9', actualColor: '#5fe3ff',
         navLineW: 2, snapLineW: 2.5, actualLineW: 1.5, flownLineW: 3,
@@ -451,6 +453,7 @@
             .aim-vv-ov-actual--retake { border-style: dashed; border-color: #fff; }
             .aim-vv-ov-look { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #ff7ad9; box-sizing: border-box; background: rgba(255,122,217,.18); }
             .aim-vv-ov-look::after { content: ''; position: absolute; left: 5px; top: 5px; width: 4px; height: 4px; border-radius: 50%; background: #ff7ad9; }
+            .aim-vv-ov-live { width: 22px; height: 22px; border-radius: 4px; border: 2px solid #ffe95f; background: rgba(0,0,0,.55); color: #ffe95f; font: 800 9px/18px monospace; text-align: center; }
             .aim-vv-ov-ghost { width: 22px; height: 22px; border-radius: 50%; border: 2px dashed #fff; background: rgba(0,0,0,.35); color: #fff; font: 800 9px/18px monospace; text-align: center; }
             .aim-vv-edit__row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 4px; }
             .aim-vv-edit__row > .dim:first-child { min-width: 82px; }
@@ -1167,8 +1170,37 @@
         activeOverlayKey = undefined;   // markers are new — force the active highlight to re-apply
         try { drawGhosts(); } catch (e) { warn('ghosts:', e); }
         try { drawLookPoints(); } catch (e) { warn('look-points:', e); }
+        try { drawLiveDiff(L, map, lineOpts); } catch (e) { warn('live-diff overlay:', e); }
         log('overlay drawn: ' + steps.length + ' plan steps' + (groupOn ? ' (whole mission, ' + ov.group.length + ' flights)' : ' (this flight)') + ', ' + Object.keys(ov.shotMarkers).length + ' actual shots, ' + ov.layers.length + ' layers');
         markActiveOverlay();
+    }
+    // Yellow: where the CURRENT saved (live) plan differs from the flown plan on the map — a marker at the live position
+    // with a dashed link back to the flown marker, so edits can be made on top of what is saved now.
+    function drawLiveDiff(L, map, lineOpts) {
+        if (!settings.liveDiffOverlay || !model || !model.liveAligned || !model.liveDiff || !model.liveDiff.length) return;
+        const col = settings.liveColor || '#ffe95f';
+        const liveNavOf = (liveStep) => { const i = model.plan.findIndex(x => x.id === liveStep.id); for (let k = i - 1; k >= 0; k--) if (model.plan[k].type_name === 'navigate') return model.liveById[model.plan[k].id]; return null; };
+        let drawn = 0;
+        model.liveDiff.forEach(id => {
+            const live = model.liveById[id]; if (!live) return;
+            let ll = null;
+            if (live.type_name === 'navigate' && live.location) ll = live.location;
+            else if (live.type_name === 'snapshot') {
+                if (isGps(live)) ll = live.location;
+                else { const nav = liveNavOf(live); if (nav && nav.location) { const g = groundAt(nav.location); const lp = g != null ? lookPointFor(nav, live, g) : null; ll = lp ? { lat: lp.ll[0], lng: lp.ll[1] } : nav.location; } }
+            }
+            if (!ll) return;
+            const flownMk = ov.stepMarkers[id];
+            if (flownMk) { const f = flownMk.getLatLng(); if (distM(f, ll) > 0.3) addLayer(map, L.polyline([[f.lat, f.lng], [ll.lat, ll.lng]], lineOpts({ color: col, weight: 1.5, opacity: 0.9, dashArray: '3,4' }))); }
+            const num = model.numbering[id];
+            try {
+                const mk = L.marker([ll.lat, ll.lng], { icon: L.divIcon({ className: 'aim-vv-ov', html: '<div class="aim-vv-ov-live" style="border-color:' + col + ';color:' + col + '">' + esc(num ? num.n : live.type_name) + '</div>', iconSize: [22, 22], iconAnchor: [11, 11] }), interactive: true, zIndexOffset: 450 });
+                const flown = model.byId[id]; const d = flown ? fieldDiffs(flown, live) : [];
+                mk.bindTooltip('<b>' + esc(num ? num.n : live.type_name) + '</b> · CURRENT saved plan (differs from what flew)' + (d.length ? '<br>' + d.map(x => esc(x.field) + ': ' + esc(x.before) + ' → ' + esc(x.after)).join('<br>') : ''), { direction: 'top', offset: [0, -10], opacity: 0.95 });
+                if (addLayer(map, mk)) drawn++;
+            } catch (e) { warn('live-diff marker failed:', e); }
+        });
+        if (drawn) log('live-diff overlay: ' + drawn + ' step(s) drawn where the saved plan differs from the flown one');
     }
     function onOverlayZoom() {
         if (!model || !ov.layers.length) return;
@@ -1593,7 +1625,8 @@
     }
     // ---- diff ----
     function F(v) { return typeof v === 'number' ? +v.toFixed(2) : v; }
-    function stepSig(st) { return JSON.stringify({ t: st.type, l: st.location ? [+(+st.location.lat).toFixed(7), +(+st.location.lng).toFixed(7)] : null, v1: F(st.value1), v2: F(st.value2), e: st.extra_options || {} }); }
+    function canon(o) { if (o == null || typeof o !== 'object') return typeof o === 'number' ? +o.toFixed(2) : o; if (Array.isArray(o)) return o.map(canon); const out = {}; Object.keys(o).sort().forEach(k => { out[k] = canon(o[k]); }); return out; }
+    function stepSig(st) { return JSON.stringify({ t: st.type, l: st.location ? [+(+st.location.lat).toFixed(7), +(+st.location.lng).toFixed(7)] : null, v1: F(st.value1), v2: F(st.value2), e: canon(st.extra_options || {}) }); }
     function fieldDiffs(a, b) {
         const out = [];
         const eqLL = (x, y) => (!x && !y) || (x && y && Math.abs(x.lat - y.lat) < 1e-7 && Math.abs(x.lng - y.lng) < 1e-7);
@@ -1661,7 +1694,7 @@
         const blocked = editsBlocked();
         if (blocked) { html = '<div><b>Adjust</b> <span class="warn">— editing unavailable: ' + esc(blocked) + '</span></div>'; if (el.innerHTML !== html) el.innerHTML = html; return; }
         if (model.liveApp && Number(model.liveApp.id) !== Number(model.mission.app && model.mission.app.id)) html += '<div class="dim">live mission app <b>' + esc(model.liveApp.id) + '</b> (this flight\'s record is a frozen copy, ' + esc(model.mission.app.id) + ') · resolved ' + esc(model.liveApp.__aimVvHow || '') + '</div>';
-        if (model.liveDiff && model.liveDiff.length) html += '<div class="warn">⚠ the live plan differs from what flew on ' + model.liveDiff.length + ' step(s) (' + esc(model.liveDiff.map(id => (model.numbering[id] || {}).n || '#' + model.byId[id].index_in_app).join(', ')) + ') — the map shows the FLOWN plan; edits start from the LIVE values</div>';
+        if (model.liveDiff && model.liveDiff.length) html += '<div class="warn">⚠ the live plan differs from what flew on ' + model.liveDiff.length + ' step(s) (' + esc(model.liveDiff.map(id => (model.numbering[id] || {}).n || '#' + model.byId[id].index_in_app).join(', ')) + ') — the map shows the FLOWN plan; the saved plan is drawn in yellow where it differs; edits start from the saved values</div>';
         if (!step) {
             html += '<div><b>Adjust</b> <span class="dim">— select a snapshot (click a thumbnail) to edit its step' + (shot && shot.step ? ' · active step is a ' + esc(shot.step.type_name) + ', not a snapshot' : '') + '</span></div>';
         } else {
@@ -1969,7 +2002,7 @@
             gmPush(BACKUPS_KEY, backup, 20); download('vv-backup-' + mid + '-' + stamp + '.json', backup);
             const fresh = { app: freshApp };
             const built = buildBody(freshApp, ed.work, shape);
-            log('save base = live app ' + appId + ' (' + freshIns.length + ' steps)');
+            log('save base = live app ' + freshApp.id + ' (' + freshIns.length + ' steps; flown record ' + appId + ')');
             log('save body: ' + built.body.instructions.length + ' instructions · keys ' + Object.keys(built.body).join(',') + (built.fromSample.length ? ' · from learned sample (unchanged): ' + built.fromSample.join(',') : ''));
             status('saving…');
             const r = await fetch('/available_app/', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf }, body: JSON.stringify(built.body) });
@@ -2106,14 +2139,14 @@
             'overlay': 'overlay', 'overlay-actual': 'overlayActual', 'overlay-labels': 'overlayLabels', 'overlay-group': 'overlayGroup', 'time-bar': 'timeBar',
             'edit': 'edit', 'turn-step': 'stepDeg', 'tilt-step': 'stepPitch', 'move-step': 'stepFt', 'alt-step': 'stepAltFt', 'ray-cap-ft': 'rayCapFt',
             'flown-dashed': 'flownDashed', 'flown-color': 'flownColor', 'look-points': 'lookPoints',
-            'nav-color': 'navColor', 'snap-color': 'snapColor', 'actual-color': 'actualColor',
+            'nav-color': 'navColor', 'snap-color': 'snapColor', 'actual-color': 'actualColor', 'live-diff': 'liveDiffOverlay', 'live-color': 'liveColor',
             'nav-line-w': 'navLineW', 'snap-line-w': 'snapLineW', 'actual-line-w': 'actualLineW', 'flown-line-w': 'flownLineW' };
         const key = map[id]; if (!key) return;
         let v = val;
         if (key === 'leadInS') { v = parseFloat(val); if (!isFinite(v) || v < 0 || v > 60) return; }
         else if (['stepDeg', 'stepPitch', 'stepFt', 'stepAltFt', 'rayCapFt'].includes(key)) { v = parseFloat(val); if (!isFinite(v) || v <= 0) return; }
         else if (key === 'units') { v = (val === 'm') ? 'm' : 'ft'; }
-        else if (key === 'flownColor' || key === 'navColor' || key === 'snapColor' || key === 'actualColor') { v = /^#[0-9a-f]{6}$/i.test(String(val)) ? String(val) : DEFAULTS[key]; }
+        else if (key === 'flownColor' || key === 'navColor' || key === 'snapColor' || key === 'actualColor' || key === 'liveColor') { v = /^#[0-9a-f]{6}$/i.test(String(val)) ? String(val) : DEFAULTS[key]; }
         else if (/LineW$/.test(key)) { v = parseFloat(val); if (!isFinite(v) || v < 0.5 || v > 12) return; }
         else v = !!val;
         if (settings[key] === v) return;   // idempotent — CP echoes from both frames
@@ -2126,7 +2159,7 @@
             if (key === 'overlay' || key === 'overlayActual' || key === 'overlayLabels') drawOverlay();
             if (key === 'timeBar') ensureBar();
             if (key === 'flownDashed' || key === 'flownColor') styleFlownPath(true);
-            if (key === 'lookPoints') drawOverlay();
+            if (key === 'lookPoints' || key === 'liveDiffOverlay' || key === 'liveColor') drawOverlay();
             if (key === 'navColor' || key === 'snapColor' || key === 'actualColor' || /LineW$/.test(key)) { syncOverlayStyle(); drawOverlay(); stampStrip(true); styleFlownPath(true); }
             if (key === 'edit' || key.startsWith('step') || key === 'rayCapFt') { if (!settings.edit) ed.open = false; renderEdit(); }
             if (key === 'overlayGroup') setGroupMode(v);
@@ -2190,6 +2223,8 @@
                     { id: 'flown-dashed', label: 'Flown path: restyle (dashed)', type: 'boolean', default: DEFAULTS.flownDashed },
                     { id: 'flown-color', label: 'Flown path color', type: 'color', default: DEFAULTS.flownColor },
                     { id: 'look-points', label: 'Planned look-points for in-place snapshots (ray to terrain)', type: 'boolean', default: DEFAULTS.lookPoints },
+                    { id: 'live-diff', label: 'Show the CURRENT saved plan where it differs from what flew (yellow)', type: 'boolean', default: DEFAULTS.liveDiffOverlay },
+                    { id: 'live-color', label: 'Saved-plan (differs) color', type: 'color', default: DEFAULTS.liveColor },
                     { id: 'nav-color', label: 'Nav color (N#)', type: 'color', default: DEFAULTS.navColor },
                     { id: 'snap-color', label: 'Snapshot color (S#, sightlines)', type: 'color', default: DEFAULTS.snapColor },
                     { id: 'actual-color', label: 'Actual shot color (rings, footprints)', type: 'color', default: DEFAULTS.actualColor },

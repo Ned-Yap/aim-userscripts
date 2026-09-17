@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Video Validation v0.36 (prod + dev): restore verified live; saved plan shown in yellow
+
+- Both write directions are now verified on a live mission: a nav move + re-aim, then a restore from the backup, each `saved + verified` with robot types and reports intact. Each save creates a new mission version id, so the live mission is always resolved by name.
+- Where the **current saved plan differs from what flew**, the map now draws it in yellow (marker at the saved position, dashed link to the flown one, hover for the field differences) — so you can keep editing on top of what is saved. Toggle + color in the Control Panel.
+- Fixed a false "plan differs" after a save (the server re-orders step options; the comparison is now order-independent).
+
 ## 2026-09-17 — AIM Video Validation v0.35 (prod + dev): saves target the live mission by its own id
 
 - A flown mission's record carries a frozen per-flight copy of the plan with its own app id; the live mission the Mission Bank edits has a different id. Saves now resolve the live mission from the site's mission list by name (and, when several missions share a name, by matching the flown plan's structure and geometry), write to that id, and say so in the Adjust panel and the Review box.
