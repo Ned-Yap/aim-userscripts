@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Video Validation latest v0.29: moving a nav keeps its cameras on target (dev only)
+
+- Moving a nav (compass nudges, drag offsets, typed lat/lng, place on map) now re-aims every in-place snapshot on that nav at the ground point it was looking at, so the look-point squares stay put and the heading / camera angle / distance update. Checkbox in the nav row to turn that off and let the view slide with the drone.
+
 ## 2026-09-17 — AIM Video Validation latest v0.28: selection sticks, closer/farther keep the aim, scrolling flight list (dev only)
 
 - Clicking a thumbnail no longer loses its map highlight to the previous shot: while the video is paused the selected shot wins, and a shot inside the seek lead-in counts as current.

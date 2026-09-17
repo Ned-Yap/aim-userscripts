@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.28
+// @version      0.29
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -29,7 +29,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-video-validation';
-    const SCRIPT_VERSION = '0.28';
+    const SCRIPT_VERSION = '0.29';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -81,6 +81,7 @@
         flownDashed: true,     // restyle Percepto's flown-path line
         flownColor: '#ffffff',
         lookPoints: true,      // planned look-point for every in-place snapshot (ray to terrain at planned heading/angle)
+        navKeepAim: true,      // moving a nav re-aims its in-place snapshots at their look-points
         navColor: '#5fa8ff', snapColor: '#ff7ad9', actualColor: '#5fe3ff',
         navLineW: 2, snapLineW: 2.5, actualLineW: 1.5, flownLineW: 3,
     };
@@ -1433,6 +1434,17 @@
         e.pitch = gimbalFromDeg(-Math.atan2(alt - ground, h) / RAD);
         e.heading = Math.round(bearingDeg(nav.location, aim)) % 360;
     }
+    // Move a nav; when "keep aim" is on, every in-place snapshot on it re-aims (heading + camera angle) at the ground
+    // point it was looking at from the OLD position. GPS snapshots keep their aim point by nature.
+    function moveNavKeepAim(nav, newLL) {
+        if (!nav || !nav.location) return;
+        const w = edEnsureWork(); const i = w.indexOf(nav);
+        const snaps = []; for (let k = i + 1; k < w.length && w[k].type_name !== 'navigate'; k++) if (w[k].type_name === 'snapshot' && !isGps(w[k])) snaps.push(w[k]);
+        const g = settings.navKeepAim ? groundAt(nav.location) : null;
+        const aims = (g != null) ? snaps.map(st => { const lp = lookPointFor(nav, st, g); return lp && !lp.capped ? lp.ll : null; }) : [];
+        nav.location = { lat: +(+newLL.lat).toFixed(8), lng: +(+newLL.lng).toFixed(8) };
+        if (g != null) snaps.forEach((st, k) => { if (aims[k]) retilt(st, nav, g, aims[k]); });
+    }
     function edRange(step, dM) {            // closer(-) / farther(+)
         const nav = wkNavOf(step); if (!nav || !nav.location) return;
         if (isGps(step)) { const brg = bearingDeg(nav.location, step.location); step.location = moveLL(step.location, Math.abs(dM), dM > 0 ? brg : brg + 180); return; }
@@ -1586,7 +1598,8 @@
                     + (function() { const o = origOf(nav.id); if (!o || !o.location || !nav.location) return ''; const ns = distM(o.location, { lat: nav.location.lat, lng: o.location.lng }) * (nav.location.lat >= o.location.lat ? 1 : -1); const ew = distM(o.location, { lat: o.location.lat, lng: nav.location.lng }) * (nav.location.lng >= o.location.lng ? 1 : -1); return ' <span class="dim">moved</span> ' + sc('nav-ns', signed(ns * M_TO_FT, ' ft', 0) + ' N', 'north / south from the original nav — drag') + ' ' + sc('nav-ew', signed(ew * M_TO_FT, ' ft', 0) + ' E', 'east / west from the original nav — drag') + ' '; })()
                     + btn('nav-place', ed.placing ? '📍 click the map… (Esc cancels)' : '📍 Place on map', 'Next click on the map sets this nav\'s position', ed.placing ? 'class="aim-vv-armed"' : '')
                     + '<input type="text" class="aim-vv-latlng" data-aim-vv-latlng="1" value="' + esc(nav.location ? nav.location.lat.toFixed(6) + ', ' + nav.location.lng.toFixed(6) : '') + '" title="lat, lng — Enter to apply" spellcheck="false">'
-                    + btn('nav-set', 'Set', 'Apply the typed lat, lng') + '</div>';
+                    + btn('nav-set', 'Set', 'Apply the typed lat, lng')
+                    + '<label class="dim" title="When the nav moves, every in-place snapshot on it re-aims (heading + camera angle) at the ground point it was looking at"><input type="checkbox" data-aim-vv-ed-check="nav-keep-aim" ' + (settings.navKeepAim ? 'checked' : '') + '> keep cameras on their look-points</label></div>';
             }
             html += '<div class="aim-vv-edit__row"><span class="dim">from flight</span>'
                 + btn('adopt', 'Adopt actual shot', 'Move the nav to where the drone stood and copy the actual heading / camera angle / altitude into the step')
@@ -1662,7 +1675,7 @@
         else if (kind === 'alt') edAlt(step, n * FT);
         else if (kind === 'range') edRange(step, n * FT);
         else if (kind === 'target-alt') { if (isGps(step)) step.value1 = +((step.value1 || 0) + n * FT).toFixed(2); }
-        else if (kind === 'nav-ns' || kind === 'nav-ew') { const nav = wkNavOf(step); if (nav && nav.location) nav.location = moveLL(nav.location, Math.abs(n) * FT, kind === 'nav-ns' ? (n > 0 ? 0 : 180) : (n > 0 ? 90 : 270)); }
+        else if (kind === 'nav-ns' || kind === 'nav-ew') { const nav = wkNavOf(step); if (nav && nav.location) moveNavKeepAim(nav, moveLL(nav.location, Math.abs(n) * FT, kind === 'nav-ns' ? (n > 0 ? 0 : 180) : (n > 0 ? 90 : 270))); }
         drawGhosts(); renderEdit();
     }
     // While a drag is in progress only the numbers change — never rebuild the panel (that would replace the elements).
@@ -1699,6 +1712,7 @@
     }
     function fallbackCopy(txt) { try { const ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); } catch (e) { warn('copy failed:', e); } }
     function onEditClick(e) {
+        if (e.target.matches && e.target.matches('[data-aim-vv-ed-check]')) return;   // native checkbox — let it toggle
         const b = e.target.closest && e.target.closest('[data-aim-vv-ed]');
         if (!b || !model) return;
         e.preventDefault(); e.stopPropagation();
@@ -1711,7 +1725,8 @@
             if (act === 'review') { openReview(); return; }
             if (act === 'discard') { edResetWork(); toast('Pending changes discarded', false); return; }
             if (act === 'close') { ed.open = false; ensureEditPanel(); return; }
-            if (act === 'nav-move' && step) { const nav = wkNavOf(step); if (nav && nav.location) { nav.location = moveLL(nav.location, Math.abs(n) * (Number(settings.stepFt) || 1) * FT, Number(b.dataset.b)); } }
+            if (act === 'nav-move' && step) { const nav = wkNavOf(step); if (nav && nav.location) moveNavKeepAim(nav, moveLL(nav.location, Math.abs(n) * (Number(settings.stepFt) || 1) * FT, Number(b.dataset.b))); }
+            else if (act === 'nav-keep-aim') { settings.navKeepAim = !settings.navKeepAim; saveSettings(); renderEdit(); return; }
             else if (act === 'nav-place' && step) { setPlacing(ed.placing ? null : { navId: wkNavOf(step) && wkNavOf(step).id }); }
             else if (act === 'nav-set' && step) {
                 const nav = wkNavOf(step); const inp = ed.panelEl && ed.panelEl.querySelector('[data-aim-vv-latlng]');
@@ -1720,7 +1735,7 @@
                 const lat = +m[1], lng = +m[2];
                 if (!(Math.abs(lat) <= 90 && Math.abs(lng) <= 180)) { toast('lat/lng out of range', true); return; }
                 if (nav.location && distM(nav.location, { lat, lng }) > 2000) { toast('That is ' + fmtDist(distM(nav.location, { lat, lng })) + ' away — refusing (>2000 m)', true); return; }
-                nav.location = { lat: +lat.toFixed(8), lng: +lng.toFixed(8) };
+                moveNavKeepAim(nav, { lat, lng });
             }
             if (act === 'nav-move' || act === 'nav-set') { drawGhosts(); renderEdit(); return; }
             if (act === 'nav-place') { renderEdit(); return; }
@@ -1764,7 +1779,7 @@
         setPlacing(null);
         if (!ll || !nav) { renderEdit(); return; }
         if (nav.location && distM(nav.location, ll) > 2000) { toast('That is ' + fmtDist(distM(nav.location, ll)) + ' from the nav — refusing (>2000 m)', true); renderEdit(); return; }
-        nav.location = { lat: +ll.lat.toFixed(8), lng: +ll.lng.toFixed(8) };
+        moveNavKeepAim(nav, ll);
         drawGhosts(); renderEdit();
         toast('Nav ' + stepLabel(nav) + ' moved — review to apply', false);
     }
@@ -2122,6 +2137,7 @@
         document.addEventListener('click', onLegendClick, true);
         document.addEventListener('click', onBarClick, true);
         document.addEventListener('click', onEditClick, true);
+        document.addEventListener('change', (e) => { const c = e.target; if (c && c.matches && c.matches('[data-aim-vv-ed-check="nav-keep-aim"]')) { settings.navKeepAim = !!c.checked; saveSettings(); log('nav keep-aim = ' + settings.navKeepAim); } }, true);
         document.addEventListener('click', onMapPlaceClick, true);
         window.addEventListener('keydown', onPlaceKey, true);
         document.addEventListener('keydown', (e) => { const t = e.target; if (t && t.matches && t.matches('[data-aim-vv-latlng]')) { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); const b = ed.panelEl && ed.panelEl.querySelector('[data-aim-vv-ed="nav-set"]'); if (b) b.click(); } } }, true);
