@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Video Validation latest v0.46 (dev only): flight checker + session change report
+
+- **🔎 Check flight** (shot card button / Control Panel): scores every shot against the plan — heading, camera angle, drone altitude, drone-vs-nav distance, planned-vs-actual look-point gap — and flags re-takes, shots with no snapshot step executing, and snapshot steps that produced no picture. Thresholds in the Control Panel. Copy for JIRA (table markup) or as tab-separated text, with mission / flight / drone ids and step counts for this flight and the whole mission.
+- **📋 Changes**: before / after of everything applied on this page for this mission (step, field, before, after, the action behind it), headed by step counts for the flight and the whole mission. Copy for JIRA or as text.
+
 ## 2026-09-17 — AIM Video Validation latest v0.44 (dev only): ⏮ ⏭ fixed, look-point shows line of sight too
 
 - `⏮ shot` / `shot ⏭` and `[` / `]` now step by where a shot starts (its lead-in point), so "next" from a freshly selected shot moves on instead of re-selecting it, and "previous" right after a shutter goes back to that shot's start.

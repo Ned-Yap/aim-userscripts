@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.45
+// @version      0.46
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.45';
+    const SCRIPT_VERSION = '0.46';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -87,6 +87,7 @@
         lookPoints: true,      // planned look-point for every in-place snapshot (ray to terrain at planned heading/angle)
         legend: true,          // legend box on the map
         legendOpen: true,      // expanded (false = collapsed to a ? chip)
+        chkHdg: 10, chkCam: 5, chkAltFt: 25, chkPosFt: 30, chkLookFt: 50,   // flight checker thresholds
         follow: true,          // selecting a snapshot pans/zooms the map to it
         followZoom: 19,        // max zoom when following
         actualLookPoints: true,// cyan ring where the ACTUAL camera ray met the ground (from the picture's real pose)
@@ -485,7 +486,8 @@
             .aim-vv-review b { color: #5fe3ff; } .aim-vv-review .dim { color: #888; } .aim-vv-review .warn { color: #ffb347; }
             .aim-vv-toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 100001; background: rgba(10,14,18,.95); color: #e6e6e6; border: 1px solid rgba(95,227,255,.6); border-radius: 4px; padding: 8px 14px; font: 12px/1.4 monospace; display: none; max-width: 70vw; }
             .aim-vv-toast--bad { border-color: #ff5f5f; color: #ffb3b3; }
-            .aim-vv-card .aim-vv-adjust { float: right; background: #1f2228; color: #5fe3ff; border: 1px solid rgba(95,227,255,.5); border-radius: 3px; padding: 1px 8px; font: inherit; cursor: pointer; }
+            .aim-vv-card .aim-vv-adjust-wrap { float: right; display: flex; gap: 6px; }
+            .aim-vv-card .aim-vv-adjust { float: none; background: #1f2228; color: #5fe3ff; border: 1px solid rgba(95,227,255,.5); border-radius: 3px; padding: 1px 8px; font: inherit; cursor: pointer; }
             .aim-vv-ov.aim-vv-ov--active > div { outline: 3px solid #fff; outline-offset: 1px; animation: aim-vv-pulse 1.2s ease-in-out infinite; }
             @keyframes aim-vv-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(95,227,255,.9); } 50% { box-shadow: 0 0 0 8px rgba(95,227,255,0); } }
         `;
@@ -971,7 +973,9 @@
             rows = '<div class="dim">actual: heading ' + rec.drone_heading + '° · camera ' + rec.camera_pitch + '° · alt ' + fmtAlt(rec.alt) + '</div>';
         }
         const prev = rec.previous_image && rec.previous_image.name ? '<span class="dim">previous capture: ' + esc(rec.previous_image.name.replace(/__\d+_.*$/, '').replace(/_/g, ' ').replace(/  /g, ' ')) + '</span>' : '<span class="dim">no previous capture linked</span>';
-        const adjust = settings.edit ? '<button type="button" class="aim-vv-adjust" data-aim-vv-ed-toggle="1" title="Open the Adjust panel for this step">✎ Adjust' + (ed.work && edDiff().length ? ' (' + edDiff().length + ')' : '') + '</button>' : '';
+        const adjust = '<span class="aim-vv-adjust-wrap">' + (settings.edit ? '<button type="button" class="aim-vv-adjust" data-aim-vv-ed-toggle="1" title="Open the Adjust panel for this step">✎ Adjust' + (ed.work && edDiff().length ? ' (' + edDiff().length + ')' : '') + '</button>' : '')
+            + '<button type="button" class="aim-vv-adjust" data-aim-vv-tool="check" title="Check every shot of this flight against the plan (re-takes, deviations, missing shots)">🔎 Check flight</button>'
+            + '<button type="button" class="aim-vv-adjust" data-aim-vv-tool="session" title="Before / after of everything applied on this page, copy for JIRA">📋 Changes' + (sessionReports.filter(r => String(r.mid) === String(model.mid)).length ? ' (' + sessionReports.filter(r => String(r.mid) === String(model.mid)).length + ')' : '') + '</button></span>';
         el.innerHTML = adjust + head + rows + '<div style="margin-top:3px;">' + prev + ' · <span class="dim">[ / ] prev / next shot</span></div>';
         if (ed.open) renderEdit();
     }
@@ -2192,6 +2196,7 @@
             ed.work.forEach((w, i) => { const a = afterIns[i]; if (!a) return; const wa = deepCopy(w); delete wa._new; const dd = fieldDiffs(Object.assign({ type_name: w.type_name }, a), Object.assign({ type_name: w.type_name }, wa)); if (a.type !== w.type) mism.push('#' + i + ' type ' + a.type + ' ≠ ' + w.type); dd.forEach(d => mism.push('#' + i + ' ' + d.field + ': server ' + d.before + ' vs sent ' + d.after)); });
             const report = { at, mid, sid, appId: fresh.app.id, name: fresh.app.name, group: model.mission.mission_group_id, actions: ed.log.map(a => ({ at: new Date(a.at).toISOString(), what: a.what, step: a.step })), changes: diff, verify: { ok: !mism.length, mismatches: mism }, httpStatus: r.status };
             gmPush(REPORTS_KEY, report, 200); download('vv-correction-' + mid + '-' + stamp + '.json', report);
+            sessionReports.push(report);
             if (mism.length) { warn('verify mismatches:', mism); toast('Saved, but ' + mism.length + ' field(s) read back differently — see console + report', true); }
             else toast('✅ Saved ' + diff.length + ' change' + (diff.length === 1 ? '' : 's') + ' · verified · backup + report downloaded', false);
             status(mism.length ? 'saved with ' + mism.length + ' mismatch(es)' : 'saved + verified');
@@ -2204,6 +2209,137 @@
             const b = ed.reviewEl && ed.reviewEl.querySelector('[data-aim-vv-rv="apply"]'); if (b) b.disabled = false;
         }
         ed.busy = false;
+    }
+    // ===============================================================
+    // FLIGHT CHECKER + SESSION CHANGE REPORT (copy for JIRA)
+    // ===============================================================
+    const sessionReports = [];   // every Apply on this page (all missions), in order
+    let reportEl = null;
+    function fmtSigned(v, unit, d) { return v == null || !isFinite(v) ? '–' : (v > 0 ? '+' : '') + v.toFixed(d == null ? 0 : d) + unit; }
+    function actualLookPointOf(im) {
+        if (!im || !im.location || typeof im.drone_heading !== 'number' || typeof im.camera_pitch !== 'number' || typeof im.alt !== 'number') return null;
+        const g = groundAt(im.location); if (g == null) return null;
+        const capM = (Number(settings.rayCapFt) || 500) * FT, down = Math.tan(Math.abs(im.camera_pitch) * RAD);
+        let dist = down > 0.01 ? (im.alt - g) / down : Infinity; let capped = false; if (!(dist > 0) || dist > capM) { dist = capM; capped = true; }
+        return { ll: moveLL(im.location, dist, im.drone_heading), dist, capped };
+    }
+    function plannedLookPointOf(step) {
+        if (!step) return null;
+        if (isGps(step)) return { ll: step.location };
+        const nav = parentNav(model, step); if (!nav || !nav.location) return null;
+        const g = groundAt(nav.location); if (g == null) return null;
+        const lp = lookPointFor(nav, step, g); return lp ? { ll: { lat: lp.ll[0], lng: lp.ll[1] }, capped: lp.capped } : null;
+    }
+    function checkFlight() {
+        const thr = { hdg: Number(settings.chkHdg) || 0, cam: Number(settings.chkCam) || 0, alt: Number(settings.chkAltFt) || 0, pos: Number(settings.chkPosFt) || 0, look: Number(settings.chkLookFt) || 0 };
+        const inSlice = (st) => !model.slice || (st.index_in_app >= model.slice.minIdx && st.index_in_app <= model.slice.maxIdx);
+        const snapsInFlight = model.plan.filter(st => st.type_name === 'snapshot' && inSlice(st));
+        const rows = []; const seen = {};
+        model.shots.forEach(sh => {
+            const im = sh.primary, st = sh.step, d = sh.delta || {};
+            const num = st && model.numbering[st.id];
+            const flags = [];
+            let lookGap = null;
+            if (st && st.type_name === 'snapshot') {
+                const p = plannedLookPointOf(st), a = actualLookPointOf(im);
+                if (p && a && p.ll && a.ll) { lookGap = distM(p.ll, a.ll) * M_TO_FT; if (!(p.capped || a.capped) && lookGap > thr.look) flags.push('look-point ' + lookGap.toFixed(0) + ' ft off'); }
+            }
+            if (!st || st.type_name !== 'snapshot') flags.push('no snapshot step executing (pilot / manual?)');
+            if (sh.retake) flags.push('re-take (' + ((seen[st.id] || 0) + 1) + ')');
+            if (d.hdg != null && Math.abs(d.hdg) > thr.hdg) flags.push('heading ' + fmtSigned(d.hdg, '°'));
+            if (d.pitch != null && Math.abs(d.pitch) > thr.cam) flags.push('camera ' + fmtSigned(d.pitch, '°'));
+            if (d.alt != null && Math.abs(d.alt * M_TO_FT) > thr.alt) flags.push('altitude ' + fmtSigned(d.alt * M_TO_FT, ' ft'));
+            if (d.pos != null && d.pos * M_TO_FT > thr.pos) flags.push('off station ' + (d.pos * M_TO_FT).toFixed(0) + ' ft ' + (d.posDir || ''));
+            if (st) seen[st.id] = (seen[st.id] || 0) + 1;
+            const pose = d.pose || {};
+            rows.push({ s: num ? num.n : (st ? st.type_name : '?'), step: st ? st.index_in_app : null, shutter: mmss(sh.videoOff), kinds: sh.images.map(i => i.kind).join('+'), name: im && im.name,
+                hdg: [pose.heading, im && im.drone_heading, d.hdg], cam: [pose.pitchDeg, im && im.camera_pitch, d.pitch], alt: [pose.alt, im && im.alt, d.alt], pos: d.pos, posDir: d.posDir, look: lookGap, asset: im && (im.assets || []).map(a => a.name).join(', '), flags });
+        });
+        const missing = snapsInFlight.filter(st => !seen[st.id]).map(st => (model.numbering[st.id] || {}).n || '#' + st.index_in_app);
+        const summary = { shots: rows.length, flagged: rows.filter(r => r.flags.length).length, retakes: rows.filter(r => r.flags.some(f => f.startsWith('re-take'))).length, missing, thr };
+        return { rows, summary };
+    }
+    function flightHeader() {
+        const m = model.mission; const inSlice = (st) => !model.slice || (st.index_in_app >= model.slice.minIdx && st.index_in_app <= model.slice.maxIdx);
+        const flightSteps = model.plan.filter(inSlice), flightSnaps = flightSteps.filter(st => st.type_name === 'snapshot');
+        const allSnaps = model.plan.filter(st => st.type_name === 'snapshot');
+        return { mission: m.name || m.app_name, appId: model.liveApp ? model.liveApp.id : (m.app && m.app.id), flownAppId: m.app && m.app.id, flightId: model.mid, group: m.mission_group_id, site: model.sid, drone: m.drone_name || (m.drone && m.drone.name), droneType: m.drone && m.drone.robot_type_name, when: m.when, flightSteps: flightSteps.length, flightSnaps: flightSnaps.length, missionSteps: model.plan.length, missionSnaps: allSnaps.length, slice: model.slice, url: location.origin + '/#/site/' + model.sid + '/control-panel/past-mission/' + model.mid };
+    }
+    const tri = (a, unit, d) => (a[0] != null ? (+a[0]).toFixed(d || 0) : '–') + unit + ' / ' + (a[1] != null ? (+a[1]).toFixed(d || 0) : '–') + unit + ' / ' + fmtSigned(a[2], unit, d || 0);
+    function checkerText(res, jira) {
+        const h = flightHeader();
+        const L = [];
+        L.push((jira ? 'h3. ' : '') + 'Flight check — ' + h.mission + ' · flight ' + h.flightId + (h.group != null && h.group >= 0 ? ' (group ' + h.group + ')' : '') + ' · ' + (h.drone || '') + (h.droneType ? ' (' + h.droneType + ')' : '') + ' · ' + new Date(h.when).toLocaleString());
+        L.push('Steps: this flight ' + h.flightSteps + ' (' + h.flightSnaps + ' snapshots) · whole mission ' + h.missionSteps + ' (' + h.missionSnaps + ' snapshots) · ' + h.url);
+        L.push('Shots ' + res.summary.shots + ' · flagged ' + res.summary.flagged + ' · re-takes ' + res.summary.retakes + ' · snapshot steps with no picture: ' + (res.summary.missing.length ? res.summary.missing.join(', ') : 'none'));
+        L.push('Thresholds: heading ' + res.summary.thr.hdg + '° · camera ' + res.summary.thr.cam + '° · altitude ' + res.summary.thr.alt + ' ft · off-station ' + res.summary.thr.pos + ' ft · look-point ' + res.summary.thr.look + ' ft. Columns are planned / actual / Δ.');
+        const head = ['shot', 'step', 'shutter', 'heading', 'camera', 'drone alt (ft)', 'drone vs nav', 'look-point gap', 'asset', 'flags'];
+        if (jira) L.push('||' + head.join('||') + '||');
+        else L.push(head.join('\t'));
+        res.rows.forEach(r => {
+            const c = [r.s, r.step != null ? '#' + r.step : '', r.shutter, tri(r.hdg, '°'), tri(r.cam, '°'), tri([r.alt[0] != null ? r.alt[0] * M_TO_FT : null, r.alt[1] != null ? r.alt[1] * M_TO_FT : null, r.alt[2] != null ? r.alt[2] * M_TO_FT : null], ''), r.pos != null ? (r.pos * M_TO_FT).toFixed(0) + ' ft ' + (r.posDir || '') : '–', r.look != null ? r.look.toFixed(0) + ' ft' : '–', r.asset || '–', r.flags.length ? r.flags.join('; ') : 'ok'];
+            L.push(jira ? '|' + c.map(x => String(x).replace(/\|/g, '/')).join('|') + '|' : c.join('\t'));
+        });
+        return L.join('\n');
+    }
+    function sessionText(jira) {
+        const h = flightHeader();
+        const reps = sessionReports.filter(r => String(r.mid) === String(model.mid));
+        const L = [];
+        L.push((jira ? 'h3. ' : '') + 'Mission changes — ' + h.mission + ' · flight ' + h.flightId + (h.group != null && h.group >= 0 ? ' (group ' + h.group + ')' : '') + ' · ' + new Date().toLocaleString());
+        L.push('Steps: this flight ' + h.flightSteps + ' (' + h.flightSnaps + ' snapshots) · whole mission ' + h.missionSteps + ' (' + h.missionSnaps + ' snapshots) · live app ' + h.appId + ' · ' + h.url);
+        if (!reps.length) { L.push('No changes applied on this page yet.'); return L.join('\n'); }
+        L.push(reps.length + ' save' + (reps.length === 1 ? '' : 's') + ' this session · ' + reps.reduce((n, r) => n + (r.changes || []).length, 0) + ' field changes · verify ' + (reps.every(r => r.verify && r.verify.ok) ? 'clean' : 'MISMATCHES — see console'));
+        const head = ['save', 'step', 'change', 'before', 'after', 'note', 'action'];
+        if (jira) L.push('||' + head.join('||') + '||'); else L.push(head.join('\t'));
+        reps.forEach((r, i) => {
+            const acts = (r.actions || []).map(a => a.what + (a.step ? ' ' + a.step : '')).join(', ');
+            (r.changes || []).forEach(c => {
+                const cells = [String(i + 1) + ' · ' + new Date(r.at).toLocaleTimeString(), c.label, c.kind + (c.field ? ' · ' + c.field : ''), c.before != null ? c.before : '', c.after != null ? c.after : '', c.note || '', acts];
+                L.push(jira ? '|' + cells.map(x => String(x).replace(/\|/g, '/')).join('|') + '|' : cells.join('\t'));
+            });
+        });
+        return L.join('\n');
+    }
+    function copyText(txt, label) {
+        const done = () => toast('Copied ' + label + ' to the clipboard', false);
+        try { navigator.clipboard.writeText(txt).then(done, () => { fallbackCopy(txt); done(); }); } catch (e) { fallbackCopy(txt); done(); }
+    }
+    function openReportBox(title, sub, tableHtml, plain, jira) {
+        if (reportEl) reportEl.remove();
+        reportEl = document.createElement('div'); reportEl.className = 'aim-vv-review';
+        reportEl.innerHTML = '<div class="aim-vv-review__box" style="max-width:96vw"><div><b>' + esc(title) + '</b></div><div class="dim" style="margin:4px 0 8px">' + esc(sub) + '</div>' + tableHtml
+            + '<div class="aim-vv-edit__row" style="margin-top:8px"><button type="button" data-aim-vv-rep="jira">Copy for JIRA (table markup)</button><button type="button" data-aim-vv-rep="plain">Copy as text (tab-separated)</button><button type="button" data-aim-vv-rep="close">Close</button></div></div>';
+        reportEl.__plain = plain; reportEl.__jira = jira;
+        document.body.appendChild(reportEl);
+    }
+    function onReportClick(e) {
+        const b = e.target.closest && e.target.closest('[data-aim-vv-rep]'); if (!b || !reportEl) return;
+        e.preventDefault(); e.stopPropagation();
+        const what = b.dataset.aimVvRep;
+        if (what === 'close') { reportEl.remove(); reportEl = null; }
+        else if (what === 'jira') copyText(reportEl.__jira, 'the JIRA table');
+        else if (what === 'plain') copyText(reportEl.__plain, 'the report');
+    }
+    function openChecker() {
+        if (!model) { toast('No mission loaded', true); return; }
+        const res = checkFlight(); const h = flightHeader();
+        const cellCls = (flag) => flag ? ' class="warn"' : '';
+        const rows = res.rows.map(r => '<tr' + (r.flags.length ? ' style="background:rgba(255,179,71,.08)"' : '') + '><td><b>' + esc(r.s) + '</b></td><td class="dim">' + (r.step != null ? '#' + r.step : '') + '</td><td>' + esc(r.shutter) + '</td>'
+            + '<td' + cellCls(r.flags.some(f => f.startsWith('heading'))) + '>' + esc(tri(r.hdg, '°')) + '</td><td' + cellCls(r.flags.some(f => f.startsWith('camera'))) + '>' + esc(tri(r.cam, '°')) + '</td>'
+            + '<td' + cellCls(r.flags.some(f => f.startsWith('altitude'))) + '>' + esc(tri([r.alt[0] != null ? r.alt[0] * M_TO_FT : null, r.alt[1] != null ? r.alt[1] * M_TO_FT : null, r.alt[2] != null ? r.alt[2] * M_TO_FT : null], '')) + '</td>'
+            + '<td' + cellCls(r.flags.some(f => f.startsWith('off station'))) + '>' + (r.pos != null ? (r.pos * M_TO_FT).toFixed(0) + ' ft ' + esc(r.posDir || '') : '–') + '</td><td' + cellCls(r.flags.some(f => f.startsWith('look-point'))) + '>' + (r.look != null ? r.look.toFixed(0) + ' ft' : '–') + '</td>'
+            + '<td class="dim">' + esc(r.asset || '–') + '</td><td>' + (r.flags.length ? '<span class="warn">' + esc(r.flags.join('; ')) + '</span>' : '<span class="ok">ok</span>') + '</td></tr>').join('');
+        const table = '<table><tr class="dim"><td>shot</td><td>step</td><td>shutter</td><td>heading p/a/Δ</td><td>camera p/a/Δ</td><td>drone alt ft p/a/Δ</td><td>drone vs nav</td><td>look-point gap</td><td>asset</td><td>flags</td></tr>' + rows + '</table>'
+            + '<div style="margin-top:6px">Shots <b>' + res.summary.shots + '</b> · flagged <b>' + res.summary.flagged + '</b> · re-takes <b>' + res.summary.retakes + '</b> · snapshot steps with no picture: ' + (res.summary.missing.length ? '<span class="warn">' + esc(res.summary.missing.join(', ')) + '</span>' : 'none') + '</div>';
+        openReportBox('Flight check — ' + (h.mission || '') + ' · flight ' + h.flightId, 'this flight ' + h.flightSteps + ' steps (' + h.flightSnaps + ' snapshots) · whole mission ' + h.missionSteps + ' steps (' + h.missionSnaps + ' snapshots) · thresholds in the Control Panel', table, checkerText(res, false), checkerText(res, true));
+    }
+    function openSessionReport() {
+        if (!model) { toast('No mission loaded', true); return; }
+        const h = flightHeader(); const reps = sessionReports.filter(r => String(r.mid) === String(model.mid));
+        const rows = reps.map((r, i) => (r.changes || []).map(c => '<tr><td class="dim">' + (i + 1) + ' · ' + esc(new Date(r.at).toLocaleTimeString()) + '</td><td><b>' + esc(c.label) + '</b></td><td>' + esc(c.kind + (c.field ? ' · ' + c.field : '')) + '</td><td>' + esc(c.before != null ? c.before : '') + '</td><td>' + esc(c.after != null ? c.after : '') + '</td><td class="dim">' + esc(c.note || '') + '</td><td class="dim">' + esc((r.actions || []).map(a => a.what + (a.step ? ' ' + a.step : '')).join(', ')) + '</td></tr>').join('')).join('');
+        const table = reps.length ? '<table><tr class="dim"><td>save</td><td>step</td><td>change</td><td>before</td><td>after</td><td>note</td><td>action</td></tr>' + rows + '</table>' : '<div class="dim">No changes applied on this page yet — Apply something first.</div>';
+        openReportBox('Mission changes this session — ' + (h.mission || '') + ' · flight ' + h.flightId, reps.length + ' save(s) · ' + reps.reduce((n, r) => n + (r.changes || []).length, 0) + ' field change(s) · this flight ' + h.flightSteps + ' steps (' + h.flightSnaps + ' snapshots) · whole mission ' + h.missionSteps + ' steps (' + h.missionSnaps + ' snapshots)', table, sessionText(false), sessionText(true));
     }
     // ---- toast ----
     let toastEl = null;
@@ -2314,6 +2450,7 @@
             'flown-dashed': 'flownDashed', 'flown-color': 'flownColor', 'look-points': 'lookPoints',
             'nav-color': 'navColor', 'snap-color': 'snapColor', 'actual-color': 'actualColor', 'live-diff': 'liveDiffOverlay', 'live-color': 'liveColor',
             'follow': 'follow', 'follow-zoom': 'followZoom', 'actual-look': 'actualLookPoints', 'legend': 'legend',
+            'chk-hdg': 'chkHdg', 'chk-cam': 'chkCam', 'chk-alt': 'chkAltFt', 'chk-pos': 'chkPosFt', 'chk-look': 'chkLookFt',
             'nav-line-w': 'navLineW', 'snap-line-w': 'snapLineW', 'actual-line-w': 'actualLineW', 'flown-line-w': 'flownLineW' };
         const key = map[id]; if (!key) return;
         let v = val;
@@ -2323,6 +2460,7 @@
         else if (key === 'flownColor' || key === 'navColor' || key === 'snapColor' || key === 'actualColor' || key === 'liveColor') { v = /^#[0-9a-f]{6}$/i.test(String(val)) ? String(val) : DEFAULTS[key]; }
         else if (/LineW$/.test(key)) { v = parseFloat(val); if (!isFinite(v) || v < 0.5 || v > 12) return; }
         else if (key === 'followZoom') { v = parseFloat(val); if (!isFinite(v) || v < 14 || v > 22) return; }
+        else if (/^chk/.test(key)) { v = parseFloat(val); if (!isFinite(v) || v < 0) return; }
         else v = !!val;
         if (settings[key] === v) return;   // idempotent — CP echoes from both frames
         settings[key] = v; saveSettings();
@@ -2364,6 +2502,8 @@
                 }
                 else if (id === 'reload') { const ids = current; deactivate(); if (ids) activate(ids); }
                 else if (id === 'dump-geo') dumpGeometry();
+                else if (id === 'check-flight') openChecker();
+                else if (id === 'session-report') openSessionReport();
             }
         };
     }
@@ -2384,6 +2524,14 @@
                     { id: 'lead-in', label: 'Seek lead-in (seconds before the shot)', type: 'number', default: DEFAULTS.leadInS, min: 0, max: 60 },
                     { id: 'shot-card', label: 'Shot card (planned vs actual)', type: 'boolean', default: DEFAULTS.shotCard },
                     { id: 'time-bar', label: 'Time bar under the player (±10/30 s, jump to time)', type: 'boolean', default: DEFAULTS.timeBar },
+                    { id: 'hdr-chk', type: 'header', label: 'Flight checker thresholds (flag a shot when …)' },
+                    { id: 'chk-hdg', label: 'heading off by more than (°)', type: 'number', default: DEFAULTS.chkHdg, min: 0, max: 180 },
+                    { id: 'chk-cam', label: 'camera angle off by more than (°)', type: 'number', default: DEFAULTS.chkCam, min: 0, max: 90 },
+                    { id: 'chk-alt', label: 'drone altitude off by more than (ft)', type: 'number', default: DEFAULTS.chkAltFt, min: 0, max: 1000 },
+                    { id: 'chk-pos', label: 'drone more than this from its nav (ft)', type: 'number', default: DEFAULTS.chkPosFt, min: 0, max: 5000 },
+                    { id: 'chk-look', label: 'planned vs actual look-point gap over (ft)', type: 'number', default: DEFAULTS.chkLookFt, min: 0, max: 5000 },
+                    { id: 'check-flight', label: '🔎 Check this flight (re-takes, deviations, missing shots)', type: 'button' },
+                    { id: 'session-report', label: '📋 Session change report (copy for JIRA)', type: 'button' },
                     { id: 'hdr-edit', type: 'header', label: 'Editing (writes the mission plan)' },
                     { id: 'edit', label: 'Adjust panel — EXPERIMENTAL: nudge / adopt / convert / delete / duplicate, saves to the mission', type: 'boolean', default: DEFAULTS.edit },
                     { id: 'turn-step', label: 'Turn step (degrees; Shift ×5)', type: 'number', default: DEFAULTS.stepDeg, min: 0.5, max: 90 },
@@ -2468,6 +2616,8 @@
         document.addEventListener('mouseup', onScrubUp, true);
         document.addEventListener('wheel', onScrubWheel, { capture: true, passive: false });
         document.addEventListener('click', onReviewClick, true);
+        document.addEventListener('click', onReportClick, true);
+        document.addEventListener('click', (e) => { const t = e.target.closest && e.target.closest('[data-aim-vv-tool]'); if (!t || !model) return; e.preventDefault(); e.stopPropagation(); if (t.dataset.aimVvTool === 'check') openChecker(); else openSessionReport(); }, true);
         document.addEventListener('click', (e) => { const t = e.target.closest && e.target.closest('[data-aim-vv-ed-toggle]'); if (!t || !model) return; e.preventDefault(); e.stopPropagation(); ed.open = !ed.open; if (ed.open) edEnsureWork(); renderEdit(); if (selectedRec) renderCard(selectedRec, 'selected'); }, true);
         installCsrfSniffer();
         window.addEventListener('keydown', fallbackKeys, true);
