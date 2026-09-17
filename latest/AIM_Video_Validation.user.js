@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.22
+// @version      0.23
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -29,7 +29,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-video-validation';
-    const SCRIPT_VERSION = '0.22';
+    const SCRIPT_VERSION = '0.23';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -78,12 +78,16 @@
         timeBar: true,         // skip / jump-to-time bar under the player
         edit: true,            // Adjust panel (Phase 2)
         stepDeg: 1, stepPitch: 1, stepFt: 1, stepAltFt: 1, rayCapFt: 500,
-        flownDashed: true,     // restyle Percepto's flown-path line: dashed white
+        flownDashed: true,     // restyle Percepto's flown-path line
+        flownColor: '#ffffff',
+        lookPoints: true,      // planned look-point for every in-place snapshot (ray to terrain at planned heading/angle)
     };
     let settings = Object.assign({}, DEFAULTS);
     try { settings = Object.assign({}, DEFAULTS, GM_getValue(SETTINGS_KEY, {}) || {}); }
     catch (e) { warn('settings load failed (defaults):', e); }
     function saveSettings() { try { GM_setValue(SETTINGS_KEY, settings); } catch (e) { warn('settings save failed:', e); } }
+    // v0.20 shipped 5° / 2° / 10 ft / 10 ft; v0.22 moved to 1-unit steps. A stored copy of the OLD defaults is not a user choice.
+    if (settings.stepDeg === 5 && settings.stepPitch === 2 && settings.stepFt === 10 && settings.stepAltFt === 10) { settings.stepDeg = settings.stepPitch = settings.stepFt = settings.stepAltFt = 1; saveSettings(); }
 
     // ---------------------------------------------------------------
     // Route / frame gates
@@ -352,6 +356,8 @@
             .aim-vv-ov-flag { font-size: 13px; line-height: 16px; text-shadow: 0 1px 2px #000; }
             .aim-vv-ov-actual { width: 16px; height: 16px; border-radius: 50%; background: rgba(95,227,255,.15); border: 2px solid #5fe3ff; box-sizing: border-box; }
             .aim-vv-ov-actual--retake { border-style: dashed; border-color: #fff; }
+            .aim-vv-ov-look { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #ff7ad9; box-sizing: border-box; background: rgba(255,122,217,.18); }
+            .aim-vv-ov-look::after { content: ''; position: absolute; left: 5px; top: 5px; width: 4px; height: 4px; border-radius: 50%; background: #ff7ad9; }
             .aim-vv-ov-ghost { width: 22px; height: 22px; border-radius: 50%; border: 2px dashed #fff; background: rgba(0,0,0,.35); color: #fff; font: 800 9px/18px monospace; text-align: center; }
             .aim-vv-edit__row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 4px; }
             .aim-vv-edit__row > .dim:first-child { min-width: 82px; }
@@ -729,7 +735,7 @@
         barEl.innerHTML = ''
             + '<button type="button" data-aim-vv-bar="prev-shot" title="Previous shot  ( [ )">⏮ shot</button>'
             + '<button type="button" data-aim-vv-bar="skip" data-s="-10" data-s2="-30" title="Left-click −10 s · right-click −30 s">‹ 10s</button>'
-            + '<input type="text" class="aim-vv-time" placeholder="m:ss" title="Type a time (m:ss or seconds) and press Enter" spellcheck="false">'
+            + '<input type="text" class="aim-vv-time" data-aim-vv-scrub="time" placeholder="m:ss" title="Type a time (m:ss or seconds) + Enter · drag ↔ or mouse-wheel to scrub (Shift ×5)" spellcheck="false">'
             + '<button type="button" data-aim-vv-bar="go" title="Jump to the typed time">Go</button>'
             + '<button type="button" data-aim-vv-bar="skip" data-s="10" data-s2="30" title="Left-click +10 s · right-click +30 s">10s ›</button>'
             + '<button type="button" data-aim-vv-bar="next-shot" title="Next shot  ( ] )">shot ⏭</button>'
@@ -894,6 +900,7 @@
         ov.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) { /* already gone */ } });
         ov.layers = []; ov.stepMarkers = {}; ov.shotMarkers = {};
         ed.ghosts.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) { /* already gone */ } }); ed.ghosts = [];
+        lookLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) { /* already gone */ } }); lookLayers = []; lookToken++;
     }
     function addLayer(map, layer) {
         try { layer.addTo(map); ov.layers.push(layer); return layer; }
@@ -1016,6 +1023,7 @@
         }
         activeOverlayKey = undefined;   // markers are new — force the active highlight to re-apply
         try { drawGhosts(); } catch (e) { warn('ghosts:', e); }
+        try { drawLookPoints(); } catch (e) { warn('look-points:', e); }
         log('overlay drawn: ' + steps.length + ' plan steps' + (groupOn ? ' (whole mission, ' + ov.group.length + ' flights)' : ' (this flight)') + ', ' + Object.keys(ov.shotMarkers).length + ' actual shots, ' + ov.layers.length + ' layers');
         markActiveOverlay();
     }
@@ -1026,18 +1034,76 @@
         const gate = (ov.map && typeof ov.map.getZoom === 'function' ? ov.map.getZoom() : 18) >= 17;
         if (gate !== ov.labelZoomGate) drawOverlay();
     }
+    // Planned look-point of an in-place snapshot: from the nav (planned altitude above the terrain under it),
+    // at the planned heading and camera angle, down to the ground (cap = rayCapFt). Terrain via /location_altitude/, cached.
+    const demCache = {};
+    function demCached(ll) {
+        const k = (+ll.lat).toFixed(5) + ',' + (+ll.lng).toFixed(5);
+        if (demCache[k] !== undefined) return Promise.resolve(demCache[k]);
+        return dem(ll).then(v => { demCache[k] = v; return v; }).catch(e => { warn('dem:', e.message); demCache[k] = null; return null; });
+    }
+    function lookPointFor(nav, step, ground) {
+        const e = step.extra_options || {};
+        const alt = typeof e.abs_alt === 'number' ? e.abs_alt : (typeof nav.value1 === 'number' ? nav.value1 : null);
+        const pitch = gimbalToDeg(e.pitch);
+        if (alt == null || pitch == null || typeof e.heading !== 'number' || !nav.location) return null;
+        const capM = (Number(settings.rayCapFt) || 500) * FT;
+        const down = Math.tan(Math.abs(pitch) * RAD);
+        let dist = (ground != null && down > 0.01) ? (alt - ground) / down : Infinity;
+        let capped = false; if (!(dist > 0) || dist > capM) { dist = capM; capped = true; }
+        return { ll: moveLL(nav.location, dist, e.heading), dist, capped, agl: ground != null ? alt - ground : null };
+    }
+    let lookLayers = [];
+    let lookToken = 0;
+    function drawLookPoints() {
+        const map = findMap(), L = getL();
+        lookLayers.forEach(l => { try { map && map.removeLayer(l); } catch (e) {} }); lookLayers = [];
+        if (!map || !L || !model || !settings.overlay || !settings.lookPoints) return;
+        const token = ++lookToken;
+        const groupOn = !!(settings.overlayGroup && ov.group);
+        const inSlice = (st) => !model.slice || (st.index_in_app >= model.slice.minIdx && st.index_in_app <= model.slice.maxIdx);
+        // This flight only (in group view the whole plan would mean hundreds of terrain lookups).
+        const pairs = []; let nav = null;
+        model.plan.forEach(st => { if (st.type_name === 'navigate') nav = st; else if (st.type_name === 'snapshot' && !isGps(st) && nav && nav.location && inSlice(st)) pairs.push({ nav, st }); });
+        if (groupOn || !pairs.length) return;
+        const navs = Array.from(new Set(pairs.map(p => p.nav)));
+        Promise.all(navs.map(n => demCached(n.location))).then(grounds => {
+            if (token !== lookToken) return;
+            const gOf = {}; navs.forEach((n, i) => { gOf[n.id] = grounds[i]; });
+            const lineOpts = (o) => Object.assign({ interactive: false }, ov.svg ? { renderer: ov.svg } : {}, o);
+            const add = (layer) => { try { layer.addTo(map); lookLayers.push(layer); } catch (e) { warn('look-point failed:', e); try { map.removeLayer(layer); } catch (e2) {} } };
+            let drawn = 0;
+            pairs.forEach(({ nav: n, st }) => {
+                const lp = lookPointFor(n, st, gOf[n.id]); if (!lp) return;
+                const num = model.numbering[st.id];
+                add(L.polyline([[n.location.lat, n.location.lng], [lp.ll.lat, lp.ll.lng]], lineOpts({ color: COLOR_SNAP, weight: 1.5, opacity: 0.7, dashArray: '2,5' })));
+                try {
+                    const mk = L.marker([lp.ll.lat, lp.ll.lng], { icon: L.divIcon({ className: 'aim-vv-ov', html: '<div class="aim-vv-ov-look" title=""></div>', iconSize: [14, 14], iconAnchor: [7, 7] }), interactive: true, zIndexOffset: 250 });
+                    mk.bindTooltip('<b>' + esc(num ? num.n : 'S') + '</b> planned look-point · ' + fmtDist(lp.dist) + ' out' + (lp.agl != null ? ' · ' + fmtAlt(lp.agl) + ' above terrain at the nav' : '') + (lp.capped ? ' · <i>capped — shallow angle</i>' : ''), { direction: 'top', offset: [0, -8], opacity: 0.95 });
+                    add(mk); drawn++;
+                } catch (e) { warn('look marker failed:', e); }
+            });
+            log('look-points drawn: ' + drawn + ' in-place snapshot(s)');
+        });
+    }
     // Percepto draws the flown path as one huge polyline; restyle it dashed white (it re-applies on tick).
     let flownLayer = null;
-    function styleFlownPath() {
+    function styleFlownPath(force) {
         const map = findMap(); if (!map) return;
         if (!flownLayer || !map.hasLayer(flownLayer)) {
             flownLayer = null; let best = 0;
             Object.values(map._layers || {}).forEach(l => { if (typeof l.getLatLngs === 'function' && !(l.options && l.options.className && /aim-/.test(l.options.className))) { const n = JSON.stringify(l.getLatLngs()).split('"lat"').length - 1; if (n > best && n > 500) { best = n; flownLayer = l; } } });
             if (!flownLayer) return;
         }
-        const want = settings.flownDashed ? { color: '#ffffff', dashArray: '6,8', opacity: 0.9 } : (flownLayer.__aimVvOrig || null);
         if (!flownLayer.__aimVvOrig) flownLayer.__aimVvOrig = { color: flownLayer.options.color, dashArray: flownLayer.options.dashArray || null, opacity: flownLayer.options.opacity };
-        if (want && (flownLayer.options.color !== want.color || (flownLayer.options.dashArray || null) !== (want.dashArray || null))) { try { flownLayer.setStyle(want); } catch (e) { warn('flown path style:', e); } }
+        const want = settings.flownDashed ? { color: settings.flownColor || '#ffffff', dashArray: '6,8', opacity: 0.9 } : flownLayer.__aimVvOrig;
+        if (force || flownLayer.options.color !== want.color || (flownLayer.options.dashArray || null) !== (want.dashArray || null)) { try { flownLayer.setStyle(want); } catch (e) { warn('flown path style:', e); } }
+        // The Map Styler colors paths by CSS, and CSS beats SVG attributes — pin our stroke as an INLINE style.
+        const el = flownLayer._path;
+        if (el && el.style) {
+            const stroke = settings.flownDashed ? want.color : '';
+            if (el.style.stroke !== stroke) { el.style.stroke = stroke; el.style.strokeDasharray = settings.flownDashed ? '6 8' : ''; }
+        }
     }
     let activeOverlayKey = null;
     function markActiveOverlay() {
@@ -1402,7 +1468,7 @@
         } else {
             const pose = wkPose(step), nav = pose.nav, gps = isGps(step);
             const sd = Number(settings.stepDeg) || 1, sp = Number(settings.stepPitch) || 1, sf = Number(settings.stepFt) || 1, sa = Number(settings.stepAltFt) || 1;
-            html += '<div><b>Adjust ' + esc(stepLabel(step)) + '</b> <span class="dim">· ' + (gps ? 'GPS aim point' : 'in-place') + ' · nav ' + (nav ? esc(stepLabel(nav)) : '–') + ' · Shift-click = ×5</span></div>';
+            html += '<div><b>Adjust ' + esc(stepLabel(step)) + '</b> <span class="dim">· ' + (gps ? 'GPS aim point' : 'in-place') + ' · nav ' + (nav ? esc(stepLabel(nav)) : '–') + ' · steps ' + sd + '° / ' + sp + '° / ' + sf + ' ft / ' + sa + ' ft alt · Shift = ×5</span></div>';
             html += '<div class="aim-vv-edit__row"><span class="dim">picture</span>'
                 + btn('turn', '◀ left', gps ? 'Move the aim point ' + sf + ' ft to the left of the nav→aim line' : 'Turn the heading ' + sd + '° left', 'data-n="-1"')
                 + btn('turn', 'right ▶', gps ? 'Move the aim point ' + sf + ' ft to the right' : 'Turn the heading ' + sd + '° right', 'data-n="1"')
@@ -1429,29 +1495,56 @@
             + (diff.length ? '<b>' + diff.length + ' pending change' + (diff.length === 1 ? '' : 's') + '</b> ' + btn('review', 'Review & Apply…', 'Show the before/after diff, back up the mission, then write') + btn('discard', 'Discard all', 'Drop every pending change') : '<span class="dim">no pending changes</span>')
             + (isLite() ? ' <span class="warn">Lite mode: writes are blocked</span>' : '')
             + (!loadShape() ? ' <span class="warn">no learned save shape yet — open any mission in the Mission Bank and Save once</span>' : '')
-            + (!getCsrf() ? ' <span class="warn">no CSRF token seen yet</span>' : '') + '</div>';
+            + (!getCsrf() ? ' <span class="warn">no CSRF token seen yet</span>' : '')
+            + (lastBackupFor(model.mid) ? ' ' + btn('restore', '↩ Restore last backup', 'Load the mission exactly as it was before the last Apply into the working copy, then Review & Apply it') : '') + '</div>';
         if (el.innerHTML !== html) el.innerHTML = html;
     }
+    function lastBackupFor(mid) { try { return (GM_getValue(BACKUPS_KEY, []) || []).find(b => String(b.mid) === String(mid)) || null; } catch (e) { return null; } }
     // Drag-to-change: mousedown on a [data-aim-vv-scrub] element, drag horizontally; every SCRUB_PX = one unit (Shift ×5).
     const SCRUB_PX = 6;
     let scrub = null;
     function onScrubDown(e) {
         const el = e.target.closest && e.target.closest('[data-aim-vv-scrub]');
         if (!el || e.button !== 0) return;
-        e.preventDefault(); e.stopPropagation();
-        scrub = { el, kind: el.dataset.aimVvScrub, x0: e.clientX, acc: 0 };
+        const isInput = el.tagName === 'INPUT';
+        if (!isInput) e.preventDefault();
+        e.stopPropagation();
+        scrub = { el, kind: el.dataset.aimVvScrub, x0: e.clientX, dx: 0, acc: 0, armed: !isInput, locked: false };
+        if (!isInput) engageScrub();
+    }
+    function engageScrub() {
+        if (!scrub || scrub.engaged) return;
+        scrub.engaged = true;
         document.body.classList.add('aim-vv-scrubbing');
+        // Pointer lock = unbounded movement (the screen edge no longer ends the drag). Falls back to clientX deltas.
+        try { const p = scrub.el.requestPointerLock && scrub.el.requestPointerLock(); if (p && p.catch) p.catch(() => {}); } catch (err) { /* fallback */ }
     }
     function onScrubMove(e) {
         if (!scrub) return;
-        const dx = e.clientX - scrub.x0;
-        const units = Math.trunc(dx / SCRUB_PX) - scrub.acc;
+        if (!scrub.engaged) { if (Math.abs(e.clientX - scrub.x0) < 5) return; scrub.armed = true; engageScrub(); }
+        const locked = document.pointerLockElement === scrub.el;
+        if (locked) { scrub.dx += e.movementX || 0; scrub.locked = true; } else if (!scrub.locked) { scrub.dx = e.clientX - scrub.x0; }
+        const units = Math.trunc(scrub.dx / SCRUB_PX) - scrub.acc;
         if (!units) return;
         scrub.acc += units;
         const n = units * (e.shiftKey ? 5 : 1);
         try { scrubApply(scrub.kind, n); } catch (err) { warn('scrub failed:', err); }
     }
-    function onScrubUp() { if (scrub) { scrub = null; document.body.classList.remove('aim-vv-scrubbing'); } }
+    function onScrubUp() {
+        if (!scrub) return;
+        const wasDrag = scrub.engaged;
+        scrub = null;
+        document.body.classList.remove('aim-vv-scrubbing');
+        try { if (document.pointerLockElement) document.exitPointerLock(); } catch (e) { /* not locked */ }
+        if (!wasDrag) return;   // a plain click on the time box keeps its normal focus/typing behaviour
+    }
+    function onScrubWheel(e) {
+        const el = e.target.closest && e.target.closest('[data-aim-vv-scrub]');
+        if (!el || !model) return;
+        e.preventDefault(); e.stopPropagation();
+        const n = (e.deltaY < 0 ? 1 : -1) * (e.shiftKey ? 5 : 1);
+        try { scrubApply(el.dataset.aimVvScrub, n); } catch (err) { warn('wheel scrub failed:', err); }
+    }
     function scrubApply(kind, n) {
         if (kind === 'time') { const v = videoEl(); if (v) { showPlayer(); seekVideo(v.currentTime + n, false); updateBarNow(); } return; }
         const shot = currentShotForEdit();
@@ -1489,6 +1582,15 @@
             if (act === 'review') { openReview(); return; }
             if (act === 'discard') { edResetWork(); toast('Pending changes discarded', false); return; }
             if (act === 'close') { ed.open = false; ensureEditPanel(); return; }
+            if (act === 'restore') {
+                const bk = lastBackupFor(model.mid); if (!bk || !bk.app) { toast('No backup for this mission', true); return; }
+                const ins = (bk.app.instructions || []).slice().sort((a, b2) => a.index_in_app - b2.index_in_app).map(deepCopy);
+                // Match backup steps to CURRENT ids positionally where possible so the diff reads as changes, not delete+add.
+                ins.forEach((st, i) => { const cur = model.plan[i]; if (cur && cur.type === st.type) st.id = cur.id; else { st.id = ed.tempId--; st._new = true; } });
+                ed.work = ins; drawGhosts(); renderEdit();
+                toast('Loaded backup from ' + new Date(bk.at).toLocaleString() + ' — review, then Apply to restore', false);
+                return;
+            }
             if (!step) return;
             if (act === 'turn') edTurn(step, isGps(step) ? n * sf : n * sd);
             else if (act === 'tilt') edTilt(step, isGps(step) ? n * sa : n * sp);
@@ -1595,6 +1697,10 @@
             const after = await getJSON('/missions/' + mid + '/');
             const afterIns = (after.app && after.app.instructions || []).slice().sort((a, b2) => a.index_in_app - b2.index_in_app);
             const mism = [];
+            const rtBefore = JSON.stringify(fresh.app.robot_type_names || []), rtAfter = JSON.stringify(after.app.robot_type_names || []);
+            if (rtBefore !== rtAfter) mism.push('ROBOT TYPES CHANGED: ' + rtBefore + ' → ' + rtAfter + ' (selected_robot semantics — restore the backup)');
+            const repB = JSON.stringify((fresh.app.data_report_object_arr || []).map(x => x && x.id)), repA = JSON.stringify((after.app.data_report_object_arr || []).map(x => x && x.id));
+            if (repB !== repA) mism.push('data reports changed: ' + repB + ' → ' + repA);
             if (afterIns.length !== ed.work.length) mism.push('step count ' + afterIns.length + ' ≠ expected ' + ed.work.length);
             ed.work.forEach((w, i) => { const a = afterIns[i]; if (!a) return; const wa = deepCopy(w); delete wa._new; const dd = fieldDiffs(Object.assign({ type_name: w.type_name }, a), Object.assign({ type_name: w.type_name }, wa)); if (a.type !== w.type) mism.push('#' + i + ' type ' + a.type + ' ≠ ' + w.type); dd.forEach(d => mism.push('#' + i + ' ' + d.field + ': server ' + d.before + ' vs sent ' + d.after)); });
             const report = { at, mid, sid, appId: fresh.app.id, name: fresh.app.name, group: model.mission.mission_group_id, changes: diff, verify: { ok: !mism.length, mismatches: mism }, httpStatus: r.status };
@@ -1715,12 +1821,14 @@
     function applyToggle(id, val) {
         const map = { 'master': 'master', 'strip-order': 'stripOrder', 'badges': 'badges', 'click-seek': 'clickSeek', 'lead-in': 'leadInS', 'shot-card': 'shotCard', 'units': 'units',
             'overlay': 'overlay', 'overlay-actual': 'overlayActual', 'overlay-labels': 'overlayLabels', 'overlay-group': 'overlayGroup', 'time-bar': 'timeBar',
-            'edit': 'edit', 'step-deg': 'stepDeg', 'step-pitch': 'stepPitch', 'step-ft': 'stepFt', 'step-alt-ft': 'stepAltFt', 'ray-cap-ft': 'rayCapFt', 'flown-dashed': 'flownDashed' };
+            'edit': 'edit', 'step-deg': 'stepDeg', 'step-pitch': 'stepPitch', 'step-ft': 'stepFt', 'step-alt-ft': 'stepAltFt', 'ray-cap-ft': 'rayCapFt',
+            'flown-dashed': 'flownDashed', 'flown-color': 'flownColor', 'look-points': 'lookPoints' };
         const key = map[id]; if (!key) return;
         let v = val;
         if (key === 'leadInS') { v = parseFloat(val); if (!isFinite(v) || v < 0 || v > 60) return; }
         else if (['stepDeg', 'stepPitch', 'stepFt', 'stepAltFt', 'rayCapFt'].includes(key)) { v = parseFloat(val); if (!isFinite(v) || v <= 0) return; }
         else if (key === 'units') { v = (val === 'm') ? 'm' : 'ft'; }
+        else if (key === 'flownColor') { v = /^#[0-9a-f]{6}$/i.test(String(val)) ? String(val) : '#ffffff'; }
         else v = !!val;
         if (settings[key] === v) return;   // idempotent — CP echoes from both frames
         settings[key] = v; saveSettings();
@@ -1731,7 +1839,8 @@
             if (key === 'units' && selectedRec) renderCard(selectedRec, 'selected');
             if (key === 'overlay' || key === 'overlayActual' || key === 'overlayLabels') drawOverlay();
             if (key === 'timeBar') ensureBar();
-            if (key === 'flownDashed') styleFlownPath();
+            if (key === 'flownDashed' || key === 'flownColor') styleFlownPath(true);
+            if (key === 'lookPoints') drawOverlay();
             if (key === 'edit' || key.startsWith('step') || key === 'rayCapFt') { if (!settings.edit) ed.open = false; renderEdit(); }
             if (key === 'overlayGroup') setGroupMode(v);
         }
@@ -1791,7 +1900,9 @@
                     { id: 'overlay-actual', label: 'Actual shot poses (cyan: drone, heading, footprint)', type: 'boolean', default: DEFAULTS.overlayActual },
                     { id: 'overlay-labels', label: 'Number labels (off = plain dots)', type: 'boolean', default: DEFAULTS.overlayLabels },
                     { id: 'overlay-group', label: 'Whole mission group (color per flight, whole-mission numbering)', type: 'boolean', default: DEFAULTS.overlayGroup },
-                    { id: 'flown-dashed', label: 'Flown path: dashed white (instead of Percepto\'s color)', type: 'boolean', default: DEFAULTS.flownDashed },
+                    { id: 'flown-dashed', label: 'Flown path: restyle (dashed)', type: 'boolean', default: DEFAULTS.flownDashed },
+                    { id: 'flown-color', label: 'Flown path color', type: 'color', default: DEFAULTS.flownColor },
+                    { id: 'look-points', label: 'Planned look-points for in-place snapshots (ray to terrain)', type: 'boolean', default: DEFAULTS.lookPoints },
                     { id: 'reload', label: 'Reload mission data', type: 'button' },
                 ],
                 hotkeys: [
@@ -1839,6 +1950,7 @@
         document.addEventListener('mousedown', onScrubDown, true);
         document.addEventListener('mousemove', onScrubMove, true);
         document.addEventListener('mouseup', onScrubUp, true);
+        document.addEventListener('wheel', onScrubWheel, { capture: true, passive: false });
         document.addEventListener('click', onReviewClick, true);
         document.addEventListener('click', (e) => { const t = e.target.closest && e.target.closest('[data-aim-vv-ed-toggle]'); if (!t || !model) return; e.preventDefault(); e.stopPropagation(); ed.open = !ed.open; if (ed.open) edEnsureWork(); renderEdit(); if (selectedRec) renderCard(selectedRec, 'selected'); }, true);
         installCsrfSniffer();

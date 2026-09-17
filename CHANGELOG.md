@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Video Validation latest v0.23: planned look-points, flown-path color, edge-free scrubbing, restore backup (dev only)
+
+- **Planned look-points** — every in-place snapshot of this flight gets a small pink ring on the ground where its planned heading and camera angle point from the nav's altitude over the terrain, with a dotted line from the nav. Hover for distance / height / capped. Control Panel toggle.
+- Flown path color is now pinned as an inline style (the Map Styler's CSS was overriding it) and there is a color picker in the Control Panel.
+- Dragging a number no longer stops at the screen edge (pointer lock); the mouse wheel over any draggable number, or over the time box, steps it too (Shift ×5). The time box itself can be dragged.
+- The Adjust panel header shows the step sizes in force; stale 5° / 2° / 10 ft / 10 ft settings are migrated to 1-unit steps.
+- **↩ Restore last backup** loads the pre-Apply mission into the working copy so a bad save can be undone in place through the same Review → Apply path. After a save, the app's robot-type list and data reports are verified unchanged and flagged loudly if not.
+
 ## 2026-09-17 — AIM Video Validation latest v0.22: finer steps, drag-to-change, copy-to-clipboard, cleaner map + strip (dev only)
 
 - Adjust steps default to 1° / 1 ft, Shift-click = ×5 (Control Panel to change).
