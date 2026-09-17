@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.40
+// @version      0.41
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.40';
+    const SCRIPT_VERSION = '0.41';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -85,6 +85,8 @@
         flownDashed: true,     // restyle Percepto's flown-path line
         flownColor: '#ffffff',
         lookPoints: true,      // planned look-point for every in-place snapshot (ray to terrain at planned heading/angle)
+        legend: true,          // legend box on the map
+        legendOpen: true,      // expanded (false = collapsed to a ? chip)
         follow: true,          // selecting a snapshot pans/zooms the map to it
         followZoom: 19,        // max zoom when following
         actualLookPoints: true,// cyan ring where the ACTUAL camera ray met the ground (from the picture's real pose)
@@ -459,6 +461,10 @@
             .aim-vv-ov-look { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #ff7ad9; box-sizing: border-box; background: rgba(255,122,217,.18); }
             .aim-vv-ov-look::after { content: ''; position: absolute; left: 5px; top: 5px; width: 4px; height: 4px; border-radius: 50%; background: #ff7ad9; }
             .aim-vv-ov-alook { width: 14px; height: 14px; border-radius: 50%; border: 2px dashed #5fe3ff; box-sizing: border-box; background: rgba(95,227,255,.12); }
+            .aim-vv-lg { position: absolute; left: 10px; bottom: 28px; z-index: 1200; background: rgba(10,14,18,.88); color: #e6e6e6; border: 1px solid rgba(95,227,255,.4); border-radius: 5px; padding: 5px 8px; font: 11px/1.5 monospace; max-width: 340px; pointer-events: auto; }
+            .aim-vv-lg--closed { padding: 2px 8px; }
+            .aim-vv-lg__head { cursor: pointer; user-select: none; } .aim-vv-lg b { color: #5fe3ff; } .aim-vv-lg .dim { color: #888; }
+            .aim-vv-lg__row { white-space: nowrap; } .aim-vv-lg__sw { display: inline-block; width: 20px; text-align: center; margin-right: 4px; }
             .aim-vv-ov-live { width: 22px; height: 22px; border-radius: 4px; border: 2px solid #ffe95f; background: rgba(0,0,0,.55); color: #ffe95f; font: 800 9px/18px monospace; text-align: center; }
             .aim-vv-ov-ghost { width: 22px; height: 22px; border-radius: 50%; border: 2px dashed #fff; background: rgba(0,0,0,.35); color: #fff; font: 800 9px/18px monospace; text-align: center; }
             .aim-vv-edit__row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 4px; }
@@ -1229,6 +1235,7 @@
         try { drawGhosts(); } catch (e) { warn('ghosts:', e); }
         try { drawLookPoints(); } catch (e) { warn('look-points:', e); }
         try { drawLiveDiff(L, map, lineOpts); } catch (e) { warn('live-diff overlay:', e); }
+        try { ensureLegend(); } catch (e) { warn('legend:', e); }
         log('overlay drawn: ' + steps.length + ' plan steps' + (groupOn ? ' (whole mission, ' + ov.group.length + ' flights)' : ' (this flight)') + ', ' + Object.keys(ov.shotMarkers).length + ' actual shots, ' + ov.layers.length + ' layers');
         markActiveOverlay();
     }
@@ -1259,6 +1266,42 @@
             } catch (e) { warn('live-diff marker failed:', e); }
         });
         if (drawn) log('live-diff overlay: ' + drawn + ' step(s) drawn where the saved plan differs from the flown one');
+    }
+    // Legend box on the map (bottom-left), built from the live color settings; collapses to a ? chip.
+    let legendBox = null;
+    function ensureLegend() {
+        const c = document.querySelector('.leaflet-container');
+        if (!c || !model || !settings.legend || !settings.overlay) { if (legendBox) { legendBox.remove(); legendBox = null; } return; }
+        if (!legendBox || !c.contains(legendBox)) { legendBox = document.createElement('div'); legendBox.className = 'aim-vv-lg'; c.appendChild(legendBox); ['mousedown', 'dblclick', 'wheel', 'pointerdown', 'touchstart'].forEach(ev => legendBox.addEventListener(ev, e => e.stopPropagation())); }
+        syncOverlayStyle();
+        const sw = (html) => '<span class="aim-vv-lg__sw">' + html + '</span>';
+        const nav = sw('<i style="display:inline-block;width:14px;height:14px;border-radius:50%;background:' + COLOR_NAV + ';border:2px solid rgba(0,0,0,.6)"></i>');
+        const snap = sw('<i style="display:inline-block;width:12px;height:12px;border-radius:3px;background:' + COLOR_SNAP + ';border:1px solid rgba(0,0,0,.6)"></i>');
+        const aring = sw('<i style="display:inline-block;width:12px;height:12px;border-radius:50%;border:2px dashed ' + COLOR_ACTUAL + ';box-sizing:border-box"></i>');
+        const dring = sw('<i style="display:inline-block;width:12px;height:12px;border-radius:50%;border:2px solid ' + COLOR_ACTUAL + ';box-sizing:border-box;background:' + COLOR_ACTUAL + '26"></i>');
+        const fov = sw('<i style="display:inline-block;width:14px;height:10px;border:1.5px solid ' + COLOR_ACTUAL + ';background:' + COLOR_ACTUAL + '14"></i>');
+        const live = sw('<i style="display:inline-block;width:12px;height:12px;border-radius:3px;border:2px solid ' + (settings.liveColor || '#ffe95f') + ';box-sizing:border-box;background:rgba(0,0,0,.5)"></i>');
+        const ghost = sw('<i style="display:inline-block;width:12px;height:12px;border-radius:50%;border:2px dashed #fff;box-sizing:border-box"></i>');
+        const line = (col, dash) => sw('<i style="display:inline-block;width:18px;border-top:2px ' + dash + ' ' + col + ';vertical-align:middle"></i>');
+        const body = settings.legendOpen ? ''
+            + '<div class="aim-vv-lg__row">' + nav + ' N# planned nav <span class="dim">(drone position)</span></div>'
+            + '<div class="aim-vv-lg__row">' + snap + ' S# planned look-point / GPS aim point <span class="dim">— what you edit</span></div>'
+            + '<div class="aim-vv-lg__row">' + line(COLOR_SNAP, 'dashed') + ' nav → what it looks at</div>'
+            + '<div class="aim-vv-lg__row">' + aring + ' ACTUAL look-point <span class="dim">(where this picture looked)</span></div>'
+            + '<div class="aim-vv-lg__row">' + dring + ' ' + fov + ' actual drone position + camera footprint</div>'
+            + '<div class="aim-vv-lg__row">' + live + ' saved plan where it differs from what flew</div>'
+            + '<div class="aim-vv-lg__row">' + ghost + ' pending edit (not saved)</div>'
+            + '<div class="aim-vv-lg__row">' + line(settings.flownColor || '#fff', 'dashed') + ' flown path &nbsp; ' + line(COLOR_NAV, 'dashed') + ' next nav</div>'
+            + '<div class="aim-vv-lg__row dim">strip: pink = RGB · orange = thermal · green = GEM · dashed = re-take</div>'
+            : '';
+        const html = '<div class="aim-vv-lg__head" data-aim-vv-lg-toggle="1" title="' + (settings.legendOpen ? 'collapse' : 'expand') + '">' + (settings.legendOpen ? '<b>Video Validation legend</b> <span class="dim">▾</span>' : '<b>?</b>') + '</div>' + body;
+        if (legendBox.innerHTML !== html) legendBox.innerHTML = html;
+        legendBox.classList.toggle('aim-vv-lg--closed', !settings.legendOpen);
+    }
+    function onLegendToggle(e) {
+        const t = e.target.closest && e.target.closest('[data-aim-vv-lg-toggle]'); if (!t) return;
+        e.preventDefault(); e.stopPropagation();
+        settings.legendOpen = !settings.legendOpen; saveSettings(); ensureLegend();
     }
     function onOverlayZoom() {
         if (!model || !ov.layers.length) return;
@@ -2202,6 +2245,7 @@
         groupPanelEl = null; groupHost = null; legendEl = null; groupMetaLoading = false;
         if (navBtnEls) { navBtnEls.forEach(b => { try { b.remove(); } catch (e) {} }); navBtnEls = null; }
         document.documentElement.classList.remove('aim-vv-own-nav');
+        if (legendBox) { try { legendBox.remove(); } catch (e) {} legendBox = null; }
         if (cardEl) { try { cardEl.remove(); } catch (e) {} cardEl = null; }
         if (barEl) { try { barEl.remove(); } catch (e) {} barEl = null; }
         if (hookedVideo) { try { hookedVideo.removeEventListener('timeupdate', onTimeUpdate); } catch (e) {} hookedVideo = null; }
@@ -2217,6 +2261,7 @@
             hookVideo(); scheduleStamp(); ensureCard(); ensureBar(); renderLegend(); updateBarNow();
             try { fixCounter(); ensureNavButtons(); } catch (e) { warn('counter/nav:', e); }
             try { styleFlownPath(); } catch (e) { warn('flown style:', e); }
+            try { ensureLegend(); } catch (e) { warn('legend:', e); }
             if (settings.overlay && !ov.layers.length) drawOverlay();          // map appeared after load
             else if (ov.map && ov.map._container && !document.body.contains(ov.map._container)) drawOverlay();   // map rebuilt
             markActiveOverlay();
@@ -2234,7 +2279,7 @@
             'edit': 'edit', 'turn-step': 'stepDeg', 'tilt-step': 'stepPitch', 'move-step': 'stepFt', 'alt-step': 'stepAltFt', 'ray-cap-ft': 'rayCapFt',
             'flown-dashed': 'flownDashed', 'flown-color': 'flownColor', 'look-points': 'lookPoints',
             'nav-color': 'navColor', 'snap-color': 'snapColor', 'actual-color': 'actualColor', 'live-diff': 'liveDiffOverlay', 'live-color': 'liveColor',
-            'follow': 'follow', 'follow-zoom': 'followZoom', 'actual-look': 'actualLookPoints',
+            'follow': 'follow', 'follow-zoom': 'followZoom', 'actual-look': 'actualLookPoints', 'legend': 'legend',
             'nav-line-w': 'navLineW', 'snap-line-w': 'snapLineW', 'actual-line-w': 'actualLineW', 'flown-line-w': 'flownLineW' };
         const key = map[id]; if (!key) return;
         let v = val;
@@ -2256,6 +2301,7 @@
             if (key === 'timeBar') ensureBar();
             if (key === 'flownDashed' || key === 'flownColor') styleFlownPath(true);
             if (key === 'lookPoints' || key === 'liveDiffOverlay' || key === 'liveColor' || key === 'actualLookPoints') drawOverlay();
+            if (key === 'legend' || /Color$/.test(key)) ensureLegend();
             if (key === 'navColor' || key === 'snapColor' || key === 'actualColor' || /LineW$/.test(key)) { syncOverlayStyle(); drawOverlay(); stampStrip(true); styleFlownPath(true); }
             if (key === 'edit' || key.startsWith('step') || key === 'rayCapFt') { if (!settings.edit) ed.open = false; renderEdit(); }
             if (key === 'overlayGroup') setGroupMode(v);
@@ -2319,6 +2365,7 @@
                     { id: 'flown-dashed', label: 'Flown path: restyle (dashed)', type: 'boolean', default: DEFAULTS.flownDashed },
                     { id: 'flown-color', label: 'Flown path color', type: 'color', default: DEFAULTS.flownColor },
                     { id: 'look-points', label: 'Planned look-points for in-place snapshots (ray to terrain)', type: 'boolean', default: DEFAULTS.lookPoints },
+                    { id: 'legend', label: 'Legend box on the map (bottom-left, collapsible)', type: 'boolean', default: DEFAULTS.legend },
                     { id: 'follow', label: 'Selecting a snapshot pans / zooms the map to it', type: 'boolean', default: DEFAULTS.follow },
                     { id: 'follow-zoom', label: 'Follow: max zoom level', type: 'number', default: DEFAULTS.followZoom, min: 14, max: 22 },
                     { id: 'actual-look', label: 'Actual look-points (cyan ring where the real camera ray met the ground)', type: 'boolean', default: DEFAULTS.actualLookPoints },
@@ -2372,6 +2419,7 @@
     if (!IS_TOP) {
         document.addEventListener('click', onGridClick, true);
         document.addEventListener('click', onLegendClick, true);
+        document.addEventListener('click', onLegendToggle, true);
         document.addEventListener('click', onBarClick, true);
         document.addEventListener('click', onEditClick, true);
         document.addEventListener('change', (e) => { const c = e.target; if (!c || !c.matches) return; if (c.matches('[data-aim-vv-ed-check="nav-keep-aim"]')) { settings.navKeepAim = !!c.checked; saveSettings(); log('nav keep-aim = ' + settings.navKeepAim); } else if (c.matches('[data-aim-vv-restore-file]')) onRestoreFile(e); }, true);

@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Video Validation v0.41 (prod + dev): legend on the map
+
+- A legend box sits bottom-left on the playback map: planned nav / planned look-point (what you edit) / actual look-point / drone position + footprint / saved-plan-differs / pending edit / flown path / next nav, plus the strip badge colors. Built from your current color settings. Click its header to collapse it to a `?` chip; Control Panel toggle to hide it.
+
 ## 2026-09-17 — AIM Video Validation v0.40 (prod + dev): planned altitude is the nav's altitude
 
 - The planned drone altitude for an in-place snapshot was read from the snapshot's stored "abs_alt", which can be stale (54 ft low on the test mission). The drone flies the nav's altitude, so that is what the shot card, the planned look-points (pink squares), re-aiming and Convert now use. Fixes a false red "+52 ft" on a shot that was 1 ft off, and pink squares landing well short of the cyan actual look-points.
