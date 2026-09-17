@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.10
+// @version      0.11
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -28,7 +28,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-video-validation';
-    const SCRIPT_VERSION = '0.10';
+    const SCRIPT_VERSION = '0.11';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -101,6 +101,11 @@
         const y = Math.sin((b.lng - a.lng) * RAD) * Math.cos(b.lat * RAD);
         const x = Math.cos(a.lat * RAD) * Math.sin(b.lat * RAD) - Math.sin(a.lat * RAD) * Math.cos(b.lat * RAD) * Math.cos((b.lng - a.lng) * RAD);
         return (Math.atan2(y, x) / RAD + 360) % 360;
+    }
+    function compass16(deg) {
+        if (deg == null || !isFinite(deg)) return '';
+        const pts = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+        return pts[Math.round((((deg % 360) + 360) % 360) / 22.5) % 16];
     }
     function hdgDelta(a, b) { if (a == null || b == null) return null; let d = ((b - a) % 360 + 540) % 360 - 180; return d; }
     // Percepto gimbal units → degrees (2000 = level, 1000 = straight down; verified ±1.5°).
@@ -263,6 +268,8 @@
         d.pitch = (pose.pitchDeg != null && typeof im.camera_pitch === 'number') ? im.camera_pitch - pose.pitchDeg : null;
         d.alt = (pose.alt != null && typeof im.alt === 'number') ? im.alt - pose.alt : null;
         d.pos = (pose.nav && pose.nav.location && im.location) ? distM(pose.nav.location, im.location) : null;
+        // Direction the drone was displaced FROM the planned nav (bearing nav → actual drone position).
+        d.posDir = (d.pos != null && d.pos >= 1) ? compass16(bearingDeg(pose.nav.location, im.location)) : '';
         return d;
     }
 
@@ -678,7 +685,7 @@
                 + '<tr><td>heading</td><td>' + (pose.heading != null ? pose.heading.toFixed(0) + '°' : '–') + '</td><td>' + (rec.drone_heading != null ? rec.drone_heading + '°' : '–') + '</td><td class="' + cls(d.hdg, 5, 15) + '">' + signed(d.hdg, '°') + '</td></tr>'
                 + '<tr><td>camera angle</td><td>' + (pose.pitchDeg != null ? pose.pitchDeg.toFixed(0) + '°' : '–') + '</td><td>' + (rec.camera_pitch != null ? rec.camera_pitch + '°' : '–') + '</td><td class="' + cls(d.pitch, 3, 8) + '">' + signed(d.pitch, '°') + '</td></tr>'
                 + '<tr><td>drone alt</td><td>' + fmtAlt(pose.alt) + '</td><td>' + fmtAlt(rec.alt) + '</td><td class="' + cls(d.alt != null ? d.alt * (settings.units === 'm' ? 1 : M_TO_FT) : null, 10, 25) + '">' + (d.alt != null ? signed(d.alt * (settings.units === 'm' ? 1 : M_TO_FT), settings.units === 'm' ? ' m' : ' ft') : '–') + '</td></tr>'
-                + '<tr><td>drone vs nav</td><td colspan="2" class="dim">' + (pose.nav ? esc((model.numbering[pose.nav.id] || {}).n || 'nav #' + pose.nav.index_in_app) : '–') + '</td><td class="' + cls(d.pos != null ? d.pos * M_TO_FT : null, 10, 30) + '">' + fmtDist(d.pos) + '</td></tr>'
+                + '<tr><td>drone vs nav</td><td colspan="2" class="dim">' + (pose.nav ? esc((model.numbering[pose.nav.id] || {}).n || 'nav #' + pose.nav.index_in_app) : '–') + (d.pos != null && d.pos * M_TO_FT >= 10 ? ' — drone stood ' + esc(d.posDir) + ' of it' : '') + '</td><td class="' + cls(d.pos != null ? d.pos * M_TO_FT : null, 10, 30) + '">' + fmtDist(d.pos) + (d.posDir ? ' ' + esc(d.posDir) : '') + '</td></tr>'
                 + (pose.type === 'gps' ? '<tr><td>aim point</td><td colspan="3" class="dim">GPS snapshot · target alt ' + fmtAlt(pose.aimAlt) + ' · range ' + fmtDist(pose.range) + '</td></tr>' : '<tr><td>type</td><td colspan="3" class="dim">in-place snapshot (heading + camera angle at the nav)</td></tr>')
                 + (fx ? '<tr><td class="dim">flown fix</td><td colspan="3" class="dim">' + (fx.velocity != null ? (fx.velocity / 1000 * 2.23694).toFixed(0) + ' mph · ' : '') + 'battery ' + fx.battery + '% · ' + Math.abs(fx._t - rec.shutter) + ' ms from shutter</td></tr>' : '')
                 + '</table>';
@@ -866,7 +873,8 @@
                     ov.shotMarkers[im.key] = mk;
                     const d = sh.delta || {};
                     mk.bindTooltip('<b>actual</b> ' + esc(num ? num.n : '?') + ' · ' + mmss(sh.videoOff) + ' · hdg ' + im.drone_heading + '° · cam ' + im.camera_pitch + '° · ' + fmtAlt(im.alt)
-                        + (d.hdg != null ? ' · Δhdg ' + signed(d.hdg, '°') : '') + (d.pitch != null ? ' · Δcam ' + signed(d.pitch, '°') : '') + (sh.retake ? ' · re-take' : ''), { direction: 'top', offset: [0, -8], opacity: 0.95 });
+                        + (d.hdg != null ? ' · Δhdg ' + signed(d.hdg, '°') : '') + (d.pitch != null ? ' · Δcam ' + signed(d.pitch, '°') : '')
+                        + (d.pos != null ? ' · ' + fmtDist(d.pos) + (d.posDir ? ' ' + d.posDir : '') + ' from nav' : '') + (sh.retake ? ' · re-take' : ''), { direction: 'top', offset: [0, -8], opacity: 0.95 });
                     mk.on('click', () => { seekToShot(im, true); scrollTileIntoView(im); });
                 } catch (e) { warn('overlay actual marker failed:', e); }
             });

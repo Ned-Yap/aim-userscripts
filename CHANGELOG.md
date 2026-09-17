@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-16 — AIM Video Validation latest v0.11: direction of the drone's offset from its nav (dev only)
+
+- The shot card's "drone vs nav" row now says which way the drone was displaced, e.g. `56 ft NW` with "drone stood NW of it", and the cyan actual-shot tooltip on the map carries the same offset.
+
 ## 2026-09-16 — AIM Video Validation latest v0.10: ▶ jumps back to the video, rapid [ ] stepping, arrows clear of the counter (dev only)
 
 - ▶ on a thumbnail while a still is open now swaps back to the video player at that shot (it only worked from the player before).
