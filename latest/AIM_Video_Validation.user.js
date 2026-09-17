@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.44
+// @version      0.45
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.44';
+    const SCRIPT_VERSION = '0.45';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -1309,6 +1309,33 @@
         e.preventDefault(); e.stopPropagation();
         settings.legendOpen = !settings.legendOpen; saveSettings(); ensureLegend();
     }
+    // Diagnostic: one JSON line per snapshot in this flight — type, plan fields, where its marker was drawn and why,
+    // the matched picture's real pose, the actual look-point, terrain. Control Panel button "Dump snapshot geometry".
+    function dumpGeometry() {
+        if (!model) { warn('dump: no model'); return; }
+        const groupOn = !!(settings.overlayGroup && ov.group);
+        const inSlice = (st) => groupOn || !model.slice || (st.index_in_app >= model.slice.minIdx && st.index_in_app <= model.slice.maxIdx);
+        log('GEOMETRY DUMP mission ' + model.mid + ' · slice ' + JSON.stringify(model.slice) + ' · lookPoints=' + settings.lookPoints + ' actualLook=' + settings.actualLookPoints + ' · demCache ' + Object.keys(demCache).length + ' entries (' + Object.values(demCache).filter(v => v == null).length + ' null)');
+        let nav = null;
+        model.plan.forEach(st => {
+            if (st.type_name === 'navigate') nav = st;
+            if (st.type_name !== 'snapshot' || !inSlice(st)) return;
+            const num = model.numbering[st.id]; const mk = ov.stepMarkers[st.id];
+            const shots = model.shots.filter(sh => sh.step && sh.step.id === st.id);
+            const im = shots.length ? shots[0].primary : null;
+            const g = nav && nav.location ? groundAt(nav.location) : null;
+            const lp = (!isGps(st) && nav && g != null) ? lookPointFor(nav, st, g) : null;
+            const row = {
+                s: num ? num.n : '#' + st.index_in_app, type: isGps(st) ? 'GPS' : 'in-place', loc: st.location, value1: st.value1, eo: st.extra_options,
+                nav: nav ? { n: (model.numbering[nav.id] || {}).n, loc: nav.location, value1: nav.value1, abs_alt: nav.extra_options && nav.extra_options.abs_alt, ground: g } : null,
+                drawnAt: mk ? mk.getLatLng() : 'NO MARKER', lookPoint: lp ? { ll: lp.ll, dist_ft: +(lp.dist * M_TO_FT).toFixed(0), agl_ft: lp.agl != null ? +(lp.agl * M_TO_FT).toFixed(0) : null, capped: lp.capped } : null,
+                picture: im ? { kind: im.kind, loc: im.location, alt: im.alt, hdg: im.drone_heading, pitch: im.camera_pitch, target: im.target_location, groundAtDrone: groundAt(im.location) } : 'none',
+                shots: shots.length,
+            };
+            console.log(TAG + ' GEO ' + JSON.stringify(row));
+        });
+        console.log(TAG + ' GEO layers=' + ov.layers.length + ' stepMarkers=' + Object.keys(ov.stepMarkers).length + ' shotMarkers=' + Object.keys(ov.shotMarkers).length);
+    }
     function onOverlayZoom() {
         if (!model || !ov.layers.length) return;
         const groupOn = !!(settings.overlayGroup && ov.group);
@@ -2336,6 +2363,7 @@
                     hotkeyStep(id === 'next-shot' ? 1 : -1);
                 }
                 else if (id === 'reload') { const ids = current; deactivate(); if (ids) activate(ids); }
+                else if (id === 'dump-geo') dumpGeometry();
             }
         };
     }
@@ -2386,6 +2414,7 @@
                     { id: 'actual-line-w', label: 'Actual shot weight (footprint, heading tick, px)', type: 'number', default: DEFAULTS.actualLineW, min: 0.5, max: 12 },
                     { id: 'flown-line-w', label: 'Flown path weight (px)', type: 'number', default: DEFAULTS.flownLineW, min: 0.5, max: 12 },
                     { id: 'reload', label: 'Reload mission data', type: 'button' },
+                    { id: 'dump-geo', label: 'Dump snapshot geometry to console (diagnostic)', type: 'button' },
                 ],
                 hotkeys: [
                     { id: 'prev-shot', label: 'Previous shot', default: '[' },
@@ -2445,5 +2474,6 @@
         tickTimer = setInterval(tick, 1000);
         tick();
     }
+    if (!IS_TOP) { try { pageWin.__aimVv = { get model() { return model; }, get overlay() { return ov; }, settings, dump: dumpGeometry }; } catch (e) { /* sandbox */ } }
     log('ready (' + (IS_TOP ? 'top: panel registration only' : 'iframe: watching for the playback route') + ')');
 })();
