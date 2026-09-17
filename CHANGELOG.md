@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Video Validation v0.39 (prod + dev): HOTFIX — v0.38 could lock the tab
+
+- v0.38's actual look-points retried terrain lookups that had failed, on every redraw, which looped the page until it froze. Failed lookups are no longer retried, and overlay redraws now have a circuit breaker (more than 8 in a second stops them for 10 s with a console warning). Update immediately if you installed v0.38.
+
 ## 2026-09-17 — AIM Video Validation v0.38 (prod + dev): map follows the selected shot; actual look-points
 
 - Selecting a snapshot (thumbnail, ▶, `[` / `]`, map marker) pans and zooms the map to it — the planned step, the drone's real position and its nav all in view (max zoom 19, both in the Control Panel). Re-selecting the same shot leaves your pan alone.

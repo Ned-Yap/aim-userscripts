@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.38
+// @version      0.39
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.38';
+    const SCRIPT_VERSION = '0.39';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -1046,9 +1046,16 @@
         return null;
     }
     let overlayToken = 0, actualLookToken = 0;
+    const overlayDrawLog = []; let overlayCooldownUntil = 0;
     function drawOverlay() {
         clearOverlay();
         if (!model || !settings.master || !settings.overlay) return;
+        // Circuit breaker: more than 8 redraws in a second means something is redrawing in a loop — stop for 10 s.
+        const now = Date.now();
+        if (now < overlayCooldownUntil) return;
+        while (overlayDrawLog.length && now - overlayDrawLog[0] > 1000) overlayDrawLog.shift();
+        overlayDrawLog.push(now);
+        if (overlayDrawLog.length > 8) { overlayCooldownUntil = now + 10000; warn('overlay redrawn ' + overlayDrawLog.length + '× in 1 s — stopping overlay redraws for 10 s (redraw loop)'); return; }
         const L = getL(), map = findMap();
         if (!L || !map) { if (!ov.warned) { ov.warned = true; warn('overlay: Leaflet map not found yet (L=' + !!L + ')'); } return; }
         ov.warned = false;
@@ -1171,8 +1178,11 @@
         // Actual look-point: where the REAL camera ray (drone position / heading / angle from the picture) met the ground.
         // Terrain under the drone comes from the same cache the planned look-points use (fetched lazily, redraw when it lands).
         if (settings.overlayActual && settings.actualLookPoints) {
-            const need = model.shots.map(sh => sh.primary).filter(im => im && im.location && typeof im.drone_heading === 'number' && typeof im.camera_pitch === 'number' && groundAt(im.location) == null);
-            if (need.length) { const tok = ++actualLookToken, ot = overlayToken; Promise.all(need.map(im => demCached(im.location))).then(() => { if (tok === actualLookToken && ot === overlayToken) drawOverlay(); }); }
+            // Only positions NEVER looked up (undefined). A failed lookup is cached as null and must not be retried here —
+            // v0.38 retried nulls on every redraw and looped the tab to death.
+            const demKey = (ll) => (+ll.lat).toFixed(5) + ',' + (+ll.lng).toFixed(5);
+            const need = model.shots.map(sh => sh.primary).filter(im => im && im.location && typeof im.drone_heading === 'number' && typeof im.camera_pitch === 'number' && demCache[demKey(im.location)] === undefined);
+            if (need.length) { const tok = ++actualLookToken, ot = overlayToken; log('overlay: fetching terrain under ' + need.length + ' drone position(s) for actual look-points…'); Promise.all(need.map(im => demCached(im.location))).then(() => { if (tok === actualLookToken && ot === overlayToken) drawOverlay(); }); }
             model.shots.forEach(sh => {
                 const im = sh.primary; if (!im || !im.location || typeof im.drone_heading !== 'number' || typeof im.camera_pitch !== 'number') return;
                 const g = groundAt(im.location); if (g == null) return;
