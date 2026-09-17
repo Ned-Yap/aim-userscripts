@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.9
+// @version      0.10
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -28,7 +28,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-video-validation';
-    const SCRIPT_VERSION = '0.9';
+    const SCRIPT_VERSION = '0.10';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -277,10 +277,10 @@
         styleEl.textContent = `
             [data-aim-vv-stamp] { position: relative; }          /* tile anchor — React rewrites className, never data-* */
             [data-aim-vv-active="1"] { outline: 2px solid #5fe3ff; outline-offset: -2px; }
-            .aim-vv-nav { position: absolute; bottom: 14px; z-index: 20; width: 34px; height: 34px; border-radius: 50%;
+            .aim-vv-nav { position: absolute; top: 50%; transform: translateY(-50%); z-index: 20; width: 40px; height: 40px; border-radius: 50%;
                 border: 1px solid rgba(95,227,255,.7); background: rgba(10,14,18,.8); color: #5fe3ff; font: 700 22px/30px monospace; cursor: pointer; }
             .aim-vv-nav:hover { background: #5fe3ff; color: #04222a; }
-            .aim-vv-nav--prev { left: 14px; } .aim-vv-nav--next { right: 14px; }
+            .aim-vv-nav--prev { left: 18px; } .aim-vv-nav--next { right: 18px; }
             .aim-vv-nav--off { opacity: .25; cursor: default; }
             html.aim-vv-own-nav .mp-media .pr-image-nav-btn { display: none !important; }
             .aim-vv-badge { position: absolute; left: 3px; top: 3px; z-index: 100; pointer-events: none;
@@ -475,10 +475,11 @@
             v.currentTime = t;
             log('seek → ' + mmss(t) + ' (shot at ' + mmss(rec.videoOff) + ')');
         } catch (e) { warn('seek failed:', e); }
-        if (showVideo) {
-            // Percepto shows the still after a thumbnail click; clicking the video tile swaps the player back.
+        if (showVideo && stillImg()) {
+            // A still is showing; clicking the video tile swaps the player back (the <video> kept its time).
             const vt = videoTile();
-            if (vt && !v.offsetParent) { try { vt.click(); } catch (e) { warn('video tile click failed:', e); } }
+            if (vt) { try { vt.click(); } catch (e) { warn('video tile click failed:', e); } }
+            else warn('video tile not found — cannot swap back to the player');
         }
         selectShot(rec);
     }
@@ -541,11 +542,18 @@
     // "8 / 14" counter walk Percepto's newest-first list. We redirect both to OUR order.
     // ---------------------------------------------------------------
     function stillImg() { return document.querySelector('.mp-media__image'); }
+    let pendingStill = null;   // { key, at } — the image we just asked Percepto to show (it may still be loading)
     function currentStillRec() {
         const im = stillImg();
         if (!im || !model) return null;
-        const k = imgKey(im.currentSrc || im.src);
-        return model.images.find(r => r.key === k) || null;
+        // The src ATTRIBUTE is the intended image; currentSrc lags until the new file starts loading.
+        const k = imgKey(im.getAttribute('src') || im.currentSrc || im.src);
+        const shown = model.images.find(r => r.key === k) || null;
+        if (pendingStill && Date.now() - pendingStill.at < 1500 && (!shown || shown.key !== pendingStill.key)) {
+            return model.images.find(r => r.key === pendingStill.key) || shown;   // rapid stepping: chain from our own target
+        }
+        pendingStill = null;
+        return shown;
     }
     function tileFor(rec) {
         const grid = stripGrid(); if (!grid || !rec) return null;
@@ -554,6 +562,7 @@
     function showStill(rec) {
         const t = tileFor(rec);
         if (!t) { warn('no tile for', rec && rec.name); return; }
+        pendingStill = { key: rec.key, at: Date.now() };
         try { t.click(); } catch (e) { warn('tile click failed:', e); }   // onGridClick handles seek/select
         setTimeout(() => { try { fixCounter(); ensureNavButtons(); } catch (e) { warn('nav refresh:', e); } }, 60);
         try { t.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (e) { /* cosmetic */ }

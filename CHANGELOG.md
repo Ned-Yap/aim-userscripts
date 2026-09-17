@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-16 — AIM Video Validation latest v0.10: ▶ jumps back to the video, rapid [ ] stepping, arrows clear of the counter (dev only)
+
+- ▶ on a thumbnail while a still is open now swaps back to the video player at that shot (it only worked from the player before).
+- `[` / `]` pressed quickly no longer stall: stepping chains from the image we just asked for instead of the one still loading.
+- Our ‹ › arrows sit at the vertical centre of the picture, where Percepto's were, instead of over the counter.
+
 ## 2026-09-16 — AIM Video Validation latest v0.9: the opened tile keeps its badge — for real this time (dev only)
 
 - Root cause found with the v0.8 probe: when a thumbnail becomes the active one, React rewrites the tile's class list, which stripped our anchor class; the badge then positioned itself against the strip and ended up under the video tile's play icon. Tiles are now anchored and highlighted through data attributes, which React never touches.
