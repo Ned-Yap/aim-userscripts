@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.32
+// @version      0.33
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.32';
+    const SCRIPT_VERSION = '0.33';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -2617,13 +2617,248 @@
         return lines.join('\n');
     }
 
+
+    // ==================================================================
+    // 🎥 FLIGHT CHECKS (v0.33, feature #267 fleet scale) — every flown flight
+    // of the picked sites (Fleet Data picker) in the last N days, scored
+    // against its plan the way AIM Video Validation does on one playback
+    // page, minus the flown-track download: the picture record already
+    // carries the real pose (position / altitude / heading / camera angle),
+    // so a flight costs TWO small reads (mission record with its embedded
+    // plan + image list). Each picture is matched to a planned snapshot by
+    // pose near its nav ([#267 shared core] — same math as Video Validation's
+    // pose fallback). A flown flight never changes → results cache per
+    // flight id in GM (script storage for now; data repo later).
+    // Views: by flight · by drone (hardware bias → IT) · by mission (build
+    // problem → CSM) · by site. Thresholds editable here, persisted in cfg.
+    // ==================================================================
+    const FC_CORE_VER = 1;
+    const FC_KEY = 'aim-ft-fc-cache';
+    const FC_CAP = 3000;
+    const FC_DEF = { hdg: 10, cam: 5, altFt: 25, posFt: 30, days: 7, gateDeg: 20, navFt: 200 };
+    if (!ftCfg.fc) ftCfg.fc = {};
+    const fcCfg = () => Object.assign({}, FC_DEF, ftCfg.fc);
+    let fcCache = loadJson(FC_KEY, null);
+    if (!fcCache || fcCache.ver !== FC_CORE_VER || !fcCache.flights) fcCache = { ver: FC_CORE_VER, flights: {} };
+    function fcSaveCache() {
+        const ids = Object.keys(fcCache.flights);
+        if (ids.length > FC_CAP) { ids.sort((a, b) => (fcCache.flights[a].when || '').localeCompare(fcCache.flights[b].when || '')); ids.slice(0, ids.length - FC_CAP).forEach(id => delete fcCache.flights[id]); }
+        gmSet(FC_KEY, JSON.stringify(fcCache));
+    }
+    let fcRun = null;          // { done, total, msg, abort, errors }
+    let fcResults = null;      // { at, sites:[ids], days, flights:[result] }
+    let fcTab = 'flights';
+    let fcOpenFlight = null;
+    let fcSortKey = 'flagged';
+
+    const FC_M2FT = 3.28084, FC_RAD = Math.PI / 180;
+    function fcDistM(a, b) { if (!a || !b) return null; const dLat = (b.lat - a.lat) * FC_RAD, dLng = (b.lng - a.lng) * FC_RAD; const x = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * FC_RAD) * Math.cos(b.lat * FC_RAD) * Math.sin(dLng / 2) ** 2; return 2 * 6371000 * Math.asin(Math.sqrt(x)); }
+    function fcBearing(a, b) { const y = Math.sin((b.lng - a.lng) * FC_RAD) * Math.cos(b.lat * FC_RAD); const x = Math.cos(a.lat * FC_RAD) * Math.sin(b.lat * FC_RAD) - Math.sin(a.lat * FC_RAD) * Math.cos(b.lat * FC_RAD) * Math.cos((b.lng - a.lng) * FC_RAD); return (Math.atan2(y, x) / FC_RAD + 360) % 360; }
+    function fcHdgDelta(a, b) { if (a == null || b == null) return null; return ((b - a) % 360 + 540) % 360 - 180; }
+    function fcCompass(deg) { const p = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW']; return p[Math.round((((deg % 360) + 360) % 360) / 22.5) % 16]; }
+    const fcGimbalDeg = (v) => (typeof v === 'number') ? (v - 2000) / (1000 / 90) : null;   // 2000 = level, 1000 = straight down
+    function fcNameTime(name) { const m = String(name || '').match(/(\d{4})_(\d{2})_(\d{2})__(\d{2})_(\d{2})_(\d{2})_(\d)/); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6], +m[7] * 100) : null; }
+    // [#267 shared core] planned pose of a snapshot step. Drone altitude = the NAV's value1 (a snapshot's abs_alt is stale).
+    function fcPlannedPose(plan, i) {
+        const st = plan[i]; let nav = null; for (let k = i - 1; k >= 0; k--) if (plan[k].type_name === 'navigate') { nav = plan[k]; break; }
+        if (!nav || !nav.location) return null;
+        const alt = typeof nav.value1 === 'number' ? nav.value1 : null;
+        if (st.location && typeof st.location.lat === 'number') {
+            const h = fcDistM(nav.location, st.location); const aimAlt = typeof st.value1 === 'number' ? st.value1 : null;
+            return { gps: true, nav, alt, heading: fcBearing(nav.location, st.location), pitch: (aimAlt != null && alt != null && h > 0.5) ? Math.atan2(aimAlt - alt, h) / FC_RAD : null };
+        }
+        const e = st.extra_options || {};
+        return { gps: false, nav, alt, heading: typeof e.heading === 'number' ? e.heading : null, pitch: fcGimbalDeg(e.pitch) };
+    }
+    // [#267 shared core] score one flight: plan (sorted instructions) + image records → shots, flags, summary.
+    function fcScore(plan, images, cfg, meta) {
+        const snaps = []; plan.forEach((st, i) => { if (st.type_name === 'snapshot') { const pose = fcPlannedPose(plan, i); if (pose) snaps.push({ st, i, pose }); } });
+        // shots = images grouped by shutter (RGB + thermal [+ GEM] of one snapshot); primary = RGB else first
+        const imgs = images.map(im => Object.assign({}, im, { shutter: fcNameTime(im.name) || (im.created_at ? new Date(im.created_at).getTime() : 0), kind: im.type === 'THERMAL' || im.thermal ? 'T' : (im.type === 'GEM' ? 'G' : 'RGB') })).sort((a, b) => a.shutter - b.shutter);
+        const shots = []; let cur = null;
+        imgs.forEach(im => { if (!cur || Math.abs(im.shutter - cur.shutter) > 1500) { cur = { shutter: im.shutter, images: [], primary: im }; shots.push(cur); } cur.images.push(im); if (im.kind === 'RGB') cur.primary = im; });
+        const claimed = {}; const rows = []; let minIdx = Infinity, maxIdx = -Infinity;
+        shots.forEach(sh => {
+            const im = sh.primary; const flags = [];
+            let best = null, bestScore = cfg.gateDeg;
+            if (im.location && typeof im.drone_heading === 'number') {
+                snaps.forEach(c => {
+                    const dNav = fcDistM(c.pose.nav.location, im.location); if (dNav == null || dNav * FC_M2FT > cfg.navFt) return;
+                    const dh = Math.abs(fcHdgDelta(c.pose.heading, im.drone_heading) || 0);
+                    const dp = (c.pose.pitch != null && typeof im.camera_pitch === 'number') ? Math.abs(im.camera_pitch - c.pose.pitch) : 0;
+                    const sc = dh + dp + (dNav * FC_M2FT) / 10 + (claimed[c.st.id] ? 8 : 0);   // an already-claimed step must fit clearly better
+                    if (sc < bestScore) { bestScore = sc; best = c; }
+                });
+            }
+            const r = { t: new Date(sh.shutter).toISOString(), kinds: sh.images.map(x => x.kind).join('+'), name: im.name, asset: (im.assets || []).map(a => a.name).filter(Boolean).join(', '), flags, hdg: [null, im.drone_heading, null], cam: [null, im.camera_pitch, null], alt: [null, typeof im.alt === 'number' ? im.alt * FC_M2FT : null, null], pos: null, dir: '' };
+            if (best) {
+                const p = best.pose; r.s = 'S' + (snaps.indexOf(best) + 1); r.idx = best.st.index_in_app; r.stepId = best.st.id;
+                minIdx = Math.min(minIdx, best.st.index_in_app); maxIdx = Math.max(maxIdx, best.st.index_in_app);
+                r.hdg = [p.heading, im.drone_heading, fcHdgDelta(p.heading, im.drone_heading)];
+                r.cam = [p.pitch, im.camera_pitch, (p.pitch != null && typeof im.camera_pitch === 'number') ? im.camera_pitch - p.pitch : null];
+                r.alt = [p.alt != null ? p.alt * FC_M2FT : null, typeof im.alt === 'number' ? im.alt * FC_M2FT : null, (p.alt != null && typeof im.alt === 'number') ? (im.alt - p.alt) * FC_M2FT : null];
+                const dNav = fcDistM(p.nav.location, im.location); r.pos = dNav != null ? dNav * FC_M2FT : null; r.dir = (r.pos != null && r.pos >= 3) ? fcCompass(fcBearing(p.nav.location, im.location)) : '';
+                if (claimed[best.st.id]) flags.push('re-take'); claimed[best.st.id] = (claimed[best.st.id] || 0) + 1;
+                if (r.hdg[2] != null && Math.abs(r.hdg[2]) > cfg.hdg) flags.push('heading ' + (r.hdg[2] > 0 ? '+' : '') + r.hdg[2].toFixed(0) + '°');
+                if (r.cam[2] != null && Math.abs(r.cam[2]) > cfg.cam) flags.push('camera ' + (r.cam[2] > 0 ? '+' : '') + r.cam[2].toFixed(0) + '°');
+                if (r.alt[2] != null && Math.abs(r.alt[2]) > cfg.altFt) flags.push('altitude ' + (r.alt[2] > 0 ? '+' : '') + r.alt[2].toFixed(0) + ' ft');
+                if (r.pos != null && r.pos > cfg.posFt) flags.push('off station ' + r.pos.toFixed(0) + ' ft ' + r.dir);
+            } else { r.s = '?'; flags.push('unplanned shot (no planned snapshot matches nearby)'); }
+            rows.push(r);
+        });
+        const missing = isFinite(minIdx) ? snaps.filter(c => c.st.index_in_app >= minIdx && c.st.index_in_app <= maxIdx && !claimed[c.st.id]).map(c => 'S' + (snaps.indexOf(c) + 1)) : [];
+        const m = (arr) => { const v = arr.filter(x => x != null && isFinite(x)); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
+        const matched = rows.filter(r => r.stepId != null);
+        return Object.assign({}, meta, {
+            coreVer: FC_CORE_VER, at: Date.now(), shots: rows.length, flagged: rows.filter(r => r.flags.length).length, retakes: rows.filter(r => r.flags.includes('re-take')).length, unplanned: rows.filter(r => r.s === '?').length,
+            missing, slice: isFinite(minIdx) ? [minIdx, maxIdx] : null, planSteps: plan.length, planSnaps: snaps.length,
+            dHdg: m(matched.map(r => Math.abs(r.hdg[2]))), dCam: m(matched.map(r => Math.abs(r.cam[2]))), dAlt: m(matched.map(r => r.alt[2])), dPos: m(matched.map(r => r.pos)),
+            rows,
+        });
+    }
+    async function fcFetchLog(sid, start, end, isAborted) {
+        const all = []; let total = null; let lastId = -1; let pages = 0;
+        for (;;) {
+            if (isAborted && isAborted()) throw new Error('aborted');
+            if (++pages > 200) break;
+            const params = { site_id: Number(sid), drones: [], missionTypes: [], missionId: [], users: [], state: null, takeoffCompleted: false, start: fdYmd(start), end: fdYmd(end), last_mission_id: lastId };
+            const j = await fdGetJson(`/missions/?site_id=${encodeURIComponent(sid)}&params=${encodeURIComponent(JSON.stringify(params))}&only=${encodeURIComponent(FD_LOG_ONLY)}`, 40000);
+            const past = (j && j.past_missions) || [];
+            if (total == null && typeof j.total_mission_count === 'number') total = j.total_mission_count;
+            all.push(...past);
+            const lastMid = past.length ? past[past.length - 1].id : null;
+            const more = past.length > 0 && (total == null || all.length < total) && lastMid != null && lastMid !== lastId;
+            if (!more) break;
+            lastId = lastMid;
+        }
+        return all;
+    }
+    async function fcFetchImages(sid, mid) {
+        let url = `/images/?site=${encodeURIComponent(sid)}&mission=${encodeURIComponent(mid)}&limit=100&offset=0`; const out = []; let guard = 0;
+        while (url && ++guard < 20) { const j = await fdGetJson(url, 40000); const res = (j && j.results) || (Array.isArray(j) ? j : []); out.push(...res); url = j && j.next ? String(j.next).replace(/^https?:\/\/[^/]+/, '') : null; }
+        return out;
+    }
+    async function fcCheckFlight(sid, row, cfg) {
+        const mid = row.id;
+        const cached = fcCache.flights[mid];
+        if (cached && cached.coreVer === FC_CORE_VER) return cached;
+        const [mission, images] = await Promise.all([fdGetJson(`/missions/${encodeURIComponent(mid)}/`, 40000), fcFetchImages(sid, mid)]);
+        const plan = (mission.app && Array.isArray(mission.app.instructions)) ? mission.app.instructions.slice().sort((a, b) => a.index_in_app - b.index_in_app) : [];
+        const res = fcScore(plan, images, cfg, { mid, sid: String(sid), site: siteName(String(sid)) || String(sid), name: mission.name || mission.app_name || row.app_name || '', drone: mission.drone_name || row.drone_name || '', droneType: mission.drone && mission.drone.robot_type_name, when: mission.when || row.when, group: mission.mission_group_id, appId: mission.app && mission.app.id });
+        fcCache.flights[mid] = res;
+        return res;
+    }
+    async function runFlightChecks() {
+        if (fcRun) return;
+        const cfg = fcCfg();
+        const sites = Array.from(fdSelected);
+        if (!sites.length) { setStatus('Flight checks: pick sites in 📦 Fleet Data first (or Select all there)'); openSections.data = true; renderPanel(); return; }
+        const end = new Date(); const start = new Date(); start.setDate(start.getDate() - (Number(cfg.days) || 7));
+        fcRun = { done: 0, total: 0, msg: 'listing flights…', abort: false, errors: [] };
+        openSections.fc = true; renderPanel();
+        const isAborted = () => fcRun && fcRun.abort;
+        const flights = [];
+        try {
+            for (const sid of sites) {
+                if (isAborted()) break;
+                fcRun.msg = `listing flights · ${siteName(sid) || sid}`; renderPanel();
+                try { const rows = await fcFetchLog(sid, start, end, isAborted); rows.forEach(r => { if ((r.image_count || 0) > 0) flights.push({ sid, row: r }); }); }
+                catch (e) { if (String(e.message).includes('aborted')) break; fcRun.errors.push(`${siteName(sid) || sid}: log ${e.message}`); }
+            }
+            fcRun.total = flights.length;
+            const results = []; let cachedHits = 0;
+            const queue = flights.slice(); const workers = [];
+            const work = async () => {
+                while (queue.length && !isAborted()) {
+                    const f = queue.shift();
+                    try { const had = !!(fcCache.flights[f.row.id] && fcCache.flights[f.row.id].coreVer === FC_CORE_VER); const res = await fcCheckFlight(f.sid, f.row, cfg); if (had) cachedHits++; results.push(res); }
+                    catch (e) { fcRun.errors.push(`${f.row.id}: ${e.message}`); }
+                    fcRun.done++; fcRun.msg = `checking flights · ${fcRun.done}/${fcRun.total}`;
+                    if (fcRun.done % 5 === 0) { fcSaveCache(); renderPanel(); }
+                }
+            };
+            for (let i = 0; i < 3; i++) workers.push(work());
+            await Promise.all(workers);
+            fcSaveCache();
+            results.sort((a, b) => String(b.when || '').localeCompare(String(a.when || '')));
+            fcResults = { at: Date.now(), sites, days: cfg.days, flights: results, cachedHits, aborted: isAborted(), errors: fcRun.errors };
+            setStatus(`Flight checks: ${results.length} flight(s) across ${sites.length} site(s), last ${cfg.days} d · ${cachedHits} from cache${fcRun.errors.length ? ` · ${fcRun.errors.length} error(s)` : ''}${isAborted() ? ' · aborted' : ''}`);
+        } catch (e) { console.error(`${TAG} flight checks failed`, e); setStatus('Flight checks failed: ' + e.message); }
+        fcRun = null; renderPanel();
+    }
+    // ---- aggregation ----
+    function fcAgg(keyFn, labelFn) {
+        const g = {};
+        (fcResults ? fcResults.flights : []).forEach(f => {
+            const k = keyFn(f); if (!g[k]) g[k] = { key: k, label: labelFn(f), flights: 0, shots: 0, flagged: 0, retakes: 0, missing: 0, unplanned: 0, hdg: [], cam: [], alt: [], pos: [] };
+            const a = g[k]; a.flights++; a.shots += f.shots; a.flagged += f.flagged; a.retakes += f.retakes; a.missing += (f.missing || []).length; a.unplanned += f.unplanned || 0;
+            f.rows.forEach(r => { if (r.stepId == null) return; if (r.hdg[2] != null) a.hdg.push(Math.abs(r.hdg[2])); if (r.cam[2] != null) a.cam.push(Math.abs(r.cam[2])); if (r.alt[2] != null) a.alt.push(r.alt[2]); if (r.pos != null) a.pos.push(r.pos); });
+        });
+        const mean = (v) => v.length ? v.reduce((x, y) => x + y, 0) / v.length : null;
+        return Object.values(g).map(a => Object.assign(a, { dHdg: mean(a.hdg), dCam: mean(a.cam), dAlt: mean(a.alt), dPos: mean(a.pos), pct: a.shots ? (100 * (a.shots - a.flagged) / a.shots) : null })).sort((x, y) => (y.flagged / Math.max(1, y.shots)) - (x.flagged / Math.max(1, x.shots)));
+    }
+    const fcN = (v, d, unit) => v == null || !isFinite(v) ? '–' : (+v).toFixed(d == null ? 0 : d) + (unit || '');
+    const fcS = (v, d, unit) => v == null || !isFinite(v) ? '–' : ((v > 0 ? '+' : '') + (+v).toFixed(d == null ? 0 : d) + (unit || ''));
+    const fcColor = (v, thr) => v == null || !isFinite(v) ? '#888' : (Math.abs(v) > 2 * thr ? '#ff5f5f' : Math.abs(v) > thr ? '#ffb347' : '#5fff5f');
+    function fcPlaybackUrl(f) { return `${location.origin}/#/site/${f.sid}/control-panel/past-mission/${f.mid}`; }
+    function fcTable() {
+        const cfg = fcCfg();
+        if (fcTab === 'drones') return { cols: ['drone', 'flights', 'shots', 'within limits', 'flagged', 're-takes', 'no picture', 'unplanned', 'mean |Δhdg|', 'mean |Δcam|', 'mean Δalt (bias)', 'mean off-station'], rows: fcAgg(f => f.drone || '?', f => (f.drone || '?') + (f.droneType ? ' (' + f.droneType + ')' : '')).map(a => [a.label, a.flights, a.shots, fcN(a.pct, 0, '%'), a.flagged, a.retakes, a.missing, a.unplanned, fcN(a.dHdg, 1, '°'), fcN(a.dCam, 1, '°'), fcS(a.dAlt, 0, ' ft'), fcN(a.dPos, 0, ' ft')]) };
+        if (fcTab === 'missions') return { cols: ['mission', 'site', 'flights', 'shots', 'within limits', 'flagged', 're-takes', 'no picture', 'unplanned', 'mean |Δhdg|', 'mean |Δcam|', 'mean Δalt', 'mean off-station'], rows: fcAgg(f => f.sid + '|' + f.name, f => f.name).map(a => { const f0 = fcResults.flights.find(f => f.sid + '|' + f.name === a.key); return [a.label, f0 ? f0.site : '', a.flights, a.shots, fcN(a.pct, 0, '%'), a.flagged, a.retakes, a.missing, a.unplanned, fcN(a.dHdg, 1, '°'), fcN(a.dCam, 1, '°'), fcS(a.dAlt, 0, ' ft'), fcN(a.dPos, 0, ' ft')]; }) };
+        if (fcTab === 'sites') return { cols: ['site', 'flights', 'shots', 'within limits', 'flagged', 're-takes', 'no picture', 'unplanned', 'mean |Δhdg|', 'mean |Δcam|', 'mean Δalt', 'mean off-station'], rows: fcAgg(f => f.sid, f => f.site).map(a => [a.label, a.flights, a.shots, fcN(a.pct, 0, '%'), a.flagged, a.retakes, a.missing, a.unplanned, fcN(a.dHdg, 1, '°'), fcN(a.dCam, 1, '°'), fcS(a.dAlt, 0, ' ft'), fcN(a.dPos, 0, ' ft')]) };
+        const fl = (fcResults ? fcResults.flights : []).slice().sort((a, b) => fcSortKey === 'when' ? String(b.when || '').localeCompare(String(a.when || '')) : (b.flagged / Math.max(1, b.shots)) - (a.flagged / Math.max(1, a.shots)) || b.flagged - a.flagged);
+        return { cols: ['flight', 'mission', 'site', 'drone', 'when', 'shots', 'flagged', 're-takes', 'no picture', 'unplanned', 'mean |Δhdg|', 'mean |Δcam|', 'mean Δalt', 'mean off-station', 'playback'], rows: fl.map(f => [f.mid, f.name, f.site, f.drone, f.when ? new Date(f.when).toLocaleString() : '', f.shots, f.flagged, f.retakes, (f.missing || []).length, f.unplanned || 0, fcN(f.dHdg, 1, '°'), fcN(f.dCam, 1, '°'), fcS(f.dAlt, 0, ' ft'), fcN(f.dPos, 0, ' ft'), fcPlaybackUrl(f)]), flights: fl };
+    }
+    function fcCsv() { const t = fcTable(); return [t.cols.map(fdCsvEsc).join(',')].concat(t.rows.map(r => r.map(fdCsvEsc).join(','))).join('\n'); }
+    function fcJira() { const t = fcTable(); return ['||' + t.cols.join('||') + '||'].concat(t.rows.map(r => '|' + r.map(x => String(x == null ? '' : x).replace(/\|/g, '/')).join('|') + '|')).join('\n'); }
+    function renderFcSection() {
+        if (!openSections.fc) return '';
+        const cfg = fcCfg();
+        const inp = (k, label, unit, w) => `<label style="margin-right:10px;color:#aaa">${label} <input type="number" data-fc-thr="${k}" value="${cfg[k]}" min="0" step="1" style="width:${w || 52}px;background:#0f1216;color:#ddd;border:1px solid #444;border-radius:3px;padding:1px 4px;font:inherit"> ${unit}</label>`;
+        let h = '<div style="padding:8px 10px;border-bottom:1px solid #222834">'
+            + `<div style="color:#888;margin-bottom:6px">Scope = the sites picked in 📦 Fleet Data (<b style="color:#ddd">${fdSelected.size}</b> picked) · flights with pictures in the last ${inp('days', '', 'days', 44)}</div>`
+            + '<div style="margin-bottom:6px">Flag a shot when: ' + inp('hdg', 'heading >', '°') + inp('cam', 'camera >', '°') + inp('altFt', 'altitude >', 'ft') + inp('posFt', 'off-station >', 'ft') + '</div>'
+            + '<div style="color:#666;margin-bottom:6px">match a picture to a planned snapshot when its nav is within ' + inp('navFt', '', 'ft', 56) + ' and the pose fits within ' + inp('gateDeg', '', '° (heading + camera + position penalty)', 44) + '</div>'
+            + (fcRun
+                ? `<span style="color:#7adfe6">${fcRun.msg}</span> <span data-ft="fc-abort" style="cursor:pointer;color:#ff7a7a;margin-left:10px">✕ abort</span>${fcRun.total ? `<div style="height:5px;background:#222834;border-radius:3px;margin-top:6px"><div style="height:5px;width:${Math.round(100 * fcRun.done / Math.max(1, fcRun.total))}%;background:#7adfe6;border-radius:3px"></div></div>` : ''}`
+                : `<span data-ft="fc-run" style="cursor:pointer;color:#7adfe6;border:1px solid #2a3140;padding:2px 8px;border-radius:3px">▶ Check flights</span>`
+                  + ` <span data-ft="fc-clear" style="cursor:pointer;color:#888;margin-left:10px" title="forget cached per-flight results (${Object.keys(fcCache.flights).length})">🗑 clear cache (${Object.keys(fcCache.flights).length})</span>`)
+            + '</div>';
+        if (!fcResults) return h + '<div style="padding:8px 10px;color:#666">No run yet. Pick sites in Fleet Data, set the window, then ▶ Check flights. A flown flight never changes, so each flight is scored once and cached; later runs only fetch new flights.</div>';
+        const R = fcResults; const shots = R.flights.reduce((n, f) => n + f.shots, 0), flagged = R.flights.reduce((n, f) => n + f.flagged, 0);
+        const chip = (v, l, c) => `<span style="display:inline-block;margin:0 6px 6px 0;padding:3px 9px;border:1px solid ${c || '#2a3140'};border-radius:5px"><b style="color:${c || '#ddd'};font-size:14px">${v}</b> <span style="color:#888">${l}</span></span>`;
+        h += '<div style="padding:8px 10px;border-bottom:1px solid #222834">'
+            + chip(R.flights.length, 'flights', '#7adfe6') + chip(shots, 'shots') + chip(shots ? Math.round(100 * (shots - flagged) / shots) + '%' : '–', 'within limits', flagged ? '#ffb347' : '#5fff5f') + chip(flagged, 'flagged', flagged ? '#ffb347' : null) + chip(R.flights.reduce((n, f) => n + f.retakes, 0), 're-takes') + chip(R.flights.reduce((n, f) => n + (f.missing || []).length, 0), 'no picture') + chip(R.flights.reduce((n, f) => n + (f.unplanned || 0), 0), 'unplanned')
+            + (R.errors && R.errors.length ? `<div style="color:#ff7a7a">${R.errors.length} error(s): ${R.errors.slice(0, 3).map(escapeHtml).join(' · ')}${R.errors.length > 3 ? ' …' : ''}</div>` : '')
+            + '<div style="margin-top:4px">' + ['flights', 'drones', 'missions', 'sites'].map(t => `<span data-ft="fc-tab-${t}" style="cursor:pointer;margin-right:12px;${fcTab === t ? 'color:#7adfe6;font-weight:bold;border-bottom:1px solid #7adfe6' : 'color:#888'}">by ${t.replace(/s$/, '')}</span>`).join('')
+            + `<span data-ft="fc-csv" style="cursor:pointer;color:#888;margin-left:14px">📋 copy CSV</span> <span data-ft="fc-jira" style="cursor:pointer;color:#888;margin-left:10px">📋 copy JIRA table</span>`
+            + (fcTab === 'flights' ? ` <span data-ft="fc-sort" style="cursor:pointer;color:#888;margin-left:10px">sort: ${fcSortKey === 'when' ? 'newest' : 'worst first'}</span>` : '') + '</div></div>';
+        const t = fcTable(); const cfgT = fcCfg();
+        const cell = (v) => `<td style="padding:2px 6px;white-space:nowrap;border-bottom:1px solid #1e2430">${escapeHtml(String(v == null ? '' : v))}</td>`;
+        h += '<div style="overflow:auto;max-height:46vh"><table style="border-collapse:collapse;font:11px/1.4 monospace;width:100%"><tr style="color:#7adfe6">' + t.cols.filter(c => c !== 'playback').map(c => `<th style="text-align:left;padding:2px 6px;position:sticky;top:0;background:#14181f">${escapeHtml(c)}</th>`).join('') + '</tr>';
+        if (fcTab === 'flights') {
+            t.flights.forEach((f, i) => {
+                const r = t.rows[i]; const open = fcOpenFlight === f.mid;
+                h += `<tr class="aim-ft-row" data-fc-flight="${f.mid}" style="cursor:pointer;${f.flagged ? 'background:rgba(255,179,71,.05)' : ''}">` + cell((open ? '▾ ' : '▸ ') + f.mid) + cell(r[1]) + cell(r[2]) + cell(r[3]) + cell(r[4]) + cell(r[5]) + `<td style="padding:2px 6px;color:${f.flagged ? '#ffb347' : '#5fff5f'}">${f.flagged}</td>` + cell(r[7]) + cell(r[8]) + cell(r[9]) + `<td style="padding:2px 6px;color:${fcColor(f.dHdg, cfgT.hdg)}">${r[10]}</td><td style="padding:2px 6px;color:${fcColor(f.dCam, cfgT.cam)}">${r[11]}</td><td style="padding:2px 6px;color:${fcColor(f.dAlt, cfgT.altFt)}">${r[12]}</td><td style="padding:2px 6px;color:${fcColor(f.dPos, cfgT.posFt)}">${r[13]}</td></tr>`;
+                if (open) {
+                    h += `<tr><td colspan="14" style="padding:4px 6px 8px 22px;background:#101419"><div style="margin-bottom:4px"><a href="${fcPlaybackUrl(f)}" target="_blank" rel="noopener" style="color:#7adfe6">🎞 open playback ↗</a> <span style="color:#666">· plan ${f.planSteps} steps / ${f.planSnaps} snapshots${f.slice ? ` · this flight steps ${f.slice[0]}–${f.slice[1]}` : ''}${f.missing && f.missing.length ? ` · <span style="color:#ff7a7a">no picture: ${f.missing.join(', ')}</span>` : ''}</span></div>`
+                        + '<table style="border-collapse:collapse;font:11px/1.4 monospace"><tr style="color:#888"><th style="text-align:left;padding:1px 6px">shot</th><th style="text-align:left;padding:1px 6px">step</th><th style="text-align:left;padding:1px 6px">shutter</th><th style="text-align:left;padding:1px 6px">heading p/a/Δ</th><th style="text-align:left;padding:1px 6px">camera p/a/Δ</th><th style="text-align:left;padding:1px 6px">alt ft p/a/Δ</th><th style="text-align:left;padding:1px 6px">drone vs nav</th><th style="text-align:left;padding:1px 6px">asset</th><th style="text-align:left;padding:1px 6px">flags</th></tr>'
+                        + f.rows.map(r => `<tr>${cell(r.s)}${cell(r.idx != null ? '#' + r.idx : '')}${cell(new Date(r.t).toLocaleTimeString())}${cell(fcN(r.hdg[0]) + '° / ' + fcN(r.hdg[1]) + '° / ' + fcS(r.hdg[2], 0, '°'))}${cell(fcN(r.cam[0]) + '° / ' + fcN(r.cam[1]) + '° / ' + fcS(r.cam[2], 0, '°'))}${cell(fcN(r.alt[0]) + ' / ' + fcN(r.alt[1]) + ' / ' + fcS(r.alt[2]))}${cell(r.pos != null ? fcN(r.pos) + ' ft ' + r.dir : '–')}${cell(r.asset || '–')}<td style="padding:2px 6px;color:${r.flags.length ? '#ffb347' : '#5fff5f'}">${escapeHtml(r.flags.length ? r.flags.join('; ') : 'ok')}</td></tr>`).join('') + '</table></td></tr>';
+                }
+            });
+        } else {
+            t.rows.forEach(r => { h += '<tr class="aim-ft-row">' + r.map(cell).join('') + '</tr>'; });
+        }
+        h += '</table></div>';
+        return h;
+    }
     // ==================================================================
     // UI — floating button on the landing page + sectioned panel
     // ==================================================================
     let buttonEl = null;
     let panelEl = null;
     // v0.31: every section starts COLLAPSED (user request) — open what you need.
-    let openSections = { issues: false, data: false, sweep: false, map: false, kml: false, xref: false, metrics: false };
+    let openSections = { issues: false, data: false, fc: false, sweep: false, map: false, kml: false, xref: false, metrics: false };
     // v0.25 (#257): 🚩 Fleet Issues front door. AIM Issues owns the engine +
     // panel (one copy of the merge/Slack/role rules); we ask it for a summary
     // and open it over tab-local DOM events on `document` (NOT the
@@ -4205,6 +4440,8 @@
             + renderIssuesSection()
             + sectionHeader('data', '📦', 'Fleet Data', `${fdSelected.size} site(s) picked · browse + export`)
             + renderDataSection()
+            + sectionHeader('fc', '🎥', 'Flight Checks', fcResults ? `${fcResults.flights.length} flight(s) · ${fcResults.flights.reduce((n, f) => n + f.flagged, 0)} flagged shots` : 'planned vs actual, every flown flight of the picked sites')
+            + renderFcSection()
             + sectionHeader('sweep', '⚠', 'Overlap Sweep', `${ENV_LABEL} · thr ${ftCfg.thresholdFt} ft`)
             + renderSweepSection()
             + sectionHeader('map', '🗺', 'Map', 'basemap + airspace chart')
@@ -4246,7 +4483,7 @@
 
             // Delegated — the body is rebuilt on every render, the root never is
             panelEl.addEventListener('click', (ev) => {
-                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad]')) return;   // checkbox/color/select → change handler
+                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad],input[data-fc-thr]')) return;   // checkbox/color/select → change handler
                 const clAll = ev.target.closest('[data-ft-clients]');
                 if (clAll) {
                     if (clAll.getAttribute('data-ft-clients') === 'all') {
@@ -4274,6 +4511,8 @@
                     scheduleSetupRefresh();
                     return;
                 }
+                const fcRow = ev.target.closest('[data-fc-flight]');
+                if (fcRow && !ev.target.closest('a')) { const mid = Number(fcRow.getAttribute('data-fc-flight')); fcOpenFlight = fcOpenFlight === mid ? null : mid; fdRenderKeepScroll(); return; }
                 const act = ev.target.closest('[data-ft]');
                 if (act) {
                     const cmd = act.getAttribute('data-ft');
@@ -4295,6 +4534,13 @@
                     else if (cmd === 'kx-circles') kxExportCircles();
                     else if (cmd === 'kx-setups') kxExportSetups();
                     else if (cmd === 'fd-abort') { if (fdRun) { fdRun.abort = true; setStatus('aborting export after the current request…'); } }
+                    else if (cmd === 'fc-run') runFlightChecks();
+                    else if (cmd === 'fc-abort') { if (fcRun) { fcRun.abort = true; setStatus('aborting flight checks after the current requests…'); } }
+                    else if (cmd === 'fc-clear') { fcCache = { ver: FC_CORE_VER, flights: {} }; fcSaveCache(); fcResults = null; renderPanel(); }
+                    else if (cmd === 'fc-csv') copyText(fcCsv(), 'flight-check CSV copied');
+                    else if (cmd === 'fc-jira') copyText(fcJira(), 'flight-check JIRA table copied');
+                    else if (cmd === 'fc-sort') { fcSortKey = fcSortKey === 'when' ? 'flagged' : 'when'; renderPanel(); }
+                    else if (cmd && cmd.startsWith('fc-tab-')) { fcTab = cmd.slice(7); fcOpenFlight = null; renderPanel(); }
                     else if (cmd === 'fd-selall') { fdVisibleSiteIds().forEach(id => fdSelected.add(id)); renderPanel(); }
                     else if (cmd === 'fd-clear') { fdSelected.clear(); renderPanel(); }
                     else if (cmd === 'fd-wide') { fdWide = !fdWide; renderPanel(); }
@@ -4454,6 +4700,7 @@
                 if (t.hasAttribute && t.hasAttribute('data-fd-site')) { const id = t.getAttribute('data-fd-site'); if (t.checked) fdSelected.add(id); else fdSelected.delete(id); fdRenderKeepScroll(); return; }
                 // 6. client select-all acts on the SHOWN rows of that client (what the header count shows)
                 if (t.hasAttribute && t.hasAttribute('data-fd-clientsel')) { const cl = t.getAttribute('data-fd-clientsel'); const ids = fdVisibleSiteIds().filter(id => fdClientOfId(id) === cl); ids.forEach(id => { if (t.checked) fdSelected.add(id); else fdSelected.delete(id); }); fdRenderKeepScroll(); return; }
+                if (t.hasAttribute && t.hasAttribute('data-fc-thr')) { const k = t.getAttribute('data-fc-thr'); const v = Number(t.value); if (isFinite(v) && v >= 0) { ftCfg.fc[k] = v; saveCfg(); } return; }
                 if (t.hasAttribute && t.hasAttribute('data-kx-inc')) { kxInclude[t.getAttribute('data-kx-inc')] = !!t.checked; return; }
                 if (t.hasAttribute && t.hasAttribute('data-kx-mode')) { kxMode = t.value === '3D' ? '3D' : '2D'; return; }
                 if (t.hasAttribute && t.hasAttribute('data-kx-pad')) { if (t.value.trim() === '') return; const v = Number(t.value); if (isFinite(v) && v >= 0) kxCirclePadFt = v; return; }

@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Fleet Tools latest v0.33 (dev only): 🎥 Flight Checks — planned vs actual across sites
+
+- New **Flight Checks** section on the landing-page Fleet Tools panel. Pick sites in 📦 Fleet Data, set the window (default last 7 days) and ▶ Check flights: every flown flight with pictures is scored against its plan the way Video Validation scores one playback page (heading / camera angle / drone altitude / drone-vs-nav, re-takes, snapshot steps with no picture, unplanned shots), from two small reads per flight — no flown-track download. A flown flight never changes, so each flight is scored once and cached in script storage; later runs only fetch new flights.
+- Views **by flight** (expand a row for its shots, 🎞 open playback), **by drone** (mean deviations and a signed altitude bias — a drone consistently high or low is a hardware question for IT), **by mission** (a mission off on every drone is a build question for the CSM) and **by site**. Copy the current view as CSV or as a JIRA table. Thresholds and the pose-match gate are editable in the section and persist.
+
 ## 2026-09-17 — AIM Video Validation latest v0.46 (dev only): flight checker + session change report
 
 - **🔎 Check flight** (shot card button / Control Panel): scores every shot against the plan — heading, camera angle, drone altitude, drone-vs-nav distance, planned-vs-actual look-point gap — and flags re-takes, shots with no snapshot step executing, and snapshot steps that produced no picture. Thresholds in the Control Panel. Copy for JIRA (table markup) or as tab-separated text, with mission / flight / drone ids and step counts for this flight and the whole mission.
