@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.20
+// @version      0.21
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -29,7 +29,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-video-validation';
-    const SCRIPT_VERSION = '0.20';
+    const SCRIPT_VERSION = '0.21';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -313,13 +313,14 @@
             .aim-vv-card .ok { color: #5fff5f; } .aim-vv-card .warn { color: #ffb347; } .aim-vv-card .bad { color: #ff5f5f; }
             .aim-vv-card .dim { color: #888; }
             .aim-vv-legend { margin-top: 0; }
-            .mp-data.aim-vv-split, .aim-vv-split { display: grid !important; grid-template-columns: minmax(0, 1fr) minmax(380px, 54%); column-gap: 20px; align-items: start; padding-top: 6px !important; padding-bottom: 6px !important; }
+            .mp-data.aim-vv-split, .aim-vv-split { display: grid !important; grid-template-columns: minmax(260px, max-content) minmax(300px, 1fr); column-gap: 20px; align-items: start; padding-top: 6px !important; padding-bottom: 6px !important; }
+            .aim-vv-group { overflow-x: auto; min-width: 0; }
             .aim-vv-split > :not(.aim-vv-group) { grid-column: 1; }
             /* Compact list view of Percepto's Mission Data: title = 1st child, field grid = 2nd child, each field = value + label. */
             .aim-vv-split > :not(.aim-vv-group):first-child { font-size: 12px !important; line-height: 1.4 !important; margin: 0 0 4px !important; padding: 0 !important; letter-spacing: .04em; color: #aaa; }
             .aim-vv-split > :not(.aim-vv-group):nth-child(2) { display: flex !important; flex-direction: column; gap: 1px; margin: 0 !important; padding: 0 !important; }
             .aim-vv-split > :not(.aim-vv-group):nth-child(2) > * { display: flex !important; flex-direction: row-reverse; justify-content: flex-end; align-items: baseline; gap: 10px; margin: 0 !important; padding: 0 !important; min-width: 0; }
-            .aim-vv-split > :not(.aim-vv-group):nth-child(2) > * > * { font-size: 12px !important; line-height: 1.45 !important; margin: 0 !important; padding: 0 !important; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+            .aim-vv-split > :not(.aim-vv-group):nth-child(2) > * > * { font-size: 12px !important; line-height: 1.45 !important; margin: 0 !important; padding: 0 !important; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 340px; }
             .aim-vv-split > :not(.aim-vv-group):nth-child(2) > * > :last-child { color: #888 !important; font-weight: 400; flex: 0 0 96px; }
             .aim-vv-group { grid-column: 2; grid-row: 1 / span 20; align-self: start; font: 11px/1.45 monospace; color: #e6e6e6;
                 padding: 8px 10px; border: 1px solid rgba(95,227,255,.35); border-radius: 4px; background: rgba(10,14,18,.85); }
@@ -1445,6 +1446,7 @@
         el.innerHTML = '<div class="aim-vv-review__box"><div><b>Review changes to mission "' + esc(model.mission.name || model.mission.app_name) + '"</b> <span class="dim">(app ' + esc(model.mission.app && model.mission.app.id) + ' · affects every future flight of group ' + esc(model.mission.mission_group_id) + ')</span></div>'
             + '<table><tr class="dim"><td>step</td><td>change</td><td>before</td><td>after</td><td></td></tr>' + rows + '</table>'
             + '<div class="dim" style="margin:6px 0">Rails: the plan is re-read and compared first · a full JSON backup is saved (script storage + download) · ONE save · re-read and verified · a before/after report is saved + downloaded.</div>'
+            + (function() { try { const app = model.mission.app; const r = resolveSelectedRobot(app); if (!r.value) blockers.push('Cannot resolve selected_robot: ' + r.from); const rep = Array.isArray(app.data_report_object_arr) ? app.data_report_object_arr.map(x => x && (x.name || x.id)).join(', ') : 'none'; return '<div class="dim">will send: name "' + esc(app.name) + '" · type ' + esc(app.type) + ' · site_id ' + esc(app.site) + ' · app_id ' + esc(app.id) + ' · selected_robot <b>' + esc(r.value || '?') + '</b> <span class="dim">(' + esc(r.from) + ')</span> · reports: ' + esc(rep) + ' · ' + edEnsureWork().length + ' instructions</div>'; } catch (e) { blockers.push('preflight failed: ' + e.message); return ''; } })()
             + (blockers.length ? '<div class="warn">' + blockers.map(esc).join('<br>') + '</div>' : '')
             + '<div class="aim-vv-edit__row"><button type="button" data-aim-vv-rv="apply" ' + (blockers.length ? 'disabled' : '') + '>Apply ' + diff.length + ' change' + (diff.length === 1 ? '' : 's') + '</button><button type="button" data-aim-vv-rv="cancel">Cancel</button><span class="aim-vv-review__status dim"></span></div></div>';
         document.body.appendChild(el); ed.reviewEl = el;
@@ -1467,12 +1469,25 @@
     function gmPush(key, entry, cap) { try { const arr = GM_getValue(key, []) || []; arr.unshift(entry); GM_setValue(key, arr.slice(0, cap)); } catch (e) { warn('GM store failed:', e); } }
     // Build the save body from the learned shape: scalars from the sample, overridden by this app's own values
     // where the field names match, name/type/site_id/app_id set explicitly, instructions minimal.
+    // Percepto's save body carries `selected_robot` (an uppercase drone-type enum such as SPARROW / AIRMAX_POWERTRAIN).
+    // Resolve it from THIS mission: the app's robot type names first, then the drone that flew it. Null = cannot write.
+    function resolveSelectedRobot(app) {
+        const enumLike = (v) => typeof v === 'string' && /^[A-Z][A-Z0-9_]+$/.test(v) ? v : null;
+        const fromApp = Array.isArray(app.robot_type_names) ? app.robot_type_names.map(enumLike).find(Boolean) : null;
+        if (fromApp) return { value: fromApp, from: 'app.robot_type_names' };
+        const fromRt = Array.isArray(app.robot_type) ? app.robot_type.map(x => enumLike(x && (x.name || x.robot_type_name || x))).find(Boolean) : null;
+        if (fromRt) return { value: fromRt, from: 'app.robot_type' };
+        const fromDrone = model && model.mission.drone && enumLike(model.mission.drone.robot_type_name);
+        if (fromDrone) return { value: fromDrone, from: 'mission.drone.robot_type_name' };
+        return { value: null, from: 'unresolved (app.robot_type_names=' + JSON.stringify(app.robot_type_names) + ', app.robot_type=' + JSON.stringify(app.robot_type) + ')' };
+    }
     function buildBody(app, work, shape) {
         const b = deepCopy(shape.sample || {});
         const src = { name: app.name, description: app.description, type: app.type, site_id: app.site, app_id: app.id, map_type: app.map_type, mock_app: app.mock_app, report_rules: app.report_rules, assets_app: app.assets_app, robot_type: app.robot_type, is_active: app.is_active };
         const used = [];
         Object.keys(src).forEach(k => { if (k in b && src[k] !== undefined) { b[k] = src[k]; used.push(k); } });
         b.name = app.name; b.type = app.type != null ? app.type : 1; b.site_id = Number(app.site); b.app_id = app.id;
+        if ('selected_robot' in b) { const r = resolveSelectedRobot(app); if (!r.value) throw new Error('cannot resolve selected_robot — ' + r.from); b.selected_robot = r.value; used.push('selected_robot'); }
         if ('dataReportObjectArr' in b) {
             const banked = Array.isArray(app.data_report_object_arr) ? app.data_report_object_arr : [];
             const learned = Array.isArray(b.dataReportObjectArr) ? b.dataReportObjectArr : [];

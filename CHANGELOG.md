@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Video Validation latest v0.21: save body matched to Percepto's real shape, layout at narrow widths (dev only)
+
+- The save body now matches the learned shape field for field: `selected_robot` is resolved from the mission's own robot type (shown in the Review box before Apply; the write is refused if it cannot be resolved), reports are sent as objects like Percepto does.
+- Mission Data list no longer wraps values letter by letter when the panel is narrow; the flight panel scrolls sideways instead.
+
 ## 2026-09-16 — AIM Video Validation latest v0.20: Phase 2 editing — Adjust panel with rails (dev only, NOT for coworkers)
 
 - **✎ Adjust** on the shot card opens an edit panel for the selected snapshot step. Picture-relative buttons: ◀ left / right ▶ (in-place: heading; GPS: aim point sideways), ▲ up / ▼ down (camera angle; GPS: target altitude), closer / farther (nav along the heading; GPS: aim point along the line), alt − / alt + (drone altitude). Shift-click = ×5. Step sizes in the Control Panel.
