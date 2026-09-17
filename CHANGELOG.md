@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Video Validation latest v0.25: drag-to-change keeps going, no cursor grab on click, overlay colors + weight (dev only)
+
+- A plain click on a draggable number no longer hides the cursor; the drag only engages after the pointer moves, and it keeps stepping for as long as you hold (it used to stop after the first step).
+- Control Panel: nav / snapshot / actual-shot colors and an overlay line weight (default 2.5 px, sightlines were 1.5). RGB badges follow the snapshot color.
+
 ## 2026-09-17 — AIM Video Validation latest v0.24: S# squares sit at the look-point, flown path stops flickering, step sizes really 1 (dev only)
 
 - In-place snapshot squares are now drawn AT their planned look-point on the ground, with a dotted line back to the nav (no separate rings). They appear beside the nav for a moment until the terrain lookup lands, then move.
