@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.11
+// @version      0.12
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -21,6 +21,7 @@
 // flown mission (images + flown path + embedded plan) and (1) reorders the snapshot strip oldest-first
 // with S# badges, (2) seeks the video to a snapshot's shutter time on click / ▶, (3) highlights the
 // shot under the playhead, (4) shows a shot card: planned vs actual heading / camera angle / altitude.
+// Time bar under the player: ‹ › skip 10 s (left-click) / 30 s (right-click), jump-to-time box, shot ⏮ ⏭.
 // Hotkeys: [ / ] — previous / next shot (still viewer open → previous / next image in OUR order; else video by shot).
 //          Routed by the Control Panel (scope 'playback', CP ≥ 1.45) with a direct fallback until the panel proves it routes them.
 // Log tag: [AIM VV]
@@ -28,7 +29,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-video-validation';
-    const SCRIPT_VERSION = '0.11';
+    const SCRIPT_VERSION = '0.12';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -74,6 +75,7 @@
         overlayActual: true,   // actual shot poses (drone dot + heading + footprint)
         overlayLabels: true,   // N#/S# labels (else plain dots)
         overlayGroup: false,   // whole mission group, color per flight, whole-mission numbering
+        timeBar: true,         // skip / jump-to-time bar under the player
     };
     let settings = Object.assign({}, DEFAULTS);
     try { settings = Object.assign({}, DEFAULTS, GM_getValue(SETTINGS_KEY, {}) || {}); }
@@ -309,6 +311,13 @@
             .aim-vv-card .ok { color: #5fff5f; } .aim-vv-card .warn { color: #ffb347; } .aim-vv-card .bad { color: #ff5f5f; }
             .aim-vv-card .dim { color: #888; }
             .aim-vv-legend { margin-top: 0; }
+            .aim-vv-bar { display: flex; align-items: center; gap: 6px; padding: 4px 8px; font: 11px/1.3 monospace; color: #e6e6e6;
+                background: rgba(10,14,18,.85); border-bottom: 1px solid rgba(95,227,255,.25); }
+            .aim-vv-bar button { background: #1f2228; color: #5fe3ff; border: 1px solid rgba(95,227,255,.5); border-radius: 3px; padding: 2px 8px; font: inherit; cursor: pointer; }
+            .aim-vv-bar button:hover { background: #5fe3ff; color: #04222a; }
+            .aim-vv-bar .aim-vv-time { width: 68px; background: #0f1216; color: #e6e6e6; border: 1px solid #444; border-radius: 3px; padding: 2px 6px; font: inherit; text-align: center; }
+            .aim-vv-bar .aim-vv-bar-now { margin-left: auto; }
+            .aim-vv-bar .dim { color: #888; }
             .aim-vv-ov { background: none; border: none; }
             .aim-vv-ov-nav { width: 22px; height: 22px; border-radius: 50%; color: #04222a; font: 800 10px/19px monospace; text-align: center; border: 2px solid rgba(0,0,0,.6); box-shadow: 0 1px 4px rgba(0,0,0,.5); }
             .aim-vv-ov-snap { width: 18px; height: 18px; border-radius: 3px; color: #04222a; font: 800 9px/17px monospace; text-align: center; border: 1px solid rgba(0,0,0,.6); opacity: .92; }
@@ -474,20 +483,28 @@
         if (!grid) return null;
         return stripTiles(grid).find(t => !tileImage(t)) || grid.children[0] || null;
     }
-    function seekToShot(rec, showVideo) {
+    function showPlayer() {
+        if (!stillImg()) return true;
+        // A still is showing; clicking the video tile swaps the player back (the <video> kept its time).
+        const vt = videoTile();
+        if (vt) { try { vt.click(); return true; } catch (e) { warn('video tile click failed:', e); } }
+        else warn('video tile not found — cannot swap back to the player');
+        return false;
+    }
+    function seekVideo(t, play) {
+        const v = videoEl();
+        if (!v) { warn('seek: no <video>'); return false; }
+        t = Math.max(0, Math.min(isFinite(v.duration) ? v.duration : t, t));
+        try { v.currentTime = t; } catch (e) { warn('seek failed:', e); return false; }
+        if (play) { try { const p = v.play(); if (p && p.catch) p.catch(e => warn('play() refused:', e.message)); } catch (e) { warn('play failed:', e); } }
+        return true;
+    }
+    function seekToShot(rec, showVideo, play) {
         const v = videoEl();
         if (!v || !rec || rec.videoOff == null) { warn('seek: no video or no offset for', rec && rec.name); return; }
         const t = Math.max(0, rec.videoOff - (Number(settings.leadInS) || 0));
-        try {
-            v.currentTime = t;
-            log('seek → ' + mmss(t) + ' (shot at ' + mmss(rec.videoOff) + ')');
-        } catch (e) { warn('seek failed:', e); }
-        if (showVideo && stillImg()) {
-            // A still is showing; clicking the video tile swaps the player back (the <video> kept its time).
-            const vt = videoTile();
-            if (vt) { try { vt.click(); } catch (e) { warn('video tile click failed:', e); } }
-            else warn('video tile not found — cannot swap back to the player');
-        }
+        if (showVideo) showPlayer();
+        if (seekVideo(t, !!play)) log('seek → ' + mmss(t) + ' (shot at ' + mmss(rec.videoOff) + ')' + (play ? ' ▶' : ''));
         selectShot(rec);
     }
     function markActiveTiles(keys) {
@@ -514,6 +531,7 @@
         if (!model || !settings.master) return;
         const v = hookedVideo; if (!v) return;
         const t = v.currentTime;
+        updateBarNow();
         let best = null, bestD = Infinity;
         model.shots.forEach(sh => { if (sh.videoOff == null) return; const d = Math.abs(sh.videoOff - t); if (d < bestD) { bestD = d; best = sh; } });
         // "Current" = the shot whose shutter is within the window, preferring the most recent one already taken.
@@ -646,6 +664,75 @@
     }
 
     // ---------------------------------------------------------------
+    // Time bar (under the player): skip ±10 s (M1) / ±30 s (M2), jump-to-time box, shot ⏮ ⏭.
+    // ---------------------------------------------------------------
+    let barEl = null;
+    function parseTime(str) {
+        const t = String(str || '').trim();
+        if (!t) return null;
+        if (/^\d+(\.\d+)?$/.test(t)) return parseFloat(t);                      // plain seconds
+        const m = t.match(/^(?:(\d+):)?(\d{1,2}):(\d{1,2}(?:\.\d+)?)$/);        // m:ss or h:mm:ss
+        if (m) return (+(m[1] || 0)) * 3600 + (+m[2]) * 60 + parseFloat(m[3]);
+        const m2 = t.match(/^(\d+)m\s*(\d+)?s?$/i);                             // 8m20s
+        if (m2) return (+m2[1]) * 60 + (+(m2[2] || 0));
+        return null;
+    }
+    function ensureBar() {
+        if (!settings.timeBar) { if (barEl) { barEl.remove(); barEl = null; } return null; }
+        const media = document.querySelector('.mp-media');
+        if (!media || !media.parentElement) return null;
+        if (barEl && media.parentElement.contains(barEl)) return barEl;
+        barEl = document.createElement('div');
+        barEl.className = 'aim-vv-bar';
+        barEl.innerHTML = ''
+            + '<button type="button" data-aim-vv-bar="prev-shot" title="Previous shot  ( [ )">⏮ shot</button>'
+            + '<button type="button" data-aim-vv-bar="skip" data-s="-10" data-s2="-30" title="Left-click −10 s · right-click −30 s">‹ 10s</button>'
+            + '<input type="text" class="aim-vv-time" placeholder="m:ss" title="Type a time (m:ss or seconds) and press Enter" spellcheck="false">'
+            + '<button type="button" data-aim-vv-bar="go" title="Jump to the typed time">Go</button>'
+            + '<button type="button" data-aim-vv-bar="skip" data-s="10" data-s2="30" title="Left-click +10 s · right-click +30 s">10s ›</button>'
+            + '<button type="button" data-aim-vv-bar="next-shot" title="Next shot  ( ] )">shot ⏭</button>'
+            + '<span class="aim-vv-bar-now dim"></span>';
+        media.insertAdjacentElement('afterend', barEl);
+        const inp = barEl.querySelector('.aim-vv-time');
+        inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); barGo(); } else if (e.key === 'Escape') { inp.blur(); } });
+        inp.addEventListener('keyup', (e) => e.stopPropagation());
+        barEl.addEventListener('contextmenu', (e) => { const b = e.target.closest('[data-aim-vv-bar="skip"]'); if (b) { e.preventDefault(); e.stopPropagation(); barSkip(Number(b.dataset.s2)); } });
+        return barEl;
+    }
+    function barGo() {
+        const inp = barEl && barEl.querySelector('.aim-vv-time');
+        const t = inp ? parseTime(inp.value) : null;
+        if (t == null) { warn('jump: could not read "' + (inp && inp.value) + '" — use m:ss or seconds'); if (inp) inp.select(); return; }
+        showPlayer();
+        if (seekVideo(t, false)) log('jump → ' + mmss(t));
+        if (inp) inp.blur();
+    }
+    function barSkip(sec) {
+        const v = videoEl(); if (!v) return;
+        showPlayer();
+        if (seekVideo(v.currentTime + sec, false)) log('skip ' + (sec > 0 ? '+' : '') + sec + 's → ' + mmss(v.currentTime));
+    }
+    function onBarClick(e) {
+        const b = e.target.closest && e.target.closest('[data-aim-vv-bar]');
+        if (!b || !model) return;
+        e.preventDefault(); e.stopPropagation();
+        const what = b.dataset.aimVvBar;
+        if (what === 'skip') barSkip(Number(b.dataset.s));
+        else if (what === 'go') barGo();
+        else if (what === 'prev-shot') { showPlayer(); stepShot(-1); }
+        else if (what === 'next-shot') { showPlayer(); stepShot(1); }
+    }
+    function updateBarNow() {
+        if (!barEl) return;
+        const v = videoEl(); if (!v) return;
+        const now = barEl.querySelector('.aim-vv-bar-now');
+        const txt = mmss(v.currentTime) + ' / ' + mmss(v.duration);
+        if (now && now.textContent !== txt) now.textContent = txt;
+        const inp = barEl.querySelector('.aim-vv-time');
+        if (inp && document.activeElement !== inp && inp.value !== mmss(v.currentTime)) inp.value = mmss(v.currentTime);
+    }
+
+    // ---------------------------------------------------------------
     // Shot card
     // ---------------------------------------------------------------
     let cardEl = null;
@@ -711,7 +798,7 @@
         if (seek) {
             e.preventDefault(); e.stopPropagation();
             const rec = model.images.find(r => r.key === seek.dataset.aimVvKey);
-            if (rec) { seekToShot(rec, true); }
+            if (rec) { seekToShot(rec, true, true); }
             return;
         }
         const tile = e.target.closest('.mp-thumbnails__item');
@@ -853,7 +940,7 @@
                     + (st.type_name === 'snapshot' ? (st.location ? ' · GPS aim point' : ' · in-place ' + ((st.extra_options || {}).heading != null ? st.extra_options.heading + '°' : '')) : '')
                     + (shots.length ? ' · shot at ' + shots.map(sh => mmss(sh.videoOff)).join(', ') : (st.type_name === 'snapshot' && !groupOn ? ' · <i>no image</i>' : ''));
                 mk.bindTooltip(tip, { direction: 'top', offset: [0, -10], opacity: 0.95 });
-                if (shots.length) mk.on('click', () => { const sh = shots[0]; seekToShot(sh.primary, true); scrollTileIntoView(sh.primary); });
+                if (shots.length) mk.on('click', () => { const sh = shots[0]; seekToShot(sh.primary, true, true); scrollTileIntoView(sh.primary); });
             } catch (e) { warn('overlay marker failed:', e); }
         });
 
@@ -875,7 +962,7 @@
                     mk.bindTooltip('<b>actual</b> ' + esc(num ? num.n : '?') + ' · ' + mmss(sh.videoOff) + ' · hdg ' + im.drone_heading + '° · cam ' + im.camera_pitch + '° · ' + fmtAlt(im.alt)
                         + (d.hdg != null ? ' · Δhdg ' + signed(d.hdg, '°') : '') + (d.pitch != null ? ' · Δcam ' + signed(d.pitch, '°') : '')
                         + (d.pos != null ? ' · ' + fmtDist(d.pos) + (d.posDir ? ' ' + d.posDir : '') + ' from nav' : '') + (sh.retake ? ' · re-take' : ''), { direction: 'top', offset: [0, -8], opacity: 0.95 });
-                    mk.on('click', () => { seekToShot(im, true); scrollTileIntoView(im); });
+                    mk.on('click', () => { seekToShot(im, true, true); scrollTileIntoView(im); });
                 } catch (e) { warn('overlay actual marker failed:', e); }
             });
         }
@@ -992,6 +1079,7 @@
             stampStrip(true);
             hookVideo();
             ensureCard();
+            ensureBar();
             renderLegend();
             drawOverlay();
             if (settings.overlayGroup) loadGroup();
@@ -1025,6 +1113,7 @@
         if (navBtnEls) { navBtnEls.forEach(b => { try { b.remove(); } catch (e) {} }); navBtnEls = null; }
         document.documentElement.classList.remove('aim-vv-own-nav');
         if (cardEl) { try { cardEl.remove(); } catch (e) {} cardEl = null; }
+        if (barEl) { try { barEl.remove(); } catch (e) {} barEl = null; }
         if (hookedVideo) { try { hookedVideo.removeEventListener('timeupdate', onTimeUpdate); } catch (e) {} hookedVideo = null; }
         selectedRec = null; lastPlayheadShot = null; activeKeys = [];
     }
@@ -1035,7 +1124,7 @@
         if (!ids || !root) { if (current) { log('left playback — tearing down'); deactivate(); } return; }
         if (!current || current.mid !== ids.mid) { if (current) deactivate(); activate(ids); return; }
         if (model) {
-            hookVideo(); scheduleStamp(); ensureCard(); renderLegend();
+            hookVideo(); scheduleStamp(); ensureCard(); ensureBar(); renderLegend(); updateBarNow();
             try { fixCounter(); ensureNavButtons(); } catch (e) { warn('counter/nav:', e); }
             if (settings.overlay && !ov.layers.length) drawOverlay();          // map appeared after load
             else if (ov.map && ov.map._container && !document.body.contains(ov.map._container)) drawOverlay();   // map rebuilt
@@ -1050,7 +1139,7 @@
     let controlPanelDetected = false;
     function applyToggle(id, val) {
         const map = { 'master': 'master', 'strip-order': 'stripOrder', 'badges': 'badges', 'click-seek': 'clickSeek', 'lead-in': 'leadInS', 'shot-card': 'shotCard', 'units': 'units',
-            'overlay': 'overlay', 'overlay-actual': 'overlayActual', 'overlay-labels': 'overlayLabels', 'overlay-group': 'overlayGroup' };
+            'overlay': 'overlay', 'overlay-actual': 'overlayActual', 'overlay-labels': 'overlayLabels', 'overlay-group': 'overlayGroup', 'time-bar': 'timeBar' };
         const key = map[id]; if (!key) return;
         let v = val;
         if (key === 'leadInS') { v = parseFloat(val); if (!isFinite(v) || v < 0 || v > 60) return; }
@@ -1064,6 +1153,7 @@
             if (key === 'shotCard') { ensureCard(); if (selectedRec) renderCard(selectedRec, 'selected'); }
             if (key === 'units' && selectedRec) renderCard(selectedRec, 'selected');
             if (key === 'overlay' || key === 'overlayActual' || key === 'overlayLabels') drawOverlay();
+            if (key === 'timeBar') ensureBar();
             if (key === 'overlayGroup') setGroupMode(v);
         }
     }
@@ -1108,6 +1198,7 @@
                     { id: 'click-seek', label: 'Clicking a thumbnail seeks the video', type: 'boolean', default: DEFAULTS.clickSeek },
                     { id: 'lead-in', label: 'Seek lead-in (seconds before the shot)', type: 'number', default: DEFAULTS.leadInS, min: 0, max: 60 },
                     { id: 'shot-card', label: 'Shot card (planned vs actual)', type: 'boolean', default: DEFAULTS.shotCard },
+                    { id: 'time-bar', label: 'Time bar under the player (±10/30 s, jump to time)', type: 'boolean', default: DEFAULTS.timeBar },
                     { id: 'units', label: 'Units', type: 'select', default: DEFAULTS.units, options: [{ value: 'ft', label: 'ft' }, { value: 'm', label: 'm' }] },
                     { id: 'hdr-map', type: 'header', label: 'Map overlay' },
                     { id: 'overlay', label: 'Plan steps on the map (N# / S#)', type: 'boolean', default: DEFAULTS.overlay },
@@ -1155,6 +1246,7 @@
     if (!IS_TOP) {
         document.addEventListener('click', onGridClick, true);
         document.addEventListener('click', onLegendClick, true);
+        document.addEventListener('click', onBarClick, true);
         window.addEventListener('keydown', fallbackKeys, true);
         tickTimer = setInterval(tick, 1000);
         tick();
