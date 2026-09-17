@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Video Validation v0.32 (prod + dev): the review names the actions behind the changes
+
+- The Review box now lists every action you took, in order (e.g. "1. Convert → GPS aim point S5 · 2. Place on map N5"), above the field-by-field table, and the Adjust footer shows the action count and the last action. Pending edits persist across shot selections until Discard or Apply, which made a forgotten Convert look like a nav move with eight side effects. The saved report carries the action list too. Missions outside a group no longer say "group -1".
+
 ## 2026-09-17 — ⭐ NEW IN PROD: AIM Video Validation v0.31 · Control Panel v1.45
 
 - **AIM Video Validation** is now available to everyone (install link in the README / install guide). On a Mission Playback page (`Mission Log → a flown mission`) it gives you: the snapshot strip in the order the pictures were taken with S# badges; click a thumbnail (or its ▶) to jump the video to that shot; the shot being taken is outlined while the video plays; a shot card with planned vs actual heading / camera angle / drone altitude and how far the drone stood from its nav; the plan's N# / S# steps drawn on the map with each in-place snapshot at its planned look-point, plus every picture's actual position, heading and ground footprint; a whole-mission-group view (per-flight colours, whole-mission numbering) with a flight list that opens the other flights in new tabs; a time bar with ±10 s / ±30 s skip and a jump-to-time box; `[` / `]` step between shots. Colours and line weights are in the Control Panel card.

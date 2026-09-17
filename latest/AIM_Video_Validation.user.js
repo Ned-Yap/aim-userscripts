@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.31
+// @version      0.32
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.31';
+    const SCRIPT_VERSION = '0.32';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -1336,7 +1336,8 @@
     const SHAPE_KEY = 'aim-mission-post-shape-v1';
     const BACKUPS_KEY = 'aim-vv-backups';        // GM: last 20 pre-write app snapshots
     const REPORTS_KEY = 'aim-vv-corrections';    // GM: last 200 before/after reports
-    const ed = { work: null, panelEl: null, reviewEl: null, ghosts: [], tempId: -1, open: false, busy: false };
+    const ed = { work: null, panelEl: null, reviewEl: null, ghosts: [], tempId: -1, open: false, busy: false, log: [] };
+    function edLog(what, step) { ed.log.push({ at: Date.now(), what, step: step ? stepLabel(step) : '' }); }
     const deepCopy = (o) => JSON.parse(JSON.stringify(o));
     const gimbalFromDeg = (deg) => Math.round(2000 + Math.max(-90, Math.min(0, deg)) * (1000 / 90));
     const FT = 1 / M_TO_FT;
@@ -1378,7 +1379,7 @@
 
     // ---- working copy ----
     function edEnsureWork() { if (!ed.work && model) ed.work = deepCopy(model.plan); return ed.work; }
-    function edResetWork() { ed.work = model ? deepCopy(model.plan) : null; drawGhosts(); renderEdit(); }
+    function edResetWork() { ed.work = model ? deepCopy(model.plan) : null; ed.log = []; drawGhosts(); renderEdit(); }
     function wk(id) { return edEnsureWork().find(x => x.id === id) || null; }
     function wkNavOf(step) { const w = edEnsureWork(); for (let k = w.indexOf(step) - 1; k >= 0; k--) if (w[k].type_name === 'navigate') return w[k]; return null; }
     function origOf(id) { return model.byId[id] || null; }
@@ -1631,7 +1632,7 @@
                 + btn('reset-step', 'Reset this step', 'Undo pending changes on this step and its nav') + '</div>';
         }
         html += '<div class="aim-vv-edit__row aim-vv-edit__foot">'
-            + (diff.length ? '<b>' + diff.length + ' pending change' + (diff.length === 1 ? '' : 's') + '</b> ' + btn('review', 'Review & Apply…', 'Show the before/after diff, back up the mission, then write') + btn('discard', 'Discard all', 'Drop every pending change') : '<span class="dim">no pending changes</span>')
+            + (diff.length ? '<b>' + diff.length + ' pending field change' + (diff.length === 1 ? '' : 's') + '</b> <span class="dim">from ' + ed.log.length + ' action' + (ed.log.length === 1 ? '' : 's') + (ed.log.length ? ' (last: ' + esc(ed.log[ed.log.length - 1].what) + (ed.log[ed.log.length - 1].step ? ' ' + esc(ed.log[ed.log.length - 1].step) : '') + ')' : '') + '</span> ' + btn('review', 'Review & Apply…', 'Show the before/after diff, back up the mission, then write') + btn('discard', 'Discard all', 'Drop every pending change') : '<span class="dim">no pending changes</span>')
             + (isLite() ? ' <span class="warn">Lite mode: writes are blocked</span>' : '')
             + (!loadShape() ? ' <span class="warn">no learned save shape yet — open any mission in the Mission Bank and Save once</span>' : '')
             + (!getCsrf() ? ' <span class="warn">no CSRF token seen yet</span>' : '')
@@ -1668,6 +1669,7 @@
         if (!units) return;
         scrub.acc += units;
         const n = units * (e.shiftKey ? 5 : 1);
+        dragKind = scrub.kind; dragUnits += n;
         try { scrubApply(scrub.kind, n); } catch (err) { warn('scrub failed:', err); }
     }
     function onScrubUp() {
@@ -1676,8 +1678,10 @@
         scrub = null;
         document.body.classList.remove('aim-vv-scrubbing');
         try { if (document.pointerLockElement) document.exitPointerLock(); } catch (e) { /* not locked */ }
-        if (wasDrag) { try { renderEdit(true); } catch (e) { /* panel may be closed */ } }   // full re-render once the drag ends
+        if (wasDrag) { if (dragKind && dragKind !== 'time' && dragUnits) { const shot = currentShotForEdit(); const st = shot && shot.step; edLog('drag ' + dragKind + ' ' + (dragUnits > 0 ? '+' : '') + dragUnits, st && st.type_name === 'snapshot' ? wk(st.id) : null); } try { renderEdit(true); } catch (e) { /* panel may be closed */ } }   // full re-render once the drag ends
+        dragKind = null; dragUnits = 0;
     }
+    let dragKind = null, dragUnits = 0;
     function onScrubWheel(e) {
         const el = e.target.closest && e.target.closest('[data-aim-vv-scrub]');
         if (!el || !model) return;
@@ -1745,7 +1749,7 @@
             if (act === 'review') { openReview(); return; }
             if (act === 'discard') { edResetWork(); toast('Pending changes discarded', false); return; }
             if (act === 'close') { ed.open = false; ensureEditPanel(); return; }
-            if (act === 'nav-move' && step) { const nav = wkNavOf(step); if (nav && nav.location) moveNavKeepAim(nav, moveLL(nav.location, Math.abs(n) * (Number(settings.stepFt) || 1) * FT, Number(b.dataset.b))); }
+            if (act === 'nav-move' && step) { const nav = wkNavOf(step); if (nav && nav.location) { moveNavKeepAim(nav, moveLL(nav.location, Math.abs(n) * (Number(settings.stepFt) || 1) * FT, Number(b.dataset.b))); edLog('nav ' + ({ 0: 'N', 90: 'E', 180: 'S', 270: 'W' }[b.dataset.b] || b.dataset.b + '°') + ' ' + Math.abs(n * (Number(settings.stepFt) || 1)) + ' ft', nav); } }
             else if (act === 'nav-keep-aim') { settings.navKeepAim = !settings.navKeepAim; saveSettings(); renderEdit(); return; }
             else if (act === 'nav-place' && step) { setPlacing(ed.placing ? null : { navId: wkNavOf(step) && wkNavOf(step).id }); }
             else if (act === 'nav-set' && step) {
@@ -1755,7 +1759,7 @@
                 const lat = +m[1], lng = +m[2];
                 if (!(Math.abs(lat) <= 90 && Math.abs(lng) <= 180)) { toast('lat/lng out of range', true); return; }
                 if (nav.location && distM(nav.location, { lat, lng }) > 2000) { toast('That is ' + fmtDist(distM(nav.location, { lat, lng })) + ' away — refusing (>2000 m)', true); return; }
-                moveNavKeepAim(nav, { lat, lng });
+                moveNavKeepAim(nav, { lat, lng }); edLog('nav set to ' + lat.toFixed(6) + ', ' + lng.toFixed(6), nav);
             }
             if (act === 'nav-move' || act === 'nav-set') { drawGhosts(); renderEdit(); return; }
             if (act === 'nav-place') { renderEdit(); return; }
@@ -1764,20 +1768,20 @@
                 const ins = (bk.app.instructions || []).slice().sort((a, b2) => a.index_in_app - b2.index_in_app).map(deepCopy);
                 // Match backup steps to CURRENT ids positionally where possible so the diff reads as changes, not delete+add.
                 ins.forEach((st, i) => { const cur = model.plan[i]; if (cur && cur.type === st.type) st.id = cur.id; else { st.id = ed.tempId--; st._new = true; } });
-                ed.work = ins; drawGhosts(); renderEdit();
+                ed.work = ins; ed.log = [{ at: Date.now(), what: 'Restore backup from ' + new Date(bk.at).toLocaleString(), step: '' }]; drawGhosts(); renderEdit();
                 toast('Loaded backup from ' + new Date(bk.at).toLocaleString() + ' — review, then Apply to restore', false);
                 return;
             }
             if (!step) return;
-            if (act === 'turn') edTurn(step, isGps(step) ? n * sf : n * sd);
-            else if (act === 'tilt') edTilt(step, isGps(step) ? n * sa : n * sp);
-            else if (act === 'range') edRange(step, n * sf);
-            else if (act === 'alt') edAlt(step, n * sa);
-            else if (act === 'adopt') { edAdopt(step, shot); delete step._aim; }
-            else if (act === 'convert') { ed.busy = true; edConvertGps(step, shot).then(() => { ed.busy = false; drawGhosts(); renderEdit(); }); return; }
-            else if (act === 'dup') { const c = edDuplicateBlock(step); toast(c ? 'Block duplicated after ' + stepLabel(step) : 'Could not duplicate', !c); }
-            else if (act === 'del') { edDeleteBlock(step); toast('Block ' + stepLabel(step) + ' marked for deletion', false); }
-            else if (act === 'reset-step') { const o = origOf(step.id); const nav = wkNavOf(step); const on = nav && origOf(nav.id); if (o) Object.assign(step, deepCopy(o)); if (on) Object.assign(nav, deepCopy(on)); delete step._aim; }
+            if (act === 'turn') { edTurn(step, isGps(step) ? n * sf : n * sd); edLog((n < 0 ? 'left ' : 'right ') + Math.abs(isGps(step) ? n * (Number(settings.stepFt) || 1) : n * sd) + (isGps(step) ? ' ft' : '°'), step); }
+            else if (act === 'tilt') { edTilt(step, isGps(step) ? n * sa : n * sp); edLog((n > 0 ? 'up ' : 'down ') + Math.abs(isGps(step) ? n * (Number(settings.stepAltFt) || 1) : n * sp) + (isGps(step) ? ' ft' : '°'), step); }
+            else if (act === 'range') { edRange(step, n * sf); edLog((n < 0 ? 'closer ' : 'farther ') + Math.abs(n * (Number(settings.stepFt) || 1)) + ' ft', step); }
+            else if (act === 'alt') { edAlt(step, n * sa); edLog('alt ' + (n > 0 ? '+' : '−') + Math.abs(n * (Number(settings.stepAltFt) || 1)) + ' ft', step); }
+            else if (act === 'adopt') { edAdopt(step, shot); delete step._aim; edLog('Adopt actual shot', step); }
+            else if (act === 'convert') { ed.busy = true; edConvertGps(step, shot).then(ok => { ed.busy = false; if (ok) edLog('Convert → GPS aim point', step); drawGhosts(); renderEdit(); }); return; }
+            else if (act === 'dup') { const c = edDuplicateBlock(step); toast(c ? 'Block duplicated after ' + stepLabel(step) : 'Could not duplicate', !c); if (c) edLog('Duplicate block after', step); }
+            else if (act === 'del') { edDeleteBlock(step); toast('Block ' + stepLabel(step) + ' marked for deletion', false); edLog('Delete block', step); }
+            else if (act === 'reset-step') { const o = origOf(step.id); const nav = wkNavOf(step); const on = nav && origOf(nav.id); if (o) Object.assign(step, deepCopy(o)); if (on) Object.assign(nav, deepCopy(on)); delete step._aim; edLog('Reset step', step); }
             drawGhosts(); renderEdit();
         } catch (err) { warn('edit action failed:', err); toast('Edit failed: ' + err.message, true); }
     }
@@ -1799,7 +1803,7 @@
         setPlacing(null);
         if (!ll || !nav) { renderEdit(); return; }
         if (nav.location && distM(nav.location, ll) > 2000) { toast('That is ' + fmtDist(distM(nav.location, ll)) + ' from the nav — refusing (>2000 m)', true); renderEdit(); return; }
-        moveNavKeepAim(nav, ll);
+        moveNavKeepAim(nav, ll); edLog('Place on map', nav);
         drawGhosts(); renderEdit();
         toast('Nav ' + stepLabel(nav) + ' moved — review to apply', false);
     }
@@ -1816,7 +1820,9 @@
         if (!csrf) blockers.push('No CSRF token seen in this tab yet');
         const rows = diff.map(d => '<tr><td>' + esc(d.label) + '</td><td>' + esc(d.kind) + (d.field ? ' · ' + esc(d.field) : '') + '</td><td>' + esc(d.before != null ? d.before : '') + '</td><td>' + esc(d.after != null ? d.after : '') + '</td><td class="dim">' + esc(d.note || '') + '</td></tr>').join('');
         const el = document.createElement('div'); el.className = 'aim-vv-review';
-        el.innerHTML = '<div class="aim-vv-review__box"><div><b>Review changes to mission "' + esc(model.mission.name || model.mission.app_name) + '"</b> <span class="dim">(app ' + esc(model.mission.app && model.mission.app.id) + ' · affects every future flight of group ' + esc(model.mission.mission_group_id) + ')</span></div>'
+        const actions = ed.log.length ? '<div class="dim" style="margin:4px 0">actions: ' + ed.log.map((a, i) => (i + 1) + '. ' + esc(a.what) + (a.step ? ' <b>' + esc(a.step) + '</b>' : '')).join(' · ') + '</div>' : '';
+        const grp = model.mission.mission_group_id;
+        el.innerHTML = '<div class="aim-vv-review__box"><div><b>Review changes to mission "' + esc(model.mission.name || model.mission.app_name) + '"</b> <span class="dim">(app ' + esc(model.mission.app && model.mission.app.id) + (grp != null && grp >= 0 ? ' · affects every future flight of group ' + esc(grp) : ' · not part of a mission group') + ')</span></div>' + actions
             + '<table><tr class="dim"><td>step</td><td>change</td><td>before</td><td>after</td><td></td></tr>' + rows + '</table>'
             + '<div class="dim" style="margin:6px 0">Rails: the plan is re-read and compared first · a full JSON backup is saved (script storage + download) · ONE save · re-read and verified · a before/after report is saved + downloaded.</div>'
             + (function() { try { const app = model.mission.app; const r = resolveSelectedRobot(app); if (!r.value) blockers.push('Cannot resolve selected_robot: ' + r.from); const rep = Array.isArray(app.data_report_object_arr) ? app.data_report_object_arr.map(x => x && (x.name || x.id)).join(', ') : 'none'; return '<div class="dim">will send: name "' + esc(app.name) + '" · type ' + esc(app.type) + ' · site_id ' + esc(app.site) + ' · app_id ' + esc(app.id) + ' · selected_robot <b>' + esc(r.value || '?') + '</b> <span class="dim">(' + esc(r.from) + ')</span> · reports: ' + esc(rep) + ' · ' + edEnsureWork().length + ' instructions</div>'; } catch (e) { blockers.push('preflight failed: ' + e.message); return ''; } })()
@@ -1903,13 +1909,13 @@
             if (repB !== repA) mism.push('data reports changed: ' + repB + ' → ' + repA);
             if (afterIns.length !== ed.work.length) mism.push('step count ' + afterIns.length + ' ≠ expected ' + ed.work.length);
             ed.work.forEach((w, i) => { const a = afterIns[i]; if (!a) return; const wa = deepCopy(w); delete wa._new; const dd = fieldDiffs(Object.assign({ type_name: w.type_name }, a), Object.assign({ type_name: w.type_name }, wa)); if (a.type !== w.type) mism.push('#' + i + ' type ' + a.type + ' ≠ ' + w.type); dd.forEach(d => mism.push('#' + i + ' ' + d.field + ': server ' + d.before + ' vs sent ' + d.after)); });
-            const report = { at, mid, sid, appId: fresh.app.id, name: fresh.app.name, group: model.mission.mission_group_id, changes: diff, verify: { ok: !mism.length, mismatches: mism }, httpStatus: r.status };
+            const report = { at, mid, sid, appId: fresh.app.id, name: fresh.app.name, group: model.mission.mission_group_id, actions: ed.log.map(a => ({ at: new Date(a.at).toISOString(), what: a.what, step: a.step })), changes: diff, verify: { ok: !mism.length, mismatches: mism }, httpStatus: r.status };
             gmPush(REPORTS_KEY, report, 200); download('vv-correction-' + mid + '-' + stamp + '.json', report);
             if (mism.length) { warn('verify mismatches:', mism); toast('Saved, but ' + mism.length + ' field(s) read back differently — see console + report', true); }
             else toast('✅ Saved ' + diff.length + ' change' + (diff.length === 1 ? '' : 's') + ' · verified · backup + report downloaded', false);
             status(mism.length ? 'saved with ' + mism.length + ' mismatch(es)' : 'saved + verified');
             if (ed.reviewEl) { ed.reviewEl.remove(); ed.reviewEl = null; }
-            ed.work = null; ed.busy = false;
+            ed.work = null; ed.log = []; ed.busy = false;
             const ids = current; deactivate(); if (ids) activate(ids);
             return;
         } catch (e) {
