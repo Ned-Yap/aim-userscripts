@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.12
+// @version      0.13
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -29,7 +29,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-video-validation';
-    const SCRIPT_VERSION = '0.12';
+    const SCRIPT_VERSION = '0.13';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -311,6 +311,18 @@
             .aim-vv-card .ok { color: #5fff5f; } .aim-vv-card .warn { color: #ffb347; } .aim-vv-card .bad { color: #ff5f5f; }
             .aim-vv-card .dim { color: #888; }
             .aim-vv-legend { margin-top: 0; }
+            .mp-data.aim-vv-split, .aim-vv-split { display: grid !important; grid-template-columns: minmax(0, 1fr) minmax(320px, 46%); column-gap: 24px; align-items: start; }
+            .aim-vv-split > :not(.aim-vv-group) { grid-column: 1; }
+            .aim-vv-group { grid-column: 2; grid-row: 1 / span 20; align-self: start; font: 11px/1.45 monospace; color: #e6e6e6;
+                padding: 8px 10px; border: 1px solid rgba(95,227,255,.35); border-radius: 4px; background: rgba(10,14,18,.85); }
+            .aim-vv-group b { color: #5fe3ff; } .aim-vv-group .dim { color: #888; } .aim-vv-group .bad { color: #ff5f5f; }
+            .aim-vv-group__head { margin-bottom: 4px; }
+            .aim-vv-group__toggle { color: #5fe3ff; margin-left: 8px; }
+            .aim-vv-group__hint { margin-bottom: 4px; }
+            .aim-vv-group__list { border-collapse: collapse; width: 100%; }
+            .aim-vv-group__list td { padding: 1px 8px 1px 0; white-space: nowrap; }
+            .aim-vv-group__list a { color: #5fe3ff; text-decoration: none; }
+            .aim-vv-group__self td { background: rgba(95,227,255,.07); }
             .aim-vv-bar { display: flex; align-items: center; gap: 6px; padding: 4px 8px; font: 11px/1.3 monospace; color: #e6e6e6;
                 background: rgba(10,14,18,.85); border-bottom: 1px solid rgba(95,227,255,.25); }
             .aim-vv-bar button { background: #1f2228; color: #5fe3ff; border: 1px solid rgba(95,227,255,.5); border-radius: 3px; padding: 2px 8px; font: inherit; cursor: pointer; }
@@ -1025,23 +1037,96 @@
         if (on) { if (ov.group) { computeNumbering(model, true); stampStrip(true); drawOverlay(); renderLegend(); } else loadGroup(); }
         else { computeNumbering(model, false); stampStrip(true); drawOverlay(); renderLegend(); if (selectedRec) renderCard(selectedRec, 'selected'); }
     }
-    // Flight legend / picker under the shot card: every flight of the group, click = open in a new tab.
-    let legendEl = null;
+    // Group panel: the Mission Data block becomes two columns — Percepto's fields left, our flight list right.
+    // Per-flight metadata (name / when / duration / images) from the mission-log list endpoint (one call),
+    // per-mission fallback for ids the list omits. Step ranges arrive when the group positions load.
+    const groupMeta = {};          // mid -> { name, when, duration, image_count, drone_name, state, landed }
+    let groupMetaLoading = false;
+    let groupHost = null, groupPanelEl = null, groupHostLogged = false;
+    function fmtWhen(iso) {
+        if (!iso) return '–';
+        try { const d = new Date(iso); return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }); }
+        catch (e) { return String(iso).slice(0, 16); }
+    }
+    function groupIds() {
+        if (!model) return [];
+        const ids = [Number(model.mid)].concat((model.mission.attached_missions || []).map(Number));
+        return Array.from(new Set(ids.filter(x => x > 0)));
+    }
+    function loadGroupMeta() {
+        if (!model || groupMetaLoading) return;
+        const ids = groupIds().filter(id => !groupMeta[id]);
+        if (!ids.length) return;
+        groupMetaLoading = true;
+        const m0 = model.mission;
+        groupMeta[Number(model.mid)] = { name: m0.name || m0.app_name, when: m0.when, duration: m0.duration, image_count: m0.image_count, drone_name: m0.drone_name, state: m0.state, landed: m0.landed };
+        const rest = ids.filter(id => id !== Number(model.mid));
+        const end = new Date(), start = new Date(); start.setFullYear(start.getFullYear() - 2);
+        const fmt = (d) => d.toISOString().slice(0, 10);
+        const params = { site_id: Number(model.sid), drones: [], missionTypes: [], missionId: rest, users: [], state: null, takeoffCompleted: false, start: fmt(start), end: fmt(end), last_mission_id: -1 };
+        const only = 'id,mission_group_id,drone_name,when,image_count,created_by_username,app_name,name,type,state,duration,landed';
+        const url = '/missions/?site_id=' + encodeURIComponent(model.sid) + '&params=' + encodeURIComponent(JSON.stringify(params)) + '&only=' + encodeURIComponent(only);
+        (rest.length ? getJSON(url) : Promise.resolve({})).then(j => {
+            const rows = ((j && j.past_missions) || []).concat((j && j.upcoming_missions) || []);
+            rows.forEach(r => { if (rest.includes(Number(r.id))) groupMeta[Number(r.id)] = { name: r.name || r.app_name, when: r.when, duration: r.duration, image_count: r.image_count, drone_name: r.drone_name, state: r.state, landed: r.landed }; });
+            const missing = rest.filter(id => !groupMeta[id]);
+            if (missing.length) log('group meta: list endpoint returned ' + (rest.length - missing.length) + '/' + rest.length + ' — fetching ' + missing.length + ' individually');
+            return missing.reduce((pr, id) => pr.then(() => getJSON('/missions/' + id + '/').then(m => { groupMeta[id] = { name: m.name || m.app_name, when: m.when, duration: m.duration, image_count: m.image_count, drone_name: m.drone_name, state: m.state, landed: m.landed }; }).catch(e => { warn('group meta ' + id + ':', e.message); groupMeta[id] = { error: e.message }; })), Promise.resolve());
+        }).catch(e => { warn('group meta list failed:', e.message); return rest.reduce((pr, id) => pr.then(() => getJSON('/missions/' + id + '/').then(m => { groupMeta[id] = { name: m.name || m.app_name, when: m.when, duration: m.duration, image_count: m.image_count, drone_name: m.drone_name, state: m.state, landed: m.landed }; }).catch(e2 => { groupMeta[id] = { error: e2.message }; })), Promise.resolve()); })
+        .then(() => { groupMetaLoading = false; renderLegend(); });
+    }
+    function findGroupHost() {
+        let host = document.querySelector('.mp-data');
+        if (!host) {
+            host = Array.from(document.querySelectorAll('.mp-right div')).find(d => d.children.length >= 2 && /^MISSION DATA/i.test(d.textContent.trim()) && d.textContent.length < 600) || null;
+        }
+        if (host && !groupHostLogged) {
+            groupHostLogged = true;
+            log('group panel host: ' + host.tagName + '.' + String(host.className).slice(0, 60) + ' → children: ' + Array.from(host.children).map(c => c.tagName + '.' + String(c.className).slice(0, 40)).join(', '));
+        }
+        return host;
+    }
+    let legendEl = null;   // kept as an alias of the panel for older call sites
     function renderLegend() {
-        const card = ensureCard();
-        if (!card) return;
-        if (legendEl && !card.parentElement.contains(legendEl)) legendEl = null;
-        if (!legendEl) { legendEl = document.createElement('div'); legendEl.className = 'aim-vv-card aim-vv-legend'; card.insertAdjacentElement('afterend', legendEl); }
-        const others = (model.mission.attached_missions || []).length;
-        let html;
-        if (!ov.group) {
-            html = '<span class="dim">Mission group ' + esc(model.mission.mission_group_id) + ' · this flight + ' + others + ' other' + (others === 1 ? '' : 's') + ' · </span>'
-                + '<a href="#" data-aim-vv="load-group" style="color:#5fe3ff">' + (ov.groupLoading ? 'loading flights…' : 'show all flights (whole-mission numbering)') + '</a>';
-        } else html = '<span class="dim">flights: </span>' + ov.group.map(g =>
-            '<a href="#" data-aim-vv="open-flight" data-mid="' + g.mid + '" title="open in a new tab" style="color:' + g.color + ';margin-right:10px;text-decoration:none">● ' + esc(g.label) + ' <span class="dim">' + (g.minIdx != null ? 'steps ' + g.minIdx + '–' + g.maxIdx : (g.error ? 'error' : 'no steps')) + '</span></a>').join('')
-            + ' · <a href="#" data-aim-vv="toggle-group" style="color:#5fe3ff">' + (settings.overlayGroup ? 'this flight only' : 'whole mission') + '</a>'
-            + (settings.overlayGroup ? ' <span class="dim">· grey dots = not flown by any flight in this group yet · labels appear when zoomed in</span>' : '');
-        if (legendEl.innerHTML !== html) legendEl.innerHTML = html;   // called every tick — only touch the DOM on change
+        if (!model) return;
+        const host = findGroupHost();
+        if (!host) return;
+        if (groupHost !== host || !groupPanelEl || !host.contains(groupPanelEl)) {
+            groupHost = host;
+            host.classList.add('aim-vv-split');
+            groupPanelEl = document.createElement('div');
+            groupPanelEl.className = 'aim-vv-group';
+            host.appendChild(groupPanelEl);
+            legendEl = groupPanelEl;
+        }
+        const ids = groupIds();
+        // Order: by flight time when known (this flight's `when` is always known), else by id.
+        const rows = ids.map(mid => {
+            const meta = groupMeta[mid] || {};
+            const g = ov.group ? ov.group.find(x => x.mid === mid) : null;
+            return { mid, meta, g, self: mid === Number(model.mid), when: meta.when ? new Date(meta.when).getTime() : (g && g.first) || 0 };
+        }).sort((a, b) => (a.when || 0) - (b.when || 0) || a.mid - b.mid);
+        const groupOn = !!(settings.overlayGroup && ov.group);
+        let html = '<div class="aim-vv-group__head"><b>Mission group ' + esc(model.mission.mission_group_id) + '</b> <span class="dim">· ' + ids.length + ' flight' + (ids.length === 1 ? '' : 's') + '</span>'
+            + ' <a href="#" data-aim-vv="' + (ov.group ? 'toggle-group' : 'load-group') + '" class="aim-vv-group__toggle">'
+            + (ov.groupLoading ? 'loading flights…' : (ov.group ? (settings.overlayGroup ? 'this flight only' : 'whole mission on map') : 'whole mission on map')) + '</a></div>'
+            + (groupOn ? '<div class="dim aim-vv-group__hint">colors = flight that flew each step · grey = not flown yet · labels at close zoom</div>' : '');
+        html += '<table class="aim-vv-group__list">' + rows.map((r, i) => {
+            const m = r.meta, g = r.g;
+            const color = g ? g.color : (r.self ? '#5fe3ff' : '#8a8f99');
+            const steps = g ? (g.minIdx != null ? g.minIdx + '–' + g.maxIdx : (g.error ? 'error' : '∅')) : '';
+            const dur = typeof m.duration === 'number' ? mmss(m.duration / 1000) : '';
+            const url = location.origin + '/#/site/' + model.sid + '/control-panel/past-mission/' + r.mid;
+            return '<tr class="' + (r.self ? 'aim-vv-group__self' : '') + '">'
+                + '<td><span style="color:' + color + '">●</span> <span class="dim">#' + (i + 1) + '</span></td>'
+                + '<td>' + (r.self ? '<b>' + r.mid + '</b> <span class="dim">(this)</span>' : '<a href="' + url + '" target="_blank" rel="noopener" data-aim-vv="open-flight" data-mid="' + r.mid + '" title="open in a new tab">' + r.mid + ' ↗</a>') + '</td>'
+                + '<td class="dim">' + esc(fmtWhen(m.when)) + '</td>'
+                + '<td class="dim">' + (dur || (m.error ? '<span class="bad">meta error</span>' : (groupMetaLoading ? '…' : ''))) + '</td>'
+                + '<td class="dim">' + (m.image_count != null ? m.image_count + ' img' : '') + '</td>'
+                + '<td class="dim">' + (steps ? 'steps ' + steps : (ov.groupLoading ? '…' : '')) + '</td>'
+                + '</tr>';
+        }).join('') + '</table>';
+        if (groupPanelEl.innerHTML !== html) groupPanelEl.innerHTML = html;   // called every tick — only touch the DOM on change
     }
     function onLegendClick(e) {
         const a = e.target.closest && e.target.closest('[data-aim-vv]');
@@ -1053,6 +1138,7 @@
         else if (what === 'open-flight') {
             const url = location.origin + '/#/site/' + model.sid + '/control-panel/past-mission/' + a.dataset.mid;
             try { pageWin.top.open(url, '_blank'); } catch (err) { window.open(url, '_blank'); }
+            log('opened flight ' + a.dataset.mid + ' in a new tab');
         }
     }
     // ---------------------------------------------------------------
@@ -1081,6 +1167,7 @@
             ensureCard();
             ensureBar();
             renderLegend();
+            loadGroupMeta();
             drawOverlay();
             if (settings.overlayGroup) loadGroup();
             if (!observer) {
@@ -1109,7 +1196,9 @@
         try { if (ov.zoomHooked && ov.zoomHookedMap) ov.zoomHookedMap.off('zoomend', onOverlayZoom); } catch (e) { /* map gone */ }
         ov.zoomHooked = false; ov.zoomHookedMap = null;
         ov.group = null; ov.groupLoading = false; ov.map = null; ov.svg = null; activeOverlayKey = null;
-        if (legendEl) { try { legendEl.remove(); } catch (e) {} legendEl = null; }
+        if (groupPanelEl) { try { groupPanelEl.remove(); } catch (e) {} }
+        if (groupHost) { try { groupHost.classList.remove('aim-vv-split'); } catch (e) {} }
+        groupPanelEl = null; groupHost = null; legendEl = null; groupMetaLoading = false;
         if (navBtnEls) { navBtnEls.forEach(b => { try { b.remove(); } catch (e) {} }); navBtnEls = null; }
         document.documentElement.classList.remove('aim-vv-own-nav');
         if (cardEl) { try { cardEl.remove(); } catch (e) {} cardEl = null; }
