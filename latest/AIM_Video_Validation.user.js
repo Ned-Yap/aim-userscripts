@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.5
+// @version      0.6
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -28,7 +28,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-video-validation';
-    const SCRIPT_VERSION = '0.5';
+    const SCRIPT_VERSION = '0.6';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -276,7 +276,11 @@
         styleEl.id = 'aim-vv-style';
         styleEl.textContent = `
             .aim-vv-tile { position: relative; }
-            .pr-image-nav-btn.aim-vv-arrow-on { opacity: 1 !important; pointer-events: auto !important; cursor: pointer !important; }
+            .aim-vv-nav { position: absolute; bottom: 14px; z-index: 20; width: 34px; height: 34px; border-radius: 50%;
+                border: 1px solid rgba(95,227,255,.7); background: rgba(10,14,18,.8); color: #5fe3ff; font: 700 22px/30px monospace; cursor: pointer; }
+            .aim-vv-nav:hover { background: #5fe3ff; color: #04222a; }
+            .aim-vv-nav--prev { left: 14px; } .aim-vv-nav--next { right: 14px; }
+            .aim-vv-nav--off { opacity: .25; cursor: default; }
             .aim-vv-badge { position: absolute; left: 3px; top: 3px; z-index: 3; pointer-events: none;
                 font: 800 10px/14px monospace; padding: 0 4px; border-radius: 3px; color: #04222a;
                 background: #ff7ad9; box-shadow: 0 1px 3px rgba(0,0,0,.6); }
@@ -325,6 +329,21 @@
     // The element whose CSS `order` matters = the grid's direct child holding this tile (Percepto may wrap it).
     function orderEl(grid, tile) { let el = tile; while (el && el.parentElement !== grid) el = el.parentElement; return el || tile; }
     const badgeLossLogged = {};
+    // Circuit breaker: if something re-renders the strip in a loop we must not amplify it into a frozen tab.
+    const stampLog = [];
+    let stampCooldownUntil = 0;
+    function stampBudget() {
+        const now = Date.now();
+        if (now < stampCooldownUntil) return false;
+        while (stampLog.length && now - stampLog[0] > 1000) stampLog.shift();
+        stampLog.push(now);
+        if (stampLog.length > 20) {
+            stampCooldownUntil = now + 5000;
+            warn('strip re-stamped ' + stampLog.length + '× in 1 s — backing off for 5 s (something re-renders the strip in a loop)');
+            return false;
+        }
+        return true;
+    }
     function stampStrip(force) {
         const grid = stripGrid();
         if (!grid || !model) return;
@@ -334,14 +353,20 @@
         const stamp = model.mid + ':' + settings.stripOrder + ':' + settings.badges + ':' + model.numberingGlobal;
         // Percepto's re-render WIPES a tile's children (our badge + ▶) but keeps the element, so the
         // stamp alone is not enough — a matched tile must still hold its badge.
+        const srcKeyOf = (t) => { const im = t.querySelector('img'); return im ? imgKey(im.currentSrc || im.src) : ''; };
+        // Re-rendered tiles get their <img src> a moment AFTER they appear — an unmatched tile must be retried
+        // once its src changes, or it sits unbadged at the front of the strip forever.
         const stale = tiles.some(t => t.dataset.aimVvStamp !== stamp
+            || t.dataset.aimVvSrc !== srcKeyOf(t)
             || (settings.badges && t.dataset.aimVvKey && !t.querySelector('.aim-vv-badge')));
         if (!force && !stale) return;
+        if (!stampBudget()) return;
         let matched = 0;
         tiles.forEach((tile, i) => {
             const rec = tileImage(tile);
             tile.classList.add('aim-vv-tile');
             tile.dataset.aimVvStamp = stamp;
+            tile.dataset.aimVvSrc = srcKeyOf(tile);
             if (rec) tile.dataset.aimVvKey = rec.key; else delete tile.dataset.aimVvKey;
             // Order: video tile (no image record) pinned first, then shutter order (RGB, T, G within a pair).
             if (settings.stripOrder) {
@@ -374,13 +399,20 @@
         // Diagnostic: a matched tile that STILL has no badge right after stamping → Percepto's structure
         // differs from what we expect; log its DOM once per image so the next fix is not a guess.
         if (settings.badges) {
+            let unmatched = 0;
             tiles.forEach(tile => {
                 const k = tile.dataset.aimVvKey;
                 if (k && !tile.querySelector('.aim-vv-badge') && !badgeLossLogged[k]) {
                     badgeLossLogged[k] = true;
                     warn('badge missing right after stamp on', k, '→ tile DOM:', tile.outerHTML.slice(0, 600), '| parent:', tile.parentElement && tile.parentElement.className);
                 }
+                if (!k) unmatched++;
             });
+            if (unmatched > 1 && !badgeLossLogged.__unmatched) {   // 1 = the video tile, expected
+                badgeLossLogged.__unmatched = true;
+                const t = tiles.find(x => !x.dataset.aimVvKey && x !== tiles[0]);
+                warn('tiles not matched to an image: ' + unmatched + ' (video tile + ' + (unmatched - 1) + ') — sample:', t ? t.outerHTML.slice(0, 500) : '');
+            }
         }
         // Re-rendered tiles lost the playhead outline too — re-apply it.
         const keys = activeKeys; activeKeys = []; markActiveTiles(keys);
@@ -398,7 +430,7 @@
             orderEl(grid, tile).style.order = '';
             tile.classList.remove('aim-vv-tile', 'aim-vv-tile--active');
             tile.querySelectorAll('.aim-vv-badge, .aim-vv-seek').forEach(el => el.remove());
-            delete tile.dataset.aimVvStamp; delete tile.dataset.aimVvKey;
+            delete tile.dataset.aimVvStamp; delete tile.dataset.aimVvKey; delete tile.dataset.aimVvSrc;
         });
     }
 
@@ -499,6 +531,7 @@
         if (!t) { warn('no tile for', rec && rec.name); return; }
         try { t.click(); } catch (e) { warn('tile click failed:', e); }
         if (settings.clickSeek) seekToShot(rec, false); else selectShot(rec);
+        setTimeout(() => { try { fixCounter(); ensureNavButtons(); } catch (e) { warn('nav refresh:', e); } }, 60);
         try { t.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (e) { /* cosmetic */ }
     }
     function stepStill(dir) {
@@ -509,14 +542,6 @@
         showStill(next);
         return true;
     }
-    function navArrows() {
-        const media = document.querySelector('.mp-media'); if (!media) return null;
-        const btns = Array.from(media.querySelectorAll('.pr-image-nav-btn')); if (btns.length < 2) return null;
-        const m = media.getBoundingClientRect();
-        let prev = null, next = null;
-        btns.forEach(b => { const r = b.getBoundingClientRect(); if ((r.left + r.width / 2) < (m.left + m.width / 2)) prev = b; else next = b; });
-        return (prev && next) ? { prev, next } : null;
-    }
     function fixCounter() {
         const cur = currentStillRec();
         if (!cur || !settings.stripOrder) return;
@@ -525,16 +550,45 @@
             const want = cur.rank + ' / ' + model.images.length;
             if (c.textContent.trim() !== want) { c.textContent = want; c.title = 'AIM order (oldest first)'; }
         }
-        // Percepto greys its arrows at ITS list ends (newest-first) — re-assert them for OUR ends.
-        const a = navArrows();
-        if (a) {
-            const atFirst = cur.rank <= 1, atLast = cur.rank >= model.images.length;
-            [[a.prev, atFirst], [a.next, atLast]].forEach(([b, off]) => {
-                if (b.disabled !== off) b.disabled = off;
-                b.classList.toggle('aim-vv-arrow-on', !off);
-                if (off) b.classList.remove('aim-vv-arrow-on');
-            });
-        }
+    }
+    // Our own ‹ › buttons in the still viewer. Percepto hides/disables its arrow at ITS list end (newest-first),
+    // and fighting React for its `disabled` state is a loop waiting to happen — so we add our own pair that
+    // always exists and walks OUR order. Percepto's arrows are still redirected when they are clickable.
+    let navBtnEls = null;
+    function ensureNavButtons() {
+        const media = document.querySelector('.mp-media');
+        const wantOn = !!(model && settings.master && settings.stripOrder && media && stillImg());
+        if (!wantOn) { if (navBtnEls) { navBtnEls.forEach(b => { try { b.remove(); } catch (e) {} }); navBtnEls = null; } return; }
+        if (navBtnEls && navBtnEls.every(b => media.contains(b))) { updateNavButtons(); return; }
+        if (navBtnEls) navBtnEls.forEach(b => { try { b.remove(); } catch (e) {} });
+        navBtnEls = [-1, 1].map(dir => {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'aim-vv-nav aim-vv-nav--' + (dir < 0 ? 'prev' : 'next');
+            b.dataset.aimVvDir = String(dir);
+            b.innerHTML = dir < 0 ? '&#8249;' : '&#8250;';
+            b.title = (dir < 0 ? 'Previous' : 'Next') + ' image (flight order)';
+            media.appendChild(b);
+            return b;
+        });
+        updateNavButtons();
+    }
+    function updateNavButtons() {
+        if (!navBtnEls) return;
+        const cur = currentStillRec();
+        const n = model ? model.images.length : 0;
+        navBtnEls.forEach(b => {
+            const dir = Number(b.dataset.aimVvDir);
+            const off = !cur || (dir < 0 ? cur.rank <= 1 : cur.rank >= n);
+            if (b.classList.contains('aim-vv-nav--off') !== off) b.classList.toggle('aim-vv-nav--off', off);
+        });
+    }
+    function onOurNavClick(e) {
+        const b = e.target.closest && e.target.closest('.aim-vv-nav');
+        if (!b || !model) return;
+        e.preventDefault(); e.stopPropagation();
+        if (b.classList.contains('aim-vv-nav--off')) return;
+        stepStill(Number(b.dataset.aimVvDir));
     }
     // Percepto's ‹ › buttons: decide direction by position (left/right of the media pane),
     // swallow the native handler, step in our order instead.
@@ -547,7 +601,7 @@
         const r = btn.getBoundingClientRect(), m = media.getBoundingClientRect();
         const dir = (r.left + r.width / 2) < (m.left + m.width / 2) ? -1 : 1;
         e.preventDefault(); e.stopPropagation();
-        stepStill(dir);
+        if (!stepStill(dir)) log('arrow: no current still — ignored');
     }
 
     // ---------------------------------------------------------------
@@ -609,6 +663,7 @@
     // ---------------------------------------------------------------
     function onGridClick(e) {
         if (!model || !settings.master) return;
+        if (e.target.closest && e.target.closest('.aim-vv-nav')) { onOurNavClick(e); return; }
         if (e.target.closest && e.target.closest('.pr-image-nav-btn')) { onNavArrowClick(e); return; }
         const grid = stripGrid(); if (!grid || !grid.contains(e.target)) return;
         const seek = e.target.closest('.aim-vv-seek');
@@ -856,9 +911,9 @@
     let tickTimer = null;
     let stampTimer = null;
 
-    function scheduleStamp() {
+    function scheduleStamp(ms) {
         if (stampTimer) return;
-        stampTimer = setTimeout(() => { stampTimer = null; try { stampStrip(false); fixCounter(); } catch (e) { warn('stamp failed:', e); } }, 150);
+        stampTimer = setTimeout(() => { stampTimer = null; try { stampStrip(false); fixCounter(); ensureNavButtons(); } catch (e) { warn('stamp failed:', e); } }, ms || 150);
     }
 
     function activate(ids) {
@@ -878,11 +933,18 @@
             if (!observer) {
                 observer = new MutationObserver((muts) => {
                     if (!model) return;
-                    const hot = muts.some(mu => { const t = mu.target; return t && t.closest && t.closest('.mp-thumbnails, .mp-media'); });
-                    if (hot) { try { stampStrip(false); fixCounter(); } catch (e) { warn('stamp (hot) failed:', e); } }
-                    else scheduleStamp();
+                    // Ignore our own writes (badges, ▶, nav buttons, card) — reacting to them is how loops start.
+                    const ours = (n) => n && n.nodeType === 1 && (n.className || '').toString().indexOf('aim-vv') === 0;
+                    const hot = muts.some(mu => {
+                        const t = mu.target;
+                        if (!t || !t.closest) return false;
+                        if (t.closest('.aim-vv-card, .aim-vv-legend')) return false;
+                        if (mu.type === 'childList' && Array.from(mu.addedNodes).concat(Array.from(mu.removedNodes)).every(ours) && (mu.addedNodes.length || mu.removedNodes.length)) return false;
+                        return !!t.closest('.mp-thumbnails, .mp-media');
+                    });
+                    scheduleStamp(hot ? 30 : 150);   // always deferred — never mutate the DOM inside an observer callback
                 });
-                observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled', 'class', 'src'] });
+                observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
             }
             log('ready v' + SCRIPT_VERSION + ' — mission ' + ids.mid);
         }).catch(e => { warn('load failed:', e); loading = null; });
@@ -893,6 +955,7 @@
         try { clearOverlay(); } catch (e) { warn('overlay clear failed:', e); }
         ov.group = null; ov.groupLoading = false; ov.map = null; ov.svg = null; activeOverlayKey = null;
         if (legendEl) { try { legendEl.remove(); } catch (e) {} legendEl = null; }
+        if (navBtnEls) { navBtnEls.forEach(b => { try { b.remove(); } catch (e) {} }); navBtnEls = null; }
         if (cardEl) { try { cardEl.remove(); } catch (e) {} cardEl = null; }
         if (hookedVideo) { try { hookedVideo.removeEventListener('timeupdate', onTimeUpdate); } catch (e) {} hookedVideo = null; }
         selectedRec = null; lastPlayheadShot = null; activeKeys = [];
@@ -905,7 +968,7 @@
         if (!current || current.mid !== ids.mid) { if (current) deactivate(); activate(ids); return; }
         if (model) {
             hookVideo(); scheduleStamp(); ensureCard(); renderLegend();
-            try { fixCounter(); } catch (e) { warn('counter:', e); }
+            try { fixCounter(); ensureNavButtons(); } catch (e) { warn('counter/nav:', e); }
             if (settings.overlay && !ov.layers.length) drawOverlay();          // map appeared after load
             else if (ov.map && ov.map._container && !document.body.contains(ov.map._container)) drawOverlay();   // map rebuilt
             markActiveOverlay();

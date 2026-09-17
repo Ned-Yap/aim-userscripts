@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-16 — AIM Video Validation latest v0.6: no more page freeze, own ‹ › buttons, badges on re-rendered tiles (dev only)
+
+- v0.5 could lock the tab when stepping to the first image: the strip observer mutated the DOM inside its own callback and re-asserted Percepto's arrow state against React. All strip work is now deferred, our own writes are ignored by the observer, and a circuit breaker backs off (with a console warning) if the strip is re-stamped more than 20× in a second.
+- The still viewer gets its **own ‹ › buttons** (bottom corners of the picture) that always exist and walk the flight order; Percepto's arrows are left alone (they still work when Percepto shows them).
+- Re-rendered tiles receive their image a moment after they appear; they are now re-matched when the source arrives instead of sitting unbadged at the front of the strip.
+
 ## 2026-09-16 — AIM Video Validation latest v0.5: plan steps + actual shots on the playback map, mission-group view (dev only)
 
 - **Map overlay** — the plan's steps drawn on the playback map: N# nav circles, S# snapshot squares (GPS snapshots at their aim point with a dashed nav→aim sightline; in-place snapshots beside their nav with a heading tick), 🚩 flag poles, dashed nav→nav flight line. Hover = step, type, when it was shot. Click an S# = seek the video there.
