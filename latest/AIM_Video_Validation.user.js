@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.49
+// @version      0.50
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.49';
+    const SCRIPT_VERSION = '0.50';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -2351,6 +2351,18 @@
             rows.push({ t: 'item', y, it, ls, subs, h: 12 + ls.length * 22 + subs.length * 18 });
             y += 12 + ls.length * 22 + subs.length * 18 + 8;
         });
+        // details table (monospace grid): column widths from content, font shrinks to fit, cells truncated with …
+        let tbl = null;
+        if (spec.table && spec.table.rows && spec.table.rows.length) {
+            const avail = W - 2 * PAD - 8;
+            let px = 12, widths, total;
+            const fit = (size) => { ctx.font = font('400', size); widths = spec.table.head.map((h, ci) => Math.max(ctx.measureText(String(h)).width, ...spec.table.rows.map(r => ctx.measureText(String(r[ci] == null ? '' : r[ci])).width)) + 14); total = widths.reduce((a, b) => a + b, 0); };
+            fit(px); if (total > avail) { px = 11; fit(px); } if (total > avail) { px = 10; fit(px); }
+            if (total > avail) { const k = avail / total; widths = widths.map(w => w * k); }
+            const rh = px + 9;
+            tbl = { y: y + 6, px, widths, rh, h: (spec.table.rows.length + 1) * rh + 8 };
+            y += 6 + tbl.h + 10;
+        }
         y += 10;
         rows.push({ t: 'footer', y }); y += 26;
         const H = y + PAD - 10;
@@ -2386,16 +2398,27 @@
             }
             else if (r.t === 'footer') { ctx.fillStyle = '#5b6068'; ctx.font = font('400', 12); ctx.fillText(spec.footer || '', PAD, r.y + 12); }
         });
+        if (tbl) {
+            const x0 = PAD + 4; let yy = tbl.y;
+            const cell = (txt, ci, x, yb, bold, color) => { ctx.font = font(bold ? '700' : '400', tbl.px); ctx.fillStyle = color; let t = String(txt == null ? '' : txt); const maxW = tbl.widths[ci] - 10; if (ctx.measureText(t).width > maxW) { while (t.length > 1 && ctx.measureText(t + '…').width > maxW) t = t.slice(0, -1); t += '…'; } ctx.fillText(t, x + 5, yb); };
+            ctx.fillStyle = 'rgba(95,227,255,.10)'; ctx.fillRect(x0, yy, tbl.widths.reduce((a, b) => a + b, 0), tbl.rh);
+            let x = x0; spec.table.head.forEach((h, ci) => { cell(h, ci, x, yy + tbl.rh - 6, true, '#5fe3ff'); x += tbl.widths[ci]; }); yy += tbl.rh;
+            spec.table.rows.forEach((r, ri) => {
+                if (ri % 2) { ctx.fillStyle = 'rgba(255,255,255,.03)'; ctx.fillRect(x0, yy, tbl.widths.reduce((a, b) => a + b, 0), tbl.rh); }
+                const flagged = spec.table.flagged && spec.table.flagged[ri];
+                let xx = x0; r.forEach((v, ci) => { cell(v, ci, xx, yy + tbl.rh - 6, false, flagged && ci === r.length - 1 ? '#ffb347' : '#d7dbe2'); xx += tbl.widths[ci]; }); yy += tbl.rh;
+            });
+            ctx.strokeStyle = 'rgba(255,255,255,.12)'; ctx.lineWidth = 1; ctx.strokeRect(x0 + 0.5, tbl.y + 0.5, tbl.widths.reduce((a, b) => a + b, 0), (spec.table.rows.length + 1) * tbl.rh);
+        }
         return c;
     }
     function roundRect(ctx, x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
     function canvasToBlob(c) { return new Promise((res, rej) => { try { c.toBlob(b => b ? res(b) : rej(new Error('toBlob failed')), 'image/png'); } catch (e) { rej(e); } }); }
-    function copyCanvasImage(c) {
+    function copyCanvasImage(c, pngName) {
         return canvasToBlob(c).then(blob => {
-            const CI = pageWin.ClipboardItem || window.ClipboardItem;
-            if (!CI || !navigator.clipboard || !navigator.clipboard.write) throw new Error('image clipboard not available in this browser — use Save PNG');
-            return navigator.clipboard.write([new CI({ 'image/png': blob })]);
-        }).then(() => toast('Image copied — paste it into the ticket', false)).catch(e => { warn('copy image:', e); toast('Could not copy the image: ' + e.message, true); });
+            const tryWrite = (win) => { const CI = win.ClipboardItem; if (!CI || !win.navigator || !win.navigator.clipboard || !win.navigator.clipboard.write) return Promise.reject(new Error('no image clipboard')); return win.navigator.clipboard.write([new CI({ 'image/png': blob })]); };
+            return tryWrite(window).catch(e1 => { log('clipboard (iframe) refused: ' + e1.message + ' — trying the top window'); return tryWrite(pageWin.top); }).then(() => 'copied').catch(e2 => { warn('copy image refused:', e2.message); saveCanvasPng(c, pngName); return 'saved'; });
+        }).then(how => toast(how === 'copied' ? '📷 Image copied — paste it into the ticket' : 'Clipboard refused the image — saved it as a PNG instead', how !== 'copied')).catch(e => { warn('copy image:', e); toast('Could not copy or save the image: ' + e.message, true); });
     }
     function saveCanvasPng(c, name) {
         canvasToBlob(c).then(blob => { const doc = pageWin.top.document; const a = doc.createElement('a'); a.href = pageWin.top.URL.createObjectURL(blob); a.download = name; doc.body.appendChild(a); a.click(); setTimeout(() => { try { pageWin.top.URL.revokeObjectURL(a.href); a.remove(); } catch (e) {} }, 2000); }).catch(e => { warn('save png:', e); toast('Could not save: ' + e.message, true); });
@@ -2409,6 +2432,9 @@
             chips: [{ label: 'shots', value: res.summary.shots, color: '#5fe3ff' }, { label: 'need attention', value: bad.length, color: bad.length ? '#ffb347' : '#5fff5f' }, { label: 're-takes', value: res.summary.retakes, color: res.summary.retakes ? '#ffb347' : null }, { label: 'no picture', value: res.summary.missing.length, color: res.summary.missing.length ? '#ff5f5f' : null }],
             items: bad.length ? bad.map(r => ({ badge: r.s, color: r.flags.some(f => f.startsWith('no snapshot') || f.startsWith('re-take')) ? '#ffb347' : '#ff7ad9', text: shotSentence(r).replace(/^\S+ at \S+ — /, ''), sub: 'at ' + r.shutter + (r.asset ? ' · ' + r.asset : '') + ' · heading ' + tri(r.hdg, '°') + ' · camera ' + tri(r.cam, '°') + ' · alt ' + tri([r.alt[0] != null ? r.alt[0] * M_TO_FT : null, r.alt[1] != null ? r.alt[1] * M_TO_FT : null, r.alt[2] != null ? r.alt[2] * M_TO_FT : null], ' ft') + ' (planned / actual / Δ)' })) : [{ badge: 'OK', color: '#5fff5f', text: 'All shots within limits.', sub: 'heading ≤ ' + res.summary.thr.hdg + '° · camera ≤ ' + res.summary.thr.cam + '° · altitude ≤ ' + res.summary.thr.alt + ' ft · off-station ≤ ' + res.summary.thr.pos + ' ft · look-point ≤ ' + res.summary.thr.look + ' ft' }],
             footer: h.url + ' · AIM Video Validation',
+            table: { head: ['shot', 'step', 'shutter', 'heading p/a/Δ', 'camera p/a/Δ', 'drone alt ft p/a/Δ', 'drone vs nav', 'look-point gap', 'asset', 'flags'],
+                rows: res.rows.map(r => [r.s, r.step != null ? '#' + r.step : '', r.shutter, tri(r.hdg, '°'), tri(r.cam, '°'), tri([r.alt[0] != null ? r.alt[0] * M_TO_FT : null, r.alt[1] != null ? r.alt[1] * M_TO_FT : null, r.alt[2] != null ? r.alt[2] * M_TO_FT : null], ''), r.pos != null ? (r.pos * M_TO_FT).toFixed(0) + ' ft ' + (r.posDir || '') : '–', r.look != null ? r.look.toFixed(0) + ' ft' : '–', r.asset || '–', r.flags.length ? r.flags.join('; ') : 'ok']),
+                flagged: res.rows.map(r => r.flags.length > 0) },
         };
     }
     function changeSentences(reps) {
@@ -2445,6 +2471,7 @@
             chips: [{ label: 'saves', value: reps.length, color: '#5fe3ff' }, { label: 'steps changed', value: items.length, color: items.length ? '#ffb347' : null }, { label: 'field changes', value: reps.reduce((n, r) => n + (r.changes || []).length, 0) }],
             items: items.length ? items : [{ badge: '—', color: '#8a8f99', text: 'No changes applied on this page yet.' }],
             footer: h.url + ' · AIM Video Validation',
+            table: reps.length ? { head: ['save', 'step', 'change', 'before', 'after', 'note'], rows: [].concat(...reps.map((r, i) => (r.changes || []).map(c => [String(i + 1) + ' · ' + new Date(r.at).toLocaleTimeString(), c.label, c.kind + (c.field ? ' · ' + c.field : ''), c.before != null ? c.before : '', c.after != null ? c.after : '', c.note || '']))) } : null,
         };
     }
     function copyText(txt, label) {
@@ -2456,7 +2483,7 @@
         reportEl = document.createElement('div'); reportEl.className = 'aim-vv-review';
         const card = renderSummaryCard(spec);
         reportEl.innerHTML = '<div class="aim-vv-review__box" style="max-width:96vw;padding:10px">'
-            + '<div class="aim-vv-edit__row" style="margin:0 0 8px"><button type="button" data-aim-vv-rep="img">📷 Copy as image</button><button type="button" data-aim-vv-rep="png">⬇ Save PNG</button>' + (summaryJira ? '<button type="button" data-aim-vv-rep="summary">Copy as text</button>' : '<button type="button" data-aim-vv-rep="plain">Copy as text</button>') + '<button type="button" data-aim-vv-rep="close">Close</button></div>'
+            + '<div class="aim-vv-edit__row" style="margin:0 0 8px"><button type="button" data-aim-vv-rep="img" style="font-weight:700">📷 Copy image (summary + table)</button><button type="button" data-aim-vv-rep="png">⬇ Save PNG</button>' + (summaryJira ? '<button type="button" data-aim-vv-rep="summary">Copy as text</button>' : '<button type="button" data-aim-vv-rep="plain">Copy as text</button>') + '<button type="button" data-aim-vv-rep="close">Close</button></div>'
             + '<div class="aim-vv-cardhost"></div>'
             + '<details style="margin-top:8px"><summary class="dim" style="cursor:pointer">details table (numbers) · copy for JIRA</summary>' + tableHtml + '<div class="aim-vv-edit__row" style="margin-top:6px"><button type="button" data-aim-vv-rep="jira">Copy table (JIRA markup)</button><button type="button" data-aim-vv-rep="plain">Copy table (text)</button></div></details></div>';
         reportEl.querySelector('.aim-vv-cardhost').appendChild(card);
@@ -2470,7 +2497,7 @@
         if (what === 'close') { reportEl.remove(); reportEl = null; }
         else if (what === 'jira') copyText(reportEl.__jira, 'the JIRA table');
         else if (what === 'summary') copyText(reportEl.__summary, 'the summary');
-        else if (what === 'img') copyCanvasImage(reportEl.__card);
+        else if (what === 'img') copyCanvasImage(reportEl.__card, reportEl.__png);
         else if (what === 'png') saveCanvasPng(reportEl.__card, reportEl.__png);
         else if (what === 'plain') copyText(reportEl.__plain, 'the report');
     }
