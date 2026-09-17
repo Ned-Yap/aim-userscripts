@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.48
+// @version      0.49
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.48';
+    const SCRIPT_VERSION = '0.49';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -2331,7 +2331,7 @@
     }
     // ---- summary CARD (canvas) — screenshot-ready, copy as image / save PNG ----
     // spec: { title, subtitle, lines[], chips[{label, value, color}], items[{badge, color, text, sub}], footer }
-    function renderCard(spec) {
+    function renderSummaryCard(spec) {
         const W = 980, PAD = 28, SCALE = 2;
         const font = (w, px) => w + ' ' + px + 'px ' + 'Consolas, "Cascadia Mono", "JetBrains Mono", Menlo, monospace';
         const c = document.createElement('canvas'); const ctx = c.getContext('2d');
@@ -2454,7 +2454,7 @@
     function openReportBox(spec, tableHtml, plain, jira, summaryJira, pngName) {
         if (reportEl) reportEl.remove();
         reportEl = document.createElement('div'); reportEl.className = 'aim-vv-review';
-        const card = renderCard(spec);
+        const card = renderSummaryCard(spec);
         reportEl.innerHTML = '<div class="aim-vv-review__box" style="max-width:96vw;padding:10px">'
             + '<div class="aim-vv-edit__row" style="margin:0 0 8px"><button type="button" data-aim-vv-rep="img">📷 Copy as image</button><button type="button" data-aim-vv-rep="png">⬇ Save PNG</button>' + (summaryJira ? '<button type="button" data-aim-vv-rep="summary">Copy as text</button>' : '<button type="button" data-aim-vv-rep="plain">Copy as text</button>') + '<button type="button" data-aim-vv-rep="close">Close</button></div>'
             + '<div class="aim-vv-cardhost"></div>'
