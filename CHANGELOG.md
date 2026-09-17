@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Video Validation latest v0.24: S# squares sit at the look-point, flown path stops flickering, step sizes really 1 (dev only)
+
+- In-place snapshot squares are now drawn AT their planned look-point on the ground, with a dotted line back to the nav (no separate rings). They appear beside the nav for a moment until the terrain lookup lands, then move.
+- The flown-path restyle is a stylesheet rule with `!important`, so the Map Styler's periodic recolor no longer makes it blink pink.
+- The four step-size controls have new ids, so values the Control Panel stored under the old ones no longer override the 1-unit defaults.
+
 ## 2026-09-17 — AIM Video Validation latest v0.23: planned look-points, flown-path color, edge-free scrubbing, restore backup (dev only)
 
 - **Planned look-points** — every in-place snapshot of this flight gets a small pink ring on the ground where its planned heading and camera angle point from the nav's altitude over the terrain, with a dotted line from the nav. Hover for distance / height / capped. Control Panel toggle.

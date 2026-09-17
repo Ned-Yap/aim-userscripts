@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.23
+// @version      0.24
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -29,7 +29,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-video-validation';
-    const SCRIPT_VERSION = '0.23';
+    const SCRIPT_VERSION = '0.24';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -901,6 +901,7 @@
         ov.layers = []; ov.stepMarkers = {}; ov.shotMarkers = {};
         ed.ghosts.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) { /* already gone */ } }); ed.ghosts = [];
         lookLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) { /* already gone */ } }); lookLayers = []; lookToken++;
+        if (model) model.plan.forEach(st => { delete st._look; });
     }
     function addLayer(map, layer) {
         try { layer.addTo(map); ov.layers.push(layer); return layer; }
@@ -912,16 +913,41 @@
         for (const g of ov.group) if (g.minIdx != null && idx >= g.minIdx && idx <= g.maxIdx) return g;
         return null;
     }
+    let overlayToken = 0;
     function drawOverlay() {
         clearOverlay();
         if (!model || !settings.master || !settings.overlay) return;
         const L = getL(), map = findMap();
         if (!L || !map) { if (!ov.warned) { ov.warned = true; warn('overlay: Leaflet map not found yet (L=' + !!L + ')'); } return; }
         ov.warned = false;
+        const token = ++overlayToken;
+        const groupOn = !!(settings.overlayGroup && ov.group);
+        // Terrain under each nav that carries in-place snapshots (this flight only) → look-points. Cached after the first pass.
+        const inSlice = (st) => groupOn || !model.slice || (st.index_in_app >= model.slice.minIdx && st.index_in_app <= model.slice.maxIdx);
+        const navsNeeding = []; let nv = null;
+        if (settings.lookPoints && !groupOn) model.plan.forEach(st => { if (st.type_name === 'navigate') nv = st; else if (st.type_name === 'snapshot' && !isGps(st) && nv && nv.location && inSlice(st) && !navsNeeding.includes(nv)) navsNeeding.push(nv); });
+        const pending = navsNeeding.filter(n => demCache[(+n.location.lat).toFixed(5) + ',' + (+n.location.lng).toFixed(5)] === undefined);
+        if (pending.length) {
+            log('overlay: fetching terrain under ' + pending.length + ' nav(s) for look-points…');
+            Promise.all(pending.map(n => demCached(n.location))).then(() => { if (token === overlayToken) drawOverlaySync(L, map); });
+            drawOverlaySync(L, map);   // draw now (in-place snaps beside their nav), redraw at look-points when terrain lands
+            return;
+        }
+        drawOverlaySync(L, map);
+    }
+    function groundAt(ll) { const v = demCache[(+ll.lat).toFixed(5) + ',' + (+ll.lng).toFixed(5)]; return v === undefined ? null : v; }
+    // Where an in-place snapshot is DRAWN: its look-point when terrain is known and look-points are on, else beside the nav.
+    function inplaceDrawPos(nav, st) {
+        if (settings.lookPoints && nav && nav.location) { const g = groundAt(nav.location); if (g != null) { const lp = lookPointFor(nav, st, g); if (lp) return { ll: [lp.ll.lat, lp.ll.lng], look: lp }; } }
+        return null;
+    }
+    function drawOverlaySync(L, map) {
+        clearOverlay();
         const svg = ensureSvg(L, map);
         const lineOpts = (o) => Object.assign({ interactive: false }, svg ? { renderer: svg } : {}, o);
         const groupOn = !!(settings.overlayGroup && ov.group);
         const inSlice = (st) => groupOn || !model.slice || (st.index_in_app >= model.slice.minIdx && st.index_in_app <= model.slice.maxIdx);
+        if (!settings.master || !settings.overlay) return;
         const steps = model.plan.filter(st => inSlice(st) && (st.type_name === 'navigate' || st.type_name === 'snapshot' || st.type_name === 'flag pole'));
         const colorFor = (st, base) => { if (!groupOn) return base; const g = flightForIdx(st.index_in_app); return g ? g.color : COLOR_OTHER; };
         // Whole-mission view is dense (800+ steps): un-flown steps become small grey dots, and flown steps
@@ -948,7 +974,9 @@
                 addLayer(map, L.polyline([[nav.location.lat, nav.location.lng], [st.location.lat, st.location.lng]], lineOpts({ color: col, weight: 2, opacity: 0.75, dashArray: '3,5' })));
             } else {
                 const eo = st.extra_options || {};
-                if (typeof eo.heading === 'number') addLayer(map, L.polyline([[nav.location.lat, nav.location.lng], offsetLatLng(nav.location, 18, eo.heading)], lineOpts({ color: col, weight: 3, opacity: 0.9 })));
+                const dp = inplaceDrawPos(nav, st);
+                if (dp) addLayer(map, L.polyline([[nav.location.lat, nav.location.lng], dp.ll], lineOpts({ color: col, weight: 1.5, opacity: 0.75, dashArray: '2,5' })));
+                else if (typeof eo.heading === 'number') addLayer(map, L.polyline([[nav.location.lat, nav.location.lng], offsetLatLng(nav.location, 18, eo.heading)], lineOpts({ color: col, weight: 3, opacity: 0.9 })));
             }
         });
 
@@ -967,10 +995,14 @@
                 if (st.location && typeof st.location.lat === 'number') {
                     ll = [st.location.lat, st.location.lng];
                 } else if (nav && nav.location) {
-                    // In-place: sit at the nav, pushed ~22 px out along its heading so several snaps on one nav don't stack.
-                    const eo = st.extra_options || {}; const h = typeof eo.heading === 'number' ? eo.heading : (inplaceCount[nav.id] = (inplaceCount[nav.id] || 0) + 1) * 45;
-                    ll = [nav.location.lat, nav.location.lng];
-                    anchor = [size / 2 - 22 * Math.sin(h * RAD), size / 2 + 22 * Math.cos(h * RAD)];
+                    const dp = inplaceDrawPos(nav, st);
+                    if (dp) { ll = dp.ll; st._look = dp.look; }
+                    else {
+                        // No terrain yet / look-points off: sit at the nav, pushed ~22 px out along the heading so snaps don't stack.
+                        const eo = st.extra_options || {}; const h = typeof eo.heading === 'number' ? eo.heading : (inplaceCount[nav.id] = (inplaceCount[nav.id] || 0) + 1) * 45;
+                        ll = [nav.location.lat, nav.location.lng];
+                        anchor = [size / 2 - 22 * Math.sin(h * RAD), size / 2 + 22 * Math.cos(h * RAD)];
+                    }
                 } else return;
                 html = '<div class="aim-vv-ov-snap" style="background:' + col + '">' + esc(num ? num.n : 'S') + '</div>';
             } else if (st.type_name === 'flag pole' && st.location) {
@@ -989,7 +1021,7 @@
                 const g = groupOn ? flightForIdx(st.index_in_app) : null;
                 const tip = '<b>' + esc(num ? num.n : st.type_name) + '</b> · step #' + st.index_in_app
                     + (g ? ' · flight ' + esc(g.label) : '')
-                    + (st.type_name === 'snapshot' ? (st.location ? ' · GPS aim point' : ' · in-place ' + ((st.extra_options || {}).heading != null ? st.extra_options.heading + '°' : '')) : '')
+                    + (st.type_name === 'snapshot' ? (st.location ? ' · GPS aim point' : ' · in-place ' + ((st.extra_options || {}).heading != null ? st.extra_options.heading + '°' : '') + (st._look ? ' · look-point ' + fmtDist(st._look.dist) + ' out' + (st._look.agl != null ? ', ' + fmtAlt(st._look.agl) + ' above terrain' : '') + (st._look.capped ? ' (capped)' : '') : '')) : '')
                     + (shots.length ? ' · shot at ' + shots.map(sh => mmss(sh.videoOff)).join(', ') : (st.type_name === 'snapshot' && !groupOn ? ' · <i>no image</i>' : ''));
                 mk.bindTooltip(tip, { direction: 'top', offset: [0, -10], opacity: 0.95 });
                 if (shots.length) mk.on('click', () => { const sh = shots[0]; seekToShot(sh.primary, true, true); scrollTileIntoView(sh.primary); });
@@ -1055,37 +1087,7 @@
     }
     let lookLayers = [];
     let lookToken = 0;
-    function drawLookPoints() {
-        const map = findMap(), L = getL();
-        lookLayers.forEach(l => { try { map && map.removeLayer(l); } catch (e) {} }); lookLayers = [];
-        if (!map || !L || !model || !settings.overlay || !settings.lookPoints) return;
-        const token = ++lookToken;
-        const groupOn = !!(settings.overlayGroup && ov.group);
-        const inSlice = (st) => !model.slice || (st.index_in_app >= model.slice.minIdx && st.index_in_app <= model.slice.maxIdx);
-        // This flight only (in group view the whole plan would mean hundreds of terrain lookups).
-        const pairs = []; let nav = null;
-        model.plan.forEach(st => { if (st.type_name === 'navigate') nav = st; else if (st.type_name === 'snapshot' && !isGps(st) && nav && nav.location && inSlice(st)) pairs.push({ nav, st }); });
-        if (groupOn || !pairs.length) return;
-        const navs = Array.from(new Set(pairs.map(p => p.nav)));
-        Promise.all(navs.map(n => demCached(n.location))).then(grounds => {
-            if (token !== lookToken) return;
-            const gOf = {}; navs.forEach((n, i) => { gOf[n.id] = grounds[i]; });
-            const lineOpts = (o) => Object.assign({ interactive: false }, ov.svg ? { renderer: ov.svg } : {}, o);
-            const add = (layer) => { try { layer.addTo(map); lookLayers.push(layer); } catch (e) { warn('look-point failed:', e); try { map.removeLayer(layer); } catch (e2) {} } };
-            let drawn = 0;
-            pairs.forEach(({ nav: n, st }) => {
-                const lp = lookPointFor(n, st, gOf[n.id]); if (!lp) return;
-                const num = model.numbering[st.id];
-                add(L.polyline([[n.location.lat, n.location.lng], [lp.ll.lat, lp.ll.lng]], lineOpts({ color: COLOR_SNAP, weight: 1.5, opacity: 0.7, dashArray: '2,5' })));
-                try {
-                    const mk = L.marker([lp.ll.lat, lp.ll.lng], { icon: L.divIcon({ className: 'aim-vv-ov', html: '<div class="aim-vv-ov-look" title=""></div>', iconSize: [14, 14], iconAnchor: [7, 7] }), interactive: true, zIndexOffset: 250 });
-                    mk.bindTooltip('<b>' + esc(num ? num.n : 'S') + '</b> planned look-point · ' + fmtDist(lp.dist) + ' out' + (lp.agl != null ? ' · ' + fmtAlt(lp.agl) + ' above terrain at the nav' : '') + (lp.capped ? ' · <i>capped — shallow angle</i>' : ''), { direction: 'top', offset: [0, -8], opacity: 0.95 });
-                    add(mk); drawn++;
-                } catch (e) { warn('look marker failed:', e); }
-            });
-            log('look-points drawn: ' + drawn + ' in-place snapshot(s)');
-        });
-    }
+    function drawLookPoints() { /* v0.24: look-points are where in-place S# squares are drawn (see inplaceDrawPos); no separate rings */ }
     // Percepto draws the flown path as one huge polyline; restyle it dashed white (it re-applies on tick).
     let flownLayer = null;
     function styleFlownPath(force) {
@@ -1098,12 +1100,20 @@
         if (!flownLayer.__aimVvOrig) flownLayer.__aimVvOrig = { color: flownLayer.options.color, dashArray: flownLayer.options.dashArray || null, opacity: flownLayer.options.opacity };
         const want = settings.flownDashed ? { color: settings.flownColor || '#ffffff', dashArray: '6,8', opacity: 0.9 } : flownLayer.__aimVvOrig;
         if (force || flownLayer.options.color !== want.color || (flownLayer.options.dashArray || null) !== (want.dashArray || null)) { try { flownLayer.setStyle(want); } catch (e) { warn('flown path style:', e); } }
-        // The Map Styler colors paths by CSS, and CSS beats SVG attributes — pin our stroke as an INLINE style.
+        // The Map Styler restyles this path every second or so (inline). A stylesheet rule with !important beats
+        // inline styles, so tag the element with a class and let CSS win instead of fighting it every tick.
         const el = flownLayer._path;
-        if (el && el.style) {
-            const stroke = settings.flownDashed ? want.color : '';
-            if (el.style.stroke !== stroke) { el.style.stroke = stroke; el.style.strokeDasharray = settings.flownDashed ? '6 8' : ''; }
+        if (el) {
+            if (el.classList.toggle('aim-vv-flown', !!settings.flownDashed) !== !!settings.flownDashed) { /* toggled */ }
+            ensureFlownRule(want.color);
         }
+    }
+    let flownRuleEl = null, flownRuleColor = null;
+    function ensureFlownRule(color) {
+        if (flownRuleEl && document.head.contains(flownRuleEl) && flownRuleColor === color) return;
+        if (!flownRuleEl || !document.head.contains(flownRuleEl)) { flownRuleEl = document.createElement('style'); flownRuleEl.id = 'aim-vv-flown-style'; document.head.appendChild(flownRuleEl); }
+        flownRuleColor = color;
+        flownRuleEl.textContent = 'path.aim-vv-flown { stroke: ' + color + ' !important; stroke-dasharray: 6 8 !important; stroke-opacity: .9 !important; }';
     }
     let activeOverlayKey = null;
     function markActiveOverlay() {
@@ -1436,12 +1446,15 @@
             if (!changed.has(st.id) && !st._new) return;
             const o = origOf(st.id);
             let ll = null;
+            let lookLine = null;
             if (st.type_name === 'navigate' && st.location) ll = st.location;
-            else if (st.type_name === 'snapshot') { const nav = wkNavOf(st); ll = isGps(st) ? st.location : (nav && nav.location); }
+            else if (st.type_name === 'snapshot') { const nav = wkNavOf(st); if (isGps(st)) ll = st.location; else { const dp = nav ? inplaceDrawPos(nav, st) : null; if (dp) { ll = { lat: dp.ll[0], lng: dp.ll[1] }; lookLine = [[nav.location.lat, nav.location.lng], dp.ll]; } else ll = nav && nav.location; } }
             if (!ll) return;
+            if (lookLine) add(L.polyline(lookLine, lineOpts({ color: '#fff', weight: 1.5, opacity: 0.8, dashArray: '2,5' })));
             const col = st.type_name === 'navigate' ? COLOR_NAV : COLOR_SNAP;
             if (o && o.location && st.location && distM(o.location, st.location) > 0.2) add(L.polyline([[o.location.lat, o.location.lng], [st.location.lat, st.location.lng]], lineOpts({ color: '#fff', weight: 1.5, opacity: 0.8, dashArray: '2,4' })));
-            if (st.type_name === 'snapshot' && !isGps(st)) { const h = wkPose(st).heading; add(L.polyline([[ll.lat, ll.lng], offsetLatLng(ll, 22, h)], lineOpts({ color: '#fff', weight: 2, opacity: 0.9, dashArray: '3,3' }))); }
+            else if (o && lookLine && ov.stepMarkers[o.id]) { const from = ov.stepMarkers[o.id].getLatLng(); if (distM(from, ll) > 0.2) add(L.polyline([[from.lat, from.lng], [ll.lat, ll.lng]], lineOpts({ color: '#fff', weight: 1.5, opacity: 0.8, dashArray: '2,4' }))); }
+            if (st.type_name === 'snapshot' && !isGps(st) && !lookLine) { const h = wkPose(st).heading; add(L.polyline([[ll.lat, ll.lng], offsetLatLng(ll, 22, h)], lineOpts({ color: '#fff', weight: 2, opacity: 0.9, dashArray: '3,3' }))); }
             try { add(L.marker([ll.lat, ll.lng], { icon: L.divIcon({ className: 'aim-vv-ov', html: '<div class="aim-vv-ov-ghost" style="border-color:' + col + '">' + esc(stepLabel(st)) + '</div>', iconSize: [22, 22], iconAnchor: [11, 11] }), interactive: false, zIndexOffset: 700 })); } catch (e) { warn('ghost marker failed:', e); }
         });
     }
@@ -1779,7 +1792,7 @@
         current = null; model = null; loading = null;
         try { unstampStrip(); } catch (e) { warn('unstamp failed:', e); }
         try { clearOverlay(); } catch (e) { warn('overlay clear failed:', e); }
-        try { if (flownLayer && flownLayer.__aimVvOrig) flownLayer.setStyle(flownLayer.__aimVvOrig); } catch (e) {} flownLayer = null;
+        try { if (flownLayer && flownLayer.__aimVvOrig) { flownLayer.setStyle(flownLayer.__aimVvOrig); if (flownLayer._path) flownLayer._path.classList.remove('aim-vv-flown'); } } catch (e) {} flownLayer = null;
         try { ed.ghosts.forEach(l => { try { ov.map && ov.map.removeLayer(l); } catch (e2) {} }); } catch (e) {}
         ed.ghosts = []; ed.work = null; ed.open = false; ed.busy = false;
         if (ed.panelEl) { try { ed.panelEl.remove(); } catch (e) {} ed.panelEl = null; }
@@ -1821,7 +1834,7 @@
     function applyToggle(id, val) {
         const map = { 'master': 'master', 'strip-order': 'stripOrder', 'badges': 'badges', 'click-seek': 'clickSeek', 'lead-in': 'leadInS', 'shot-card': 'shotCard', 'units': 'units',
             'overlay': 'overlay', 'overlay-actual': 'overlayActual', 'overlay-labels': 'overlayLabels', 'overlay-group': 'overlayGroup', 'time-bar': 'timeBar',
-            'edit': 'edit', 'step-deg': 'stepDeg', 'step-pitch': 'stepPitch', 'step-ft': 'stepFt', 'step-alt-ft': 'stepAltFt', 'ray-cap-ft': 'rayCapFt',
+            'edit': 'edit', 'turn-step': 'stepDeg', 'tilt-step': 'stepPitch', 'move-step': 'stepFt', 'alt-step': 'stepAltFt', 'ray-cap-ft': 'rayCapFt',
             'flown-dashed': 'flownDashed', 'flown-color': 'flownColor', 'look-points': 'lookPoints' };
         const key = map[id]; if (!key) return;
         let v = val;
@@ -1889,10 +1902,10 @@
                     { id: 'time-bar', label: 'Time bar under the player (±10/30 s, jump to time)', type: 'boolean', default: DEFAULTS.timeBar },
                     { id: 'hdr-edit', type: 'header', label: 'Editing (writes the mission — dev only)' },
                     { id: 'edit', label: 'Adjust panel (nudge / adopt / convert / delete / duplicate)', type: 'boolean', default: DEFAULTS.edit },
-                    { id: 'step-deg', label: 'Turn step (degrees; Shift ×5)', type: 'number', default: DEFAULTS.stepDeg, min: 0.5, max: 90 },
-                    { id: 'step-pitch', label: 'Camera tilt step (degrees; Shift ×5)', type: 'number', default: DEFAULTS.stepPitch, min: 0.5, max: 45 },
-                    { id: 'step-ft', label: 'Move step (ft; Shift ×5)', type: 'number', default: DEFAULTS.stepFt, min: 0.5, max: 500 },
-                    { id: 'step-alt-ft', label: 'Altitude step (ft; Shift ×5)', type: 'number', default: DEFAULTS.stepAltFt, min: 0.5, max: 200 },
+                    { id: 'turn-step', label: 'Turn step (degrees; Shift ×5)', type: 'number', default: DEFAULTS.stepDeg, min: 0.5, max: 90 },
+                    { id: 'tilt-step', label: 'Camera tilt step (degrees; Shift ×5)', type: 'number', default: DEFAULTS.stepPitch, min: 0.5, max: 45 },
+                    { id: 'move-step', label: 'Move step (ft; Shift ×5)', type: 'number', default: DEFAULTS.stepFt, min: 0.5, max: 500 },
+                    { id: 'alt-step', label: 'Altitude step (ft; Shift ×5)', type: 'number', default: DEFAULTS.stepAltFt, min: 0.5, max: 200 },
                     { id: 'ray-cap-ft', label: 'Convert → GPS: max ray distance (ft)', type: 'number', default: DEFAULTS.rayCapFt, min: 50, max: 5000 },
                     { id: 'units', label: 'Units', type: 'select', default: DEFAULTS.units, options: [{ value: 'ft', label: 'ft' }, { value: 'm', label: 'm' }] },
                     { id: 'hdr-map', type: 'header', label: 'Map overlay' },
