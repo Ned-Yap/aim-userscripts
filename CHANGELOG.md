@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-16 — AIM Video Validation latest v0.4: arrows usable at both ends, wrapped-tile handling (dev only)
+
+- Percepto greys its ‹ › arrow at what IT thinks is the end of the list, so at our first and last image the redirected arrow never fired. The disabled state now follows our order.
+- Tiles are found by class wherever Percepto puts them (a wrapped selected tile keeps its badge); the strip re-stamps immediately on any change inside the strip or the viewer, and logs the tile's DOM once if a badge still refuses to stick.
+
 ## 2026-09-16 — AIM Video Validation latest v0.3: badges really stick, ‹ › arrows + counter follow our order, [ ] work without a panel update (dev only)
 
 - Percepto's re-render keeps the tile element but wipes its contents, so v0.2's per-tile stamp still missed it. Now a tile is re-stamped whenever its badge is gone.

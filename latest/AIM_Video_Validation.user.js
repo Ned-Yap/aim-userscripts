@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.3
+// @version      0.4
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -28,7 +28,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-video-validation';
-    const SCRIPT_VERSION = '0.3';
+    const SCRIPT_VERSION = '0.4';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -271,7 +271,8 @@
         styleEl = document.createElement('style');
         styleEl.id = 'aim-vv-style';
         styleEl.textContent = `
-            .mp-thumbnails__item.aim-vv-tile { position: relative; }
+            .aim-vv-tile { position: relative; }
+            .pr-image-nav-btn.aim-vv-arrow-on { opacity: 1 !important; pointer-events: auto !important; cursor: pointer !important; }
             .aim-vv-badge { position: absolute; left: 3px; top: 3px; z-index: 3; pointer-events: none;
                 font: 800 10px/14px monospace; padding: 0 4px; border-radius: 3px; color: #04222a;
                 background: #ff7ad9; box-shadow: 0 1px 3px rgba(0,0,0,.6); }
@@ -283,7 +284,7 @@
                 font: 700 11px/16px monospace; width: 18px; height: 18px; text-align: center; border-radius: 3px;
                 background: rgba(0,0,0,.65); color: #5fe3ff; border: 1px solid rgba(95,227,255,.6); }
             .aim-vv-seek:hover { background: #5fe3ff; color: #04222a; }
-            .mp-thumbnails__item.aim-vv-tile--active { outline: 2px solid #5fe3ff; outline-offset: -2px; }
+            .aim-vv-tile--active { outline: 2px solid #5fe3ff; outline-offset: -2px; }
             .aim-vv-card { margin: 6px 0 4px; padding: 6px 8px; border: 1px solid rgba(95,227,255,.35); border-radius: 4px;
                 background: rgba(10,14,18,.85); color: #e6e6e6; font: 11px/1.4 monospace; }
             .aim-vv-card b { color: #5fe3ff; }
@@ -303,10 +304,17 @@
         const k = imgKey(im.currentSrc || im.src);
         return model.images.find(r => r.key === k) || null;
     }
+    function stripTiles(grid) {
+        const items = Array.from(grid.querySelectorAll('.mp-thumbnails__item'));
+        return items.length ? items : Array.from(grid.children);
+    }
+    // The element whose CSS `order` matters = the grid's direct child holding this tile (Percepto may wrap it).
+    function orderEl(grid, tile) { let el = tile; while (el && el.parentElement !== grid) el = el.parentElement; return el || tile; }
+    const badgeLossLogged = {};
     function stampStrip(force) {
         const grid = stripGrid();
         if (!grid || !model) return;
-        const tiles = Array.from(grid.children);
+        const tiles = stripTiles(grid);
         // Stamp key = everything that changes what a tile should look like. Percepto re-renders
         // tiles (new elements) when you click one, so "already stamped" must be checked PER TILE.
         const stamp = model.mid + ':' + settings.stripOrder + ':' + settings.badges + ':' + model.numberingGlobal;
@@ -323,9 +331,9 @@
             if (rec) tile.dataset.aimVvKey = rec.key; else delete tile.dataset.aimVvKey;
             // Order: video tile (no image record) pinned first, then shutter order (RGB, T, G within a pair).
             if (settings.stripOrder) {
-                tile.style.order = rec ? String(rec.rank) : '0';
+                orderEl(grid, tile).style.order = rec ? String(rec.rank) : '0';
             } else {
-                tile.style.order = '';
+                orderEl(grid, tile).style.order = '';
             }
             let badge = tile.querySelector('.aim-vv-badge');
             let seek = tile.querySelector('.aim-vv-seek');
@@ -349,6 +357,17 @@
                 }
             } else { if (badge) badge.remove(); if (seek) seek.remove(); }
         });
+        // Diagnostic: a matched tile that STILL has no badge right after stamping → Percepto's structure
+        // differs from what we expect; log its DOM once per image so the next fix is not a guess.
+        if (settings.badges) {
+            tiles.forEach(tile => {
+                const k = tile.dataset.aimVvKey;
+                if (k && !tile.querySelector('.aim-vv-badge') && !badgeLossLogged[k]) {
+                    badgeLossLogged[k] = true;
+                    warn('badge missing right after stamp on', k, '→ tile DOM:', tile.outerHTML.slice(0, 600), '| parent:', tile.parentElement && tile.parentElement.className);
+                }
+            });
+        }
         // Re-rendered tiles lost the playhead outline too — re-apply it.
         const keys = activeKeys; activeKeys = []; markActiveTiles(keys);
         // First stamp (explicit) → scroll to the start so S1 is in view.
@@ -361,8 +380,8 @@
     function unstampStrip() {
         const grid = stripGrid();
         if (!grid) return;
-        Array.from(grid.children).forEach(tile => {
-            tile.style.order = '';
+        stripTiles(grid).forEach(tile => {
+            orderEl(grid, tile).style.order = '';
             tile.classList.remove('aim-vv-tile', 'aim-vv-tile--active');
             tile.querySelectorAll('.aim-vv-badge, .aim-vv-seek').forEach(el => el.remove());
             delete tile.dataset.aimVvStamp; delete tile.dataset.aimVvKey;
@@ -376,7 +395,7 @@
     function videoTile() {
         const grid = stripGrid();
         if (!grid) return null;
-        return Array.from(grid.children).find(t => !tileImage(t)) || grid.children[0] || null;
+        return stripTiles(grid).find(t => !tileImage(t)) || grid.children[0] || null;
     }
     function seekToShot(rec, showVideo) {
         const v = videoEl();
@@ -398,7 +417,7 @@
         if (!grid) return;
         if (keys.join('|') === activeKeys.join('|')) return;
         activeKeys = keys;
-        Array.from(grid.children).forEach(tile => {
+        stripTiles(grid).forEach(tile => {
             const rec = tileImage(tile);
             tile.classList.toggle('aim-vv-tile--active', !!(rec && keys.includes(rec.key)));
         });
@@ -430,7 +449,7 @@
     }
     function scrollTileIntoView(rec) {
         const grid = stripGrid(); if (!grid) return;
-        const tile = Array.from(grid.children).find(t => tileImage(t) === rec);
+        const tile = stripTiles(grid).find(t => tileImage(t) === rec);
         if (tile) { try { tile.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (e) { /* cosmetic */ } }
     }
     function stepShot(dir) {
@@ -458,7 +477,7 @@
     }
     function tileFor(rec) {
         const grid = stripGrid(); if (!grid || !rec) return null;
-        return Array.from(grid.children).find(t => t.dataset.aimVvKey === rec.key || tileImage(t) === rec) || null;
+        return stripTiles(grid).find(t => t.dataset.aimVvKey === rec.key || tileImage(t) === rec) || null;
     }
     function showStill(rec) {
         const t = tileFor(rec);
@@ -475,12 +494,32 @@
         showStill(next);
         return true;
     }
+    function navArrows() {
+        const media = document.querySelector('.mp-media'); if (!media) return null;
+        const btns = Array.from(media.querySelectorAll('.pr-image-nav-btn')); if (btns.length < 2) return null;
+        const m = media.getBoundingClientRect();
+        let prev = null, next = null;
+        btns.forEach(b => { const r = b.getBoundingClientRect(); if ((r.left + r.width / 2) < (m.left + m.width / 2)) prev = b; else next = b; });
+        return (prev && next) ? { prev, next } : null;
+    }
     function fixCounter() {
-        const c = document.querySelector('.mp-media__counter');
         const cur = currentStillRec();
-        if (!c || !cur || !settings.stripOrder) return;
-        const want = cur.rank + ' / ' + model.images.length;
-        if (c.textContent.trim() !== want) { c.textContent = want; c.title = 'AIM order (oldest first)'; }
+        if (!cur || !settings.stripOrder) return;
+        const c = document.querySelector('.mp-media__counter');
+        if (c) {
+            const want = cur.rank + ' / ' + model.images.length;
+            if (c.textContent.trim() !== want) { c.textContent = want; c.title = 'AIM order (oldest first)'; }
+        }
+        // Percepto greys its arrows at ITS list ends (newest-first) — re-assert them for OUR ends.
+        const a = navArrows();
+        if (a) {
+            const atFirst = cur.rank <= 1, atLast = cur.rank >= model.images.length;
+            [[a.prev, atFirst], [a.next, atLast]].forEach(([b, off]) => {
+                if (b.disabled !== off) b.disabled = off;
+                b.classList.toggle('aim-vv-arrow-on', !off);
+                if (off) b.classList.remove('aim-vv-arrow-on');
+            });
+        }
     }
     // Percepto's ‹ › buttons: decide direction by position (left/right of the media pane),
     // swallow the native handler, step in our order instead.
@@ -596,8 +635,13 @@
             hookVideo();
             ensureCard();
             if (!observer) {
-                observer = new MutationObserver(() => { if (model) scheduleStamp(); });
-                observer.observe(document.body, { childList: true, subtree: true });
+                observer = new MutationObserver((muts) => {
+                    if (!model) return;
+                    const hot = muts.some(mu => { const t = mu.target; return t && t.closest && t.closest('.mp-thumbnails, .mp-media'); });
+                    if (hot) { try { stampStrip(false); fixCounter(); } catch (e) { warn('stamp (hot) failed:', e); } }
+                    else scheduleStamp();
+                });
+                observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled', 'class', 'src'] });
             }
             log('ready v' + SCRIPT_VERSION + ' — mission ' + ids.mid);
         }).catch(e => { warn('load failed:', e); loading = null; });
