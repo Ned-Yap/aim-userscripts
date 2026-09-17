@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.14
+// @version      0.20
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -16,7 +16,7 @@
 // @run-at       document-idle
 // ==/UserScript==
 
-// AIM Video Validation — Phase 1 (view only, no writes).
+// AIM Video Validation — Phase 1 (view) + Phase 2 (edit: writes the mission plan; dev only).
 // What it does: on /#/site/<sid>/control-panel/past-mission/<mid> (Mission Playback) it joins the
 // flown mission (images + flown path + embedded plan) and (1) reorders the snapshot strip oldest-first
 // with S# badges, (2) seeks the video to a snapshot's shutter time on click / ▶, (3) highlights the
@@ -29,7 +29,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-video-validation';
-    const SCRIPT_VERSION = '0.14';
+    const SCRIPT_VERSION = '0.20';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -76,6 +76,8 @@
         overlayLabels: true,   // N#/S# labels (else plain dots)
         overlayGroup: false,   // whole mission group, color per flight, whole-mission numbering
         timeBar: true,         // skip / jump-to-time bar under the player
+        edit: true,            // Adjust panel (Phase 2)
+        stepDeg: 5, stepPitch: 2, stepFt: 10, stepAltFt: 10, rayCapFt: 500,
     };
     let settings = Object.assign({}, DEFAULTS);
     try { settings = Object.assign({}, DEFAULTS, GM_getValue(SETTINGS_KEY, {}) || {}); }
@@ -344,6 +346,22 @@
             .aim-vv-ov-flag { font-size: 13px; line-height: 16px; text-shadow: 0 1px 2px #000; }
             .aim-vv-ov-actual { width: 12px; height: 12px; border-radius: 50%; background: #5fe3ff; border: 2px solid #04222a; box-shadow: 0 0 0 1px #5fe3ff; }
             .aim-vv-ov-actual--retake { border-style: dashed; border-color: #fff; }
+            .aim-vv-ov-ghost { width: 22px; height: 22px; border-radius: 50%; border: 2px dashed #fff; background: rgba(0,0,0,.35); color: #fff; font: 800 9px/18px monospace; text-align: center; }
+            .aim-vv-edit__row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 4px; }
+            .aim-vv-edit__row > .dim:first-child { min-width: 82px; }
+            .aim-vv-edit button, .aim-vv-review button { background: #1f2228; color: #5fe3ff; border: 1px solid rgba(95,227,255,.5); border-radius: 3px; padding: 2px 8px; font: inherit; cursor: pointer; }
+            .aim-vv-edit button:hover, .aim-vv-review button:hover { background: #5fe3ff; color: #04222a; }
+            .aim-vv-edit button.aim-vv-danger { color: #ff7a7a; border-color: rgba(255,95,95,.6); }
+            .aim-vv-edit button.aim-vv-danger:hover { background: #ff5f5f; color: #fff; }
+            .aim-vv-review button[disabled] { opacity: .4; cursor: default; }
+            .aim-vv-edit__foot { border-top: 1px solid rgba(255,255,255,.12); padding-top: 4px; margin-top: 6px; }
+            .aim-vv-review { position: fixed; inset: 0; z-index: 100000; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; }
+            .aim-vv-review__box { max-width: 900px; max-height: 80vh; overflow: auto; background: #12151a; color: #e6e6e6; border: 1px solid rgba(95,227,255,.5); border-radius: 6px; padding: 12px 14px; font: 12px/1.45 monospace; }
+            .aim-vv-review table { border-collapse: collapse; margin: 6px 0; } .aim-vv-review td { padding: 2px 10px 2px 0; white-space: nowrap; border-bottom: 1px solid rgba(255,255,255,.06); }
+            .aim-vv-review b { color: #5fe3ff; } .aim-vv-review .dim { color: #888; } .aim-vv-review .warn { color: #ffb347; }
+            .aim-vv-toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 100001; background: rgba(10,14,18,.95); color: #e6e6e6; border: 1px solid rgba(95,227,255,.6); border-radius: 4px; padding: 8px 14px; font: 12px/1.4 monospace; display: none; max-width: 70vw; }
+            .aim-vv-toast--bad { border-color: #ff5f5f; color: #ffb3b3; }
+            .aim-vv-card .aim-vv-adjust { float: right; background: #1f2228; color: #5fe3ff; border: 1px solid rgba(95,227,255,.5); border-radius: 3px; padding: 1px 8px; font: inherit; cursor: pointer; }
             .aim-vv-ov.aim-vv-ov--active > div { outline: 3px solid #fff; outline-offset: 1px; animation: aim-vv-pulse 1.2s ease-in-out infinite; }
             @keyframes aim-vv-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(95,227,255,.9); } 50% { box-shadow: 0 0 0 8px rgba(95,227,255,0); } }
         `;
@@ -801,7 +819,9 @@
             rows = '<div class="dim">actual: heading ' + rec.drone_heading + '° · camera ' + rec.camera_pitch + '° · alt ' + fmtAlt(rec.alt) + '</div>';
         }
         const prev = rec.previous_image && rec.previous_image.name ? '<span class="dim">previous capture: ' + esc(rec.previous_image.name.replace(/__\d+_.*$/, '').replace(/_/g, ' ').replace(/  /g, ' ')) + '</span>' : '<span class="dim">no previous capture linked</span>';
-        el.innerHTML = head + rows + '<div style="margin-top:3px;">' + prev + ' · <span class="dim">[ / ] prev / next shot</span></div>';
+        const adjust = settings.edit ? '<button type="button" class="aim-vv-adjust" data-aim-vv-ed-toggle="1" title="Open the Adjust panel for this step">✎ Adjust' + (ed.work && edDiff().length ? ' (' + edDiff().length + ')' : '') + '</button>' : '';
+        el.innerHTML = adjust + head + rows + '<div style="margin-top:3px;">' + prev + ' · <span class="dim">[ / ] prev / next shot</span></div>';
+        if (ed.open) renderEdit();
     }
 
     // ---------------------------------------------------------------
@@ -867,6 +887,7 @@
         const map = ov.map;
         ov.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) { /* already gone */ } });
         ov.layers = []; ov.stepMarkers = {}; ov.shotMarkers = {};
+        ed.ghosts.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) { /* already gone */ } }); ed.ghosts = [];
     }
     function addLayer(map, layer) {
         try { layer.addTo(map); ov.layers.push(layer); return layer; }
@@ -988,6 +1009,7 @@
             try { map.on('zoomend', onOverlayZoom); ov.zoomHooked = true; ov.zoomHookedMap = map; } catch (e) { warn('zoomend hook failed:', e); }
         }
         activeOverlayKey = undefined;   // markers are new — force the active highlight to re-apply
+        try { drawGhosts(); } catch (e) { warn('ghosts:', e); }
         log('overlay drawn: ' + steps.length + ' plan steps' + (groupOn ? ' (whole mission, ' + ov.group.length + ' flights)' : ' (this flight)') + ', ' + Object.keys(ov.shotMarkers).length + ' actual shots, ' + ov.layers.length + ' layers');
         markActiveOverlay();
     }
@@ -1147,6 +1169,370 @@
             log('opened flight ' + a.dataset.mid + ' in a new tab');
         }
     }
+
+    // ===============================================================
+    // PHASE 2 — EDIT: nudge / adopt / convert / delete / duplicate on a WORKING COPY of the plan,
+    // ghost preview on the map, review diff, then ONE full-mission save with rails.
+    // Writes: POST /available_app/ (body shape LEARNED from a real Percepto save — Delete Guard banks it
+    // in localStorage 'aim-mission-post-shape-v1'; we fail closed without it). Lite mode blocks writes.
+    // ===============================================================
+    const SHAPE_KEY = 'aim-mission-post-shape-v1';
+    const BACKUPS_KEY = 'aim-vv-backups';        // GM: last 20 pre-write app snapshots
+    const REPORTS_KEY = 'aim-vv-corrections';    // GM: last 200 before/after reports
+    const ed = { work: null, panelEl: null, reviewEl: null, ghosts: [], tempId: -1, open: false, busy: false };
+    const deepCopy = (o) => JSON.parse(JSON.stringify(o));
+    const gimbalFromDeg = (deg) => Math.round(2000 + Math.max(-90, Math.min(0, deg)) * (1000 / 90));
+    const FT = 1 / M_TO_FT;
+    function isLite() { try { return localStorage.getItem('aim-mode') !== 'full'; } catch (e) { return true; } }
+    function moveLL(ll, meters, bearing) { const p = offsetLatLng(ll, meters, bearing); return { lat: +p[0].toFixed(8), lng: +p[1].toFixed(8) }; }
+
+    // Own CSRF sniffer (Delete Guard exposes window.top.__AIM_CSRF too — use either).
+    let sniffedCsrf = null;
+    function sniffHeaders(h) {
+        try {
+            if (!h) return;
+            const take = (k, v) => { if (String(k).toLowerCase() === 'x-csrftoken' && v) sniffedCsrf = String(v); };
+            if (typeof h.forEach === 'function') h.forEach((v, k) => take(k, v));
+            else if (Array.isArray(h)) h.forEach(p => take(p[0], p[1]));
+            else Object.keys(h).forEach(k => take(k, h[k]));
+        } catch (e) { /* best effort */ }
+    }
+    function installCsrfSniffer() {
+        try {
+            const w = pageWin;
+            if (w.__aimVvSniff) return;
+            w.__aimVvSniff = true;
+            const of = w.fetch;
+            w.fetch = function(input, init) { sniffHeaders((init && init.headers) || (input && input.headers)); return of.apply(this, arguments); };
+            const oh = w.XMLHttpRequest.prototype.setRequestHeader;
+            w.XMLHttpRequest.prototype.setRequestHeader = function(k, v) { if (String(k).toLowerCase() === 'x-csrftoken' && v) sniffedCsrf = String(v); return oh.apply(this, arguments); };
+        } catch (e) { warn('csrf sniffer failed:', e); }
+    }
+    function getCsrf() {
+        if (sniffedCsrf) return sniffedCsrf;
+        try { if (pageWin.top.__AIM_CSRF) return pageWin.top.__AIM_CSRF; } catch (e) { /* cross-origin */ }
+        try { const m = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/); if (m) return decodeURIComponent(m[1]); } catch (e) { /* no cookie */ }
+        return null;
+    }
+    function loadShape() {
+        try { const raw = localStorage.getItem(SHAPE_KEY); if (raw) return JSON.parse(raw); } catch (e) { /* fall through */ }
+        try { return pageWin.top.__AIM_MISSION_SHAPE || null; } catch (e) { return null; }
+    }
+
+    // ---- working copy ----
+    function edEnsureWork() { if (!ed.work && model) ed.work = deepCopy(model.plan); return ed.work; }
+    function edResetWork() { ed.work = model ? deepCopy(model.plan) : null; drawGhosts(); renderEdit(); }
+    function wk(id) { return edEnsureWork().find(x => x.id === id) || null; }
+    function wkNavOf(step) { const w = edEnsureWork(); for (let k = w.indexOf(step) - 1; k >= 0; k--) if (w[k].type_name === 'navigate') return w[k]; return null; }
+    function origOf(id) { return model.byId[id] || null; }
+    function stepLabel(step) { const n = model.numbering[step.id]; return n ? n.n : (step.type_name + ' #' + (step.index_in_app != null ? step.index_in_app : '+')); }
+    function isGps(step) { return !!(step.location && typeof step.location.lat === 'number'); }
+    function eo(step) { if (!step.extra_options) step.extra_options = {}; return step.extra_options; }
+    // Current in-place heading/pitch or GPS-derived pose of a WORK step.
+    function wkPose(step) {
+        const nav = wkNavOf(step);
+        if (isGps(step)) {
+            const r = { type: 'gps', nav, heading: null, pitchDeg: null };
+            if (nav && nav.location) { r.heading = bearingDeg(nav.location, step.location); const h = distM(nav.location, step.location); if (typeof step.value1 === 'number' && typeof nav.value1 === 'number') r.pitchDeg = Math.atan2(step.value1 - nav.value1, h) / RAD; r.range = h; }
+            return r;
+        }
+        const e = step.extra_options || {};
+        return { type: 'inplace', nav, heading: typeof e.heading === 'number' ? e.heading : 0, pitchDeg: gimbalToDeg(e.pitch) != null ? gimbalToDeg(e.pitch) : 0 };
+    }
+    // Set a nav's altitude keeping its abs_alt offset (abs_alt tracks value1 by a small constant on MSL sites).
+    function setNavAlt(nav, m) {
+        const old = nav.value1;
+        nav.value1 = +m.toFixed(2);
+        const e = eo(nav);
+        if (typeof e.abs_alt === 'number' && typeof old === 'number') e.abs_alt = +(e.abs_alt + (nav.value1 - old)).toFixed(2);
+        // Snapshots hanging off this nav mirror abs_alt (they carry no altitude of their own).
+        const w = ed.work; const i = w.indexOf(nav);
+        for (let k = i + 1; k < w.length && w[k].type_name !== 'navigate'; k++) if (w[k].type_name === 'snapshot' && !isGps(w[k]) && w[k].extra_options && typeof w[k].extra_options.abs_alt === 'number' && typeof e.abs_alt === 'number') w[k].extra_options.abs_alt = e.abs_alt;
+    }
+    // Picture-relative edits. Amounts: deg for turn/tilt, metres for moves/alt.
+    function edTurn(step, dDeg) {           // left(-) / right(+)
+        if (isGps(step)) { const nav = wkNavOf(step); if (!nav) return; const brg = bearingDeg(nav.location, step.location); step.location = moveLL(step.location, Math.abs(dDeg), brg + (dDeg > 0 ? 90 : -90)); return; }   // GPS: dDeg used as metres sideways
+        const e = eo(step); e.heading = ((((typeof e.heading === 'number' ? e.heading : 0) + dDeg) % 360) + 360) % 360;
+    }
+    function edTilt(step, dDeg) {           // up(+) / down(-) in picture terms → camera angle
+        if (isGps(step)) { step.value1 = +(((typeof step.value1 === 'number') ? step.value1 : 0) + dDeg).toFixed(2); return; }   // GPS: dDeg used as metres of target alt
+        const e = eo(step); e.pitch = gimbalFromDeg((gimbalToDeg(e.pitch) != null ? gimbalToDeg(e.pitch) : 0) + dDeg);
+    }
+    function edRange(step, dM) {            // closer(-) / farther(+)
+        const nav = wkNavOf(step); if (!nav || !nav.location) return;
+        if (isGps(step)) { const brg = bearingDeg(nav.location, step.location); step.location = moveLL(step.location, Math.abs(dM), dM > 0 ? brg : brg + 180); return; }
+        const h = wkPose(step).heading; nav.location = moveLL(nav.location, Math.abs(dM), dM < 0 ? h : h + 180);   // closer = nav moves TOWARD the heading
+    }
+    function edAlt(step, dM) { const nav = wkNavOf(step); if (nav && typeof nav.value1 === 'number') setNavAlt(nav, nav.value1 + dM); }
+    function edAdopt(step, shot) {
+        const im = shot.primary; const nav = wkNavOf(step); if (!im || !nav) return;
+        if (im.location) nav.location = { lat: +im.location.lat, lng: +im.location.lng };
+        if (typeof im.alt === 'number') setNavAlt(nav, im.alt);
+        if (!isGps(step)) { const e = eo(step); if (typeof im.drone_heading === 'number') e.heading = im.drone_heading; if (typeof im.camera_pitch === 'number') e.pitch = gimbalFromDeg(im.camera_pitch); }
+    }
+    function dem(ll) { return getJSON('/location_altitude/?location=' + encodeURIComponent(JSON.stringify({ lat: ll.lat, lng: ll.lng }))).then(j => (j && typeof j.altitude === 'number') ? j.altitude : null); }
+    // Convert an in-place snapshot to a GPS aim point by casting the ACTUAL camera ray to the ground (cap = rayCapFt).
+    function edConvertGps(step, shot) {
+        const im = shot.primary; if (!im || !im.location || typeof im.drone_heading !== 'number' || typeof im.camera_pitch !== 'number') { toast('Convert needs the actual shot pose (position, heading, camera angle)', true); return Promise.resolve(false); }
+        const nav = wkNavOf(step); if (!nav) return Promise.resolve(false);
+        const capM = (Number(settings.rayCapFt) || 500) * FT;
+        return dem(im.location).then(ground => {
+            const alt = typeof im.alt === 'number' ? im.alt : nav.value1;
+            const down = Math.tan(Math.abs(im.camera_pitch) * RAD);
+            let dist = (ground != null && down > 0.01) ? (alt - ground) / down : Infinity;
+            let capped = false; if (!(dist > 0) || dist > capM) { dist = capM; capped = true; }
+            const aim = moveLL(im.location, dist, im.drone_heading);
+            const aimAlt = capped ? alt - dist * down : ground;
+            return dem(aim).then(g2 => {
+                const finalAlt = (!capped && g2 != null) ? g2 : aimAlt;
+                nav.location = { lat: +im.location.lat, lng: +im.location.lng }; setNavAlt(nav, alt);
+                step.location = aim; step.value1 = +finalAlt.toFixed(2);
+                const e = eo(step); e.heading = 0; e.pitch = 2000;   // placeholders Percepto stores on GPS snapshots
+                log('convert → GPS aim point ' + aim.lat + ',' + aim.lng + ' alt ' + fmtAlt(finalAlt) + ' (' + fmtDist(dist) + (capped ? ', CAPPED' : '') + ', ground ' + (ground != null ? fmtAlt(ground) : 'n/a') + ')');
+                return true;
+            });
+        }).catch(e => { warn('convert failed:', e); toast('Convert failed: ' + e.message, true); return false; });
+    }
+    // A snapshot "block" = the snapshot + the camera/wait steps that follow it up to the next snapshot/nav/flag/returnHome.
+    function blockOf(step) {
+        const w = edEnsureWork(); const i = w.indexOf(step); if (i < 0) return null;
+        let j = i + 1;
+        while (j < w.length && !['snapshot', 'navigate', 'flag pole', 'returnHome', 'takeoff'].includes(w[j].type_name)) j++;
+        return { start: i, end: j };
+    }
+    function edDeleteBlock(step) { const b = blockOf(step); if (!b) return; ed.work.splice(b.start, b.end - b.start); }
+    function edDuplicateBlock(step) {
+        const b = blockOf(step); if (!b) return null;
+        const clone = ed.work.slice(b.start, b.end).map(x => { const c = deepCopy(x); c.id = ed.tempId--; c._new = true; return c; });
+        ed.work.splice(b.end, 0, ...clone);
+        return clone[0];
+    }
+    // ---- diff ----
+    const F = (v) => (typeof v === 'number' ? +v.toFixed(2) : v);
+    function stepSig(st) { return JSON.stringify({ t: st.type, l: st.location ? [+(+st.location.lat).toFixed(7), +(+st.location.lng).toFixed(7)] : null, v1: F(st.value1), v2: F(st.value2), e: st.extra_options || {} }); }
+    function fieldDiffs(a, b) {
+        const out = [];
+        const eqLL = (x, y) => (!x && !y) || (x && y && Math.abs(x.lat - y.lat) < 1e-7 && Math.abs(x.lng - y.lng) < 1e-7);
+        if (!eqLL(a.location, b.location)) out.push({ field: 'position', before: a.location ? a.location.lat.toFixed(6) + ', ' + a.location.lng.toFixed(6) : '–', after: b.location ? b.location.lat.toFixed(6) + ', ' + b.location.lng.toFixed(6) : '–', note: (a.location && b.location) ? fmtDist(distM(a.location, b.location)) + ' ' + compass16(bearingDeg(a.location, b.location)) : '' });
+        if (F(a.value1) !== F(b.value1)) out.push({ field: a.type_name === 'navigate' ? 'drone alt' : (isGps(b) ? 'target alt' : 'value1'), before: fmtAlt(a.value1), after: fmtAlt(b.value1) });
+        const ea = a.extra_options || {}, eb = b.extra_options || {};
+        ['heading', 'pitch', 'abs_alt'].forEach(k => {
+            if (F(ea[k]) !== F(eb[k])) out.push({ field: k === 'pitch' ? 'camera angle' : (k === 'abs_alt' ? 'abs alt' : k), before: k === 'pitch' ? (gimbalToDeg(ea[k]) != null ? gimbalToDeg(ea[k]).toFixed(0) + '°' : '–') : (k === 'abs_alt' ? fmtAlt(ea[k]) : (ea[k] != null ? ea[k] + '°' : '–')), after: k === 'pitch' ? gimbalToDeg(eb[k]).toFixed(0) + '°' : (k === 'abs_alt' ? fmtAlt(eb[k]) : eb[k] + '°') });
+        });
+        return out;
+    }
+    function edDiff() {
+        const w = edEnsureWork(); const out = [];
+        model.plan.forEach(o => {
+            const n = w.find(x => x.id === o.id);
+            if (!n) { out.push({ id: o.id, label: stepLabel(o), kind: 'deleted', type: o.type_name }); return; }
+            if (stepSig(o) !== stepSig(n)) fieldDiffs(o, n).forEach(d => out.push(Object.assign({ id: o.id, label: stepLabel(o), kind: 'changed', type: o.type_name }, d)));
+        });
+        w.forEach((n, i) => { if (n._new) out.push({ id: n.id, label: n.type_name + ' (new, after #' + (i > 0 ? (w[i - 1].index_in_app != null ? w[i - 1].index_in_app : '+') : 0) + ')', kind: 'added', type: n.type_name }); });
+        return out;
+    }
+    // ---- ghosts on the map ----
+    function drawGhosts() {
+        const map = findMap(), L = getL();
+        ed.ghosts.forEach(l => { try { map && map.removeLayer(l); } catch (e) { /* gone */ } }); ed.ghosts = [];
+        if (!map || !L || !ed.work || !settings.overlay) return;
+        const add = (layer) => { try { layer.addTo(map); ed.ghosts.push(layer); } catch (e) { warn('ghost failed:', e); try { map.removeLayer(layer); } catch (e2) {} } };
+        const lineOpts = (o) => Object.assign({ interactive: false }, ov.svg ? { renderer: ov.svg } : {}, o);
+        const changed = new Set(edDiff().map(d => d.id));
+        ed.work.forEach(st => {
+            if (!changed.has(st.id) && !st._new) return;
+            const o = origOf(st.id);
+            let ll = null;
+            if (st.type_name === 'navigate' && st.location) ll = st.location;
+            else if (st.type_name === 'snapshot') { const nav = wkNavOf(st); ll = isGps(st) ? st.location : (nav && nav.location); }
+            if (!ll) return;
+            const col = st.type_name === 'navigate' ? COLOR_NAV : COLOR_SNAP;
+            if (o && o.location && st.location && distM(o.location, st.location) > 0.2) add(L.polyline([[o.location.lat, o.location.lng], [st.location.lat, st.location.lng]], lineOpts({ color: '#fff', weight: 1.5, opacity: 0.8, dashArray: '2,4' })));
+            if (st.type_name === 'snapshot' && !isGps(st)) { const h = wkPose(st).heading; add(L.polyline([[ll.lat, ll.lng], offsetLatLng(ll, 22, h)], lineOpts({ color: '#fff', weight: 2, opacity: 0.9, dashArray: '3,3' }))); }
+            try { add(L.marker([ll.lat, ll.lng], { icon: L.divIcon({ className: 'aim-vv-ov', html: '<div class="aim-vv-ov-ghost" style="border-color:' + col + '">' + esc(stepLabel(st)) + '</div>', iconSize: [22, 22], iconAnchor: [11, 11] }), interactive: false, zIndexOffset: 700 })); } catch (e) { warn('ghost marker failed:', e); }
+        });
+    }
+    // ---- panel ----
+    function currentShotForEdit() { if (!selectedRec || !model) return null; return model.shots.find(sh => sh.images.includes(selectedRec)) || null; }
+    function ensureEditPanel() {
+        if (!settings.edit || !ed.open) { if (ed.panelEl) { ed.panelEl.remove(); ed.panelEl = null; } return null; }
+        const card = ensureCard(); if (!card) return null;
+        if (ed.panelEl && card.parentElement.contains(ed.panelEl)) return ed.panelEl;
+        ed.panelEl = document.createElement('div'); ed.panelEl.className = 'aim-vv-card aim-vv-edit';
+        card.insertAdjacentElement('afterend', ed.panelEl);
+        return ed.panelEl;
+    }
+    function renderEdit() {
+        const el = ensureEditPanel(); if (!el || !model) return;
+        edEnsureWork();
+        const shot = currentShotForEdit();
+        const step = shot && shot.step && shot.step.type_name === 'snapshot' ? wk(shot.step.id) : null;
+        const diff = edDiff();
+        const btn = (act, txt, title, extra) => '<button type="button" data-aim-vv-ed="' + act + '" ' + (extra || '') + ' title="' + esc(title || '') + '">' + txt + '</button>';
+        let html = '';
+        if (!step) {
+            html += '<div><b>Adjust</b> <span class="dim">— select a snapshot (click a thumbnail) to edit its step' + (shot && shot.step ? ' · active step is a ' + esc(shot.step.type_name) + ', not a snapshot' : '') + '</span></div>';
+        } else {
+            const pose = wkPose(step), nav = pose.nav, gps = isGps(step);
+            const sd = Number(settings.stepDeg) || 5, sp = Number(settings.stepPitch) || 2, sf = Number(settings.stepFt) || 10, sa = Number(settings.stepAltFt) || 10;
+            html += '<div><b>Adjust ' + esc(stepLabel(step)) + '</b> <span class="dim">· ' + (gps ? 'GPS aim point' : 'in-place') + ' · nav ' + (nav ? esc(stepLabel(nav)) : '–') + ' · Shift-click = ×5</span></div>';
+            html += '<div class="aim-vv-edit__row"><span class="dim">picture</span>'
+                + btn('turn', '◀ left', gps ? 'Move the aim point ' + sf + ' ft to the left of the nav→aim line' : 'Turn the heading ' + sd + '° left', 'data-n="-1"')
+                + btn('turn', 'right ▶', gps ? 'Move the aim point ' + sf + ' ft to the right' : 'Turn the heading ' + sd + '° right', 'data-n="1"')
+                + btn('tilt', '▲ up', gps ? 'Raise the target altitude ' + sa + ' ft' : 'Tilt the camera ' + sp + '° up', 'data-n="1"')
+                + btn('tilt', '▼ down', gps ? 'Lower the target altitude ' + sa + ' ft' : 'Tilt the camera ' + sp + '° down', 'data-n="-1"')
+                + btn('range', 'closer', gps ? 'Move the aim point ' + sf + ' ft toward the nav' : 'Move the nav ' + sf + ' ft toward the heading', 'data-n="-1"')
+                + btn('range', 'farther', gps ? 'Move the aim point ' + sf + ' ft away from the nav' : 'Move the nav ' + sf + ' ft away', 'data-n="1"')
+                + btn('alt', 'alt −', 'Drone (nav) altitude −' + sa + ' ft', 'data-n="-1"')
+                + btn('alt', 'alt +', 'Drone (nav) altitude +' + sa + ' ft', 'data-n="1"') + '</div>';
+            html += '<div class="aim-vv-edit__row"><span class="dim">now</span> heading <b>' + (pose.heading != null ? pose.heading.toFixed(0) + '°' : '–') + '</b> · camera <b>' + (pose.pitchDeg != null ? pose.pitchDeg.toFixed(0) + '°' : '–') + '</b> · drone alt <b>' + fmtAlt(nav ? nav.value1 : null) + '</b>'
+                + (gps ? ' · target alt <b>' + fmtAlt(step.value1) + '</b> · range <b>' + fmtDist(pose.range) + '</b>' : '')
+                + (nav && nav.location ? ' · nav <span class="dim">' + nav.location.lat.toFixed(6) + ', ' + nav.location.lng.toFixed(6) + '</span>' : '') + '</div>';
+            html += '<div class="aim-vv-edit__row"><span class="dim">from flight</span>'
+                + btn('adopt', 'Adopt actual shot', 'Move the nav to where the drone stood and copy the actual heading / camera angle / altitude into the step')
+                + (gps ? '' : btn('convert', 'Convert → GPS aim point', 'Cast the actual camera ray to the ground (cap ' + (settings.rayCapFt || 500) + ' ft) and make that the aim point'))
+                + '</div>';
+            html += '<div class="aim-vv-edit__row"><span class="dim">steps</span>'
+                + btn('dup', 'Duplicate block after', 'Copy this snapshot and its camera/wait steps right after it')
+                + btn('del', 'Delete block', 'Remove this snapshot and its camera/wait steps', 'class="aim-vv-danger"')
+                + btn('reset-step', 'Reset this step', 'Undo pending changes on this step and its nav') + '</div>';
+        }
+        html += '<div class="aim-vv-edit__row aim-vv-edit__foot">'
+            + (diff.length ? '<b>' + diff.length + ' pending change' + (diff.length === 1 ? '' : 's') + '</b> ' + btn('review', 'Review & Apply…', 'Show the before/after diff, back up the mission, then write') + btn('discard', 'Discard all', 'Drop every pending change') : '<span class="dim">no pending changes</span>')
+            + (isLite() ? ' <span class="warn">Lite mode: writes are blocked</span>' : '')
+            + (!loadShape() ? ' <span class="warn">no learned save shape yet — open any mission in the Mission Bank and Save once</span>' : '')
+            + (!getCsrf() ? ' <span class="warn">no CSRF token seen yet</span>' : '') + '</div>';
+        if (el.innerHTML !== html) el.innerHTML = html;
+    }
+    function onEditClick(e) {
+        const b = e.target.closest && e.target.closest('[data-aim-vv-ed]');
+        if (!b || !model) return;
+        e.preventDefault(); e.stopPropagation();
+        if (ed.busy) return;
+        const act = b.dataset.aimVvEd; const mult = e.shiftKey ? 5 : 1; const n = Number(b.dataset.n || 1) * mult;
+        const shot = currentShotForEdit();
+        const step = shot && shot.step && shot.step.type_name === 'snapshot' ? wk(shot.step.id) : null;
+        const sd = Number(settings.stepDeg) || 5, sp = Number(settings.stepPitch) || 2, sf = (Number(settings.stepFt) || 10) * FT, sa = (Number(settings.stepAltFt) || 10) * FT;
+        try {
+            if (act === 'review') { openReview(); return; }
+            if (act === 'discard') { edResetWork(); toast('Pending changes discarded', false); return; }
+            if (act === 'close') { ed.open = false; ensureEditPanel(); return; }
+            if (!step) return;
+            if (act === 'turn') edTurn(step, isGps(step) ? n * sf : n * sd);
+            else if (act === 'tilt') edTilt(step, isGps(step) ? n * sa : n * sp);
+            else if (act === 'range') edRange(step, n * sf);
+            else if (act === 'alt') edAlt(step, n * sa);
+            else if (act === 'adopt') edAdopt(step, shot);
+            else if (act === 'convert') { ed.busy = true; edConvertGps(step, shot).then(() => { ed.busy = false; drawGhosts(); renderEdit(); }); return; }
+            else if (act === 'dup') { const c = edDuplicateBlock(step); toast(c ? 'Block duplicated after ' + stepLabel(step) : 'Could not duplicate', !c); }
+            else if (act === 'del') { edDeleteBlock(step); toast('Block ' + stepLabel(step) + ' marked for deletion', false); }
+            else if (act === 'reset-step') { const o = origOf(step.id); const nav = wkNavOf(step); const on = nav && origOf(nav.id); if (o) Object.assign(step, deepCopy(o)); if (on) Object.assign(nav, deepCopy(on)); }
+            drawGhosts(); renderEdit();
+        } catch (err) { warn('edit action failed:', err); toast('Edit failed: ' + err.message, true); }
+    }
+    // ---- review + apply ----
+    function openReview() {
+        const diff = edDiff();
+        if (!diff.length) { toast('Nothing to apply', false); return; }
+        if (ed.reviewEl) ed.reviewEl.remove();
+        const shape = loadShape(), csrf = getCsrf(), lite = isLite();
+        const blockers = [];
+        if (lite) blockers.push('Lite mode — writes are blocked (CSM access needed)');
+        if (!shape || !shape.sample) blockers.push('No learned save shape: open any mission in the Mission Bank, click Save once (unchanged is fine), reload this page');
+        if (!csrf) blockers.push('No CSRF token seen in this tab yet');
+        const rows = diff.map(d => '<tr><td>' + esc(d.label) + '</td><td>' + esc(d.kind) + (d.field ? ' · ' + esc(d.field) : '') + '</td><td>' + esc(d.before != null ? d.before : '') + '</td><td>' + esc(d.after != null ? d.after : '') + '</td><td class="dim">' + esc(d.note || '') + '</td></tr>').join('');
+        const el = document.createElement('div'); el.className = 'aim-vv-review';
+        el.innerHTML = '<div class="aim-vv-review__box"><div><b>Review changes to mission "' + esc(model.mission.name || model.mission.app_name) + '"</b> <span class="dim">(app ' + esc(model.mission.app && model.mission.app.id) + ' · affects every future flight of group ' + esc(model.mission.mission_group_id) + ')</span></div>'
+            + '<table><tr class="dim"><td>step</td><td>change</td><td>before</td><td>after</td><td></td></tr>' + rows + '</table>'
+            + '<div class="dim" style="margin:6px 0">Rails: the plan is re-read and compared first · a full JSON backup is saved (script storage + download) · ONE save · re-read and verified · a before/after report is saved + downloaded.</div>'
+            + (blockers.length ? '<div class="warn">' + blockers.map(esc).join('<br>') + '</div>' : '')
+            + '<div class="aim-vv-edit__row"><button type="button" data-aim-vv-rv="apply" ' + (blockers.length ? 'disabled' : '') + '>Apply ' + diff.length + ' change' + (diff.length === 1 ? '' : 's') + '</button><button type="button" data-aim-vv-rv="cancel">Cancel</button><span class="aim-vv-review__status dim"></span></div></div>';
+        document.body.appendChild(el); ed.reviewEl = el;
+    }
+    function onReviewClick(e) {
+        const b = e.target.closest && e.target.closest('[data-aim-vv-rv]'); if (!b) return;
+        e.preventDefault(); e.stopPropagation();
+        if (b.dataset.aimVvRv === 'cancel') { if (ed.reviewEl) ed.reviewEl.remove(); ed.reviewEl = null; return; }
+        if (b.dataset.aimVvRv === 'apply' && !b.disabled) { b.disabled = true; applyChanges(); }
+    }
+    function status(msg) { const s2 = ed.reviewEl && ed.reviewEl.querySelector('.aim-vv-review__status'); if (s2) s2.textContent = msg; log(msg); }
+    function download(name, obj) {
+        try {
+            const doc = pageWin.top.document;   // top-window download bypasses the iframe sandbox
+            const blob = new pageWin.top.Blob([JSON.stringify(obj, null, 1)], { type: 'application/json' });
+            const a = doc.createElement('a'); a.href = pageWin.top.URL.createObjectURL(blob); a.download = name; doc.body.appendChild(a); a.click();
+            setTimeout(() => { try { pageWin.top.URL.revokeObjectURL(a.href); a.remove(); } catch (e2) {} }, 2000);
+        } catch (e) { warn('download failed (' + name + '):', e); }
+    }
+    function gmPush(key, entry, cap) { try { const arr = GM_getValue(key, []) || []; arr.unshift(entry); GM_setValue(key, arr.slice(0, cap)); } catch (e) { warn('GM store failed:', e); } }
+    // Build the save body from the learned shape: scalars from the sample, overridden by this app's own values
+    // where the field names match, name/type/site_id/app_id set explicitly, instructions minimal.
+    function buildBody(app, work, shape) {
+        const b = deepCopy(shape.sample || {});
+        const src = { name: app.name, description: app.description, type: app.type, site_id: app.site, app_id: app.id, map_type: app.map_type, mock_app: app.mock_app, report_rules: app.report_rules, assets_app: app.assets_app, robot_type: app.robot_type, is_active: app.is_active };
+        const used = [];
+        Object.keys(src).forEach(k => { if (k in b && src[k] !== undefined) { b[k] = src[k]; used.push(k); } });
+        b.name = app.name; b.type = app.type != null ? app.type : 1; b.site_id = Number(app.site); b.app_id = app.id;
+        if ('dataReportObjectArr' in b) {
+            const banked = Array.isArray(app.data_report_object_arr) ? app.data_report_object_arr : [];
+            const learned = Array.isArray(b.dataReportObjectArr) ? b.dataReportObjectArr : [];
+            b.dataReportObjectArr = (learned.length && typeof learned[0] === 'number') ? banked.map(x => (x && x.id != null) ? x.id : x) : banked;
+        }
+        b.instructions = work.map(st => ({ type: st.type, polygon_points: st.polygon_points === undefined ? null : st.polygon_points, extra_options: st.extra_options || {}, snapshot_points: st.snapshot_points === undefined ? null : st.snapshot_points, location: st.location || null, value1: st.value1 === undefined ? null : st.value1, value2: st.value2 === undefined ? null : st.value2 }));
+        const fromSample = Object.keys(b).filter(k => !used.includes(k) && !['name', 'type', 'site_id', 'app_id', 'instructions', 'dataReportObjectArr'].includes(k));
+        return { body: b, fromSample };
+    }
+    function planSig(ins) { return (ins || []).map(x => x.id).join(','); }
+    async function applyChanges() {
+        if (ed.busy) return; ed.busy = true;
+        const diff = edDiff(); const mid = model.mid, sid = model.sid;
+        try {
+            const shape = loadShape(), csrf = getCsrf();
+            if (isLite() || !shape || !shape.sample || !csrf || !diff.length) throw new Error('blocked (lite / shape / csrf / empty)');
+            status('re-reading the mission…');
+            const fresh = await getJSON('/missions/' + mid + '/');
+            const freshIns = (fresh.app && fresh.app.instructions || []).slice().sort((a, b2) => a.index_in_app - b2.index_in_app);
+            if (planSig(freshIns) !== planSig(model.plan)) throw new Error('the mission changed since this page loaded — reload and redo the edits');
+            const at = new Date().toISOString(), stamp = at.replace(/[:.]/g, '-');
+            status('backing up…');
+            const backup = { at, mid, sid, appId: fresh.app.id, name: fresh.app.name, app: fresh.app };
+            gmPush(BACKUPS_KEY, backup, 20); download('vv-backup-' + mid + '-' + stamp + '.json', backup);
+            const built = buildBody(fresh.app, ed.work, shape);
+            log('save body: ' + built.body.instructions.length + ' instructions · keys ' + Object.keys(built.body).join(',') + (built.fromSample.length ? ' · from learned sample (unchanged): ' + built.fromSample.join(',') : ''));
+            status('saving…');
+            const r = await fetch('/available_app/', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf }, body: JSON.stringify(built.body) });
+            const txt = await r.text().catch(() => '');
+            if (!r.ok) { warn('save failed HTTP ' + r.status + ': ' + txt.slice(0, 500)); warn('failing body:', built.body); throw new Error('save HTTP ' + r.status); }
+            status('verifying…');
+            const after = await getJSON('/missions/' + mid + '/');
+            const afterIns = (after.app && after.app.instructions || []).slice().sort((a, b2) => a.index_in_app - b2.index_in_app);
+            const mism = [];
+            if (afterIns.length !== ed.work.length) mism.push('step count ' + afterIns.length + ' ≠ expected ' + ed.work.length);
+            ed.work.forEach((w, i) => { const a = afterIns[i]; if (!a) return; const wa = deepCopy(w); delete wa._new; const dd = fieldDiffs(Object.assign({ type_name: w.type_name }, a), Object.assign({ type_name: w.type_name }, wa)); if (a.type !== w.type) mism.push('#' + i + ' type ' + a.type + ' ≠ ' + w.type); dd.forEach(d => mism.push('#' + i + ' ' + d.field + ': server ' + d.before + ' vs sent ' + d.after)); });
+            const report = { at, mid, sid, appId: fresh.app.id, name: fresh.app.name, group: model.mission.mission_group_id, changes: diff, verify: { ok: !mism.length, mismatches: mism }, httpStatus: r.status };
+            gmPush(REPORTS_KEY, report, 200); download('vv-correction-' + mid + '-' + stamp + '.json', report);
+            if (mism.length) { warn('verify mismatches:', mism); toast('Saved, but ' + mism.length + ' field(s) read back differently — see console + report', true); }
+            else toast('✅ Saved ' + diff.length + ' change' + (diff.length === 1 ? '' : 's') + ' · verified · backup + report downloaded', false);
+            status(mism.length ? 'saved with ' + mism.length + ' mismatch(es)' : 'saved + verified');
+            if (ed.reviewEl) { ed.reviewEl.remove(); ed.reviewEl = null; }
+            ed.work = null; ed.busy = false;
+            const ids = current; deactivate(); if (ids) activate(ids);
+            return;
+        } catch (e) {
+            warn('apply failed:', e); toast('🛑 Not applied: ' + e.message, true); status('failed: ' + e.message);
+            const b = ed.reviewEl && ed.reviewEl.querySelector('[data-aim-vv-rv="apply"]'); if (b) b.disabled = false;
+        }
+        ed.busy = false;
+    }
+    // ---- toast ----
+    let toastEl = null;
+    function toast(msg, bad) {
+        try {
+            if (!toastEl) { toastEl = document.createElement('div'); toastEl.className = 'aim-vv-toast'; document.body.appendChild(toastEl); }
+            toastEl.textContent = msg; toastEl.classList.toggle('aim-vv-toast--bad', !!bad); toastEl.style.display = 'block';
+            clearTimeout(toastEl._t); toastEl._t = setTimeout(() => { toastEl.style.display = 'none'; }, bad ? 7000 : 3500);
+        } catch (e) { log(msg); }
+    }
     // ---------------------------------------------------------------
     // Lifecycle
     // ---------------------------------------------------------------
@@ -1199,6 +1585,10 @@
         current = null; model = null; loading = null;
         try { unstampStrip(); } catch (e) { warn('unstamp failed:', e); }
         try { clearOverlay(); } catch (e) { warn('overlay clear failed:', e); }
+        try { ed.ghosts.forEach(l => { try { ov.map && ov.map.removeLayer(l); } catch (e2) {} }); } catch (e) {}
+        ed.ghosts = []; ed.work = null; ed.open = false; ed.busy = false;
+        if (ed.panelEl) { try { ed.panelEl.remove(); } catch (e) {} ed.panelEl = null; }
+        if (ed.reviewEl) { try { ed.reviewEl.remove(); } catch (e) {} ed.reviewEl = null; }
         try { if (ov.zoomHooked && ov.zoomHookedMap) ov.zoomHookedMap.off('zoomend', onOverlayZoom); } catch (e) { /* map gone */ }
         ov.zoomHooked = false; ov.zoomHookedMap = null;
         ov.group = null; ov.groupLoading = false; ov.map = null; ov.svg = null; activeOverlayKey = null;
@@ -1234,10 +1624,12 @@
     let controlPanelDetected = false;
     function applyToggle(id, val) {
         const map = { 'master': 'master', 'strip-order': 'stripOrder', 'badges': 'badges', 'click-seek': 'clickSeek', 'lead-in': 'leadInS', 'shot-card': 'shotCard', 'units': 'units',
-            'overlay': 'overlay', 'overlay-actual': 'overlayActual', 'overlay-labels': 'overlayLabels', 'overlay-group': 'overlayGroup', 'time-bar': 'timeBar' };
+            'overlay': 'overlay', 'overlay-actual': 'overlayActual', 'overlay-labels': 'overlayLabels', 'overlay-group': 'overlayGroup', 'time-bar': 'timeBar',
+            'edit': 'edit', 'step-deg': 'stepDeg', 'step-pitch': 'stepPitch', 'step-ft': 'stepFt', 'step-alt-ft': 'stepAltFt', 'ray-cap-ft': 'rayCapFt' };
         const key = map[id]; if (!key) return;
         let v = val;
         if (key === 'leadInS') { v = parseFloat(val); if (!isFinite(v) || v < 0 || v > 60) return; }
+        else if (['stepDeg', 'stepPitch', 'stepFt', 'stepAltFt', 'rayCapFt'].includes(key)) { v = parseFloat(val); if (!isFinite(v) || v <= 0) return; }
         else if (key === 'units') { v = (val === 'm') ? 'm' : 'ft'; }
         else v = !!val;
         if (settings[key] === v) return;   // idempotent — CP echoes from both frames
@@ -1249,6 +1641,7 @@
             if (key === 'units' && selectedRec) renderCard(selectedRec, 'selected');
             if (key === 'overlay' || key === 'overlayActual' || key === 'overlayLabels') drawOverlay();
             if (key === 'timeBar') ensureBar();
+            if (key === 'edit' || key.startsWith('step') || key === 'rayCapFt') { if (!settings.edit) ed.open = false; renderEdit(); }
             if (key === 'overlayGroup') setGroupMode(v);
         }
     }
@@ -1294,6 +1687,13 @@
                     { id: 'lead-in', label: 'Seek lead-in (seconds before the shot)', type: 'number', default: DEFAULTS.leadInS, min: 0, max: 60 },
                     { id: 'shot-card', label: 'Shot card (planned vs actual)', type: 'boolean', default: DEFAULTS.shotCard },
                     { id: 'time-bar', label: 'Time bar under the player (±10/30 s, jump to time)', type: 'boolean', default: DEFAULTS.timeBar },
+                    { id: 'hdr-edit', type: 'header', label: 'Editing (writes the mission — dev only)' },
+                    { id: 'edit', label: 'Adjust panel (nudge / adopt / convert / delete / duplicate)', type: 'boolean', default: DEFAULTS.edit },
+                    { id: 'step-deg', label: 'Turn step (degrees)', type: 'number', default: DEFAULTS.stepDeg, min: 1, max: 90 },
+                    { id: 'step-pitch', label: 'Camera tilt step (degrees)', type: 'number', default: DEFAULTS.stepPitch, min: 1, max: 45 },
+                    { id: 'step-ft', label: 'Move step (ft)', type: 'number', default: DEFAULTS.stepFt, min: 1, max: 500 },
+                    { id: 'step-alt-ft', label: 'Altitude step (ft)', type: 'number', default: DEFAULTS.stepAltFt, min: 1, max: 200 },
+                    { id: 'ray-cap-ft', label: 'Convert → GPS: max ray distance (ft)', type: 'number', default: DEFAULTS.rayCapFt, min: 50, max: 5000 },
                     { id: 'units', label: 'Units', type: 'select', default: DEFAULTS.units, options: [{ value: 'ft', label: 'ft' }, { value: 'm', label: 'm' }] },
                     { id: 'hdr-map', type: 'header', label: 'Map overlay' },
                     { id: 'overlay', label: 'Plan steps on the map (N# / S#)', type: 'boolean', default: DEFAULTS.overlay },
@@ -1342,6 +1742,10 @@
         document.addEventListener('click', onGridClick, true);
         document.addEventListener('click', onLegendClick, true);
         document.addEventListener('click', onBarClick, true);
+        document.addEventListener('click', onEditClick, true);
+        document.addEventListener('click', onReviewClick, true);
+        document.addEventListener('click', (e) => { const t = e.target.closest && e.target.closest('[data-aim-vv-ed-toggle]'); if (!t || !model) return; e.preventDefault(); e.stopPropagation(); ed.open = !ed.open; if (ed.open) edEnsureWork(); renderEdit(); if (selectedRec) renderCard(selectedRec, 'selected'); }, true);
+        installCsrfSniffer();
         window.addEventListener('keydown', fallbackKeys, true);
         tickTimer = setInterval(tick, 1000);
         tick();

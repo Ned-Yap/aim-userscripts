@@ -6,6 +6,13 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-16 — AIM Video Validation latest v0.20: Phase 2 editing — Adjust panel with rails (dev only, NOT for coworkers)
+
+- **✎ Adjust** on the shot card opens an edit panel for the selected snapshot step. Picture-relative buttons: ◀ left / right ▶ (in-place: heading; GPS: aim point sideways), ▲ up / ▼ down (camera angle; GPS: target altitude), closer / farther (nav along the heading; GPS: aim point along the line), alt − / alt + (drone altitude). Shift-click = ×5. Step sizes in the Control Panel.
+- **From the flight:** *Adopt actual shot* (nav → where the drone stood, heading / camera angle / altitude → what it actually did) and *Convert → GPS aim point* (casts the actual camera ray to the ground, 500 ft cap, editable).
+- **Steps:** *Duplicate block after* (the snapshot plus its camera / wait steps) and *Delete block*. *Reset this step* undoes pending changes on it.
+- Every pending change is previewed as a white dashed ghost on the map. **Review & Apply** shows a before / after table and then, in one save: re-reads the mission and refuses if it changed since load, backs the full mission up (script storage + JSON download), writes ONCE, re-reads and verifies every step, saves + downloads a before / after correction report. Lite mode blocks writes. Needs Percepto's learned save shape (Delete Guard banks it after any Mission Bank save) and a CSRF token.
+
 ## 2026-09-16 — AIM Video Validation latest v0.14: compact Mission Data list (dev only)
 
 - Percepto's Mission Data fields collapse to a small label / value list on the left, the flight panel gets more room on the right, and long values (the creator's email) wrap instead of being covered.
