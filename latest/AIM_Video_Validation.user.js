@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.36
+// @version      0.37
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.36';
+    const SCRIPT_VERSION = '0.37';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -281,7 +281,7 @@
             m.liveById[flown.id] = copy;
             if (stepSig(flown) !== stepSig(copy)) m.liveDiff.push(flown.id);
         });
-        if (m.liveDiff.length) log('live plan differs from the flown plan on ' + m.liveDiff.length + ' step(s): ' + m.liveDiff.map(id => (m.numbering[id] || {}).n || '#' + m.byId[id].index_in_app).join(', ') + ' — edits start from the LIVE values');
+        if (m.liveDiff.length) log('live plan differs from the flown plan on ' + m.liveDiff.length + ' step(s): ' + m.liveDiff.map(id => ((m.numbering[id] || {}).n || '#' + m.byId[id].index_in_app) + ' [' + fieldDiffs(m.byId[id], m.liveById[id]).map(d => d.field + ' ' + d.before + '→' + d.after).join('; ') + ']').join(', ') + ' — edits start from the LIVE values');
         else log('live plan = flown plan (' + live.length + ' steps)');
     }
     // Numbering: S#/N# per flight (slice) by default; whole-plan when `global`.
@@ -462,6 +462,7 @@
             .aim-vv-edit button.aim-vv-danger { color: #ff7a7a; border-color: rgba(255,95,95,.6); }
             .aim-vv-edit button.aim-vv-danger:hover { background: #ff5f5f; color: #fff; }
             .aim-vv-review button[disabled] { opacity: .4; cursor: default; }
+            .aim-vv-edit .aim-vv-restore-pick { max-width: 420px; background: #0f1216; color: #e6e6e6; border: 1px solid #444; border-radius: 3px; padding: 2px 6px; font: inherit; }
             .aim-vv-edit .aim-vv-latlng { width: 190px; background: #0f1216; color: #e6e6e6; border: 1px solid #444; border-radius: 3px; padding: 2px 6px; font: inherit; }
             .aim-vv-edit button.aim-vv-armed { background: #5fe3ff; color: #04222a; }
             .leaflet-container.aim-vv-placing, .leaflet-container.aim-vv-placing * { cursor: crosshair !important; }
@@ -1738,10 +1739,48 @@
             + (isLite() ? ' <span class="warn">Lite mode: writes are blocked</span>' : '')
             + (!loadShape() ? ' <span class="warn">no learned save shape yet — open any mission in the Mission Bank and Save once</span>' : '')
             + (!getCsrf() ? ' <span class="warn">no CSRF token seen yet</span>' : '')
-            + (lastBackupFor(model.mid) ? ' ' + btn('restore', '↩ Restore last backup', 'Load the mission exactly as it was before the last Apply into the working copy, then Review & Apply it') : '') + '</div>';
+            + '</div>'
+            + '<div class="aim-vv-edit__row"><span class="dim">restore</span><select class="aim-vv-restore-pick" data-aim-vv-restore-pick="1">' + restoreOptions() + '</select>'
+            + btn('restore', '↩ Load into working copy', 'Load the chosen state into the working copy — then Review & Apply writes it (the saved backups are per mission, newest first)')
+            + btn('restore-file', '📂 From backup file…', 'Load a vv-backup-*.json you downloaded earlier') + '<input type="file" accept=".json,application/json" class="aim-vv-restore-file" data-aim-vv-restore-file="1" style="display:none"></div>';
         if (el.innerHTML !== html) el.innerHTML = html;
     }
-    function lastBackupFor(mid) { try { return (GM_getValue(BACKUPS_KEY, []) || []).find(b => String(b.mid) === String(mid)) || null; } catch (e) { return null; } }
+    function backupsFor(mid) { try { return (GM_getValue(BACKUPS_KEY, []) || []).filter(b => String(b.mid) === String(mid)); } catch (e) { return []; } }
+    function reportsFor(mid) { try { return (GM_getValue(REPORTS_KEY, []) || []).filter(r => String(r.mid) === String(mid)); } catch (e) { return []; } }
+    function restoreOptions() {
+        const reps = reportsFor(model.mid);
+        const opts = ['<option value="flown">the plan exactly as it FLEW (this flight\'s record)</option>'];
+        backupsFor(model.mid).forEach(b => {
+            const rep = reps.find(r => r.at === b.at);
+            const what = rep && rep.actions && rep.actions.length ? 'before: ' + rep.actions.map(a => a.what + (a.step ? ' ' + a.step : '')).join(', ') : (rep ? 'before: ' + (rep.changes || []).length + ' change(s)' : 'before a save');
+            opts.push('<option value="' + esc(b.at) + '">' + esc(new Date(b.at).toLocaleString()) + ' — ' + esc(what.slice(0, 90)) + '</option>');
+        });
+        return opts.join('');
+    }
+    // Load a full instruction list into the working copy, matching CURRENT ids positionally so the diff reads as changes.
+    function loadIntoWork(instructions, label) {
+        const ins = (instructions || []).slice().sort((a, b2) => (a.index_in_app || 0) - (b2.index_in_app || 0)).map(deepCopy);
+        ins.forEach((st, i) => { const cur = model.plan[i]; if (cur && cur.type === st.type) st.id = cur.id; else { st.id = ed.tempId--; st._new = true; } delete st._aim; });
+        ed.work = ins; ed.log = [{ at: Date.now(), what: 'Load ' + label, step: '' }];
+        drawGhosts(); renderEdit();
+        const n = edDiff().length;
+        toast(n ? 'Loaded ' + label + ' — ' + n + ' field change' + (n === 1 ? '' : 's') + ' vs the saved plan · Review & Apply to write' : 'Loaded ' + label + ' — identical to the saved plan, nothing to apply', !n);
+    }
+    function onRestoreFile(e) {
+        const f = e.target.files && e.target.files[0]; if (!f) return;
+        const rd = new FileReader();
+        rd.onload = () => {
+            try {
+                const j = JSON.parse(String(rd.result));
+                const ins = (j.app && j.app.instructions) || j.instructions || null;
+                if (!Array.isArray(ins)) throw new Error('not a vv-backup file (no app.instructions)');
+                if (j.mid && String(j.mid) !== String(model.mid)) warn('backup file is for mission ' + j.mid + ', this page is ' + model.mid + ' — loading anyway (positional match)');
+                loadIntoWork(ins, 'file ' + f.name);
+            } catch (err) { warn('backup file:', err); toast('Could not load: ' + err.message, true); }
+        };
+        rd.readAsText(f);
+        e.target.value = '';
+    }
     // Drag-to-change: mousedown on a [data-aim-vv-scrub] element, drag horizontally; every SCRUB_PX = one unit (Shift ×5).
     const SCRUB_PX = 6;
     let scrub = null;
@@ -1838,7 +1877,7 @@
     }
     function fallbackCopy(txt) { try { const ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); } catch (e) { warn('copy failed:', e); } }
     function onEditClick(e) {
-        if (e.target.matches && e.target.matches('[data-aim-vv-ed-check]')) return;   // native checkbox — let it toggle
+        if (e.target.matches && (e.target.matches('[data-aim-vv-ed-check]') || e.target.matches('[data-aim-vv-restore-pick], [data-aim-vv-restore-pick] *'))) return;   // native controls
         const b = e.target.closest && e.target.closest('[data-aim-vv-ed]');
         if (!b || !model) return;
         e.preventDefault(); e.stopPropagation();
@@ -1866,14 +1905,12 @@
             if (act === 'nav-move' || act === 'nav-set') { drawGhosts(); renderEdit(); return; }
             if (act === 'nav-place') { renderEdit(); return; }
             if (act === 'restore') {
-                const bk = lastBackupFor(model.mid); if (!bk || !bk.app) { toast('No backup for this mission', true); return; }
-                const ins = (bk.app.instructions || []).slice().sort((a, b2) => a.index_in_app - b2.index_in_app).map(deepCopy);
-                // Match backup steps to CURRENT ids positionally where possible so the diff reads as changes, not delete+add.
-                ins.forEach((st, i) => { const cur = model.plan[i]; if (cur && cur.type === st.type) st.id = cur.id; else { st.id = ed.tempId--; st._new = true; } });
-                ed.work = ins; ed.log = [{ at: Date.now(), what: 'Restore backup from ' + new Date(bk.at).toLocaleString(), step: '' }]; drawGhosts(); renderEdit();
-                toast('Loaded backup from ' + new Date(bk.at).toLocaleString() + ' — review, then Apply to restore', false);
-                return;
+                const sel = ed.panelEl && ed.panelEl.querySelector('[data-aim-vv-restore-pick]'); const v = sel ? sel.value : 'flown';
+                if (v === 'flown') { loadIntoWork(model.plan, 'the plan as flown'); return; }
+                const bk = backupsFor(model.mid).find(b => b.at === v); if (!bk || !bk.app) { toast('That backup is no longer in script storage — use 📂 From backup file', true); return; }
+                loadIntoWork(bk.app.instructions, 'backup from ' + new Date(bk.at).toLocaleString()); return;
             }
+            if (act === 'restore-file') { const inp = ed.panelEl && ed.panelEl.querySelector('[data-aim-vv-restore-file]'); if (inp) inp.click(); return; }
             if (!step) return;
             if (act === 'turn') { edTurn(step, isGps(step) ? n * sf : n * sd); edLog((n < 0 ? 'left ' : 'right ') + Math.abs(isGps(step) ? n * (Number(settings.stepFt) || 1) : n * sd) + (isGps(step) ? ' ft' : '°'), step); }
             else if (act === 'tilt') { edTilt(step, isGps(step) ? n * sa : n * sp); edLog((n > 0 ? 'up ' : 'down ') + Math.abs(isGps(step) ? n * (Number(settings.stepAltFt) || 1) : n * sp) + (isGps(step) ? ' ft' : '°'), step); }
@@ -2275,7 +2312,7 @@
         document.addEventListener('click', onLegendClick, true);
         document.addEventListener('click', onBarClick, true);
         document.addEventListener('click', onEditClick, true);
-        document.addEventListener('change', (e) => { const c = e.target; if (c && c.matches && c.matches('[data-aim-vv-ed-check="nav-keep-aim"]')) { settings.navKeepAim = !!c.checked; saveSettings(); log('nav keep-aim = ' + settings.navKeepAim); } }, true);
+        document.addEventListener('change', (e) => { const c = e.target; if (!c || !c.matches) return; if (c.matches('[data-aim-vv-ed-check="nav-keep-aim"]')) { settings.navKeepAim = !!c.checked; saveSettings(); log('nav keep-aim = ' + settings.navKeepAim); } else if (c.matches('[data-aim-vv-restore-file]')) onRestoreFile(e); }, true);
         document.addEventListener('click', onMapPlaceClick, true);
         window.addEventListener('keydown', onPlaceKey, true);
         document.addEventListener('keydown', (e) => { const t = e.target; if (t && t.matches && t.matches('[data-aim-vv-latlng]')) { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); const b = ed.panelEl && ed.panelEl.querySelector('[data-aim-vv-ed="nav-set"]'); if (b) b.click(); } } }, true);

@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Video Validation v0.37 (prod + dev): restore picker
+
+- The Adjust panel's restore row now lets you choose what to go back to: **the plan exactly as it flew**, any of this mission's saved backups (newest first, each labelled with the action it preceded), or **a backup file** you downloaded. The chosen state loads into the working copy and goes through the usual Review → Apply. The console line about a live/flown difference now names the fields.
+
 ## 2026-09-17 — AIM Video Validation v0.36 (prod + dev): restore verified live; saved plan shown in yellow
 
 - Both write directions are now verified on a live mission: a nav move + re-aim, then a restore from the backup, each `saved + verified` with robot types and reports intact. Each save creates a new mission version id, so the live mission is always resolved by name.
