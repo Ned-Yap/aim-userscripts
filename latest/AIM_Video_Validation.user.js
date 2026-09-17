@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.7
+// @version      0.8
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -28,7 +28,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-video-validation';
-    const SCRIPT_VERSION = '0.7';
+    const SCRIPT_VERSION = '0.8';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -425,6 +425,30 @@
         }
         log('strip stamped' + (force === true ? '' : ' (re-render)') + ': ' + tiles.length + ' tiles, ' + matched + ' matched to images' + (settings.stripOrder ? ' (oldest first)' : ''));
     }
+    // Diagnostic: is the badge on this tile actually VISIBLE after Percepto reacted to the click?
+    // Logs what covers it (once per image) so a hidden badge is never a guess again.
+    const visProbeLogged = {};
+    function probeTileVisibility(tile, rec) {
+        try {
+            if (!settings.badges || !rec || visProbeLogged[rec.key]) return;
+            const live = tileFor(rec) || tile;
+            const badge = live && live.querySelector('.aim-vv-badge');
+            const seek = live && live.querySelector('.aim-vv-seek');
+            const info = (el) => el ? { tag: el.tagName, cls: String(el.className).slice(0, 80), z: getComputedStyle(el).zIndex, pos: getComputedStyle(el).position, op: getComputedStyle(el).opacity, vis: getComputedStyle(el).visibility, disp: getComputedStyle(el).display } : null;
+            const check = (el, name) => {
+                if (!el) return name + ': MISSING from DOM';
+                const r = el.getBoundingClientRect();
+                if (!r.width || !r.height) return name + ': zero size ' + JSON.stringify(info(el));
+                const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+                if (top === el || el.contains(top)) return name + ': visible';
+                return name + ': COVERED by ' + JSON.stringify(info(top)) + ' | badge ' + JSON.stringify(info(el)) + ' | rect ' + Math.round(r.left) + ',' + Math.round(r.top) + ' ' + Math.round(r.width) + 'x' + Math.round(r.height);
+            };
+            const res = [check(badge, 'badge'), check(seek, 'seek')];
+            visProbeLogged[rec.key] = true;
+            const bad = res.some(x => !/visible$/.test(x));
+            (bad ? warn : log)('tile visibility after click (' + rec.key + '): ' + res.join(' · ') + (bad ? ' | tile: ' + JSON.stringify(info(live)) + ' | tile children: ' + Array.from(live.children).map(c => c.tagName + '.' + String(c.className).slice(0, 40)).join(', ') : ''));
+        } catch (e) { warn('visibility probe failed:', e); }
+    }
     function unstampStrip() {
         const grid = stripGrid();
         if (!grid) return;
@@ -681,6 +705,7 @@
         if (!rec) return;   // video tile — let Percepto handle it
         // Let Percepto show the still first; then seek the (still-alive) video so ▶ resumes at the shot.
         setTimeout(() => { if (settings.clickSeek) seekToShot(rec, false); else selectShot(rec); }, 0);
+        setTimeout(() => probeTileVisibility(tile, rec), 700);
     }
 
 
