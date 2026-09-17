@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.43
+// @version      0.44
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.43';
+    const SCRIPT_VERSION = '0.44';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -716,10 +716,14 @@
     function stepShot(dir) {
         if (!model || !model.shots.length) return;
         const v = videoEl(); const t = v ? v.currentTime : 0;
-        const offs = model.shots.filter(s => s.videoOff != null);
+        const lead = Number(settings.leadInS) || 0;
+        // A shot "starts" at its lead-in point (where selecting it seeks to). Next = first shot whose start is ahead of
+        // the playhead; previous = last shot whose start is behind it. Judging by the shutter instead made "next" from a
+        // freshly selected shot land on the same shot, and "previous" just after a shutter find nothing.
+        const offs = model.shots.filter(s => s.videoOff != null).map(s => ({ s, start: Math.max(0, s.videoOff - lead) }));
         let target = null;
-        if (dir > 0) target = offs.find(s => s.videoOff > t + 0.5);
-        else { for (const s of offs) { if (s.videoOff < t - (Number(settings.leadInS) || 0) - 0.5) target = s; } }
+        if (dir > 0) { const hit = offs.find(o => o.start > t + 0.5); target = hit && hit.s; }
+        else { const before = offs.filter(o => o.start < t - 0.5); target = before.length ? before[before.length - 1].s : null; }
         if (!target) { log('no ' + (dir > 0 ? 'next' : 'previous') + ' shot'); return; }
         seekToShot(target.primary, true);
         scrollTileIntoView(target.primary);
@@ -1176,7 +1180,7 @@
                 const g = groupOn ? flightForIdx(st.index_in_app) : null;
                 const tip = '<b>' + esc(num ? num.n : st.type_name) + '</b> · step #' + st.index_in_app
                     + (g ? ' · flight ' + esc(g.label) : '')
-                    + (st.type_name === 'snapshot' ? (st.location ? ' · GPS aim point' : ' · in-place ' + ((st.extra_options || {}).heading != null ? st.extra_options.heading + '°' : '') + (st._look ? ' · look-point ' + fmtDist(st._look.dist) + ' out' + (st._look.agl != null ? ', ' + fmtAlt(st._look.agl) + ' above terrain' : '') + (st._look.capped ? ' (capped)' : '') : '')) : '')
+                    + (st.type_name === 'snapshot' ? (st.location ? ' · GPS aim point' : ' · in-place ' + ((st.extra_options || {}).heading != null ? st.extra_options.heading + '°' : '') + (st._look ? ' · look-point ' + fmtDist(st._look.dist) + ' out (horizontal)' + (st._look.slant != null ? ', ' + fmtDist(st._look.slant) + ' line of sight' : '') + (st._look.agl != null ? ', ' + fmtAlt(st._look.agl) + ' above terrain' : '') + (st._look.capped ? ' (capped)' : '') : '')) : '')
                     + (shots.length ? ' · shot at ' + shots.map(sh => mmss(sh.videoOff)).join(', ') : (st.type_name === 'snapshot' && !groupOn ? ' · <i>no image</i>' : ''));
                 mk.bindTooltip(tip, { direction: 'top', offset: [0, -10], opacity: 0.95 });
                 if (shots.length) mk.on('click', () => { const sh = shots[0]; seekToShot(sh.primary, true, true); scrollTileIntoView(sh.primary); });
@@ -1201,7 +1205,7 @@
                 const num = sh.step && model.numbering[sh.step.id];
                 try {
                     const mk = L.marker([aim.lat, aim.lng], { icon: L.divIcon({ className: 'aim-vv-ov', html: '<div class="aim-vv-ov-alook" style="border-color:' + COLOR_ACTUAL + '"></div>', iconSize: [14, 14], iconAnchor: [7, 7] }), interactive: true, zIndexOffset: 280 });
-                    mk.bindTooltip('<b>' + esc(num ? num.n : '?') + '</b> ACTUAL look-point · ' + fmtDist(dist) + ' out' + (capped ? ' (capped — shallow angle)' : '') + ' · from the real position, ' + im.drone_heading + '° / ' + im.camera_pitch + '°, ' + fmtAlt(alt - g) + ' above terrain', { direction: 'top', offset: [0, -8], opacity: 0.95 });
+                    mk.bindTooltip('<b>' + esc(num ? num.n : '?') + '</b> ACTUAL look-point · ' + fmtDist(dist) + ' out (horizontal), ' + fmtDist(Math.sqrt(dist * dist + (alt - g) * (alt - g))) + ' line of sight' + (capped ? ' (capped — shallow angle)' : '') + ' · from the real position, ' + im.drone_heading + '° / ' + im.camera_pitch + '°, ' + fmtAlt(alt - g) + ' above terrain', { direction: 'top', offset: [0, -8], opacity: 0.95 });
                     if (addLayer(map, mk)) { const pm = ov.stepMarkers[sh.step && sh.step.id]; if (pm) { const pp = pm.getLatLng(); if (distM(pp, aim) > 1) addLayer(map, L.polyline([[pp.lat, pp.lng], [aim.lat, aim.lng]], lineOpts({ color: COLOR_ACTUAL, weight: 1, opacity: 0.6, dashArray: '2,4' }))); } }
                 } catch (e) { warn('actual look-point failed:', e); }
             });
@@ -1329,7 +1333,8 @@
         const down = Math.tan(Math.abs(pitch) * RAD);
         let dist = (ground != null && down > 0.01) ? (alt - ground) / down : Infinity;
         let capped = false; if (!(dist > 0) || dist > capM) { dist = capM; capped = true; }
-        return { ll: moveLL(nav.location, dist, e.heading), dist, capped, agl: ground != null ? alt - ground : null };
+        const agl = ground != null ? alt - ground : null;
+        return { ll: moveLL(nav.location, dist, e.heading), dist, capped, agl, slant: agl != null ? Math.sqrt(dist * dist + agl * agl) : null };
     }
     let lookLayers = [];
     let lookToken = 0;
@@ -1815,7 +1820,7 @@
                 + btn('alt', 'alt −', 'Drone (nav) altitude −' + sa + ' ft' + (gps ? '' : ' (camera re-tilts to keep the look-point)'), 'data-n="-1"')
                 + btn('alt', 'alt +', 'Drone (nav) altitude +' + sa + ' ft' + (gps ? '' : ' (camera re-tilts to keep the look-point)'), 'data-n="1"') + '</div>';
             html += '<div class="aim-vv-edit__row"><span class="dim">now</span> heading ' + sc('heading', pose.heading != null ? pose.heading.toFixed(0) + '°' : '–', gps ? 'aim point sideways, 1 ft per step' : 'heading') + ' · camera ' + sc('camera', pose.pitchDeg != null ? pose.pitchDeg.toFixed(0) + '°' : '–', gps ? 'target altitude' : 'camera angle') + ' · drone alt ' + sc('alt', fmtAlt(nav ? nav.value1 : null), 'drone (nav) altitude')
-                + (gps ? ' · target alt ' + sc('target-alt', fmtAlt(step.value1), 'target altitude') + ' · range ' + sc('range', fmtDist(pose.range), 'aim point closer / farther') : ' · look-point ' + sc('range', (function() { const lk = inplaceLook(step); if (lk) return fmtDist(lk.dist) + (lk.aim.capped ? ' (capped)' : ''); const g = nav && nav.location ? groundAt(nav.location) : null; const lp = (nav && g != null) ? lookPointFor(nav, step, g) : null; return lp ? fmtDist(lp.dist) + (lp.capped ? ' (capped)' : '') : '?'; })(), 'distance from the nav to where the camera points (terrain at the nav) — drag: nav closer / farther along the heading'))
+                + (gps ? ' · target alt ' + sc('target-alt', fmtAlt(step.value1), 'target altitude') + ' · range ' + sc('range', fmtDist(pose.range), 'aim point closer / farther') : ' · look-point ' + sc('range', (function() { const lk = inplaceLook(step); if (lk) { const h = (typeof nav.value1 === 'number' && lk.aim.alt != null) ? nav.value1 - lk.aim.alt : null; return fmtDist(lk.dist) + (h != null ? ' / ' + fmtDist(Math.sqrt(lk.dist * lk.dist + h * h)) + ' LOS' : '') + (lk.aim.capped ? ' (capped)' : ''); } const g = nav && nav.location ? groundAt(nav.location) : null; const lp = (nav && g != null) ? lookPointFor(nav, step, g) : null; return lp ? fmtDist(lp.dist) + (lp.slant != null ? ' / ' + fmtDist(lp.slant) + ' LOS' : '') + (lp.capped ? ' (capped)' : '') : '?'; })(), 'distance from the nav to where the camera points (terrain at the nav) — drag: nav closer / farther along the heading'))
                 + '</div>';
             if (nav) {
                 html += '<div class="aim-vv-edit__row"><span class="dim">nav ' + esc(stepLabel(nav)) + '</span>'
@@ -1957,7 +1962,7 @@
         set('camera', pose.pitchDeg != null ? pose.pitchDeg.toFixed(0) + '°' : '–');
         set('alt', fmtAlt(nav ? nav.value1 : null));
         if (isGps(step)) { set('target-alt', fmtAlt(step.value1)); set('range', fmtDist(pose.range)); }
-        else if (nav && nav.location) { const lk = inplaceLook(step); set('range', lk ? fmtDist(lk.dist) + (lk.aim.capped ? ' (capped)' : '') : '?'); }
+        else if (nav && nav.location) { const lk = inplaceLook(step); if (lk) { const h = (typeof nav.value1 === 'number' && lk.aim.alt != null) ? nav.value1 - lk.aim.alt : null; set('range', fmtDist(lk.dist) + (h != null ? ' / ' + fmtDist(Math.sqrt(lk.dist * lk.dist + h * h)) + ' LOS' : '') + (lk.aim.capped ? ' (capped)' : '')); } else set('range', '?'); }
         const o = nav && origOf(nav.id);
         if (o && o.location && nav.location) {
             const ns = distM(o.location, { lat: nav.location.lat, lng: o.location.lng }) * (nav.location.lat >= o.location.lat ? 1 : -1);

@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Video Validation latest v0.44 (dev only): ⏮ ⏭ fixed, look-point shows line of sight too
+
+- `⏮ shot` / `shot ⏭` and `[` / `]` now step by where a shot starts (its lead-in point), so "next" from a freshly selected shot moves on instead of re-selecting it, and "previous" right after a shutter goes back to that shot's start.
+- Look-point distances show both the horizontal distance and the line-of-sight (slant) range, in tooltips and the Adjust row.
+
 ## 2026-09-17 — AIM Video Validation v0.41 (prod + dev): legend on the map
 
 - A legend box sits bottom-left on the playback map: planned nav / planned look-point (what you edit) / actual look-point / drone position + footprint / saved-plan-differs / pending edit / flown path / next nav, plus the strip badge colors. Built from your current color settings. Click its header to collapse it to a `?` chip; Control Panel toggle to hide it.
