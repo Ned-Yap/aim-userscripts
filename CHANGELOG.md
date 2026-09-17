@@ -6,6 +6,13 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-16 — AIM Video Validation latest v0.7: badges stay visible on the opened tile, Percepto arrows hidden, readable group view (dev only)
+
+- The opened thumbnail's badge and ▶ were never removed — Percepto paints a selection overlay above them. They now sit above it.
+- Percepto's own ‹ › arrows are hidden while our flight-order arrows are shown (they walked the wrong order and vanished at Percepto's list end).
+- Whole-mission view: steps no flight in the group has flown yet are small grey dots; flown steps get N#/S# labels only when zoomed in (zoom 17+), dots otherwise. The legend says so.
+- Stepping with the arrows no longer seeks the video twice.
+
 ## 2026-09-16 — AIM Video Validation latest v0.6: no more page freeze, own ‹ › buttons, badges on re-rendered tiles (dev only)
 
 - v0.5 could lock the tab when stepping to the first image: the strip observer mutated the DOM inside its own callback and re-asserted Percepto's arrow state against React. All strip work is now deferred, our own writes are ignored by the observer, and a circuit breaker backs off (with a console warning) if the strip is re-stamped more than 20× in a second.

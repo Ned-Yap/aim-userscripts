@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.6
+// @version      0.7
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -28,7 +28,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-video-validation';
-    const SCRIPT_VERSION = '0.6';
+    const SCRIPT_VERSION = '0.7';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -281,14 +281,15 @@
             .aim-vv-nav:hover { background: #5fe3ff; color: #04222a; }
             .aim-vv-nav--prev { left: 14px; } .aim-vv-nav--next { right: 14px; }
             .aim-vv-nav--off { opacity: .25; cursor: default; }
-            .aim-vv-badge { position: absolute; left: 3px; top: 3px; z-index: 3; pointer-events: none;
+            html.aim-vv-own-nav .mp-media .pr-image-nav-btn { display: none !important; }
+            .aim-vv-badge { position: absolute; left: 3px; top: 3px; z-index: 100; pointer-events: none;
                 font: 800 10px/14px monospace; padding: 0 4px; border-radius: 3px; color: #04222a;
                 background: #ff7ad9; box-shadow: 0 1px 3px rgba(0,0,0,.6); }
             .aim-vv-badge--t { background: #ffb347; }
             .aim-vv-badge--g { background: #b0ff5f; }
             .aim-vv-badge--none { background: #ff5f5f; color: #fff; }
             .aim-vv-badge--retake { outline: 2px dashed #fff; }
-            .aim-vv-seek { position: absolute; right: 3px; bottom: 3px; z-index: 3; cursor: pointer;
+            .aim-vv-seek { position: absolute; right: 3px; bottom: 3px; z-index: 100; cursor: pointer;
                 font: 700 11px/16px monospace; width: 18px; height: 18px; text-align: center; border-radius: 3px;
                 background: rgba(0,0,0,.65); color: #5fe3ff; border: 1px solid rgba(95,227,255,.6); }
             .aim-vv-seek:hover { background: #5fe3ff; color: #04222a; }
@@ -305,6 +306,7 @@
             .aim-vv-ov-nav { width: 22px; height: 22px; border-radius: 50%; color: #04222a; font: 800 10px/19px monospace; text-align: center; border: 2px solid rgba(0,0,0,.6); box-shadow: 0 1px 4px rgba(0,0,0,.5); }
             .aim-vv-ov-snap { width: 18px; height: 18px; border-radius: 3px; color: #04222a; font: 800 9px/17px monospace; text-align: center; border: 1px solid rgba(0,0,0,.6); opacity: .92; }
             .aim-vv-ov-dot { width: 10px; height: 10px; border-radius: 50%; border: 1px solid rgba(0,0,0,.6); margin: 4px; }
+            .aim-vv-ov-dot--small { width: 6px; height: 6px; margin: 2px; opacity: .7; }
             .aim-vv-ov-flag { font-size: 13px; line-height: 16px; text-shadow: 0 1px 2px #000; }
             .aim-vv-ov-actual { width: 12px; height: 12px; border-radius: 50%; background: #5fe3ff; border: 2px solid #04222a; box-shadow: 0 0 0 1px #5fe3ff; }
             .aim-vv-ov-actual--retake { border-style: dashed; border-color: #fff; }
@@ -529,8 +531,7 @@
     function showStill(rec) {
         const t = tileFor(rec);
         if (!t) { warn('no tile for', rec && rec.name); return; }
-        try { t.click(); } catch (e) { warn('tile click failed:', e); }
-        if (settings.clickSeek) seekToShot(rec, false); else selectShot(rec);
+        try { t.click(); } catch (e) { warn('tile click failed:', e); }   // onGridClick handles seek/select
         setTimeout(() => { try { fixCounter(); ensureNavButtons(); } catch (e) { warn('nav refresh:', e); } }, 60);
         try { t.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (e) { /* cosmetic */ }
     }
@@ -558,6 +559,7 @@
     function ensureNavButtons() {
         const media = document.querySelector('.mp-media');
         const wantOn = !!(model && settings.master && settings.stripOrder && media && stillImg());
+        document.documentElement.classList.toggle('aim-vv-own-nav', wantOn);
         if (!wantOn) { if (navBtnEls) { navBtnEls.forEach(b => { try { b.remove(); } catch (e) {} }); navBtnEls = null; } return; }
         if (navBtnEls && navBtnEls.every(b => media.contains(b))) { updateNavButtons(); return; }
         if (navBtnEls) navBtnEls.forEach(b => { try { b.remove(); } catch (e) {} });
@@ -743,6 +745,13 @@
         const inSlice = (st) => groupOn || !model.slice || (st.index_in_app >= model.slice.minIdx && st.index_in_app <= model.slice.maxIdx);
         const steps = model.plan.filter(st => inSlice(st) && (st.type_name === 'navigate' || st.type_name === 'snapshot' || st.type_name === 'flag pole'));
         const colorFor = (st, base) => { if (!groupOn) return base; const g = flightForIdx(st.index_in_app); return g ? g.color : COLOR_OTHER; };
+        // Whole-mission view is dense (800+ steps): un-flown steps become small grey dots, and flown steps
+        // only get N#/S# labels when zoomed in close. Redrawn on zoomend when the threshold flips.
+        const zoom = (typeof map.getZoom === 'function') ? map.getZoom() : 18;
+        const dense = groupOn && steps.length > 120;
+        ov.labelZoomGate = dense ? (zoom >= 17) : true;
+        const showLabel = (st) => settings.overlayLabels && (!dense || (ov.labelZoomGate && !!flightForIdx(st.index_in_app)));
+        const unflown = (st) => groupOn && !flightForIdx(st.index_in_app);
 
         // Flight line nav→nav (dashed) + sightlines nav→aim point for GPS snapshots + heading ticks for in-place ones.
         let curNav = null; const navPts = [];
@@ -754,6 +763,7 @@
         steps.forEach(st => {
             if (st.type_name === 'navigate') { nav = st; return; }
             if (st.type_name !== 'snapshot' || !nav || !nav.location) return;
+            if (dense && unflown(st)) return;
             const col = colorFor(st, COLOR_SNAP);
             if (st.location && typeof st.location.lat === 'number') {
                 addLayer(map, L.polyline([[nav.location.lat, nav.location.lng], [st.location.lat, st.location.lng]], lineOpts({ color: col, weight: 2, opacity: 0.75, dashArray: '3,5' })));
@@ -787,7 +797,10 @@
             } else if (st.type_name === 'flag pole' && st.location) {
                 ll = [st.location.lat, st.location.lng]; size = 16; html = '<div class="aim-vv-ov-flag">🚩</div>';
             } else return;
-            if (!settings.overlayLabels && st.type_name !== 'flag pole') html = '<div class="aim-vv-ov-dot" style="background:' + col + '"></div>';
+            if (st.type_name !== 'flag pole') {
+                if (unflown(st)) { html = '<div class="aim-vv-ov-dot aim-vv-ov-dot--small" style="background:' + COLOR_OTHER + '"></div>'; size = 10; anchor = null; }
+                else if (!showLabel(st)) { html = '<div class="aim-vv-ov-dot" style="background:' + col + '"></div>'; }
+            }
             try {
                 const icon = L.divIcon({ className: 'aim-vv-ov', html, iconSize: [size, size], iconAnchor: anchor || [size / 2, size / 2] });
                 const mk = L.marker(ll, { icon, interactive: true, zIndexOffset: 500 });
@@ -825,9 +838,19 @@
                 } catch (e) { warn('overlay actual marker failed:', e); }
             });
         }
+        if (!ov.zoomHooked || ov.zoomHookedMap !== map) {
+            try { map.on('zoomend', onOverlayZoom); ov.zoomHooked = true; ov.zoomHookedMap = map; } catch (e) { warn('zoomend hook failed:', e); }
+        }
         activeOverlayKey = undefined;   // markers are new — force the active highlight to re-apply
         log('overlay drawn: ' + steps.length + ' plan steps' + (groupOn ? ' (whole mission, ' + ov.group.length + ' flights)' : ' (this flight)') + ', ' + Object.keys(ov.shotMarkers).length + ' actual shots, ' + ov.layers.length + ' layers');
         markActiveOverlay();
+    }
+    function onOverlayZoom() {
+        if (!model || !ov.layers.length) return;
+        const groupOn = !!(settings.overlayGroup && ov.group);
+        if (!groupOn) return;
+        const gate = (ov.map && typeof ov.map.getZoom === 'function' ? ov.map.getZoom() : 18) >= 17;
+        if (gate !== ov.labelZoomGate) drawOverlay();
     }
     let activeOverlayKey = null;
     function markActiveOverlay() {
@@ -888,7 +911,8 @@
                 + '<a href="#" data-aim-vv="load-group" style="color:#5fe3ff">' + (ov.groupLoading ? 'loading flights…' : 'show all flights (whole-mission numbering)') + '</a>';
         } else html = '<span class="dim">flights: </span>' + ov.group.map(g =>
             '<a href="#" data-aim-vv="open-flight" data-mid="' + g.mid + '" title="open in a new tab" style="color:' + g.color + ';margin-right:10px;text-decoration:none">● ' + esc(g.label) + ' <span class="dim">' + (g.minIdx != null ? 'steps ' + g.minIdx + '–' + g.maxIdx : (g.error ? 'error' : 'no steps')) + '</span></a>').join('')
-            + ' · <a href="#" data-aim-vv="toggle-group" style="color:#5fe3ff">' + (settings.overlayGroup ? 'this flight only' : 'whole mission') + '</a>';
+            + ' · <a href="#" data-aim-vv="toggle-group" style="color:#5fe3ff">' + (settings.overlayGroup ? 'this flight only' : 'whole mission') + '</a>'
+            + (settings.overlayGroup ? ' <span class="dim">· grey dots = not flown by any flight in this group yet · labels appear when zoomed in</span>' : '');
         if (legendEl.innerHTML !== html) legendEl.innerHTML = html;   // called every tick — only touch the DOM on change
     }
     function onLegendClick(e) {
@@ -953,9 +977,12 @@
         current = null; model = null; loading = null;
         try { unstampStrip(); } catch (e) { warn('unstamp failed:', e); }
         try { clearOverlay(); } catch (e) { warn('overlay clear failed:', e); }
+        try { if (ov.zoomHooked && ov.zoomHookedMap) ov.zoomHookedMap.off('zoomend', onOverlayZoom); } catch (e) { /* map gone */ }
+        ov.zoomHooked = false; ov.zoomHookedMap = null;
         ov.group = null; ov.groupLoading = false; ov.map = null; ov.svg = null; activeOverlayKey = null;
         if (legendEl) { try { legendEl.remove(); } catch (e) {} legendEl = null; }
         if (navBtnEls) { navBtnEls.forEach(b => { try { b.remove(); } catch (e) {} }); navBtnEls = null; }
+        document.documentElement.classList.remove('aim-vv-own-nav');
         if (cardEl) { try { cardEl.remove(); } catch (e) {} cardEl = null; }
         if (hookedVideo) { try { hookedVideo.removeEventListener('timeupdate', onTimeUpdate); } catch (e) {} hookedVideo = null; }
         selectedRec = null; lastPlayheadShot = null; activeKeys = [];
