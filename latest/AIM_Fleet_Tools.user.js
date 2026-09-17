@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.35
+// @version      0.36
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.35';
+    const SCRIPT_VERSION = '0.36';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -2647,7 +2647,7 @@
     }
     let fcRun = null;          // { done, total, msg, abort, errors }
     let fcResults = null;      // { at, sites:[ids], days, flights:[result] }
-    let fcTab = 'flights';
+    let fcTab = 'summary';
     let fcOpenFlight = null;
     let fcSortKey = 'flagged';
 
@@ -2797,6 +2797,63 @@
         const mean = (v) => v.length ? v.reduce((x, y) => x + y, 0) / v.length : null;
         return Object.values(g).map(a => Object.assign(a, { dHdg: mean(a.hdg), dCam: mean(a.cam), dAlt: mean(a.alt), dPos: mean(a.pos), pct: a.shots ? (100 * (a.shots - a.flagged) / a.shots) : null })).sort((x, y) => (y.flagged / Math.max(1, y.shots)) - (x.flagged / Math.max(1, x.shots)));
     }
+    // ---- one-page SUMMARY: only what matters, in words ----
+    function fcMajorIssues() {
+        const cfg = fcCfg(); const F = fcResults ? fcResults.flights : [];
+        const out = [];
+        F.forEach(f => {
+            if (!f.shots) return;
+            const reasons = []; let sev = 0;
+            const share = f.flagged / f.shots;
+            const off = f.rows.filter(r => r.flags.some(x => x.startsWith('off station')));
+            if (off.length >= Math.max(2, f.shots * 0.25)) { const dirs = {}; off.forEach(r => { dirs[r.dir] = (dirs[r.dir] || 0) + 1; }); const dir = Object.keys(dirs).sort((a, b) => dirs[b] - dirs[a])[0]; const mean = off.reduce((n, r) => n + r.pos, 0) / off.length; reasons.push(`${off.length} of ${f.shots} shots off station (~${mean.toFixed(0)} ft ${dir || ''}) — drone position, not the plan`); sev += 3 + share * 3; }
+            const hdg = f.rows.filter(r => r.flags.some(x => x.startsWith('heading'))); if (hdg.length >= 2) { reasons.push(`${hdg.length} shots heading off by >${cfg.hdg}°`); sev += 2; }
+            const cam = f.rows.filter(r => r.flags.some(x => x.startsWith('camera'))); if (cam.length >= 2) { reasons.push(`${cam.length} shots camera angle off by >${cfg.cam}°`); sev += 2; }
+            const alt = f.rows.filter(r => r.flags.some(x => x.startsWith('altitude'))); if (alt.length >= 2) { const mean = alt.reduce((n, r) => n + r.alt[2], 0) / alt.length; reasons.push(`${alt.length} shots flown ${mean > 0 ? 'high' : 'low'} by ~${Math.abs(mean).toFixed(0)} ft`); sev += 2; }
+            if ((f.missing || []).length >= 2) { reasons.push(`${f.missing.length} planned snapshots produced no picture (${f.missing.slice(0, 6).join(', ')}${f.missing.length > 6 ? '…' : ''})`); sev += 2 + Math.min(3, f.missing.length / 2); }
+            if (f.retakes >= 2) { reasons.push(`${f.retakes} re-takes`); sev += 1.5; }
+            if ((f.unplanned || 0) >= 3) { reasons.push(`${f.unplanned} pictures match no planned snapshot (pilot / manual?)`); sev += 1; }
+            if (!reasons.length && share >= 0.5 && f.flagged >= 3) { reasons.push(`${f.flagged} of ${f.shots} shots outside limits`); sev += 2; }
+            if (reasons.length) out.push({ f, sev, text: reasons.join(' · ') });
+        });
+        out.sort((a, b) => b.sev - a.sev);
+        // drone bias: mean off-station or altitude bias across ≥ 2 flights
+        const drones = fcAgg(f => f.drone || '?', f => f.drone || '?').filter(a => a.flights >= 2 && ((a.dPos != null && a.dPos > cfg.posFt) || (a.dAlt != null && Math.abs(a.dAlt) > cfg.altFt) || a.pct < 75)).map(a => ({ label: a.label, text: [a.dPos != null && a.dPos > cfg.posFt ? `mean off-station ${a.dPos.toFixed(0)} ft across ${a.flights} flights — position / RTK?` : null, a.dAlt != null && Math.abs(a.dAlt) > cfg.altFt ? `flies ${a.dAlt > 0 ? 'high' : 'low'} by ~${Math.abs(a.dAlt).toFixed(0)} ft on average — altitude source?` : null, a.pct < 75 ? `only ${a.pct.toFixed(0)}% of shots within limits` : null].filter(Boolean).join(' · ') }));
+        const missions = fcAgg(f => f.sid + '|' + f.name, f => f.name).filter(a => a.flights >= 2 && a.pct < 75).map(a => { const dr = new Set(F.filter(f => f.sid + '|' + f.name === a.key).map(f => f.drone)); return { label: a.label, text: `${a.pct.toFixed(0)}% within limits over ${a.flights} flights${dr.size > 1 ? ' on ' + dr.size + ' drones — plan problem, not a drone' : ''}` }; });
+        return { flights: out, drones, missions };
+    }
+    function fcSummaryRows() {
+        const R = fcResults; if (!R) return { cols: [], rows: [], bold: [] };
+        const cfg = fcCfg(); const shots = R.flights.reduce((n, f) => n + f.shots, 0), flagged = R.flights.reduce((n, f) => n + f.flagged, 0);
+        const S = fcMajorIssues();
+        const rows = [], bold = [];
+        const push = (r, b) => { rows.push(r); bold.push(!!b); };
+        push(['Flight check summary', R.sites.map(id => siteName(String(id)) || id).join(', '), 'last ' + cfg.days + ' days', new Date(R.at).toLocaleString()], true);
+        push(['flights', R.flights.length, 'shots', shots]); push(['within limits', shots ? Math.round(100 * (shots - flagged) / shots) + '%' : '', 'flagged shots', flagged]);
+        push(['re-takes', R.flights.reduce((n, f) => n + f.retakes, 0), 'no picture', R.flights.reduce((n, f) => n + (f.missing || []).length, 0)]);
+        push(['thresholds', `heading ${cfg.hdg}° · camera ${cfg.cam}° · altitude ${cfg.altFt} ft · off-station ${cfg.posFt} ft`, '', '']);
+        push(['', '', '', '']);
+        push(['MAJOR ISSUES — flights', '', '', ''], true);
+        push(['flight · mission', 'drone · when', 'what is wrong', 'playback'], true);
+        if (!S.flights.length) push(['none', 'every flight within limits', '', '']);
+        S.flights.slice(0, 25).forEach(x => push([`${x.f.mid} · ${x.f.name}`, `${x.f.drone} · ${x.f.when ? new Date(x.f.when).toLocaleString() : ''}`, x.text, fcPlaybackUrl(x.f)]));
+        if (S.flights.length > 25) push([`… ${S.flights.length - 25} more`, '', 'see the flights view', '']);
+        if (S.drones.length) { push(['', '', '', '']); push(['DRONES WITH A PATTERN (hardware / position / altitude — for IT)', '', '', ''], true); S.drones.forEach(d => push([d.label, '', d.text, ''])); }
+        if (S.missions.length) { push(['', '', '', '']); push(['MISSIONS WITH A PATTERN (build — for the CSM)', '', '', ''], true); S.missions.forEach(m => push([m.label, '', m.text, ''])); }
+        return { cols: ['', '', '', ''], rows, bold };
+    }
+    function fcCopySummary() { const t = fcSummaryRows(); fcCopySheets2(t.cols, t.rows, 'flight-check summary (' + t.rows.length + ' rows)', t.bold); }
+    function renderFcSummary() {
+        const S = fcMajorIssues(); const esc = escapeHtml;
+        let h = '<div style="padding:6px 10px">';
+        h += '<div style="color:#7adfe6;font-weight:bold;margin-bottom:4px">Major issues — flights</div>';
+        if (!S.flights.length) h += '<div style="color:#5fff5f">none — every flight within limits</div>';
+        S.flights.slice(0, 25).forEach(x => { h += `<div class="aim-ft-row" style="padding:3px 0;border-bottom:1px solid #1e2430"><a href="${fcPlaybackUrl(x.f)}" target="_blank" rel="noopener" style="color:#7adfe6">${esc(String(x.f.mid))}</a> <b>${esc(x.f.name)}</b> <span style="color:#888">· ${esc(x.f.drone)} · ${x.f.when ? esc(new Date(x.f.when).toLocaleString()) : ''}</span><div style="color:#ffb347;padding-left:14px">${esc(x.text)}</div></div>`; });
+        if (S.flights.length > 25) h += `<div style="color:#666">… ${S.flights.length - 25} more in the flights view</div>`;
+        if (S.drones.length) { h += '<div style="color:#7adfe6;font-weight:bold;margin:8px 0 4px">Drones with a pattern <span style="color:#888;font-weight:normal">(for IT)</span></div>'; S.drones.forEach(d => { h += `<div style="padding:2px 0"><b>${esc(d.label)}</b> <span style="color:#ffb347">${esc(d.text)}</span></div>`; }); }
+        if (S.missions.length) { h += '<div style="color:#7adfe6;font-weight:bold;margin:8px 0 4px">Missions with a pattern <span style="color:#888;font-weight:normal">(for the CSM)</span></div>'; S.missions.forEach(m => { h += `<div style="padding:2px 0"><b>${esc(m.label)}</b> <span style="color:#ffb347">${esc(m.text)}</span></div>`; }); }
+        return h + '</div>';
+    }
     const fcN = (v, d, unit) => v == null || !isFinite(v) ? '–' : (+v).toFixed(d == null ? 0 : d) + (unit || '');
     const fcS = (v, d, unit) => v == null || !isFinite(v) ? '–' : ((v > 0 ? '+' : '') + (+v).toFixed(d == null ? 0 : d) + (unit || ''));
     const fcColor = (v, thr) => v == null || !isFinite(v) ? '#888' : (Math.abs(v) > 2 * thr ? '#ff5f5f' : Math.abs(v) > thr ? '#ffb347' : '#5fff5f');
@@ -2839,6 +2896,7 @@
         copyText(tsv, label + ' copied (tab-separated)');
     }
     function fcCopyView() {
+        if (fcTab === 'summary') { fcCopySummary(); return; }
         if (fcTab !== 'flights') {
             // aggregate views: same columns, numbers as numbers
             const t = fcTable();
@@ -2865,7 +2923,7 @@
         (fcResults ? fcResults.flights : []).forEach(f => f.rows.forEach(r => rows.push([f.mid, f.name, f.site, f.drone, f.when ? new Date(f.when).toLocaleString() : '', r.s, r.idx != null ? r.idx : '', new Date(r.t).toLocaleString(), r.kinds, r.asset || '', n(r.hdg[0]), n(r.hdg[1]), n(r.hdg[2]), n(r.cam[0]), n(r.cam[1]), n(r.cam[2]), n(r.alt[0]), n(r.alt[1]), n(r.alt[2]), n(r.pos), r.dir || '', r.flags.join('; ') || 'ok', r.name || '', fcPlaybackUrl(f)])));
         fcCopySheets2(cols, rows, 'all shots flat (' + rows.length + ' rows)');
     }
-    function fcJira() { const t = fcTable(); return ['||' + t.cols.join('||') + '||'].concat(t.rows.map(r => '|' + r.map(x => String(x == null ? '' : x).replace(/\|/g, '/')).join('|') + '|')).join('\n'); }
+    function fcJira() { if (fcTab === 'summary') { const t = fcSummaryRows(); return t.rows.map((r, i) => (t.bold[i] ? '*' : '') + r.filter(x => x !== '').join(' · ') + (t.bold[i] ? '*' : '')).join('\n'); } const t = fcTable(); return ['||' + t.cols.join('||') + '||'].concat(t.rows.map(r => '|' + r.map(x => String(x == null ? '' : x).replace(/\|/g, '/')).join('|') + '|')).join('\n'); }
     function renderFcSection() {
         if (!openSections.fc) return '';
         const cfg = fcCfg();
@@ -2885,9 +2943,10 @@
         h += '<div style="padding:8px 10px;border-bottom:1px solid #222834">'
             + chip(R.flights.length, 'flights', '#7adfe6') + chip(shots, 'shots') + chip(shots ? Math.round(100 * (shots - flagged) / shots) + '%' : '–', 'within limits', flagged ? '#ffb347' : '#5fff5f') + chip(flagged, 'flagged', flagged ? '#ffb347' : null) + chip(R.flights.reduce((n, f) => n + f.retakes, 0), 're-takes') + chip(R.flights.reduce((n, f) => n + (f.missing || []).length, 0), 'no picture') + chip(R.flights.reduce((n, f) => n + (f.unplanned || 0), 0), 'unplanned')
             + (R.errors && R.errors.length ? `<div style="color:#ff7a7a">${R.errors.length} error(s): ${R.errors.slice(0, 3).map(escapeHtml).join(' · ')}${R.errors.length > 3 ? ' …' : ''}</div>` : '')
-            + '<div style="margin-top:4px">' + ['flights', 'drones', 'missions', 'sites'].map(t => `<span data-ft="fc-tab-${t}" style="cursor:pointer;margin-right:12px;${fcTab === t ? 'color:#7adfe6;font-weight:bold;border-bottom:1px solid #7adfe6' : 'color:#888'}">by ${t.replace(/s$/, '')}</span>`).join('')
-            + `<span data-ft="fc-csv" style="cursor:pointer;color:#888;margin-left:14px" title="pastes into cells: on the flights view = a bold row per flight followed by its shots">📋 copy for Sheets${fcTab === 'flights' ? ' (flights + shots)' : ''}</span> <span data-ft="fc-shots" style="cursor:pointer;color:#888;margin-left:10px" title="every shot of every flight, one row each, no flight rows — for pivots">📋 shots only (flat)</span> <span data-ft="fc-jira" style="cursor:pointer;color:#888;margin-left:10px">📋 JIRA table</span>`
+            + '<div style="margin-top:4px">' + ['summary', 'flights', 'drones', 'missions', 'sites'].map(t => `<span data-ft="fc-tab-${t}" style="cursor:pointer;margin-right:12px;${fcTab === t ? 'color:#7adfe6;font-weight:bold;border-bottom:1px solid #7adfe6' : 'color:#888'}">${t === 'summary' ? 'summary' : 'by ' + t.replace(/s$/, '')}</span>`).join('')
+            + `<span data-ft="fc-csv" style="cursor:pointer;color:#888;margin-left:14px" title="pastes into cells: on the flights view = a bold row per flight followed by its shots">📋 copy for Sheets${fcTab === 'flights' ? ' (flights + shots)' : fcTab === 'summary' ? ' (one page)' : ''}</span> <span data-ft="fc-shots" style="cursor:pointer;color:#888;margin-left:10px" title="every shot of every flight, one row each, no flight rows — for pivots">📋 shots only (flat)</span> <span data-ft="fc-jira" style="cursor:pointer;color:#888;margin-left:10px">📋 JIRA table</span>`
             + (fcTab === 'flights' ? ` <span data-ft="fc-sort" style="cursor:pointer;color:#888;margin-left:10px">sort: ${fcSortKey === 'when' ? 'newest' : 'worst first'}</span>` : '') + '</div></div>';
+        if (fcTab === 'summary') return h + renderFcSummary();
         const t = fcTable(); const cfgT = fcCfg();
         const cell = (v) => `<td style="padding:2px 6px;white-space:nowrap;border-bottom:1px solid #1e2430">${escapeHtml(String(v == null ? '' : v))}</td>`;
         h += '<div style="overflow:auto;max-height:46vh"><table style="border-collapse:collapse;font:11px/1.4 monospace;width:100%"><tr style="color:#7adfe6">' + t.cols.filter(c => c !== 'playback').map(c => `<th style="text-align:left;padding:2px 6px;position:sticky;top:0;background:#14181f">${escapeHtml(c)}</th>`).join('') + '</tr>';

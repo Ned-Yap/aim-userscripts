@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Fleet Tools latest v0.36 (dev only): Flight Checks one-page summary
+
+- New **summary** view (now the default after a run): headline numbers, then only the flights with a real problem, one line each in words ("20 of 27 shots off station ~109 ft SW — drone position, not the plan", "5 planned snapshots produced no picture"), worst first, capped at 25; then drones with a pattern across flights (position / altitude bias — for IT) and missions that misbehave on more than one drone (build — for the CSM). Copy for Sheets gives just that page; JIRA copy gives it as text.
+- v0.35: Sheets copies are bare numbers (no `#ERROR!`), the flights copy groups each flight's shots under a bold flight row, and a flat shots-only copy remains for pivots.
+
 ## 2026-09-17 — AIM Fleet Tools latest v0.34 (dev only): Flight Checks copy for Sheets
 
 - "copy CSV" replaced by **copy for Sheets** (the current view) and **all shots for Sheets** (one row per picture across every flight, with planned / actual / Δ as separate numeric columns): both write a real table to the clipboard so Google Sheets / Excel paste into cells with the header row. JIRA table copy unchanged.
