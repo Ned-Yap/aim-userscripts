@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-16 — AIM Video Validation latest v0.5: plan steps + actual shots on the playback map, mission-group view (dev only)
+
+- **Map overlay** — the plan's steps drawn on the playback map: N# nav circles, S# snapshot squares (GPS snapshots at their aim point with a dashed nav→aim sightline; in-place snapshots beside their nav with a heading tick), 🚩 flag poles, dashed nav→nav flight line. Hover = step, type, when it was shot. Click an S# = seek the video there.
+- **Actual shot poses** (cyan, toggleable) — for every picture: drone position dot, heading tick and the camera's ground footprint from the image record, so planned vs actual is visible on the map. Re-takes get a dashed dot. The shot under the playhead / selected shot pulses.
+- **Whole mission group** — a line under the shot card lists every flight in the mission group; "show all flights" fetches each flight's flown path once, colours every step by the flight that flew it, and switches N#/S# to whole-mission numbering (strip badges + shot card follow). Click a flight to open its playback in a new tab. Toggle back to "this flight only" any time. Also in the Control Panel card under "Map overlay".
+
 ## 2026-09-16 — AIM Video Validation latest v0.4: arrows usable at both ends, wrapped-tile handling (dev only)
 
 - Percepto greys its ‹ › arrow at what IT thinks is the end of the list, so at our first and last image the redirected arrow never fired. The disabled state now follows our order.

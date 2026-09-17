@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.4
+// @version      0.5
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -28,7 +28,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-video-validation';
-    const SCRIPT_VERSION = '0.4';
+    const SCRIPT_VERSION = '0.5';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -70,6 +70,10 @@
         leadInS: 3,            // seek this many seconds BEFORE the shutter
         shotCard: true,        // docked shot card under the strip
         units: 'ft',           // 'ft' | 'm'
+        overlay: true,         // plan steps on the map
+        overlayActual: true,   // actual shot poses (drone dot + heading + footprint)
+        overlayLabels: true,   // N#/S# labels (else plain dots)
+        overlayGroup: false,   // whole mission group, color per flight, whole-mission numbering
     };
     let settings = Object.assign({}, DEFAULTS);
     try { settings = Object.assign({}, DEFAULTS, GM_getValue(SETTINGS_KEY, {}) || {}); }
@@ -292,6 +296,16 @@
             .aim-vv-card td { padding: 0 10px 0 0; white-space: nowrap; }
             .aim-vv-card .ok { color: #5fff5f; } .aim-vv-card .warn { color: #ffb347; } .aim-vv-card .bad { color: #ff5f5f; }
             .aim-vv-card .dim { color: #888; }
+            .aim-vv-legend { margin-top: 0; }
+            .aim-vv-ov { background: none; border: none; }
+            .aim-vv-ov-nav { width: 22px; height: 22px; border-radius: 50%; color: #04222a; font: 800 10px/19px monospace; text-align: center; border: 2px solid rgba(0,0,0,.6); box-shadow: 0 1px 4px rgba(0,0,0,.5); }
+            .aim-vv-ov-snap { width: 18px; height: 18px; border-radius: 3px; color: #04222a; font: 800 9px/17px monospace; text-align: center; border: 1px solid rgba(0,0,0,.6); opacity: .92; }
+            .aim-vv-ov-dot { width: 10px; height: 10px; border-radius: 50%; border: 1px solid rgba(0,0,0,.6); margin: 4px; }
+            .aim-vv-ov-flag { font-size: 13px; line-height: 16px; text-shadow: 0 1px 2px #000; }
+            .aim-vv-ov-actual { width: 12px; height: 12px; border-radius: 50%; background: #5fe3ff; border: 2px solid #04222a; box-shadow: 0 0 0 1px #5fe3ff; }
+            .aim-vv-ov-actual--retake { border-style: dashed; border-color: #fff; }
+            .aim-vv-ov.aim-vv-ov--active > div { outline: 3px solid #fff; outline-offset: 1px; animation: aim-vv-pulse 1.2s ease-in-out infinite; }
+            @keyframes aim-vv-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(95,227,255,.9); } 50% { box-shadow: 0 0 0 8px rgba(95,227,255,0); } }
         `;
         document.head.appendChild(styleEl);
     }
@@ -445,6 +459,7 @@
         if (current !== lastPlayheadShot) {
             lastPlayheadShot = current;
             if (current) { renderCard(current.primary, 'playhead'); if (!v.paused) scrollTileIntoView(current.primary); }
+            markActiveOverlay();
         }
     }
     function scrollTileIntoView(rec) {
@@ -551,7 +566,7 @@
         host.insertAdjacentElement('afterend', cardEl);
         return cardEl;
     }
-    function selectShot(rec) { selectedRec = rec; renderCard(rec, 'selected'); }
+    function selectShot(rec) { selectedRec = rec; renderCard(rec, 'selected'); markActiveOverlay(); }
     function cls(v, warnAt, badAt) { if (v == null) return 'dim'; const a = Math.abs(v); return a >= badAt ? 'bad' : a >= warnAt ? 'warn' : 'ok'; }
     function renderCard(rec, why) {
         const el = ensureCard();
@@ -611,6 +626,228 @@
         setTimeout(() => { if (settings.clickSeek) seekToShot(rec, false); else selectShot(rec); }, 0);
     }
 
+
+    // ---------------------------------------------------------------
+    // Map overlay — plan steps (N#/S#) + actual shot poses on the playback Leaflet map.
+    // Raw Leaflet only (react-leaflet map): own L.svg() renderer, explicitly added + primed.
+    // ---------------------------------------------------------------
+    const ov = { map: null, L: null, svg: null, layers: [], stepMarkers: {}, shotMarkers: {}, group: null, groupLoading: false };
+    const FLIGHT_COLORS = ['#ff7ad9', '#ffb347', '#b0ff5f', '#5fa8ff', '#ff5f5f', '#c77dff', '#ffe95f', '#5fe3ff'];
+    const COLOR_NAV = '#5fa8ff', COLOR_SNAP = '#ff7ad9', COLOR_ACTUAL = '#5fe3ff', COLOR_OTHER = '#8a8f99';
+
+    function looksLikeLeafletMap(v) {
+        return !!v && typeof v === 'object' && typeof v.latLngToLayerPoint === 'function' && typeof v.latLngToContainerPoint === 'function'
+            && typeof v.layerPointToLatLng === 'function' && typeof v.distance === 'function' && typeof v.getContainer === 'function';
+    }
+    function findMap() {
+        if (ov.map && ov.map._container && document.body.contains(ov.map._container)) return ov.map;
+        ov.map = null;
+        const containers = document.querySelectorAll('.leaflet-container');
+        for (const c of containers) {
+            const hints = [c.__aim_map__, c._leaflet_map, c._leaflet];
+            for (const h of hints) if (looksLikeLeafletMap(h)) { ov.map = h; return h; }
+            try { for (const k of Object.getOwnPropertyNames(c)) { const v = c[k]; if (looksLikeLeafletMap(v)) { ov.map = v; return v; } } } catch (e) { /* keep looking */ }
+        }
+        return null;
+    }
+    function getL() { const L = pageWin.L || window.L; return (L && typeof L.polyline === 'function' && typeof L.marker === 'function') ? L : null; }
+    function ensureSvg(L, map) {
+        if (ov.svg && ov.svg._map === map) return ov.svg;
+        try { ov.svg = L.svg({ pane: 'overlayPane' }); ov.svg.addTo(map); if (typeof ov.svg._update === 'function') ov.svg._update(); }
+        catch (e) { warn('svg renderer failed:', e); ov.svg = null; }
+        return ov.svg;
+    }
+    function offsetLatLng(ll, meters, headingDeg) {
+        const dN = meters * Math.cos(headingDeg * RAD), dE = meters * Math.sin(headingDeg * RAD);
+        return [ll.lat + dN / 111320, ll.lng + dE / (111320 * Math.cos(ll.lat * RAD))];
+    }
+    function clearOverlay() {
+        const map = ov.map;
+        ov.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) { /* already gone */ } });
+        ov.layers = []; ov.stepMarkers = {}; ov.shotMarkers = {};
+    }
+    function addLayer(map, layer) {
+        try { layer.addTo(map); ov.layers.push(layer); return layer; }
+        catch (e) { warn('overlay layer failed:', e); try { map.removeLayer(layer); } catch (e2) { /* detached */ } return null; }
+    }
+    // Which flight of the group flew a plan index (group toggle): returns {mid, color, i} or null.
+    function flightForIdx(idx) {
+        if (!ov.group) return null;
+        for (const g of ov.group) if (g.minIdx != null && idx >= g.minIdx && idx <= g.maxIdx) return g;
+        return null;
+    }
+    function drawOverlay() {
+        clearOverlay();
+        if (!model || !settings.master || !settings.overlay) return;
+        const L = getL(), map = findMap();
+        if (!L || !map) { if (!ov.warned) { ov.warned = true; warn('overlay: Leaflet map not found yet (L=' + !!L + ')'); } return; }
+        ov.warned = false;
+        const svg = ensureSvg(L, map);
+        const lineOpts = (o) => Object.assign({ interactive: false }, svg ? { renderer: svg } : {}, o);
+        const groupOn = !!(settings.overlayGroup && ov.group);
+        const inSlice = (st) => groupOn || !model.slice || (st.index_in_app >= model.slice.minIdx && st.index_in_app <= model.slice.maxIdx);
+        const steps = model.plan.filter(st => inSlice(st) && (st.type_name === 'navigate' || st.type_name === 'snapshot' || st.type_name === 'flag pole'));
+        const colorFor = (st, base) => { if (!groupOn) return base; const g = flightForIdx(st.index_in_app); return g ? g.color : COLOR_OTHER; };
+
+        // Flight line nav→nav (dashed) + sightlines nav→aim point for GPS snapshots + heading ticks for in-place ones.
+        let curNav = null; const navPts = [];
+        steps.forEach(st => {
+            if (st.type_name === 'navigate' && st.location) { curNav = st; navPts.push([st.location.lat, st.location.lng]); }
+        });
+        if (navPts.length >= 2) addLayer(map, L.polyline(navPts, lineOpts({ color: COLOR_NAV, weight: 2, opacity: 0.6, dashArray: '6,8' })));
+        let nav = null;
+        steps.forEach(st => {
+            if (st.type_name === 'navigate') { nav = st; return; }
+            if (st.type_name !== 'snapshot' || !nav || !nav.location) return;
+            const col = colorFor(st, COLOR_SNAP);
+            if (st.location && typeof st.location.lat === 'number') {
+                addLayer(map, L.polyline([[nav.location.lat, nav.location.lng], [st.location.lat, st.location.lng]], lineOpts({ color: col, weight: 2, opacity: 0.75, dashArray: '3,5' })));
+            } else {
+                const eo = st.extra_options || {};
+                if (typeof eo.heading === 'number') addLayer(map, L.polyline([[nav.location.lat, nav.location.lng], offsetLatLng(nav.location, 18, eo.heading)], lineOpts({ color: col, weight: 3, opacity: 0.9 })));
+            }
+        });
+
+        // Markers with N#/S# labels.
+        let inplaceCount = {};
+        nav = null;
+        steps.forEach(st => {
+            const num = model.numbering[st.id];
+            let ll = null, html = null, size = 0, anchor = null, col = null;
+            if (st.type_name === 'navigate') {
+                nav = st; if (!st.location) return;
+                col = colorFor(st, COLOR_NAV); ll = [st.location.lat, st.location.lng]; size = 22;
+                html = '<div class="aim-vv-ov-nav" style="background:' + col + '">' + esc(num ? num.n : 'N') + '</div>';
+            } else if (st.type_name === 'snapshot') {
+                col = colorFor(st, COLOR_SNAP); size = 18;
+                if (st.location && typeof st.location.lat === 'number') {
+                    ll = [st.location.lat, st.location.lng];
+                } else if (nav && nav.location) {
+                    // In-place: sit at the nav, pushed ~22 px out along its heading so several snaps on one nav don't stack.
+                    const eo = st.extra_options || {}; const h = typeof eo.heading === 'number' ? eo.heading : (inplaceCount[nav.id] = (inplaceCount[nav.id] || 0) + 1) * 45;
+                    ll = [nav.location.lat, nav.location.lng];
+                    anchor = [size / 2 - 22 * Math.sin(h * RAD), size / 2 + 22 * Math.cos(h * RAD)];
+                } else return;
+                html = '<div class="aim-vv-ov-snap" style="background:' + col + '">' + esc(num ? num.n : 'S') + '</div>';
+            } else if (st.type_name === 'flag pole' && st.location) {
+                ll = [st.location.lat, st.location.lng]; size = 16; html = '<div class="aim-vv-ov-flag">🚩</div>';
+            } else return;
+            if (!settings.overlayLabels && st.type_name !== 'flag pole') html = '<div class="aim-vv-ov-dot" style="background:' + col + '"></div>';
+            try {
+                const icon = L.divIcon({ className: 'aim-vv-ov', html, iconSize: [size, size], iconAnchor: anchor || [size / 2, size / 2] });
+                const mk = L.marker(ll, { icon, interactive: true, zIndexOffset: 500 });
+                if (!addLayer(map, mk)) return;
+                ov.stepMarkers[st.id] = mk;
+                const shots = model.shots.filter(sh => sh.step && sh.step.id === st.id);
+                const g = groupOn ? flightForIdx(st.index_in_app) : null;
+                const tip = '<b>' + esc(num ? num.n : st.type_name) + '</b> · step #' + st.index_in_app
+                    + (g ? ' · flight ' + esc(g.label) : '')
+                    + (st.type_name === 'snapshot' ? (st.location ? ' · GPS aim point' : ' · in-place ' + ((st.extra_options || {}).heading != null ? st.extra_options.heading + '°' : '')) : '')
+                    + (shots.length ? ' · shot at ' + shots.map(sh => mmss(sh.videoOff)).join(', ') : (st.type_name === 'snapshot' && !groupOn ? ' · <i>no image</i>' : ''));
+                mk.bindTooltip(tip, { direction: 'top', offset: [0, -10], opacity: 0.95 });
+                if (shots.length) mk.on('click', () => { const sh = shots[0]; seekToShot(sh.primary, true); scrollTileIntoView(sh.primary); });
+            } catch (e) { warn('overlay marker failed:', e); }
+        });
+
+        // Actual shot poses from the image records: drone dot + heading tick + ground footprint.
+        if (settings.overlayActual) {
+            model.shots.forEach(sh => {
+                const im = sh.primary; if (!im || !im.location) return;
+                const num = sh.step && model.numbering[sh.step.id];
+                if (Array.isArray(im.fov_polygon) && im.fov_polygon.length >= 3) {
+                    addLayer(map, L.polygon(im.fov_polygon.map(p => [p.lat, p.lng]), lineOpts({ color: COLOR_ACTUAL, weight: 1.5, opacity: 0.8, fillColor: COLOR_ACTUAL, fillOpacity: 0.08 })));
+                }
+                if (typeof im.drone_heading === 'number') addLayer(map, L.polyline([[im.location.lat, im.location.lng], offsetLatLng(im.location, 14, im.drone_heading)], lineOpts({ color: COLOR_ACTUAL, weight: 2, opacity: 0.9 })));
+                try {
+                    const icon = L.divIcon({ className: 'aim-vv-ov', html: '<div class="aim-vv-ov-actual' + (sh.retake ? ' aim-vv-ov-actual--retake' : '') + '"></div>', iconSize: [12, 12], iconAnchor: [6, 6] });
+                    const mk = L.marker([im.location.lat, im.location.lng], { icon, interactive: true, zIndexOffset: 600 });
+                    if (!addLayer(map, mk)) return;
+                    ov.shotMarkers[im.key] = mk;
+                    const d = sh.delta || {};
+                    mk.bindTooltip('<b>actual</b> ' + esc(num ? num.n : '?') + ' · ' + mmss(sh.videoOff) + ' · hdg ' + im.drone_heading + '° · cam ' + im.camera_pitch + '° · ' + fmtAlt(im.alt)
+                        + (d.hdg != null ? ' · Δhdg ' + signed(d.hdg, '°') : '') + (d.pitch != null ? ' · Δcam ' + signed(d.pitch, '°') : '') + (sh.retake ? ' · re-take' : ''), { direction: 'top', offset: [0, -8], opacity: 0.95 });
+                    mk.on('click', () => { seekToShot(im, true); scrollTileIntoView(im); });
+                } catch (e) { warn('overlay actual marker failed:', e); }
+            });
+        }
+        activeOverlayKey = undefined;   // markers are new — force the active highlight to re-apply
+        log('overlay drawn: ' + steps.length + ' plan steps' + (groupOn ? ' (whole mission, ' + ov.group.length + ' flights)' : ' (this flight)') + ', ' + Object.keys(ov.shotMarkers).length + ' actual shots, ' + ov.layers.length + ' layers');
+        markActiveOverlay();
+    }
+    let activeOverlayKey = null;
+    function markActiveOverlay() {
+        if (!model) return;
+        const sh = lastPlayheadShot || (selectedRec && model.shots.find(x => x.images.includes(selectedRec))) || null;
+        const key = sh ? (sh.primary.key + '|' + (sh.step ? sh.step.id : '')) : null;
+        if (key === activeOverlayKey && ov.layers.length) return;
+        activeOverlayKey = key;
+        const setActive = (mk, on) => { const el = mk && mk._icon; if (el) el.classList.toggle('aim-vv-ov--active', !!on); };
+        Object.values(ov.stepMarkers).forEach(mk => setActive(mk, false));
+        Object.values(ov.shotMarkers).forEach(mk => setActive(mk, false));
+        if (sh) { if (sh.step) setActive(ov.stepMarkers[sh.step.id], true); setActive(ov.shotMarkers[sh.primary.key], true); }
+    }
+    // Group: every flight of this mission group → its plan index range (one positions fetch per flight, cached per tab).
+    const groupCache = {};
+    function loadGroup() {
+        if (!model || ov.groupLoading) return;
+        const others = (model.mission.attached_missions || []).map(Number).filter(x => x && String(x) !== String(model.mid));
+        ov.groupLoading = true;
+        const entries = [{ mid: Number(model.mid), minIdx: model.slice && model.slice.minIdx, maxIdx: model.slice && model.slice.maxIdx, first: model.fixes.length ? model.fixes[0]._t : 0, self: true }];
+        const chain = others.reduce((p, mid) => p.then(() => {
+            if (groupCache[mid]) { entries.push(groupCache[mid]); return; }
+            return getJSON('/mission_positions/' + mid + '/').then(j => {
+                const Q = j.positions || [];
+                const idx = Q.filter(f => f.app_instruction != null).map(f => { const id = typeof f.app_instruction === 'object' ? f.app_instruction.id : f.app_instruction; return model.byId[id] ? model.byId[id].index_in_app : null; }).filter(x => x != null);
+                const first = Q.length ? Math.min.apply(null, Q.map(f => new Date(f.timestamp).getTime())) : 0;
+                const e = { mid, minIdx: idx.length ? Math.min.apply(null, idx) : null, maxIdx: idx.length ? Math.max.apply(null, idx) : null, first, fixes: Q.length };
+                groupCache[mid] = e; entries.push(e);
+                log('group flight ' + mid + ': steps ' + (e.minIdx != null ? e.minIdx + '–' + e.maxIdx : 'none in this plan') + ' (' + Q.length + ' fixes)');
+            }).catch(e => { warn('group flight ' + mid + ' failed:', e.message); entries.push({ mid, minIdx: null, maxIdx: null, first: 0, error: e.message }); });
+        }), Promise.resolve());
+        chain.then(() => {
+            entries.sort((a, b) => (a.first || 0) - (b.first || 0));
+            entries.forEach((e, i) => { e.i = i + 1; e.color = FLIGHT_COLORS[i % FLIGHT_COLORS.length]; e.label = '#' + e.i + ' ' + e.mid + (e.self ? ' (this)' : ''); });
+            ov.group = entries; ov.groupLoading = false;
+            computeNumbering(model, true);
+            stampStrip(true); drawOverlay(); renderLegend();
+            if (selectedRec) renderCard(selectedRec, 'selected');
+            log('group ready: ' + entries.map(e => e.label + ' ' + (e.minIdx != null ? e.minIdx + '–' + e.maxIdx : '∅')).join(' · '));
+        });
+    }
+    function setGroupMode(on) {
+        if (!model) return;
+        if (on) { if (ov.group) { computeNumbering(model, true); stampStrip(true); drawOverlay(); renderLegend(); } else loadGroup(); }
+        else { computeNumbering(model, false); stampStrip(true); drawOverlay(); renderLegend(); if (selectedRec) renderCard(selectedRec, 'selected'); }
+    }
+    // Flight legend / picker under the shot card: every flight of the group, click = open in a new tab.
+    let legendEl = null;
+    function renderLegend() {
+        const card = ensureCard();
+        if (!card) return;
+        if (legendEl && !card.parentElement.contains(legendEl)) legendEl = null;
+        if (!legendEl) { legendEl = document.createElement('div'); legendEl.className = 'aim-vv-card aim-vv-legend'; card.insertAdjacentElement('afterend', legendEl); }
+        const others = (model.mission.attached_missions || []).length;
+        let html;
+        if (!ov.group) {
+            html = '<span class="dim">Mission group ' + esc(model.mission.mission_group_id) + ' · this flight + ' + others + ' other' + (others === 1 ? '' : 's') + ' · </span>'
+                + '<a href="#" data-aim-vv="load-group" style="color:#5fe3ff">' + (ov.groupLoading ? 'loading flights…' : 'show all flights (whole-mission numbering)') + '</a>';
+        } else html = '<span class="dim">flights: </span>' + ov.group.map(g =>
+            '<a href="#" data-aim-vv="open-flight" data-mid="' + g.mid + '" title="open in a new tab" style="color:' + g.color + ';margin-right:10px;text-decoration:none">● ' + esc(g.label) + ' <span class="dim">' + (g.minIdx != null ? 'steps ' + g.minIdx + '–' + g.maxIdx : (g.error ? 'error' : 'no steps')) + '</span></a>').join('')
+            + ' · <a href="#" data-aim-vv="toggle-group" style="color:#5fe3ff">' + (settings.overlayGroup ? 'this flight only' : 'whole mission') + '</a>';
+        if (legendEl.innerHTML !== html) legendEl.innerHTML = html;   // called every tick — only touch the DOM on change
+    }
+    function onLegendClick(e) {
+        const a = e.target.closest && e.target.closest('[data-aim-vv]');
+        if (!a || !model) return;
+        e.preventDefault(); e.stopPropagation();
+        const what = a.dataset.aimVv;
+        if (what === 'load-group') { settings.overlayGroup = true; saveSettings(); loadGroup(); renderLegend(); }
+        else if (what === 'toggle-group') { settings.overlayGroup = !settings.overlayGroup; saveSettings(); setGroupMode(settings.overlayGroup); }
+        else if (what === 'open-flight') {
+            const url = location.origin + '/#/site/' + model.sid + '/control-panel/past-mission/' + a.dataset.mid;
+            try { pageWin.top.open(url, '_blank'); } catch (err) { window.open(url, '_blank'); }
+        }
+    }
     // ---------------------------------------------------------------
     // Lifecycle
     // ---------------------------------------------------------------
@@ -631,9 +868,13 @@
         loading = loadModel(ids.sid, ids.mid).then(m => {
             if (!current || current.mid !== ids.mid) return;   // navigated away while loading
             model = m;
+            if (settings.overlayGroup) computeNumbering(m, false);   // numbering goes global once the group loads
             stampStrip(true);
             hookVideo();
             ensureCard();
+            renderLegend();
+            drawOverlay();
+            if (settings.overlayGroup) loadGroup();
             if (!observer) {
                 observer = new MutationObserver((muts) => {
                     if (!model) return;
@@ -649,6 +890,9 @@
     function deactivate() {
         current = null; model = null; loading = null;
         try { unstampStrip(); } catch (e) { warn('unstamp failed:', e); }
+        try { clearOverlay(); } catch (e) { warn('overlay clear failed:', e); }
+        ov.group = null; ov.groupLoading = false; ov.map = null; ov.svg = null; activeOverlayKey = null;
+        if (legendEl) { try { legendEl.remove(); } catch (e) {} legendEl = null; }
         if (cardEl) { try { cardEl.remove(); } catch (e) {} cardEl = null; }
         if (hookedVideo) { try { hookedVideo.removeEventListener('timeupdate', onTimeUpdate); } catch (e) {} hookedVideo = null; }
         selectedRec = null; lastPlayheadShot = null; activeKeys = [];
@@ -659,7 +903,13 @@
         const root = playbackRoot();
         if (!ids || !root) { if (current) { log('left playback — tearing down'); deactivate(); } return; }
         if (!current || current.mid !== ids.mid) { if (current) deactivate(); activate(ids); return; }
-        if (model) { hookVideo(); scheduleStamp(); ensureCard(); try { fixCounter(); } catch (e) { warn('counter:', e); } }
+        if (model) {
+            hookVideo(); scheduleStamp(); ensureCard(); renderLegend();
+            try { fixCounter(); } catch (e) { warn('counter:', e); }
+            if (settings.overlay && !ov.layers.length) drawOverlay();          // map appeared after load
+            else if (ov.map && ov.map._container && !document.body.contains(ov.map._container)) drawOverlay();   // map rebuilt
+            markActiveOverlay();
+        }
     }
 
     // ---------------------------------------------------------------
@@ -668,7 +918,8 @@
     let controlChannel = null;
     let controlPanelDetected = false;
     function applyToggle(id, val) {
-        const map = { 'master': 'master', 'strip-order': 'stripOrder', 'badges': 'badges', 'click-seek': 'clickSeek', 'lead-in': 'leadInS', 'shot-card': 'shotCard', 'units': 'units' };
+        const map = { 'master': 'master', 'strip-order': 'stripOrder', 'badges': 'badges', 'click-seek': 'clickSeek', 'lead-in': 'leadInS', 'shot-card': 'shotCard', 'units': 'units',
+            'overlay': 'overlay', 'overlay-actual': 'overlayActual', 'overlay-labels': 'overlayLabels', 'overlay-group': 'overlayGroup' };
         const key = map[id]; if (!key) return;
         let v = val;
         if (key === 'leadInS') { v = parseFloat(val); if (!isFinite(v) || v < 0 || v > 60) return; }
@@ -681,6 +932,8 @@
             if (key === 'stripOrder' || key === 'badges') stampStrip(true);
             if (key === 'shotCard') { ensureCard(); if (selectedRec) renderCard(selectedRec, 'selected'); }
             if (key === 'units' && selectedRec) renderCard(selectedRec, 'selected');
+            if (key === 'overlay' || key === 'overlayActual' || key === 'overlayLabels') drawOverlay();
+            if (key === 'overlayGroup') setGroupMode(v);
         }
     }
     function setupControlPanel() {
@@ -725,6 +978,11 @@
                     { id: 'lead-in', label: 'Seek lead-in (seconds before the shot)', type: 'number', default: DEFAULTS.leadInS, min: 0, max: 60 },
                     { id: 'shot-card', label: 'Shot card (planned vs actual)', type: 'boolean', default: DEFAULTS.shotCard },
                     { id: 'units', label: 'Units', type: 'select', default: DEFAULTS.units, options: [{ value: 'ft', label: 'ft' }, { value: 'm', label: 'm' }] },
+                    { id: 'hdr-map', type: 'header', label: 'Map overlay' },
+                    { id: 'overlay', label: 'Plan steps on the map (N# / S#)', type: 'boolean', default: DEFAULTS.overlay },
+                    { id: 'overlay-actual', label: 'Actual shot poses (cyan: drone, heading, footprint)', type: 'boolean', default: DEFAULTS.overlayActual },
+                    { id: 'overlay-labels', label: 'Number labels (off = plain dots)', type: 'boolean', default: DEFAULTS.overlayLabels },
+                    { id: 'overlay-group', label: 'Whole mission group (color per flight, whole-mission numbering)', type: 'boolean', default: DEFAULTS.overlayGroup },
                     { id: 'reload', label: 'Reload mission data', type: 'button' },
                 ],
                 hotkeys: [
@@ -765,6 +1023,7 @@
     registerWithControlPanel();
     if (!IS_TOP) {
         document.addEventListener('click', onGridClick, true);
+        document.addEventListener('click', onLegendClick, true);
         window.addEventListener('keydown', fallbackKeys, true);
         tickTimer = setInterval(tick, 1000);
         tick();
