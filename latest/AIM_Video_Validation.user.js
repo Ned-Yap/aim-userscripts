@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.26
+// @version      0.27
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -29,7 +29,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-video-validation';
-    const SCRIPT_VERSION = '0.26';
+    const SCRIPT_VERSION = '0.27';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -181,7 +181,7 @@
             m.slice = idxs.length ? { minIdx: Math.min.apply(null, idxs), maxIdx: Math.max.apply(null, idxs) } : null;
             computeNumbering(m, false);
 
-            // Images: shutter time, video offset, step join, actual-vs-planned deltas.
+            // Images: shutter time, video offset; step join happens per SHOT below (pose-aware).
             images.forEach(im => {
                 const shutter = nameTime(im.name) || (im.created_at ? new Date(im.created_at).getTime() : null);
                 const rec = Object.assign({}, im, {
@@ -190,9 +190,7 @@
                     key: imgKey(im.thumbnail_url || im.url),
                     kind: im.type === 'THERMAL' || im.thermal ? 'T' : (im.type === 'GEM' ? 'G' : 'RGB'),
                 });
-                rec.step = activeStepAt(m, shutter);
                 rec.fix = nearestFix(m, shutter);
-                rec.delta = computeDelta(m, rec);
                 m.images.push(rec);
             });
             const KIND_RANK = { RGB: 0, T: 1, G: 2 };
@@ -202,12 +200,18 @@
             let cur = null;
             m.images.forEach(im => {
                 if (!cur || im.shutter == null || cur.shutter == null || Math.abs(im.shutter - cur.shutter) > 1500) {
-                    cur = { shutter: im.shutter, videoOff: im.videoOff, images: [], step: im.step, delta: im.delta, primary: im };
+                    cur = { shutter: im.shutter, videoOff: im.videoOff, images: [], primary: im };
                     m.shots.push(cur);
                 }
                 cur.images.push(im);
-                if (im.kind === 'RGB') { cur.primary = im; cur.delta = im.delta; }
+                if (im.kind === 'RGB') cur.primary = im;
             });
+            // Join each shot to its plan step: the executing step from the flown log, unless a LATER unclaimed
+            // snapshot in this flight matches the picture's actual heading + camera angle much better (the log is sparse —
+            // 235004's S7 was shot between two log entries and would otherwise read as an S6 re-take).
+            const claimed = {};
+            m.shots.forEach(sh => { sh.step = joinShotToStep(m, sh, claimed); if (sh.step) claimed[sh.step.id] = (claimed[sh.step.id] || 0) + 1; });
+            m.shots.forEach(sh => { sh.images.forEach(im => { im.step = sh.step; im.delta = computeDelta(m, im); }); sh.delta = sh.primary.delta; });
             // Extra shots on an already-shot step (pilot re-take) get flagged.
             const seen = {};
             m.shots.forEach(sh => { const id = sh.step && sh.step.id; if (id != null) { sh.retake = !!seen[id]; seen[id] = true; } });
@@ -229,6 +233,30 @@
         });
     }
 
+    function joinShotToStep(m, sh, claimed) {
+        const im = sh.primary; const t = sh.shutter;
+        const active = activeStepAt(m, t);
+        const poseScore = (st) => {
+            const p = plannedPose(m, st); if (!p || p.heading == null) return Infinity;
+            const dh = Math.abs(hdgDelta(p.heading, im.drone_heading) || 0);
+            const dp = (p.pitchDeg != null && typeof im.camera_pitch === 'number') ? Math.abs(im.camera_pitch - p.pitchDeg) : 0;
+            return dh + dp;
+        };
+        const activeOk = active && active.type_name === 'snapshot';
+        const activeScore = activeOk ? poseScore(active) : Infinity;
+        // Only look past the log when the logged step is not a clean fit (already claimed, or the pose disagrees).
+        if (activeOk && !claimed[active.id] && activeScore <= 12) return active;
+        const fromIdx = active ? active.index_in_app : (m.slice ? m.slice.minIdx : 0);
+        const toIdx = m.slice ? m.slice.maxIdx : Infinity;
+        let best = null, bestScore = 12;   // hard gate: ≤ 12° combined heading + angle error
+        m.plan.forEach(st => {
+            if (st.type_name !== 'snapshot' || st.index_in_app < fromIdx || st.index_in_app > toIdx || claimed[st.id]) return;
+            const sc = poseScore(st);
+            if (sc < bestScore) { bestScore = sc; best = st; }
+        });
+        if (best && best !== active) log('join: shot at ' + mmss(sh.videoOff) + ' → ' + (m.numbering[best.id] ? m.numbering[best.id].n : 'step #' + best.index_in_app) + ' by pose (' + bestScore.toFixed(1) + '° off) instead of logged ' + (active ? active.type_name + ' #' + active.index_in_app : 'none'));
+        return best || active;
+    }
     // Plan step active at time t: latest app_instruction fix at or before t.
     function activeStepAt(m, t) {
         if (t == null || !m.insFixes.length) return null;
@@ -1501,6 +1529,7 @@
             html += '<div><b>Adjust</b> <span class="dim">— select a snapshot (click a thumbnail) to edit its step' + (shot && shot.step ? ' · active step is a ' + esc(shot.step.type_name) + ', not a snapshot' : '') + '</span></div>';
         } else {
             const pose = wkPose(step), nav = pose.nav, gps = isGps(step);
+            const sc = (kind, txt, title) => '<b data-aim-vv-scrub="' + kind + '" class="aim-vv-scrub" title="' + esc(title) + ' — drag ↔ to change (Shift ×5)">' + txt + '</b>';
             const sd = Number(settings.stepDeg) || 1, sp = Number(settings.stepPitch) || 1, sf = Number(settings.stepFt) || 1, sa = Number(settings.stepAltFt) || 1;
             html += '<div><b>Adjust ' + esc(stepLabel(step)) + '</b> <span class="dim">· ' + (gps ? 'GPS aim point' : 'in-place') + ' · nav ' + (nav ? esc(stepLabel(nav)) : '–') + ' · steps ' + sd + '° / ' + sp + '° / ' + sf + ' ft / ' + sa + ' ft alt · Shift = ×5</span></div>';
             html += '<div class="aim-vv-edit__row"><span class="dim">picture</span>'
@@ -1512,14 +1541,14 @@
                 + btn('range', 'farther', gps ? 'Move the aim point ' + sf + ' ft away from the nav' : 'Move the nav ' + sf + ' ft away', 'data-n="1"')
                 + btn('alt', 'alt −', 'Drone (nav) altitude −' + sa + ' ft', 'data-n="-1"')
                 + btn('alt', 'alt +', 'Drone (nav) altitude +' + sa + ' ft', 'data-n="1"') + '</div>';
-            const sc = (kind, txt, title) => '<b data-aim-vv-scrub="' + kind + '" class="aim-vv-scrub" title="' + esc(title) + ' — drag ↔ to change (Shift ×5)">' + txt + '</b>';
             html += '<div class="aim-vv-edit__row"><span class="dim">now</span> heading ' + sc('heading', pose.heading != null ? pose.heading.toFixed(0) + '°' : '–', gps ? 'aim point sideways, 1 ft per step' : 'heading') + ' · camera ' + sc('camera', pose.pitchDeg != null ? pose.pitchDeg.toFixed(0) + '°' : '–', gps ? 'target altitude' : 'camera angle') + ' · drone alt ' + sc('alt', fmtAlt(nav ? nav.value1 : null), 'drone (nav) altitude')
-                + (gps ? ' · target alt ' + sc('target-alt', fmtAlt(step.value1), 'target altitude') + ' · range ' + sc('range', fmtDist(pose.range), 'aim point closer / farther') : ' · range ' + sc('range', '↔', 'nav closer / farther along the heading'))
+                + (gps ? ' · target alt ' + sc('target-alt', fmtAlt(step.value1), 'target altitude') + ' · range ' + sc('range', fmtDist(pose.range), 'aim point closer / farther') : ' · look-point ' + sc('range', (function() { const g = nav && nav.location ? groundAt(nav.location) : null; const lp = (nav && g != null) ? lookPointFor(nav, step, g) : null; return lp ? fmtDist(lp.dist) + (lp.capped ? ' (capped)' : '') : '?'; })(), 'distance from the nav to where the camera points (terrain at the nav) — drag: nav closer / farther along the heading'))
                 + '</div>';
             if (nav) {
                 html += '<div class="aim-vv-edit__row"><span class="dim">nav ' + esc(stepLabel(nav)) + '</span>'
                     + btn('nav-move', '▲ N', 'Move the nav ' + sf + ' ft north', 'data-b="0"') + btn('nav-move', '▼ S', 'Move the nav ' + sf + ' ft south', 'data-b="180"')
                     + btn('nav-move', '◀ W', 'Move the nav ' + sf + ' ft west', 'data-b="270"') + btn('nav-move', 'E ▶', 'Move the nav ' + sf + ' ft east', 'data-b="90"')
+                    + (function() { const o = origOf(nav.id); if (!o || !o.location || !nav.location) return ''; const ns = distM(o.location, { lat: nav.location.lat, lng: o.location.lng }) * (nav.location.lat >= o.location.lat ? 1 : -1); const ew = distM(o.location, { lat: o.location.lat, lng: nav.location.lng }) * (nav.location.lng >= o.location.lng ? 1 : -1); return ' <span class="dim">moved</span> ' + sc('nav-ns', signed(ns * M_TO_FT, ' ft', 0) + ' N', 'north / south from the original nav — drag') + ' ' + sc('nav-ew', signed(ew * M_TO_FT, ' ft', 0) + ' E', 'east / west from the original nav — drag') + ' '; })()
                     + btn('nav-place', ed.placing ? '📍 click the map… (Esc cancels)' : '📍 Place on map', 'Next click on the map sets this nav\'s position', ed.placing ? 'class="aim-vv-armed"' : '')
                     + '<input type="text" class="aim-vv-latlng" data-aim-vv-latlng="1" value="' + esc(nav.location ? nav.location.lat.toFixed(6) + ', ' + nav.location.lng.toFixed(6) : '') + '" title="lat, lng — Enter to apply" spellcheck="false">'
                     + btn('nav-set', 'Set', 'Apply the typed lat, lng') + '</div>';
@@ -1598,6 +1627,7 @@
         else if (kind === 'alt') edAlt(step, n * FT);
         else if (kind === 'range') edRange(step, n * FT);
         else if (kind === 'target-alt') { if (isGps(step)) step.value1 = +((step.value1 || 0) + n * FT).toFixed(2); }
+        else if (kind === 'nav-ns' || kind === 'nav-ew') { const nav = wkNavOf(step); if (nav && nav.location) nav.location = moveLL(nav.location, Math.abs(n) * FT, kind === 'nav-ns' ? (n > 0 ? 0 : 180) : (n > 0 ? 90 : 270)); }
         drawGhosts(); renderEdit();
     }
     // While a drag is in progress only the numbers change — never rebuild the panel (that would replace the elements).
@@ -1612,6 +1642,14 @@
         set('camera', pose.pitchDeg != null ? pose.pitchDeg.toFixed(0) + '°' : '–');
         set('alt', fmtAlt(nav ? nav.value1 : null));
         if (isGps(step)) { set('target-alt', fmtAlt(step.value1)); set('range', fmtDist(pose.range)); }
+        else if (nav && nav.location) { const g = groundAt(nav.location); const lp = g != null ? lookPointFor(nav, step, g) : null; set('range', lp ? fmtDist(lp.dist) + (lp.capped ? ' (capped)' : '') : '?'); }
+        const o = nav && origOf(nav.id);
+        if (o && o.location && nav.location) {
+            const ns = distM(o.location, { lat: nav.location.lat, lng: o.location.lng }) * (nav.location.lat >= o.location.lat ? 1 : -1);
+            const ew = distM(o.location, { lat: o.location.lat, lng: nav.location.lng }) * (nav.location.lng >= o.location.lng ? 1 : -1);
+            set('nav-ns', signed(ns * M_TO_FT, ' ft', 0) + ' N'); set('nav-ew', signed(ew * M_TO_FT, ' ft', 0) + ' E');
+            const inp = ed.panelEl.querySelector('[data-aim-vv-latlng]'); if (inp && document.activeElement !== inp) inp.value = nav.location.lat.toFixed(6) + ', ' + nav.location.lng.toFixed(6);
+        }
     }
     function onCopyClick(e) {
         if (!groupHost || !groupHost.classList.contains('aim-vv-split')) return;

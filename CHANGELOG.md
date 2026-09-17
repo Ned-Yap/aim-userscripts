@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — AIM Video Validation latest v0.27: pose-aware shot join, look-point range, nav drag offsets (dev only)
+
+- A picture is matched to its snapshot step by the flown log AND its actual heading / camera angle: when the log's step is already taken or disagrees with the picture, a later unclaimed snapshot in this flight whose planned pose matches within 12° wins. Fixes 235004's 14:08 picture reading as an "S6 re-take" — it is S7, shot between two log entries. The console says when this happens.
+- In-place snapshots show their look-point distance in the "now" row (drag it: nav closer / farther along the heading).
+- The nav row shows how far the nav has moved north / south and east / west from the original, both draggable; the lat, lng box follows.
+
 ## 2026-09-17 — AIM Video Validation latest v0.26: nav editing, per-line weights, flown path steady (dev only)
 
 - **Nav editing** in the Adjust panel: ▲N ▼S ◀W E▶ nudges (move step, Shift ×5), a `lat, lng` box with Set / Enter, and **📍 Place on map** — the next click on the map moves the nav (Esc cancels, crosshair cursor). The in-place look-points and GPS sightlines follow the moved nav in the ghost preview. Moves over 2,000 m are refused.
