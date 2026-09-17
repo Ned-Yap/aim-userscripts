@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.46
+// @version      0.47
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.46';
+    const SCRIPT_VERSION = '0.47';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -2215,7 +2215,7 @@
     // ===============================================================
     const sessionReports = [];   // every Apply on this page (all missions), in order
     let reportEl = null;
-    function fmtSigned(v, unit, d) { return v == null || !isFinite(v) ? '–' : (v > 0 ? '+' : '') + v.toFixed(d == null ? 0 : d) + unit; }
+    function fmtSigned(v, unit, d) { if (v == null || !isFinite(v)) return '–'; const r = +v.toFixed(d == null ? 0 : d); return (r > 0 ? '+' : '') + (r === 0 ? '0' : r.toFixed(d == null ? 0 : d)) + unit; }
     function actualLookPointOf(im) {
         if (!im || !im.location || typeof im.drone_heading !== 'number' || typeof im.camera_pitch !== 'number' || typeof im.alt !== 'number') return null;
         const g = groundAt(im.location); if (g == null) return null;
@@ -2228,7 +2228,7 @@
         if (isGps(step)) return { ll: step.location };
         const nav = parentNav(model, step); if (!nav || !nav.location) return null;
         const g = groundAt(nav.location); if (g == null) return null;
-        const lp = lookPointFor(nav, step, g); return lp ? { ll: { lat: lp.ll[0], lng: lp.ll[1] }, capped: lp.capped } : null;
+        const lp = lookPointFor(nav, step, g); return lp ? { ll: lp.ll, capped: lp.capped } : null;
     }
     function checkFlight() {
         const thr = { hdg: Number(settings.chkHdg) || 0, cam: Number(settings.chkCam) || 0, alt: Number(settings.chkAltFt) || 0, pos: Number(settings.chkPosFt) || 0, look: Number(settings.chkLookFt) || 0 };
@@ -2264,6 +2264,33 @@
         const flightSteps = model.plan.filter(inSlice), flightSnaps = flightSteps.filter(st => st.type_name === 'snapshot');
         const allSnaps = model.plan.filter(st => st.type_name === 'snapshot');
         return { mission: m.name || m.app_name, appId: model.liveApp ? model.liveApp.id : (m.app && m.app.id), flownAppId: m.app && m.app.id, flightId: model.mid, group: m.mission_group_id, site: model.sid, drone: m.drone_name || (m.drone && m.drone.name), droneType: m.drone && m.drone.robot_type_name, when: m.when, flightSteps: flightSteps.length, flightSnaps: flightSnaps.length, missionSteps: model.plan.length, missionSnaps: allSnaps.length, slice: model.slice, url: location.origin + '/#/site/' + model.sid + '/control-panel/past-mission/' + model.mid };
+    }
+    function shotSentence(r) {
+        const bits = [];
+        r.flags.forEach(f => {
+            if (f.startsWith('off station')) bits.push('drone was ' + f.replace('off station ', '') + ' of its nav');
+            else if (f.startsWith('heading')) bits.push('heading ' + f.replace('heading ', '') + ' off plan');
+            else if (f.startsWith('camera')) bits.push('camera angle ' + f.replace('camera ', '') + ' off plan');
+            else if (f.startsWith('altitude')) bits.push('flew ' + f.replace('altitude ', '') + ' vs plan');
+            else if (f.startsWith('look-point')) bits.push('looked ' + f.replace('look-point ', '').replace(' off', '') + ' away from the planned spot');
+            else if (f.startsWith('re-take')) bits.push('re-take of a step already shot');
+            else if (f.startsWith('no snapshot')) bits.push('taken while no snapshot step was running (pilot / manual)');
+            else bits.push(f);
+        });
+        const ok = [];
+        if (!r.flags.some(f => f.startsWith('heading') || f.startsWith('camera'))) ok.push('camera on plan');
+        if (!r.flags.some(f => f.startsWith('off station'))) ok.push('on station');
+        return r.s + ' at ' + r.shutter + ' — ' + bits.join('; ') + (ok.length ? '; ' + ok.join(', ') : '') + (r.asset ? '' : '; no asset in frame');
+    }
+    function checkerSummary(res, jira) {
+        const h = flightHeader(); const L = [];
+        L.push((jira ? 'h3. ' : '') + 'Flight check — ' + h.mission + ' · flight ' + h.flightId + ' · ' + new Date(h.when).toLocaleString() + (h.drone ? ' · ' + h.drone : ''));
+        L.push('This flight: ' + h.flightSteps + ' steps, ' + h.flightSnaps + ' snapshots · whole mission: ' + h.missionSteps + ' steps, ' + h.missionSnaps + ' snapshots · ' + h.url);
+        const bad = res.rows.filter(r => r.flags.length);
+        L.push(res.summary.shots + ' shots · ' + bad.length + ' need' + (bad.length === 1 ? 's' : '') + ' attention · ' + res.summary.retakes + ' re-take' + (res.summary.retakes === 1 ? '' : 's') + (res.summary.missing.length ? ' · no picture for ' + res.summary.missing.join(', ') : ''));
+        if (!bad.length) L.push((jira ? '* ' : '• ') + 'All shots within limits.');
+        bad.forEach(r => L.push((jira ? '* ' : '• ') + shotSentence(r)));
+        return L.join('\n');
     }
     const tri = (a, unit, d) => (a[0] != null ? (+a[0]).toFixed(d || 0) : '–') + unit + ' / ' + (a[1] != null ? (+a[1]).toFixed(d || 0) : '–') + unit + ' / ' + fmtSigned(a[2], unit, d || 0);
     function checkerText(res, jira) {
@@ -2305,12 +2332,13 @@
         const done = () => toast('Copied ' + label + ' to the clipboard', false);
         try { navigator.clipboard.writeText(txt).then(done, () => { fallbackCopy(txt); done(); }); } catch (e) { fallbackCopy(txt); done(); }
     }
-    function openReportBox(title, sub, tableHtml, plain, jira) {
+    function openReportBox(title, sub, tableHtml, plain, jira, summaryHtml, summaryJira) {
         if (reportEl) reportEl.remove();
         reportEl = document.createElement('div'); reportEl.className = 'aim-vv-review';
-        reportEl.innerHTML = '<div class="aim-vv-review__box" style="max-width:96vw"><div><b>' + esc(title) + '</b></div><div class="dim" style="margin:4px 0 8px">' + esc(sub) + '</div>' + tableHtml
-            + '<div class="aim-vv-edit__row" style="margin-top:8px"><button type="button" data-aim-vv-rep="jira">Copy for JIRA (table markup)</button><button type="button" data-aim-vv-rep="plain">Copy as text (tab-separated)</button><button type="button" data-aim-vv-rep="close">Close</button></div></div>';
-        reportEl.__plain = plain; reportEl.__jira = jira;
+        reportEl.innerHTML = '<div class="aim-vv-review__box" style="max-width:96vw"><div><b>' + esc(title) + '</b></div><div class="dim" style="margin:4px 0 8px">' + esc(sub) + '</div>'
+            + (summaryHtml ? summaryHtml + '<details style="margin-top:8px"><summary class="dim" style="cursor:pointer">full table (numbers)</summary>' + tableHtml + '</details>' : tableHtml)
+            + '<div class="aim-vv-edit__row" style="margin-top:8px">' + (summaryJira ? '<button type="button" data-aim-vv-rep="summary">Copy summary for JIRA</button>' : '') + '<button type="button" data-aim-vv-rep="jira">Copy ' + (summaryJira ? 'full table' : '') + ' for JIRA</button><button type="button" data-aim-vv-rep="plain">Copy as text</button><button type="button" data-aim-vv-rep="close">Close</button></div></div>';
+        reportEl.__plain = plain; reportEl.__jira = jira; reportEl.__summary = summaryJira;
         document.body.appendChild(reportEl);
     }
     function onReportClick(e) {
@@ -2319,6 +2347,7 @@
         const what = b.dataset.aimVvRep;
         if (what === 'close') { reportEl.remove(); reportEl = null; }
         else if (what === 'jira') copyText(reportEl.__jira, 'the JIRA table');
+        else if (what === 'summary') copyText(reportEl.__summary, 'the summary');
         else if (what === 'plain') copyText(reportEl.__plain, 'the report');
     }
     function openChecker() {
@@ -2332,7 +2361,10 @@
             + '<td class="dim">' + esc(r.asset || '–') + '</td><td>' + (r.flags.length ? '<span class="warn">' + esc(r.flags.join('; ')) + '</span>' : '<span class="ok">ok</span>') + '</td></tr>').join('');
         const table = '<table><tr class="dim"><td>shot</td><td>step</td><td>shutter</td><td>heading p/a/Δ</td><td>camera p/a/Δ</td><td>drone alt ft p/a/Δ</td><td>drone vs nav</td><td>look-point gap</td><td>asset</td><td>flags</td></tr>' + rows + '</table>'
             + '<div style="margin-top:6px">Shots <b>' + res.summary.shots + '</b> · flagged <b>' + res.summary.flagged + '</b> · re-takes <b>' + res.summary.retakes + '</b> · snapshot steps with no picture: ' + (res.summary.missing.length ? '<span class="warn">' + esc(res.summary.missing.join(', ')) + '</span>' : 'none') + '</div>';
-        openReportBox('Flight check — ' + (h.mission || '') + ' · flight ' + h.flightId, 'this flight ' + h.flightSteps + ' steps (' + h.flightSnaps + ' snapshots) · whole mission ' + h.missionSteps + ' steps (' + h.missionSnaps + ' snapshots) · thresholds in the Control Panel', table, checkerText(res, false), checkerText(res, true));
+        const bad = res.rows.filter(r => r.flags.length);
+        const summaryHtml = '<div>' + res.summary.shots + ' shots · <b>' + bad.length + '</b> need' + (bad.length === 1 ? 's' : '') + ' attention · ' + res.summary.retakes + ' re-take' + (res.summary.retakes === 1 ? '' : 's') + (res.summary.missing.length ? ' · <span class="warn">no picture for ' + esc(res.summary.missing.join(', ')) + '</span>' : '') + '</div>'
+            + (bad.length ? '<ul style="margin:6px 0 0 18px;padding:0">' + bad.map(r => '<li>' + esc(shotSentence(r)) + '</li>').join('') + '</ul>' : '<div class="ok" style="margin-top:6px">All shots within limits.</div>');
+        openReportBox('Flight check — ' + (h.mission || '') + ' · flight ' + h.flightId, 'this flight ' + h.flightSteps + ' steps (' + h.flightSnaps + ' snapshots) · whole mission ' + h.missionSteps + ' steps (' + h.missionSnaps + ' snapshots) · thresholds in the Control Panel', table, checkerText(res, false), checkerText(res, true), summaryHtml, checkerSummary(res, true));
     }
     function openSessionReport() {
         if (!model) { toast('No mission loaded', true); return; }
