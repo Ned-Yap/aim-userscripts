@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.296
+// @version      4.297
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.296';
+    const SCRIPT_VERSION = '4.297';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -190,6 +190,10 @@
     const IMP_SCRIPT_ID = 'aim-asset-importer';
     let impMasterEnabled = true;
     let impDupFt = 50;              // duplicate-guard proximity, CP-editable
+    // ---- 📌 GM Stamper (#271) — CP card id + init-referenced state (same TDZ reason).
+    const GMT_SCRIPT_ID = 'aim-gm-stamper';
+    let gmtMasterEnabled = true;
+    let gmtAltGate = false;         // CP toggle: require ALT+click to place (plain click stays free for Percepto)
     let impSizeFt = 30;             // created-asset square side ft, CP-editable
     let impDeleteGuardSeen = 0;     // ts of the last Delete Guard REGISTER seen on the control channel
     const AIR_THRESH_KEY = 'aim-airspace-thresholds';
@@ -11318,6 +11322,17 @@
                     impOpenFromAction();
                 }
             }
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === GMT_SCRIPT_ID) {
+                handleGmtToggle(msg);
+            }
+            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === GMT_SCRIPT_ID && CONTEXT === 'IFRAME') {
+                if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;   // tab-local (see importer above)
+                if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
+                if (msg.actionId === 'gmt-open') {
+                    if (!gmtMasterEnabled) { showToast('GM Stamper is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+                    gmtOpenFromAction();
+                }
+            }
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === TER_SCRIPT_ID) {
                 handleTerrainToggle(msg);
             }
@@ -11389,6 +11404,23 @@
             if (msg.value === impSizeFt || msg.value < 5 || msg.value > 2000) return;
             impSizeFt = msg.value;
             try { const el = document.getElementById('aim-imp-size'); if (el) el.value = impSizeFt; } catch (e) {}
+        }
+    }
+    function handleGmtToggle(msg) {
+        const id = msg.toggleId;
+        if (id === 'gmt-master') {
+            const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            if (v === gmtMasterEnabled) return;
+            gmtMasterEnabled = v;
+            if (!v) { try { if (gmt.armed) gmtArm(false); } catch (e) {} }
+            try { const b = document.getElementById(GMT_MAP_BTN_ID); if (b) b.style.display = v ? '' : 'none'; } catch (e) {}
+            return;
+        }
+        if (id === 'gmt-alt-gate') {
+            const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            if (v === gmtAltGate) return;
+            gmtAltGate = v;
+            try { if (gmt.armed) { const t = gmtActiveTemplate(); gmtSetStatus(`armed — ${gmtAltGate ? 'ALT+click' : 'click'} the map to place "${t.label}" · Esc stops`); gmtRenderPanel(); } } catch (e) {}
         }
     }
     // Idempotent per [[feedback_set_toggle_handlers_must_be_idempotent]] —
@@ -11622,6 +11654,20 @@
                 { id: 'imp-dup-ft', label: 'Duplicate guard radius (staged point near an existing asset)', type: 'number', min: 0, max: 1000, step: 5, default: 50, unit: 'ft' },
                 { id: 'imp-size-ft', label: 'Created-asset square size', type: 'number', min: 5, max: 2000, step: 5, default: 30, unit: 'ft' },
                 { id: 'imp-open', label: '📥 Open Asset Importer', type: 'button', action: 'imp-open' },
+            ],
+            hotkeys: [],
+        });
+        // v4.297: 📌 GM Stamper — own card (feature #271). Template-driven
+        // General Marker placement: arm a template, click the map, a uniquely
+        // numbered GM of the right type/notes/height is created on the spot.
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: GMT_SCRIPT_ID, name: 'GM Stamper',
+            description: 'Place General Markers from saved templates (name pattern with #, marker type/icon, notes, height) with one map click each — the # becomes the next free number on the site. Create-only via the site-setup API; ↩ Undo deletes the last one (Delete Guard banks it). 📌 button in the map toolbar.',
+            version: SCRIPT_VERSION, group: 'GM Stamper', scope: 'site-setup', priority: 36,
+            toggles: [
+                { id: 'gmt-master', label: 'Enable GM Stamper', type: 'boolean', default: true, master: true },
+                { id: 'gmt-alt-gate', label: 'Require ALT+click to place (plain clicks stay free for Percepto)', type: 'boolean', default: false },
+                { id: 'gmt-open', label: '📌 Open GM Stamper', type: 'button', action: 'gmt-open' },
             ],
             hotkeys: [],
         });
@@ -15363,6 +15409,7 @@
             injectSumButton(win.document);
             injectGenMapButton(win.document);
             injectFfdMapButton(win.document);
+            injectGmtMapButton(win.document);
             const frames = win.document.querySelectorAll('iframe');
             frames.forEach(f => { if (f.contentWindow) recursiveSumInject(f.contentWindow); });
         } catch (e) {}
@@ -19038,6 +19085,7 @@
         if (nfzDraw.active) {
             try { if (advDraw.active) setAdvDraw(false); } catch (e) {}   // mutually exclusive
             try { if (imp.mode) impSetMode(null); } catch (e) {}          // …and with the importer's select tools
+            try { if (gmt.armed) gmtArm(false); } catch (e) {}            // …and with the 📌 GM Stamper
             try { if (genDraw.active) { const b = document.getElementById('aim-gen-draw'); if (b) b.click(); } } catch (e) {}
             nfzWire();
         } else {
@@ -19868,6 +19916,7 @@
         if (imp.mode) {
             try { if (nfzDraw.active) setNfzMode(null); } catch (e) {}   // mutually exclusive with the other map tools
             try { if (advDraw.active) setAdvDraw(false); } catch (e) {}
+            try { if (gmt.armed) gmtArm(false); } catch (e) {}
             try { if (genDraw.active) { const b = document.getElementById('aim-gen-draw'); if (b) b.click(); } } catch (e) {}
             impWire();
         } else impUnwire();
@@ -20593,6 +20642,600 @@
     }
 
     // ============================================================
+    // 📌 GM STAMPER (#271) — template-driven General Marker placement.
+    // Percepto requires a unique name per General Marker and its native flow
+    // is click → pick type → type a name → notes → save, EVERY time. Here a
+    // TEMPLATE (label, name pattern with "#", marker type, notes, height) is
+    // armed once and every map click creates a real GM through the same
+    // POST /map_objects/ create rails the Airspace Checker uses (create-only,
+    // never edits existing entities). "#" becomes the next free number on the
+    // site (site-wide name uniqueness — Percepto rejects duplicate names
+    // across ALL entity types, not just markers). Templates live in GM
+    // storage (per user, carries across prod/QA); Copy / Paste JSON shares a
+    // set with coworkers. Each placed marker is drawn locally right away
+    // (Percepto only re-reads /map_objects on reload) and ↩ Undo deletes the
+    // last placed GM (Delete Guard banks the body first). Placement is
+    // click-vs-pan aware (mouseup within GMT_CLICK_PX of mousedown = place;
+    // a drag still pans) with an optional ALT+click gate from the CP card.
+    // Log tag: [AIM SITE SETUP]. Full mode only (site-write).
+    // ============================================================
+    const GMT_TEMPLATES_KEY = 'aim_gmt_templates';   // GM: [{id,label,name,type,description,heightFt,start,pad}]
+    const GMT_PANEL_ID = 'aim-gmt-panel';
+    const GMT_MAP_BTN_ID = 'aim-gmt-maptools-btn';
+    const GMT_STYLE_ID = 'aim-gmt-style';
+    const GMT_KNOWN_TYPES = ['general', 'tower', 'hazard', 'building', 'pole'];   // general_marker_type values seen live
+    const GMT_TYPE_COLORS = { general: '#c39bd3', tower: '#ff8a80', hazard: '#ffd400', building: '#7adfe6', pole: '#ffb020' };
+    const GMT_CLICK_PX = 6;                          // mouseup within this many px of mousedown = a click (a drag = pan)
+    const GMT_MAX_NUMBER_SCAN = 100000;              // "#" search cap — a template that can't find a free name in 100k fails loudly
+    let gmt = {
+        siteID: null,                                // site the drawn session markers belong to
+        templates: [],
+        activeId: null,
+        armed: false,
+        editing: null,                               // template draft in the panel form (null = list view)
+        pasteOpen: false,                            // ⬆ Paste JSON textarea shown
+        placed: [],                                  // this session: [{id, name, lat, lng, siteID, layer}]
+        queue: Promise.resolve(),                    // placements run strictly in order so "#" numbering never races
+        pending: 0,
+        status: '',
+        pos: null,                                   // {left, top} after the user drags the panel
+        _container: null, _onDown: null, _onUp: null, _onClick: null, _onDbl: null, _onKey: null,
+        _down: null, _suppressClickUntil: 0,
+    };
+    function gmtNormalizeTemplate(t) {
+        const type = String(t.type || 'general').toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'general';
+        const heightFt = Number(t.heightFt);
+        const start = Number(t.start);
+        const pad = Number(t.pad);
+        return {
+            id: String(t.id || `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`),
+            label: String(t.label || '').trim() || 'Untitled',
+            name: String(t.name || '').trim() || 'Marker #',
+            type,
+            description: typeof t.description === 'string' ? t.description : '',
+            heightFt: (isFinite(heightFt) && heightFt >= 0) ? heightFt : 0,
+            start: (Number.isInteger(start) && start >= 0) ? start : 1,
+            pad: (Number.isInteger(pad) && pad >= 0 && pad <= 6) ? pad : 0,
+        };
+    }
+    function gmtLoadTemplates() {
+        try {
+            const raw = GM_getValue(GMT_TEMPLATES_KEY, '');
+            const arr = raw ? JSON.parse(raw) : [];
+            gmt.templates = Array.isArray(arr) ? arr.filter(t => t && typeof t === 'object').map(gmtNormalizeTemplate) : [];
+        } catch (e) { console.warn(`${TAG} 📌 template load failed:`, e); gmt.templates = []; }
+        if (gmt.activeId && !gmt.templates.some(t => t.id === gmt.activeId)) gmt.activeId = null;
+        if (!gmt.activeId && gmt.templates.length) gmt.activeId = gmt.templates[0].id;
+    }
+    function gmtSaveTemplates() {
+        try { GM_setValue(GMT_TEMPLATES_KEY, JSON.stringify(gmt.templates)); }
+        catch (e) { console.warn(`${TAG} 📌 template save failed:`, e); showToast('Template save failed — see console', 'rgba(255,96,96,0.55)'); }
+    }
+    function gmtActiveTemplate() { return gmt.templates.find(t => t.id === gmt.activeId) || null; }
+    // ---- naming: "#" → next free number, unique against EVERY entity name on the site ----
+    function gmtUsedNames(sid) {
+        const set = new Set();
+        const bucket = mapObjectsBySite[sid];
+        (((bucket && bucket.entities) || [])).forEach(e => { if (e && e.name) set.add(String(e.name).toLowerCase()); });
+        gmt.placed.forEach(p => { if (p.siteID === sid) set.add(p.name.toLowerCase()); });
+        return set;
+    }
+    function gmtRenderName(t, n) {
+        const num = t.pad ? String(n).padStart(t.pad, '0') : String(n);
+        const pattern = /#/.test(t.name) ? t.name : `${t.name} #`;
+        return genCleanName(pattern.replace(/#/g, num));
+    }
+    function gmtNextName(t, sid) {
+        const used = gmtUsedNames(sid);
+        let n = t.start;
+        for (let guard = 0; guard < GMT_MAX_NUMBER_SCAN; guard++, n++) {
+            const name = gmtRenderName(t, n);
+            if (name && !used.has(name.toLowerCase())) return { name, n };
+        }
+        return null;
+    }
+    // ---- write: one GM via POST /map_objects/ (create-only) ----
+    async function gmtCreateGm(t, ll, sid) {
+        if (liteBlockedWrite('stamp GM')) return null;
+        const csrf = getCsrfToken();
+        if (!csrf) { showToast('No CSRF token yet — make one native save/edit anywhere in Percepto, then retry', 'rgba(255,96,96,0.55)'); return null; }
+        const next = gmtNextName(t, sid);
+        if (!next) { console.warn(`${TAG} 📌 no free name for template "${t.label}" (pattern "${t.name}")`); showToast(`No free name for "${t.label}" — change its pattern`, 'rgba(255,96,96,0.55)'); return null; }
+        let siteCfg = null;
+        try { siteCfg = await fetchSiteConfig(sid); } catch (e) { console.warn(`${TAG} 📌 site cfg fetch failed:`, e); }
+        // Clone an existing GM's write body when one exists (guarantees every
+        // field the server wants); else the minimal body the Airspace Checker uses.
+        const bucket = mapObjectsBySite[sid];
+        const tmplGm = bucket && bucket.entities && bucket.entities.find(e => e.type === 19 && Array.isArray(e.coords) && e.coords.length);
+        let b = null;
+        if (tmplGm) { try { b = buildWriteBody(tmplGm, siteCfg); } catch (e) { console.warn(`${TAG} 📌 GM body clone failed, using minimal body:`, e); } }
+        if (!b) b = { type: 19, description: '', custom: {}, params: {}, asset_waypoints: null, constantly_present_asset_name: false, restrictions: [], arcs: [], is_unshielded: false };
+        delete b.id;
+        b.type = 19;
+        b.name = next.name;
+        b.site_id = sid;
+        b.points = [{ lat: ll.lat, lng: ll.lng }];
+        b.general_marker_type = t.type;
+        b.marker_height = Math.round((t.heightFt / M_TO_FT) * 100) / 100;
+        b.description = t.description || '';
+        b.validated = false;
+        b.arcs = [];
+        b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
+        let r, txt = '', json = null;
+        try {
+            r = await fetch('/map_objects/', {
+                method: 'POST', credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf },
+                body: JSON.stringify(b),
+            });
+            txt = await r.text();
+            try { json = JSON.parse(txt); } catch (e) {}
+        } catch (e) {
+            console.warn(`${TAG} 📌 create "${next.name}" threw:`, e);
+            showToast(`GM "${next.name}" NOT created — network error (see console)`, 'rgba(255,96,96,0.55)');
+            return null;
+        }
+        const saved = r.status === 200 && json && json.map_objects;
+        if (!saved) {
+            console.warn(`${TAG} 📌 create "${next.name}" failed: server ${r.status} ${(txt || '').slice(0, 300)}`);
+            showToast(`GM "${next.name}" NOT created — server ${r.status} (see console)`, 'rgba(255,96,96,0.55)');
+            return null;
+        }
+        // Keep the entity cache current so the next "#" and the right-click
+        // inspector see the new marker without a refetch.
+        const ent = Object.assign({}, saved, { site: Number(sid), type: 19, coords: (Array.isArray(saved.coords) && saved.coords.length) ? saved.coords : b.points });
+        if (bucket && Array.isArray(bucket.entities)) bucket.entities.push(ent);
+        console.log(`${TAG} 📌 created GM "${next.name}" (${t.type}) id ${saved.id} at ${ll.lat.toFixed(6)}, ${ll.lng.toFixed(6)}`);
+        return { id: saved.id, name: next.name };
+    }
+    async function gmtUndoLast() {
+        const p = gmt.placed[gmt.placed.length - 1];
+        if (!p) { showToast('Nothing to undo'); return; }
+        if (liteBlockedWrite('undo GM')) return;
+        const csrf = getCsrfToken();
+        if (!csrf) { showToast('No CSRF token — cannot delete', 'rgba(255,96,96,0.55)'); return; }
+        try {
+            const r = await fetch(`/map_objects/${p.id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
+            if (r.status === 200 || r.status === 204) {
+                gmt.placed.pop();
+                if (p.layer) { try { p.layer.remove(); } catch (e) {} }
+                const bucket = mapObjectsBySite[p.siteID];
+                if (bucket && Array.isArray(bucket.entities)) bucket.entities = bucket.entities.filter(e => e.id !== p.id);
+                console.log(`${TAG} 📌 undo: deleted GM "${p.name}" (#${p.id}) — Delete Guard banked it`);
+                showToast(`↩ Deleted "${p.name}"`);
+            } else {
+                const txt = await r.text();
+                console.warn(`${TAG} 📌 undo delete of "${p.name}" (#${p.id}) failed: server ${r.status} ${(txt || '').slice(0, 200)}`);
+                showToast(`Undo failed — server ${r.status} (see console)`, 'rgba(255,96,96,0.55)');
+            }
+        } catch (e) { console.warn(`${TAG} 📌 undo threw:`, e); showToast('Undo failed — see console', 'rgba(255,96,96,0.55)'); }
+        gmtRenderPanel();
+    }
+    // ---- local preview marker (Percepto shows the real one after a reload) ----
+    function gmtEnsureStyle() {
+        if (document.getElementById(GMT_STYLE_ID)) return;
+        const st = document.createElement('style');
+        st.id = GMT_STYLE_ID;
+        st.textContent = `
+            .aim-gmt-pin { background: none; border: none; }
+            .aim-gmt-tip { background: rgba(16,22,32,0.92); color: #dfe9f0; border: 1px solid rgba(195,155,211,0.7); border-radius: 4px; padding: 1px 5px; font: 11px/1.3 -apple-system,Segoe UI,Roboto,sans-serif; box-shadow: none; white-space: nowrap; }
+            .aim-gmt-tip::before { display: none; }
+            @keyframes aim-gmt-pulse { 0% { box-shadow: 0 0 0 0 rgba(95,255,95,0.5); } 100% { box-shadow: 0 0 0 8px rgba(95,255,95,0); } }
+            #${GMT_PANEL_ID} [data-gmt-arm].on { animation: aim-gmt-pulse 1.2s ease-out infinite; }
+            #${GMT_PANEL_ID} input, #${GMT_PANEL_ID} select, #${GMT_PANEL_ID} textarea { background: rgba(0,0,0,0.35); color: #dfe9f0; border: 1px solid rgba(122,223,230,0.35); border-radius: 4px; padding: 3px 5px; font: inherit; box-sizing: border-box; }
+            #${GMT_PANEL_ID} button { font: inherit; cursor: pointer; }
+            #${GMT_PANEL_ID} button:disabled { opacity: 0.45; cursor: default; }
+            #${GMT_PANEL_ID} [data-gmt-row]:hover { background: rgba(122,223,230,0.08); }
+        `;
+        document.head.appendChild(st);
+    }
+    function gmtDrawMarker(ll, name, t) {
+        const map = getLeafletMap();
+        const L = getLeafletL();
+        if (!map || !L) return null;
+        try {
+            gmtEnsureStyle();
+            const color = GMT_TYPE_COLORS[t.type] || '#c39bd3';
+            const icon = L.divIcon({
+                className: 'aim-gmt-pin', iconSize: [14, 14], iconAnchor: [7, 7],
+                html: `<div style="width:14px;height:14px;border-radius:50%;background:${color};border:2px solid #101620;box-shadow:0 0 0 2px ${color}88;"></div>`,
+            });
+            const mk = L.marker([ll.lat, ll.lng], { icon, interactive: false, zIndexOffset: 1000 });
+            mk.bindTooltip(name, { permanent: true, direction: 'top', offset: [0, -8], className: 'aim-gmt-tip', interactive: false });
+            mk.addTo(map);
+            return mk;
+        } catch (e) { console.warn(`${TAG} 📌 preview marker failed:`, e); return null; }
+    }
+    function gmtClearSession(reason) {
+        if (!gmt.placed.length) return;
+        gmt.placed.forEach(p => { if (p.layer) { try { p.layer.remove(); } catch (e) {} } });
+        console.log(`${TAG} 📌 cleared ${gmt.placed.length} session marker(s) (${reason})`);
+        gmt.placed = [];
+    }
+    // ---- placement queue ----
+    function gmtPlaceAt(ll) {
+        const t = gmtActiveTemplate();
+        if (!t) { showToast('Pick a template first', 'rgba(255,179,71,0.6)'); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
+        gmt.pending++;
+        gmtSetStatus(`saving${gmt.pending > 1 ? ` (${gmt.pending} queued)` : ''}…`);
+        gmt.queue = gmt.queue.then(async () => {
+            try {
+                if (gmt.siteID !== sid) { gmtClearSession('site changed'); gmt.siteID = sid; }
+                if (!mapObjectsBySite[sid] || !mapObjectsBySite[sid].entities) await fetchMapObjects(sid, true);
+                const res = await gmtCreateGm(t, ll, sid);
+                if (res) {
+                    const layer = gmtDrawMarker(ll, res.name, t);
+                    gmt.placed.push({ id: res.id, name: res.name, lat: ll.lat, lng: ll.lng, siteID: sid, layer });
+                    showToast(`📌 ${res.name} created`);
+                    gmtSetStatus(`✓ ${res.name}`);
+                } else gmtSetStatus('last placement failed — see console');
+            } catch (e) {
+                console.warn(`${TAG} 📌 place failed:`, e);
+                showToast('Place failed — see console', 'rgba(255,96,96,0.55)');
+                gmtSetStatus('last placement failed — see console');
+            }
+            gmt.pending = Math.max(0, gmt.pending - 1);
+            if (!gmt.editing) gmtRenderPanel();                                 // never wipe an open template form
+        });
+    }
+    // ---- map wiring: capture-phase harness like the importer; click-vs-pan aware ----
+    function gmtWire() {
+        const map = getLeafletMap();
+        if (!map) { showToast('Map not ready — try again in a moment', 'rgba(255,179,71,0.6)'); return false; }
+        gmtUnwire();
+        const c = map.getContainer();
+        gmt._container = c;
+        gmt._onDown = (ev) => {
+            if (!gmt.armed || ev.button !== 0) { gmt._down = null; return; }
+            if (gmtAltGate && !ev.altKey) { gmt._down = null; return; }         // plain click stays free when the gate is on
+            gmt._down = { x: ev.clientX, y: ev.clientY };
+            if (gmtAltGate) { ev.preventDefault(); ev.stopPropagation(); }       // ALT+click never pans / selects
+        };
+        gmt._onUp = (ev) => {
+            const d = gmt._down; gmt._down = null;
+            if (!gmt.armed || !d || ev.button !== 0) return;
+            if (Math.hypot(ev.clientX - d.x, ev.clientY - d.y) > GMT_CLICK_PX) return;   // it was a pan
+            if (ev.target && ev.target.closest && ev.target.closest('.map-tools, .leaflet-control, button, .ant-btn')) return;
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            // NOT stopPropagation here: Leaflet's Draggable ends its (unstarted) drag on a
+            // DOCUMENT mouseup — swallowing it leaves the map glued to the cursor. The
+            // trailing 'click' (Leaflet + Percepto selection) and 'dblclick' (zoom) are eaten instead.
+            gmt._suppressClickUntil = Date.now() + 400;
+            gmtPlaceAt(ll);
+        };
+        gmt._onClick = (ev) => { if (Date.now() < gmt._suppressClickUntil) { ev.preventDefault(); ev.stopPropagation(); } };
+        gmt._onDbl = (ev) => { if (gmt.armed) { ev.preventDefault(); ev.stopPropagation(); } };
+        gmt._onKey = (ev) => {
+            if (ev.key !== 'Escape' || !gmt.armed) return;
+            ev.preventDefault(); ev.stopPropagation();
+            gmtArm(false);
+        };
+        c.addEventListener('mousedown', gmt._onDown, true);
+        c.addEventListener('mouseup', gmt._onUp, true);
+        c.addEventListener('click', gmt._onClick, true);
+        c.addEventListener('dblclick', gmt._onDbl, true);
+        try { uwin().addEventListener('keydown', gmt._onKey, true); } catch (e) {}
+        try { c.style.cursor = 'crosshair'; } catch (e) {}
+        return true;
+    }
+    function gmtUnwire() {
+        const c = gmt._container;
+        if (c) {
+            try { c.removeEventListener('mousedown', gmt._onDown, true); } catch (e) {}
+            try { c.removeEventListener('mouseup', gmt._onUp, true); } catch (e) {}
+            try { c.removeEventListener('click', gmt._onClick, true); } catch (e) {}
+            try { c.removeEventListener('dblclick', gmt._onDbl, true); } catch (e) {}
+            try { if (!advDraw.active && !nfzDraw.active && !imp.mode) c.style.cursor = ''; } catch (e) {}
+        }
+        try { uwin().removeEventListener('keydown', gmt._onKey, true); } catch (e) {}
+        gmt._container = null;
+        gmt._down = null;
+    }
+    function gmtArm(on) {
+        if (on && !gmtMasterEnabled) { showToast('GM Stamper is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+        if (on && LITE) { showToast('GM Stamper needs Full mode (CSM access)', 'rgba(255,180,0,0.6)'); return; }
+        if (on && !gmtActiveTemplate()) { showToast('Pick a template first', 'rgba(255,179,71,0.6)'); return; }
+        if (on) {
+            try { if (nfzDraw.active) setNfzMode(null); } catch (e) {}          // mutually exclusive with the other map tools
+            try { if (advDraw.active) setAdvDraw(false); } catch (e) {}
+            try { if (imp.mode) impSetMode(null); } catch (e) {}
+            try { if (genDraw.active) { const b = document.getElementById('aim-gen-draw'); if (b) b.click(); } } catch (e) {}
+            if (!gmtWire()) return;
+            gmt.armed = true;
+            const t = gmtActiveTemplate();
+            console.log(`${TAG} 📌 armed template "${t.label}" (${t.type}, pattern "${t.name}")${gmtAltGate ? ' — ALT+click gate on' : ''}`);
+            gmtSetStatus(`armed — ${gmtAltGate ? 'ALT+click' : 'click'} the map to place "${t.label}" · Esc stops`);
+        } else {
+            gmt.armed = false;
+            gmtUnwire();
+            gmtSetStatus('');
+        }
+        gmtRenderPanel();
+    }
+    function gmtSetStatus(s) {
+        gmt.status = s || '';
+        const el = document.querySelector(`#${GMT_PANEL_ID} [data-gmt-status]`);
+        if (el) el.textContent = gmt.status;
+    }
+    // ---- panel ----
+    function gmtEsc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+    function gmtOpenPanel() {
+        if (LITE) { showToast('GM Stamper needs Full mode (CSM access)', 'rgba(255,180,0,0.6)'); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('Open a site first', 'rgba(255,179,71,0.6)'); return; }
+        gmtLoadTemplates();
+        gmtEnsureStyle();
+        let p = document.getElementById(GMT_PANEL_ID);
+        if (!p) {
+            p = document.createElement('div');
+            p.id = GMT_PANEL_ID;
+            p.style.cssText = 'position:fixed;top:110px;right:70px;width:360px;max-height:80vh;z-index:2147483000;'
+                + 'background:rgba(16,22,32,0.97);border:1px solid rgba(195,155,211,0.6);border-radius:10px;'
+                + 'color:#dfe9f0;font:12px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,0.6);'
+                + 'display:flex;flex-direction:column;overflow:hidden;';
+            if (gmt.pos) { p.style.left = `${gmt.pos.left}px`; p.style.top = `${gmt.pos.top}px`; p.style.right = 'auto'; }
+            p.addEventListener('click', gmtPanelClick);
+            p.addEventListener('change', gmtPanelChange);
+            p.addEventListener('input', gmtPanelInput);
+            p.addEventListener('mousedown', gmtPanelDragStart);
+            document.body.appendChild(p);
+        }
+        gmtRenderPanel();
+        if (!mapObjectsBySite[sid] || !mapObjectsBySite[sid].entities) {
+            gmtSetStatus('loading site entities…');
+            fetchMapObjects(sid, true).then(() => { gmtSetStatus(''); gmtRenderPanel(); })
+                .catch(err => { console.warn(`${TAG} 📌 entity fetch failed:`, err); gmtSetStatus('entity load failed — numbering may collide; see console'); });
+        }
+    }
+    function gmtClosePanel() {
+        if (gmt.armed) gmtArm(false);
+        const p = document.getElementById(GMT_PANEL_ID);
+        if (p) p.remove();
+    }
+    function gmtPanelDragStart(ev) {
+        const h = ev.target.closest && ev.target.closest('[data-gmt-drag]');
+        if (!h || ev.button !== 0 || ev.target.closest('button')) return;
+        const p = document.getElementById(GMT_PANEL_ID);
+        if (!p) return;
+        ev.preventDefault();
+        const r = p.getBoundingClientRect();
+        const off = { x: ev.clientX - r.left, y: ev.clientY - r.top };
+        const move = (e) => {
+            const left = Math.max(0, Math.min(window.innerWidth - 60, e.clientX - off.x));
+            const top = Math.max(0, Math.min(window.innerHeight - 40, e.clientY - off.y));
+            p.style.left = `${left}px`; p.style.top = `${top}px`; p.style.right = 'auto';
+            gmt.pos = { left, top };
+        };
+        const up = () => { window.removeEventListener('mousemove', move, true); window.removeEventListener('mouseup', up, true); };
+        window.addEventListener('mousemove', move, true);
+        window.addEventListener('mouseup', up, true);
+    }
+    function gmtTypeSelectHtml(cur) {
+        const known = GMT_KNOWN_TYPES.includes(cur);
+        return `<select data-gmt-f="typeSel" style="width:110px">${GMT_KNOWN_TYPES.map(k => `<option value="${k}" ${k === cur ? 'selected' : ''}>${k}</option>`).join('')}<option value="__custom" ${known ? '' : 'selected'}>custom…</option></select>`
+            + `<input data-gmt-f="typeCustom" placeholder="custom type" value="${known ? '' : gmtEsc(cur)}" style="width:110px;margin-left:5px;${known ? 'display:none' : ''}">`;
+    }
+    function gmtRenderPanel() {
+        const p = document.getElementById(GMT_PANEL_ID);
+        if (!p) return;
+        const sid = getCurrentSiteID();
+        const haveEnts = !!(sid && mapObjectsBySite[sid] && mapObjectsBySite[sid].entities);
+        const active = gmtActiveTemplate();
+        const btn = (rgb, extra) => `background:rgba(${rgb},0.15);border:1px solid rgb(${rgb});color:rgb(${rgb});border-radius:5px;padding:3px 9px;${extra || ''}`;
+        let body = '';
+        if (gmt.editing) {
+            const d = gmt.editing;
+            const preview = haveEnts ? gmtNextName(gmtNormalizeTemplate(d), sid) : null;
+            body = `
+                <div style="display:grid;grid-template-columns:78px 1fr;gap:6px 8px;align-items:center;">
+                    <label>Label</label><input data-gmt-f="label" value="${gmtEsc(d.label)}" placeholder="e.g. Gate">
+                    <label title="# becomes the next free number on the site. No # → one is appended.">Name pattern</label><input data-gmt-f="name" value="${gmtEsc(d.name)}" placeholder="Gate #">
+                    <label>Type (icon)</label><div>${gmtTypeSelectHtml(d.type)}</div>
+                    <label>Notes</label><textarea data-gmt-f="description" rows="3" placeholder="saved into the marker's notes/description">${gmtEsc(d.description)}</textarea>
+                    <label>Height</label><div><input data-gmt-f="heightFt" type="number" min="0" step="1" value="${gmtEsc(d.heightFt)}" style="width:70px"> ft</div>
+                    <label>Numbering</label><div>start at <input data-gmt-f="start" type="number" min="0" step="1" value="${gmtEsc(d.start)}" style="width:60px"> · pad to <input data-gmt-f="pad" type="number" min="0" max="6" step="1" value="${gmtEsc(d.pad)}" style="width:50px"> digits</div>
+                </div>
+                <div style="margin-top:6px;color:#9ad;">Next name here: <strong data-gmt-preview>${preview ? gmtEsc(preview.name) : (haveEnts ? '(no free name)' : '…')}</strong></div>
+                <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
+                    <button data-gmt-act="cancel-edit" style="${btn('223,233,240')}">Cancel</button>
+                    <button data-gmt-act="save-edit" style="${btn('95,255,95')}">Save template</button>
+                </div>`;
+        } else {
+            const rows = gmt.templates.map(t => {
+                const nx = haveEnts ? gmtNextName(t, sid) : null;
+                const color = GMT_TYPE_COLORS[t.type] || '#c39bd3';
+                const on = t.id === gmt.activeId;
+                return `<div data-gmt-row="${t.id}" style="display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:5px;cursor:pointer;border:1px solid ${on ? 'rgba(195,155,211,0.7)' : 'transparent'};background:${on ? 'rgba(195,155,211,0.12)' : 'transparent'};">
+                    <span style="width:10px;height:10px;border-radius:50%;background:${color};flex:none;"></span>
+                    <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><strong>${gmtEsc(t.label)}</strong> <span style="opacity:0.65">· ${gmtEsc(t.type)}${t.heightFt ? ` · ${t.heightFt} ft` : ''}</span><br><span style="color:#9ad;">→ ${nx ? gmtEsc(nx.name) : (haveEnts ? '(no free name)' : '…')}</span>${t.description ? `<br><span style="opacity:0.55;">${gmtEsc(t.description.slice(0, 60))}${t.description.length > 60 ? '…' : ''}</span>` : ''}</span>
+                    <button data-gmt-act="edit" data-id="${t.id}" title="Edit" style="background:none;border:none;color:#7adfe6;padding:0 3px;">✎</button>
+                    <button data-gmt-act="dup" data-id="${t.id}" title="Duplicate" style="background:none;border:none;color:#dfe9f0;padding:0 3px;">⧉</button>
+                    <button data-gmt-act="del" data-id="${t.id}" title="Delete template" style="background:none;border:none;color:#ff8a80;padding:0 3px;">🗑</button>
+                </div>`;
+            }).join('');
+            const recent = gmt.placed.slice(-5).reverse().map(x => `<div style="opacity:0.8;">📌 ${gmtEsc(x.name)}</div>`).join('');
+            body = `
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                    <span style="color:#7adfe6;font-weight:700;">Templates</span>
+                    <span>
+                        <button data-gmt-act="new" style="${btn('95,255,95')}">+ New</button>
+                        <button data-gmt-act="copy-json" title="Copy all templates as JSON (share with a coworker)" style="${btn('122,223,230')}">⬇ Copy JSON</button>
+                        <button data-gmt-act="paste-json" title="Paste JSON from a coworker — merges by template id" style="${btn('122,223,230')}">⬆ Paste</button>
+                    </span>
+                </div>
+                ${gmt.pasteOpen ? `<div style="margin:4px 0 8px;"><textarea data-gmt-f="pasteBox" rows="4" placeholder='[{"label":"Gate","name":"Gate #","type":"general",…}]' style="width:100%"></textarea><div style="display:flex;gap:6px;justify-content:flex-end;margin-top:4px;"><button data-gmt-act="paste-cancel" style="${btn('223,233,240')}">Cancel</button><button data-gmt-act="paste-go" style="${btn('95,255,95')}">Import</button></div></div>` : ''}
+                <div style="max-height:34vh;overflow-y:auto;margin-bottom:8px;">${rows || '<div style="opacity:0.6;padding:6px;">No templates yet — click <strong>+ New</strong>.</div>'}</div>
+                <button data-gmt-arm class="${gmt.armed ? 'on' : ''}" ${active ? '' : 'disabled'} style="${gmt.armed ? btn('95,255,95', 'font-weight:700;width:100%;padding:6px;') : btn('195,155,211', 'font-weight:700;width:100%;padding:6px;')}">${gmt.armed ? `■ PLACING "${gmtEsc(active ? active.label : '')}" — ${gmtAltGate ? 'ALT+click' : 'click'} the map · Esc / click to stop` : `▶ Arm "${gmtEsc(active ? active.label : 'template')}" — then click the map to place`}</button>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">
+                    <span>Placed this session: <strong>${gmt.placed.length}</strong>${gmt.pending ? ` <span style="color:#ffd400">(+${gmt.pending} saving)</span>` : ''}</span>
+                    <button data-gmt-act="undo" ${gmt.placed.length && !gmt.pending ? '' : 'disabled'} title="Delete the last placed marker (Delete Guard banks it)" style="${btn('255,138,128')}">↩ Undo last</button>
+                </div>
+                ${recent ? `<div style="margin-top:4px;">${recent}</div>` : ''}
+                ${gmt.placed.length ? '<div style="margin-top:6px;opacity:0.65;">Markers are real on the server now; reload the page to see them as native Percepto markers.</div>' : ''}`;
+        }
+        p.innerHTML = `
+            <div data-gmt-drag style="padding:8px 12px;border-bottom:1px solid rgba(195,155,211,0.3);color:#c39bd3;font-weight:700;display:flex;justify-content:space-between;align-items:center;cursor:move;user-select:none;">
+                <span>📌 GM Stamper <span style="opacity:0.5;font-weight:400;">site ${gmtEsc(sid || '?')}</span></span>
+                <button data-gmt-act="close" style="background:none;border:none;color:#dfe9f0;font-size:14px;padding:0 4px;">✕</button>
+            </div>
+            <div style="padding:8px 12px;overflow-y:auto;">${body}</div>
+            <div data-gmt-status style="padding:4px 12px 8px;color:#9ad;min-height:16px;">${gmtEsc(gmt.status)}</div>`;
+    }
+    function gmtReadForm() {
+        const p = document.getElementById(GMT_PANEL_ID);
+        if (!p || !gmt.editing) return;
+        const q = (f) => p.querySelector(`[data-gmt-f="${f}"]`);
+        const d = gmt.editing;
+        d.label = q('label').value;
+        d.name = q('name').value;
+        const sel = q('typeSel').value;
+        d.type = sel === '__custom' ? q('typeCustom').value : sel;
+        d.description = q('description').value;
+        d.heightFt = Number(q('heightFt').value);
+        d.start = Number(q('start').value);
+        d.pad = Number(q('pad').value);
+    }
+    function gmtPanelInput(ev) {
+        if (!gmt.editing) return;
+        gmtReadForm();
+        const sid = getCurrentSiteID();
+        const prev = document.querySelector(`#${GMT_PANEL_ID} [data-gmt-preview]`);
+        if (prev && sid && mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) {
+            const nx = gmtNextName(gmtNormalizeTemplate(gmt.editing), sid);
+            prev.textContent = nx ? nx.name : '(no free name)';
+        }
+    }
+    function gmtPanelChange(ev) {
+        const sel = ev.target.closest && ev.target.closest('[data-gmt-f="typeSel"]');
+        if (sel) {
+            const custom = document.querySelector(`#${GMT_PANEL_ID} [data-gmt-f="typeCustom"]`);
+            if (custom) { custom.style.display = sel.value === '__custom' ? '' : 'none'; if (sel.value === '__custom') custom.focus(); }
+            gmtPanelInput(ev);
+        }
+    }
+    function gmtPanelClick(ev) {
+        const armBtn = ev.target.closest && ev.target.closest('[data-gmt-arm]');
+        if (armBtn) { gmtArm(!gmt.armed); return; }
+        const a = ev.target.closest && ev.target.closest('[data-gmt-act]');
+        if (a) {
+            const act = a.dataset.gmtAct, id = a.dataset.id;
+            if (act === 'close') { gmtClosePanel(); return; }
+            if (act === 'new') { gmt.editing = { id: null, label: '', name: '', type: 'general', description: '', heightFt: 0, start: 1, pad: 0 }; gmtRenderPanel(); return; }
+            if (act === 'edit') { const t = gmt.templates.find(x => x.id === id); if (t) { gmt.editing = Object.assign({}, t); gmtRenderPanel(); } return; }
+            if (act === 'dup') {
+                const t = gmt.templates.find(x => x.id === id);
+                if (t) { const c = gmtNormalizeTemplate(Object.assign({}, t, { id: null, label: `${t.label} copy` })); gmt.templates.push(c); gmtSaveTemplates(); gmt.activeId = c.id; gmtRenderPanel(); }
+                return;
+            }
+            if (act === 'del') {
+                const t = gmt.templates.find(x => x.id === id);
+                if (t && confirm(`Delete template "${t.label}"? (Markers already placed are not affected.)`)) {
+                    gmt.templates = gmt.templates.filter(x => x.id !== id);
+                    if (gmt.activeId === id) { gmt.activeId = gmt.templates.length ? gmt.templates[0].id : null; if (gmt.armed) gmtArm(false); }
+                    gmtSaveTemplates(); gmtRenderPanel();
+                }
+                return;
+            }
+            if (act === 'cancel-edit') { gmt.editing = null; gmtRenderPanel(); return; }
+            if (act === 'save-edit') {
+                gmtReadForm();
+                const d = gmt.editing;
+                if (!d.label.trim()) { showToast('Give the template a label', 'rgba(255,179,71,0.6)'); return; }
+                if (!genCleanName(d.name.replace(/#/g, '1'))) { showToast('Name pattern needs letters or numbers (Percepto allows letters, numbers, space, _ and -)', 'rgba(255,179,71,0.6)'); return; }
+                if (!String(d.type || '').trim()) { showToast('Pick or type a marker type', 'rgba(255,179,71,0.6)'); return; }
+                const t = gmtNormalizeTemplate(d);
+                const i = gmt.templates.findIndex(x => x.id === t.id);
+                if (i >= 0) gmt.templates[i] = t; else gmt.templates.push(t);
+                gmt.activeId = t.id;
+                gmt.editing = null;
+                gmtSaveTemplates();
+                console.log(`${TAG} 📌 template saved: "${t.label}" pattern "${t.name}" type ${t.type}`);
+                gmtRenderPanel();
+                return;
+            }
+            if (act === 'copy-json') {
+                const txt = JSON.stringify(gmt.templates, null, 2);
+                const done = () => { showToast(`Copied ${gmt.templates.length} template(s) as JSON`); };
+                const fail = (e) => { console.warn(`${TAG} 📌 clipboard write failed:`, e); prompt('Copy this JSON:', txt); };
+                try { navigator.clipboard.writeText(txt).then(done, fail); } catch (e) { fail(e); }
+                return;
+            }
+            if (act === 'paste-json') { gmt.pasteOpen = true; gmtRenderPanel(); return; }
+            if (act === 'paste-cancel') { gmt.pasteOpen = false; gmtRenderPanel(); return; }
+            if (act === 'paste-go') {
+                const box = document.querySelector(`#${GMT_PANEL_ID} [data-gmt-f="pasteBox"]`);
+                let arr = null;
+                try { arr = JSON.parse(box ? box.value : ''); } catch (e) { showToast('That is not valid JSON', 'rgba(255,96,96,0.55)'); return; }
+                if (!Array.isArray(arr)) arr = [arr];
+                let added = 0, replaced = 0;
+                arr.forEach(raw => {
+                    if (!raw || typeof raw !== 'object') return;
+                    const t = gmtNormalizeTemplate(raw);
+                    const i = gmt.templates.findIndex(x => x.id === t.id);
+                    if (i >= 0) { gmt.templates[i] = t; replaced++; } else { gmt.templates.push(t); added++; }
+                });
+                gmt.pasteOpen = false;
+                if (!gmt.activeId && gmt.templates.length) gmt.activeId = gmt.templates[0].id;
+                gmtSaveTemplates();
+                showToast(`Imported ${added} new, ${replaced} updated template(s)`);
+                gmtRenderPanel();
+                return;
+            }
+            if (act === 'undo') { gmtUndoLast(); return; }
+        }
+        const row = ev.target.closest && ev.target.closest('[data-gmt-row]');
+        if (row) {
+            const id = row.dataset.gmtRow;
+            if (gmt.activeId !== id) {
+                gmt.activeId = id;
+                if (gmt.armed) { const t = gmtActiveTemplate(); gmtSetStatus(`armed — ${gmtAltGate ? 'ALT+click' : 'click'} the map to place "${t.label}" · Esc stops`); }
+                gmtRenderPanel();
+            }
+        }
+    }
+    function gmtOpenFromAction() {
+        // TRIGGER_ACTION 'gmt-open' (CP card button) — mirrors the 📌 map-button flow
+        try { gmtOpenPanel(); } catch (e) { console.warn(`${TAG} 📌 open failed:`, e); }
+    }
+    // Site changed underneath us (SPA nav) → drop the session markers + disarm.
+    function gmtSiteTick() {
+        const sid = getCurrentSiteID();
+        if (gmt.siteID && sid !== gmt.siteID) {
+            gmtClearSession('site nav');
+            gmt.siteID = sid;
+            if (gmt.armed) gmtArm(false);
+            const p = document.getElementById(GMT_PANEL_ID);
+            if (p && !gmt.editing) gmtRenderPanel();
+        }
+    }
+    function injectGmtMapButton(doc) {
+        if (LITE) return;   // 📌 GM Stamper = site-write, CSM-only
+        try {
+            gmtSiteTick();
+            const tools = doc.querySelector('.map-tools');
+            if (!tools) return;
+            const existing = doc.getElementById(GMT_MAP_BTN_ID);
+            if (existing) { existing.style.display = gmtMasterEnabled ? '' : 'none'; placeGenMapButton(tools, existing); return; }
+            const ref = tools.querySelector('.map-tools__button, button');
+            const btn = doc.createElement('button');
+            btn.id = GMT_MAP_BTN_ID;
+            btn.type = 'button';
+            btn.className = ref ? ref.className : 'map-tools__button';
+            btn.title = 'GM Stamper (AIM) — place General Markers from a template with one click';
+            btn.style.setProperty('color', '#c39bd3', 'important');
+            btn.innerHTML = '<span style="font-size:15px;line-height:1">📌</span>';
+            btn.onclick = (e) => {
+                e.preventDefault(); e.stopPropagation();
+                if (!gmtMasterEnabled) { showToast('GM Stamper is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+                gmtOpenPanel();
+            };
+            placeGenMapButton(tools, btn);
+        } catch (e) { console.warn(`${TAG} 📌 toolbar inject failed:`, e); }
+    }
+
+    // ============================================================
     // ✦ ADVANCED DRAW — interactive zigzag corridor FFZ builder.
     // You draw the INNER (asset-facing) edge click-by-click; each segment is a
     // box of `widthFt` extending to one side (F flips). A live shielding BAND of
@@ -21081,6 +21724,7 @@
             try { genDraw.active = false; } catch (e) {} // mutually exclusive with the simple Draw
             try { if (nfzDraw.active) setNfzMode(null); } catch (e) {} // …and with NFZ draw
             try { if (imp.mode) impSetMode(null); } catch (e) {} // …and with the importer's select tools
+            try { if (gmt.armed) gmtArm(false); } catch (e) {} // …and with the 📌 GM Stamper
             if (!advDraw.verts.length) advRestore();      // resume a crash/reload in-progress draw
             try { const w = document.getElementById('aim-adv-width'); if (w) w.value = advDraw.widthFt; const o = document.getElementById('aim-adv-offset'); if (o) o.value = advDraw.offsetFt; const an = document.getElementById('aim-adv-anchor'); if (an) an.value = advDraw.anchor; } catch (e) {}
             advWire(); advRender();
