@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — 📐 Cross-ref: "sites checked" vs "sites with a match": AIM Fleet Tools v0.40 (latest — dev only)
+
+The old "Sites in range" number was the count of sites whose setup was **checked** (every picked site near the layer's extent), not the sites that matched — confusing next to a 16-site match list. Now every surface says **N sites checked · M with a match** (section, 📊 card, text report, Sheets tile).
+
 ## 2026-09-17 — 📐 Cross-ref: picked-sites scope + match detail: AIM Fleet Tools v0.39 (latest — dev only)
 
 - **picked only** checkbox on the cross-ref row (site and base-station targets): the sites ticked in 📦 Fleet Data become the ONLY targets. Pick a client there, tick the box, run.

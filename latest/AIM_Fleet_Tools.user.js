@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.39
+// @version      0.40
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.39';
+    const SCRIPT_VERSION = '0.40';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -2436,6 +2436,7 @@
                 mode: isBases ? 'bases' : 'coverage',
                 basesUsed, sitesNoBase: sitesNoBase.length, perBase: perBaseList,
                 pointMatches, pointMatchesCapped: pointMatches.length >= PM_CAP,
+                sitesMatched: (() => { const S = new Set(); pointMatches.forEach(m => { if (m.sid) S.add(m.sid); }); runs.forEach(rn => { if (rn.band && rn.tag && rn.tag.sid) S.add(rn.tag.sid); }); return S.size; })(),
                 b1: B1FT, b2: B2FT,
                 stepFt: Math.round(step * FT_PER_M),
                 totalM: totalLenM, bandLenM,
@@ -2483,10 +2484,10 @@
         const miN = (m) => (m * FT_PER_M / 5280).toFixed(2);
         const l1 = bases ? `Tattu ≤${r.b1.toLocaleString()} ft` : `≤${r.b1} ft`, l2 = bases ? `Tulip only ${r.b1.toLocaleString()}–${r.b2.toLocaleString()} ft` : `${r.b1}–${r.b2} ft`;
         const out = [`<p><b>AIM Fleet Tools — cross-reference</b> — "${escapeHtml(r.srcName)}" vs ${escapeHtml(r.tgtLabel)} — ${escapeHtml(new Date(r.at).toLocaleString())}</p>`];
-        out.push('<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px"><tr>' + [pointsOnly ? 'Points' : 'Total mi', l1, l2, `≤${r.b2.toLocaleString()} ft cumulative`, 'Beyond', 'Sites in range', bases ? 'Bases' : ''].filter(Boolean).map(th).join('') + '</tr><tr>'
+        out.push('<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px"><tr>' + [pointsOnly ? 'Points' : 'Total mi', l1, l2, `≤${r.b2.toLocaleString()} ft cumulative`, 'Beyond', 'Sites checked', 'Sites with matches', bases ? 'Bases' : ''].filter(Boolean).map(th).join('') + '</tr><tr>'
             + (pointsOnly ? [r.pointsTotal, `${P[1]} (${pct(P[1], r.pointsTotal)})`, `${P[2]} (${pct(P[2], r.pointsTotal)})`, `${P[1] + P[2]} (${pct(P[1] + P[2], r.pointsTotal)})`, `${P[0]} (${pct(P[0], r.pointsTotal)})`]
                 : [miN(r.totalM), `${miN(r.bandLenM[1])} (${pct(r.bandLenM[1], r.totalM)})`, `${miN(r.bandLenM[2])} (${pct(r.bandLenM[2], r.totalM)})`, `${miN(r.bandLenM[1] + r.bandLenM[2])} (${pct(r.bandLenM[1] + r.bandLenM[2], r.totalM)})`, `${miN(r.bandLenM[0])} (${pct(r.bandLenM[0], r.totalM)})`])
-              .concat([r.sitesUsed, bases ? r.basesUsed : null]).filter(v => v !== null).map(v => td(escapeHtml(String(v)))).join('') + '</tr></table><br>');
+              .concat([r.sitesUsed, r.sitesMatched || 0, bases ? r.basesUsed : null]).filter(v => v !== null).map(v => td(escapeHtml(String(v)))).join('') + '</tr></table><br>');
         if (bases && r.perBase && r.perBase.length) {
             out.push('<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px"><tr>' + ['Base (site)', 'Site ID', pointsOnly ? 'Tattu pts' : 'Tattu mi', pointsOnly ? 'Tulip-only pts' : 'Tulip-only mi', pointsOnly ? 'Reachable pts' : 'Reachable mi', pointsOnly ? '' : 'Points Tattu/Tulip'].filter(Boolean).map(th).join('') + '</tr>');
             r.perBase.forEach(b => out.push('<tr>' + td(`<a href="${siteSetupUrl(b.sid)}" style="color:#1a73e8">${escapeHtml(b.name)}</a>${b.bases > 1 ? ` ×${b.bases}` : ''}`) + td(b.sid)
@@ -2548,7 +2549,7 @@
             </div>
             <div style="padding:12px 14px;overflow:auto;flex:1;min-height:0">
                 <div style="font-size:13px;line-height:1.5"><b>"${escapeHtml(r.srcName)}"</b> <span style="color:#888">vs</span> ${escapeHtml(r.tgtLabel)}<br>
-                    <span style="color:#888;font-size:11px">${r.sitesUsed ? `${bases ? `${r.basesUsed} base(s) across ` : ''}${r.sitesUsed} site(s) in range${r.sitesNoBase ? ` · ${r.sitesNoBase} skipped (no base in setup)` : ''} · ` : ''}${bases ? 'one-way straight-line distance from the base' : 'distance to the nearest target geometry'} · sampled every ~${r.stepFt} ft</span></div>
+                    <span style="color:#888;font-size:11px">${r.sitesUsed ? `${bases ? `${r.basesUsed} base(s) across ` : ''}${r.sitesUsed} site(s) checked · <b style="color:#5fff5f">${r.sitesMatched || 0} with a match</b>${r.sitesNoBase ? ` · ${r.sitesNoBase} skipped (no base in setup)` : ''} · ` : ''}${bases ? 'one-way straight-line distance from the base' : 'distance to the nearest target geometry'} · sampled every ~${r.stepFt} ft</span></div>
                 <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
                     ${tile(pointsOnly ? 'Points' : 'Network', pointsOnly ? r.pointsTotal : fmtMi(r.totalM), pointsOnly ? 'in the source layer' : 'total line length', '#e6e6e6')}
                     ${tile(bases ? 'Reachable · no shielding' : 'Inspectable', fmtV(v(1) + v(2)), `${pct(v(1) + v(2), total)} within ${r.b2.toLocaleString()} ft`, '#5fff5f')}
@@ -2589,7 +2590,7 @@
         const L = r.bandLenM;
         const lines = [];
         lines.push(`AIM Fleet Tools — KML cross-reference [${ENV_LABEL}]`);
-        lines.push(`Source: "${r.srcName}" · Target: ${r.tgtLabel}${r.sitesUsed ? ` (${r.sitesUsed} site(s) in range)` : ''}`);
+        lines.push(`Source: "${r.srcName}" · Target: ${r.tgtLabel}${r.sitesUsed ? ` (${r.sitesUsed} site(s) checked · ${r.sitesMatched || 0} with a match within ≤${r.b2.toLocaleString()} ft)` : ''}`);
         lines.push(`Ran ${new Date(r.at).toLocaleString()} · bands ≤${r.b1} ft / ≤${r.b2} ft · sampled every ~${r.stepFt} ft`);
         lines.push('');
         const P = r.pointHits || { 0: 0, 1: 0, 2: 0 };
@@ -3332,7 +3333,7 @@
             const f = (x) => pointsOnly ? `${x} pts` : fmtMi(x);
             const l1 = bases ? 'Tattu' : `≤${r.b1} ft`, l2 = bases ? 'Tulip only' : `${r.b1}–${r.b2} ft`;
             rows.push(`<div style="padding:6px 10px;border-bottom:1px solid #222834;line-height:1.6">`
-                + `<div>"${escapeHtml(r.srcName)}" <span style="color:#888">vs</span> ${escapeHtml(r.tgtLabel)} <span style="color:#888">· ${pointsOnly ? `${r.pointsTotal} points` : fmtMi(r.totalM)}${r.sitesUsed ? ` · ${r.sitesUsed} sites` : ''}${r.pointMatches && r.pointMatches.length ? ` · <span style="color:#5fff5f">${r.pointMatches.length} matched point(s) listed in 📊 Report</span>` : ''}</span></div>`
+                + `<div>"${escapeHtml(r.srcName)}" <span style="color:#888">vs</span> ${escapeHtml(r.tgtLabel)} <span style="color:#888">· ${pointsOnly ? `${r.pointsTotal} points` : fmtMi(r.totalM)}${r.sitesUsed ? ` · ${r.sitesUsed} sites checked, ${r.sitesMatched || 0} with a match` : ''}${r.pointMatches && r.pointMatches.length ? ` · <span style="color:#5fff5f">${r.pointMatches.length} matched point(s) listed in 📊 Report</span>` : ''}</span></div>`
                 + `<div><b style="color:#5fff5f;font-size:14px">${f(v(1) + v(2))} (${pct(v(1) + v(2), total)})</b> <span style="color:#888">${bases ? 'reachable from a base without shielding' : 'inspectable from existing coverage'}</span>`
                 + ` — <span style="color:${XREF_COLORS[1]}">${l1} ${f(v(1))}</span> · <span style="color:${XREF_COLORS[2]}">${l2} ${f(v(2))}</span> · <span style="color:${XREF_COLORS[0]}">beyond ${f(v(0))}</span></div>`
                 + `<div style="color:#888">📊 Report = the full breakdown${bases ? ' per base' : ''}${r.runsTotal ? ' + longest stretches (🎯 fly-to)' : ''} · the map shows every stretch colour-coded</div>`
