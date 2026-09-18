@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.299
+// @version      4.300
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.299';
+    const SCRIPT_VERSION = '4.300';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -20684,6 +20684,7 @@
         pos: null,                                   // {left, top} after the user drags the panel
         templatesLoaded: false,
         ringLayers: [], ringSig: '', ringMap: null,  // ⭕ radius rings drawn around template-matched GMs
+        nativeEdit: null,                            // {input, id, ll, type, sig, layers} while Percepto's form edits a known GM
         _container: null, _onDown: null, _onUp: null, _onClick: null, _onDbl: null, _onKey: null,
         _down: null, _suppressClickUntil: 0,
     };
@@ -20701,6 +20702,8 @@
             color: /^#[0-9a-f]{6}$/i.test(String(r.color || '')) ? String(r.color).toLowerCase() : '#f020a0',
             opacity: (isFinite(opacity) && opacity >= 0 && opacity <= 1) ? Math.round(opacity * 100) / 100 : 0.25,
             cross: r.cross !== false,
+            match: String(r.match || '').replace(/\s+/g, ' ').trim().slice(0, 300),   // extra name filter: comma-separated "contains" terms (e.g. "not shielded")
+            anyType: !!r.anyType,                                                  // contains-terms ignore the marker type
         };
         return {
             id: String(t.id || gmtNewId()),
@@ -21010,6 +21013,30 @@
         try { return new RegExp(`^${src.trim().replace(/\s+/g, '\\s+')}$`, 'i'); } catch (e) { return null; }
     }
     function gmtRingMeters(r) { return r.unit === 'ft' ? r.dist / M_TO_FT : r.dist * 1609.344; }
+    function gmtRingTerms(r) { return String(r.match || '').split(/[,\n]/).map(x => x.trim().toLowerCase()).filter(Boolean); }
+    // Which ring-enabled template (from a prepared {t, re, terms} list) claims a
+    // marker with this name + type? Name pattern (+ same type) OR any "contains"
+    // term (+ same type unless anyType).
+    function gmtRingTemplateFor(name, type, tmpls) {
+        const nm = String(name || '').trim(), lo = nm.toLowerCase(), ty = String(type || 'general').toLowerCase();
+        return tmpls.find(x => (x.re && x.t.type === ty && x.re.test(nm))
+            || (x.terms.length && (x.t.ring.anyType || x.t.type === ty) && x.terms.some(term => lo.includes(term)))) || null;
+    }
+    function gmtRingPrepared(draft) {
+        return gmtRingTemplates(draft).map(t => ({ t, re: gmtRingRegex(t), terms: gmtRingTerms(t.ring) })).filter(x => x.re || x.terms.length);
+    }
+    function gmtRingDraw(map, L, c, r, preview) {
+        const m = gmtRingMeters(r);
+        const out = [];
+        const circle = L.circle([c.lat, c.lng], { radius: m, color: r.color, weight: preview ? 2.5 : 1.5, opacity: Math.min(1, r.opacity + 0.45), fillColor: r.color, fillOpacity: r.opacity, dashArray: preview ? '8,6' : null, interactive: false });
+        circle.addTo(map); out.push(circle);
+        if (r.cross) {
+            const dLat = m / 111320, dLng = m / (111320 * Math.cos(c.lat * Math.PI / 180));
+            const cross = L.polyline([[[c.lat - dLat, c.lng], [c.lat + dLat, c.lng]], [[c.lat, c.lng - dLng], [c.lat, c.lng + dLng]]], { color: r.color, weight: 1, opacity: Math.min(1, r.opacity + 0.3), dashArray: '4,6', interactive: false });
+            cross.addTo(map); out.push(cross);
+        }
+        return out;
+    }
     function gmtRingsClear() {
         gmt.ringLayers.forEach(l => { try { l.remove(); } catch (e) {} });
         gmt.ringLayers = [];
@@ -21027,29 +21054,18 @@
         gmtRingsClear();
         if (!map || !L || !sid || !gmtRingsOn) return;
         gmt.ringMap = map;
-        const tmpls = gmtRingTemplates(draft).map(t => ({ t, re: gmtRingRegex(t) })).filter(x => x.re);
+        const tmpls = gmtRingPrepared(draft);
         if (!tmpls.length) return;
         const bucket = mapObjectsBySite[sid];
         const ents = (bucket && Array.isArray(bucket.entities)) ? bucket.entities : [];
         let n = 0;
         ents.forEach(g => {
             if (!g || g.type !== 19 || !Array.isArray(g.coords) || !g.coords[0] || typeof g.coords[0].lat !== 'number') return;
-            const gType = String(g.general_marker_type || 'general').toLowerCase();
-            const hit = tmpls.find(x => x.t.type === gType && x.re.test(String(g.name || '').trim()));
+            if (gmt.nativeEdit && gmt.nativeEdit.id === g.id) return;            // the native-edit preview ring owns this one
+            const hit = gmtRingTemplateFor(g.name, g.general_marker_type, tmpls);
             if (!hit) return;
-            const r = hit.t.ring;
-            const m = gmtRingMeters(r);
-            const c = g.coords[0];
-            try {
-                const circle = L.circle([c.lat, c.lng], { radius: m, color: r.color, weight: 1.5, opacity: Math.min(1, r.opacity + 0.45), fillColor: r.color, fillOpacity: r.opacity, interactive: false });
-                circle.addTo(map); gmt.ringLayers.push(circle);
-                if (r.cross) {
-                    const dLat = m / 111320, dLng = m / (111320 * Math.cos(c.lat * Math.PI / 180));
-                    const cross = L.polyline([[[c.lat - dLat, c.lng], [c.lat + dLat, c.lng]], [[c.lat, c.lng - dLng], [c.lat, c.lng + dLng]]], { color: r.color, weight: 1, opacity: Math.min(1, r.opacity + 0.3), dashArray: '4,6', interactive: false });
-                    cross.addTo(map); gmt.ringLayers.push(cross);
-                }
-                n++;
-            } catch (e) { console.warn(`${TAG} 📌 ring draw failed for "${g.name}":`, e); }
+            try { gmt.ringLayers.push(...gmtRingDraw(map, L, g.coords[0], hit.t.ring, false)); n++; }
+            catch (e) { console.warn(`${TAG} 📌 ring draw failed for "${g.name}":`, e); }
         });
         if (n) console.log(`${TAG} 📌 rings: ${n} drawn on site ${sid}${draft ? ' (live preview)' : ''}`);
     }
@@ -21075,6 +21091,54 @@
             gmt.ringSig = sig;
         } catch (e) { console.warn(`${TAG} 📌 rings tick failed:`, e); }
     }
+    // ---- live ring while EDITING AN EXISTING GM natively: Percepto's entity
+    // form holds the name in #upsert-entity-form-name (selector banked by the
+    // inspector's editor helpers). Latch the entity by its name when the form
+    // opens (position + type from the cache), then re-match the CURRENT typed
+    // name every 500 ms and draw a dashed preview ring the moment it matches a
+    // ring template. Type is the cached one (Percepto's type picker isn't a
+    // selector we've banked) — use "any marker type" on the template if the
+    // type is changing too. Clears when the form closes; the normal ring
+    // catches up after the save (cache refetch). ----
+    function gmtNativeEditTick() {
+        try {
+            if (!gmtRingsOn || !gmt.templates.some(t => t.ring && t.ring.on)) { if (gmt.nativeEdit) gmtNativeEditClear(); return; }
+            const hits = scanAllDocs('#upsert-entity-form-name');
+            const input = hits.length ? hits[hits.length - 1].el : null;
+            if (!input) { if (gmt.nativeEdit) gmtNativeEditClear(); return; }
+            const sid = getCurrentSiteID();
+            const bucket = sid && mapObjectsBySite[sid];
+            const ents = (bucket && Array.isArray(bucket.entities)) ? bucket.entities : [];
+            const cur = String(input.value || '').trim();
+            if (!gmt.nativeEdit || gmt.nativeEdit.input !== input) {
+                // form just opened — latch the GM by its initial name
+                const g = ents.find(e => e && e.type === 19 && String(e.name || '').trim().toLowerCase() === cur.toLowerCase() && Array.isArray(e.coords) && e.coords[0]);
+                if (!g) { if (gmt.nativeEdit) gmtNativeEditClear(); return; }   // not a GM we know (new marker / other entity)
+                gmt.nativeEdit = { input, id: g.id, ll: g.coords[0], type: g.general_marker_type, sig: '', layers: [] };
+                console.log(`${TAG} 📌 native edit of GM "${g.name}" (#${g.id}) — live ring preview armed`);
+                gmt.ringSig = ''; gmtRingsRebuild();                              // hand this GM's ring to the preview
+            }
+            const ne = gmt.nativeEdit;
+            const hit = gmtRingTemplateFor(cur, ne.type, gmtRingPrepared(gmt.editing ? gmtNormalizeTemplate(gmt.editing) : null));
+            const sig = hit ? `${hit.t.id}|${JSON.stringify(hit.t.ring)}` : '';
+            if (sig === ne.sig) return;
+            ne.layers.forEach(l => { try { l.remove(); } catch (e) {} });
+            ne.layers = [];
+            ne.sig = sig;
+            if (!hit) return;
+            const map = getLeafletMap(), L = getLeafletL();
+            if (!map || !L) return;
+            ne.layers = gmtRingDraw(map, L, ne.ll, hit.t.ring, true);
+        } catch (e) { console.warn(`${TAG} 📌 native-edit ring tick failed:`, e); }
+    }
+    function gmtNativeEditClear() {
+        const ne = gmt.nativeEdit;
+        if (!ne) return;
+        ne.layers.forEach(l => { try { l.remove(); } catch (e) {} });
+        gmt.nativeEdit = null;
+        gmt.ringSig = ''; gmtRingsRebuild(gmt.editing ? gmtNormalizeTemplate(gmt.editing) : null);
+    }
+    if (CONTEXT === 'IFRAME') setInterval(gmtNativeEditTick, 500);
     function gmtSetRingsOn(v) {
         gmtRingsOn = !!v;
         try { GM_setValue(GMT_RINGS_ON_KEY, gmtRingsOn ? '1' : '0'); } catch (e) { console.warn(`${TAG} 📌 rings pref save failed:`, e); }
@@ -21161,9 +21225,10 @@
                     <label>Numbering</label><div>start at <input data-gmt-f="start" type="number" min="0" step="1" value="${gmtEsc(d.start)}" style="width:60px"> · pad to <input data-gmt-f="pad" type="number" min="0" max="6" step="1" value="${gmtEsc(d.pad)}" style="width:50px"> digits</div>
                     <label style="color:#f070c0;">⭕ Ring</label><div><label style="display:inline-flex;gap:5px;align-items:center;cursor:pointer;"><input data-gmt-f="ringOn" type="checkbox" ${d.ring.on ? 'checked' : ''}> draw a radius ring around markers made from this template</label></div>
                     <label>Radius</label><div><input data-gmt-f="ringDist" type="number" min="0" step="any" value="${gmtEsc(d.ring.dist)}" style="width:70px"> <select data-gmt-f="ringUnit"><option value="mi" ${d.ring.unit === 'mi' ? 'selected' : ''}>mi</option><option value="ft" ${d.ring.unit === 'ft' ? 'selected' : ''}>ft</option></select> · <label style="display:inline-flex;gap:4px;align-items:center;cursor:pointer;"><input data-gmt-f="ringCross" type="checkbox" ${d.ring.cross ? 'checked' : ''}> N/S/E/W cross</label></div>
+                    <label title="Also ring existing markers whose name CONTAINS any of these terms (comma-separated), whatever they were named — e.g. not shielded">Also match</label><div><input data-gmt-f="ringMatch" value="${gmtEsc(d.ring.match)}" placeholder="not shielded, unshielded" style="width:100%"><label style="display:inline-flex;gap:4px;align-items:center;cursor:pointer;margin-top:3px;"><input data-gmt-f="ringAnyType" type="checkbox" ${d.ring.anyType ? 'checked' : ''}> any marker type (otherwise only ${gmtEsc(d.type || 'this type')})</label></div>
                     <label>Ring style</label><div style="display:flex;align-items:center;gap:6px;"><input data-gmt-f="ringColor" type="color" value="${gmtEsc(d.ring.color)}" style="width:38px;height:22px;padding:0;"> opacity <input data-gmt-f="ringOpacity" type="range" min="0" max="1" step="0.05" value="${gmtEsc(d.ring.opacity)}" style="width:90px;"> <span data-gmt-ringop>${gmtEsc(d.ring.opacity)}</span></div>
                 </div>
-                <div style="margin-top:4px;opacity:0.6;">Ring changes preview live on the map while you edit; existing markers that match the name pattern + type get one too.</div>
+                <div style="margin-top:4px;opacity:0.6;">Rings preview live on the map while you edit. A marker gets this ring when its name fits the pattern above (same type), or contains one of the "Also match" terms.</div>
                 <div style="margin-top:4px;opacity:0.6;">Tokens: <code>#</code> = next free number · <code>{name}</code> = source entity's name (Bulk → 📌 GM from the SUM panel)</div>
                 <div style="margin-top:6px;color:#9ad;">Next name here: <strong data-gmt-preview>${preview ? gmtEsc(preview.name) : (haveEnts ? '(no free name)' : '…')}</strong></div>
                 <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
@@ -21177,7 +21242,7 @@
                 const on = t.id === gmt.activeId;
                 return `<div data-gmt-row="${t.id}" style="display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:5px;cursor:pointer;border:1px solid ${on ? 'rgba(195,155,211,0.7)' : 'transparent'};background:${on ? 'rgba(195,155,211,0.12)' : 'transparent'};">
                     <span style="width:10px;height:10px;border-radius:50%;background:${color};flex:none;"></span>
-                    <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><strong>${gmtEsc(t.label)}</strong> <span style="opacity:0.65">· ${gmtEsc(t.type)}${t.heightFt ? ` · ${t.heightFt} ft` : ''}</span>${t.ring.on ? ` <span style="color:${t.ring.color};font-weight:600;">⭕ ${t.ring.dist} ${t.ring.unit}</span>` : ''}<br><span style="color:#9ad;">→ ${nx ? gmtEsc(nx.name) : (haveEnts ? '(no free name)' : '…')}</span>${t.description ? `<br><span style="opacity:0.55;">${gmtEsc(t.description.slice(0, 60))}${t.description.length > 60 ? '…' : ''}</span>` : ''}</span>
+                    <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><strong>${gmtEsc(t.label)}</strong> <span style="opacity:0.65">· ${gmtEsc(t.type)}${t.heightFt ? ` · ${t.heightFt} ft` : ''}</span>${t.ring.on ? ` <span style="color:${t.ring.color};font-weight:600;">⭕ ${t.ring.dist} ${t.ring.unit}${t.ring.match ? ` · "${gmtEsc(t.ring.match)}"` : ''}</span>` : ''}<br><span style="color:#9ad;">→ ${nx ? gmtEsc(nx.name) : (haveEnts ? '(no free name)' : '…')}</span>${t.description ? `<br><span style="opacity:0.55;">${gmtEsc(t.description.slice(0, 60))}${t.description.length > 60 ? '…' : ''}</span>` : ''}</span>
                     <button data-gmt-act="ring" data-id="${t.id}" title="${t.ring.on ? 'Remove' : 'Add'} the radius ring for markers made from this template" style="background:none;border:none;color:${t.ring.on ? t.ring.color : '#667'};padding:0 3px;font-weight:700;">⭕</button>
                     <button data-gmt-act="edit" data-id="${t.id}" title="Edit" style="background:none;border:none;color:#7adfe6;padding:0 3px;">✎</button>
                     <button data-gmt-act="dup" data-id="${t.id}" title="Duplicate" style="background:none;border:none;color:#dfe9f0;padding:0 3px;">⧉</button>
@@ -21232,6 +21297,8 @@
             color: q('ringColor').value,
             opacity: Number(q('ringOpacity').value),
             cross: q('ringCross').checked,
+            match: q('ringMatch').value,
+            anyType: q('ringAnyType').checked,
         };
         const op = p.querySelector('[data-gmt-ringop]');
         if (op) op.textContent = String(d.ring.opacity);
@@ -21239,7 +21306,7 @@
     function gmtPanelInput(ev) {
         if (!gmt.editing) return;
         gmtReadForm();
-        if (ev && ev.target && /^ring/.test(ev.target.dataset.gmtF || '')) gmtRingsRebuild(gmtNormalizeTemplate(gmt.editing));   // live ring preview
+        if (ev && ev.target && /^(ring|name|typeSel|typeCustom)/.test(ev.target.dataset.gmtF || '')) gmtRingsRebuild(gmtNormalizeTemplate(gmt.editing));   // live ring preview
         const sid = getCurrentSiteID();
         const prev = document.querySelector(`#${GMT_PANEL_ID} [data-gmt-preview]`);
         if (prev && sid && mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) {
@@ -21255,7 +21322,7 @@
             gmtPanelInput(ev);
             return;
         }
-        if (ev.target.closest && ev.target.closest('[data-gmt-f="ringUnit"], [data-gmt-f="ringOn"], [data-gmt-f="ringCross"]')) gmtPanelInput(ev);
+        if (ev.target.closest && ev.target.closest('[data-gmt-f="ringUnit"], [data-gmt-f="ringOn"], [data-gmt-f="ringCross"], [data-gmt-f="ringAnyType"]')) gmtPanelInput(ev);
     }
     function gmtPanelClick(ev) {
         const armBtn = ev.target.closest && ev.target.closest('[data-gmt-arm]');
@@ -21270,8 +21337,8 @@
                 if (t) { t.ring.on = !t.ring.on; gmtSaveTemplates(); gmt.ringSig = ''; gmtRingsRebuild(); console.log(`${TAG} 📌 ring ${t.ring.on ? 'ON' : 'off'} for "${t.label}"`); gmtRenderPanel(); }
                 return;
             }
-            if (act === 'new') { gmt.editing = gmtNormalizeTemplate({ id: gmtNewId(), label: '', name: '', type: 'general', description: '', heightFt: 0, start: 1, pad: 0, ring: { on: false } }); gmt.editing.label = ''; gmt.editing.name = ''; gmtRenderPanel(); return; }
-            if (act === 'edit') { const t = gmt.templates.find(x => x.id === id); if (t) { gmt.editing = Object.assign({}, t); gmtRenderPanel(); } return; }
+            if (act === 'new') { gmt.editing = gmtNormalizeTemplate({ id: gmtNewId(), label: '', name: '', type: 'general', description: '', heightFt: 0, start: 1, pad: 0, ring: { on: false } }); gmt.editing.label = ''; gmt.editing.name = ''; gmtRenderPanel(); gmtRingsRebuild(gmtNormalizeTemplate(gmt.editing)); return; }
+            if (act === 'edit') { const t = gmt.templates.find(x => x.id === id); if (t) { gmt.editing = JSON.parse(JSON.stringify(t)); gmtRenderPanel(); gmtRingsRebuild(gmtNormalizeTemplate(gmt.editing)); } return; }
             if (act === 'dup') {
                 const t = gmt.templates.find(x => x.id === id);
                 if (t) { const c = gmtNormalizeTemplate(Object.assign({}, t, { id: null, label: `${t.label} copy` })); gmt.templates.push(c); gmtSaveTemplates(); gmt.activeId = c.id; gmtRenderPanel(); }
