@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.297
+// @version      4.298
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.297';
+    const SCRIPT_VERSION = '4.298';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -20720,26 +20720,34 @@
         gmt.placed.forEach(p => { if (p.siteID === sid) set.add(p.name.toLowerCase()); });
         return set;
     }
-    function gmtRenderName(t, n) {
+    // Pattern tokens: "#" = number, "{name}" = the source entity's name (bulk
+    // stamping from the SUM panel; empty on a plain map click). A pattern with
+    // {name} and no "#" tries the plain name first and only numbers on collision.
+    function gmtRenderName(t, n, srcName) {
         const num = t.pad ? String(n).padStart(t.pad, '0') : String(n);
-        const pattern = /#/.test(t.name) ? t.name : `${t.name} #`;
+        const base = t.name.replace(/\{name\}/gi, srcName || '');
+        const pattern = /#/.test(base) ? base : `${base} #`;
         return genCleanName(pattern.replace(/#/g, num));
     }
-    function gmtNextName(t, sid) {
-        const used = gmtUsedNames(sid);
+    function gmtNextName(t, sid, srcName, usedOverride) {
+        const used = usedOverride || gmtUsedNames(sid);
+        if (/\{name\}/i.test(t.name) && !/#/.test(t.name)) {
+            const plain = genCleanName(t.name.replace(/\{name\}/gi, srcName || ''));
+            if (plain && !used.has(plain.toLowerCase())) return { name: plain, n: null };
+        }
         let n = t.start;
         for (let guard = 0; guard < GMT_MAX_NUMBER_SCAN; guard++, n++) {
-            const name = gmtRenderName(t, n);
+            const name = gmtRenderName(t, n, srcName);
             if (name && !used.has(name.toLowerCase())) return { name, n };
         }
         return null;
     }
     // ---- write: one GM via POST /map_objects/ (create-only) ----
-    async function gmtCreateGm(t, ll, sid) {
+    async function gmtCreateGm(t, ll, sid, srcName) {
         if (liteBlockedWrite('stamp GM')) return null;
         const csrf = getCsrfToken();
         if (!csrf) { showToast('No CSRF token yet — make one native save/edit anywhere in Percepto, then retry', 'rgba(255,96,96,0.55)'); return null; }
-        const next = gmtNextName(t, sid);
+        const next = gmtNextName(t, sid, srcName);
         if (!next) { console.warn(`${TAG} 📌 no free name for template "${t.label}" (pattern "${t.name}")`); showToast(`No free name for "${t.label}" — change its pattern`, 'rgba(255,96,96,0.55)'); return null; }
         let siteCfg = null;
         try { siteCfg = await fetchSiteConfig(sid); } catch (e) { console.warn(`${TAG} 📌 site cfg fetch failed:`, e); }
@@ -20788,27 +20796,31 @@
         console.log(`${TAG} 📌 created GM "${next.name}" (${t.type}) id ${saved.id} at ${ll.lat.toFixed(6)}, ${ll.lng.toFixed(6)}`);
         return { id: saved.id, name: next.name };
     }
+    // Delete one placed GM (Delete Guard banks the body first). Returns true on success.
+    async function gmtDeletePlaced(p, csrf) {
+        try {
+            const r = await fetch(`/map_objects/${p.id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
+            if (r.status === 200 || r.status === 204) {
+                gmt.placed = gmt.placed.filter(x => x !== p);
+                if (p.layer) { try { p.layer.remove(); } catch (e) {} }
+                const bucket = mapObjectsBySite[p.siteID];
+                if (bucket && Array.isArray(bucket.entities)) bucket.entities = bucket.entities.filter(e => e.id !== p.id);
+                console.log(`${TAG} 📌 undo: deleted GM "${p.name}" (#${p.id}) — Delete Guard banked it`);
+                return true;
+            }
+            const txt = await r.text();
+            console.warn(`${TAG} 📌 undo delete of "${p.name}" (#${p.id}) failed: server ${r.status} ${(txt || '').slice(0, 200)}`);
+            return false;
+        } catch (e) { console.warn(`${TAG} 📌 undo delete of "${p.name}" threw:`, e); return false; }
+    }
     async function gmtUndoLast() {
         const p = gmt.placed[gmt.placed.length - 1];
         if (!p) { showToast('Nothing to undo'); return; }
         if (liteBlockedWrite('undo GM')) return;
         const csrf = getCsrfToken();
         if (!csrf) { showToast('No CSRF token — cannot delete', 'rgba(255,96,96,0.55)'); return; }
-        try {
-            const r = await fetch(`/map_objects/${p.id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
-            if (r.status === 200 || r.status === 204) {
-                gmt.placed.pop();
-                if (p.layer) { try { p.layer.remove(); } catch (e) {} }
-                const bucket = mapObjectsBySite[p.siteID];
-                if (bucket && Array.isArray(bucket.entities)) bucket.entities = bucket.entities.filter(e => e.id !== p.id);
-                console.log(`${TAG} 📌 undo: deleted GM "${p.name}" (#${p.id}) — Delete Guard banked it`);
-                showToast(`↩ Deleted "${p.name}"`);
-            } else {
-                const txt = await r.text();
-                console.warn(`${TAG} 📌 undo delete of "${p.name}" (#${p.id}) failed: server ${r.status} ${(txt || '').slice(0, 200)}`);
-                showToast(`Undo failed — server ${r.status} (see console)`, 'rgba(255,96,96,0.55)');
-            }
-        } catch (e) { console.warn(`${TAG} 📌 undo threw:`, e); showToast('Undo failed — see console', 'rgba(255,96,96,0.55)'); }
+        const ok = await gmtDeletePlaced(p, csrf);
+        showToast(ok ? `↩ Deleted "${p.name}"` : 'Undo failed — see console', ok ? undefined : 'rgba(255,96,96,0.55)');
         gmtRenderPanel();
     }
     // ---- local preview marker (Percepto shows the real one after a reload) ----
@@ -21031,12 +21043,13 @@
             body = `
                 <div style="display:grid;grid-template-columns:78px 1fr;gap:6px 8px;align-items:center;">
                     <label>Label</label><input data-gmt-f="label" value="${gmtEsc(d.label)}" placeholder="e.g. Gate">
-                    <label title="# becomes the next free number on the site. No # → one is appended.">Name pattern</label><input data-gmt-f="name" value="${gmtEsc(d.name)}" placeholder="Gate #">
+                    <label title="# = next free number on the site (no # → one is appended). {name} = the source entity's name when stamping in bulk from the SUM panel (Bulk → 📌 GM).">Name pattern</label><input data-gmt-f="name" value="${gmtEsc(d.name)}" placeholder="Gate #">
                     <label>Type (icon)</label><div>${gmtTypeSelectHtml(d.type)}</div>
                     <label>Notes</label><textarea data-gmt-f="description" rows="3" placeholder="saved into the marker's notes/description">${gmtEsc(d.description)}</textarea>
                     <label>Height</label><div><input data-gmt-f="heightFt" type="number" min="0" step="1" value="${gmtEsc(d.heightFt)}" style="width:70px"> ft</div>
                     <label>Numbering</label><div>start at <input data-gmt-f="start" type="number" min="0" step="1" value="${gmtEsc(d.start)}" style="width:60px"> · pad to <input data-gmt-f="pad" type="number" min="0" max="6" step="1" value="${gmtEsc(d.pad)}" style="width:50px"> digits</div>
                 </div>
+                <div style="margin-top:4px;opacity:0.6;">Tokens: <code>#</code> = next free number · <code>{name}</code> = source entity's name (Bulk → 📌 GM from the SUM panel)</div>
                 <div style="margin-top:6px;color:#9ad;">Next name here: <strong data-gmt-preview>${preview ? gmtEsc(preview.name) : (haveEnts ? '(no free name)' : '…')}</strong></div>
                 <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
                     <button data-gmt-act="cancel-edit" style="${btn('223,233,240')}">Cancel</button>
@@ -21209,6 +21222,146 @@
             const p = document.getElementById(GMT_PANEL_ID);
             if (p && !gmt.editing) gmtRenderPanel();
         }
+    }
+    // ---- Bulk → 📌 GM (SUM panel): stamp a template at every SELECTED row's
+    // centroid — e.g. filter Unshielded → select all → one GM per asset. Rows
+    // that already have a GM within GMT_BULK_NEAR_FT start unchecked (probably
+    // done on a previous run). Runs sequentially so numbering never races;
+    // ↩ Undo batch deletes everything this run created. ----
+    const GMT_BULK_MODAL_ID = 'aim-gmt-bulk-modal';
+    const GMT_BULK_NEAR_FT = 50;
+    function gmtBulkTargets(sid) {
+        const bucket = mapObjectsBySite[sid];
+        const all = (bucket && Array.isArray(bucket.entities)) ? bucket.entities : [];
+        const ids = new Set();
+        sumPanelState.selectedIds.forEach(k => ids.add(String(k).split(':')[0]));
+        const gms = all.filter(e => e && e.type === 19 && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number');
+        const out = [];
+        all.forEach(e => {
+            if (!e || !ids.has(String(e.id)) || e.type === 19) return;    // never stamp a GM on a GM
+            const c = getEntityCentroid(e);
+            if (!c) return;
+            const near = gms.find(g => approxMeters(c.lat, c.lng, g.coords[0].lat, g.coords[0].lng) * M_TO_FT < GMT_BULK_NEAR_FT);
+            out.push({ ent: e, ll: c, near: near ? near.name : null, checked: !near });
+        });
+        return out;
+    }
+    // Dry-run the numbering across the checked targets in order (a cloned used-set
+    // advances as each name is taken) so the preview matches what will be created.
+    function gmtBulkPlanNames(t, sid, targets) {
+        const used = new Set(gmtUsedNames(sid));
+        targets.forEach(tg => {
+            tg.planned = null;
+            if (!tg.checked) return;
+            const nx = gmtNextName(t, sid, tg.ent.name, used);
+            if (nx) { tg.planned = nx.name; used.add(nx.name.toLowerCase()); }
+        });
+    }
+    function openGmtBulkModal() {
+        if (LITE) { showToast('GM Stamper needs Full mode (CSM access)', 'rgba(255,180,0,0.6)'); return; }
+        if (!gmtMasterEnabled) { showToast('GM Stamper is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
+        if (!sumPanelState.selectedIds.size) { showToast('Select rows first — e.g. filter Unshielded, then ☑ the assets to mark', 'rgba(255,179,71,0.6)'); return; }
+        gmtLoadTemplates();
+        if (!gmt.templates.length) { showToast('No templates yet — make one in 📌 GM Stamper first', 'rgba(255,179,71,0.6)'); gmtOpenPanel(); return; }
+        const targets = gmtBulkTargets(sid);
+        if (!targets.length) { showToast('None of the selected rows has a position (GM rows are skipped)', 'rgba(255,179,71,0.6)'); return; }
+        const old = document.getElementById(GMT_BULK_MODAL_ID);
+        if (old) old.remove();
+        const st = { sid, tmplId: (gmt.templates.some(t => t.id === gmt.activeId) ? gmt.activeId : gmt.templates[0].id), targets, running: false, done: false, created: [], failed: 0, batch: `b${Date.now().toString(36)}` };
+        const wrap = document.createElement('div');
+        wrap.id = GMT_BULK_MODAL_ID;
+        wrap.style.cssText = 'position:fixed;top:100px;right:80px;width:520px;max-height:76vh;z-index:2147483001;'
+            + 'background:rgba(16,22,32,0.98);border:1px solid rgba(195,155,211,0.6);border-radius:10px;'
+            + 'color:#dfe9f0;font:12px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,0.6);'
+            + 'display:flex;flex-direction:column;';
+        const btn = (rgb, extra) => `background:rgba(${rgb},0.15);border:1px solid rgb(${rgb});color:rgb(${rgb});border-radius:5px;padding:3px 12px;cursor:pointer;font:inherit;${extra || ''}`;
+        const render = () => {
+            const t = gmt.templates.find(x => x.id === st.tmplId) || gmt.templates[0];
+            gmtBulkPlanNames(t, st.sid, st.targets);
+            const nChecked = st.targets.filter(x => x.checked).length;
+            const tmplRows = gmt.templates.map(x => `<label style="display:flex;gap:6px;align-items:center;cursor:pointer;margin:2px 0;"><input type="radio" name="aim-gmt-bulk-tmpl" value="${x.id}" ${x.id === t.id ? 'checked' : ''} ${st.running || st.done ? 'disabled' : ''}><span style="width:9px;height:9px;border-radius:50%;background:${GMT_TYPE_COLORS[x.type] || '#c39bd3'};flex:none;"></span><strong>${gmtEsc(x.label)}</strong> <span style="opacity:0.65">· ${gmtEsc(x.type)} · "${gmtEsc(x.name)}"${x.heightFt ? ` · ${x.heightFt} ft` : ''}</span></label>`).join('');
+            const rows = st.targets.map((tg, i) => {
+                const res = st.created.find(c => c.i === i);
+                const state = res ? `<span style="color:#5fff5f">✓ ${gmtEsc(res.name)}</span>` : (tg.failedWhy ? `<span style="color:#ff6060">✗ ${gmtEsc(tg.failedWhy)}</span>` : (tg.checked ? `<span style="color:#9ad">→ ${tg.planned ? gmtEsc(tg.planned) : '(no free name)'}</span>` : ''));
+                return `<label style="display:flex;gap:6px;align-items:baseline;margin:2px 0;cursor:pointer;"><input type="checkbox" data-gmt-bulk-chk="${i}" ${tg.checked ? 'checked' : ''} ${st.running || st.done ? 'disabled' : ''} style="flex:none;position:relative;top:2px;"><span style="flex:1;min-width:0;">${gmtEsc(tg.ent.name || `#${tg.ent.id}`)} <span style="opacity:0.55">(${gmtEsc((TYPE_REG[tg.ent.type] && TYPE_REG[tg.ent.type].long) || `type ${tg.ent.type}`)})</span> ${state}${tg.near ? `<br><span style="color:#ffb020;opacity:0.85;">⚠ existing GM "${gmtEsc(tg.near)}" within ${GMT_BULK_NEAR_FT} ft</span>` : ''}</span></label>`;
+            }).join('');
+            const foot = st.done
+                ? `<span style="margin-right:auto;">${st.created.length} created${st.failed ? `, <span style="color:#ff6060">${st.failed} failed</span>` : ''} — reload the page to see them natively</span>
+                   <button data-gmt-bulk-undo ${st.created.length ? '' : 'disabled'} style="${btn('255,138,128')}">↩ Undo batch (${st.created.length})</button>
+                   <button data-gmt-bulk-close style="${btn('223,233,240')}">Close</button>`
+                : (st.running
+                    ? `<span style="margin-right:auto;color:#ffd400;">Creating… ${st.created.length + st.failed} / ${nChecked}</span><button data-gmt-bulk-abort style="${btn('255,138,128')}">Stop after this one</button>`
+                    : `<label style="margin-right:auto;display:flex;gap:5px;align-items:center;cursor:pointer;opacity:0.85;"><input type="checkbox" data-gmt-bulk-all ${nChecked === st.targets.length ? 'checked' : ''}>All</label>
+                       <button data-gmt-bulk-close style="${btn('223,233,240')}">Cancel</button>
+                       <button data-gmt-bulk-go ${nChecked ? '' : 'disabled'} style="${btn('95,255,95')}">Create ${nChecked}</button>`);
+            wrap.innerHTML = `
+                <div style="padding:8px 12px;border-bottom:1px solid rgba(195,155,211,0.3);color:#c39bd3;font-weight:700;">📌 Bulk → GM — one marker per selected row</div>
+                <div style="padding:8px 12px;overflow-y:auto;">
+                    <div style="color:#7adfe6;font-weight:700;margin-bottom:3px;">Template</div>
+                    <div style="margin-bottom:8px;">${tmplRows}</div>
+                    <div style="color:#7adfe6;font-weight:700;margin-bottom:3px;">Targets (${st.targets.length} selected rows with a position)</div>
+                    <div style="opacity:0.65;margin-bottom:4px;">A GM is created at each checked row's centroid via the site-setup API (create-only — the source entity is untouched). Rows with a GM already nearby start unchecked.</div>
+                    ${rows}
+                </div>
+                <div style="padding:8px 12px;border-top:1px solid rgba(195,155,211,0.3);display:flex;gap:8px;justify-content:flex-end;align-items:center;">${foot}</div>`;
+        };
+        wrap.addEventListener('change', (e) => {
+            const r = e.target.closest('input[name="aim-gmt-bulk-tmpl"]');
+            if (r) { st.tmplId = r.value; gmt.activeId = r.value; render(); return; }
+            const all = e.target.closest('[data-gmt-bulk-all]');
+            if (all) { st.targets.forEach(tg => { tg.checked = all.checked; }); render(); return; }
+            const cb = e.target.closest('[data-gmt-bulk-chk]');
+            if (cb) { const tg = st.targets[Number(cb.dataset.gmtBulkChk)]; if (tg) tg.checked = cb.checked; render(); }
+        });
+        wrap.addEventListener('click', async (e) => {
+            if (e.target.closest('[data-gmt-bulk-close]')) { wrap.remove(); return; }
+            if (e.target.closest('[data-gmt-bulk-abort]')) { st.abort = true; return; }
+            if (e.target.closest('[data-gmt-bulk-go]') && !st.running) {
+                if (liteBlockedWrite('bulk stamp GMs')) return;
+                const t = gmt.templates.find(x => x.id === st.tmplId) || gmt.templates[0];
+                const chosen = st.targets.map((tg, i) => ({ tg, i })).filter(x => x.tg.checked);
+                if (!chosen.length) return;
+                st.running = true; st.abort = false; render();
+                if (gmt.siteID !== st.sid) { gmtClearSession('site changed'); gmt.siteID = st.sid; }
+                console.log(`${TAG} 📌 bulk: stamping "${t.label}" at ${chosen.length} entities on site ${st.sid}`);
+                for (const { tg, i } of chosen) {
+                    if (st.abort) { tg.failedWhy = 'stopped'; st.failed++; render(); continue; }
+                    try {
+                        const res = await gmtCreateGm(t, tg.ll, st.sid, tg.ent.name);
+                        if (res) {
+                            const layer = gmtDrawMarker(tg.ll, res.name, t);
+                            gmt.placed.push({ id: res.id, name: res.name, lat: tg.ll.lat, lng: tg.ll.lng, siteID: st.sid, layer, batch: st.batch });
+                            st.created.push({ i, id: res.id, name: res.name });
+                        } else { tg.failedWhy = 'not created — see console'; st.failed++; }
+                    } catch (err) { console.warn(`${TAG} 📌 bulk create threw:`, err); tg.failedWhy = 'threw — see console'; st.failed++; }
+                    render();
+                }
+                st.running = false; st.done = true; render();
+                console.log(`${TAG} 📌 bulk: ${st.created.length} created, ${st.failed} failed`);
+                showToast(st.failed ? `GMs: ${st.created.length} created, ${st.failed} FAILED — see console` : `📌 ${st.created.length} GM${st.created.length === 1 ? '' : 's'} created — reload to see them natively`, st.failed ? 'rgba(255,96,96,0.55)' : undefined);
+                try { if (document.getElementById(GMT_PANEL_ID)) gmtRenderPanel(); } catch (err) {}
+                return;
+            }
+            if (e.target.closest('[data-gmt-bulk-undo]') && st.done && st.created.length) {
+                if (liteBlockedWrite('undo bulk GMs')) return;
+                if (!confirm(`Delete the ${st.created.length} marker(s) this run created? (Delete Guard banks each one.)`)) return;
+                const csrf = getCsrfToken();
+                if (!csrf) { showToast('No CSRF token — cannot delete', 'rgba(255,96,96,0.55)'); return; }
+                const mine = gmt.placed.filter(p => p.batch === st.batch);
+                let ok = 0, bad = 0;
+                for (const p of mine) { if (await gmtDeletePlaced(p, csrf)) ok++; else bad++; }
+                st.created = st.created.filter(c => gmt.placed.some(p => p.id === c.id));
+                st.targets.forEach(tg => { tg.failedWhy = null; });
+                showToast(bad ? `Undo: ${ok} deleted, ${bad} FAILED — see console` : `↩ Undo: ${ok} marker(s) deleted`, bad ? 'rgba(255,96,96,0.55)' : undefined);
+                render();
+                try { if (document.getElementById(GMT_PANEL_ID)) gmtRenderPanel(); } catch (err) {}
+            }
+        });
+        gmtEnsureStyle();
+        render();
+        document.body.appendChild(wrap);
     }
     function injectGmtMapButton(doc) {
         if (LITE) return;   // 📌 GM Stamper = site-write, CSM-only
@@ -25969,6 +26122,17 @@
         delBtn.style.cssText = 'background:transparent;color:#ff5555;border:1px solid rgba(255,85,85,0.5);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
         delBtn.onclick = (ev) => { ev.stopPropagation(); openBulkDeleteModal(); };
         if (!LITE) optsRow.appendChild(delBtn);         // Bulk → Delete — write, CSM-only
+
+        // --- v4.298: Bulk → 📌 GM button (feature #271) ---
+        // One General Marker from a GM Stamper template at every selected
+        // row's centroid (e.g. filter Unshielded → select all). Create-only.
+        const gmtBtn = document.createElement('button');
+        gmtBtn.type = 'button';
+        gmtBtn.textContent = 'Bulk → 📌 GM';
+        gmtBtn.title = 'Create one General Marker from a GM Stamper template at each selected row (create-only; source entities untouched)';
+        gmtBtn.style.cssText = 'background:transparent;color:#c39bd3;border:1px solid rgba(195,155,211,0.5);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+        gmtBtn.onclick = (ev) => { ev.stopPropagation(); openGmtBulkModal(); };
+        if (!LITE) optsRow.appendChild(gmtBtn);         // Bulk → GM — write, CSM-only
 
         // Popover: pick a target (✓ Valid / ✗ Invalid), scope, and entity-
         // type filter, preview the count, then queue one validated edit per
