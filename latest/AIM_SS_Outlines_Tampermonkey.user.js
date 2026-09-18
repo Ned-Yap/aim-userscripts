@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.139
+// @version      34.140
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -67,7 +67,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.139';
+    const SCRIPT_VERSION = '34.140';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1396,6 +1396,8 @@
         applyRrcLayers();
         // 11g. TX boundaries (districts / counties / cities / surveys).
         applyTxBoundaries();
+        // 11h. 🌐 Fleet KML layers (data repo fleet-kml/), clipped to the site.
+        applyFleetKml();
         // 12. Flight-path vertex dots: hide / resize / recolor via CSS.
         applyVertexStyle();
 
@@ -2271,10 +2273,12 @@
                     : { siteID: sid, bbox: null, basePts, nonBaseN: 0, loading: false, failed: true };
                 if (!_rrcSiteBBox.bbox) console.warn(`${TAG} RRC: site ${sid} has no entity geometry — nothing to bound the well fetch`);
                 applyRrcLayers();
+                if (isActive) applyFleetKml();   // v34.140: cached fleet layers wait on these bounds too
             })
             .catch(err => {
                 _rrcSiteBBox = { siteID: sid, bbox: null, loading: false, failed: true };
                 console.warn(`${TAG} RRC: site bounds fetch failed:`, err);
+                if (isActive) applyFleetKml();   // clears any stale layers via .failed
             });
         return null;
     }
@@ -4263,13 +4267,291 @@
     // RRC operator checkboxes spliced into their category. Posted to the
     // Control Panel on every register; the panel only re-renders when the
     // set actually changes (it signatures the payload).
+    // ==================================================================
+    // 🌐 FLEET KML LAYERS (v34.140, feature #269) — the layers Fleet Tools
+    // saves to the data repo (fleet-kml/<name>.kml|.geojson) drawn on the
+    // SITE map, clipped to the site bounds + a radius. No re-upload: the
+    // repo is the single source. Control Panel gets one show + colour per
+    // layer (dynamic children, re-registered once the list is known).
+    // Rendering = Leaflet layers in their own pane UNDER the entity pane
+    // (same apply/remove idiom as the TX boundaries), rebuilt only when
+    // the site / envelope / layer set / styles change.
+    // ==================================================================
+    const FK_DIR = 'fleet-kml';
+    const FK_LIST_KEY = 'aim-fleetkml-list';
+    const FK_CACHE_PREFIX = 'aim-fleetkml-cache-';
+    const FK_PALETTE = ['#ffd54f', '#4fc3f7', '#ff8a65', '#aed581', '#ba68c8', '#4db6ac', '#f06292', '#90a4ae'];
+    const FK_PANE = 'aimFleetKml';
+    const FK_POINT_CAP = 800;
+    let fkList = (function() { try { const v = gmGet(FK_LIST_KEY, null); const a = v ? JSON.parse(v) : []; return Array.isArray(a) ? a : []; } catch (e) { return []; } })();   // [{name, sha}]
+    let fkFeatures = {};          // name → { sha, features }
+    const fkFetching = new Set();
+    const fkFailed = new Map();   // name → ts of the last failed fetch/parse (5-min backoff; cleared by Re-list / REFETCH_KMLS)
+    const FK_FAIL_BACKOFF_MS = 5 * 60 * 1000;
+    let fkListing = false;
+    let fkListAt = 0;
+    let fkLayers = [];
+    let fkKey = '';
+    let fkWarned = false;
+
+    function fkReadGmList() { try { const v = gmGet(FK_LIST_KEY, null); const a = v ? JSON.parse(v) : []; return Array.isArray(a) ? a : []; } catch (e) { return []; } }
+    function fkSyncListFromGm() {
+        // TOP and IFRAME both register under one scriptId (last REGISTER wins) —
+        // re-read the shared GM list whenever the other frame refreshed it.
+        const at = Number(gmGet(FK_LIST_KEY + '-at', 0)) || 0;
+        if (at !== fkListAt) { fkList = fkReadGmList(); fkListAt = at; fkKey = ''; }
+    }
+    function fkSlugRaw(name) { return String(name || '').replace(/\.(kml|geojson|json)$/i, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'layer'; }
+    // Unique per list: two files whose names slug identically get -2, -3… (order = sorted list, so ids are stable).
+    function fkSlug(name) {
+        const raw = fkSlugRaw(name);
+        let seen = 0;
+        for (const l of fkList) {
+            if (l.name === name) return seen ? `${raw}-${seen + 1}` : raw;
+            if (fkSlugRaw(l.name) === raw) seen++;
+        }
+        return raw;
+    }
+    function fkLabel(name) { return String(name || '').replace(/\.(kml|geojson|json)$/i, '').replace(/[_]+/g, ' ').trim(); }
+    function fkShowId(name) { return `fleetkml.L.${fkSlug(name)}.show`; }
+    function fkColorId(name) { return `fleetkml.L.${fkSlug(name)}.color`; }
+
+    // Dynamic Control Panel category — one show + colour per repo layer.
+    function buildFleetKmlToggles() {
+        fkSyncListFromGm();
+        const children = [
+            { id: 'fleetkml.radius-mi', label: 'Show within __ mi of the site', type: 'number', default: 5, min: 0.5, max: 50, step: 0.5, unit: 'mi' },
+            { id: 'fleetkml.width', label: 'Line width', type: 'number', default: 2, min: 1, max: 8, step: 0.5, unit: 'px' },
+            { id: 'fleetkml-refresh', label: 'Re-list layers from GitHub', type: 'button', action: 'fleetkml-refresh' },
+        ];
+        if (fkList.length) children.push({ type: 'header', label: `Layers (${fkList.length})` });
+        else children.push({ type: 'header', label: cachedToken ? 'No layers listed yet — click Re-list' : 'Needs the GitHub PAT (AIM Controls → token)' });
+        fkList.forEach((l, i) => {
+            children.push({ id: fkShowId(l.name), label: fkLabel(l.name), type: 'boolean', default: false });
+            children.push({ id: fkColorId(l.name), label: `${fkLabel(l.name)} colour`, type: 'color', default: FK_PALETTE[i % FK_PALETTE.length] });
+        });
+        // toggleState defaults for ids that did not exist at load
+        children.forEach(c => { if (c.id && toggleState[c.id] === undefined) toggleState[c.id] = c.default; });
+        if (toggleState['fleetkml.show'] === undefined) toggleState['fleetkml.show'] = false;
+        return {
+            type: 'category', id: 'fleetkml-cat', label: '🌐 Fleet KML layers',
+            meta: 'layers saved from Fleet Tools (data repo fleet-kml/), drawn around this site',
+            master: { id: 'fleetkml.show', default: false },
+            children,
+        };
+    }
+
+    // ---- repo I/O (same PAT + Contents API as the shielding KMLs) ----
+    function fkListRepo(force) {
+        const token = cachedToken || gmGet(TOKEN_KEY, '');
+        if (!token) { if (!fkWarned) { fkWarned = true; console.log(`${TAG} fleet KML: no token yet — layers list when the PAT arrives`); } return; }
+        if (fkListing) return;
+        if (!force && fkList.length && Date.now() - (Number(gmGet(FK_LIST_KEY + '-at', 0)) || 0) < 6 * 3600 * 1000) return;
+        fkListing = true;
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${FK_DIR}?ref=${KMLS_BRANCH}`,
+            headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+            timeout: 20000,
+            onload: (resp) => {
+                fkListing = false;
+                try {
+                    if (resp.status === 404) { fkList = []; fkListAt = Date.now(); gmSet(FK_LIST_KEY, '[]'); gmSet(FK_LIST_KEY + '-at', String(fkListAt)); registerWithControlPanel(); fkKey = ''; if (isActive) applyFleetKml(); return; }
+                    if (resp.status !== 200) { console.warn(`${TAG} fleet KML: list HTTP ${resp.status}`); return; }
+                    const arr = JSON.parse(resp.responseText);
+                    const next = (Array.isArray(arr) ? arr : []).filter(f => f && f.type === 'file' && /\.(kml|geojson|json)$/i.test(f.name))
+                        .map(f => ({ name: f.name, sha: f.sha || null })).sort((a, b) => a.name.localeCompare(b.name));
+                    const changed = JSON.stringify(next) !== JSON.stringify(fkList);
+                    fkList = next;
+                    fkListAt = Date.now();
+                    gmSet(FK_LIST_KEY, JSON.stringify(fkList));
+                    gmSet(FK_LIST_KEY + '-at', String(fkListAt));
+                    console.log(`${TAG} fleet KML: ${fkList.length} layer(s) in ${FK_DIR}/${changed ? ' (list changed — re-registering)' : ''}`);
+                    if (changed || force) registerWithControlPanel();   // new toggle ids → CP echoes stored values
+                    fkKey = '';
+                    if (isActive) applyFleetKml();
+                } catch (e) { console.warn(`${TAG} fleet KML: list parse threw:`, e); }
+            },
+            onerror: () => { fkListing = false; console.warn(`${TAG} fleet KML: list request failed`); },
+            ontimeout: () => { fkListing = false; console.warn(`${TAG} fleet KML: list request timed out`); },
+        });
+    }
+    function fkEnsureLoaded(entry) {
+        const name = entry.name;
+        const have = fkFeatures[name];
+        if (have && (!entry.sha || have.sha === entry.sha)) return true;
+        // GM cache by sha
+        try {
+            const raw = gmGet(FK_CACHE_PREFIX + name, null);
+            if (raw) {
+                const c = JSON.parse(raw);
+                if (c && Array.isArray(c.features) && (!entry.sha || c.sha === entry.sha)) { fkFeatures[name] = { sha: c.sha, features: c.features }; return true; }
+            }
+        } catch (e) { console.warn(`${TAG} fleet KML: cache read threw for ${name}:`, e); }
+        if (fkFetching.has(name)) return false;
+        if (Date.now() - (fkFailed.get(name) || 0) < FK_FAIL_BACKOFF_MS) return false;   // don't hammer GitHub on a 404/403/parse error
+        const token = cachedToken || gmGet(TOKEN_KEY, '');
+        if (!token) return false;
+        fkFetching.add(name);
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${FK_DIR}/${encodeURIComponent(name)}?ref=${KMLS_BRANCH}`,
+            headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github.raw' },
+            timeout: 60000,
+            onload: (resp) => {
+                fkFetching.delete(name);
+                try {
+                    if (resp.status !== 200) { fkFailed.set(name, Date.now()); console.warn(`${TAG} fleet KML: ${name} HTTP ${resp.status}`); showKMLToast(`Fleet KML "${fkLabel(name)}" failed to load (HTTP ${resp.status}) — retrying in 5 min, or use Re-list`, 4000); return; }
+                    const parsed = fkParseGeoText(resp.responseText, name);
+                    fkFeatures[name] = { sha: entry.sha, features: parsed.features };
+                    try { gmSet(FK_CACHE_PREFIX + name, JSON.stringify({ sha: entry.sha, features: parsed.features, at: Date.now() })); }
+                    catch (e) { console.warn(`${TAG} fleet KML: cache write failed for ${name} (too large?):`, e); }
+                    console.log(`${TAG} fleet KML: loaded ${name} — ${parsed.features.length} feature(s), ${parsed.vertexCount} vertices`);
+                    fkKey = '';
+                    if (isActive) applyFleetKml();
+                } catch (e) { fkFailed.set(name, Date.now()); console.warn(`${TAG} fleet KML: ${name} parse threw:`, e); showKMLToast(`Fleet KML "${fkLabel(name)}" could not be parsed — ${e.message || e}`, 5000); }
+            },
+            onerror: () => { fkFetching.delete(name); fkFailed.set(name, Date.now()); console.warn(`${TAG} fleet KML: ${name} request failed`); },
+            ontimeout: () => { fkFetching.delete(name); fkFailed.set(name, Date.now()); console.warn(`${TAG} fleet KML: ${name} timed out`); },
+        });
+        return false;
+    }
+
+    // ---- parsers (ported VERBATIM from Fleet Tools parseKmlText / parseGeojsonText) ----
+    function fkParseKml(text) {
+        const doc = new DOMParser().parseFromString(text, 'text/xml');
+        if (doc.querySelector('parsererror')) throw new Error('not valid KML/XML');
+        const features = [];
+        let vertexCount = 0;
+        const parseCoords = (node) => {
+            const out = [];
+            String(node.textContent || '').trim().split(/\s+/).forEach(tok => {
+                const p = tok.split(',');
+                const lng = Number(p[0]), lat = Number(p[1]);
+                if (isFinite(lat) && isFinite(lng)) out.push([lat, lng]);
+            });
+            return out;
+        };
+        doc.querySelectorAll('Placemark').forEach(pm => {
+            let fname = '';
+            try { const n = pm.querySelector(':scope > name'); fname = (n && n.textContent.trim()) || ''; } catch (e) {}
+            pm.querySelectorAll('Point > coordinates').forEach(c => { const pts = parseCoords(c); if (pts.length) { features.push({ name: fname, type: 'point', pts: [pts[0]] }); vertexCount++; } });
+            pm.querySelectorAll('LineString > coordinates').forEach(c => { const pts = parseCoords(c); if (pts.length > 1) { features.push({ name: fname, type: 'line', pts }); vertexCount += pts.length; } });
+            pm.querySelectorAll('Polygon').forEach(pg => { const outer = pg.querySelector('outerBoundaryIs coordinates'); if (outer) { const pts = parseCoords(outer); if (pts.length > 2) { features.push({ name: fname, type: 'poly', pts }); vertexCount += pts.length; } } });
+        });
+        if (!features.length) throw new Error('no Point/LineString/Polygon placemarks found');
+        return { features, vertexCount };
+    }
+    function fkParseGeojson(text) {
+        let j;
+        try { j = JSON.parse(text); } catch (e) { throw new Error('not valid JSON'); }
+        const features = [];
+        let vertexCount = 0;
+        const conv = (coords) => coords.map(c => [Number(c[1]), Number(c[0])]).filter(p => isFinite(p[0]) && isFinite(p[1]));
+        const addGeom = (g, name) => {
+            if (!g || !g.type) return;
+            if (g.type === 'Point') { const p = conv([g.coordinates]); if (p.length) { features.push({ name, type: 'point', pts: p }); vertexCount++; } }
+            else if (g.type === 'MultiPoint') (g.coordinates || []).forEach(c => addGeom({ type: 'Point', coordinates: c }, name));
+            else if (g.type === 'LineString') { const pts = conv(g.coordinates || []); if (pts.length > 1) { features.push({ name, type: 'line', pts }); vertexCount += pts.length; } }
+            else if (g.type === 'MultiLineString') (g.coordinates || []).forEach(cs => addGeom({ type: 'LineString', coordinates: cs }, name));
+            else if (g.type === 'Polygon') { const pts = conv((g.coordinates || [])[0] || []); if (pts.length > 2) { features.push({ name, type: 'poly', pts }); vertexCount += pts.length; } }
+            else if (g.type === 'MultiPolygon') (g.coordinates || []).forEach(rings => addGeom({ type: 'Polygon', coordinates: rings }, name));
+            else if (g.type === 'GeometryCollection') (g.geometries || []).forEach(gg => addGeom(gg, name));
+        };
+        const featName = (f) => { const pr = f.properties || {}; for (const k of ['name', 'Name', 'NAME', 'label', 'id', 'ID', 'LineID', 'FacilityID']) { if (pr[k] != null && String(pr[k]).trim()) return String(pr[k]).trim(); } return ''; };
+        if (j.type === 'FeatureCollection') (j.features || []).forEach(f => f && addGeom(f.geometry, featName(f)));
+        else if (j.type === 'Feature') addGeom(j.geometry, featName(j));
+        else addGeom(j, '');
+        if (!features.length) throw new Error('no usable GeoJSON geometries found');
+        return { features, vertexCount };
+    }
+    function fkParseGeoText(text, name) {
+        const head = String(text).slice(0, 200).trim();
+        return (/\.(geojson|json)$/i.test(name) || head.startsWith('{') || head.startsWith('[')) ? fkParseGeojson(text) : fkParseKml(text);
+    }
+
+    // ---- draw ----
+    function removeFleetKml() {
+        if (!fkLayers.length) { fkKey = ''; return; }
+        const map = getLeafletMap();
+        fkLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        fkLayers = [];
+        fkKey = '';
+    }
+    function fkPaneName(map) {
+        try {
+            if (typeof map.getPane === 'function' && map.getPane(FK_PANE)) return FK_PANE;
+            if (typeof map.createPane === 'function') {
+                const p = map.createPane(FK_PANE);
+                if (p) { p.style.zIndex = '390'; p.style.pointerEvents = 'none'; return FK_PANE; }   // under overlayPane (400) → entities stay on top + clickable
+            }
+        } catch (e) { console.warn(`${TAG} fleet KML: pane creation failed, using the default pane:`, e); }
+        return undefined;
+    }
+    function applyFleetKml() {
+        const map = getLeafletMap();
+        const L = _stylerL();
+        if (!map || !L || typeof map.addLayer !== 'function') return;
+        if (toggleState['fleetkml.show'] !== true) { removeFleetKml(); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { removeFleetKml(); return; }
+        fkSyncListFromGm();
+        const on = fkList.filter(l => toggleState[fkShowId(l.name)] === true);
+        if (!on.length) { removeFleetKml(); return; }
+        const bbox = rrcEnsureSiteBBox(sid);   // shared site-bounds cache (fetches once; null while loading → next heartbeat retries)
+        if (!bbox) { if (_rrcSiteBBox.failed) removeFleetKml(); return; }
+        const radMi = Math.max(0.5, Number(toggleState['fleetkml.radius-mi']) || 5);
+        const width = Math.max(1, Number(toggleState['fleetkml.width']) || 2);
+        const midLat = (bbox[1] + bbox[3]) / 2;
+        const radFt = radMi * 5280;
+        const dLat = radFt / 364000, dLng = radFt / (364000 * Math.cos(midLat * Math.PI / 180));
+        const env = [bbox[0] - dLng, bbox[1] - dLat, bbox[2] + dLng, bbox[3] + dLat];
+        // Layers still downloading render on their arrival (fkEnsureLoaded → applyFleetKml).
+        const ready = on.filter(l => fkEnsureLoaded(l));
+        const key = `${sid}|${env.map(v => v.toFixed(5)).join(',')}|${width}|${ready.map(l => `${l.name}:${l.sha}:${toggleState[fkColorId(l.name)]}`).join(';')}`;
+        if (key === fkKey) return;
+        fkLayers.forEach(l => { try { map.removeLayer(l); } catch (e) {} });
+        fkLayers = [];
+        fkKey = key;
+        const pane = fkPaneName(map);
+        const inEnv = (p) => p[1] >= env[0] && p[1] <= env[2] && p[0] >= env[1] && p[0] <= env[3];
+        let totalDrawn = 0, capped = false;
+        ready.forEach((l, i) => {
+            const color = toggleState[fkColorId(l.name)] || FK_PALETTE[i % FK_PALETTE.length];
+            const feats = fkFeatures[l.name].features;
+            const lineRuns = [], polyRings = [], points = [];
+            feats.forEach(f => {
+                if (f.type === 'line') rrcClipPathToEnv(f.pts, env).forEach(run => { if (run.length > 1) lineRuns.push(run); });
+                else if (f.type === 'poly') {
+                    let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+                    f.pts.forEach(p => { if (p[0] < minLat) minLat = p[0]; if (p[0] > maxLat) maxLat = p[0]; if (p[1] < minLng) minLng = p[1]; if (p[1] > maxLng) maxLng = p[1]; });
+                    if (minLng <= env[2] && maxLng >= env[0] && minLat <= env[3] && maxLat >= env[1]) polyRings.push(f.pts);
+                } else if (f.type === 'point' && f.pts[0] && inEnv(f.pts[0])) points.push(f);
+            });
+            const opts = { color, weight: width, opacity: 0.9, interactive: false };
+            if (pane) opts.pane = pane;
+            const add = (mk) => { try { mk.addTo(map); fkLayers.push(mk); totalDrawn++; } catch (e) { console.warn(`${TAG} fleet KML: addTo failed:`, e); } };
+            if (lineRuns.length) add(L.polyline(lineRuns, opts));
+            // depth-3 array = MultiPolygon; a depth-2 array would make ring 2+ HOLES of ring 1
+            if (polyRings.length) add(L.polygon(polyRings.map(r => [r]), Object.assign({}, opts, { fill: true, fillColor: color, fillOpacity: 0.08 })));
+            if (points.length) {
+                const pts = points.slice(0, FK_POINT_CAP);
+                if (points.length > FK_POINT_CAP) capped = true;
+                pts.forEach(f => add(L.circleMarker([f.pts[0][0], f.pts[0][1]], Object.assign({}, opts, { radius: 4, fill: true, fillColor: color, fillOpacity: 0.85, weight: 1.5 }))));
+            }
+            console.log(`${TAG} fleet KML: "${fkLabel(l.name)}" → ${lineRuns.length} line run(s), ${polyRings.length} polygon(s), ${Math.min(points.length, FK_POINT_CAP)} point(s) within ${radMi} mi of site ${sid}`);
+        });
+        if (capped) showKMLToast(`Fleet KML: more than ${FK_POINT_CAP} points in range — showing the first ${FK_POINT_CAP}. Narrow the radius.`, 4500);
+        if (!totalDrawn && ready.length) console.log(`${TAG} fleet KML: nothing from the enabled layer(s) lies within ${radMi} mi of this site`);
+    }
+
     function buildRegistrationToggles() {
         const rrcExtra = buildRrcOperatorToggles();
-        if (!rrcExtra.length) return TOGGLES;
-        return TOGGLES.map(cat => {
+        const base = !rrcExtra.length ? TOGGLES : TOGGLES.map(cat => {
             if (cat && cat.id === 'rrc-cat' && rrcExtra.length) return { ...cat, children: [...cat.children, ...rrcExtra] };
             return cat;
         });
+        return [...base, buildFleetKmlToggles()];   // v34.140: dynamic 🌐 Fleet KML category
     }
 
     // GM storage helpers. Returns def if GM is unavailable (script grants
@@ -8914,6 +9196,8 @@
         removeCropLayer();
         // And the RRC wells/pipelines overlay.
         removeRrcLayers();
+        // And the fleet KML layers.
+        removeFleetKml();
         // Land-owner click mode + outlines.
         parcelsDisarm();
         parcelsClear();
@@ -9364,6 +9648,7 @@
                     KML_TYPES.forEach(t => { delete kmlFeatures[kmlKey(sid, t)]; });
                     fetchKMLForSite(sid, true);
                 }
+                fkFeatures = {}; fkFailed.clear(); fkKey = ''; fkListRepo(true);   // v34.140: fleet layers too
             } else if (msg.type === 'TOKEN_VALUE') {
                 // Control panel handed us the PAT (either on our REQUEST_TOKEN,
                 // or proactively after the user saved a new one). Cache in
@@ -9373,6 +9658,7 @@
                 if (cachedToken && cachedToken !== prev) {
                     const sid = getCurrentSiteID();
                     if (sid) fetchKMLForSite(sid, true);
+                    fkListRepo(false);   // v34.140: list the fleet layers once the PAT is known
                 }
             } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID && rendersInThisFrame()) {
                 // Cross-tab guard: BroadcastChannel delivers to EVERY open tab — only
@@ -9410,6 +9696,7 @@
                         // asset boxes too (DV_ASSET_SELECTOR), so the editor
                         // and data refresh work there.
                         'asset-styles-editor', 'refresh-asset-data',
+                        'fleetkml-refresh',   // v34.140: view-only overlay
                     ];
                     if (!DV_SAFE_ACTIONS.includes(msg.actionId)) {
                         showKMLToast('That tool is Site-Setup-only — Data View is view-only.', 4000);
@@ -9461,6 +9748,11 @@
                     _rrcScoutEnv = null;
                     showKMLToast('Back to site-area wells only.', 3500);
                     applyRrcLayers();
+                }
+                else if (msg.actionId === 'fleetkml-refresh') {
+                    fkFeatures = {}; fkFailed.clear(); fkKey = '';
+                    showKMLToast('Re-listing fleet KML layers from GitHub…', 2500);
+                    fkListRepo(true);
                 }
                 else if (msg.actionId === 'refresh-asset-data') {
                     const sid = getCurrentSiteID();
@@ -9563,6 +9855,7 @@
 
     setupControlPanel();
     registerWithControlPanel();
+    fkListRepo(false);   // v34.140: no-op until the PAT arrives (TOKEN_VALUE re-tries)
     installListener();
     installAssetLockHandler();
     installKMLEditHandlers();
@@ -10001,6 +10294,7 @@
         // nav so a stale entry can never apply to the wrong site.
         Object.keys(committedKmlCache).forEach(k => { delete committedKmlCache[k]; });
         loadValidatorResults();
+        removeFleetKml();   // v34.140: never show the old site's clipped layers while the new bounds load
         if (isActive && sid) {
             console.log(`${TAG} site changed to ${sid} — fetching KML`);
             fetchKMLForSite(sid);
