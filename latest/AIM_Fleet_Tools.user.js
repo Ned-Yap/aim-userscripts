@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.40
+// @version      0.41
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -19,6 +19,8 @@
 // signal AIM Defaults uses). No map, no Leaflet — pure panel + tables.
 //   ⚠ Overlap Sweep (#250 layer 1): find every pair of sites whose
 //     FFZs/FPs/assets come within the conflict threshold of each other.
+//   📊 Entities → Sheets (#270): every entity of every picked site as one
+//     table for Google Sheets / CSV, per-type checkboxes.
 //   📊 Fleet Metrics (bones): per-site entity counts from the Site Watch
 //     snapshot index; grouped by client when the /sites/ payload carries one.
 // GitHub PAT arrives over the AIM_CONTROL_CHANNEL TOKEN_VALUE broadcast
@@ -32,7 +34,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.40';
+    const SCRIPT_VERSION = '0.41';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -4350,6 +4352,7 @@
             + '<span style="color:#666">per-site JSON + CSV, combined ALL-*.csv, README — nothing is written to Percepto</span>'
             + '</div>');
         out.push(renderKmlExportRow());   // v0.32: ⭕ site circles / 🗺 site setups KML
+        out.push(renderSheetsExportRow());   // v0.41 (#270): 📊 every entity of every picked site → Sheets / CSV
         // browse
         if (fdBrowse) {
             const b = fdBrowse;
@@ -4671,6 +4674,259 @@
             + '</div>';
     }
 
+    // ==================================================================
+    // 📊 FLEET SHEETS EXPORT (v0.41, #270) — every entity of every picked
+    // site as ONE flat table (client → site → type → name), with per-type
+    // include checkboxes. 📊 Copy → Sheets writes rich HTML + TSV to the
+    // clipboard (paste straight into Google Sheets / Excel); ⬇ CSV downloads
+    // the same table. Columns are the union of everything /map_objects/
+    // carries for the ticked types (asset custom.* fields, FFZ/NFZ
+    // restrictions, FP arcs, base-station drone, …). "Key: value | Key: value"
+    // descriptions (the Exxon asset convention) are split into their own
+    // Desc: columns so the client's own asset ID lands in a sortable cell.
+    // Live /map_objects/ per site (fdFetchSetup, 10-min cache), read-only.
+    // ==================================================================
+    const KEY_FX = 'aim-ft-sheets-opts';
+    const FX_TYPES = [
+        { key: 'assets',  type: 3,  label: 'Assets' },
+        { key: 'ffzs',    type: 16, label: 'FFZ' },
+        { key: 'fps',     type: 15, label: 'FP' },
+        { key: 'nfzs',    type: 4,  label: 'NFZ' },
+        { key: 'markers', type: 19, label: 'Markers' },
+        { key: 'base',    type: 8,  label: 'Base' },
+        { key: 'safe',    type: 98, label: 'Safe' },
+    ];
+    const fxOpts = (() => {
+        const def = { inc: { assets: true, ffzs: true, fps: true, nfzs: true, markers: true, base: true, safe: true }, splitDesc: true, geometry: false, raw: false };
+        const s = loadJson(KEY_FX, {});
+        if (s.inc && typeof s.inc === 'object') Object.keys(def.inc).forEach(k => { if (typeof s.inc[k] === 'boolean') def.inc[k] = s.inc[k]; });
+        ['splitDesc', 'geometry', 'raw'].forEach(k => { if (typeof s[k] === 'boolean') def[k] = s[k]; });
+        return def;
+    })();
+    const fxSave = () => gmSet(KEY_FX, JSON.stringify(fxOpts));
+    let fxLast = null;   // { rows, sites, failed, aborted, at } — shown in the row after an export
+
+    const fxFt = (m) => (typeof m === 'number' && isFinite(m)) ? Math.round(m * FT_PER_M * 10) / 10 : '';
+    const fxVal = (v) => (v == null) ? '' : (typeof v === 'object' ? JSON.stringify(v) : v);
+    const fxYesNo = (v) => v == null ? '' : (v ? 'yes' : 'no');
+    const fxCustom = (e, k) => (e.custom && typeof e.custom === 'object' && !Array.isArray(e.custom)) ? fxVal(e.custom[k]) : '';
+    const fxRestr = (e, k) => (e.restrictions && typeof e.restrictions === 'object' && !Array.isArray(e.restrictions)) ? e.restrictions[k] : undefined;
+    const fxDrone = (e) => (e.custom && e.custom.allocated_by_drone && typeof e.custom.allocated_by_drone === 'object') ? e.custom.allocated_by_drone : null;
+    // Every vertex of an entity: polygon ring / point / FP waypoints, else the arc chain.
+    function fxPoints(e) {
+        const pts = (entityCoords(e) || []).filter(p => p && typeof p.lat === 'number' && typeof p.lng === 'number');
+        if (pts.length) return pts;
+        const out = [];
+        if (Array.isArray(e.arcs)) e.arcs.forEach((a, i) => { if (!a) return; if (i === 0 && a.point_a && typeof a.point_a.lat === 'number') out.push(a.point_a); if (a.point_b && typeof a.point_b.lat === 'number') out.push(a.point_b); });
+        return out;
+    }
+    function fxCentroid(e) {
+        const pts = fxPoints(e);
+        if (!pts.length) return null;
+        // closed rings repeat the first vertex — drop it so it doesn't double-weight
+        const ring = (pts.length > 3 && pts[0].lat === pts[pts.length - 1].lat && pts[0].lng === pts[pts.length - 1].lng) ? pts.slice(0, -1) : pts;
+        return { lat: ring.reduce((s, p) => s + p.lat, 0) / ring.length, lng: ring.reduce((s, p) => s + p.lng, 0) / ring.length };
+    }
+    function fxArcStats(e) {
+        const st = { n: 0, lenM: 0, lo: Infinity, hi: -Infinity, em: Infinity, wait: 0 };
+        if (!Array.isArray(e.arcs)) return st;
+        e.arcs.forEach(a => {
+            if (!a) return;
+            st.n++;
+            if (typeof a.distance === 'number') st.lenM += a.distance;
+            else if (a.point_a && a.point_b && typeof a.point_a.lat === 'number' && typeof a.point_b.lat === 'number') st.lenM += haversineM(a.point_a.lat, a.point_a.lng, a.point_b.lat, a.point_b.lng);
+            if (typeof a.min_alt === 'number') st.lo = Math.min(st.lo, a.min_alt);
+            if (typeof a.max_alt === 'number') st.hi = Math.max(st.hi, a.max_alt);
+            if (typeof a.min_emergency_alt === 'number') st.em = Math.min(st.em, a.min_emergency_alt);
+            if (a.wait_until_approved) st.wait++;
+        });
+        return st;
+    }
+    function haversineM(lat1, lng1, lat2, lng2) {
+        const R = 6371008.8, d = Math.PI / 180;
+        const a = Math.sin((lat2 - lat1) * d / 2) ** 2 + Math.cos(lat1 * d) * Math.cos(lat2 * d) * Math.sin((lng2 - lng1) * d / 2) ** 2;
+        return 2 * R * Math.asin(Math.sqrt(a));
+    }
+    // "Desig: h-Pioneer | Div: PER MID Northwest | ID: 34409" → [['Desig','h-Pioneer'], …]; [] when it isn't that shape.
+    function fxDescPairs(desc) {
+        const s = String(desc == null ? '' : desc).trim();
+        if (!s || s.indexOf(':') < 0) return [];
+        const pairs = [];
+        for (const part of s.split('|')) {
+            const i = part.indexOf(':');
+            if (i <= 0) return [];   // a piece without "key:" → not the key/value convention, keep it as plain text
+            const k = part.slice(0, i).trim(), v = part.slice(i + 1).trim();
+            if (!k || k.length > 40 || !/[A-Za-z]/.test(k) || /^(https?|ftp|s3|file)$/i.test(k) || v.startsWith('//')) return [];
+            pairs.push([k, v]);
+        }
+        return pairs;
+    }
+    // Column registry. `t` = entity types the column applies to (null = every type);
+    // a column is emitted when at least one ticked type uses it. get(e, r) → cell value.
+    const FX_COLS = [
+        { label: 'Client', get: (e, r) => r.client },
+        { label: 'Site ID', get: (e, r) => r.sid },
+        { label: 'Site', get: (e, r) => r.site, link: (e, r) => siteSetupUrl(r.sid) },
+        { label: 'Site status', get: (e, r) => siteStatus(r.sid) || '' },
+        { label: 'Entity ID', get: e => e.id },
+        { label: 'Type', get: e => FD_TYPE[e.type] || `type ${e.type}` },
+        { label: 'Type code', get: e => e.type },
+        { label: 'Name', get: e => e.name || '' },
+        { label: 'Subtype', get: e => (e.custom && e.custom.poi_type_str) || '', t: [3] },
+        { label: 'Equipment', get: e => mtParseSubtype(e.custom && e.custom.poi_type_str).typeKey, t: [3] },
+        { label: 'State', get: e => (e.custom && e.custom.poi_type_str) ? mtParseSubtype(e.custom.poi_type_str).state : '', t: [3] },
+        { label: 'Marker type', get: e => e.general_marker_type || '', t: [19] },
+        { label: 'Marker height', get: e => fxVal(e.marker_height), t: [19] },
+        { label: 'Description', get: e => e.description == null ? '' : String(e.description) },
+        { label: 'Validated', get: e => fxYesNo(e.validated) },
+        { label: 'Unshielded', get: e => fxYesNo(e.is_unshielded) },
+        { label: 'Lat', get: (e, r) => r.c ? Number(r.c.lat.toFixed(7)) : '' },
+        { label: 'Lng', get: (e, r) => r.c ? Number(r.c.lng.toFixed(7)) : '' },
+        { label: 'GPS', get: (e, r) => r.c ? `${r.c.lat.toFixed(6)}, ${r.c.lng.toFixed(6)}` : '' },
+        { label: 'Vertices', get: (e, r) => r.pts.length },
+        { label: 'Area (acres)', get: (e, r) => (e.type === 3 || e.type === 16 || e.type === 4) && r.pts.length >= 3 ? Math.round(mtRingAreaM2(r.pts) / 4046.8564 * 1000) / 1000 : '', t: [3, 16, 4] },
+        { label: 'Min alt ft MSL', get: e => fxFt(fxRestr(e, 'minAlt')), t: [16, 4] },
+        { label: 'Max alt ft MSL', get: e => fxFt(fxRestr(e, 'maxAlt')), t: [16, 4] },
+        { label: 'Alt band ft', get: e => { const lo = fxRestr(e, 'minAlt'), hi = fxRestr(e, 'maxAlt'); return (typeof lo === 'number' && typeof hi === 'number') ? Math.round((hi - lo) * FT_PER_M * 10) / 10 : ''; }, t: [16, 4] },
+        { label: 'Orig min alt (raw)', get: e => fxVal(fxRestr(e, 'origMinAlt')), t: [16, 4] },
+        { label: 'Emergency alt ft MSL', get: e => fxFt(fxRestr(e, 'minEmergencyAlt')), t: [16, 4] },
+        { label: 'Orig emergency alt (raw)', get: e => fxVal(fxRestr(e, 'origMinEmergencyAlt')), t: [16, 4] },
+        { label: 'Arcs', get: (e, r) => r.arc.n, t: [15] },
+        { label: 'Length ft', get: (e, r) => r.arc.n ? Math.round(r.arc.lenM * FT_PER_M) : '', t: [15] },
+        { label: 'FP min alt ft MSL', get: (e, r) => isFinite(r.arc.lo) ? fxFt(r.arc.lo) : '', t: [15] },
+        { label: 'FP max alt ft MSL', get: (e, r) => isFinite(r.arc.hi) ? fxFt(r.arc.hi) : '', t: [15] },
+        { label: 'FP emergency alt (raw)', get: (e, r) => isFinite(r.arc.em) ? r.arc.em : '', t: [15] },
+        { label: 'Wait-until-approved arcs', get: (e, r) => r.arc.n ? r.arc.wait : '', t: [15] },
+        { label: 'Asset altitude', get: e => fxCustom(e, 'altitude'), t: [3] },
+        { label: 'Height AGL', get: e => fxCustom(e, 'height_agl'), t: [3] },
+        { label: 'Elevation ASL m', get: e => fxCustom(e, 'elevation_asl'), t: [3, 8] },
+        { label: 'Elevation ASL ft', get: e => fxFt(e.custom && e.custom.elevation_asl), t: [3, 8] },
+        { label: 'POI ID', get: e => fxCustom(e, 'poi_id'), t: [3] },
+        { label: 'POI volume method', get: e => fxCustom(e, 'poi_volume_method'), t: [3] },
+        { label: 'Pole feeder', get: e => fxCustom(e, 'pole_feeder'), t: [3] },
+        { label: 'Pole usage', get: e => fxCustom(e, 'pole_usage'), t: [3] },
+        { label: 'Pole is simple', get: e => e.custom && typeof e.custom.pole_is_simple === 'boolean' ? fxYesNo(e.custom.pole_is_simple) : '', t: [3] },
+        { label: 'Constantly present', get: e => fxYesNo(e.constantly_present_asset_name), t: [3] },
+        { label: 'Asset waypoints', get: e => Array.isArray(e.asset_waypoints) ? e.asset_waypoints.length : '', t: [3] },
+        { label: 'Safe-zone altitude m', get: e => fxCustom(e, 'altitude'), t: [98] },
+        { label: 'Safe-zone altitude ft', get: e => fxFt(e.custom && e.custom.altitude), t: [98] },
+        { label: 'Heading', get: e => fxCustom(e, 'heading'), t: [8] },
+        { label: 'Docking heading', get: e => fxCustom(e, 'docking_heading'), t: [8] },
+        { label: 'Ground station ID', get: e => fxCustom(e, 'ground_station_id'), t: [8] },
+        { label: 'Relative alt', get: e => fxCustom(e, 'relative_alt'), t: [8] },
+        { label: 'Base active', get: e => e.custom && typeof e.custom.active === 'boolean' ? fxYesNo(e.custom.active) : '', t: [8] },
+        { label: 'Doors status', get: e => fxCustom(e, 'doors_status'), t: [8] },
+        { label: 'Drone', get: e => { const d = fxDrone(e); return d ? (d.name || '') : ''; }, t: [8] },
+        { label: 'Drone ID', get: e => { const d = fxDrone(e); return d && d.id != null ? d.id : ''; }, t: [8] },
+        { label: 'Drone type', get: e => { const d = fxDrone(e); return d ? (d.robot_type_name || '') : ''; }, t: [8] },
+        { label: 'Drone connected', get: e => { const d = fxDrone(e); return d && typeof d.is_connected === 'boolean' ? fxYesNo(d.is_connected) : ''; }, t: [8] },
+        { label: 'Drone battery %', get: e => { const d = fxDrone(e); return d && d.battery_status != null ? d.battery_status : ''; }, t: [8] },
+        { label: 'Drone cameras', get: e => { const d = fxDrone(e); return d && d.camera_types && typeof d.camera_types === 'object' ? Object.keys(d.camera_types).join(', ') : ''; }, t: [8] },
+        { label: 'Coordinates', get: (e, r) => r.pts.map(p => `${p.lat.toFixed(7)},${p.lng.toFixed(7)}`).join(' | '), opt: 'geometry' },
+        { label: 'Arcs (a → b, alt m)', get: e => Array.isArray(e.arcs) ? e.arcs.map(a => a && a.point_a && a.point_b ? `${a.point_a.lat.toFixed(6)},${a.point_a.lng.toFixed(6)} → ${a.point_b.lat.toFixed(6)},${a.point_b.lng.toFixed(6)} [${a.min_alt}–${a.max_alt}]` : '').filter(Boolean).join(' | ') : '', t: [15], opt: 'geometry' },
+        { label: 'Polygon (WKT)', get: e => e.polygon || '', t: [3, 16, 4], opt: 'geometry' },
+        { label: 'Custom (JSON)', get: e => e.custom && Object.keys(e.custom).length ? JSON.stringify(e.custom) : '', opt: 'raw' },
+        { label: 'Restrictions (JSON)', get: e => e.restrictions && !Array.isArray(e.restrictions) && Object.keys(e.restrictions).length ? JSON.stringify(e.restrictions) : '', opt: 'raw' },
+        { label: 'Params (JSON)', get: e => e.params && Object.keys(e.params).length ? JSON.stringify(e.params) : '', opt: 'raw' },
+        { label: 'Site setup link', get: (e, r) => siteSetupUrl(r.sid) },
+    ];
+    const fxTypeOrder = FX_TYPES.map(t => t.type);
+    function fxSelectedTypes() { return FX_TYPES.filter(t => fxOpts.inc[t.key]).map(t => t.type); }
+    // Build { cols, rows } from the collected setups. Rows carry precomputed
+    // centroid / points / arc stats so each column getter stays cheap.
+    function fxBuildTable(got) {
+        const types = new Set(fxSelectedTypes());
+        const rows = [];
+        kxGroupByClient(Array.from(got.keys())).forEach(([client, ids]) => {
+            ids.sort((a, b) => siteName(a).localeCompare(siteName(b))).forEach(sid => {
+                const site = siteName(sid);
+                const ents = (got.get(sid) || []).filter(e => e && types.has(e.type));
+                ents.sort((a, b) => (fxTypeOrder.indexOf(a.type) - fxTypeOrder.indexOf(b.type)) || String(a.name || '').localeCompare(String(b.name || ''), undefined, { numeric: true }) || ((a.id || 0) - (b.id || 0)));
+                ents.forEach(e => {
+                    const pts = fxPoints(e);
+                    rows.push({ e, sid, site, client, pts, c: fxCentroid(e), arc: e.type === 15 ? fxArcStats(e) : { n: 0, lenM: 0, lo: Infinity, hi: -Infinity, em: Infinity, wait: 0 } });
+                });
+            });
+        });
+        const cols = FX_COLS.filter(c => (!c.t || c.t.some(t => types.has(t))) && (!c.opt || fxOpts[c.opt])).map(c => ({ label: c.label, get: c.get, link: c.link, t: c.t }));
+        if (fxOpts.splitDesc) {
+            // one "Desc: <key>" column per distinct key, in first-seen order; rows that don't follow the convention leave them blank
+            const keys = []; const seen = new Set();
+            rows.forEach(r => { r.desc = {}; fxDescPairs(r.e.description).forEach(([k, v]) => { r.desc[k] = v; if (!seen.has(k)) { seen.add(k); keys.push(k); } }); });
+            const at = cols.findIndex(c => c.label === 'Description') + 1;
+            cols.splice(at || cols.length, 0, ...keys.map(k => ({ label: `Desc: ${k}`, get: (e, r) => (r.desc && r.desc[k] != null) ? r.desc[k] : '' })));
+        }
+        return { cols, rows };
+    }
+    // Type-gated columns stay blank on rows of other types (custom.altitude / general_marker_type exist on every entity).
+    const fxCell = (col, r) => { if (col.t && !col.t.includes(r.e.type)) return ''; try { const v = col.get(r.e, r); return v == null ? '' : v; } catch (e) { console.warn(`${TAG} sheets export: column "${col.label}" failed for entity ${r.e && r.e.id}:`, e); return ''; } };
+    function fxSheetsHtml(cols, rows) {
+        const th = (s) => `<th style="background:#e8eaed;border:1px solid #bbb;padding:3px 6px;text-align:left;white-space:nowrap">${escapeHtml(s)}</th>`;
+        const td = (s) => `<td style="border:1px solid #ccc;padding:2px 6px">${s}</td>`;
+        const out = ['<table border="1" cellpadding="3" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:11px"><tr>' + cols.map(c => th(c.label)).join('') + '</tr>'];
+        rows.forEach(r => out.push('<tr>' + cols.map(c => { const v = fxCell(c, r); return td(c.link ? `<a href="${escapeHtml(c.link(r.e, r))}" style="color:#1a73e8">${escapeHtml(String(v))}</a>` : escapeHtml(String(v))); }).join('') + '</tr>'));
+        out.push('</table>');
+        return out.join('');
+    }
+    function fxTsv(cols, rows) {
+        const esc = (v) => String(v == null ? '' : v).replace(/[\t\r\n]+/g, ' ');
+        return [cols.map(c => esc(c.label)).join('\t')].concat(rows.map(r => cols.map(c => esc(fxCell(c, r))).join('\t'))).join('\n');
+    }
+    function fxSummary(rows, got) {
+        const per = {};
+        rows.forEach(r => { const k = FD_TYPE[r.e.type] || `type ${r.e.type}`; per[k] = (per[k] || 0) + 1; });
+        return `${rows.length.toLocaleString()} row(s) · ${got.size} site(s)` + (Object.keys(per).length ? ' · ' + Object.entries(per).map(([k, v]) => `${k} ${v.toLocaleString()}`).join(', ') : '');
+    }
+    async function fxExport(kind) {
+        const sids = Array.from(fdSelected);
+        if (!sids.length) { setStatus('pick at least one site first'); return; }
+        if (!fxSelectedTypes().length) { setStatus('tick at least one entity type for the Sheets export'); return; }
+        if (fdRun) return;
+        fdRun = { done: 0, total: sids.length, msg: 'starting…', abort: false };
+        renderPanel();
+        try {
+            const { got, failed } = await kxCollect(sids, kind === 'csv' ? 'entity CSV' : 'entity table');
+            const aborted = !!fdRun.abort;
+            setStatus('building entity table…'); await ftYield();
+            const { cols, rows } = fxBuildTable(got);
+            fxLast = { rows: rows.length, sites: got.size, failed: failed.length, aborted, at: Date.now(), summary: fxSummary(rows, got) };
+            const tail = `${failed.length ? ` · ${failed.length} fetch failure(s) (console)` : ''}${aborted ? ' · ABORTED (partial)' : ''}`;
+            if (failed.length) console.warn(`${TAG} sheets export: failures`, failed);
+            console.log(`${TAG} sheets export: ${fxLast.summary} · ${cols.length} column(s)`);
+            if (!rows.length) { setStatus(`no entities of the ticked types on the picked site(s)${tail}`); return; }
+            const stamp = new Date().toISOString().slice(0, 10);
+            if (kind === 'csv') {
+                const csv = fdCsv(cols.map(c => ({ label: c.label, get: r => fxCell(c, r) })), rows);
+                fdDownload(new Blob([csv], { type: 'text/csv' }), `AIM-fleet-entities ${stamp} (${got.size} sites, ${rows.length} rows).csv`);
+                setStatus(`entity CSV downloaded — ${fxLast.summary} · ${cols.length} columns${tail}`);
+            } else {
+                const html = fxSheetsHtml(cols, rows), text = fxTsv(cols, rows);
+                if (html.length > 40 * 1048576) { setStatus(`table too large for the clipboard (${(html.length / 1048576).toFixed(0)} MB) — use ⬇ CSV, or tick fewer types / sites`); return; }
+                copyHtmlToClipboard(html, text, `entity table copied — ${fxLast.summary} · ${cols.length} columns — paste into Google Sheets / Excel${tail}`);
+            }
+        } catch (e) { console.error(`${TAG} sheets export failed:`, e); setStatus(`sheets export failed — ${String(e && e.message || e)}`); }
+        finally { fdRun = null; renderPanel(); }
+    }
+    function renderSheetsExportRow() {
+        const dis = fdRun ? 'disabled' : '';
+        const inc = FX_TYPES.map(t => `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="checkbox" data-fx-inc="${t.key}" ${fxOpts.inc[t.key] ? 'checked' : ''} ${dis}> ${t.label}</label>`).join('');
+        const opt = (k, l, title) => `<label title="${escapeHtml(title)}" style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;color:#aaa"><input type="checkbox" data-fx-opt="${k}" ${fxOpts[k] ? 'checked' : ''} ${dis}> ${l}</label>`;
+        const ready = fdSelected.size && !fdRun && fxSelectedTypes().length;
+        const last = fxLast ? `<span style="color:#666;margin-left:auto" title="last export">${escapeHtml(fxLast.summary)}${fxLast.aborted ? ' · partial' : ''}${fxLast.failed ? ` · ${fxLast.failed} failed` : ''}</span>` : '';
+        return '<div style="padding:6px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + '<span style="color:#888">Entities:</span>'
+            + `<span data-ft="fx-sheets" title="Every entity of the ticked types on every picked site, one row each — copied as a table for Google Sheets / Excel" style="cursor:pointer;color:${ready ? '#ffd54f' : '#555'};font-weight:bold">📊 Copy → Sheets</span>`
+            + `<span data-ft="fx-csv" title="Same table as a CSV download" style="cursor:pointer;color:${ready ? '#5fff5f' : '#555'};font-weight:bold">⬇ CSV</span>`
+            + '<span style="width:1px;height:16px;background:#2a3140"></span>'
+            + inc
+            + '<span style="width:1px;height:16px;background:#2a3140"></span>'
+            + opt('splitDesc', 'split description', 'Split "Key: value | Key: value" descriptions into one Desc: column per key (the Exxon asset convention — puts the client asset ID in its own column)')
+            + opt('geometry', 'coordinates', 'Add every vertex (and FP arcs / polygon WKT) as extra columns')
+            + opt('raw', 'raw JSON', 'Add the raw custom / restrictions / params objects as JSON columns')
+            + last
+            + '</div>';
+    }
+
     function fdClientOfId(id) { const raw = rawSites && rawSites[id] && rawSites[id].raw; return (raw && siteEntryClient(raw)) || clientGroupOf(siteName(id)) || 'Other'; }
     function fdClientIds(cl) { return rawSites ? Object.keys(rawSites).filter(id => fdClientOfId(id) === cl) : []; }
     function fdVisibleSiteIds() {
@@ -4732,7 +4988,7 @@
 
             // Delegated — the body is rebuilt on every render, the root never is
             panelEl.addEventListener('click', (ev) => {
-                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad],input[data-fc-thr],#aim-ft-xr-picked')) return;   // checkbox/color/select → change handler
+                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad],input[data-fx-inc],input[data-fx-opt],input[data-fc-thr],#aim-ft-xr-picked')) return;   // checkbox/color/select → change handler
                 const clAll = ev.target.closest('[data-ft-clients]');
                 if (clAll) {
                     if (clAll.getAttribute('data-ft-clients') === 'all') {
@@ -4782,6 +5038,8 @@
                     else if (cmd === 'fd-export') fdExport();
                     else if (cmd === 'kx-circles') kxExportCircles();
                     else if (cmd === 'kx-setups') kxExportSetups();
+                    else if (cmd === 'fx-sheets') fxExport('sheets');
+                    else if (cmd === 'fx-csv') fxExport('csv');
                     else if (cmd === 'fd-abort') { if (fdRun) { fdRun.abort = true; setStatus('aborting export after the current request…'); } }
                     else if (cmd === 'fc-run') runFlightChecks();
                     else if (cmd === 'fc-abort') { if (fcRun) { fcRun.abort = true; setStatus('aborting flight checks after the current requests…'); } }
@@ -4953,6 +5211,8 @@
                 if (t.hasAttribute && t.hasAttribute('data-fc-thr')) { const k = t.getAttribute('data-fc-thr'); const v = Number(t.value); if (isFinite(v) && v >= 0) { ftCfg.fc[k] = v; saveCfg(); } return; }
                 if (t.id === 'aim-ft-xr-picked') { xrefUsePicked = !!t.checked; renderPanel(); return; }
                 if (t.hasAttribute && t.hasAttribute('data-kx-inc')) { kxInclude[t.getAttribute('data-kx-inc')] = !!t.checked; return; }
+                if (t.hasAttribute && t.hasAttribute('data-fx-inc')) { const k = t.getAttribute('data-fx-inc'); if (k in fxOpts.inc) { fxOpts.inc[k] = !!t.checked; fxSave(); renderPanel(); } return; }
+                if (t.hasAttribute && t.hasAttribute('data-fx-opt')) { const k = t.getAttribute('data-fx-opt'); if (['splitDesc', 'geometry', 'raw'].includes(k)) { fxOpts[k] = !!t.checked; fxSave(); } return; }
                 if (t.hasAttribute && t.hasAttribute('data-kx-mode')) { kxMode = t.value === '3D' ? '3D' : '2D'; return; }
                 if (t.hasAttribute && t.hasAttribute('data-kx-pad')) { if (t.value.trim() === '') return; const v = Number(t.value); if (isFinite(v) && v >= 0) kxCirclePadFt = v; return; }
                 if (t.hasAttribute && t.hasAttribute('data-fd-dataset')) { fdDatasets[t.getAttribute('data-fd-dataset')] = !!t.checked; renderPanel(); return; }

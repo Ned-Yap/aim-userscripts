@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-18 — 📊 Entities → Sheets from the fleet site picker: AIM Fleet Tools v0.41 (latest — dev only, feature #270)
+
+Pick sites in **Fleet Data** (tick a whole client, e.g. every Exxon site), then use the new **Entities:** row: **📊 Copy → Sheets** puts one row per entity of every picked site on the clipboard as a real table (paste into Google Sheets / Excel — the Site column is a link), or **⬇ CSV** downloads the same thing. Per-type checkboxes (Assets / FFZ / FP / NFZ / Markers / Base / Safe) choose what goes in; they're remembered. Columns are everything Percepto stores for the ticked types — name, ID, type, subtype / equipment / state, description, GPS + vertices + area, FFZ/NFZ altitude bands, flight-path length + altitudes, asset POI / pole / elevation fields, base-station drone — and "Key: value | Key: value" descriptions (the Exxon asset convention) are split into their own **Desc:** columns so the client's asset ID is a sortable cell. Optional extras: **coordinates** (every vertex, FP arcs, polygon WKT) and **raw JSON**. Read-only; sites are fetched one at a time with progress + Abort.
+
 ## 2026-09-17 — 🌐 Fleet KML layers on the site map: AIM Map Styler v34.140 (latest — dev only, feature #269)
 
 The layers you save from Fleet Tools (data repo `fleet-kml/`) now show **inside sites** — no re-upload. New **🌐 Fleet KML layers** section in AIM Controls: master switch (off by default), a "within __ mi of the site" radius (5 mi default), line width, and one **show + colour** per layer, listed straight from GitHub (Re-list button; new saves in Fleet Tools appear on the next list). Lines are clipped to the site bounds plus the radius, so a basin-wide water network only draws the part near the site; points (risers, wells) show as small circles; polygons as outlines. Layers download once per version and cache locally; they draw in their own pane under the entity outlines so nothing on the site becomes un-clickable. Works with .kml and .geojson.
