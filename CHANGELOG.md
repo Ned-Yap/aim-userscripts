@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-17 — 📐 Cross-ref: picked-sites scope + match detail: AIM Fleet Tools v0.39 (latest — dev only)
+
+- **picked only** checkbox on the cross-ref row (site and base-station targets): the sites ticked in 📦 Fleet Data become the ONLY targets. Pick a client there, tick the box, run.
+- **Match detail.** The report now says *what* matched: every point inside the outer band is listed with **Site → FFZ / FP (entity name) → feature name → distance**, sorted by site then distance, in the 📊 Report card (click a row to fly there), the 📋 text report and Copy → Sheets (every match, with lat/lng). Line stretches show their nearest site and entity too, and the base-station target attributes through the same mechanism.
+
 ## 2026-09-17 — AIM Fleet Tools latest v0.38 (dev only): Flight Checks join rebuilt — position is measured, not assumed
 
 - The first join only considered planned snapshots whose nav was within 200 ft of the drone, so a drone 278 ft off station could never be matched to its real step and was silently matched to a neighbouring nav (the source of the "109 ft SW" rows). Pictures are now aligned to the plan's snapshot sequence by heading + camera angle (sequence alignment, position only as a tie-breaker), so the distance from the intended nav is reported however large it is. Cached results are recomputed automatically.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.38
+// @version      0.39
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -32,7 +32,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.38';
+    const SCRIPT_VERSION = '0.39';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -2063,7 +2063,9 @@
     // v0.30: site scope — only sites whose name contains one of these
     // comma-separated terms count as targets/bases (e.g. "Exxon"). Empty = all.
     let xrefSiteFilter = '';
+    let xrefUsePicked = false;   // v0.39: scope = the Fleet Data picker selection
     function xrefSiteMatches(id) {
+        if (xrefUsePicked) return fdSelected.has(String(id));
         const terms = xrefSiteFilter.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
         if (!terms.length) return true;
         const nm = siteName(id).toLowerCase();
@@ -2124,10 +2126,10 @@
         return best;
     }
 
-    // v0.28: like xrefDistGrid but also returns WHICH segment was nearest
-    // (its `tag`) — the base-station target attributes every stretch to a
-    // site. Segments only (that envelope has no polygons).
-    function xrefNearestSegGrid(x, y, grid, cellM, pad) {
+    // v0.28/v0.39: like xrefDistGrid but also returns WHICH target item was
+    // nearest (its `tag` = {sid, site, ename, etype}) — every sample/point
+    // can then be attributed to a site + entity. Polygons and segments.
+    function xrefNearestGrid(x, y, grid, cellM, pad) {
         let best = Infinity, tag = null;
         const qid = ++xrefQueryId;
         const gx = Math.floor(x / cellM), gy = Math.floor(y / cellM);
@@ -2135,6 +2137,16 @@
             for (let dy = -1; dy <= 1; dy++) {
                 const cell = grid.get((gx + dx) + ':' + (gy + dy));
                 if (!cell) continue;
+                for (const pg of cell.polys) {
+                    if (pg.__q === qid) continue;
+                    pg.__q = qid;
+                    if (x < pg.minX - pad || x > pg.maxX + pad || y < pg.minY - pad || y > pg.maxY + pad) continue;
+                    if (pointInRingXY(x, y, pg.xs, pg.ys)) return { d: 0, tag: pg.tag };
+                    for (let i = 0, j = pg.xs.length - 1; i < pg.xs.length; j = i++) {
+                        const c = nbSegPtClosest(x, y, pg.xs[j], pg.ys[j], pg.xs[i], pg.ys[i]);
+                        if (c.d < best) { best = c.d; tag = pg.tag; }
+                    }
+                }
                 for (const s of cell.segs) {
                     if (s.__q === qid) continue;
                     s.__q = qid;
@@ -2154,7 +2166,7 @@
             tag: tag || null,
         });
     }
-    function xrefEnvAddRing(env, ptsXY) {
+    function xrefEnvAddRing(env, ptsXY, tag) {
         const xs = [], ys = [];
         let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
         ptsXY.forEach(q => {
@@ -2164,7 +2176,7 @@
             if (q.y < minY) minY = q.y;
             if (q.y > maxY) maxY = q.y;
         });
-        if (xs.length > 2) env.polys.push({ xs, ys, minX, maxX, minY, maxY });
+        if (xs.length > 2) env.polys.push({ xs, ys, minX, maxX, minY, maxY, tag: tag || null });
     }
 
     async function runXref() {
@@ -2181,6 +2193,7 @@
         const b2m = B2FT / FT_PER_M;
         if (!(b2m > b1m)) { setStatus('band 2 must be larger than band 1'); return; }
         const perBase = {};   // sid → { name, lenM:{1,2,0}, pts:{1,2,0} } (bases mode)
+        if (xrefUsePicked && !fdSelected.size && (isBases || String(xrefTgtSel).startsWith('sites'))) { setStatus('"picked only" is on but nothing is picked — tick sites in 📦 Fleet Data or turn it off'); return; }
         xrefState = { running: true, result: null };
         renderPanel();
         try {
@@ -2228,7 +2241,7 @@
                         const c = (entityCoords(e) || [])[0];
                         if (!c || typeof c.lat !== 'number' || typeof c.lng !== 'number') return;
                         const q = proj.toXY(c);
-                        xrefEnvAddSeg(env, q, q, String(cands[i]));   // point = degenerate segment, tagged by site
+                        xrefEnvAddSeg(env, q, q, { sid: String(cands[i]), site: siteName(cands[i]), ename: e.name || 'base', etype: 'Base' });   // point = degenerate segment, tagged
                         found++;
                     });
                     if (found) { basesUsed += found; perBase[cands[i]] = { sid: cands[i], name: siteName(cands[i]), bases: found, lenM: { 0: 0, 1: 0, 2: 0 }, pts: { 0: 0, 1: 0, 2: 0 } }; }
@@ -2254,6 +2267,10 @@
                     return b && !b.empty && bboxGapFt(b, src.bbox) <= ftCfg.xrefB2 + marginFt;
                 });
                 if (!cands.length) notes.push('NO sites within range of this layer');
+                if (xrefUsePicked) {   // v0.39: a picked site with no Site Watch snapshot can't be placed — say so, never silently drop it
+                    const missing = Array.from(fdSelected).filter(id => !(nbIndex.bboxes[id] && !nbIndex.bboxes[id].empty));
+                    if (missing.length) notes.push(`${missing.length} picked site(s) have no Site Watch snapshot and were NOT checked: ${missing.slice(0, 8).map(id => siteName(id)).join(', ')}${missing.length > 8 ? '…' : ''} — run ⟳ Update index in the Overlap Sweep section`);
+                }
                 for (let i = 0; i < cands.length; i++) {
                     if (seq !== xrefSeq) return;
                     setStatus(`cross-ref: fetching site ${cands[i]} (${i + 1}/${cands.length})…`);
@@ -2261,16 +2278,18 @@
                     try { ents = await fetchSiteEntities(cands[i], false); }
                     catch (e) { notes.push(`site ${siteName(cands[i])} (#${cands[i]}) fetch failed — not counted as coverage`); continue; }
                     sitesUsed++;
+                    const sidTag = String(cands[i]), siteTag = siteName(cands[i]);
                     ents.forEach(e => {
                         if (useFp && e.type === 15 && Array.isArray(e.arcs)) {
+                            const tag = { sid: sidTag, site: siteTag, ename: e.name || `FP ${e.id}`, etype: 'FP' };
                             e.arcs.forEach(a => {
                                 if (a && a.point_a && a.point_b && typeof a.point_a.lat === 'number' && typeof a.point_b.lat === 'number') {
-                                    xrefEnvAddSeg(env, proj.toXY(a.point_a), proj.toXY(a.point_b));
+                                    xrefEnvAddSeg(env, proj.toXY(a.point_a), proj.toXY(a.point_b), tag);
                                 }
                             });
                         } else if (useFfz && e.type === 16) {
                             const cs = (entityCoords(e) || []).filter(p => p && typeof p.lat === 'number');
-                            if (cs.length > 2) xrefEnvAddRing(env, cs.map(p => proj.toXY(p)));
+                            if (cs.length > 2) xrefEnvAddRing(env, cs.map(p => proj.toXY(p)), { sid: sidTag, site: siteTag, ename: e.name || `FFZ ${e.id}`, etype: 'FFZ' });
                         }
                     });
                 }
@@ -2282,12 +2301,13 @@
                 tgtLabel = `KML "${tgt.name}"`;
                 tgt.features.forEach(f => {
                     const xy = f.pts.map(p => proj.toXY({ lat: p[0], lng: p[1] }));
+                    const tag = { sid: null, site: tgt.name, ename: f.name || '', etype: 'KML' };
                     if (f.type === 'poly') {
-                        xrefEnvAddRing(env, xy);
+                        xrefEnvAddRing(env, xy, tag);
                     } else if (f.type === 'line') {
-                        for (let i = 1; i < xy.length; i++) xrefEnvAddSeg(env, xy[i - 1], xy[i]);
+                        for (let i = 1; i < xy.length; i++) xrefEnvAddSeg(env, xy[i - 1], xy[i], tag);
                     } else {
-                        xrefEnvAddSeg(env, xy[0], xy[0]);   // point = degenerate segment
+                        xrefEnvAddSeg(env, xy[0], xy[0], tag);   // point = degenerate segment
                     }
                 });
             }
@@ -2330,14 +2350,13 @@
                 const ft = Math.round(d * FT_PER_M);
                 return ft < b1ft ? 1 : (ft < b2ft ? 2 : 0);
             };
-            // bases mode: distance + WHICH base, so lengths roll up per site
+            // v0.39: every query returns WHICH target item was nearest — points
+            // within the bands are listed with site / entity / distance, runs
+            // carry their site/entity, bases roll up per site.
             let lastTag = null;
-            const dist = (x, y) => {
-                if (!isBases) return xrefDistGrid(x, y, grid, cellM, pad);
-                const r = xrefNearestSegGrid(x, y, grid, cellM, pad);
-                lastTag = r.tag;
-                return r.d;
-            };
+            const dist = (x, y) => { const r = xrefNearestGrid(x, y, grid, cellM, pad); lastTag = r.tag; return r.d; };
+            const pointMatches = [];   // { name, lat, lng, band, ft, sid, site, ename, etype }
+            const PM_CAP = 5000;
             const finishRun = (run) => {
                 if (!run) return;
                 if (run.pts.length > 320) {   // decimate drawing pts, keep shape
@@ -2353,9 +2372,12 @@
                 if (seq !== xrefSeq) return;
                 if (f.type === 'point') {
                     const q = proj.toXY({ lat: f.pts[0][0], lng: f.pts[0][1] });
-                    const band = classify(dist(q.x, q.y));
+                    const dq = dist(q.x, q.y);
+                    const band = classify(dq);
                     pointHits[band]++;
-                    if (isBases && band && lastTag && perBase[lastTag]) perBase[lastTag].pts[band]++;
+                    if (isBases && band && lastTag && perBase[lastTag.sid]) perBase[lastTag.sid].pts[band]++;
+                    if (band && pointMatches.length < PM_CAP) pointMatches.push({ name: f.name || '', lat: f.pts[0][0], lng: f.pts[0][1], band, ft: Math.round(dq * FT_PER_M),
+                        sid: lastTag ? lastTag.sid : null, site: lastTag ? lastTag.site : '', ename: lastTag ? lastTag.ename : '', etype: lastTag ? lastTag.etype : '' });
                     if (pointMarks.length < 500) pointMarks.push({ lat: f.pts[0][0], lng: f.pts[0][1], band });
                     continue;
                 }
@@ -2378,7 +2400,7 @@
                         const lat = Pa[0] + (Pb[0] - Pa[0]) * t, lng = Pa[1] + (Pb[1] - Pa[1]) * t;
                         if (k > 0) {
                             bandLenM[band] += segLen / n; doneLenM += segLen / n;
-                            if (isBases && band && lastTag && perBase[lastTag]) perBase[lastTag].lenM[band] += segLen / n;
+                            if (isBases && band && lastTag && perBase[lastTag.sid]) perBase[lastTag.sid].lenM[band] += segLen / n;
                         }
                         if (!run || run.band !== band) {
                             // extend the outgoing run to the transition point
@@ -2386,7 +2408,7 @@
                             // this every color change left a one-step gap
                             if (run) run.pts.push([lat, lng]);
                             finishRun(run);
-                            run = { band, featName: f.name, pts: [[lat, lng]], lenM: 0 };
+                            run = { band, featName: f.name, pts: [[lat, lng]], lenM: 0, tag: band ? lastTag : null };
                         } else {
                             run.lenM += segLen / n;
                             run.pts.push([lat, lng]);
@@ -2402,13 +2424,18 @@
                 finishRun(run);
             }
             const topRuns = [...runs].sort((a, b) => b.lenM - a.lenM).slice(0, 60);
-            if (xrefSiteFilter.trim() && String(xrefTgtSel).startsWith('sites') || (isBases && xrefSiteFilter.trim())) tgtLabel += ` · sites matching "${xrefSiteFilter.trim()}"`;
+            if (isBases || String(xrefTgtSel).startsWith('sites')) {
+                if (xrefUsePicked) tgtLabel += ` · picked sites only (${fdSelected.size})`;
+                else if (xrefSiteFilter.trim()) tgtLabel += ` · sites matching "${xrefSiteFilter.trim()}"`;
+            }
+            pointMatches.sort((a, b) => (a.site || '').localeCompare(b.site || '') || a.ft - b.ft);
             const perBaseList = Object.values(perBase).sort((a, b) => (b.lenM[1] + b.lenM[2]) - (a.lenM[1] + a.lenM[2]) || (b.pts[1] + b.pts[2]) - (a.pts[1] + a.pts[2]));
             const result = {
                 at: Date.now(),
                 srcName: src.name, tgtLabel, sitesUsed,
                 mode: isBases ? 'bases' : 'coverage',
                 basesUsed, sitesNoBase: sitesNoBase.length, perBase: perBaseList,
+                pointMatches, pointMatchesCapped: pointMatches.length >= PM_CAP,
                 b1: B1FT, b2: B2FT,
                 stepFt: Math.round(step * FT_PER_M),
                 totalM: totalLenM, bandLenM,
@@ -2466,9 +2493,14 @@
                 + (pointsOnly ? td(b.pts[1]) + td(b.pts[2]) + td(b.pts[1] + b.pts[2]) : td(miN(b.lenM[1])) + td(miN(b.lenM[2])) + td(miN(b.lenM[1] + b.lenM[2])) + td(`${b.pts[1]}/${b.pts[2]}`)) + '</tr>'));
             out.push('</table><br>');
         }
+        if (r.pointMatches && r.pointMatches.length) {
+            out.push('<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px"><tr>' + ['Site', 'Site ID', 'Entity type', 'Entity', 'Feature', 'Distance ft', 'Band', 'Lat', 'Lng'].map(th).join('') + '</tr>');
+            r.pointMatches.forEach(m => out.push('<tr>' + td(escapeHtml(m.site || '')) + td(m.sid || '') + td(escapeHtml(m.etype || '')) + td(escapeHtml(m.ename || '')) + td(escapeHtml(m.name || '')) + td(m.ft) + td(m.band === 1 ? l1 : l2) + td(m.lat.toFixed(6)) + td(m.lng.toFixed(6)) + '</tr>'));
+            out.push('</table><br>');
+        }
         if (r.runsTotal) {
-            out.push('<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px"><tr>' + ['#', 'Band', 'Length mi', 'Feature', 'Lat', 'Lng'].map(th).join('') + '</tr>');
-            (r.topRuns || r.runs).slice(0, 40).forEach((run, i) => { const mid = run.pts[Math.floor(run.pts.length / 2)]; out.push('<tr>' + td(i + 1) + td(run.band === 1 ? l1 : run.band === 2 ? l2 : 'beyond') + td(miN(run.lenM)) + td(escapeHtml(run.featName || '')) + td(mid[0].toFixed(6)) + td(mid[1].toFixed(6)) + '</tr>'); });
+            out.push('<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px"><tr>' + ['#', 'Band', 'Length mi', 'Feature', 'Nearest site', 'Nearest entity', 'Lat', 'Lng'].map(th).join('') + '</tr>');
+            (r.topRuns || r.runs).slice(0, 40).forEach((run, i) => { const mid = run.pts[Math.floor(run.pts.length / 2)]; out.push('<tr>' + td(i + 1) + td(run.band === 1 ? l1 : run.band === 2 ? l2 : 'beyond') + td(miN(run.lenM)) + td(escapeHtml(run.featName || '')) + td(escapeHtml(run.tag ? run.tag.site || '' : '')) + td(escapeHtml(run.tag ? `${run.tag.etype || ''} ${run.tag.ename || ''}`.trim() : '')) + td(mid[0].toFixed(6)) + td(mid[1].toFixed(6)) + '</tr>'); });
             out.push('</table>');
         }
         return out.join('');
@@ -2499,8 +2531,11 @@
                 ${list.map(b => { const reach = pointsOnly ? b.pts[1] + b.pts[2] : b.lenM[1] + b.lenM[2]; const f = pointsOnly ? (x) => `${x}` : fmtMi; return `<tr style="border-top:1px solid rgba(255,255,255,0.06)"><td style="padding:4px 6px">${escapeHtml(b.name)} <span style="color:#555">#${b.sid}</span>${b.bases > 1 ? ` <span style="color:#888">×${b.bases}</span>` : ''} <span data-ft-link="${b.sid}" style="cursor:pointer;color:#5fb3ff">↗</span></td><td style="padding:4px 6px">${f(pointsOnly ? b.pts[1] : b.lenM[1])}</td><td style="padding:4px 6px">${f(pointsOnly ? b.pts[2] : b.lenM[2])}</td><td style="padding:4px 6px;font-weight:700;color:#5fff5f">${f(reach)}</td><td style="padding:4px 6px"><div style="height:8px;background:#0e1115;border-radius:4px;overflow:hidden"><div style="width:${Math.round(100 * reach / max)}%;height:100%;background:#5fff5f"></div></div></td>${pointsOnly ? '' : `<td style="padding:4px 6px;color:#aaa">${b.pts[1]}/${b.pts[2]}</td>`}</tr>`; }).join('')}
                 ${zero ? `<tr><td colspan="6" style="padding:4px 6px;color:#666">+${zero} base(s) with nothing in range</td></tr>` : ''}</table></div>`;
         })() : '';
+        const matchesHtml = (r.pointMatches && r.pointMatches.length) ? `<div style="margin-top:14px"><div style="color:#7adfe6;font-weight:700;font-size:11px;margin-bottom:4px">POINTS WITHIN ≤${r.b2.toLocaleString()} FT <span style="color:#888;font-weight:400">(${r.pointMatches.length}${r.pointMatchesCapped ? '+, capped' : ''} · site → entity → feature → distance · click 🎯)</span></div>
+            <div style="max-height:34vh;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><tr style="color:#888;text-align:left;position:sticky;top:0;background:#1f2228"><th style="padding:4px 6px">Site</th><th style="padding:4px 6px">Entity</th><th style="padding:4px 6px">Feature</th><th style="padding:4px 6px">Distance</th><th style="padding:4px 6px"></th></tr>
+            ${r.pointMatches.slice(0, 1500).map((m, i) => `<tr data-xrs-pt="${i}" style="border-top:1px solid rgba(255,255,255,0.05);cursor:pointer"><td style="padding:3px 6px;color:#7adfe6">${escapeHtml(m.site || '—')}</td><td style="padding:3px 6px"><span style="color:#888;font-size:10px">${escapeHtml(m.etype || '')}</span> ${escapeHtml(m.ename || '—')}</td><td style="padding:3px 6px;color:#aaa">${escapeHtml(m.name || '(unnamed)')}</td><td style="padding:3px 6px;font-weight:700;color:${XREF_COLORS[m.band]}">${m.ft.toLocaleString()} ft</td><td style="padding:3px 6px">🎯</td></tr>`).join('')}</table>${r.pointMatches.length > 1500 ? `<div style="color:#666;font-size:11px;padding:4px 6px">…${r.pointMatches.length - 1500} more in Copy → Sheets</div>` : ''}</div></div>` : '';
         const runsHtml = r.runsTotal ? `<div style="margin-top:14px"><div style="color:#7adfe6;font-weight:700;font-size:11px;margin-bottom:4px">LONGEST STRETCHES <span style="color:#888;font-weight:400">(${Math.min(20, r.runsTotal)} of ${r.runsTotal} · click 🎯 to fly there)</span></div>
-            ${(r.topRuns || r.runs).slice(0, 20).map((run, i) => `<div data-xrs-fly="${i}" style="display:flex;gap:10px;align-items:center;padding:3px 6px;border-top:1px solid rgba(255,255,255,0.05);cursor:pointer"><span style="width:180px;color:${XREF_COLORS[run.band]};font-weight:700">${run.band === 1 ? l1 : run.band === 2 ? l2 : 'beyond'}</span><span style="width:80px;font-weight:700">${fmtMi(run.lenM)}</span><span style="flex:1;color:#aaa;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(run.featName || '')}</span><span>🎯</span></div>`).join('')}</div>` : '';
+            ${(r.topRuns || r.runs).slice(0, 20).map((run, i) => `<div data-xrs-fly="${i}" style="display:flex;gap:10px;align-items:center;padding:3px 6px;border-top:1px solid rgba(255,255,255,0.05);cursor:pointer"><span style="width:180px;color:${XREF_COLORS[run.band]};font-weight:700">${run.band === 1 ? l1 : run.band === 2 ? l2 : 'beyond'}</span><span style="width:80px;font-weight:700">${fmtMi(run.lenM)}</span><span style="flex:1;color:#aaa;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(run.featName || '')}${run.tag ? ` <span style="color:#7adfe6">→ ${escapeHtml(run.tag.site || '')}</span> <span style="color:#888">${escapeHtml(`${run.tag.etype || ''} ${run.tag.ename || ''}`.trim())}</span>` : ''}</span><span>🎯</span></div>`).join('')}</div>` : '';
         card.innerHTML = `
             <div style="padding:10px 14px;background:#14171b;border-bottom:1px solid rgba(255,255,255,0.1);display:flex;align-items:center;gap:10px">
                 <span style="font-size:16px">📐</span><span style="font-weight:700;color:#7adfe6">Cross-reference report</span>
@@ -2526,6 +2561,7 @@
                     ${(!pointsOnly && r.pointsTotal) ? `<div style="color:#888;font-size:11px;margin-top:6px">Points in the layer: ${l1} ${P[1]} · ${l2} ${P[2]} · beyond ${P[0]} of ${r.pointsTotal}</div>` : ''}
                 </div>
                 ${perBaseHtml}
+                ${matchesHtml}
                 ${runsHtml}
                 ${r.notes.length ? `<div style="margin-top:12px;color:#888;font-size:11px">${r.notes.map(x => `• ${escapeHtml(x)}`).join('<br>')}</div>` : ''}
             </div>`;
@@ -2538,6 +2574,8 @@
         card.addEventListener('click', (ev) => {
             const fly = ev.target.closest('[data-xrs-fly]');
             if (fly) { const run = (r.topRuns || r.runs)[Number(fly.getAttribute('data-xrs-fly'))]; if (run) flyToBbox(ptsBbox(run.pts)); return; }
+            const pt = ev.target.closest('[data-xrs-pt]');
+            if (pt) { const m = r.pointMatches[Number(pt.getAttribute('data-xrs-pt'))]; if (m) flyToBbox({ minLat: m.lat - 0.001, maxLat: m.lat + 0.001, minLng: m.lng - 0.0013, maxLng: m.lng + 0.0013 }); return; }
             const link = ev.target.closest('[data-ft-link]');
             if (link) window.open(siteSetupUrl(link.getAttribute('data-ft-link')), '_blank');
         });
@@ -2579,6 +2617,12 @@
                 const zero = r.perBase.filter(b => b.pts[1] + b.pts[2] === 0).length;
                 if (zero) lines.push(`  (+${zero} base(s) with no points in range)`);
             }
+            if (r.pointMatches && r.pointMatches.length) {
+                lines.push('');
+                lines.push(`Points within ≤${r.b2.toLocaleString()} ft (${r.pointMatches.length}${r.pointMatchesCapped ? '+, capped' : ''}) — site | entity | feature | distance | band:`);
+                r.pointMatches.slice(0, 500).forEach(m => lines.push(`  ${m.site || '—'} | ${m.etype ? m.etype + ' ' : ''}${m.ename || '—'} | ${m.name || '(unnamed)'} | ${m.ft.toLocaleString()} ft | ${m.band === 1 ? `≤${r.b1.toLocaleString()}` : `≤${r.b2.toLocaleString()}`} @ ${m.lat.toFixed(6)}, ${m.lng.toFixed(6)}`));
+                if (r.pointMatches.length > 500) lines.push(`  …${r.pointMatches.length - 500} more (📊 Report → Copy → Sheets has them all)`);
+            }
             r.notes.forEach(nn => lines.push(`Note: ${nn}`));
             return lines.join('\n');
         }
@@ -2604,13 +2648,20 @@
             lines.push('');
             lines.push(`Points: ${r.pointsTotal} total — ≤${r.b1} ft: ${r.pointHits[1]} · ${r.b1}–${r.b2} ft: ${r.pointHits[2]} · beyond: ${r.pointHits[0]}`);
         }
+        if (r.pointMatches && r.pointMatches.length) {
+            lines.push('');
+            lines.push(`Points within ≤${r.b2.toLocaleString()} ft (${r.pointMatches.length}${r.pointMatchesCapped ? '+, capped' : ''}) — site | entity | feature | distance | band:`);
+            r.pointMatches.slice(0, 500).forEach(m => lines.push(`  ${m.site || '—'} | ${m.etype ? m.etype + ' ' : ''}${m.ename || '—'} | ${m.name || '(unnamed)'} | ${m.ft.toLocaleString()} ft | ${m.band === 1 ? `≤${r.b1.toLocaleString()}` : `≤${r.b2.toLocaleString()}`} @ ${m.lat.toFixed(6)}, ${m.lng.toFixed(6)}`));
+            if (r.pointMatches.length > 500) lines.push(`  …${r.pointMatches.length - 500} more (📊 Report → Copy → Sheets has them all)`);
+        }
         if (r.runsTotal) {
         lines.push('');
         lines.push(`Longest stretches (${Math.min(40, r.runsTotal)} of ${r.runsTotal}):`);
         (r.topRuns || r.runs).slice(0, 40).forEach((run, i) => {
             const tag = run.band === 1 ? `≤${r.b1}ft` : (run.band === 2 ? `≤${r.b2}ft` : `>${r.b2}ft`);
             const mid = run.pts[Math.floor(run.pts.length / 2)];
-            lines.push(`  ${i + 1}. [${tag}] ${fmtMi(run.lenM)}${run.featName ? ` — ${run.featName}` : ''} @ ${mid[0].toFixed(6)}, ${mid[1].toFixed(6)}`);
+            const near = run.tag ? ` → ${run.tag.site ? run.tag.site + ' · ' : ''}${run.tag.etype ? run.tag.etype + ' ' : ''}${run.tag.ename || ''}` : '';
+            lines.push(`  ${i + 1}. [${tag}] ${fmtMi(run.lenM)}${run.featName ? ` — ${run.featName}` : ''}${near} @ ${mid[0].toFixed(6)}, ${mid[1].toFixed(6)}`);
         });
         }
         r.notes.forEach(n => lines.push(`Note: ${n}`));
@@ -3253,7 +3304,8 @@
             + `<label>Source <select data-xr="src" style="${sel}">${srcOpts || '<option value="">(load a KML first)</option>'}</select></label>`
             + `<label>vs <select data-xr="tgt" style="${sel}">${tgtOpts}</select></label>`
             + (xrefTgtSel !== 'bases' && !String(xrefTgtSel).startsWith('sites') ? ''
-                : `<label title="Only sites whose NAME contains one of these comma-separated words count (e.g. Exxon, Diamondback). Empty = every site you can access.">sites: <input type="text" id="aim-ft-xr-sites" value="${escapeHtml(xrefSiteFilter)}" placeholder="all (e.g. Exxon)" style="width:110px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;padding:1px 4px;"></label>`)
+                : `<label title="Only sites whose NAME contains one of these comma-separated words count (e.g. Exxon, Diamondback). Empty = every site you can access.">sites: <input type="text" id="aim-ft-xr-sites" value="${escapeHtml(xrefSiteFilter)}" placeholder="all (e.g. Exxon)" ${xrefUsePicked ? 'disabled' : ''} style="width:110px;background:#0e1218;color:${xrefUsePicked ? '#666' : '#ddd'};border:1px solid #2a3140;border-radius:3px;font:inherit;padding:1px 4px;"></label>`
+                  + `<label title="Use the sites ticked in 📦 Fleet Data as the ONLY targets" style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="checkbox" id="aim-ft-xr-picked" ${xrefUsePicked ? 'checked' : ''}> picked only <span style="color:${fdSelected.size ? '#5fff5f' : '#888'}">(${fdSelected.size})</span></label>`)
             + (xrefTgtSel === 'bases'
                 ? `<label title="Tattu one-way range from the base">Tattu ≤<input type="number" data-ft-num="xrefBaseB1" value="${ftCfg.xrefBaseB1}" min="1000" max="60000" step="500" style="${num};width:64px"> ft</label>`
                   + `<label title="Tulip one-way range from the base">Tulip ≤<input type="number" data-ft-num="xrefBaseB2" value="${ftCfg.xrefBaseB2}" min="1000" max="80000" step="500" style="${num};width:64px"> ft</label>`
@@ -3280,7 +3332,7 @@
             const f = (x) => pointsOnly ? `${x} pts` : fmtMi(x);
             const l1 = bases ? 'Tattu' : `≤${r.b1} ft`, l2 = bases ? 'Tulip only' : `${r.b1}–${r.b2} ft`;
             rows.push(`<div style="padding:6px 10px;border-bottom:1px solid #222834;line-height:1.6">`
-                + `<div>"${escapeHtml(r.srcName)}" <span style="color:#888">vs</span> ${escapeHtml(r.tgtLabel)} <span style="color:#888">· ${pointsOnly ? `${r.pointsTotal} points` : fmtMi(r.totalM)}${r.sitesUsed ? ` · ${r.sitesUsed} sites` : ''}</span></div>`
+                + `<div>"${escapeHtml(r.srcName)}" <span style="color:#888">vs</span> ${escapeHtml(r.tgtLabel)} <span style="color:#888">· ${pointsOnly ? `${r.pointsTotal} points` : fmtMi(r.totalM)}${r.sitesUsed ? ` · ${r.sitesUsed} sites` : ''}${r.pointMatches && r.pointMatches.length ? ` · <span style="color:#5fff5f">${r.pointMatches.length} matched point(s) listed in 📊 Report</span>` : ''}</span></div>`
                 + `<div><b style="color:#5fff5f;font-size:14px">${f(v(1) + v(2))} (${pct(v(1) + v(2), total)})</b> <span style="color:#888">${bases ? 'reachable from a base without shielding' : 'inspectable from existing coverage'}</span>`
                 + ` — <span style="color:${XREF_COLORS[1]}">${l1} ${f(v(1))}</span> · <span style="color:${XREF_COLORS[2]}">${l2} ${f(v(2))}</span> · <span style="color:${XREF_COLORS[0]}">beyond ${f(v(0))}</span></div>`
                 + `<div style="color:#888">📊 Report = the full breakdown${bases ? ' per base' : ''}${r.runsTotal ? ' + longest stretches (🎯 fly-to)' : ''} · the map shows every stretch colour-coded</div>`
@@ -4679,7 +4731,7 @@
 
             // Delegated — the body is rebuilt on every render, the root never is
             panelEl.addEventListener('click', (ev) => {
-                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad],input[data-fc-thr]')) return;   // checkbox/color/select → change handler
+                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad],input[data-fc-thr],#aim-ft-xr-picked')) return;   // checkbox/color/select → change handler
                 const clAll = ev.target.closest('[data-ft-clients]');
                 if (clAll) {
                     if (clAll.getAttribute('data-ft-clients') === 'all') {
@@ -4898,6 +4950,7 @@
                 // 6. client select-all acts on the SHOWN rows of that client (what the header count shows)
                 if (t.hasAttribute && t.hasAttribute('data-fd-clientsel')) { const cl = t.getAttribute('data-fd-clientsel'); const ids = fdVisibleSiteIds().filter(id => fdClientOfId(id) === cl); ids.forEach(id => { if (t.checked) fdSelected.add(id); else fdSelected.delete(id); }); fdRenderKeepScroll(); return; }
                 if (t.hasAttribute && t.hasAttribute('data-fc-thr')) { const k = t.getAttribute('data-fc-thr'); const v = Number(t.value); if (isFinite(v) && v >= 0) { ftCfg.fc[k] = v; saveCfg(); } return; }
+                if (t.id === 'aim-ft-xr-picked') { xrefUsePicked = !!t.checked; renderPanel(); return; }
                 if (t.hasAttribute && t.hasAttribute('data-kx-inc')) { kxInclude[t.getAttribute('data-kx-inc')] = !!t.checked; return; }
                 if (t.hasAttribute && t.hasAttribute('data-kx-mode')) { kxMode = t.value === '3D' ? '3D' : '2D'; return; }
                 if (t.hasAttribute && t.hasAttribute('data-kx-pad')) { if (t.value.trim() === '') return; const v = Number(t.value); if (isFinite(v) && v >= 0) kxCirclePadFt = v; return; }
