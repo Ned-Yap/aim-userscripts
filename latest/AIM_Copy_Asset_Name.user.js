@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.298
+// @version      4.299
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.298';
+    const SCRIPT_VERSION = '4.299';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -20667,6 +20667,9 @@
     const GMT_TYPE_COLORS = { general: '#c39bd3', tower: '#ff8a80', hazard: '#ffd400', building: '#7adfe6', pole: '#ffb020' };
     const GMT_CLICK_PX = 6;                          // mouseup within this many px of mousedown = a click (a drag = pan)
     const GMT_MAX_NUMBER_SCAN = 100000;              // "#" search cap — a template that can't find a free name in 100k fails loudly
+    const GMT_RINGS_ON_KEY = 'aim_gmt_rings_on';     // GM: '1' | '0' — show/hide every template ring
+    let gmtRingsOn = true;
+    try { gmtRingsOn = GM_getValue(GMT_RINGS_ON_KEY, '1') !== '0'; } catch (e) { console.warn(`${TAG} 📌 rings pref read failed:`, e); }
     let gmt = {
         siteID: null,                                // site the drawn session markers belong to
         templates: [],
@@ -20679,6 +20682,8 @@
         pending: 0,
         status: '',
         pos: null,                                   // {left, top} after the user drags the panel
+        templatesLoaded: false,
+        ringLayers: [], ringSig: '', ringMap: null,  // ⭕ radius rings drawn around template-matched GMs
         _container: null, _onDown: null, _onUp: null, _onClick: null, _onDbl: null, _onKey: null,
         _down: null, _suppressClickUntil: 0,
     };
@@ -20687,8 +20692,18 @@
         const heightFt = Number(t.heightFt);
         const start = Number(t.start);
         const pad = Number(t.pad);
+        const r = (t.ring && typeof t.ring === 'object') ? t.ring : {};
+        const dist = Number(r.dist), opacity = Number(r.opacity);
+        const ring = {
+            on: !!r.on,
+            dist: (isFinite(dist) && dist > 0) ? dist : 0.5,
+            unit: r.unit === 'ft' ? 'ft' : 'mi',
+            color: /^#[0-9a-f]{6}$/i.test(String(r.color || '')) ? String(r.color).toLowerCase() : '#f020a0',
+            opacity: (isFinite(opacity) && opacity >= 0 && opacity <= 1) ? Math.round(opacity * 100) / 100 : 0.25,
+            cross: r.cross !== false,
+        };
         return {
-            id: String(t.id || `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`),
+            id: String(t.id || gmtNewId()),
             label: String(t.label || '').trim() || 'Untitled',
             name: String(t.name || '').trim() || 'Marker #',
             type,
@@ -20696,8 +20711,10 @@
             heightFt: (isFinite(heightFt) && heightFt >= 0) ? heightFt : 0,
             start: (Number.isInteger(start) && start >= 0) ? start : 1,
             pad: (Number.isInteger(pad) && pad >= 0 && pad <= 6) ? pad : 0,
+            ring,
         };
     }
+    function gmtNewId() { return `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; }
     function gmtLoadTemplates() {
         try {
             const raw = GM_getValue(GMT_TEMPLATES_KEY, '');
@@ -20706,6 +20723,7 @@
         } catch (e) { console.warn(`${TAG} 📌 template load failed:`, e); gmt.templates = []; }
         if (gmt.activeId && !gmt.templates.some(t => t.id === gmt.activeId)) gmt.activeId = null;
         if (!gmt.activeId && gmt.templates.length) gmt.activeId = gmt.templates[0].id;
+        gmt.templatesLoaded = true;
     }
     function gmtSaveTemplates() {
         try { GM_setValue(GMT_TEMPLATES_KEY, JSON.stringify(gmt.templates)); }
@@ -20747,6 +20765,12 @@
         if (liteBlockedWrite('stamp GM')) return null;
         const csrf = getCsrfToken();
         if (!csrf) { showToast('No CSRF token yet — make one native save/edit anywhere in Percepto, then retry', 'rgba(255,96,96,0.55)'); return null; }
+        // The save invalidator wipes mapObjectsBySite after every POST /map_objects/
+        // (ours included) — re-ensure it so "#" is checked against the live site.
+        if (!mapObjectsBySite[sid] || !mapObjectsBySite[sid].entities) {
+            try { await fetchMapObjects(sid, true); } catch (e) { console.warn(`${TAG} 📌 entity refetch failed:`, e); }
+            if (!mapObjectsBySite[sid] || !mapObjectsBySite[sid].entities) { showToast('Could not load site entities — not placing (name uniqueness unverifiable)', 'rgba(255,96,96,0.55)'); return null; }
+        }
         const next = gmtNextName(t, sid, srcName);
         if (!next) { console.warn(`${TAG} 📌 no free name for template "${t.label}" (pattern "${t.name}")`); showToast(`No free name for "${t.label}" — change its pattern`, 'rgba(255,96,96,0.55)'); return null; }
         let siteCfg = null;
@@ -20820,6 +20844,7 @@
         const csrf = getCsrfToken();
         if (!csrf) { showToast('No CSRF token — cannot delete', 'rgba(255,96,96,0.55)'); return; }
         const ok = await gmtDeletePlaced(p, csrf);
+        gmt.ringSig = ''; gmtRingsRebuild();
         showToast(ok ? `↩ Deleted "${p.name}"` : 'Undo failed — see console', ok ? undefined : 'rgba(255,96,96,0.55)');
         gmtRenderPanel();
     }
@@ -20882,6 +20907,7 @@
                     gmt.placed.push({ id: res.id, name: res.name, lat: ll.lat, lng: ll.lng, siteID: sid, layer });
                     showToast(`📌 ${res.name} created`);
                     gmtSetStatus(`✓ ${res.name}`);
+                    gmt.ringSig = ''; gmtRingsRebuild();
                 } else gmtSetStatus('last placement failed — see console');
             } catch (e) {
                 console.warn(`${TAG} 📌 place failed:`, e);
@@ -20971,6 +20997,90 @@
         const el = document.querySelector(`#${GMT_PANEL_ID} [data-gmt-status]`);
         if (el) el.textContent = gmt.status;
     }
+    // ---- ⭕ radius rings: drawn around every GM on the site that MATCHES a
+    // template with ring.on (same general_marker_type + name fits the pattern:
+    // "#" → digits, "{name}" → anything). The SOP case: an unshielded asset may
+    // be used when power lines sit within 0.5 mi on 3 sides — ring + N/S/E/W
+    // cross around each hazard GM makes that a glance. Rebuilt from the entity
+    // cache whenever the site / templates / GM set change (2 s tick), so rings
+    // survive reloads and also cover GMs created natively. Read-only overlay. ----
+    function gmtRingRegex(t) {
+        const esc = String(t.name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const src = esc.replace(/\\\{name\\\}/gi, '.+').replace(/#/g, '\\d+');
+        try { return new RegExp(`^${src.trim().replace(/\s+/g, '\\s+')}$`, 'i'); } catch (e) { return null; }
+    }
+    function gmtRingMeters(r) { return r.unit === 'ft' ? r.dist / M_TO_FT : r.dist * 1609.344; }
+    function gmtRingsClear() {
+        gmt.ringLayers.forEach(l => { try { l.remove(); } catch (e) {} });
+        gmt.ringLayers = [];
+        gmt.ringSig = '';
+    }
+    function gmtRingTemplates(draft) {
+        let list = gmt.templates;
+        if (draft) list = list.some(t => t.id === draft.id) ? list.map(t => t.id === draft.id ? draft : t) : list.concat([draft]);
+        return list.filter(t => t.ring && t.ring.on);
+    }
+    function gmtRingsRebuild(draft) {
+        const map = getLeafletMap();
+        const L = getLeafletL();
+        const sid = getCurrentSiteID();
+        gmtRingsClear();
+        if (!map || !L || !sid || !gmtRingsOn) return;
+        gmt.ringMap = map;
+        const tmpls = gmtRingTemplates(draft).map(t => ({ t, re: gmtRingRegex(t) })).filter(x => x.re);
+        if (!tmpls.length) return;
+        const bucket = mapObjectsBySite[sid];
+        const ents = (bucket && Array.isArray(bucket.entities)) ? bucket.entities : [];
+        let n = 0;
+        ents.forEach(g => {
+            if (!g || g.type !== 19 || !Array.isArray(g.coords) || !g.coords[0] || typeof g.coords[0].lat !== 'number') return;
+            const gType = String(g.general_marker_type || 'general').toLowerCase();
+            const hit = tmpls.find(x => x.t.type === gType && x.re.test(String(g.name || '').trim()));
+            if (!hit) return;
+            const r = hit.t.ring;
+            const m = gmtRingMeters(r);
+            const c = g.coords[0];
+            try {
+                const circle = L.circle([c.lat, c.lng], { radius: m, color: r.color, weight: 1.5, opacity: Math.min(1, r.opacity + 0.45), fillColor: r.color, fillOpacity: r.opacity, interactive: false });
+                circle.addTo(map); gmt.ringLayers.push(circle);
+                if (r.cross) {
+                    const dLat = m / 111320, dLng = m / (111320 * Math.cos(c.lat * Math.PI / 180));
+                    const cross = L.polyline([[[c.lat - dLat, c.lng], [c.lat + dLat, c.lng]], [[c.lat, c.lng - dLng], [c.lat, c.lng + dLng]]], { color: r.color, weight: 1, opacity: Math.min(1, r.opacity + 0.3), dashArray: '4,6', interactive: false });
+                    cross.addTo(map); gmt.ringLayers.push(cross);
+                }
+                n++;
+            } catch (e) { console.warn(`${TAG} 📌 ring draw failed for "${g.name}":`, e); }
+        });
+        if (n) console.log(`${TAG} 📌 rings: ${n} drawn on site ${sid}${draft ? ' (live preview)' : ''}`);
+    }
+    function gmtRingsSig(sid) {
+        const bucket = mapObjectsBySite[sid];
+        const ents = (bucket && Array.isArray(bucket.entities)) ? bucket.entities : null;
+        const gms = ents ? ents.filter(g => g && g.type === 19).map(g => `${g.id}:${g.name}:${g.general_marker_type}:${g.coords && g.coords[0] ? `${g.coords[0].lat},${g.coords[0].lng}` : ''}`).join(';') : 'nocache';
+        return `${sid}|${gmtRingsOn ? 1 : 0}|${JSON.stringify(gmt.templates.map(t => [t.id, t.type, t.name, t.ring]))}|${gms}`;
+    }
+    function gmtRingsTick() {
+        try {
+            if (!gmt.templatesLoaded) gmtLoadTemplates();
+            const sid = getCurrentSiteID();
+            const map = getLeafletMap();
+            if (!sid || !map) { if (gmt.ringLayers.length) gmtRingsClear(); return; }
+            if (gmt.editing) return;                                              // live preview owns the rings while a form is open
+            const any = gmtRingsOn && gmt.templates.some(t => t.ring && t.ring.on);
+            if (!any) { if (gmt.ringLayers.length) gmtRingsClear(); return; }
+            if (!mapObjectsBySite[sid] && !fetchingSites.has(sid)) { fetchMapObjects(sid).catch(e => console.warn(`${TAG} 📌 rings entity fetch failed:`, e)); return; }
+            const sig = gmtRingsSig(sid);
+            if (sig === gmt.ringSig && gmt.ringMap === map) return;
+            gmtRingsRebuild();
+            gmt.ringSig = sig;
+        } catch (e) { console.warn(`${TAG} 📌 rings tick failed:`, e); }
+    }
+    function gmtSetRingsOn(v) {
+        gmtRingsOn = !!v;
+        try { GM_setValue(GMT_RINGS_ON_KEY, gmtRingsOn ? '1' : '0'); } catch (e) { console.warn(`${TAG} 📌 rings pref save failed:`, e); }
+        gmtRingsRebuild();
+        gmt.ringSig = '';
+    }
     // ---- panel ----
     function gmtEsc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
     function gmtOpenPanel() {
@@ -21003,6 +21113,7 @@
     }
     function gmtClosePanel() {
         if (gmt.armed) gmtArm(false);
+        if (gmt.editing) { gmt.editing = null; gmt.ringSig = ''; gmtRingsRebuild(); }
         const p = document.getElementById(GMT_PANEL_ID);
         if (p) p.remove();
     }
@@ -21048,7 +21159,11 @@
                     <label>Notes</label><textarea data-gmt-f="description" rows="3" placeholder="saved into the marker's notes/description">${gmtEsc(d.description)}</textarea>
                     <label>Height</label><div><input data-gmt-f="heightFt" type="number" min="0" step="1" value="${gmtEsc(d.heightFt)}" style="width:70px"> ft</div>
                     <label>Numbering</label><div>start at <input data-gmt-f="start" type="number" min="0" step="1" value="${gmtEsc(d.start)}" style="width:60px"> · pad to <input data-gmt-f="pad" type="number" min="0" max="6" step="1" value="${gmtEsc(d.pad)}" style="width:50px"> digits</div>
+                    <label style="color:#f070c0;">⭕ Ring</label><div><label style="display:inline-flex;gap:5px;align-items:center;cursor:pointer;"><input data-gmt-f="ringOn" type="checkbox" ${d.ring.on ? 'checked' : ''}> draw a radius ring around markers made from this template</label></div>
+                    <label>Radius</label><div><input data-gmt-f="ringDist" type="number" min="0" step="any" value="${gmtEsc(d.ring.dist)}" style="width:70px"> <select data-gmt-f="ringUnit"><option value="mi" ${d.ring.unit === 'mi' ? 'selected' : ''}>mi</option><option value="ft" ${d.ring.unit === 'ft' ? 'selected' : ''}>ft</option></select> · <label style="display:inline-flex;gap:4px;align-items:center;cursor:pointer;"><input data-gmt-f="ringCross" type="checkbox" ${d.ring.cross ? 'checked' : ''}> N/S/E/W cross</label></div>
+                    <label>Ring style</label><div style="display:flex;align-items:center;gap:6px;"><input data-gmt-f="ringColor" type="color" value="${gmtEsc(d.ring.color)}" style="width:38px;height:22px;padding:0;"> opacity <input data-gmt-f="ringOpacity" type="range" min="0" max="1" step="0.05" value="${gmtEsc(d.ring.opacity)}" style="width:90px;"> <span data-gmt-ringop>${gmtEsc(d.ring.opacity)}</span></div>
                 </div>
+                <div style="margin-top:4px;opacity:0.6;">Ring changes preview live on the map while you edit; existing markers that match the name pattern + type get one too.</div>
                 <div style="margin-top:4px;opacity:0.6;">Tokens: <code>#</code> = next free number · <code>{name}</code> = source entity's name (Bulk → 📌 GM from the SUM panel)</div>
                 <div style="margin-top:6px;color:#9ad;">Next name here: <strong data-gmt-preview>${preview ? gmtEsc(preview.name) : (haveEnts ? '(no free name)' : '…')}</strong></div>
                 <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
@@ -21062,7 +21177,8 @@
                 const on = t.id === gmt.activeId;
                 return `<div data-gmt-row="${t.id}" style="display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:5px;cursor:pointer;border:1px solid ${on ? 'rgba(195,155,211,0.7)' : 'transparent'};background:${on ? 'rgba(195,155,211,0.12)' : 'transparent'};">
                     <span style="width:10px;height:10px;border-radius:50%;background:${color};flex:none;"></span>
-                    <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><strong>${gmtEsc(t.label)}</strong> <span style="opacity:0.65">· ${gmtEsc(t.type)}${t.heightFt ? ` · ${t.heightFt} ft` : ''}</span><br><span style="color:#9ad;">→ ${nx ? gmtEsc(nx.name) : (haveEnts ? '(no free name)' : '…')}</span>${t.description ? `<br><span style="opacity:0.55;">${gmtEsc(t.description.slice(0, 60))}${t.description.length > 60 ? '…' : ''}</span>` : ''}</span>
+                    <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><strong>${gmtEsc(t.label)}</strong> <span style="opacity:0.65">· ${gmtEsc(t.type)}${t.heightFt ? ` · ${t.heightFt} ft` : ''}</span>${t.ring.on ? ` <span style="color:${t.ring.color};font-weight:600;">⭕ ${t.ring.dist} ${t.ring.unit}</span>` : ''}<br><span style="color:#9ad;">→ ${nx ? gmtEsc(nx.name) : (haveEnts ? '(no free name)' : '…')}</span>${t.description ? `<br><span style="opacity:0.55;">${gmtEsc(t.description.slice(0, 60))}${t.description.length > 60 ? '…' : ''}</span>` : ''}</span>
+                    <button data-gmt-act="ring" data-id="${t.id}" title="${t.ring.on ? 'Remove' : 'Add'} the radius ring for markers made from this template" style="background:none;border:none;color:${t.ring.on ? t.ring.color : '#667'};padding:0 3px;font-weight:700;">⭕</button>
                     <button data-gmt-act="edit" data-id="${t.id}" title="Edit" style="background:none;border:none;color:#7adfe6;padding:0 3px;">✎</button>
                     <button data-gmt-act="dup" data-id="${t.id}" title="Duplicate" style="background:none;border:none;color:#dfe9f0;padding:0 3px;">⧉</button>
                     <button data-gmt-act="del" data-id="${t.id}" title="Delete template" style="background:none;border:none;color:#ff8a80;padding:0 3px;">🗑</button>
@@ -21091,7 +21207,7 @@
         p.innerHTML = `
             <div data-gmt-drag style="padding:8px 12px;border-bottom:1px solid rgba(195,155,211,0.3);color:#c39bd3;font-weight:700;display:flex;justify-content:space-between;align-items:center;cursor:move;user-select:none;">
                 <span>📌 GM Stamper <span style="opacity:0.5;font-weight:400;">site ${gmtEsc(sid || '?')}</span></span>
-                <button data-gmt-act="close" style="background:none;border:none;color:#dfe9f0;font-size:14px;padding:0 4px;">✕</button>
+                <span><button data-gmt-act="rings-toggle" title="Show / hide every template's radius ring on the map" style="background:${gmtRingsOn ? 'rgba(240,32,160,0.2)' : 'none'};border:1px solid ${gmtRingsOn ? '#f070c0' : 'rgba(223,233,240,0.35)'};color:${gmtRingsOn ? '#f070c0' : '#889'};border-radius:5px;padding:1px 7px;font-weight:600;margin-right:6px;">⭕ Rings ${gmtRingsOn ? 'ON' : 'off'}</button><button data-gmt-act="close" style="background:none;border:none;color:#dfe9f0;font-size:14px;padding:0 4px;">✕</button></span>
             </div>
             <div style="padding:8px 12px;overflow-y:auto;">${body}</div>
             <div data-gmt-status style="padding:4px 12px 8px;color:#9ad;min-height:16px;">${gmtEsc(gmt.status)}</div>`;
@@ -21109,10 +21225,21 @@
         d.heightFt = Number(q('heightFt').value);
         d.start = Number(q('start').value);
         d.pad = Number(q('pad').value);
+        d.ring = {
+            on: q('ringOn').checked,
+            dist: Number(q('ringDist').value),
+            unit: q('ringUnit').value,
+            color: q('ringColor').value,
+            opacity: Number(q('ringOpacity').value),
+            cross: q('ringCross').checked,
+        };
+        const op = p.querySelector('[data-gmt-ringop]');
+        if (op) op.textContent = String(d.ring.opacity);
     }
     function gmtPanelInput(ev) {
         if (!gmt.editing) return;
         gmtReadForm();
+        if (ev && ev.target && /^ring/.test(ev.target.dataset.gmtF || '')) gmtRingsRebuild(gmtNormalizeTemplate(gmt.editing));   // live ring preview
         const sid = getCurrentSiteID();
         const prev = document.querySelector(`#${GMT_PANEL_ID} [data-gmt-preview]`);
         if (prev && sid && mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) {
@@ -21126,7 +21253,9 @@
             const custom = document.querySelector(`#${GMT_PANEL_ID} [data-gmt-f="typeCustom"]`);
             if (custom) { custom.style.display = sel.value === '__custom' ? '' : 'none'; if (sel.value === '__custom') custom.focus(); }
             gmtPanelInput(ev);
+            return;
         }
+        if (ev.target.closest && ev.target.closest('[data-gmt-f="ringUnit"], [data-gmt-f="ringOn"], [data-gmt-f="ringCross"]')) gmtPanelInput(ev);
     }
     function gmtPanelClick(ev) {
         const armBtn = ev.target.closest && ev.target.closest('[data-gmt-arm]');
@@ -21135,7 +21264,13 @@
         if (a) {
             const act = a.dataset.gmtAct, id = a.dataset.id;
             if (act === 'close') { gmtClosePanel(); return; }
-            if (act === 'new') { gmt.editing = { id: null, label: '', name: '', type: 'general', description: '', heightFt: 0, start: 1, pad: 0 }; gmtRenderPanel(); return; }
+            if (act === 'rings-toggle') { gmtSetRingsOn(!gmtRingsOn); gmtRenderPanel(); return; }
+            if (act === 'ring') {
+                const t = gmt.templates.find(x => x.id === id);
+                if (t) { t.ring.on = !t.ring.on; gmtSaveTemplates(); gmt.ringSig = ''; gmtRingsRebuild(); console.log(`${TAG} 📌 ring ${t.ring.on ? 'ON' : 'off'} for "${t.label}"`); gmtRenderPanel(); }
+                return;
+            }
+            if (act === 'new') { gmt.editing = gmtNormalizeTemplate({ id: gmtNewId(), label: '', name: '', type: 'general', description: '', heightFt: 0, start: 1, pad: 0, ring: { on: false } }); gmt.editing.label = ''; gmt.editing.name = ''; gmtRenderPanel(); return; }
             if (act === 'edit') { const t = gmt.templates.find(x => x.id === id); if (t) { gmt.editing = Object.assign({}, t); gmtRenderPanel(); } return; }
             if (act === 'dup') {
                 const t = gmt.templates.find(x => x.id === id);
@@ -21151,7 +21286,7 @@
                 }
                 return;
             }
-            if (act === 'cancel-edit') { gmt.editing = null; gmtRenderPanel(); return; }
+            if (act === 'cancel-edit') { gmt.editing = null; gmt.ringSig = ''; gmtRingsRebuild(); gmtRenderPanel(); return; }
             if (act === 'save-edit') {
                 gmtReadForm();
                 const d = gmt.editing;
@@ -21164,7 +21299,8 @@
                 gmt.activeId = t.id;
                 gmt.editing = null;
                 gmtSaveTemplates();
-                console.log(`${TAG} 📌 template saved: "${t.label}" pattern "${t.name}" type ${t.type}`);
+                gmt.ringSig = ''; gmtRingsRebuild();
+                console.log(`${TAG} 📌 template saved: "${t.label}" pattern "${t.name}" type ${t.type}${t.ring.on ? ` ring ${t.ring.dist} ${t.ring.unit}` : ''}`);
                 gmtRenderPanel();
                 return;
             }
@@ -21217,6 +21353,7 @@
         const sid = getCurrentSiteID();
         if (gmt.siteID && sid !== gmt.siteID) {
             gmtClearSession('site nav');
+            gmtRingsClear();
             gmt.siteID = sid;
             if (gmt.armed) gmtArm(false);
             const p = document.getElementById(GMT_PANEL_ID);
@@ -21339,6 +21476,7 @@
                     render();
                 }
                 st.running = false; st.done = true; render();
+                gmt.ringSig = ''; gmtRingsRebuild();
                 console.log(`${TAG} 📌 bulk: ${st.created.length} created, ${st.failed} failed`);
                 showToast(st.failed ? `GMs: ${st.created.length} created, ${st.failed} FAILED — see console` : `📌 ${st.created.length} GM${st.created.length === 1 ? '' : 's'} created — reload to see them natively`, st.failed ? 'rgba(255,96,96,0.55)' : undefined);
                 try { if (document.getElementById(GMT_PANEL_ID)) gmtRenderPanel(); } catch (err) {}
@@ -21364,9 +21502,10 @@
         document.body.appendChild(wrap);
     }
     function injectGmtMapButton(doc) {
+        gmtSiteTick();
+        gmtRingsTick();     // ⭕ rings are a read-only overlay — run in Lite too
         if (LITE) return;   // 📌 GM Stamper = site-write, CSM-only
         try {
-            gmtSiteTick();
             const tools = doc.querySelector('.map-tools');
             if (!tools) return;
             const existing = doc.getElementById(GMT_MAP_BTN_ID);
