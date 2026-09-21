@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.302
+// @version      4.303
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.302';
+    const SCRIPT_VERSION = '4.303';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -11733,7 +11733,7 @@
     // emergAlt/segLen/unshielded/notes) are known but OFF by default —
     // they'd be mostly-blank for most rows. They surface via the Columns ▾
     // menu's "Hidden" list, or get switched on by a built-in preset.
-    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'entId', 'subtype', 'equipment', 'state', 'assetAlt', 'assetHeightAgl', 'assetElevAsl', 'poiId', 'poleFeeder', 'poleUsage', 'poleIsSimple', 'gmGroup', 'parent', 'nestDepth', 'children', 'nestPath', 'altMin', 'altMax', 'emergAlt', 'altDelta', 'elevation', 'agl', 'segLen', 'area', 'route', 'battery', 'ptAlt', 'validated', 'waitApproved', 'unshielded', 'notes', 'droneName', 'droneId', 'lat', 'long', 'gps'];
+    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'entId', 'subtype', 'equipment', 'state', 'assetAlt', 'assetHeightAgl', 'assetElevAsl', 'poiId', 'poleFeeder', 'poleUsage', 'poleIsSimple', 'gmGroup', 'parent', 'root', 'nestDepth', 'children', 'nestPath', 'altMin', 'altMax', 'emergAlt', 'altDelta', 'elevation', 'agl', 'segLen', 'area', 'route', 'battery', 'ptAlt', 'validated', 'waitApproved', 'unshielded', 'notes', 'droneName', 'droneId', 'lat', 'long', 'gps'];
     const DEFAULT_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated', 'lat', 'long', 'gps'];
 
     // Load the persisted column order from GM storage. Falls back to the
@@ -11843,7 +11843,7 @@
         {
             name: 'Nested Assets',
             desc: 'Assets in tree order — each pad followed by the assets nested inside it (Parent / Depth / Children columns; sort by Parent or Depth to regroup).',
-            columnOrder: ['name', 'parent', 'nestDepth', 'children', 'nestPath', 'subtype', 'equipment', 'state'],
+            columnOrder: ['name', 'root', 'parent', 'nestDepth', 'children', 'nestPath', 'subtype', 'equipment', 'state'],
             typeFilter: ['3'], sortKey: 'nestPath', sortDir: 1, unitsFt: true,
         },
         {
@@ -12133,6 +12133,7 @@
             poleIsSimple: { label: 'Pole Simple', val: r => r.poleIsSimple == null ? '' : (r.poleIsSimple ? 'TRUE' : 'FALSE') },
             gmGroup: { label: 'GM Group', val: r => r.gmGroup || '' },
             parent: { label: 'Parent', val: r => r.parentName || '' },
+            root: { label: 'Root', val: r => r.rootName || '' },
             nestDepth: { label: 'Depth', val: r => r.nestDepth == null ? '' : String(r.nestDepth) },
             children: { label: 'Children', val: r => r.childCount == null ? '' : String(r.childCount) },
             nestPath: { label: 'Nest path', val: r => r.nestPath || '' },
@@ -15660,6 +15661,7 @@
                 nestDepth: null,        // 0 = root asset, 1 = child, 2 = grandchild …
                 childCount: null,       // direct children
                 nestPath: '',           // 'Pad › Flowline › Fully inside flowline' — sort by it for tree order
+                rootName: '',           // top-level ancestor (a root asset's own name) — sort by it to group whole pads
             };
             if (e.type === 3 && e.custom) {
                 const c = e.custom;
@@ -15688,6 +15690,7 @@
                     const chain = []; let cur = nn; const guard = new Set();
                     while (cur && !guard.has(cur.id)) { guard.add(cur.id); chain.unshift(cur.name); cur = cur.parentId === null ? null : nestTree.byId.get(cur.parentId); }
                     row.nestPath = chain.join(' › ');
+                    row.rootName = chain[0] || '';
                     row._nestOrphan = nn.orphan;
                     row._nestOutside = nn.outsideParent;
                 }
@@ -25780,6 +25783,7 @@
                 poleIsSimple: '(Assets) Pole Is Simple',
                 gmGroup:   'GM Group',
                 parent:    '(Assets) Parent asset',
+                root:      '(Assets) Root asset (top of the nest)',
                 nestDepth: '(Assets) Nest depth (0 = top level)',
                 children:  '(Assets) Child assets (count)',
                 nestPath:  '(Assets) Nest path (Pad › child › …)',
@@ -28045,6 +28049,7 @@
                 { key: 'gmGroup',   label: 'GM Group',       w: 120, num: false, dataKey: 'gmGroup' },
                 // #273 nested assets — sort by Parent to group children under their pad, by Depth for parents-first, by Nest path for tree order.
                 { key: 'parent',    label: 'Parent',         w: 140, num: false, dataKey: 'parentName' },
+                { key: 'root',      label: 'Root',           w: 140, num: false, dataKey: 'rootName' },
                 { key: 'nestDepth', label: 'Depth',          w: 55,  num: true,  dataKey: 'nestDepth' },
                 { key: 'children',  label: 'Children',       w: 70,  num: true,  dataKey: 'childCount' },
                 { key: 'nestPath',  label: 'Nest path',      w: 220, num: false, dataKey: 'nestPath' },
@@ -28747,7 +28752,7 @@
                                 : col.key === 'poleUsage' ? 'Pole usage (custom.pole_usage) — assets only'
                                 : 'Equipment = asset subtype minus any trailing state word (empty/unshielded/…)';
                         }
-                    } else if (col.key === 'parent' || col.key === 'nestPath') {
+                    } else if (col.key === 'parent' || col.key === 'root' || col.key === 'nestPath') {
                         // #273 nested assets — parent name / full nest path. Blank for non-assets. Right-click copies.
                         const v = r[col.dataKey] || '';
                         const warn = r._nestOrphan ? ' ⚠ parent not found on this site' : (r._nestOutside ? ' ⚠ centroid outside its parent' : '');
@@ -28757,7 +28762,7 @@
                             td.title = `${v}${warn} — Right-click: copy`;
                             td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(v, `Copied "${v}"`); };
                         } else {
-                            td.title = r.type === 3 ? (col.key === 'parent' ? 'Top-level asset (no parent)' : 'Nest path') : 'Nesting applies to assets only';
+                            td.title = r.type === 3 ? (col.key === 'parent' ? 'Top-level asset (no parent)' : col.key === 'root' ? 'Root asset' : 'Nest path') : 'Nesting applies to assets only';
                         }
                     } else if (col.key === 'nestDepth' || col.key === 'children') {
                         // #273 nested assets — depth (0 = root) / direct-child count. Right-aligned, blank for non-assets.

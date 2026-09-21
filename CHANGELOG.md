@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-21 — 🪆 Nested assets: Root column: AIM Site Setup Tools v4.303 (latest — dev only, feature #273)
+
+New **Root** SUM column (off by default, Columns ▾): the top-level asset of the nest — the pad for anything inside it, and the asset's own name when it is top level. Sort by it to keep every pad's whole family together regardless of depth; the **Nested Assets** preset now includes it.
+
 ## 2026-09-21 — 🪆 Nested assets: tag search: AIM Site Setup Tools v4.302 (latest — dev only, feature #273)
 
 The SUM search box now takes **tags** for nested assets: `parent:Pad` shows only the assets directly inside Pad, `root:Pad` shows Pad plus everything nested anywhere under it (children, grandchildren, …), and `depth:1` shows one nesting level (0 = top level). Combine with free text by putting the text first (`pump parent:Pad`). Multi-word names need no quotes (`parent:Well Pad 1`). A tag value matches an asset name exactly when that name exists on the site, otherwise as a substring (`parent:flow` finds children of Flowline).
