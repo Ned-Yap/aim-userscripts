@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.41
+// @version      0.42
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -34,7 +34,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.41';
+    const SCRIPT_VERSION = '0.42';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -3547,6 +3547,11 @@
     const MT_M2_PER_ACRE = 4046.8564224;
     let mtIndex = loadJson(KEY_METRICS, { shas: {}, mshas: {}, sites: {}, missions: {}, builtAt: 0, checkedAt: 0 });
     if (!mtIndex.shas || !mtIndex.sites) mtIndex = { shas: {}, mshas: {}, sites: {}, missions: {}, builtAt: 0, checkedAt: 0 };
+    // v0.42: schema stamp — when computeSetupMetrics gains fields, older per-site
+    // records must be recomputed: drop the setup shas so the next build re-reads
+    // every setup snapshot once (missions untouched).
+    const MT_SCHEMA = 2;
+    if (mtIndex.schema !== MT_SCHEMA) { mtIndex.shas = {}; mtIndex.schema = MT_SCHEMA; mtIndex.checkedAt = 0; saveMetricsIndex(); console.log(`${TAG} metrics index schema → ${MT_SCHEMA}: setup snapshots will be re-read on the next ▶ Build`); }
     if (!mtIndex.mshas) mtIndex.mshas = {};
     if (!mtIndex.missions) mtIndex.missions = {};
     function saveMetricsIndex() { gmSet(KEY_METRICS, JSON.stringify(mtIndex)); }
@@ -3603,6 +3608,7 @@
             ffzAcres: 0, ffzBandFtSum: 0, ffzBandN: 0, nfzAcres: 0,
             fpArcs: 0, fpM: 0, fpBandFtSum: 0, fpBandN: 0,
             gmTypes: {}, baseActive: 0,
+            apprArcs: 0, apprFps: 0, apprList: [],   // v0.42: arcs flagged wait_until_approved ("approval required")
         };
         const V = (k, e) => { m.valid[k][e.validated ? 0 : 1]++; };
         (entities || []).forEach(e => {
@@ -3633,12 +3639,15 @@
                 case 4: { m.counts.nfz++; V('nfz', e); m.nfzAcres += mtRingAreaM2(c) / MT_M2_PER_ACRE; break; }
                 case 15: {
                     m.counts.fp++; V('fp', e);
+                    let appr = 0, tot = 0;
                     (Array.isArray(e.arcs) ? e.arcs : []).forEach(a => {
                         if (!a) return;
-                        m.fpArcs++;
+                        m.fpArcs++; tot++;
+                        if (a.wait_until_approved) appr++;
                         if (typeof a.distance === 'number') m.fpM += a.distance;
                         if (typeof a.min_alt === 'number' && typeof a.max_alt === 'number') { m.fpBandFtSum += (a.max_alt - a.min_alt) * FT_PER_M; m.fpBandN++; }
                     });
+                    if (appr) { m.apprArcs += appr; m.apprFps++; m.apprList.push({ id: e.id, name: e.name || `FP ${e.id}`, appr, arcs: tot }); }
                     break;
                 }
                 case 19: { m.counts.gm++; V('gm', e); mtInc(m.gmTypes, String(e.general_marker_type || 'general')); break; }
@@ -3777,6 +3786,9 @@
         fpBand:    { label: 'FP band ft', get: r => r.s && r.s.fpBandN ? Math.round(r.s.fpBandFtSum / r.s.fpBandN) : null, title: 'Average flight-path arc altitude band', total: 'avg' },
         gmTypes:   { label: 'Marker types', get: r => r.s ? mtTop(r.s.gmTypes, 4) : '', text: true },
         unsh:      { label: 'Unshielded', get: r => r.s && r.s.unshielded },
+        // null (→ '—') when the record predates this check — a stale site must read "unknown", never 0
+        apprFp:    { label: '🛂 Approval FPs', get: r => (r.s && Array.isArray(r.s.apprList)) ? r.s.apprFps : null, title: 'Flight paths with at least one arc flagged "wait until approved" (approval required before flying); — = site not re-indexed since this check was added' },
+        apprArcs:  { label: 'Approval arcs', get: r => (r.s && Array.isArray(r.s.apprList)) ? r.s.apprArcs : null, title: 'Flight-path arcs flagged "wait until approved"' },
         notes:     { label: 'Notes', get: r => r.s && r.s.notes, title: 'Non-asset entities with a description' },
         equip:     { label: 'Equipment', get: r => r.s ? mtTop(r.s.equip, 5) : '', text: true },
         cats:      { label: 'Categories', get: r => r.s ? mtTop(r.s.cats, 5) : '', text: true, title: '"Cat:" from asset descriptions (Exxon taxonomy)' },
@@ -3807,11 +3819,11 @@
         stepTypes: { label: 'Step mix', get: r => r.m ? mtTop(r.m.stepTypes, 5) : '', text: true },
     };
     const MT_SETS = {
-        overview:   { label: 'Overview',   cols: ['name', 'client', 'status', 'assets', 'ffz', 'fp', 'nfz', 'gm', 'fpMi', 'missions', 'steps', 'vPct', 'snapAge'] },
-        setup:      { label: 'Site setup', cols: ['name', 'entities', 'assets', 'ffz', 'ffzAcres', 'ffzBand', 'fp', 'fpArcs', 'fpMi', 'fpBand', 'nfz', 'nfzAcres', 'gm', 'gmTypes', 'base', 'safe', 'unsh', 'notes'] },
+        overview:   { label: 'Overview',   cols: ['name', 'client', 'status', 'assets', 'ffz', 'fp', 'apprFp', 'nfz', 'gm', 'fpMi', 'missions', 'steps', 'vPct', 'snapAge'] },
+        setup:      { label: 'Site setup', cols: ['name', 'entities', 'assets', 'ffz', 'ffzAcres', 'ffzBand', 'fp', 'fpArcs', 'fpMi', 'fpBand', 'apprFp', 'apprArcs', 'nfz', 'nfzAcres', 'gm', 'gmTypes', 'base', 'safe', 'unsh', 'notes'] },
         assets:     { label: 'Assets',     cols: ['name', 'assets', 'equip', 'cats', 'stNormal', 'stHY', 'stEmpty', 'stInact', 'stUnsh', 'stUnreach'] },
         missions:   { label: 'Missions',   cols: ['name', 'missions', 'mActive', 'mInactive', 'steps', 'avgSteps', 'snaps', 'orbits', 'areaMaps', 'gem', 'mMi', 'mHrs', 'avgMi', 'stepTypes'] },
-        validation: { label: 'Validation', cols: ['name', 'vAsset', 'vFfz', 'vFp', 'vNfz', 'vGm', 'vPct', 'unsh'] },
+        validation: { label: 'Validation', cols: ['name', 'vAsset', 'vFfz', 'vFp', 'vNfz', 'vGm', 'vPct', 'unsh', 'apprFp', 'apprArcs'] },
         all:        { label: 'All columns', cols: Object.keys(MT_COLS) },
     };
     function mtPair(v) { return v ? `<span style="color:#5fff5f">${v[0]}</span>/<span style="color:${v[1] ? '#ff8585' : '#666'}">${v[1]}</span>` : '—'; }
@@ -3941,6 +3953,7 @@
             + tile('Sites', `${S.sites}`, '#7adfe6') + tile('Assets', S.assets, '#fff') + tile('FFZ', S.ffz, '#5fff5f') + tile('FP', S.fp, '#1ca0de') + tile('NFZ', S.nfz, '#ff5555') + tile('Markers', S.gm, '#c084fc')
             + tile('FP miles', S.fpMi.toFixed(0), '#1ca0de') + tile('Missions', S.missions, '#ffd54f') + tile('Steps', S.steps, '#ffd54f') + tile('Planned mi', S.mMi.toFixed(0), '#ffd54f') + tile('Planned h', S.mHrs.toFixed(0), '#ffd54f')
             + tile('Validated', S.vt ? `${Math.round(100 * S.vy / S.vt)}%` : '—', '#5fff5f')
+            + tile('🛂 Approval FPs', rows.some(r => r.s && Array.isArray(r.s.apprList)) ? rows.reduce((n, r) => n + ((r.s && Array.isArray(r.s.apprList)) ? r.s.apprFps : 0), 0) + (rows.some(r => r.s && !Array.isArray(r.s.apprList)) ? '<span style="color:#ffa030;font-size:11px" title="some sites not re-indexed since this check was added — ▶ Build metrics">*</span>' : '') : '—', '#ffa030')
             + '</div>'
             + '<div style="padding:4px 10px 6px;display:grid;grid-template-columns:1fr 1fr;gap:10px;border-bottom:1px solid #222834;">'
             + `<div><div style="color:#7adfe6;font-weight:bold;font-size:11px">EQUIPMENT (fleet, top 10)</div>${eq.map(([k, v]) => `<div style="display:flex;align-items:center;gap:6px;font-size:11px"><span style="width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#aaa">${escapeHtml(k)}</span><div style="flex:1;height:8px;background:#0e1218;border-radius:4px;overflow:hidden"><div style="width:${Math.round(100 * v / eqMax)}%;height:100%;background:#7adfe6"></div></div><span style="width:40px;text-align:right">${v}</span></div>`).join('') || '<span style="color:#666">—</span>'}</div>`
@@ -3960,6 +3973,7 @@
                     <div style="margin-top:2px"><span style="color:#888">States:</span> ${list(s.states)}</div>
                     ${Object.keys(s.cats).length ? `<div style="margin-top:2px"><span style="color:#888">Categories:</span> ${list(s.cats)}</div>` : ''}
                     <div style="margin-top:2px"><span style="color:#888">Marker types:</span> ${list(s.gmTypes)}</div>
+                    ${s.apprList && s.apprList.length ? `<div style="margin-top:2px;color:#ffa030">🛂 Approval-required FPs (${s.apprList.length}): ${s.apprList.map(f => `${escapeHtml(f.name)} <span style="color:#888">(${f.appr}/${f.arcs} arcs)</span>`).join(' · ')}</div>` : ''}
                     <div style="margin-top:2px"><span style="color:#888">Validated ✓/✗:</span> assets ${mtPair(s.valid.asset)} · FFZ ${mtPair(s.valid.ffz)} · FP ${mtPair(s.valid.fp)} · NFZ ${mtPair(s.valid.nfz)} · markers ${mtPair(s.valid.gm)}</div>` : ''}
                 </div>
                 <div>
@@ -3970,6 +3984,78 @@
             </div>
             <div style="margin-top:6px"><span data-ft-link="${r.id}" style="cursor:pointer;color:#5fb3ff">↗ open site setup</span></div>
         </td></tr>`;
+    }
+
+    // ---- v0.42: 🛂 approval-required flight paths (arcs flagged wait_until_approved) ----
+    function mtApprovalRows() {
+        const fps = [], sitesWith = new Set();
+        let stale = 0;
+        buildMetricsRows().forEach(r => {
+            if (!r.s) return;
+            if (mtIndex.schema !== MT_SCHEMA || !Array.isArray(r.s.apprList)) { stale++; return; }   // record predates the field
+            r.s.apprList.forEach(f => { fps.push({ sid: r.id, site: r.name, client: r.client, status: r.status, ageD: r.snapAgeD, name: f.name, id: f.id, appr: f.appr, arcs: f.arcs }); sitesWith.add(r.id); });
+        });
+        fps.sort((a, b) => a.site.localeCompare(b.site) || a.name.localeCompare(b.name));
+        return { fps, sites: sitesWith.size, stale };
+    }
+    let apprCardEl = null, apprCardKeyH = null;
+    function closeApprovalCard() {
+        if (apprCardEl) { try { apprCardEl.remove(); } catch (e) {} }
+        apprCardEl = null;
+        if (apprCardKeyH) { try { document.removeEventListener('keydown', apprCardKeyH, true); } catch (e) {} apprCardKeyH = null; }
+    }
+    function openApprovalCard() {
+        closeApprovalCard();
+        const A = mtApprovalRows();
+        const indexed = Object.keys(mtIndex.sites).length;
+        const needRebuild = !Object.keys(mtIndex.shas).length && indexed > 0;   // schema bump dropped the shas → ▶ Build re-reads
+        const csv = ['site_id,site,client,status,flight_path,fp_id,approval_arcs,total_arcs,indexed_days_ago'].concat(A.fps.map(f => [f.sid, f.site, f.client, f.status, f.name, f.id, f.appr, f.arcs, f.ageD].map(v => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`).join(','))).join('\n');
+        const th = (v) => `<th style="background:#14171b;color:#fff;padding:6px 8px;border:1px solid #444;text-align:left">${escapeHtml(v)}</th>`;
+        const td = (v) => `<td style="padding:5px 8px;border:1px solid #444">${v}</td>`;
+        const sheets = `<p><b>AIM Fleet Tools — approval-required flight paths</b> — ${escapeHtml(new Date().toLocaleString())} — ${A.fps.length} flight path(s) on ${A.sites} site(s)</p>`
+            + '<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px"><tr>' + ['Site', 'Site ID', 'Client', 'Status', 'Flight path', 'FP ID', 'Approval arcs', 'Total arcs', 'Indexed (d ago)'].map(th).join('') + '</tr>'
+            + A.fps.map(f => '<tr>' + td(`<a href="${siteSetupUrl(f.sid)}" style="color:#1a73e8">${escapeHtml(f.site)}</a>`) + td(f.sid) + td(escapeHtml(f.client || '')) + td(escapeHtml(f.status || '')) + td(escapeHtml(f.name)) + td(f.id) + td(f.appr) + td(f.arcs) + td(f.ageD == null ? '' : f.ageD) + '</tr>').join('') + '</table>';
+        const card = document.createElement('div');
+        card.id = 'aim-ft-appr-card';
+        card.style.cssText = `position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:860px;max-width:95vw;max-height:88vh;background:#1f2228;border:1px solid rgba(255,160,48,0.55);border-radius:10px;color:#e6e6e6;z-index:2147480002;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;box-shadow:0 8px 32px rgba(0,0,0,0.7);display:flex;flex-direction:column;overflow:hidden`;
+        const tile = (label, val, color) => `<div style="background:#14171b;border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:8px 12px;min-width:110px"><div style="color:#888;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">${label}</div><div style="color:${color || '#e6e6e6'};font-size:20px;font-weight:700">${val}</div></div>`;
+        let bySite = '';
+        if (A.fps.length) {
+            let cur = null;
+            A.fps.forEach(f => {
+                if (f.sid !== cur) { cur = f.sid; bySite += `<tr style="background:#181b21"><td colspan="4" style="padding:5px 8px;color:#7adfe6;font-weight:700">${escapeHtml(f.site)} <span style="color:#555">#${f.sid}</span> <span data-ft-link="${f.sid}" style="cursor:pointer;color:#5fb3ff">↗</span>${f.status && statusTag(f.status) ? ` <span style="color:#ffa030;font-weight:400">${escapeHtml(f.status)}</span>` : ''} <span style="color:#666;font-weight:400">· indexed ${f.ageD == null ? '?' : f.ageD + ' d ago'}</span></td></tr>`; }
+                bySite += `<tr style="border-top:1px solid rgba(255,255,255,0.05)"><td style="padding:4px 8px 4px 24px">${escapeHtml(f.name)}</td><td style="padding:4px 8px;color:#666">#${f.id}</td><td style="padding:4px 8px;color:#ffa030;font-weight:700">${f.appr} of ${f.arcs} arc${f.arcs === 1 ? '' : 's'}</td><td style="padding:4px 8px;color:#888">${f.appr === f.arcs ? 'whole path' : 'partial'}</td></tr>`;
+            });
+        }
+        card.innerHTML = `
+            <div style="padding:10px 14px;background:#14171b;border-bottom:1px solid rgba(255,255,255,0.1);display:flex;align-items:center;gap:10px">
+                <span style="font-size:16px">🛂</span><span style="font-weight:700;color:#ffa030">Approval-required flight paths</span>
+                <span style="color:#888;font-size:11px">· arcs flagged "wait until approved" · from the Site Watch snapshots (indexed ${indexed} sites)</span>
+                <span style="margin-left:auto;display:flex;gap:6px">
+                    <button id="aim-appr-sheets" style="padding:4px 10px;background:#3a3f48;color:#ffd54f;border:1px solid rgba(255,213,79,0.4);border-radius:4px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">📊 Copy → Sheets</button>
+                    <button id="aim-appr-csv" style="padding:4px 10px;background:#3a3f48;color:#a8c4ff;border:1px solid rgba(168,196,255,0.3);border-radius:4px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">📋 Copy CSV</button>
+                    <button id="aim-appr-close" style="padding:4px 10px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">✕</button>
+                </span>
+            </div>
+            <div style="padding:12px 14px;overflow:auto;flex:1;min-height:0">
+                ${needRebuild ? '<div style="color:#ffa030;margin-bottom:10px">⚠ The index predates this check — run <b>▶ Build metrics</b> once so every site setup is re-read, then reopen.</div>' : ''}
+                ${A.stale ? `<div style="color:#ffa030;margin-bottom:10px">⚠ ${A.stale} site record(s) were computed before this check existed and are not counted — run ▶ Build metrics.</div>` : ''}
+                <div style="display:flex;gap:8px;flex-wrap:wrap">
+                    ${tile('Flight paths', A.fps.length, '#ffa030')}${tile('Sites', A.sites, '#7adfe6')}${tile('Approval arcs', A.fps.reduce((n, f) => n + f.appr, 0), '#ffa030')}${tile('Sites indexed', indexed, '#888')}
+                </div>
+                ${A.fps.length ? `<div style="margin-top:14px;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><tr style="color:#888;text-align:left"><th style="padding:4px 8px">Flight path</th><th style="padding:4px 8px">ID</th><th style="padding:4px 8px">Arcs needing approval</th><th style="padding:4px 8px"></th></tr>${bySite}</table></div>`
+                    : (indexed ? '<div style="margin-top:14px;color:#5fff5f">No flight path in the indexed fleet is flagged wait-until-approved.</div>' : '<div style="margin-top:14px;color:#888">No metrics yet — run ▶ Build metrics first.</div>')}
+                <div style="margin-top:12px;color:#666;font-size:11px">Numbers are as fresh as each site's Site Watch snapshot (age shown per site). Click ↗ to open the site.</div>
+            </div>`;
+        ['mousedown', 'pointerdown', 'wheel', 'dblclick', 'contextmenu', 'touchstart'].forEach(evt => card.addEventListener(evt, e => e.stopPropagation(), false));
+        document.body.appendChild(card);
+        apprCardEl = card;
+        card.querySelector('#aim-appr-close').onclick = closeApprovalCard;
+        card.querySelector('#aim-appr-csv').onclick = () => copyText(csv, `${A.fps.length} row(s) copied as CSV`);
+        card.querySelector('#aim-appr-sheets').onclick = () => copyHtmlToClipboard(sheets, csv, 'approval-required flight paths copied — paste into Google Sheets / Excel');
+        card.addEventListener('click', (ev) => { const link = ev.target.closest('[data-ft-link]'); if (link) window.open(siteSetupUrl(link.getAttribute('data-ft-link')), '_blank'); });
+        apprCardKeyH = (e) => { if (e.key === 'Escape' && apprCardEl) { e.preventDefault(); closeApprovalCard(); } };
+        document.addEventListener('keydown', apprCardKeyH, true);
     }
 
     function renderMetricsSection() {
@@ -3984,6 +4070,7 @@
             + '<span data-ft="metrics-sheets" style="cursor:pointer;color:#ffd54f">📊 Copy → Sheets</span>'
             + '<span data-ft="metrics-csv" style="cursor:pointer;color:#7adfe6">📋 Copy CSV (all columns)</span>'
             + `<span data-ft="metrics-wide" style="cursor:pointer;color:#7adfe6" title="Toggle a wide panel for the table">${mtWide ? '⤡ Normal width' : '⤢ Wide'}</span>`
+            + (total ? `<span data-ft="metrics-appr" style="cursor:pointer;color:#ffa030;font-weight:bold" title="Every flight path in the fleet whose arcs are flagged wait-until-approved">🛂 Approval FPs (${mtApprovalRows().fps.length})</span>` : '')
             + `<span style="color:#888">${total} site(s) indexed${orphans ? ` · ${orphans} no-access hidden` : ''}${mtIndex.builtAt ? ` · built ${new Date(mtIndex.builtAt).toLocaleString()}` : ''}</span>`
             + '</div>');
         if (!total) {
@@ -5056,6 +5143,7 @@
                     else if (cmd === 'fd-copy') { const { cols, rows } = fdBrowseRows(); copyText(fdCsv(cols, rows), `${rows.length} row(s) copied as CSV`); }
                     else if (cmd === 'fd-reload') { if (fdBrowse) { const b = fdBrowse; if (b.tab === 'setup') delete fdCache.setup[b.sid]; else if (b.tab === 'missions') delete fdCache.missions[b.sid]; else delete fdCache.log[b.sid]; fdOpenBrowse(b.sid, b.tab); } }
                     else if (cmd === 'fd-sites') { fetchRawSites(true).then(() => renderPanel()).catch(e => { console.warn(`${TAG} /sites/ fetch failed:`, e); setStatus('site list fetch failed — see console'); }); }
+                    else if (cmd === 'metrics-appr') openApprovalCard();
                     else if (cmd === 'metrics-sheets') copyHtmlToClipboard(buildMetricsSheetsHtml(), buildMetricsCsv(), 'metrics table copied — paste into Google Sheets / Excel');
                     else if (cmd === 'metrics-wide') { mtWide = !mtWide; renderPanel(); }
                     else if (cmd === 'metrics-build') {
