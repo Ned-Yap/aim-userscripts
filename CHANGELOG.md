@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-21 — 🪆 Nested assets: AIM Site Setup Tools v4.301 · AIM Fleet Tools v0.44 · AIM Mission Bank Tools v3.03 (latest — dev only, feature #273)
+
+Percepto lets an asset be nested inside another asset (a pump jack inside its pad, and chains like pad → flowline → fitting), but its own sidebar shows them as a flat list. Our tools now read the nesting. **Site Setup Tools SUM panel:** four new asset columns, off by default (Columns ▾ to turn on) — **Parent** (the asset it is nested in), **Depth** (0 = top level), **Children** (direct children count) and **Nest path** (`Pad › Flowline › …`). Click a header to sort: by Parent groups every child under its pad, by Depth puts pads first, by Nest path gives tree order. New built-in preset **Nested Assets** does that in one click. The search box also matches parent names, and the right-click inspector shows the Parent and the Children of an asset. A child whose parent name no longer exists on the site, or whose centroid falls outside its parent, is marked ⚠. **Fleet Tools:** Entities → Sheets gains Parent asset / Nest depth / Child assets columns; Fleet Metrics gains Nested + Parents counts (Assets + Site setup sets — the first ▶ Build metrics after this update re-reads every site once). **Mission Bank Tools:** the generator's asset records now carry parent / root / children (no behaviour change yet), and a bug where the unshielded flag was read from the wrong place (so it was always "no") is fixed — unshielded assets are now skipped by the generator as intended.
+
 ## 2026-09-21 — 🛂 Approval FPs: Verify live: AIM Fleet Tools v0.43 (latest — dev only)
 
 The approval-required list comes from the Site Watch snapshots, so a path you just fixed keeps showing until Site Watch re-snapshots that site (24 h quiet / 3 h after a change). New **🔄 Verify live** button on the 🛂 card re-reads every flagged site straight from Percepto and refreshes its record on the spot; live-verified sites are marked, and the status line says how many paths cleared.

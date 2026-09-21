@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.43
+// @version      0.44
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -34,7 +34,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.43';
+    const SCRIPT_VERSION = '0.44';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -3550,7 +3550,7 @@
     // v0.42: schema stamp — when computeSetupMetrics gains fields, older per-site
     // records must be recomputed: drop the setup shas so the next build re-reads
     // every setup snapshot once (missions untouched).
-    const MT_SCHEMA = 2;
+    const MT_SCHEMA = 3;   // 3 = #273 nested-asset counts added
     if (mtIndex.schema !== MT_SCHEMA) { mtIndex.shas = {}; mtIndex.schema = MT_SCHEMA; mtIndex.checkedAt = 0; saveMetricsIndex(); console.log(`${TAG} metrics index schema → ${MT_SCHEMA}: setup snapshots will be re-read on the next ▶ Build`); }
     if (!mtIndex.mshas) mtIndex.mshas = {};
     if (!mtIndex.missions) mtIndex.missions = {};
@@ -3599,6 +3599,70 @@
     }
     function mtInc(map, key, n) { if (!key) return; map[key] = (map[key] || 0) + (n == null ? 1 : n); }
 
+    // ====================================================================
+    // [#273 nested assets — shared glue] buildAssetTree(ents). Copied VERBATIM
+    // into Site Setup Tools / Fleet Tools / Mission Bank Tools (reference copy:
+    // ShortKeys/AIM_Asset_Tree.js). Verified live on site 1607 (2026-09-21):
+    // a child asset carries top-level `parent_asset_name: "<name>"`; a root
+    // has no such key; the link is a server-side FK serialised as the NAME
+    // (renaming the parent cascades); names are unique per site so an exact
+    // name match is unambiguous; chains are allowed (asset → Flowline → Pad).
+    // Geometry is NOT a parent signal (Flowline overlaps Pump Jack 3 yet is
+    // parented to the Pad) — `outsideParent` is a diagnostic only.
+    // → { byId: Map<id,node>, roots, orphans }; node = { id, name, ent, parentId,
+    //    parentName, rootId, depth, children[], descendants[], orphan, outsideParent }
+    // ====================================================================
+    function buildAssetTree(ents) {
+        const assets = (ents || []).filter(e => e && e.type === 3);
+        const byName = new Map();
+        const byId = new Map();
+        assets.forEach(e => {
+            byName.set(String(e.name || '').trim(), e);
+            byId.set(e.id, { id: e.id, name: e.name || '', ent: e, parentId: null, parentName: null,
+                rootId: e.id, depth: 0, children: [], descendants: [], orphan: false, outsideParent: false });
+        });
+        // link parents
+        assets.forEach(e => {
+            const n = byId.get(e.id);
+            const pName = typeof e.parent_asset_name === 'string' ? e.parent_asset_name.trim() : '';
+            if (!pName) return;
+            n.parentName = pName;
+            const p = byName.get(pName);
+            if (!p || p.id === e.id) { n.orphan = true; return; }
+            n.parentId = p.id;
+            byId.get(p.id).children.push(e.id);
+        });
+        // depth / root / descendants, cycle-safe
+        byId.forEach(n => {
+            const seen = new Set([n.id]);
+            let cur = n, d = 0;
+            while (cur.parentId !== null) {
+                const up = byId.get(cur.parentId);
+                if (!up || seen.has(up.id)) { n.orphan = true; n.parentId = null; d = 0; cur = n; break; }
+                seen.add(up.id); cur = up; d++;
+            }
+            n.depth = d; n.rootId = cur.id;
+            let a = n.parentId === null ? null : byId.get(n.parentId);
+            const guard = new Set();
+            while (a && !guard.has(a.id)) { guard.add(a.id); a.descendants.push(n.id); a = a.parentId === null ? null : byId.get(a.parentId); }
+        });
+        // diagnostic: centroid outside declared parent ring
+        const centroid = e => { const c = e.coords || []; if (!c.length) return null;
+            return { lat: c.reduce((s, p) => s + p.lat, 0) / c.length, lng: c.reduce((s, p) => s + p.lng, 0) / c.length }; };
+        const pip = (pt, ring) => { let ins = false;
+            for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+                const a = ring[i], b = ring[j];
+                if ((a.lat > pt.lat) !== (b.lat > pt.lat) && pt.lng < (b.lng - a.lng) * (pt.lat - a.lat) / (b.lat - a.lat) + a.lng) ins = !ins;
+            } return ins; };
+        byId.forEach(n => {
+            if (n.parentId === null) return;
+            const c = centroid(n.ent), ring = byId.get(n.parentId).ent.coords;
+            if (c && Array.isArray(ring) && ring.length >= 3 && !pip(c, ring)) n.outsideParent = true;
+        });
+        const nodes = [...byId.values()];
+        return { byId, roots: nodes.filter(n => n.parentId === null && !n.orphan), orphans: nodes.filter(n => n.orphan) };
+    }
+
     function computeSetupMetrics(entities) {
         const m = {
             n: 0, counts: { asset: 0, ffz: 0, fp: 0, nfz: 0, gm: 0, base: 0, safe: 0, other: 0 },
@@ -3609,7 +3673,11 @@
             fpArcs: 0, fpM: 0, fpBandFtSum: 0, fpBandN: 0,
             gmTypes: {}, baseActive: 0,
             apprArcs: 0, apprFps: 0, apprList: [],   // v0.42: arcs flagged wait_until_approved ("approval required")
+            nested: 0, nestParents: 0,               // v0.44 #273: assets with a parent_asset_name / assets that have children
         };
+        try {
+            buildAssetTree(entities).byId.forEach(n => { if (n.depth > 0) m.nested++; if (n.children.length) m.nestParents++; });
+        } catch (err) { console.warn(`${TAG} nested-asset metrics failed:`, err); }
         const V = (k, e) => { m.valid[k][e.validated ? 0 : 1]++; };
         (entities || []).forEach(e => {
             if (!e || typeof e.type !== 'number') return;
@@ -3786,6 +3854,8 @@
         fpBand:    { label: 'FP band ft', get: r => r.s && r.s.fpBandN ? Math.round(r.s.fpBandFtSum / r.s.fpBandN) : null, title: 'Average flight-path arc altitude band', total: 'avg' },
         gmTypes:   { label: 'Marker types', get: r => r.s ? mtTop(r.s.gmTypes, 4) : '', text: true },
         unsh:      { label: 'Unshielded', get: r => r.s && r.s.unshielded },
+        nested:    { label: 'Nested', get: r => (r.s && typeof r.s.nested === 'number') ? r.s.nested : null, title: 'Assets nested inside another asset (parent_asset_name set); — = site not re-indexed since this check was added' },
+        nestParents: { label: 'Parents', get: r => (r.s && typeof r.s.nestParents === 'number') ? r.s.nestParents : null, title: 'Assets that have at least one nested child (usually pads)' },
         // null (→ '—') when the record predates this check — a stale site must read "unknown", never 0
         apprFp:    { label: '🛂 Approval FPs', get: r => (r.s && Array.isArray(r.s.apprList)) ? r.s.apprFps : null, title: 'Flight paths with at least one arc flagged "wait until approved" (approval required before flying); — = site not re-indexed since this check was added' },
         apprArcs:  { label: 'Approval arcs', get: r => (r.s && Array.isArray(r.s.apprList)) ? r.s.apprArcs : null, title: 'Flight-path arcs flagged "wait until approved"' },
@@ -3820,8 +3890,8 @@
     };
     const MT_SETS = {
         overview:   { label: 'Overview',   cols: ['name', 'client', 'status', 'assets', 'ffz', 'fp', 'apprFp', 'nfz', 'gm', 'fpMi', 'missions', 'steps', 'vPct', 'snapAge'] },
-        setup:      { label: 'Site setup', cols: ['name', 'entities', 'assets', 'ffz', 'ffzAcres', 'ffzBand', 'fp', 'fpArcs', 'fpMi', 'fpBand', 'apprFp', 'apprArcs', 'nfz', 'nfzAcres', 'gm', 'gmTypes', 'base', 'safe', 'unsh', 'notes'] },
-        assets:     { label: 'Assets',     cols: ['name', 'assets', 'equip', 'cats', 'stNormal', 'stHY', 'stEmpty', 'stInact', 'stUnsh', 'stUnreach'] },
+        setup:      { label: 'Site setup', cols: ['name', 'entities', 'assets', 'ffz', 'ffzAcres', 'ffzBand', 'fp', 'fpArcs', 'fpMi', 'fpBand', 'apprFp', 'apprArcs', 'nfz', 'nfzAcres', 'gm', 'gmTypes', 'base', 'safe', 'unsh', 'nested', 'notes'] },
+        assets:     { label: 'Assets',     cols: ['name', 'assets', 'nested', 'nestParents', 'equip', 'cats', 'stNormal', 'stHY', 'stEmpty', 'stInact', 'stUnsh', 'stUnreach'] },
         missions:   { label: 'Missions',   cols: ['name', 'missions', 'mActive', 'mInactive', 'steps', 'avgSteps', 'snaps', 'orbits', 'areaMaps', 'gem', 'mMi', 'mHrs', 'avgMi', 'stepTypes'] },
         validation: { label: 'Validation', cols: ['name', 'vAsset', 'vFfz', 'vFp', 'vNfz', 'vGm', 'vPct', 'unsh', 'apprFp', 'apprArcs'] },
         all:        { label: 'All columns', cols: Object.keys(MT_COLS) },
@@ -3968,7 +4038,7 @@
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
                 <div>
                     <div style="color:#7adfe6;font-weight:bold">SITE SETUP ${s ? `<span style="color:#666;font-weight:normal">· indexed ${r.snapAgeD} d ago</span>` : '<span style="color:#ffa030;font-weight:normal">· no snapshot</span>'}</div>
-                    ${s ? `<div>Entities <b>${s.n}</b> · assets <b>${s.counts.asset}</b> · FFZ <b>${s.counts.ffz}</b> (${s.ffzAcres} ac) · FP <b>${s.counts.fp}</b> (${s.fpArcs} arcs, ${(s.fpM / MT_M_PER_MI).toFixed(2)} mi) · NFZ <b>${s.counts.nfz}</b> (${s.nfzAcres} ac) · markers <b>${s.counts.gm}</b> · base <b>${s.counts.base}</b>${s.baseActive ? ' (active)' : ''} · safe <b>${s.counts.safe}</b> · unshielded <b>${s.unshielded}</b></div>
+                    ${s ? `<div>Entities <b>${s.n}</b> · assets <b>${s.counts.asset}</b> · FFZ <b>${s.counts.ffz}</b> (${s.ffzAcres} ac) · FP <b>${s.counts.fp}</b> (${s.fpArcs} arcs, ${(s.fpM / MT_M_PER_MI).toFixed(2)} mi) · NFZ <b>${s.counts.nfz}</b> (${s.nfzAcres} ac) · markers <b>${s.counts.gm}</b> · base <b>${s.counts.base}</b>${s.baseActive ? ' (active)' : ''} · safe <b>${s.counts.safe}</b> · unshielded <b>${s.unshielded}</b>${typeof s.nested === 'number' ? ` · nested <b>${s.nested}</b>` : ''}</div>
                     <div style="margin-top:3px"><span style="color:#888">Equipment:</span> ${list(s.equip)}</div>
                     <div style="margin-top:2px"><span style="color:#888">States:</span> ${list(s.states)}</div>
                     ${Object.keys(s.cats).length ? `<div style="margin-top:2px"><span style="color:#888">Categories:</span> ${list(s.cats)}</div>` : ''}
@@ -4895,6 +4965,10 @@
         { label: 'Subtype', get: e => (e.custom && e.custom.poi_type_str) || '', t: [3] },
         { label: 'Equipment', get: e => mtParseSubtype(e.custom && e.custom.poi_type_str).typeKey, t: [3] },
         { label: 'State', get: e => (e.custom && e.custom.poi_type_str) ? mtParseSubtype(e.custom.poi_type_str).state : '', t: [3] },
+        // #273 nested assets (r.nest = buildAssetTree node for this entity, computed per site in fxBuildTable)
+        { label: 'Parent asset', get: (e, r) => r.nest ? (r.nest.parentName || '') : '', t: [3] },
+        { label: 'Nest depth', get: (e, r) => r.nest ? r.nest.depth : '', t: [3] },
+        { label: 'Child assets', get: (e, r) => r.nest ? r.nest.children.length : '', t: [3] },
         { label: 'Marker type', get: e => e.general_marker_type || '', t: [19] },
         { label: 'Marker height', get: e => fxVal(e.marker_height), t: [19] },
         { label: 'Description', get: e => e.description == null ? '' : String(e.description) },
@@ -4960,11 +5034,12 @@
         kxGroupByClient(Array.from(got.keys())).forEach(([client, ids]) => {
             ids.sort((a, b) => siteName(a).localeCompare(siteName(b))).forEach(sid => {
                 const site = siteName(sid);
+                const nestTree = buildAssetTree(got.get(sid) || []);   // #273 — from the FULL list, before the type filter
                 const ents = (got.get(sid) || []).filter(e => e && types.has(e.type));
                 ents.sort((a, b) => (fxTypeOrder.indexOf(a.type) - fxTypeOrder.indexOf(b.type)) || String(a.name || '').localeCompare(String(b.name || ''), undefined, { numeric: true }) || ((a.id || 0) - (b.id || 0)));
                 ents.forEach(e => {
                     const pts = fxPoints(e);
-                    rows.push({ e, sid, site, client, pts, c: fxCentroid(e), arc: e.type === 15 ? fxArcStats(e) : { n: 0, lenM: 0, lo: Infinity, hi: -Infinity, em: Infinity, wait: 0 } });
+                    rows.push({ e, sid, site, client, pts, c: fxCentroid(e), nest: e.type === 3 ? (nestTree.byId.get(e.id) || null) : null, arc: e.type === 15 ? fxArcStats(e) : { n: 0, lenM: 0, lo: Infinity, hi: -Infinity, em: Infinity, wait: 0 } });
                 });
             });
         });
