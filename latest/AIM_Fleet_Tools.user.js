@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.42
+// @version      0.43
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -34,7 +34,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.42';
+    const SCRIPT_VERSION = '0.43';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -3993,12 +3993,42 @@
         buildMetricsRows().forEach(r => {
             if (!r.s) return;
             if (mtIndex.schema !== MT_SCHEMA || !Array.isArray(r.s.apprList)) { stale++; return; }   // record predates the field
-            r.s.apprList.forEach(f => { fps.push({ sid: r.id, site: r.name, client: r.client, status: r.status, ageD: r.snapAgeD, name: f.name, id: f.id, appr: f.appr, arcs: f.arcs }); sitesWith.add(r.id); });
+            r.s.apprList.forEach(f => { fps.push({ sid: r.id, site: r.name, client: r.client, status: r.status, ageD: r.snapAgeD, live: !!r.s.live, name: f.name, id: f.id, appr: f.appr, arcs: f.arcs }); sitesWith.add(r.id); });
         });
         fps.sort((a, b) => a.site.localeCompare(b.site) || a.name.localeCompare(b.name));
         return { fps, sites: sitesWith.size, stale };
     }
-    let apprCardEl = null, apprCardKeyH = null;
+    let apprCardEl = null, apprCardKeyH = null, apprVerifying = false;
+    // v0.43: snapshots lag (Site Watch cadence) — re-read the flagged sites LIVE
+    // from /map_objects/ and refresh their metrics records in place, so a fix
+    // made minutes ago drops off the list without waiting for the next snapshot.
+    async function apprVerifyLive() {
+        if (apprVerifying) return;
+        const sids = Array.from(new Set(mtApprovalRows().fps.map(f => f.sid)));
+        if (!sids.length) { setStatus('nothing to verify — no flagged flight paths'); return; }
+        apprVerifying = true;
+        let cleared = 0, still = 0, failed = 0;
+        try {
+            for (let i = 0; i < sids.length; i++) {
+                const sid = sids[i];
+                setStatus(`verifying live… ${siteName(sid)} (${i + 1}/${sids.length})`);
+                try {
+                    const live = await fdFetchSetup(sid, true);
+                    const before = (mtIndex.sites[sid] && mtIndex.sites[sid].apprFps) || 0;
+                    const rec = Object.assign(computeSetupMetrics(live.entities), { at: Date.now(), empty: false, live: true });
+                    mtIndex.sites[sid] = rec;   // sha untouched: the next snapshot change still re-reads it
+                    if (rec.apprFps < before) cleared += before - rec.apprFps;
+                    still += rec.apprFps;
+                } catch (e) { failed++; console.warn(`${TAG} live verify failed for site ${sid}:`, e); }
+            }
+            saveMetricsIndex();
+            setStatus(`live verify done — ${still} flight path(s) still need approval · ${cleared} cleared since the snapshot${failed ? ` · ${failed} site(s) failed` : ''}`);
+        } finally {
+            apprVerifying = false;
+            renderPanel();
+            openApprovalCard();
+        }
+    }
     function closeApprovalCard() {
         if (apprCardEl) { try { apprCardEl.remove(); } catch (e) {} }
         apprCardEl = null;
@@ -4023,7 +4053,7 @@
         if (A.fps.length) {
             let cur = null;
             A.fps.forEach(f => {
-                if (f.sid !== cur) { cur = f.sid; bySite += `<tr style="background:#181b21"><td colspan="4" style="padding:5px 8px;color:#7adfe6;font-weight:700">${escapeHtml(f.site)} <span style="color:#555">#${f.sid}</span> <span data-ft-link="${f.sid}" style="cursor:pointer;color:#5fb3ff">↗</span>${f.status && statusTag(f.status) ? ` <span style="color:#ffa030;font-weight:400">${escapeHtml(f.status)}</span>` : ''} <span style="color:#666;font-weight:400">· indexed ${f.ageD == null ? '?' : f.ageD + ' d ago'}</span></td></tr>`; }
+                if (f.sid !== cur) { cur = f.sid; bySite += `<tr style="background:#181b21"><td colspan="4" style="padding:5px 8px;color:#7adfe6;font-weight:700">${escapeHtml(f.site)} <span style="color:#555">#${f.sid}</span> <span data-ft-link="${f.sid}" style="cursor:pointer;color:#5fb3ff">↗</span>${f.status && statusTag(f.status) ? ` <span style="color:#ffa030;font-weight:400">${escapeHtml(f.status)}</span>` : ''} <span style="color:#666;font-weight:400">· ${f.live ? '<span style=\"color:#5fff5f\">live-verified</span>' : 'indexed ' + (f.ageD == null ? '?' : f.ageD + ' d ago')}</span></td></tr>`; }
                 bySite += `<tr style="border-top:1px solid rgba(255,255,255,0.05)"><td style="padding:4px 8px 4px 24px">${escapeHtml(f.name)}</td><td style="padding:4px 8px;color:#666">#${f.id}</td><td style="padding:4px 8px;color:#ffa030;font-weight:700">${f.appr} of ${f.arcs} arc${f.arcs === 1 ? '' : 's'}</td><td style="padding:4px 8px;color:#888">${f.appr === f.arcs ? 'whole path' : 'partial'}</td></tr>`;
             });
         }
@@ -4032,6 +4062,7 @@
                 <span style="font-size:16px">🛂</span><span style="font-weight:700;color:#ffa030">Approval-required flight paths</span>
                 <span style="color:#888;font-size:11px">· arcs flagged "wait until approved" · from the Site Watch snapshots (indexed ${indexed} sites)</span>
                 <span style="margin-left:auto;display:flex;gap:6px">
+                    <button id="aim-appr-verify" ${apprVerifying || !A.fps.length ? 'disabled' : ''} title="Re-read the flagged sites from Percepto right now (snapshots can lag a day) and refresh their records" style="padding:4px 10px;background:#1a3a40;color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:4px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">${apprVerifying ? '⏳ Verifying…' : `🔄 Verify live (${A.sites} sites)`}</button>
                     <button id="aim-appr-sheets" style="padding:4px 10px;background:#3a3f48;color:#ffd54f;border:1px solid rgba(255,213,79,0.4);border-radius:4px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">📊 Copy → Sheets</button>
                     <button id="aim-appr-csv" style="padding:4px 10px;background:#3a3f48;color:#a8c4ff;border:1px solid rgba(168,196,255,0.3);border-radius:4px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">📋 Copy CSV</button>
                     <button id="aim-appr-close" style="padding:4px 10px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">✕</button>
@@ -4045,12 +4076,14 @@
                 </div>
                 ${A.fps.length ? `<div style="margin-top:14px;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><tr style="color:#888;text-align:left"><th style="padding:4px 8px">Flight path</th><th style="padding:4px 8px">ID</th><th style="padding:4px 8px">Arcs needing approval</th><th style="padding:4px 8px"></th></tr>${bySite}</table></div>`
                     : (indexed ? '<div style="margin-top:14px;color:#5fff5f">No flight path in the indexed fleet is flagged wait-until-approved.</div>' : '<div style="margin-top:14px;color:#888">No metrics yet — run ▶ Build metrics first.</div>')}
-                <div style="margin-top:12px;color:#666;font-size:11px">Numbers are as fresh as each site's Site Watch snapshot (age shown per site). Click ↗ to open the site.</div>
+                <div style="margin-top:12px;color:#666;font-size:11px">Numbers come from each site's Site Watch snapshot (age shown per site) — a fix made since then still shows until Site Watch re-snapshots the site (24 h quiet / 3 h after a change). <b>🔄 Verify live</b> re-reads the flagged sites from Percepto now. Click ↗ to open the site.</div>
             </div>`;
         ['mousedown', 'pointerdown', 'wheel', 'dblclick', 'contextmenu', 'touchstart'].forEach(evt => card.addEventListener(evt, e => e.stopPropagation(), false));
         document.body.appendChild(card);
         apprCardEl = card;
         card.querySelector('#aim-appr-close').onclick = closeApprovalCard;
+        const vb = card.querySelector('#aim-appr-verify');
+        if (vb && !vb.disabled) vb.onclick = () => { vb.disabled = true; vb.textContent = '⏳ Verifying…'; apprVerifyLive(); };
         card.querySelector('#aim-appr-csv').onclick = () => copyText(csv, `${A.fps.length} row(s) copied as CSV`);
         card.querySelector('#aim-appr-sheets').onclick = () => copyHtmlToClipboard(sheets, csv, 'approval-required flight paths copied — paste into Google Sheets / Excel');
         card.addEventListener('click', (ev) => { const link = ev.target.closest('[data-ft-link]'); if (link) window.open(siteSetupUrl(link.getAttribute('data-ft-link')), '_blank'); });

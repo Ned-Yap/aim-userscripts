@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-21 — 🛂 Approval FPs: Verify live: AIM Fleet Tools v0.43 (latest — dev only)
+
+The approval-required list comes from the Site Watch snapshots, so a path you just fixed keeps showing until Site Watch re-snapshots that site (24 h quiet / 3 h after a change). New **🔄 Verify live** button on the 🛂 card re-reads every flagged site straight from Percepto and refreshes its record on the spot; live-verified sites are marked, and the status line says how many paths cleared.
+
 ## 2026-09-21 — 🛂 Approval-required flight paths: AIM Fleet Tools v0.42 (latest — dev only)
 
 Fleet Metrics now checks every site for flight paths whose arcs are flagged **"wait until approved"** (Percepto's approval-required setting). New **🛂 Approval FPs** column (Overview / Site setup / Validation sets, with an "Approval arcs" companion), a fleet-totals tile, the flight paths named in each site's detail row, and a **🛂 Approval FPs** button that opens a report card listing site → flight path → how many of its arcs need approval (whole path vs partial), with ↗ links, Copy → Sheets and Copy CSV. Because the per-site records gain a field, the first **▶ Build metrics** after this update re-reads every site setup once (the card says so until you do).
