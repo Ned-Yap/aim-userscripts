@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.301
+// @version      4.302
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.301';
+    const SCRIPT_VERSION = '4.302';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -15946,9 +15946,51 @@
         return n;
     }
 
+    // #273: split a search string into { text, tags: { parent, root, depth } }.
+    // A tag starts at a `key:` token and its value runs until the next `key:`
+    // token (so multi-word names need no quotes). Unknown keys stay in text.
+    const SEARCH_TAG_KEYS = ['parent', 'root', 'depth'];
+    function parseSearchTags(raw) {
+        const out = { text: '', tags: {} };
+        const textParts = [];
+        let cur = null;
+        String(raw).trim().split(/\s+/).forEach(tok => {
+            if (!tok) return;
+            const m = /^([A-Za-z]+):(.*)$/.exec(tok);
+            if (m && SEARCH_TAG_KEYS.includes(m[1].toLowerCase())) { cur = m[1].toLowerCase(); out.tags[cur] = m[2]; return; }
+            if (cur) out.tags[cur] = (out.tags[cur] ? out.tags[cur] + ' ' : '') + tok;
+            else textParts.push(tok);
+        });
+        for (const k in out.tags) { out.tags[k] = out.tags[k].trim(); if (!out.tags[k]) delete out.tags[k]; }
+        out.text = textParts.join(' ').trim();
+        return out;
+    }
+
     function filterAndSortRows(rows, state) {
-        const q = (state.search || '').trim().toLowerCase();
+        // #273 tag search: `parent:Pad` (direct parent), `root:Pad` (Pad + everything
+        // nested anywhere under it), `depth:1`. Free text goes BEFORE the tags
+        // (`pump parent:Pad`); a tag value runs to the next tag, so spaces are fine
+        // (`parent:Well Pad 1`). Tag values match a name exactly (case-insensitive)
+        // when such a name exists on the site, otherwise as a substring.
+        const parsed = parseSearchTags(state.search || '');
+        const q = parsed.text.toLowerCase();
+        const tags = parsed.tags;
+        const nameMatcher = (want) => {
+            const w = want.toLowerCase();
+            const exact = rows.some(r => r.type === 3 && String(r.name || '').toLowerCase() === w);
+            return exact ? (n => n.toLowerCase() === w) : (n => n.toLowerCase().includes(w));
+        };
+        const parentOk = tags.parent ? nameMatcher(tags.parent) : null;
+        const rootOk = tags.root ? nameMatcher(tags.root) : null;
+        const depthWant = tags.depth != null && /^\d+$/.test(tags.depth) ? Number(tags.depth) : null;
         let out = rows.filter(r => {
+            if (parentOk && !(r.type === 3 && r.parentName && parentOk(r.parentName))) return false;
+            if (rootOk) {
+                // the named asset itself + every row whose nest path passes through it
+                const chain = r.type === 3 && r.nestPath ? r.nestPath.split(' › ') : [];
+                if (!chain.some(rootOk)) return false;
+            }
+            if (depthWant != null && !(r.type === 3 && r.nestDepth === depthWant)) return false;
             if (!state.typeFilter.has(String(r.type))) return false;
             // Validation filters apply only to types where validation is
             // meaningful (FFZ / FP / NFZ). N/A rows (r.validated === null)
@@ -25206,7 +25248,8 @@
         searchRow.style.cssText = 'display:flex;gap:8px;align-items:center';
         const searchInput = document.createElement('input');
         searchInput.type = 'text';
-        searchInput.placeholder = '🔍  Search name, subtype, or Seg ID…';
+        searchInput.placeholder = '🔍  Search name, subtype, Seg ID · tags: parent:Pad · root:Pad · depth:1';
+        searchInput.title = 'Free text matches name / subtype / parent / Seg ID. Tags (put them after any free text): parent:<asset> = direct children of that asset · root:<asset> = that asset + everything nested anywhere under it · depth:<n> = nesting level (0 = top level). Multi-word names need no quotes: parent:Well Pad 1';
         searchInput.value = sumPanelState.search;
         searchInput.style.cssText = 'flex:1;background:#15171c;color:#e6e6e6;border:1px solid rgba(255,255,255,0.18);border-radius:4px;padding:5px 8px;font:inherit;font-size:12px';
         searchInput.oninput = () => {
