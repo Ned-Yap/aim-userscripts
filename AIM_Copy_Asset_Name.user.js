@@ -2,7 +2,7 @@
 // @name         AIM Copy Asset Name
 // @name:en      AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.244.1
+// @version      4.245
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.244.1';
+    const SCRIPT_VERSION = '4.245';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -4592,6 +4592,16 @@
         }
         if (e.type === 3 && e.custom) {
             if (e.custom.poi_type_str) out.push({ label: 'Subtype', value: e.custom.poi_type_str });
+            // #273 nested assets — parent + direct children from the site's entity list.
+            try {
+                const bucket = mapObjectsBySite[e.site] || mapObjectsBySite[String(e.site)];
+                const tree = bucket ? buildAssetTree(bucket.entities) : null;
+                const nn = tree ? tree.byId.get(e.id) : null;
+                if (nn) {
+                    if (nn.parentName) out.push({ label: 'Parent', value: nn.orphan ? `${nn.parentName} (⚠ not found on this site)` : (nn.outsideParent ? `${nn.parentName} (⚠ centroid outside parent)` : `${nn.parentName}${nn.depth > 1 ? ` (depth ${nn.depth})` : ''}`) });
+                    if (nn.children.length) out.push({ label: `Children (${nn.children.length})`, value: nn.children.map(id => tree.byId.get(id).name).join(', ') });
+                }
+            } catch (err) { console.warn(`${TAG} nested-asset rows failed:`, err); }
             // Elevation ASL is in meters in the JSON despite Percepto's
             // UI labeling it as ft elsewhere. Show both.
             if (typeof e.custom.elevation_asl === 'number') {
@@ -8302,7 +8312,7 @@
     // emergAlt/segLen/unshielded/notes) are known but OFF by default —
     // they'd be mostly-blank for most rows. They surface via the Columns ▾
     // menu's "Hidden" list, or get switched on by a built-in preset.
-    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'entId', 'subtype', 'equipment', 'state', 'assetAlt', 'assetHeightAgl', 'assetElevAsl', 'poiId', 'poleFeeder', 'poleUsage', 'poleIsSimple', 'gmGroup', 'altMin', 'altMax', 'emergAlt', 'altDelta', 'elevation', 'agl', 'segLen', 'area', 'route', 'battery', 'ptAlt', 'validated', 'waitApproved', 'unshielded', 'notes', 'droneName', 'droneId', 'lat', 'long', 'gps'];
+    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'entId', 'subtype', 'equipment', 'state', 'assetAlt', 'assetHeightAgl', 'assetElevAsl', 'poiId', 'poleFeeder', 'poleUsage', 'poleIsSimple', 'gmGroup', 'parent', 'root', 'nestDepth', 'children', 'nestPath', 'altMin', 'altMax', 'emergAlt', 'altDelta', 'elevation', 'agl', 'segLen', 'area', 'route', 'battery', 'ptAlt', 'validated', 'waitApproved', 'unshielded', 'notes', 'droneName', 'droneId', 'lat', 'long', 'gps'];
     const DEFAULT_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated', 'lat', 'long', 'gps'];
 
     // Load the persisted column order from GM storage. Falls back to the
@@ -8408,6 +8418,12 @@
             desc: 'All assets with equipment, state/health, notes, elevation + coordinates.',
             columnOrder: ['name', 'subtype', 'equipment', 'state', 'notes', 'elevation', 'lat', 'long', 'gps'],
             typeFilter: ['3'], sortKey: 'name', sortDir: 1, unitsFt: true,
+        },
+        {
+            name: 'Nested Assets',
+            desc: 'Assets in tree order — each pad followed by the assets nested inside it (Parent / Depth / Children columns; sort by Parent or Depth to regroup).',
+            columnOrder: ['name', 'root', 'parent', 'nestDepth', 'children', 'nestPath', 'subtype', 'equipment', 'state'],
+            typeFilter: ['3'], sortKey: 'nestPath', sortDir: 1, unitsFt: true,
         },
         {
             name: 'Shielding Review',
@@ -8695,6 +8711,11 @@
             poleUsage: { label: 'Pole Usage', val: r => r.poleUsage || '' },
             poleIsSimple: { label: 'Pole Simple', val: r => r.poleIsSimple == null ? '' : (r.poleIsSimple ? 'TRUE' : 'FALSE') },
             gmGroup: { label: 'GM Group', val: r => r.gmGroup || '' },
+            parent: { label: 'Parent', val: r => r.parentName || '' },
+            root: { label: 'Root', val: r => r.rootName || '' },
+            nestDepth: { label: 'Depth', val: r => r.nestDepth == null ? '' : String(r.nestDepth) },
+            children: { label: 'Children', val: r => r.childCount == null ? '' : String(r.childCount) },
+            nestPath: { label: 'Nest path', val: r => r.nestPath || '' },
             altMin: { label: `Min Alt (${u})`, val: r => num(r.altMinM) },
             altMax: { label: `Max Alt (${u})`, val: r => num(r.altMaxM) },
             emergAlt: { label: `Emerg Alt (${u})`, val: r => num(r.emergAltM) },
@@ -12032,6 +12053,78 @@
     function typeShortLabel(t) { return typeReg(t).short; }
     function typeBadgeColor(t) { return typeReg(t).color; }
 
+    // ====================================================================
+    // [#273 nested assets — shared glue] buildAssetTree(ents). Copied VERBATIM
+    // into Site Setup Tools / Fleet Tools / Mission Bank Tools (reference copy:
+    // ShortKeys/AIM_Asset_Tree.js). Verified live on site 1607 (2026-09-21):
+    // a child asset carries top-level `parent_asset_name: "<name>"`; a root
+    // has no such key; the link is a server-side FK serialised as the NAME
+    // (renaming the parent cascades); names are unique per site so an exact
+    // name match is unambiguous; chains are allowed (asset → Flowline → Pad).
+    // Geometry is NOT a parent signal (Flowline overlaps Pump Jack 3 yet is
+    // parented to the Pad) — `outsideParent` is a diagnostic only.
+    // → { byId: Map<id,node>, roots, orphans }; node = { id, name, ent, parentId,
+    //    parentName, rootId, depth, children[], descendants[], orphan, outsideParent }
+    // ====================================================================
+    function buildAssetTree(ents) {
+        const assets = (ents || []).filter(e => e && e.type === 3);
+        const byName = new Map();
+        const byId = new Map();
+        assets.forEach(e => {
+            const key = String(e.name || '').trim();
+            // Percepto enforces unique asset names per site; a collision here can only come
+            // from whitespace variants. Keep the FIRST, warn, never guess silently.
+            if (byName.has(key)) console.warn(`${typeof TAG === 'string' ? TAG : '[AIM ASSET TREE]'} duplicate asset name "${key}" (ids ${byName.get(key).id}, ${e.id}) — children link to the first`);
+            else byName.set(key, e);
+            byId.set(e.id, { id: e.id, name: e.name || '', ent: e, parentId: null, parentName: null,
+                rootId: e.id, depth: 0, children: [], descendants: [], orphan: false, outsideParent: false });
+        });
+        // pass 1: resolve parent links by name
+        assets.forEach(e => {
+            const n = byId.get(e.id);
+            const pName = typeof e.parent_asset_name === 'string' ? e.parent_asset_name.trim() : '';
+            if (!pName) return;
+            n.parentName = pName;
+            const p = byName.get(pName);
+            if (!p || p.id === e.id) { n.orphan = true; return; }
+            n.parentId = p.id;
+        });
+        // pass 2: break cycles BEFORE any counts are taken — every member of a cycle
+        // becomes an orphan root, so children[] / depth / roots stay consistent
+        byId.forEach(n => {
+            const seen = new Set([n.id]);
+            let cur = n;
+            while (cur.parentId !== null) {
+                const up = byId.get(cur.parentId);
+                if (!up || seen.has(up.id)) { n.orphan = true; n.parentId = null; break; }
+                seen.add(up.id); cur = up;
+            }
+        });
+        // pass 3: children from the final links, then depth / root / descendants
+        byId.forEach(n => { if (n.parentId !== null) byId.get(n.parentId).children.push(n.id); });
+        byId.forEach(n => {
+            let cur = n, d = 0;
+            while (cur.parentId !== null) { cur = byId.get(cur.parentId); d++; }
+            n.depth = d; n.rootId = cur.id;
+            for (let a = n.parentId === null ? null : byId.get(n.parentId); a; a = a.parentId === null ? null : byId.get(a.parentId)) a.descendants.push(n.id);
+        });
+        // diagnostic: centroid outside declared parent ring
+        const centroid = e => { const c = e.coords || []; if (!c.length) return null;
+            return { lat: c.reduce((s, p) => s + p.lat, 0) / c.length, lng: c.reduce((s, p) => s + p.lng, 0) / c.length }; };
+        const pip = (pt, ring) => { let ins = false;
+            for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+                const a = ring[i], b = ring[j];
+                if ((a.lat > pt.lat) !== (b.lat > pt.lat) && pt.lng < (b.lng - a.lng) * (pt.lat - a.lat) / (b.lat - a.lat) + a.lng) ins = !ins;
+            } return ins; };
+        byId.forEach(n => {
+            if (n.parentId === null) return;
+            const c = centroid(n.ent), ring = byId.get(n.parentId).ent.coords;
+            if (c && Array.isArray(ring) && ring.length >= 3 && !pip(c, ring)) n.outsideParent = true;
+        });
+        const nodes = [...byId.values()];
+        return { byId, roots: nodes.filter(n => n.parentId === null && !n.orphan), orphans: nodes.filter(n => n.orphan) };
+    }
+
     // Build the flat row-set for the table. Each row is { entity, name,
     // typeLabel, subtype, elevFt, altRangeFt, validated } — pre-computed
     // so sort/filter are cheap.
@@ -12039,6 +12132,7 @@
         const bucket = mapObjectsBySite[siteID];
         if (!bucket) return [];
         const out = [];
+        const nestTree = buildAssetTree(bucket.entities); // #273 nested assets (type 3 → parent_asset_name)
         (bucket.entities || []).forEach(e => {
             const reg = typeReg(e.type);
             // Flight paths (type 15) explode into one row PER arc/segment.
@@ -12148,6 +12242,12 @@
                 poleFeeder: '',         // custom.pole_feeder
                 poleUsage: '',          // custom.pole_usage
                 poleIsSimple: null,     // custom.pole_is_simple (bool)
+                // #273 nested assets (type 3 only; blank/null elsewhere).
+                parentName: '',         // parent_asset_name (server FK serialised as the name)
+                nestDepth: null,        // 0 = root asset, 1 = child, 2 = grandchild …
+                childCount: null,       // direct children
+                nestPath: '',           // 'Pad › Flowline › Fully inside flowline' — sort by it for tree order
+                rootName: '',           // top-level ancestor (a root asset's own name) — sort by it to group whole pads
             };
             if (e.type === 3 && e.custom) {
                 const c = e.custom;
@@ -12166,6 +12266,20 @@
                 row.poleFeeder = (c.pole_feeder != null && c.pole_feeder !== '') ? String(c.pole_feeder) : '';
                 row.poleUsage = (c.pole_usage != null && c.pole_usage !== '') ? String(c.pole_usage) : '';
                 if (typeof c.pole_is_simple === 'boolean') row.poleIsSimple = c.pole_is_simple;
+            }
+            if (e.type === 3) {
+                const nn = nestTree.byId.get(e.id);
+                if (nn) {
+                    row.parentName = nn.parentName || '';
+                    row.nestDepth = nn.depth;
+                    row.childCount = nn.children.length;
+                    const chain = []; let cur = nn; const guard = new Set();
+                    while (cur && !guard.has(cur.id)) { guard.add(cur.id); chain.unshift(cur.name); cur = cur.parentId === null ? null : nestTree.byId.get(cur.parentId); }
+                    row.nestPath = chain.join(' › ');
+                    row.rootName = chain[0] || '';
+                    row._nestOrphan = nn.orphan;
+                    row._nestOutside = nn.outsideParent;
+                }
             }
             // NFZ (4) and FFZ (16) both store altitude range in restrictions.
             if ((e.type === 4 || e.type === 16) && e.restrictions && typeof e.restrictions === 'object') {
@@ -12421,9 +12535,52 @@
         return n;
     }
 
+    // #273: split a search string into { text, tags: { parent, root, depth } }.
+    // A tag starts at a `key:` token and its value runs until the next `key:`
+    // token (so multi-word names need no quotes). Unknown keys stay in text.
+    const SEARCH_TAG_KEYS = ['parent', 'root', 'depth'];
+    function parseSearchTags(raw) {
+        const out = { text: '', tags: {} };
+        const textParts = [];
+        let cur = null;
+        String(raw).trim().split(/\s+/).forEach(tok => {
+            if (!tok) return;
+            const m = /^([A-Za-z]+):(.*)$/.exec(tok);
+            if (m && SEARCH_TAG_KEYS.includes(m[1].toLowerCase())) { cur = m[1].toLowerCase(); out.tags[cur] = m[2]; return; }
+            if (cur) out.tags[cur] = (out.tags[cur] ? out.tags[cur] + ' ' : '') + tok;
+            else textParts.push(tok);
+        });
+        for (const k in out.tags) { out.tags[k] = out.tags[k].trim(); if (!out.tags[k]) delete out.tags[k]; }
+        out.text = textParts.join(' ').trim();
+        return out;
+    }
+
     function filterAndSortRows(rows, state) {
-        const q = (state.search || '').trim().toLowerCase();
+        // #273 tag search: `parent:Pad` (direct parent), `root:Pad` (Pad + everything
+        // nested anywhere under it), `depth:1`. Free text goes BEFORE the tags
+        // (`pump parent:Pad`); a tag value runs to the next tag, so spaces are fine
+        // (`parent:Well Pad 1`). Tag values match a name exactly (case-insensitive)
+        // when such a name exists on the site, otherwise as a substring.
+        const parsed = parseSearchTags(state.search || '');
+        const q = parsed.text.toLowerCase();
+        const tags = parsed.tags;
+        const nameMatcher = (want) => {
+            const w = want.toLowerCase();
+            const exact = rows.some(r => r.type === 3 && String(r.name || '').toLowerCase() === w);
+            return exact ? (n => n.toLowerCase() === w) : (n => n.toLowerCase().includes(w));
+        };
+        const parentOk = tags.parent ? nameMatcher(tags.parent) : null;
+        const rootOk = tags.root ? nameMatcher(tags.root) : null;
+        // depth: fails CLOSED like the other tags — a non-integer value matches nothing rather than showing every asset.
+        const depthWant = tags.depth == null ? null : (/^\d+$/.test(tags.depth) ? Number(tags.depth) : -1);
         let out = rows.filter(r => {
+            if (parentOk && !(r.type === 3 && r.parentName && parentOk(r.parentName))) return false;
+            if (rootOk) {
+                // the named asset itself + every row whose nest path passes through it
+                const chain = r.type === 3 && r.nestPath ? r.nestPath.split(' › ') : [];
+                if (!chain.some(rootOk)) return false;
+            }
+            if (depthWant != null && !(r.type === 3 && r.nestDepth === depthWant)) return false;
             if (!state.typeFilter.has(String(r.type))) return false;
             // Validation filters apply only to types where validation is
             // meaningful (FFZ / FP / NFZ). N/A rows (r.validated === null)
@@ -12455,6 +12612,7 @@
                 // "2571" hits arc 2571233, 2571234, etc.
                 const matches = r.name.toLowerCase().includes(q)
                     || r.subtype.toLowerCase().includes(q)
+                    || (!!r.parentName && r.parentName.toLowerCase().includes(q))
                     || (r._segId != null && String(r._segId).includes(q));
                 if (!matches) return false;
             }
@@ -18648,7 +18806,8 @@
         searchRow.style.cssText = 'display:flex;gap:8px;align-items:center';
         const searchInput = document.createElement('input');
         searchInput.type = 'text';
-        searchInput.placeholder = '🔍  Search name, subtype, or Seg ID…';
+        searchInput.placeholder = '🔍  Search name, subtype, Seg ID · tags: parent:Pad · root:Pad · depth:1';
+        searchInput.title = 'Free text matches name / subtype / parent / Seg ID. Tags (put them after any free text): parent:<asset> = direct children of that asset · root:<asset> = that asset + everything nested anywhere under it · depth:<n> = nesting level (0 = top level). Multi-word names need no quotes: parent:Well Pad 1';
         searchInput.value = sumPanelState.search;
         searchInput.style.cssText = 'flex:1;background:#15171c;color:#e6e6e6;border:1px solid rgba(255,255,255,0.18);border-radius:4px;padding:5px 8px;font:inherit;font-size:12px';
         searchInput.oninput = () => {
@@ -19167,6 +19326,11 @@
                 poleUsage: '(Assets) Pole Usage',
                 poleIsSimple: '(Assets) Pole Is Simple',
                 gmGroup:   'GM Group',
+                parent:    '(Assets) Parent asset',
+                root:      '(Assets) Root asset (top of the nest)',
+                nestDepth: '(Assets) Nest depth (0 = top level)',
+                children:  '(Assets) Child assets (count)',
+                nestPath:  '(Assets) Nest path (Pad › child › …)',
                 altMin:    'Min Alt',
                 altMax:    'Max Alt',
                 emergAlt:  'Emergency Alt (FP seg)',
@@ -21416,6 +21580,12 @@
                 { key: 'poleUsage', label: 'Pole Usage',     w: 110, num: false, dataKey: 'poleUsage' },
                 { key: 'poleIsSimple', label: 'Pole Simple', w: 85,  num: false, dataKey: 'poleIsSimple' },
                 { key: 'gmGroup',   label: 'GM Group',       w: 120, num: false, dataKey: 'gmGroup' },
+                // #273 nested assets — sort by Parent to group children under their pad, by Depth for parents-first, by Nest path for tree order.
+                { key: 'parent',    label: 'Parent',         w: 140, num: false, dataKey: 'parentName' },
+                { key: 'root',      label: 'Root',           w: 140, num: false, dataKey: 'rootName' },
+                { key: 'nestDepth', label: 'Depth',          w: 55,  num: true,  dataKey: 'nestDepth' },
+                { key: 'children',  label: 'Children',       w: 70,  num: true,  dataKey: 'childCount' },
+                { key: 'nestPath',  label: 'Nest path',      w: 220, num: false, dataKey: 'nestPath' },
                 { key: 'altMin',    label: `Min Alt (${unitLbl})`,       w: 80,  num: true, dataKey: 'altMinM',   fmt: fmtAlt, raw: fmtRaw },
                 { key: 'altMax',    label: `Max Alt (${unitLbl})`,       w: 80,  num: true, dataKey: 'altMaxM',   fmt: fmtAlt, raw: fmtRaw },
                 { key: 'emergAlt',  label: `Emerg Alt (${unitLbl})`,     w: 90,  num: true, dataKey: 'emergAltM', fmt: fmtAlt, raw: fmtRaw },
@@ -22115,6 +22285,25 @@
                                 : col.key === 'poleUsage' ? 'Pole usage (custom.pole_usage) — assets only'
                                 : 'Equipment = asset subtype minus any trailing state word (empty/unshielded/…)';
                         }
+                    } else if (col.key === 'parent' || col.key === 'root' || col.key === 'nestPath') {
+                        // #273 nested assets — parent name / full nest path. Blank for non-assets. Right-click copies.
+                        const v = r[col.dataKey] || '';
+                        const warn = r._nestOrphan ? ' ⚠ parent not found on this site' : (r._nestOutside ? ' ⚠ centroid outside its parent' : '');
+                        td.style.cssText = `padding:5px 8px;color:${v ? (warn ? '#ffb347' : '#cdd6e0') : '#555'};font-size:11px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:${col.w + 20}px`;
+                        td.textContent = v ? (warn ? `⚠ ${v}` : v) : '—';
+                        if (v) {
+                            td.title = `${v}${warn} — Right-click: copy`;
+                            td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(v, `Copied "${v}"`); };
+                        } else {
+                            td.title = r.type === 3 ? (col.key === 'parent' ? 'Top-level asset (no parent)' : col.key === 'root' ? 'Root asset' : 'Nest path') : 'Nesting applies to assets only';
+                        }
+                    } else if (col.key === 'nestDepth' || col.key === 'children') {
+                        // #273 nested assets — depth (0 = root) / direct-child count. Right-aligned, blank for non-assets.
+                        const v = r[col.dataKey];
+                        const show = v == null ? '—' : String(v);
+                        td.style.cssText = `padding:5px 8px;color:${v == null ? '#555' : (v > 0 ? '#cdd6e0' : '#7a8a92')};text-align:right;font-size:11px;font-variant-numeric:tabular-nums`;
+                        td.textContent = show;
+                        td.title = v == null ? 'Nesting applies to assets only' : (col.key === 'nestDepth' ? (v === 0 ? 'Top-level asset' : `Nested ${v} level${v === 1 ? '' : 's'} deep`) : `${v} direct child asset${v === 1 ? '' : 's'}`);
                     } else if (col.key === 'poleIsSimple') {
                         // Asset boolean custom.pole_is_simple → Yes / No / — (N/A).
                         const v = r.poleIsSimple;

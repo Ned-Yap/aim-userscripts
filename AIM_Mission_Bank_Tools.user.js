@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.92
+// @version      2.93
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.92';
+    const SCRIPT_VERSION = '2.93';
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -3221,6 +3221,78 @@
     const genEntCache = {};
     let genLayer = null, genPreviewLayer = null, genOverlayOn = false, genBase = null, genPopupEl = null;
 
+    // ====================================================================
+    // [#273 nested assets — shared glue] buildAssetTree(ents). Copied VERBATIM
+    // into Site Setup Tools / Fleet Tools / Mission Bank Tools (reference copy:
+    // ShortKeys/AIM_Asset_Tree.js). Verified live on site 1607 (2026-09-21):
+    // a child asset carries top-level `parent_asset_name: "<name>"`; a root
+    // has no such key; the link is a server-side FK serialised as the NAME
+    // (renaming the parent cascades); names are unique per site so an exact
+    // name match is unambiguous; chains are allowed (asset → Flowline → Pad).
+    // Geometry is NOT a parent signal (Flowline overlaps Pump Jack 3 yet is
+    // parented to the Pad) — `outsideParent` is a diagnostic only.
+    // → { byId: Map<id,node>, roots, orphans }; node = { id, name, ent, parentId,
+    //    parentName, rootId, depth, children[], descendants[], orphan, outsideParent }
+    // ====================================================================
+    function buildAssetTree(ents) {
+        const assets = (ents || []).filter(e => e && e.type === 3);
+        const byName = new Map();
+        const byId = new Map();
+        assets.forEach(e => {
+            const key = String(e.name || '').trim();
+            // Percepto enforces unique asset names per site; a collision here can only come
+            // from whitespace variants. Keep the FIRST, warn, never guess silently.
+            if (byName.has(key)) console.warn(`${typeof TAG === 'string' ? TAG : '[AIM ASSET TREE]'} duplicate asset name "${key}" (ids ${byName.get(key).id}, ${e.id}) — children link to the first`);
+            else byName.set(key, e);
+            byId.set(e.id, { id: e.id, name: e.name || '', ent: e, parentId: null, parentName: null,
+                rootId: e.id, depth: 0, children: [], descendants: [], orphan: false, outsideParent: false });
+        });
+        // pass 1: resolve parent links by name
+        assets.forEach(e => {
+            const n = byId.get(e.id);
+            const pName = typeof e.parent_asset_name === 'string' ? e.parent_asset_name.trim() : '';
+            if (!pName) return;
+            n.parentName = pName;
+            const p = byName.get(pName);
+            if (!p || p.id === e.id) { n.orphan = true; return; }
+            n.parentId = p.id;
+        });
+        // pass 2: break cycles BEFORE any counts are taken — every member of a cycle
+        // becomes an orphan root, so children[] / depth / roots stay consistent
+        byId.forEach(n => {
+            const seen = new Set([n.id]);
+            let cur = n;
+            while (cur.parentId !== null) {
+                const up = byId.get(cur.parentId);
+                if (!up || seen.has(up.id)) { n.orphan = true; n.parentId = null; break; }
+                seen.add(up.id); cur = up;
+            }
+        });
+        // pass 3: children from the final links, then depth / root / descendants
+        byId.forEach(n => { if (n.parentId !== null) byId.get(n.parentId).children.push(n.id); });
+        byId.forEach(n => {
+            let cur = n, d = 0;
+            while (cur.parentId !== null) { cur = byId.get(cur.parentId); d++; }
+            n.depth = d; n.rootId = cur.id;
+            for (let a = n.parentId === null ? null : byId.get(n.parentId); a; a = a.parentId === null ? null : byId.get(a.parentId)) a.descendants.push(n.id);
+        });
+        // diagnostic: centroid outside declared parent ring
+        const centroid = e => { const c = e.coords || []; if (!c.length) return null;
+            return { lat: c.reduce((s, p) => s + p.lat, 0) / c.length, lng: c.reduce((s, p) => s + p.lng, 0) / c.length }; };
+        const pip = (pt, ring) => { let ins = false;
+            for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+                const a = ring[i], b = ring[j];
+                if ((a.lat > pt.lat) !== (b.lat > pt.lat) && pt.lng < (b.lng - a.lng) * (pt.lat - a.lat) / (b.lat - a.lat) + a.lng) ins = !ins;
+            } return ins; };
+        byId.forEach(n => {
+            if (n.parentId === null) return;
+            const c = centroid(n.ent), ring = byId.get(n.parentId).ent.coords;
+            if (c && Array.isArray(ring) && ring.length >= 3 && !pip(c, ring)) n.outsideParent = true;
+        });
+        const nodes = [...byId.values()];
+        return { byId, roots: nodes.filter(n => n.parentId === null && !n.orphan), orphans: nodes.filter(n => n.orphan) };
+    }
+
     function genFetchEntities(siteID) {
         if (genEntCache[siteID]) return Promise.resolve(genEntCache[siteID]);
         const url = `/map_objects/?getPoiMapObjectsAsList=true&site_id=${encodeURIComponent(siteID)}`;
@@ -3229,8 +3301,18 @@
             .then(arr => {
                 const list = Array.isArray(arr) ? arr : (arr && arr.objects) || [];
                 const ring = e => e.coords.map(c => ({ lat: c.lat, lng: c.lng }));
+                const nestTree = buildAssetTree(list);   // #273 nested assets (parent_asset_name chain)
+                const keptAsset = new Set(list.filter(e => e && e.type === 3 && Array.isArray(e.coords) && e.coords.length >= 3).map(e => e.id));
                 const assets = list.filter(e => e && e.type === 3 && Array.isArray(e.coords) && e.coords.length >= 3)
-                    .map(e => ({ id: e.id, name: e.name || '', ring: ring(e), poi: (e.custom && e.custom.poi_type_str) || '', unshielded: !!(e.custom && e.custom.is_unshielded) }));
+                    .map(e => {
+                        const nn = nestTree.byId.get(e.id);
+                        // children / descendants / parentId only reference assets that survive the ≥3-coords filter above
+                        const kept = ids => ids.filter(id => keptAsset.has(id));
+                        // v2.93: is_unshielded is a TOP-LEVEL entity field (was read from custom.* → always false).
+                        return { id: e.id, name: e.name || '', ring: ring(e), poi: (e.custom && e.custom.poi_type_str) || '', unshielded: !!e.is_unshielded,
+                            parentName: nn ? (nn.parentName || '') : '', parentId: nn && nn.parentId !== null && keptAsset.has(nn.parentId) ? nn.parentId : null, rootId: nn && keptAsset.has(nn.rootId) ? nn.rootId : e.id,
+                            nestDepth: nn ? nn.depth : 0, children: nn ? kept(nn.children) : [], descendants: nn ? kept(nn.descendants) : [] };
+                    });
                 const ffzs = list.filter(e => e && e.type === 16 && Array.isArray(e.coords) && e.coords.length >= 3)
                     .map(e => ({ id: e.id, name: e.name || '', ring: ring(e), minAltM: (e.restrictions && typeof e.restrictions.minAlt === 'number') ? e.restrictions.minAlt : null }));
                 // Base station (type 8) → origin for N/E/S/W section naming.
