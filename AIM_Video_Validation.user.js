@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.43
+// @version      0.52
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.43';
+    const SCRIPT_VERSION = '0.52';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -87,6 +87,7 @@
         lookPoints: true,      // planned look-point for every in-place snapshot (ray to terrain at planned heading/angle)
         legend: true,          // legend box on the map
         legendOpen: true,      // expanded (false = collapsed to a ? chip)
+        chkHdg: 10, chkCam: 5, chkAltFt: 25, chkPosFt: 30, chkLookFt: 50,   // flight checker thresholds
         follow: true,          // selecting a snapshot pans/zooms the map to it
         followZoom: 19,        // max zoom when following
         actualLookPoints: true,// cyan ring where the ACTUAL camera ray met the ground (from the picture's real pose)
@@ -481,11 +482,13 @@
             .aim-vv-edit__foot { border-top: 1px solid rgba(255,255,255,.12); padding-top: 4px; margin-top: 6px; }
             .aim-vv-review { position: fixed; inset: 0; z-index: 100000; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; }
             .aim-vv-review__box { max-width: 900px; max-height: 80vh; overflow: auto; background: #12151a; color: #e6e6e6; border: 1px solid rgba(95,227,255,.5); border-radius: 6px; padding: 12px 14px; font: 12px/1.45 monospace; }
+            .aim-vv-cardhost canvas { display: block; max-width: 100%; height: auto; border-radius: 6px; }
             .aim-vv-review table { border-collapse: collapse; margin: 6px 0; } .aim-vv-review td { padding: 2px 10px 2px 0; white-space: nowrap; border-bottom: 1px solid rgba(255,255,255,.06); }
             .aim-vv-review b { color: #5fe3ff; } .aim-vv-review .dim { color: #888; } .aim-vv-review .warn { color: #ffb347; }
             .aim-vv-toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 100001; background: rgba(10,14,18,.95); color: #e6e6e6; border: 1px solid rgba(95,227,255,.6); border-radius: 4px; padding: 8px 14px; font: 12px/1.4 monospace; display: none; max-width: 70vw; }
             .aim-vv-toast--bad { border-color: #ff5f5f; color: #ffb3b3; }
-            .aim-vv-card .aim-vv-adjust { float: right; background: #1f2228; color: #5fe3ff; border: 1px solid rgba(95,227,255,.5); border-radius: 3px; padding: 1px 8px; font: inherit; cursor: pointer; }
+            .aim-vv-card .aim-vv-adjust-wrap { float: right; display: flex; gap: 6px; }
+            .aim-vv-card .aim-vv-adjust { float: none; background: #1f2228; color: #5fe3ff; border: 1px solid rgba(95,227,255,.5); border-radius: 3px; padding: 1px 8px; font: inherit; cursor: pointer; }
             .aim-vv-ov.aim-vv-ov--active > div { outline: 3px solid #fff; outline-offset: 1px; animation: aim-vv-pulse 1.2s ease-in-out infinite; }
             @keyframes aim-vv-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(95,227,255,.9); } 50% { box-shadow: 0 0 0 8px rgba(95,227,255,0); } }
         `;
@@ -716,10 +719,14 @@
     function stepShot(dir) {
         if (!model || !model.shots.length) return;
         const v = videoEl(); const t = v ? v.currentTime : 0;
-        const offs = model.shots.filter(s => s.videoOff != null);
+        const lead = Number(settings.leadInS) || 0;
+        // A shot "starts" at its lead-in point (where selecting it seeks to). Next = first shot whose start is ahead of
+        // the playhead; previous = last shot whose start is behind it. Judging by the shutter instead made "next" from a
+        // freshly selected shot land on the same shot, and "previous" just after a shutter find nothing.
+        const offs = model.shots.filter(s => s.videoOff != null).map(s => ({ s, start: Math.max(0, s.videoOff - lead) }));
         let target = null;
-        if (dir > 0) target = offs.find(s => s.videoOff > t + 0.5);
-        else { for (const s of offs) { if (s.videoOff < t - (Number(settings.leadInS) || 0) - 0.5) target = s; } }
+        if (dir > 0) { const hit = offs.find(o => o.start > t + 0.5); target = hit && hit.s; }
+        else { const before = offs.filter(o => o.start < t - 0.5); target = before.length ? before[before.length - 1].s : null; }
         if (!target) { log('no ' + (dir > 0 ? 'next' : 'previous') + ' shot'); return; }
         seekToShot(target.primary, true);
         scrollTileIntoView(target.primary);
@@ -967,7 +974,9 @@
             rows = '<div class="dim">actual: heading ' + rec.drone_heading + '° · camera ' + rec.camera_pitch + '° · alt ' + fmtAlt(rec.alt) + '</div>';
         }
         const prev = rec.previous_image && rec.previous_image.name ? '<span class="dim">previous capture: ' + esc(rec.previous_image.name.replace(/__\d+_.*$/, '').replace(/_/g, ' ').replace(/  /g, ' ')) + '</span>' : '<span class="dim">no previous capture linked</span>';
-        const adjust = settings.edit ? '<button type="button" class="aim-vv-adjust" data-aim-vv-ed-toggle="1" title="Open the Adjust panel for this step">✎ Adjust' + (ed.work && edDiff().length ? ' (' + edDiff().length + ')' : '') + '</button>' : '';
+        const adjust = '<span class="aim-vv-adjust-wrap">' + (settings.edit ? '<button type="button" class="aim-vv-adjust" data-aim-vv-ed-toggle="1" title="Open the Adjust panel for this step">✎ Adjust' + (ed.work && edDiff().length ? ' (' + edDiff().length + ')' : '') + '</button>' : '')
+            + '<button type="button" class="aim-vv-adjust" data-aim-vv-tool="check" title="Check every shot of this flight against the plan (re-takes, deviations, missing shots)">🔎 Check flight</button>'
+            + '<button type="button" class="aim-vv-adjust" data-aim-vv-tool="session" title="Before / after of everything applied on this page, copy for JIRA">📋 Changes' + (sessionReports.filter(r => String(r.mid) === String(model.mid)).length ? ' (' + sessionReports.filter(r => String(r.mid) === String(model.mid)).length + ')' : '') + '</button></span>';
         el.innerHTML = adjust + head + rows + '<div style="margin-top:3px;">' + prev + ' · <span class="dim">[ / ] prev / next shot</span></div>';
         if (ed.open) renderEdit();
     }
@@ -1176,7 +1185,7 @@
                 const g = groupOn ? flightForIdx(st.index_in_app) : null;
                 const tip = '<b>' + esc(num ? num.n : st.type_name) + '</b> · step #' + st.index_in_app
                     + (g ? ' · flight ' + esc(g.label) : '')
-                    + (st.type_name === 'snapshot' ? (st.location ? ' · GPS aim point' : ' · in-place ' + ((st.extra_options || {}).heading != null ? st.extra_options.heading + '°' : '') + (st._look ? ' · look-point ' + fmtDist(st._look.dist) + ' out' + (st._look.agl != null ? ', ' + fmtAlt(st._look.agl) + ' above terrain' : '') + (st._look.capped ? ' (capped)' : '') : '')) : '')
+                    + (st.type_name === 'snapshot' ? (st.location ? ' · GPS aim point' : ' · in-place ' + ((st.extra_options || {}).heading != null ? st.extra_options.heading + '°' : '') + (st._look ? ' · look-point ' + fmtDist(st._look.dist) + ' out (horizontal)' + (st._look.slant != null ? ', ' + fmtDist(st._look.slant) + ' line of sight' : '') + (st._look.agl != null ? ', ' + fmtAlt(st._look.agl) + ' above terrain' : '') + (st._look.capped ? ' (capped)' : '') : '')) : '')
                     + (shots.length ? ' · shot at ' + shots.map(sh => mmss(sh.videoOff)).join(', ') : (st.type_name === 'snapshot' && !groupOn ? ' · <i>no image</i>' : ''));
                 mk.bindTooltip(tip, { direction: 'top', offset: [0, -10], opacity: 0.95 });
                 if (shots.length) mk.on('click', () => { const sh = shots[0]; seekToShot(sh.primary, true, true); scrollTileIntoView(sh.primary); });
@@ -1201,7 +1210,7 @@
                 const num = sh.step && model.numbering[sh.step.id];
                 try {
                     const mk = L.marker([aim.lat, aim.lng], { icon: L.divIcon({ className: 'aim-vv-ov', html: '<div class="aim-vv-ov-alook" style="border-color:' + COLOR_ACTUAL + '"></div>', iconSize: [14, 14], iconAnchor: [7, 7] }), interactive: true, zIndexOffset: 280 });
-                    mk.bindTooltip('<b>' + esc(num ? num.n : '?') + '</b> ACTUAL look-point · ' + fmtDist(dist) + ' out' + (capped ? ' (capped — shallow angle)' : '') + ' · from the real position, ' + im.drone_heading + '° / ' + im.camera_pitch + '°, ' + fmtAlt(alt - g) + ' above terrain', { direction: 'top', offset: [0, -8], opacity: 0.95 });
+                    mk.bindTooltip('<b>' + esc(num ? num.n : '?') + '</b> ACTUAL look-point · ' + fmtDist(dist) + ' out (horizontal), ' + fmtDist(Math.sqrt(dist * dist + (alt - g) * (alt - g))) + ' line of sight' + (capped ? ' (capped — shallow angle)' : '') + ' · from the real position, ' + im.drone_heading + '° / ' + im.camera_pitch + '°, ' + fmtAlt(alt - g) + ' above terrain', { direction: 'top', offset: [0, -8], opacity: 0.95 });
                     if (addLayer(map, mk)) { const pm = ov.stepMarkers[sh.step && sh.step.id]; if (pm) { const pp = pm.getLatLng(); if (distM(pp, aim) > 1) addLayer(map, L.polyline([[pp.lat, pp.lng], [aim.lat, aim.lng]], lineOpts({ color: COLOR_ACTUAL, weight: 1, opacity: 0.6, dashArray: '2,4' }))); } }
                 } catch (e) { warn('actual look-point failed:', e); }
             });
@@ -1305,6 +1314,33 @@
         e.preventDefault(); e.stopPropagation();
         settings.legendOpen = !settings.legendOpen; saveSettings(); ensureLegend();
     }
+    // Diagnostic: one JSON line per snapshot in this flight — type, plan fields, where its marker was drawn and why,
+    // the matched picture's real pose, the actual look-point, terrain. Control Panel button "Dump snapshot geometry".
+    function dumpGeometry() {
+        if (!model) { warn('dump: no model'); return; }
+        const groupOn = !!(settings.overlayGroup && ov.group);
+        const inSlice = (st) => groupOn || !model.slice || (st.index_in_app >= model.slice.minIdx && st.index_in_app <= model.slice.maxIdx);
+        log('GEOMETRY DUMP mission ' + model.mid + ' · slice ' + JSON.stringify(model.slice) + ' · lookPoints=' + settings.lookPoints + ' actualLook=' + settings.actualLookPoints + ' · demCache ' + Object.keys(demCache).length + ' entries (' + Object.values(demCache).filter(v => v == null).length + ' null)');
+        let nav = null;
+        model.plan.forEach(st => {
+            if (st.type_name === 'navigate') nav = st;
+            if (st.type_name !== 'snapshot' || !inSlice(st)) return;
+            const num = model.numbering[st.id]; const mk = ov.stepMarkers[st.id];
+            const shots = model.shots.filter(sh => sh.step && sh.step.id === st.id);
+            const im = shots.length ? shots[0].primary : null;
+            const g = nav && nav.location ? groundAt(nav.location) : null;
+            const lp = (!isGps(st) && nav && g != null) ? lookPointFor(nav, st, g) : null;
+            const row = {
+                s: num ? num.n : '#' + st.index_in_app, type: isGps(st) ? 'GPS' : 'in-place', loc: st.location, value1: st.value1, eo: st.extra_options,
+                nav: nav ? { n: (model.numbering[nav.id] || {}).n, loc: nav.location, value1: nav.value1, abs_alt: nav.extra_options && nav.extra_options.abs_alt, ground: g } : null,
+                drawnAt: mk ? mk.getLatLng() : 'NO MARKER', lookPoint: lp ? { ll: lp.ll, dist_ft: +(lp.dist * M_TO_FT).toFixed(0), agl_ft: lp.agl != null ? +(lp.agl * M_TO_FT).toFixed(0) : null, capped: lp.capped } : null,
+                picture: im ? { kind: im.kind, loc: im.location, alt: im.alt, hdg: im.drone_heading, pitch: im.camera_pitch, target: im.target_location, groundAtDrone: groundAt(im.location) } : 'none',
+                shots: shots.length,
+            };
+            console.log(TAG + ' GEO ' + JSON.stringify(row));
+        });
+        console.log(TAG + ' GEO layers=' + ov.layers.length + ' stepMarkers=' + Object.keys(ov.stepMarkers).length + ' shotMarkers=' + Object.keys(ov.shotMarkers).length);
+    }
     function onOverlayZoom() {
         if (!model || !ov.layers.length) return;
         const groupOn = !!(settings.overlayGroup && ov.group);
@@ -1329,7 +1365,8 @@
         const down = Math.tan(Math.abs(pitch) * RAD);
         let dist = (ground != null && down > 0.01) ? (alt - ground) / down : Infinity;
         let capped = false; if (!(dist > 0) || dist > capM) { dist = capM; capped = true; }
-        return { ll: moveLL(nav.location, dist, e.heading), dist, capped, agl: ground != null ? alt - ground : null };
+        const agl = ground != null ? alt - ground : null;
+        return { ll: moveLL(nav.location, dist, e.heading), dist, capped, agl, slant: agl != null ? Math.sqrt(dist * dist + agl * agl) : null };
     }
     let lookLayers = [];
     let lookToken = 0;
@@ -1815,7 +1852,7 @@
                 + btn('alt', 'alt −', 'Drone (nav) altitude −' + sa + ' ft' + (gps ? '' : ' (camera re-tilts to keep the look-point)'), 'data-n="-1"')
                 + btn('alt', 'alt +', 'Drone (nav) altitude +' + sa + ' ft' + (gps ? '' : ' (camera re-tilts to keep the look-point)'), 'data-n="1"') + '</div>';
             html += '<div class="aim-vv-edit__row"><span class="dim">now</span> heading ' + sc('heading', pose.heading != null ? pose.heading.toFixed(0) + '°' : '–', gps ? 'aim point sideways, 1 ft per step' : 'heading') + ' · camera ' + sc('camera', pose.pitchDeg != null ? pose.pitchDeg.toFixed(0) + '°' : '–', gps ? 'target altitude' : 'camera angle') + ' · drone alt ' + sc('alt', fmtAlt(nav ? nav.value1 : null), 'drone (nav) altitude')
-                + (gps ? ' · target alt ' + sc('target-alt', fmtAlt(step.value1), 'target altitude') + ' · range ' + sc('range', fmtDist(pose.range), 'aim point closer / farther') : ' · look-point ' + sc('range', (function() { const lk = inplaceLook(step); if (lk) return fmtDist(lk.dist) + (lk.aim.capped ? ' (capped)' : ''); const g = nav && nav.location ? groundAt(nav.location) : null; const lp = (nav && g != null) ? lookPointFor(nav, step, g) : null; return lp ? fmtDist(lp.dist) + (lp.capped ? ' (capped)' : '') : '?'; })(), 'distance from the nav to where the camera points (terrain at the nav) — drag: nav closer / farther along the heading'))
+                + (gps ? ' · target alt ' + sc('target-alt', fmtAlt(step.value1), 'target altitude') + ' · range ' + sc('range', fmtDist(pose.range), 'aim point closer / farther') : ' · look-point ' + sc('range', (function() { const lk = inplaceLook(step); if (lk) { const h = (typeof nav.value1 === 'number' && lk.aim.alt != null) ? nav.value1 - lk.aim.alt : null; return fmtDist(lk.dist) + (h != null ? ' / ' + fmtDist(Math.sqrt(lk.dist * lk.dist + h * h)) + ' LOS' : '') + (lk.aim.capped ? ' (capped)' : ''); } const g = nav && nav.location ? groundAt(nav.location) : null; const lp = (nav && g != null) ? lookPointFor(nav, step, g) : null; return lp ? fmtDist(lp.dist) + (lp.slant != null ? ' / ' + fmtDist(lp.slant) + ' LOS' : '') + (lp.capped ? ' (capped)' : '') : '?'; })(), 'distance from the nav to where the camera points (terrain at the nav) — drag: nav closer / farther along the heading'))
                 + '</div>';
             if (nav) {
                 html += '<div class="aim-vv-edit__row"><span class="dim">nav ' + esc(stepLabel(nav)) + '</span>'
@@ -1957,7 +1994,7 @@
         set('camera', pose.pitchDeg != null ? pose.pitchDeg.toFixed(0) + '°' : '–');
         set('alt', fmtAlt(nav ? nav.value1 : null));
         if (isGps(step)) { set('target-alt', fmtAlt(step.value1)); set('range', fmtDist(pose.range)); }
-        else if (nav && nav.location) { const lk = inplaceLook(step); set('range', lk ? fmtDist(lk.dist) + (lk.aim.capped ? ' (capped)' : '') : '?'); }
+        else if (nav && nav.location) { const lk = inplaceLook(step); if (lk) { const h = (typeof nav.value1 === 'number' && lk.aim.alt != null) ? nav.value1 - lk.aim.alt : null; set('range', fmtDist(lk.dist) + (h != null ? ' / ' + fmtDist(Math.sqrt(lk.dist * lk.dist + h * h)) + ' LOS' : '') + (lk.aim.capped ? ' (capped)' : '')); } else set('range', '?'); }
         const o = nav && origOf(nav.id);
         if (o && o.location && nav.location) {
             const ns = distM(o.location, { lat: nav.location.lat, lng: o.location.lng }) * (nav.location.lat >= o.location.lat ? 1 : -1);
@@ -2160,18 +2197,376 @@
             ed.work.forEach((w, i) => { const a = afterIns[i]; if (!a) return; const wa = deepCopy(w); delete wa._new; const dd = fieldDiffs(Object.assign({ type_name: w.type_name }, a), Object.assign({ type_name: w.type_name }, wa)); if (a.type !== w.type) mism.push('#' + i + ' type ' + a.type + ' ≠ ' + w.type); dd.forEach(d => mism.push('#' + i + ' ' + d.field + ': server ' + d.before + ' vs sent ' + d.after)); });
             const report = { at, mid, sid, appId: fresh.app.id, name: fresh.app.name, group: model.mission.mission_group_id, actions: ed.log.map(a => ({ at: new Date(a.at).toISOString(), what: a.what, step: a.step })), changes: diff, verify: { ok: !mism.length, mismatches: mism }, httpStatus: r.status };
             gmPush(REPORTS_KEY, report, 200); download('vv-correction-' + mid + '-' + stamp + '.json', report);
+            sessionReports.push(report);
             if (mism.length) { warn('verify mismatches:', mism); toast('Saved, but ' + mism.length + ' field(s) read back differently — see console + report', true); }
             else toast('✅ Saved ' + diff.length + ' change' + (diff.length === 1 ? '' : 's') + ' · verified · backup + report downloaded', false);
             status(mism.length ? 'saved with ' + mism.length + ' mismatch(es)' : 'saved + verified');
             if (ed.reviewEl) { ed.reviewEl.remove(); ed.reviewEl = null; }
             ed.work = null; ed.log = []; ed.busy = false;
-            const ids = current; deactivate(); if (ids) activate(ids);
+            reloadModel('after save');
             return;
         } catch (e) {
             warn('apply failed:', e); toast('🛑 Not applied: ' + e.message, true); status('failed: ' + e.message);
             const b = ed.reviewEl && ed.reviewEl.querySelector('[data-aim-vv-rv="apply"]'); if (b) b.disabled = false;
         }
         ed.busy = false;
+    }
+    // ===============================================================
+    // FLIGHT CHECKER + SESSION CHANGE REPORT (copy for JIRA)
+    // ===============================================================
+    const sessionReports = [];   // every Apply on this page (all missions), in order — merged with stored reports below
+    // Reports for THIS mission: everything applied on this page plus what script storage holds for it from the last
+    // 24 h (each Apply also writes there), so a page reload doesn't empty the Changes button.
+    function missionReports() {
+        if (!model) return [];
+        const cutoff = Date.now() - 24 * 3600 * 1000;
+        let stored = []; try { stored = (GM_getValue(REPORTS_KEY, []) || []).filter(r => String(r.mid) === String(model.mid) && new Date(r.at).getTime() >= cutoff); } catch (e) { warn('reports read:', e); }
+        const seen = {}; const all = [];
+        stored.concat(sessionReports.filter(r => String(r.mid) === String(model.mid))).forEach(r => { if (!seen[r.at]) { seen[r.at] = true; all.push(r); } });
+        return all.sort((a, b) => String(a.at).localeCompare(String(b.at)));
+    }
+    let reportEl = null;
+    function fmtSigned(v, unit, d) { if (v == null || !isFinite(v)) return '–'; const r = +v.toFixed(d == null ? 0 : d); return (r > 0 ? '+' : '') + (r === 0 ? '0' : r.toFixed(d == null ? 0 : d)) + unit; }
+    function actualLookPointOf(im) {
+        if (!im || !im.location || typeof im.drone_heading !== 'number' || typeof im.camera_pitch !== 'number' || typeof im.alt !== 'number') return null;
+        const g = groundAt(im.location); if (g == null) return null;
+        const capM = (Number(settings.rayCapFt) || 500) * FT, down = Math.tan(Math.abs(im.camera_pitch) * RAD);
+        let dist = down > 0.01 ? (im.alt - g) / down : Infinity; let capped = false; if (!(dist > 0) || dist > capM) { dist = capM; capped = true; }
+        return { ll: moveLL(im.location, dist, im.drone_heading), dist, capped };
+    }
+    function plannedLookPointOf(step) {
+        if (!step) return null;
+        if (isGps(step)) return { ll: step.location };
+        const nav = parentNav(model, step); if (!nav || !nav.location) return null;
+        const g = groundAt(nav.location); if (g == null) return null;
+        const lp = lookPointFor(nav, step, g); return lp ? { ll: lp.ll, capped: lp.capped } : null;
+    }
+    function checkFlight() {
+        const thr = { hdg: Number(settings.chkHdg) || 0, cam: Number(settings.chkCam) || 0, alt: Number(settings.chkAltFt) || 0, pos: Number(settings.chkPosFt) || 0, look: Number(settings.chkLookFt) || 0 };
+        const inSlice = (st) => !model.slice || (st.index_in_app >= model.slice.minIdx && st.index_in_app <= model.slice.maxIdx);
+        const snapsInFlight = model.plan.filter(st => st.type_name === 'snapshot' && inSlice(st));
+        const rows = []; const seen = {};
+        model.shots.forEach(sh => {
+            const im = sh.primary, st = sh.step, d = sh.delta || {};
+            const num = st && model.numbering[st.id];
+            const flags = [];
+            let lookGap = null;
+            if (st && st.type_name === 'snapshot') {
+                const p = plannedLookPointOf(st), a = actualLookPointOf(im);
+                if (p && a && p.ll && a.ll) { lookGap = distM(p.ll, a.ll) * M_TO_FT; if (!(p.capped || a.capped) && lookGap > thr.look) flags.push('look-point ' + lookGap.toFixed(0) + ' ft off'); }
+            }
+            if (!st || st.type_name !== 'snapshot') flags.push('no snapshot step executing (pilot / manual?)');
+            if (sh.retake) flags.push('re-take (' + ((seen[st.id] || 0) + 1) + ')');
+            if (d.hdg != null && Math.abs(d.hdg) > thr.hdg) flags.push('heading ' + fmtSigned(d.hdg, '°'));
+            if (d.pitch != null && Math.abs(d.pitch) > thr.cam) flags.push('camera ' + fmtSigned(d.pitch, '°'));
+            if (d.alt != null && Math.abs(d.alt * M_TO_FT) > thr.alt) flags.push('altitude ' + fmtSigned(d.alt * M_TO_FT, ' ft'));
+            if (d.pos != null && d.pos * M_TO_FT > thr.pos) flags.push('off station ' + (d.pos * M_TO_FT).toFixed(0) + ' ft ' + (d.posDir || ''));
+            if (st) seen[st.id] = (seen[st.id] || 0) + 1;
+            const pose = d.pose || {};
+            rows.push({ s: num ? num.n : (st ? st.type_name : '?'), step: st ? st.index_in_app : null, shutter: mmss(sh.videoOff), kinds: sh.images.map(i => i.kind).join('+'), name: im && im.name,
+                hdg: [pose.heading, im && im.drone_heading, d.hdg], cam: [pose.pitchDeg, im && im.camera_pitch, d.pitch], alt: [pose.alt, im && im.alt, d.alt], pos: d.pos, posDir: d.posDir, look: lookGap, asset: im && (im.assets || []).map(a => a.name).join(', '), flags });
+        });
+        const missing = snapsInFlight.filter(st => !seen[st.id]).map(st => (model.numbering[st.id] || {}).n || '#' + st.index_in_app);
+        const summary = { shots: rows.length, flagged: rows.filter(r => r.flags.length).length, retakes: rows.filter(r => r.flags.some(f => f.startsWith('re-take'))).length, missing, thr };
+        return { rows, summary };
+    }
+    function flightHeader() {
+        const m = model.mission; const inSlice = (st) => !model.slice || (st.index_in_app >= model.slice.minIdx && st.index_in_app <= model.slice.maxIdx);
+        const flightSteps = model.plan.filter(inSlice), flightSnaps = flightSteps.filter(st => st.type_name === 'snapshot');
+        const allSnaps = model.plan.filter(st => st.type_name === 'snapshot');
+        return { mission: m.name || m.app_name, appId: model.liveApp ? model.liveApp.id : (m.app && m.app.id), flownAppId: m.app && m.app.id, flightId: model.mid, group: m.mission_group_id, site: model.sid, drone: m.drone_name || (m.drone && m.drone.name), droneType: m.drone && m.drone.robot_type_name, when: m.when, flightSteps: flightSteps.length, flightSnaps: flightSnaps.length, missionSteps: model.plan.length, missionSnaps: allSnaps.length, slice: model.slice, url: location.origin + '/#/site/' + model.sid + '/control-panel/past-mission/' + model.mid };
+    }
+    function shotSentence(r) {
+        const bits = [];
+        r.flags.forEach(f => {
+            if (f.startsWith('off station')) bits.push('drone was ' + f.replace('off station ', '') + ' of its nav');
+            else if (f.startsWith('heading')) bits.push('heading ' + f.replace('heading ', '') + ' off plan');
+            else if (f.startsWith('camera')) bits.push('camera angle ' + f.replace('camera ', '') + ' off plan');
+            else if (f.startsWith('altitude')) bits.push('flew ' + f.replace('altitude ', '') + ' vs plan');
+            else if (f.startsWith('look-point')) bits.push('looked ' + f.replace('look-point ', '').replace(' off', '') + ' away from the planned spot');
+            else if (f.startsWith('re-take')) bits.push('re-take of a step already shot');
+            else if (f.startsWith('no snapshot')) bits.push('taken while no snapshot step was running (pilot / manual)');
+            else bits.push(f);
+        });
+        const ok = [];
+        if (!r.flags.some(f => f.startsWith('heading') || f.startsWith('camera'))) ok.push('camera on plan');
+        if (!r.flags.some(f => f.startsWith('off station'))) ok.push('on station');
+        return r.s + ' at ' + r.shutter + ' — ' + bits.join('; ') + (ok.length ? '; ' + ok.join(', ') : '') + (r.asset ? '' : '; no asset in frame');
+    }
+    function checkerSummary(res, jira) {
+        const h = flightHeader(); const L = [];
+        L.push((jira ? 'h3. ' : '') + 'Flight check — ' + h.mission + ' · flight ' + h.flightId + ' · ' + new Date(h.when).toLocaleString() + (h.drone ? ' · ' + h.drone : ''));
+        L.push('This flight: ' + h.flightSteps + ' steps, ' + h.flightSnaps + ' snapshots · whole mission: ' + h.missionSteps + ' steps, ' + h.missionSnaps + ' snapshots · ' + h.url);
+        const bad = res.rows.filter(r => r.flags.length);
+        L.push(res.summary.shots + ' shots · ' + bad.length + ' need' + (bad.length === 1 ? 's' : '') + ' attention · ' + res.summary.retakes + ' re-take' + (res.summary.retakes === 1 ? '' : 's') + (res.summary.missing.length ? ' · no picture for ' + res.summary.missing.join(', ') : ''));
+        if (!bad.length) L.push((jira ? '* ' : '• ') + 'All shots within limits.');
+        bad.forEach(r => L.push((jira ? '* ' : '• ') + shotSentence(r)));
+        return L.join('\n');
+    }
+    const tri = (a, unit, d) => (a[0] != null ? (+a[0]).toFixed(d || 0) : '–') + unit + ' / ' + (a[1] != null ? (+a[1]).toFixed(d || 0) : '–') + unit + ' / ' + fmtSigned(a[2], unit, d || 0);
+    function checkerText(res, jira) {
+        const h = flightHeader();
+        const L = [];
+        L.push((jira ? 'h3. ' : '') + 'Flight check — ' + h.mission + ' · flight ' + h.flightId + (h.group != null && h.group >= 0 ? ' (group ' + h.group + ')' : '') + ' · ' + (h.drone || '') + (h.droneType ? ' (' + h.droneType + ')' : '') + ' · ' + new Date(h.when).toLocaleString());
+        L.push('Steps: this flight ' + h.flightSteps + ' (' + h.flightSnaps + ' snapshots) · whole mission ' + h.missionSteps + ' (' + h.missionSnaps + ' snapshots) · ' + h.url);
+        L.push('Shots ' + res.summary.shots + ' · flagged ' + res.summary.flagged + ' · re-takes ' + res.summary.retakes + ' · snapshot steps with no picture: ' + (res.summary.missing.length ? res.summary.missing.join(', ') : 'none'));
+        L.push('Thresholds: heading ' + res.summary.thr.hdg + '° · camera ' + res.summary.thr.cam + '° · altitude ' + res.summary.thr.alt + ' ft · off-station ' + res.summary.thr.pos + ' ft · look-point ' + res.summary.thr.look + ' ft. Columns are planned / actual / Δ.');
+        const head = ['shot', 'step', 'shutter', 'heading', 'camera', 'drone alt (ft)', 'drone vs nav', 'look-point gap', 'asset', 'flags'];
+        if (jira) L.push('||' + head.join('||') + '||');
+        else L.push(head.join('\t'));
+        res.rows.forEach(r => {
+            const c = [r.s, r.step != null ? '#' + r.step : '', r.shutter, tri(r.hdg, '°'), tri(r.cam, '°'), tri([r.alt[0] != null ? r.alt[0] * M_TO_FT : null, r.alt[1] != null ? r.alt[1] * M_TO_FT : null, r.alt[2] != null ? r.alt[2] * M_TO_FT : null], ''), r.pos != null ? (r.pos * M_TO_FT).toFixed(0) + ' ft ' + (r.posDir || '') : '–', r.look != null ? r.look.toFixed(0) + ' ft' : '–', r.asset || '–', r.flags.length ? r.flags.join('; ') : 'ok'];
+            L.push(jira ? '|' + c.map(x => String(x).replace(/\|/g, '/')).join('|') + '|' : c.join('\t'));
+        });
+        return L.join('\n');
+    }
+    function sessionText(jira) {
+        const h = flightHeader();
+        const reps = missionReports();
+        const L = [];
+        L.push((jira ? 'h3. ' : '') + 'Mission changes — ' + h.mission + ' · flight ' + h.flightId + (h.group != null && h.group >= 0 ? ' (group ' + h.group + ')' : '') + ' · ' + new Date().toLocaleString());
+        L.push('Steps: this flight ' + h.flightSteps + ' (' + h.flightSnaps + ' snapshots) · whole mission ' + h.missionSteps + ' (' + h.missionSnaps + ' snapshots) · live app ' + h.appId + ' · ' + h.url);
+        if (!reps.length) { L.push('No changes applied to this mission in the last 24 h.'); return L.join('\n'); }
+        L.push(reps.length + ' save' + (reps.length === 1 ? '' : 's') + ' in the last 24 h · ' + reps.reduce((n, r) => n + (r.changes || []).length, 0) + ' field changes · verify ' + (reps.every(r => r.verify && r.verify.ok) ? 'clean' : 'MISMATCHES — see console'));
+        const head = ['save', 'step', 'change', 'before', 'after', 'note', 'action'];
+        if (jira) L.push('||' + head.join('||') + '||'); else L.push(head.join('\t'));
+        reps.forEach((r, i) => {
+            const acts = (r.actions || []).map(a => a.what + (a.step ? ' ' + a.step : '')).join(', ');
+            (r.changes || []).forEach(c => {
+                const cells = [String(i + 1) + ' · ' + new Date(r.at).toLocaleTimeString(), c.label, c.kind + (c.field ? ' · ' + c.field : ''), c.before != null ? c.before : '', c.after != null ? c.after : '', c.note || '', acts];
+                L.push(jira ? '|' + cells.map(x => String(x).replace(/\|/g, '/')).join('|') + '|' : cells.join('\t'));
+            });
+        });
+        return L.join('\n');
+    }
+    // ---- summary CARD (canvas) — screenshot-ready, copy as image / save PNG ----
+    // spec: { title, subtitle, lines[], chips[{label, value, color}], items[{badge, color, text, sub}], footer }
+    function renderSummaryCard(spec) {
+        const PAD = 28, SCALE = 2;
+        const font = (w, px) => w + ' ' + px + 'px ' + 'Consolas, "Cascadia Mono", "JetBrains Mono", Menlo, monospace';
+        const c = document.createElement('canvas'); const ctx = c.getContext('2d');
+        // Card width: 980, or wider (up to 1500) when the table needs it at 12 px — shrink the font only after that.
+        let W = 980;
+        if (spec.table && spec.table.rows && spec.table.rows.length) {
+            ctx.font = font('400', 12);
+            const nat = spec.table.head.reduce((sum, h, ci) => sum + Math.max(ctx.measureText(String(h)).width, ...spec.table.rows.map(r => ctx.measureText(String(r[ci] == null ? '' : r[ci])).width)) + 14, 0);
+            W = Math.min(1500, Math.max(980, Math.ceil(nat + 2 * PAD + 8)));
+        }
+        // measure pass
+        const wrap = (text, px, maxW, weight) => { ctx.font = font(weight || '400', px); const words = String(text).split(' '); const out = []; let line = ''; words.forEach(w => { const t = line ? line + ' ' + w : w; if (ctx.measureText(t).width > maxW && line) { out.push(line); line = w; } else line = t; }); if (line) out.push(line); return out; };
+        const rows = [];
+        let y = PAD;
+        rows.push({ t: 'title', y, h: 34 }); y += 40;
+        wrap(spec.subtitle || '', 15, W - 2 * PAD).forEach(l => { rows.push({ t: 'sub', y, text: l }); y += 22; });
+        (spec.lines || []).forEach(l => { wrap(l, 14, W - 2 * PAD).forEach(x => { rows.push({ t: 'line', y, text: x }); y += 20; }); });
+        y += 8;
+        if (spec.chips && spec.chips.length) { rows.push({ t: 'chips', y }); y += 54; }
+        y += 6;
+        (spec.items || []).forEach(it => {
+            const ls = wrap(it.text, 15, W - 2 * PAD - 70, '600');
+            const subs = it.sub ? wrap(it.sub, 13, W - 2 * PAD - 70) : [];
+            rows.push({ t: 'item', y, it, ls, subs, h: 12 + ls.length * 22 + subs.length * 18 });
+            y += 12 + ls.length * 22 + subs.length * 18 + 8;
+        });
+        // details table (monospace grid): column widths from content, font shrinks to fit, cells truncated with …
+        let tbl = null;
+        if (spec.table && spec.table.rows && spec.table.rows.length) {
+            const avail = W - 2 * PAD - 8;
+            let px = 12, widths, total;
+            const fit = (size) => { ctx.font = font('400', size); widths = spec.table.head.map((h, ci) => Math.max(ctx.measureText(String(h)).width, ...spec.table.rows.map(r => ctx.measureText(String(r[ci] == null ? '' : r[ci])).width)) + 14); total = widths.reduce((a, b) => a + b, 0); };
+            fit(px); if (total > avail) { px = 11; fit(px); } if (total > avail) { px = 10; fit(px); }
+            if (total > avail) { const k = avail / total; widths = widths.map(w => w * k); }
+            const rh = px + 9;
+            const groupH = spec.table.groups ? rh : 0;
+            tbl = { y: y + 6, px, widths, rh, groupH, h: (spec.table.rows.length + 1) * rh + groupH + 8 };
+            y += 6 + tbl.h + 10;
+        }
+        y += 10;
+        rows.push({ t: 'footer', y }); y += 26;
+        const H = y + PAD - 10;
+        c.width = W * SCALE; c.height = H * SCALE; c.style.width = W + 'px'; c.style.height = H + 'px';
+        ctx.scale(SCALE, SCALE);
+        // paint
+        ctx.fillStyle = '#0e1116'; ctx.fillRect(0, 0, W, H);
+        ctx.strokeStyle = 'rgba(95,227,255,.35)'; ctx.lineWidth = 1; ctx.strokeRect(0.5, 0.5, W - 1, H - 1);
+        ctx.fillStyle = '#5fe3ff'; ctx.fillRect(0, 0, W, 4);
+        rows.forEach(r => {
+            if (r.t === 'title') { ctx.fillStyle = '#5fe3ff'; ctx.font = font('700', 24); ctx.fillText(spec.title, PAD, r.y + 24); }
+            else if (r.t === 'sub') { ctx.fillStyle = '#cfd3da'; ctx.font = font('400', 15); ctx.fillText(r.text, PAD, r.y + 15); }
+            else if (r.t === 'line') { ctx.fillStyle = '#8a8f99'; ctx.font = font('400', 14); ctx.fillText(r.text, PAD, r.y + 14); }
+            else if (r.t === 'chips') {
+                let x = PAD;
+                spec.chips.forEach(ch => {
+                    ctx.font = font('700', 22); const vw = ctx.measureText(String(ch.value)).width; ctx.font = font('400', 12); const lw = ctx.measureText(ch.label).width;
+                    const w = Math.max(vw, lw) + 28;
+                    ctx.fillStyle = 'rgba(255,255,255,.04)'; ctx.strokeStyle = ch.color || 'rgba(255,255,255,.18)'; ctx.lineWidth = 1.5;
+                    roundRect(ctx, x, r.y, w, 46, 8); ctx.fill(); ctx.stroke();
+                    ctx.fillStyle = ch.color || '#e6e6e6'; ctx.font = font('700', 22); ctx.fillText(String(ch.value), x + 14, r.y + 24);
+                    ctx.fillStyle = '#8a8f99'; ctx.font = font('400', 12); ctx.fillText(ch.label, x + 14, r.y + 40);
+                    x += w + 10;
+                });
+            }
+            else if (r.t === 'item') {
+                const it = r.it;
+                ctx.fillStyle = 'rgba(255,255,255,.03)'; roundRect(ctx, PAD, r.y, W - 2 * PAD, r.h, 6); ctx.fill();
+                ctx.fillStyle = it.color || '#ff7ad9'; roundRect(ctx, PAD + 10, r.y + 10, 44, 24, 5); ctx.fill();
+                ctx.fillStyle = '#04222a'; ctx.font = font('800', 13); const bw = ctx.measureText(it.badge).width; ctx.fillText(it.badge, PAD + 10 + (44 - bw) / 2, r.y + 27);
+                ctx.fillStyle = '#e6e6e6'; ctx.font = font('600', 15); r.ls.forEach((l, i) => ctx.fillText(l, PAD + 66, r.y + 26 + i * 22));
+                ctx.fillStyle = '#8a8f99'; ctx.font = font('400', 13); r.subs.forEach((l, i) => ctx.fillText(l, PAD + 66, r.y + 26 + r.ls.length * 22 + i * 18 - 2));
+            }
+            else if (r.t === 'footer') { ctx.fillStyle = '#5b6068'; ctx.font = font('400', 12); ctx.fillText(spec.footer || '', PAD, r.y + 12); }
+        });
+        if (tbl) {
+            const x0 = PAD + 4; let yy = tbl.y; const totalW = tbl.widths.reduce((a, b) => a + b, 0);
+            const cell = (txt, ci, x, yb, bold, color, w) => { ctx.font = font(bold ? '700' : '400', tbl.px); ctx.fillStyle = color; let t = String(txt == null ? '' : txt); const maxW = (w || tbl.widths[ci]) - 10; if (ctx.measureText(t).width > maxW) { while (t.length > 1 && ctx.measureText(t + '…').width > maxW) t = t.slice(0, -1); t += '…'; } ctx.fillText(t, x + 5, yb); };
+            if (spec.table.groups) {   // group header row: [{label, span}] — spans drawn as a bracketed band
+                let gx = x0, ci = 0;
+                spec.table.groups.forEach(g => { const gw = tbl.widths.slice(ci, ci + g.span).reduce((a, b) => a + b, 0); if (g.label) { ctx.fillStyle = 'rgba(95,227,255,.06)'; ctx.fillRect(gx + 1, yy, gw - 2, tbl.rh - 2); cell(g.label, ci, gx, yy + tbl.rh - 6, true, '#cfd3da', gw); } gx += gw; ci += g.span; });
+                yy += tbl.groupH;
+            }
+            ctx.fillStyle = 'rgba(95,227,255,.10)'; ctx.fillRect(x0, yy, totalW, tbl.rh);
+            let x = x0; spec.table.head.forEach((h, ci) => { cell(h, ci, x, yy + tbl.rh - 6, true, '#5fe3ff'); x += tbl.widths[ci]; }); yy += tbl.rh;
+            spec.table.rows.forEach((r, ri) => {
+                if (ri % 2) { ctx.fillStyle = 'rgba(255,255,255,.03)'; ctx.fillRect(x0, yy, totalW, tbl.rh); }
+                let xx = x0; r.forEach((v, ci) => { const col = (spec.table.color && spec.table.color(ri, ci, v)) || '#d7dbe2'; cell(v, ci, xx, yy + tbl.rh - 6, col !== '#d7dbe2', col); xx += tbl.widths[ci]; }); yy += tbl.rh;
+            });
+            ctx.strokeStyle = 'rgba(255,255,255,.12)'; ctx.lineWidth = 1; ctx.strokeRect(x0 + 0.5, tbl.y + 0.5, totalW, (spec.table.rows.length + 1) * tbl.rh + tbl.groupH);
+        }
+        return c;
+    }
+    function roundRect(ctx, x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
+    function canvasToBlob(c) { return new Promise((res, rej) => { try { c.toBlob(b => b ? res(b) : rej(new Error('toBlob failed')), 'image/png'); } catch (e) { rej(e); } }); }
+    function copyCanvasImage(c, pngName) {
+        return canvasToBlob(c).then(blob => {
+            const tryWrite = (win) => { const CI = win.ClipboardItem; if (!CI || !win.navigator || !win.navigator.clipboard || !win.navigator.clipboard.write) return Promise.reject(new Error('no image clipboard')); return win.navigator.clipboard.write([new CI({ 'image/png': blob })]); };
+            return tryWrite(window).catch(e1 => { log('clipboard (iframe) refused: ' + e1.message + ' — trying the top window'); return tryWrite(pageWin.top); }).then(() => 'copied').catch(e2 => { warn('copy image refused:', e2.message); saveCanvasPng(c, pngName); return 'saved'; });
+        }).then(how => toast(how === 'copied' ? '📷 Image copied — paste it into the ticket' : 'Clipboard refused the image — saved it as a PNG instead', how !== 'copied')).catch(e => { warn('copy image:', e); toast('Could not copy or save the image: ' + e.message, true); });
+    }
+    function saveCanvasPng(c, name) {
+        canvasToBlob(c).then(blob => { const doc = pageWin.top.document; const a = doc.createElement('a'); a.href = pageWin.top.URL.createObjectURL(blob); a.download = name; doc.body.appendChild(a); a.click(); setTimeout(() => { try { pageWin.top.URL.revokeObjectURL(a.href); a.remove(); } catch (e) {} }, 2000); }).catch(e => { warn('save png:', e); toast('Could not save: ' + e.message, true); });
+    }
+    function checkerCardSpec(res) {
+        const h = flightHeader(); const bad = res.rows.filter(r => r.flags.length);
+        return {
+            title: 'Flight check · ' + (h.mission || ''),
+            subtitle: 'flight ' + h.flightId + (h.group != null && h.group >= 0 ? ' · group ' + h.group : '') + ' · ' + new Date(h.when).toLocaleString() + (h.drone ? ' · ' + h.drone : ''),
+            lines: ['this flight ' + h.flightSteps + ' steps / ' + h.flightSnaps + ' snapshots · whole mission ' + h.missionSteps + ' steps / ' + h.missionSnaps + ' snapshots'],
+            chips: [{ label: 'shots', value: res.summary.shots, color: '#5fe3ff' }, { label: 'need attention', value: bad.length, color: bad.length ? '#ffb347' : '#5fff5f' }, { label: 're-takes', value: res.summary.retakes, color: res.summary.retakes ? '#ffb347' : null }, { label: 'no picture', value: res.summary.missing.length, color: res.summary.missing.length ? '#ff5f5f' : null }],
+            items: bad.length ? bad.map(r => ({ badge: r.s, color: r.flags.some(f => f.startsWith('no snapshot') || f.startsWith('re-take')) ? '#ffb347' : '#ff7ad9', text: shotSentence(r).replace(/^\S+ at \S+ — /, ''), sub: 'at ' + r.shutter + (r.asset ? ' · ' + r.asset : '') })) : [{ badge: 'OK', color: '#5fff5f', text: 'All shots within limits.', sub: 'heading ≤ ' + res.summary.thr.hdg + '° · camera ≤ ' + res.summary.thr.cam + '° · altitude ≤ ' + res.summary.thr.alt + ' ft · off-station ≤ ' + res.summary.thr.pos + ' ft · look-point ≤ ' + res.summary.thr.look + ' ft' }],
+            footer: h.url + ' · AIM Video Validation',
+            table: checkerTable(res),
+        };
+    }
+    // Details table with planned / actual / Δ as real columns; Δ, off-station and look-point gap colored vs thresholds.
+    function checkerTable(res) {
+        const thr = res.summary.thr;
+        const n = (v, d) => v == null || !isFinite(v) ? '–' : (+v).toFixed(d || 0);
+        const ft = (v) => v == null ? null : v * M_TO_FT;
+        const rows = res.rows.map(r => [r.s, r.step != null ? '#' + r.step : '', r.shutter,
+            n(r.hdg[0]) + '°', n(r.hdg[1]) + '°', fmtSigned(r.hdg[2], '°'),
+            n(r.cam[0]) + '°', n(r.cam[1]) + '°', fmtSigned(r.cam[2], '°'),
+            n(ft(r.alt[0])), n(ft(r.alt[1])), fmtSigned(ft(r.alt[2]), ''),
+            r.pos != null ? n(ft(r.pos)) + ' ft ' + (r.posDir || '') : '–', r.look != null ? n(r.look) + ' ft' : '–', r.asset || '–', r.flags.length ? r.flags.join('; ') : 'ok']);
+        const grade = (v, t) => { if (v == null || !isFinite(v) || !t) return null; const a = Math.abs(v); return a > 2 * t ? '#ff5f5f' : a > t ? '#ffb347' : '#5fff5f'; };
+        const color = (ri, ci) => {
+            const r = res.rows[ri];
+            if (ci === 5) return grade(r.hdg[2], thr.hdg);
+            if (ci === 8) return grade(r.cam[2], thr.cam);
+            if (ci === 11) return grade(ft(r.alt[2]), thr.alt);
+            if (ci === 12) return grade(ft(r.pos), thr.pos);
+            if (ci === 13) return grade(r.look, thr.look);
+            if (ci === 15) return r.flags.length ? '#ffb347' : '#5fff5f';
+            return null;
+        };
+        return { groups: [{ label: '', span: 3 }, { label: 'heading', span: 3 }, { label: 'camera angle', span: 3 }, { label: 'drone altitude (ft)', span: 3 }, { label: '', span: 4 }],
+            head: ['shot', 'step', 'shutter', 'planned', 'actual', 'Δ', 'planned', 'actual', 'Δ', 'planned', 'actual', 'Δ', 'drone vs nav', 'look-point gap', 'asset', 'flags'], rows, color };
+    }
+    function changeSentences(reps) {
+        // Group each save's field changes by step → one line per step in words.
+        const out = [];
+        reps.forEach((r, i) => {
+            const byStep = {};
+            (r.changes || []).forEach(c => { (byStep[c.label] = byStep[c.label] || []).push(c); });
+            Object.keys(byStep).forEach(label => {
+                const cs = byStep[label]; const parts = [];
+                cs.forEach(c => {
+                    if (c.kind === 'deleted') parts.push('deleted');
+                    else if (c.kind === 'added') parts.push('added');
+                    else if (c.field === 'position') parts.push('moved ' + (c.note || '') + (c.after ? '' : ''));
+                    else if (c.field === 'heading') parts.push('heading ' + c.before + ' → ' + c.after);
+                    else if (c.field === 'camera angle') parts.push('camera ' + c.before + ' → ' + c.after);
+                    else if (c.field === 'drone alt') parts.push('altitude ' + c.before + ' → ' + c.after);
+                    else if (c.field === 'target alt') parts.push('target alt ' + c.before + ' → ' + c.after);
+                    else if (c.field === 'abs alt') { /* derived — skip in the summary */ }
+                    else parts.push(c.field + ' ' + c.before + ' → ' + c.after);
+                });
+                if (parts.length) out.push({ badge: label, color: /^N/.test(label) ? '#5fa8ff' : '#ff7ad9', text: parts.join(' · '), sub: 'save ' + (i + 1) + ' at ' + new Date(r.at).toLocaleTimeString() + ' · ' + (r.actions || []).map(a => a.what + (a.step ? ' ' + a.step : '')).join(', ') + (r.verify && r.verify.ok ? ' · verified' : ' · VERIFY MISMATCH') });
+            });
+        });
+        return out;
+    }
+    function sessionCardSpec(reps) {
+        const h = flightHeader();
+        const items = changeSentences(reps);
+        return {
+            title: 'Mission changes (last 24 h) · ' + (h.mission || ''),
+            subtitle: 'flight ' + h.flightId + (h.group != null && h.group >= 0 ? ' · group ' + h.group : '') + ' · ' + new Date().toLocaleString(),
+            lines: ['this flight ' + h.flightSteps + ' steps / ' + h.flightSnaps + ' snapshots · whole mission ' + h.missionSteps + ' steps / ' + h.missionSnaps + ' snapshots · live app ' + h.appId],
+            chips: [{ label: 'saves', value: reps.length, color: '#5fe3ff' }, { label: 'steps changed', value: items.length, color: items.length ? '#ffb347' : null }, { label: 'field changes', value: reps.reduce((n, r) => n + (r.changes || []).length, 0) }],
+            items: items.length ? items : [{ badge: '—', color: '#8a8f99', text: 'No changes applied to this mission in the last 24 h.' }],
+            footer: h.url + ' · AIM Video Validation',
+            table: reps.length ? { head: ['save', 'step', 'change', 'before', 'after', 'note'], rows: [].concat(...reps.map((r, i) => (r.changes || []).map(c => [String(i + 1) + ' · ' + new Date(r.at).toLocaleTimeString(), c.label, c.kind + (c.field ? ' · ' + c.field : ''), c.before != null ? c.before : '', c.after != null ? c.after : '', c.note || '']))), color: (ri, ci) => ci === 3 ? '#8a8f99' : ci === 4 ? '#5fe3ff' : null } : null,
+        };
+    }
+    function copyText(txt, label) {
+        const done = () => toast('Copied ' + label + ' to the clipboard', false);
+        try { navigator.clipboard.writeText(txt).then(done, () => { fallbackCopy(txt); done(); }); } catch (e) { fallbackCopy(txt); done(); }
+    }
+    function openReportBox(spec, tableHtml, plain, jira, summaryJira, pngName) {
+        if (reportEl) reportEl.remove();
+        reportEl = document.createElement('div'); reportEl.className = 'aim-vv-review';
+        const card = renderSummaryCard(spec);
+        reportEl.innerHTML = '<div class="aim-vv-review__box" style="max-width:96vw;padding:10px">'
+            + '<div class="aim-vv-edit__row" style="margin:0 0 8px"><button type="button" data-aim-vv-rep="img" style="font-weight:700">📷 Copy image (summary + table)</button><button type="button" data-aim-vv-rep="png">⬇ Save PNG</button>' + (summaryJira ? '<button type="button" data-aim-vv-rep="summary">Copy as text</button>' : '<button type="button" data-aim-vv-rep="plain">Copy as text</button>') + '<button type="button" data-aim-vv-rep="close">Close</button></div>'
+            + '<div class="aim-vv-cardhost"></div>'
+            + '<details style="margin-top:8px"><summary class="dim" style="cursor:pointer">details table (numbers) · copy for JIRA</summary>' + tableHtml + '<div class="aim-vv-edit__row" style="margin-top:6px"><button type="button" data-aim-vv-rep="jira">Copy table (JIRA markup)</button><button type="button" data-aim-vv-rep="plain">Copy table (text)</button></div></details></div>';
+        reportEl.querySelector('.aim-vv-cardhost').appendChild(card);
+        reportEl.__plain = plain; reportEl.__jira = jira; reportEl.__summary = summaryJira; reportEl.__card = card; reportEl.__png = pngName || 'aim-video-validation.png';
+        document.body.appendChild(reportEl);
+    }
+    function onReportClick(e) {
+        const b = e.target.closest && e.target.closest('[data-aim-vv-rep]'); if (!b || !reportEl) return;
+        e.preventDefault(); e.stopPropagation();
+        const what = b.dataset.aimVvRep;
+        if (what === 'close') { reportEl.remove(); reportEl = null; }
+        else if (what === 'jira') copyText(reportEl.__jira, 'the JIRA table');
+        else if (what === 'summary') copyText(reportEl.__summary, 'the summary');
+        else if (what === 'img') copyCanvasImage(reportEl.__card, reportEl.__png);
+        else if (what === 'png') saveCanvasPng(reportEl.__card, reportEl.__png);
+        else if (what === 'plain') copyText(reportEl.__plain, 'the report');
+    }
+    function openChecker() {
+        if (!model) { toast('No mission loaded', true); return; }
+        const res = checkFlight(); const h = flightHeader();
+        const cellCls = (flag) => flag ? ' class="warn"' : '';
+        const rows = res.rows.map(r => '<tr' + (r.flags.length ? ' style="background:rgba(255,179,71,.08)"' : '') + '><td><b>' + esc(r.s) + '</b></td><td class="dim">' + (r.step != null ? '#' + r.step : '') + '</td><td>' + esc(r.shutter) + '</td>'
+            + '<td' + cellCls(r.flags.some(f => f.startsWith('heading'))) + '>' + esc(tri(r.hdg, '°')) + '</td><td' + cellCls(r.flags.some(f => f.startsWith('camera'))) + '>' + esc(tri(r.cam, '°')) + '</td>'
+            + '<td' + cellCls(r.flags.some(f => f.startsWith('altitude'))) + '>' + esc(tri([r.alt[0] != null ? r.alt[0] * M_TO_FT : null, r.alt[1] != null ? r.alt[1] * M_TO_FT : null, r.alt[2] != null ? r.alt[2] * M_TO_FT : null], '')) + '</td>'
+            + '<td' + cellCls(r.flags.some(f => f.startsWith('off station'))) + '>' + (r.pos != null ? (r.pos * M_TO_FT).toFixed(0) + ' ft ' + esc(r.posDir || '') : '–') + '</td><td' + cellCls(r.flags.some(f => f.startsWith('look-point'))) + '>' + (r.look != null ? r.look.toFixed(0) + ' ft' : '–') + '</td>'
+            + '<td class="dim">' + esc(r.asset || '–') + '</td><td>' + (r.flags.length ? '<span class="warn">' + esc(r.flags.join('; ')) + '</span>' : '<span class="ok">ok</span>') + '</td></tr>').join('');
+        const table = '<table><tr class="dim"><td>shot</td><td>step</td><td>shutter</td><td>heading p/a/Δ</td><td>camera p/a/Δ</td><td>drone alt ft p/a/Δ</td><td>drone vs nav</td><td>look-point gap</td><td>asset</td><td>flags</td></tr>' + rows + '</table>'
+            + '<div style="margin-top:6px">Shots <b>' + res.summary.shots + '</b> · flagged <b>' + res.summary.flagged + '</b> · re-takes <b>' + res.summary.retakes + '</b> · snapshot steps with no picture: ' + (res.summary.missing.length ? '<span class="warn">' + esc(res.summary.missing.join(', ')) + '</span>' : 'none') + '</div>';
+        const bad = res.rows.filter(r => r.flags.length);
+        const summaryHtml = '<div>' + res.summary.shots + ' shots · <b>' + bad.length + '</b> need' + (bad.length === 1 ? 's' : '') + ' attention · ' + res.summary.retakes + ' re-take' + (res.summary.retakes === 1 ? '' : 's') + (res.summary.missing.length ? ' · <span class="warn">no picture for ' + esc(res.summary.missing.join(', ')) + '</span>' : '') + '</div>'
+            + (bad.length ? '<ul style="margin:6px 0 0 18px;padding:0">' + bad.map(r => '<li>' + esc(shotSentence(r)) + '</li>').join('') + '</ul>' : '<div class="ok" style="margin-top:6px">All shots within limits.</div>');
+        openReportBox(checkerCardSpec(res), table, checkerText(res, false), checkerText(res, true), checkerSummary(res, false), 'vv-flight-check-' + h.flightId + '.png');
+    }
+    function openSessionReport() {
+        if (!model) { toast('No mission loaded', true); return; }
+        const h = flightHeader(); const reps = missionReports();
+        const rows = reps.map((r, i) => (r.changes || []).map(c => '<tr><td class="dim">' + (i + 1) + ' · ' + esc(new Date(r.at).toLocaleTimeString()) + '</td><td><b>' + esc(c.label) + '</b></td><td>' + esc(c.kind + (c.field ? ' · ' + c.field : '')) + '</td><td>' + esc(c.before != null ? c.before : '') + '</td><td>' + esc(c.after != null ? c.after : '') + '</td><td class="dim">' + esc(c.note || '') + '</td><td class="dim">' + esc((r.actions || []).map(a => a.what + (a.step ? ' ' + a.step : '')).join(', ')) + '</td></tr>').join('')).join('');
+        const table = reps.length ? '<table><tr class="dim"><td>save</td><td>step</td><td>change</td><td>before</td><td>after</td><td>note</td><td>action</td></tr>' + rows + '</table>' : '<div class="dim">No changes applied on this page yet — Apply something first.</div>';
+        openReportBox(sessionCardSpec(reps), table, sessionText(false), sessionText(true), null, 'vv-changes-' + h.flightId + '.png');
     }
     // ---- toast ----
     let toastEl = null;
@@ -2228,7 +2623,31 @@
                 observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
             }
             log('ready v' + SCRIPT_VERSION + ' — mission ' + ids.mid);
-        }).catch(e => { warn('load failed:', e); loading = null; });
+        }).catch(e => { loading = null; loadFailures++; nextRetryAt = Date.now() + Math.min(30000, 3000 * loadFailures); warn('load failed (' + loadFailures + ', retrying): ' + (e && e.stack || e)); });
+    }
+    // Reload the mission data WITHOUT tearing the UI down (after a save, or the Reload button). Everything that
+    // depends on the model is re-rendered; the strip / card / bar / legend / overlay stay mounted.
+    let loadFailures = 0, nextRetryAt = 0;
+    function reloadModel(reason) {
+        if (!current) return;
+        const ids = current;
+        log('reloading mission data (' + (reason || 'manual') + ')…');
+        loading = loadModel(ids.sid, ids.mid).then(m => {
+            if (!current || current.mid !== ids.mid) return;
+            model = m; loadFailures = 0;
+            ed.work = null; ed.ghosts.forEach(l => { try { ov.map && ov.map.removeLayer(l); } catch (e) {} }); ed.ghosts = [];
+            activeKeys = []; lastPlayheadShot = null; activeOverlayKey = null;
+            if (selectedRec) selectedRec = m.images.find(im => im.key === selectedRec.key) || null;
+            if (settings.overlayGroup) computeNumbering(m, false);
+            try { stampStrip(true); } catch (e) { warn('reload: strip:', e); }
+            try { hookVideo(); ensureCard(); ensureBar(); renderLegend(); loadGroupMeta(); } catch (e) { warn('reload: panels:', e); }
+            try { drawOverlay(); } catch (e) { warn('reload: overlay:', e); }
+            if (settings.overlayGroup) loadGroup();
+            if (selectedRec) renderCard(selectedRec, 'selected');
+            if (ed.open) renderEdit();
+            loading = null;
+            log('reloaded — ' + m.shots.length + ' shots, live app ' + (m.liveApp ? m.liveApp.id : 'n/a'));
+        }).catch(e => { loading = null; loadFailures++; nextRetryAt = Date.now() + Math.min(30000, 3000 * loadFailures); warn('reload failed (' + loadFailures + '): ' + (e && e.stack || e)); toast('Video Validation: reload failed — ' + e.message + ' (retrying)', true); });
     }
     function deactivate() {
         current = null; model = null; loading = null;
@@ -2259,6 +2678,7 @@
         const root = playbackRoot();
         if (!ids || !root) { if (current) { log('left playback — tearing down'); deactivate(); } return; }
         if (!current || current.mid !== ids.mid) { if (current) deactivate(); activate(ids); return; }
+        if (!model && !loading && Date.now() >= nextRetryAt) { if (loadFailures >= 8) { if (loadFailures === 8) { warn('giving up after 8 failed loads — use Reload mission data in the Control Panel'); loadFailures++; } return; } activate(ids); return; }
         if (model) {
             hookVideo(); scheduleStamp(); ensureCard(); ensureBar(); renderLegend(); updateBarNow();
             try { fixCounter(); ensureNavButtons(); } catch (e) { warn('counter/nav:', e); }
@@ -2282,6 +2702,7 @@
             'flown-dashed': 'flownDashed', 'flown-color': 'flownColor', 'look-points': 'lookPoints',
             'nav-color': 'navColor', 'snap-color': 'snapColor', 'actual-color': 'actualColor', 'live-diff': 'liveDiffOverlay', 'live-color': 'liveColor',
             'follow': 'follow', 'follow-zoom': 'followZoom', 'actual-look': 'actualLookPoints', 'legend': 'legend',
+            'chk-hdg': 'chkHdg', 'chk-cam': 'chkCam', 'chk-alt': 'chkAltFt', 'chk-pos': 'chkPosFt', 'chk-look': 'chkLookFt',
             'nav-line-w': 'navLineW', 'snap-line-w': 'snapLineW', 'actual-line-w': 'actualLineW', 'flown-line-w': 'flownLineW' };
         const key = map[id]; if (!key) return;
         let v = val;
@@ -2291,6 +2712,7 @@
         else if (key === 'flownColor' || key === 'navColor' || key === 'snapColor' || key === 'actualColor' || key === 'liveColor') { v = /^#[0-9a-f]{6}$/i.test(String(val)) ? String(val) : DEFAULTS[key]; }
         else if (/LineW$/.test(key)) { v = parseFloat(val); if (!isFinite(v) || v < 0.5 || v > 12) return; }
         else if (key === 'followZoom') { v = parseFloat(val); if (!isFinite(v) || v < 14 || v > 22) return; }
+        else if (/^chk/.test(key)) { v = parseFloat(val); if (!isFinite(v) || v < 0) return; }
         else v = !!val;
         if (settings[key] === v) return;   // idempotent — CP echoes from both frames
         settings[key] = v; saveSettings();
@@ -2330,7 +2752,10 @@
                     if (Date.now() - lastDirectKeyAt < 250) return;  // the fallback already handled this keypress
                     hotkeyStep(id === 'next-shot' ? 1 : -1);
                 }
-                else if (id === 'reload') { const ids = current; deactivate(); if (ids) activate(ids); }
+                else if (id === 'reload') reloadModel('Control Panel');
+                else if (id === 'dump-geo') dumpGeometry();
+                else if (id === 'check-flight') openChecker();
+                else if (id === 'session-report') openSessionReport();
             }
         };
     }
@@ -2351,6 +2776,14 @@
                     { id: 'lead-in', label: 'Seek lead-in (seconds before the shot)', type: 'number', default: DEFAULTS.leadInS, min: 0, max: 60 },
                     { id: 'shot-card', label: 'Shot card (planned vs actual)', type: 'boolean', default: DEFAULTS.shotCard },
                     { id: 'time-bar', label: 'Time bar under the player (±10/30 s, jump to time)', type: 'boolean', default: DEFAULTS.timeBar },
+                    { id: 'hdr-chk', type: 'header', label: 'Flight checker thresholds (flag a shot when …)' },
+                    { id: 'chk-hdg', label: 'heading off by more than (°)', type: 'number', default: DEFAULTS.chkHdg, min: 0, max: 180 },
+                    { id: 'chk-cam', label: 'camera angle off by more than (°)', type: 'number', default: DEFAULTS.chkCam, min: 0, max: 90 },
+                    { id: 'chk-alt', label: 'drone altitude off by more than (ft)', type: 'number', default: DEFAULTS.chkAltFt, min: 0, max: 1000 },
+                    { id: 'chk-pos', label: 'drone more than this from its nav (ft)', type: 'number', default: DEFAULTS.chkPosFt, min: 0, max: 5000 },
+                    { id: 'chk-look', label: 'planned vs actual look-point gap over (ft)', type: 'number', default: DEFAULTS.chkLookFt, min: 0, max: 5000 },
+                    { id: 'check-flight', label: '🔎 Check this flight (re-takes, deviations, missing shots)', type: 'button' },
+                    { id: 'session-report', label: '📋 Session change report (copy for JIRA)', type: 'button' },
                     { id: 'hdr-edit', type: 'header', label: 'Editing (writes the mission plan)' },
                     { id: 'edit', label: 'Adjust panel — EXPERIMENTAL: nudge / adopt / convert / delete / duplicate, saves to the mission', type: 'boolean', default: DEFAULTS.edit },
                     { id: 'turn-step', label: 'Turn step (degrees; Shift ×5)', type: 'number', default: DEFAULTS.stepDeg, min: 0.5, max: 90 },
@@ -2381,6 +2814,7 @@
                     { id: 'actual-line-w', label: 'Actual shot weight (footprint, heading tick, px)', type: 'number', default: DEFAULTS.actualLineW, min: 0.5, max: 12 },
                     { id: 'flown-line-w', label: 'Flown path weight (px)', type: 'number', default: DEFAULTS.flownLineW, min: 0.5, max: 12 },
                     { id: 'reload', label: 'Reload mission data', type: 'button' },
+                    { id: 'dump-geo', label: 'Dump snapshot geometry to console (diagnostic)', type: 'button' },
                 ],
                 hotkeys: [
                     { id: 'prev-shot', label: 'Previous shot', default: '[' },
@@ -2434,11 +2868,14 @@
         document.addEventListener('mouseup', onScrubUp, true);
         document.addEventListener('wheel', onScrubWheel, { capture: true, passive: false });
         document.addEventListener('click', onReviewClick, true);
+        document.addEventListener('click', onReportClick, true);
+        document.addEventListener('click', (e) => { const t = e.target.closest && e.target.closest('[data-aim-vv-tool]'); if (!t || !model) return; e.preventDefault(); e.stopPropagation(); if (t.dataset.aimVvTool === 'check') openChecker(); else openSessionReport(); }, true);
         document.addEventListener('click', (e) => { const t = e.target.closest && e.target.closest('[data-aim-vv-ed-toggle]'); if (!t || !model) return; e.preventDefault(); e.stopPropagation(); ed.open = !ed.open; if (ed.open) edEnsureWork(); renderEdit(); if (selectedRec) renderCard(selectedRec, 'selected'); }, true);
         installCsrfSniffer();
         window.addEventListener('keydown', fallbackKeys, true);
         tickTimer = setInterval(tick, 1000);
         tick();
     }
+    if (!IS_TOP) { try { pageWin.__aimVv = { get model() { return model; }, get overlay() { return ov; }, settings, dump: dumpGeometry }; } catch (e) { /* sandbox */ } }
     log('ready (' + (IS_TOP ? 'top: panel registration only' : 'iframe: watching for the playback route') + ')');
 })();

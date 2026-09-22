@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-22 — ⭐ PROD: AIM Video Validation v0.52 (from v0.43)
+
+- Everything built since the working version reaches coworkers: **🔎 Check flight** (planned-vs-actual card for the open flight, re-takes, missing shots, copy as image / JIRA), **📋 Changes** (before/after of what was applied to the mission in the last 24 h, copy as image / JIRA), the on-map legend, the saved-plan-in-yellow overlay, actual look-point rings, restore picker, drag-to-change numbers, look-point distances horizontal + line of sight, and the save-path fixes (live mission resolved by name, in-place reload after a save).
+- The **Adjust panel stays OFF by default in prod** (Control Panel → Video Validation → Editing). It writes to the mission; turn it on only if you know what you are doing. Every save backs the mission up first and can be restored from the panel.
+
 ## 2026-09-22 — AIM Video Validation latest v0.52 (dev only): tools survive a save; Changes survives a reload
 
 - After Apply the mission data reloads in place instead of tearing the whole UI down and rebuilding it; a failed load now retries on its own with a console line saying why, instead of leaving the page bare until a refresh.
