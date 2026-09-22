@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-21 — 🪆 Nested assets: review hardening: AIM Site Setup Tools v4.304 · AIM Fleet Tools v0.45 · AIM Mission Bank Tools v3.04 (latest — dev only, feature #273)
+
+Pre-promotion review fixes, no visible change on a healthy site. The shared nesting resolver now breaks a parent loop (A inside B inside A) cleanly so counts, roots and the Children column all agree; two assets whose names differ only by surrounding spaces no longer silently swap children (first one wins, warning in the console). `depth:abc` in the SUM search now shows nothing instead of everything. Fleet Metrics' "Nested" tooltip says exactly what it counts. Mission Bank Tools' asset records only reference children that exist in its own asset list.
+
 ## 2026-09-21 — 🪆 Nested assets: Root column: AIM Site Setup Tools v4.303 (latest — dev only, feature #273)
 
 New **Root** SUM column (off by default, Columns ▾): the top-level asset of the nest — the pad for anything inside it, and the asset's own name when it is top level. Sort by it to keep every pad's whole family together regardless of depth; the **Nested Assets** preset now includes it.

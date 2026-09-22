@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.303
+// @version      4.304
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.303';
+    const SCRIPT_VERSION = '4.304';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -15493,11 +15493,15 @@
         const byName = new Map();
         const byId = new Map();
         assets.forEach(e => {
-            byName.set(String(e.name || '').trim(), e);
+            const key = String(e.name || '').trim();
+            // Percepto enforces unique asset names per site; a collision here can only come
+            // from whitespace variants. Keep the FIRST, warn, never guess silently.
+            if (byName.has(key)) console.warn(`${typeof TAG === 'string' ? TAG : '[AIM ASSET TREE]'} duplicate asset name "${key}" (ids ${byName.get(key).id}, ${e.id}) — children link to the first`);
+            else byName.set(key, e);
             byId.set(e.id, { id: e.id, name: e.name || '', ent: e, parentId: null, parentName: null,
                 rootId: e.id, depth: 0, children: [], descendants: [], orphan: false, outsideParent: false });
         });
-        // link parents
+        // pass 1: resolve parent links by name
         assets.forEach(e => {
             const n = byId.get(e.id);
             const pName = typeof e.parent_asset_name === 'string' ? e.parent_asset_name.trim() : '';
@@ -15506,21 +15510,25 @@
             const p = byName.get(pName);
             if (!p || p.id === e.id) { n.orphan = true; return; }
             n.parentId = p.id;
-            byId.get(p.id).children.push(e.id);
         });
-        // depth / root / descendants, cycle-safe
+        // pass 2: break cycles BEFORE any counts are taken — every member of a cycle
+        // becomes an orphan root, so children[] / depth / roots stay consistent
         byId.forEach(n => {
             const seen = new Set([n.id]);
-            let cur = n, d = 0;
+            let cur = n;
             while (cur.parentId !== null) {
                 const up = byId.get(cur.parentId);
-                if (!up || seen.has(up.id)) { n.orphan = true; n.parentId = null; d = 0; cur = n; break; }
-                seen.add(up.id); cur = up; d++;
+                if (!up || seen.has(up.id)) { n.orphan = true; n.parentId = null; break; }
+                seen.add(up.id); cur = up;
             }
+        });
+        // pass 3: children from the final links, then depth / root / descendants
+        byId.forEach(n => { if (n.parentId !== null) byId.get(n.parentId).children.push(n.id); });
+        byId.forEach(n => {
+            let cur = n, d = 0;
+            while (cur.parentId !== null) { cur = byId.get(cur.parentId); d++; }
             n.depth = d; n.rootId = cur.id;
-            let a = n.parentId === null ? null : byId.get(n.parentId);
-            const guard = new Set();
-            while (a && !guard.has(a.id)) { guard.add(a.id); a.descendants.push(n.id); a = a.parentId === null ? null : byId.get(a.parentId); }
+            for (let a = n.parentId === null ? null : byId.get(n.parentId); a; a = a.parentId === null ? null : byId.get(a.parentId)) a.descendants.push(n.id);
         });
         // diagnostic: centroid outside declared parent ring
         const centroid = e => { const c = e.coords || []; if (!c.length) return null;
@@ -15985,7 +15993,8 @@
         };
         const parentOk = tags.parent ? nameMatcher(tags.parent) : null;
         const rootOk = tags.root ? nameMatcher(tags.root) : null;
-        const depthWant = tags.depth != null && /^\d+$/.test(tags.depth) ? Number(tags.depth) : null;
+        // depth: fails CLOSED like the other tags — a non-integer value matches nothing rather than showing every asset.
+        const depthWant = tags.depth == null ? null : (/^\d+$/.test(tags.depth) ? Number(tags.depth) : -1);
         let out = rows.filter(r => {
             if (parentOk && !(r.type === 3 && r.parentName && parentOk(r.parentName))) return false;
             if (rootOk) {

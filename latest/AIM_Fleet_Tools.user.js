@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.44
+// @version      0.45
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -34,7 +34,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.44';
+    const SCRIPT_VERSION = '0.45';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -3617,11 +3617,15 @@
         const byName = new Map();
         const byId = new Map();
         assets.forEach(e => {
-            byName.set(String(e.name || '').trim(), e);
+            const key = String(e.name || '').trim();
+            // Percepto enforces unique asset names per site; a collision here can only come
+            // from whitespace variants. Keep the FIRST, warn, never guess silently.
+            if (byName.has(key)) console.warn(`${typeof TAG === 'string' ? TAG : '[AIM ASSET TREE]'} duplicate asset name "${key}" (ids ${byName.get(key).id}, ${e.id}) — children link to the first`);
+            else byName.set(key, e);
             byId.set(e.id, { id: e.id, name: e.name || '', ent: e, parentId: null, parentName: null,
                 rootId: e.id, depth: 0, children: [], descendants: [], orphan: false, outsideParent: false });
         });
-        // link parents
+        // pass 1: resolve parent links by name
         assets.forEach(e => {
             const n = byId.get(e.id);
             const pName = typeof e.parent_asset_name === 'string' ? e.parent_asset_name.trim() : '';
@@ -3630,21 +3634,25 @@
             const p = byName.get(pName);
             if (!p || p.id === e.id) { n.orphan = true; return; }
             n.parentId = p.id;
-            byId.get(p.id).children.push(e.id);
         });
-        // depth / root / descendants, cycle-safe
+        // pass 2: break cycles BEFORE any counts are taken — every member of a cycle
+        // becomes an orphan root, so children[] / depth / roots stay consistent
         byId.forEach(n => {
             const seen = new Set([n.id]);
-            let cur = n, d = 0;
+            let cur = n;
             while (cur.parentId !== null) {
                 const up = byId.get(cur.parentId);
-                if (!up || seen.has(up.id)) { n.orphan = true; n.parentId = null; d = 0; cur = n; break; }
-                seen.add(up.id); cur = up; d++;
+                if (!up || seen.has(up.id)) { n.orphan = true; n.parentId = null; break; }
+                seen.add(up.id); cur = up;
             }
+        });
+        // pass 3: children from the final links, then depth / root / descendants
+        byId.forEach(n => { if (n.parentId !== null) byId.get(n.parentId).children.push(n.id); });
+        byId.forEach(n => {
+            let cur = n, d = 0;
+            while (cur.parentId !== null) { cur = byId.get(cur.parentId); d++; }
             n.depth = d; n.rootId = cur.id;
-            let a = n.parentId === null ? null : byId.get(n.parentId);
-            const guard = new Set();
-            while (a && !guard.has(a.id)) { guard.add(a.id); a.descendants.push(n.id); a = a.parentId === null ? null : byId.get(a.parentId); }
+            for (let a = n.parentId === null ? null : byId.get(n.parentId); a; a = a.parentId === null ? null : byId.get(a.parentId)) a.descendants.push(n.id);
         });
         // diagnostic: centroid outside declared parent ring
         const centroid = e => { const c = e.coords || []; if (!c.length) return null;
@@ -3854,7 +3862,7 @@
         fpBand:    { label: 'FP band ft', get: r => r.s && r.s.fpBandN ? Math.round(r.s.fpBandFtSum / r.s.fpBandN) : null, title: 'Average flight-path arc altitude band', total: 'avg' },
         gmTypes:   { label: 'Marker types', get: r => r.s ? mtTop(r.s.gmTypes, 4) : '', text: true },
         unsh:      { label: 'Unshielded', get: r => r.s && r.s.unshielded },
-        nested:    { label: 'Nested', get: r => (r.s && typeof r.s.nested === 'number') ? r.s.nested : null, title: 'Assets nested inside another asset (parent_asset_name set); — = site not re-indexed since this check was added' },
+        nested:    { label: 'Nested', get: r => (r.s && typeof r.s.nested === 'number') ? r.s.nested : null, title: 'Assets nested under a parent that exists on the site (a parent name that matches nothing is not counted); — = site not re-indexed since this check was added' },
         nestParents: { label: 'Parents', get: r => (r.s && typeof r.s.nestParents === 'number') ? r.s.nestParents : null, title: 'Assets that have at least one nested child (usually pads)' },
         // null (→ '—') when the record predates this check — a stale site must read "unknown", never 0
         apprFp:    { label: '🛂 Approval FPs', get: r => (r.s && Array.isArray(r.s.apprList)) ? r.s.apprFps : null, title: 'Flight paths with at least one arc flagged "wait until approved" (approval required before flying); — = site not re-indexed since this check was added' },
