@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-22 — AIM Video Validation latest v0.52 (dev only): tools survive a save; Changes survives a reload
+
+- After Apply the mission data reloads in place instead of tearing the whole UI down and rebuilding it; a failed load now retries on its own with a console line saying why, instead of leaving the page bare until a refresh.
+- 📋 Changes reads this mission's saved reports from script storage (last 24 h) as well as what was applied on the page, so a page reload no longer empties it.
+
 ## 2026-09-21 — 🪆 Nested assets → PROD: AIM Site Setup Tools v4.245 · AIM Mission Bank Tools v2.93 (feature #273)
 
 Percepto lets an asset be nested inside another asset (a pump jack inside its pad, and chains like pad → flowline → fitting), but its sidebar shows them as a flat list. **Site Setup Tools SUM panel** now reads the nesting: five new asset columns, off by default (Columns ▾ to turn on) — **Parent**, **Root** (the pad at the top of the nest), **Depth** (0 = top level), **Children** (direct count) and **Nest path** (`Pad › Flowline › …`). Click a header to sort: by Parent groups every child under its pad, by Root keeps whole families together, by Depth puts pads first, by Nest path gives tree order. New built-in preset **Nested Assets** does that in one click. The search box takes **tags**: `parent:Pad` (direct children of Pad), `root:Pad` (Pad + everything nested anywhere under it), `depth:1`; free text goes first (`pump parent:Pad`), multi-word names need no quotes. The right-click inspector shows an asset's Parent and Children. A child whose parent no longer exists on the site, or whose centroid falls outside its parent, is marked ⚠. **Mission Bank Tools:** the generator's asset records carry parent / root / children (no behaviour change yet); a bug where the unshielded flag was read from the wrong place (always "no") is fixed, so unshielded assets are now skipped by the generator as intended. Backported from latest 4.304 / 3.04 — nothing else from latest ships in this update.

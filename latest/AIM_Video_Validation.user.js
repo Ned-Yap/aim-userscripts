@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.51
+// @version      0.52
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.51';
+    const SCRIPT_VERSION = '0.52';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -2203,7 +2203,7 @@
             status(mism.length ? 'saved with ' + mism.length + ' mismatch(es)' : 'saved + verified');
             if (ed.reviewEl) { ed.reviewEl.remove(); ed.reviewEl = null; }
             ed.work = null; ed.log = []; ed.busy = false;
-            const ids = current; deactivate(); if (ids) activate(ids);
+            reloadModel('after save');
             return;
         } catch (e) {
             warn('apply failed:', e); toast('🛑 Not applied: ' + e.message, true); status('failed: ' + e.message);
@@ -2214,7 +2214,17 @@
     // ===============================================================
     // FLIGHT CHECKER + SESSION CHANGE REPORT (copy for JIRA)
     // ===============================================================
-    const sessionReports = [];   // every Apply on this page (all missions), in order
+    const sessionReports = [];   // every Apply on this page (all missions), in order — merged with stored reports below
+    // Reports for THIS mission: everything applied on this page plus what script storage holds for it from the last
+    // 24 h (each Apply also writes there), so a page reload doesn't empty the Changes button.
+    function missionReports() {
+        if (!model) return [];
+        const cutoff = Date.now() - 24 * 3600 * 1000;
+        let stored = []; try { stored = (GM_getValue(REPORTS_KEY, []) || []).filter(r => String(r.mid) === String(model.mid) && new Date(r.at).getTime() >= cutoff); } catch (e) { warn('reports read:', e); }
+        const seen = {}; const all = [];
+        stored.concat(sessionReports.filter(r => String(r.mid) === String(model.mid))).forEach(r => { if (!seen[r.at]) { seen[r.at] = true; all.push(r); } });
+        return all.sort((a, b) => String(a.at).localeCompare(String(b.at)));
+    }
     let reportEl = null;
     function fmtSigned(v, unit, d) { if (v == null || !isFinite(v)) return '–'; const r = +v.toFixed(d == null ? 0 : d); return (r > 0 ? '+' : '') + (r === 0 ? '0' : r.toFixed(d == null ? 0 : d)) + unit; }
     function actualLookPointOf(im) {
@@ -2312,12 +2322,12 @@
     }
     function sessionText(jira) {
         const h = flightHeader();
-        const reps = sessionReports.filter(r => String(r.mid) === String(model.mid));
+        const reps = missionReports();
         const L = [];
         L.push((jira ? 'h3. ' : '') + 'Mission changes — ' + h.mission + ' · flight ' + h.flightId + (h.group != null && h.group >= 0 ? ' (group ' + h.group + ')' : '') + ' · ' + new Date().toLocaleString());
         L.push('Steps: this flight ' + h.flightSteps + ' (' + h.flightSnaps + ' snapshots) · whole mission ' + h.missionSteps + ' (' + h.missionSnaps + ' snapshots) · live app ' + h.appId + ' · ' + h.url);
-        if (!reps.length) { L.push('No changes applied on this page yet.'); return L.join('\n'); }
-        L.push(reps.length + ' save' + (reps.length === 1 ? '' : 's') + ' this session · ' + reps.reduce((n, r) => n + (r.changes || []).length, 0) + ' field changes · verify ' + (reps.every(r => r.verify && r.verify.ok) ? 'clean' : 'MISMATCHES — see console'));
+        if (!reps.length) { L.push('No changes applied to this mission in the last 24 h.'); return L.join('\n'); }
+        L.push(reps.length + ' save' + (reps.length === 1 ? '' : 's') + ' in the last 24 h · ' + reps.reduce((n, r) => n + (r.changes || []).length, 0) + ' field changes · verify ' + (reps.every(r => r.verify && r.verify.ok) ? 'clean' : 'MISMATCHES — see console'));
         const head = ['save', 'step', 'change', 'before', 'after', 'note', 'action'];
         if (jira) L.push('||' + head.join('||') + '||'); else L.push(head.join('\t'));
         reps.forEach((r, i) => {
@@ -2499,11 +2509,11 @@
         const h = flightHeader();
         const items = changeSentences(reps);
         return {
-            title: 'Mission changes · ' + (h.mission || ''),
+            title: 'Mission changes (last 24 h) · ' + (h.mission || ''),
             subtitle: 'flight ' + h.flightId + (h.group != null && h.group >= 0 ? ' · group ' + h.group : '') + ' · ' + new Date().toLocaleString(),
             lines: ['this flight ' + h.flightSteps + ' steps / ' + h.flightSnaps + ' snapshots · whole mission ' + h.missionSteps + ' steps / ' + h.missionSnaps + ' snapshots · live app ' + h.appId],
             chips: [{ label: 'saves', value: reps.length, color: '#5fe3ff' }, { label: 'steps changed', value: items.length, color: items.length ? '#ffb347' : null }, { label: 'field changes', value: reps.reduce((n, r) => n + (r.changes || []).length, 0) }],
-            items: items.length ? items : [{ badge: '—', color: '#8a8f99', text: 'No changes applied on this page yet.' }],
+            items: items.length ? items : [{ badge: '—', color: '#8a8f99', text: 'No changes applied to this mission in the last 24 h.' }],
             footer: h.url + ' · AIM Video Validation',
             table: reps.length ? { head: ['save', 'step', 'change', 'before', 'after', 'note'], rows: [].concat(...reps.map((r, i) => (r.changes || []).map(c => [String(i + 1) + ' · ' + new Date(r.at).toLocaleTimeString(), c.label, c.kind + (c.field ? ' · ' + c.field : ''), c.before != null ? c.before : '', c.after != null ? c.after : '', c.note || '']))), color: (ri, ci) => ci === 3 ? '#8a8f99' : ci === 4 ? '#5fe3ff' : null } : null,
         };
@@ -2553,7 +2563,7 @@
     }
     function openSessionReport() {
         if (!model) { toast('No mission loaded', true); return; }
-        const h = flightHeader(); const reps = sessionReports.filter(r => String(r.mid) === String(model.mid));
+        const h = flightHeader(); const reps = missionReports();
         const rows = reps.map((r, i) => (r.changes || []).map(c => '<tr><td class="dim">' + (i + 1) + ' · ' + esc(new Date(r.at).toLocaleTimeString()) + '</td><td><b>' + esc(c.label) + '</b></td><td>' + esc(c.kind + (c.field ? ' · ' + c.field : '')) + '</td><td>' + esc(c.before != null ? c.before : '') + '</td><td>' + esc(c.after != null ? c.after : '') + '</td><td class="dim">' + esc(c.note || '') + '</td><td class="dim">' + esc((r.actions || []).map(a => a.what + (a.step ? ' ' + a.step : '')).join(', ')) + '</td></tr>').join('')).join('');
         const table = reps.length ? '<table><tr class="dim"><td>save</td><td>step</td><td>change</td><td>before</td><td>after</td><td>note</td><td>action</td></tr>' + rows + '</table>' : '<div class="dim">No changes applied on this page yet — Apply something first.</div>';
         openReportBox(sessionCardSpec(reps), table, sessionText(false), sessionText(true), null, 'vv-changes-' + h.flightId + '.png');
@@ -2613,7 +2623,31 @@
                 observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
             }
             log('ready v' + SCRIPT_VERSION + ' — mission ' + ids.mid);
-        }).catch(e => { warn('load failed:', e); loading = null; });
+        }).catch(e => { loading = null; loadFailures++; nextRetryAt = Date.now() + Math.min(30000, 3000 * loadFailures); warn('load failed (' + loadFailures + ', retrying): ' + (e && e.stack || e)); });
+    }
+    // Reload the mission data WITHOUT tearing the UI down (after a save, or the Reload button). Everything that
+    // depends on the model is re-rendered; the strip / card / bar / legend / overlay stay mounted.
+    let loadFailures = 0, nextRetryAt = 0;
+    function reloadModel(reason) {
+        if (!current) return;
+        const ids = current;
+        log('reloading mission data (' + (reason || 'manual') + ')…');
+        loading = loadModel(ids.sid, ids.mid).then(m => {
+            if (!current || current.mid !== ids.mid) return;
+            model = m; loadFailures = 0;
+            ed.work = null; ed.ghosts.forEach(l => { try { ov.map && ov.map.removeLayer(l); } catch (e) {} }); ed.ghosts = [];
+            activeKeys = []; lastPlayheadShot = null; activeOverlayKey = null;
+            if (selectedRec) selectedRec = m.images.find(im => im.key === selectedRec.key) || null;
+            if (settings.overlayGroup) computeNumbering(m, false);
+            try { stampStrip(true); } catch (e) { warn('reload: strip:', e); }
+            try { hookVideo(); ensureCard(); ensureBar(); renderLegend(); loadGroupMeta(); } catch (e) { warn('reload: panels:', e); }
+            try { drawOverlay(); } catch (e) { warn('reload: overlay:', e); }
+            if (settings.overlayGroup) loadGroup();
+            if (selectedRec) renderCard(selectedRec, 'selected');
+            if (ed.open) renderEdit();
+            loading = null;
+            log('reloaded — ' + m.shots.length + ' shots, live app ' + (m.liveApp ? m.liveApp.id : 'n/a'));
+        }).catch(e => { loading = null; loadFailures++; nextRetryAt = Date.now() + Math.min(30000, 3000 * loadFailures); warn('reload failed (' + loadFailures + '): ' + (e && e.stack || e)); toast('Video Validation: reload failed — ' + e.message + ' (retrying)', true); });
     }
     function deactivate() {
         current = null; model = null; loading = null;
@@ -2644,6 +2678,7 @@
         const root = playbackRoot();
         if (!ids || !root) { if (current) { log('left playback — tearing down'); deactivate(); } return; }
         if (!current || current.mid !== ids.mid) { if (current) deactivate(); activate(ids); return; }
+        if (!model && !loading && Date.now() >= nextRetryAt) { if (loadFailures >= 8) { if (loadFailures === 8) { warn('giving up after 8 failed loads — use Reload mission data in the Control Panel'); loadFailures++; } return; } activate(ids); return; }
         if (model) {
             hookVideo(); scheduleStamp(); ensureCard(); ensureBar(); renderLegend(); updateBarNow();
             try { fixCounter(); ensureNavButtons(); } catch (e) { warn('counter/nav:', e); }
@@ -2717,7 +2752,7 @@
                     if (Date.now() - lastDirectKeyAt < 250) return;  // the fallback already handled this keypress
                     hotkeyStep(id === 'next-shot' ? 1 : -1);
                 }
-                else if (id === 'reload') { const ids = current; deactivate(); if (ids) activate(ids); }
+                else if (id === 'reload') reloadModel('Control Panel');
                 else if (id === 'dump-geo') dumpGeometry();
                 else if (id === 'check-flight') openChecker();
                 else if (id === 'session-report') openSessionReport();
