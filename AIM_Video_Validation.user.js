@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.54
+// @version      0.55
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.54';
+    const SCRIPT_VERSION = '0.55';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -246,28 +246,51 @@
     // live app by name, disambiguating same-name missions by structure and geometry against the flown plan.
     // (GET /available_app/<id>/ is 404 and the list needs type=1 — without it the server answers 400.)
     function fetchLiveApp(sid, appId, name, flownPlan) {
-        return getJSON('/available_app/?site_id=' + encodeURIComponent(sid) + '&type=1').then(arr => {
-            const list = Array.isArray(arr) ? arr : (arr && (arr.results || arr.apps)) || [];
-            const direct = list.find(a => a && Number(a.id) === Number(appId));
-            if (direct) { direct.__aimVvHow = 'by id'; return direct; }
-            const named = list.filter(a => a && a.name === name);
-            if (!named.length) throw new Error('no live mission named "' + name + '" in the site list (' + list.length + ' missions; flown record app ' + appId + ')');
-            let pick = named[0], how = 'by name';
-            if (named.length > 1) {
-                const flown = flownPlan || [];
-                const aligned = named.filter(a => Array.isArray(a.instructions) && a.instructions.length === flown.length && a.instructions.slice().sort((x, y) => x.index_in_app - y.index_in_app).every((st, i) => st.type === flown[i].type));
-                const pool = aligned.length ? aligned : named;
-                // Geometry: total distance between located steps of the candidate and the flown plan (smaller = closer copy).
-                const score = (a) => { const ins = (a.instructions || []).slice().sort((x, y) => x.index_in_app - y.index_in_app); let d = 0, n = 0; ins.forEach((st, i) => { const f = flown[i]; if (st && f && st.location && f.location) { d += distM(st.location, f.location) || 0; n++; } }); return n ? d / n : Infinity; };
-                pool.sort((a, b) => score(a) - score(b));
-                pick = pool[0];
-                how = 'by name (' + named.length + ' same-name missions; ' + (aligned.length ? aligned.length + ' structurally matching, ' : '') + 'closest geometry ' + (isFinite(score(pick)) ? score(pick).toFixed(1) + ' m/step' : 'n/a') + ')';
-                warn('live app for "' + name + '": ' + named.length + ' missions share the name — picked ' + pick.id + ' ' + how);
-            }
+        const norm = (v) => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
+        const flown = flownPlan || [];
+        const sortedIns = (a) => (a.instructions || []).slice().sort((x, y) => x.index_in_app - y.index_in_app);
+        const structural = (a) => Array.isArray(a.instructions) && a.instructions.length === flown.length && sortedIns(a).every((st, i) => st.type === flown[i].type);
+        // mean distance between the located steps of a candidate and the flown plan (m); Infinity when nothing to compare
+        const geoScore = (a) => { const ins = sortedIns(a); let d = 0, n = 0; ins.forEach((st, i) => { const f = flown[i]; if (st && f && st.location && f.location) { d += distM(st.location, f.location) || 0; n++; } }); return n ? d / n : Infinity; };
+        const finish = (pick, how) => {
             pick.__aimVvHow = how;
             if (Number(pick.id) !== Number(appId)) log('live app = ' + pick.id + ' (flown record carries frozen copy ' + appId + ') — resolved ' + how);
             if (!Array.isArray(pick.instructions)) throw new Error('live app ' + pick.id + ' has no instructions in the list response');
             return pick;
+        };
+        const tried = [];
+        const resolveIn = (list, label) => {
+            tried.push(label + ' (' + list.length + ')');
+            const direct = list.find(a => a && Number(a.id) === Number(appId));
+            if (direct) return finish(direct, 'by id');
+            const exact = list.filter(a => a && a.name === name);
+            const loose = exact.length ? exact : list.filter(a => a && norm(a.name) === norm(name));
+            if (loose.length === 1) return finish(loose[0], exact.length ? 'by name' : 'by name (loose match: "' + loose[0].name + '")');
+            if (loose.length > 1) {
+                const aligned = loose.filter(structural); const pool = aligned.length ? aligned : loose;
+                pool.sort((a, b) => geoScore(a) - geoScore(b));
+                const how = 'by name (' + loose.length + ' same-name missions; ' + (aligned.length ? aligned.length + ' structurally matching, ' : '') + 'closest geometry ' + (isFinite(geoScore(pool[0])) ? geoScore(pool[0]).toFixed(1) + ' m/step' : 'n/a') + ')';
+                warn('live app for "' + name + '": ' + loose.length + ' missions share the name — picked ' + pool[0].id + ' ' + how);
+                return finish(pool[0], how);
+            }
+            // Renamed since it flew? Same step count + types, and the geometry still lines up (< 30 m mean).
+            const shaped = list.filter(structural).map(a => ({ a, g: geoScore(a) })).filter(x => x.g < 30).sort((x, y) => x.g - y.g);
+            if (shaped.length === 1 || (shaped.length > 1 && shaped[1].g > shaped[0].g * 3 + 5)) {
+                warn('live app for "' + name + '": no mission has that name — matched "' + shaped[0].a.name + '" (' + shaped[0].a.id + ') by structure + geometry (' + shaped[0].g.toFixed(1) + ' m/step); it was probably renamed after this flight');
+                return finish(shaped[0].a, 'by structure + geometry (renamed? now "' + shaped[0].a.name + '")');
+            }
+            if (shaped.length > 1) throw new Error('no mission named "' + name + '"; ' + shaped.length + ' missions match its shape too closely to choose (' + shaped.slice(0, 3).map(x => '"' + x.a.name + '"').join(', ') + ')');
+            return null;
+        };
+        const listOf = (type) => getJSON('/available_app/?site_id=' + encodeURIComponent(sid) + '&type=' + type).then(arr => Array.isArray(arr) ? arr : (arr && (arr.results || arr.apps)) || []).catch(e => { log('mission list type=' + type + ': ' + e.message); return []; });
+        return listOf(1).then(l1 => {
+            const r1 = resolveIn(l1, 'type 1'); if (r1) return r1;
+            // Other mission types (Percepto: 1 = patrol; others exist) — the flown mission may not be a patrol.
+            return Promise.all([listOf(2), listOf(3), listOf(0)]).then(more => {
+                const others = [].concat(...more).filter(a => a && !l1.some(b => b && b.id === a.id));
+                const r2 = others.length ? resolveIn(others, 'other types') : null; if (r2) return r2;
+                throw new Error('no live mission named "' + name + '" on this site — tried ' + tried.join(', ') + ' by id, name and shape (flown record app ' + appId + '). Deleted, or rebuilt as a different mission?');
+            });
         });
     }
     // Map the live app onto the flown plan positionally (ids are per-copy; the POST never sends them anyway).

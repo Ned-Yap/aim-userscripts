@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-23 — AIM Video Validation v0.55 (prod + dev): finds the live mission even when it was renamed
+
+- "could not read the live mission (no live mission named …)" — the lookup was exact-name only. It now tries the exact name, a loose name (spacing / case), then a structural match against every mission on the site (same steps, geometry still lining up — catches a mission renamed after the flight), then the other mission types. The Adjust panel says how it resolved; the error, when it still happens, lists what was tried.
+- v0.54: startup console line shows the running version, the edit setting and Lite/full mode (a stored "off" from the Control Panel was hiding the Adjust button on one install).
+
 ## 2026-09-22 — AIM Video Validation v0.53 (prod + dev): Adjust panel on by default
 
 - The ✎ Adjust panel is now on for everyone (Control Panel → Video Validation → Editing to switch it off). Every save still backs the mission up first, verifies after, and can be restored from the panel.
