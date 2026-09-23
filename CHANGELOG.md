@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-23 — AIM Video Validation v0.57 (prod + dev): hotfix "F is not a function"
+
+- v0.56's step alignment crashed on every restructured mission with "Adjust — editing unavailable: could not read the live mission (F is not a function)". Two local names inside the alignment shadowed a rounding helper. Renamed; the alignment now runs and prints its `live plan vs flown:` summary in the console.
+
 ## 2026-09-23 — AIM Video Validation v0.56 (prod + dev): editing survives missions edited since the flight
 
 - "the mission has been restructured since this flight (281 steps now vs 287 flown)" no longer blocks editing. The flown plan is aligned to the live plan step by step (navs by position, snapshots by aim point or heading + angle, control steps by type), so steps that still exist are editable, steps added in the Mission Bank since the flight are carried through untouched, and steps removed since the flight are named in the panel and simply can't be edited from that flight's page. Editing is only refused when fewer than half the flown steps can be found in the live mission.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.56
+// @version      0.57
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.56';
+    const SCRIPT_VERSION = '0.57';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -302,7 +302,7 @@
         // aim point / heading + angle, control steps by type (+ identical values). Gaps = steps removed / added since
         // the flight (the missions get edited in the Mission Bank between flights — a different step count must not
         // block editing, only the steps that no longer exist).
-        const F = m.plan, L = live;
+        const FL = m.plan, LV = live;
         const g2d = (v) => gimbalToDeg(v);
         const score = (f, l) => {
             if (f.type !== l.type) return -Infinity;
@@ -314,12 +314,12 @@
             }
             return (F(f.value1) === F(l.value1) && JSON.stringify(canon(f.extra_options || {})) === JSON.stringify(canon(l.extra_options || {}))) ? 8 : 5;
         };
-        const GAP = -4, n = F.length, k = L.length;
+        const GAP = -4, n = FL.length, k = LV.length;
         const H = []; const T = [];
         for (let i = 0; i <= n; i++) { H.push(new Float64Array(k + 1)); T.push(new Uint8Array(k + 1)); H[i][0] = i * GAP; T[i][0] = 2; }
         for (let j = 1; j <= k; j++) { H[0][j] = j * GAP; T[0][j] = 3; }
         for (let i = 1; i <= n; i++) for (let j = 1; j <= k; j++) {
-            const sc = score(F[i - 1], L[j - 1]);
+            const sc = score(FL[i - 1], LV[j - 1]);
             const d = isFinite(sc) ? H[i - 1][j - 1] + sc : -Infinity, u = H[i - 1][j] + GAP, l = H[i][j - 1] + GAP;
             let v = d, t = 1; if (u > v) { v = u; t = 2; } if (l > v) { v = l; t = 3; }
             H[i][j] = v; T[i][j] = t;
@@ -328,27 +328,27 @@
         let i = n, j = k;
         while (i > 0 || j > 0) { const t = (i > 0 && j > 0) ? T[i][j] : (i > 0 ? 2 : 3); if (t === 1) { liveOfFlown[i - 1] = j - 1; flownOfLive[j - 1] = i - 1; i--; j--; } else if (t === 2) i--; else j--; }
         const matched = liveOfFlown.filter(x => x != null).length;
-        if (!matched || matched < F.length * 0.5) {
-            warn('live plan aligns with only ' + matched + '/' + F.length + ' flown steps — edits disabled on this page');
-            m.liveAlignInfo = { matched, flown: F.length, live: L.length };
+        if (!matched || matched < FL.length * 0.5) {
+            warn('live plan aligns with only ' + matched + '/' + FL.length + ' flown steps — edits disabled on this page');
+            m.liveAlignInfo = { matched, flown: FL.length, live: LV.length };
             return;
         }
         // Working-copy base = the live plan in LIVE order; matched steps carry the flown step's id (so pictures,
         // numbering and the overlay keep pointing at them), unmatched live steps keep their own live id.
-        m.liveList = L.map((l, jj) => {
+        m.liveList = LV.map((l, jj) => {
             const c = deepCopy(l); const fi = flownOfLive[jj];
-            if (fi != null) { const f = F[fi]; c.id = f.id; c.type_name = f.type_name; c.index_in_app = f.index_in_app; }
+            if (fi != null) { const f = FL[fi]; c.id = f.id; c.type_name = f.type_name; c.index_in_app = f.index_in_app; }
             else { c.id = 'live-' + l.id; c.type_name = c.type_name || (m.plan.find(x => x.type === l.type) || {}).type_name || ('type ' + l.type); c._liveOnly = true; }
             m.liveById[c.id] = c;
             return c;
         });
         m.liveAdded = flownOfLive.filter(x => x == null).length;
-        m.liveRemoved = F.filter((f, ii) => liveOfFlown[ii] == null).map(f => f.id);
-        m.liveDiff = F.filter((f, ii) => liveOfFlown[ii] != null && stepSig(f) !== stepSig(m.liveById[f.id])).map(f => f.id);
+        m.liveRemoved = FL.filter((f, ii) => liveOfFlown[ii] == null).map(f => f.id);
+        m.liveDiff = FL.filter((f, ii) => liveOfFlown[ii] != null && stepSig(f) !== stepSig(m.liveById[f.id])).map(f => f.id);
         m.liveAligned = true;
         const lbl = (id) => (m.numbering[id] || {}).n || '#' + (m.byId[id] ? m.byId[id].index_in_app : id);
-        if (m.liveDiff.length || m.liveAdded || m.liveRemoved.length) log('live plan vs flown: ' + m.liveDiff.length + ' changed' + (m.liveDiff.length ? ' (' + m.liveDiff.map(id => lbl(id) + ' [' + fieldDiffs(m.byId[id], m.liveById[id]).map(d => d.field + ' ' + d.before + '→' + d.after).join('; ') + ']').join(', ') + ')' : '') + ' · ' + m.liveAdded + ' added since the flight · ' + m.liveRemoved.length + ' removed since the flight' + (m.liveRemoved.length ? ' (' + m.liveRemoved.map(lbl).join(', ') + ')' : '') + ' · ' + matched + '/' + F.length + ' steps matched — edits start from the LIVE values');
-        else log('live plan = flown plan (' + L.length + ' steps)');
+        if (m.liveDiff.length || m.liveAdded || m.liveRemoved.length) log('live plan vs flown: ' + m.liveDiff.length + ' changed' + (m.liveDiff.length ? ' (' + m.liveDiff.map(id => lbl(id) + ' [' + fieldDiffs(m.byId[id], m.liveById[id]).map(d => d.field + ' ' + d.before + '→' + d.after).join('; ') + ']').join(', ') + ')' : '') + ' · ' + m.liveAdded + ' added since the flight · ' + m.liveRemoved.length + ' removed since the flight' + (m.liveRemoved.length ? ' (' + m.liveRemoved.map(lbl).join(', ') + ')' : '') + ' · ' + matched + '/' + FL.length + ' steps matched — edits start from the LIVE values');
+        else log('live plan = flown plan (' + LV.length + ' steps)');
     }
     // Numbering: S#/N# per flight (slice) by default; whole-plan when `global`.
     function computeNumbering(m, global) {
