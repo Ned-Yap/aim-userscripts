@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.53
+// @version      0.54
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.53';
+    const SCRIPT_VERSION = '0.54';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -2716,7 +2716,7 @@
         else v = !!val;
         if (settings[key] === v) return;   // idempotent — CP echoes from both frames
         settings[key] = v; saveSettings();
-        log(id + ' = ' + JSON.stringify(v));
+        log(id + ' = ' + JSON.stringify(v) + ' (from the Control Panel)');
         if (!IS_TOP && model) {
             if (key === 'stripOrder' || key === 'badges') stampStrip(true);
             if (key === 'shotCard') { ensureCard(); if (selectedRec) renderCard(selectedRec, 'selected'); }
@@ -2849,7 +2849,7 @@
     // ---------------------------------------------------------------
     // Go.
     // ---------------------------------------------------------------
-    log('init v' + SCRIPT_VERSION + ' (' + (IS_TOP ? 'top' : 'iframe') + ')');
+    log('init v' + SCRIPT_VERSION + ' (' + (IS_TOP ? 'top' : 'iframe') + ') · edit=' + settings.edit + ' master=' + settings.master + ' · mode=' + (isLite() ? 'LITE (writes blocked)' : 'full') + ' · saved settings: ' + (function() { try { const g = GM_getValue(SETTINGS_KEY, null); return g ? Object.keys(g).join(',') : 'none'; } catch (e) { return 'unreadable'; } })());
     setupControlPanel();
     registerWithControlPanel();
     if (!IS_TOP) {
