@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-22 — AIM Video Validation v0.53 (prod + dev): Adjust panel on by default
+
+- The ✎ Adjust panel is now on for everyone (Control Panel → Video Validation → Editing to switch it off). Every save still backs the mission up first, verifies after, and can be restored from the panel.
+
 ## 2026-09-22 — ⭐ PROD: AIM Video Validation v0.52 (from v0.43)
 
 - Everything built since the working version reaches coworkers: **🔎 Check flight** (planned-vs-actual card for the open flight, re-takes, missing shots, copy as image / JIRA), **📋 Changes** (before/after of what was applied to the mission in the last 24 h, copy as image / JIRA), the on-map legend, the saved-plan-in-yellow overlay, actual look-point rings, restore picker, drag-to-change numbers, look-point distances horizontal + line of sight, and the save-path fixes (live mission resolved by name, in-place reload after a save).

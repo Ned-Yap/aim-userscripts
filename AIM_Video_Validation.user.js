@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.52
+// @version      0.53
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -18,8 +18,8 @@
 // ==/UserScript==
 
 // AIM Video Validation — Phase 1 (view) + Phase 2 (edit: writes the mission plan).
-// Editing is ON by default in the dev copy ("Latest - …") and OFF by default in prod until the save path has been
-// proven on a live mission; prod users opt in from the Control Panel (labelled experimental).
+// Editing (the Adjust panel) is ON by default in both copies since 2026-09-22 — the save path was verified live in both
+// directions; it can be switched off per install from the Control Panel.
 // What it does: on /#/site/<sid>/control-panel/past-mission/<mid> (Mission Playback) it joins the
 // flown mission (images + flown path + embedded plan) and (1) reorders the snapshot strip oldest-first
 // with S# badges, (2) seeks the video to a snapshot's shutter time on click / ▶, (3) highlights the
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.52';
+    const SCRIPT_VERSION = '0.53';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -80,7 +80,7 @@
         overlayLabels: true,   // N#/S# labels (else plain dots)
         overlayGroup: false,   // whole mission group, color per flight, whole-mission numbering
         timeBar: true,         // skip / jump-to-time bar under the player
-        edit: IS_DEV,          // Adjust panel (Phase 2) — on in the dev copy, opt-in in prod until the save path is proven
+        edit: true,            // Adjust panel — on by default everywhere (user decision 2026-09-22; save path verified live both ways)
         stepDeg: 1, stepPitch: 1, stepFt: 1, stepAltFt: 1, rayCapFt: 500,
         flownDashed: true,     // restyle Percepto's flown-path line
         flownColor: '#ffffff',
@@ -2785,7 +2785,7 @@
                     { id: 'check-flight', label: '🔎 Check this flight (re-takes, deviations, missing shots)', type: 'button' },
                     { id: 'session-report', label: '📋 Session change report (copy for JIRA)', type: 'button' },
                     { id: 'hdr-edit', type: 'header', label: 'Editing (writes the mission plan)' },
-                    { id: 'edit', label: 'Adjust panel — EXPERIMENTAL: nudge / adopt / convert / delete / duplicate, saves to the mission', type: 'boolean', default: DEFAULTS.edit },
+                    { id: 'edit', label: 'Adjust panel: nudge / adopt / convert / delete / duplicate — saves to the mission (backup + verify on every save)', type: 'boolean', default: DEFAULTS.edit },
                     { id: 'turn-step', label: 'Turn step (degrees; Shift ×5)', type: 'number', default: DEFAULTS.stepDeg, min: 0.5, max: 90 },
                     { id: 'tilt-step', label: 'Camera tilt step (degrees; Shift ×5)', type: 'number', default: DEFAULTS.stepPitch, min: 0.5, max: 45 },
                     { id: 'move-step', label: 'Move step (ft; Shift ×5)', type: 'number', default: DEFAULTS.stepFt, min: 0.5, max: 500 },
