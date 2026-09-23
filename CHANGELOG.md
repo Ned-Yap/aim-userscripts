@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-23 — AIM Video Validation v0.56 (prod + dev): editing survives missions edited since the flight
+
+- "the mission has been restructured since this flight (281 steps now vs 287 flown)" no longer blocks editing. The flown plan is aligned to the live plan step by step (navs by position, snapshots by aim point or heading + angle, control steps by type), so steps that still exist are editable, steps added in the Mission Bank since the flight are carried through untouched, and steps removed since the flight are named in the panel and simply can't be edited from that flight's page. Editing is only refused when fewer than half the flown steps can be found in the live mission.
+
 ## 2026-09-23 — AIM Video Validation v0.55 (prod + dev): finds the live mission even when it was renamed
 
 - "could not read the live mission (no live mission named …)" — the lookup was exact-name only. It now tries the exact name, a loose name (spacing / case), then a structural match against every mission on the site (same steps, geometry still lining up — catches a mission renamed after the flight), then the other mission types. The Adjust panel says how it resolved; the error, when it still happens, lists what was tried.

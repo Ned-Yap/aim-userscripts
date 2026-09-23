@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.55
+// @version      0.56
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.55';
+    const SCRIPT_VERSION = '0.56';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -297,21 +297,58 @@
     // Same count + same type per index → edits work, "before" = live values, differences are reported.
     function attachLive(m, app) {
         const live = (app && Array.isArray(app.instructions)) ? app.instructions.slice().sort((a, b) => a.index_in_app - b.index_in_app) : [];
-        m.liveApp = app; m.live = live; m.liveById = {}; m.liveDiff = [];
-        if (live.length !== m.plan.length || live.some((st, i) => st.type !== m.plan[i].type)) {
-            m.liveAligned = false;
-            warn('live plan differs STRUCTURALLY from the flown plan (' + live.length + ' vs ' + m.plan.length + ' steps) — edits disabled on this page');
+        m.liveApp = app; m.live = live; m.liveById = {}; m.liveDiff = []; m.liveAdded = 0; m.liveRemoved = []; m.liveList = null; m.liveAligned = false;
+        // Align FLOWN steps to LIVE steps (global alignment): same type required; navs by distance, snapshots by
+        // aim point / heading + angle, control steps by type (+ identical values). Gaps = steps removed / added since
+        // the flight (the missions get edited in the Mission Bank between flights — a different step count must not
+        // block editing, only the steps that no longer exist).
+        const F = m.plan, L = live;
+        const g2d = (v) => gimbalToDeg(v);
+        const score = (f, l) => {
+            if (f.type !== l.type) return -Infinity;
+            if (f.type_name === 'navigate' || f.type_name === 'flag pole') { const d = (f.location && l.location) ? distM(f.location, l.location) : null; return d == null ? 2 : Math.max(-6, 20 - d / 5); }
+            if (f.type_name === 'snapshot') {
+                if (f.location && l.location) { const d = distM(f.location, l.location); return Math.max(-6, 20 - d / 5); }
+                if (!f.location && !l.location) { const fe = f.extra_options || {}, le = l.extra_options || {}; const dh = Math.abs(hdgDelta(fe.heading, le.heading) || 0); const dp = (g2d(fe.pitch) != null && g2d(le.pitch) != null) ? Math.abs(g2d(fe.pitch) - g2d(le.pitch)) : 0; return Math.max(-6, 20 - dh - dp); }
+                return 4;   // in-place ↔ GPS conversion of the same step: weak match
+            }
+            return (F(f.value1) === F(l.value1) && JSON.stringify(canon(f.extra_options || {})) === JSON.stringify(canon(l.extra_options || {}))) ? 8 : 5;
+        };
+        const GAP = -4, n = F.length, k = L.length;
+        const H = []; const T = [];
+        for (let i = 0; i <= n; i++) { H.push(new Float64Array(k + 1)); T.push(new Uint8Array(k + 1)); H[i][0] = i * GAP; T[i][0] = 2; }
+        for (let j = 1; j <= k; j++) { H[0][j] = j * GAP; T[0][j] = 3; }
+        for (let i = 1; i <= n; i++) for (let j = 1; j <= k; j++) {
+            const sc = score(F[i - 1], L[j - 1]);
+            const d = isFinite(sc) ? H[i - 1][j - 1] + sc : -Infinity, u = H[i - 1][j] + GAP, l = H[i][j - 1] + GAP;
+            let v = d, t = 1; if (u > v) { v = u; t = 2; } if (l > v) { v = l; t = 3; }
+            H[i][j] = v; T[i][j] = t;
+        }
+        const liveOfFlown = new Array(n).fill(null), flownOfLive = new Array(k).fill(null);
+        let i = n, j = k;
+        while (i > 0 || j > 0) { const t = (i > 0 && j > 0) ? T[i][j] : (i > 0 ? 2 : 3); if (t === 1) { liveOfFlown[i - 1] = j - 1; flownOfLive[j - 1] = i - 1; i--; j--; } else if (t === 2) i--; else j--; }
+        const matched = liveOfFlown.filter(x => x != null).length;
+        if (!matched || matched < F.length * 0.5) {
+            warn('live plan aligns with only ' + matched + '/' + F.length + ' flown steps — edits disabled on this page');
+            m.liveAlignInfo = { matched, flown: F.length, live: L.length };
             return;
         }
-        m.liveAligned = true;
-        live.forEach((st, i) => {
-            const flown = m.plan[i];
-            const copy = deepCopy(st); copy.id = flown.id; copy.index_in_app = flown.index_in_app; copy.type_name = flown.type_name;
-            m.liveById[flown.id] = copy;
-            if (stepSig(flown) !== stepSig(copy)) m.liveDiff.push(flown.id);
+        // Working-copy base = the live plan in LIVE order; matched steps carry the flown step's id (so pictures,
+        // numbering and the overlay keep pointing at them), unmatched live steps keep their own live id.
+        m.liveList = L.map((l, jj) => {
+            const c = deepCopy(l); const fi = flownOfLive[jj];
+            if (fi != null) { const f = F[fi]; c.id = f.id; c.type_name = f.type_name; c.index_in_app = f.index_in_app; }
+            else { c.id = 'live-' + l.id; c.type_name = c.type_name || (m.plan.find(x => x.type === l.type) || {}).type_name || ('type ' + l.type); c._liveOnly = true; }
+            m.liveById[c.id] = c;
+            return c;
         });
-        if (m.liveDiff.length) log('live plan differs from the flown plan on ' + m.liveDiff.length + ' step(s): ' + m.liveDiff.map(id => ((m.numbering[id] || {}).n || '#' + m.byId[id].index_in_app) + ' [' + fieldDiffs(m.byId[id], m.liveById[id]).map(d => d.field + ' ' + d.before + '→' + d.after).join('; ') + ']').join(', ') + ' — edits start from the LIVE values');
-        else log('live plan = flown plan (' + live.length + ' steps)');
+        m.liveAdded = flownOfLive.filter(x => x == null).length;
+        m.liveRemoved = F.filter((f, ii) => liveOfFlown[ii] == null).map(f => f.id);
+        m.liveDiff = F.filter((f, ii) => liveOfFlown[ii] != null && stepSig(f) !== stepSig(m.liveById[f.id])).map(f => f.id);
+        m.liveAligned = true;
+        const lbl = (id) => (m.numbering[id] || {}).n || '#' + (m.byId[id] ? m.byId[id].index_in_app : id);
+        if (m.liveDiff.length || m.liveAdded || m.liveRemoved.length) log('live plan vs flown: ' + m.liveDiff.length + ' changed' + (m.liveDiff.length ? ' (' + m.liveDiff.map(id => lbl(id) + ' [' + fieldDiffs(m.byId[id], m.liveById[id]).map(d => d.field + ' ' + d.before + '→' + d.after).join('; ') + ']').join(', ') + ')' : '') + ' · ' + m.liveAdded + ' added since the flight · ' + m.liveRemoved.length + ' removed since the flight' + (m.liveRemoved.length ? ' (' + m.liveRemoved.map(lbl).join(', ') + ')' : '') + ' · ' + matched + '/' + F.length + ' steps matched — edits start from the LIVE values');
+        else log('live plan = flown plan (' + L.length + ' steps)');
     }
     // Numbering: S#/N# per flight (slice) by default; whole-plan when `global`.
     function computeNumbering(m, global) {
@@ -1630,20 +1667,20 @@
     }
 
     // ---- working copy ----
-    function liveBase() { return (model && model.liveAligned) ? model.plan.map(st => model.liveById[st.id]) : (model ? model.plan : []); }
+    function liveBase() { return (model && model.liveAligned && model.liveList) ? model.liveList : (model ? model.plan : []); }
     function edEnsureWork() { if (!ed.work && model) ed.work = deepCopy(liveBase()); return ed.work; }
     function edResetWork() { ed.work = model ? deepCopy(liveBase()) : null; ed.log = []; drawGhosts(); renderEdit(); }
     function editsBlocked() {
         if (!model) return 'no mission loaded';
         if (model.liveError) return 'could not read the live mission (' + model.liveError + ')';
         if (!model.live) return 'live mission not loaded';
-        if (!model.liveAligned) return 'the mission has been restructured since this flight (' + model.live.length + ' steps now vs ' + model.plan.length + ' flown) — edit it in the Mission Bank';
+        if (!model.liveAligned) { const a = model.liveAlignInfo || {}; return 'the mission has been rebuilt since this flight (only ' + (a.matched || 0) + ' of ' + model.plan.length + ' flown steps still exist in the ' + model.live.length + '-step live plan) — edit it in the Mission Bank'; }
         return null;
     }
     function wk(id) { return edEnsureWork().find(x => x.id === id) || null; }
     function wkNavOf(step) { const w = edEnsureWork(); for (let k = w.indexOf(step) - 1; k >= 0; k--) if (w[k].type_name === 'navigate') return w[k]; return null; }
     function origOf(id) { return (model.liveAligned && model.liveById[id]) || model.byId[id] || null; }
-    function stepLabel(step) { const n = model.numbering[step.id]; return n ? n.n : (step.type_name + ' #' + (step.index_in_app != null ? step.index_in_app : '+')); }
+    function stepLabel(step) { const n = model.numbering[step.id]; return n ? n.n : (step._liveOnly ? step.type_name + ' (added since flight)' : step.type_name + ' #' + (step.index_in_app != null ? step.index_in_app : '+')); }
     function isGps(step) { return !!(step.location && typeof step.location.lat === 'number'); }
     function eo(step) { if (!step.extra_options) step.extra_options = {}; return step.extra_options; }
     // Current in-place heading/pitch or GPS-derived pose of a WORK step.
@@ -1851,13 +1888,18 @@
         if (scrub && scrub.engaged && !force) { refreshScrubValues(); return; }
         const shot = currentShotForEdit();
         const step = shot && shot.step && shot.step.type_name === 'snapshot' ? wk(shot.step.id) : null;
+        const removed = shot && shot.step && model.liveRemoved && model.liveRemoved.includes(shot.step.id);
         const diff = edDiff();
         const btn = (act, txt, title, extra) => '<button type="button" data-aim-vv-ed="' + act + '" ' + (extra || '') + ' title="' + esc(title || '') + '">' + txt + '</button>';
         let html = '';
         const blocked = editsBlocked();
         if (blocked) { html = '<div><b>Adjust</b> <span class="warn">— editing unavailable: ' + esc(blocked) + '</span></div>'; if (el.innerHTML !== html) el.innerHTML = html; return; }
         if (model.liveApp && Number(model.liveApp.id) !== Number(model.mission.app && model.mission.app.id)) html += '<div class="dim">live mission app <b>' + esc(model.liveApp.id) + '</b> (this flight\'s record is a frozen copy, ' + esc(model.mission.app.id) + ') · resolved ' + esc(model.liveApp.__aimVvHow || '') + '</div>';
-        if (model.liveDiff && model.liveDiff.length) html += '<div class="warn">⚠ the live plan differs from what flew on ' + model.liveDiff.length + ' step(s) (' + esc(model.liveDiff.map(id => (model.numbering[id] || {}).n || '#' + model.byId[id].index_in_app).join(', ')) + ') — the map shows the FLOWN plan; the saved plan is drawn in yellow where it differs; edits start from the saved values</div>';
+        if ((model.liveDiff && model.liveDiff.length) || model.liveAdded || (model.liveRemoved && model.liveRemoved.length)) {
+            const lbl = (id) => (model.numbering[id] || {}).n || '#' + (model.byId[id] ? model.byId[id].index_in_app : id);
+            html += '<div class="warn">⚠ the live plan differs from what flew: ' + (model.liveDiff || []).length + ' changed' + ((model.liveDiff || []).length ? ' (' + esc(model.liveDiff.map(lbl).join(', ')) + ')' : '') + (model.liveAdded ? ' · ' + model.liveAdded + ' step(s) added since the flight' : '') + ((model.liveRemoved || []).length ? ' · ' + model.liveRemoved.length + ' removed since the flight (' + esc(model.liveRemoved.map(lbl).join(', ')) + ')' : '') + ' — the map shows the FLOWN plan; the saved plan is drawn in yellow where it differs; edits start from the saved values</div>';
+        }
+        if (removed) { html += '<div><b>Adjust ' + esc(stepLabel(shot.step)) + '</b> <span class="warn">— this step no longer exists in the live mission (removed since the flight); nothing to edit here</span></div>'; if (el.innerHTML !== html) el.innerHTML = html; return; }
         if (!step) {
             html += '<div><b>Adjust</b> <span class="dim">— select a snapshot (click a thumbnail) to edit its step' + (shot && shot.step ? ' · active step is a ' + esc(shot.step.type_name) + ', not a snapshot' : '') + '</span></div>';
         } else {
@@ -1922,7 +1964,8 @@
     // Load a full instruction list into the working copy, matching CURRENT ids positionally so the diff reads as changes.
     function loadIntoWork(instructions, label) {
         const ins = (instructions || []).slice().sort((a, b2) => (a.index_in_app || 0) - (b2.index_in_app || 0)).map(deepCopy);
-        ins.forEach((st, i) => { const cur = model.plan[i]; if (cur && cur.type === st.type) st.id = cur.id; else { st.id = ed.tempId--; st._new = true; } delete st._aim; });
+        const base = liveBase();
+        ins.forEach((st, i) => { const cur = base[i]; if (cur && cur.type === st.type) st.id = cur.id; else { st.id = ed.tempId--; st._new = true; } delete st._aim; });
         ed.work = ins; ed.log = [{ at: Date.now(), what: 'Load ' + label, step: '' }];
         drawGhosts(); renderEdit();
         const n = edDiff().length;
