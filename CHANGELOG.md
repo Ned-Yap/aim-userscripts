@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-23 — AIM Video Validation v0.58 (prod + dev): Review no longer needs Delete Guard
+
+- Coworkers hit "No learned save shape" + "No CSRF token seen in this tab yet" on Review even after saving in the Mission Bank and reloading. Both came from the script leaning on Delete Guard (not installed everywhere) and on an in-memory token that a reload wiped. The script now captures both itself on every Percepto page (any native mission save teaches the save shape, any native edit banks the token), keeps them across reloads and sign-outs, shares the token bank with Site Setup Tools, and when no token is banked yet it scrapes one from a rendered page like Site Setup Tools does. If nothing has been learned in this browser, the save uses the built-in body verified live on 2026-09-17 and the Review panel says so in yellow.
+
 ## 2026-09-23 — AIM Video Validation v0.57 (prod + dev): hotfix "F is not a function"
 
 - v0.56's step alignment crashed on every restructured mission with "Adjust — editing unavailable: could not read the live mission (F is not a function)". Two local names inside the alignment shadowed a rounding helper. Renamed; the alignment now runs and prints its `live plan vs flown:` summary in the console.

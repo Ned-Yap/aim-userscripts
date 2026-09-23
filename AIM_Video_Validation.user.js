@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.57
+// @version      0.58
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.57';
+    const SCRIPT_VERSION = '0.58';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -1633,16 +1633,46 @@
     function isLite() { try { return localStorage.getItem('aim-mode') !== 'full'; } catch (e) { return true; } }
     function moveLL(ll, meters, bearing) { const p = offsetLatLng(ll, meters, bearing); return { lat: +p[0].toFixed(8), lng: +p[1].toFixed(8) }; }
 
-    // Own CSRF sniffer (Delete Guard exposes window.top.__AIM_CSRF too — use either).
+    // CSRF + save-shape capture. Percepto's cookies are HttpOnly (PER-32471), so the token is only ever visible on
+    // the app's OWN outgoing requests. v0.58: this script learns BOTH itself on every Percepto page it runs in (top +
+    // every react-pages iframe) and persists them — no longer dependent on Delete Guard being installed:
+    //   token → memory + localStorage 'aim-sd-csrf' (shared bank with Site Setup Tools / Site Diff) + top.__AIM_CSRF
+    //   shape → GM 'aim-vv-post-shape' (survives Percepto sign-out, which wipes localStorage) + localStorage SHAPE_KEY
+    //           (so Delete Guard's mission Restore benefits too) + top.__AIM_MISSION_SHAPE
+    // Last rung for the shape: BUILTIN_SHAPE = the body verified live 2026-09-17 (flight 232413, both directions).
+    const CSRF_LS_KEY = 'aim-sd-csrf';
+    const SHAPE_GM_KEY = 'aim-vv-post-shape';
+    const MISSION_POST_RX = /\/available_app\/?(\?|$)/;
+    const BUILTIN_SHAPE = { learnedAt: 0, builtin: true, keys: ['name', 'type', 'dataReportObjectArr', 'site_id', 'app_id', 'selected_robot', 'instructions'], sample: { name: '', type: 1, dataReportObjectArr: [], site_id: 0, app_id: 0, selected_robot: null } };
     let sniffedCsrf = null;
-    function sniffHeaders(h) {
+    function bankCsrf(v, from) {
+        if (!v || typeof v !== 'string' || v.length < 16) return;
+        const fresh = sniffedCsrf !== v; sniffedCsrf = v;
+        try { pageWin.top.__AIM_CSRF = v; } catch (e) { /* cross-origin */ }
+        try { localStorage.setItem(CSRF_LS_KEY, JSON.stringify({ t: v, at: Date.now(), from: 'AIM VV: ' + from })); } catch (e) { /* storage blocked */ }
+        if (fresh) log('CSRF token captured from ' + from);
+    }
+    function sniffHeaders(h, from) {
         try {
             if (!h) return;
-            const take = (k, v) => { if (String(k).toLowerCase() === 'x-csrftoken' && v) sniffedCsrf = String(v); };
+            const take = (k, v) => { if (String(k).toLowerCase() === 'x-csrftoken' && v) bankCsrf(String(v), from); };
             if (typeof h.forEach === 'function') h.forEach((v, k) => take(k, v));
             else if (Array.isArray(h)) h.forEach(p => take(p[0], p[1]));
             else Object.keys(h).forEach(k => take(k, h[k]));
         } catch (e) { /* best effort */ }
+    }
+    function learnShape(body, from) {
+        try {
+            if (typeof body !== 'string' || body[0] !== '{') return;
+            const j = JSON.parse(body);
+            if (!j || !Array.isArray(j.instructions) || typeof j.name !== 'string' || !('site_id' in j)) return;
+            const sample = {}; Object.keys(j).forEach(k => { if (k !== 'instructions') sample[k] = j[k]; });
+            const shape = { learnedAt: Date.now(), keys: Object.keys(j), sample };
+            try { GM_setValue(SHAPE_GM_KEY, shape); } catch (e) { warn('shape GM store failed:', e); }
+            try { localStorage.setItem(SHAPE_KEY, JSON.stringify(shape)); } catch (e) { /* storage blocked */ }
+            try { pageWin.top.__AIM_MISSION_SHAPE = shape; } catch (e) { /* cross-origin */ }
+            log('mission save shape learned from ' + from + ' (' + shape.keys.join(',') + ')');
+        } catch (e) { warn('shape learn skipped:', e); }
     }
     function installCsrfSniffer() {
         try {
@@ -1650,21 +1680,57 @@
             if (w.__aimVvSniff) return;
             w.__aimVvSniff = true;
             const of = w.fetch;
-            w.fetch = function(input, init) { sniffHeaders((init && init.headers) || (input && input.headers)); return of.apply(this, arguments); };
-            const oh = w.XMLHttpRequest.prototype.setRequestHeader;
-            w.XMLHttpRequest.prototype.setRequestHeader = function(k, v) { if (String(k).toLowerCase() === 'x-csrftoken' && v) sniffedCsrf = String(v); return oh.apply(this, arguments); };
+            w.fetch = function(input, init) {
+                try {
+                    sniffHeaders((init && init.headers) || (input && typeof input === 'object' && input.headers), 'a native fetch');
+                    const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+                    const url = typeof input === 'string' ? input : ((input && input.url) || '');
+                    if (method === 'POST' && MISSION_POST_RX.test(url) && init) learnShape(init.body, 'a native fetch save');
+                } catch (e) { /* never break the request */ }
+                return of.apply(this, arguments);
+            };
+            const XP = w.XMLHttpRequest.prototype;
+            const oo = XP.open, oh = XP.setRequestHeader, os = XP.send;
+            XP.open = function(method, url) { try { this.__aimVvReq = { method: String(method || 'GET').toUpperCase(), url: String(url || '') }; } catch (e) { /* ignore */ } return oo.apply(this, arguments); };
+            XP.setRequestHeader = function(k, v) { try { if (String(k).toLowerCase() === 'x-csrftoken') bankCsrf(String(v), 'a native XHR'); } catch (e) { /* ignore */ } return oh.apply(this, arguments); };
+            XP.send = function(body) { try { const r = this.__aimVvReq; if (r && r.method === 'POST' && MISSION_POST_RX.test(r.url)) learnShape(body, 'a native XHR save'); } catch (e) { /* ignore */ } return os.apply(this, arguments); };
+            log('CSRF + save-shape sniffer armed (' + (IS_TOP ? 'top' : 'iframe') + ')');
         } catch (e) { warn('csrf sniffer failed:', e); }
     }
     function getCsrf() {
         if (sniffedCsrf) return sniffedCsrf;
         try { if (pageWin.top.__AIM_CSRF) return pageWin.top.__AIM_CSRF; } catch (e) { /* cross-origin */ }
+        try { const raw = localStorage.getItem(CSRF_LS_KEY); if (raw) { const s = JSON.parse(raw); if (s && typeof s.t === 'string' && s.t.length >= 16) return s.t; } } catch (e) { /* no bank */ }
         try { const m = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/); if (m) return decodeURIComponent(m[1]); } catch (e) { /* no cookie */ }
+        try { const inp = document.querySelector('input[name="csrfmiddlewaretoken"]'); if (inp && inp.value) return inp.value; } catch (e) { /* no form */ }
+        return null;
+    }
+    // Django accepts a MASKED form token in the X-CSRFToken header, so a rendered page from this session can seed the
+    // bank without waiting for a native save (same rung Site Setup Tools uses).
+    async function primeCsrf() {
+        const have = getCsrf(); if (have) return have;
+        for (const path of ['/', '/admin/login/']) {
+            try {
+                const r = await fetch(path, { credentials: 'same-origin', headers: { 'Accept': 'text/html' } });
+                if (!r.ok) continue;
+                const html = await r.text();
+                let m = html.match(/name=["']csrfmiddlewaretoken["'][^>]*value=["']([^"']+)["']/);
+                if (!m) m = html.match(/value=["']([^"']{32,128})["'][^>]*name=["']csrfmiddlewaretoken["']/);
+                if (!m) m = html.match(/csrf[_-]?token["']?\s*[:=]\s*["']([A-Za-z0-9+/=]{32,128})["']/i);
+                if (m) { bankCsrf(m[1], 'a page scrape (' + path + ')'); return m[1]; }
+            } catch (e) { warn('csrf scrape ' + path + ' failed:', e); }
+        }
+        warn('no CSRF token available yet — it is captured automatically from the next native save/edit anywhere in Percepto');
         return null;
     }
     function loadShape() {
-        try { const raw = localStorage.getItem(SHAPE_KEY); if (raw) return JSON.parse(raw); } catch (e) { /* fall through */ }
-        try { return pageWin.top.__AIM_MISSION_SHAPE || null; } catch (e) { return null; }
+        const read = (fn) => { try { const s = fn(); if (s && s.sample && Array.isArray(s.keys)) return s; } catch (e) { /* unreadable */ } return null; };
+        return read(() => JSON.parse(localStorage.getItem(SHAPE_KEY)))
+            || read(() => GM_getValue(SHAPE_GM_KEY, null))
+            || read(() => pageWin.top.__AIM_MISSION_SHAPE)
+            || BUILTIN_SHAPE;
     }
+    function shapeLabel(shape) { return shape.builtin ? 'built-in default (verified live 2026-09-17; nothing learned in this browser yet)' : 'learned ' + new Date(shape.learnedAt).toLocaleString() + ' (' + shape.keys.join(',') + ')'; }
 
     // ---- working copy ----
     function liveBase() { return (model && model.liveAligned && model.liveList) ? model.liveList : (model ? model.plan : []); }
@@ -2161,15 +2227,16 @@
         const blockers = [];
         const blk = editsBlocked(); if (blk) blockers.push(blk);
         if (lite) blockers.push('Lite mode — writes are blocked (CSM access needed)');
-        if (!shape || !shape.sample) blockers.push('No learned save shape: open any mission in the Mission Bank, click Save once (unchanged is fine), reload this page');
-        if (!csrf) blockers.push('No CSRF token seen in this tab yet');
+        if (!shape || !shape.sample) blockers.push('No save shape available (should never happen — report this)');
+        if (!csrf) { blockers.push('No CSRF token yet — looking for one now… if this stays, make ONE native save or edit anywhere in Percepto (any page, any site), then reopen Review'); primeCsrf().then(t => { if (t && ed.reviewEl) { log('token found, refreshing review'); openReview(); } }); }
+        const shapeNote = '<div class="dim" style="margin:4px 0;color:' + (shape && shape.builtin ? '#ffd45f' : 'inherit') + '">Save shape: ' + esc(shape ? shapeLabel(shape) : 'none') + '</div>';
         const rows = diff.map(d => '<tr><td>' + esc(d.label) + '</td><td>' + esc(d.kind) + (d.field ? ' · ' + esc(d.field) : '') + '</td><td>' + esc(d.before != null ? d.before : '') + '</td><td>' + esc(d.after != null ? d.after : '') + '</td><td class="dim">' + esc(d.note || '') + '</td></tr>').join('');
         const el = document.createElement('div'); el.className = 'aim-vv-review';
         const actions = ed.log.length ? '<div class="dim" style="margin:4px 0">actions: ' + ed.log.map((a, i) => (i + 1) + '. ' + esc(a.what) + (a.step ? ' <b>' + esc(a.step) + '</b>' : '')).join(' · ') + '</div>' : '';
         const grp = model.mission.mission_group_id;
         el.innerHTML = '<div class="aim-vv-review__box"><div><b>Review changes to mission "' + esc(model.mission.name || model.mission.app_name) + '"</b> <span class="dim">(app ' + esc(model.mission.app && model.mission.app.id) + (grp != null && grp >= 0 ? ' · affects every future flight of group ' + esc(grp) : ' · not part of a mission group') + ')</span></div>' + actions
             + '<table><tr class="dim"><td>step</td><td>change</td><td>before</td><td>after</td><td></td></tr>' + rows + '</table>'
-            + '<div class="dim" style="margin:6px 0">Rails: the plan is re-read and compared first · a full JSON backup is saved (script storage + download) · ONE save · re-read and verified · a before/after report is saved + downloaded.</div>'
+            + shapeNote + '<div class="dim" style="margin:6px 0">Rails: the plan is re-read and compared first · a full JSON backup is saved (script storage + download) · ONE save · re-read and verified · a before/after report is saved + downloaded.</div>'
             + (function() { try { const app = model.liveApp || model.mission.app; const r = resolveSelectedRobot(app); if (!r.value) blockers.push('Cannot resolve selected_robot: ' + r.from); const rep = Array.isArray(app.data_report_object_arr) ? app.data_report_object_arr.map(x => x && (x.name || x.id)).join(', ') : 'none'; return '<div class="dim">will send: name "' + esc(app.name) + '" · type ' + esc(app.type) + ' · site_id ' + esc(app.site) + ' · app_id <b>' + esc(app.id) + '</b>' + (app.__aimVvHow ? ' <span class="dim">(live app, ' + esc(app.__aimVvHow) + ')</span>' : '') + ' · selected_robot <b>' + esc(r.value || '?') + '</b> <span class="dim">(' + esc(r.from) + ')</span> · reports: ' + esc(rep) + ' · ' + edEnsureWork().length + ' instructions</div>'; } catch (e) { blockers.push('preflight failed: ' + e.message); return ''; } })()
             + (blockers.length ? '<div class="warn">' + blockers.map(esc).join('<br>') + '</div>' : '')
             + '<div class="aim-vv-edit__row"><button type="button" data-aim-vv-rv="apply" ' + (blockers.length ? 'disabled' : '') + '>Apply ' + diff.length + ' change' + (diff.length === 1 ? '' : 's') + '</button><button type="button" data-aim-vv-rv="cancel">Cancel</button><span class="aim-vv-review__status dim"></span></div></div>';
@@ -2245,7 +2312,7 @@
             const fresh = { app: freshApp };
             const built = buildBody(freshApp, ed.work, shape);
             log('save base = live app ' + freshApp.id + ' (' + freshIns.length + ' steps; flown record ' + appId + ')');
-            log('save body: ' + built.body.instructions.length + ' instructions · keys ' + Object.keys(built.body).join(',') + (built.fromSample.length ? ' · from learned sample (unchanged): ' + built.fromSample.join(',') : ''));
+            log('save body: ' + built.body.instructions.length + ' instructions · keys ' + Object.keys(built.body).join(',') + (built.fromSample.length ? ' · from learned sample (unchanged): ' + built.fromSample.join(',') : '') + ' · shape: ' + shapeLabel(shape));
             status('saving…');
             const r = await fetch('/available_app/', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf }, body: JSON.stringify(built.body) });
             const txt = await r.text().catch(() => '');
@@ -2915,6 +2982,7 @@
     // ---------------------------------------------------------------
     // Go.
     // ---------------------------------------------------------------
+    installCsrfSniffer();
     log('init v' + SCRIPT_VERSION + ' (' + (IS_TOP ? 'top' : 'iframe') + ') · edit=' + settings.edit + ' master=' + settings.master + ' · mode=' + (isLite() ? 'LITE (writes blocked)' : 'full') + ' · saved settings: ' + (function() { try { const g = GM_getValue(SETTINGS_KEY, null); return g ? Object.keys(g).join(',') : 'none'; } catch (e) { return 'unreadable'; } })());
     setupControlPanel();
     registerWithControlPanel();
@@ -2937,7 +3005,6 @@
         document.addEventListener('click', onReportClick, true);
         document.addEventListener('click', (e) => { const t = e.target.closest && e.target.closest('[data-aim-vv-tool]'); if (!t || !model) return; e.preventDefault(); e.stopPropagation(); if (t.dataset.aimVvTool === 'check') openChecker(); else openSessionReport(); }, true);
         document.addEventListener('click', (e) => { const t = e.target.closest && e.target.closest('[data-aim-vv-ed-toggle]'); if (!t || !model) return; e.preventDefault(); e.stopPropagation(); ed.open = !ed.open; if (ed.open) edEnsureWork(); renderEdit(); if (selectedRec) renderCard(selectedRec, 'selected'); }, true);
-        installCsrfSniffer();
         window.addEventListener('keydown', fallbackKeys, true);
         tickTimer = setInterval(tick, 1000);
         tick();
