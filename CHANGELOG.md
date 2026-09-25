@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-25 — Pilot Utilization: complete vs incomplete flights: AIM Fleet Tools v0.54 (latest — dev only, feature #274)
+
+Percepto's `state` code turned out to be Completed on every flown flight, so a flight that ended early was invisible. New signal from the log's own image counts: **Incomplete** = a flight that captured fewer images than its plan (`uploader_planned_images_count`), and **Capture %** = images captured ÷ planned, on the Pilots and Pilot-days tabs; the Flights tab shows **Images actual/planned** and the raw **State code**. The 🔬 Data check gains three rows: raw state codes with our label mapping (flagged as unverified), planned-vs-actual summary, and a sample of `mission_data_reports` so we can learn what Percepto stores there.
+
 ## 2026-09-25 — Pilot Utilization: empty columns hidden: AIM Fleet Tools v0.52 (latest — dev only, feature #274)
 
 Columns that are 0 or blank on every row of a tab (Locked 1:1 and 1:1 overlaps before any site is flagged, Aborted/failed and Landing failed when Percepto files every flight as Completed, …) are now left out of the panel table and of the Sheets / CSV exports. A "hidden (all zero / blank): …" note under the tab bar says which ones, and a **hide empty columns** checkbox in the controls brings them back.
