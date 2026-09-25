@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-25 — Pilot Utilization: empty columns hidden: AIM Fleet Tools v0.52 (latest — dev only, feature #274)
+
+Columns that are 0 or blank on every row of a tab (Locked 1:1 and 1:1 overlaps before any site is flagged, Aborted/failed and Landing failed when Percepto files every flight as Completed, …) are now left out of the panel table and of the Sheets / CSV exports. A "hidden (all zero / blank): …" note under the tab bar says which ones, and a **hide empty columns** checkbox in the controls brings them back.
+
 ## 2026-09-25 — 🕘 Remembered site selections: AIM Fleet Tools v0.51 (latest — dev only, feature #275)
 
 No more re-ticking the same sites for every test. The Fleet Data picker has a new row: a **remembered selections** dropdown with **Saved** (name the current selection with 💾 save current) and **Recent** (filled automatically every time you run anything with sites picked — ZIP export, KML exports, Entities → Sheets, Flight Checks, Pilot Utilization; the same set is never listed twice, last 12 kept). Picking one re-selects exactly those sites and restores the filter text. ✕ deletes the saved pick you applied.

@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.51
+// @version      0.52
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -36,7 +36,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.51';
+    const SCRIPT_VERSION = '0.52';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -3122,7 +3122,8 @@
         const def = { days: 28, shiftHrs: 8, minMin: 0, tz: 'America/Chicago', endMode: 'duration' };   // endMode: 'duration' (when + duration) | 'landed' (landed timestamp)
         const s = loadJson(KEY_PU, {});
         if (s.endMode === 'landed') def.endMode = 'landed';
-        def.twilightMin = 30;
+        def.twilightMin = 30; def.hideEmpty = true;
+        if (typeof s.hideEmpty === 'boolean') def.hideEmpty = s.hideEmpty;
         ['days', 'shiftHrs', 'minMin', 'twilightMin'].forEach(k => { if (typeof s[k] === 'number' && isFinite(s[k]) && s[k] >= 0) def[k] = s[k]; });
         if (typeof s.tz === 'string' && PU_TZS.some(t => t[0] === s.tz)) def.tz = s.tz;
         if (!(def.days >= 1)) def.days = 28;
@@ -3538,17 +3539,26 @@
         rows.sort((a, b) => { const x = col.get(a), y = col.get(b); const c = (typeof x === 'number' && typeof y === 'number') ? x - y : String(x).localeCompare(String(y), undefined, { numeric: true }); return c * st.dir || String(a.pilot || a.day || '').localeCompare(String(b.pilot || b.day || '')); });
         return rows;
     }
-    function puExportCols(tab) {
-        return PU_COLS[tab].map(c => ({ label: c.expLabel || c.label, get: r => { const v = c.get(r); return c.exp ? c.exp(v, r) : v; } }));
+    // columns worth showing: drop the ones that are 0 / blank on EVERY row (1:1 columns before any site is flagged, Aborted/failed when Percepto files everything as Completed, …)
+    const puEmptyVal = (v) => v == null || v === '' || v === 0 || v === false || (Array.isArray(v) && !v.length);
+    function puVisibleCols(tab, rows) {
+        const all = PU_COLS[tab].filter(c => !c.hide);
+        if (!puOpts.hideEmpty || !rows.length) return { cols: all, hidden: [] };
+        const hidden = []; const cols = all.filter((c, i) => { if (i === 0) return true; const keep = rows.some(r => !puEmptyVal(c.get(r))); if (!keep) hidden.push(c.label); return keep; });
+        return { cols, hidden };
+    }
+    function puExportCols(tab, rows) {
+        const src = rows ? puVisibleCols(tab, rows).cols : PU_COLS[tab].filter(c => !c.hide);
+        return src.map(c => ({ label: c.expLabel || c.label, get: r => { const v = c.get(r); return c.exp ? c.exp(v, r) : v; } }));
     }
     function puSheetsHtml(tab) {
-        const cols = puExportCols(tab), rows = puSorted(tab);
+        const rows = puSorted(tab), cols = puExportCols(tab, rows);
         const th = (s) => `<th style="background:#e8eaed;border:1px solid #bbb;padding:3px 6px;text-align:left;white-space:nowrap">${escapeHtml(s)}</th>`;
         const td = (s) => `<td style="border:1px solid #ccc;padding:2px 6px">${escapeHtml(String(s == null ? '' : s))}</td>`;
         return `<table border="1" cellpadding="3" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:11px"><tr>${cols.map(c => th(c.label)).join('')}</tr>${rows.map(r => '<tr>' + cols.map(c => td(c.get(r))).join('') + '</tr>').join('')}</table>`;
     }
     function puTsv(tab) {
-        const cols = puExportCols(tab), rows = puSorted(tab); const esc = (v) => String(v == null ? '' : v).replace(/[\t\r\n]+/g, ' ');
+        const rows = puSorted(tab), cols = puExportCols(tab, rows); const esc = (v) => String(v == null ? '' : v).replace(/[\t\r\n]+/g, ' ');
         return [cols.map(c => esc(c.label)).join('\t')].concat(rows.map(r => cols.map(c => esc(c.get(r))).join('\t'))).join('\n');
     }
     function puExport(kind) {
@@ -3556,7 +3566,7 @@
         const tab = puTab; const n = puRows(tab).length;
         const label = { pilots: 'pilots', days: 'pilot-days', dates: 'dates', flights: 'flights', drones: 'drones', hours: 'hours' }[tab] || tab;
         if (kind === 'csv') {
-            fdDownload(new Blob([fdCsv(puExportCols(tab), puSorted(tab))], { type: 'text/csv' }), `AIM-pilot-utilization ${label} ${puResults.from} to ${puResults.to}.csv`);
+            fdDownload(new Blob([(() => { const rows = puSorted(tab); return fdCsv(puExportCols(tab, rows), rows); })()], { type: 'text/csv' }), `AIM-pilot-utilization ${label} ${puResults.from} to ${puResults.to}.csv`);
             setStatus(`pilot utilization ${label} CSV downloaded — ${n} row(s)`);
         } else copyHtmlToClipboard(puSheetsHtml(tab), puTsv(tab), `pilot utilization ${label} copied — ${n} row(s) — paste into Google Sheets / Excel`);
     }
@@ -3655,7 +3665,7 @@
         let h = '<div style="padding:8px 10px;border-bottom:1px solid #222834">'
             + `<div style="color:#888;margin-bottom:6px">Scope = the sites picked in 📦 Fleet Data (<b style="color:#ddd">${fdSelected.size}</b> picked) · flights in the last ${num('days', 48, 1)} days · shift ${num('shiftHrs', 40, 1, 0.5)} h · ignore flights under ${num('minMin', 40, 0)} min · days in `
             + `<select data-pu-tz ${dis} style="background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;">${PU_TZS.map(t => `<option value="${t[0]}" ${puOpts.tz === t[0] ? 'selected' : ''}>${t[1]}</option>`).join('')}</select>`
-            + ` · flight end = <select data-pu-end ${dis} title="duration: launch + the log's duration field · landed: the log's landed timestamp (also rescues rows with no duration)" style="background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;"><option value="duration" ${puOpts.endMode !== 'landed' ? 'selected' : ''}>launch + duration</option><option value="landed" ${puOpts.endMode === 'landed' ? 'selected' : ''}>landed time</option></select></div>`
+            + ` · flight end = <select data-pu-end ${dis} title="duration: launch + the log's duration field · landed: the log's landed timestamp (also rescues rows with no duration)" style="background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;"><option value="duration" ${puOpts.endMode !== 'landed' ? 'selected' : ''}>launch + duration</option><option value="landed" ${puOpts.endMode === 'landed' ? 'selected' : ''}>landed time</option></select> · <label title="drop columns that are 0 / blank on every row of the tab (panel + exports)" style="cursor:pointer"><input type="checkbox" data-pu-chk="hideEmpty" ${puOpts.hideEmpty ? 'checked' : ''} ${dis}> hide empty columns</label></div>`
             + `<div style="color:#888;margin-bottom:6px">Site rules: <span data-ft="pu-rules" style="cursor:pointer;color:#7adfe6">${puShowRules ? '▾' : '▸'} ⚙ ${Object.keys(puRules).length} site(s) configured</span> · day = sunrise − <input type="number" data-pu-opt="twilightMin" value="${puOpts.twilightMin}" min="0" step="5" ${dis} style="width:44px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;padding:1px 3px;"> min … sunset + same (at the site\'s own coordinates)</div>`
             + (puShowRules ? renderPuRules() : '')
             + '<div style="color:#666;margin-bottom:6px">Air time = the UNION of a pilot\'s flight intervals per day — two drones up in the same 30 min count 30 min once. Drone-hrs = plain sum of durations. Util % = air time per active day ÷ shift hours. Flights that cross midnight are split at midnight.</div>'
@@ -3682,7 +3692,8 @@
             + `<span data-ft="pu-check" style="cursor:pointer;color:${puShowCheck ? '#7adfe6' : '#888'};margin-left:10px" title="audit the fetched log rows: states, durations, landed-vs-duration, same-drone overlaps, attribution">🔬 Data check</span>`
             + '<span style="color:#666;margin-left:10px">click a column header to sort · Pilot-days: click a row for its flights</span></div></div>';
         if (puShowCheck) h += puDataCheck();
-        const cols = PU_COLS[puTab].filter(c => !c.hide); const st = puSort[puTab]; const rows = puSorted(puTab);
+        const st = puSort[puTab]; const rows = puSorted(puTab); const vis = puVisibleCols(puTab, rows); const cols = vis.cols;
+        if (vis.hidden.length) h += `<div style="padding:2px 10px;color:#666;font-size:11px">hidden (all zero / blank): ${vis.hidden.map(escapeHtml).join(' · ')}</div>`;
         const cell = (c, r) => { const v = c.get(r); const txt = c.fmt ? c.fmt(v, r) : (v == null ? '' : String(v)); const tip = typeof c.title === 'function' ? c.title(r) : ''; return `<td style="padding:2px 6px;white-space:nowrap;border-bottom:1px solid #1e2430;${typeof v === 'number' ? 'text-align:right' : ''}" ${tip ? `title="${escapeHtml(tip)}"` : ''}>${escapeHtml(txt)}</td>`; };
         h += `<div style="overflow:auto;max-height:50vh"><table style="border-collapse:collapse;font:11px/1.4 monospace;width:100%"><tr>`
             + cols.map(c => `<th data-pu-sort="${c.key}" title="${escapeHtml(typeof c.title === 'string' ? c.title : 'sort')}" style="text-align:left;padding:2px 6px;position:sticky;top:0;background:#14181f;cursor:pointer;white-space:nowrap;color:${st.key === c.key ? '#7adfe6' : '#888'}">${escapeHtml(c.label)}${st.key === c.key ? (st.dir < 0 ? ' ▼' : ' ▲') : ''}</th>`).join('') + '</tr>'
@@ -5843,7 +5854,7 @@
 
             // Delegated — the body is rebuilt on every render, the root never is
             panelEl.addEventListener('click', (ev) => {
-                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],select[data-fd-pick],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad],input[data-fx-inc],input[data-fx-opt],input[data-fc-thr],input[data-pu-opt],select[data-pu-tz],select[data-pu-end],select[data-pu-rule],input[data-pu-rule],select[data-pu-bulk],#aim-ft-xr-picked')) return;   // checkbox/color/select → change handler
+                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],select[data-fd-pick],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad],input[data-fx-inc],input[data-fx-opt],input[data-fc-thr],input[data-pu-opt],input[data-pu-chk],select[data-pu-tz],select[data-pu-end],select[data-pu-rule],input[data-pu-rule],select[data-pu-bulk],#aim-ft-xr-picked')) return;   // checkbox/color/select → change handler
                 const clAll = ev.target.closest('[data-ft-clients]');
                 if (clAll) {
                     if (clAll.getAttribute('data-ft-clients') === 'all') {
@@ -6084,6 +6095,7 @@
                 // 6. client select-all acts on the SHOWN rows of that client (what the header count shows)
                 if (t.hasAttribute && t.hasAttribute('data-fd-clientsel')) { const cl = t.getAttribute('data-fd-clientsel'); const ids = fdVisibleSiteIds().filter(id => fdClientOfId(id) === cl); ids.forEach(id => { if (t.checked) fdSelected.add(id); else fdSelected.delete(id); }); fdRenderKeepScroll(); return; }
                 if (t.hasAttribute && t.hasAttribute('data-pu-opt')) { const k = t.getAttribute('data-pu-opt'); const v = Number(t.value); if (t.value.trim() === '' || !isFinite(v) || v < 0) return; if (k === 'days' && v < 1) return; if (k === 'shiftHrs' && !(v > 0)) return; if (k in puOpts) { puOpts[k] = v; puSave(); if (k === 'twilightMin' || k === 'shiftHrs') { if (puResults && k === 'shiftHrs') puResults.shiftHrs = v; puReaggregate(); renderPanel(); } } return; }
+                if (t.hasAttribute && t.hasAttribute('data-pu-chk')) { const k = t.getAttribute('data-pu-chk'); if (k === 'hideEmpty') { puOpts.hideEmpty = !!t.checked; puSave(); renderPanel(); } return; }
                 if (t.hasAttribute && t.hasAttribute('data-pu-bulk')) { puBulkW = t.value in PU_WINDOWS ? t.value : '247'; return; }
                 if (t.hasAttribute && t.hasAttribute('data-pu-rule')) {
                     const [sid, field] = t.getAttribute('data-pu-rule').split('|'); const r = puRuleOf(sid);
