@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.25
+// @version      0.26
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON (and optionally its missions) on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Daily Slack digest. Configurable in the AIM Control Panel ("Site Watch").
@@ -98,7 +98,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.25';
+    const SCRIPT_VERSION = '0.26';
 
     // Server model (v0.21): prod and QA are separate databases with their own
     // site lists — the same numeric ID is two different sites. A QA leader
@@ -170,6 +170,19 @@
     let digestRetryAfter = 0;       // backoff timestamp after a failed digest post
     let mySlackId = null;           // this user's Slack member id (for Simulate DM), resolved from GitHub login
     const tabId = 'tab-' + Math.random().toString(36).slice(2) + '-' + Date.now();
+    // v0.26: a STABLE per-browser-profile runner id (persisted once per GM store,
+    // unlike tabId which is per page load). Stamped into every commit message and
+    // alert so `git log` shows at a glance how many Site Watch installs are
+    // writing to the repo. Two browser profiles / machines each have their own GM
+    // store, never see each other's leader lease, and silently double-audit the
+    // fleet (seen 2026-09-25: every site baselined twice, CSV commits in pairs).
+    const RUNNER_KEY = `aim-site-watch-runner${ENV_SFX}`;
+    const runnerId = (() => {
+        let r = gmGet(RUNNER_KEY, null);
+        if (typeof r !== 'string' || !/^[a-z0-9]{4,8}$/.test(r)) { r = Math.random().toString(36).slice(2, 6); gmSet(RUNNER_KEY, r); }
+        return r;
+    })();
+    function withRunner(message) { return `${message} · r:${runnerId}`; }
     let amLeader = false;
     let pausedForAuth = false;
     let cycleRunning = false;
@@ -312,7 +325,12 @@
         });
     }
     function ghHeaders(write) {
-        const h = { 'Authorization': `Bearer ${cachedToken}`, 'Accept': 'application/vnd.github+json' };
+        // v0.26: GitHub API responses carry `Cache-Control: private, max-age=60`
+        // and GM_xmlhttpRequest goes through the browser HTTP cache. The GET URL
+        // (?ref=main) differs from the PUT URL, so a PUT never invalidates the
+        // cached GET → a re-read within 60 s of a write can hand back the OLD sha
+        // → 409 on every retry → rows dropped (2026-09-25 16:05). Never cache.
+        const h = { 'Authorization': `Bearer ${cachedToken}`, 'Accept': 'application/vnd.github+json', 'Cache-Control': 'no-cache' };
         if (write) h['Content-Type'] = 'application/json';
         return h;
     }
@@ -322,7 +340,7 @@
     async function ghGetMeta(path) {
         if (!cachedToken) throw new Error('no token');
         const url = `${GITHUB_API_BASE}/repos/${DATA_REPO}/contents/${ghPath(path)}?ref=${DATA_BRANCH}`;
-        const resp = await ghRequest({ method: 'GET', url, headers: ghHeaders(), timeout: 25000 });
+        const resp = await ghRequest({ method: 'GET', url, headers: ghHeaders(), timeout: 25000, nocache: true });
         if (resp.status === 404) return null;
         if (resp.status !== 200) throw new Error(`GET ${path} HTTP ${resp.status}`);
         const meta = JSON.parse(resp.responseText);
@@ -338,8 +356,9 @@
         const url = `${GITHUB_API_BASE}/repos/${DATA_REPO}/contents/${ghPath(path)}?ref=${DATA_BRANCH}`;
         const resp = await ghRequest({
             method: 'GET', url,
-            headers: { 'Authorization': `Bearer ${cachedToken}`, 'Accept': 'application/vnd.github.raw' },
+            headers: { 'Authorization': `Bearer ${cachedToken}`, 'Accept': 'application/vnd.github.raw', 'Cache-Control': 'no-cache' },
             timeout: 30000,
+            nocache: true,
         });
         if (resp.status === 404) return null;
         if (resp.status !== 200) throw new Error(`GET(raw) ${path} HTTP ${resp.status}`);
@@ -358,7 +377,7 @@
     // (sha conflict) by re-GETting the sha and retrying once.
     async function ghPut(path, base64Content, message, sha) {
         const url = `${GITHUB_API_BASE}/repos/${DATA_REPO}/contents/${ghPath(path)}`;
-        const body = { message, content: base64Content, branch: DATA_BRANCH };
+        const body = { message: withRunner(message), content: base64Content, branch: DATA_BRANCH };
         if (sha) body.sha = sha;
         let resp = await ghRequest({ method: 'PUT', url, headers: ghHeaders(true), data: JSON.stringify(body), timeout: 30000 });
         if (resp.status === 200 || resp.status === 201) {
@@ -367,7 +386,7 @@
         }
         if (resp.status === 409 || resp.status === 422) {
             const fresh = await safeGetSha(path);
-            const body2 = { message, content: base64Content, branch: DATA_BRANCH };
+            const body2 = { message: withRunner(message), content: base64Content, branch: DATA_BRANCH };
             if (fresh) body2.sha = fresh;
             resp = await ghRequest({ method: 'PUT', url, headers: ghHeaders(true), data: JSON.stringify(body2), timeout: 30000 });
             if (resp.status === 200 || resp.status === 201) {
@@ -419,7 +438,18 @@
     // read retries, then aborts with history intact rather than wiping it).
     async function appendCsvRows(rowStrings, message) {
         if (!rowStrings.length) return;
-        for (let attempt = 0; attempt < 3; attempt++) {
+        const ATTEMPTS = 5;
+        let lastErr = '';
+        for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
+            if (attempt) {
+                // v0.26: jittered backoff. A sha conflict means another writer
+                // (a second Site Watch runner, or an Action) just moved the
+                // branch — give it a moment instead of hammering three times in
+                // ten seconds, and say WHY each attempt failed.
+                const wait = 800 + attempt * 900 + Math.floor(Math.random() * 700);
+                console.warn(`${TAG} CSV append attempt ${attempt}/${ATTEMPTS} failed (${lastErr}) — retrying in ${wait} ms`);
+                await sleep(wait);
+            }
             let base, sha;
             try {
                 const r = await readCsv();
@@ -427,8 +457,7 @@
                 else { base = r.text.endsWith('\n') ? r.text : r.text + '\n'; sha = r.sha; }
             } catch (e) {
                 // Read of an existing file failed — retry; do NOT overwrite.
-                console.warn(`${TAG} CSV read attempt ${attempt + 1}/3 failed, retrying`, e);
-                await sleep(800);
+                lastErr = `read: ${errText(e)}`;
                 continue;
             }
             let content = base + rowStrings.join('\n') + '\n';
@@ -445,16 +474,21 @@
                 message = `${message} (fresh changes.csv after rotation)`;
             }
             const url = `${GITHUB_API_BASE}/repos/${DATA_REPO}/contents/${ghPath(CSV_PATH)}`;
-            const body = { message, content: textToB64(content), branch: DATA_BRANCH };
+            const body = { message: withRunner(message), content: textToB64(content), branch: DATA_BRANCH };
             if (sha) body.sha = sha;
             const resp = await ghRequest({ method: 'PUT', url, headers: ghHeaders(true), data: JSON.stringify(body), timeout: 30000 });
-            if (resp.status === 200 || resp.status === 201) return;
+            if (resp.status === 200 || resp.status === 201) {
+                if (attempt) console.log(`${TAG} CSV append succeeded on attempt ${attempt + 1}/${ATTEMPTS}`);
+                return;
+            }
+            const snippet = String(resp.responseText || '').replace(/\s+/g, ' ').slice(0, 160);
+            lastErr = `PUT HTTP ${resp.status} (sha ${sha ? sha.slice(0, 7) : 'none'}) ${snippet}`;
             if (resp.status === 409 || resp.status === 422) continue;   // sha conflict → re-read and re-append
-            throw new Error(`CSV PUT HTTP ${resp.status}`);
+            throw new Error(`CSV ${lastErr}`);
         }
         // All attempts exhausted. Better to drop these rows (still recorded in the
         // per-site snapshots) than to wipe the whole audit log.
-        throw new Error('CSV append failed after retries — audit log left intact, rows not written');
+        throw new Error(`CSV append failed after ${ATTEMPTS} attempts — audit log left intact, rows not written. Last: ${lastErr}`);
     }
 
     // =====================================================================
@@ -1096,7 +1130,7 @@
                 console.warn(TAG, 'alert: no Slack DM route (needs PAT + slack-config.json users mapping) — console only');
                 return false;
             }
-            const ts = await slackPost(`🚨 *Site Watch alert — ${key}*\n${text}\n_${location.host} · ${new Date().toLocaleString()} · ${SCRIPT_VERSION}_`, null, dm);
+            const ts = await slackPost(`🚨 *Site Watch alert — ${key}*\n${text}\n_${location.host} · r:${runnerId} · ${new Date().toLocaleString()} · ${SCRIPT_VERSION}_`, null, dm);
             if (!ts) { state.alerts[key] = now - ALERT_REPEAT_MS + ALERT_RETRY_MS; persistState(); console.warn(TAG, 'alert DM failed — will retry in 30 min'); }
             return !!ts;
         } catch (e) {
@@ -1376,6 +1410,7 @@
             `%c${TAG} STATUS — ${ids.length}/${siteList.length} checked · %c${hot.length} HOT%c · ${cold.length} cold · ${dueNow} due now · paused=${pausedForAuth} · leader=${amLeader}`,
             'color:#5fd0ff;font-weight:700', 'color:#ff8c42;font-weight:800', 'color:#5fd0ff;font-weight:700'
         );
+        console.log(`%c   runner r:${runnerId} · ${tabId} · ${location.host} · v${SCRIPT_VERSION} — commits from another r:xxxx in git log = a second Site Watch install is auditing too`, 'color:#8a8f98');
         const csv = state.csv || {};
         if (csv.lastFailAt && (csv.lastFailAt > (csv.lastOkAt || 0))) {
             console.log(
@@ -1594,6 +1629,11 @@
         if (!claimLeader()) { console.log(`${TAG} another tab is the active watcher — standing by (use "Check all due now" to take over)`); return; }
         cycleRunning = true;
         lastCycleAt = Date.now();
+        // v0.26: re-read persisted state at every cycle start. A tab that stood
+        // by for hours and then inherited the lease used to audit from the copy
+        // it loaded at boot — re-checking everything the old leader had already
+        // done, then overwriting the leader's state (double baselines/snapshots).
+        state = loadState();
         try {
             const now = Date.now();
             if (!siteList.length || (now - siteListFetchedAt) > cfg.siteListRefreshHours * 3600e3) {
