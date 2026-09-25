@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-25 — 🕘 Remembered site selections: AIM Fleet Tools v0.51 (latest — dev only, feature #275)
+
+No more re-ticking the same sites for every test. The Fleet Data picker has a new row: a **remembered selections** dropdown with **Saved** (name the current selection with 💾 save current) and **Recent** (filled automatically every time you run anything with sites picked — ZIP export, KML exports, Entities → Sheets, Flight Checks, Pilot Utilization; the same set is never listed twice, last 12 kept). Picking one re-selects exactly those sites and restores the filter text. ✕ deletes the saved pick you applied.
+
 ## 2026-09-25 — Pilot Utilization fixes: AIM Fleet Tools v0.50 (latest — dev only, feature #274)
 
 **Night (h)** was a plain sum per drone, so a pilot with two drones up at night showed more night hours than air hours. It is now the same union rule as air time. New **Landing failed** column (Pilots, Pilot-days, Flights) from the log's own `landing_is_failed` flag, as a second signal next to Aborted/failed. The 🔬 Data check now lists **flown rows by state** so a zero Aborted/failed column can be read against what Percepto actually filed.

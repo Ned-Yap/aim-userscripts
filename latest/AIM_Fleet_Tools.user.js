@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.50
+// @version      0.51
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -36,7 +36,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.50';
+    const SCRIPT_VERSION = '0.51';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -2842,7 +2842,7 @@
     async function runFlightChecks() {
         if (fcRun) return;
         const cfg = fcCfg();
-        const sites = Array.from(fdSelected);
+        const sites = Array.from(fdSelected); fdNotePick();
         if (!sites.length) { setStatus('Flight checks: pick sites in 📦 Fleet Data first (or Select all there)'); openSections.data = true; renderPanel(); return; }
         const end = new Date(); const start = new Date(); start.setDate(start.getDate() - (Number(cfg.days) || 7));
         fcRun = { done: 0, total: 0, msg: 'listing flights…', abort: false, errors: [] };
@@ -3364,7 +3364,7 @@
     }
     async function runPilotUtil() {
         if (puRun) return;
-        const sites = Array.from(fdSelected);
+        const sites = Array.from(fdSelected); fdNotePick();
         if (!sites.length) { setStatus('Pilot utilization: pick sites in 📦 Fleet Data first (or ☑ select shown there)'); openSections.data = true; renderPanel(); return; }
         const { start, end } = puWindow();
         const from = fdYmd(start), to = fdYmd(end);
@@ -4817,6 +4817,62 @@
     const FD_TRACK_CAP = 200;
     const fdSelected = new Set();
     let fdFilter = '';
+    // ---- remembered picks (v0.51): every run that consumes the selection notes it under "Recent"; "Saved" = named by the user. GM, env-keyed. ----
+    const KEY_PICKS = 'aim-ft-picks' + ENV_SUFFIX;
+    const fdPicks = (() => { const v = loadJson(KEY_PICKS, {}); return { saved: Array.isArray(v.saved) ? v.saved : [], recent: Array.isArray(v.recent) ? v.recent : [] }; })();   // { saved: [{name, ids, filter, at}], recent: [{label, ids, filter, at}] }
+    const fdPicksSave = () => gmSet(KEY_PICKS, JSON.stringify(fdPicks));
+    let fdPickApplied = '';   // label of the pick last applied (shown in the picker row)
+    const fdPickKey = (ids) => ids.slice().sort().join(',');
+    function fdPickLabel(ids) {
+        const by = {}; ids.forEach(id => { const c = fdClientOfId(id); by[c] = (by[c] || 0) + 1; });
+        const top = Object.entries(by).sort((a, b) => b[1] - a[1]);
+        const head = top.slice(0, 3).map(([c, n]) => `${c} ${n}`).join(' · ') + (top.length > 3 ? ` · +${top.length - 3} more` : '');
+        return `${head} (${ids.length} site${ids.length === 1 ? '' : 's'})`;
+    }
+    // called by every run that reads fdSelected — moves an identical set to the top instead of duplicating it
+    function fdNotePick() {
+        const ids = Array.from(fdSelected); if (!ids.length) return;
+        const key = fdPickKey(ids);
+        fdPicks.recent = fdPicks.recent.filter(r => fdPickKey(r.ids || []) !== key);
+        fdPicks.recent.unshift({ label: fdPickLabel(ids), ids, filter: fdFilter, at: Date.now() });
+        fdPicks.recent = fdPicks.recent.slice(0, 12);
+        fdPicksSave();
+    }
+    function fdApplyPick(kind, idx) {
+        const list = kind === 'saved' ? fdPicks.saved : fdPicks.recent; const pk = list[idx]; if (!pk) return;
+        const known = rawSites ? new Set(Object.keys(rawSites)) : null;
+        fdSelected.clear(); let missing = 0;
+        (pk.ids || []).forEach(id => { if (!known || known.has(String(id))) fdSelected.add(String(id)); else missing++; });
+        fdFilter = typeof pk.filter === 'string' ? pk.filter : '';
+        fdPickApplied = kind === 'saved' ? pk.name : pk.label;
+        setStatus(`applied ${kind === 'saved' ? `saved pick "${pk.name}"` : 'recent pick'} — ${fdSelected.size} site(s)${missing ? ` · ${missing} no longer in your site list` : ''}`);
+        renderPanel();
+    }
+    function fdSavePick() {
+        const ids = Array.from(fdSelected); if (!ids.length) { setStatus('pick sites first, then save'); return; }
+        let name = null; try { name = window.prompt('Name this selection:', fdPickLabel(ids)); } catch (e) { console.warn(`${TAG} prompt unavailable:`, e); }
+        if (name == null) return; name = String(name).trim(); if (!name) return;
+        fdPicks.saved = fdPicks.saved.filter(p => p.name !== name);
+        fdPicks.saved.unshift({ name, ids, filter: fdFilter, at: Date.now() });
+        fdPicksSave(); fdPickApplied = name; setStatus(`saved pick "${name}" — ${ids.length} site(s)`); renderPanel();
+    }
+    function fdDeletePick(name) {
+        fdPicks.saved = fdPicks.saved.filter(p => p.name !== name); fdPicksSave(); if (fdPickApplied === name) fdPickApplied = ''; setStatus(`deleted saved pick "${name}"`); renderPanel();
+    }
+    function renderPickRow() {
+        const when = (t) => { try { return new Date(t).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; } };
+        const opt = (kind, i, text) => `<option value="${kind}:${i}">${escapeHtml(text)}</option>`;
+        const savedOpts = fdPicks.saved.map((p, i) => opt('saved', i, `${p.name} — ${(p.ids || []).length} sites`)).join('');
+        const recentOpts = fdPicks.recent.map((r, i) => opt('recent', i, `${r.label} · ${when(r.at)}`)).join('');
+        const cur = fdPicks.saved.find(p => p.name === fdPickApplied);
+        return '<div style="padding:4px 10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;color:#888">'
+            + '<span title="selections you ran before — pick one to re-select the same sites (and filter text)">🕘</span>'
+            + `<select data-fd-pick style="max-width:360px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;"><option value="">${fdPicks.saved.length || fdPicks.recent.length ? 'apply a remembered selection…' : 'no remembered selections yet — run anything with sites picked'}</option>`
+            + (savedOpts ? `<optgroup label="Saved">${savedOpts}</optgroup>` : '') + (recentOpts ? `<optgroup label="Recent (auto)">${recentOpts}</optgroup>` : '') + '</select>'
+            + `<span data-ft="fd-pick-save" title="name the current selection so it stays under Saved" style="cursor:pointer;color:${fdSelected.size ? '#5fff5f' : '#555'}">💾 save current</span>`
+            + (cur ? `<span data-ft="fd-pick-del" data-name="${escapeHtml(cur.name)}" title="delete this saved pick" style="cursor:pointer;color:#ff7a7a">✕ ${escapeHtml(cur.name)}</span>` : (fdPickApplied ? `<span style="color:#7adfe6">${escapeHtml(fdPickApplied)}</span>` : ''))
+            + '</div>';
+    }
     let fdDatasets = { setup: true, missions: true, log: true, tracks: false };
     let fdRange = '90d';           // 30d | 90d | 12m | 18m | custom
     let fdStart = '', fdEnd = '';  // custom yyyy-mm-dd
@@ -4982,6 +5038,7 @@
     async function fdExport() {
         const sids = Array.from(fdSelected);
         if (!sids.length) { setStatus('pick at least one site first'); return; }
+        fdNotePick();
         if (fdRun) return;
         const ds = fdDatasets;
         if (!ds.setup && !ds.missions && !ds.log) { setStatus('tick at least one dataset'); return; }
@@ -5111,6 +5168,7 @@
             + `<span style="color:${fdSelected.size ? '#5fff5f' : '#888'};font-weight:bold">${fdSelected.size} selected</span>`
             + `<span data-ft="fd-wide" style="cursor:pointer;color:#7adfe6;margin-left:auto">${fdWide ? '⤡ Normal width' : '⤢ Wide'}</span>`
             + '</div>');
+        out.push(renderPickRow());   // v0.51: remembered selections
         out.push('<div id="aim-fd-list" style="max-height:170px;overflow:auto;border-bottom:1px solid #222834;">'
             + clients.map(cl => {
                 const ids = byClient[cl].sort((a, b) => siteName(a).localeCompare(siteName(b)));
@@ -5384,6 +5442,7 @@
     async function kxExportCircles() {
         const sids = Array.from(fdSelected);
         if (!sids.length) { setStatus('pick at least one site first'); return; }
+        fdNotePick();
         if (fdRun) return;
         fdRun = { done: 0, total: sids.length, msg: 'starting…', abort: false };
         renderPanel();
@@ -5420,6 +5479,7 @@
     async function kxExportSetups() {
         const sids = Array.from(fdSelected);
         if (!sids.length) { setStatus('pick at least one site first'); return; }
+        fdNotePick();
         if (fdRun) return;
         fdRun = { done: 0, total: sids.length, msg: 'starting…', abort: false };
         renderPanel();
@@ -5672,6 +5732,7 @@
     async function fxExport(kind) {
         const sids = Array.from(fdSelected);
         if (!sids.length) { setStatus('pick at least one site first'); return; }
+        fdNotePick();
         if (!fxSelectedTypes().length) { setStatus('tick at least one entity type for the Sheets export'); return; }
         if (fdRun) return;
         fdRun = { done: 0, total: sids.length, msg: 'starting…', abort: false };
@@ -5782,7 +5843,7 @@
 
             // Delegated — the body is rebuilt on every render, the root never is
             panelEl.addEventListener('click', (ev) => {
-                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad],input[data-fx-inc],input[data-fx-opt],input[data-fc-thr],input[data-pu-opt],select[data-pu-tz],select[data-pu-end],select[data-pu-rule],input[data-pu-rule],select[data-pu-bulk],#aim-ft-xr-picked')) return;   // checkbox/color/select → change handler
+                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],select[data-fd-pick],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad],input[data-fx-inc],input[data-fx-opt],input[data-fc-thr],input[data-pu-opt],select[data-pu-tz],select[data-pu-end],select[data-pu-rule],input[data-pu-rule],select[data-pu-bulk],#aim-ft-xr-picked')) return;   // checkbox/color/select → change handler
                 const clAll = ev.target.closest('[data-ft-clients]');
                 if (clAll) {
                     if (clAll.getAttribute('data-ft-clients') === 'all') {
@@ -5859,6 +5920,8 @@
                     else if (cmd === 'fc-jira') copyText(fcJira(), 'flight-check JIRA table copied');
                     else if (cmd === 'fc-sort') { fcSortKey = fcSortKey === 'when' ? 'flagged' : 'when'; renderPanel(); }
                     else if (cmd && cmd.startsWith('fc-tab-')) { fcTab = cmd.slice(7); fcOpenFlight = null; renderPanel(); }
+                    else if (cmd === 'fd-pick-save') fdSavePick();
+                    else if (cmd === 'fd-pick-del') fdDeletePick(act.getAttribute('data-name'));
                     else if (cmd === 'fd-selall') { fdVisibleSiteIds().forEach(id => fdSelected.add(id)); renderPanel(); }
                     else if (cmd === 'fd-clear') { fdSelected.clear(); renderPanel(); }
                     else if (cmd === 'fd-wide') { fdWide = !fdWide; renderPanel(); }
@@ -6016,6 +6079,7 @@
             });
             panelEl.addEventListener('change', (ev) => {
                 const t = ev.target;
+                if (t.hasAttribute && t.hasAttribute('data-fd-pick')) { const v = String(t.value || ''); const i = v.indexOf(':'); if (i > 0) fdApplyPick(v.slice(0, i), Number(v.slice(i + 1))); return; }
                 if (t.hasAttribute && t.hasAttribute('data-fd-site')) { const id = t.getAttribute('data-fd-site'); if (t.checked) fdSelected.add(id); else fdSelected.delete(id); fdRenderKeepScroll(); return; }
                 // 6. client select-all acts on the SHOWN rows of that client (what the header count shows)
                 if (t.hasAttribute && t.hasAttribute('data-fd-clientsel')) { const cl = t.getAttribute('data-fd-clientsel'); const ids = fdVisibleSiteIds().filter(id => fdClientOfId(id) === cl); ids.forEach(id => { if (t.checked) fdSelected.add(id); else fdSelected.delete(id); }); fdRenderKeepScroll(); return; }
