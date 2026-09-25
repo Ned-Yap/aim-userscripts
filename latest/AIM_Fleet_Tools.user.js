@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.49
+// @version      0.50
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -36,7 +36,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.49';
+    const SCRIPT_VERSION = '0.50';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -3249,7 +3249,7 @@
         if (!(dur > 0)) return { skip: r.state === 0 || r.state === 5 ? 'never flew' : 'no duration' };
         if (dur > 12 * 3600000) return { skip: `duration ${(dur / 3600000).toFixed(1)} h > 12 h (bad record)` };
         if (dur < (Number(puOpts.minMin) || 0) * 60000) return { skip: 'under min length' };
-        return { id: r.id, sid, site: siteName(sid) || String(sid), pilot: String(r.created_by_username || '').trim() || '(unknown)', drone: r.drone_name || '', name: r.app_name || '', state: r.state != null ? (FD_STATE[r.state] || `State ${r.state}`) : '', group: r.mission_group_id != null ? r.mission_group_id : '', start, end: start + dur, dur, media: !!r.is_media_mission, landedAt: isFinite(landed) ? landed : null, durField: Number(r.duration) };
+        return { id: r.id, sid, site: siteName(sid) || String(sid), pilot: String(r.created_by_username || '').trim() || '(unknown)', drone: r.drone_name || '', name: r.app_name || '', state: r.state != null ? (FD_STATE[r.state] || `State ${r.state}`) : '', group: r.mission_group_id != null ? r.mission_group_id : '', start, end: start + dur, dur, media: !!r.is_media_mission, landedAt: isFinite(landed) ? landed : null, durField: Number(r.duration), landFail: !!r.landing_is_failed };
     }
     // Split a flight at local midnight(s) → [{day, s, e}]
     function puDaySlices(f, tz) {
@@ -3267,10 +3267,13 @@
             puDaySlices(f, tz).forEach(sl => {
                 const k = `${f.pilot}|${sl.day}`;
                 let b = pd.get(k);
-                if (!b) { b = { pilot: f.pilot, day: sl.day, iv: [], oneIv: [], flexIv: [], flexMs: 0, nightMs: 0, viol: 0, flights: new Set(), droneMs: 0, sites: new Set(), drones: new Set(), first: Infinity, last: -Infinity, aborted: 0 }; pd.set(k, b); }
+                if (!b) { b = { pilot: f.pilot, day: sl.day, iv: [], oneIv: [], flexIv: [], flexMs: 0, nightIv: [], viol: 0, landFail: 0, flights: new Set(), droneMs: 0, sites: new Set(), drones: new Set(), first: Infinity, last: -Infinity, aborted: 0 }; pd.set(k, b); }
                 b.iv.push([sl.s, sl.e]); b.flights.add(f.id); b.droneMs += sl.e - sl.s; b.sites.add(f.site); if (f.drone) b.drones.add(f.drone);
                 if (f.one) { b.oneIv.push([sl.s, sl.e]); if (sl.s === f.start && f.viol) b.viol++; } else { b.flexIv.push([sl.s, sl.e]); b.flexMs += sl.e - sl.s; }
-                const dw = puDayWindow(f.sid, sl.day, tz, memo); const nm = dw ? (sl.e - sl.s) - puOverlapMs(sl.s, sl.e, [dw]) : 0; b.nightMs += nm; f.nightMs += nm;
+                if (sl.s === f.start && f.landFail) b.landFail++;
+                // night pieces of this slice (before sunrise−m / after sunset+m at the flight's site) — unioned per pilot-day like air time
+                const dw = puDayWindow(f.sid, sl.day, tz, memo);
+                if (dw) { if (sl.s < dw[0]) { const e = Math.min(sl.e, dw[0]); b.nightIv.push([sl.s, e]); f.nightMs += e - sl.s; } if (sl.e > dw[1]) { const a = Math.max(sl.s, dw[1]); b.nightIv.push([a, sl.e]); f.nightMs += sl.e - a; } }
                 b.first = Math.min(b.first, sl.s); b.last = Math.max(b.last, sl.e);
                 if (sl.s === f.start && /Aborted|Failed/.test(f.state)) b.aborted++;
             });
@@ -3280,14 +3283,14 @@
             const p = puProfile(b.iv);
             const locked = puProfile(b.oneIv).unionMs / H, flex = puProfile(b.flexIv).unionMs / H;
             return { pilot: b.pilot, day: b.day, flights: b.flights.size, droneH: b.droneMs / H, air: p.unionMs / H, util: (p.unionMs / H) / shiftHrs, maxK: p.maxK, k1: p.atK[0] / H, k2: p.atK[1] / H, k3: p.atK[2] / H, k4: p.atK[3] / H,
-                locked, flex, flexDroneH: b.flexMs / H, levFlex: flex ? (b.flexMs / H) / flex : 0, viol: b.viol, night: b.nightMs / H,
+                locked, flex, flexDroneH: b.flexMs / H, levFlex: flex ? (b.flexMs / H) / flex : 0, viol: b.viol, night: puProfile(b.nightIv).unionMs / H, landFail: b.landFail,
                 first: b.first, last: b.last, span: (b.last - b.first) / H, sites: Array.from(b.sites).sort(), drones: Array.from(b.drones).sort(), aborted: b.aborted };
         });
         const byPilot = new Map();
         pilotDays.forEach(d => {
             let p = byPilot.get(d.pilot);
-            if (!p) { p = { pilot: d.pilot, days: 0, flights: 0, droneH: 0, air: 0, k1: 0, k2: 0, k3: 0, k4: 0, maxK: 0, maxDay: null, minDay: null, sites: new Set(), drones: new Set(), aborted: 0, span: 0, locked: 0, flex: 0, flexDroneH: 0, viol: 0, night: 0 }; byPilot.set(d.pilot, p); }
-            p.locked += d.locked; p.flex += d.flex; p.flexDroneH += d.flexDroneH; p.viol += d.viol; p.night += d.night;
+            if (!p) { p = { pilot: d.pilot, days: 0, flights: 0, droneH: 0, air: 0, k1: 0, k2: 0, k3: 0, k4: 0, maxK: 0, maxDay: null, minDay: null, sites: new Set(), drones: new Set(), aborted: 0, span: 0, locked: 0, flex: 0, flexDroneH: 0, viol: 0, night: 0, landFail: 0 }; byPilot.set(d.pilot, p); }
+            p.locked += d.locked; p.flex += d.flex; p.flexDroneH += d.flexDroneH; p.viol += d.viol; p.night += d.night; p.landFail += d.landFail;
             p.days++; p.flights += d.flights; p.droneH += d.droneH; p.air += d.air; p.k1 += d.k1; p.k2 += d.k2; p.k3 += d.k3; p.k4 += d.k4; p.maxK = Math.max(p.maxK, d.maxK); p.aborted += d.aborted; p.span += d.span;
             d.sites.forEach(s => p.sites.add(s)); d.drones.forEach(s => p.drones.add(s));
             if (!p.maxDay || d.air > p.maxDay.air) p.maxDay = d;
@@ -3295,7 +3298,7 @@
         });
         const pilots = Array.from(byPilot.values()).map(p => ({ pilot: p.pilot, days: p.days, flights: p.flights, fpd: p.flights / p.days, droneH: p.droneH, air: p.air, airPerDay: p.air / p.days, util: (p.air / p.days) / shiftHrs, leverage: p.air ? p.droneH / p.air : 0,
             k1: p.k1, k2: p.k2, k3: p.k3, k4: p.k4, maxK: p.maxK, maxDayAir: p.maxDay ? p.maxDay.air : 0, maxDayDate: p.maxDay ? p.maxDay.day : '', minDayAir: p.minDay ? p.minDay.air : 0, minDayDate: p.minDay ? p.minDay.day : '',
-            locked: p.locked, flex: p.flex, levFlex: p.flex ? p.flexDroneH / p.flex : 0, viol: p.viol, night: p.night,
+            locked: p.locked, flex: p.flex, levFlex: p.flex ? p.flexDroneH / p.flex : 0, viol: p.viol, night: p.night, landFail: p.landFail,
             spanPerDay: p.span / p.days, avgFlightMin: p.flights ? (p.droneH * 60) / p.flights : 0, aborted: p.aborted, sites: Array.from(p.sites).sort(), drones: Array.from(p.drones).sort() }));
         const byDate = new Map();
         pilotDays.forEach(d => {
@@ -3428,7 +3431,8 @@
             { key: 'minDayDate', label: 'Lightest day date', get: r => r.minDayDate, hide: true },
             { key: 'spanPerDay', label: 'Span / day', get: r => r.spanPerDay, fmt: puHm, exp: puH2, expLabel: 'Span / day (h)', title: 'first takeoff → last landing, averaged over active days' },
             { key: 'avgFlightMin', label: 'Avg flight', get: r => r.avgFlightMin, fmt: v => Math.round(v) + ' min', exp: v => Math.round(v), expLabel: 'Avg flight (min)' },
-            { key: 'aborted', label: 'Aborted/failed', get: r => r.aborted },
+            { key: 'aborted', label: 'Aborted/failed', get: r => r.aborted, title: 'flown flights whose log state is Aborted or Failed (see 🔬 Data check → flown rows by state)' },
+            { key: 'landFail', label: 'Landing failed', get: r => r.landFail, title: 'flights the log flags landing_is_failed' },
             { key: 'drones', label: 'Drones', get: r => r.drones.length, fmt: (v, r) => `${v}`, exp: (v, r) => r.drones.join(', '), title: r => r.drones.join(', ') },
             { key: 'sites', label: 'Sites', get: r => r.sites.length, fmt: (v, r) => `${v}`, exp: (v, r) => r.sites.join(', '), title: r => r.sites.join(', ') },
         ],
@@ -3452,6 +3456,7 @@
             { key: 'last', label: 'Last landing', get: r => r.last, fmt: v => puClock(v, puOpts.tz), exp: v => puClock(v, puOpts.tz) },
             { key: 'span', label: 'Span', get: r => r.span, fmt: puHm, exp: puH2, expLabel: 'Span (h)', title: 'first takeoff → last landing' },
             { key: 'aborted', label: 'Aborted/failed', get: r => r.aborted },
+            { key: 'landFail', label: 'Landing failed', get: r => r.landFail },
             { key: 'drones', label: 'Drones', get: r => r.drones.join(', ') },
             { key: 'sites', label: 'Sites', get: r => r.sites.join(', ') },
         ],
@@ -3506,6 +3511,7 @@
             { key: 'site', label: 'Site', get: r => r.site },
             { key: 'name', label: 'Mission', get: r => r.name },
             { key: 'state', label: 'State', get: r => r.state },
+            { key: 'landFail', label: 'Landing failed', get: r => r.landFail ? 'yes' : '' },
             { key: 'overlap', label: 'Overlapping', get: r => r.overlap, title: 'other flights by the same pilot in the air at any point during this one' },
             { key: 'one', label: '1:1 site', get: r => r.one ? (r.viol ? 'yes ⚠ overlapped' : 'yes') : '' },
             { key: 'night', label: 'Night (min)', get: r => Math.round((r.nightMs || 0) / 60000) },
@@ -3589,6 +3595,7 @@
             + '<div style="color:#7adfe6;font-weight:bold;margin-bottom:4px">🔬 Data check — what the mission log actually contains</div>'
             + row('log rows fetched', `${R.raw.length} · used ${R.flights.length} · skipped ${R.raw.length - R.flights.length}`)
             + row('rows by state', fmtMap(byState))
+            + row('flown rows by state', (() => { const m = {}; R.flights.forEach(f => inc(m, f.state || 'null')); const lf = R.flights.filter(f => f.landFail).length; return `${fmtMap(m)}${lf ? ` · <b style="color:#ffb347">${lf} flagged landing_is_failed</b>` : ' · no landing_is_failed flags'} — if every flown row is Completed, Percepto files aborted launches under the no-duration rows above and the Aborted/failed column stays 0`; })())
             + row('rows by type', `${fmtMap(byType)}${media ? ` · media missions ${media}` : ''}`)
             + row('rows with no duration', Object.keys(noDurState).length ? `${fmtMap(noDurState)} · ${noDurWithLanded} rescued from their landed time (counted) · <b>${Object.values(noDurState).reduce((a, b) => a + b, 0) - noDurWithLanded} have neither → skipped</b> (Pending/Cancelled never flew; an Aborted/Failed row with no times is a launch that did not happen or a broken record)` : 'none', Object.keys(noDurState).length ? '#ffb347' : '#5fff5f')
             + row('duration (min)', durMin.length ? `min ${puPctl(durMin, 0).toFixed(1)} · p10 ${puPctl(durMin, 0.1).toFixed(1)} · median ${puPctl(durMin, 0.5).toFixed(1)} · p90 ${puPctl(durMin, 0.9).toFixed(1)} · max ${puPctl(durMin, 1).toFixed(1)} · mean ${(durMin.reduce((a, b) => a + b, 0) / durMin.length).toFixed(1)}` : 'none')

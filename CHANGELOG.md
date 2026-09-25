@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-25 — Pilot Utilization fixes: AIM Fleet Tools v0.50 (latest — dev only, feature #274)
+
+**Night (h)** was a plain sum per drone, so a pilot with two drones up at night showed more night hours than air hours. It is now the same union rule as air time. New **Landing failed** column (Pilots, Pilot-days, Flights) from the log's own `landing_is_failed` flag, as a second signal next to Aborted/failed. The 🔬 Data check now lists **flown rows by state** so a zero Aborted/failed column can be read against what Percepto actually filed.
+
 ## 2026-09-25 — Pilot Utilization: site rules (day / night / 1:1) and flyable capacity: AIM Fleet Tools v0.49 (latest — dev only, feature #274)
 
 Sites differ: some fly 24/7, some day-only or night-only, and some force the pilot to stay 1:1 with the drone. New **⚙ Site rules** table in the Pilot Utilization section (for the picked sites): flying window **24/7 / Day only / Night only / Custom hours**, a **1:1** flag, and the number of drones based there (blank = as seen in the log). Day and night come from sunrise and sunset computed at each site's own coordinates for each date, with an adjustable twilight margin (30 min default); the table shows today's sunrise–sunset per site. A "set all picked to …" bulk control and a reset. Changing a rule recomputes instantly from the flights already fetched.
