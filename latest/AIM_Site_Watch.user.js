@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.28
+// @version      0.29
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON (and optionally its missions) on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Daily Slack digest. Configurable in the AIM Control Panel ("Site Watch").
@@ -98,7 +98,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.28';
+    const SCRIPT_VERSION = '0.29';
 
     // Server model (v0.21): prod and QA are separate databases with their own
     // site lists — the same numeric ID is two different sites. A QA leader
@@ -1220,6 +1220,35 @@
 
     // This user's Slack member id, for the Simulate DM: resolve the GitHub login
     // from the PAT (GET /user) and map it via slack-config.json's `users`. Cached.
+    // v0.29: OWNER-ONLY. Site Watch polls every site and commits under whatever
+    // PAT is in the Control Panel. Only the owner's GitHub login may run it; any
+    // other login is locked out — master forced off, nothing polled, nothing
+    // written, panel shows a lock notice. Verified once per token (fingerprint
+    // cached in GM); fails CLOSED while unverified.
+    const OWNER_LOGINS = ['PaydenW-AIM'];
+    const OWNER_OK_KEY = `aim-site-watch-owner-ok${ENV_SFX}`;
+    let ownerStatus = 'unknown';   // 'unknown' | 'ok' | 'locked'
+    async function verifyOwner() {
+        if (!cachedToken) { ownerStatus = 'unknown'; return false; }
+        const fpr = await sha256Hex('owner:' + cachedToken);
+        if (gmGet(OWNER_OK_KEY, null) === fpr) { ownerStatus = 'ok'; return true; }
+        try {
+            const resp = await ghRequest({ method: 'GET', url: `${GITHUB_API_BASE}/user`, headers: ghHeaders(), timeout: 15000, nocache: true });
+            if (resp.status === 200) {
+                const login = (JSON.parse(resp.responseText) || {}).login || '';
+                if (OWNER_LOGINS.includes(login)) { gmSet(OWNER_OK_KEY, fpr); ownerStatus = 'ok'; return true; }
+                ownerStatus = 'locked';
+                if (masterEnabled) { masterEnabled = false; gmSet(MASTER_KEY, false); }
+                console.warn(`${TAG} 🔒 Site Watch is owner-only (${OWNER_LOGINS.join(', ')}); this PAT belongs to "${login}" — disabled on this account. Please uninstall this script from Tampermonkey.`);
+                registerWithControlPanel();
+                return false;
+            }
+            console.warn(`${TAG} owner check: GET /user HTTP ${resp.status} — not running until verified`);
+        } catch (e) { console.warn(TAG, 'owner check failed — not running until verified', errText(e)); }
+        ownerStatus = 'unknown';
+        return false;
+    }
+
     async function resolveMySlackId() {
         if (mySlackId) return mySlackId;
         if (!cachedToken) return null;
@@ -1765,6 +1794,7 @@
         if (!masterEnabled) return;
         if (cycleRunning) return;
         if (!cachedToken) { console.warn(`${TAG} no GitHub token yet — open the Control Panel and save your PAT`); return; }
+        if (ownerStatus !== 'ok' && !(await verifyOwner())) { console.log(`${TAG} not running — owner check ${ownerStatus}`); return; }
         if (!claimLeader()) { console.log(`${TAG} another tab is the active watcher — standing by (use "Check all due now" to take over)`); return; }
         cycleRunning = true;
         lastCycleAt = Date.now();
@@ -1897,7 +1927,10 @@
         try {
             controlChannel.postMessage({
                 type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Site Watch', version: SCRIPT_VERSION,
-                toggles: TOGGLES, hotkeys: [],
+                toggles: ownerStatus === 'locked'
+                    ? [{ id: 'owner-lock', label: `🔒 Owner-only script (${OWNER_LOGINS.join(', ')}) — disabled for this GitHub account. Please uninstall it from Tampermonkey.`, type: 'header' }]
+                    : TOGGLES,
+                hotkeys: [],
             });
         } catch (e) { console.warn(TAG, 'register failed', e); }
     }
@@ -1906,6 +1939,7 @@
         const val = (msg.value !== undefined ? msg.value : msg.enabled);
         if (id === 'master') {
             const on = !!val;
+            if (on && ownerStatus === 'locked') { console.warn(`${TAG} 🔒 owner-only — cannot enable on this account`); return; }
             if (on === masterEnabled) return;       // idempotent (panel runs in top + iframe)
             masterEnabled = on;
             gmSet(MASTER_KEY, masterEnabled);
@@ -2074,8 +2108,9 @@
         cachedToken = token || '';
         if (cachedToken === prev) return;
         gmSet(TOKEN_KEY, cachedToken);
+        ownerStatus = 'unknown';
         if (cachedToken) fetchSlackConfig();
-        if (cachedToken && masterEnabled) runCycle('token');
+        if (cachedToken) verifyOwner().then(ok => { if (ok && masterEnabled) runCycle('token'); });
     }
     function setupControlChannel() {
         try { controlChannel = new BroadcastChannel(CONTROL_CHANNEL_NAME); }
@@ -2102,6 +2137,7 @@
     setupControlChannel();
     registerWithControlPanel();
     if (cachedToken) fetchSlackConfig();        // load bot config for the daily digest
+    if (cachedToken) verifyOwner();             // v0.29: owner-only gate (locks non-owner installs)
     console.log(`${TAG} v${SCRIPT_VERSION} ready (master ${masterEnabled ? 'ON' : 'OFF'})`);
 
     setInterval(() => runCycle('wake'), WAKE_MS);
