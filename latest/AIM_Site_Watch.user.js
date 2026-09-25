@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.30
+// @version      0.31
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON (and optionally its missions) on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Daily Slack digest. Configurable in the AIM Control Panel ("Site Watch").
@@ -98,7 +98,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.30';
+    const SCRIPT_VERSION = '0.31';
 
     // Server model (v0.21): prod and QA are separate databases with their own
     // site lists — the same numeric ID is two different sites. A QA leader
@@ -1678,7 +1678,7 @@
             if (stableStringify(prevSFP) === stableStringify(curFP)) {
                 // v0.28: PHANTOM — repo snapshot already current; only our local hash
                 // was stale (another install recorded it). Adopt, no row, no snapshot.
-                console.warn(`${TAG} site ${id}: repo snapshot already current — stale local hash (another install recorded it). Adopting, no change row.`);
+                console.warn(`${TAG} site ${id}: repo snapshot already current — this tab's stored hash was stale (another tab of this install recorded it earlier). Adopting, no change row.`);
                 st.hash = hash; scheduleNext(st, st.state); return 'checked';
             }
             let rows = diffSetup(prevSFP, curFP);
@@ -1764,7 +1764,7 @@
                 // OUR local hash was stale, i.e. another Site Watch install recorded
                 // the change first (see detectOtherRunners). Not a change: adopt the
                 // hash, write no row, no snapshot, don't go HOT.
-                console.warn(`${TAG} site ${id} missions: repo snapshot already current — stale local hash (another install recorded it). Adopting, no change row.`);
+                console.warn(`${TAG} site ${id} missions: repo snapshot already current — this tab's stored hash was stale (another tab of this install recorded it earlier). Adopting, no change row.`);
                 st.hash = hash; scheduleNext(st, st.state); return 'checked';
             }
             let rows = diffMissions(prevFPs, fps);
