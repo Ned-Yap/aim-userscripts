@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.27
+// @version      0.28
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON (and optionally its missions) on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Daily Slack digest. Configurable in the AIM Control Panel ("Site Watch").
@@ -98,7 +98,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.27';
+    const SCRIPT_VERSION = '0.28';
 
     // Server model (v0.21): prod and QA are separate databases with their own
     // site lists — the same numeric ID is two different sites. A QA leader
@@ -831,6 +831,45 @@
             if (stableStringify(a) === stableStringify(b)) continue;
             emit(`step[${i}].${tName}.${k}`, a, b);
         }
+    }
+    // v0.28: when the fingerprint hash moved but the value-level diff found
+    // nothing to say, NAME what moved instead of writing a bare
+    // "(non-structural change)" row. A row with no entity and no field is
+    // worthless downstream — on 2026-09-25 the alert explainer wrote a whole
+    // story around one (site 1467). Walks the two fingerprint objects and emits
+    // one row per differing leaf path (capped).
+    function deepDiffPaths(a, b, path, out) {
+        if (out.length >= 20) return;
+        const ta = a === null ? 'null' : typeof a, tb = b === null ? 'null' : typeof b;
+        if (ta === 'object' && tb === 'object') {
+            if (Array.isArray(a) && Array.isArray(b) && a.length !== b.length) { out.push({ path: `${path}.length`, was: a.length, is: b.length }); return; }
+            const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+            for (const k of keys) deepDiffPaths(a[k], b[k], path ? `${path}.${k}` : k, out);
+            return;
+        }
+        if (stableStringify(a) !== stableStringify(b)) out.push({ path, was: a, is: b });
+    }
+    function unreportedMissionRows(prevFPs, fps) {
+        const rows = [];
+        const oldMap = new Map(); (prevFPs || []).forEach(f => oldMap.set(f.id, f));
+        for (const nf of fps || []) {
+            const of = oldMap.get(nf.id);
+            if (!of || stableStringify(of) === stableStringify(nf)) continue;
+            const out = []; deepDiffPaths(of, nf, '', out);
+            for (const d of out) rows.push({ change: 'modified', etype: 'mission', ename: nf.name || nf.id, objectId: nf.id, field: d.path || '(fingerprint)', was: fmtVal(d.was), is: fmtVal(d.is) });
+        }
+        return rows;
+    }
+    function unreportedSetupRows(prevSFP, curSFP) {
+        const rows = [];
+        const pe = (prevSFP && prevSFP.ents) || {}, ce = (curSFP && curSFP.ents) || {};
+        for (const id of new Set([...Object.keys(pe), ...Object.keys(ce)])) {
+            if (stableStringify(pe[id]) === stableStringify(ce[id])) continue;
+            const out = []; deepDiffPaths(pe[id] || {}, ce[id] || {}, '', out);
+            const e = ce[id] || pe[id] || {};
+            for (const d of out) rows.push({ change: 'modified', etype: e.t || '', ename: e.name || id, objectId: id, field: d.path || '(fingerprint)', was: fmtVal(d.was), is: fmtVal(d.is) });
+        }
+        return rows;
     }
     // Summarized diff of two fingerprint arrays. Returns rows in the same shape
     // as diffObjects (etype fixed to 'mission' so the CSV/digest can split it out).
@@ -1601,8 +1640,16 @@
         const ts = new Date().toISOString();
         const nm = nameFor(id) || s.name || '';
         if (prevData) {
-            let rows = diffSetup(siteFP(stripVolatile(prevData)), curFP);
+            const prevSFP = siteFP(stripVolatile(prevData));
+            if (stableStringify(prevSFP) === stableStringify(curFP)) {
+                // v0.28: PHANTOM — repo snapshot already current; only our local hash
+                // was stale (another install recorded it). Adopt, no row, no snapshot.
+                console.warn(`${TAG} site ${id}: repo snapshot already current — stale local hash (another install recorded it). Adopting, no change row.`);
+                st.hash = hash; scheduleNext(st, st.state); return 'checked';
+            }
+            let rows = diffSetup(prevSFP, curFP);
             rows = await finalizeSetupRows(rows);       // AGL feet on the alt rows
+            if (!rows.length) rows = unreportedSetupRows(prevSFP, curFP);
             if (rows.length) {
                 for (const row of rows) pendingCsv.push(csvRow([ts, id, nm, row.change, row.etype, row.ename, row.objectId, row.field, row.was, row.is]));
             } else {
@@ -1678,7 +1725,16 @@
         const ts = new Date().toISOString();
         const nm = nameFor(id) || s.name || '';
         if (prevFPs) {
-            const rows = diffMissions(prevFPs, fps);
+            if (stableStringify(prevFPs) === norm) {
+                // v0.28: PHANTOM. The repo already holds exactly this state — only
+                // OUR local hash was stale, i.e. another Site Watch install recorded
+                // the change first (see detectOtherRunners). Not a change: adopt the
+                // hash, write no row, no snapshot, don't go HOT.
+                console.warn(`${TAG} site ${id} missions: repo snapshot already current — stale local hash (another install recorded it). Adopting, no change row.`);
+                st.hash = hash; scheduleNext(st, st.state); return 'checked';
+            }
+            let rows = diffMissions(prevFPs, fps);
+            if (!rows.length) rows = unreportedMissionRows(prevFPs, fps);
             if (rows.length) {
                 for (const row of rows) pendingCsv.push(csvRow([ts, id, nm, row.change, row.etype, row.ename, row.objectId, row.field, row.was, row.is]));
             } else {
