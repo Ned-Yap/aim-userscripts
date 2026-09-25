@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.26
+// @version      0.27
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON (and optionally its missions) on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Daily Slack digest. Configurable in the AIM Control Panel ("Site Watch").
@@ -98,7 +98,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.26';
+    const SCRIPT_VERSION = '0.27';
 
     // Server model (v0.21): prod and QA are separate databases with their own
     // site lists — the same numeric ID is two different sites. A QA leader
@@ -396,6 +396,89 @@
         }
         throw new Error(`PUT ${path} HTTP ${resp.status}`);
     }
+    // v0.27: which machine/browser is THIS install? Shown in the Control Panel
+    // header + every runner alert so a DM read from anywhere says where it came from.
+    function runnerLabel() {
+        try {
+            const uad = navigator.userAgentData;
+            const ua = navigator.userAgent || '';
+            let platform = (uad && uad.platform) || (/Windows/i.test(ua) ? 'Windows' : /Mac/i.test(ua) ? 'macOS' : /Linux/i.test(ua) ? 'Linux' : 'unknown OS');
+            let browser = '';
+            if (uad && Array.isArray(uad.brands)) {
+                const b = uad.brands.find(x => /Edge|Chrome|Brave|Opera|Firefox/i.test(x.brand) && !/Chromium|Not/i.test(x.brand)) || uad.brands.find(x => !/Not/i.test(x.brand));
+                if (b) browser = `${b.brand} ${b.version}`;
+            }
+            if (!browser) { const m = ua.match(/(Edg|Firefox|OPR|Chrome)\/(\d+)/); browser = m ? `${m[1] === 'Edg' ? 'Edge' : m[1] === 'OPR' ? 'Opera' : m[1]} ${m[2]}` : 'unknown browser'; }
+            return `${platform} · ${browser}`;
+        } catch (e) { console.warn(TAG, 'runnerLabel', e); return 'unknown'; }
+    }
+    // Last N commits under WATCH_DIR (commits API accepts a directory path).
+    async function ghListCommits(n) {
+        if (!cachedToken) throw new Error('no token');
+        const url = `${GITHUB_API_BASE}/repos/${DATA_REPO}/commits?path=${encodeURIComponent(WATCH_DIR)}&sha=${DATA_BRANCH}&per_page=${n}`;
+        const resp = await ghRequest({ method: 'GET', url, headers: ghHeaders(), timeout: 25000, nocache: true });
+        if (resp.status !== 200) throw new Error(`GET commits HTTP ${resp.status}`);
+        const list = JSON.parse(resp.responseText);
+        return (Array.isArray(list) ? list : []).map(c => ({
+            msg: (c.commit && c.commit.message) || '',
+            at: Date.parse((c.commit && c.commit.committer && c.commit.committer.date) || '') || 0,
+        }));
+    }
+    // v0.27: SECOND-RUNNER DETECTION — read the data repo's own git log and
+    // count who has been committing. Answers "is another Site Watch install
+    // auditing too?" NOW, from any one machine, instead of after days of
+    // watching commit pairs. Tagged commits (`· r:xxxx`, v0.26+) are attributed
+    // by runner id; untagged [site-watch] commits newer than this install's
+    // first tagged cycle come from a pre-0.26 install. Each install that sees a
+    // foreign runner DMs once per ALERT_REPEAT_MS, self-identifying with its
+    // runner id + OS/browser, so the DMs themselves say which machines they are.
+    const RUNNER_LOOKBACK_MS = 3 * 3600e3;
+    async function detectOtherRunners(opts) {
+        const o = opts || {};
+        const now = Date.now();
+        if (!state.runnerSince) { state.runnerSince = now; persistState(); }
+        const commits = await ghListCommits(60);
+        const seen = {};   // key → {count, lastAt}
+        for (const c of commits) {
+            if (now - c.at > RUNNER_LOOKBACK_MS) continue;
+            if (!/^\[site-watch\]/.test(c.msg)) continue;
+            const m = c.msg.match(/· r:([a-z0-9]{4,8})\s*$/);
+            let key;
+            if (m) key = m[1];
+            else if (c.at > state.runnerSince + 60e3) key = 'untagged';   // pre-0.26 install still writing
+            else continue;                                                // my own pre-0.26 history
+            const e = seen[key] || (seen[key] = { count: 0, lastAt: 0 });
+            e.count++; if (c.at > e.lastAt) e.lastAt = c.at;
+        }
+        const keys = Object.keys(seen);
+        const foreign = keys.filter(k => k !== runnerId);
+        const fmt = t => new Date(t).toLocaleTimeString();
+        const line = k => {
+            const e = seen[k];
+            const who = k === runnerId ? `r:${k} (THIS install — ${runnerLabel()} · ${location.host})`
+                : k === 'untagged' ? '(untagged — an install still on v0.25 or older)' : `r:${k}`;
+            return `• ${who} — ${e.count} commit(s), last ${fmt(e.lastAt)}`;
+        };
+        const lines = keys.sort((a, b) => seen[b].lastAt - seen[a].lastAt).map(line);
+        const mine = seen[runnerId] ? '' : `• r:${runnerId} (THIS install — ${runnerLabel()} · ${location.host}) — no commits yet in this window\n`;
+        let text = `👥 Site Watch installs that wrote to ${WATCH_DIR}/ in the last ${Math.round(RUNNER_LOOKBACK_MS / 3600e3)}h:\n${mine}${lines.join('\n') || '(none)'}`;
+        if (foreign.length) {
+            text += `\n⚠ MORE THAN ONE INSTALL IS AUDITING (${foreign.length} other). Every site gets checked twice and CSV appends race. On each machine open the AIM Control Panel → Site Watch: the section header shows that machine's runner id. Turn "Enable Site Watch" OFF on the one you don't want.`;
+            console.warn(`${TAG} ${text}`);
+        } else {
+            text += `\n✅ Only this install is auditing.`;
+            console.log(`%c${TAG} ${text}`, 'color:#8a8f98');
+        }
+        if (o.force) {
+            delete (state.alerts || {})['who-else'];
+            const ok = await alertMe('who-else', text);
+            console.log(`${TAG} who-else → ${ok ? 'DM sent' : 'NOT sent (see warning above)'}`);
+        } else if (foreign.length) {
+            await alertMe('second-runner', text);
+        }
+        return { seen, foreign };
+    }
+
     // Robust read of the changes.csv. Returns {text, sha}:
     //   - {text:null, sha:null}  ONLY on a genuine 404 (file does not exist yet).
     //   - {text, sha}            on success (full content + the sha for the PUT).
@@ -1635,6 +1718,8 @@
         // done, then overwriting the leader's state (double baselines/snapshots).
         state = loadState();
         try {
+            // v0.27: shout on the FIRST cycle if another install is also writing.
+            try { await detectOtherRunners(); } catch (e) { console.warn(TAG, 'runner detection skipped', errText(e)); }
             const now = Date.now();
             if (!siteList.length || (now - siteListFetchedAt) > cfg.siteListRefreshHours * 3600e3) {
                 const list = await fetchSiteList();
@@ -1736,6 +1821,7 @@
     // Control Panel integration
     // =====================================================================
     const TOGGLES = [
+        { id: 'runner-hdr', label: `🪪 This install: r:${runnerId} · ${runnerLabel()}`, type: 'header' },
         { id: 'master', label: 'Enable Site Watch', type: 'boolean', default: false, master: true },
         { id: 'coldHours', label: 'Quiet check interval (hours)', type: 'number', default: DEFAULTS.coldHours, min: 1, max: 168, step: 1 },
         { id: 'hotHours', label: 'Active check interval (hours)', type: 'number', default: DEFAULTS.hotHours, min: 1, max: 24, step: 1 },
@@ -1744,6 +1830,7 @@
         { id: 'check-now', label: 'Check all due now', type: 'button', action: 'check-now' },
         { id: 'simulate', label: 'Simulate a change (console preview)', type: 'button', action: 'simulate' },
         { id: 'status', label: 'Show status (console)', type: 'button', action: 'status' },
+        { id: 'who-else', label: 'Who else is auditing? (reads git log now → Slack DM)', type: 'button', action: 'who-else' },
         { id: 'test-alert', label: 'Send test alert (Slack DM)', type: 'button', action: 'test-alert' },
         { id: 'post-digest-now', label: 'Post Slack digest now (last 24h, manual only)', type: 'button', action: 'post-digest-now' },
         { id: 'reset-baselines', label: 'Reset all baselines (re-learn)', type: 'button', action: 'reset-baselines' },
@@ -1887,6 +1974,7 @@
     function handleAction(actionId) {
         if (actionId === 'check-now') { console.log(`${TAG} manual check requested`); stealLeader(); runCycle('manual'); }
         else if (actionId === 'status') { showStatus(); }
+        else if (actionId === 'who-else') { detectOtherRunners({ force: true }).catch(e => console.error(TAG, 'who-else failed', e)); }
         else if (actionId === 'simulate') { simulateDigest(); }
         else if (actionId === 'test-alert') {
             delete (state.alerts || {})['test'];   // never deduped — it's a manual check

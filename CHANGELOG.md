@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-25 — 👥 Site Watch: "Who else is auditing?" — second-install detection on demand: AIM Site Watch v0.27 (latest — personal, dev only)
+
+No more waiting days to learn whether two installs are running. New Control Panel button **Who else is auditing?** reads the data repo's git log right now, lists every runner id that committed in the last 3 hours (tagged `r:xxxx` from v0.26+, or "untagged" for an install still on an older version) and DMs the answer to your Slack. The same check runs automatically at the start of every cycle and DMs once per 6 h whenever a foreign runner is seen. Every install self-identifies in its DM with its runner id, OS and browser, and the Site Watch section header in the Control Panel now shows **this** machine's runner id, so matching a DM to a machine takes one look.
+
 ## 2026-09-25 — 🛡 Site Watch: stale-sha append fix + runner id in commits: AIM Site Watch v0.26 (latest — personal, dev only)
 
 A `csv-append-failed` DM fired at 16:05 for one 6-row batch while every other append that day landed. Cause: GitHub API responses are cacheable for 60 s in the browser and the GET (`?ref=main`) and PUT URLs differ, so a re-read within a minute of another writer's commit returned the OLD sha and all three retries hit 409 in ten seconds. Fix: every GitHub read now sends `Cache-Control: no-cache` + `nocache`, the CSV append retries 5× with jittered backoff and the failure alert now carries the last HTTP status/body instead of a generic line. The day's git log also showed the fleet being audited **twice** (site 1566 baselined a minute apart, change-row commits in pairs, 2× the usual snapshot volume) — two Site Watch installs with separate Tampermonkey stores never see each other's leader lease. Every commit message and alert is now stamped `· r:<runner id>` (stable per browser profile) so `git log` reveals how many installs are writing, and a tab that inherits the lease re-reads persisted state at cycle start instead of auditing from the copy it loaded at boot.
