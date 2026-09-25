@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.46
+// @version      0.47
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -36,7 +36,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.46';
+    const SCRIPT_VERSION = '0.47';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -3119,8 +3119,9 @@
     const KEY_PU = 'aim-ft-pilot-opts';
     const PU_TZS = [['America/Chicago', 'Central (CT)'], ['America/Denver', 'Mountain (MT)'], ['America/Los_Angeles', 'Pacific (PT)'], ['America/New_York', 'Eastern (ET)'], ['UTC', 'UTC']];
     const puOpts = (() => {
-        const def = { days: 28, shiftHrs: 8, minMin: 0, tz: 'America/Chicago' };
+        const def = { days: 28, shiftHrs: 8, minMin: 0, tz: 'America/Chicago', endMode: 'duration' };   // endMode: 'duration' (when + duration) | 'landed' (landed timestamp)
         const s = loadJson(KEY_PU, {});
+        if (s.endMode === 'landed') def.endMode = 'landed';
         ['days', 'shiftHrs', 'minMin'].forEach(k => { if (typeof s[k] === 'number' && isFinite(s[k]) && s[k] >= 0) def[k] = s[k]; });
         if (typeof s.tz === 'string' && PU_TZS.some(t => t[0] === s.tz)) def.tz = s.tz;
         if (!(def.days >= 1)) def.days = 28;
@@ -3131,6 +3132,8 @@
     let puRun = null;        // { done, total, msg, abort, errors }
     let puResults = null;    // { at, sites, days, from, to, tz, flights, pilots, pilotDays, dates, skipped, errors, aborted }
     let puTab = 'pilots';    // pilots | days | dates | flights
+    let puOpenDay = null;    // 'pilot|day' expanded on the Pilot-days tab (flight-by-flight trace)
+    let puShowCheck = false; // 🔬 data check block open
     const puSort = { pilots: { key: 'air', dir: -1 }, days: { key: 'air', dir: -1 }, dates: { key: 'date', dir: -1 }, flights: { key: 'start', dir: -1 } };
     const puLogCache = {};   // `${sid}|${from}|${to}` → rows (a flown flight never changes; per page load)
 
@@ -3182,12 +3185,14 @@
     function puNormalize(sid, r) {
         const start = Date.parse(r.when);
         if (!isFinite(start)) return { skip: 'no launch time' };
+        const landed = Date.parse(r.landed);
         let dur = Number(r.duration);
-        if (!(dur > 0)) { const landed = Date.parse(r.landed); dur = isFinite(landed) && landed > start ? landed - start : NaN; }
+        if (puOpts.endMode === 'landed' && isFinite(landed) && landed > start) dur = landed - start;   // user chose the landed timestamp as the flight end
+        if (!(dur > 0)) dur = isFinite(landed) && landed > start ? landed - start : NaN;
         if (!(dur > 0)) return { skip: r.state === 0 || r.state === 5 ? 'never flew' : 'no duration' };
         if (dur > 12 * 3600000) return { skip: `duration ${(dur / 3600000).toFixed(1)} h > 12 h (bad record)` };
         if (dur < (Number(puOpts.minMin) || 0) * 60000) return { skip: 'under min length' };
-        return { id: r.id, sid, site: siteName(sid) || String(sid), pilot: String(r.created_by_username || '').trim() || '(unknown)', drone: r.drone_name || '', name: r.app_name || '', state: r.state != null ? (FD_STATE[r.state] || `State ${r.state}`) : '', group: r.mission_group_id != null ? r.mission_group_id : '', start, end: start + dur, dur, media: !!r.is_media_mission };
+        return { id: r.id, sid, site: siteName(sid) || String(sid), pilot: String(r.created_by_username || '').trim() || '(unknown)', drone: r.drone_name || '', name: r.app_name || '', state: r.state != null ? (FD_STATE[r.state] || `State ${r.state}`) : '', group: r.mission_group_id != null ? r.mission_group_id : '', start, end: start + dur, dur, media: !!r.is_media_mission, landedAt: isFinite(landed) ? landed : null, durField: Number(r.duration) };
     }
     // Split a flight at local midnight(s) → [{day, s, e}]
     function puDaySlices(f, tz) {
@@ -3244,7 +3249,7 @@
         puRun = { done: 0, total: sites.length, msg: 'listing flights…', abort: false, errors: [] };
         openSections.pilots = true; renderPanel();
         const isAborted = () => puRun && puRun.abort;
-        const flights = []; const skipped = {}; let rawRows = 0;
+        const flights = []; const skipped = {}; const skippedRows = []; const raw = []; let rawRows = 0;
         try {
             for (const sid of sites) {
                 if (isAborted()) break;
@@ -3253,7 +3258,7 @@
                 try {
                     const rows = puLogCache[ck] || (puLogCache[ck] = await fcFetchLog(sid, start, end, isAborted));
                     rawRows += rows.length;
-                    rows.forEach(r => { const f = puNormalize(sid, r); if (f.skip) skipped[f.skip] = (skipped[f.skip] || 0) + 1; else flights.push(f); });
+                    rows.forEach(r => { raw.push({ sid, r }); const f = puNormalize(sid, r); if (f.skip) { skipped[f.skip] = (skipped[f.skip] || 0) + 1; skippedRows.push({ sid, r, why: f.skip }); } else flights.push(f); });
                 } catch (e) { if (String(e.message).includes('aborted')) break; puRun.errors.push(`${siteName(sid) || sid}: ${e.message}`); console.warn(`${TAG} pilot util: log fetch failed for ${sid}:`, e); }
                 puRun.done++;
                 await ftYield();
@@ -3262,7 +3267,8 @@
             const seen = new Set(); const uniq = flights.filter(f => !seen.has(f.id) && seen.add(f.id));
             uniq.sort((a, b) => a.start - b.start);
             const agg = puAggregate(uniq, puOpts.tz, puOpts.shiftHrs);
-            puResults = { at: Date.now(), sites, days: puOpts.days, from, to, tz: puOpts.tz, shiftHrs: puOpts.shiftHrs, flights: uniq, pilots: agg.pilots, pilotDays: agg.pilotDays, dates: agg.dates, skipped, rawRows, errors: puRun.errors, aborted: isAborted() };
+            puResults = { at: Date.now(), sites, days: puOpts.days, from, to, tz: puOpts.tz, shiftHrs: puOpts.shiftHrs, flights: uniq, pilots: agg.pilots, pilotDays: agg.pilotDays, dates: agg.dates, skipped, skippedRows, raw, endMode: puOpts.endMode, rawRows, errors: puRun.errors, aborted: isAborted() };
+            puOpenDay = null; puShowCheck = false;
             const sk = Object.entries(skipped).map(([k, v]) => `${v} ${k}`).join(', ');
             setStatus(`Pilot utilization: ${uniq.length} flight(s) · ${agg.pilots.length} pilot(s) · ${agg.pilotDays.length} pilot-day(s) across ${sites.length} site(s), last ${puOpts.days} d${sk ? ` · skipped ${sk}` : ''}${puRun.errors.length ? ` · ${puRun.errors.length} error(s)` : ''}${isAborted() ? ' · ABORTED (partial)' : ''}`);
             console.log(`${TAG} pilot util: ${rawRows} log rows → ${uniq.length} flights, ${agg.pilots.length} pilots`, { skipped, errors: puRun.errors });
@@ -3381,13 +3387,76 @@
             setStatus(`pilot utilization ${label} CSV downloaded — ${n} row(s)`);
         } else copyHtmlToClipboard(puSheetsHtml(tab), puTsv(tab), `pilot utilization ${label} copied — ${n} row(s) — paste into Google Sheets / Excel`);
     }
+    // ---- 🔬 data check: is the log telling us what we think it is? ----
+    const puPctl = (arr, q) => { if (!arr.length) return NaN; const a = arr.slice().sort((x, y) => x - y); return a[Math.min(a.length - 1, Math.floor(q * (a.length - 1)))]; };
+    function puDataCheck() {
+        const R = puResults; if (!R || !R.raw) return '';
+        const inc = (m, k) => { m[k] = (m[k] || 0) + 1; };
+        const byType = {}, byState = {}, noDurState = {}, users = {}; let media = 0, blankUser = 0, noDurWithLanded = 0, landedBeforeWhen = 0;
+        const durMin = [], delta = [];
+        R.raw.forEach(({ r }) => {
+            inc(byType, r.type == null ? 'null' : String(r.type)); inc(byState, r.state != null ? (FD_STATE[r.state] || `State ${r.state}`) : 'null');
+            if (r.is_media_mission) media++;
+            const u = String(r.created_by_username || '').trim(); if (!u) blankUser++; inc(users, u || '(blank)');
+            const when = Date.parse(r.when), landed = Date.parse(r.landed), d = Number(r.duration);
+            if (!(d > 0)) { inc(noDurState, r.state != null ? (FD_STATE[r.state] || `State ${r.state}`) : 'null'); if (isFinite(landed) && isFinite(when) && landed > when) noDurWithLanded++; }
+            else durMin.push(d / 60000);
+            if (isFinite(landed) && isFinite(when)) { if (landed < when) landedBeforeWhen++; if (d > 0) delta.push(((landed - when) - d) / 60000); }
+        });
+        // a physical drone cannot be in two flights at once — self-overlap means the intervals are too long (bad when/duration semantics)
+        const byDrone = {}; R.flights.forEach(f => { if (f.drone) (byDrone[f.drone] = byDrone[f.drone] || []).push(f); });
+        let selfOverlap = 0; const selfEx = [];
+        Object.values(byDrone).forEach(list => { list.sort((a, b) => a.start - b.start); for (let i = 1; i < list.length; i++) { if (list[i].start < list[i - 1].end - 60000) { selfOverlap++; if (selfEx.length < 3) selfEx.push(`${list[i].drone} #${list[i - 1].id}→#${list[i].id} (${Math.round((list[i - 1].end - list[i].start) / 60000)} min)`); } } });
+        const totDrone = R.pilotDays.reduce((s, d) => s + d.droneH, 0), totAir = R.pilotDays.reduce((s, d) => s + d.air, 0);
+        const fmtMap = (m) => Object.entries(m).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${escapeHtml(k)} ${v}`).join(' · ');
+        const topUsers = Object.entries(users).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, v]) => `${escapeHtml(k)} ${v}`).join(' · ');
+        const dMed = puPctl(delta, 0.5), dP90 = puPctl(delta, 0.9), dBig = delta.filter(x => Math.abs(x) > 2).length;
+        const row = (l, v, c) => `<div style="display:flex;gap:8px;padding:1px 0"><span style="color:#888;min-width:190px;flex:none">${l}</span><span style="color:${c || '#ddd'}">${v}</span></div>`;
+        let verdict = '';
+        if (delta.length) {
+            if (Math.abs(dMed) <= 2) verdict = `<span style="color:#5fff5f">duration ≈ landed − launch (median Δ ${dMed.toFixed(1)} min) → duration spans the whole flight. Using it is right.</span>`;
+            else if (dMed > 2) verdict = `<span style="color:#ffb347">landed − launch is typically ${dMed.toFixed(1)} min LONGER than duration (p90 ${dP90.toFixed(1)}) → duration excludes takeoff / return-to-dock. Switch "flight end" to <b>landed time</b> to count the full airborne span.</span>`;
+            else verdict = `<span style="color:#ff7a7a">landed − launch is typically ${(-dMed).toFixed(1)} min SHORTER than duration → these two fields disagree; check a flight in Percepto before trusting either.</span>`;
+        } else verdict = '<span style="color:#888">no rows carry both landed and duration — cannot cross-check</span>';
+        return '<div style="padding:8px 10px;border-bottom:1px solid #222834;background:#10141a;font:11px/1.5 monospace">'
+            + '<div style="color:#7adfe6;font-weight:bold;margin-bottom:4px">🔬 Data check — what the mission log actually contains</div>'
+            + row('log rows fetched', `${R.raw.length} · used ${R.flights.length} · skipped ${R.raw.length - R.flights.length}`)
+            + row('rows by state', fmtMap(byState))
+            + row('rows by type', `${fmtMap(byType)}${media ? ` · media missions ${media}` : ''}`)
+            + row('rows with no duration', Object.keys(noDurState).length ? `${fmtMap(noDurState)} · ${noDurWithLanded} rescued from their landed time (counted) · <b>${Object.values(noDurState).reduce((a, b) => a + b, 0) - noDurWithLanded} have neither → skipped</b> (Pending/Cancelled never flew; an Aborted/Failed row with no times is a launch that did not happen or a broken record)` : 'none', Object.keys(noDurState).length ? '#ffb347' : '#5fff5f')
+            + row('duration (min)', durMin.length ? `min ${puPctl(durMin, 0).toFixed(1)} · p10 ${puPctl(durMin, 0.1).toFixed(1)} · median ${puPctl(durMin, 0.5).toFixed(1)} · p90 ${puPctl(durMin, 0.9).toFixed(1)} · max ${puPctl(durMin, 1).toFixed(1)} · mean ${(durMin.reduce((a, b) => a + b, 0) / durMin.length).toFixed(1)}` : 'none')
+            + row('landed − launch vs duration', delta.length ? `${delta.length} rows carry both · median Δ ${dMed.toFixed(1)} min · p90 ${dP90.toFixed(1)} · ${dBig} differ by >2 min` : 'no rows carry both')
+            + row('verdict on "duration"', verdict)
+            + row('landed before launch', landedBeforeWhen ? `${landedBeforeWhen} rows (bad records)` : 'none', landedBeforeWhen ? '#ff7a7a' : '#5fff5f')
+            + row('same drone in 2 flights at once', selfOverlap ? `<b>${selfOverlap}</b> — intervals are TOO LONG or overlap by >1 min; e.g. ${selfEx.map(escapeHtml).join(', ')}` : 'none — intervals are consistent with one drone per flight', selfOverlap ? '#ff7a7a' : '#5fff5f')
+            + row('pilot attribution', `${Object.keys(users).length} distinct created_by_username${blankUser ? ` · <b style="color:#ff7a7a">${blankUser} blank</b>` : ''} · top: ${topUsers}`)
+            + row('overlap removed', `drone-hrs ${puHm(totDrone)} − air ${puHm(totAir)} = <b>${puHm(totDrone - totAir)}</b> of concurrent flying not double-counted`)
+            + `<div style="color:#666;margin-top:6px">Air time is time with ≥1 drone airborne — a FLOOR on pilot busy-time. Not in it: pre-flight checks, waiting on charge / dock cycles, weather holds, data review, driving. Attribution is the username that launched the mission (created_by_username); if a scheduler or CSM launches for pilots, those hours land on that account. Scope is the picked sites only — a pilot's flights on un-picked sites are missing.</div>`
+            + '</div>';
+    }
+    // ---- flight-by-flight trace for one pilot-day (verify the union by hand against Percepto's mission log) ----
+    function puDayTrace(pilot, day) {
+        const R = puResults; if (!R) return '';
+        const tz = R.tz; const slices = [];
+        R.flights.filter(f => f.pilot === pilot).forEach(f => puDaySlices(f, tz).forEach(sl => { if (sl.day === day) slices.push({ f, s: sl.s, e: sl.e, cut: sl.s !== f.start || sl.e !== f.end }); }));
+        slices.sort((a, b) => a.s - b.s);
+        const merged = []; slices.forEach(sl => { const m = merged[merged.length - 1]; if (m && sl.s <= m.e) { m.e = Math.max(m.e, sl.e); m.n++; } else merged.push({ s: sl.s, e: sl.e, n: 1 }); });
+        const union = merged.reduce((t, m) => t + (m.e - m.s), 0), sum = slices.reduce((t, x) => t + (x.e - x.s), 0);
+        const c = (v, extra) => `<td style="padding:1px 6px;white-space:nowrap;${extra || ''}">${escapeHtml(String(v))}</td>`;
+        let h = `<tr><td colspan="99" style="padding:4px 6px 8px 22px;background:#101419"><div style="color:#7adfe6;margin-bottom:3px">${escapeHtml(pilot)} · ${day} · ${slices.length} flight(s) · sum of durations ${puHm(sum / 3600000)} → union ${puHm(union / 3600000)} (${merged.length} airborne block(s))</div>`
+            + '<table style="border-collapse:collapse;font:11px/1.4 monospace"><tr style="color:#888"><th style="text-align:left;padding:1px 6px">takeoff</th><th style="text-align:left;padding:1px 6px">landed</th><th style="text-align:left;padding:1px 6px">min</th><th style="text-align:left;padding:1px 6px">drone</th><th style="text-align:left;padding:1px 6px">site</th><th style="text-align:left;padding:1px 6px">mission</th><th style="text-align:left;padding:1px 6px">state</th><th style="text-align:left;padding:1px 6px">id</th></tr>'
+            + slices.map(x => `<tr>${c(puClock(x.s, tz) + (x.cut && x.s !== x.f.start ? ' (cont.)' : ''))}${c(puClock(x.e, tz) + (x.cut && x.e !== x.f.end ? ' (→ next day)' : ''))}${c(Math.round((x.e - x.s) / 60000), 'text-align:right')}${c(x.f.drone)}${c(x.f.site)}${c(x.f.name)}${c(x.f.state)}<td style="padding:1px 6px"><a href="${location.origin}/#/site/${x.f.sid}/control-panel/past-mission/${x.f.id}" target="_blank" rel="noopener" style="color:#7adfe6">${x.f.id} ↗</a></td></tr>`).join('')
+            + '</table><div style="color:#888;margin-top:4px">airborne blocks: ' + merged.map(m => `${puClock(m.s, tz)}–${puClock(m.e, tz)} (${Math.round((m.e - m.s) / 60000)} min, ${m.n} flight${m.n > 1 ? 's' : ''})`).join(' · ') + '</div></td></tr>';
+        return h;
+    }
     function renderPilotSection() {
         if (!openSections.pilots) return '';
         const dis = puRun ? 'disabled' : '';
         const num = (k, w, min, step) => `<input type="number" data-pu-opt="${k}" value="${puOpts[k]}" min="${min}" step="${step || 1}" ${dis} style="width:${w}px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;padding:1px 3px;">`;
         let h = '<div style="padding:8px 10px;border-bottom:1px solid #222834">'
             + `<div style="color:#888;margin-bottom:6px">Scope = the sites picked in 📦 Fleet Data (<b style="color:#ddd">${fdSelected.size}</b> picked) · flights in the last ${num('days', 48, 1)} days · shift ${num('shiftHrs', 40, 1, 0.5)} h · ignore flights under ${num('minMin', 40, 0)} min · days in `
-            + `<select data-pu-tz ${dis} style="background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;">${PU_TZS.map(t => `<option value="${t[0]}" ${puOpts.tz === t[0] ? 'selected' : ''}>${t[1]}</option>`).join('')}</select></div>`
+            + `<select data-pu-tz ${dis} style="background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;">${PU_TZS.map(t => `<option value="${t[0]}" ${puOpts.tz === t[0] ? 'selected' : ''}>${t[1]}</option>`).join('')}</select>`
+            + ` · flight end = <select data-pu-end ${dis} title="duration: launch + the log's duration field · landed: the log's landed timestamp (also rescues rows with no duration)" style="background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;"><option value="duration" ${puOpts.endMode !== 'landed' ? 'selected' : ''}>launch + duration</option><option value="landed" ${puOpts.endMode === 'landed' ? 'selected' : ''}>landed time</option></select></div>`
             + '<div style="color:#666;margin-bottom:6px">Air time = the UNION of a pilot\'s flight intervals per day — two drones up in the same 30 min count 30 min once. Drone-hrs = plain sum of durations. Util % = air time per active day ÷ shift hours. Flights that cross midnight are split at midnight.</div>'
             + (puRun
                 ? `<span style="color:#7adfe6">${escapeHtml(puRun.msg)}</span> <span data-ft="pu-abort" style="cursor:pointer;color:#ff7a7a;margin-left:10px">✕ abort</span><div style="height:5px;background:#222834;border-radius:3px;margin-top:6px"><div style="height:5px;width:${puRun.total ? Math.round(100 * puRun.done / puRun.total) : 0}%;background:#7adfe6;border-radius:3px"></div></div>`
@@ -3407,12 +3476,14 @@
             + '<div style="margin-top:4px">' + [['pilots', 'Pilots'], ['days', 'Pilot-days'], ['dates', 'Dates'], ['flights', 'Flights']].map(([t, l]) => `<span data-ft="pu-tab-${t}" style="cursor:pointer;margin-right:12px;${puTab === t ? 'color:#7adfe6;font-weight:bold;border-bottom:1px solid #7adfe6' : 'color:#888'}">${l}</span>`).join('')
             + '<span data-ft="pu-sheets" style="cursor:pointer;color:#ffd54f;margin-left:14px" title="this tab, current sort, as a table for Google Sheets / Excel">📊 Copy → Sheets</span>'
             + '<span data-ft="pu-csv" style="cursor:pointer;color:#5fff5f;margin-left:10px" title="this tab, current sort, as CSV">⬇ CSV</span>'
-            + '<span style="color:#666;margin-left:10px">click a column header to sort</span></div></div>';
+            + `<span data-ft="pu-check" style="cursor:pointer;color:${puShowCheck ? '#7adfe6' : '#888'};margin-left:10px" title="audit the fetched log rows: states, durations, landed-vs-duration, same-drone overlaps, attribution">🔬 Data check</span>`
+            + '<span style="color:#666;margin-left:10px">click a column header to sort · Pilot-days: click a row for its flights</span></div></div>';
+        if (puShowCheck) h += puDataCheck();
         const cols = PU_COLS[puTab].filter(c => !c.hide); const st = puSort[puTab]; const rows = puSorted(puTab);
         const cell = (c, r) => { const v = c.get(r); const txt = c.fmt ? c.fmt(v, r) : (v == null ? '' : String(v)); const tip = typeof c.title === 'function' ? c.title(r) : ''; return `<td style="padding:2px 6px;white-space:nowrap;border-bottom:1px solid #1e2430;${typeof v === 'number' ? 'text-align:right' : ''}" ${tip ? `title="${escapeHtml(tip)}"` : ''}>${escapeHtml(txt)}</td>`; };
         h += `<div style="overflow:auto;max-height:50vh"><table style="border-collapse:collapse;font:11px/1.4 monospace;width:100%"><tr>`
             + cols.map(c => `<th data-pu-sort="${c.key}" title="${escapeHtml(typeof c.title === 'string' ? c.title : 'sort')}" style="text-align:left;padding:2px 6px;position:sticky;top:0;background:#14181f;cursor:pointer;white-space:nowrap;color:${st.key === c.key ? '#7adfe6' : '#888'}">${escapeHtml(c.label)}${st.key === c.key ? (st.dir < 0 ? ' ▼' : ' ▲') : ''}</th>`).join('') + '</tr>'
-            + rows.slice(0, 2000).map(r => `<tr class="aim-ft-row"${puTab === 'flights' ? ` data-pu-flight="${r.sid}/${r.id}"` : ''}>${cols.map(c => cell(c, r)).join('')}</tr>`).join('')
+            + rows.slice(0, 2000).map(r => { const dk = puTab === 'days' ? `${r.pilot}|${r.day}` : null; return `<tr class="aim-ft-row"${puTab === 'flights' ? ` data-pu-flight="${r.sid}/${r.id}"` : ''}${dk ? ` data-pu-day="${escapeHtml(dk)}" style="cursor:pointer;${puOpenDay === dk ? 'background:#1a2029' : ''}"` : ''}>${cols.map(c => cell(c, r)).join('')}</tr>` + (dk && puOpenDay === dk ? puDayTrace(r.pilot, r.day) : ''); }).join('')
             + '</table>' + (rows.length > 2000 ? `<div style="padding:4px 10px;color:#888">showing 2000 of ${rows.length} — exports carry every row</div>` : '') + '</div>';
         return h;
     }
@@ -5508,7 +5579,7 @@
 
             // Delegated — the body is rebuilt on every render, the root never is
             panelEl.addEventListener('click', (ev) => {
-                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad],input[data-fx-inc],input[data-fx-opt],input[data-fc-thr],input[data-pu-opt],select[data-pu-tz],#aim-ft-xr-picked')) return;   // checkbox/color/select → change handler
+                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad],input[data-fx-inc],input[data-fx-opt],input[data-fc-thr],input[data-pu-opt],select[data-pu-tz],select[data-pu-end],#aim-ft-xr-picked')) return;   // checkbox/color/select → change handler
                 const clAll = ev.target.closest('[data-ft-clients]');
                 if (clAll) {
                     if (clAll.getAttribute('data-ft-clients') === 'all') {
@@ -5538,6 +5609,8 @@
                 }
                 const puTh = ev.target.closest('[data-pu-sort]');
                 if (puTh) { const k = puTh.getAttribute('data-pu-sort'); const st = puSort[puTab]; if (st.key === k) st.dir = -st.dir; else { st.key = k; st.dir = ['pilot', 'day', 'site', 'drone', 'name', 'state'].includes(k) ? 1 : -1; } renderPanel(); return; }
+                const puDy = ev.target.closest('[data-pu-day]');
+                if (puDy && !ev.target.closest('a')) { const k = puDy.getAttribute('data-pu-day'); puOpenDay = puOpenDay === k ? null : k; renderPanel(); return; }
                 const puFl = ev.target.closest('[data-pu-flight]');
                 if (puFl && !ev.target.closest('a')) { const [sid, mid] = puFl.getAttribute('data-pu-flight').split('/'); window.open(`${location.origin}/#/site/${sid}/control-panel/past-mission/${mid}`, '_blank', 'noopener'); return; }
                 const fcRow = ev.target.closest('[data-fc-flight]');
@@ -5569,6 +5642,7 @@
                     else if (cmd === 'pu-run') runPilotUtil();
                     else if (cmd === 'pu-abort') { if (puRun) { puRun.abort = true; setStatus('aborting pilot utilization after the current request…'); } }
                     else if (cmd === 'pu-clear') { Object.keys(puLogCache).forEach(k => delete puLogCache[k]); setStatus('pilot utilization log cache cleared'); renderPanel(); }
+                    else if (cmd === 'pu-check') { puShowCheck = !puShowCheck; renderPanel(); }
                     else if (cmd === 'pu-sheets') puExport('sheets');
                     else if (cmd === 'pu-csv') puExport('csv');
                     else if (cmd && cmd.startsWith('pu-tab-')) { puTab = cmd.slice(7); renderPanel(); }
@@ -5740,6 +5814,7 @@
                 // 6. client select-all acts on the SHOWN rows of that client (what the header count shows)
                 if (t.hasAttribute && t.hasAttribute('data-fd-clientsel')) { const cl = t.getAttribute('data-fd-clientsel'); const ids = fdVisibleSiteIds().filter(id => fdClientOfId(id) === cl); ids.forEach(id => { if (t.checked) fdSelected.add(id); else fdSelected.delete(id); }); fdRenderKeepScroll(); return; }
                 if (t.hasAttribute && t.hasAttribute('data-pu-opt')) { const k = t.getAttribute('data-pu-opt'); const v = Number(t.value); if (t.value.trim() === '' || !isFinite(v) || v < 0) return; if (k === 'days' && v < 1) return; if (k === 'shiftHrs' && !(v > 0)) return; if (k in puOpts) { puOpts[k] = v; puSave(); } return; }
+                if (t.hasAttribute && t.hasAttribute('data-pu-end')) { puOpts.endMode = t.value === 'landed' ? 'landed' : 'duration'; puSave(); return; }
                 if (t.hasAttribute && t.hasAttribute('data-pu-tz')) { if (PU_TZS.some(z => z[0] === t.value)) { puOpts.tz = t.value; puSave(); } return; }
                 if (t.hasAttribute && t.hasAttribute('data-fc-thr')) { const k = t.getAttribute('data-fc-thr'); const v = Number(t.value); if (isFinite(v) && v >= 0) { ftCfg.fc[k] = v; saveCfg(); } return; }
                 if (t.id === 'aim-ft-xr-picked') { xrefUsePicked = !!t.checked; renderPanel(); return; }
