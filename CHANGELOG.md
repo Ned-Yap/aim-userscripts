@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-25 — Pilot Utilization: site rules (day / night / 1:1) and flyable capacity: AIM Fleet Tools v0.49 (latest — dev only, feature #274)
+
+Sites differ: some fly 24/7, some day-only or night-only, and some force the pilot to stay 1:1 with the drone. New **⚙ Site rules** table in the Pilot Utilization section (for the picked sites): flying window **24/7 / Day only / Night only / Custom hours**, a **1:1** flag, and the number of drones based there (blank = as seen in the log). Day and night come from sunrise and sunset computed at each site's own coordinates for each date, with an adjustable twilight margin (30 min default); the table shows today's sunrise–sunset per site. A "set all picked to …" bulk control and a reset. Changing a rule recomputes instantly from the flights already fetched.
+
+What the rules feed: **Flyable drone-hrs** and **Pool util %** on the Dates and Hours tabs (drones × window, so a night-only site no longer counts against a day pilot's hour), header chips for drones in the pool, flyable drone-hours and overall pool utilisation; per pilot and per pilot-day, **Locked 1:1** hours (could not add a drone), **Flex air** (1-to-many allowed), **Drones ⌀ (flex)** measured over the flex hours only, **1:1 overlaps** (a 1:1 flight that overlapped another flight by the same pilot — a rule breach or a mis-flagged site), and **Night** hours; Drones tab shows each drone's window and 1:1 flag; Flights tab marks 1:1 flights and night minutes.
+
 ## 2026-09-25 — Pilot Utilization: Drones + Hours tabs: AIM Fleet Tools v0.48 (latest — dev only, feature #274)
 
 The drone side of the same question. **Drones** tab: per drone, flights, air time, days flown, idle days, longest gap between flights, days since it last landed, average flight, aborted count, pilots and sites — sort by idle days or longest gap to find drones nobody is flying. **Hours** tab: for each local hour of the day, the average number of drones airborne, distinct drones and pilots active, takeoffs and drone-hours — the shape of the workday against the size of the pool. Header chips now show drones seen and the peak number airborne at once.
