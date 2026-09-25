@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.54
+// @version      0.55
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -36,7 +36,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.54';
+    const SCRIPT_VERSION = '0.55';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -3189,10 +3189,13 @@
     const puOverlapMs = (s, e, wins) => wins.reduce((t, [a, b]) => t + Math.max(0, Math.min(e, b) - Math.max(s, a)), 0);
     let puRun = null;        // { done, total, msg, abort, errors }
     let puResults = null;    // { at, sites, days, from, to, tz, flights, pilots, pilotDays, dates, skipped, errors, aborted }
-    let puTab = 'pilots';    // pilots | days | dates | flights
+    let puTab = 'pilots';    // pilots | days | drones | sites | clients | dates | hours | flights
+    const PU_LENSES = { pilots: { icon: '🧑‍✈️', label: 'Pilots', tabs: ['pilots', 'days'] }, drones: { icon: '🛸', label: 'Drones', tabs: ['drones'] }, sites: { icon: '📍', label: 'Sites', tabs: ['sites'] }, clients: { icon: '🏢', label: 'Clients', tabs: ['clients'] } };
+    const PU_SHARED_TABS = [['dates', 'Dates'], ['hours', 'Hours'], ['flights', 'Flights']];
+    let puLens = 'pilots';
     let puOpenDay = null;    // 'pilot|day' expanded on the Pilot-days tab (flight-by-flight trace)
     let puShowCheck = false; // 🔬 data check block open
-    const puSort = { pilots: { key: 'air', dir: -1 }, days: { key: 'air', dir: -1 }, dates: { key: 'date', dir: -1 }, flights: { key: 'start', dir: -1 }, drones: { key: 'air', dir: -1 }, hours: { key: 'hour', dir: 1 } };
+    const puSort = { pilots: { key: 'air', dir: -1 }, days: { key: 'air', dir: -1 }, dates: { key: 'date', dir: -1 }, flights: { key: 'start', dir: -1 }, drones: { key: 'air', dir: -1 }, hours: { key: 'hour', dir: 1 }, sites: { key: 'droneH', dir: -1 }, clients: { key: 'droneH', dir: -1 } };
     const puLogCache = {};   // `${sid}|${from}|${to}` → rows (a flown flight never changes; per page load)
 
     // ---- time-zone helpers (Intl only, no library) ----
@@ -3312,7 +3315,7 @@
         });
         // ---- flyable capacity under the site rules: drone-hours available per calendar day and per local hour ----
         const nDaysCal = Math.max(1, Number(puOpts.days) || 1);
-        const availHour = new Array(24).fill(0); const availDate = {}; const dayKeys = [];
+        const availHour = new Array(24).fill(0); const availDate = {}; const dayKeys = []; const availSite = {}; const availWin = {};
         const ctxSites = (ctx && ctx.sites) || []; const seenBySite = {}; flights.forEach(f => { if (f.drone) (seenBySite[f.sid] = seenBySite[f.sid] || new Set()).add(f.drone); });
         if (ctx && ctx.start && ctx.end) { let t = ctx.start.getTime(); const endT = ctx.end.getTime(); let g = 0; while (t <= endT && ++g < 800) { dayKeys.push(puDayKey(t, tz)); t = puNextMidnight(t, tz); } }
         const droneCount = {};
@@ -3326,7 +3329,7 @@
                     // hour bins by offset from local midnight (exact except across a DST switch, where one bin is an hour off)
                     let x = a; let g = 0; while (x < b && ++g < 60) { const hr = Math.min(23, Math.floor((x - m0) / H)); const e = Math.min(b, m0 + (hr + 1) * H); if (e <= x) break; availHour[hr] += (e - x) * nd; x = e; }
                 });
-                availDate[dk] = (availDate[dk] || 0) + dayMs * nd;
+                availDate[dk] = (availDate[dk] || 0) + dayMs * nd; availSite[sid] = (availSite[sid] || 0) + dayMs * nd; availWin[sid] = (availWin[sid] || 0) + dayMs;
             });
         });
         const availTotalH = Object.values(availDate).reduce((a, b) => a + b, 0) / H;
@@ -3339,14 +3342,16 @@
         flights.forEach(f => {
             const k = f.drone || '(no drone name)';
             let d = byDrone.get(k);
-            if (!d) { d = { drone: k, flights: 0, ms: 0, days: new Set(), sites: new Set(), pilots: new Set(), last: -Infinity, first: Infinity, aborted: 0, starts: [] }; byDrone.set(k, d); }
+            if (!d) { d = { drone: k, flights: 0, ms: 0, days: new Set(), sites: new Set(), sids: {}, pilots: new Set(), last: -Infinity, first: Infinity, aborted: 0, starts: [], incomplete: 0, planned: 0, images: 0, nightMs: 0, landFail: 0 }; byDrone.set(k, d); }
+            d.sids[f.sid] = (d.sids[f.sid] || 0) + 1; if (f.planned > 0) { d.planned += f.planned; d.images += f.images; if (f.incomplete) d.incomplete++; } d.nightMs += f.nightMs; if (f.landFail) d.landFail++;
             d.flights++; d.ms += f.dur; d.days.add(puDayKey(f.start, tz)); d.sites.add(f.site); d.pilots.add(f.pilot); d.last = Math.max(d.last, f.end); d.first = Math.min(d.first, f.start); if (/Aborted|Failed/.test(f.state)) d.aborted++; d.starts.push(puDayKey(f.start, tz));
         });
         const drones = Array.from(byDrone.values()).map(d => {
             const days = Array.from(d.days).sort(); let gap = 0;
             for (let i = 1; i < days.length; i++) gap = Math.max(gap, Math.round((Date.parse(days[i]) - Date.parse(days[i - 1])) / 86400000) - 1);
             const sinceLast = Math.max(0, Math.floor((Date.now() - d.last) / 86400000));
-            return { drone: d.drone, flights: d.flights, air: d.ms / H, days: d.days.size, idleDays: nDays - d.days.size, airPerDay: d.ms / H / d.days.size, airPerCalDay: d.ms / H / nDays, gap, sinceLast, avgFlightMin: d.ms / 60000 / d.flights, aborted: d.aborted, sites: Array.from(d.sites).sort(), pilots: Array.from(d.pilots).sort(), last: d.last };
+            const home = Object.entries(d.sids).sort((a, b) => b[1] - a[1])[0]; d.home = home ? home[0] : null;
+            return { drone: d.drone, home: d.home, flights: d.flights, air: d.ms / H, days: d.days.size, idleDays: nDays - d.days.size, incomplete: d.incomplete, capture: d.planned ? d.images / d.planned : null, night: d.nightMs / H, landFail: d.landFail, airPerDay: d.ms / H / d.days.size, airPerCalDay: d.ms / H / nDays, gap, sinceLast, avgFlightMin: d.ms / 60000 / d.flights, aborted: d.aborted, sites: Array.from(d.sites).sort(), pilots: Array.from(d.pilots).sort(), last: d.last };
         });
         // ---- hour of day (local): how much of the pool is airborne when ----
         const hourMs = new Array(24).fill(0), hourStarts = new Array(24).fill(0), hourPilotDays = Array.from({ length: 24 }, () => new Set()), hourDroneDays = Array.from({ length: 24 }, () => new Set());
@@ -3361,9 +3366,28 @@
         });
         const nDates = Math.max(1, byDate.size);
         const hours = hourMs.map((ms, hr) => ({ hour: hr, label: `${String(hr).padStart(2, '0')}:00`, droneH: ms / H, avgAirborne: ms / H / nDates, avgAirborneCal: ms / H / nDays, starts: hourStarts[hr], pilotsAvg: hourPilotDays[hr].size / nDates, dronesAvg: hourDroneDays[hr].size / nDates, avail: availHour[hr] / H / nDaysCal, poolUtil: availHour[hr] ? ms / availHour[hr] : 0 }));
-        drones.forEach(d => { const top = d.sites.length ? d.sites[0] : null; const sid = flights.find(f => f.drone === d.drone && f.site === top); const r = sid ? puRuleOf(sid.sid) : null; d.window = r ? PU_WINDOWS[r.w] : ''; d.one = r ? !!r.one : false; });
+        drones.forEach(d => { const r = d.home ? puRuleOf(d.home) : null; d.window = r ? PU_WINDOWS[r.w] : ''; d.one = r ? !!r.one : false; d.avail = d.home && availWin[d.home] ? availWin[d.home] / H : 0; d.util = d.avail ? d.air / d.avail : 0; });
+        // ---- sites (every PICKED site, flown or not) and clients ----
+        const bySite = {};
+        flights.forEach(f => { let x = bySite[f.sid]; if (!x) x = bySite[f.sid] = { iv: [], ms: 0, flights: 0, days: new Set(), drones: new Set(), pilots: new Set(), incomplete: 0, planned: 0, images: 0, nightMs: 0, aborted: 0, landFail: 0, first: Infinity, last: -Infinity };
+            x.iv.push([f.start, f.end]); x.ms += f.dur; x.flights++; x.days.add(puDayKey(f.start, tz)); if (f.drone) x.drones.add(f.drone); x.pilots.add(f.pilot); if (f.planned > 0) { x.planned += f.planned; x.images += f.images; if (f.incomplete) x.incomplete++; } x.nightMs += f.nightMs; if (/Aborted|Failed/.test(f.state)) x.aborted++; if (f.landFail) x.landFail++; x.first = Math.min(x.first, f.start); x.last = Math.max(x.last, f.end); });
+        const gapOf = (daysSet) => { const ds = Array.from(daysSet).sort(); let g = 0; for (let i = 1; i < ds.length; i++) g = Math.max(g, Math.round((Date.parse(ds[i]) - Date.parse(ds[i - 1])) / 86400000) - 1); return g; };
+        const siteIds = Array.from(new Set(ctxSites.concat(Object.keys(bySite))));
+        const sites = siteIds.map(sid => {
+            const x = bySite[sid] || { iv: [], ms: 0, flights: 0, days: new Set(), drones: new Set(), pilots: new Set(), incomplete: 0, planned: 0, images: 0, nightMs: 0, aborted: 0, landFail: 0, first: Infinity, last: -Infinity };
+            const r = puRuleOf(sid); const avail = (availSite[sid] || 0) / H; const air = puProfile(x.iv).unionMs / H;
+            return { sid, site: siteName(sid) || String(sid), client: fdClientOfId(sid), window: PU_WINDOWS[r.w], one: !!r.one, dronesRule: droneCount[sid] != null ? droneCount[sid] : 0, dronesSeen: x.drones.size, flights: x.flights, days: x.days.size, idleDays: nDays - x.days.size,
+                droneH: x.ms / H, air, avail, poolUtil: avail ? (x.ms / H) / avail : 0, airPerDay: x.days.size ? air / x.days.size : 0, fpd: x.days.size ? x.flights / x.days.size : 0, pilots: Array.from(x.pilots).sort(), avgFlightMin: x.flights ? x.ms / 60000 / x.flights : 0,
+                incomplete: x.incomplete, capture: x.planned ? x.images / x.planned : null, night: x.nightMs / H, gap: gapOf(x.days), sinceLast: isFinite(x.last) ? Math.max(0, Math.floor((Date.now() - x.last) / 86400000)) : nDays, aborted: x.aborted, landFail: x.landFail, planned: x.planned, images: x.images, iv: x.iv, ms: x.ms, daysSet: x.days };
+        });
+        const byClient = {};
+        sites.forEach(st => { let c = byClient[st.client]; if (!c) c = byClient[st.client] = { client: st.client, sites: 0, flown: 0, never: [], flights: 0, ms: 0, iv: [], avail: 0, days: new Set(), drones: 0, pilots: new Set(), incomplete: 0, planned: 0, images: 0, nightMs: 0, aborted: 0, landFail: 0 };
+            c.sites++; if (st.flights) c.flown++; else c.never.push(st.site); c.flights += st.flights; c.ms += st.ms; c.iv.push(...st.iv); c.avail += st.avail; st.daysSet.forEach(d => c.days.add(d)); c.drones += st.dronesSeen; st.pilots.forEach(p => c.pilots.add(p)); c.incomplete += st.incomplete; c.planned += st.planned; c.images += st.images; c.nightMs += st.night * H; c.aborted += st.aborted; c.landFail += st.landFail; });
+        const clients = Object.values(byClient).map(c => ({ client: c.client, sites: c.sites, flown: c.flown, coverage: c.sites ? c.flown / c.sites : 0, never: c.never.sort(), flights: c.flights, days: c.days.size, droneH: c.ms / H, air: puProfile(c.iv).unionMs / H, avail: c.avail, poolUtil: c.avail ? (c.ms / H) / c.avail : 0,
+            drones: c.drones, pilots: Array.from(c.pilots).sort(), avgFlightMin: c.flights ? c.ms / 60000 / c.flights : 0, incomplete: c.incomplete, capture: c.planned ? c.images / c.planned : null, night: c.nightMs / H, aborted: c.aborted, landFail: c.landFail }));
+        sites.forEach(st => { delete st.iv; delete st.ms; delete st.daysSet; });
         const fleet = puProfile(flights.map(f => [f.start, f.end]));
-        return { pilots, pilotDays, dates, drones, hours, fleetPeak: fleet.maxK, nDates, availTotalH, poolDrones, poolUtil: availTotalH ? (flights.reduce((t, f) => t + f.dur, 0) / H) / availTotalH : 0 };
+        return { pilots, pilotDays, dates, drones, sites, clients, hours, fleetPeak: fleet.maxK, nDates, availTotalH, poolDrones, poolUtil: availTotalH ? (flights.reduce((t, f) => t + f.dur, 0) / H) / availTotalH : 0 };
     }
     async function runPilotUtil() {
         if (puRun) return;
@@ -3392,7 +3416,7 @@
             const seen = new Set(); const uniq = flights.filter(f => !seen.has(f.id) && seen.add(f.id));
             uniq.sort((a, b) => a.start - b.start);
             const agg = puAggregate(uniq, puOpts.tz, puOpts.shiftHrs, { sites, start, end });
-            puResults = { at: Date.now(), sites, days: puOpts.days, from, to, tz: puOpts.tz, shiftHrs: puOpts.shiftHrs, flights: uniq, pilots: agg.pilots, pilotDays: agg.pilotDays, dates: agg.dates, drones: agg.drones, hours: agg.hours, fleetPeak: agg.fleetPeak, nDates: agg.nDates, availTotalH: agg.availTotalH, poolDrones: agg.poolDrones, poolUtil: agg.poolUtil, startMs: start.getTime(), endMs: end.getTime(), skipped, skippedRows, raw, endMode: puOpts.endMode, rawRows, errors: puRun.errors, aborted: isAborted() };
+            puResults = { at: Date.now(), sites, days: puOpts.days, from, to, tz: puOpts.tz, shiftHrs: puOpts.shiftHrs, flights: uniq, pilots: agg.pilots, pilotDays: agg.pilotDays, dates: agg.dates, drones: agg.drones, sites: agg.sites, clients: agg.clients, hours: agg.hours, fleetPeak: agg.fleetPeak, nDates: agg.nDates, availTotalH: agg.availTotalH, poolDrones: agg.poolDrones, poolUtil: agg.poolUtil, startMs: start.getTime(), endMs: end.getTime(), skipped, skippedRows, raw, endMode: puOpts.endMode, rawRows, errors: puRun.errors, aborted: isAborted() };
             puOpenDay = null; puShowCheck = false;
             const sk = Object.entries(skipped).map(([k, v]) => `${v} ${k}`).join(', ');
             setStatus(`Pilot utilization: ${uniq.length} flight(s) · ${agg.pilots.length} pilot(s) · ${agg.pilotDays.length} pilot-day(s) across ${sites.length} site(s), last ${puOpts.days} d${sk ? ` · skipped ${sk}` : ''}${puRun.errors.length ? ` · ${puRun.errors.length} error(s)` : ''}${isAborted() ? ' · ABORTED (partial)' : ''}`);
@@ -3403,7 +3427,7 @@
     // rules / options changed → recompute from the flights already fetched (no network)
     function puReaggregate() {
         if (!puResults) return;
-        try { const R = puResults; const agg = puAggregate(R.flights, R.tz, R.shiftHrs, { sites: R.sites, start: new Date(R.startMs), end: new Date(R.endMs) }); Object.assign(R, { pilots: agg.pilots, pilotDays: agg.pilotDays, dates: agg.dates, drones: agg.drones, hours: agg.hours, fleetPeak: agg.fleetPeak, nDates: agg.nDates, availTotalH: agg.availTotalH, poolDrones: agg.poolDrones, poolUtil: agg.poolUtil }); }
+        try { const R = puResults; const agg = puAggregate(R.flights, R.tz, R.shiftHrs, { sites: R.sites, start: new Date(R.startMs), end: new Date(R.endMs) }); Object.assign(R, { pilots: agg.pilots, pilotDays: agg.pilotDays, dates: agg.dates, drones: agg.drones, sites: agg.sites, clients: agg.clients, hours: agg.hours, fleetPeak: agg.fleetPeak, nDates: agg.nDates, availTotalH: agg.availTotalH, poolDrones: agg.poolDrones, poolUtil: agg.poolUtil }); }
         catch (e) { console.error(`${TAG} pilot util re-aggregate failed:`, e); setStatus(`re-aggregate failed — ${String(e && e.message || e)}`); }
     }
     // ---- tables: cols = { key, label, get(row) → raw (number/string), fmt?(raw) → panel text, title? } ----
@@ -3493,10 +3517,64 @@
             { key: 'sinceLast', label: 'Since last', get: r => r.sinceLast, fmt: v => v + ' d', expLabel: 'Since last (days)', title: 'days since this drone last landed' },
             { key: 'avgFlightMin', label: 'Avg flight', get: r => r.avgFlightMin, fmt: v => Math.round(v) + ' min', exp: v => Math.round(v), expLabel: 'Avg flight (min)' },
             { key: 'aborted', label: 'Aborted/failed', get: r => r.aborted },
+            { key: 'avail', label: 'Flyable hrs', get: r => r.avail, fmt: puHm, exp: puH2, expLabel: 'Flyable hrs (h)', title: 'hours the home site\'s window allowed this drone to fly in the window' },
+            { key: 'util', label: 'Util %', get: r => r.util, fmt: v => puPct(v) + '%', exp: puPct, title: 'air time ÷ flyable hours' },
+            { key: 'incomplete', label: 'Incomplete', get: r => r.incomplete },
+            { key: 'capture', label: 'Capture %', get: r => r.capture == null ? '' : r.capture, fmt: v => v === '' ? '' : puPct(v) + '%', exp: v => v === '' ? '' : puPct(v) },
+            { key: 'night', label: 'Night', get: r => r.night, fmt: puHm, exp: puH2, expLabel: 'Night (h)' },
+            { key: 'landFail', label: 'Landing failed', get: r => r.landFail },
             { key: 'window', label: 'Window', get: r => r.window || '' },
             { key: 'one', label: '1:1', get: r => r.one ? 'yes' : '' },
             { key: 'pilots', label: 'Pilots', get: r => r.pilots.length, fmt: (v, r) => `${v}`, exp: (v, r) => r.pilots.join(', '), title: r => r.pilots.join(', ') },
             { key: 'sites', label: 'Sites', get: r => r.sites.join(', ') },
+        ],
+        sites: [
+            { key: 'site', label: 'Site', get: r => r.site },
+            { key: 'client', label: 'Client', get: r => r.client },
+            { key: 'sid', label: 'Site ID', get: r => r.sid },
+            { key: 'flights', label: 'Flights', get: r => r.flights },
+            { key: 'days', label: 'Days flown', get: r => r.days },
+            { key: 'idleDays', label: 'Idle days', get: r => r.idleDays, title: 'calendar days in the window with no flight at this site' },
+            { key: 'droneH', label: 'Drone-hrs', get: r => r.droneH, fmt: puHm, exp: puH2, expLabel: 'Drone-hrs (h)' },
+            { key: 'air', label: 'Air time', get: r => r.air, fmt: puHm, exp: puH2, expLabel: 'Air time (h)', title: 'time with ≥1 drone airborne at this site (union)' },
+            { key: 'avail', label: 'Flyable drone-hrs', get: r => r.avail, fmt: puHm, exp: puH2, expLabel: 'Flyable drone-hrs (h)', title: 'drones based here × the site window, over the whole period' },
+            { key: 'poolUtil', label: 'Util %', get: r => r.poolUtil, fmt: v => puPct(v) + '%', exp: puPct, title: 'drone-hrs flown ÷ flyable drone-hrs' },
+            { key: 'airPerDay', label: 'Air / flown day', get: r => r.airPerDay, fmt: puHm, exp: puH2, expLabel: 'Air / flown day (h)' },
+            { key: 'fpd', label: 'Flights / flown day', get: r => r.fpd, fmt: v => v.toFixed(1), exp: puH2 },
+            { key: 'dronesRule', label: 'Drones (rule)', get: r => r.dronesRule, title: 'drones based here per the site rules (blank rule = as seen)' },
+            { key: 'dronesSeen', label: 'Drones seen', get: r => r.dronesSeen },
+            { key: 'pilots', label: 'Pilots', get: r => r.pilots.length, fmt: (v, r) => `${v}`, exp: (v, r) => r.pilots.join(', '), title: r => r.pilots.join(', ') },
+            { key: 'avgFlightMin', label: 'Avg flight', get: r => r.avgFlightMin, fmt: v => Math.round(v) + ' min', exp: v => Math.round(v), expLabel: 'Avg flight (min)' },
+            { key: 'incomplete', label: 'Incomplete', get: r => r.incomplete },
+            { key: 'capture', label: 'Capture %', get: r => r.capture == null ? '' : r.capture, fmt: v => v === '' ? '' : puPct(v) + '%', exp: v => v === '' ? '' : puPct(v) },
+            { key: 'night', label: 'Night', get: r => r.night, fmt: puHm, exp: puH2, expLabel: 'Night (h)' },
+            { key: 'gap', label: 'Longest gap', get: r => r.gap, fmt: v => v + ' d', expLabel: 'Longest gap (days)' },
+            { key: 'sinceLast', label: 'Since last', get: r => r.sinceLast, fmt: v => v + ' d', expLabel: 'Since last (days)' },
+            { key: 'window', label: 'Window', get: r => r.window },
+            { key: 'one', label: '1:1', get: r => r.one ? 'yes' : '' },
+            { key: 'aborted', label: 'Aborted/failed', get: r => r.aborted },
+            { key: 'landFail', label: 'Landing failed', get: r => r.landFail },
+        ],
+        clients: [
+            { key: 'client', label: 'Client', get: r => r.client },
+            { key: 'sites', label: 'Sites picked', get: r => r.sites },
+            { key: 'flown', label: 'Sites flown', get: r => r.flown },
+            { key: 'coverage', label: 'Coverage %', get: r => r.coverage, fmt: v => puPct(v) + '%', exp: puPct, title: 'sites with ≥1 flight ÷ sites picked' },
+            { key: 'never', label: 'Sites never flown', get: r => r.never.length, fmt: (v, r) => `${v}`, exp: (v, r) => r.never.join(', '), title: r => r.never.join(', ') },
+            { key: 'flights', label: 'Flights', get: r => r.flights },
+            { key: 'days', label: 'Days with flying', get: r => r.days },
+            { key: 'droneH', label: 'Drone-hrs', get: r => r.droneH, fmt: puHm, exp: puH2, expLabel: 'Drone-hrs (h)' },
+            { key: 'air', label: 'Air time', get: r => r.air, fmt: puHm, exp: puH2, expLabel: 'Air time (h)', title: 'time with ≥1 drone airborne anywhere at this client (union)' },
+            { key: 'avail', label: 'Flyable drone-hrs', get: r => r.avail, fmt: puHm, exp: puH2, expLabel: 'Flyable drone-hrs (h)' },
+            { key: 'poolUtil', label: 'Util %', get: r => r.poolUtil, fmt: v => puPct(v) + '%', exp: puPct, title: 'drone-hrs flown ÷ flyable drone-hrs across the client\'s picked sites' },
+            { key: 'drones', label: 'Drones seen', get: r => r.drones },
+            { key: 'pilots', label: 'Pilots', get: r => r.pilots.length, fmt: (v, r) => `${v}`, exp: (v, r) => r.pilots.join(', '), title: r => r.pilots.join(', ') },
+            { key: 'avgFlightMin', label: 'Avg flight', get: r => r.avgFlightMin, fmt: v => Math.round(v) + ' min', exp: v => Math.round(v), expLabel: 'Avg flight (min)' },
+            { key: 'incomplete', label: 'Incomplete', get: r => r.incomplete },
+            { key: 'capture', label: 'Capture %', get: r => r.capture == null ? '' : r.capture, fmt: v => v === '' ? '' : puPct(v) + '%', exp: v => v === '' ? '' : puPct(v) },
+            { key: 'night', label: 'Night', get: r => r.night, fmt: puHm, exp: puH2, expLabel: 'Night (h)' },
+            { key: 'aborted', label: 'Aborted/failed', get: r => r.aborted },
+            { key: 'landFail', label: 'Landing failed', get: r => r.landFail },
         ],
         hours: [
             { key: 'hour', label: 'Hour (local)', get: r => r.hour, fmt: (v, r) => r.label, exp: (v, r) => r.label },
@@ -3540,7 +3618,7 @@
             }
             return puResults.flights;
         }
-        return tab === 'pilots' ? puResults.pilots : tab === 'days' ? puResults.pilotDays : tab === 'drones' ? (puResults.drones || []) : tab === 'hours' ? (puResults.hours || []) : puResults.dates;
+        return tab === 'pilots' ? puResults.pilots : tab === 'days' ? puResults.pilotDays : tab === 'drones' ? (puResults.drones || []) : tab === 'sites' ? (puResults.sites || []) : tab === 'clients' ? (puResults.clients || []) : tab === 'hours' ? (puResults.hours || []) : puResults.dates;
     }
     function puSorted(tab) {
         const cols = PU_COLS[tab]; const st = puSort[tab]; const col = cols.find(c => c.key === st.key) || cols[0];
@@ -3573,7 +3651,7 @@
     function puExport(kind) {
         if (!puResults) { setStatus('run ▶ Pilot utilization first'); return; }
         const tab = puTab; const n = puRows(tab).length;
-        const label = { pilots: 'pilots', days: 'pilot-days', dates: 'dates', flights: 'flights', drones: 'drones', hours: 'hours' }[tab] || tab;
+        const label = { pilots: 'pilots', days: 'pilot-days', dates: 'dates', flights: 'flights', drones: 'drones', hours: 'hours', sites: 'sites', clients: 'clients' }[tab] || tab;
         if (kind === 'csv') {
             fdDownload(new Blob([(() => { const rows = puSorted(tab); return fdCsv(puExportCols(tab, rows), rows); })()], { type: 'text/csv' }), `AIM-pilot-utilization ${label} ${puResults.from} to ${puResults.to}.csv`);
             setStatus(`pilot utilization ${label} CSV downloaded — ${n} row(s)`);
@@ -3698,7 +3776,8 @@
             + chip(`${R.poolDrones || 0}`, 'drones in pool (rules)') + chip(puHm(R.availTotalH || 0), 'flyable drone-hrs') + chip(R.availTotalH ? puPct(R.poolUtil) + '%' : '–', 'pool util', '#ffd54f')
             + `<div style="color:#666">${R.from} → ${R.to} · ${R.tz} · ${R.sites.length} site(s)${sk ? ` · skipped: ${escapeHtml(sk)}` : ''}${R.aborted ? ' · <b style="color:#ff7a7a">ABORTED — partial</b>' : ''}</div>`
             + (R.errors && R.errors.length ? `<div style="color:#ff7a7a">${R.errors.length} error(s): ${R.errors.slice(0, 3).map(escapeHtml).join(' · ')}${R.errors.length > 3 ? ' …' : ''}</div>` : '')
-            + '<div style="margin-top:4px">' + [['pilots', 'Pilots'], ['days', 'Pilot-days'], ['dates', 'Dates'], ['drones', 'Drones'], ['hours', 'Hours'], ['flights', 'Flights']].map(([t, l]) => `<span data-ft="pu-tab-${t}" style="cursor:pointer;margin-right:12px;${puTab === t ? 'color:#7adfe6;font-weight:bold;border-bottom:1px solid #7adfe6' : 'color:#888'}">${l}</span>`).join('')
+            + '<div style="margin-top:6px">' + Object.entries(PU_LENSES).map(([k, L]) => `<span data-ft="pu-lens-${k}" title="utilization by ${L.label.toLowerCase()}" style="cursor:pointer;margin-right:8px;padding:2px 9px;border-radius:3px;border:1px solid ${puLens === k ? '#7adfe6' : '#2a3140'};color:${puLens === k ? '#14181f' : '#aaa'};background:${puLens === k ? '#7adfe6' : 'transparent'};font-weight:bold">${L.icon} ${L.label}</span>`).join('') + '</div>'
+            + '<div style="margin-top:6px">' + (PU_LENSES[puLens].tabs.map(t => [t, { pilots: 'Pilots', days: 'Pilot-days', drones: 'Drones', sites: 'Sites', clients: 'Clients' }[t]]).concat(PU_SHARED_TABS)).map(([t, l]) => `<span data-ft="pu-tab-${t}" style="cursor:pointer;margin-right:12px;${puTab === t ? 'color:#7adfe6;font-weight:bold;border-bottom:1px solid #7adfe6' : 'color:#888'}">${l}</span>`).join('')
             + '<span data-ft="pu-sheets" style="cursor:pointer;color:#ffd54f;margin-left:14px" title="this tab, current sort, as a table for Google Sheets / Excel">📊 Copy → Sheets</span>'
             + '<span data-ft="pu-csv" style="cursor:pointer;color:#5fff5f;margin-left:10px" title="this tab, current sort, as CSV">⬇ CSV</span>'
             + `<span data-ft="pu-check" style="cursor:pointer;color:${puShowCheck ? '#7adfe6' : '#888'};margin-left:10px" title="audit the fetched log rows: states, durations, landed-vs-duration, same-drone overlaps, attribution">🔬 Data check</span>`
@@ -5823,7 +5902,7 @@
             + renderDataSection()
             + sectionHeader('fc', '🎥', 'Flight Checks', fcResults ? `${fcResults.flights.length} flight(s) · ${fcResults.flights.reduce((n, f) => n + f.flagged, 0)} flagged shots` : 'planned vs actual, every flown flight of the picked sites')
             + renderFcSection()
-            + sectionHeader('pilots', '🧑‍✈️', 'Pilot Utilization', puResults ? `${puResults.pilots.length} pilot(s) · ${puResults.flights.length} flight(s) · last ${puResults.days} d` : 'air time per pilot per day — overlapping drones count once')
+            + sectionHeader('pilots', '📈', 'Utilization', puResults ? `${puResults.pilots.length} pilot(s) · ${(puResults.drones || []).length} drone(s) · ${(puResults.sites || []).length} site(s) · ${puResults.flights.length} flight(s) · last ${puResults.days} d` : 'pilots · drones · sites · clients — overlapping drones count once')
             + renderPilotSection()
             + sectionHeader('sweep', '⚠', 'Overlap Sweep', `${ENV_LABEL} · thr ${ftCfg.thresholdFt} ft`)
             + renderSweepSection()
@@ -5936,6 +6015,7 @@
                     else if (cmd === 'pu-sheets') puExport('sheets');
                     else if (cmd === 'pu-csv') puExport('csv');
                     else if (cmd && cmd.startsWith('pu-tab-')) { puTab = cmd.slice(7); renderPanel(); }
+                    else if (cmd && cmd.startsWith('pu-lens-')) { const k = cmd.slice(8); if (PU_LENSES[k]) { puLens = k; if (!PU_LENSES[k].tabs.includes(puTab) && !PU_SHARED_TABS.some(t => t[0] === puTab)) puTab = PU_LENSES[k].tabs[0]; else if (!PU_SHARED_TABS.some(t => t[0] === puTab)) puTab = PU_LENSES[k].tabs[0]; renderPanel(); } }
                     else if (cmd === 'fc-abort') { if (fcRun) { fcRun.abort = true; setStatus('aborting flight checks after the current requests…'); } }
                     else if (cmd === 'fc-clear') { fcCache = { ver: FC_CORE_VER, flights: {} }; fcSaveCache(); fcResults = null; renderPanel(); }
                     else if (cmd === 'fc-csv') fcCopyView();

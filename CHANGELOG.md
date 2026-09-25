@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-25 — 📈 Utilization lenses: Pilots / Drones / Sites / Clients: AIM Fleet Tools v0.55 (latest — dev only, feature #276)
+
+The Pilot Utilization section is now **Utilization** with a lens row above the tabs: **🧑‍✈️ Pilots**, **🛸 Drones**, **📍 Sites**, **🏢 Clients**. Dates, Hours and Flights stay available under every lens. **Sites** lists every picked site, flown or not: flights, days flown and idle days, drone-hours, air time (time with at least one drone up at the site), flyable drone-hours from the site rules, **Util %**, drones per the rule versus drones actually seen, pilots, incomplete flights and capture %, night hours, longest gap and days since the last flight. **Clients** rolls those up per client with sites picked / flown / **coverage %** and the names of sites never flown, plus the same hours and util figures. **Drones** gains flyable hours and Util % against its home site's window. Same fetch and same rules; switching lenses is instant.
+
 ## 2026-09-25 — Pilot Utilization: complete vs incomplete flights: AIM Fleet Tools v0.54 (latest — dev only, feature #274)
 
 Percepto's `state` code turned out to be Completed on every flown flight, so a flight that ended early was invisible. New signal from the log's own image counts: **Incomplete** = a flight that captured fewer images than its plan (`uploader_planned_images_count`), and **Capture %** = images captured ÷ planned, on the Pilots and Pilot-days tabs; the Flights tab shows **Images actual/planned** and the raw **State code**. The 🔬 Data check gains three rows: raw state codes with our label mapping (flagged as unverified), planned-vs-actual summary, and a sample of `mission_data_reports` so we can learn what Percepto stores there.
