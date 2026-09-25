@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-25 — Pilot Utilization: Drones + Hours tabs: AIM Fleet Tools v0.48 (latest — dev only, feature #274)
+
+The drone side of the same question. **Drones** tab: per drone, flights, air time, days flown, idle days, longest gap between flights, days since it last landed, average flight, aborted count, pilots and sites — sort by idle days or longest gap to find drones nobody is flying. **Hours** tab: for each local hour of the day, the average number of drones airborne, distinct drones and pilots active, takeoffs and drone-hours — the shape of the workday against the size of the pool. Header chips now show drones seen and the peak number airborne at once.
+
 ## 2026-09-25 — 🔬 Pilot Utilization data check: AIM Fleet Tools v0.47 (latest — dev only, feature #274)
 
 Trust-but-verify pass on the new Pilot Utilization numbers. **🔬 Data check** audits the fetched log rows: rows by state and type, how many had no duration (and how many of those were rescued from a landed time), the duration distribution, a **landed − launch vs duration** cross-check with a verdict on whether Percepto's duration field covers the whole airborne span or leaves out takeoff / return-to-dock, a **same-drone-in-two-flights** test (a physical drone cannot overlap itself, so any hit means the intervals are wrong), and who the flights are attributed to. New **flight end** control: launch + duration (default) or the landed timestamp. On the Pilot-days tab, **click a row** to see that day's flights one by one with the merged airborne blocks, so the union can be checked by hand against Percepto's mission log.
