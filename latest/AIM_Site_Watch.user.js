@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.29
+// @version      0.30
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON (and optionally its missions) on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Daily Slack digest. Configurable in the AIM Control Panel ("Site Watch").
@@ -98,7 +98,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.29';
+    const SCRIPT_VERSION = '0.30';
 
     // Server model (v0.21): prod and QA are separate databases with their own
     // site lists — the same numeric ID is two different sites. A QA leader
@@ -182,7 +182,12 @@
         if (typeof r !== 'string' || !/^[a-z0-9]{4,8}$/.test(r)) { r = Math.random().toString(36).slice(2, 6); gmSet(RUNNER_KEY, r); }
         return r;
     })();
-    function withRunner(message) { return `${message} · r:${runnerId}`; }
+    // v0.30: also stamp a short per-TAB token. Same install, several Percepto
+    // tabs: leadership hops between tabs on refresh, and that hop is what
+    // produced the stale-state double audits on 2026-09-25 — now visible in
+    // the git log as r:<install>.<tab> changing between consecutive cycles.
+    const tabToken = tabId.slice(4, 8);
+    function withRunner(message) { return `${message} · r:${runnerId}.${tabToken}`; }
     let amLeader = false;
     let pausedForAuth = false;
     let cycleRunning = false;
@@ -442,7 +447,7 @@
         for (const c of commits) {
             if (now - c.at > RUNNER_LOOKBACK_MS) continue;
             if (!/^\[site-watch\]/.test(c.msg)) continue;
-            const m = c.msg.match(/· r:([a-z0-9]{4,8})\s*$/);
+            const m = c.msg.match(/· r:([a-z0-9]{4,8})(?:\.[a-z0-9]+)?\s*$/);   // install id; tab token ignored here
             let key;
             if (m) key = m[1];
             else if (c.at > state.runnerSince + 60e3) key = 'untagged';   // pre-0.26 install still writing
@@ -461,7 +466,7 @@
         };
         const lines = keys.sort((a, b) => seen[b].lastAt - seen[a].lastAt).map(line);
         const mine = seen[runnerId] ? '' : `• r:${runnerId} (THIS install — ${runnerLabel()} · ${location.host}) — no commits yet in this window\n`;
-        let text = `👥 Site Watch installs that wrote to ${WATCH_DIR}/ in the last ${Math.round(RUNNER_LOOKBACK_MS / 3600e3)}h:\n${mine}${lines.join('\n') || '(none)'}`;
+        let text = `👥 Site Watch installs that wrote to ${WATCH_DIR}/ in the last ${Math.round(RUNNER_LOOKBACK_MS / 3600e3)}h:\n${mine}${lines.join('\n')}`;
         if (foreign.length) {
             text += `\n⚠ MORE THAN ONE INSTALL IS AUDITING (${foreign.length} other). Every site gets checked twice and CSV appends race. On each machine open the AIM Control Panel → Site Watch: the section header shows that machine's runner id. Turn "Enable Site Watch" OFF on the one you don't want.`;
             console.warn(`${TAG} ${text}`);
