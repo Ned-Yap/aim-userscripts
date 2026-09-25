@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.57
+// @version      0.58
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -36,7 +36,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.57';
+    const SCRIPT_VERSION = '0.58';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -2675,23 +2675,26 @@
 
 
     // ==================================================================
-    // 🎥 FLIGHT CHECKS (v0.33, feature #267 fleet scale) — every flown flight
-    // of the picked sites (Fleet Data picker) in the last N days, scored
-    // against its plan the way AIM Video Validation does on one playback
-    // page, minus the flown-track download: the picture record already
-    // carries the real pose (position / altitude / heading / camera angle),
-    // so a flight costs TWO small reads (mission record with its embedded
-    // plan + image list). Each picture is matched to a planned snapshot by
-    // pose near its nav ([#267 shared core] — same math as Video Validation's
-    // pose fallback). A flown flight never changes → results cache per
-    // flight id in GM (script storage for now; data repo later).
+    // 🎥 FLIGHT CHECKS (v0.33, feature #267 fleet scale; v0.58 = the Video
+    // Validation engine itself) — every flown flight of the picked sites
+    // (Fleet Data picker) in the last N days, MEASURED exactly as the
+    // playback page's flight check does: mission record (as-flown plan) +
+    // picture records (real pose) + flown positions (which plan step was
+    // executing when → picture↔step join, this flight's slice, S# numbers)
+    // + Percepto DEM (planned vs actual LOOK-POINT = where the camera ray
+    // meets the ground). Measurements cache per flight id; the limits are
+    // applied at render, so changing a limit re-scores instantly. Flights
+    // whose flown slice has no planned snapshot (alert jumps, manual) are
+    // reported as manual and never flagged — the flags view is for the
+    // obvious, unexplained deviations that go to IT.
     // Views: by flight · by drone (hardware bias → IT) · by mission (build
     // problem → CSM) · by site. Thresholds editable here, persisted in cfg.
     // ==================================================================
-    const FC_CORE_VER = 2;   // v2: sequence alignment join (position is an OUTPUT), per-flight S# numbering
+    const FC_CORE_VER = 3;   // v3: Video Validation engine port — flown-log join, DEM look-points, log-slice missing; cache holds MEASUREMENTS, thresholds apply at render
     const FC_KEY = 'aim-ft-fc-cache';
-    const FC_CAP = 3000;
-    const FC_DEF = { hdg: 10, cam: 5, altFt: 25, posFt: 30, days: 7, gateDeg: 20, navFt: 200 };
+    const FC_CAP = 800;      // measured flights kept (≈ 50 rounded rows each)
+    const FC_DEF = { hdg: 10, cam: 5, altFt: 25, posFt: 30, lookFt: 50, days: 7 };
+    const FC_RAY_CAP_FT = 500;       // look-point ray cap (same as Video Validation's rayCapFt default)
     if (!ftCfg.fc) ftCfg.fc = {};
     const fcCfg = () => Object.assign({}, FC_DEF, ftCfg.fc);
     let fcCache = loadJson(FC_KEY, null);
@@ -2701,8 +2704,36 @@
         if (ids.length > FC_CAP) { ids.sort((a, b) => (fcCache.flights[a].when || '').localeCompare(fcCache.flights[b].when || '')); ids.slice(0, ids.length - FC_CAP).forEach(id => delete fcCache.flights[id]); }
         gmSet(FC_KEY, JSON.stringify(fcCache));
     }
+    // Terrain under a point (Percepto DEM, cookie auth), keyed per 1e-5° cell. Plan navs recur flight after flight on
+    // a site → persisted (GM); drone positions almost never repeat → session-only, so they cannot evict the nav cells.
+    // An unknown (non-numeric) answer is never persisted.
+    const FC_DEM_KEY = 'aim-ft-dem-cache';
+    const fcDemCache = loadJson(FC_DEM_KEY, {}) || {};
+    const fcDemSession = {};
+    let fcDemDirty = 0;
+    const fcDemKey = (ll) => (+ll.lat).toFixed(5) + ',' + (+ll.lng).toFixed(5);
+    async function fcDemCached(ll, persist) {
+        if (!ll || typeof ll.lat !== 'number' || typeof ll.lng !== 'number') return null;
+        const k = fcDemKey(ll);
+        if (fcDemCache[k] !== undefined) return fcDemCache[k];
+        if (fcDemSession[k] !== undefined) return fcDemSession[k];
+        let v = null;
+        try {
+            const j = await fdGetJson('/location_altitude/?location=' + encodeURIComponent(JSON.stringify({ lat: ll.lat, lng: ll.lng })), 20000);
+            v = (j && typeof j.altitude === 'number') ? j.altitude : null;
+        } catch (e) { console.warn(`${TAG} flight checks: DEM read failed at ${k}: ${e.message}`); return null; }   // not cached — retry next time
+        if (v != null && persist !== false) { fcDemCache[k] = v; if (++fcDemDirty >= 25) fcDemSave(); }
+        else fcDemSession[k] = v;
+        return v;
+    }
+    function fcDemSave() {
+        fcDemDirty = 0;
+        const keys = Object.keys(fcDemCache);
+        if (keys.length > 20000) keys.slice(0, keys.length - 20000).forEach(k => delete fcDemCache[k]);
+        gmSet(FC_DEM_KEY, JSON.stringify(fcDemCache));
+    }
     let fcRun = null;          // { done, total, msg, abort, errors }
-    let fcResults = null;      // { at, sites:[ids], days, flights:[result] }
+    let fcResults = null;      // { at, sites:[ids], days, flights:[measured flight] }
     let fcTab = 'summary';
     let fcOpenFlight = null;
     let fcSortKey = 'flagged';
@@ -2711,101 +2742,96 @@
     function fcDistM(a, b) { if (!a || !b) return null; const dLat = (b.lat - a.lat) * FC_RAD, dLng = (b.lng - a.lng) * FC_RAD; const x = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * FC_RAD) * Math.cos(b.lat * FC_RAD) * Math.sin(dLng / 2) ** 2; return 2 * 6371000 * Math.asin(Math.sqrt(x)); }
     function fcBearing(a, b) { const y = Math.sin((b.lng - a.lng) * FC_RAD) * Math.cos(b.lat * FC_RAD); const x = Math.cos(a.lat * FC_RAD) * Math.sin(b.lat * FC_RAD) - Math.sin(a.lat * FC_RAD) * Math.cos(b.lat * FC_RAD) * Math.cos((b.lng - a.lng) * FC_RAD); return (Math.atan2(y, x) / FC_RAD + 360) % 360; }
     function fcHdgDelta(a, b) { if (a == null || b == null) return null; return ((b - a) % 360 + 540) % 360 - 180; }
-    function fcCompass(deg) { const p = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW']; return p[Math.round((((deg % 360) + 360) % 360) / 22.5) % 16]; }
+    function fcCompass(deg) { if (deg == null || !isFinite(deg)) return ''; const p = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW']; return p[Math.round((((deg % 360) + 360) % 360) / 22.5) % 16]; }
     const fcGimbalDeg = (v) => (typeof v === 'number') ? (v - 2000) / (1000 / 90) : null;   // 2000 = level, 1000 = straight down
     function fcNameTime(name) { const m = String(name || '').match(/(\d{4})_(\d{2})_(\d{2})__(\d{2})_(\d{2})_(\d{2})_(\d)/); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6], +m[7] * 100) : null; }
-    // [#267 shared core] planned pose of a snapshot step. Drone altitude = the NAV's value1 (a snapshot's abs_alt is stale).
-    function fcPlannedPose(plan, i) {
-        const st = plan[i]; let nav = null; for (let k = i - 1; k >= 0; k--) if (plan[k].type_name === 'navigate') { nav = plan[k]; break; }
-        if (!nav || !nav.location) return null;
-        const alt = typeof nav.value1 === 'number' ? nav.value1 : null;
-        if (st.location && typeof st.location.lat === 'number') {
-            const h = fcDistM(nav.location, st.location); const aimAlt = typeof st.value1 === 'number' ? st.value1 : null;
-            return { gps: true, nav, alt, heading: fcBearing(nav.location, st.location), pitch: (aimAlt != null && alt != null && h > 0.5) ? Math.atan2(aimAlt - alt, h) / FC_RAD : null };
+    function fcMoveLL(ll, meters, bearing) { const dN = meters * Math.cos(bearing * FC_RAD), dE = meters * Math.sin(bearing * FC_RAD); return { lat: +(ll.lat + dN / 111320).toFixed(8), lng: +(ll.lng + dE / (111320 * Math.cos(ll.lat * FC_RAD))).toFixed(8) }; }
+    const fcIsGps = (st) => !!(st && st.location && typeof st.location.lat === 'number');
+    // ---- [#267 shared core] verbatim ports of Video Validation's engine (loadModel / joinShotToStep / plannedPose /
+    // computeDelta / lookPointFor / actualLookPointOf / plannedLookPointOf / checkFlight). Keep the two in step. ----
+    function fcParentNav(m, step) { if (!step) return null; const i = m.plan.indexOf(step); for (let k = i - 1; k >= 0; k--) if (m.plan[k].type_name === 'navigate') return m.plan[k]; return null; }
+    // Plan step active at time t: latest app_instruction fix at or before t.
+    function fcActiveStepAt(m, t) { if (t == null || !m.insFixes.length) return null; let best = null; for (const f of m.insFixes) { if (f.t <= t) best = f; else break; } return best ? (m.byId[best.id] || null) : null; }
+    // Planned pose for a snapshot step: GPS snapshot (has location) → derived from nav → aim point; in-place → explicit.
+    // Drone altitude = the NAV's value1 (a snapshot's abs_alt is a stale derived field).
+    function fcPlannedPose(m, step) {
+        if (!step || step.type_name !== 'snapshot') return null;
+        const nav = fcParentNav(m, step);
+        const eo = step.extra_options || {};
+        const navAlt = nav ? ((typeof nav.value1 === 'number') ? nav.value1 : (nav.extra_options && nav.extra_options.abs_alt != null ? nav.extra_options.abs_alt : null)) : null;
+        if (fcIsGps(step)) {
+            const aimAlt = (typeof step.value1 === 'number') ? step.value1 : null;
+            const pose = { type: 'gps', aim: step.location, aimAlt, nav, navAlt, heading: null, pitchDeg: null, alt: navAlt };
+            if (nav && nav.location) {
+                pose.heading = fcBearing(nav.location, step.location);
+                const horiz = fcDistM(nav.location, step.location);
+                if (aimAlt != null && navAlt != null && horiz != null) pose.pitchDeg = Math.atan2(aimAlt - navAlt, horiz) / FC_RAD;
+                pose.range = horiz;
+            }
+            return pose;
         }
-        const e = st.extra_options || {};
-        return { gps: false, nav, alt, heading: typeof e.heading === 'number' ? e.heading : null, pitch: fcGimbalDeg(e.pitch) };
+        return { type: 'inplace', nav, navAlt, heading: (typeof eo.heading === 'number') ? eo.heading : null, pitchDeg: fcGimbalDeg(eo.pitch), alt: (nav && typeof nav.value1 === 'number') ? nav.value1 : ((typeof eo.abs_alt === 'number') ? eo.abs_alt : navAlt) };
     }
-    // [#267 shared core] score one flight: plan (sorted instructions) + image records → shots, flags, summary.
-    // JOIN = local sequence alignment (Smith–Waterman) of the pictures (time order) against the plan's snapshots
-    // (step order). Match cost = how well the picture's heading + camera angle fit the planned pose, with only a
-    // WEAK position prior — so a drone 278 ft off station still lands on its own step and the distance is reported,
-    // instead of being quietly matched to whatever nav happened to be nearby (the v1 mistake). Gaps = planned
-    // snapshots with no picture (missing) or pictures with no step (unplanned); a leftover picture whose pose fits
-    // the neighbouring matched step is a re-take.
-    function fcScore(plan, images, cfg, meta) {
-        const snaps = []; plan.forEach((st, i) => { if (st.type_name === 'snapshot') { const pose = fcPlannedPose(plan, i); if (pose) snaps.push({ st, i, pose }); } });
-        const imgs = images.map(im => Object.assign({}, im, { shutter: fcNameTime(im.name) || (im.created_at ? new Date(im.created_at).getTime() : 0), kind: im.type === 'THERMAL' || im.thermal ? 'T' : (im.type === 'GEM' ? 'G' : 'RGB') })).sort((a, b) => a.shutter - b.shutter);
-        const shots = []; let cur = null;
-        imgs.forEach(im => { if (!cur || Math.abs(im.shutter - cur.shutter) > 1500) { cur = { shutter: im.shutter, images: [], primary: im }; shots.push(cur); } cur.images.push(im); if (im.kind === 'RGB') cur.primary = im; });
-        // pose fit of shot a vs planned snapshot b: 0 = perfect; degrees of combined heading + camera error, plus a
-        // weak position term (≤ 3 "degrees" at 300 ft) that only breaks ties between look-alike snapshots.
-        const fit = (sh, c) => {
-            const im = sh.primary; if (!im.location || typeof im.drone_heading !== 'number') return 99;
-            const dh = Math.abs(fcHdgDelta(c.pose.heading, im.drone_heading) || 0);
-            const dp = (c.pose.pitch != null && typeof im.camera_pitch === 'number') ? Math.abs(im.camera_pitch - c.pose.pitch) : 0;
-            const dNav = fcDistM(c.pose.nav.location, im.location); const posTerm = dNav == null ? 3 : Math.min(3, (dNav * FC_M2FT) / 100);
-            return dh + dp + posTerm;
+    // Join a shot to its plan step: the executing step from the flown log, unless a LATER unclaimed snapshot in this
+    // flight matches the picture's actual heading + camera angle much better (the log is sparse).
+    function fcJoinShotToStep(m, sh, claimed) {
+        const im = sh.primary; const t = sh.shutter;
+        const active = fcActiveStepAt(m, t);
+        const poseScore = (st) => {
+            const p = fcPlannedPose(m, st); if (!p || p.heading == null) return Infinity;
+            const dh = Math.abs(fcHdgDelta(p.heading, im.drone_heading) || 0);
+            const dp = (p.pitchDeg != null && typeof im.camera_pitch === 'number') ? Math.abs(im.camera_pitch - p.pitchDeg) : 0;
+            return dh + dp;
         };
-        const GATE = Number(cfg.gateDeg) || 20;
-        const matchScore = (sh, c) => GATE - fit(sh, c);         // positive = plausible match, negative = not
-        const GAP_SNAP = -4, GAP_SHOT = -5;                        // skip a planned snapshot / skip a picture
-        const n = shots.length, m = snaps.length;
-        const H = []; const T = [];
-        for (let i = 0; i <= n; i++) { H.push(new Float64Array(m + 1)); T.push(new Uint8Array(m + 1)); }
-        let best = 0, bi = 0, bj = 0;
-        for (let i = 1; i <= n; i++) for (let j = 1; j <= m; j++) {
-            const d = H[i - 1][j - 1] + matchScore(shots[i - 1], snaps[j - 1]);
-            const u = H[i - 1][j] + GAP_SHOT, l = H[i][j - 1] + GAP_SNAP;
-            let v = 0, t = 0;
-            if (d > v) { v = d; t = 1; } if (u > v) { v = u; t = 2; } if (l > v) { v = l; t = 3; }
-            H[i][j] = v; T[i][j] = t;
-            if (v > best) { best = v; bi = i; bj = j; }
-        }
-        const assign = new Array(n).fill(null);   // shot index → snap index
-        let i = bi, j = bj;
-        while (i > 0 && j > 0 && H[i][j] > 0) { const t = T[i][j]; if (t === 1) { assign[i - 1] = j - 1; i--; j--; } else if (t === 2) i--; else j--; }
-        // re-takes: an unassigned picture whose pose fits an already-assigned neighbouring step
-        const usedSnap = {}; assign.forEach(a => { if (a != null) usedSnap[a] = true; });
-        assign.forEach((a, k) => {
-            if (a != null) return;
-            const cand = [k - 1, k + 1].map(x => assign[x]).filter(x => x != null);
-            let pick = null, pf = 8;
-            cand.forEach(ci => { const f = fit(shots[k], snaps[ci]); if (f < pf) { pf = f; pick = ci; } });
-            if (pick != null) { assign[k] = pick; shots[k].retake = true; }
+        const activeOk = active && active.type_name === 'snapshot';
+        const activeScore = activeOk ? poseScore(active) : Infinity;
+        if (activeOk && !claimed[active.id] && activeScore <= 12) return active;
+        const fromIdx = active ? active.index_in_app : (m.slice ? m.slice.minIdx : 0);
+        const toIdx = m.slice ? m.slice.maxIdx : Infinity;
+        let best = null, bestScore = 12;   // hard gate: ≤ 12° combined heading + angle error
+        m.plan.forEach(st => {
+            if (st.type_name !== 'snapshot' || st.index_in_app < fromIdx || st.index_in_app > toIdx || claimed[st.id]) return;
+            const sc = poseScore(st);
+            if (sc < bestScore) { bestScore = sc; best = st; }
         });
-        const matchedIdx = assign.filter(a => a != null).map(a => snaps[a].st.index_in_app);
-        const minIdx = matchedIdx.length ? Math.min.apply(null, matchedIdx) : null, maxIdx = matchedIdx.length ? Math.max.apply(null, matchedIdx) : null;
-        // per-flight S# = ordinal among the plan's snapshots inside this flight's slice (matches Video Validation)
-        const inSlice = snaps.filter(c => minIdx != null && c.st.index_in_app >= minIdx && c.st.index_in_app <= maxIdx);
-        const sNum = {}; inSlice.forEach((c, k) => { sNum[c.st.id] = 'S' + (k + 1); });
-        const seen = {}; const rows = [];
-        shots.forEach((sh, k) => {
-            const im = sh.primary; const flags = []; const a = assign[k];
-            const r = { t: new Date(sh.shutter).toISOString(), kinds: sh.images.map(x => x.kind).join('+'), name: im.name, asset: (im.assets || []).map(x => x.name).filter(Boolean).join(', '), flags, hdg: [null, im.drone_heading, null], cam: [null, im.camera_pitch, null], alt: [null, typeof im.alt === 'number' ? im.alt * FC_M2FT : null, null], pos: null, dir: '' };
-            if (a != null) {
-                const c = snaps[a], p = c.pose; r.s = sNum[c.st.id] || 'S?'; r.idx = c.st.index_in_app; r.stepId = c.st.id;
-                r.hdg = [p.heading, im.drone_heading, fcHdgDelta(p.heading, im.drone_heading)];
-                r.cam = [p.pitch, im.camera_pitch, (p.pitch != null && typeof im.camera_pitch === 'number') ? im.camera_pitch - p.pitch : null];
-                r.alt = [p.alt != null ? p.alt * FC_M2FT : null, typeof im.alt === 'number' ? im.alt * FC_M2FT : null, (p.alt != null && typeof im.alt === 'number') ? (im.alt - p.alt) * FC_M2FT : null];
-                const dNav = im.location ? fcDistM(p.nav.location, im.location) : null; r.pos = dNav != null ? dNav * FC_M2FT : null; r.dir = (r.pos != null && r.pos >= 3) ? fcCompass(fcBearing(p.nav.location, im.location)) : '';
-                if (sh.retake || seen[c.st.id]) flags.push('re-take'); seen[c.st.id] = (seen[c.st.id] || 0) + 1;
-                if (r.hdg[2] != null && Math.abs(r.hdg[2]) > cfg.hdg) flags.push('heading ' + (r.hdg[2] > 0 ? '+' : '') + r.hdg[2].toFixed(0) + '°');
-                if (r.cam[2] != null && Math.abs(r.cam[2]) > cfg.cam) flags.push('camera ' + (r.cam[2] > 0 ? '+' : '') + r.cam[2].toFixed(0) + '°');
-                if (r.alt[2] != null && Math.abs(r.alt[2]) > cfg.altFt) flags.push('altitude ' + (r.alt[2] > 0 ? '+' : '') + r.alt[2].toFixed(0) + ' ft');
-                if (r.pos != null && r.pos > cfg.posFt) flags.push('off station ' + r.pos.toFixed(0) + ' ft ' + r.dir);
-            } else { r.s = '?'; flags.push('unplanned shot (fits no planned snapshot in sequence)'); }
-            rows.push(r);
-        });
-        const missing = inSlice.filter(c => !seen[c.st.id]).map(c => sNum[c.st.id]);
-        const mean = (arr) => { const v = arr.filter(x => x != null && isFinite(x)); return v.length ? v.reduce((x, y) => x + y, 0) / v.length : null; };
-        const matched = rows.filter(r => r.stepId != null);
-        return Object.assign({}, meta, {
-            coreVer: FC_CORE_VER, at: Date.now(), shots: rows.length, flagged: rows.filter(r => r.flags.length).length, retakes: rows.filter(r => r.flags.includes('re-take')).length, unplanned: rows.filter(r => r.s === '?').length,
-            missing, slice: minIdx != null ? [minIdx, maxIdx] : null, planSteps: plan.length, planSnaps: snaps.length, flightSnaps: inSlice.length, alignScore: best,
-            dHdg: mean(matched.map(r => Math.abs(r.hdg[2]))), dCam: mean(matched.map(r => Math.abs(r.cam[2]))), dAlt: mean(matched.map(r => r.alt[2])), dPos: mean(matched.map(r => r.pos)),
-            rows,
-        });
+        return best || active;
+    }
+    function fcComputeDelta(m, im, step) {
+        if (!step) return { none: true };
+        const pose = fcPlannedPose(m, step);
+        if (!pose) return { notSnap: true, stepType: step.type_name };
+        const d = { pose };
+        d.hdg = fcHdgDelta(pose.heading, im.drone_heading);
+        d.pitch = (pose.pitchDeg != null && typeof im.camera_pitch === 'number') ? im.camera_pitch - pose.pitchDeg : null;
+        d.alt = (pose.alt != null && typeof im.alt === 'number') ? im.alt - pose.alt : null;
+        d.pos = (pose.nav && pose.nav.location && im.location) ? fcDistM(pose.nav.location, im.location) : null;
+        d.posDir = (d.pos != null && d.pos >= 1) ? fcCompass(fcBearing(pose.nav.location, im.location)) : '';
+        return d;
+    }
+    // Where the camera ray meets the ground (planned = nav + step angles; actual = the picture's pose). Cap 500 ft.
+    function fcLookPointFor(nav, step, ground) {
+        const e = step.extra_options || {};
+        const alt = typeof nav.value1 === 'number' ? nav.value1 : (typeof e.abs_alt === 'number' ? e.abs_alt : null);
+        const pitch = fcGimbalDeg(e.pitch);
+        if (alt == null || pitch == null || typeof e.heading !== 'number' || !nav.location) return null;
+        const capM = FC_RAY_CAP_FT / FC_M2FT;
+        const down = Math.tan(Math.abs(pitch) * FC_RAD);
+        let dist = (ground != null && down > 0.01) ? (alt - ground) / down : Infinity;
+        let capped = false; if (!(dist > 0) || dist > capM) { dist = capM; capped = true; }
+        return { ll: fcMoveLL(nav.location, dist, e.heading), dist, capped };
+    }
+    function fcActualLookPointOf(im, g) {
+        if (!im || !im.location || typeof im.drone_heading !== 'number' || typeof im.camera_pitch !== 'number' || typeof im.alt !== 'number' || g == null) return null;
+        const capM = FC_RAY_CAP_FT / FC_M2FT, down = Math.tan(Math.abs(im.camera_pitch) * FC_RAD);
+        let dist = down > 0.01 ? (im.alt - g) / down : Infinity; let capped = false; if (!(dist > 0) || dist > capM) { dist = capM; capped = true; }
+        return { ll: fcMoveLL(im.location, dist, im.drone_heading), dist, capped };
+    }
+    async function fcPlannedLookPointOf(m, step) {
+        if (!step) return null;
+        if (fcIsGps(step)) return { ll: step.location };
+        const nav = fcParentNav(m, step); if (!nav || !nav.location) return null;
+        const g = await fcDemCached(nav.location); if (g == null) return null;
+        const lp = fcLookPointFor(nav, step, g); return lp ? { ll: lp.ll, capped: lp.capped } : null;
     }
     async function fcFetchLog(sid, start, end, isAborted) {
         const all = []; let total = null; let lastId = -1; let pages = 0;
@@ -2829,15 +2855,98 @@
         while (url && ++guard < 20) { const j = await fdGetJson(url, 40000); const res = (j && j.results) || (Array.isArray(j) ? j : []); out.push(...res); url = j && j.next ? String(j.next).replace(/^https?:\/\/[^/]+/, '') : null; }
         return out;
     }
-    async function fcCheckFlight(sid, row, cfg) {
+    // MEASURE one flight (no thresholds here — every number is stored, flags are decided at render from the current
+    // limits, so changing a limit never needs a re-fetch). Three reads: mission record (embedded as-flown plan),
+    // image records (real pose per picture), flown positions (which plan step was executing when) + DEM per look-point.
+    async function fcMeasureFlight(sid, row, isAborted) {
         const mid = row.id;
-        const cached = fcCache.flights[mid];
+        const [mission, images, pos] = await Promise.all([fdGetJson(`/missions/${encodeURIComponent(mid)}/`, 40000), fcFetchImages(sid, mid), fdGetJson(`/mission_positions/${encodeURIComponent(mid)}/`, 40000)]);   // positions failing = the flight fails (never cache a whole-mission guess)
+        const m = { plan: [], byId: {}, insFixes: [], slice: null };
+        m.plan = (mission.app && Array.isArray(mission.app.instructions)) ? mission.app.instructions.slice().sort((a, b) => a.index_in_app - b.index_in_app) : [];
+        m.plan.forEach(s => { m.byId[s.id] = s; });
+        const fixes = ((pos && pos.positions) || []).slice().sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+        m.insFixes = fixes.filter(f => f.app_instruction != null).map(f => ({ t: new Date(f.timestamp).getTime(), id: (typeof f.app_instruction === 'object') ? f.app_instruction.id : f.app_instruction }));
+        const idxs = m.insFixes.map(x => m.byId[x.id] ? m.byId[x.id].index_in_app : null).filter(x => x != null);
+        m.slice = idxs.length ? { minIdx: Math.min.apply(null, idxs), maxIdx: Math.max.apply(null, idxs) } : null;
+        // per-flight S# / N# numbering = ordinal within this flight's slice (matches the playback page)
+        const num = {}; let sC = 0, nC = 0;
+        m.plan.forEach(st => { if (m.slice && (st.index_in_app < m.slice.minIdx || st.index_in_app > m.slice.maxIdx)) return; if (st.type_name === 'snapshot') num[st.id] = 'S' + (++sC); else if (st.type_name === 'navigate') num[st.id] = 'N' + (++nC); });
+        // No plan step ever activated in the flown log = nothing was flown from the plan (manual / alert flight): no join, no missing.
+        const snapsInFlight = m.slice ? m.plan.filter(st => st.type_name === 'snapshot' && st.index_in_app >= m.slice.minIdx && st.index_in_app <= m.slice.maxIdx) : [];
+        // images → shots (RGB + thermal [+ GEM] within 1.5 s of one shutter; RGB is the primary record)
+        const KIND_RANK = { RGB: 0, T: 1, G: 2 };
+        const imgs = images.map(im => Object.assign({}, im, { shutter: fcNameTime(im.name) || (im.created_at ? new Date(im.created_at).getTime() : null), kind: im.type === 'THERMAL' || im.thermal ? 'T' : (im.type === 'GEM' ? 'G' : 'RGB') }))
+            .sort((a, b) => (a.shutter || 0) - (b.shutter || 0) || (KIND_RANK[a.kind] || 0) - (KIND_RANK[b.kind] || 0));
+        const shots = []; let cur = null;
+        imgs.forEach(im => { if (!cur || im.shutter == null || cur.shutter == null || Math.abs(im.shutter - cur.shutter) > 1500) { cur = { shutter: im.shutter, images: [], primary: im }; shots.push(cur); } cur.images.push(im); if (im.kind === 'RGB') cur.primary = im; });
+        const claimed = {};
+        shots.forEach(sh => { sh.step = m.slice ? fcJoinShotToStep(m, sh, claimed) : null; if (sh.step) claimed[sh.step.id] = (claimed[sh.step.id] || 0) + 1; });
+        const seen = {}; const rows = []; const r1 = (v) => (v == null || !isFinite(v)) ? null : +(+v).toFixed(1);
+        for (const sh of shots) {
+            if (isAborted && isAborted()) throw new Error('aborted');
+            const im = sh.primary, st = sh.step; const d = fcComputeDelta(m, im, st); const pose = d.pose || {};
+            const isSnap = !!(st && st.type_name === 'snapshot');
+            let look = null, lookCapped = false;
+            if (isSnap) {
+                const [p, g] = await Promise.all([fcPlannedLookPointOf(m, st), im.location ? fcDemCached(im.location, false) : null]);
+                const a = im.location ? fcActualLookPointOf(im, g) : null;
+                if (p && a && p.ll && a.ll) { look = fcDistM(p.ll, a.ll) * FC_M2FT; lookCapped = !!(p.capped || a.capped); }
+            }
+            const retake = isSnap ? (seen[st.id] || 0) : 0; if (st) seen[st.id] = (seen[st.id] || 0) + 1;
+            rows.push({
+                s: st ? (num[st.id] || (isSnap ? '#' + st.index_in_app : st.type_name)) : '?', idx: st ? st.index_in_app : null, stepId: isSnap ? st.id : null, manual: !isSnap, stepType: st ? st.type_name : null,
+                t: sh.shutter != null ? new Date(sh.shutter).toISOString() : null, kinds: sh.images.map(x => x.kind).join('+'), name: im.name, asset: (im.assets || []).map(x => x.name).filter(Boolean).join(', '),
+                hdg: [r1(pose.heading), r1(im.drone_heading), r1(d.hdg)],
+                cam: [r1(pose.pitchDeg), r1(im.camera_pitch), r1(d.pitch)],
+                alt: [r1(pose.alt != null ? pose.alt * FC_M2FT : null), r1(typeof im.alt === 'number' ? im.alt * FC_M2FT : null), r1(d.alt != null ? d.alt * FC_M2FT : null)],
+                pos: r1(d.pos != null ? d.pos * FC_M2FT : null), dir: d.posDir || '', look: r1(look), lookCapped, retake,
+            });
+        }
+        const missing = snapsInFlight.filter(st => !seen[st.id]).map(st => num[st.id] || '#' + st.index_in_app);
+        // A flight whose plan slice has NO snapshot steps (alert jump, manual flight, mapping-only) cannot deviate from
+        // a snapshot plan — it is reported as MANUAL, never flagged.
+        const manualFlight = !m.slice || snapsInFlight.length === 0;
+        return {
+            coreVer: FC_CORE_VER, at: Date.now(), mid, sid: String(sid), site: siteName(String(sid)) || String(sid), name: mission.name || mission.app_name || row.app_name || '', drone: mission.drone_name || row.drone_name || '', droneType: mission.drone && mission.drone.robot_type_name, when: mission.when || row.when, group: mission.mission_group_id, appId: mission.app && mission.app.id,
+            shots: rows.length, missing, slice: m.slice ? [m.slice.minIdx, m.slice.maxIdx] : null, planSteps: m.plan.length, planSnaps: m.plan.filter(st => st.type_name === 'snapshot').length, flightSnaps: snapsInFlight.length, fixes: fixes.length, logSteps: m.insFixes.length, manualFlight,
+            rows,
+        };
+    }
+    async function fcCheckFlight(sid, row, isAborted) {
+        const cached = fcCache.flights[row.id];
         if (cached && cached.coreVer === FC_CORE_VER) return cached;
-        const [mission, images] = await Promise.all([fdGetJson(`/missions/${encodeURIComponent(mid)}/`, 40000), fcFetchImages(sid, mid)]);
-        const plan = (mission.app && Array.isArray(mission.app.instructions)) ? mission.app.instructions.slice().sort((a, b) => a.index_in_app - b.index_in_app) : [];
-        const res = fcScore(plan, images, cfg, { mid, sid: String(sid), site: siteName(String(sid)) || String(sid), name: mission.name || mission.app_name || row.app_name || '', drone: mission.drone_name || row.drone_name || '', droneType: mission.drone && mission.drone.robot_type_name, when: mission.when || row.when, group: mission.mission_group_id, appId: mission.app && mission.app.id });
-        fcCache.flights[mid] = res;
+        const res = await fcMeasureFlight(sid, row, isAborted);
+        fcCache.flights[row.id] = res;
         return res;
+    }
+    // ---- thresholds → flags, at render. `fcFlights()` = the current results scored against the current limits. ----
+    function fcFlagsOf(r, cfg) {
+        const flags = [];
+        if (r.manual) { return flags; }   // information (shown in the shot table), never a flag
+        if (r.look != null && !r.lookCapped && r.look > cfg.lookFt) flags.push('look-point ' + r.look.toFixed(0) + ' ft off');
+        if (r.retake) flags.push('re-take (' + (r.retake + 1) + ')');
+        if (r.hdg[2] != null && Math.abs(r.hdg[2]) > cfg.hdg) flags.push('heading ' + (r.hdg[2] > 0 ? '+' : '') + r.hdg[2].toFixed(0) + '°');
+        if (r.cam[2] != null && Math.abs(r.cam[2]) > cfg.cam) flags.push('camera ' + (r.cam[2] > 0 ? '+' : '') + r.cam[2].toFixed(0) + '°');
+        if (r.alt[2] != null && Math.abs(r.alt[2]) > cfg.altFt) flags.push('altitude ' + (r.alt[2] > 0 ? '+' : '') + r.alt[2].toFixed(0) + ' ft');
+        if (r.pos != null && r.pos > cfg.posFt) flags.push('off station ' + r.pos.toFixed(0) + ' ft ' + r.dir);
+        return flags;
+    }
+    let fcScoredMemo = { key: '', flights: [] };
+    function fcFlights() {
+        if (!fcResults) return [];
+        const cfg = fcCfg(); const key = fcResults.at + '|' + JSON.stringify(cfg);
+        if (fcScoredMemo.key === key) return fcScoredMemo.flights;
+        const mean = (arr) => { const v = arr.filter(x => x != null && isFinite(x)); return v.length ? v.reduce((x, y) => x + y, 0) / v.length : null; };
+        const flights = fcResults.flights.map(f => {
+            const rows = (f.rows || []).map(r => Object.assign({}, r, { flags: fcFlagsOf(r, cfg) }));
+            const matched = rows.filter(r => r.stepId != null);
+            return Object.assign({}, f, {
+                rows, flagged: rows.filter(r => r.flags.length).length, retakes: rows.filter(r => r.retake).length, unplanned: rows.filter(r => r.manual).length,
+                dHdg: mean(matched.map(r => Math.abs(r.hdg[2]))), dCam: mean(matched.map(r => Math.abs(r.cam[2]))), dAlt: mean(matched.map(r => r.alt[2])), dPos: mean(matched.map(r => r.pos)), dLook: mean(matched.filter(r => !r.lookCapped).map(r => r.look)),
+            });
+        });
+        fcScoredMemo = { key, flights };
+        return flights;
     }
     async function runFlightChecks() {
         if (fcRun) return;
@@ -2862,55 +2971,71 @@
             const work = async () => {
                 while (queue.length && !isAborted()) {
                     const f = queue.shift();
-                    try { const had = !!(fcCache.flights[f.row.id] && fcCache.flights[f.row.id].coreVer === FC_CORE_VER); const res = await fcCheckFlight(f.sid, f.row, cfg); if (had) cachedHits++; results.push(res); }
-                    catch (e) { fcRun.errors.push(`${f.row.id}: ${e.message}`); }
+                    try { const had = !!(fcCache.flights[f.row.id] && fcCache.flights[f.row.id].coreVer === FC_CORE_VER); const res = await fcCheckFlight(f.sid, f.row, isAborted); if (had) cachedHits++; results.push(res); }
+                    catch (e) { if (!String(e.message).includes('aborted')) fcRun.errors.push(`${f.row.id}: ${e.message}`); }
                     fcRun.done++; fcRun.msg = `checking flights · ${fcRun.done}/${fcRun.total}`;
-                    if (fcRun.done % 5 === 0) { fcSaveCache(); renderPanel(); }
+                    if (fcRun.done % 20 === 0) fcSaveCache();
+                    if (fcRun.done % 5 === 0) renderPanel();
                 }
             };
             for (let i = 0; i < 3; i++) workers.push(work());
             await Promise.all(workers);
-            fcSaveCache();
+            fcSaveCache(); fcDemSave();
             results.sort((a, b) => String(b.when || '').localeCompare(String(a.when || '')));
             fcResults = { at: Date.now(), sites, days: cfg.days, flights: results, cachedHits, aborted: isAborted(), errors: fcRun.errors };
-            setStatus(`Flight checks: ${results.length} flight(s) across ${sites.length} site(s), last ${cfg.days} d · ${cachedHits} from cache${fcRun.errors.length ? ` · ${fcRun.errors.length} error(s)` : ''}${isAborted() ? ' · aborted' : ''}`);
+            const sc = fcFlights(); const manual = sc.filter(f => f.manualFlight).length;
+            setStatus(`Flight checks: ${results.length} flight(s) across ${sites.length} site(s), last ${cfg.days} d · ${sc.filter(f => f.flagged).length} with flags · ${manual} manual · ${cachedHits} from cache${fcRun.errors.length ? ` · ${fcRun.errors.length} error(s)` : ''}${isAborted() ? ' · aborted' : ''}`);
         } catch (e) { console.error(`${TAG} flight checks failed`, e); setStatus('Flight checks failed: ' + e.message); }
         fcRun = null; renderPanel();
     }
     // ---- aggregation ----
     function fcAgg(keyFn, labelFn) {
         const g = {};
-        (fcResults ? fcResults.flights : []).forEach(f => {
-            const k = keyFn(f); if (!g[k]) g[k] = { key: k, label: labelFn(f), flights: 0, shots: 0, flagged: 0, retakes: 0, missing: 0, unplanned: 0, hdg: [], cam: [], alt: [], pos: [] };
-            const a = g[k]; a.flights++; a.shots += f.shots; a.flagged += f.flagged; a.retakes += f.retakes; a.missing += (f.missing || []).length; a.unplanned += f.unplanned || 0;
-            f.rows.forEach(r => { if (r.stepId == null) return; if (r.hdg[2] != null) a.hdg.push(Math.abs(r.hdg[2])); if (r.cam[2] != null) a.cam.push(Math.abs(r.cam[2])); if (r.alt[2] != null) a.alt.push(r.alt[2]); if (r.pos != null) a.pos.push(r.pos); });
+        fcFlights().forEach(f => {
+            const k = keyFn(f); if (!g[k]) g[k] = { key: k, label: labelFn(f), flights: 0, manualFlights: 0, shots: 0, planned: 0, flagged: 0, retakes: 0, missing: 0, unplanned: 0, hdg: [], cam: [], alt: [], pos: [], look: [] };
+            const a = g[k]; a.flights++; if (f.manualFlight) a.manualFlights++; a.shots += f.shots; a.planned += f.shots - (f.unplanned || 0); a.flagged += f.flagged; a.retakes += f.retakes; a.missing += (f.missing || []).length; a.unplanned += f.unplanned || 0;
+            f.rows.forEach(r => { if (r.stepId == null) return; if (r.hdg[2] != null) a.hdg.push(Math.abs(r.hdg[2])); if (r.cam[2] != null) a.cam.push(Math.abs(r.cam[2])); if (r.alt[2] != null) a.alt.push(r.alt[2]); if (r.pos != null) a.pos.push(r.pos); if (r.look != null && !r.lookCapped) a.look.push(r.look); });
         });
         const mean = (v) => v.length ? v.reduce((x, y) => x + y, 0) / v.length : null;
-        return Object.values(g).map(a => Object.assign(a, { dHdg: mean(a.hdg), dCam: mean(a.cam), dAlt: mean(a.alt), dPos: mean(a.pos), pct: a.shots ? (100 * (a.shots - a.flagged) / a.shots) : null })).sort((x, y) => (y.flagged / Math.max(1, y.shots)) - (x.flagged / Math.max(1, x.shots)));
+        // "within limits" is over PLANNED shots only — a manual / alert picture has no plan to be within.
+        return Object.values(g).map(a => Object.assign(a, { dHdg: mean(a.hdg), dCam: mean(a.cam), dAlt: mean(a.alt), dPos: mean(a.pos), dLook: mean(a.look), pct: a.planned ? (100 * (a.planned - a.flagged) / a.planned) : null })).sort((x, y) => (y.flagged / Math.max(1, y.planned)) - (x.flagged / Math.max(1, x.planned)));
+    }
+    // fleet-wide counters for the chips / summary header
+    function fcTotals(FL) {
+        const t = { flights: FL.length, manualFlights: 0, shots: 0, planned: 0, flagged: 0, retakes: 0, missing: 0, unplanned: 0 };
+        FL.forEach(f => { if (f.manualFlight) t.manualFlights++; t.shots += f.shots; t.planned += f.shots - (f.unplanned || 0); t.flagged += f.flagged; t.retakes += f.retakes; t.missing += (f.missing || []).length; t.unplanned += f.unplanned || 0; });
+        t.pct = t.planned ? Math.round(100 * (t.planned - t.flagged) / t.planned) : null;
+        return t;
     }
     // ---- one-page SUMMARY: only what matters, in words ----
     function fcMajorIssues() {
-        const cfg = fcCfg(); const F = fcResults ? fcResults.flights : [];
+        const cfg = fcCfg(); const F = fcFlights();
         const out = [];
         F.forEach(f => {
-            if (!f.shots) return;
+            if (!f.shots || f.manualFlight) return;
             const reasons = []; let sev = 0;
-            const share = f.flagged / f.shots;
+            const planned = Math.max(1, f.shots - (f.unplanned || 0));
+            const share = f.flagged / planned;
+            const look = f.rows.filter(r => r.flags.some(x => x.startsWith('look-point')));
+            if (look.length >= 2) { const mean = look.reduce((n, r) => n + r.look, 0) / look.length; reasons.push(`${look.length} shots looked ~${mean.toFixed(0)} ft from the planned spot (limit ${cfg.lookFt} ft)`); sev += 2.5 + share * 2; }
+            // a SINGLE shot more than twice over a limit is obvious on its own (S87 102 ft off the planned spot)
+            const severe = f.rows.filter(r => (r.look != null && !r.lookCapped && r.look > 2 * cfg.lookFt) || (r.pos != null && r.pos > 2 * cfg.posFt) || (r.alt[2] != null && Math.abs(r.alt[2]) > 2 * cfg.altFt) || (r.hdg[2] != null && Math.abs(r.hdg[2]) > 2 * cfg.hdg));
+            if (severe.length && severe.length < 2 + look.length) { reasons.push(severe.slice(0, 3).map(r => `${r.s} ${fcFlagWords(r)}`).join('; ') + (severe.length > 3 ? ` (+${severe.length - 3} more)` : '')); sev += 1.5 * Math.min(3, severe.length); }
             const off = f.rows.filter(r => r.flags.some(x => x.startsWith('off station')));
-            if (off.length >= Math.max(2, f.shots * 0.25)) { const dirs = {}; off.forEach(r => { dirs[r.dir] = (dirs[r.dir] || 0) + 1; }); const dir = Object.keys(dirs).sort((a, b) => dirs[b] - dirs[a])[0]; const mean = off.reduce((n, r) => n + r.pos, 0) / off.length; reasons.push(`${off.length} of ${f.shots} shots off station (~${mean.toFixed(0)} ft ${dir || ''}) — drone position, not the plan`); sev += 3 + share * 3; }
+            if (off.length >= Math.max(2, planned * 0.25)) { const dirs = {}; off.forEach(r => { dirs[r.dir] = (dirs[r.dir] || 0) + 1; }); const dir = Object.keys(dirs).sort((a, b) => dirs[b] - dirs[a])[0]; const mean = off.reduce((n, r) => n + r.pos, 0) / off.length; reasons.push(`${off.length} of ${f.shots} shots off station (~${mean.toFixed(0)} ft ${dir || ''}) — drone position, not the plan`); sev += 3 + share * 3; }
             const hdg = f.rows.filter(r => r.flags.some(x => x.startsWith('heading'))); if (hdg.length >= 2) { reasons.push(`${hdg.length} shots heading off by >${cfg.hdg}°`); sev += 2; }
             const cam = f.rows.filter(r => r.flags.some(x => x.startsWith('camera'))); if (cam.length >= 2) { reasons.push(`${cam.length} shots camera angle off by >${cfg.cam}°`); sev += 2; }
             const alt = f.rows.filter(r => r.flags.some(x => x.startsWith('altitude'))); if (alt.length >= 2) { const mean = alt.reduce((n, r) => n + r.alt[2], 0) / alt.length; reasons.push(`${alt.length} shots flown ${mean > 0 ? 'high' : 'low'} by ~${Math.abs(mean).toFixed(0)} ft`); sev += 2; }
             if ((f.missing || []).length >= 2) { reasons.push(`${f.missing.length} planned snapshots produced no picture (${f.missing.slice(0, 6).join(', ')}${f.missing.length > 6 ? '…' : ''})`); sev += 2 + Math.min(3, f.missing.length / 2); }
             if (f.retakes >= 2) { reasons.push(`${f.retakes} re-takes`); sev += 1.5; }
-            if ((f.unplanned || 0) >= 3) { reasons.push(`${f.unplanned} pictures match no planned snapshot (pilot / manual?)`); sev += 1; }
-            if (!reasons.length && share >= 0.5 && f.flagged >= 3) { reasons.push(`${f.flagged} of ${f.shots} shots outside limits`); sev += 2; }
+            if ((f.unplanned || 0) >= 3) { reasons.push(`${f.unplanned} pictures taken with no snapshot step executing (pilot / manual?)`); sev += 1; }
+            if (!reasons.length && share >= 0.5 && f.flagged >= 3) { reasons.push(`${f.flagged} of ${planned} planned shots outside limits`); sev += 2; }
             if (reasons.length) out.push({ f, sev, text: reasons.join(' · ') });
         });
         out.sort((a, b) => b.sev - a.sev);
         // drone bias: mean off-station or altitude bias across ≥ 2 flights
-        const drones = fcAgg(f => f.drone || '?', f => f.drone || '?').filter(a => a.flights >= 2 && ((a.dPos != null && a.dPos > cfg.posFt) || (a.dAlt != null && Math.abs(a.dAlt) > cfg.altFt) || a.pct < 75)).map(a => ({ label: a.label, text: [a.dPos != null && a.dPos > cfg.posFt ? `mean off-station ${a.dPos.toFixed(0)} ft across ${a.flights} flights — position / RTK?` : null, a.dAlt != null && Math.abs(a.dAlt) > cfg.altFt ? `flies ${a.dAlt > 0 ? 'high' : 'low'} by ~${Math.abs(a.dAlt).toFixed(0)} ft on average — altitude source?` : null, a.pct < 75 ? `only ${a.pct.toFixed(0)}% of shots within limits` : null].filter(Boolean).join(' · ') }));
-        const missions = fcAgg(f => f.sid + '|' + f.name, f => f.name).filter(a => a.flights >= 2 && a.pct < 75).map(a => { const dr = new Set(F.filter(f => f.sid + '|' + f.name === a.key).map(f => f.drone)); return { label: a.label, text: `${a.pct.toFixed(0)}% within limits over ${a.flights} flights${dr.size > 1 ? ' on ' + dr.size + ' drones — plan problem, not a drone' : ''}` }; });
+        const drones = fcAgg(f => f.drone || '?', f => f.drone || '?').filter(a => a.flights - a.manualFlights >= 2 && ((a.dPos != null && a.dPos > cfg.posFt) || (a.dAlt != null && Math.abs(a.dAlt) > cfg.altFt) || (a.dLook != null && a.dLook > cfg.lookFt) || (a.pct != null && a.pct < 75))).map(a => ({ label: a.label, text: [a.dPos != null && a.dPos > cfg.posFt ? `mean off-station ${a.dPos.toFixed(0)} ft across ${a.flights} flights — position / RTK?` : null, a.dAlt != null && Math.abs(a.dAlt) > cfg.altFt ? `flies ${a.dAlt > 0 ? 'high' : 'low'} by ~${Math.abs(a.dAlt).toFixed(0)} ft on average — altitude source?` : null, a.dLook != null && a.dLook > cfg.lookFt ? `looks ~${a.dLook.toFixed(0)} ft from the planned spot on average — gimbal / heading / altitude?` : null, a.pct != null && a.pct < 75 ? `only ${a.pct.toFixed(0)}% of shots within limits` : null].filter(Boolean).join(' · ') }));
+        const missions = fcAgg(f => f.sid + '|' + f.name, f => f.name).filter(a => a.flights - a.manualFlights >= 2 && a.pct != null && a.pct < 75).map(a => { const dr = new Set(F.filter(f => f.sid + '|' + f.name === a.key).map(f => f.drone)); return { label: a.label, text: `${a.pct.toFixed(0)}% within limits over ${a.flights} flights${dr.size > 1 ? ' on ' + dr.size + ' drones — plan problem, not a drone' : ''}` }; });
         return { flights: out, drones, missions };
     }
     function fcFlagWords(r) {
@@ -2919,15 +3044,15 @@
             if (f.startsWith('heading')) return 'heading ' + f.replace('heading ', '') + ' off';
             if (f.startsWith('camera')) return 'camera ' + f.replace('camera ', '') + ' off';
             if (f.startsWith('altitude')) return 'flew ' + f.replace('altitude ', '');
-            if (f === 're-take') return 're-take';
-            if (f.startsWith('unplanned')) return 'no planned snapshot matches';
+            if (f.startsWith('look-point')) return 'looked ' + f.replace('look-point ', '').replace(' off', '') + ' from the planned spot';
             return f;
         }).join(' · ');
     }
     function fcFlagRows() {
-        const F = fcResults ? fcResults.flights : []; const rows = [];
+        const F = fcFlights(); const rows = [];
         F.forEach(f => {
             const day = f.when ? new Date(f.when).toLocaleDateString() : '';
+            if (f.manualFlight) return;
             f.rows.forEach(r => { if (!r.flags.length) return; rows.push({ f, r, cells: [f.mid, f.name, f.drone, day, r.s + (r.idx != null ? ' (#' + r.idx + ')' : ''), r.asset || '', fcFlagWords(r), fcPlaybackUrl(f)] }); });
             (f.missing || []).forEach(sn => rows.push({ f, r: null, cells: [f.mid, f.name, f.drone, day, sn, '', 'planned snapshot — no picture taken', fcPlaybackUrl(f)] }));
         });
@@ -2935,10 +3060,10 @@
     }
     function fcSummaryRows() {
         const R = fcResults; if (!R) return { cols: [], rows: [], bold: [] };
-        const cfg = fcCfg(); const shots = R.flights.reduce((n, f) => n + f.shots, 0), flagged = R.flights.reduce((n, f) => n + f.flagged, 0);
+        const cfg = fcCfg(); const T = fcTotals(fcFlights());
         const fr = fcFlagRows();
         const rows = [], bold = [];
-        rows.push([`${R.flights.length} flights · ${shots} shots · ${shots ? Math.round(100 * (shots - flagged) / shots) : 0}% within limits · ${flagged} flagged · ${R.flights.reduce((n, f) => n + f.retakes, 0)} re-takes · ${R.flights.reduce((n, f) => n + (f.missing || []).length, 0)} no picture`, R.sites.map(id => siteName(String(id)) || id).join(', '), `last ${cfg.days} days`, new Date(R.at).toLocaleString(), '', '', `limits: heading ${cfg.hdg}° · camera ${cfg.cam}° · altitude ${cfg.altFt} ft · off-station ${cfg.posFt} ft`, '']); bold.push(true);
+        rows.push([`${T.flights} flights (${T.manualFlights} manual) · ${T.planned} planned shots · ${T.pct == null ? '–' : T.pct + '%'} within limits · ${T.flagged} flagged · ${T.retakes} re-takes · ${T.missing} no picture · ${T.unplanned} manual shots`, R.sites.map(id => siteName(String(id)) || id).join(', '), `last ${cfg.days} days`, new Date(R.at).toLocaleString(), '', '', `limits: heading ${cfg.hdg}° · camera ${cfg.cam}° · altitude ${cfg.altFt} ft · off-station ${cfg.posFt} ft · look-point ${cfg.lookFt} ft`, '']); bold.push(true);
         rows.push(['flight', 'mission', 'drone', 'date', 'shot', 'asset', 'issue', 'playback']); bold.push(true);
         fr.forEach(x => { rows.push(x.cells); bold.push(false); });
         if (!fr.length) { rows.push(['', '', '', '', '', '', 'no flagged shots', '']); bold.push(false); }
@@ -2946,14 +3071,14 @@
     }
     function fcSummaryRowsNarrative() {
         const R = fcResults; if (!R) return { cols: [], rows: [], bold: [] };
-        const cfg = fcCfg(); const shots = R.flights.reduce((n, f) => n + f.shots, 0), flagged = R.flights.reduce((n, f) => n + f.flagged, 0);
+        const cfg = fcCfg(); const T = fcTotals(fcFlights());
         const S = fcMajorIssues();
         const rows = [], bold = [];
         const push = (r, b) => { rows.push(r); bold.push(!!b); };
         push(['Flight check summary', R.sites.map(id => siteName(String(id)) || id).join(', '), 'last ' + cfg.days + ' days', new Date(R.at).toLocaleString()], true);
-        push(['flights', R.flights.length, 'shots', shots]); push(['within limits', shots ? Math.round(100 * (shots - flagged) / shots) + '%' : '', 'flagged shots', flagged]);
-        push(['re-takes', R.flights.reduce((n, f) => n + f.retakes, 0), 'no picture', R.flights.reduce((n, f) => n + (f.missing || []).length, 0)]);
-        push(['thresholds', `heading ${cfg.hdg}° · camera ${cfg.cam}° · altitude ${cfg.altFt} ft · off-station ${cfg.posFt} ft`, '', '']);
+        push(['flights', T.flights + (T.manualFlights ? ` (${T.manualFlights} manual / alert — not scored)` : ''), 'planned shots', T.planned]); push(['within limits', T.pct == null ? '' : T.pct + '%', 'flagged shots', T.flagged]);
+        push(['re-takes', T.retakes, 'no picture', T.missing]); push(['manual shots (no snapshot step executing)', T.unplanned, '', '']);
+        push(['thresholds', `heading ${cfg.hdg}° · camera ${cfg.cam}° · altitude ${cfg.altFt} ft · off-station ${cfg.posFt} ft · look-point ${cfg.lookFt} ft`, '', '']);
         push(['', '', '', '']);
         push(['MAJOR ISSUES — flights', '', '', ''], true);
         push(['flight · mission', 'drone · when', 'what is wrong', 'playback'], true);
@@ -2972,6 +3097,8 @@
         if (!fr.length) h += '<tr><td colspan="7" style="padding:6px;color:#5fff5f">no flagged shots</td></tr>';
         fr.forEach(x => { h += `<tr class="aim-ft-row"><td style="padding:2px 6px;border-bottom:1px solid #1e2430;white-space:nowrap"><a href="${fcPlaybackUrl(x.f)}" target="_blank" rel="noopener" style="color:#7adfe6">${esc(String(x.f.mid))}</a></td>${cell(x.cells[1], 'white-space:nowrap')}${cell(x.cells[2], 'white-space:nowrap')}${cell(x.cells[3], 'white-space:nowrap')}${cell(x.cells[4], 'white-space:nowrap')}${cell(x.cells[5], 'white-space:nowrap')}${cell(x.cells[6], 'color:' + (x.r ? '#ffb347' : '#ff7a7a'))}</tr>`; });
         h += '</table></div>';
+        const manual = fcFlights().filter(f => f.manualFlight);
+        if (manual.length) h += `<div style="padding:4px 10px;color:#666;border-top:1px solid #222834">${manual.length} manual / alert flight(s) had no planned snapshot in their flown slice and were not scored: ${manual.slice(0, 8).map(f => `<a href="${fcPlaybackUrl(f)}" target="_blank" rel="noopener" style="color:#7adfe6">${esc(String(f.mid))}</a> ${esc(f.name)}`).join(' · ')}${manual.length > 8 ? ' …' : ''}</div>`;
         const S = fcMajorIssues();
         if (S.drones.length || S.missions.length) {
             h += '<div style="padding:6px 10px;border-top:1px solid #222834">';
@@ -2996,13 +3123,17 @@
     const fcS = (v, d, unit) => v == null || !isFinite(v) ? '–' : ((v > 0 ? '+' : '') + (+v).toFixed(d == null ? 0 : d) + (unit || ''));
     const fcColor = (v, thr) => v == null || !isFinite(v) ? '#888' : (Math.abs(v) > 2 * thr ? '#ff5f5f' : Math.abs(v) > thr ? '#ffb347' : '#5fff5f');
     function fcPlaybackUrl(f) { return `${location.origin}/#/site/${f.sid}/control-panel/past-mission/${f.mid}`; }
+    const fcWhen = (iso) => iso ? new Date(iso).toLocaleString() : '';
+    const fcShotStatus = (r) => r.manual ? `manual — no snapshot step executing${r.stepType ? ' (' + r.stepType + ')' : ''}` : (r.flags.join('; ') || 'ok');
     function fcTable() {
         const cfg = fcCfg();
-        if (fcTab === 'drones') return { cols: ['drone', 'flights', 'shots', 'within limits', 'flagged', 're-takes', 'no picture', 'unplanned', 'mean |Δhdg|', 'mean |Δcam|', 'mean Δalt (bias)', 'mean off-station'], rows: fcAgg(f => f.drone || '?', f => (f.drone || '?') + (f.droneType ? ' (' + f.droneType + ')' : '')).map(a => [a.label, a.flights, a.shots, fcN(a.pct, 0, '%'), a.flagged, a.retakes, a.missing, a.unplanned, fcN(a.dHdg, 1, '°'), fcN(a.dCam, 1, '°'), fcS(a.dAlt, 0, ' ft'), fcN(a.dPos, 0, ' ft')]) };
-        if (fcTab === 'missions') return { cols: ['mission', 'site', 'flights', 'shots', 'within limits', 'flagged', 're-takes', 'no picture', 'unplanned', 'mean |Δhdg|', 'mean |Δcam|', 'mean Δalt', 'mean off-station'], rows: fcAgg(f => f.sid + '|' + f.name, f => f.name).map(a => { const f0 = fcResults.flights.find(f => f.sid + '|' + f.name === a.key); return [a.label, f0 ? f0.site : '', a.flights, a.shots, fcN(a.pct, 0, '%'), a.flagged, a.retakes, a.missing, a.unplanned, fcN(a.dHdg, 1, '°'), fcN(a.dCam, 1, '°'), fcS(a.dAlt, 0, ' ft'), fcN(a.dPos, 0, ' ft')]; }) };
-        if (fcTab === 'sites') return { cols: ['site', 'flights', 'shots', 'within limits', 'flagged', 're-takes', 'no picture', 'unplanned', 'mean |Δhdg|', 'mean |Δcam|', 'mean Δalt', 'mean off-station'], rows: fcAgg(f => f.sid, f => f.site).map(a => [a.label, a.flights, a.shots, fcN(a.pct, 0, '%'), a.flagged, a.retakes, a.missing, a.unplanned, fcN(a.dHdg, 1, '°'), fcN(a.dCam, 1, '°'), fcS(a.dAlt, 0, ' ft'), fcN(a.dPos, 0, ' ft')]) };
-        const fl = (fcResults ? fcResults.flights : []).slice().sort((a, b) => fcSortKey === 'when' ? String(b.when || '').localeCompare(String(a.when || '')) : (b.flagged / Math.max(1, b.shots)) - (a.flagged / Math.max(1, a.shots)) || b.flagged - a.flagged);
-        return { cols: ['flight', 'mission', 'site', 'drone', 'when', 'shots', 'flagged', 're-takes', 'no picture', 'unplanned', 'mean |Δhdg|', 'mean |Δcam|', 'mean Δalt', 'mean off-station', 'playback'], rows: fl.map(f => [f.mid, f.name, f.site, f.drone, f.when ? new Date(f.when).toLocaleString() : '', f.shots, f.flagged, f.retakes, (f.missing || []).length, f.unplanned || 0, fcN(f.dHdg, 1, '°'), fcN(f.dCam, 1, '°'), fcS(f.dAlt, 0, ' ft'), fcN(f.dPos, 0, ' ft'), fcPlaybackUrl(f)]), flights: fl };
+        const aggCols = ['flights', 'manual flights', 'shots', 'within limits', 'flagged', 're-takes', 'no picture', 'manual shots', 'mean |Δhdg|', 'mean |Δcam|', 'mean Δalt (bias)', 'mean off-station', 'mean look gap'];
+        const aggCells = (a) => [a.flights, a.manualFlights, a.shots, fcN(a.pct, 0, '%'), a.flagged, a.retakes, a.missing, a.unplanned, fcN(a.dHdg, 1, '°'), fcN(a.dCam, 1, '°'), fcS(a.dAlt, 0, ' ft'), fcN(a.dPos, 0, ' ft'), fcN(a.dLook, 0, ' ft')];
+        if (fcTab === 'drones') return { cols: ['drone'].concat(aggCols), rows: fcAgg(f => f.drone || '?', f => (f.drone || '?') + (f.droneType ? ' (' + f.droneType + ')' : '')).map(a => [a.label].concat(aggCells(a))) };
+        if (fcTab === 'missions') return { cols: ['mission', 'site'].concat(aggCols), rows: fcAgg(f => f.sid + '|' + f.name, f => f.name).map(a => { const f0 = fcFlights().find(f => f.sid + '|' + f.name === a.key); return [a.label, f0 ? f0.site : ''].concat(aggCells(a)); }) };
+        if (fcTab === 'sites') return { cols: ['site'].concat(aggCols), rows: fcAgg(f => f.sid, f => f.site).map(a => [a.label].concat(aggCells(a))) };
+        const fl = fcFlights().slice().sort((a, b) => fcSortKey === 'when' ? String(b.when || '').localeCompare(String(a.when || '')) : (b.flagged / Math.max(1, b.shots - (b.unplanned || 0))) - (a.flagged / Math.max(1, a.shots - (a.unplanned || 0))) || b.flagged - a.flagged);
+        return { cols: ['flight', 'mission', 'site', 'drone', 'when', 'shots', 'flagged', 're-takes', 'no picture', 'manual shots', 'mean |Δhdg|', 'mean |Δcam|', 'mean Δalt', 'mean off-station', 'mean look gap', 'playback'], rows: fl.map(f => [f.mid, f.name, f.site, f.drone, f.when ? new Date(f.when).toLocaleString() : '', f.shots, f.manualFlight ? 'manual' : f.flagged, f.retakes, (f.missing || []).length, f.unplanned || 0, fcN(f.dHdg, 1, '°'), fcN(f.dCam, 1, '°'), fcS(f.dAlt, 0, ' ft'), fcN(f.dPos, 0, ' ft'), fcN(f.dLook, 0, ' ft'), fcPlaybackUrl(f)]), flights: fl };
     }
     // Copy for Google Sheets / Excel: an HTML table (pastes into cells, header kept) + a tab-separated plain-text fallback.
     function fcCopySheets(cols, rows, label) {
@@ -3039,26 +3170,26 @@
             // aggregate views: same columns, numbers as numbers
             const t = fcTable();
             const rows = t.rows.map(r => r.map(v => { const m = typeof v === 'string' && v.match(/^([+-]?\d+(?:\.\d+)?)\s*(%|°|ft)?$/); return m ? +m[1] : (v === '–' ? '' : v); }));
-            const cols = t.cols.map(c => c.replace(/mean \|Δhdg\|/, 'mean |Δ heading| (°)').replace(/mean \|Δcam\|/, 'mean |Δ camera| (°)').replace(/mean Δalt( \(bias\))?/, 'mean Δ alt (ft, signed)').replace(/mean off-station/, 'mean off-station (ft)').replace(/within limits/, 'within limits (%)'));
+            const cols = t.cols.map(c => c.replace(/mean \|Δhdg\|/, 'mean |Δ heading| (°)').replace(/mean \|Δcam\|/, 'mean |Δ camera| (°)').replace(/mean Δalt( \(bias\))?/, 'mean Δ alt (ft, signed)').replace(/mean off-station/, 'mean off-station (ft)').replace(/mean look gap/, 'mean look-point gap (ft)').replace(/within limits/, 'within limits (%)'));
             fcCopySheets2(cols, rows, 'flight-check by ' + fcTab.replace(/s$/, ''));
             return;
         }
         // flights view: a bold FLIGHT row (counts + means) followed by its shots, flight columns repeated on every row.
-        const cols = ['row', 'flight', 'mission', 'site', 'drone', 'when', 'shot', 'step', 'shutter', 'kinds', 'asset', 'planned heading (°)', 'actual heading (°)', 'Δ heading (°)', 'planned camera (°)', 'actual camera (°)', 'Δ camera (°)', 'planned alt (ft)', 'actual alt (ft)', 'Δ alt (ft)', 'drone vs nav (ft)', 'direction', 'flags', 'playback'];
+        const cols = ['row', 'flight', 'mission', 'site', 'drone', 'when', 'shot', 'step', 'shutter', 'kinds', 'asset', 'planned heading (°)', 'actual heading (°)', 'Δ heading (°)', 'planned camera (°)', 'actual camera (°)', 'Δ camera (°)', 'planned alt (ft)', 'actual alt (ft)', 'Δ alt (ft)', 'drone vs nav (ft)', 'direction', 'look-point gap (ft)', 'flags', 'playback'];
         const rows = [], bold = [];
         const t = fcTable();
         t.flights.forEach(f => {
-            rows.push(['FLIGHT', f.mid, f.name, f.site, f.drone, f.when ? new Date(f.when).toLocaleString() : '', f.shots + ' shots', f.flagged + ' flagged', f.retakes + ' re-takes', (f.missing || []).length + ' no picture', (f.unplanned || 0) + ' unplanned', '', '', fcNum(f.dHdg, 1), '', '', fcNum(f.dCam, 1), '', '', fcNum(f.dAlt, 0), fcNum(f.dPos, 0), 'means →', (f.missing && f.missing.length) ? 'no picture: ' + f.missing.join(', ') : '', fcPlaybackUrl(f)]);
+            rows.push(['FLIGHT', f.mid, f.name, f.site, f.drone, f.when ? new Date(f.when).toLocaleString() : '', f.shots + ' shots', f.manualFlight ? 'manual / alert flight' : f.flagged + ' flagged', f.retakes + ' re-takes', (f.missing || []).length + ' no picture', (f.unplanned || 0) + ' manual shots', '', '', fcNum(f.dHdg, 1), '', '', fcNum(f.dCam, 1), '', '', fcNum(f.dAlt, 0), fcNum(f.dPos, 0), 'means →', fcNum(f.dLook, 0), (f.missing && f.missing.length) ? 'no picture: ' + f.missing.join(', ') : '', fcPlaybackUrl(f)]);
             bold.push(true);
-            f.rows.forEach(r => { rows.push(['shot', f.mid, f.name, f.site, f.drone, f.when ? new Date(f.when).toLocaleString() : '', r.s, r.idx != null ? r.idx : '', new Date(r.t).toLocaleString(), r.kinds, r.asset || '', fcNum(r.hdg[0]), fcNum(r.hdg[1]), fcNum(r.hdg[2]), fcNum(r.cam[0]), fcNum(r.cam[1]), fcNum(r.cam[2]), fcNum(r.alt[0]), fcNum(r.alt[1]), fcNum(r.alt[2]), fcNum(r.pos), r.dir || '', r.flags.join('; ') || 'ok', fcPlaybackUrl(f)]); bold.push(false); });
+            f.rows.forEach(r => { rows.push(['shot', f.mid, f.name, f.site, f.drone, f.when ? new Date(f.when).toLocaleString() : '', r.s, r.idx != null ? r.idx : '', fcWhen(r.t), r.kinds, r.asset || '', fcNum(r.hdg[0]), fcNum(r.hdg[1]), fcNum(r.hdg[2]), fcNum(r.cam[0]), fcNum(r.cam[1]), fcNum(r.cam[2]), fcNum(r.alt[0]), fcNum(r.alt[1]), fcNum(r.alt[2]), fcNum(r.pos), r.dir || '', r.lookCapped ? '' : fcNum(r.look, 0), fcShotStatus(r), fcPlaybackUrl(f)]); bold.push(false); });
         });
         fcCopySheets2(cols, rows, 'flights + shots (' + t.flights.length + ' flights, ' + (rows.length - t.flights.length) + ' shots)', bold);
     }
     function fcCopyAllShots() {
-        const cols = ['flight', 'mission', 'site', 'drone', 'when', 'shot', 'step', 'shutter', 'kinds', 'asset', 'planned heading', 'actual heading', 'Δ heading', 'planned camera', 'actual camera', 'Δ camera', 'planned alt ft', 'actual alt ft', 'Δ alt ft', 'drone vs nav ft', 'direction', 'flags', 'image', 'playback'];
+        const cols = ['flight', 'mission', 'site', 'drone', 'when', 'shot', 'step', 'shutter', 'kinds', 'asset', 'planned heading', 'actual heading', 'Δ heading', 'planned camera', 'actual camera', 'Δ camera', 'planned alt ft', 'actual alt ft', 'Δ alt ft', 'drone vs nav ft', 'direction', 'look-point gap ft', 'flags', 'image', 'playback'];
         const n = fcNum;
         const rows = [];
-        (fcResults ? fcResults.flights : []).forEach(f => f.rows.forEach(r => rows.push([f.mid, f.name, f.site, f.drone, f.when ? new Date(f.when).toLocaleString() : '', r.s, r.idx != null ? r.idx : '', new Date(r.t).toLocaleString(), r.kinds, r.asset || '', n(r.hdg[0]), n(r.hdg[1]), n(r.hdg[2]), n(r.cam[0]), n(r.cam[1]), n(r.cam[2]), n(r.alt[0]), n(r.alt[1]), n(r.alt[2]), n(r.pos), r.dir || '', r.flags.join('; ') || 'ok', r.name || '', fcPlaybackUrl(f)])));
+        fcFlights().forEach(f => f.rows.forEach(r => rows.push([f.mid, f.name, f.site, f.drone, f.when ? new Date(f.when).toLocaleString() : '', r.s, r.idx != null ? r.idx : '', fcWhen(r.t), r.kinds, r.asset || '', n(r.hdg[0]), n(r.hdg[1]), n(r.hdg[2]), n(r.cam[0]), n(r.cam[1]), n(r.cam[2]), n(r.alt[0]), n(r.alt[1]), n(r.alt[2]), n(r.pos), r.dir || '', r.lookCapped ? '' : n(r.look, 0), fcShotStatus(r), r.name || '', fcPlaybackUrl(f)])));
         fcCopySheets2(cols, rows, 'all shots flat (' + rows.length + ' rows)');
     }
     function fcJira() { if (fcTab === 'summary') { const t = fcSummaryRows(); return t.rows.map((r, i) => (t.bold[i] ? '*' : '') + r.filter(x => x !== '').join(' · ') + (t.bold[i] ? '*' : '')).join('\n'); } const t = fcTable(); return ['||' + t.cols.join('||') + '||'].concat(t.rows.map(r => '|' + r.map(x => String(x == null ? '' : x).replace(/\|/g, '/')).join('|') + '|')).join('\n'); }
@@ -3068,18 +3199,18 @@
         const inp = (k, label, unit, w) => `<label style="margin-right:10px;color:#aaa">${label} <input type="number" data-fc-thr="${k}" value="${cfg[k]}" min="0" step="1" style="width:${w || 52}px;background:#0f1216;color:#ddd;border:1px solid #444;border-radius:3px;padding:1px 4px;font:inherit"> ${unit}</label>`;
         let h = '<div style="padding:8px 10px;border-bottom:1px solid #222834">'
             + `<div style="color:#888;margin-bottom:6px">Scope = the sites picked in 📦 Fleet Data (<b style="color:#ddd">${fdSelected.size}</b> picked) · flights with pictures in the last ${inp('days', '', 'days', 44)}</div>`
-            + '<div style="margin-bottom:6px">Flag a shot when: ' + inp('hdg', 'heading >', '°') + inp('cam', 'camera >', '°') + inp('altFt', 'altitude >', 'ft') + inp('posFt', 'off-station >', 'ft') + '</div>'
-            + '<div style="color:#666;margin-bottom:6px">pictures are aligned to the plan\'s snapshot sequence by heading + camera angle; a match needs a pose fit within ' + inp('gateDeg', '', '° (heading + camera, plus ≤3 for position)', 44) + ' — position is measured, never assumed</div>'
+            + '<div style="margin-bottom:6px">Flag a shot when: ' + inp('hdg', 'heading >', '°') + inp('cam', 'camera >', '°') + inp('altFt', 'altitude >', 'ft') + inp('posFt', 'off-station >', 'ft') + inp('lookFt', 'look-point >', 'ft') + '</div>'
+            + '<div style="color:#666;margin-bottom:6px">same engine as the playback page\'s flight check: each picture is joined to the plan step that was executing in the flown log (pose override when the log is sparse); look-point = where the camera ray meets the terrain, planned vs actual. Limits apply instantly — cached flights are re-scored without a re-fetch.</div>'
             + (fcRun
                 ? `<span style="color:#7adfe6">${fcRun.msg}</span> <span data-ft="fc-abort" style="cursor:pointer;color:#ff7a7a;margin-left:10px">✕ abort</span>${fcRun.total ? `<div style="height:5px;background:#222834;border-radius:3px;margin-top:6px"><div style="height:5px;width:${Math.round(100 * fcRun.done / Math.max(1, fcRun.total))}%;background:#7adfe6;border-radius:3px"></div></div>` : ''}`
                 : `<span data-ft="fc-run" style="cursor:pointer;color:#7adfe6;border:1px solid #2a3140;padding:2px 8px;border-radius:3px">▶ Check flights</span>`
                   + ` <span data-ft="fc-clear" style="cursor:pointer;color:#888;margin-left:10px" title="forget cached per-flight results (${Object.keys(fcCache.flights).length})">🗑 clear cache (${Object.keys(fcCache.flights).length})</span>`)
             + '</div>';
-        if (!fcResults) return h + '<div style="padding:8px 10px;color:#666">No run yet. Pick sites in Fleet Data, set the window, then ▶ Check flights. A flown flight never changes, so each flight is scored once and cached; later runs only fetch new flights.</div>';
-        const R = fcResults; const shots = R.flights.reduce((n, f) => n + f.shots, 0), flagged = R.flights.reduce((n, f) => n + f.flagged, 0);
+        if (!fcResults) return h + '<div style="padding:8px 10px;color:#666">No run yet. Pick sites in Fleet Data, set the window, then ▶ Check flights. A flown flight never changes, so each flight is measured once (mission record + pictures + flown log + terrain) and cached; later runs only fetch new flights.</div>';
+        const R = fcResults; const T = fcTotals(fcFlights());
         const chip = (v, l, c) => `<span style="display:inline-block;margin:0 6px 6px 0;padding:3px 9px;border:1px solid ${c || '#2a3140'};border-radius:5px"><b style="color:${c || '#ddd'};font-size:14px">${v}</b> <span style="color:#888">${l}</span></span>`;
         h += '<div style="padding:8px 10px;border-bottom:1px solid #222834">'
-            + chip(R.flights.length, 'flights', '#7adfe6') + chip(shots, 'shots') + chip(shots ? Math.round(100 * (shots - flagged) / shots) + '%' : '–', 'within limits', flagged ? '#ffb347' : '#5fff5f') + chip(flagged, 'flagged', flagged ? '#ffb347' : null) + chip(R.flights.reduce((n, f) => n + f.retakes, 0), 're-takes') + chip(R.flights.reduce((n, f) => n + (f.missing || []).length, 0), 'no picture') + chip(R.flights.reduce((n, f) => n + (f.unplanned || 0), 0), 'unplanned')
+            + chip(T.flights - T.manualFlights, 'planned flights', '#7adfe6') + chip(T.manualFlights, 'manual / alert') + chip(T.planned, 'planned shots') + chip(T.pct == null ? '–' : T.pct + '%', 'within limits', T.flagged ? '#ffb347' : '#5fff5f') + chip(T.flagged, 'flagged', T.flagged ? '#ffb347' : null) + chip(T.retakes, 're-takes') + chip(T.missing, 'no picture') + chip(T.unplanned, 'manual shots')
             + (R.errors && R.errors.length ? `<div style="color:#ff7a7a">${R.errors.length} error(s): ${R.errors.slice(0, 3).map(escapeHtml).join(' · ')}${R.errors.length > 3 ? ' …' : ''}</div>` : '')
             + '<div style="margin-top:4px">' + ['summary', 'flights', 'drones', 'missions', 'sites'].map(t => `<span data-ft="fc-tab-${t}" style="cursor:pointer;margin-right:12px;${fcTab === t ? 'color:#7adfe6;font-weight:bold;border-bottom:1px solid #7adfe6' : 'color:#888'}">${t === 'summary' ? 'flags' : 'by ' + t.replace(/s$/, '')}</span>`).join('')
             + `<span data-ft="fc-csv" style="cursor:pointer;color:#888;margin-left:14px" title="pastes into cells: on the flights view = a bold row per flight followed by its shots">📋 copy for Sheets${fcTab === 'flights' ? ' (flights + shots)' : fcTab === 'summary' ? ' (flagged shots)' : ''}</span> <span data-ft="fc-shots" style="cursor:pointer;color:#888;margin-left:10px" title="every shot of every flight, one row each, no flight rows — for pivots">📋 shots only (flat)</span> <span data-ft="fc-jira" style="cursor:pointer;color:#888;margin-left:10px">📋 JIRA table</span>`
@@ -3091,11 +3222,11 @@
         if (fcTab === 'flights') {
             t.flights.forEach((f, i) => {
                 const r = t.rows[i]; const open = fcOpenFlight === f.mid;
-                h += `<tr class="aim-ft-row" data-fc-flight="${f.mid}" style="cursor:pointer;${f.flagged ? 'background:rgba(255,179,71,.05)' : ''}">` + cell((open ? '▾ ' : '▸ ') + f.mid) + cell(r[1]) + cell(r[2]) + cell(r[3]) + cell(r[4]) + cell(r[5]) + `<td style="padding:2px 6px;color:${f.flagged ? '#ffb347' : '#5fff5f'}">${f.flagged}</td>` + cell(r[7]) + cell(r[8]) + cell(r[9]) + `<td style="padding:2px 6px;color:${fcColor(f.dHdg, cfgT.hdg)}">${r[10]}</td><td style="padding:2px 6px;color:${fcColor(f.dCam, cfgT.cam)}">${r[11]}</td><td style="padding:2px 6px;color:${fcColor(f.dAlt, cfgT.altFt)}">${r[12]}</td><td style="padding:2px 6px;color:${fcColor(f.dPos, cfgT.posFt)}">${r[13]}</td></tr>`;
+                h += `<tr class="aim-ft-row" data-fc-flight="${f.mid}" style="cursor:pointer;${f.flagged ? 'background:rgba(255,179,71,.05)' : ''}${f.manualFlight ? 'color:#777' : ''}">` + cell((open ? '▾ ' : '▸ ') + f.mid) + cell(r[1]) + cell(r[2]) + cell(r[3]) + cell(r[4]) + cell(r[5]) + `<td style="padding:2px 6px;color:${f.manualFlight ? '#777' : f.flagged ? '#ffb347' : '#5fff5f'}">${r[6]}</td>` + cell(r[7]) + cell(r[8]) + cell(r[9]) + `<td style="padding:2px 6px;color:${fcColor(f.dHdg, cfgT.hdg)}">${r[10]}</td><td style="padding:2px 6px;color:${fcColor(f.dCam, cfgT.cam)}">${r[11]}</td><td style="padding:2px 6px;color:${fcColor(f.dAlt, cfgT.altFt)}">${r[12]}</td><td style="padding:2px 6px;color:${fcColor(f.dPos, cfgT.posFt)}">${r[13]}</td><td style="padding:2px 6px;color:${fcColor(f.dLook, cfgT.lookFt)}">${r[14]}</td></tr>`;
                 if (open) {
-                    h += `<tr><td colspan="14" style="padding:4px 6px 8px 22px;background:#101419"><div style="margin-bottom:4px"><a href="${fcPlaybackUrl(f)}" target="_blank" rel="noopener" style="color:#7adfe6">🎞 open playback ↗</a> <span style="color:#666">· whole mission ${f.planSteps} steps / ${f.planSnaps} snapshots${f.slice ? ` · this flight steps ${f.slice[0]}–${f.slice[1]} (${f.flightSnaps || '?'} snapshots)` : ''}${f.missing && f.missing.length ? ` · <span style="color:#ff7a7a">no picture: ${f.missing.join(', ')}</span>` : ''}</span></div>`
-                        + '<table style="border-collapse:collapse;font:11px/1.4 monospace"><tr style="color:#888"><th style="text-align:left;padding:1px 6px">shot</th><th style="text-align:left;padding:1px 6px">step</th><th style="text-align:left;padding:1px 6px">shutter</th><th style="text-align:left;padding:1px 6px">heading p/a/Δ</th><th style="text-align:left;padding:1px 6px">camera p/a/Δ</th><th style="text-align:left;padding:1px 6px">alt ft p/a/Δ</th><th style="text-align:left;padding:1px 6px">drone vs nav</th><th style="text-align:left;padding:1px 6px">asset</th><th style="text-align:left;padding:1px 6px">flags</th></tr>'
-                        + f.rows.map(r => `<tr>${cell(r.s)}${cell(r.idx != null ? '#' + r.idx : '')}${cell(new Date(r.t).toLocaleTimeString())}${cell(fcN(r.hdg[0]) + '° / ' + fcN(r.hdg[1]) + '° / ' + fcS(r.hdg[2], 0, '°'))}${cell(fcN(r.cam[0]) + '° / ' + fcN(r.cam[1]) + '° / ' + fcS(r.cam[2], 0, '°'))}${cell(fcN(r.alt[0]) + ' / ' + fcN(r.alt[1]) + ' / ' + fcS(r.alt[2]))}${cell(r.pos != null ? fcN(r.pos) + ' ft ' + r.dir : '–')}${cell(r.asset || '–')}<td style="padding:2px 6px;color:${r.flags.length ? '#ffb347' : '#5fff5f'}">${escapeHtml(r.flags.length ? r.flags.join('; ') : 'ok')}</td></tr>`).join('') + '</table></td></tr>';
+                    h += `<tr><td colspan="15" style="padding:4px 6px 8px 22px;background:#101419"><div style="margin-bottom:4px"><a href="${fcPlaybackUrl(f)}" target="_blank" rel="noopener" style="color:#7adfe6">🎞 open playback ↗</a> <span style="color:#666">· whole mission ${f.planSteps} steps / ${f.planSnaps} snapshots${f.slice ? ` · this flight steps ${f.slice[0]}–${f.slice[1]} (${f.flightSnaps || 0} snapshots)` : ' · <span style="color:#ffb347">no plan steps in the flown log</span>'} · ${f.logSteps || 0} step fixes of ${f.fixes || 0}${f.manualFlight ? ' · <span style="color:#777">manual / alert flight — no planned snapshot, not scored</span>' : ''}${f.missing && f.missing.length ? ` · <span style="color:#ff7a7a">no picture: ${f.missing.join(', ')}</span>` : ''}</span></div>`
+                        + '<table style="border-collapse:collapse;font:11px/1.4 monospace"><tr style="color:#888"><th style="text-align:left;padding:1px 6px">shot</th><th style="text-align:left;padding:1px 6px">step</th><th style="text-align:left;padding:1px 6px">shutter</th><th style="text-align:left;padding:1px 6px">heading p/a/Δ</th><th style="text-align:left;padding:1px 6px">camera p/a/Δ</th><th style="text-align:left;padding:1px 6px">alt ft p/a/Δ</th><th style="text-align:left;padding:1px 6px">drone vs nav</th><th style="text-align:left;padding:1px 6px">look-point</th><th style="text-align:left;padding:1px 6px">asset</th><th style="text-align:left;padding:1px 6px">flags</th></tr>'
+                        + f.rows.map(r => `<tr${r.manual ? ' style="color:#777"' : ''}>${cell(r.s)}${cell(r.idx != null ? '#' + r.idx : '')}${cell(r.t ? new Date(r.t).toLocaleTimeString() : '–')}${cell(fcN(r.hdg[0]) + '° / ' + fcN(r.hdg[1]) + '° / ' + fcS(r.hdg[2], 0, '°'))}${cell(fcN(r.cam[0]) + '° / ' + fcN(r.cam[1]) + '° / ' + fcS(r.cam[2], 0, '°'))}${cell(fcN(r.alt[0]) + ' / ' + fcN(r.alt[1]) + ' / ' + fcS(r.alt[2]))}${cell(r.pos != null ? fcN(r.pos) + ' ft ' + r.dir : '–')}${cell(r.look != null ? fcN(r.look) + ' ft' + (r.lookCapped ? ' (ray capped)' : '') : '–')}${cell(r.asset || '–')}<td style="padding:2px 6px;color:${r.manual ? '#777' : r.flags.length ? '#ffb347' : '#5fff5f'}">${escapeHtml(fcShotStatus(r))}</td></tr>`).join('') + '</table></td></tr>';
                 }
             });
         } else {
@@ -5923,7 +6054,7 @@
             + renderIssuesSection()
             + sectionHeader('data', '📦', 'Fleet Data', `${fdSelected.size} site(s) picked · browse + export`)
             + renderDataSection()
-            + sectionHeader('fc', '🎥', 'Flight Checks', fcResults ? `${fcResults.flights.length} flight(s) · ${fcResults.flights.reduce((n, f) => n + f.flagged, 0)} flagged shots` : 'planned vs actual, every flown flight of the picked sites')
+            + sectionHeader('fc', '🎥', 'Flight Checks', fcResults ? `${fcResults.flights.length} flight(s) · ${fcFlights().reduce((n, f) => n + f.flagged, 0)} flagged shots` : 'planned vs actual, every flown flight of the picked sites')
             + renderFcSection()
             + sectionHeader('pilots', '📈', 'Utilization', puResults ? `${puResults.pilots.length} pilot(s) · ${(puResults.drones || []).length} drone(s) · ${(puResults.sites || []).length} site(s) · ${puResults.flights.length} flight(s) · last ${puResults.days} d` : 'pilots · drones · sites · clients — overlapping drones count once')
             + renderPilotSection()
@@ -6226,7 +6357,7 @@
                 }
                 if (t.hasAttribute && t.hasAttribute('data-pu-end')) { puOpts.endMode = t.value === 'landed' ? 'landed' : 'duration'; puSave(); return; }
                 if (t.hasAttribute && t.hasAttribute('data-pu-tz')) { if (PU_TZS.some(z => z[0] === t.value)) { puOpts.tz = t.value; puSave(); } return; }
-                if (t.hasAttribute && t.hasAttribute('data-fc-thr')) { const k = t.getAttribute('data-fc-thr'); const v = Number(t.value); if (isFinite(v) && v >= 0) { ftCfg.fc[k] = v; saveCfg(); } return; }
+                if (t.hasAttribute && t.hasAttribute('data-fc-thr')) { const k = t.getAttribute('data-fc-thr'); const v = Number(t.value); if (isFinite(v) && v >= 0) { ftCfg.fc[k] = v; saveCfg(); if (fcResults && k !== 'days') fdRenderKeepScroll(); } return; }
                 if (t.id === 'aim-ft-xr-picked') { xrefUsePicked = !!t.checked; renderPanel(); return; }
                 if (t.hasAttribute && t.hasAttribute('data-kx-inc')) { kxInclude[t.getAttribute('data-kx-inc')] = !!t.checked; return; }
                 if (t.hasAttribute && t.hasAttribute('data-fx-inc')) { const k = t.getAttribute('data-fx-inc'); if (k in fxOpts.inc) { fxOpts.inc[k] = !!t.checked; fxSave(); renderPanel(); } return; }
