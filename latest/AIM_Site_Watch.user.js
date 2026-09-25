@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.31
+// @version      0.32
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON (and optionally its missions) on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Daily Slack digest. Configurable in the AIM Control Panel ("Site Watch").
@@ -98,7 +98,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.31';
+    const SCRIPT_VERSION = '0.32';
 
     // Server model (v0.21): prod and QA are separate databases with their own
     // site lists — the same numeric ID is two different sites. A QA leader
@@ -139,6 +139,7 @@
     const SLACK_CONFIG_KEY = 'aim-site-watch-slack-config';   // cached {botToken,channelId}
     const DIGEST_DAY_KEY = `aim-site-watch-digest-day${ENV_SFX}`;   // PT day (YYYY-MM-DD) already posted
     const DIGEST_AT_KEY = `aim-site-watch-digest-at${ENV_SFX}`;     // ISO cutoff of the last digest
+    const DIGEST_MODE_KEY = `aim-site-watch-digest-mode${ENV_SFX}`; // v0.32: 'dm' once the DM digest has baselined (never replays the pre-v0.32 gap)
 
     // ---- tunables ----
     const DEFAULTS = {
@@ -1488,7 +1489,7 @@
     //   'empty'  — no changes in the window (silent day; window may still close)
     //   'failed' — couldn't read the CSV or the parent post failed (do NOT
     //              advance the cutoff; the caller retries later)
-    async function postDigest(sinceISO, dayLabel) {
+    async function postDigest(sinceISO, dayLabel, channelOverride) {
         if (!slackEnabled()) { console.warn(TAG, 'digest: Slack not configured'); return 'failed'; }
         let rows;
         try { rows = await fetchChangesSince(sinceISO); }
@@ -1496,19 +1497,20 @@
         if (!rows.length) { console.log(`${TAG} digest: no changes since ${sinceISO || '(start)'} — staying silent`); return 'empty'; }
         const sites = rollup(rows);
         const nowISO = new Date().toISOString();
-        const parentTs = await slackPost(buildParent(sites, dayLabel, sinceISO, nowISO));
+        const parentTs = await slackPost(buildParent(sites, dayLabel, sinceISO, nowISO), null, channelOverride);
         if (!parentTs) { console.warn(TAG, 'digest: parent post failed — not advancing cutoff, will retry'); return 'failed'; }
         const chunks = buildThreadChunks(sites);
         let chunkFails = 0;
-        for (const ch of chunks) { if (!await slackPost(ch, parentTs)) chunkFails++; await sleep(400); }
+        for (const ch of chunks) { if (!await slackPost(ch, parentTs, channelOverride)) chunkFails++; await sleep(400); }
         console.log(`%c${TAG} digest posted — ${sites.size} site(s), ${rows.length} change row(s), ${chunks.length} thread message(s)${chunkFails ? ` · ${chunkFails} thread post(s) failed` : ''}`, 'color:#5fd0ff;font-weight:700');
         return 'posted';
     }
 
-    // *** UNCALLED since v0.23 (2026-08-27): the automatic daily digest was
-    // removed (channel policy — only AIM Issues open/update/close posts).
-    // Kept intact in case a scheduled digest ever comes back; re-wire the
-    // runCycle tail + leader-heartbeat calls to re-enable. ***
+    // *** v0.23 (2026-08-27) removed the automatic CHANNEL digest (channel
+    // policy — only AIM Issues open/update/close posts there). v0.32
+    // (2026-09-25) brings the daily digest back as a Slack DM to the owner
+    // only; the channel stays quiet. First run baselines silently so the
+    // Aug-27→now gap is never replayed. ***
     // Fire the daily digest once the PT boundary passes. Cheap when not firing
     // (pure GM/clock checks); only the leader tab posts. Guarded against reentry.
     async function maybeDailyDigest(trigger) {
@@ -1516,14 +1518,22 @@
         if (!slackEnabled()) return;
         if (Date.now() < digestRetryAfter) return;     // backing off after a failure
         const target = targetDigestDay();
+        // v0.32: DM mode baseline — the stored cutoff may date from the last
+        // channel digest (Aug 2026); start fresh instead of replaying weeks.
+        if (gmGet(DIGEST_MODE_KEY, null) !== 'dm') {
+            gmSet(DIGEST_MODE_KEY, 'dm'); gmSet(DIGEST_DAY_KEY, target); gmSet(DIGEST_AT_KEY, new Date().toISOString());
+            console.log(`${TAG} daily digest → Slack DM enabled; baselined now, first digest after ${hourLabelPT(cfg.digestHourPT)} PT tomorrow`);
+            return;
+        }
         const lastDay = gmGet(DIGEST_DAY_KEY, null);
-        // First ever: baseline silently so we never dump the whole historical CSV.
         if (!lastDay) { gmSet(DIGEST_DAY_KEY, target); gmSet(DIGEST_AT_KEY, new Date().toISOString()); return; }
         if (lastDay >= target) return;                 // already posted this boundary
+        const dm = await resolveMySlackId();
+        if (!dm) { digestRetryAfter = Date.now() + 10 * 60 * 1000; console.warn(`${TAG} daily digest: no Slack DM route (PAT + slack-config users mapping) — retry in ~10 min`); return; }
         digestRunning = true;
         try {
             const since = gmGet(DIGEST_AT_KEY, '') || '';
-            const status = await postDigest(since, target);
+            const status = await postDigest(since, target, dm);
             if (status === 'failed') {
                 // Don't advance the cutoff — that span is unreported. Back off so a
                 // hard failure (Slack down / bad token) retries every ~10 min, not
@@ -1898,8 +1908,8 @@
                 ? `${stillDue} still due — next batch in ~${Math.round(WAKE_MS / 60000)} min (or click "Check all due now")`
                 : `all ${siteList.length} sites baselined — now watching on the adaptive schedule`;
             console.log(`%c${TAG} cycle done: ${checked} checked, ${changed} changed · ${tail}`, 'color:#5fd0ff;font-weight:600');
-            // v0.23: automatic daily digest removed (channel policy 2026-08-27) —
-            // digest is manual-only via the "Post Slack digest now" button.
+            // v0.32: daily digest → owner's Slack DM (channel stays quiet, #247).
+            maybeDailyDigest('cycle');
         } catch (e) {
             console.error(TAG, 'cycle error', e);
             alertMe('cycle-error', `a watch cycle crashed (${trigger}): \`${errText(e)}\``);
@@ -1918,12 +1928,13 @@
         { id: 'hotHours', label: 'Active check interval (hours)', type: 'number', default: DEFAULTS.hotHours, min: 1, max: 24, step: 1 },
         { id: 'hotWindowHours', label: 'Stay-active window after a change (hours)', type: 'number', default: DEFAULTS.hotWindowHours, min: 3, max: 168, step: 1 },
         { id: 'watchMissions', label: 'Also watch missions (steps · distance · values)', type: 'boolean', default: DEFAULTS.watchMissions },
+        { id: 'digestHourPT', label: 'Daily digest → my Slack DM at this hour (PT, 0–23)', type: 'number', default: DEFAULTS.digestHourPT, min: 0, max: 23, step: 1 },
         { id: 'check-now', label: 'Check all due now', type: 'button', action: 'check-now' },
         { id: 'simulate', label: 'Simulate a change (console preview)', type: 'button', action: 'simulate' },
         { id: 'status', label: 'Show status (console)', type: 'button', action: 'status' },
         { id: 'who-else', label: 'Who else is auditing? (reads git log now → Slack DM)', type: 'button', action: 'who-else' },
         { id: 'test-alert', label: 'Send test alert (Slack DM)', type: 'button', action: 'test-alert' },
-        { id: 'post-digest-now', label: 'Post Slack digest now (last 24h, manual only)', type: 'button', action: 'post-digest-now' },
+        { id: 'post-digest-now', label: 'Post digest to the CHANNEL now (last 24h, manual only)', type: 'button', action: 'post-digest-now' },
         { id: 'reset-baselines', label: 'Reset all baselines (re-learn)', type: 'button', action: 'reset-baselines' },
     ];
 
@@ -1959,6 +1970,15 @@
             cfg[id] = n;
             saveConfig();
             console.log(`${TAG} ${id} = ${n}`);
+        }
+        if (id === 'digestHourPT') {
+            const n = Number(val);
+            if (!isFinite(n) || n < 0 || n > 23) return;
+            if (cfg.digestHourPT === n) return;     // idempotent
+            cfg.digestHourPT = n;
+            saveConfig();
+            console.log(`${TAG} digestHourPT = ${n}`);
+            return;
         }
         if (id === 'watchMissions') {
             const on = !!val;
@@ -2154,8 +2174,8 @@
         if (!masterEnabled || !cachedToken) return;
         if (amLeader) renewLeader();
         else claimLeader();
-        // v0.23: automatic daily digest removed (channel policy 2026-08-27) —
-        // the heartbeat no longer fires maybeDailyDigest.
+        // v0.32: daily digest → owner's DM, fires even on a quiet day.
+        maybeDailyDigest('heartbeat');
         // v0.25 watchdog: this tab is leader, logged in, and hasn't started a
         // cycle in STALL_MS although runCycle fires every WAKE_MS → the
         // scheduler is wedged (the v0.3 lease-deadlock class). Shout.
