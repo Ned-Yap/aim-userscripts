@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.58
+// @version      0.59
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -36,7 +36,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.58';
+    const SCRIPT_VERSION = '0.59';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -2712,6 +2712,19 @@
     const fcDemSession = {};
     let fcDemDirty = 0;
     const fcDemKey = (ll) => (+ll.lat).toFixed(5) + ',' + (+ll.lng).toFixed(5);
+    // Known terrain at (or within maxM of) a point, no network. The drone stands on its nav when it shoots, so the
+    // nav's cell (cached after the site's first flight) answers nearly every drone-position lookup.
+    function fcGroundAt(ll, maxM) {
+        if (!ll || typeof ll.lat !== 'number' || typeof ll.lng !== 'number') return null;
+        const k = fcDemKey(ll);
+        if (fcDemCache[k] != null) return fcDemCache[k];
+        if (fcDemSession[k] != null) return fcDemSession[k];
+        if (!(maxM > 0)) return null;
+        let best = null, bd = maxM;
+        const scan = (store) => { for (const key in store) { const g = store[key]; if (g == null) continue; const c = key.indexOf(','); const la = +key.slice(0, c), ln = +key.slice(c + 1); if (Math.abs(la - ll.lat) > 0.001 || Math.abs(ln - ll.lng) > 0.001) continue; const d = fcDistM(ll, { lat: la, lng: ln }); if (d < bd) { bd = d; best = g; } } };
+        scan(fcDemCache); scan(fcDemSession);
+        return best;
+    }
     async function fcDemCached(ll, persist) {
         if (!ll || typeof ll.lat !== 'number' || typeof ll.lng !== 'number') return null;
         const k = fcDemKey(ll);
@@ -2826,12 +2839,27 @@
         let dist = down > 0.01 ? (im.alt - g) / down : Infinity; let capped = false; if (!(dist > 0) || dist > capM) { dist = capM; capped = true; }
         return { ll: fcMoveLL(im.location, dist, im.drone_heading), dist, capped };
     }
-    async function fcPlannedLookPointOf(m, step) {
+    function fcPlannedLookPointOf(m, step) {
         if (!step) return null;
         if (fcIsGps(step)) return { ll: step.location };
         const nav = fcParentNav(m, step); if (!nav || !nav.location) return null;
-        const g = await fcDemCached(nav.location); if (g == null) return null;
+        const g = fcGroundAt(nav.location, 0); if (g == null) return null;
         const lp = fcLookPointFor(nav, step, g); return lp ? { ll: lp.ll, capped: lp.capped } : null;
+    }
+    const FC_GROUND_NEAR_M = 30;     // a drone position this close to a known cell reuses it (terrain drift ≪ the 50 ft look limit)
+    // Fetch, in parallel, every terrain cell a flight needs that is not known yet: plan navs of in-place snapshots
+    // (persisted) and drone positions with no known cell within 30 m (session-only).
+    async function fcPrefetchTerrain(m, shots, isAborted) {
+        const fetchAll = async (list) => { const q = list.slice(); const pool = []; for (let i = 0; i < 8; i++) pool.push((async () => { while (q.length) { if (isAborted && isAborted()) throw new Error('aborted'); const x = q.shift(); await fcDemCached(x.ll, x.persist); } })()); await Promise.all(pool); return list.length; };
+        const snapShots = shots.filter(sh => sh.step && sh.step.type_name === 'snapshot');
+        // phase 1: plan navs (persisted) — phase 2 then sees them, so a drone standing on its nav needs no read of its own
+        const navs = new Map();
+        snapShots.forEach(sh => { if (fcIsGps(sh.step)) return; const nav = fcParentNav(m, sh.step); if (nav && nav.location && fcGroundAt(nav.location, 0) == null) navs.set(fcDemKey(nav.location), { ll: nav.location, persist: true }); });
+        let n = await fetchAll(Array.from(navs.values()));
+        const pts = new Map();
+        snapShots.forEach(sh => { const im = sh.primary; if (im.location && typeof im.location.lat === 'number' && fcGroundAt(im.location, FC_GROUND_NEAR_M) == null) { const k = fcDemKey(im.location); if (!pts.has(k)) pts.set(k, { ll: im.location, persist: false }); } });
+        n += await fetchAll(Array.from(pts.values()));
+        return n;
     }
     async function fcFetchLog(sid, start, end, isAborted) {
         const all = []; let total = null; let lastId = -1; let pages = 0;
@@ -2881,15 +2909,15 @@
         imgs.forEach(im => { if (!cur || im.shutter == null || cur.shutter == null || Math.abs(im.shutter - cur.shutter) > 1500) { cur = { shutter: im.shutter, images: [], primary: im }; shots.push(cur); } cur.images.push(im); if (im.kind === 'RGB') cur.primary = im; });
         const claimed = {};
         shots.forEach(sh => { sh.step = m.slice ? fcJoinShotToStep(m, sh, claimed) : null; if (sh.step) claimed[sh.step.id] = (claimed[sh.step.id] || 0) + 1; });
+        const demReads = await fcPrefetchTerrain(m, shots, isAborted);
         const seen = {}; const rows = []; const r1 = (v) => (v == null || !isFinite(v)) ? null : +(+v).toFixed(1);
         for (const sh of shots) {
-            if (isAborted && isAborted()) throw new Error('aborted');
             const im = sh.primary, st = sh.step; const d = fcComputeDelta(m, im, st); const pose = d.pose || {};
             const isSnap = !!(st && st.type_name === 'snapshot');
             let look = null, lookCapped = false;
             if (isSnap) {
-                const [p, g] = await Promise.all([fcPlannedLookPointOf(m, st), im.location ? fcDemCached(im.location, false) : null]);
-                const a = im.location ? fcActualLookPointOf(im, g) : null;
+                const p = fcPlannedLookPointOf(m, st);
+                const a = im.location ? fcActualLookPointOf(im, fcGroundAt(im.location, FC_GROUND_NEAR_M)) : null;
                 if (p && a && p.ll && a.ll) { look = fcDistM(p.ll, a.ll) * FC_M2FT; lookCapped = !!(p.capped || a.capped); }
             }
             const retake = isSnap ? (seen[st.id] || 0) : 0; if (st) seen[st.id] = (seen[st.id] || 0) + 1;
@@ -2908,7 +2936,7 @@
         const manualFlight = !m.slice || snapsInFlight.length === 0;
         return {
             coreVer: FC_CORE_VER, at: Date.now(), mid, sid: String(sid), site: siteName(String(sid)) || String(sid), name: mission.name || mission.app_name || row.app_name || '', drone: mission.drone_name || row.drone_name || '', droneType: mission.drone && mission.drone.robot_type_name, when: mission.when || row.when, group: mission.mission_group_id, appId: mission.app && mission.app.id,
-            shots: rows.length, missing, slice: m.slice ? [m.slice.minIdx, m.slice.maxIdx] : null, planSteps: m.plan.length, planSnaps: m.plan.filter(st => st.type_name === 'snapshot').length, flightSnaps: snapsInFlight.length, fixes: fixes.length, logSteps: m.insFixes.length, manualFlight,
+            shots: rows.length, missing, slice: m.slice ? [m.slice.minIdx, m.slice.maxIdx] : null, planSteps: m.plan.length, planSnaps: m.plan.filter(st => st.type_name === 'snapshot').length, flightSnaps: snapsInFlight.length, fixes: fixes.length, logSteps: m.insFixes.length, manualFlight, demReads,
             rows,
         };
     }
@@ -2973,12 +3001,12 @@
                     const f = queue.shift();
                     try { const had = !!(fcCache.flights[f.row.id] && fcCache.flights[f.row.id].coreVer === FC_CORE_VER); const res = await fcCheckFlight(f.sid, f.row, isAborted); if (had) cachedHits++; results.push(res); }
                     catch (e) { if (!String(e.message).includes('aborted')) fcRun.errors.push(`${f.row.id}: ${e.message}`); }
-                    fcRun.done++; fcRun.msg = `checking flights · ${fcRun.done}/${fcRun.total}`;
+                    fcRun.done++; fcRun.msg = `checking flights · ${fcRun.done}/${fcRun.total}${cachedHits ? ` (${cachedHits} cached)` : ''}${fcRun.errors.length ? ` · ${fcRun.errors.length} error(s)` : ''}`;
                     if (fcRun.done % 20 === 0) fcSaveCache();
                     if (fcRun.done % 5 === 0) renderPanel();
                 }
             };
-            for (let i = 0; i < 3; i++) workers.push(work());
+            for (let i = 0; i < 6; i++) workers.push(work());
             await Promise.all(workers);
             fcSaveCache(); fcDemSave();
             results.sort((a, b) => String(b.when || '').localeCompare(String(a.when || '')));
