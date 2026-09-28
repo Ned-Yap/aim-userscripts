@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.33
+// @version      0.34
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON (and optionally its missions) on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Daily Slack digest. Configurable in the AIM Control Panel ("Site Watch").
@@ -98,7 +98,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.33';
+    const SCRIPT_VERSION = '0.34';
 
     // Server model (v0.21): prod and QA are separate databases with their own
     // site lists — the same numeric ID is two different sites. A QA leader
@@ -1909,8 +1909,9 @@
                 ? `${stillDue} still due — next batch in ~${Math.round(WAKE_MS / 60000)} min (or click "Check all due now")`
                 : `all ${siteList.length} sites baselined — now watching on the adaptive schedule`;
             console.log(`%c${TAG} cycle done: ${checked} checked, ${changed} changed · ${tail}`, 'color:#5fd0ff;font-weight:600');
-            // v0.32: daily digest → owner's Slack DM (channel stays quiet, #247).
-            maybeDailyDigest('cycle');
+            // v0.34: the daily report is now the cloud Fleet Agent daily digest
+            // (aim-userscripts-data daily-digest.yml, 22:00 Pacific) — no
+            // tab-side digest; maybeDailyDigest stays uncalled.
         } catch (e) {
             console.error(TAG, 'cycle error', e);
             alertMe('cycle-error', `a watch cycle crashed (${trigger}): \`${errText(e)}\``);
@@ -1929,7 +1930,6 @@
         { id: 'hotHours', label: 'Active check interval (hours)', type: 'number', default: DEFAULTS.hotHours, min: 1, max: 24, step: 1 },
         { id: 'hotWindowHours', label: 'Stay-active window after a change (hours)', type: 'number', default: DEFAULTS.hotWindowHours, min: 3, max: 168, step: 1 },
         { id: 'watchMissions', label: 'Also watch missions (steps · distance · values)', type: 'boolean', default: DEFAULTS.watchMissions },
-        { id: 'digestHourPT', label: 'Daily digest → my Slack DM at this hour (PT, 0–23)', type: 'number', default: DEFAULTS.digestHourPT, min: 0, max: 23, step: 1 },
         { id: 'check-now', label: 'Check all due now', type: 'button', action: 'check-now' },
         { id: 'simulate', label: 'Simulate a change (console preview)', type: 'button', action: 'simulate' },
         { id: 'status', label: 'Show status (console)', type: 'button', action: 'status' },
@@ -2189,8 +2189,7 @@
         }
         if (amLeader) renewLeader();
         else claimLeader();
-        // v0.32: daily digest → owner's DM, fires even on a quiet day.
-        maybeDailyDigest('heartbeat');
+        // v0.34: no tab-side daily digest (cloud daily-digest job owns it).
         // v0.25 watchdog: this tab is leader, logged in, and hasn't started a
         // cycle in STALL_MS although runCycle fires every WAKE_MS → the
         // scheduler is wedged (the v0.3 lease-deadlock class). Shout.
