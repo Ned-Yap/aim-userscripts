@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.32
+// @version      0.33
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON (and optionally its missions) on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Daily Slack digest. Configurable in the AIM Control Panel ("Site Watch").
@@ -98,7 +98,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.32';
+    const SCRIPT_VERSION = '0.33';
 
     // Server model (v0.21): prod and QA are separate databases with their own
     // site lists — the same numeric ID is two different sites. A QA leader
@@ -1275,6 +1275,7 @@
     // Slack DM to the user (never the channel — channel policy is AIM Issues
     // lifecycle events only). Deduped per key; console-only when no DM route.
     let lastCycleAt = 0;   // watchdog input — set on every cycle the leader tab starts
+    let lastHeartbeatAt = Date.now();   // v0.33: detects machine sleep / tab freeze (heartbeat gap ≫ HEARTBEAT_MS)
     async function alertMe(key, text) {
         const now = Date.now();
         state.alerts = state.alerts || {};
@@ -2172,6 +2173,20 @@
     // stale one (so a vanished leader is replaced within ~LEASE_TTL).
     setInterval(() => {
         if (!masterEnabled || !cachedToken) return;
+        // v0.33: a heartbeat gap far longer than HEARTBEAT_MS means the machine
+        // slept or Chrome froze the tab — the scheduler was not wedged, it was
+        // not running at all. Reset the watchdog clock and run a catch-up cycle
+        // instead of crying "stalled" (Mon 2026-09-28 09:23: 3,245 min after a
+        // weekend laptop sleep; the cycle then ran fine 6 min later).
+        const hbNow = Date.now();
+        const hbGap = hbNow - lastHeartbeatAt;
+        lastHeartbeatAt = hbNow;
+        if (hbGap > 3 * HEARTBEAT_MS) {
+            console.log(`${TAG} resumed after ~${Math.round(hbGap / 60000)} min without heartbeats (sleep/freeze) — catch-up cycle in 5 s`);
+            if (lastCycleAt) lastCycleAt = hbNow;
+            setTimeout(() => runCycle('resume'), 5000);
+            return;
+        }
         if (amLeader) renewLeader();
         else claimLeader();
         // v0.32: daily digest → owner's DM, fires even on a quiet day.
