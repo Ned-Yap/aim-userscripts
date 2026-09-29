@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-28 — 🎥 Flight Checks flights view shows the WORST shot, not the mean: AIM Fleet Tools v0.62 (latest — dev only)
+
+"Mean off-station 65 ft" was hiding a 239 ft shot behind three good ones. The by-flight table now shows each flight's worst single shot per measure — heading, camera, altitude, off-station, look-point gap — with the shot's S# beside it (`239 ft (S1)`), coloured against the limit. Means stay in the by-drone / by-mission / by-site views, where a bias across many flights is the point. The Sheets "flights + shots" export's flight row carries the worst values too. Feature [#267](https://github.com/Ned-Yap/aim-userscripts-issues/issues/267).
+
 ## 2026-09-28 — 🎞 Video Validation v0.59 (latest — dev only) + 🎥 Fleet Tools v0.61 (latest): picture↔step join gated by distance
 
 Flight 235887 showed S3 "1,699 ft S of N2": the picture was a second capture at the S1 pad, but every pump jack on the lease faces the same way, so its heading + camera angle fitted S3's plan within 3° and the join (which looked only at the pose once the logged step was already claimed) put it on the pad 1,699 ft away. Both engines now only consider a pose-override snapshot whose nav is within 150 m (~500 ft) of where the picture was actually taken; the step from the flown log is never gated. That shot now reads as an S1 re-take. Fleet Tools re-measures only cached flights that have a shot more than 500 ft from its nav (the only ones the gate can change). Feature [#267](https://github.com/Ned-Yap/aim-userscripts-issues/issues/267).
