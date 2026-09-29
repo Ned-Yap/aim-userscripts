@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-29 — 🛡 KML crash-loop breaker — AIM Fleet Tools v0.65 (latest — dev only)
+
+A huge client KML could crash the tab **on every boot**: repo layers auto-load before the panel is reachable, so there was no way to turn the layer off. Three guards: (1) a boot guard is set before each auto-load and cleared after — found still set on the next boot, that layer is switched **OFF** with a status note (tick it to retry on demand); (2) repo layers over 12 MB are never auto-loaded, click to load; (3) `<Style>`/`<StyleMap>`/`<description>` blocks are stripped before parsing — Google Earth / Diamondback exports carry one style block per placemark (6.9 MB → 0.7 MB, same 1,078 points).
+
+---
+
 ## 2026-09-28 — 🎥 Flight Checks by-flight: flag count + worst of each kind — AIM Fleet Tools v0.64 (latest — dev only)
 
 The by-flight table is now scannable: **flags** (count), then one column per kind holding that flight's worst flagged shot with its S# — off-station `322 ft (S13)`, heading `-97° (S1)`, camera `+52° (S14)`, altitude, look-point — plus re-takes, no picture, manual shots and navs outside setup. Cells are coloured against the limit (orange over, red over twice), `–` where nothing of that kind flagged. Expand a flight for the full shot table. Feature [#267](https://github.com/Ned-Yap/aim-userscripts-issues/issues/267).
