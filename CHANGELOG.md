@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-28 — 🎥 Flight Checks: "is the nav even in the site setup?" — AIM Fleet Tools v0.60 (latest — dev only)
+
+A drone that is 166 ft off station because its nav no longer sits inside any FFZ (the site setup was updated after the mission was built) is not a system fault — it simply cannot fly there. Flight Checks now reads each picked site's CURRENT setup once per run and tests every planned nav: inside an FFZ or on an FP arc (within 3 m), and inside its altitude band. Shots at a nav that fails the test are **explained**, not flagged: their deviations are kept (grey, behind a "show explained" toggle on the flags view, and in every export under a new **nav in current setup** column that reads `FFZ Pad A` / `FP Trunk` / `NO — 166 ft to nearest FFZ Pad A` / `ALT ✗`), and the flags view gains a **Missions with navs outside the current setup** list for the CSM to update. Flights view adds a "navs outside setup" column; drone / mission / site views add an "explained" count; "within limits" is over the remaining planned shots only. Flights already cached get their navs filled from the mission record alone (one small read, no re-measure). Feature [#267](https://github.com/Ned-Yap/aim-userscripts-issues/issues/267).
+
 ## 2026-09-28 — 🎥 Flight Checks speed fix: AIM Fleet Tools v0.59 (latest — dev only)
 
 v0.58's engine read the terrain under every single picture, one request at a time — a 50-shot flight was ~50 serial DEM reads and a 511-flight run crawled. v0.59 fetches each flight's terrain in one parallel batch (plan navs first, then only the drone positions with no known cell within 30 m — the drone stands on its nav when it shoots, so after a site's first flight almost nothing is left to read), and checks 6 flights at a time instead of 3. Verdicts are unchanged. Progress line now shows cached hits and errors as they happen. Feature [#267](https://github.com/Ned-Yap/aim-userscripts-issues/issues/267).
