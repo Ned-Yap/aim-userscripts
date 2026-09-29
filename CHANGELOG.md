@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-28 — 🎥 Flight Checks: flags, nothing else — AIM Fleet Tools v0.63 (latest — dev only)
+
+No averages anywhere. The by-flight table has one **flags** column that spells out every flagged shot (`S1: heading -97°, camera +18°, off station 239 ft S · S3: re-take (2)`), sorted most-flagged first; the by-drone / by-mission / by-site views count flags by kind (heading, camera, altitude, off-station, look-point, re-takes) beside flagged / explained / no-picture / manual counts. The Sheets flight row carries the same flag text. Feature [#267](https://github.com/Ned-Yap/aim-userscripts-issues/issues/267).
+
 ## 2026-09-28 — 🎥 Flight Checks flights view shows the WORST shot, not the mean: AIM Fleet Tools v0.62 (latest — dev only)
 
 "Mean off-station 65 ft" was hiding a 239 ft shot behind three good ones. The by-flight table now shows each flight's worst single shot per measure — heading, camera, altitude, off-station, look-point gap — with the shot's S# beside it (`239 ft (S1)`), coloured against the limit. Means stay in the by-drone / by-mission / by-site views, where a bias across many flights is the point. The Sheets "flights + shots" export's flight row carries the worst values too. Feature [#267](https://github.com/Ned-Yap/aim-userscripts-issues/issues/267).
