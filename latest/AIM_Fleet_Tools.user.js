@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.60
+// @version      0.61
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -36,7 +36,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.60';
+    const SCRIPT_VERSION = '0.61';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -2787,6 +2787,7 @@
     }
     // Join a shot to its plan step: the executing step from the flown log, unless a LATER unclaimed snapshot in this
     // flight matches the picture's actual heading + camera angle much better (the log is sparse).
+    const FC_JOIN_NAV_M = 150;   // [#267 shared core] same as Video Validation's JOIN_NAV_M
     function fcJoinShotToStep(m, sh, claimed) {
         const im = sh.primary; const t = sh.shutter;
         const active = fcActiveStepAt(m, t);
@@ -2801,9 +2802,13 @@
         if (activeOk && !claimed[active.id] && activeScore <= 12) return active;
         const fromIdx = active ? active.index_in_app : (m.slice ? m.slice.minIdx : 0);
         const toIdx = m.slice ? m.slice.maxIdx : Infinity;
+        // pose-override candidates must have their nav NEAR where the picture was taken (pump jacks on one lease all
+        // face the same way — a second capture at S1 fitted S3's pose within 3° and was joined 1,699 ft away). The
+        // logged step (active) is never gated.
+        const near = (st) => { if (!im.location || typeof im.location.lat !== 'number') return true; const nav = fcParentNav(m, st); return !nav || !nav.location || (fcDistM(nav.location, im.location) <= FC_JOIN_NAV_M); };
         let best = null, bestScore = 12;   // hard gate: ≤ 12° combined heading + angle error
         m.plan.forEach(st => {
-            if (st.type_name !== 'snapshot' || st.index_in_app < fromIdx || st.index_in_app > toIdx || claimed[st.id]) return;
+            if (st.type_name !== 'snapshot' || st.index_in_app < fromIdx || st.index_in_app > toIdx || claimed[st.id] || !near(st)) return;
             const sc = poseScore(st);
             if (sc < bestScore) { bestScore = sc; best = st; }
         });
@@ -2937,7 +2942,7 @@
         const manualFlight = !m.slice || snapsInFlight.length === 0;
         return {
             coreVer: FC_CORE_VER, at: Date.now(), mid, sid: String(sid), site: siteName(String(sid)) || String(sid), name: mission.name || mission.app_name || row.app_name || '', drone: mission.drone_name || row.drone_name || '', droneType: mission.drone && mission.drone.robot_type_name, when: mission.when || row.when, group: mission.mission_group_id, appId: mission.app && mission.app.id,
-            shots: rows.length, missing, slice: m.slice ? [m.slice.minIdx, m.slice.maxIdx] : null, planSteps: m.plan.length, planSnaps: m.plan.filter(st => st.type_name === 'snapshot').length, flightSnaps: snapsInFlight.length, fixes: fixes.length, logSteps: m.insFixes.length, manualFlight, demReads, navVer: 1,
+            shots: rows.length, missing, slice: m.slice ? [m.slice.minIdx, m.slice.maxIdx] : null, planSteps: m.plan.length, planSnaps: m.plan.filter(st => st.type_name === 'snapshot').length, flightSnaps: snapsInFlight.length, fixes: fixes.length, logSteps: m.insFixes.length, manualFlight, demReads, navVer: 1, joinVer: 1,
             rows,
         };
     }
@@ -2957,7 +2962,10 @@
     }
     async function fcCheckFlight(sid, row, isAborted) {
         const cached = fcCache.flights[row.id];
-        if (cached && cached.coreVer === FC_CORE_VER) { if (!cached.navVer) await fcUpgradeNavs(cached); return cached; }
+        // joinVer 1 (v0.61) gates pose-override joins by distance; only a cached flight that has a shot far from its
+        // nav (the only case the gate can change) is re-measured — everything else stays cached.
+        const staleJoin = cached && cached.coreVer === FC_CORE_VER && !cached.joinVer && (cached.rows || []).some(r => r.pos != null && r.pos > FC_JOIN_NAV_M * FC_M2FT);
+        if (cached && cached.coreVer === FC_CORE_VER && !staleJoin) { if (!cached.navVer) await fcUpgradeNavs(cached); return cached; }
         const res = await fcMeasureFlight(sid, row, isAborted);
         fcCache.flights[row.id] = res;
         return res;

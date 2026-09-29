@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.58
+// @version      0.59
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.58';
+    const SCRIPT_VERSION = '0.59';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -363,6 +363,7 @@
         });
     }
 
+    const JOIN_NAV_M = 150;   // pose-override candidates must have their nav within 150 m (~500 ft) of the picture's position
     function joinShotToStep(m, sh, claimed) {
         const im = sh.primary; const t = sh.shutter;
         const active = activeStepAt(m, t);
@@ -378,9 +379,13 @@
         if (activeOk && !claimed[active.id] && activeScore <= 12) return active;
         const fromIdx = active ? active.index_in_app : (m.slice ? m.slice.minIdx : 0);
         const toIdx = m.slice ? m.slice.maxIdx : Infinity;
+        // v0.59: the pose search only considers snapshots whose nav is NEAR where the picture was actually taken.
+        // Pump jacks on one lease all face the same way, so a second capture at S1 fitted S3's heading + angle within
+        // 3° and was joined to a pad 1,699 ft away (flight 235887). The logged step (active) is never gated.
+        const near = (st) => { if (!im.location || typeof im.location.lat !== 'number') return true; const nav = parentNav(m, st); return !nav || !nav.location || (distM(nav.location, im.location) <= JOIN_NAV_M); };
         let best = null, bestScore = 12;   // hard gate: ≤ 12° combined heading + angle error
         m.plan.forEach(st => {
-            if (st.type_name !== 'snapshot' || st.index_in_app < fromIdx || st.index_in_app > toIdx || claimed[st.id]) return;
+            if (st.type_name !== 'snapshot' || st.index_in_app < fromIdx || st.index_in_app > toIdx || claimed[st.id] || !near(st)) return;
             const sc = poseScore(st);
             if (sc < bestScore) { bestScore = sc; best = st; }
         });
