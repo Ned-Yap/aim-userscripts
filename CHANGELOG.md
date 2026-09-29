@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-28 — 🎥 Flight Checks by-flight: flag count + worst of each kind — AIM Fleet Tools v0.64 (latest — dev only)
+
+The by-flight table is now scannable: **flags** (count), then one column per kind holding that flight's worst flagged shot with its S# — off-station `322 ft (S13)`, heading `-97° (S1)`, camera `+52° (S14)`, altitude, look-point — plus re-takes, no picture, manual shots and navs outside setup. Cells are coloured against the limit (orange over, red over twice), `–` where nothing of that kind flagged. Expand a flight for the full shot table. Feature [#267](https://github.com/Ned-Yap/aim-userscripts-issues/issues/267).
+
 ## 2026-09-28 — 🎥 Flight Checks: flags, nothing else — AIM Fleet Tools v0.63 (latest — dev only)
 
 No averages anywhere. The by-flight table has one **flags** column that spells out every flagged shot (`S1: heading -97°, camera +18°, off station 239 ft S · S3: re-take (2)`), sorted most-flagged first; the by-drone / by-mission / by-site views count flags by kind (heading, camera, altitude, off-station, look-point, re-takes) beside flagged / explained / no-picture / manual counts. The Sheets flight row carries the same flag text. Feature [#267](https://github.com/Ned-Yap/aim-userscripts-issues/issues/267).
