@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-09-29 — Site Setup Tools latest v4.305: SpiderWeb "drop failing legs" for test sites (dev only)
+
+- New panel checkbox "✂ drop failing legs (test sites)" (also in the Control Panel card, off by default). A leg that fails a hard gate (FP ↔ zone handoff under 2 m, or cuts through a zone) is cut from the staged web instead of blocking Commit; the zone keeps its FFZ and its other legs. The stage log names every cut leg. Built for the heavy UX-load site 1643, where one four-pad zone with 23 ft of relief cannot hand off at the 52 m floor.
+
+---
+
 ## 2026-09-29 — 🛡 KML crash-loop breaker — AIM Fleet Tools v0.65 (latest — dev only)
 
 A huge client KML could crash the tab **on every boot**: repo layers auto-load before the panel is reachable, so there was no way to turn the layer off. Three guards: (1) a boot guard is set before each auto-load and cleared after — found still set on the next boot, that layer is switched **OFF** with a status note (tick it to retry on demand); (2) repo layers over 12 MB are never auto-loaded, click to load; (3) `<Style>`/`<StyleMap>`/`<description>` blocks are stripped before parsing — Google Earth / Diamondback exports carry one style block per placemark (6.9 MB → 0.7 MB, same 1,078 points).

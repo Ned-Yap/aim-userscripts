@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.304
+// @version      4.305
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.304';
+    const SCRIPT_VERSION = '4.305';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -9427,6 +9427,7 @@
         regroundPercepto: true,                   // commit: re-check every written vertex against Percepto's own DEM (floors only go UP)
         entityPtsWarn: 150,                       // commit: warn when one flight-path entity carries more points than this
         baseZoneFt: 120,                          // a base outside every zone gets its own square zone of this side
+        dropFailing: false,                       // test sites: legs that fail a hard gate (handoff < 2 m, cuts a zone) are cut from the web instead of blocking Commit
     };
     let swbThresholds = loadSwbThresholds();
     let swbMasterEnabled = true;
@@ -9791,6 +9792,19 @@
             result.skippedEmpty = skippedEmpty.map(e => e.name);
             result.bases = bases; result.sid = sid; result.limitFt = limitFt; result.thresholds = th;
             result.runLog = log;
+            // Test-site escape hatch (user 2026-09-29, heavy UX-load site 1643: "just cut that part off"): legs that would
+            // fail a HARD gate are removed from the web so the rest can be committed. The zone keeps its FFZ and its other legs.
+            if (th.dropFailing) {
+                const bad = result.legs.filter(l => l.flags.some(f => /HANDOFF FAIL|^CROSSES/.test(f)));
+                if (bad.length) {
+                    const badSet = new Set(bad);
+                    result.legs = result.legs.filter(l => !badSet.has(l));
+                    result.totalArcs = 0; result.totalVerts = 0; result.totalLenM = 0;
+                    result.legs.forEach(l => { result.totalArcs += l.arcs.length; result.totalVerts += l.verts.length; result.totalLenM += l.lenM; });
+                    result.droppedLegs = bad.map(l => `${l.nameA} → ${l.nameB}`);
+                    logL(`✂ dropped ${bad.length} leg(s) that failed a hard gate (drop failing legs is ON): ${result.droppedLegs.join('; ')}`);
+                }
+            }
             // Gates (preview-only build — informational until Commit exists).
             const gates = [];
             gates.push({ label: 'MSL site', ok: true });
@@ -10903,6 +10917,7 @@
                 <label style="display:flex;align-items:center;gap:4px;">battery<select data-swb-p="battery" style="background:#0d131d;color:#dfe9f0;border:1px solid rgba(43,140,255,0.4);border-radius:4px;font:inherit;"><option value="tulip" ${th.battery === 'tulip' ? 'selected' : ''}>Tulip</option><option value="tattu" ${th.battery === 'tattu' ? 'selected' : ''}>Tattu</option></select></label>
                 <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input data-swb-p="hubs" type="checkbox" ${th.hubs ? 'checked' : ''}>hubs</label>
                 <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input data-swb-p="junctions" type="checkbox" ${th.junctions ? 'checked' : ''}>junctions at crossings</label>
+                <label title="Test sites only: a leg that fails a hard gate (handoff under 2 m, cuts through a zone) is cut from the web instead of blocking Commit" style="display:flex;align-items:center;gap:4px;cursor:pointer;color:#ffb020;"><input data-swb-p="dropFailing" type="checkbox" ${th.dropFailing ? 'checked' : ''}>✂ drop failing legs (test sites)</label>
             </div>
             <div style="padding:6px 12px;display:flex;gap:8px;align-items:center;border-bottom:1px solid rgba(43,140,255,0.2);">
                 <button data-swb-stage style="background:rgba(43,140,255,0.15);border:1px solid rgba(43,140,255,0.55);color:#8ec2ff;border-radius:5px;padding:3px 12px;cursor:pointer;font-weight:600;">🕸 Stage</button>
@@ -11626,6 +11641,7 @@
                 { id: 'hubKeepLegs', label: 'Hubs add spokes on top of the mesh (off = a star replaces the legs between its members)', type: 'boolean', default: SWB_DEFAULTS.hubKeepLegs },
                 { id: 'hubs', label: 'Propose hubs', type: 'boolean', default: SWB_DEFAULTS.hubs },
                 { id: 'junctions', label: 'Shared waypoint where two legs cross', type: 'boolean', default: SWB_DEFAULTS.junctions },
+                { id: 'dropFailing', label: '✂ Test sites: cut legs that fail a hard gate instead of blocking Commit', type: 'boolean', default: SWB_DEFAULTS.dropFailing },
                 { id: 'junctionMinFt', label: 'No junction closer than … to a leg end', type: 'number', min: 20, max: 300, step: 10, default: SWB_DEFAULTS.junctionMinFt, unit: 'ft' },
                 { id: 'snapNodeFt', label: 'Route a leg through a hub/junction it passes within … of (0 = off)', type: 'number', min: 0, max: 500, step: 10, default: SWB_DEFAULTS.snapNodeFt, unit: 'ft' },
                 { id: 'hubRadiusFt', label: 'Hub star radius', type: 'number', min: 500, max: 10000, step: 100, default: SWB_DEFAULTS.hubRadiusFt, unit: 'ft' },
