@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-10-02 — Site Setup Tools latest v4.306: ☎ airport / helipad phone numbers in the Airspace Validator (dev only, feature #279)
+
+- Every airport and heliport row in the Airspace panel now carries a second line from the FAA's 28-day NASR data: airspace class with hours (Class C/E, tower hours), tower / approach facility, and the **manager and owner names + phone numbers** (click a number to copy it). The LAANC section names the controlling facility's phone too. Copy report and the map hover tooltips include the numbers.
+- Source: a weekly GitHub Action in the data repo (`tools/nasr_contacts.py` → `faa/contacts/<ST>.json`, cycle 2026-10-01 seeded: 19,105 of 19,427 US facilities have a phone). Needs the GitHub token in the Control Panel; without it the panel says so instead of showing blanks. Cached 7 days per state.
+
 ## 2026-09-29 — Site Setup Tools latest v4.305: SpiderWeb "drop failing legs" for test sites (dev only)
 
 - New panel checkbox "✂ drop failing legs (test sites)" (also in the Control Panel card, off by default). A leg that fails a hard gate (FP ↔ zone handoff under 2 m, or cuts through a zone) is cut from the staged web instead of blocking Commit; the zone keeps its FFZ and its other legs. The stage log names every cut leg. Built for the heavy UX-load site 1643, where one four-pad zone with 23 ft of relief cannot hand off at the 52 m floor.

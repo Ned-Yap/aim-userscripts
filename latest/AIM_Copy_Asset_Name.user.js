@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.305
+// @version      4.306
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.305';
+    const SCRIPT_VERSION = '4.306';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -2747,6 +2747,106 @@
         if (best) airSiteStateCache[sid] = best;
         return best;
     }
+
+    // ---- ☎ NASR contacts (#279). The FAA ArcGIS airport layer has no phone
+    // field; the FAA's 28-day NASR data does (APT_CON: manager + owner).
+    // A weekly Action in the data repo turns it into faa/contacts/<ST>.json
+    // (also class-airspace flags + tower/approach facility per airport).
+    // Joined on ArcGIS IDENT == NASR ARPT_ID. Private repo → needs the PAT. ----
+    const AIR_CONTACTS_CACHE_KEY = 'aim-air-contacts-v1';
+    const AIR_CONTACTS_TTL_MS = 7 * 24 * 3600 * 1000;   // NASR cycles are 28 d; Action runs weekly
+    const airContactsMem = {};                           // st → { cycle, byId } for this session
+    async function airFetchContactsState(st) {
+        if (airContactsMem[st]) return airContactsMem[st];
+        const key = `${AIR_CONTACTS_CACHE_KEY}::${st}`;
+        try {
+            const raw = elevGmGet(key, null);
+            if (raw) {
+                const o = JSON.parse(raw);
+                if (o && o.byId && (Date.now() - (o.fetchedAt || 0)) < AIR_CONTACTS_TTL_MS) {
+                    airContactsMem[st] = o;
+                    return o;
+                }
+            }
+        } catch (e) { console.warn(`${TAG} contacts cache read threw (${st}):`, e); }
+        if (!elevSharedToken) throw new Error('no GitHub token — open the Control Panel and set the PAT');
+        const path = `faa/contacts/${st}.json`;
+        const url = `${ELEV_GITHUB_API}/repos/${ELEV_REPO}/contents/${encodeURIComponent(path)}?ref=${ELEV_REPO_BRANCH}`;
+        const r = await elevGmRequest({
+            method: 'GET', url, timeout: 25000,
+            headers: { 'Authorization': `Bearer ${elevSharedToken}`, 'Accept': 'application/vnd.github.raw+json' },
+        });
+        if (!r.ok) throw new Error(r.status === 404 ? `no contacts file for state ${st}` : `contacts ${st}: HTTP ${r.status || 'network error'}`);
+        let o;
+        try { o = JSON.parse(r.responseText); } catch (e) { throw new Error(`contacts ${st}: bad JSON`); }
+        if (!o || !o.byId) throw new Error(`contacts ${st}: unexpected shape`);
+        const store = { cycle: o.cycle, st, fetchedAt: Date.now(), byId: o.byId };
+        airContactsMem[st] = store;
+        try { elevGmSet(key, JSON.stringify(store)); }
+        catch (e) { console.warn(`${TAG} contacts cache write threw (${st}):`, e); }
+        return store;
+    }
+    // Attach NASR records to the airport entries (+ the LAANC controlling
+    // facility). Soft-fails into inventory.contacts.err — a phone number can
+    // never change a verdict, so this is never the red PARTIAL path.
+    async function airAttachContacts(inventory, siteState) {
+        const info = { cycle: null, states: [], matched: 0, total: 0, err: null };
+        inventory.contacts = info;
+        const states = new Set();
+        (inventory.airports || []).forEach(a => { if (a.state) states.add(a.state); });
+        if (inventory.laancFacility && siteState) states.add(siteState);
+        if (!states.size && siteState) states.add(siteState);
+        if (!states.size) return;
+        const files = {};
+        for (const st of states) {
+            try { files[st] = await airFetchContactsState(st); info.states.push(st); if (!info.cycle) info.cycle = files[st].cycle; }
+            catch (e) { info.err = (e && e.message) || String(e); console.warn(`${TAG} NASR contacts (${st}) unavailable:`, info.err); }
+        }
+        const lookup = (ident, st) => {
+            if (!ident) return null;
+            const f = st && files[st];
+            if (f && f.byId[ident]) return f.byId[ident];
+            for (const k in files) if (files[k].byId[ident]) return files[k].byId[ident];
+            return null;
+        };
+        (inventory.airports || []).forEach(a => {
+            info.total++;
+            const rec = lookup(a.ident, a.state);
+            if (!rec) return;
+            info.matched++;
+            a.nasr = rec;
+        });
+        if (inventory.laancFacility) {
+            const rec = lookup(inventory.laancFacility.id, siteState);
+            if (rec) inventory.laancFacility.nasr = rec;
+        }
+    }
+    // "Mgr JUSTINE RUFF 432-560-2200 · Owner CITY OF MIDLAND 432-685-7100"
+    // (plain text; the panel wraps the numbers in click-to-copy spans).
+    function airContactParts(rec) {
+        if (!rec) return [];
+        const parts = [];
+        const add = (label, c) => { if (c && (c.phone || c.name)) parts.push({ label, name: c.name || '', phone: c.phone || '' }); };
+        add('Mgr', rec.mgr);
+        add('Owner', rec.owner);
+        (rec.other || []).slice(0, 2).forEach(c => add(c.title || 'Contact', c));
+        return parts;
+    }
+    function airContactText(rec) {
+        const parts = airContactParts(rec);
+        if (!parts.length) return 'Unknown — not in NASR';
+        return parts.map(p => `${p.label} ${p.name}${p.phone ? ` ${p.phone}` : ' (no phone)'}`).join(' · ');
+    }
+    // "Class C (CLASS C SVC 0600-0000; OTHER TIMES CLASS E) · ATCT-TRACON, tower MIDLAND 0600-0000"
+    function airNasrAirspaceText(rec) {
+        if (!rec) return '';
+        const bits = [];
+        if (rec.air && rec.air.cls && rec.air.cls.length) bits.push(`Class ${rec.air.cls.join('/')}${rec.air.hrs ? ` (${rec.air.hrs})` : ''}`);
+        else bits.push('Class G (no NASR class record)');
+        if (rec.atc && rec.atc.fac && rec.atc.fac !== 'NON-ATCT') bits.push(`${rec.atc.fac}${rec.atc.twrCall ? `, tower ${rec.atc.twrCall}` : ''}${rec.atc.twrHrs ? ` ${rec.atc.twrHrs}` : ''}`);
+        else if (rec.atc && rec.atc.apch) bits.push(`no tower · approach ${rec.atc.apch}`);
+        return bits.join(' · ');
+    }
     // TFR-only check. Self-contained (builds its own site geometry) so the
     // 20-min auto-sweep can run it without a full report. Returns
     // { violations:[{shape,polygon,note,severity,kind:'tfr'}], tfrs:[…] }.
@@ -2860,7 +2960,7 @@
             : Promise.resolve(null);
         const [apRes, obRes, asRes, laRes] = await Promise.all([
             airEnabled.strips ? grab('Airports', airPointQuery('US_Airport', clat, clng, invM,
-                'IDENT,NAME,ICAO_ID,TYPE_CODE,PRIVATEUSE,ELEVATION', true)) : Promise.resolve(null),
+                'IDENT,NAME,ICAO_ID,TYPE_CODE,PRIVATEUSE,ELEVATION,STATE', true)) : Promise.resolve(null),
             airEnabled.obstacles ? grab('Obstacles', airPointQuery('Digital_Obstacle_File', clat, clng, obsInvM,
                 'OAS_Number,Type_Code,AGL,AMSL,Lighting,Quantity,City,Lat_DD,Long_DD', false)) : Promise.resolve(null),
             airEnabled.airspace ? grab('Airspace', airPointQuery('Class_Airspace', clat, clng, invM,
@@ -2959,6 +3059,7 @@
                 const entry = {
                     name: (a.NAME || a.IDENT || '?').trim(), ident: (a.IDENT || '').trim(),
                     kind, priv, distMi, distNm, brg, lat, lng,
+                    state: (a.STATE || '').trim(),          // NASR contacts file to join (#279)
                     hit: +distNm.toFixed(2) < th.stripNm,   // flag on the displayed value
                 };
                 inventory.airports.push(entry);
@@ -3166,6 +3267,7 @@
                 inventory.laanc = { sev: 'ok', text: `Site is not in any LAANC facility grid (400 ft Part-107 default applies)${laancGrids.length ? ` — ${laancGrids.length} grid(s) nearby drawn on the map` : ''}` };
             } else {
                 const apt = (worst.APT1_NAME || worst.APT1_FAAID || '?').trim();
+                inventory.laancFacility = { id: (worst.APT1_FAAID || '').trim(), name: apt };
                 if (worst.CEILING < th.maxOpAglFt) {
                     boxIssue(clat, clng,
                         `violation: LAANC facility grid over the site caps drone ops at ${worst.CEILING} ft AGL (our max ${th.maxOpAglFt} ft) — controlling facility: ${apt}`,
@@ -3251,6 +3353,13 @@
         }
 
         inventory.cacheServed = airCacheHits.slice();
+        // ☎ NASR contacts join (#279) — soft; needs the PAT.
+        if (airEnabled.strips || airEnabled.laanc) {
+            let siteState = null;
+            try { siteState = await airGetSiteState(sid, clat, clng); } catch (e) { console.warn(`${TAG} site state lookup failed (contacts):`, e); }
+            try { await airAttachContacts(inventory, siteState); }
+            catch (e) { inventory.contacts = { err: (e && e.message) || String(e), states: [], matched: 0, total: 0 }; console.warn(`${TAG} airAttachContacts threw:`, e); }
+        }
         return { violations, inventory, errors, laancGrids, meta: { clat, clng, siteRadM, entCount: ents.length, ptCount: sitePts.length } };
     }
 
@@ -3310,7 +3419,7 @@
             (res.inventory.airports || []).forEach(a => {
                 if (!isFinite(a.lat)) return;
                 add(tip(L.circleMarker([a.lat, a.lng], { radius: 13, color: a.hit ? '#ff5555' : '#5fff5f', weight: 3, fillColor: a.hit ? '#ff5555' : '#5fff5f', fillOpacity: 0.15, interactive: canTip }),
-                    `<strong>${airEsc(a.name)}</strong>${a.ident ? ` (${airEsc(a.ident)})` : ''}<br>${airEsc(a.kind)}, ${a.priv} — ${a.distNm.toFixed(2)} NM ${a.brg}`));
+                    `<strong>${airEsc(a.name)}</strong>${a.ident ? ` (${airEsc(a.ident)})` : ''}<br>${airEsc(a.kind)}, ${a.priv} — ${a.distNm.toFixed(2)} NM ${a.brg}${a.nasr ? `<br>☎ ${airEsc(airContactText(a.nasr))}` : ''}`));
             });
             (res.inventory.stadiums || []).forEach(s => {
                 if (!isFinite(s.lat)) return;
@@ -3347,6 +3456,22 @@
         airClearMapHighlights();
     }
 
+    // Second line under an airport row: NASR airspace class + contacts.
+    // Phone numbers are click-to-copy (data-air-tel) and win over the row jump.
+    function airContactHtml(rec, inline) {
+        if (!rec) return '';
+        const tel = (p) => p.phone
+            ? `<span data-air-tel="${airEsc(p.phone)}" title="Click to copy" style="color:#ffd27a;cursor:copy;text-decoration:underline dotted;">${airEsc(p.phone)}</span>`
+            : '<span style="opacity:0.6;">no phone</span>';
+        const parts = airContactParts(rec);
+        const contacts = parts.length
+            ? parts.map(p => `${airEsc(p.label)} ${airEsc(p.name)} ${tel(p)}`).join(' · ')
+            : 'Unknown — not in NASR';
+        const air = airNasrAirspaceText(rec);
+        const pre = inline ? ' — ' : '<br><span style="opacity:0.82;padding-left:14px;">';
+        const post = inline ? '' : '</span>';
+        return `${pre}${air ? `${airEsc(air)} · ` : ''}☎ ${contacts}${post}`;
+    }
     // Floating inventory panel — everything found, violations first.
     function renderAirspacePanel(res, sid, siteName) {
         closeAirspacePanel();
@@ -3413,12 +3538,18 @@
         if (airEnabled.laanc && inv.laanc) {
             section('LAANC ceiling');
             line(inv.laanc.sev, airEsc(inv.laanc.text));
+            if (inv.laancFacility && inv.laancFacility.nasr) line('info', `☎ Controlling facility ${airEsc(inv.laancFacility.name)}${airContactHtml(inv.laancFacility.nasr, true)}`);
         }
         if (airEnabled.strips) {
             section(`Airports &amp; helipads (within ${th.inventoryMi} mi · standoff ${th.stripNm} NM)`);
             if (!inv.airports.length) line('ok', 'None within range');
+            if (inv.contacts) {
+                if (inv.contacts.err) line('warn', `☎ Phone numbers unavailable — ${airEsc(inv.contacts.err)}`);
+                else if (inv.contacts.states.length) line('info', `☎ FAA NASR contacts · cycle ${airEsc(inv.contacts.cycle || '?')} · matched ${inv.contacts.matched} of ${inv.contacts.total}`);
+            }
             inv.airports.slice(0, 25).forEach(a => line(a.hit ? 'high' : 'ok',
-                `<strong>${airEsc(a.name)}</strong>${a.ident ? ` (${airEsc(a.ident)})` : ''} — ${airEsc(a.kind)}, ${a.priv} · ${a.distNm.toFixed(2)} NM / ${a.distMi.toFixed(1)} mi ${a.brg}`,
+                `<strong>${airEsc(a.name)}</strong>${a.ident ? ` (${airEsc(a.ident)})` : ''} — ${airEsc(a.kind)}, ${a.priv} · ${a.distNm.toFixed(2)} NM / ${a.distMi.toFixed(1)} mi ${a.brg}`
+                + airContactHtml(a.nasr),
                 (typeof a.lat === 'number') ? { lat: a.lat, lng: a.lng, zoom: 13 } : null));
             if (inv.airports.length > 25) line('info', `…and ${inv.airports.length - 25} more`);
         }
@@ -3494,6 +3625,13 @@
                 else airProfOpenTransline(+profEl.getAttribute('data-air-prof-tl'));
                 return;
             }
+            const telEl = e.target.closest('[data-air-tel]');
+            if (telEl) {
+                e.stopPropagation();
+                const num = telEl.getAttribute('data-air-tel');
+                navigator.clipboard.writeText(num).then(() => showToast(`Copied ${num}`), () => showToast('Copy failed', 'rgba(255,96,96,0.55)'));
+                return;
+            }
             if (e.target.closest('[data-air-copy]')) {
                 const text = airBuildReport(res, sid, siteName);
                 navigator.clipboard.writeText(text).then(
@@ -3551,14 +3689,21 @@
             out.push(`Transmission lines (HIFLD, within ${airThresholds.translineShowFt} ft): ${tlS.length ? '' : 'none'}`);
             tlS.slice(0, 8).forEach(t => out.push(`  - ${t.volt}${t.owner ? ` (${t.owner})` : ''} — ${t.distFt < 5000 ? `${t.distFt.toLocaleString()} ft` : `${t.distMi.toFixed(1)} mi`}${t.src ? ` from ${t.src}` : ''}`));
         }
-        if (airEnabled.laanc && inv.laanc) out.push(`LAANC: ${inv.laanc.text}`);
+        if (airEnabled.laanc && inv.laanc) {
+            out.push(`LAANC: ${inv.laanc.text}`);
+            if (inv.laancFacility && inv.laancFacility.nasr) out.push(`  ☎ controlling facility ${inv.laancFacility.name}: ${airContactText(inv.laancFacility.nasr)}`);
+        }
         if (airEnabled.stadiums && inv.stadiums.length) {
             out.push('Stadiums:');
             inv.stadiums.slice(0, 5).forEach(s => out.push(`  - ${s.name}${s.city ? `, ${s.city}` : ''} — ${s.distNm.toFixed(2)} NM ${s.brg}${s.hit ? ' (INSIDE TFR RADIUS)' : ''}`));
         }
         if (airEnabled.strips) {
-            out.push(`Airports & helipads (nearest first):`);
-            inv.airports.slice(0, 15).forEach(a => out.push(`  - ${a.name}${a.ident ? ` (${a.ident})` : ''} — ${a.kind}, ${a.priv}, ${a.distNm.toFixed(2)} NM / ${a.distMi.toFixed(1)} mi ${a.brg}`));
+            out.push(`Airports & helipads (nearest first)${inv.contacts && inv.contacts.cycle ? ` — contacts: FAA NASR ${inv.contacts.cycle}` : ''}:`);
+            if (inv.contacts && inv.contacts.err) out.push(`  ⚠ phone numbers unavailable — ${inv.contacts.err}`);
+            inv.airports.slice(0, 15).forEach(a => {
+                out.push(`  - ${a.name}${a.ident ? ` (${a.ident})` : ''} — ${a.kind}, ${a.priv}, ${a.distNm.toFixed(2)} NM / ${a.distMi.toFixed(1)} mi ${a.brg}`);
+                if (a.nasr) out.push(`      ${airNasrAirspaceText(a.nasr)} · ☎ ${airContactText(a.nasr)}`);
+            });
         }
         if (airEnabled.obstacles) {
             const oS = inv.obstacles.filter(o => o.show);
