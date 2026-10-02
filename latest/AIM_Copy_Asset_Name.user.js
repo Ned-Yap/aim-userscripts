@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.310
+// @version      4.311
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.310';
+    const SCRIPT_VERSION = '4.311';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -4039,6 +4039,15 @@
     }
 
     // ---- Survey model + markdown ----
+    // "2026-10-02 13:24 CDT" — the clock of whoever is sitting there (stamps are
+    // stored as UTC ISO for sorting; this is what people read).
+    function surveyLocalStamp(d) {
+        try {
+            const parts = new Intl.DateTimeFormat(undefined, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false, timeZoneName: 'short' }).formatToParts(d);
+            const g = (t) => (parts.find(p => p.type === t) || {}).value || '';
+            return `${g('year')}-${g('month')}-${g('day')} ${g('hour')}:${g('minute')} ${g('timeZoneName')}`.trim();
+        } catch (e) { return d.toLocaleString(); }
+    }
     function surveyRunId(d) {
         const p = (n) => String(n).padStart(2, '0');
         return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}_${p(d.getUTCHours())}${p(d.getUTCMinutes())}Z`;
@@ -4111,7 +4120,7 @@
         return {
             v: 1, siteId: Number(sid), siteKey: envSiteKey(sid), env: IS_QA ? 'qa' : 'prod',
             siteName: siteName || (siteInfo && siteInfo.name) || `Site ${sid}`,
-            runId, takenAt: new Date().toISOString(), takenBy: login || 'unknown', reason,
+            runId, takenAt: new Date().toISOString(), takenAtLocal: surveyLocalStamp(new Date()), takenBy: login || 'unknown', reason,
             script: SCRIPT_VERSION, nasrCycle,
             thresholds: Object.assign({}, airThresholds), enabled: Object.assign({}, airEnabled),
             site: {
@@ -4205,7 +4214,7 @@
             else if (typeof f[k] === 'string' && f[k].trim()) out.tables[k] = mdRows(f[k]);   // v1 "a | b | c" lines
         });
         if (n.contacts && typeof n.contacts === 'object') {
-            Object.keys(n.contacts).forEach(id => { const c = n.contacts[id]; if (c && typeof c === 'object' && c.contacted) out.contacts[id] = { contacted: true, at: c.at || '', by: c.by || '' }; });
+            Object.keys(n.contacts).forEach(id => { const c = n.contacts[id]; if (c && typeof c === 'object' && c.contacted) out.contacts[id] = { contacted: true, at: c.at || '', atLocal: c.atLocal || '', by: c.by || '' }; });
         }
         return out;
     }
@@ -4231,7 +4240,7 @@
             { t: 'kv', rows: [
                 ['Customer', { field: 'customer', auto: sv.site.customer || '', fallback: 'Unknown' }],
                 ['Site name', site],
-                ['Date and time', `${sv.takenAt.replace('T', ' ').slice(0, 16)} UTC`],
+                ['Date and time', sv.takenAtLocal ? `${sv.takenAtLocal} (${sv.takenAt.replace('T', ' ').slice(0, 16)} UTC)` : `${sv.takenAt.replace('T', ' ').slice(0, 16)} UTC`],
                 ['Address', { field: 'address', auto: sv.site.address || '', fallback: 'Unknown' }],
                 ['GPS coordinates', `${sv.geometry.lat.toFixed(6)}, ${sv.geometry.lng.toFixed(6)} (${sv.geometry.centerSrc})`],
                 ['Airspace (most restrictive at the site)', `Class ${s.airspaceClass}`],
@@ -4252,7 +4261,7 @@
         if (sv.reason !== 'preview' && !sv.images.sectional) ovBlocks.push({ t: 'text', md: `*VFR sectional image not captured: ${sv.images.sectionalErr || 'unavailable'}.*` });
         ovBlocks.push({ t: 'text', md: 'Customer CSV / KML: see the Site Setup Analyzer export in AIM (🗺️ Analyzer) — the setup above is the as-built version.' });
         S.push({ id: 'overview', title: 'Overview', blocks: ovBlocks });
-        const stamp = (c) => c && c.contacted ? `${(c.at || '').replace('T', ' ').slice(0, 16)}${c.by ? ` · ${c.by}` : ''}` : '';
+        const stamp = (c) => c && c.contacted ? `${c.atLocal || (c.at ? surveyLocalStamp(new Date(c.at)) : '')}${c.by ? ` · ${c.by}` : ''}` : '';
         S.push({ id: 'facilities', title: 'Nearby aviation facilities', blocks: [
             { t: 'text', md: `${fac.length ? `${fac.length} facilit${fac.length === 1 ? 'y' : 'ies'} within ${SURVEY_FACILITY_MI} SM of the ${sv.geometry.centerSrc}` : `None within ${SURVEY_FACILITY_MI} SM — closest ${facList.length} listed`}. Distances are to the nearest site entity; a facility inside the ${th.stripNm} NM standoff is **contact required** (Regulations notifies them of our operations). Phones: FAA NASR ${sv.nasrCycle || 'unavailable'}${inv.contacts && inv.contacts.err ? ` (⚠ ${inv.contacts.err})` : ''}.` },
             { t: 'table', contacts: true, cols: ['Facility', 'Code', 'Type', 'Use', 'Phone (manager / owner)', 'Airspace', 'Distance & direction', 'Standoff', 'Contacted', 'Contacted on · by'],
@@ -4332,7 +4341,7 @@
         const nf = notes.fields || {};
         const site = `${sv.siteName}${sv.env === 'qa' ? ' (QA)' : ''}`;
         const L = [`# ${site} — Airspace Survey`, '',
-            `Site ${sv.siteId} · run \`${sv.runId}\` (${sv.reason}) · generated by AIM Site Setup Tools v${sv.script} on ${sv.takenAt.replace('T', ' ').slice(0, 16)} UTC by ${sv.takenBy}  `,
+            `Site ${sv.siteId} · run \`${sv.runId}\` (${sv.reason}) · generated by AIM Site Setup Tools v${sv.script} on ${sv.takenAtLocal || `${sv.takenAt.replace('T', ' ').slice(0, 16)} UTC`} by ${sv.takenBy}  `,
             `Data: FAA AIS (56-day chart cycle) · FAA NASR ${sv.nasrCycle || 'n/a'} · HIFLD · USGS USWTDB · LAANC facility maps · tfr.faa.gov`, '',
             '> This survey is not the final route validation or risk assessment. Sections marked ✎ are entered by people (📄 Survey in AIM) and persist across runs; everything else is regenerated from data on each run.', ''];
         surveySections(sv, notes).forEach(sec => {
@@ -4556,7 +4565,7 @@
         if (!st || st.idx === undefined) return elevSharedToken ? 'checking survey history…' : 'no GitHub token — surveys not saved';
         const d = surveyDue(st.idx);
         if (!d.last) return 'no survey saved yet — the next run saves one (creation)';
-        return `last saved ${d.last.takenAt.slice(0, 10)} (${d.last.reason}${d.last.signed ? ` · ${d.last.signed}` : ''}) · ${d.due ? '⚠ DUE — next run re-saves' : `next due ${d.dueAt.toISOString().slice(0, 10)}`} · ${st.idx.runs.length} run${st.idx.runs.length === 1 ? '' : 's'}`;
+        return `last saved ${surveyLocalStamp(new Date(d.last.takenAt))} (${d.last.reason}${d.last.signed ? ` · ${d.last.signed}` : ''}) · ${d.due ? '⚠ DUE — next run re-saves' : `next due ${d.dueAt.toISOString().slice(0, 10)}`} · ${st.idx.runs.length} run${st.idx.runs.length === 1 ? '' : 's'}`;
     }
     function surveyRenderStatus(sid, msg) {
         if (msg !== undefined) surveyStatus[sid] = Object.assign(surveyStatus[sid] || {}, { msg });
@@ -4633,7 +4642,7 @@
         const st = { tab: 'summary', imgTab: 'setup' };
         let notesDraft = surveyEmptyNotes(), dirty = false, viewSv = null, viewDir = null, selectedRun = null, viewLabel = '';
         const setDirty = (d) => { dirty = d; saveNotesBtn.style.background = d ? 'rgba(255,210,122,0.18)' : 'none'; saveNotesBtn.textContent = d ? '💾 Save notes •' : '💾 Save notes'; };
-        const noteStatText = () => notesDraft.updatedAt ? `✎ notes last saved ${notesDraft.updatedAt.slice(0, 16).replace('T', ' ')} by ${notesDraft.updatedBy || '?'}` : '✎ no notes saved yet';
+        const noteStatText = () => notesDraft.updatedAt ? `✎ notes last saved ${surveyLocalStamp(new Date(notesDraft.updatedAt))} by ${notesDraft.updatedBy || '?'}` : '✎ no notes saved yet';
         const renderMain = () => {
             if (!viewSv) { body.innerHTML = '<div style="opacity:0.7;">Run the airspace check, or pick a saved run on the left.</div>'; return; }
             body.innerHTML = `<div style="color:${viewDir ? '#7adfe6' : '#ffb020'};margin-bottom:4px;">${airEsc(viewLabel)}</div>` + surveyRenderTabs(viewSv, notesDraft, st);
@@ -4674,7 +4683,7 @@
             const runs = (idx && idx.runs) || [];
             const live = surveyLast && String(surveyLast.sid) === String(sid);
             runsEl.innerHTML = (runs.length ? runs.map(r => `<div data-survey-run="${airEsc(r.runId)}" title="Show this saved report (with its map images)" style="padding:4px 10px;cursor:pointer;display:flex;gap:6px;align-items:center;border-left:3px solid transparent;">`
-                    + `<span style="flex:1;"><strong>📄 ${airEsc(r.takenAt.slice(0, 10))}</strong> <span style="opacity:0.7">${airEsc(r.runId.slice(11, 15))}Z · ${airEsc(r.reason)}</span><br><span style="font-size:11px;opacity:0.8">${r.violations} violation${r.violations === 1 ? '' : 's'} · ${airEsc(r.signed || r.decision || '')}</span></span>`
+                    + `<span style="flex:1;"><strong>📄 ${airEsc(surveyLocalStamp(new Date(r.takenAt)))}</strong> <span style="opacity:0.7">${airEsc(r.reason)}</span><br><span style="font-size:11px;opacity:0.8">${r.violations} violation${r.violations === 1 ? '' : 's'} · ${airEsc(r.signed || r.decision || '')}</span></span>`
                     + `<button data-survey-view="${airEsc(r.runId)}" title="Re-draw this saved run in the airspace panel + map (read-only)" style="background:none;border:1px solid rgba(122,223,230,0.35);color:#7adfe6;border-radius:4px;padding:0 5px;cursor:pointer;">👁</button></div>`).join('')
                     : '<div style="padding:4px 10px;opacity:0.6;">No saved runs yet — 💾 Save survey writes the first one.</div>')
                 + (live ? `<div data-survey-preview title="What a save would write right now (no images — those are captured at save time)" style="padding:4px 10px;cursor:pointer;color:#5fff5f;border-top:1px solid rgba(122,223,230,0.15);border-left:3px solid transparent;">▶ Live preview of the last run (${new Date(surveyLast.at).toLocaleTimeString()})</div>` : '<div style="padding:4px 10px;opacity:0.6;">Run the airspace check for a live preview.</div>');
@@ -4705,7 +4714,7 @@
             const ck = e.target.closest('[data-sn-contact]');
             if (ck) {
                 const id = ck.getAttribute('data-sn-contact');
-                if (ck.checked) { const login = await surveyGithubLogin(); notesDraft.contacts[id] = { contacted: true, at: new Date().toISOString(), by: login || 'unknown' }; }
+                if (ck.checked) { const login = await surveyGithubLogin(); const now = new Date(); notesDraft.contacts[id] = { contacted: true, at: now.toISOString(), atLocal: surveyLocalStamp(now), by: login || 'unknown' }; }
                 else delete notesDraft.contacts[id];
                 setDirty(true); renderMain();
             }
