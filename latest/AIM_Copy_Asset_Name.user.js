@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.308
+// @version      4.309
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.308';
+    const SCRIPT_VERSION = '4.309';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -4387,7 +4387,7 @@
             showToast(`📄 Survey saved (${reason}) — ${runId}`, 'rgba(95,255,95,0.55)');
             surveyRenderStatus(sid);
             const modal = document.getElementById(SURVEY_MODAL_ID);
-            if (modal) openSurveyModal(sid);
+            if (modal) openSurveyModal(sid, runId);
             return entry;
         } catch (e) {
             console.warn(`${TAG} survey save failed:`, e);
@@ -4491,7 +4491,7 @@
         return `<textarea data-survey-note="${f.k}" rows="${f.type === 'rows' ? 3 : 2}" placeholder="${airEsc(ph)}" style="${base}resize:vertical;">${airEsc(v)}</textarea>`;
     }
     function closeSurveyModal() { const el = document.getElementById(SURVEY_MODAL_ID); if (el) el.remove(); }
-    async function openSurveyModal(sid) {
+    async function openSurveyModal(sid, selectRunId) {
         closeSurveyModal();
         const wrap = document.createElement('div');
         wrap.id = SURVEY_MODAL_ID;
@@ -4530,16 +4530,35 @@
         const body = wrap.querySelector('[data-survey-body]');
         const runsEl = wrap.querySelector('[data-survey-runs]');
         const notesEl = wrap.querySelector('[data-survey-notes]');
-        let currentMd = '';
+        let currentMd = '', selectedRun = null;
         const showMd = (md, dir) => { currentMd = md; body.innerHTML = surveyMdToHtml(md); if (dir) surveyHydrateImages(body, dir); };
+        const markSelected = () => {
+            runsEl.querySelectorAll('[data-survey-run],[data-survey-preview]').forEach(el => {
+                const on = selectedRun ? el.getAttribute('data-survey-run') === selectedRun : el.hasAttribute('data-survey-preview');
+                el.style.background = on ? 'rgba(122,223,230,0.18)' : '';
+                el.style.borderLeft = on ? '3px solid #7adfe6' : '3px solid transparent';
+            });
+        };
+        const loadRun = async (runId) => {
+            selectedRun = runId; markSelected();
+            const dir = `${surveyDirFor(sid)}/${runId}`;
+            body.innerHTML = '<div style="opacity:0.7">loading saved report…</div>';
+            try {
+                const md = await ghGetText(`${dir}/${sid}_Airspace_Survey.md`);
+                if (md == null) throw new Error('report file missing');
+                showMd(md, dir);
+                body.insertAdjacentHTML('afterbegin', `<div style="color:#7adfe6;margin-bottom:6px;">Saved run ${airEsc(runId)} — images load from GitHub below.</div>`);
+            } catch (err) { body.innerHTML = `<div style="color:#ff8080">load failed — ${airEsc(err.message)}</div>`; }
+        };
         const renderRuns = (idx) => {
             const runs = (idx && idx.runs) || [];
             const live = surveyLast && String(surveyLast.sid) === String(sid);
-            runsEl.innerHTML = (live ? `<div data-survey-preview style="padding:4px 10px;cursor:pointer;color:#5fff5f;" onmouseover="this.style.background='rgba(122,223,230,0.12)'" onmouseout="this.style.background=''">▶ Live preview of the last run (${new Date(surveyLast.at).toLocaleTimeString()})</div>` : '<div style="padding:4px 10px;opacity:0.6;">Run the airspace check for a live preview.</div>')
-                + (runs.length ? runs.map(r => `<div data-survey-run="${airEsc(r.runId)}" style="padding:4px 10px;cursor:pointer;display:flex;gap:6px;align-items:center;" onmouseover="this.style.background='rgba(122,223,230,0.12)'" onmouseout="this.style.background=''">`
-                    + `<span style="flex:1;"><strong>${airEsc(r.takenAt.slice(0, 10))}</strong> <span style="opacity:0.7">${airEsc(r.reason)}</span><br><span style="font-size:11px;opacity:0.8">${r.violations} violation${r.violations === 1 ? '' : 's'} · ${airEsc(r.signed || r.decision || '')} · ${airEsc(r.takenBy || '')}</span></span>`
+            runsEl.innerHTML = (runs.length ? runs.map(r => `<div data-survey-run="${airEsc(r.runId)}" title="Show this saved report (with its map images)" style="padding:4px 10px;cursor:pointer;display:flex;gap:6px;align-items:center;border-left:3px solid transparent;">`
+                    + `<span style="flex:1;"><strong>📄 ${airEsc(r.takenAt.slice(0, 10))}</strong> <span style="opacity:0.7">${airEsc(r.runId.slice(11, 15))}Z · ${airEsc(r.reason)}</span><br><span style="font-size:11px;opacity:0.8">${r.violations} violation${r.violations === 1 ? '' : 's'} · ${airEsc(r.signed || r.decision || '')} · ${airEsc(r.takenBy || '')}</span></span>`
                     + `<button data-survey-view="${airEsc(r.runId)}" title="Re-draw this saved run in the airspace panel + map (read-only)" style="background:none;border:1px solid rgba(122,223,230,0.35);color:#7adfe6;border-radius:4px;padding:0 5px;cursor:pointer;">👁</button></div>`).join('')
-                    : '<div style="padding:4px 10px;opacity:0.6;">No saved runs yet.</div>');
+                    : '<div style="padding:4px 10px;opacity:0.6;">No saved runs yet — 💾 Save survey writes the first one.</div>')
+                + (live ? `<div data-survey-preview title="What a save would write right now (no images — those are captured at save time)" style="padding:4px 10px;cursor:pointer;color:#5fff5f;border-top:1px solid rgba(122,223,230,0.15);border-left:3px solid transparent;">▶ Live preview of the last run (${new Date(surveyLast.at).toLocaleTimeString()})</div>` : '<div style="padding:4px 10px;opacity:0.6;">Run the airspace check for a live preview.</div>');
+            markSelected();
         };
         const renderNotes = (notes) => {
             const f = (notes && notes.fields) || {};
@@ -4577,7 +4596,7 @@
                 finally { b.disabled = false; b.textContent = '💾 Save notes'; }
                 return;
             }
-            if (e.target.closest('[data-survey-preview]')) { await livePreview(); return; }
+            if (e.target.closest('[data-survey-preview]')) { selectedRun = null; markSelected(); await livePreview(); return; }
             const viewEl = e.target.closest('[data-survey-view]');
             if (viewEl) {
                 e.stopPropagation();
@@ -4588,16 +4607,7 @@
                 return;
             }
             const runEl = e.target.closest('[data-survey-run]');
-            if (runEl) {
-                const runId = runEl.getAttribute('data-survey-run');
-                const dir = `${surveyDirFor(sid)}/${runId}`;
-                body.innerHTML = '<div style="opacity:0.7">loading report…</div>';
-                try {
-                    const md = await ghGetText(`${dir}/${sid}_Airspace_Survey.md`);
-                    if (md == null) throw new Error('report file missing');
-                    showMd(md, dir);
-                } catch (err) { body.innerHTML = `<div style="color:#ff8080">load failed — ${airEsc(err.message)}</div>`; }
-            }
+            if (runEl) { await loadRun(runEl.getAttribute('data-survey-run')); }
         });
         if (!elevSharedToken) {
             runsEl.innerHTML = '<div style="padding:6px 10px;color:#ff8080;">No GitHub token — open the Control Panel (gear) and set the PAT to read / save surveys.</div>';
@@ -4605,10 +4615,14 @@
             if (surveyLast && String(surveyLast.sid) === String(sid)) livePreview();
             return;
         }
-        try { renderRuns(await surveyLoadIndex(sid, true)); } catch (e) { runsEl.innerHTML = `<div style="padding:6px 10px;color:#ff8080;">history unavailable — ${airEsc(e.message)}</div>`; }
+        let idx = null;
+        try { idx = await surveyLoadIndex(sid, true); renderRuns(idx); } catch (e) { runsEl.innerHTML = `<div style="padding:6px 10px;color:#ff8080;">history unavailable — ${airEsc(e.message)}</div>`; }
         try { notesLoaded = await surveyLoadNotes(sid); renderNotes(notesLoaded); } catch (e) { notesEl.innerHTML = `<div style="color:#ff8080;">notes unavailable — ${airEsc(e.message)}</div>`; }
         const stat = wrap.querySelector('[data-survey-stat]'); if (stat) stat.textContent = `📄 Survey: ${surveyStatusText(sid)}`;
-        if (surveyLast && String(surveyLast.sid) === String(sid)) livePreview();
+        const runs = (idx && idx.runs) || [];
+        const want = selectRunId && runs.some(r => r.runId === selectRunId) ? selectRunId : (runs[0] && runs[0].runId);
+        if (want) await loadRun(want);
+        else if (surveyLast && String(surveyLast.sid) === String(sid)) livePreview();
     }
 
     function airspaceRun() {
