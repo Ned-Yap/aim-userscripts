@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.315
+// @version      4.316
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.315';
+    const SCRIPT_VERSION = '4.316';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -4178,8 +4178,10 @@
     // row tables (added rows for things the data can't know) and the
     // per-facility "Contacted" stamps. ----
     const SURVEY_FIELDS = {
+        reference:    { label: 'Percepto reference (cover)', ph: 'e.g. SS-2026-017' },
+        writtenBy:    { label: 'Written by (cover) — name, position', ph: 'Jane Doe, Customer Success Manager' },
         decision:     { label: 'Decision (signed)', type: 'select', opts: ['', 'Acceptable without limitations', 'Acceptable with limitations', 'Needs Additional Review'] },
-        decisionBy:   { label: 'Decided by · date', ph: 'name · 2026-10-02' },
+        decisionBy:   { label: 'Approved and signed by — name, position · date', ph: 'John Roe, Director of Operations · 2026-10-02' },
         limitations:  { label: 'Limitations / what additional review needs', type: 'textarea' },
         customer:     { label: 'Customer' },
         address:      { label: 'Address' },
@@ -4359,6 +4361,7 @@
                     L.push(`**Decision (signed):** ${nf.decision || '✎ _not yet signed_'}${nf.decisionBy ? ` — ${nf.decisionBy}` : ''}  `);
                     L.push(`**Decision (AIM-suggested):** ${sv.decision.suggested} — ${sv.decision.why}  `);
                     if (nf.limitations) L.push(`**Limitations / review needed:** ${nf.limitations}  `);
+                    if (nf.reference || nf.writtenBy) L.push(`**Percepto reference:** ${nf.reference || 'N/A'} · **Written by:** ${nf.writtenBy || 'N/A'}  `);
                 } else if (b.t === 'kv') {
                     L.push(mdTable(['Field', 'Value'], b.rows.map(rw => [rw[0], surveyFieldValue(rw[1], nf)])));
                 } else if (b.t === 'images') {
@@ -4444,7 +4447,9 @@
                 h.push(`<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;margin:4px 0 8px;">
                     <div><div style="opacity:0.8;">AIM-suggested</div><div><strong>${airEsc(sv.decision.suggested)}</strong> — ${airEsc(sv.decision.why)}</div></div>
                     <div><div style="opacity:0.8;">${airEsc(SURVEY_FIELDS.decision.label)}</div>${surveyFieldInput('decision', nf)}<div style="opacity:0.8;margin-top:4px;">${airEsc(SURVEY_FIELDS.decisionBy.label)}</div>${surveyFieldInput('decisionBy', nf)}</div>
-                    <div style="grid-column:1 / -1;"><div style="opacity:0.8;">${airEsc(SURVEY_FIELDS.limitations.label)}</div>${surveyFieldInput('limitations', nf)}</div></div>`);
+                    <div style="grid-column:1 / -1;"><div style="opacity:0.8;">${airEsc(SURVEY_FIELDS.limitations.label)}</div>${surveyFieldInput('limitations', nf)}</div>
+                    <div><div style="opacity:0.8;">${airEsc(SURVEY_FIELDS.reference.label)}</div>${surveyFieldInput('reference', nf)}</div>
+                    <div><div style="opacity:0.8;">${airEsc(SURVEY_FIELDS.writtenBy.label)}</div>${surveyFieldInput('writtenBy', nf)}</div></div>`);
             } else if (b.t === 'kv') {
                 h.push(`<table style="border-collapse:collapse;font-size:11px;margin:4px 0;width:100%;max-width:900px;"><tbody>${b.rows.map(rw => {
                     const v = rw[1];
@@ -4684,12 +4689,37 @@
         } catch (e) { console.warn(`${TAG} survey print: overlay bake failed:`, e); }
         return canvas.toDataURL('image/jpeg', 0.9);
     }
-    function surveyPrintHtml(sv, notes, imgData, layersOn) {
+    const SURVEY_ASSETS = { cover: `${SURVEY_DIR}/assets/cover.jpg`, logo: `${SURVEY_DIR}/assets/logo-white.png` };
+    const surveyAssetCache = {};
+    async function surveyAsset(key) {
+        if (surveyAssetCache[key]) return surveyAssetCache[key];
+        try { surveyAssetCache[key] = await ghGetDataUrl(SURVEY_ASSETS[key], key === 'cover' ? 'image/jpeg' : 'image/png'); }
+        catch (e) { console.warn(`${TAG} survey print: asset ${key} unavailable:`, e); surveyAssetCache[key] = ''; }
+        return surveyAssetCache[key];
+    }
+    function surveyPrintHtml(sv, notes, imgData, layersOn, assets) {
         const nf = notes.fields || {};
         const site = `${sv.siteName}${sv.env === 'qa' ? ' (QA)' : ''}`;
+        assets = assets || {};
         const td = 'border:1px solid #bbb;padding:3px 6px;vertical-align:top;';
         const tbl = (cols, rows) => `<table style="border-collapse:collapse;width:100%;font-size:9pt;margin:4px 0;page-break-inside:auto;"><thead><tr>${cols.map(c => `<th style="${td}background:#eee;text-align:left;">${airEsc(c)}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.map(r => `<tr>${cols.map((c, i) => `<td style="${td}">${surveyPrintInline(r[i] || '')}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${cols.length}" style="${td}color:#777;">N/A</td></tr>`}</tbody></table>`;
         const out = [];
+        // Cover — the Regulations form's cover art (logo top, blue hex band
+        // bottom) with the report block in the white area and the sign-off
+        // block on the band.
+        out.push(`<section class="cover" style="${assets.cover ? `background-image:url('${assets.cover}');` : 'background:#0d4b63;'}">
+            <div class="cover-co">Percepto Robotics LTD · +972 54-4540368 │ info@percepto.co<br>Privately Held Company, ID 6476229 · 8 Haoreg St, Modi'in-Maccabim-Re'ut 7178102 Israel</div>
+            <div class="cover-title"><div class="t1">SITE SURVEY</div><div class="t2">Report</div>
+                <div class="t3">${airEsc(site)}</div>
+                <div class="t4">${airEsc(sv.site.customer || nf.customer || '')}${sv.site.customer || nf.customer ? ' · ' : ''}${airEsc((sv.takenAtLocal || sv.takenAt).slice(0, 10))}</div></div>
+            <div class="cover-band">
+                <div><span>Percepto Reference:</span> ${airEsc(nf.reference || '—')}</div>
+                <div><span>Written by:</span> ${airEsc(nf.writtenBy || sv.takenBy || '—')}</div>
+                <div><span>Approved and Signed by:</span> ${airEsc(nf.decisionBy || '—')}</div>
+                <div class="small">Decision: ${airEsc(nf.decision || 'not yet signed')} · Site ${sv.siteId} · run ${airEsc(sv.runId)}</div>
+            </div></section>`);
+        out.push(`<div class="hdr">${assets.logo ? `<img src="${assets.logo}" alt="Percepto">` : '<strong>PERCEPTO</strong>'}<span>Site Survey Report — ${airEsc(site)}</span></div>`);
+        out.push('<div class="ftr">This document is proprietary and confidential. No part of this document may be disclosed in any manner to a third party without the prior written consent of Percepto Robotics.</div>');
         out.push(`<h1>${airEsc(site)} — Airspace Survey</h1>`);
         out.push(`<p class="meta">Site ${sv.siteId} · run ${airEsc(sv.runId)} (${airEsc(sv.reason)}) · generated by AIM Site Setup Tools v${airEsc(sv.script)} on ${airEsc(sv.takenAtLocal || sv.takenAt)} by ${airEsc(sv.takenBy)}<br>Data: FAA AIS (56-day chart cycle) · FAA NASR ${airEsc(sv.nasrCycle || 'n/a')} · HIFLD · USGS USWTDB · LAANC facility maps · tfr.faa.gov${layersOn.length ? `<br>Map overlays printed: ${airEsc(layersOn.join(', '))}` : ''}</p>`);
         out.push('<p class="note">This survey is not the final route validation or risk assessment. Sections marked ✎ are entered by people in AIM and persist across runs; everything else is regenerated from data on each run.</p>');
@@ -4729,7 +4759,22 @@
             table { page-break-inside: auto; } tr { page-break-inside: avoid; } th { font-weight: 600; } code { background: #f0f0f0; padding: 0 3px; }
             .bar { position: sticky; top: 0; background: #0f1a24; color: #fff; padding: 8px 12px; margin: -12px -12px 12px; display: flex; gap: 10px; align-items: center; font-size: 10pt; }
             .bar button { font: inherit; padding: 4px 12px; border-radius: 5px; border: 1px solid #7adfe6; background: #163041; color: #7adfe6; cursor: pointer; }
-            @media print { .bar { display: none; } body { padding: 0; } }
+            .cover { position: relative; height: 10in; width: 100%; background-size: cover; background-position: center; page-break-after: always; break-after: page; color: #0d2a36; -webkit-print-color-adjust: exact; print-color-adjust: exact; overflow: hidden; }
+            .cover-co { position: absolute; left: 0.4in; top: 1.9in; font-size: 7.5pt; color: #555; line-height: 1.5; }
+            .cover-title { position: absolute; left: 0.4in; top: 3.0in; }
+            .cover-title .t1 { font-size: 30pt; font-weight: 800; letter-spacing: 2px; } .cover-title .t2 { font-size: 20pt; font-weight: 300; margin-top: -4px; }
+            .cover-title .t3 { font-size: 15pt; font-weight: 600; margin-top: 22px; } .cover-title .t4 { font-size: 11pt; color: #444; margin-top: 4px; }
+            .cover-band { position: absolute; left: 0.4in; right: 0.4in; top: 6.2in; color: #fff; font-size: 11pt; line-height: 1.9; }
+            .cover-band span { display: inline-block; width: 2.1in; color: #cfe6ee; } .cover-band .small { font-size: 8.5pt; color: #cfe6ee; margin-top: 10px; }
+            .hdr { display: none; } .ftr { display: none; }
+            @media print {
+                .bar { display: none; } body { padding: 0; }
+                .hdr { display: flex; position: fixed; top: 0; left: 0; right: 0; height: 0.32in; background: #0d4b63; color: #fff; align-items: center; gap: 10px; padding: 0 10px; font-size: 8.5pt; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+                .hdr img { height: 0.22in; }
+                .ftr { display: block; position: fixed; bottom: 0; left: 0; right: 0; font-size: 7pt; color: #777; text-align: center; border-top: 1px solid #ddd; padding-top: 2px; }
+                h1 { margin-top: 0.4in; }
+            }
+            @page { @bottom-right { content: "Page " counter(page) " of " counter(pages); font-size: 8pt; color: #777; } }
         </style></head><body>
             <div class="bar"><strong>📄 ${airEsc(site)}</strong> — survey ${airEsc(sv.runId)}<span style="flex:1"></span><button onclick="window.print()">🖨 Print / Save as PDF</button><span style="opacity:0.7">choose “Save as PDF” as the destination</span></div>
             ${out.join('\n')}
@@ -4750,7 +4795,8 @@
                 imgData[k] = await surveyBakeImage(raw, geos[k], markers);
             } catch (e) { console.warn(`${TAG} survey print: image ${k} skipped:`, e); }
         }
-        const html = surveyPrintHtml(sv, notes, imgData, layersOn);
+        const assets = { cover: await surveyAsset('cover'), logo: await surveyAsset('logo') };
+        const html = surveyPrintHtml(sv, notes, imgData, layersOn, assets);
         let w = null;
         try { w = (window.top || window).open('about:blank', '_blank'); } catch (e) {}
         if (!w) { try { w = window.open('about:blank', '_blank'); } catch (e) {} }
