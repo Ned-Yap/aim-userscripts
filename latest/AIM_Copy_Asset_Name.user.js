@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.318
+// @version      4.319
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.318';
+    const SCRIPT_VERSION = '4.319';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -4637,13 +4637,19 @@
     // Minimal markdown → HTML for the report preview (headings, tables,
     // lists, bold, images, links, blockquote). Images resolve lazily via
     // data-survey-img → ghGetDataUrl.
+    const surveyImgCache = {};   // "<dir>/<file>" → data URL (per session; a run's images never change)
+    async function surveyImageDataUrl(dir, f) {
+        const k = `${dir}/${f}`;
+        if (!surveyImgCache[k]) surveyImgCache[k] = ghGetDataUrl(k, 'image/jpeg').catch(e => { delete surveyImgCache[k]; throw e; });
+        return surveyImgCache[k];
+    }
     async function surveyHydrateImages(root, dir) {
-        const imgs = root.querySelectorAll('img[data-survey-img]');
-        for (const im of imgs) {
+        const imgs = Array.from(root.querySelectorAll('img[data-survey-img]'));
+        await Promise.all(imgs.map(async (im) => {
             const f = im.getAttribute('data-survey-img');
-            try { im.src = await ghGetDataUrl(`${dir}/${f}`, 'image/jpeg'); }
+            try { const u = await surveyImageDataUrl(dir, f); if (im.isConnected) im.src = u; }
             catch (e) { im.alt = `${f}: ${e.message}`; im.style.minHeight = '20px'; console.warn(`${TAG} survey image ${f}:`, e); }
-        }
+        }));
     }
     // Re-render a saved run in the normal panel + map highlights, read-only.
     async function surveyViewRun(sid, runId) {
@@ -4794,7 +4800,7 @@
         for (const k of ['setup', 'overview', 'sectional']) {
             if (!sv.images || !sv.images[k] || !dir) continue;
             try {
-                const raw = await ghGetDataUrl(`${dir}/${sv.images[k]}`, 'image/jpeg');
+                const raw = await surveyImageDataUrl(dir, sv.images[k]);
                 imgData[k] = await surveyBakeImage(raw, geos[k], markers);
             } catch (e) { console.warn(`${TAG} survey print: image ${k} skipped:`, e); }
         }
@@ -4862,7 +4868,7 @@
         const guard = (e) => { if (isEditable(e.target)) e.stopImmediatePropagation(); };
         ['mousedown', 'pointerdown', 'keydown', 'keyup', 'keypress'].forEach(t => window.addEventListener(t, guard, true));
         const origRemove = wrap.remove.bind(wrap);
-        wrap.remove = () => { ['mousedown', 'pointerdown', 'keydown', 'keyup', 'keypress'].forEach(t => window.removeEventListener(t, guard, true)); origRemove(); };
+        wrap.remove = () => { ['mousedown', 'pointerdown', 'keydown', 'keyup', 'keypress'].forEach(t => window.removeEventListener(t, guard, true)); try { if (longTasks) longTasks.disconnect(); } catch (e) {} origRemove(); };
         wrap.addEventListener('mousedown', (e) => { if (isEditable(e.target)) { e.stopPropagation(); setTimeout(() => { try { if (document.activeElement !== e.target) e.target.focus(); } catch (err) {} }, 0); } });
         let drag = null;
         wrap.querySelector('[data-survey-drag]').addEventListener('mousedown', (e) => { if (e.target.closest('button')) return; const r = wrap.getBoundingClientRect(); drag = { dx: e.clientX - r.left, dy: e.clientY - r.top }; wrap.style.transform = 'none'; wrap.style.left = `${r.left}px`; e.preventDefault(); });
@@ -4878,9 +4884,23 @@
         const noteStatText = () => notesDraft.updatedAt ? `✎ notes last saved ${surveyLocalStamp(new Date(notesDraft.updatedAt))} by ${notesDraft.updatedBy || '?'}` : '✎ no notes saved yet';
         const renderMain = () => {
             if (!viewSv) { body.innerHTML = '<div style="opacity:0.7;">Run the airspace check, or pick a saved run on the left.</div>'; return; }
+            const t0 = performance.now();
             body.innerHTML = `<div style="color:${viewDir ? '#7adfe6' : '#ffb020'};margin-bottom:4px;">${airEsc(viewLabel)}</div>` + surveyRenderTabs(viewSv, notesDraft, st);
             if (viewDir) surveyHydrateImages(body, viewDir);
+            const ms = performance.now() - t0;
+            if (ms > 50) console.log(`${TAG} survey: pane render ${Math.round(ms)} ms (${st.tab})`);
         };
+        // Diagnostics: while the window is open, log any main-thread task over
+        // 200 ms with what the page was doing — paste these if typing feels slow.
+        let longTasks = null;
+        try {
+            longTasks = new PerformanceObserver((list) => list.getEntries().forEach(en => {
+                if (en.duration < 200) return;
+                const a = (en.attribution && en.attribution[0]) || {};
+                console.warn(`${TAG} survey: long task ${Math.round(en.duration)} ms — ${a.containerType || 'window'} ${a.containerSrc || a.containerName || ''} (focus on ${document.activeElement && document.activeElement.tagName}${document.activeElement && document.activeElement.getAttribute('data-sn-field') ? ' ' + document.activeElement.getAttribute('data-sn-field') : ''})`);
+            }));
+            longTasks.observe({ entryTypes: ['longtask'] });
+        } catch (e) { longTasks = null; }
         const markSelected = () => {
             runsEl.querySelectorAll('[data-survey-run],[data-survey-preview]').forEach(el => {
                 const on = selectedRun ? el.getAttribute('data-survey-run') === selectedRun : el.hasAttribute('data-survey-preview');
