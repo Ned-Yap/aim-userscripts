@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.317
+// @version      4.318
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.317';
+    const SCRIPT_VERSION = '4.318';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -4854,6 +4854,16 @@
                 <div data-survey-body style="flex:1;overflow-y:auto;padding:8px 14px;min-width:0;"><div style="opacity:0.7;">loading…</div></div>
             </div>`;
         document.body.appendChild(wrap);
+        // Inputs inside the window must win over every page-level mouse/key
+        // handler (Percepto's and our own hotkey scripts): window-capture runs
+        // first, so stop the event there for anything editable in the window.
+        // Default actions (focus, typing) are untouched.
+        const isEditable = (t) => t && t.closest && t.closest(`#${SURVEY_MODAL_ID}`) && /^(INPUT|SELECT|TEXTAREA)$/.test(t.tagName);
+        const guard = (e) => { if (isEditable(e.target)) e.stopImmediatePropagation(); };
+        ['mousedown', 'pointerdown', 'keydown', 'keyup', 'keypress'].forEach(t => window.addEventListener(t, guard, true));
+        const origRemove = wrap.remove.bind(wrap);
+        wrap.remove = () => { ['mousedown', 'pointerdown', 'keydown', 'keyup', 'keypress'].forEach(t => window.removeEventListener(t, guard, true)); origRemove(); };
+        wrap.addEventListener('mousedown', (e) => { if (isEditable(e.target)) { e.stopPropagation(); setTimeout(() => { try { if (document.activeElement !== e.target) e.target.focus(); } catch (err) {} }, 0); } });
         let drag = null;
         wrap.querySelector('[data-survey-drag]').addEventListener('mousedown', (e) => { if (e.target.closest('button')) return; const r = wrap.getBoundingClientRect(); drag = { dx: e.clientX - r.left, dy: e.clientY - r.top }; wrap.style.transform = 'none'; wrap.style.left = `${r.left}px`; e.preventDefault(); });
         document.addEventListener('mousemove', (e) => { if (!drag) return; wrap.style.left = `${e.clientX - drag.dx}px`; wrap.style.top = `${e.clientY - drag.dy}px`; });
