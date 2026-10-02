@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.313
+// @version      4.314
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.313';
+    const SCRIPT_VERSION = '4.314';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -4777,6 +4777,7 @@
             <div data-survey-drag style="cursor:move;padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid rgba(122,223,230,0.25);flex:none;flex-wrap:wrap;">
                 <span style="color:#7adfe6;font-weight:700;">📄 Airspace Survey</span><span style="opacity:0.75;">${airEsc(site)}</span>
                 <span style="flex:1"></span>
+                ${btn('data-survey-rerun', '🛩 Re-run check', '#7adfe6', 'Query the FAA data again (cached 6 h) and open the live result in the airspace panel — only needed when you want fresh data')}
                 ${btn('data-survey-notes-save', '💾 Save notes', '#ffd27a', 'Commit the ✎ edits (site-level — they fold into every report from now on)')}
                 ${btn('data-survey-save', '💾 Save survey', '#5fff5f', 'Capture the three map images, build the report from the LAST airspace run and commit a new dated run')}
                 ${btn('data-survey-pdf', '🖨 PDF', '#7adfe6', 'Print-ready page in a new tab with every section in form order and the toggled map overlays baked into the images — Print → Save as PDF')}
@@ -4919,6 +4920,7 @@
             const del = e.target.closest('[data-sn-del]');
             if (del) { const [k, ri] = del.getAttribute('data-sn-del').split('|'); if (notesDraft.tables[k]) notesDraft.tables[k].splice(+ri, 1); setDirty(true); renderMain(); return; }
             if (e.target.closest('[data-survey-open]')) { const u = `https://github.com/${ELEV_REPO}/tree/${ELEV_REPO_BRANCH}/${surveyDirFor(sid)}`; try { GM_openInTab(u, { active: true }); } catch (err) { window.open(u, '_blank'); } return; }
+            if (e.target.closest('[data-survey-rerun]')) { if (dirty && elevSharedToken) await saveNotes(); airspaceRun(); return; }
             if (e.target.closest('[data-survey-pdf]')) { await surveyExportPdf(sid, viewSv, notesDraft, st).catch(err => { console.warn(`${TAG} survey pdf failed:`, err); showToast(`PDF export failed — ${err.message}`, 'rgba(255,96,96,0.55)'); }); return; }
             if (e.target.closest('[data-survey-copy]')) { if (!viewSv) { showToast('Nothing to copy yet'); return; } const md = surveyMarkdown(Object.assign({}, viewSv, { notes: notesDraft })); navigator.clipboard.writeText(md).then(() => showToast('Survey markdown copied (full form order)'), () => showToast('Copy failed', 'rgba(255,96,96,0.55)')); return; }
             if (e.target.closest('[data-survey-save]')) { if (dirty) { const ok = await saveNotes(); if (!ok) return; } await surveyCommit(sid, 'manual'); return; }
@@ -12706,6 +12708,10 @@
                 if (msg.actionId === 'air-run') {
                     if (!airMasterEnabled) { showToast('Airspace Checker is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
                     airspaceRun();
+                } else if (msg.actionId === 'air-survey') {
+                    const sid = getCurrentSiteID();
+                    if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
+                    openSurveyModal(sid).catch(err => { console.warn(`${TAG} survey modal threw:`, err); showToast('Survey window failed — see console', 'rgba(255,96,96,0.55)'); });
                 } else if (msg.actionId === 'air-clear') {
                     airspaceClear();
                 }
@@ -12947,6 +12953,7 @@
                 { id: 'stadiums', label: 'Check · Stadium TFR (3 NM during events)', type: 'boolean', default: AIR_ENABLE_DEFAULTS.stadiums },
                 { id: 'stadiumNm', label: 'Stadium TFR radius', type: 'number', min: 1, max: 10, step: 0.5, default: AIR_THRESH_DEFAULTS.stadiumNm, unit: 'NM' },
                 { id: 'air-run', label: '🛩 Run airspace check', type: 'button', action: 'air-run' },
+                { id: 'air-survey', label: '📄 Open site survey (saved runs, notes, PDF — no re-run)', type: 'button', action: 'air-survey' },
                 { id: 'air-clear', label: 'Clear airspace issues', type: 'button', action: 'air-clear' },
             ],
             hotkeys: [],
