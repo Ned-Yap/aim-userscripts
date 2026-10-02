@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.04
+// @version      3.06
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,25 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.04';
+    const SCRIPT_VERSION = '3.06';
+
+    // v3.06: the server's REASON for a rejected mission save. Percepto's
+    // saveApp throws a bare "HTTP 400" — the validation message in the
+    // response body never reaches our callers. The save hook (fetch + XHR,
+    // installSaveDiffProbe) banks every non-2xx POST /available_app/
+    // response here; saveErrText(e) appends it to our toasts / console lines
+    // when it is fresh (≤ 15 s), so a failed merge/create says WHY.
+    let lastSaveError = null;
+    function noteSaveError(status, text) {
+        lastSaveError = { status, text: String(text || '').replace(/\s+/g, ' ').trim().slice(0, 600), at: Date.now() };
+        console.warn(`${TAG} mission save rejected — HTTP ${status}: ${lastSaveError.text || '(empty response body)'}`);
+    }
+    function saveErrText(e) {
+        const base = String((e && e.message) || e);
+        const le = lastSaveError;
+        if (le && (Date.now() - le.at) < 15000 && le.text) return `${base} — server says: ${le.text}`;
+        return base;
+    }
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -6671,10 +6689,14 @@
         const takeoff = ins.find(i => i && i.type === 0) || null;
         const rh = Array.from(ins).reverse().find(i => i && i.type === 99) || null;
         const lead = [], units = [], orphans = [];
-        let unit = null, bundle = null;
+        let unit = null, bundle = null, inPlace = 0;
         ins.forEach(i => {
             if (!i || i.type === 0 || i.type === 99) return;
             const located = i.location && typeof i.location.lat === 'number';
+            // IN-PLACE snapshot (no GPS aim point — shot from the nav's own
+            // position, heading/pitch in extra_options). Not modeled here:
+            // counted so stoAnalyze can refuse the mission (see guard there).
+            if (i.type === 6 && !located) inPlace++;
             if (located && i.type === 1) {
                 unit = { nav: i, frags: [], bundles: [], others: [] };
                 units.push(unit); bundle = null;
@@ -6692,7 +6714,7 @@
                 else lead.push(i);
             }
         });
-        return { takeoff, rh, lead, units, orphans };
+        return { takeoff, rh, lead, units, orphans, inPlace };
     }
     // Standoff preference LADDER (v2.77, user-ruled after a live 87→182 ft
     // re-home — "that's TOO BIG of a swing"). 100 ft ideal, then:
@@ -6816,6 +6838,18 @@
         const cfg = stoCfg();
         const m = mc.mission;
         const parsed = stoParse(m);
+        // GUARD (v2.94 / v3.05 — live data loss 2026-10-02, mission 185239):
+        // a mission whose snapshots are IN-PLACE (type 6, location null) is
+        // invisible to this model — every snapshot files as wrap/frag glue,
+        // so every nav reads as snap-less, every stacked nav pair reads as a
+        // duplicate, and the accounting rails PASS because they expect exactly
+        // that. Apply then saved takeoff → returnHome. Refuse the mission
+        // outright until in-place snapshots are modeled.
+        if (parsed.inPlace) {
+            const e = new Error(`${parsed.inPlace} in-place snapshot(s) (no GPS aim point) — the Step Optimizer only models located snapshots and cannot safely touch this mission. Nothing changed.`);
+            e.aimUnsupported = true;
+            throw e;
+        }
         const issues = [];
         if (parsed.orphans.length) issues.push({ kind: 'orphan', text: `${parsed.orphans.length} located step(s) before the first NAV — a mission must start with a navigate. They will be re-attached to the first nav on Apply.` });
         // wrap canon = the mission's own majority pattern
@@ -7415,7 +7449,7 @@
                 rows.push({ mc, an, col: COLORS[i % COLORS.length], err: null });
             } catch (e) {
                 console.warn(`${TAG} [sto] sweep failed for "${mc.mission.name}"`, e);
-                rows.push({ mc, an: null, col: COLORS[i % COLORS.length], err: String(e && e.message || e) });
+                rows.push({ mc, an: null, col: COLORS[i % COLORS.length], err: String(e && e.message || e), unsupported: !!(e && e.aimUnsupported) });
             }
         }
         stoSweepBusy = false;
@@ -7430,7 +7464,7 @@
         el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><b style="color:#c39dff;">🪄 Site sweep</b><span style="color:#789;">${rows.length} macro(s) — sorted by route savings</span><span data-sto-sw-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
             + `<table style="border-collapse:collapse;width:100%;font-size:10.5px;"><tr style="color:#9ad;text-align:left;"><th style="padding:2px 6px;">Macro</th><th style="padding:2px 6px;">route</th><th style="padding:2px 6px;">↩</th><th style="padding:2px 6px;">wraps</th><th style="padding:2px 6px;">dups</th><th style="padding:2px 6px;">standoff</th><th style="padding:2px 6px;">stops</th><th></th></tr>`
             + rows.map(r => {
-                if (!r.an) return `<tr>${td(escapeHtml(String(r.mc.mission.name || '')))}${td(`<span style="color:#ff5252;">failed</span>`, '')}${td('')}${td('')}${td('')}${td('')}${td('')}${td('')}</tr>`;
+                if (!r.an) return `<tr>${td(escapeHtml(String(r.mc.mission.name || '')))}${td(`<span style="color:${r.unsupported ? '#ff9800' : '#ff5252'};cursor:help;" title="${escapeHtml(r.err || '')}">${r.unsupported ? 'skipped' : 'failed'}</span>`, '')}${td('')}${td('')}${td('')}${td('')}${td('')}${td('')}</tr>`;
                 const an = r.an;
                 const saved = (an.curM - an.propM) * STO_FT;
                 const routeTxt = an.keptCurrent && !an.doctrineFlips
@@ -7465,7 +7499,12 @@
         await new Promise(r => setTimeout(r, 30));   // let the toast paint
         let an;
         try { an = await stoAnalyze(mc, data); }
-        catch (e) { console.warn(`${TAG} [sto] analyze failed`, e); showToast('🪄 Analysis failed (see console).', '#ff5252', 4500); stoBusy = false; return; }
+        catch (e) {
+            console.warn(`${TAG} [sto] analyze failed`, e);
+            if (e && e.aimUnsupported) showToast(`🪄 "${mc.mission.name}" skipped: ${e.message}`, '#ff9800', 9000);
+            else showToast('🪄 Analysis failed (see console).', '#ff5252', 4500);
+            stoBusy = false; return;
+        }
         stoBusy = false;
         console.log(`${TAG} [sto] "${mc.mission.name}": ${an.parsed.units.length} navs · cur ${(an.curM * STO_FT / 1000).toFixed(1)}k ft → opt ${(an.propM * STO_FT / 1000).toFixed(1)}k ft · ${an.fallbacks} route fallback(s)`);
         sto.state = { an, col, fixWraps: (an.wrapAnoms.length + an.fragUnits.length) > 0,
@@ -7693,6 +7732,14 @@
         if (rb.acc.navs !== expNavs || rb.acc.snaps !== expSnaps) {
             console.warn(`${TAG} [sto] ABORT — rebuild accounting mismatch: navs ${rb.acc.navs}/${expNavs}, snaps ${rb.acc.snaps}/${expSnaps}`, m.name);
             showToast('🪄 Aborted: rebuilt nav/snapshot count does not match (see console). Nothing saved.', '#ff5252', 6000);
+            return;
+        }
+        // HARD RAIL (v2.94 / v3.05): whatever the analysis believed, a rebuild
+        // that leaves no navs — or no snapshots where there were some — is a
+        // wipe, not an optimization. Refuse before the backup/confirm step.
+        if (rb.acc.navs === 0 || (origSnaps > 0 && rb.acc.snaps === 0)) {
+            console.warn(`${TAG} [sto] ABORT — rebuild would leave ${rb.acc.navs} nav(s) / ${rb.acc.snaps} snapshot(s) of ${origNavs} / ${origSnaps}`, m.name);
+            showToast(`🪄 Aborted: the rebuilt mission would keep ${rb.acc.navs} nav(s) / ${rb.acc.snaps} snapshot(s) of ${origNavs} / ${origSnaps} — that is a wipe, not an optimization. Nothing saved.`, '#ff5252', 8000);
             return;
         }
         const savedFt = (an.curM - an.propM) * STO_FT;
@@ -9318,9 +9365,10 @@
             }
         } catch (e) {
             pcmBusy = false;
-            console.warn(`${TAG} [pcm] create failed`, e);
-            showToast(`🔗 Merge create FAILED — ${String(e && e.message || e)}`, '#ff5252', 6000);
-            if (statusEl) statusEl.textContent = 'Create failed — see console.';
+            const why = saveErrText(e);
+            console.warn(`${TAG} [pcm] create failed — ${why} (name ${name.length} chars, ${instrs.length} instructions)`, e);
+            showToast(`🔗 Merge create FAILED — ${why}`, '#ff5252', 9000);
+            if (statusEl) statusEl.textContent = `Create failed — ${why}`;
             return;
         }
         pcmBusy = false;
@@ -9704,7 +9752,7 @@
             g.solos.forEach(s => mbMissionBody(s.mission).forEach(st => body.push(pcmNormStep(st))));
             const instrs = [mbMakeStep(0, 20)].concat(body, [mbMakeStep(99)]);
             try { await ctx.saveApp({ id: null, type: 1, instructions: instrs, data_report_object_arr: [] }, g.name); ok++; }
-            catch (e) { fail++; console.warn(`${TAG} [merge] failed "${g.name}"`, e); }
+            catch (e) { fail++; console.warn(`${TAG} [merge] failed "${g.name}" — ${saveErrText(e)}`, e); }
         }
         mbMergeBusy = false;
         const refreshed = ok ? refreshMissionList() : false;
@@ -14758,7 +14806,17 @@ ${snapPlacemarks}
                     // v2.13: observe the save RESPONSE (status only, body
                     // untouched) — a successful save refreshes the mission-
                     // preview overlay so its dots/badges track the edit.
-                    if (isSave) { try { p.then(r => { if (r && r.ok) mpvOnMissionSaved(); }, () => {}); } catch (e) {} }
+                    if (isSave) {
+                        try {
+                            p.then(r => {
+                                if (!r) return;
+                                if (r.ok) { mpvOnMissionSaved(); return; }
+                                // v3.06: bank the rejection reason (clone — the page still reads its own copy).
+                                try { r.clone().text().then(t => noteSaveError(r.status, t), () => noteSaveError(r.status, '')); }
+                                catch (e2) { noteSaveError(r.status, ''); }
+                            }, () => {});
+                        } catch (e) {}
+                    }
                     return p;
                 };
             }
@@ -14773,7 +14831,10 @@ ${snapPlacemarks}
                         // v2.13: successful save → refresh the preview overlay.
                         try {
                             this.addEventListener('load', function() {
-                                try { if (this.status >= 200 && this.status < 300) mpvOnMissionSaved(); } catch (e) {}
+                                try {
+                                    if (this.status >= 200 && this.status < 300) mpvOnMissionSaved();
+                                    else if (this.status >= 400) noteSaveError(this.status, this.responseText); // v3.06
+                                } catch (e) {}
                             });
                         } catch (e) {}
                         if (typeof b === 'string') {
