@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.306
+// @version      4.307
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.306';
+    const SCRIPT_VERSION = '4.307';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -3125,7 +3125,7 @@
                 if (useNear.pt && typeof useNear.pt.floorM === 'number' && typeof a.AMSL === 'number') {
                     tlCleared = useNear.pt.floorM * M_TO_FT >= a.AMSL + th.tlClearFt;
                 }
-                const entry = { type, agl, lit, tb, distFt: isFinite(useDistFt) ? useDistFt : distFt, distMi: (isFinite(useNear.d) ? useNear.d : near.d) / MI_TO_M, qty: (a.Quantity || '').trim(), lat: oLat, lng: oLng, src: (useNear.pt && useNear.pt.src) || (near.pt && near.pt.src) || null, hit: false, show: false,
+                const entry = { type, agl, lit, tb, oas: (a.OAS_Number || '').trim(), distFt: isFinite(useDistFt) ? useDistFt : distFt, distMi: (isFinite(useNear.d) ? useNear.d : near.d) / MI_TO_M, qty: (a.Quantity || '').trim(), lat: oLat, lng: oLng, src: (useNear.pt && useNear.pt.src) || (near.pt && near.pt.src) || null, hit: false, show: false,
                     // Profile-view data: obstacle top MSL + the nearest flight
                     // segment's altitude band (MSL ft) and location (for DEM).
                     amsl: (typeof a.AMSL === 'number') ? a.AMSL : null,
@@ -3473,7 +3473,7 @@
         return `${pre}${air ? `${airEsc(air)} · ` : ''}☎ ${contacts}${post}`;
     }
     // Floating inventory panel — everything found, violations first.
-    function renderAirspacePanel(res, sid, siteName) {
+    function renderAirspacePanel(res, sid, siteName, snap) {
         closeAirspacePanel();
         const inv = res.inventory;
         const th = airThresholds;
@@ -3502,6 +3502,8 @@
             : `<div style="margin:2px 0;line-height:1.45;">${sevDot(sev)} ${html}</div>`);
 
         const vioCount = res.violations.length;
+        if (snap) h.push(`<div style="margin-bottom:6px;padding:4px 8px;border:1px solid rgba(255,176,32,0.6);border-radius:5px;color:#ffb020;">📸 SAVED RUN ${airEsc(snap.runId)} (${airEsc(snap.reason || '')}${snap.takenBy ? ` · ${airEsc(snap.takenBy)}` : ''}) — read-only. Live TFRs are as of that date. <span data-air-live style="cursor:pointer;text-decoration:underline;">⟲ back to live</span></div>`);
+        h.push(`<div data-survey-status style="margin-bottom:4px;opacity:0.85;">📄 Survey: ${airEsc(surveyStatusText(sid))}</div>`);
         h.push(`<div style="margin-bottom:4px;">${vioCount
             ? `<span style="color:#ff5555;font-weight:700;">${vioCount} violation${vioCount === 1 ? '' : 's'}</span> — drawn as Validator issues (needs AIM Issues enabled)`
             : '<span style="color:#5fff5f;font-weight:700;">No airspace violations ✓</span>'}</div>`);
@@ -3608,7 +3610,8 @@
                 <span style="color:#7adfe6;font-weight:700;">🛩 Airspace Check</span>
                 <span style="opacity:0.7;">${airEsc(siteName || `site ${sid}`)}</span>
                 <span style="flex:1"></span>
-                ${((inv.obstacles || []).some(o => o.show) && !LITE) ? '<button data-air-gms title="Create General Markers at listed obstacles (flagged ones pre-checked)" style="background:none;border:1px solid rgba(95,255,95,0.5);color:#5fff5f;border-radius:5px;padding:2px 8px;cursor:pointer;">📍 Create GMs</button>' : ''}
+                <button data-air-survey title="Site survey report: history, notes, save to GitHub" style="background:none;border:1px solid rgba(255,210,122,0.5);color:#ffd27a;border-radius:5px;padding:2px 8px;cursor:pointer;">📄 Survey</button>
+                ${((inv.obstacles || []).some(o => o.show) && !LITE && !snap) ? '<button data-air-gms title="Create General Markers at listed obstacles (flagged ones pre-checked)" style="background:none;border:1px solid rgba(95,255,95,0.5);color:#5fff5f;border-radius:5px;padding:2px 8px;cursor:pointer;">📍 Create GMs</button>' : ''}
                 <button data-air-copy style="background:none;border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:5px;padding:2px 8px;cursor:pointer;">Copy report</button>
                 <button data-air-close style="background:none;border:none;color:#dfe9f0;font-size:15px;cursor:pointer;">✕</button>
             </div>
@@ -3617,6 +3620,12 @@
         wrap.addEventListener('click', (e) => {
             if (e.target.closest('[data-air-close]')) { closeAirspacePanel(); return; }
             if (e.target.closest('[data-air-gms]')) { showAirGmModal(res, sid); return; }
+            if (e.target.closest('[data-air-survey]')) { openSurveyModal(sid).catch(err => { console.warn(`${TAG} survey modal threw:`, err); showToast('Survey panel failed — see console', 'rgba(255,96,96,0.55)'); }); return; }
+            if (e.target.closest('[data-air-live]')) {
+                if (surveyLast && String(surveyLast.sid) === String(sid)) { renderAirspacePanel(surveyLast.res, sid, surveyLast.siteName); airDrawMapHighlights(surveyLast.res); }
+                else airspaceRun();
+                return;
+            }
             // 📐 sits inside a jump row — must win over data-air-jump.
             const profEl = e.target.closest('[data-air-prof],[data-air-prof-tl]');
             if (profEl) {
@@ -3715,6 +3724,885 @@
         return out.join('\n');
     }
 
+    // ============================================================
+    // 📄 AIRSPACE SURVEY (#278 snapshots · #280 report) — v4.307
+    // One Airspace Validator run → a Regulations-style site survey committed
+    // to the data repo:
+    //   airspace/<siteKey>/<runId>/{survey.json, <SID>_Airspace_Survey.md,
+    //                               setup.jpg, overview.jpg, sectional.jpg}
+    //   airspace/<siteKey>/index.json   run history for the site
+    //   airspace/<siteKey>/notes.json   the manual sections (LTE, planned
+    //                                   changes, signed decision…) — folded
+    //                                   into every report, never clobbered
+    //   airspace/index.json             fleet roll-up (Fleet Tools reads it)
+    // A run auto-saves when the site has no survey yet (creation) or the
+    // last one is ≥ SURVEY_DUE_DAYS old (six-month); every other run saves
+    // only on 📄 Survey → 💾. survey.json carries the validator result
+    // VERBATIM, so a saved run re-renders in the normal panel + map
+    // highlights read-only — review without re-running (#278).
+    // Map images are re-drawn from what's on screen (tiles + SVG overlays +
+    // marker icons) — the user's own Percepto map, with the FAA sectional
+    // flipped on by Map Styler (CHART_PREVIEW, v34.141+) for the third shot.
+    // ============================================================
+    const SURVEY_DIR = 'airspace';
+    const SURVEY_DUE_DAYS = 180;
+    const SURVEY_MIN_RADIUS_MI = 5;      // form: ≥ 5 SM circle, or furthest entity + 3 SM
+    const SURVEY_PAD_RADIUS_MI = 3;
+    const SURVEY_FACILITY_MI = 10;       // form: every facility within 10 SM, else the closest 2
+    const SURVEY_IMG_MAX_W = 1400;       // capture width cap → ~150–400 KB JPEG (Contents API inlines ≤ 1 MB)
+    const SURVEY_MODAL_ID = 'aim-survey-modal';
+    const SURVEY_IDX_TTL_MS = 10 * 60 * 1000;
+    const surveyDirFor = (sid) => `${SURVEY_DIR}/${envSiteKey(sid)}`;
+    let surveyLast = null;               // { res, sid, siteName, at } — latest LIVE run this session
+    const surveyStatus = {};             // sid → { idx, at, err, msg }
+    let surveyBusy = false;
+    let surveyLogin = null;              // GitHub login of the PAT holder (takenBy)
+    let surveyChartAck = null;           // resolver waiting on Map Styler's CHART_PREVIEW_ACK
+    let surveyStyleChannel = null;
+    const SURVEY_NOTE_FIELDS = [
+        { k: 'decision', label: 'Decision (signed)', type: 'select', opts: ['', 'Acceptable without limitations', 'Acceptable with limitations', 'Needs Additional Review'] },
+        { k: 'decisionBy', label: 'Decided by · date', type: 'text', ph: 'name · 2026-10-02' },
+        { k: 'limitations', label: 'Limitations / what additional review needs', type: 'textarea' },
+        { k: 'customer', label: 'Customer (overrides the site record)', type: 'text' },
+        { k: 'address', label: 'Address', type: 'text' },
+        { k: 'lteCarrier', label: 'LTE carrier (top performer)', type: 'text' },
+        { k: 'lteSpeeds', label: 'Upload / download', type: 'text', ph: '12 / 45 Mbps' },
+        { k: 'localAviation', label: 'Local aviation activity', type: 'rows', cols: ['Type of activity', 'Source used to identify', 'Operator'] },
+        { k: 'droneActivity', label: 'Drone activity', type: 'rows', cols: ['Type of activity', 'Source used to identify', 'Operator'] },
+        { k: 'hazards', label: 'Additional hazards (schools, prisons, venues… not in FAA data)', type: 'rows', cols: ['Identified hazard', 'Location / height', 'Impact on operation', 'Verified & source', 'Additional review'] },
+        { k: 'hazardReview', label: 'Field review notes on the FAA-listed hazards', type: 'textarea' },
+        { k: 'restrictions', label: 'Restrictions', type: 'rows', cols: ['Restriction', 'Impact on operation', 'Source used'] },
+        { k: 'terrain', label: 'Terrain / obstacles / environment', type: 'rows', cols: ['Factor', 'Impact on operation', 'Source used'] },
+        { k: 'planned', label: 'Planned changes', type: 'rows', cols: ['Change being made', 'Status (current / planned)', 'Impact on operation', 'Source used'] },
+        { k: 'lte', label: 'LTE survey', type: 'rows', cols: ['Carrier', 'Download', 'Upload', 'Latency', 'Location'] },
+        { k: 'lteGo', label: 'LTE Go / No Go', type: 'text' },
+        { k: 'images', label: 'Images (links, one per line)', type: 'textarea' },
+        { k: 'followUp', label: 'Follow-up', type: 'textarea' },
+    ];
+
+    // ---- GitHub Contents API (data repo). Segment-encoded paths, no-cache
+    // reads (a stale cached sha 409s the next PUT), one sha-race retry —
+    // Site Watch commits to this repo all day. ----
+    const ghPath = (p) => p.split('/').map(encodeURIComponent).join('/');
+    const ghContentsUrl = (p, withRef) => `${ELEV_GITHUB_API}/repos/${ELEV_REPO}/contents/${ghPath(p)}${withRef ? `?ref=${ELEV_REPO_BRANCH}&_t=${Date.now()}` : ''}`;
+    function ghHeaders(extra) {
+        return Object.assign({ 'Authorization': `Bearer ${elevSharedToken}`, 'Accept': 'application/vnd.github+json', 'Cache-Control': 'no-cache' }, extra || {});
+    }
+    async function ghGetText(path) {
+        if (!elevSharedToken) throw new Error('no GitHub token');
+        const r = await elevGmRequest({ method: 'GET', url: ghContentsUrl(path, true), headers: ghHeaders({ 'Accept': 'application/vnd.github.raw+json' }), timeout: 30000 });
+        if (r.status === 404) return null;
+        if (!r.ok) throw new Error(`GET ${path}: HTTP ${r.status || 'network error'}`);
+        return r.responseText;
+    }
+    async function ghGetJson(path) {
+        const t = await ghGetText(path);
+        if (t == null) return null;
+        try { return JSON.parse(t); } catch (e) { throw new Error(`GET ${path}: bad JSON`); }
+    }
+    async function ghGetSha(path) {
+        const r = await elevGmRequest({ method: 'GET', url: ghContentsUrl(path, true), headers: ghHeaders(), timeout: 15000 });
+        if (r.status === 404) return null;
+        if (!r.ok) throw new Error(`sha ${path}: HTTP ${r.status || 'network error'}`);
+        try { return JSON.parse(r.responseText).sha || null; } catch (e) { return null; }
+    }
+    // Binary file → data: URL for an <img> (Contents API inlines ≤ 1 MB).
+    async function ghGetDataUrl(path, mime) {
+        if (!elevSharedToken) throw new Error('no GitHub token');
+        const r = await elevGmRequest({ method: 'GET', url: ghContentsUrl(path, true), headers: ghHeaders(), timeout: 40000 });
+        if (r.status === 404) throw new Error(`${path}: not found`);
+        if (!r.ok) throw new Error(`GET ${path}: HTTP ${r.status || 'network error'}`);
+        let j; try { j = JSON.parse(r.responseText); } catch (e) { throw new Error(`${path}: bad response`); }
+        if (!j.content) throw new Error(`${path}: too large to preview inline (> 1 MB)`);
+        return `data:${mime};base64,${String(j.content).replace(/\n/g, '')}`;
+    }
+    function surveyB64(bytes) {
+        let bin = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        return btoa(bin);
+    }
+    async function ghPutFile(path, bytes, message) {
+        if (!elevSharedToken) throw new Error('no GitHub token');
+        const b64 = surveyB64(typeof bytes === 'string' ? new TextEncoder().encode(bytes) : bytes);
+        let sha = await ghGetSha(path);
+        for (let attempt = 0; attempt < 2; attempt++) {
+            const body = { message, content: b64, branch: ELEV_REPO_BRANCH };
+            if (sha) body.sha = sha;
+            const r = await elevGmRequest({ method: 'PUT', url: ghContentsUrl(path, false), headers: ghHeaders({ 'Content-Type': 'application/json' }), data: JSON.stringify(body), timeout: 90000 });
+            if (r.ok) { try { return JSON.parse(r.responseText).content.sha; } catch (e) { return null; } }
+            if ((r.status === 409 || r.status === 422) && attempt === 0) { sha = await ghGetSha(path); continue; }
+            if (r.status === 401 || r.status === 403) throw new Error(`PUT ${path}: token rejected (HTTP ${r.status})`);
+            throw new Error(`PUT ${path}: HTTP ${r.status || 'network error'}`);
+        }
+        throw new Error(`PUT ${path}: sha conflict twice`);
+    }
+    async function surveyGithubLogin() {
+        if (surveyLogin) return surveyLogin;
+        if (presetAdminLogin) { surveyLogin = presetAdminLogin; return surveyLogin; }
+        try { surveyLogin = await fetchGithubLogin(elevSharedToken); } catch (e) { surveyLogin = null; }
+        return surveyLogin;
+    }
+
+    // ---- Map capture: re-draw what's on screen onto a canvas. Tiles and
+    // marker icons are re-fetched (page fetch; the tile hosts allow CORS)
+    // because drawing the live <img>s would taint the canvas; overlay SVGs
+    // (entities, our circle + dots, Map Styler buffers) are serialized. ----
+    function surveyLayerOpacity(el, stopAt) {
+        let o = 1, n = el;
+        while (n && n !== stopAt) {
+            const cs = getComputedStyle(n);
+            if (cs.display === 'none' || cs.visibility === 'hidden') return 0;
+            const v = parseFloat(cs.opacity);
+            if (!isNaN(v)) o *= v;
+            n = n.parentElement;
+        }
+        return o;
+    }
+    function surveyLoadImg(src) {
+        return new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error('image load failed')); im.src = src; });
+    }
+    async function surveyFetchImage(src) {
+        if (/^(data|blob):/i.test(src)) return surveyLoadImg(src);
+        const r = await fetch(src, { mode: 'cors', credentials: 'same-origin' });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return createImageBitmap(await r.blob());
+    }
+    async function surveyWaitTiles(container, maxMs) {
+        const t0 = Date.now();
+        while (Date.now() - t0 < maxMs) {
+            if (!container.querySelectorAll('img.leaflet-tile:not(.leaflet-tile-loaded)').length) break;
+            await new Promise(r => setTimeout(r, 200));
+        }
+        await new Promise(r => setTimeout(r, 500));   // fade-in settle
+    }
+    async function surveyCaptureMap(map, label, allowCanvas) {
+        const container = map.getContainer();
+        const crect = container.getBoundingClientRect();
+        if (!(crect.width > 50 && crect.height > 50)) throw new Error('map container not visible');
+        const scale = Math.min(1, SURVEY_IMG_MAX_W / crect.width);
+        const W = Math.round(crect.width * scale), H = Math.round(crect.height * scale);
+        const canvas = document.createElement('canvas'); canvas.width = W; canvas.height = H;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#0b1016'; ctx.fillRect(0, 0, W, H);
+        const place = (el) => { const r = el.getBoundingClientRect(); return { x: (r.left - crect.left) * scale, y: (r.top - crect.top) * scale, w: r.width * scale, h: r.height * scale, r }; };
+        const visible = (p) => p.w > 0 && p.h > 0 && p.r.right > crect.left && p.r.left < crect.right && p.r.bottom > crect.top && p.r.top < crect.bottom;
+        let drawn = 0, failed = 0;
+        // 1. rasters — tile + image layers in z order (layer zIndex, then DOM order)
+        const rasters = [];
+        container.querySelectorAll('.leaflet-tile-pane img, .leaflet-tile-pane canvas, .leaflet-overlay-pane img.leaflet-image-layer, .leaflet-pane > img.leaflet-image-layer').forEach((el, i) => {
+            const layerDiv = el.closest('.leaflet-layer') || el.parentElement;
+            const z = parseInt(getComputedStyle(layerDiv).zIndex, 10);
+            rasters.push({ el, z: isNaN(z) ? 0 : z, i });
+        });
+        rasters.sort((a, b) => a.z - b.z || a.i - b.i);
+        const jobs = [];
+        for (const { el } of rasters) {
+            const p = place(el); if (!visible(p)) continue;
+            const op = surveyLayerOpacity(el, container); if (op <= 0.01) continue;
+            if (el.tagName === 'CANVAS') { if (allowCanvas) jobs.push({ p, op, bitmap: Promise.resolve(el) }); continue; }
+            if (!el.complete || !el.src) continue;
+            jobs.push({ p, op, bitmap: surveyFetchImage(el.src).catch(() => { failed++; return null; }) });
+        }
+        for (const j of jobs) {
+            const bm = await j.bitmap; if (!bm) continue;
+            ctx.globalAlpha = j.op;
+            try { ctx.drawImage(bm, j.p.x, j.p.y, j.p.w, j.p.h); drawn++; } catch (e) { failed++; }
+        }
+        ctx.globalAlpha = 1;
+        // 2. vectors — every overlay SVG, serialized at its on-screen box
+        for (const svg of container.querySelectorAll('.leaflet-overlay-pane svg, .leaflet-pane > svg')) {
+            const p = place(svg); if (!visible(p)) continue;
+            const op = surveyLayerOpacity(svg, container); if (op <= 0.01) continue;
+            try {
+                const clone = svg.cloneNode(true);
+                clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+                clone.setAttribute('width', String(p.r.width)); clone.setAttribute('height', String(p.r.height));
+                clone.removeAttribute('style');
+                const xml = new XMLSerializer().serializeToString(clone);
+                const im = await surveyLoadImg(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(xml)}`);
+                ctx.globalAlpha = op; ctx.drawImage(im, p.x, p.y, p.w, p.h); drawn++;
+            } catch (e) { failed++; console.warn(`${TAG} survey capture: SVG layer skipped:`, e); }
+        }
+        ctx.globalAlpha = 1;
+        // 3. marker icons (base / safe zone / GM images); divIcon text is skipped
+        for (const im of container.querySelectorAll('.leaflet-marker-pane img')) {
+            const p = place(im); if (!visible(p)) continue;
+            const op = surveyLayerOpacity(im, container); if (op <= 0.01 || !im.src) continue;
+            try { const bm = await surveyFetchImage(im.src); ctx.globalAlpha = op; ctx.drawImage(bm, p.x, p.y, p.w, p.h); drawn++; } catch (e) { failed++; }
+        }
+        ctx.globalAlpha = 1;
+        // caption strip
+        ctx.font = `${Math.round(13 * Math.max(0.8, scale))}px sans-serif`; ctx.textBaseline = 'bottom';
+        const tw = ctx.measureText(label).width + 16;
+        ctx.fillStyle = 'rgba(0,0,0,0.62)'; ctx.fillRect(0, H - 24, tw, 24);
+        ctx.fillStyle = '#fff'; ctx.fillText(label, 8, H - 6);
+        let blob;
+        try {
+            blob = await new Promise((res, rej) => { try { canvas.toBlob(b => b ? res(b) : rej(new Error('toBlob returned null')), 'image/jpeg', 0.84); } catch (e) { rej(e); } });
+        } catch (e) {
+            if (allowCanvas) { console.warn(`${TAG} survey capture: canvas tainted — retrying without canvas tiles`); return surveyCaptureMap(map, label, false); }
+            throw e;
+        }
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        console.log(`${TAG} survey capture "${label}": ${W}×${H}, ${drawn} layer(s), ${failed} skipped, ${Math.round(bytes.length / 1024)} KB`);
+        return { bytes, w: W, h: H, drawn, failed };
+    }
+    // Ask Map Styler (v34.141+) for the FAA sectional on/off without touching
+    // the user's toggle. Resolves {present, err}.
+    function surveyChartPreview(on) {
+        return new Promise((resolve) => {
+            try {
+                if (!surveyStyleChannel) {
+                    surveyStyleChannel = new BroadcastChannel('AIM_STYLER_CHANNEL');
+                    surveyStyleChannel.onmessage = (ev) => {
+                        const d = ev.data || {};
+                        if (d.action === 'CHART_PREVIEW_ACK' && surveyChartAck) { const f = surveyChartAck; surveyChartAck = null; f(d); }
+                    };
+                }
+            } catch (e) { resolve({ present: false, err: 'BroadcastChannel unavailable' }); return; }
+            const timer = setTimeout(() => { if (surveyChartAck) { surveyChartAck = null; resolve({ present: false, err: 'Map Styler did not answer — needs Map Styler v34.141+' }); } }, 5000);
+            surveyChartAck = (d) => { clearTimeout(timer); resolve(d); };
+            try { surveyStyleChannel.postMessage({ action: 'CHART_PREVIEW', on: !!on, opacity: 0.7 }); }
+            catch (e) { clearTimeout(timer); surveyChartAck = null; resolve({ present: false, err: 'post failed' }); }
+        });
+    }
+    // Site geometry for the form: center = base station (type 8) else the
+    // validator centroid; circle radius = max(5 SM, furthest entity + 3 SM);
+    // red dots = asset centroids.
+    function surveyGeometry(sid, res, ents) {
+        const pts = airCollectSitePoints(ents);
+        const base = ents.find(e => e.type === 8 && entityCoords(e));
+        let lat = res.meta.clat, lng = res.meta.clng, centerSrc = 'site centroid';
+        if (base) { const c = entityCoords(base)[0]; if (c && isFinite(c.lat)) { lat = c.lat; lng = c.lng; centerSrc = `base station "${base.name || ''}"`.trim(); } }
+        let furthestM = 0, minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+        pts.forEach(p => {
+            const d = approxMeters(lat, lng, p.lat, p.lng); if (d > furthestM) furthestM = d;
+            if (p.lat < minLat) minLat = p.lat; if (p.lat > maxLat) maxLat = p.lat;
+            if (p.lng < minLng) minLng = p.lng; if (p.lng > maxLng) maxLng = p.lng;
+        });
+        const radiusMi = Math.max(SURVEY_MIN_RADIUS_MI, furthestM / MI_TO_M + SURVEY_PAD_RADIUS_MI);
+        const rM = radiusMi * MI_TO_M;
+        const dLat = rM / 110540, dLng = rM / (111320 * Math.cos(lat * Math.PI / 180));
+        const assets = [];
+        ents.forEach(e => {
+            if (e.type !== 3) return;
+            const cs = entityCoords(e); if (!cs || !cs.length) return;
+            let a = 0, b = 0, n = 0; cs.forEach(c => { if (c && isFinite(c.lat)) { a += c.lat; b += c.lng; n++; } });
+            if (n) assets.push({ lat: a / n, lng: b / n, name: e.name || '' });
+        });
+        const counts = {};
+        ents.forEach(e => { const k = typeReg(e.type).long; counts[k] = (counts[k] || 0) + 1; });
+        return {
+            lat, lng, centerSrc, radiusMi, furthestMi: furthestM / MI_TO_M, assets, counts,
+            bounds: pts.length ? [[minLat, minLng], [maxLat, maxLng]] : null,
+            circleBounds: [[lat - dLat, lng - dLng], [lat + dLat, lng + dLng]],
+        };
+    }
+    async function surveyCaptureAll(sid, res, siteName, geom, progress) {
+        const map = getLeafletMap(); const L = getLeafletL();
+        if (!map || !L) throw new Error('map not reachable in this frame');
+        const saved = { center: map.getCenter(), zoom: map.getZoom() };
+        const temp = [];
+        const add = (l) => { try { l.addTo(map); temp.push(l); } catch (e) {} };
+        const drop = (l) => { try { map.removeLayer(l); } catch (e) {} };
+        const out = {};
+        const name = siteName || `Site ${sid}`;
+        const date = new Date().toISOString().slice(0, 10);
+        try {
+            airClearMapHighlights();
+            // A. site setup close-up — entities fill the frame
+            if (geom.bounds) map.fitBounds(geom.bounds, { animate: false, padding: [24, 24] });
+            await surveyWaitTiles(map.getContainer(), 10000);
+            progress('capturing site setup…');
+            out.setup = await surveyCaptureMap(map, `${name} — site setup · ${date}`, true);
+            // B. overview — yellow circle (form: "yellow circle = proposed area"), assets red, base yellow
+            let ring = L.circle([geom.lat, geom.lng], { radius: geom.radiusMi * MI_TO_M, color: '#ffd400', weight: 3, fill: false, interactive: false });
+            add(ring);
+            add(L.circleMarker([geom.lat, geom.lng], { radius: 6, color: '#ffd400', fillColor: '#ffd400', fillOpacity: 1, interactive: false }));
+            geom.assets.forEach(a => add(L.circleMarker([a.lat, a.lng], { radius: 3.5, color: '#ff2a2a', weight: 1, fillColor: '#ff2a2a', fillOpacity: 1, interactive: false })));
+            map.fitBounds(geom.circleBounds, { animate: false, padding: [12, 12] });
+            await surveyWaitTiles(map.getContainer(), 12000);
+            progress('capturing overview…');
+            out.overview = await surveyCaptureMap(map, `${name} — ${geom.radiusMi.toFixed(0)} SM radius · assets red · base yellow · ${date}`, true);
+            // C. sectional — same view, FAA chart on, RED circle (form convention)
+            drop(ring); temp.splice(temp.indexOf(ring), 1);
+            ring = L.circle([geom.lat, geom.lng], { radius: geom.radiusMi * MI_TO_M, color: '#ff2a2a', weight: 4, fill: false, interactive: false });
+            add(ring);
+            const ack = await surveyChartPreview(true);
+            if (ack && ack.present) {
+                await surveyWaitTiles(map.getContainer(), 15000);
+                progress('capturing sectional…');
+                out.sectional = await surveyCaptureMap(map, `${name} — VFR sectional · red circle = area of operation · ${date}`, true);
+            } else {
+                out.sectionalErr = (ack && ack.err) || 'FAA chart overlay unavailable';
+                console.warn(`${TAG} survey: sectional skipped — ${out.sectionalErr}`);
+            }
+        } finally {
+            try { await surveyChartPreview(false); } catch (e) {}
+            temp.forEach(drop);
+            try { map.setView(saved.center, saved.zoom, { animate: false }); } catch (e) {}
+            try { airDrawMapHighlights(res); } catch (e) {}
+        }
+        return out;
+    }
+
+    // ---- Survey model + markdown ----
+    function surveyRunId(d) {
+        const p = (n) => String(n).padStart(2, '0');
+        return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}_${p(d.getUTCHours())}${p(d.getUTCMinutes())}Z`;
+    }
+    async function surveySiteInfo(sid) {
+        const cfg = await fetchSiteConfig(sid);
+        const pick = (keys) => {
+            for (const k of keys) {
+                const v = cfg && cfg[k];
+                if (typeof v === 'string' && v.trim()) return v.trim();
+                if (v && typeof v === 'object' && typeof v.name === 'string' && v.name.trim()) return v.name.trim();
+            }
+            return '';
+        };
+        return {
+            name: pick(['name', 'site_name']),
+            customer: pick(['client', 'client_name', 'company', 'company_name', 'customer', 'organization', 'account']),
+            address: pick(['address', 'street_address', 'location', 'full_address']),
+            city: pick(['city']), state: pick(['state', 'region']), timezone: pick(['timezone', 'time_zone']),
+            mountain: !!(cfg && cfg.mountain_terrain),
+        };
+    }
+    function surveyDecision(res) {
+        const v = res.violations || [];
+        const high = v.filter(x => x.severity === 'high');
+        const warn = v.length - high.length;
+        const strip = (n) => String(n || '').replace(/^violation: /, '');
+        const inv = res.inventory || {};
+        if ((inv.sua || []).some(s => s.sev === 'high')) return { value: 'Needs Additional Review', why: 'inside prohibited / restricted surface airspace' };
+        if (inv.laanc && /caps drone ops at 0 ft/.test(inv.laanc.text)) return { value: 'Needs Additional Review', why: 'LAANC ceiling 0 ft over the site' };
+        if (high.length) return { value: 'Needs Additional Review', why: `${high.length} high-severity finding${high.length === 1 ? '' : 's'}: ${high.slice(0, 3).map(x => strip(x.note)).join('; ')}${high.length > 3 ? '; …' : ''}` };
+        if (warn) return { value: 'Acceptable with limitations', why: `${warn} warning${warn === 1 ? '' : 's'}: ${v.slice(0, 3).map(x => strip(x.note)).join('; ')}${v.length > 3 ? '; …' : ''}` };
+        if ((res.errors || []).length) return { value: 'Needs Additional Review', why: `FAA data incomplete this run (${res.errors.join('; ')})` };
+        return { value: 'Acceptable without limitations', why: 'no airspace findings against the current thresholds' };
+    }
+    // Compact copy of the validator result for the file (drop render-only
+    // fields; HIFLD paths can run to hundreds of KB — keep unless huge).
+    function surveyTrimResult(res) {
+        const inv = Object.assign({}, res.inventory);
+        delete inv.cacheServed;
+        inv.obstacles = (inv.obstacles || []).map(o => { const c = Object.assign({}, o); delete c._pi; return c; });
+        inv.translines = (inv.translines || []).map(t => { const c = Object.assign({}, t); delete c._pi; return c; });
+        const out = { violations: res.violations, inventory: inv, errors: res.errors || [], laancGrids: res.laancGrids || [], meta: res.meta };
+        if (JSON.stringify(out).length > 900000) {
+            out.inventory.translines = out.inventory.translines.map(t => { const c = Object.assign({}, t); c.paths = c.paths ? [c.paths[0].slice(0, 2)] : []; c.pathsDropped = true; return c; });
+        }
+        return out;
+    }
+    function surveyBuild(o) {
+        const { sid, res, siteName, siteInfo, notes, geom, reason, runId, images, login } = o;
+        const inv = res.inventory || {};
+        const sug = surveyDecision(res);
+        const nf = (notes && notes.fields) || {};
+        const nasrCycle = inv.contacts && inv.contacts.cycle || null;
+        const facilities = (inv.airports || []).filter(a => a.distMi <= SURVEY_FACILITY_MI);
+        const facList = facilities.length ? facilities : (inv.airports || []).slice(0, 2);
+        const laancMin = inv.laanc && /caps drone ops at (\d+) ft/.exec(inv.laanc.text);
+        const opAlt = Math.min(airThresholds.maxOpAglFt, laancMin ? Number(laancMin[1]) : 400);
+        const mostRestrictive = (() => {
+            const order = ['B', 'C', 'D', 'E', 'G'];
+            let best = 'G';
+            (inv.airspace || []).forEach(a => {
+                const m = /INSIDE surface Class ([BCDE])/i.exec(a.text) || (a.sev === 'high' && /Class ([BCDE])/.exec(a.text));
+                if (m && order.indexOf(m[1]) < order.indexOf(best)) best = m[1];
+            });
+            return best;
+        })();
+        const suaHits = (inv.sua || []).filter(s => /^(INSIDE|Inside) /.test(s.text));
+        return {
+            v: 1, siteId: Number(sid), siteKey: envSiteKey(sid), env: IS_QA ? 'qa' : 'prod',
+            siteName: siteName || (siteInfo && siteInfo.name) || `Site ${sid}`,
+            runId, takenAt: new Date().toISOString(), takenBy: login || 'unknown', reason,
+            script: SCRIPT_VERSION, nasrCycle,
+            thresholds: Object.assign({}, airThresholds), enabled: Object.assign({}, airEnabled),
+            site: {
+                customer: nf.customer || (siteInfo && siteInfo.customer) || '',
+                address: nf.address || [siteInfo && siteInfo.address, siteInfo && siteInfo.city, siteInfo && siteInfo.state].filter(Boolean).join(', '),
+                timezone: siteInfo && siteInfo.timezone || '', mountainTerrain: !!(siteInfo && siteInfo.mountain),
+            },
+            geometry: {
+                lat: geom.lat, lng: geom.lng, centerSrc: geom.centerSrc, radiusMi: Math.round(geom.radiusMi * 10) / 10,
+                furthestMi: Math.round(geom.furthestMi * 100) / 100, assets: geom.assets.length, counts: geom.counts,
+                clat: res.meta.clat, clng: res.meta.clng, siteRadM: res.meta.siteRadM,
+            },
+            summary: {
+                violations: (res.violations || []).length,
+                high: (res.violations || []).filter(x => x.severity === 'high').length,
+                airspaceClass: mostRestrictive, sua: suaHits.length ? suaHits.map(s => s.text).join('; ') : 'No',
+                opAltAgl: opAlt, laanc: inv.laanc ? inv.laanc.text : 'not checked',
+                facilities: facList.length, facilitiesWithin10: facilities.length,
+                obstaclesShown: (inv.obstacles || []).filter(x => x.show).length, obstaclesFlagged: (inv.obstacles || []).filter(x => x.hit).length,
+                translines: (inv.translines || []).filter(x => x.show).length, stadiums: (inv.stadiums || []).length,
+                tfrs: (inv.tfrs || []).filter(t => t.status !== 'far').length, faaErrors: (res.errors || []).length,
+            },
+            decision: { suggested: sug.value, why: sug.why, signed: nf.decision || '', signedBy: nf.decisionBy || '', limitations: nf.limitations || '' },
+            images: {
+                setup: images.setup ? 'setup.jpg' : null, overview: images.overview ? 'overview.jpg' : null,
+                sectional: images.sectional ? 'sectional.jpg' : null, sectionalErr: images.sectionalErr || null,
+            },
+            notes: nf,
+            result: surveyTrimResult(res),
+        };
+    }
+    const mdCell = (s) => String(s == null ? '' : s).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim();
+    const mdRows = (txt) => String(txt || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean).map(l => l.split('|').map(c => c.trim()));
+    function mdTable(cols, rows) {
+        const out = [`| ${cols.join(' | ')} |`, `| ${cols.map(() => '---').join(' | ')} |`];
+        if (!rows.length) out.push(`| N/A ${cols.slice(1).map(() => '| ').join('')}|`);
+        rows.forEach(r => out.push(`| ${cols.map((c, i) => mdCell(r[i])).join(' | ')} |`));
+        return out.join('\n');
+    }
+    const fmtMi = (mi) => mi < 0.95 ? `${Math.round(mi * 5280).toLocaleString()} ft` : `${mi.toFixed(1)} SM`;
+    const fmtMiNm = (mi, nm) => `${fmtMi(mi)} (${nm.toFixed(2)} NM)`;
+    function surveyMarkdown(sv) {
+        const r = sv.result, inv = r.inventory || {}, s = sv.summary, nf = sv.notes || {};
+        const fac = (inv.airports || []).filter(a => a.distMi <= SURVEY_FACILITY_MI);
+        const facList = fac.length ? fac : (inv.airports || []).slice(0, 2);
+        const site = `${sv.siteName}${sv.env === 'qa' ? ' (QA)' : ''}`;
+        const L = [];
+        L.push(`# ${site} — Airspace Survey`);
+        L.push('');
+        L.push(`Site ${sv.siteId} · run \`${sv.runId}\` (${sv.reason}) · generated by AIM Site Setup Tools v${sv.script} on ${sv.takenAt.replace('T', ' ').slice(0, 16)} UTC by ${sv.takenBy}  `);
+        L.push(`Data: FAA AIS (56-day chart cycle) · FAA NASR ${sv.nasrCycle || 'n/a'} · HIFLD · USGS USWTDB · LAANC facility maps · tfr.faa.gov`);
+        L.push('');
+        L.push('> This survey is not the final route validation or risk assessment. Sections marked ✎ are entered by people (📄 Survey → Notes in AIM) and persist across runs; everything else is regenerated from data on each run.');
+        L.push('');
+        L.push('## Summary');
+        L.push('');
+        L.push(`**Decision (signed):** ${sv.decision.signed || '✎ _not yet signed_'}${sv.decision.signedBy ? ` — ${sv.decision.signedBy}` : ''}  `);
+        L.push(`**Decision (AIM-suggested):** ${sv.decision.suggested} — ${sv.decision.why}  `);
+        if (sv.decision.limitations) L.push(`**Limitations / review needed:** ${sv.decision.limitations}  `);
+        L.push('');
+        L.push(mdTable(['Field', 'Value'], [
+            ['Customer', sv.site.customer || 'Unknown — set in Notes'],
+            ['Site name', site],
+            ['Date and time', `${sv.takenAt.replace('T', ' ').slice(0, 16)} UTC`],
+            ['Address', sv.site.address || 'Unknown — set in Notes'],
+            ['GPS coordinates', `${sv.geometry.lat.toFixed(6)}, ${sv.geometry.lng.toFixed(6)} (${sv.geometry.centerSrc})`],
+            ['Airspace (most restrictive at the site)', `Class ${s.airspaceClass}`],
+            ['Special use airspace', s.sua],
+            ['Operational altitude (AGL)', `${s.opAltAgl} ft AGL — AIM max operating setting ${sv.thresholds.maxOpAglFt} ft · ${s.laanc}`],
+            ['LTE carrier', nf.lteCarrier || '✎ N/A — field survey'],
+            ['Upload / download', nf.lteSpeeds || '✎ N/A — field survey'],
+            ['Site setup', Object.keys(sv.geometry.counts).sort().map(k => `${sv.geometry.counts[k]} ${k}`).join(', ') || 'none'],
+        ]));
+        L.push('');
+        L.push('## Overview');
+        L.push('');
+        if (sv.images.setup) { L.push(`![Site setup](setup.jpg)`); L.push(''); L.push('*Site setup as drawn in Percepto (FFZ green, flight paths blue, assets white).*'); L.push(''); }
+        if (sv.images.overview) { L.push(`![Overview](overview.jpg)`); L.push(''); L.push(`*Yellow circle = ${sv.geometry.radiusMi} SM around the ${sv.geometry.centerSrc} (furthest entity ${sv.geometry.furthestMi} SM + ${SURVEY_PAD_RADIUS_MI} SM, minimum ${SURVEY_MIN_RADIUS_MI} SM). Red dots = ${sv.geometry.assets} asset${sv.geometry.assets === 1 ? '' : 's'}.*`); L.push(''); }
+        if (sv.images.sectional) { L.push(`![VFR sectional](sectional.jpg)`); L.push(''); L.push('*FAA VFR sectional — red circle = area of operation.*'); L.push(''); }
+        else L.push(`*VFR sectional image not captured: ${sv.images.sectionalErr || 'unavailable'}.*\n`);
+        L.push(`Customer CSV / KML: see the Site Setup Analyzer export in AIM (🗺️ Analyzer) — the setup above is the as-built version.`);
+        L.push('');
+        L.push(`## Nearby aviation facilities`);
+        L.push('');
+        L.push(`${fac.length ? `${fac.length} facilit${fac.length === 1 ? 'y' : 'ies'} within ${SURVEY_FACILITY_MI} SM of the ${sv.geometry.centerSrc}` : `None within ${SURVEY_FACILITY_MI} SM — closest ${facList.length} listed`}. Distances are to the nearest site entity; standoff ${sv.thresholds.stripNm} NM. Phones: FAA NASR ${sv.nasrCycle || 'unavailable'}${inv.contacts && inv.contacts.err ? ` (⚠ ${inv.contacts.err})` : ''}.`);
+        L.push('');
+        L.push(mdTable(['Facility', 'Code', 'Type', 'Use', 'Phone (manager / owner)', 'Airspace', 'Distance & direction', 'Flag'],
+            facList.map(a => [
+                a.name, `${a.ident || '—'}${a.nasr && a.nasr.icao ? ` / ${a.nasr.icao}` : ''}`,
+                a.nasr && a.nasr.medical ? `${a.kind} (medical)` : a.kind, a.priv,
+                a.nasr ? airContactText(a.nasr) : 'Unknown — not in NASR',
+                a.nasr ? airNasrAirspaceText(a.nasr) : '—',
+                `${fmtMiNm(a.distMi, a.distNm)} ${a.brg}`,
+                a.hit ? `⚠ inside ${sv.thresholds.stripNm} NM standoff` : '',
+            ])));
+        L.push('');
+        L.push('## Local aviation activity ✎');
+        L.push('');
+        const privStrips = (inv.airports || []).filter(a => a.priv === 'private' && a.distMi <= SURVEY_FACILITY_MI && /airport/i.test(a.kind));
+        const localRows = mdRows(nf.localAviation);
+        if (privStrips.length) localRows.unshift(['Agricultural / general aviation (possible)', `FAA airport data — ${privStrips.length} private strip${privStrips.length === 1 ? '' : 's'} within ${SURVEY_FACILITY_MI} SM: ${privStrips.slice(0, 4).map(a => a.name).join(', ')}${privStrips.length > 4 ? '…' : ''}`, privStrips.slice(0, 3).map(a => a.nasr ? airContactText(a.nasr) : a.name).join('; ')]);
+        L.push(mdTable(['Type of activity', 'Source used to identify', 'Operator'], localRows));
+        L.push('');
+        L.push('## Drone activity ✎');
+        L.push('');
+        L.push(mdTable(['Type of activity', 'Source used to identify', 'Operator'], mdRows(nf.droneActivity)));
+        L.push('');
+        L.push('## Hazards');
+        L.push('');
+        const hz = [];
+        (inv.obstacles || []).filter(o => o.show).forEach(o => hz.push([
+            `${o.isWindmill ? 'Wind turbine' : o.type}${o.lit && o.lit !== 'N' ? ' (lit)' : ''}${o.qty && o.qty !== '1' ? ` ×${o.qty}` : ''}`,
+            `${o.agl != null ? `${o.agl} ft AGL` : 'height unknown'}${o.amsl != null ? ` / ${o.amsl.toLocaleString()} ft MSL` : ''} · ${o.distFt < 100 ? 'on site' : o.distFt < 5000 ? `${o.distFt.toLocaleString()} ft` : `${o.distMi.toFixed(1)} SM`} from ${o.src || 'site'} · ${o.lat.toFixed(5)}, ${o.lng.toFixed(5)}${o.tb ? ` · ${airTbText(o.tb)}` : ''}`,
+            o.hit ? `⚠ inside the ${o.isWindmill ? sv.thresholds.windmillFt : o.isTL ? sv.thresholds.tlTowerFt : sv.thresholds.obstacleFt} ft standoff${o.band ? ` (flight band ${o.band.floorFt}–${o.band.ceilFt != null ? o.band.ceilFt : '?'} ft MSL)` : ''}` : 'outside standoff — awareness',
+            `Yes — FAA DOF${o.oas ? ` ${o.oas}` : ''}${o.tb ? ' + USWTDB' : ''}`, o.hit ? 'Yes' : 'No', '✎',
+        ]));
+        (inv.translines || []).filter(t => t.show).forEach(t => hz.push([
+            `Transmission line ${t.volt}${t.owner ? ` (${t.owner})` : ''}`,
+            `${t.distFt < 5000 ? `${t.distFt.toLocaleString()} ft` : `${t.distMi.toFixed(1)} SM`} from ${t.src || 'site'}${t.nearPt ? ` · ${t.nearPt[0].toFixed(5)}, ${t.nearPt[1].toFixed(5)}` : ''}`,
+            'Conductor height unknown — shielding / standoff', 'Yes — HIFLD', 'No', '✎',
+        ]));
+        (inv.stadiums || []).forEach(st => hz.push([`Stadium ${st.name}${st.city ? `, ${st.city}` : ''}`, `${fmtMiNm(st.distMi, st.distNm)} ${st.brg}`, st.hit ? `⚠ inside the ${sv.thresholds.stadiumNm} NM event TFR radius` : 'event TFR awareness', 'Yes — FAA Stadiums', st.hit ? 'Yes' : 'No', '✎']));
+        (inv.tfrs || []).filter(t => t.status !== 'far').forEach(t => hz.push([`TFR ${t.id} (${t.type})`, t.window || '', t.text, 'Yes — tfr.faa.gov (live at run time)', t.status === 'active' && t.inside ? 'Yes' : 'No', '✎']));
+        mdRows(nf.hazards).forEach(rw => hz.push([rw[0], rw[1], rw[2], rw[3], rw[4] || 'No', '✎']));
+        L.push(mdTable(['Identified hazard', 'Location / height', 'Impact on operation', 'Verified & source', 'Additional review', 'Field review'], hz));
+        if (nf.hazardReview) { L.push(''); L.push(`**Field review notes:** ${nf.hazardReview}`); }
+        L.push('');
+        L.push('## Restrictions');
+        L.push('');
+        const rs = [];
+        if (inv.laanc) rs.push([`LAANC`, inv.laanc.text, `FAA UAS facility map${inv.laancFacility ? ` — ${inv.laancFacility.name}${inv.laancFacility.nasr ? `, ${airContactText(inv.laancFacility.nasr)}` : ''}` : ''}`]);
+        (inv.airspace || []).forEach(a => rs.push([`Controlled airspace`, a.text, 'FAA Class Airspace']));
+        (inv.sua || []).filter(x => x.sev !== 'ok').forEach(x => rs.push(['Special use airspace', x.text, 'FAA SUA / Prohibited Areas']));
+        mdRows(nf.restrictions).forEach(rw => rs.push([rw[0], rw[1], `${rw[2] || ''} ✎`]));
+        L.push(mdTable(['Restriction', 'Impact on operation', 'Source used'], rs));
+        L.push('');
+        L.push('## Terrain / obstacles / environment');
+        L.push('');
+        const tr = [];
+        if (sv.site.mountainTerrain) tr.push(['Mountain-terrain site flag set in Percepto', 'Altitude handling per site setup', 'Percepto site record']);
+        const wind = (inv.obstacles || []).filter(o => o.show && o.isWindmill);
+        if (wind.length) tr.push([`Wind turbines (${wind.length} within view)`, 'Wake turbulence + rotor disc — see 📐 Profile view per turbine in AIM', 'FAA DOF + USWTDB']);
+        mdRows(nf.terrain).forEach(rw => tr.push([rw[0], rw[1], `${rw[2] || ''} ✎`]));
+        L.push(mdTable(['Factor', 'Impact on operation', 'Source used'], tr));
+        L.push('');
+        L.push('## Planned changes ✎');
+        L.push('');
+        L.push(mdTable(['Change being made', 'Status', 'Impact on operation', 'Source used'], mdRows(nf.planned)));
+        L.push('');
+        L.push('## LTE survey ✎');
+        L.push('');
+        L.push(mdTable(['Carrier', 'Download', 'Upload', 'Latency', 'Location'], mdRows(nf.lte)));
+        L.push('');
+        L.push(`**LTE Go / No Go:** ${nf.lteGo || 'N/A'}`);
+        L.push('');
+        L.push('## Images ✎');
+        L.push('');
+        const imgs = String(nf.images || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+        L.push(imgs.length ? imgs.map(u => /^https?:/i.test(u) ? `- <${u}>` : `- ${u}`).join('\n') : 'N/A');
+        L.push('');
+        L.push('## Follow-up ✎');
+        L.push('');
+        const fu = String(nf.followUp || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+        (inv.obstacles || []).filter(o => o.hit).forEach(o => fu.unshift(`Hazard field review: ${o.isWindmill ? 'wind turbine' : o.type} ${o.agl != null ? `${o.agl} ft` : ''} at ${o.distFt.toLocaleString()} ft from ${o.src || 'site'}`));
+        L.push(fu.length ? fu.map(x => `- ${x}`).join('\n') : 'N/A');
+        L.push('');
+        L.push('## Appendix');
+        L.push('');
+        L.push(`Thresholds: strips ${sv.thresholds.stripNm} NM · obstacles ${sv.thresholds.obstacleFt} ft · turbines ${sv.thresholds.windmillFt} ft · T-L towers ${sv.thresholds.tlTowerFt} ft (fly-over clearance ${sv.thresholds.tlClearFt} ft) · max ops ${sv.thresholds.maxOpAglFt} ft AGL · stadium ${sv.thresholds.stadiumNm} NM · inventory ${sv.thresholds.inventoryMi} mi.  `);
+        L.push(`Checks enabled: ${Object.keys(sv.enabled).filter(k => sv.enabled[k]).join(', ')}.  `);
+        if (r.errors && r.errors.length) L.push(`⚠ FAA queries that failed this run (results partial): ${r.errors.join('; ')}  `);
+        L.push(`Violations drawn as Validator issues: ${s.violations} (${s.high} high).`);
+        L.push('');
+        return L.join('\n');
+    }
+
+    // ---- Store: indexes, notes, commit ----
+    async function surveyLoadIndex(sid, force) {
+        const st = surveyStatus[sid];
+        if (!force && st && st.idx !== undefined && (Date.now() - st.at) < SURVEY_IDX_TTL_MS) return st.idx;
+        const idx = await ghGetJson(`${surveyDirFor(sid)}/index.json`);
+        surveyStatus[sid] = Object.assign(surveyStatus[sid] || {}, { idx, at: Date.now(), err: null });
+        return idx;
+    }
+    async function surveyLoadNotes(sid) {
+        return (await ghGetJson(`${surveyDirFor(sid)}/notes.json`)) || { v: 1, fields: {} };
+    }
+    async function surveySaveNotes(sid, fields) {
+        const login = await surveyGithubLogin();
+        const notes = { v: 1, updatedAt: new Date().toISOString(), updatedBy: login || 'unknown', fields };
+        await ghPutFile(`${surveyDirFor(sid)}/notes.json`, JSON.stringify(notes, null, 1), `[AIM airspace] site ${sid}: survey notes`);
+        return notes;
+    }
+    function surveyDue(idx) {
+        const last = idx && idx.runs && idx.runs[0];
+        if (!last) return { last: null, dueAt: null, due: true, reason: 'creation' };
+        const t = Date.parse(last.takenAt);
+        const dueAt = isFinite(t) ? new Date(t + SURVEY_DUE_DAYS * 86400000) : null;
+        const due = !dueAt || dueAt.getTime() <= Date.now();
+        return { last, dueAt, due, reason: due ? 'six-month' : null };
+    }
+    async function surveyUpdateIndexes(sid, sv, entry, siteIdx) {
+        const idx = siteIdx || { v: 1, siteId: Number(sid), siteKey: envSiteKey(sid), runs: [] };
+        idx.siteName = sv.siteName; idx.customer = sv.site.customer || idx.customer || '';
+        idx.runs = [entry].concat((idx.runs || []).filter(r => r.runId !== entry.runId));
+        idx.updatedAt = sv.takenAt;
+        await ghPutFile(`${surveyDirFor(sid)}/index.json`, JSON.stringify(idx, null, 1), `[AIM airspace] site ${sid}: index (${entry.runId})`);
+        let fleet = null;
+        try { fleet = await ghGetJson(`${SURVEY_DIR}/index.json`); } catch (e) { console.warn(`${TAG} fleet survey index read failed:`, e); }
+        if (!fleet || typeof fleet !== 'object') fleet = { v: 1, sites: {} };
+        fleet.sites = fleet.sites || {};
+        fleet.sites[envSiteKey(sid)] = {
+            siteId: Number(sid), env: sv.env, siteName: sv.siteName, customer: sv.site.customer || '',
+            last: entry, runs: idx.runs.length, nextDue: new Date(Date.parse(sv.takenAt) + SURVEY_DUE_DAYS * 86400000).toISOString(),
+        };
+        fleet.updatedAt = sv.takenAt;
+        await ghPutFile(`${SURVEY_DIR}/index.json`, JSON.stringify(fleet, null, 1), `[AIM airspace] fleet index (site ${sid} ${entry.runId})`);
+        surveyStatus[sid] = Object.assign(surveyStatus[sid] || {}, { idx, at: Date.now(), err: null });
+        return idx;
+    }
+    async function surveyCommit(sid, reason) {
+        if (surveyBusy) { showToast('Survey save already running'); return null; }
+        if (!elevSharedToken) { showToast('Survey: GitHub token needed — Control Panel → token', 'rgba(255,96,96,0.55)'); return null; }
+        const live = surveyLast && String(surveyLast.sid) === String(sid) ? surveyLast : null;
+        if (!live) { showToast('Run the airspace check first', 'rgba(255,96,96,0.55)'); return null; }
+        if (CONTEXT !== 'IFRAME') { showToast('Survey save runs in the map frame', 'rgba(255,96,96,0.55)'); return null; }
+        surveyBusy = true;
+        const progress = (m) => { showToast(`📄 Survey: ${m}`); surveyRenderStatus(sid, m); };
+        try {
+            progress('reading site record + notes…');
+            const [siteInfo, notes, siteIdx, login] = await Promise.all([
+                surveySiteInfo(sid).catch(e => { console.warn(`${TAG} survey: site record failed:`, e); return null; }),
+                surveyLoadNotes(sid).catch(e => { console.warn(`${TAG} survey: notes read failed:`, e); return { v: 1, fields: {} }; }),
+                surveyLoadIndex(sid, true).catch(e => { console.warn(`${TAG} survey: index read failed:`, e); return null; }),
+                surveyGithubLogin(),
+            ]);
+            const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+            const geom = surveyGeometry(sid, live.res, ents);
+            const images = await surveyCaptureAll(sid, live.res, live.siteName, geom, progress);
+            const runId = surveyRunId(new Date());
+            const sv = surveyBuild({ sid, res: live.res, siteName: live.siteName, siteInfo, notes, geom, reason, runId, images, login });
+            const md = surveyMarkdown(sv);
+            const dir = `${surveyDirFor(sid)}/${runId}`;
+            const msg = (what) => `[AIM airspace] site ${sid} ${runId} ${reason}: ${what}`;
+            let n = 0;
+            for (const k of ['setup', 'overview', 'sectional']) {
+                if (!images[k] || !images[k].bytes) continue;
+                progress(`uploading ${k}.jpg (${Math.round(images[k].bytes.length / 1024)} KB)…`);
+                await ghPutFile(`${dir}/${k}.jpg`, images[k].bytes, msg(`${k}.jpg`)); n++;
+            }
+            progress('uploading report…');
+            await ghPutFile(`${dir}/survey.json`, JSON.stringify(sv), msg('survey.json'));
+            await ghPutFile(`${dir}/${sid}_Airspace_Survey.md`, md, msg('report'));
+            progress('updating index…');
+            const entry = {
+                runId, takenAt: sv.takenAt, takenBy: sv.takenBy, reason, script: SCRIPT_VERSION,
+                decision: sv.decision.suggested, signed: sv.decision.signed, violations: sv.summary.violations, high: sv.summary.high,
+                facilities: sv.summary.facilities, obstaclesFlagged: sv.summary.obstaclesFlagged, airspaceClass: sv.summary.airspaceClass,
+                images: ['setup', 'overview', 'sectional'].filter(k => sv.images[k]), report: `${sid}_Airspace_Survey.md`,
+            };
+            await surveyUpdateIndexes(sid, sv, entry, siteIdx);
+            console.log(`${TAG} 📄 survey saved: ${dir} (${reason}, ${n} image(s))`);
+            showToast(`📄 Survey saved (${reason}) — ${runId}`, 'rgba(95,255,95,0.55)');
+            surveyRenderStatus(sid);
+            const modal = document.getElementById(SURVEY_MODAL_ID);
+            if (modal) openSurveyModal(sid);
+            return entry;
+        } catch (e) {
+            console.warn(`${TAG} survey save failed:`, e);
+            showToast(`Survey save failed — ${e && e.message ? e.message : e}`, 'rgba(255,96,96,0.55)');
+            surveyRenderStatus(sid, `save failed: ${e && e.message ? e.message : e}`);
+            return null;
+        } finally { surveyBusy = false; }
+    }
+    // After every live run: remember the result, then auto-save when the
+    // site has no survey (creation) or the last one is due (six-month).
+    async function surveyAfterRun(sid, res, siteName) {
+        surveyLast = { res, sid, siteName, at: Date.now() };
+        if (CONTEXT !== 'IFRAME') return;
+        if (!elevSharedToken) { surveyRenderStatus(sid, 'no GitHub token — survey not saved'); return; }
+        let idx;
+        try { idx = await surveyLoadIndex(sid, true); }
+        catch (e) { surveyStatus[sid] = Object.assign(surveyStatus[sid] || {}, { err: e.message, at: Date.now() }); surveyRenderStatus(sid); return; }
+        const d = surveyDue(idx);
+        surveyRenderStatus(sid);
+        if (d.due && !surveyBusy) {
+            showToast(d.reason === 'creation' ? '📸 First survey for this site — saving to GitHub…' : '📸 Survey is 6+ months old — saving a fresh one…');
+            await surveyCommit(sid, d.reason);
+        }
+    }
+    function surveyStatusText(sid) {
+        const st = surveyStatus[sid];
+        if (st && st.msg) return st.msg;
+        if (st && st.err) return `survey index unavailable — ${st.err}`;
+        if (!st || st.idx === undefined) return elevSharedToken ? 'checking survey history…' : 'no GitHub token — surveys not saved';
+        const d = surveyDue(st.idx);
+        if (!d.last) return 'no survey saved yet — the next run saves one (creation)';
+        return `last saved ${d.last.takenAt.slice(0, 10)} (${d.last.reason}${d.last.signed ? ` · ${d.last.signed}` : ''}) · ${d.due ? '⚠ DUE — next run re-saves' : `next due ${d.dueAt.toISOString().slice(0, 10)}`} · ${st.idx.runs.length} run${st.idx.runs.length === 1 ? '' : 's'}`;
+    }
+    function surveyRenderStatus(sid, msg) {
+        if (msg !== undefined) surveyStatus[sid] = Object.assign(surveyStatus[sid] || {}, { msg });
+        else if (surveyStatus[sid]) surveyStatus[sid].msg = null;
+        const el = document.querySelector(`#${AIRSPACE_PANEL_ID} [data-survey-status]`);
+        if (el) el.textContent = `📄 Survey: ${surveyStatusText(sid)}`;
+    }
+
+    // ---- Viewer: history, read-only snapshot render, notes editor ----
+    // Minimal markdown → HTML for the report preview (headings, tables,
+    // lists, bold, images, links, blockquote). Images resolve lazily via
+    // data-survey-img → ghGetDataUrl.
+    function surveyMdToHtml(md) {
+        const esc = airEsc;
+        const inline = (t) => esc(t)
+            .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (m, alt, src) => `<img data-survey-img="${esc(src)}" alt="${alt}" style="max-width:100%;border:1px solid rgba(122,223,230,0.3);border-radius:4px;margin:4px 0;">`)
+            .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" style="color:#7adfe6">$1</a>')
+            .replace(/&lt;(https?:[^&]+)&gt;/g, '<a href="$1" target="_blank" style="color:#7adfe6">$1</a>')
+            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+            .replace(/`([^`]+)`/g, '<code style="color:#ffd27a">$1</code>')
+            .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>');
+        const lines = md.split('\n'); const out = []; let i = 0;
+        const tdS = 'padding:3px 7px;border:1px solid rgba(122,223,230,0.22);vertical-align:top;';
+        while (i < lines.length) {
+            const ln = lines[i];
+            if (/^#{1,3} /.test(ln)) { const lvl = ln.match(/^#+/)[0].length; out.push(`<h${lvl + 1} style="color:#7adfe6;margin:${lvl === 1 ? '4px' : '14px'} 0 6px;font-size:${lvl === 1 ? 16 : lvl === 2 ? 14 : 13}px;border-bottom:${lvl === 2 ? '1px solid rgba(122,223,230,0.25)' : 'none'};padding-bottom:2px;">${inline(ln.replace(/^#+ /, ''))}</h${lvl + 1}>`); i++; continue; }
+            if (/^\|/.test(ln)) {
+                const rows = []; while (i < lines.length && /^\|/.test(lines[i])) rows.push(lines[i++]);
+                const cells = (r) => r.replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map(c => c.replace(/\\\|/g, '|').trim());
+                const head = cells(rows[0]); const body = rows.slice(2).map(cells);
+                out.push(`<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:11px;margin:4px 0;"><thead><tr>${head.map(h => `<th style="${tdS}background:rgba(122,223,230,0.12);text-align:left;">${inline(h)}</th>`).join('')}</tr></thead><tbody>${body.map(r => `<tr>${head.map((h, k) => `<td style="${tdS}">${inline(r[k] || '')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`);
+                continue;
+            }
+            if (/^- /.test(ln)) { const items = []; while (i < lines.length && /^- /.test(lines[i])) items.push(lines[i++].slice(2)); out.push(`<ul style="margin:4px 0 4px 18px;padding:0;">${items.map(x => `<li>${inline(x)}</li>`).join('')}</ul>`); continue; }
+            if (/^> /.test(ln)) { out.push(`<blockquote style="margin:6px 0;padding:4px 10px;border-left:3px solid #ffb020;opacity:0.9;">${inline(ln.slice(2))}</blockquote>`); i++; continue; }
+            if (!ln.trim()) { i++; continue; }
+            const para = []; while (i < lines.length && lines[i].trim() && !/^(#{1,3} |\||- |> )/.test(lines[i])) para.push(lines[i++]);
+            out.push(`<p style="margin:4px 0;">${para.map(inline).join('<br>')}</p>`);
+        }
+        return out.join('');
+    }
+    async function surveyHydrateImages(root, dir) {
+        const imgs = root.querySelectorAll('img[data-survey-img]');
+        for (const im of imgs) {
+            const f = im.getAttribute('data-survey-img');
+            try { im.src = await ghGetDataUrl(`${dir}/${f}`, 'image/jpeg'); }
+            catch (e) { im.alt = `${f}: ${e.message}`; im.style.minHeight = '20px'; console.warn(`${TAG} survey image ${f}:`, e); }
+        }
+    }
+    // Re-render a saved run in the normal panel + map highlights, read-only.
+    async function surveyViewRun(sid, runId) {
+        const dir = `${surveyDirFor(sid)}/${runId}`;
+        const sv = await ghGetJson(`${dir}/survey.json`);
+        if (!sv || !sv.result) throw new Error(`survey.json missing for ${runId}`);
+        const res = sv.result;
+        res.inventory = res.inventory || {};
+        ['airports', 'obstacles', 'airspace', 'sua', 'stadiums', 'translines', 'tfrs'].forEach(k => { if (!Array.isArray(res.inventory[k])) res.inventory[k] = []; });
+        renderAirspacePanel(res, sid, sv.siteName, { runId, takenAt: sv.takenAt, reason: sv.reason, takenBy: sv.takenBy });
+        airDrawMapHighlights(res);
+        const map = getLeafletMap();
+        if (map && sv.geometry && isFinite(sv.geometry.lat)) { try { map.setView([sv.geometry.lat, sv.geometry.lng], map.getZoom()); } catch (e) {} }
+        return sv;
+    }
+    function surveyNoteInput(f, v) {
+        const base = 'width:100%;box-sizing:border-box;background:rgba(0,0,0,0.35);color:#dfe9f0;border:1px solid rgba(122,223,230,0.3);border-radius:4px;padding:3px 6px;font:11px/1.4 inherit;';
+        if (f.type === 'select') return `<select data-survey-note="${f.k}" style="${base}">${f.opts.map(o => `<option value="${airEsc(o)}" ${o === v ? 'selected' : ''}>${o || '— not signed —'}</option>`).join('')}</select>`;
+        if (f.type === 'text') return `<input data-survey-note="${f.k}" type="text" value="${airEsc(v)}" placeholder="${airEsc(f.ph || '')}" style="${base}">`;
+        const ph = f.type === 'rows' ? `one per line: ${f.cols.join(' | ')}` : '';
+        return `<textarea data-survey-note="${f.k}" rows="${f.type === 'rows' ? 3 : 2}" placeholder="${airEsc(ph)}" style="${base}resize:vertical;">${airEsc(v)}</textarea>`;
+    }
+    function closeSurveyModal() { const el = document.getElementById(SURVEY_MODAL_ID); if (el) el.remove(); }
+    async function openSurveyModal(sid) {
+        closeSurveyModal();
+        const wrap = document.createElement('div');
+        wrap.id = SURVEY_MODAL_ID;
+        wrap.style.cssText = 'position:fixed;top:40px;left:50%;transform:translateX(-50%);width:min(1180px,96vw);height:min(86vh,900px);z-index:2147483100;'
+            + 'background:rgba(16,22,32,0.98);border:1px solid rgba(122,223,230,0.5);border-radius:10px;color:#dfe9f0;'
+            + 'font:12px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 10px 40px rgba(0,0,0,0.6);display:flex;flex-direction:column;';
+        const btn = (attr, label, color, title) => `<button ${attr} title="${airEsc(title || '')}" style="background:none;border:1px solid ${color};color:${color};border-radius:5px;padding:2px 9px;cursor:pointer;font:inherit;">${label}</button>`;
+        const site = siteHeaderLabel(sid);
+        wrap.innerHTML = `
+            <div data-survey-drag style="cursor:move;padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid rgba(122,223,230,0.25);flex:none;">
+                <span style="color:#7adfe6;font-weight:700;">📄 Airspace Survey</span><span style="opacity:0.75;">${airEsc(site)}</span>
+                <span style="flex:1"></span>
+                ${btn('data-survey-save', '💾 Save survey to GitHub', '#5fff5f', 'Capture the three map images, build the report from the LAST airspace run and commit a new dated run folder')}
+                ${btn('data-survey-copy', '📋 Copy markdown', '#7adfe6', 'Markdown of the preview (saved run, or a live preview of the last run)')}
+                ${btn('data-survey-open', '🔗 GitHub folder', '#7adfe6', 'Open airspace/<site>/ in the data repo')}
+                <button data-survey-close style="background:none;border:none;color:#dfe9f0;font-size:15px;cursor:pointer;">✕</button>
+            </div>
+            <div data-survey-stat style="padding:5px 12px;border-bottom:1px solid rgba(122,223,230,0.15);opacity:0.85;flex:none;">📄 Survey: ${airEsc(surveyStatusText(sid))}</div>
+            <div style="display:flex;flex:1;min-height:0;">
+                <div style="width:300px;flex:none;border-right:1px solid rgba(122,223,230,0.2);display:flex;flex-direction:column;min-height:0;">
+                    <div style="padding:6px 10px;color:#7adfe6;font-weight:600;border-bottom:1px solid rgba(122,223,230,0.15);">🕘 History</div>
+                    <div data-survey-runs style="overflow-y:auto;flex:none;max-height:38%;padding:4px 0;">loading…</div>
+                    <div style="padding:6px 10px;color:#7adfe6;font-weight:600;border-top:1px solid rgba(122,223,230,0.15);border-bottom:1px solid rgba(122,223,230,0.15);display:flex;align-items:center;gap:6px;">✎ Notes <span style="flex:1"></span>${btn('data-survey-notes-save', '💾 Save notes', '#ffd27a', 'Commit notes.json — folded into every report from now on')}</div>
+                    <div data-survey-notes style="overflow-y:auto;flex:1;padding:4px 10px;">loading…</div>
+                </div>
+                <div data-survey-body style="flex:1;overflow-y:auto;padding:8px 14px;min-width:0;">
+                    <div style="opacity:0.7;">Pick a run on the left to see its report, or 👁 to re-draw it in the panel + map. “Live preview” shows what a save would write now.</div>
+                </div>
+            </div>`;
+        document.body.appendChild(wrap);
+        // drag
+        let drag = null;
+        wrap.querySelector('[data-survey-drag]').addEventListener('mousedown', (e) => { if (e.target.closest('button')) return; const r = wrap.getBoundingClientRect(); drag = { dx: e.clientX - r.left, dy: e.clientY - r.top }; wrap.style.transform = 'none'; wrap.style.left = `${r.left}px`; e.preventDefault(); });
+        document.addEventListener('mousemove', (e) => { if (!drag) return; wrap.style.left = `${e.clientX - drag.dx}px`; wrap.style.top = `${e.clientY - drag.dy}px`; });
+        document.addEventListener('mouseup', () => { drag = null; });
+        const body = wrap.querySelector('[data-survey-body]');
+        const runsEl = wrap.querySelector('[data-survey-runs]');
+        const notesEl = wrap.querySelector('[data-survey-notes]');
+        let currentMd = '';
+        const showMd = (md, dir) => { currentMd = md; body.innerHTML = surveyMdToHtml(md); if (dir) surveyHydrateImages(body, dir); };
+        const renderRuns = (idx) => {
+            const runs = (idx && idx.runs) || [];
+            const live = surveyLast && String(surveyLast.sid) === String(sid);
+            runsEl.innerHTML = (live ? `<div data-survey-preview style="padding:4px 10px;cursor:pointer;color:#5fff5f;" onmouseover="this.style.background='rgba(122,223,230,0.12)'" onmouseout="this.style.background=''">▶ Live preview of the last run (${new Date(surveyLast.at).toLocaleTimeString()})</div>` : '<div style="padding:4px 10px;opacity:0.6;">Run the airspace check for a live preview.</div>')
+                + (runs.length ? runs.map(r => `<div data-survey-run="${airEsc(r.runId)}" style="padding:4px 10px;cursor:pointer;display:flex;gap:6px;align-items:center;" onmouseover="this.style.background='rgba(122,223,230,0.12)'" onmouseout="this.style.background=''">`
+                    + `<span style="flex:1;"><strong>${airEsc(r.takenAt.slice(0, 10))}</strong> <span style="opacity:0.7">${airEsc(r.reason)}</span><br><span style="font-size:11px;opacity:0.8">${r.violations} violation${r.violations === 1 ? '' : 's'} · ${airEsc(r.signed || r.decision || '')} · ${airEsc(r.takenBy || '')}</span></span>`
+                    + `<button data-survey-view="${airEsc(r.runId)}" title="Re-draw this saved run in the airspace panel + map (read-only)" style="background:none;border:1px solid rgba(122,223,230,0.35);color:#7adfe6;border-radius:4px;padding:0 5px;cursor:pointer;">👁</button></div>`).join('')
+                    : '<div style="padding:4px 10px;opacity:0.6;">No saved runs yet.</div>');
+        };
+        const renderNotes = (notes) => {
+            const f = (notes && notes.fields) || {};
+            notesEl.innerHTML = SURVEY_NOTE_FIELDS.map(fd => `<div style="margin:5px 0;"><div style="opacity:0.8;margin-bottom:2px;">${airEsc(fd.label)}</div>${surveyNoteInput(fd, f[fd.k] || '')}</div>`).join('')
+                + (notes && notes.updatedAt ? `<div style="opacity:0.6;margin-top:6px;">last saved ${airEsc(notes.updatedAt.slice(0, 16).replace('T', ' '))} by ${airEsc(notes.updatedBy || '?')}</div>` : '');
+        };
+        const readNotes = () => { const f = {}; notesEl.querySelectorAll('[data-survey-note]').forEach(el => { f[el.getAttribute('data-survey-note')] = el.value || ''; }); return f; };
+        let notesLoaded = null;
+        const livePreview = async () => {
+            if (!surveyLast || String(surveyLast.sid) !== String(sid)) return;
+            body.innerHTML = '<div style="opacity:0.7">building preview…</div>';
+            try {
+                const siteInfo = await surveySiteInfo(sid).catch(() => null);
+                const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+                const geom = surveyGeometry(sid, surveyLast.res, ents);
+                const notes = { fields: readNotes() };
+                const sv = surveyBuild({ sid, res: surveyLast.res, siteName: surveyLast.siteName, siteInfo, notes, geom, reason: 'preview', runId: 'preview', images: {}, login: surveyLogin || '' });
+                showMd(surveyMarkdown(sv), null);
+                body.insertAdjacentHTML('afterbegin', '<div style="color:#ffb020;margin-bottom:6px;">Live preview — not saved. Images are captured at save time.</div>');
+            } catch (e) { body.innerHTML = `<div style="color:#ff8080">preview failed — ${airEsc(e.message)}</div>`; }
+        };
+        wrap.addEventListener('click', async (e) => {
+            if (e.target.closest('[data-survey-close]')) { closeSurveyModal(); return; }
+            if (e.target.closest('[data-survey-open]')) { try { GM_openInTab(`https://github.com/${ELEV_REPO}/tree/${ELEV_REPO_BRANCH}/${surveyDirFor(sid)}`, { active: true }); } catch (err) { window.open(`https://github.com/${ELEV_REPO}/tree/${ELEV_REPO_BRANCH}/${surveyDirFor(sid)}`, '_blank'); } return; }
+            if (e.target.closest('[data-survey-copy]')) { if (!currentMd) { showToast('Nothing to copy yet'); return; } navigator.clipboard.writeText(currentMd).then(() => showToast('Survey markdown copied'), () => showToast('Copy failed', 'rgba(255,96,96,0.55)')); return; }
+            if (e.target.closest('[data-survey-save]')) { await surveyCommit(sid, 'manual'); return; }
+            if (e.target.closest('[data-survey-notes-save]')) {
+                const b = e.target.closest('button'); b.disabled = true; b.textContent = 'saving…';
+                try { notesLoaded = await surveySaveNotes(sid, readNotes()); renderNotes(notesLoaded); showToast('Survey notes saved', 'rgba(95,255,95,0.55)'); }
+                catch (err) { showToast(`Notes save failed — ${err.message}`, 'rgba(255,96,96,0.55)'); b.disabled = false; b.textContent = '💾 Save notes'; }
+                return;
+            }
+            if (e.target.closest('[data-survey-preview]')) { await livePreview(); return; }
+            const viewEl = e.target.closest('[data-survey-view]');
+            if (viewEl) {
+                e.stopPropagation();
+                const runId = viewEl.getAttribute('data-survey-view');
+                showToast(`Loading survey ${runId}…`);
+                try { await surveyViewRun(sid, runId); showToast(`📸 Showing saved run ${runId} (read-only)`); }
+                catch (err) { showToast(`Load failed — ${err.message}`, 'rgba(255,96,96,0.55)'); }
+                return;
+            }
+            const runEl = e.target.closest('[data-survey-run]');
+            if (runEl) {
+                const runId = runEl.getAttribute('data-survey-run');
+                const dir = `${surveyDirFor(sid)}/${runId}`;
+                body.innerHTML = '<div style="opacity:0.7">loading report…</div>';
+                try {
+                    const md = await ghGetText(`${dir}/${sid}_Airspace_Survey.md`);
+                    if (md == null) throw new Error('report file missing');
+                    showMd(md, dir);
+                } catch (err) { body.innerHTML = `<div style="color:#ff8080">load failed — ${airEsc(err.message)}</div>`; }
+            }
+        });
+        if (!elevSharedToken) {
+            runsEl.innerHTML = '<div style="padding:6px 10px;color:#ff8080;">No GitHub token — open the Control Panel (gear) and set the PAT to read / save surveys.</div>';
+            notesEl.innerHTML = '';
+            if (surveyLast && String(surveyLast.sid) === String(sid)) livePreview();
+            return;
+        }
+        try { renderRuns(await surveyLoadIndex(sid, true)); } catch (e) { runsEl.innerHTML = `<div style="padding:6px 10px;color:#ff8080;">history unavailable — ${airEsc(e.message)}</div>`; }
+        try { notesLoaded = await surveyLoadNotes(sid); renderNotes(notesLoaded); } catch (e) { notesEl.innerHTML = `<div style="color:#ff8080;">notes unavailable — ${airEsc(e.message)}</div>`; }
+        const stat = wrap.querySelector('[data-survey-stat]'); if (stat) stat.textContent = `📄 Survey: ${surveyStatusText(sid)}`;
+        if (surveyLast && String(surveyLast.sid) === String(sid)) livePreview();
+    }
+
     function airspaceRun() {
         const sid = getCurrentSiteID();
         if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
@@ -3729,6 +4617,7 @@
             postValidatorIssues(sid);
             renderAirspacePanel(res, sid, getCurrentSiteName());
             airDrawMapHighlights(res);
+            surveyAfterRun(sid, res, getCurrentSiteName()).catch(err => console.warn(`${TAG} surveyAfterRun threw:`, err));
             const errNote = res.errors.length ? ` (${res.errors.length} FAA quer${res.errors.length === 1 ? 'y' : 'ies'} FAILED — partial)` : '';
             console.log(`${TAG} airspace check: ${res.violations.length} violation(s), `
                 + `${res.inventory.airports.length} airport(s), ${res.inventory.obstacles.length} obstacle(s)${errNote}`);

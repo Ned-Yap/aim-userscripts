@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-10-02 — 📄 Airspace Survey: Site Setup Tools latest v4.307 + Fleet Tools latest v0.66 + Map Styler latest v34.141 (dev only, features #278 / #280)
+
+- **Site Setup Tools v4.307 — 📄 Survey button in the Airspace panel.** Every airspace run now has a survey report behind it, built to the Regulations department's Site Survey Form: Summary (customer, GPS, airspace class, SUA, operational altitude, AIM-suggested decision + signed decision), three map images captured from your own Percepto map (site setup close-up · 5-SM overview with assets red / base yellow · FAA VFR sectional with the red circle), Nearby aviation facilities within 10 SM with phone numbers, Hazards (FAA obstacles, turbines, transmission lines, stadiums, live TFRs), Restrictions (LAANC, airspace, SUA), Terrain, and the manual sections (LTE, planned changes, local aviation / drone activity, images, follow-up). Saved to the data repo as `airspace/<site>/<run>/` (survey.json + `<SiteID>_Airspace_Survey.md` + jpgs), one dated folder per run so history is never overwritten.
+- **Auto-snapshots (#278):** the first run on a site saves a survey automatically (creation), and any run 180+ days after the last saved one saves again (six-month). Other runs save only on 💾. The panel's new "📄 Survey:" line shows last saved / next due. 🕘 History in the Survey window lists every saved run: click a row for its report, 👁 to re-draw that run in the panel and on the map read-only (no FAA re-query). ✎ Notes (decision, LTE, planned changes, extra hazards…) are saved once per site and folded into every later report.
+- **Fleet Tools v0.66 — new 📄 Airspace Surveys section** on the landing page: every surveyed site with last date, decision, findings and days-to-due (overdue in red), 📄 opens the report with images, 🔗 jumps to the site; plus the list of your sites with no survey yet.
+- **Map Styler v34.141:** answers the survey's request to flip the FAA sectional on for the capture and off again without touching your own chart toggle.
+- Needs the GitHub token (Control Panel) — the data repo is private. Without it the panel says so and nothing is saved.
+
 ## 2026-10-02 — Site Setup Tools latest v4.306: ☎ airport / helipad phone numbers in the Airspace Validator (dev only, feature #279)
 
 - Every airport and heliport row in the Airspace panel now carries a second line from the FAA's 28-day NASR data: airspace class with hours (Class C/E, tower hours), tower / approach facility, and the **manager and owner names + phone numbers** (click a number to copy it). The LAANC section names the controlling facility's phone too. Copy report and the map hover tooltips include the numbers.

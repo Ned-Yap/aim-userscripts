@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.140
+// @version      34.141
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -67,7 +67,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.140';
+    const SCRIPT_VERSION = '34.141';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -83,7 +83,43 @@
         // buffer settings so its draw-time preview bands match the real FP
         // treatment exactly (GM storage is per-script — this is the bridge).
         else if (d.action === "FP_BUFFER_REQUEST") broadcastFpBufferSettings();
+        // v34.141: Site Setup Tools' 📄 Airspace Survey asks for the FAA
+        // sectional overlay ON just long enough to screenshot the map, then
+        // OFF again — without touching the user's faachart.show toggle.
+        else if (d.action === "CHART_PREVIEW") handleChartPreview(d);
     };
+    // Temporary FAA chart layer for the Airspace Survey capture (#280).
+    // No-op when the user already has the chart on. Only the frame that
+    // owns a map answers, with CHART_PREVIEW_ACK {on, present}.
+    let _aimChartPreviewLayer = null;
+    function handleChartPreview(d) {
+        const map = getLeafletMap();
+        if (!map || typeof map.addLayer !== 'function') return;   // not the map frame
+        let present = false;
+        try {
+            if (d.on) {
+                if (toggleState['faachart.show'] === true && _aimChartLayer) {
+                    present = true;                                  // user's own chart is up
+                } else if (_aimChartPreviewLayer) {
+                    present = true;
+                } else {
+                    const spec = _FAA_CHART_SOURCES.sectional;
+                    const layer = makeAimTileLayer(spec.url, {
+                        opacity: Number(d.opacity) > 0 ? Number(d.opacity) : 0.7,
+                        minNativeZoom: spec.minNativeZoom, maxNativeZoom: spec.maxNativeZoom,
+                        maxZoom: 23, zIndex: 9990, attribution: 'FAA AIS',
+                    });
+                    if (layer) { map.addLayer(layer); _aimChartPreviewLayer = layer; present = true; }
+                    console.log(`${TAG} FAA chart preview ${present ? 'ON (survey capture)' : 'unavailable'}`);
+                }
+            } else if (_aimChartPreviewLayer) {
+                try { map.removeLayer(_aimChartPreviewLayer); } catch (e) {}
+                _aimChartPreviewLayer = null;
+                console.log(`${TAG} FAA chart preview OFF`);
+            }
+        } catch (e) { console.warn(`${TAG} chart preview failed:`, e); }
+        try { stateChannel.postMessage({ action: 'CHART_PREVIEW_ACK', on: !!d.on, present }); } catch (e) {}
+    }
     // Answer FP_BUFFER_REQUEST + re-broadcast whenever an fp.* toggle changes,
     // so a consumer's cached copy stays live while the user tweaks the card.
     function broadcastFpBufferSettings() {

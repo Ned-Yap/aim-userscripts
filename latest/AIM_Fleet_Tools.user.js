@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.65
+// @version      0.66
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -36,7 +36,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.65';
+    const SCRIPT_VERSION = '0.66';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -4148,7 +4148,7 @@
     let buttonEl = null;
     let panelEl = null;
     // v0.31: every section starts COLLAPSED (user request) — open what you need.
-    let openSections = { issues: false, data: false, fc: false, pilots: false, sweep: false, map: false, kml: false, xref: false, metrics: false };
+    let openSections = { issues: false, data: false, fc: false, pilots: false, sweep: false, map: false, kml: false, xref: false, metrics: false, surveys: false };
     // v0.25 (#257): 🚩 Fleet Issues front door. AIM Issues owns the engine +
     // panel (one copy of the merge/Slack/role rules); we ask it for a summary
     // and open it over tab-local DOM events on `document` (NOT the
@@ -6238,6 +6238,180 @@
         return rawSites ? Object.keys(rawSites).filter(id => !q || siteName(id).toLowerCase().includes(q) || fdClientOfId(id).toLowerCase().includes(q) || id === q) : [];
     }
 
+    // ==================================================================
+    // 📄 Airspace Surveys (#280, v0.66) — reads airspace/index.json, which
+    // Site Setup Tools' Airspace Validator writes on every saved survey run
+    // (creation / six-month / manual). One row per surveyed site with its
+    // due state; 📄 opens the latest report (markdown + the three map
+    // images) in a card, 🔗 jumps to the site's setup page. Sites you can
+    // access that have never been surveyed are listed underneath.
+    // ==================================================================
+    const SV_DIR = 'airspace';
+    const SV_DUE_DAYS = 180;
+    let svIndex = null;              // { sites: { <siteKey>: { siteId, env, siteName, customer, last, runs, nextDue } } }
+    let svLoading = false, svErr = null, svLoadedAt = 0, svShowUnsurveyed = false;
+    const svPath = (p) => p.split('/').map(encodeURIComponent).join('/');
+    async function svRepoGet(path, raw) {
+        if (!cachedToken) throw new Error('GitHub token needed (AIM Controls gear)');
+        const r = await fetchWithTimeout(`${GH_API}/repos/${DATA_REPO}/contents/${svPath(path)}?ref=${DATA_BRANCH}`,
+            { headers: { 'Authorization': `Bearer ${cachedToken}`, 'Accept': raw ? 'application/vnd.github.raw' : 'application/vnd.github+json' }, cache: 'no-store' }, 40000);
+        if (r.status === 404) return null;
+        if (!r.ok) throw new Error(`GET ${path} HTTP ${r.status}`);
+        return raw ? r.text() : r.json();
+    }
+    async function svRepoDataUrl(path, mime) {
+        const j = await svRepoGet(path, false);
+        if (!j) throw new Error(`${path}: not found`);
+        if (!j.content) throw new Error(`${path}: too large to preview inline (> 1 MB)`);
+        return `data:${mime};base64,${String(j.content).replace(/\n/g, '')}`;
+    }
+    async function svLoadIndex(force) {
+        if (svLoading) return;
+        if (!force && svIndex && Date.now() - svLoadedAt < 5 * 60 * 1000) return;
+        svLoading = true; svErr = null; renderPanel();
+        try {
+            const t = await svRepoGet(`${SV_DIR}/index.json`, true);
+            svIndex = t ? JSON.parse(t) : { sites: {} };
+            svLoadedAt = Date.now();
+            if (!rawSites) { try { await fetchRawSites(false); } catch (e) { console.warn(`${TAG} surveys: /sites/ list unavailable:`, e); } }
+        } catch (e) { svErr = e.message || String(e); console.warn(`${TAG} surveys index failed:`, e); }
+        finally { svLoading = false; renderPanel(); }
+    }
+    function svRows() {
+        const sites = (svIndex && svIndex.sites) || {};
+        const mine = Object.keys(sites).filter(k => (sites[k].env === 'qa') === IS_QA);
+        const now = Date.now();
+        return mine.map(k => {
+            const s = sites[k]; const last = s.last || {};
+            const due = Date.parse(s.nextDue || '') || (Date.parse(last.takenAt || '') + SV_DUE_DAYS * 86400000);
+            return { key: k, id: s.siteId, name: s.siteName || siteName(String(s.siteId)) || `site ${s.siteId}`, customer: s.customer || '', last, runs: s.runs || 0,
+                dueAt: due, dueDays: isFinite(due) ? Math.round((due - now) / 86400000) : null };
+        }).sort((a, b) => (a.dueDays == null ? 1e9 : a.dueDays) - (b.dueDays == null ? 1e9 : b.dueDays));
+    }
+    function renderSurveysSection() {
+        if (!openSections.surveys) return '';
+        const esc = escapeHtml;
+        let h = '<div style="padding:6px 10px;border-bottom:1px solid #222834;display:flex;gap:12px;flex-wrap:wrap;align-items:center;">'
+            + `<span data-sv="refresh" style="cursor:pointer;color:#7adfe6;border:1px solid #2a3140;padding:2px 8px;border-radius:3px">${svLoading ? '⟳ loading…' : '⟳ Refresh'}</span>`
+            + '<span style="color:#888">Saved by the Airspace Validator in Site Setup (📄 Survey). Auto-saves on a site\'s first run and every 6 months; rows sort by due date.</span>'
+            + '</div>';
+        if (!cachedToken) return h + '<div style="padding:8px 10px;color:#ff7a7a">GitHub token needed — set it in the AIM Controls gear.</div>';
+        if (svErr) h += `<div style="padding:6px 10px;color:#ff7a7a">index unavailable — ${esc(svErr)}</div>`;
+        if (!svIndex) { if (!svLoading) setTimeout(() => svLoadIndex(false), 0); return h + '<div style="padding:8px 10px;color:#888">loading…</div>'; }
+        const rows = svRows();
+        if (!rows.length) h += `<div style="padding:8px 10px;color:#888">No surveys saved for ${ENV_LABEL} yet. Run the Airspace Validator on a site — the first run saves one automatically.</div>`;
+        else {
+            const td = 'padding:3px 6px;border-bottom:1px solid #1d2330;vertical-align:top;';
+            h += '<div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%;font-size:11px"><thead><tr style="color:#888;text-align:left">'
+                + `<th style="${td}">Site</th><th style="${td}">Customer</th><th style="${td}">Last survey</th><th style="${td}">Decision</th><th style="${td}">Findings</th><th style="${td}">Due</th><th style="${td}"></th></tr></thead><tbody>`;
+            rows.forEach(r => {
+                const dueTxt = r.dueDays == null ? '?' : r.dueDays < 0 ? `<span style="color:#ff7a7a">⚠ ${-r.dueDays} d overdue</span>` : r.dueDays < 30 ? `<span style="color:#ffb020">${r.dueDays} d</span>` : `${r.dueDays} d`;
+                const dec = r.last.signed || (r.last.decision ? `<span style="color:#888">${esc(r.last.decision)} (suggested)</span>` : '');
+                h += `<tr class="aim-ft-row"><td style="${td}"><strong>${esc(r.name)}</strong> <span style="color:#666">#${r.id}</span></td>`
+                    + `<td style="${td}">${esc(r.customer || '—')}</td>`
+                    + `<td style="${td}">${esc((r.last.takenAt || '').slice(0, 10))} <span style="color:#888">${esc(r.last.reason || '')}${r.runs > 1 ? ` · ${r.runs} runs` : ''}</span></td>`
+                    + `<td style="${td}">${dec}</td>`
+                    + `<td style="${td}">${r.last.violations != null ? `${r.last.violations} violation${r.last.violations === 1 ? '' : 's'}${r.last.high ? ` <span style="color:#ff7a7a">(${r.last.high} high)</span>` : ''}` : ''}${r.last.airspaceClass ? ` · Class ${esc(r.last.airspaceClass)}` : ''}</td>`
+                    + `<td style="${td}">${dueTxt}</td>`
+                    + `<td style="${td};white-space:nowrap"><span data-sv-site="${esc(r.key)}" title="Open the latest report" style="cursor:pointer;color:#ffd54f">📄 report</span> <span data-ft-link="${r.id}" title="Open site setup" style="cursor:pointer;color:#7adfe6;margin-left:6px">🔗</span></td></tr>`;
+            });
+            h += '</tbody></table></div>';
+        }
+        if (rawSites) {
+            const have = new Set(rows.map(r => String(r.id)));
+            const missing = Object.keys(rawSites).filter(id => !have.has(id)).sort((a, b) => rawSites[a].name.localeCompare(rawSites[b].name));
+            h += `<div style="padding:6px 10px;border-top:1px solid #222834;color:#888"><span data-sv="unsurveyed" style="cursor:pointer">${svShowUnsurveyed ? '▾' : '▸'} ${missing.length} site${missing.length === 1 ? '' : 's'} you can access with no survey yet</span>`
+                + (svShowUnsurveyed ? `<div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px 12px;">${missing.map(id => `<span><span data-ft-link="${id}" style="cursor:pointer;color:#7adfe6">🔗</span> ${esc(rawSites[id].name)}</span>`).join('')}</div>` : '')
+                + '</div>';
+        }
+        return h;
+    }
+    // Minimal markdown → HTML (same subset Site Setup Tools writes).
+    function svMdToHtml(md) {
+        const esc = escapeHtml;
+        const inline = (t) => esc(t)
+            .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (m, alt, src) => `<img data-sv-img="${esc(src)}" alt="${alt}" style="max-width:100%;border:1px solid #2a3140;border-radius:4px;margin:4px 0;">`)
+            .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" style="color:#7adfe6">$1</a>')
+            .replace(/&lt;(https?:[^&]+)&gt;/g, '<a href="$1" target="_blank" style="color:#7adfe6">$1</a>')
+            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+            .replace(/`([^`]+)`/g, '<code style="color:#ffd27a">$1</code>')
+            .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>');
+        const lines = md.split('\n'); const out = []; let i = 0;
+        const tdS = 'padding:3px 7px;border:1px solid #2a3140;vertical-align:top;';
+        while (i < lines.length) {
+            const ln = lines[i];
+            if (/^#{1,3} /.test(ln)) { const lvl = ln.match(/^#+/)[0].length; out.push(`<h${lvl + 1} style="color:#7adfe6;margin:${lvl === 1 ? '4px' : '14px'} 0 6px;font-size:${lvl === 1 ? 16 : lvl === 2 ? 14 : 13}px;border-bottom:${lvl === 2 ? '1px solid #2a3140' : 'none'};padding-bottom:2px;">${inline(ln.replace(/^#+ /, ''))}</h${lvl + 1}>`); i++; continue; }
+            if (/^\|/.test(ln)) {
+                const rows = []; while (i < lines.length && /^\|/.test(lines[i])) rows.push(lines[i++]);
+                const cells = (r) => r.replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map(c => c.replace(/\\\|/g, '|').trim());
+                const head = cells(rows[0]); const body = rows.slice(2).map(cells);
+                out.push(`<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:11px;margin:4px 0;"><thead><tr>${head.map(x => `<th style="${tdS}background:#1a2029;text-align:left;">${inline(x)}</th>`).join('')}</tr></thead><tbody>${body.map(r => `<tr>${head.map((x, k) => `<td style="${tdS}">${inline(r[k] || '')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`);
+                continue;
+            }
+            if (/^- /.test(ln)) { const items = []; while (i < lines.length && /^- /.test(lines[i])) items.push(lines[i++].slice(2)); out.push(`<ul style="margin:4px 0 4px 18px;padding:0;">${items.map(x => `<li>${inline(x)}</li>`).join('')}</ul>`); continue; }
+            if (/^> /.test(ln)) { out.push(`<blockquote style="margin:6px 0;padding:4px 10px;border-left:3px solid #ffb020;opacity:0.9;">${inline(ln.slice(2))}</blockquote>`); i++; continue; }
+            if (!ln.trim()) { i++; continue; }
+            const para = []; while (i < lines.length && lines[i].trim() && !/^(#{1,3} |\||- |> )/.test(lines[i])) para.push(lines[i++]);
+            out.push(`<p style="margin:4px 0;">${para.map(inline).join('<br>')}</p>`);
+        }
+        return out.join('');
+    }
+    function svCloseCard() { const c = document.getElementById('aim-ft-sv-card'); if (c) c.remove(); }
+    async function svOpenCard(key, runId) {
+        svCloseCard();
+        const s = svIndex && svIndex.sites && svIndex.sites[key];
+        if (!s) { setStatus('survey entry missing'); return; }
+        const card = document.createElement('div');
+        card.id = 'aim-ft-sv-card';
+        card.style.cssText = 'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:1000px;max-width:96vw;height:min(88vh,920px);background:#14181f;color:#ddd;'
+            + 'border:1px solid #2a3140;border-radius:8px;z-index:2147480005;box-shadow:0 8px 30px rgba(0,0,0,0.6);font:12px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;display:flex;flex-direction:column;';
+        const esc = escapeHtml;
+        card.innerHTML = `<div style="padding:8px 12px;border-bottom:1px solid #2a3140;display:flex;gap:8px;align-items:center;flex:none;">`
+            + `<span style="color:#7adfe6;font-weight:bold">📄 Airspace Survey</span><span style="color:#888">${esc(s.siteName || '')} · site ${s.siteId}</span>`
+            + `<select data-sv-run style="margin-left:8px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;padding:1px 4px;"><option>loading runs…</option></select>`
+            + `<span style="flex:1"></span>`
+            + `<span data-sv-copy style="cursor:pointer;color:#7adfe6;border:1px solid #2a3140;padding:2px 8px;border-radius:3px">📋 Copy markdown</span>`
+            + `<span data-ft-link="${s.siteId}" style="cursor:pointer;color:#7adfe6;border:1px solid #2a3140;padding:2px 8px;border-radius:3px">🔗 Site setup</span>`
+            + `<a href="https://github.com/${DATA_REPO}/tree/${DATA_BRANCH}/${SV_DIR}/${esc(key)}" target="_blank" style="color:#888;border:1px solid #2a3140;padding:2px 8px;border-radius:3px;text-decoration:none">GitHub</a>`
+            + `<span data-sv-close style="cursor:pointer;color:#888;font-size:15px;margin-left:4px">✕</span></div>`
+            + `<div data-sv-body style="flex:1;overflow-y:auto;padding:8px 14px;">loading report…</div>`;
+        document.body.appendChild(card);
+        const body = card.querySelector('[data-sv-body]');
+        const sel = card.querySelector('[data-sv-run]');
+        let currentMd = '';
+        const load = async (rid) => {
+            body.innerHTML = '<div style="color:#888">loading report…</div>';
+            try {
+                const dir = `${SV_DIR}/${key}/${rid}`;
+                const md = await svRepoGet(`${dir}/${s.siteId}_Airspace_Survey.md`, true);
+                if (md == null) throw new Error('report file missing');
+                currentMd = md;
+                body.innerHTML = svMdToHtml(md);
+                for (const im of body.querySelectorAll('img[data-sv-img]')) {
+                    const f = im.getAttribute('data-sv-img');
+                    try { im.src = await svRepoDataUrl(`${dir}/${f}`, 'image/jpeg'); }
+                    catch (e) { im.alt = `${f}: ${e.message}`; im.style.minHeight = '20px'; }
+                }
+            } catch (e) { body.innerHTML = `<div style="color:#ff7a7a">load failed — ${esc(e.message)}</div>`; }
+        };
+        card.addEventListener('click', (ev) => {
+            if (ev.target.closest('[data-sv-close]')) { svCloseCard(); return; }
+            if (ev.target.closest('[data-sv-copy]')) { if (currentMd) copyText(currentMd, 'survey markdown copied'); return; }
+            const link = ev.target.closest('[data-ft-link]');
+            if (link) { window.open(siteSetupUrl(link.getAttribute('data-ft-link')), '_blank'); }
+        });
+        sel.addEventListener('change', () => load(sel.value));
+        try {
+            const idx = await svRepoGet(`${SV_DIR}/${key}/index.json`, true);
+            const runs = (idx && JSON.parse(idx).runs) || [];
+            if (!runs.length) throw new Error('no runs in the site index');
+            sel.innerHTML = runs.map(r => `<option value="${esc(r.runId)}">${esc(r.takenAt.slice(0, 10))} · ${esc(r.reason)} · ${r.violations} violation${r.violations === 1 ? '' : 's'}${r.signed ? ` · ${esc(r.signed)}` : ''}</option>`).join('');
+            const pick = runId && runs.some(r => r.runId === runId) ? runId : runs[0].runId;
+            sel.value = pick;
+            await load(pick);
+        } catch (e) { body.innerHTML = `<div style="color:#ff7a7a">history unavailable — ${esc(e.message)}</div>`; }
+    }
+
     function renderPanel() {
         if (!panelEl) return;
         const body = panelEl.querySelector('#aim-ft-body');
@@ -6262,7 +6436,9 @@
             + sectionHeader('xref', '📐', 'Cross-reference', 'KML vs sites / KML vs KML')
             + renderXrefSection()
             + sectionHeader('metrics', '📊', 'Fleet Metrics', Object.keys(mtIndex.sites).length ? `${Object.keys(mtIndex.sites).length} sites · setups + missions` : 'setups + missions from Site Watch snapshots')
-            + renderMetricsSection();
+            + renderMetricsSection()
+            + sectionHeader('surveys', '📄', 'Airspace Surveys', svIndex ? `${svRows().length} surveyed site(s) · ${svRows().filter(r => r.dueDays != null && r.dueDays < 0).length} due` : 'per-site survey reports from the Airspace Validator')
+            + renderSurveysSection();
     }
 
     function copyText(txt, doneMsg) {
@@ -6442,7 +6618,17 @@
                 if (sec) {
                     const k = sec.getAttribute('data-ft-sec');
                     openSections[k] = !openSections[k];
+                    if (k === 'surveys' && openSections.surveys && !svIndex) setTimeout(() => svLoadIndex(false), 0);
                     renderPanel();
+                    return;
+                }
+                const svSite = ev.target.closest('[data-sv-site]');
+                if (svSite) { svOpenCard(svSite.getAttribute('data-sv-site')).catch(e => { console.warn(`${TAG} survey card failed:`, e); setStatus(`survey card failed — ${e.message}`); }); return; }
+                const svAct = ev.target.closest('[data-sv]');
+                if (svAct) {
+                    const c = svAct.getAttribute('data-sv');
+                    if (c === 'refresh') svLoadIndex(true);
+                    else if (c === 'unsurveyed') { svShowUnsurveyed = !svShowUnsurveyed; renderPanel(); }
                     return;
                 }
                 const link = ev.target.closest('[data-ft-link]');
