@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.314
+// @version      4.315
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.314';
+    const SCRIPT_VERSION = '4.315';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -4768,9 +4768,18 @@
         closeSurveyModal();
         const wrap = document.createElement('div');
         wrap.id = SURVEY_MODAL_ID;
-        wrap.style.cssText = 'position:fixed;top:40px;left:50%;transform:translateX(-50%);width:min(1180px,96vw);height:min(86vh,900px);z-index:2147483100;'
+        // Resizable (corner handle) + remembers size/position per user.
+        let geoSaved = null;
+        try { geoSaved = JSON.parse(elevGmGet('aim-survey-window', 'null')); } catch (e) { geoSaved = null; }
+        const vw = window.innerWidth, vh = window.innerHeight;
+        const ok = geoSaved && geoSaved.w >= 600 && geoSaved.h >= 380 && geoSaved.x >= -50 && geoSaved.y >= 0 && geoSaved.x < vw - 200 && geoSaved.y < vh - 100;
+        wrap.style.cssText = `position:fixed;z-index:2147483100;${ok ? `left:${geoSaved.x}px;top:${geoSaved.y}px;width:${Math.min(geoSaved.w, vw - 20)}px;height:${Math.min(geoSaved.h, vh - 20)}px;` : 'top:40px;left:50%;transform:translateX(-50%);width:min(1180px,96vw);height:min(86vh,900px);'}`
+            + 'min-width:640px;min-height:380px;resize:both;overflow:hidden;'
             + 'background:rgba(16,22,32,0.98);border:1px solid rgba(122,223,230,0.5);border-radius:10px;color:#dfe9f0;'
             + 'font:12px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 10px 40px rgba(0,0,0,0.6);display:flex;flex-direction:column;';
+        const saveGeo = () => { try { const r = wrap.getBoundingClientRect(); elevGmSet('aim-survey-window', JSON.stringify({ x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) })); } catch (e) {} };
+        let geoTimer = null;
+        try { new ResizeObserver(() => { clearTimeout(geoTimer); geoTimer = setTimeout(saveGeo, 300); }).observe(wrap); } catch (e) {}
         const btn = (attr, label, color, title) => `<button ${attr} title="${airEsc(title || '')}" style="background:none;border:1px solid ${color};color:${color};border-radius:5px;padding:2px 9px;cursor:pointer;font:inherit;">${label}</button>`;
         const site = siteHeaderLabel(sid);
         wrap.innerHTML = `
@@ -4783,6 +4792,7 @@
                 ${btn('data-survey-pdf', '🖨 PDF', '#7adfe6', 'Print-ready page in a new tab with every section in form order and the toggled map overlays baked into the images — Print → Save as PDF')}
                 ${btn('data-survey-copy', '📋 Copy markdown', '#7adfe6', 'Full report in form order (the GitHub version)')}
                 ${btn('data-survey-open', '🔗 GitHub', '#7adfe6', 'Open airspace/<site>/ in the data repo')}
+                <button data-survey-max title="Maximize / restore" style="background:none;border:none;color:#dfe9f0;font-size:14px;cursor:pointer;">⛶</button>
                 <button data-survey-close style="background:none;border:none;color:#dfe9f0;font-size:15px;cursor:pointer;">✕</button>
             </div>
             <div data-survey-stat style="padding:5px 12px;border-bottom:1px solid rgba(122,223,230,0.15);opacity:0.85;flex:none;">📄 Survey: ${airEsc(surveyStatusText(sid))}</div>
@@ -4798,7 +4808,7 @@
         let drag = null;
         wrap.querySelector('[data-survey-drag]').addEventListener('mousedown', (e) => { if (e.target.closest('button')) return; const r = wrap.getBoundingClientRect(); drag = { dx: e.clientX - r.left, dy: e.clientY - r.top }; wrap.style.transform = 'none'; wrap.style.left = `${r.left}px`; e.preventDefault(); });
         document.addEventListener('mousemove', (e) => { if (!drag) return; wrap.style.left = `${e.clientX - drag.dx}px`; wrap.style.top = `${e.clientY - drag.dy}px`; });
-        document.addEventListener('mouseup', () => { drag = null; });
+        document.addEventListener('mouseup', () => { if (drag) { drag = null; saveGeo(); } });
         const body = wrap.querySelector('[data-survey-body]');
         const runsEl = wrap.querySelector('[data-survey-runs]');
         const notesStat = wrap.querySelector('[data-survey-notes-stat]');
@@ -4890,6 +4900,11 @@
                 if (dirty && elevSharedToken) { showToast('Saving notes…'); await saveNotes(); }
                 else if (dirty) showToast('Unsaved notes discarded (no GitHub token)', 'rgba(255,176,32,0.55)');
                 closeSurveyModal(); return;
+            }
+            if (e.target.closest('[data-survey-max]')) {
+                if (wrap.dataset.max) { Object.assign(wrap.style, JSON.parse(wrap.dataset.max)); delete wrap.dataset.max; }
+                else { wrap.dataset.max = JSON.stringify({ left: wrap.style.left, top: wrap.style.top, width: wrap.style.width, height: wrap.style.height, transform: wrap.style.transform }); Object.assign(wrap.style, { left: '8px', top: '8px', width: `${window.innerWidth - 16}px`, height: `${window.innerHeight - 16}px`, transform: 'none' }); }
+                return;
             }
             const tab = e.target.closest('[data-sn-tab]');
             if (tab) { st.tab = tab.getAttribute('data-sn-tab'); renderMain(); return; }
