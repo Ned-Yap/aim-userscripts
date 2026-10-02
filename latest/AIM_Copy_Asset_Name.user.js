@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.319
+// @version      4.320
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.319';
+    const SCRIPT_VERSION = '4.320';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -4193,8 +4193,8 @@
         followUp:     { label: 'Follow-up — one per line', type: 'textarea' },
     };
     const SURVEY_TABLES = {
-        localAviation: { cols: ['Type of activity', 'Source used to identify', 'Operator'] },
-        droneActivity: { cols: ['Type of activity', 'Source used to identify', 'Operator'] },
+        localAviation: { cols: ['Type of activity', 'Source used to identify', 'Operator', 'Contacted', 'Contacted on · by'], contactCol: 3 },
+        droneActivity: { cols: ['Type of activity', 'Source used to identify', 'Operator', 'Contacted', 'Contacted on · by'], contactCol: 3 },
         hazards:       { cols: ['Identified hazard', 'Location / height', 'Impact on operation', 'Verified & source', 'Additional review', 'Field review'] },
         restrictions:  { cols: ['Restriction', 'Impact on operation', 'Source used'] },
         terrain:       { cols: ['Factor', 'Impact on operation', 'Source used'] },
@@ -4287,7 +4287,9 @@
               ] })) },
         ] });
         const privStrips = (inv.airports || []).filter(a => a.priv === 'private' && a.distMi <= SURVEY_FACILITY_MI && /airport/i.test(a.kind));
-        const localAuto = privStrips.length ? [['Agricultural / general aviation (possible)', `FAA airport data — ${privStrips.length} private strip${privStrips.length === 1 ? '' : 's'} within ${SURVEY_FACILITY_MI} SM: ${privStrips.slice(0, 4).map(a => a.name).join(', ')}${privStrips.length > 4 ? '…' : ''}`, privStrips.slice(0, 3).map(a => a.nasr ? airContactText(a.nasr) : a.name).join('; ')]] : [];
+        const stripsContacted = privStrips.filter(a => nc[a.ident || a.name] && nc[a.ident || a.name].contacted);
+        const localAuto = privStrips.length ? [['Agricultural / general aviation (possible)', `FAA airport data — ${privStrips.length} private strip${privStrips.length === 1 ? '' : 's'} within ${SURVEY_FACILITY_MI} SM: ${privStrips.slice(0, 4).map(a => a.name).join(', ')}${privStrips.length > 4 ? '…' : ''}`, privStrips.slice(0, 3).map(a => a.nasr ? airContactText(a.nasr) : a.name).join('; '),
+            stripsContacted.length === privStrips.length ? 'Yes' : stripsContacted.length ? `${stripsContacted.length} of ${privStrips.length}` : 'No', stripsContacted.map(a => `${a.ident || a.name}: ${stamp(nc[a.ident || a.name])}`).join('; ')]] : [];
         S.push({ id: 'localAviation', title: 'Local aviation activity', edit: true, blocks: [
             { t: 'text', md: 'Manned activity at or below 1,000 ft AGL that could affect the area (ag, mapping, utility patrol, public safety, military). Add what ADS-B, observation or the client tells you.' },
             { t: 'table', cols: SURVEY_TABLES.localAviation.cols, rows: localAuto.map(c => ({ cells: c })), edit: 'localAviation' } ] });
@@ -4478,7 +4480,12 @@
                     return `<td style="${SURVEY_TD}">${airEsc(rw.cells[i] || '')}</td>`;
                 }).join('')}${b.edit ? `<td style="${SURVEY_TD}opacity:0.5;">auto</td>` : ''}</tr>`).join('');
                 const pickCol = b.edit && SURVEY_TABLES[b.edit].pick;
-                const editRows = noteRows.map((rw, ri) => `<tr>${cols.map((c, ci) => `<td style="${SURVEY_TD}padding:2px;${pickCol === ci ? 'white-space:nowrap;' : ''}"><input data-sn-cell="${b.edit}|${ri}|${ci}" type="text" value="${airEsc(rw[ci] || '')}" style="${SURVEY_INPUT_CSS}width:${pickCol === ci ? 'calc(100% - 28px)' : '100%'};min-width:70px;">${pickCol === ci ? `<span data-sn-pick="${b.edit}|${ri}" title="Pick this spot on the map (the window hides until you click)" style="cursor:crosshair;margin-left:4px;">📍</span>` : ''}</td>`).join('')}<td style="${SURVEY_TD}text-align:center;"><span data-sn-del="${b.edit}|${ri}" title="Remove this row" style="cursor:pointer;color:#ff8080;">✕</span></td></tr>`).join('');
+                const cCol = b.edit && SURVEY_TABLES[b.edit].contactCol;
+                const editRows = noteRows.map((rw, ri) => `<tr>${cols.map((c, ci) => {
+                    if (cCol != null && ci === cCol) return `<td style="${SURVEY_TD}text-align:center;"><input type="checkbox" data-sn-rowcontact="${b.edit}|${ri}" ${rw[ci] === 'Yes' ? 'checked' : ''} title="Mark contacted — stamps now + you"></td>`;
+                    if (cCol != null && ci === cCol + 1) return `<td style="${SURVEY_TD}white-space:nowrap;">${airEsc(rw[ci] || '')}</td>`;
+                    return `<td style="${SURVEY_TD}padding:2px;${pickCol === ci ? 'white-space:nowrap;' : ''}"><input data-sn-cell="${b.edit}|${ri}|${ci}" type="text" value="${airEsc(rw[ci] || '')}" style="${SURVEY_INPUT_CSS}width:${pickCol === ci ? 'calc(100% - 28px)' : '100%'};min-width:70px;">${pickCol === ci ? `<span data-sn-pick="${b.edit}|${ri}" title="Pick this spot on the map (the window hides until you click)" style="cursor:crosshair;margin-left:4px;">📍</span>` : ''}</td>`;
+                }).join('')}<td style="${SURVEY_TD}text-align:center;"><span data-sn-del="${b.edit}|${ri}" title="Remove this row" style="cursor:pointer;color:#ff8080;">✕</span></td></tr>`).join('');
                 h.push(`<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:11px;margin:4px 0;width:100%;">${head}<tbody>${autoRows}${editRows}${!autoRows && !editRows ? `<tr><td colspan="${cols.length + 1}" style="${SURVEY_TD}opacity:0.6;">N/A</td></tr>` : ''}</tbody></table></div>`
                     + (b.edit ? `<div style="margin:2px 0 8px;"><span data-sn-add="${b.edit}" style="cursor:pointer;color:#ffd27a;border:1px solid rgba(255,210,122,0.45);border-radius:4px;padding:1px 8px;">+ add row</span></div>` : ''));
             } else if (b.t === 'field') {
@@ -4966,6 +4973,15 @@
             if (f) { notesDraft.fields[f.getAttribute('data-sn-field')] = f.value; setDirty(true); return; }
             const ly = e.target.closest('[data-sn-layer]');
             if (ly) { st.layers[ly.getAttribute('data-sn-layer')] = ly.checked; renderMain(); return; }
+            const rc = e.target.closest('[data-sn-rowcontact]');
+            if (rc) {
+                const [k, ri] = rc.getAttribute('data-sn-rowcontact').split('|');
+                const col = SURVEY_TABLES[k].contactCol;
+                const rows = notesDraft.tables[k] = notesDraft.tables[k] || []; rows[+ri] = rows[+ri] || [];
+                if (rc.checked) { const login = await surveyGithubLogin(); const now = new Date(); rows[+ri][col] = 'Yes'; rows[+ri][col + 1] = `${surveyLocalStamp(now)} · ${login || 'unknown'}`; }
+                else { rows[+ri][col] = ''; rows[+ri][col + 1] = ''; }
+                setDirty(true); renderMain(); return;
+            }
             const ck = e.target.closest('[data-sn-contact]');
             if (ck) {
                 const id = ck.getAttribute('data-sn-contact');
