@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.141
+// @version      34.142
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -67,7 +67,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.141';
+    const SCRIPT_VERSION = '34.142';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -87,7 +87,39 @@
         // sectional overlay ON just long enough to screenshot the map, then
         // OFF again — without touching the user's faachart.show toggle.
         else if (d.action === "CHART_PREVIEW") handleChartPreview(d);
+        // v34.142: same idea for the base layer — Esri World Imagery under the
+        // survey's setup/overview shots regardless of the user's basemap pick.
+        else if (d.action === "BASEMAP_PREVIEW") handleBasemapPreview(d);
     };
+    function handleBasemapPreview(d) {
+        const map = getLeafletMap();
+        if (!map || typeof map.addLayer !== 'function') return;   // not the map frame
+        let present = false;
+        try {
+            const want = String(d.source || 'esri');
+            if (d.on) {
+                if (toggleState['basemap.enabled'] !== false && String(toggleState['basemap.source'] || 'percepto') === want && _aimBasemapLayer) {
+                    present = true;                                  // user already on that basemap
+                } else if (_aimBasemapPreviewLayer) {
+                    present = true;
+                } else {
+                    const spec = BASEMAP_SOURCES[want] || BASEMAP_SOURCES.esri;
+                    const layer = makeAimTileLayer(spec.url, { maxNativeZoom: spec.maxNative, maxZoom: 23, zIndex: 1, attribution: spec.attribution });
+                    if (layer) {
+                        map.addLayer(layer); _aimBasemapPreviewLayer = layer; basemapPreviewActive = true; present = true;
+                        try { applyMapBackgroundVisibility(); } catch (e) {}
+                    }
+                    console.log(`${TAG} basemap preview ${present ? `ON (${want}, survey capture)` : 'unavailable'}`);
+                }
+            } else if (_aimBasemapPreviewLayer) {
+                try { map.removeLayer(_aimBasemapPreviewLayer); } catch (e) {}
+                _aimBasemapPreviewLayer = null; basemapPreviewActive = false;
+                try { applyMapBackgroundVisibility(); } catch (e) {}
+                console.log(`${TAG} basemap preview OFF`);
+            }
+        } catch (e) { console.warn(`${TAG} basemap preview failed:`, e); }
+        try { stateChannel.postMessage({ action: 'BASEMAP_PREVIEW_ACK', on: !!d.on, present }); } catch (e) {}
+    }
     // Temporary FAA chart layer for the Airspace Survey capture (#280).
     // No-op when the user already has the chart on. Only the frame that
     // owns a map answers, with CHART_PREVIEW_ACK {on, present}.
@@ -1477,6 +1509,8 @@
     // applyMapBackgroundVisibility reads it and can run before the
     // basemap block executes (same TDZ lesson as the FAA chart state).
     let basemapOverrideActive = false;
+    let basemapPreviewActive = false;      // v34.142: survey capture borrowing Esri imagery (BASEMAP_PREVIEW)
+    let _aimBasemapPreviewLayer = null;
     // FAA chart overlay state — declared up here (not next to its functions
     // further down) because applyMapBackgroundVisibility references
     // _aimChartLayer and can run early; see the TDZ lesson in
@@ -1502,7 +1536,7 @@
     function applyMapBackgroundVisibility() {
         // Hide the HERE base when the Perf Shield toggle says so OR when a
         // replacement basemap is active (both restore through _aimHidden).
-        const hide = perfHideSatellite === true || basemapOverrideActive === true;
+        const hide = perfHideSatellite === true || basemapOverrideActive === true || basemapPreviewActive === true;
         const map = getLeafletMap();
         if (!map || typeof map.eachLayer !== 'function') return;
         try {
@@ -1515,7 +1549,7 @@
                 // hide-satellite would hide the chart the moment both are
                 // on (v34.86 bug, caught by the probe). Match on the FAA
                 // AIS org id so the console-probe layer is excluded too.
-                if (layer === _aimChartLayer || layer === _aimBasemapLayer || /ssFJjBXIUyZDrSYZ/.test(url)) return;
+                if (layer === _aimChartLayer || layer === _aimBasemapLayer || layer === _aimBasemapPreviewLayer || /ssFJjBXIUyZDrSYZ/.test(url)) return;
                 // Diagnostic: print every unique tile layer URL once. Helps
                 // identify Percepto's actual satellite provider when our
                 // built-in patterns don't match. Always logs (not just when

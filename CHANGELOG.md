@@ -6,6 +6,23 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-10-02 — Site Setup Tools latest v4.310 + Map Styler latest v34.142: the Survey window gets tabs, in-place editing and a Contacted column (dev only, #280)
+
+- **Tabs across the top** — Summary · Aviation · Hazards · Site & LTE · Appendix — instead of one long page. The markdown on GitHub (and the future PDF) keeps the full form order unchanged; the tabs are only how AIM shows it.
+- **Edit in place.** The ✎ parts are inputs inside the report itself: decision + signed-by, customer, address, LTE carrier/speeds, field review notes, images, follow-up, and **row tables you can add to** (+ add row / ✕) for local aviation, drone activity, extra hazards, restrictions, terrain, planned changes and the LTE survey. Rows the data found are shown read-only above yours. One 💾 Save notes button (dot = unsaved); closing the window saves pending edits; 💾 Save survey saves notes first.
+- **Nearby aviation facilities** now has **Contacted** (checkbox) and **Contacted on · by** (stamped with the time and your GitHub login when ticked). Facilities inside the 3 NM standoff are highlighted "contact required", and any not yet ticked appear in Follow-up automatically.
+- **Images** are three tabs (Site setup · Overview · VFR sectional) instead of stacked. The setup and overview shots now capture on **Esri World Imagery** regardless of your day-to-day basemap (Map Styler v34.142 lends it for the capture and puts yours back).
+- Notes saved by v4.307–4.309 are migrated automatically (the "a | b | c" lines become table rows).
+
+## 2026-10-02 — 🔗 Merge by pad clicks fixed: Mission Bank Tools **prod v2.95** + latest v3.08 (bugfix)
+
+- **What went wrong:** Percepto rejects (HTTP 400) any mission name containing characters other than letters, digits, space, `-` and `_`. The merge panel's default name joined the picked missions with ` + `, so every merge created with the default name failed with a bare "HTTP 400". Renaming the mission by hand to remove the `+` made the same merge succeed.
+- **Fix:** the default merged name now joins with ` AND ` (`Merged - A AND B`). Before any save, 🔗 Merge, inline ✎ Rename / bulk rename and ⧉ Duplicate now check the name and refuse with a toast naming the offending characters (e.g. `name has character Percepto rejects: "+"`), instead of failing with HTTP 400 after the fact. The ⧉ Duplicate qualifier default changed from `(copy)` to `copy` for the same reason (a qualifier you already saved is kept as-is — change it in the popover if it has parentheses).
+- **Prod also gains the v3.06 rail:** when Percepto rejects a save, the toast and console now carry the server's own message ("server says: …") instead of a bare "HTTP 400".
+- Note for long merges: the by-name default name can get very long (both full mission names). Shorten it in the Name box before Create — a name-length limit is not enforced yet.
+
+---
+
 ## 2026-10-02 — Mission Bank Tools latest v3.07: ↩ Restore a mission from the panel (dev only, feature #283)
 
 - New **↩ Restore** button in the Mission Bank Tools panel. Two sources: **🕘 Deleted recently** lists every mission Delete Guard banked for this site in the last 72 h — one click re-creates it (new id, same name and steps) and marks the Delete Guard entry as restored. **📂 From a backup file** takes any JSON this script downloaded before a bulk edit (pre-step-optimizer, pre-reorder, pre-wrap, pre-remove, remerge batches, a bare mission, or a raw mission list): if the mission still exists it is restored **in place** (same id; the current server copy downloads first as a backup), otherwise it is re-created.
