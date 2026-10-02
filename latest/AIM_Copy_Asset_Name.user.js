@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.311
+// @version      4.312
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.311';
+    const SCRIPT_VERSION = '4.312';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -3923,8 +3923,15 @@
             throw e;
         }
         const bytes = new Uint8Array(await blob.arrayBuffer());
+        // Geographic frame of the shot → the viewer can draw toggleable
+        // markers (LTE points, airports, obstacles…) over the static JPEG.
+        let geo = null;
+        try {
+            const nw = map.containerPointToLatLng([0, 0]), se = map.containerPointToLatLng([crect.width, crect.height]);
+            geo = { n: nw.lat, w: nw.lng, s: se.lat, e: se.lng, px: W, py: H, zoom: map.getZoom() };
+        } catch (e) { console.warn(`${TAG} survey capture: no geo frame (${e.message})`); }
         console.log(`${TAG} survey capture "${label}": ${W}×${H}, ${drawn} layer(s), ${failed} skipped, ${Math.round(bytes.length / 1024)} KB`);
-        return { bytes, w: W, h: H, drawn, failed };
+        return { bytes, w: W, h: H, drawn, failed, geo };
     }
     // Ask Map Styler (v34.141+) for the FAA sectional on/off without touching
     // the user's toggle. Resolves {present, err}.
@@ -4149,6 +4156,7 @@
             images: {
                 setup: images.setup ? 'setup.jpg' : null, overview: images.overview ? 'overview.jpg' : null,
                 sectional: images.sectional ? 'sectional.jpg' : null, sectionalErr: images.sectionalErr || null,
+                geo: { setup: images.setup && images.setup.geo || null, overview: images.overview && images.overview.geo || null, sectional: images.sectional && images.sectional.geo || null },
             },
             notes: nn,
             result: surveyTrimResult(res),
@@ -4189,7 +4197,7 @@
         restrictions:  { cols: ['Restriction', 'Impact on operation', 'Source used'] },
         terrain:       { cols: ['Factor', 'Impact on operation', 'Source used'] },
         planned:       { cols: ['Change being made', 'Status (current / planned)', 'Impact on operation', 'Source used'] },
-        lte:           { cols: ['Carrier', 'Download', 'Upload', 'Latency', 'Location'] },
+        lte:           { cols: ['Carrier', 'Download', 'Upload', 'Latency', 'Location (lat, lng — 📍 picks it)'], pick: 4 },
     };
     // Tabs group the sections for reading in AIM; the markdown keeps the
     // flat form order (summary → … → appendix) for GitHub and the PDF.
@@ -4318,7 +4326,7 @@
             { t: 'text', md: 'Current or planned changes in the next 24 months: construction, new equipment, expansions, shutdowns, crane work, new powerlines or pads, decommissioning.' },
             { t: 'table', cols: SURVEY_TABLES.planned.cols, rows: [], edit: 'planned' } ] });
         S.push({ id: 'lte', title: 'LTE survey', edit: true, blocks: [
-            { t: 'text', md: 'Per carrier and location: Chrome speed test download / upload / latency (three phones; XR60 if results are poor). The best carrier goes in the Summary.' },
+            { t: 'text', md: 'Per carrier and location: Chrome speed test download / upload / latency (three phones; XR60 if results are poor). The best carrier goes in the Summary. 📍 on a row picks the spot on the map; rows with coordinates draw on the Summary maps (LTE layer).' },
             { t: 'table', cols: SURVEY_TABLES.lte.cols, rows: [], edit: 'lte' },
             { t: 'field', key: 'lteGo' } ] });
         S.push({ id: 'images', title: 'Images', edit: true, blocks: [
@@ -4389,6 +4397,45 @@
         if (f.type === 'textarea') return `<textarea ${attrs} rows="2" placeholder="${airEsc(f.ph || '')}" style="${SURVEY_INPUT_CSS}width:100%;resize:vertical;">${airEsc(v)}</textarea>`;
         return `<input ${attrs} type="text" value="${airEsc(v)}" placeholder="${airEsc(f.ph || '')}" style="${SURVEY_INPUT_CSS}width:100%;">`;
     }
+    // Markers to draw over a capture, from the saved data + current notes.
+    const SURVEY_LAYERS = [
+        { id: 'lte', label: 'LTE points', color: '#ffd27a' },
+        { id: 'airports', label: 'Airports', color: '#5fff5f' },
+        { id: 'obstacles', label: 'Obstacles', color: '#ff5555' },
+        { id: 'lines', label: 'Power lines', color: '#ff9f43' },
+        { id: 'base', label: 'Base / centre', color: '#ffd400' },
+    ];
+    const surveyParseLatLng = (txt) => { const m = /^\s*(-?\d{1,2}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)/.exec(String(txt || '')); return m ? { lat: +m[1], lng: +m[2] } : null; };
+    function surveyOverlayMarkers(sv, notes, layers) {
+        const inv = (sv.result && sv.result.inventory) || {};
+        const out = [];
+        if (layers.lte) ((notes.tables && notes.tables.lte) || []).forEach(r => { const p = surveyParseLatLng(r[4]); if (p) out.push({ lat: p.lat, lng: p.lng, label: `${r[0] || 'LTE'}${r[1] || r[2] ? ` ${r[1] || '?'}/${r[2] || '?'}` : ''}`, color: '#ffd27a', shape: 'diamond' }); });
+        if (layers.airports) (inv.airports || []).forEach(a => { if (isFinite(a.lat)) out.push({ lat: a.lat, lng: a.lng, label: a.ident || a.name, color: a.hit ? '#ff5555' : '#5fff5f', shape: 'ring' }); });
+        if (layers.obstacles) (inv.obstacles || []).filter(o => o.show).forEach(o => { if (isFinite(o.lat)) out.push({ lat: o.lat, lng: o.lng, label: `${o.isWindmill ? 'WT' : o.type}${o.agl != null ? ` ${o.agl}` : ''}`, color: o.hit ? '#ff5555' : '#ff8080', shape: 'tri' }); });
+        if (layers.lines) (inv.translines || []).filter(t => t.show && t.nearPt).forEach(t => out.push({ lat: t.nearPt[0], lng: t.nearPt[1], label: t.volt, color: '#ff9f43', shape: 'dot' }));
+        if (layers.base && sv.geometry) out.push({ lat: sv.geometry.lat, lng: sv.geometry.lng, label: 'base', color: '#ffd400', shape: 'square' });
+        return out;
+    }
+    function surveyOverlaySvg(geo, markers) {
+        if (!geo || !isFinite(geo.n)) return '';
+        const mx = (lng) => lng * Math.PI / 180, my = (lat) => Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360));
+        const x0 = mx(geo.w), x1 = mx(geo.e), y0 = my(geo.n), y1 = my(geo.s);
+        const W = geo.px, H = geo.py, r = Math.max(5, Math.round(W / 220));
+        const items = [];
+        markers.forEach(m => {
+            const x = (mx(m.lng) - x0) / (x1 - x0) * W, y = (my(m.lat) - y0) / (y1 - y0) * H;
+            if (!(x >= -r && x <= W + r && y >= -r && y <= H + r)) return;
+            const stroke = `stroke="#000" stroke-width="1.2" paint-order="stroke"`;
+            let g = '';
+            if (m.shape === 'ring') g = `<circle cx="${x}" cy="${y}" r="${r * 1.6}" fill="none" stroke="${m.color}" stroke-width="3"/><circle cx="${x}" cy="${y}" r="${r * 1.6 + 1.5}" fill="none" stroke="#000" stroke-width="1" opacity="0.6"/>`;
+            else if (m.shape === 'diamond') g = `<path d="M${x} ${y - r * 1.5} L${x + r * 1.5} ${y} L${x} ${y + r * 1.5} L${x - r * 1.5} ${y} Z" fill="${m.color}" ${stroke}/>`;
+            else if (m.shape === 'tri') g = `<path d="M${x} ${y - r * 1.4} L${x + r * 1.3} ${y + r} L${x - r * 1.3} ${y + r} Z" fill="${m.color}" ${stroke}/>`;
+            else if (m.shape === 'square') g = `<rect x="${x - r}" y="${y - r}" width="${r * 2}" height="${r * 2}" fill="${m.color}" ${stroke}/>`;
+            else g = `<circle cx="${x}" cy="${y}" r="${r}" fill="${m.color}" ${stroke}/>`;
+            items.push(`${g}<text x="${x + r * 1.8}" y="${y + r * 0.5}" font-size="${r * 2.2}" font-family="sans-serif" font-weight="700" fill="${m.color}" stroke="#000" stroke-width="2.5" paint-order="stroke" stroke-linejoin="round">${airEsc(m.label)}</text>`);
+        });
+        return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;">${items.join('')}</svg>`;
+    }
     function surveyRenderSection(sec, sv, notes, st) {
         const nf = notes.fields || {}, nc = notes.contacts || {};
         const h = [`<h3 style="color:#7adfe6;margin:12px 0 6px;font-size:14px;border-bottom:1px solid rgba(122,223,230,0.25);padding-bottom:2px;">${airEsc(sec.title)}${sec.edit ? ' <span style="color:#ffd27a;font-size:11px;">✎ editable</span>' : ''}</h3>`];
@@ -4407,8 +4454,14 @@
                 }).join('')}</tbody></table>`);
             } else if (b.t === 'images') {
                 const cur = b.items.some(im => im.key === st.imgTab) ? st.imgTab : b.items[0].key;
-                h.push(`<div style="margin:6px 0;"><div style="display:flex;gap:4px;margin-bottom:4px;">${b.items.map(im => `<span data-sn-imgtab="${im.key}" style="cursor:pointer;padding:3px 10px;border-radius:5px 5px 0 0;border:1px solid rgba(122,223,230,0.35);border-bottom:none;${im.key === cur ? 'background:rgba(122,223,230,0.18);color:#7adfe6;' : 'opacity:0.7;'}">${airEsc(im.label)}</span>`).join('')}</div>`
-                    + b.items.map(im => `<div data-sn-imgpane="${im.key}" ${im.key === cur ? '' : 'hidden'}><img data-survey-img="${airEsc(im.file)}" alt="${airEsc(im.label)}" style="max-width:100%;border:1px solid rgba(122,223,230,0.3);border-radius:0 4px 4px 4px;"><div style="opacity:0.8;margin:3px 0 6px;"><em>${airEsc(im.caption)}</em></div></div>`).join('') + '</div>');
+                const geos = (sv.images && sv.images.geo) || {};
+                const anyGeo = b.items.some(im => geos[im.key]);
+                const markers = anyGeo ? surveyOverlayMarkers(sv, notes, st.layers) : [];
+                const toggles = anyGeo
+                    ? SURVEY_LAYERS.map(l => `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;margin-right:10px;"><input type="checkbox" data-sn-layer="${l.id}" ${st.layers[l.id] ? 'checked' : ''}> <span style="color:${l.color}">●</span> ${airEsc(l.label)}</label>`).join('')
+                    : '<span style="opacity:0.6;">map overlays need a run saved with v4.312 or later</span>';
+                h.push(`<div style="margin:6px 0;"><div style="display:flex;gap:4px;margin-bottom:4px;align-items:center;flex-wrap:wrap;">${b.items.map(im => `<span data-sn-imgtab="${im.key}" style="cursor:pointer;padding:3px 10px;border-radius:5px 5px 0 0;border:1px solid rgba(122,223,230,0.35);border-bottom:none;${im.key === cur ? 'background:rgba(122,223,230,0.18);color:#7adfe6;' : 'opacity:0.7;'}">${airEsc(im.label)}</span>`).join('')}<span style="flex:1"></span><span style="font-size:11px;">${toggles}</span></div>`
+                    + b.items.map(im => `<div data-sn-imgpane="${im.key}" ${im.key === cur ? '' : 'hidden'}><div style="position:relative;display:inline-block;max-width:100%;"><img data-survey-img="${airEsc(im.file)}" alt="${airEsc(im.label)}" style="max-width:100%;display:block;border:1px solid rgba(122,223,230,0.3);border-radius:0 4px 4px 4px;">${surveyOverlaySvg(geos[im.key], markers)}</div><div style="opacity:0.8;margin:3px 0 6px;"><em>${airEsc(im.caption)}</em></div></div>`).join('') + '</div>');
             } else if (b.t === 'text') {
                 h.push(`<p style="margin:4px 0;">${surveyInline(b.md)}</p>`);
             } else if (b.t === 'table') {
@@ -4419,7 +4472,8 @@
                     if (b.contacts && c === 'Contacted') { const on = !!(nc[rw.ident] && nc[rw.ident].contacted); return `<td style="${SURVEY_TD}text-align:center;"><input type="checkbox" data-sn-contact="${airEsc(rw.ident)}" ${on ? 'checked' : ''} title="Mark contacted — stamps now + you"></td>`; }
                     return `<td style="${SURVEY_TD}">${airEsc(rw.cells[i] || '')}</td>`;
                 }).join('')}${b.edit ? `<td style="${SURVEY_TD}opacity:0.5;">auto</td>` : ''}</tr>`).join('');
-                const editRows = noteRows.map((rw, ri) => `<tr>${cols.map((c, ci) => `<td style="${SURVEY_TD}padding:2px;"><input data-sn-cell="${b.edit}|${ri}|${ci}" type="text" value="${airEsc(rw[ci] || '')}" style="${SURVEY_INPUT_CSS}width:100%;min-width:70px;"></td>`).join('')}<td style="${SURVEY_TD}text-align:center;"><span data-sn-del="${b.edit}|${ri}" title="Remove this row" style="cursor:pointer;color:#ff8080;">✕</span></td></tr>`).join('');
+                const pickCol = b.edit && SURVEY_TABLES[b.edit].pick;
+                const editRows = noteRows.map((rw, ri) => `<tr>${cols.map((c, ci) => `<td style="${SURVEY_TD}padding:2px;${pickCol === ci ? 'white-space:nowrap;' : ''}"><input data-sn-cell="${b.edit}|${ri}|${ci}" type="text" value="${airEsc(rw[ci] || '')}" style="${SURVEY_INPUT_CSS}width:${pickCol === ci ? 'calc(100% - 28px)' : '100%'};min-width:70px;">${pickCol === ci ? `<span data-sn-pick="${b.edit}|${ri}" title="Pick this spot on the map (the window hides until you click)" style="cursor:crosshair;margin-left:4px;">📍</span>` : ''}</td>`).join('')}<td style="${SURVEY_TD}text-align:center;"><span data-sn-del="${b.edit}|${ri}" title="Remove this row" style="cursor:pointer;color:#ff8080;">✕</span></td></tr>`).join('');
                 h.push(`<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:11px;margin:4px 0;width:100%;">${head}<tbody>${autoRows}${editRows}${!autoRows && !editRows ? `<tr><td colspan="${cols.length + 1}" style="${SURVEY_TD}opacity:0.6;">N/A</td></tr>` : ''}</tbody></table></div>`
                     + (b.edit ? `<div style="margin:2px 0 8px;"><span data-sn-add="${b.edit}" style="cursor:pointer;color:#ffd27a;border:1px solid rgba(255,210,122,0.45);border-radius:4px;padding:1px 8px;">+ add row</span></div>` : ''));
             } else if (b.t === 'field') {
@@ -4639,7 +4693,7 @@
         const runsEl = wrap.querySelector('[data-survey-runs]');
         const notesStat = wrap.querySelector('[data-survey-notes-stat]');
         const saveNotesBtn = wrap.querySelector('[data-survey-notes-save]');
-        const st = { tab: 'summary', imgTab: 'setup' };
+        const st = { tab: 'summary', imgTab: 'setup', layers: { lte: true, airports: true, obstacles: true, lines: false, base: true } };
         let notesDraft = surveyEmptyNotes(), dirty = false, viewSv = null, viewDir = null, selectedRun = null, viewLabel = '';
         const setDirty = (d) => { dirty = d; saveNotesBtn.style.background = d ? 'rgba(255,210,122,0.18)' : 'none'; saveNotesBtn.textContent = d ? '💾 Save notes •' : '💾 Save notes'; };
         const noteStatText = () => notesDraft.updatedAt ? `✎ notes last saved ${surveyLocalStamp(new Date(notesDraft.updatedAt))} by ${notesDraft.updatedBy || '?'}` : '✎ no notes saved yet';
@@ -4711,6 +4765,8 @@
         wrap.addEventListener('change', async (e) => {
             const f = e.target.closest('select[data-sn-field]');
             if (f) { notesDraft.fields[f.getAttribute('data-sn-field')] = f.value; setDirty(true); return; }
+            const ly = e.target.closest('[data-sn-layer]');
+            if (ly) { st.layers[ly.getAttribute('data-sn-layer')] = ly.checked; renderMain(); return; }
             const ck = e.target.closest('[data-sn-contact]');
             if (ck) {
                 const id = ck.getAttribute('data-sn-contact');
@@ -4729,6 +4785,26 @@
             if (tab) { st.tab = tab.getAttribute('data-sn-tab'); renderMain(); return; }
             const it = e.target.closest('[data-sn-imgtab]');
             if (it) { st.imgTab = it.getAttribute('data-sn-imgtab'); body.querySelectorAll('[data-sn-imgpane]').forEach(p => { p.hidden = p.getAttribute('data-sn-imgpane') !== st.imgTab; }); body.querySelectorAll('[data-sn-imgtab]').forEach(t => { const on = t.getAttribute('data-sn-imgtab') === st.imgTab; t.style.background = on ? 'rgba(122,223,230,0.18)' : ''; t.style.color = on ? '#7adfe6' : ''; t.style.opacity = on ? '1' : '0.7'; }); return; }
+            const pick = e.target.closest('[data-sn-pick]');
+            if (pick) {
+                const [k, ri] = pick.getAttribute('data-sn-pick').split('|');
+                const map = getLeafletMap();
+                if (!map || typeof map.on !== 'function') { showToast('Map not reachable from this frame', 'rgba(255,96,96,0.55)'); return; }
+                const col = SURVEY_TABLES[k].pick;
+                wrap.style.display = 'none';
+                showToast('📍 Click the spot on the map (Esc to cancel)');
+                const done = (ll) => {
+                    try { map.off('click', onClick); } catch (err) {}
+                    document.removeEventListener('keydown', onKey, true);
+                    wrap.style.display = '';
+                    if (ll) { const rows = notesDraft.tables[k] = notesDraft.tables[k] || []; rows[+ri] = rows[+ri] || []; rows[+ri][col] = `${ll.lat.toFixed(5)}, ${ll.lng.toFixed(5)}`; setDirty(true); renderMain(); }
+                };
+                const onClick = (ev) => { done(ev && ev.latlng); };
+                const onKey = (ev) => { if (ev.key === 'Escape') { ev.stopPropagation(); done(null); } };
+                map.on('click', onClick);
+                document.addEventListener('keydown', onKey, true);
+                return;
+            }
             const add = e.target.closest('[data-sn-add]');
             if (add) { const k = add.getAttribute('data-sn-add'); (notesDraft.tables[k] = notesDraft.tables[k] || []).push(SURVEY_TABLES[k].cols.map(() => '')); setDirty(true); renderMain(); const first = body.querySelector(`[data-sn-cell="${k}|${notesDraft.tables[k].length - 1}|0"]`); if (first) first.focus(); return; }
             const del = e.target.closest('[data-sn-del]');
