@@ -6,6 +6,25 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-10-02 — Mission Bank Tools latest v3.07: ↩ Restore a mission from the panel (dev only, feature #283)
+
+- New **↩ Restore** button in the Mission Bank Tools panel. Two sources: **🕘 Deleted recently** lists every mission Delete Guard banked for this site in the last 72 h — one click re-creates it (new id, same name and steps) and marks the Delete Guard entry as restored. **📂 From a backup file** takes any JSON this script downloaded before a bulk edit (pre-step-optimizer, pre-reorder, pre-wrap, pre-remove, remerge batches, a bare mission, or a raw mission list): if the mission still exists it is restored **in place** (same id; the current server copy downloads first as a backup), otherwise it is re-created.
+- Same write path as every in-place tool (Percepto's own saveApp), verified by a fresh fetch of step / nav / snapshot counts, and the sidebar list refetches so no reload is needed. Replaces the AIM_Mission_Restore console snippet.
+
+## 2026-10-02 — Mission Bank Tools latest v3.06: failed mission saves now say WHY (dev only)
+
+- **🔗 Merge by pad clicks / ⛟ merge creates:** when Percepto rejects the save (HTTP 400), the toast, panel status and console now include the server's own validation message instead of a bare "HTTP 400". The save hook banks every rejected `POST /available_app/` response body (fetch + XHR) and the console line also prints the merged name length and instruction count — the two things a merge of two by-name picks changes versus a pad-click merge.
+
+---
+
+## 2026-10-02 — 🪄 Step Optimizer refuses missions with in-place snapshots: Mission Bank Tools **prod v2.94** + latest v3.05 (bugfix)
+
+- **What went wrong:** on a legacy mission whose snapshots are *in-place* (shot from the nav's own position — no GPS aim point, heading/pitch stored on the step), the Step Optimizer's model saw no snapshots at all. Every nav read as "snap-less", every stacked nav pair read as a duplicate, the step-accounting rails passed because they expected exactly that, and **Apply saved the mission as takeoff → return home**. The pre-optimize backup JSON that downloads before every Apply is what brings the mission back.
+- **Fix:** the analysis now **refuses** any mission containing an in-place snapshot before the panel opens ("skipped: N in-place snapshot(s)… Nothing changed."), and 🪄 All marks such macros *skipped* (hover for the reason) instead of *failed*. Independently, Apply now **hard-aborts any rebuild that would leave zero navs, or zero snapshots where there were some** — a wipe is never saved regardless of what the analysis believed.
+- **Restoring a mission from one of these backups:** paste the `AIM_Mission_Restore.js` console snippet (ask Payden — it is not distributed) into the Mission Bank tab of that site, pick the `mission<id>_prestepopt_backup.json`, confirm. Same id, same name, verified by re-fetch.
+
+---
+
 ## 2026-10-02 — 📄 Airspace Survey: Site Setup Tools latest v4.307 + Fleet Tools latest v0.66 + Map Styler latest v34.141 (dev only, features #278 / #280)
 
 - **Site Setup Tools v4.307 — 📄 Survey button in the Airspace panel.** Every airspace run now has a survey report behind it, built to the Regulations department's Site Survey Form: Summary (customer, GPS, airspace class, SUA, operational altitude, AIM-suggested decision + signed decision), three map images captured from your own Percepto map (site setup close-up · 5-SM overview with assets red / base yellow · FAA VFR sectional with the red circle), Nearby aviation facilities within 10 SM with phone numbers, Hazards (FAA obstacles, turbines, transmission lines, stadiums, live TFRs), Restrictions (LAANC, airspace, SUA), Terrain, and the manual sections (LTE, planned changes, local aviation / drone activity, images, follow-up). Saved to the data repo as `airspace/<site>/<run>/` (survey.json + `<SiteID>_Airspace_Survey.md` + jpgs), one dated folder per run so history is never overwritten.

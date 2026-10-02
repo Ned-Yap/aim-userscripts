@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.06
+// @version      3.07
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.06';
+    const SCRIPT_VERSION = '3.07';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -2467,6 +2467,218 @@
             showToast('Site-wide wrap failed — see console.', '#ff5252', 5000);
         } finally { wrapSiteBusy = false; }
     }
+    // ── ↩ RESTORE A MISSION (v3.07, feature #281) ───────────────────────────
+    // The console snippet AIM_Mission_Restore.js, as a panel. Two sources:
+    //   🕘 Deleted recently — Delete Guard's 72 h ring (localStorage
+    //      aim-delete-history-v1, kind 'mission', this site). Those missions
+    //      are gone from the server → RE-CREATE with a new id (same name,
+    //      same steps). The ring entry is stamped restoredAt so Delete Guard's
+    //      own panel shows it too.
+    //   📂 Backup file — any JSON this script downloaded before a bulk edit
+    //      (mission<id>_prestepopt/_prereorder/_prerestore, site<id>_missions_
+    //      prewrap/_preremove, <reason>_…_backup) or a bare mission. If the
+    //      mission still exists → RESTORE IN PLACE (same id, same name; the
+    //      current server copy downloads first as mission<id>_prerestore_
+    //      backup.json). If it is gone → re-create.
+    // Write path = Percepto's own saveApp (the Mission Bank React context),
+    // same rails as 🪄 ⟳ ⇅ ✂ 🧹; verify = fresh fetch + step/nav/snapshot
+    // counts; the sidebar list refetches so no reload is needed.
+    // NOTE: Site Watch mission snapshots are FINGERPRINTS (name + step bag),
+    // not full missions — they cannot feed a restore. Log tag [AIM MB TOOLS] [restore].
+    const MRS_PANEL_ID = 'aim-mb-restore-panel';
+    const MRS_HISTORY_KEY = 'aim-delete-history-v1';   // Delete Guard's ring (same origin → shared localStorage)
+    let mrsBusy = false;
+    function mrsNormStep(s) {
+        return {
+            type: s.type,
+            value1: s.value1 === undefined ? null : s.value1,
+            value2: s.value2 === undefined ? null : s.value2,
+            location: s.location ? JSON.parse(JSON.stringify(s.location)) : null,
+            extra_options: s.extra_options ? JSON.parse(JSON.stringify(s.extra_options)) : {},
+            polygon_points: s.polygon_points ? JSON.parse(JSON.stringify(s.polygon_points)) : null,
+            snapshot_points: s.snapshot_points ? JSON.parse(JSON.stringify(s.snapshot_points)) : null,
+        };
+    }
+    function mrsCounts(ins) {
+        const a = Array.isArray(ins) ? ins.filter(Boolean) : [];
+        return { steps: a.length, navs: a.filter(i => i.type === 1).length, snaps: a.filter(i => i.type === 6).length };
+    }
+    const mrsFmt = (c) => `${c.steps} steps (${c.navs} nav · ${c.snaps} snap)`;
+    function mrsLoadRing() {
+        let raw = null;
+        try { raw = (window.top || window).localStorage.getItem(MRS_HISTORY_KEY); } catch (e) {}
+        if (raw == null) { try { raw = localStorage.getItem(MRS_HISTORY_KEY); } catch (e) {} }
+        try { const arr = raw ? JSON.parse(raw) : []; return Array.isArray(arr) ? arr : []; }
+        catch (e) { console.warn(`${TAG} [restore] Delete Guard ring unreadable:`, e); return []; }
+    }
+    function mrsStampRestored(ts, newId) {
+        try {
+            const ls = (window.top || window).localStorage;
+            const arr = JSON.parse(ls.getItem(MRS_HISTORY_KEY) || '[]');
+            const e = Array.isArray(arr) && arr.find(x => x && x.ts === ts);
+            if (e) { e.restoredAt = Date.now(); e.restoredId = newId; ls.setItem(MRS_HISTORY_KEY, JSON.stringify(arr)); }
+        } catch (e) { console.warn(`${TAG} [restore] could not stamp ring entry:`, e); }
+    }
+    // Every backup shape this script writes: {mission}, {missions:[…]}, a bare mission.
+    function mrsMissionsInFile(backup) {
+        if (backup && backup.mission && Array.isArray(backup.mission.instructions)) return [backup.mission];
+        if (backup && Array.isArray(backup.instructions) && backup.name !== undefined) return [backup];
+        if (backup && Array.isArray(backup.missions)) return backup.missions.filter(m => m && Array.isArray(m.instructions));
+        if (Array.isArray(backup)) return backup.filter(m => m && Array.isArray(m.instructions));   // raw /available_app/ list dump
+        return [];
+    }
+    function mrsDownload(obj, name) {
+        try {
+            const blob = new Blob([JSON.stringify(obj)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            let ok = false;
+            for (const doc of [(window.top || window).document, document]) {
+                if (ok) break;
+                try { const a = doc.createElement('a'); a.href = url; a.download = name; (doc.body || document.body).appendChild(a); a.click(); a.remove(); ok = true; } catch (e) {}
+            }
+            setTimeout(() => { try { URL.revokeObjectURL(url); } catch (e) {} }, 5000);
+            return ok;
+        } catch (e) { console.warn(`${TAG} [restore] backup download failed`, e); return false; }
+    }
+    // The restore itself. m = mission object with instructions; src = label
+    // for the log; ringTs = Delete Guard entry to stamp on success.
+    async function mrsRestore(m, src, ringTs, log) {
+        const sid = getCurrentSiteID();
+        if (!sid) throw new Error('no site loaded');
+        const name = String(m.name || '').trim();
+        if (!name) throw new Error('the backed-up mission has no name');
+        const steps = (m.instructions || []).filter(Boolean);
+        if (!steps.length) throw new Error('the backed-up mission has zero steps — refusing');
+        const want = mrsCounts(steps);
+        const ctx = findMissionAppCtx();
+        if (!ctx) throw new Error('Mission Bank context not found — open this site\'s Mission Bank (mission list visible) and retry');
+        log(`fetching current missions for site ${sid}…`);
+        const before = await mbFetchMissionsFull(sid);
+        const live = before.find(x => String(x.id) === String(m.id));
+        const inPlace = !!live;
+        const clash = !live && before.find(x => String(x.name || '').trim().toLowerCase() === name.toLowerCase());
+        if (clash) throw new Error(`mission id ${m.id} is gone but "${name}" already exists as id ${clash.id} — rename or delete that one first`);
+        if (inPlace) {
+            const ok = mrsDownload({ site: sid, savedAt: new Date().toISOString(), reason: 'pre-restore', mission: live }, `mission${m.id}_prerestore_backup.json`);
+            if (!ok) throw new Error('pre-restore backup download failed — nothing changed');
+            log(`server copy downloaded (mission${m.id}_prerestore_backup.json) — ${mrsFmt(mrsCounts(live.instructions))}`);
+        }
+        const instrs = steps.map(mrsNormStep);
+        log(`${inPlace ? 'saving in place' : 're-creating'} "${name}" with ${mrsFmt(want)} (${src})…`);
+        const app = inPlace
+            ? Object.assign({}, m, { instructions: instrs })
+            : { id: null, type: m.type || 1, instructions: instrs, data_report_object_arr: [] };
+        let res;
+        try { res = await ctx.saveApp(app, name); }
+        catch (e) { throw new Error(`saveApp failed: ${typeof saveErrText === 'function' ? saveErrText(e) : (e && e.message) || e}`); }
+        console.log(`${TAG} [restore] saveApp returned`, res);
+        await new Promise(r => setTimeout(r, 1500));
+        const after = await mbFetchMissionsFull(sid);
+        const got = inPlace
+            ? after.find(x => String(x.id) === String(m.id))
+            : after.find(x => String(x.name || '').trim().toLowerCase() === name.toLowerCase() && !before.some(b => String(b.id) === String(x.id)));
+        if (!got) throw new Error('verify failed — mission not found after save (check the Mission Bank + console)');
+        const now = mrsCounts(got.instructions);
+        const ok = now.steps === want.steps && now.navs === want.navs && now.snaps === want.snaps;
+        if (ringTs) mrsStampRestored(ringTs, got.id);
+        try { const rf = findMissionListRefetch(); if (rf) rf(); } catch (e) {}
+        const line = `"${name}" (id ${got.id}) ${inPlace ? 'restored in place' : 're-created'} — server now ${mrsFmt(now)}, backup ${mrsFmt(want)}`;
+        if (ok) { console.log(`${TAG} [restore] ✅ ${line}`); log(`✅ ${line}`); showToast(`↩ ${line}`, '#5fff5f', 6000); }
+        else { console.warn(`${TAG} [restore] ⚠ VERIFY MISMATCH: ${line}`, got); log(`⚠ saved, but verify mismatched: ${line} — check before flying`); showToast('↩ Saved, but step counts differ — check the mission', '#ff9800', 7000); }
+        return got;
+    }
+    function mrsOpen() {
+        const old = document.getElementById(MRS_PANEL_ID);
+        if (old) { old.remove(); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded.', '#ff5252', 3000); return; }
+        const p = document.createElement('div');
+        p.id = MRS_PANEL_ID;
+        p.style.cssText = 'position:fixed;top:60px;right:24px;width:460px;max-height:84vh;display:flex;flex-direction:column;z-index:2147483602;'
+            + 'background:#161a20;border:1px solid #7fffb0;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;font-size:12px;';
+        const rowS = 'display:flex;gap:8px;align-items:center;padding:6px 10px;border-bottom:1px solid #222a33;';
+        const render = () => {
+            const ring = mrsLoadRing().filter(e => e && e.kind === 'mission' && String(e.siteId) === String(sid) && e.entity);
+            const ago = (ts) => { const m = Math.round((Date.now() - ts) / 60000); return m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} d ago`; };
+            p.innerHTML = `
+                <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid #2b3540;">
+                    <span style="font-weight:800;color:#7fffb0;font-size:13px;">↩ Restore a mission — site ${escapeHtml(String(sid))}</span>
+                    <span style="flex:1"></span>
+                    <button data-mrs-close style="background:none;border:none;color:#aaa;font-size:16px;cursor:pointer;">✕</button>
+                </div>
+                <div style="overflow-y:auto;flex:1;">
+                    <div style="padding:8px 10px 4px;color:#ffd54f;font-weight:700;">🕘 Deleted recently (Delete Guard, last 72 h)</div>
+                    ${ring.length ? ring.map(e => `<div style="${rowS}"><span style="flex:1;"><strong>${escapeHtml(e.entity.name || 'unnamed')}</strong> <span style="color:#889;">id ${escapeHtml(String(e.entity.id))} · ${mrsFmt(mrsCounts(e.entity.instructions))} · deleted ${ago(e.ts)}</span>${e.restoredAt ? `<br><span style="color:#5fff5f;">already restored ${ago(e.restoredAt)}${e.restoredId ? ` as id ${escapeHtml(String(e.restoredId))}` : ''}</span>` : ''}</span>`
+                        + `<button data-mrs-ring="${e.ts}" class="aim-mb-tbtn" style="border-color:#2a6;color:#7fffb0;">${e.restoredAt ? 'Restore again' : 'Re-create'}</button></div>`).join('')
+                        : `<div style="padding:4px 10px 8px;color:#889;">Nothing banked for this site. Delete Guard records every mission delete (native trash, bulk delete) for 72 h — if it was deleted longer ago or on another computer, use a backup file below.</div>`}
+                    <div style="padding:10px 10px 4px;color:#ffd54f;font-weight:700;border-top:1px solid #2b3540;">📂 From a backup file</div>
+                    <div style="padding:2px 10px 8px;color:#889;">Any JSON this script downloaded before a bulk edit (<code>mission&lt;id&gt;_prestepopt / _prereorder / _prerestore</code>, <code>site&lt;id&gt;_missions_prewrap / _preremove</code>, remerge batches) or a bare mission export. Same id still on the server → restored <strong>in place</strong>; gone → re-created with a new id.</div>
+                    <div style="padding:0 10px 8px;"><button data-mrs-file class="aim-mb-tbtn" style="border-color:#2a6;color:#7fffb0;">📂 Choose backup JSON…</button> <input data-mrs-input type="file" accept=".json,application/json" style="display:none;"></div>
+                    <div data-mrs-list></div>
+                    <div data-mrs-log style="padding:6px 10px;color:#9ad;white-space:pre-wrap;font-family:monospace;font-size:11px;border-top:1px solid #222a33;min-height:18px;"></div>
+                </div>`;
+        };
+        render();
+        document.body.appendChild(p);
+        const logEl = () => p.querySelector('[data-mrs-log]');
+        const log = (m) => { const el = logEl(); if (el) el.textContent += (el.textContent ? '\n' : '') + m; console.log(`${TAG} [restore] ${m}`); };
+        const run = async (m, src, ringTs) => {
+            if (mrsBusy) { showToast('A restore is already running', '#ff9800', 2500); return; }
+            mrsBusy = true;
+            p.querySelectorAll('button[data-mrs-ring],button[data-mrs-go]').forEach(b => { b.disabled = true; });
+            try { await mrsRestore(m, src, ringTs, log); }
+            catch (e) { console.warn(`${TAG} [restore] failed:`, e); log(`❌ ${e && e.message ? e.message : e}`); showToast(`↩ Restore failed — ${e && e.message ? e.message : e}`, '#ff5252', 7000); }
+            finally { mrsBusy = false; p.querySelectorAll('button[data-mrs-ring],button[data-mrs-go]').forEach(b => { b.disabled = false; }); }
+        };
+        const confirmRow = (m, src, ringTs, liveMission) => {
+            const want = mrsCounts(m.instructions);
+            const mode = liveMission ? `RESTORE IN PLACE (same id ${m.id}) — server now ${mrsFmt(mrsCounts(liveMission.instructions))}; the current copy downloads first` : `RE-CREATE with a NEW id (id ${m.id} no longer exists) — schedules / report settings must be re-attached`;
+            const list = p.querySelector('[data-mrs-list]');
+            list.innerHTML = `<div style="margin:6px 10px;padding:8px 10px;border:1px solid #7fffb0;border-radius:6px;background:#10201a;">
+                <div><strong>${escapeHtml(String(m.name || ''))}</strong> <span style="color:#889;">· ${mrsFmt(want)} · ${escapeHtml(src)}</span></div>
+                <div style="color:#ffd54f;margin:4px 0;">${escapeHtml(mode)}</div>
+                <button data-mrs-go class="aim-mb-tbtn" style="border-color:#2a6;color:#7fffb0;">↩ Restore now</button> <button data-mrs-cancel class="aim-mb-tbtn">Cancel</button></div>`;
+            list.querySelector('[data-mrs-go]').onclick = () => run(m, src, ringTs);
+            list.querySelector('[data-mrs-cancel]').onclick = () => { list.innerHTML = ''; };
+        };
+        p.addEventListener('click', async (e) => {
+            if (e.target.closest('[data-mrs-close]')) { p.remove(); return; }
+            if (e.target.closest('[data-mrs-file]')) { const inp = p.querySelector('[data-mrs-input]'); if (inp) inp.click(); return; }
+            const rb = e.target.closest('[data-mrs-ring]');
+            if (rb) {
+                const ts = Number(rb.getAttribute('data-mrs-ring'));
+                const entry = mrsLoadRing().find(x => x && x.ts === ts);
+                if (!entry) { showToast('That history entry is gone (72 h prune?)', '#ff9800', 3000); render(); return; }
+                let liveList = [];
+                try { liveList = await mbFetchMissionsFull(sid); } catch (err) { log(`❌ mission fetch failed: ${err.message}`); return; }
+                const live = liveList.find(x => String(x.id) === String(entry.entity.id));
+                confirmRow(entry.entity, `Delete Guard ${entry.iso ? entry.iso.slice(0, 16).replace('T', ' ') : ''}`, ts, live);
+            }
+        });
+        p.addEventListener('change', async (e) => {
+            const inp = e.target.closest('[data-mrs-input]');
+            if (!inp) return;
+            const f = inp.files && inp.files[0];
+            inp.value = '';
+            if (!f) return;
+            log(`reading ${f.name} (${f.size.toLocaleString()} bytes)…`);
+            let backup;
+            try { backup = JSON.parse(await f.text()); } catch (err) { log(`❌ not valid JSON: ${err.message}`); return; }
+            const missions = mrsMissionsInFile(backup);
+            if (!missions.length) { log('❌ no mission with an instructions array in this file'); return; }
+            const fileSite = String(backup.site || missions[0].site || '');
+            if (fileSite && fileSite !== String(sid)) { log(`❌ this file belongs to site ${fileSite}, this tab is site ${sid} — switch sites first`); return; }
+            let liveList = [];
+            try { liveList = await mbFetchMissionsFull(sid); } catch (err) { log(`❌ mission fetch failed: ${err.message}`); return; }
+            const src = `${f.name}${backup.reason ? ` (${backup.reason})` : ''}${backup.savedAt ? ` ${backup.savedAt.slice(0, 16).replace('T', ' ')}` : ''}`;
+            if (missions.length === 1) { confirmRow(missions[0], src, null, liveList.find(x => String(x.id) === String(missions[0].id))); return; }
+            const list = p.querySelector('[data-mrs-list]');
+            list.innerHTML = `<div style="padding:4px 10px;color:#ffd54f;">${missions.length} missions in ${escapeHtml(f.name)} — pick one:</div>`
+                + missions.map((m, i) => { const live = liveList.find(x => String(x.id) === String(m.id)); return `<div style="${rowS}"><span style="flex:1;"><strong>${escapeHtml(String(m.name || ''))}</strong> <span style="color:#889;">id ${escapeHtml(String(m.id))} · ${mrsFmt(mrsCounts(m.instructions))} · ${live ? 'on server → in place' : 'gone → re-create'}</span></span><button data-mrs-pick="${i}" class="aim-mb-tbtn" style="border-color:#2a6;color:#7fffb0;">Pick</button></div>`; }).join('');
+            list.querySelectorAll('[data-mrs-pick]').forEach(b => { b.onclick = () => { const m = missions[Number(b.getAttribute('data-mrs-pick'))]; confirmRow(m, src, null, liveList.find(x => String(x.id) === String(m.id))); }; });
+        });
+    }
+
     // ── 🧹 REMOVE A STEP TYPE SITE-WIDE (v2.56, feature #239) ───────────────
     // "Open each mission, delete the step, save" ×N missions, automated with
     // a review gate. Pick a target from what actually exists across the
@@ -11653,6 +11865,7 @@
                 <button class="aim-mb-tbtn ${lasso.armed ? 'active' : ''}" data-lasso-toggle title="Draw a freehand loop around pads → auto-build a furthest→closest merge list (Tulip pads auto-split into a separate '2' mission) and stage it in the merge editor for inspection.">🖊 Lasso</button>
                 <button class="aim-mb-tbtn ${mcv.on ? 'active' : ''}" data-mcv-toggle title="Show which pads are already claimed by macro (merged) missions — each macro gets a color + name chip; white dashed pads have missions but no macro yet. Click-through.">🧩 Macros</button>
                 <button class="aim-mb-tbtn" data-srm-open title="Find every step of a chosen type across ALL missions on this site (flag poles, 1s waits, …) and remove them after a per-row review. Flag poles take their paired nav too. Backup JSON downloads before anything saves.">🧹 Steps</button>
+                <button class="aim-mb-tbtn" data-mrs-open title="Restore a mission: re-create one Delete Guard banked in the last 72 h, or restore in place from a backup JSON this script downloaded before a bulk edit. Same write path as every in-place tool; verified by re-fetch.">↩ Restore</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'imperial' ? 'active' : ''}" data-unit="imperial">mi</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'metric' ? 'active' : ''}" data-unit="metric">km</button>
                 <button class="aim-mb-tbtn" data-settings title="Battery → flights thresholds">⚙</button>
@@ -12334,6 +12547,9 @@
         // v2.56 — 🧹 site-wide step removal
         const srmBtn = panelEl.querySelector('[data-srm-open]');
         if (srmBtn) srmBtn.onclick = () => srmOpen();
+        // v3.07 — ↩ mission restore (Delete Guard ring / backup file)
+        const mrsBtn = panelEl.querySelector('[data-mrs-open]');
+        if (mrsBtn) mrsBtn.onclick = () => mrsOpen();
         const pcmBtn = panelEl.querySelector('[data-pcm-toggle]');
         if (pcmBtn) pcmBtn.onclick = async () => {
             if (pcm.on) { pcmExit(); }
