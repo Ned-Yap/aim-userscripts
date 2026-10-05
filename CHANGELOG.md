@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-10-05 — AIM Mission Logs latest v0.5: Simple / Advanced views (dev only, #286)
+
+- **Simple view (default)** — every card opens with one bold plain-English sentence ("The drone stayed connected, but the connection was poor: one bar of signal, slow response. Expect choppy video and delayed commands.") followed by a few bullets a pilot or customer can act on: signal as bars, response time in words, packet-loss share, blips, tower hopping, whether 5G was there, and a **What to do** line (weak-coverage site vs. tower-crossing route vs. repeat-check advice). Mission, What happened, Aircraft nearby and Software warnings cards get the same treatment, with process names translated (image_processor → camera image processing).
+- **Advanced view** is the existing technical card set. The toggle sits in the panel header and is remembered. In Simple view each card keeps a collapsed **Technical details ▸** holding its full Advanced card, so nothing is hidden, only folded.
+- Aircraft list in Simple view only names planes that came within about 6 miles; airliners passing high overhead are summarised as a count.
+
 ## 2026-10-05 — AIM Mission Logs latest v0.4: false "33-minute outage" on older drones fixed (dev only, #286)
 
 - **Older modem format.** Drones with the Sierra EM7565 (ogi / older Sparrow) report RSRP under a different field name. v0.3 read no signal at all and called every sample "no cell", producing a false LTE DROPPED verdict for the whole flight (mission 238538). v0.4 reads both formats; if a format is still unknown the card says so with a ⚠ instead of guessing.

@@ -1,15 +1,17 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Logs
 // @namespace    http://tampermonkey.net/
-// @version      0.4
+// @version      0.5
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Logs.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Logs.user.js
-// @description  v0.4: reads the older EM7565 modem's status fields (RSRP_(dBm) / PCC_RxM_RSSI / Tx_Power) — v0.3 saw no RSRP and flagged a false 33-min outage; a sample is lost only with no band / stuck handover / no cell+no RSRP; isolated 10 s TCP blips = amber POOR link (loss %, avg/worst rtt) not red; unknown formats raise a ⚠ with lte.rawSample; mission duration is ms. v0.3: LTE card gains an Outages line (each loss window with start → recovery and duration, from no-cell / stuck-handover samples and failing TCP checks) and a Coverage line (median RSRP, % weak / very weak / no cell); dropped verdict names the outages. v0.2: row 🔎 anchors on the dashboard's own Get App Logs control (not table structure); prefill from the FILTER box or the single visible row only; server reply shown when a mission has no archive. Pull a mission's log archives straight from the Mission Dashboard (no download → unzip → hunt) and extract what matters: LTE link health (modem registration, TCP/ping checks, signal, cell handovers, RTK-stream gaps), mission event timeline (stages, aborts, go-to-base), DAA aircraft with closest approach to the drone, warnings/errors by process. v0.1 (#286): POC on percepto.app/dashboard — 🔎 per mission row + floating launcher; engine (fetch → gunzip → untar → extractors) is self-contained for the later Fleet Tools site/date sweep.
+// @description  v0.5: Simple / Advanced view toggle (remembered) — Simple is plain English for pilots and customers: one bold bottom line per card + bullets (signal as bars, response time, packet loss, blips, tower hopping, what to do) with the full technical card under 'Technical details ▸'. v0.4: reads the older EM7565 modem's status fields (RSRP_(dBm) / PCC_RxM_RSSI / Tx_Power) — v0.3 saw no RSRP and flagged a false 33-min outage; a sample is lost only with no band / stuck handover / no cell+no RSRP; isolated 10 s TCP blips = amber POOR link (loss %, avg/worst rtt) not red; unknown formats raise a ⚠ with lte.rawSample; mission duration is ms. v0.3: LTE card gains an Outages line (each loss window with start → recovery and duration, from no-cell / stuck-handover samples and failing TCP checks) and a Coverage line (median RSRP, % weak / very weak / no cell); dropped verdict names the outages. v0.2: row 🔎 anchors on the dashboard's own Get App Logs control (not table structure); prefill from the FILTER box or the single visible row only; server reply shown when a mission has no archive. Pull a mission's log archives straight from the Mission Dashboard (no download → unzip → hunt) and extract what matters: LTE link health (modem registration, TCP/ping checks, signal, cell handovers, RTK-stream gaps), mission event timeline (stages, aborts, go-to-base), DAA aircraft with closest approach to the drone, warnings/errors by process. v0.1 (#286): POC on percepto.app/dashboard — 🔎 per mission row + floating launcher; engine (fetch → gunzip → untar → extractors) is self-contained for the later Fleet Tools site/date sweep.
 // @author       Payden
 // @match        *://percepto.app/dashboard*
 // @match        *://qa.percepto.app/dashboard*
 // @connect      d2lb831xgi5b1q.cloudfront.net
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @run-at       document-end
 // ==/UserScript==
 
@@ -33,7 +35,7 @@
     if (window !== window.top) return;
 
     const SCRIPT_ID = 'aim-mission-logs';
-    const SCRIPT_VERSION = '0.4';
+    const SCRIPT_VERSION = '0.5';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const IS_QA = location.hostname === 'qa.percepto.app' || location.hostname.endsWith('.qa.percepto.app');
 
@@ -514,6 +516,18 @@
     const fmtMB = (b) => (b / 1048576).toFixed(1) + ' MB';
     const fmtDist = (m) => m == null ? '—' : (m >= 1609 ? `${(m / 1609.34).toFixed(2)} mi (${Math.round(m).toLocaleString()} m)` : `${mlFt(m).toLocaleString()} ft (${Math.round(m)} m)`);
     let wantDaa = true;
+    // View mode: 'simple' (plain-English, default) | 'advanced' (full technical cards). Remembered per user.
+    const MODE_KEY = 'aim-ml-view-mode';
+    let viewMode = 'simple';
+    try { if (typeof GM_getValue === 'function') { const v = GM_getValue(MODE_KEY, 'simple'); if (v === 'advanced' || v === 'simple') viewMode = v; } } catch (e) { console.warn(`${TAG} mode read failed`, e); }
+    let lastResult = null;
+    function setViewMode(mode) {
+        viewMode = mode === 'advanced' ? 'advanced' : 'simple';
+        try { if (typeof GM_setValue === 'function') GM_setValue(MODE_KEY, viewMode); } catch (e) { console.warn(`${TAG} mode save failed`, e); }
+        const seg = document.getElementById('aim-ml-mode');
+        if (seg) seg.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.getAttribute('data-mode') === viewMode));
+        if (lastResult) render(lastResult);
+    }
 
     function setStatus(html, level) {
         if (!ui.status) return;
@@ -536,6 +550,19 @@
             #aim-ml-head input{width:110px;background:#0b0e12;color:#eee;border:1px solid #2a3240;border-radius:4px;padding:3px 6px;font:12px system-ui}
             #aim-ml-head button,.aim-ml-btn{background:#1b2230;color:#ddd;border:1px solid #2a3240;border-radius:4px;padding:3px 8px;cursor:pointer;font:12px system-ui}
             #aim-ml-head button:hover,.aim-ml-btn:hover{border-color:#7adfe6;color:#fff}
+            .aim-ml-seg{display:inline-flex;border:1px solid #2a3240;border-radius:6px;overflow:hidden}
+            .aim-ml-seg button{background:#0b0e12;color:#999;border:0;border-right:1px solid #2a3240;padding:3px 10px;cursor:pointer;font:12px system-ui}
+            .aim-ml-seg button:last-child{border-right:0}
+            .aim-ml-seg button.on{background:#1b2a33;color:#7adfe6;font-weight:700}
+            .aim-ml-bottom{font-size:14px;font-weight:700;line-height:1.4;padding:8px 10px;border-radius:6px;margin-bottom:8px;border:1px solid #222834;background:rgba(255,255,255,.03)}
+            .aim-ml-bottom.g{border-color:#224a22}.aim-ml-bottom.a{border-color:#4a3a1a}.aim-ml-bottom.r{border-color:#4a2222}
+            .aim-ml-plain{margin:0;padding-left:18px;font-size:12.5px;line-height:1.55}
+            .aim-ml-plain li{margin:2px 0}
+            .aim-ml-plain b{color:#eee}
+            .aim-ml-tech{margin-top:8px}
+            .aim-ml-tech>summary{cursor:pointer;color:#7adfe6;font-size:11.5px;user-select:none}
+            .aim-ml-tech>summary:hover{text-decoration:underline}
+            .aim-ml-tech .aim-ml-card{margin-top:6px}
             #aim-ml-status{padding:6px 12px;border-bottom:1px solid #222834;color:#aaa;min-height:18px}
             #aim-ml-body{overflow:auto;padding:10px 12px;display:flex;flex-direction:column;gap:10px}
             .aim-ml-card{border:1px solid #222834;border-radius:8px;background:#11151b}
@@ -561,6 +588,7 @@
         p.id = 'aim-ml-panel';
         p.innerHTML = `
             <div id="aim-ml-head"><b>🔎 AIM Mission Logs</b><span class="m">v${SCRIPT_VERSION}${IS_QA ? ' · QA' : ''}</span>
+                <span id="aim-ml-mode" class="aim-ml-seg" title="Simple = plain English for pilots and customers · Advanced = every technical detail"><button data-mode="simple">Simple</button><button data-mode="advanced">Advanced</button></span>
                 <span style="flex:1"></span>
                 <label class="m">Mission ID <input id="aim-ml-id" type="text" inputmode="numeric" placeholder="237893"></label>
                 <label class="m" title="Also fetch the DAA (ADS-B / radar) archive"><input id="aim-ml-daa" type="checkbox" checked> DAA</label>
@@ -575,6 +603,8 @@
         p.querySelector('#aim-ml-run').addEventListener('click', () => { const v = p.querySelector('#aim-ml-id').value.trim(); if (/^\d+$/.test(v)) analyzeMission(v); else setStatus('Mission ID must be a number.', 'red'); });
         p.querySelector('#aim-ml-id').addEventListener('keydown', (e) => { if (e.key === 'Enter') p.querySelector('#aim-ml-run').click(); });
         p.querySelector('#aim-ml-daa').addEventListener('change', (e) => { wantDaa = !!e.target.checked; });
+        p.querySelectorAll('#aim-ml-mode button').forEach(b => b.addEventListener('click', () => setViewMode(b.getAttribute('data-mode'))));
+        setViewMode(viewMode);
         // drag
         const head = p.querySelector('#aim-ml-head');
         let drag = null;
@@ -666,11 +696,14 @@
     function render(res) {
         const { lte, events, daa, warnings, meta, extra } = res;
         const parts = [];
+        const adv = {};
+        const addCard = (key, html) => { adv[key] = html; parts.push(html); };
+        lastResult = res;
         // --- mission header ---
         const mj = meta.json || {}, m = extra.mission || {};
         const durS = m.duration != null ? Math.round(Number(m.duration) / 1000) : null;   // server duration is milliseconds (Fleet Tools convention)
         const dur = durS != null && isFinite(durS) ? `${Math.floor(durS / 60)}:${mlPad(durS % 60)}` : '—';
-        parts.push(card(`🛸 Mission ${esc(res.missionId)} ${esc(m.app && m.app.name ? '· ' + m.app.name : '')}`, kv([
+        addCard('mission', card(`🛸 Mission ${esc(res.missionId)} ${esc(m.app && m.app.name ? '· ' + m.app.name : '')}`, kv([
             ['Site', `${esc(mj.site_name || (m.site && m.site.name) || '—')} <span class="m">${esc(mj.site_status || '')}</span>`],
             ['Drone', `${esc(mj.vehicle_name || (m.drone && m.drone.name) || '—')} <span class="m">${esc(mj.app_version ? 'app ' + mj.app_version : '')}</span>`],
             ['Start (UTC)', `${esc(mj.start_time || m.when || '—')} <span class="m">· duration ${esc(dur)}</span>`],
@@ -702,13 +735,13 @@
                 ...rows,
             ])}
             ${g.length ? `<details style="margin-top:6px"><summary class="m" style="cursor:pointer">Signal samples (${g.length})</summary>${tbl(['UTC', 'Mode', 'Band', 'RSRP', 'RSRQ', 'SINR', 'Tx', '5G RSRP', '5G SINR', 'Cell', 'RRC'], g.map(s => [mlHms(s.t), esc(s.mode), esc(s.band), esc(s.rsrp), esc(s.rsrq), esc(s.sinr), esc(s.tx), esc(s.nrRsrp), esc(s.nrSinr), esc(s.cell), esc(s.rrc)]))}</details>` : ''}`;
-        parts.push(card('📶 LTE link', lteInner, copyBtn('lte')));
+        addCard('lte', card('📶 LTE link', lteInner, copyBtn('lte')));
         // --- Events ---
         const tl = events.timeline;
         const evInner = tl.length ? `
             ${events.aborts.length ? `<div class="aim-ml-verdict r" style="background:rgba(255,95,95,.08);border:1px solid #3a2222">${events.aborts.map(a => `${mlHms(a.t)} ${esc(a.type.replace('edge.notify.', '').replace(/_/g, ' '))}`).join(' · ')}</div>` : '<div class="aim-ml-verdict g" style="background:rgba(95,255,95,.05);border:1px solid #223a22">No abort / safety event</div>'}
             ${tbl(['UTC', 'Event', 'Detail'], tl.map(e => [`<span class="m">${mlHms(e.t)}</span>`, `<span class="${/droneErr|safetyInit|emergency|failsafe/i.test(e.type) ? 'r' : /warn/i.test(e.type) ? 'a' : /stageUpdate/.test(e.type) ? 'm' : 'c'}">${esc(e.type.replace(/^edge\.(notify\.)?/, ''))}</span>`, esc(e.label)]))}` : '<span class="m">no Amplitude mission events found in syslog</span>';
-        parts.push(card(`🧭 Mission events (${tl.length})`, evInner, copyBtn('events')));
+        addCard('events', card(`🧭 Mission events (${tl.length})`, evInner, copyBtn('events')));
         // --- DAA ---
         let daaInner;
         if (daa.aircraft.length) {
@@ -728,19 +761,128 @@
             const sample = Array.isArray(dp) && dp.length ? dp[0] : dp;
             daaInner += `<details style="margin-top:8px"><summary class="m" style="cursor:pointer">Server /mission_daa_positions/ (${n} ${Array.isArray(dp) ? 'rows' : 'keys'}) — shape probe</summary><div class="aim-ml-mono">${esc(JSON.stringify(sample, null, 1).slice(0, 2500))}</div></details>`;
         } else if (extra.daaPositionsError) daaInner += `<div class="m" style="margin-top:6px">/mission_daa_positions/: ${esc(extra.daaPositionsError)}</div>`;
-        parts.push(card(`✈ DAA — aircraft near the flight (${daa.aircraft.length})`, daaInner, copyBtn('daa')));
+        addCard('daa', card(`✈ DAA — aircraft near the flight (${daa.aircraft.length})`, daaInner, copyBtn('daa')));
         // --- Warnings ---
         const wInner = warnings.length ? tbl(['Process', 'Count', 'First', 'Samples'], warnings.map(w => [esc(w.proc), String(w.n), `<span class="m">${mlHms(w.first)}</span>`, w.samples.map(s => `<div><span class="m">${mlHms(s.t)}</span> ${esc(s.msg)}</div>`).join('')])) : '<span class="g">nothing flagged in the flight window</span>';
-        parts.push(card(`⚠ Warnings / errors in the flight window (${warnings.reduce((s, w) => s + w.n, 0)})`, wInner, copyBtn('warnings')));
+        addCard('warnings', card(`⚠ Warnings / errors in the flight window (${warnings.reduce((s, w) => s + w.n, 0)})`, wInner, copyBtn('warnings')));
         // --- raw files ---
         const dl = Object.entries(res.roles).filter(([k, f]) => f && !/ardupilot/.test(k)).map(([k, f]) => `<button class="aim-ml-btn" data-aim-ml-dl="${esc(f.name)}" title="${esc(f.name)}">⬇ ${esc(k)} <span class="m">${fmtMB(f.bytes.length)}</span></button>`).join(' ');
-        parts.push(card('🗂 Files', `<div style="display:flex;flex-wrap:wrap;gap:6px">${dl}</div><div class="m" style="margin-top:6px">Full result object: <code>window.__aimMissionLogs</code> in the console.</div>`));
-        ui.body.innerHTML = parts.join('');
+        addCard('files', card('🗂 Files', `<div style="display:flex;flex-wrap:wrap;gap:6px">${dl}</div><div class="m" style="margin-top:6px">Full result object: <code>window.__aimMissionLogs</code> in the console.</div>`));
+        ui.body.innerHTML = viewMode === 'advanced' ? parts.join('') : renderSimple(res, adv);
         ui.body.querySelectorAll('[data-aim-ml-dl]').forEach(b => b.addEventListener('click', () => {
             const f = res.files.find(x => x.name === b.getAttribute('data-aim-ml-dl')); if (!f) return;
             const blob = new Blob([f.bytes], { type: 'application/octet-stream' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = f.base; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
         }));
         ui.body.querySelectorAll('[data-aim-ml-copy]').forEach(b => b.addEventListener('click', () => copySection(res, b.getAttribute('data-aim-ml-copy'), b)));
+    }
+
+    // ---------------- Simple mode: plain English for pilots / customers ----------------
+    const PROC_PLAIN = { image_processor: 'camera image processing', video_source: 'video streaming', video_source_0: 'video streaming', video_source_1: 'video streaming', video_source_2: 'video streaming', teleport: 'remote-support tunnel', pdb_server: 'power board', telemetry_server: 'flight-controller telemetry link', lte_manager: 'cellular modem manager', qmi_modem: 'cellular modem', kernel: 'operating system', systemd: 'operating system services', perfmon: 'performance monitor', gimbal_telemetry: 'gimbal', esc_telemetry: 'motor controllers', temps_server: 'temperature monitor', odid_service: 'Remote ID broadcast', odid_client: 'Remote ID broadcast', python3: 'drone app', supervisord: 'app supervisor', das: 'app supervisor', 'apt-helper': 'software updater', nv_update_engine: 'software updater' };
+    const CRITICAL_PROCS = /^(pdb_server|esc_telemetry|telemetry_server|lte_manager|qmi_modem|kernel|gimbal_telemetry)$/;
+    const abortPlain = (type) => {
+        if (/flyingobject/i.test(type)) return 'it detected another aircraft nearby';
+        if (/goToBase/i.test(type)) return 'a safety rule sent it back to base';
+        if (/lowbattery|battery/i.test(type)) return 'the battery got low';
+        if (/gps|navigation/i.test(type)) return 'it lost confidence in its GPS position';
+        if (/link|comm|connection/i.test(type)) return 'it lost its communication link';
+        if (/wind|weather/i.test(type)) return 'the weather exceeded its limits';
+        if (/geofence|nfz|zone/i.test(type)) return 'it reached a no-fly boundary';
+        return type.replace(/^edge\.(notify\.)?/, '').replace(/^drone_/, '').replace(/_/g, ' ');
+    };
+    const barsPlain = (rsrp) => rsrp == null ? null : rsrp > -90 ? 'full bars' : rsrp > -100 ? 'two bars' : rsrp > -110 ? 'one bar' : 'barely any signal';
+    const lagPlain = (ms) => ms == null ? null : ms < 250 ? 'normal' : ms < 500 ? 'a little slow' : ms < 1000 ? 'slow' : 'very slow';
+    const tech = (key, adv) => adv[key] ? `<details class="aim-ml-tech"><summary>Technical details ▸</summary>${adv[key]}</details>` : '';
+    const simpleCard = (title, level, bottom, bullets, techHtml, actions) => card(title, `<div class="aim-ml-bottom ${lv(level)}">${bottom}</div>${bullets.length ? `<ul class="aim-ml-plain">${bullets.map(b => `<li>${b}</li>`).join('')}</ul>` : ''}${techHtml}`, actions);
+
+    function renderSimple(res, adv) {
+        const { lte, events, daa, warnings, meta, extra } = res;
+        const out = [];
+        const mj = meta.json || {}, m = extra.mission || {};
+        const site = mj.site_name || (m.site && m.site.name) || 'this site';
+        const droneName = mj.vehicle_name || (m.drone && m.drone.name) || 'the drone';
+        const to = events.takeoff && events.takeoff.t, td = events.touchdown && events.touchdown.t;
+        const airMin = to && td ? Math.round((td - to) / 60000) : null;
+        const abort = res.abortEv;
+
+        // --- Mission ---
+        const flags = [];
+        if (meta.events) {
+            if (meta.events.mainLoopStall) flags.push(`The flight computer hiccupped <b>${meta.events.mainLoopStall}</b> time(s) (brief freezes well under a second). Not a network issue; worth reporting if it repeats on this drone.`);
+            if (meta.events.landingLowIPS) flags.push(`The landing camera had trouble seeing the pad during landing (low frame rate). The landing still completed.`);
+            if (meta.events.takeoffFail) flags.push(`<b>Takeoff failed ${meta.events.takeoffFail} time(s)</b> before it got airborne.`);
+            if (meta.events.navigationFail) flags.push(`<b>Navigation failed ${meta.events.navigationFail} time(s).</b>`);
+            if (meta.events.safetySwitch) flags.push(`<b>The safety switch tripped ${meta.events.safetySwitch} time(s).</b>`);
+        }
+        const ended = abort ? `It was <b>cut short at ${mlHms(abort.t)} UTC</b> because ${abortPlain(abort.type)}, and it flew home.` : (td ? 'It flew its plan and landed normally.' : 'No landing was recorded in these logs.');
+        out.push(simpleCard(`🛸 Mission ${esc(res.missionId)}${m.app && m.app.name ? ' · ' + esc(m.app.name) : ''}`, abort ? 'amber' : 'green',
+            `${esc(droneName)} flew <b>${esc(site)}</b>${airMin != null ? ` for about <b>${airMin} minute${airMin === 1 ? '' : 's'}</b>` : ''}${to ? ` (took off ${mlHms(to)} UTC)` : ''}. ${ended}`,
+            [`Pilot: <b>${esc(m.created_by && (m.created_by.full_name || m.created_by.username) || '—')}</b>. Drone software ${esc(mj.app_version || '—')}.`, ...flags], tech('mission', adv)));
+
+        // --- LTE ---
+        const med = lte.coverage ? lte.coverage.median : null, bars = barsPlain(med), lag = lagPlain(lte.avgRtt);
+        let lteBottom, lteBullets = [];
+        if (!lte.tcp.firstOk) lteBottom = `${esc(droneName)} <b>never got an internet connection</b> in these logs.`;
+        else if (lte.verdict.level === 'red') {
+            const real = lte.outages.filter(w => (w.s || 0) >= 30 || w.samples >= 2);
+            lteBottom = `The connection <b>dropped ${real.length} time${real.length === 1 ? '' : 's'}</b>${real.length ? `, the longest for <b>${lte.longestOutageS} seconds</b> starting ${mlHms(real[0].from)} UTC` : ''}. The drone keeps flying its plan on its own during a gap, but you cannot see or control it until the link returns.`;
+        } else if (lte.verdict.level === 'amber' && /POOR/.test(lte.verdict.text)) lteBottom = `The drone <b>stayed connected, but the connection was poor</b>: ${bars ? `${bars} of signal` : 'weak signal'}${lag ? `, ${lag} response` : ''}. Expect choppy video and delayed commands.`;
+        else if (lte.verdict.level === 'amber') lteBottom = `The drone <b>stayed connected</b> with a few slow moments. Nothing a pilot would notice beyond a brief stutter.`;
+        else lteBottom = `The drone <b>stayed connected the whole flight</b> with a healthy connection.`;
+        if (bars) lteBullets.push(`<b>Signal:</b> ${bars} most of the flight${lte.coverage.weakPct ? `; weak for ${lte.coverage.weakPct}% of the time` : ''}${lte.worstRsrp ? `, worst at ${mlHms(lte.worstRsrp.t)}` : ''}.`);
+        if (lte.avgRtt != null) lteBullets.push(`<b>Response time:</b> ${lag} (about ${lte.avgRtt} ms per round trip; a good site is near 150 ms, worst moment ${lte.worstRtt} ms).`);
+        const lossShare = lte.lossShare != null ? lte.lossShare : (lte.pings.length ? Math.round(100 * lte.lossyPings.length / lte.pings.length) : 0);
+        if (lte.pings.length) lteBullets.push(`<b>Packet loss:</b> ${lossShare}% of the test pings lost something${lossShare >= 25 ? ' — that is a lot' : lossShare ? ' — minor' : ' — clean'}.`);
+        if (lte.outages.length && lte.verdict.level !== 'red') lteBullets.push(`<b>Blips:</b> ${lte.outages.map(w => `${mlHms(w.from)} (${w.s} s)`).join(', ')} — came back on its own each time.`);
+        if (lte.handovers.length > 6) lteBullets.push(`<b>Tower hopping:</b> switched cell towers ${lte.handovers.length} times. Flying between overlapping towers usually means momentary stalls at each switch.`);
+        if (lte.modes.includes('ENDC')) lteBullets.push(`<b>5G</b> was available for part of the flight.`);
+        if (lte.resetCount > 1) lteBullets.push(`<b>The modem restarted</b> during the flight.`);
+        if (lte.formatWarning) lteBullets.push(`⚠ ${esc(lte.formatWarning)}`);
+        const advice = lte.verdict.level === 'green' ? null
+            : (med != null && med <= -100) ? `<b>What to do:</b> this site has weak cellular coverage. Options: a different carrier SIM, an antenna/booster if the drone supports one, or accept the lag. Nothing points to a fault in the drone or base.`
+            : lte.handovers.length > 6 ? `<b>What to do:</b> the route crosses several towers. If stalls bother the pilot, try a flight path or altitude that stays in one tower's area.`
+            : lte.verdict.level === 'red' ? `<b>What to do:</b> check whether this drop repeats at the same place on other flights; if so it is coverage, if not it may be the carrier or modem.`
+            : null;
+        if (advice) lteBullets.push(advice);
+        out.push(simpleCard('📶 Connection (LTE)', lte.verdict.level, lteBottom, lteBullets, tech('lte', adv), copyBtn('lte')));
+
+        // --- Events ---
+        const stalls = events.all.filter(e => /mainLoopStall/.test(e.type)).length;
+        const evBullets = [];
+        if (to) evBullets.push(`Took off <b>${mlHms(to)}</b> UTC${td ? `, landed <b>${mlHms(td)}</b>` : ''}${airMin != null ? ` (${airMin} min in the air)` : ''}.`);
+        if (abort) evBullets.push(`<b>${mlHms(abort.t)}:</b> mission stopped because ${abortPlain(abort.type)}${events.aborts.length > 1 ? `; then ${events.aborts.slice(1).map(a => `${mlHms(a.t)} ${abortPlain(a.type)}`).join('; ')}` : ''}.`);
+        const warnEv = events.all.filter(e => /_warn_/.test(e.type) && !/mainLoopStall/.test(e.type));
+        if (warnEv.length) evBullets.push(`Other warnings from the drone: ${Array.from(new Set(warnEv.map(e => abortPlain(e.type)))).slice(0, 5).map(esc).join(', ')}.`);
+        out.push(simpleCard('🧭 What happened', abort ? 'amber' : 'green', abort ? `The mission <b>did not finish</b>: ${abortPlain(abort.type)} at ${mlHms(abort.t)} UTC and the drone returned to base.` : `The mission <b>ran start to finish</b> with no safety events.`, evBullets, tech('events', adv), copyBtn('events')));
+
+        // --- DAA ---
+        let daaBottom, daaBullets = [], daaLevel = 'green';
+        if (!res.roles.pingstation && !res.roles.radars) { daaBottom = extra.daaNote ? `Aircraft data was not available: ${esc(extra.daaNote)}.` : 'Aircraft data was not fetched (DAA box unticked).'; daaLevel = 'm'; }
+        else if (!daa.aircraft.length) daaBottom = 'No aircraft were heard near the site during the flight.';
+        else {
+            const near = daa.aircraft.filter(a => a.closest);
+            const c = near[0];
+            if (c) {
+                daaLevel = c.closest.dist < 1852 ? 'red' : c.closest.dist < 5556 ? 'amber' : 'green';
+                daaBottom = `<b>${daa.aircraft.length}</b> aircraft ${daa.aircraft.length === 1 ? 'was' : 'were'} heard nearby. The closest, <b>${esc(c.callsign || c.nNumber || c.icao)}</b> (${esc(c.emitter)}), came within <b>${fmtDist(c.closest.dist)}</b> at ${mlHms(new Date(c.closest.t))} UTC, flying at ${mlFt(c.closest.acAltM).toLocaleString()} ft while the drone was at ${mlFt(c.closest.droneAltM)} ft.`;
+                if (abort && /flyingobject/i.test(abort.type)) { const trig = daa.aircraft.find(a => a.atAbort) || c; daaBullets.push(`<b>This is the aircraft that stopped the mission.</b> At ${mlHms(abort.t)} it was ${trig.atAbort ? fmtDist(trig.atAbort.dist) : 'closing in'} from the drone${trig.atAbort ? ` at ${mlFt(trig.atAbort.acAltM).toLocaleString()} ft` : ''}. The drone did the right thing by going home.`); }
+                const nearish = near.slice(1).filter(a => a.closest.dist < 10000);
+                for (const a of nearish.slice(0, 3)) daaBullets.push(`${esc(a.callsign || a.nNumber || a.icao)} (${esc(a.emitter)}): closest ${fmtDist(a.closest.dist)} at ${mlHms(new Date(a.closest.t))}, ${mlFt(a.closest.acAltM).toLocaleString()} ft.`);
+                const far = daa.aircraft.length - 1 - nearish.length; if (far > 0) daaBullets.push(`${far} more ${far === 1 ? 'was' : 'were'} heard but never near the drone's flight path (airliners passing high overhead, typically).`);
+            } else { daaBottom = `${daa.aircraft.length} aircraft ${daa.aircraft.length === 1 ? 'was' : 'were'} heard in the area, none anywhere near the drone's path.`; }
+            daaBullets.push(`<span class="m">Red = within 1 nautical mile, amber = within 3. Heard by the base station's ADS-B receiver; aircraft without a transponder are not seen.</span>`);
+        }
+        out.push(simpleCard('✈ Aircraft nearby', daaLevel, daaBottom, daaBullets, tech('daa', adv), copyBtn('daa')));
+
+        // --- Warnings ---
+        const total = warnings.reduce((s, w) => s + w.n, 0);
+        const crit = warnings.filter(w => CRITICAL_PROCS.test(w.proc));
+        const wBullets = warnings.slice(0, 4).map(w => `<b>${esc(PROC_PLAIN[w.proc] || w.proc)}</b>: ${w.n} message${w.n === 1 ? '' : 's'}${w.samples[0] ? ` — e.g. “${esc(w.samples[0].msg.replace(/^\S+\s+T_\S+\s+\[[A-Z ]+\]\s+/, '').slice(0, 110))}”` : ''}.`);
+        out.push(simpleCard('⚠ Software warnings during the flight', total ? (crit.length ? 'amber' : 'm') : 'green',
+            total ? `${total} warning${total === 1 ? '' : 's'} from the drone's software${crit.length ? `, including from <b>${crit.map(w => PROC_PLAIN[w.proc] || w.proc).join(', ')}</b> — worth a look` : ', none from flight-critical parts'}.` : 'No warnings from the drone\'s software during the flight.',
+            wBullets, tech('warnings', adv), copyBtn('warnings')));
+
+        out.push(adv.files || '');
+        return out.join('');
     }
 
     const copyBtn = (key) => `<button class="aim-ml-btn" data-aim-ml-copy="${key}" title="Copy as a table (paste into Sheets)">📋 Sheets</button>`;
