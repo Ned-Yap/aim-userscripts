@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Logs
 // @namespace    http://tampermonkey.net/
-// @version      0.5
+// @version      0.6
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Logs.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Logs.user.js
-// @description  v0.5: Simple / Advanced view toggle (remembered) — Simple is plain English for pilots and customers: one bold bottom line per card + bullets (signal as bars, response time, packet loss, blips, tower hopping, what to do) with the full technical card under 'Technical details ▸'. v0.4: reads the older EM7565 modem's status fields (RSRP_(dBm) / PCC_RxM_RSSI / Tx_Power) — v0.3 saw no RSRP and flagged a false 33-min outage; a sample is lost only with no band / stuck handover / no cell+no RSRP; isolated 10 s TCP blips = amber POOR link (loss %, avg/worst rtt) not red; unknown formats raise a ⚠ with lte.rawSample; mission duration is ms. v0.3: LTE card gains an Outages line (each loss window with start → recovery and duration, from no-cell / stuck-handover samples and failing TCP checks) and a Coverage line (median RSRP, % weak / very weak / no cell); dropped verdict names the outages. v0.2: row 🔎 anchors on the dashboard's own Get App Logs control (not table structure); prefill from the FILTER box or the single visible row only; server reply shown when a mission has no archive. Pull a mission's log archives straight from the Mission Dashboard (no download → unzip → hunt) and extract what matters: LTE link health (modem registration, TCP/ping checks, signal, cell handovers, RTK-stream gaps), mission event timeline (stages, aborts, go-to-base), DAA aircraft with closest approach to the drone, warnings/errors by process. v0.1 (#286): POC on percepto.app/dashboard — 🔎 per mission row + floating launcher; engine (fetch → gunzip → untar → extractors) is self-contained for the later Fleet Tools site/date sweep.
+// @description  v0.6: outage detection now also uses 100%-loss ping runs, IP-lease loss (udhcpc deconfigured→bound) and LTE-manager restarts — a reconnect the TCP checks never saw (238589) was reported as 'dropped 0 times' in red; outages are tagged before takeoff / in flight / after landing and the Simple card downgrades a drop that happened on the base to amber. v0.5: Simple / Advanced view toggle (remembered) — Simple is plain English for pilots and customers: one bold bottom line per card + bullets (signal as bars, response time, packet loss, blips, tower hopping, what to do) with the full technical card under 'Technical details ▸'. v0.4: reads the older EM7565 modem's status fields (RSRP_(dBm) / PCC_RxM_RSSI / Tx_Power) — v0.3 saw no RSRP and flagged a false 33-min outage; a sample is lost only with no band / stuck handover / no cell+no RSRP; isolated 10 s TCP blips = amber POOR link (loss %, avg/worst rtt) not red; unknown formats raise a ⚠ with lte.rawSample; mission duration is ms. v0.3: LTE card gains an Outages line (each loss window with start → recovery and duration, from no-cell / stuck-handover samples and failing TCP checks) and a Coverage line (median RSRP, % weak / very weak / no cell); dropped verdict names the outages. v0.2: row 🔎 anchors on the dashboard's own Get App Logs control (not table structure); prefill from the FILTER box or the single visible row only; server reply shown when a mission has no archive. Pull a mission's log archives straight from the Mission Dashboard (no download → unzip → hunt) and extract what matters: LTE link health (modem registration, TCP/ping checks, signal, cell handovers, RTK-stream gaps), mission event timeline (stages, aborts, go-to-base), DAA aircraft with closest approach to the drone, warnings/errors by process. v0.1 (#286): POC on percepto.app/dashboard — 🔎 per mission row + floating launcher; engine (fetch → gunzip → untar → extractors) is self-contained for the later Fleet Tools site/date sweep.
 // @author       Payden
 // @match        *://percepto.app/dashboard*
 // @match        *://qa.percepto.app/dashboard*
@@ -35,7 +35,7 @@
     if (window !== window.top) return;
 
     const SCRIPT_ID = 'aim-mission-logs';
-    const SCRIPT_VERSION = '0.5';
+    const SCRIPT_VERSION = '0.6';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const IS_QA = location.hostname === 'qa.percepto.app' || location.hostname.endsWith('.qa.percepto.app');
 
@@ -403,7 +403,8 @@
         r.outages = [];
         for (const w of windows) {
             const last = r.outages[r.outages.length - 1];
-            if (last && (w.from - last.to) <= 20000) {   // Date arithmetic: subtraction coerces to ms (Date + number would concatenate) if (w.to > last.to) last.to = w.to; last.s = Math.round((last.to - last.from) / 1000); if (!last.kind.includes(w.kind)) last.kind += ' + ' + w.kind; last.samples += w.samples; last.unresolved = last.unresolved || w.unresolved; }
+            // Date arithmetic: subtraction coerces to ms (Date + number would concatenate strings)
+            if (last && (w.from - last.to) <= 20000) { if (w.to > last.to) last.to = w.to; last.s = Math.round((last.to - last.from) / 1000); if (!last.kind.includes(w.kind)) last.kind += ' + ' + w.kind; last.samples += w.samples; last.unresolved = last.unresolved || w.unresolved; }
             else r.outages.push(Object.assign({}, w));
         }
         r.longestOutageS = r.outages.reduce((m, w) => Math.max(m, w.s || 0), 0);

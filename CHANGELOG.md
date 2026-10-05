@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-10-05 — AIM Mission Logs latest v0.6: "dropped 0 times" in red fixed, outages placed in the flight (dev only, #286)
+
+- **More ways to see a drop.** The detector now also counts a run of ping tests with 100 % loss, an IP-lease loss on the LTE interface until it re-binds, and a restart of the modem manager (a re-dial). Mission 238589 lost its internet for about 80 s while the manager re-dialled, which the TCP checks never saw because they paused too; the card went red on the lease loss but said "dropped 0 times". All symptoms within 20 s of each other merge into one outage.
+- **When did it happen?** Each outage is tagged **before takeoff / in flight / after landing**. In Simple view a drop that happened on the base before takeoff is said plainly ("dropped once but not while flying") and shown amber, since the aircraft was never out of contact in the air. Advanced view keeps the red verdict and shows the tag on each outage line.
+- Note: the commit before this one briefly pushed a v0.5 file with a syntax error (a comment swallowed a line). If Tampermonkey fetched it in that window, update again.
+
 ## 2026-10-05 — AIM Mission Logs latest v0.5: Simple / Advanced views (dev only, #286)
 
 - **Simple view (default)** — every card opens with one bold plain-English sentence ("The drone stayed connected, but the connection was poor: one bar of signal, slow response. Expect choppy video and delayed commands.") followed by a few bullets a pilot or customer can act on: signal as bars, response time in words, packet-loss share, blips, tower hopping, whether 5G was there, and a **What to do** line (weak-coverage site vs. tower-crossing route vs. repeat-check advice). Mission, What happened, Aircraft nearby and Software warnings cards get the same treatment, with process names translated (image_processor → camera image processing).
