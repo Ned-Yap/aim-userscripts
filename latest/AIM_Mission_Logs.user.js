@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Logs
 // @namespace    http://tampermonkey.net/
-// @version      0.2
+// @version      0.3
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Logs.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Logs.user.js
-// @description  v0.2: row 🔎 anchors on the dashboard's own Get App Logs control (not table structure); prefill from the FILTER box or the single visible row only; server reply shown when a mission has no archive. Pull a mission's log archives straight from the Mission Dashboard (no download → unzip → hunt) and extract what matters: LTE link health (modem registration, TCP/ping checks, signal, cell handovers, RTK-stream gaps), mission event timeline (stages, aborts, go-to-base), DAA aircraft with closest approach to the drone, warnings/errors by process. v0.1 (#286): POC on percepto.app/dashboard — 🔎 per mission row + floating launcher; engine (fetch → gunzip → untar → extractors) is self-contained for the later Fleet Tools site/date sweep.
+// @description  v0.3: LTE card gains an Outages line (each loss window with start → recovery and duration, from no-cell / stuck-handover samples and failing TCP checks) and a Coverage line (median RSRP, % weak / very weak / no cell); dropped verdict names the outages. v0.2: row 🔎 anchors on the dashboard's own Get App Logs control (not table structure); prefill from the FILTER box or the single visible row only; server reply shown when a mission has no archive. Pull a mission's log archives straight from the Mission Dashboard (no download → unzip → hunt) and extract what matters: LTE link health (modem registration, TCP/ping checks, signal, cell handovers, RTK-stream gaps), mission event timeline (stages, aborts, go-to-base), DAA aircraft with closest approach to the drone, warnings/errors by process. v0.1 (#286): POC on percepto.app/dashboard — 🔎 per mission row + floating launcher; engine (fetch → gunzip → untar → extractors) is self-contained for the later Fleet Tools site/date sweep.
 // @author       Payden
 // @match        *://percepto.app/dashboard*
 // @match        *://qa.percepto.app/dashboard*
@@ -33,7 +33,7 @@
     if (window !== window.top) return;
 
     const SCRIPT_ID = 'aim-mission-logs';
-    const SCRIPT_VERSION = '0.2';
+    const SCRIPT_VERSION = '0.3';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const IS_QA = location.hostname === 'qa.percepto.app' || location.hostname.endsWith('.qa.percepto.app');
 
@@ -284,7 +284,7 @@
 
     // LTE link health from syslog (lte_manager / qmi_modem / udhcpc / telemetry_server RTCM).
     function mlExtractLte(syslogLines, hint) {
-        const r = { modem: null, sim: null, apn: null, tcp: { ok: 0, fail: 0, firstOk: null, lastOk: null, fails: [] }, pings: [], gstatus: [], creg: {}, dhcp: [], managerRestarts: 0, rtcm: { packets: 0, gaps: [] }, resets: new Set() };
+        const r = { modem: null, sim: null, apn: null, tcp: { ok: 0, fail: 0, firstOk: null, lastOk: null, fails: [], oks: [] }, pings: [], gstatus: [], creg: {}, dhcp: [], managerRestarts: 0, rtcm: { packets: 0, gaps: [] }, resets: new Set() };
         let lastRtcm = null;
         // Python-repr dict field reader: 'key': 'quoted string' | 'key': -12.5 | 'key': 1234
         const num = (s, key) => {
@@ -304,7 +304,7 @@
             if (line.includes('lte_manager')) {
                 const d = mlSyslogDate(line, hint);
                 if (line.includes('LTE Manager started')) { r.managerRestarts++; continue; }
-                if (line.includes('TCP check succesfull') || line.includes('TCP check successful')) { r.tcp.ok++; if (!r.tcp.firstOk) r.tcp.firstOk = d; r.tcp.lastOk = d; continue; }
+                if (line.includes('TCP check succesfull') || line.includes('TCP check successful')) { r.tcp.ok++; if (!r.tcp.firstOk) r.tcp.firstOk = d; r.tcp.lastOk = d; if (d) r.tcp.oks.push(d); continue; }
                 if (/TCP check failed|TCP check.*fail/i.test(line)) { r.tcp.fail++; r.tcp.fails.push(d); continue; }
                 let m = /Latency Test for: ([\d.]+) : (\d+) packets transmitted, (\d+) received,.*?([\d.]+)% packet loss(?:.*?rtt min\/avg\/max\/mdev = ([\d.]+)\/([\d.]+)\/([\d.]+)\/([\d.]+))?/.exec(line);
                 if (m) { r.pings.push({ t: d, host: m[1], sent: +m[2], recv: +m[3], loss: +m[4], avg: m[6] ? +m[6] : null, max: m[7] ? +m[7] : null }); continue; }
@@ -338,9 +338,43 @@
         r.failsAfterUp = r.tcp.fails.filter(d => r.tcp.firstOk && d > r.tcp.firstOk);
         r.deconfAfterUp = r.dhcp.filter(x => x.ev !== 'bound' && r.tcp.firstOk && x.t > r.tcp.firstOk);
         r.resetCount = r.resets.size;
+        // outages: windows where the modem reports no cell (No band / RRC Idle / waiting for RRC) or TCP checks fail,
+        // each spanning from the last good sample to the next good one.
+        // "RRC Idle" alone is NOT a loss (attached, no data in flight); no RSRP / "No band" / a stuck handover is.
+        const lostSample = (s) => typeof s.rsrp !== 'number' || /no band/i.test(String(s.band || '')) || /waiting/i.test(String(s.rrc || ''));
+        const windows = [];
+        let open = null, lastGood = null;
+        for (const s of r.gstatus) {
+            if (!s.t) continue;
+            if (lostSample(s)) { if (!open) open = { from: s.t, prevGood: lastGood, firstLost: s.t, samples: 0, kind: 'no cell' }; open.samples++; }
+            else { if (open) { open.to = s.t; windows.push(open); open = null; } lastGood = s.t; }
+        }
+        if (open) { open.to = r.gstatus[r.gstatus.length - 1].t; open.unresolved = true; windows.push(open); }
+        // TCP-fail clusters after link-up
+        let cl = null;
+        const okTimes = r.tcp.oks.slice().sort((a, b) => a - b);
+        for (const f of r.tcp.fails.filter(d => d && r.tcp.firstOk && d > r.tcp.firstOk).sort((a, b) => a - b)) {
+            if (cl && f - cl.lastFail <= 60000) { cl.lastFail = f; cl.samples++; continue; }
+            if (cl) windows.push(cl);
+            cl = { from: f, prevGood: okTimes.filter(o => o < f).pop() || null, firstLost: f, lastFail: f, samples: 1, kind: 'TCP checks failing' };
+        }
+        if (cl) windows.push(cl);
+        for (const w of windows) { if (!w.to) { const nextOk = okTimes.find(o => o > (w.lastFail || w.firstLost)); w.to = nextOk || w.lastFail || w.firstLost; w.unresolved = !nextOk; } w.s = Math.round((w.to - w.from) / 1000); }
+        // merge overlapping windows (a no-cell window and its TCP failures are one outage)
+        windows.sort((a, b) => a.from - b.from);
+        r.outages = [];
+        for (const w of windows) {
+            const last = r.outages[r.outages.length - 1];
+            if (last && w.from < last.to) { if (w.to > last.to) last.to = w.to; last.s = Math.round((last.to - last.from) / 1000); if (!last.kind.includes(w.kind)) last.kind += ' + ' + w.kind; last.samples += w.samples; last.unresolved = last.unresolved || w.unresolved; }
+            else r.outages.push(Object.assign({}, w));
+        }
+        r.longestOutageS = r.outages.reduce((m, w) => Math.max(m, w.s || 0), 0);
+        // coverage quality from RSRP samples
+        const rs = r.gstatus.map(s => s.rsrp).filter(v => typeof v === 'number').sort((a, b) => a - b);
+        r.coverage = rs.length ? { n: rs.length, median: rs[Math.floor(rs.length / 2)], weakPct: Math.round(100 * rs.filter(v => v <= -100).length / rs.length), veryWeakPct: Math.round(100 * rs.filter(v => v <= -110).length / rs.length), noCellPct: Math.round(100 * r.gstatus.filter(lostSample).length / r.gstatus.length) } : null;
         // verdict
         if (!r.tcp.firstOk) r.verdict = { level: 'red', text: 'LTE never came up (no successful TCP check in the log)' };
-        else if (r.failsAfterUp.length || r.deconfAfterUp.length || r.resetCount > 1) r.verdict = { level: 'red', text: `LTE DROPPED — ${r.failsAfterUp.length} failed TCP check(s), ${r.deconfAfterUp.length} DHCP loss event(s), ${r.resetCount > 1 ? 'modem reset seen' : 'no modem reset'}` };
+        else if (r.failsAfterUp.length || r.deconfAfterUp.length || r.resetCount > 1 || r.outages.length) r.verdict = { level: 'red', text: `LTE DROPPED — ${r.outages.length} outage(s), longest ${r.longestOutageS} s${r.outages.length ? ' (' + r.outages.slice(0, 3).map(w => `${mlHms(w.from)}→${mlHms(w.to)}`).join(', ') + (r.outages.length > 3 ? ', …' : '') + ')' : ''} · ${r.failsAfterUp.length} failed TCP check(s) · ${r.deconfAfterUp.length} DHCP loss event(s) · ${r.resetCount > 1 ? 'modem reset seen' : 'no modem reset'}` };
         else if (r.lossyPings.length || r.rtcm.gaps.length) r.verdict = { level: 'amber', text: `No disconnect — link stayed up, but degraded: ${r.lossyPings.length} lossy ping test(s), ${r.rtcm.gaps.length} RTK-stream gap(s) > ${ML_RTCM_GAP_S} s` };
         else r.verdict = { level: 'green', text: 'No disconnect — every TCP check and ping passed, no DHCP loss, no modem reset' };
         return r;
@@ -634,6 +668,8 @@
                 ['DHCP (LTE iface)', lte.dhcp.length ? lte.dhcp.map(d => `<span class="${d.ev === 'bound' ? 'g' : 'a'}">${mlHms(d.t)} ${esc(d.iface)} ${esc(d.ev)}</span>`).join(' · ') : '—'],
                 ['Modem resets', `<span class="${lte.resetCount > 1 ? 'r' : 'm'}">${lte.resetCount > 1 ? 'YES' : 'none'}</span> <span class="m">(Reset_Counter values seen: ${lte.resetCount})</span> · LTE manager starts: ${lte.managerRestarts}`],
                 ['Bands / mode', `${esc(lte.bands.join(', ') || '—')} · ${esc(lte.modes.join(', ') || '—')}`],
+                ['Outages', lte.outages.length ? lte.outages.map(w => `<span class="r">${mlHms(w.from)} → ${mlHms(w.to)}</span> <b>${w.s} s</b> <span class="m">${esc(w.kind)}, ${w.samples} sample(s)${w.unresolved ? ', never recovered in the log' : ''}</span>`).join('<br>') : '<span class="g">none — the modem never lost its cell and no TCP check failed after link-up</span>'],
+                ['Coverage', lte.coverage ? `median RSRP <b>${lte.coverage.median}</b> dBm · <span class="${lte.coverage.weakPct >= 50 ? 'r' : lte.coverage.weakPct >= 20 ? 'a' : 'g'}">${lte.coverage.weakPct}% of samples weak (≤ -100)</span> · <span class="${lte.coverage.veryWeakPct ? 'r' : 'm'}">${lte.coverage.veryWeakPct}% very weak (≤ -110)</span> · <span class="${lte.coverage.noCellPct ? 'r' : 'm'}">${lte.coverage.noCellPct}% no cell</span> <span class="m">(RSRP: > -90 good · -90…-100 fair · ≤ -100 weak · ≤ -110 edge of service)</span>` : '—'],
                 ['Signal (worst)', g.length ? `RSRP ${lte.worstRsrp ? `<b>${lte.worstRsrp.rsrp}</b> dBm @ ${mlHms(lte.worstRsrp.t)}` : '—'} · RSRQ ${lte.worstRsrq ? `<b>${lte.worstRsrq.rsrq}</b> dB @ ${mlHms(lte.worstRsrq.t)}` : '—'} · SINR ${lte.worstSinr ? `<b>${lte.worstSinr.sinr}</b> dB @ ${mlHms(lte.worstSinr.t)}` : '—'} <span class="m">(${g.length} samples)</span>` : '— (no GSTATUS samples)'],
                 ['RTK stream', `${lte.rtcm.packets.toLocaleString()} RTCM packets · <span class="${lte.rtcm.gaps.length ? 'a' : 'g'}">${lte.rtcm.gaps.length} gap(s) > ${ML_RTCM_GAP_S} s</span>${lte.rtcm.gaps.length ? ' — ' + lte.rtcm.gaps.slice(0, 8).map(x => `${mlHms(x.from)}→${mlHms(x.to)} (${x.s} s)`).join(', ') : ''}`],
                 ...rows,
@@ -686,7 +722,8 @@
         let rows = [];
         if (key === 'lte') {
             rows = [['UTC', 'Mode', 'Band', 'RSRP dBm', 'RSRQ dB', 'SINR dB', 'Tx', '5G RSRP', '5G SINR', 'Cell', 'RRC', 'Temp'], ...res.lte.gstatus.map(s => [mlHms(s.t), s.mode, s.band, s.rsrp, s.rsrq, s.sinr, s.tx, s.nrRsrp, s.nrSinr, s.cell, s.rrc, s.temp])];
-            rows.unshift(['Verdict', res.lte.verdict.text], []);
+            const cov = res.lte.coverage;
+            rows.unshift(['Verdict', res.lte.verdict.text], ...res.lte.outages.map(w => ['Outage', `${mlHms(w.from)} → ${mlHms(w.to)}`, `${w.s} s`, w.kind]), cov ? ['Coverage', `median RSRP ${cov.median} dBm`, `${cov.weakPct}% weak`, `${cov.veryWeakPct}% very weak`, `${cov.noCellPct}% no cell`] : [], []);
         } else if (key === 'events') rows = [['UTC', 'Event', 'Detail'], ...res.events.timeline.map(e => [mlHms(e.t), e.type, e.label])];
         else if (key === 'daa') rows = [['Callsign', 'ICAO', 'N-number', 'Type', 'Squawk', 'First UTC', 'Last UTC', 'Alt min ft', 'Alt max ft', 'Max kt', 'Closest m', 'Closest UTC', 'At abort m'], ...res.daa.aircraft.map(a => [a.callsign, a.icao, a.nNumber || '', a.emitter, a.squawks.join('/'), mlHms(new Date(a.first)), mlHms(new Date(a.last)), mlFt(a.altMinM), mlFt(a.altMaxM), a.spdMaxMs ? Math.round(a.spdMaxMs * 1.944) : '', a.closest ? Math.round(a.closest.dist) : '', a.closest ? mlHms(new Date(a.closest.t)) : '', a.atAbort ? Math.round(a.atAbort.dist) : ''])];
         else if (key === 'warnings') rows = [['Process', 'Count', 'First UTC', 'Sample'], ...res.warnings.map(w => [w.proc, w.n, mlHms(w.first), w.samples.map(s => s.msg).join(' | ')])];

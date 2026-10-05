@@ -6,6 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-10-05 — AIM Mission Logs latest v0.3: the LTE card now states the outage instead of making you read the samples (dev only, #286)
+
+- **Outages line** — every window where the modem lost its cell (no RSRP, "No band", or a handover stuck in "Waiting RRC Cfm") or the TCP checks failed, shown as start → recovery with the duration. "RRC Idle" on its own is not counted (the radio is attached, just not moving data). The red verdict now names the outages and the longest one.
+- **Coverage line** — median RSRP plus the share of samples that were weak (≤ -100 dBm), very weak (≤ -110) or had no cell, with the scale spelled out. Both lines are included in 📋 Sheets.
+
 ## 2026-10-05 — AIM Mission Logs latest v0.2: first live-run fixes (dev only, #286)
 
 - The row 🔎 now anchors on the dashboard's own **Get App Logs** control instead of table structure, so it appears regardless of how the All Missions grid is built. The console logs which mission IDs were detected.
