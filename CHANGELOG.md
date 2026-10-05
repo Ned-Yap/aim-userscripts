@@ -6,6 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-10-05 — NEW: AIM Mission Logs latest v0.1 — read a mission's logs in place from the Mission Dashboard (dev only, #286)
+
+- **🔎 on every row of the All Missions table** (and a floating 🔎 Logs launcher with a mission-ID box). One click fetches the mission's app-log archive (and the DAA archive) **into memory**, unpacks it, and shows the answers instead of a 30 MB download to unzip and grep.
+- **📶 LTE link** — verdict line (never up / **dropped** / degraded / clean) from the modem manager's own TCP and ping checks, DHCP lease events, modem reset counter, registration, worst RSRP/RSRQ/SINR, cell handovers, and gaps in the RTK correction stream that rides the LTE link. Full signal sample table on expand.
+- **🧭 Mission events** — stage changes, takeoff, aborts (flying object, safety go-to-base, failsafes), landing, with the abort highlighted.
+- **✈ DAA** — every aircraft the base station's ADS-B receiver tracked during the flight: callsign, ICAO → N-number, type, squawk, altitude band, speed, **closest approach to the drone track**, and distance at the moment of the abort.
+- **⚠ Warnings / errors** in the flight window grouped by process (known boot noise filtered out). **📋 Sheets** on every card; ⬇ per-file download of syslog / events / DAA files.
+- Dashboard only for now (`percepto.app/dashboard`, QA twin included). The engine is one self-contained block so the next step is the Fleet Tools sites × dates sweep.
+
 ## 2026-10-05 — Fleet Tools latest v0.67: 📡 Coverage — radius circles on the landing map + "how many sites fit in a 20-mile circle" (dev only, #285)
 
 - **New 📡 Coverage section** in Fleet Tools (landing page). Circles of any diameter on the fleet map: ➕ at the map centre or 📍 by clicking the map; **drag the centre dot to move, the square on the edge to resize**; each circle shows the **sites inside** (and partially inside) live, with a click-to-list of their names and 🔗 links. Rule is selectable: a site counts when its **whole setup extent** is inside (default) or when just its **centre** is.
