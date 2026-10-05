@@ -286,7 +286,7 @@
 
     // LTE link health from syslog (lte_manager / qmi_modem / udhcpc / telemetry_server RTCM).
     function mlExtractLte(syslogLines, hint) {
-        const r = { modem: null, sim: null, apn: null, tcp: { ok: 0, fail: 0, firstOk: null, lastOk: null, fails: [], oks: [] }, pings: [], gstatus: [], creg: {}, dhcp: [], managerRestarts: 0, rtcm: { packets: 0, gaps: [] }, resets: new Set() };
+        const r = { modem: null, sim: null, apn: null, tcp: { ok: 0, fail: 0, firstOk: null, lastOk: null, fails: [], oks: [] }, pings: [], gstatus: [], creg: {}, dhcp: [], managerRestarts: 0, managerStarts: [], rtcm: { packets: 0, gaps: [] }, resets: new Set() };
         let lastRtcm = null;
         // Python-repr dict field reader: 'key': 'quoted string' | 'key': -12.5 | 'key': 1234
         const num = (s, key) => {
@@ -305,7 +305,7 @@
             }
             if (line.includes('lte_manager')) {
                 const d = mlSyslogDate(line, hint);
-                if (line.includes('LTE Manager started')) { r.managerRestarts++; continue; }
+                if (line.includes('LTE Manager started')) { r.managerRestarts++; if (d) r.managerStarts.push(d); continue; }
                 if (line.includes('TCP check succesfull') || line.includes('TCP check successful')) { r.tcp.ok++; if (!r.tcp.firstOk) r.tcp.firstOk = d; r.tcp.lastOk = d; if (d) r.tcp.oks.push(d); continue; }
                 if (/TCP check failed|TCP check.*fail/i.test(line)) { r.tcp.fail++; r.tcp.fails.push(d); continue; }
                 let m = /Latency Test for: ([\d.]+) : (\d+) packets transmitted, (\d+) received,.*?([\d.]+)% packet loss(?:.*?rtt min\/avg\/max\/mdev = ([\d.]+)\/([\d.]+)\/([\d.]+)\/([\d.]+))?/.exec(line);
@@ -364,22 +364,46 @@
             else { if (open) { open.to = s.t; windows.push(open); open = null; } lastGood = s.t; }
         }
         if (open) { open.to = r.gstatus[r.gstatus.length - 1].t; open.unresolved = true; windows.push(open); }
-        // TCP-fail clusters after link-up
-        let cl = null;
+        // Four more loss signals, all after link-up. Each becomes a window [from, to]:
+        const up = r.tcp.firstOk;
         const okTimes = r.tcp.oks.slice().sort((a, b) => a - b);
-        for (const f of r.tcp.fails.filter(d => d && r.tcp.firstOk && d > r.tcp.firstOk).sort((a, b) => a - b)) {
+        const nextOkAfter = (t) => okTimes.find(o => o > t) || null;
+        // (a) TCP-check failures, clustered when ≤ 60 s apart
+        let cl = null;
+        for (const f of r.tcp.fails.filter(d => d && up && d > up).sort((a, b) => a - b)) {
             if (cl && f - cl.lastFail <= 60000) { cl.lastFail = f; cl.samples++; continue; }
             if (cl) windows.push(cl);
-            cl = { from: f, prevGood: okTimes.filter(o => o < f).pop() || null, firstLost: f, lastFail: f, samples: 1, kind: 'TCP checks failing' };
+            cl = { from: f, firstLost: f, lastFail: f, samples: 1, kind: 'TCP checks failing' };
         }
         if (cl) windows.push(cl);
-        for (const w of windows) { if (!w.to) { const nextOk = okTimes.find(o => o > (w.lastFail || w.firstLost)); w.to = nextOk || w.lastFail || w.firstLost; w.unresolved = !nextOk; } w.s = Math.round((w.to - w.from) / 1000); }
-        // merge overlapping windows (a no-cell window and its TCP failures are one outage)
+        // (b) ping tests with 100 % loss, clustered when ≤ 30 s apart; ends at the next ping that gets replies
+        const pings = r.pings.filter(p => p.t && up && p.t > up).sort((a, b) => a.t - b.t);
+        let pc = null;
+        for (let i = 0; i < pings.length; i++) {
+            const p = pings[i];
+            if (p.loss >= 100) { if (pc && p.t - pc.lastFail <= 30000) { pc.lastFail = p.t; pc.samples++; } else { if (pc) windows.push(pc); pc = { from: p.t, firstLost: p.t, lastFail: p.t, samples: 1, kind: 'no internet (pings 100% lost)' }; } }
+            else if (pc) { pc.to = p.t; windows.push(pc); pc = null; }
+        }
+        if (pc) windows.push(pc);
+        // (c) DHCP lease lost on the LTE interface → next 'bound'
+        const dh = r.dhcp.filter(x => x.t && up && x.t > up).sort((a, b) => a.t - b.t);
+        for (let i = 0; i < dh.length; i++) {
+            if (dh[i].ev === 'bound') continue;
+            const rebound = dh.slice(i + 1).find(x => x.ev === 'bound');
+            windows.push({ from: dh[i].t, firstLost: dh[i].t, lastFail: dh[i].t, to: rebound ? rebound.t : undefined, samples: 1, kind: 'IP lease lost' });
+        }
+        // (d) the LTE manager itself restarted (re-dial) → from the last good check before it to the first after
+        for (const st of r.managerStarts.filter(d => up && d > up)) {
+            const prevOk = okTimes.filter(o => o < st).pop() || st;
+            windows.push({ from: prevOk, firstLost: st, lastFail: st, samples: 1, kind: 'modem reconnect' });
+        }
+        for (const w of windows) { if (!w.to) { const n = nextOkAfter(w.lastFail || w.firstLost); w.to = n || w.lastFail || w.firstLost; w.unresolved = !n; } w.s = Math.round((w.to - w.from) / 1000); }
+        // merge windows that overlap or sit within 20 s of each other — one outage, several symptoms
         windows.sort((a, b) => a.from - b.from);
         r.outages = [];
         for (const w of windows) {
             const last = r.outages[r.outages.length - 1];
-            if (last && w.from < last.to) { if (w.to > last.to) last.to = w.to; last.s = Math.round((last.to - last.from) / 1000); if (!last.kind.includes(w.kind)) last.kind += ' + ' + w.kind; last.samples += w.samples; last.unresolved = last.unresolved || w.unresolved; }
+            if (last && (w.from - last.to) <= 20000) {   // Date arithmetic: subtraction coerces to ms (Date + number would concatenate) if (w.to > last.to) last.to = w.to; last.s = Math.round((last.to - last.from) / 1000); if (!last.kind.includes(w.kind)) last.kind += ' + ' + w.kind; last.samples += w.samples; last.unresolved = last.unresolved || w.unresolved; }
             else r.outages.push(Object.assign({}, w));
         }
         r.longestOutageS = r.outages.reduce((m, w) => Math.max(m, w.s || 0), 0);
@@ -391,7 +415,7 @@
         else {
             // A real drop = an outage of ≥ 30 s or with ≥ 2 consecutive bad samples, a DHCP lease loss, or a modem reset.
             // One failed TCP check that passes again 10 s later is a blip, reported as degraded, not dropped.
-            const realOutages = r.outages.filter(w => (w.s || 0) >= 30 || w.samples >= 2);
+            const realOutages = r.outages.filter(w => (w.s || 0) >= 30 || w.samples >= 2 || /lease|reconnect|no internet/.test(w.kind));
             const blips = r.outages.filter(w => !realOutages.includes(w));
             const withRtt = r.pings.filter(p => p.avg != null);
             const avgRtt = withRtt.length ? Math.round(withRtt.reduce((s, p) => s + p.avg, 0) / withRtt.length) : null;
@@ -504,6 +528,10 @@
         const fromMs = events.takeoff && events.takeoff.t ? events.takeoff.t.getTime() - 60000 : null;
         const toMs = events.touchdown && events.touchdown.t ? events.touchdown.t.getTime() + 30000 : null;
         const warnings = mlExtractWarnings(syslogLines, hint, fromMs, toMs);
+        // when in the flight did each LTE outage happen?
+        const tTo = events.takeoff && events.takeoff.t ? events.takeoff.t.getTime() : null, tTd = events.touchdown && events.touchdown.t ? events.touchdown.t.getTime() : null;
+        for (const w of lte.outages) w.phase = tTo == null ? '' : (w.to < tTo ? 'before takeoff' : (tTd != null && w.from > tTd) ? 'after landing' : 'in flight');
+        lte.inFlightOutages = lte.outages.filter(w => w.phase === 'in flight');
         return { roles, files, meta, events, lte, daa, droneTrack, warnings, abortEv, extra: extra || {}, syslogLineCount: syslogLines.length };
     }
     // ===================== end [AIM_ML_ENGINE] =========================
@@ -728,7 +756,7 @@
                 ['DHCP (LTE iface)', lte.dhcp.length ? lte.dhcp.map(d => `<span class="${d.ev === 'bound' ? 'g' : 'a'}">${mlHms(d.t)} ${esc(d.iface)} ${esc(d.ev)}</span>`).join(' · ') : '—'],
                 ['Modem resets', `<span class="${lte.resetCount > 1 ? 'r' : 'm'}">${lte.resetCount > 1 ? 'YES' : 'none'}</span> <span class="m">(Reset_Counter values seen: ${lte.resetCount})</span> · LTE manager starts: ${lte.managerRestarts}`],
                 ['Bands / mode', `${esc(lte.bands.join(', ') || '—')} · ${esc(lte.modes.join(', ') || '—')}`],
-                ['Outages', lte.outages.length ? lte.outages.map(w => `<span class="r">${mlHms(w.from)} → ${mlHms(w.to)}</span> <b>${w.s} s</b> <span class="m">${esc(w.kind)}, ${w.samples} sample(s)${w.unresolved ? ', never recovered in the log' : ''}</span>`).join('<br>') : '<span class="g">none — the modem never lost its cell and no TCP check failed after link-up</span>'],
+                ['Outages', lte.outages.length ? lte.outages.map(w => `<span class="r">${mlHms(w.from)} → ${mlHms(w.to)}</span> <b>${w.s} s</b>${w.phase ? ` <span class="${w.phase === 'in flight' ? 'r' : 'a'}">${esc(w.phase)}</span>` : ''} <span class="m">${esc(w.kind)}, ${w.samples} sample(s)${w.unresolved ? ', never recovered in the log' : ''}</span>`).join('<br>') : '<span class="g">none — no lost cell, failed TCP check, 100%-loss ping run, IP-lease loss or modem reconnect after link-up</span>'],
                 ['Coverage', lte.coverage ? `median RSRP <b>${lte.coverage.median}</b> dBm · <span class="${lte.coverage.weakPct >= 50 ? 'r' : lte.coverage.weakPct >= 20 ? 'a' : 'g'}">${lte.coverage.weakPct}% of samples weak (≤ -100)</span> · <span class="${lte.coverage.veryWeakPct ? 'r' : 'm'}">${lte.coverage.veryWeakPct}% very weak (≤ -110)</span> · <span class="${lte.coverage.noCellPct ? 'r' : 'm'}">${lte.coverage.noCellPct}% no cell</span> <span class="m">(RSRP: > -90 good · -90…-100 fair · ≤ -100 weak · ≤ -110 edge of service)</span>` : '—'],
                 ['Signal (worst)', g.length ? `RSRP ${lte.worstRsrp ? `<b>${lte.worstRsrp.rsrp}</b> dBm @ ${mlHms(lte.worstRsrp.t)}` : '—'} · RSRQ ${lte.worstRsrq ? `<b>${lte.worstRsrq.rsrq}</b> dB @ ${mlHms(lte.worstRsrq.t)}` : '—'} · SINR ${lte.worstSinr ? `<b>${lte.worstSinr.sinr}</b> dB @ ${mlHms(lte.worstSinr.t)}` : '—'} <span class="m">(${g.length} samples)</span>` : '— (no GSTATUS samples)'],
                 ['RTK stream', `${lte.rtcm.packets.toLocaleString()} RTCM packets · <span class="${lte.rtcm.gaps.length ? 'a' : 'g'}">${lte.rtcm.gaps.length} gap(s) > ${ML_RTCM_GAP_S} s</span>${lte.rtcm.gaps.length ? ' — ' + lte.rtcm.gaps.slice(0, 8).map(x => `${mlHms(x.from)}→${mlHms(x.to)} (${x.s} s)`).join(', ') : ''}`],
@@ -820,11 +848,21 @@
 
         // --- LTE ---
         const med = lte.coverage ? lte.coverage.median : null, bars = barsPlain(med), lag = lagPlain(lte.avgRtt);
-        let lteBottom, lteBullets = [];
+        let lteBottom, lteBullets = [], lteLevelOverride = null;
         if (!lte.tcp.firstOk) lteBottom = `${esc(droneName)} <b>never got an internet connection</b> in these logs.`;
         else if (lte.verdict.level === 'red') {
-            const real = lte.outages.filter(w => (w.s || 0) >= 30 || w.samples >= 2);
-            lteBottom = `The connection <b>dropped ${real.length} time${real.length === 1 ? '' : 's'}</b>${real.length ? `, the longest for <b>${lte.longestOutageS} seconds</b> starting ${mlHms(real[0].from)} UTC` : ''}. The drone keeps flying its plan on its own during a gap, but you cannot see or control it until the link returns.`;
+            const real = lte.outages.filter(w => (w.s || 0) >= 30 || w.samples >= 2 || /lease|reconnect|no internet/.test(w.kind));
+            const inFlight = real.filter(w => w.phase === 'in flight');
+            const where = (w) => w.phase === 'before takeoff' ? 'before takeoff, while on the base' : w.phase === 'after landing' ? 'after landing' : 'in flight';
+            if (real.length && !inFlight.length) {
+                lteLevelOverride = 'amber';
+                lteBottom = `The connection <b>dropped ${real.length === 1 ? 'once' : real.length + ' times'} but not while flying</b>: ${real.map(w => `${mlHms(w.from)} UTC for ${w.s} s (${where(w)})`).join('; ')}. In the air the drone stayed connected.`;
+            } else if (real.length) {
+                const longest = real.reduce((a, b) => (b.s > a.s ? b : a));
+                lteBottom = `The connection <b>dropped ${real.length === 1 ? 'once' : real.length + ' times'} while flying</b>, the longest for <b>${longest.s} seconds</b> starting ${mlHms(longest.from)} UTC. The drone keeps flying its plan on its own during a gap, but you cannot see or control it until the link returns.`;
+            } else {
+                lteBottom = `The modem <b>${lte.resetCount > 1 ? 'restarted' : 'had to reconnect'}</b> during the flight${lte.deconfAfterUp.length ? ` (${lte.deconfAfterUp.length} IP-lease loss event${lte.deconfAfterUp.length === 1 ? '' : 's'})` : ''}; the link came back on its own.`;
+            }
         } else if (lte.verdict.level === 'amber' && /POOR/.test(lte.verdict.text)) lteBottom = `The drone <b>stayed connected, but the connection was poor</b>: ${bars ? `${bars} of signal` : 'weak signal'}${lag ? `, ${lag} response` : ''}. Expect choppy video and delayed commands.`;
         else if (lte.verdict.level === 'amber') lteBottom = `The drone <b>stayed connected</b> with a few slow moments. Nothing a pilot would notice beyond a brief stutter.`;
         else lteBottom = `The drone <b>stayed connected the whole flight</b> with a healthy connection.`;
@@ -843,7 +881,7 @@
             : lte.verdict.level === 'red' ? `<b>What to do:</b> check whether this drop repeats at the same place on other flights; if so it is coverage, if not it may be the carrier or modem.`
             : null;
         if (advice) lteBullets.push(advice);
-        out.push(simpleCard('📶 Connection (LTE)', lte.verdict.level, lteBottom, lteBullets, tech('lte', adv), copyBtn('lte')));
+        out.push(simpleCard('📶 Connection (LTE)', lteLevelOverride || lte.verdict.level, lteBottom, lteBullets, tech('lte', adv), copyBtn('lte')));
 
         // --- Events ---
         const stalls = events.all.filter(e => /mainLoopStall/.test(e.type)).length;
