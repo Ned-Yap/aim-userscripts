@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-10-05 — AIM Mission Logs latest v0.4: false "33-minute outage" on older drones fixed (dev only, #286)
+
+- **Older modem format.** Drones with the Sierra EM7565 (ogi / older Sparrow) report RSRP under a different field name. v0.3 read no signal at all and called every sample "no cell", producing a false LTE DROPPED verdict for the whole flight (mission 238538). v0.4 reads both formats; if a format is still unknown the card says so with a ⚠ instead of guessing.
+- **Blips vs drops.** One failed TCP check that passes again 10 s later is now a "brief blip" inside an amber **POOR link** verdict, together with the ping loss share and average / worst round-trip. Red is reserved for an outage of 30 s or more, a DHCP lease loss or a modem reset.
+- Mission duration in the header was shown in the wrong units (server value is milliseconds).
+
 ## 2026-10-05 — AIM Mission Logs latest v0.3: the LTE card now states the outage instead of making you read the samples (dev only, #286)
 
 - **Outages line** — every window where the modem lost its cell (no RSRP, "No band", or a handover stuck in "Waiting RRC Cfm") or the TCP checks failed, shown as start → recovery with the duration. "RRC Idle" on its own is not counted (the radio is attached, just not moving data). The red verdict now names the outages and the longest one.

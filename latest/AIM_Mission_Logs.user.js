@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Logs
 // @namespace    http://tampermonkey.net/
-// @version      0.3
+// @version      0.4
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Logs.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Logs.user.js
-// @description  v0.3: LTE card gains an Outages line (each loss window with start → recovery and duration, from no-cell / stuck-handover samples and failing TCP checks) and a Coverage line (median RSRP, % weak / very weak / no cell); dropped verdict names the outages. v0.2: row 🔎 anchors on the dashboard's own Get App Logs control (not table structure); prefill from the FILTER box or the single visible row only; server reply shown when a mission has no archive. Pull a mission's log archives straight from the Mission Dashboard (no download → unzip → hunt) and extract what matters: LTE link health (modem registration, TCP/ping checks, signal, cell handovers, RTK-stream gaps), mission event timeline (stages, aborts, go-to-base), DAA aircraft with closest approach to the drone, warnings/errors by process. v0.1 (#286): POC on percepto.app/dashboard — 🔎 per mission row + floating launcher; engine (fetch → gunzip → untar → extractors) is self-contained for the later Fleet Tools site/date sweep.
+// @description  v0.4: reads the older EM7565 modem's status fields (RSRP_(dBm) / PCC_RxM_RSSI / Tx_Power) — v0.3 saw no RSRP and flagged a false 33-min outage; a sample is lost only with no band / stuck handover / no cell+no RSRP; isolated 10 s TCP blips = amber POOR link (loss %, avg/worst rtt) not red; unknown formats raise a ⚠ with lte.rawSample; mission duration is ms. v0.3: LTE card gains an Outages line (each loss window with start → recovery and duration, from no-cell / stuck-handover samples and failing TCP checks) and a Coverage line (median RSRP, % weak / very weak / no cell); dropped verdict names the outages. v0.2: row 🔎 anchors on the dashboard's own Get App Logs control (not table structure); prefill from the FILTER box or the single visible row only; server reply shown when a mission has no archive. Pull a mission's log archives straight from the Mission Dashboard (no download → unzip → hunt) and extract what matters: LTE link health (modem registration, TCP/ping checks, signal, cell handovers, RTK-stream gaps), mission event timeline (stages, aborts, go-to-base), DAA aircraft with closest approach to the drone, warnings/errors by process. v0.1 (#286): POC on percepto.app/dashboard — 🔎 per mission row + floating launcher; engine (fetch → gunzip → untar → extractors) is self-contained for the later Fleet Tools site/date sweep.
 // @author       Payden
 // @match        *://percepto.app/dashboard*
 // @match        *://qa.percepto.app/dashboard*
@@ -33,7 +33,7 @@
     if (window !== window.top) return;
 
     const SCRIPT_ID = 'aim-mission-logs';
-    const SCRIPT_VERSION = '0.3';
+    const SCRIPT_VERSION = '0.4';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const IS_QA = location.hostname === 'qa.percepto.app' || location.hostname.endsWith('.qa.percepto.app');
 
@@ -313,7 +313,15 @@
                 m = /SIM id: (\d+)/.exec(line); if (m) { r.sim = m[1]; continue; }
                 m = /APN suggestion is: (\S+)/.exec(line); if (m) { r.apn = m[1]; continue; }
                 if (line.includes("'!GSTATUS'")) {
-                    r.gstatus.push({ t: d, mode: num(line, 'System_mode'), band: num(line, 'LTE_band'), bw: num(line, 'LTE_bw'), rsrp: num(line, 'PCC_Rx0_RSRP'), rsrp1: num(line, 'PCC_Rx1_RSRP'), rssi: num(line, 'PCC_Rx0_RSSI'), rsrq: num(line, 'RSRQ_(dB)'), sinr: num(line, 'SINR_(dB)'), tx: num(line, 'PCC_Tx_Power'), nrRsrp: num(line, 'NR5G_RSRP_(dBm)'), nrSinr: num(line, 'NR5G_SINR_(dB)'), cell: String(num(line, 'Cell_ID') || '').slice(0, 8), rrc: num(line, 'RRC_state'), ps: num(line, 'PS_state'), temp: num(line, 'Temperature'), reset: num(line, 'Reset_Counter') });
+                    // Field names differ by modem: EM9291 (Airmax) uses PCC_Rx0_RSRP / PCC_Rx0_RSSI / PCC_Tx_Power;
+                    // EM7565 (older Sparrow/OGI) uses RSRP_(dBm) / PCC_RxM_RSSI / Tx_Power. First numeric alias wins.
+                    const numAny = (keys) => { for (const k of keys) { const v = num(line, k); if (typeof v === 'number') return v; } return null; };
+                    if (!r.rawSample) r.rawSample = line.slice(line.indexOf("{'!GSTATUS'"), line.indexOf("{'!GSTATUS'") + 900);
+                    r.gstatus.push({ t: d, mode: num(line, 'System_mode'), band: num(line, 'LTE_band'), bw: num(line, 'LTE_bw'),
+                        rsrp: numAny(['PCC_Rx0_RSRP', 'RSRP_(dBm)', 'PCC_RxM_RSRP', 'RSRP']), rsrp1: numAny(['PCC_Rx1_RSRP', 'PCC_RxD_RSRP']),
+                        rssi: numAny(['PCC_Rx0_RSSI', 'PCC_RxM_RSSI', 'RSSI']), rsrq: numAny(['RSRQ_(dB)', 'RSRQ']), sinr: numAny(['SINR_(dB)', 'SINR']),
+                        tx: numAny(['PCC_Tx_Power', 'Tx_Power']), nrRsrp: num(line, 'NR5G_RSRP_(dBm)'), nrSinr: num(line, 'NR5G_SINR_(dB)'),
+                        cell: String(num(line, 'Cell_ID') || '').slice(0, 8), rrc: num(line, 'RRC_state'), ps: num(line, 'PS_state'), emm: num(line, 'EMM_state'), temp: num(line, 'Temperature'), reset: num(line, 'Reset_Counter') });
                     const rc = num(line, 'Reset_Counter'); if (rc != null) r.resets.add(rc);
                     continue;
                 }
@@ -341,7 +349,11 @@
         // outages: windows where the modem reports no cell (No band / RRC Idle / waiting for RRC) or TCP checks fail,
         // each spanning from the last good sample to the next good one.
         // "RRC Idle" alone is NOT a loss (attached, no data in flight); no RSRP / "No band" / a stuck handover is.
-        const lostSample = (s) => typeof s.rsrp !== 'number' || /no band/i.test(String(s.band || '')) || /waiting/i.test(String(s.rrc || ''));
+        // A sample is "lost" when the modem reports no band, a stuck handover, or no cell AND no RSRP. A missing RSRP
+        // alone is not a loss — it may just be a field name this parser doesn't know (surfaced as formatWarning).
+        const hasCell = (s) => /^[0-9A-F]{4,}$/i.test(String(s.cell || '')) && !/^F+$/i.test(String(s.cell || ''));
+        const lostSample = (s) => /no band/i.test(String(s.band || '')) || /waiting/i.test(String(s.rrc || '')) || (typeof s.rsrp !== 'number' && !hasCell(s));
+        r.formatWarning = r.gstatus.length && !r.gstatus.some(s => typeof s.rsrp === 'number') ? 'RSRP not found in this modem\'s status format — signal and coverage are unavailable; paste window.__aimMissionLogs.lte.rawSample to AIM so the parser can learn it' : null;
         const windows = [];
         let open = null, lastGood = null;
         for (const s of r.gstatus) {
@@ -374,9 +386,22 @@
         r.coverage = rs.length ? { n: rs.length, median: rs[Math.floor(rs.length / 2)], weakPct: Math.round(100 * rs.filter(v => v <= -100).length / rs.length), veryWeakPct: Math.round(100 * rs.filter(v => v <= -110).length / rs.length), noCellPct: Math.round(100 * r.gstatus.filter(lostSample).length / r.gstatus.length) } : null;
         // verdict
         if (!r.tcp.firstOk) r.verdict = { level: 'red', text: 'LTE never came up (no successful TCP check in the log)' };
-        else if (r.failsAfterUp.length || r.deconfAfterUp.length || r.resetCount > 1 || r.outages.length) r.verdict = { level: 'red', text: `LTE DROPPED — ${r.outages.length} outage(s), longest ${r.longestOutageS} s${r.outages.length ? ' (' + r.outages.slice(0, 3).map(w => `${mlHms(w.from)}→${mlHms(w.to)}`).join(', ') + (r.outages.length > 3 ? ', …' : '') + ')' : ''} · ${r.failsAfterUp.length} failed TCP check(s) · ${r.deconfAfterUp.length} DHCP loss event(s) · ${r.resetCount > 1 ? 'modem reset seen' : 'no modem reset'}` };
-        else if (r.lossyPings.length || r.rtcm.gaps.length) r.verdict = { level: 'amber', text: `No disconnect — link stayed up, but degraded: ${r.lossyPings.length} lossy ping test(s), ${r.rtcm.gaps.length} RTK-stream gap(s) > ${ML_RTCM_GAP_S} s` };
-        else r.verdict = { level: 'green', text: 'No disconnect — every TCP check and ping passed, no DHCP loss, no modem reset' };
+        else {
+            // A real drop = an outage of ≥ 30 s or with ≥ 2 consecutive bad samples, a DHCP lease loss, or a modem reset.
+            // One failed TCP check that passes again 10 s later is a blip, reported as degraded, not dropped.
+            const realOutages = r.outages.filter(w => (w.s || 0) >= 30 || w.samples >= 2);
+            const blips = r.outages.filter(w => !realOutages.includes(w));
+            const withRtt = r.pings.filter(p => p.avg != null);
+            const avgRtt = withRtt.length ? Math.round(withRtt.reduce((s, p) => s + p.avg, 0) / withRtt.length) : null;
+            const worstRtt = withRtt.length ? Math.round(Math.max(...withRtt.map(p => p.max || 0))) : null;
+            const lossShare = r.pings.length ? Math.round(100 * r.lossyPings.length / r.pings.length) : 0;
+            const quality = `${r.lossyPings.length}/${r.pings.length} ping tests with loss (${lossShare}%)${avgRtt != null ? `, avg rtt ${avgRtt} ms, worst ${worstRtt} ms` : ''}${r.rtcm.packets ? `, ${r.rtcm.gaps.length} RTK-stream gap(s) > ${ML_RTCM_GAP_S} s` : ''}`;
+            r.avgRtt = avgRtt; r.worstRtt = worstRtt; r.lossShare = lossShare;
+            if (realOutages.length || r.deconfAfterUp.length || r.resetCount > 1) r.verdict = { level: 'red', text: `LTE DROPPED — ${realOutages.length} outage(s), longest ${r.longestOutageS} s${realOutages.length ? ' (' + realOutages.slice(0, 3).map(w => `${mlHms(w.from)}→${mlHms(w.to)}`).join(', ') + (realOutages.length > 3 ? ', …' : '') + ')' : ''} · ${r.failsAfterUp.length} failed TCP check(s) · ${r.deconfAfterUp.length} DHCP loss event(s) · ${r.resetCount > 1 ? 'modem reset seen' : 'no modem reset'}` };
+            else if (blips.length || lossShare >= 25 || (avgRtt != null && avgRtt >= 400)) r.verdict = { level: 'amber', text: `No disconnect, but a POOR link — ${blips.length ? blips.length + ' brief blip(s) (' + blips.map(w => mlHms(w.from) + ' ' + w.s + ' s').join(', ') + '), ' : ''}${quality}` };
+            else if (r.lossyPings.length || r.rtcm.gaps.length) r.verdict = { level: 'amber', text: `No disconnect — link stayed up, minor degradation: ${quality}` };
+        }
+        if (!r.verdict) r.verdict = { level: 'green', text: 'No disconnect — every TCP check and ping passed, no DHCP loss, no modem reset' };
         return r;
     }
 
@@ -643,7 +668,8 @@
         const parts = [];
         // --- mission header ---
         const mj = meta.json || {}, m = extra.mission || {};
-        const dur = m.duration != null ? `${Math.floor(m.duration / 60)}:${mlPad(m.duration % 60)}` : '—';
+        const durS = m.duration != null ? Math.round(Number(m.duration) / 1000) : null;   // server duration is milliseconds (Fleet Tools convention)
+        const dur = durS != null && isFinite(durS) ? `${Math.floor(durS / 60)}:${mlPad(durS % 60)}` : '—';
         parts.push(card(`🛸 Mission ${esc(res.missionId)} ${esc(m.app && m.app.name ? '· ' + m.app.name : '')}`, kv([
             ['Site', `${esc(mj.site_name || (m.site && m.site.name) || '—')} <span class="m">${esc(mj.site_status || '')}</span>`],
             ['Drone', `${esc(mj.vehicle_name || (m.drone && m.drone.name) || '—')} <span class="m">${esc(mj.app_version ? 'app ' + mj.app_version : '')}</span>`],
@@ -658,6 +684,7 @@
         if (lte.handovers.length) rows.push(['Cell handovers', `${lte.handovers.length} — ${lte.handovers.slice(0, 12).map(h => `<span class="m">${mlHms(h.t)}</span> ${esc(h.from)}→${esc(h.to)}`).join(' · ')}${lte.handovers.length > 12 ? ' …' : ''}`]);
         const lteInner = `
             <div class="aim-ml-verdict ${lv(lte.verdict.level)}" style="background:rgba(255,255,255,.03);border:1px solid #222834">${esc(lte.verdict.text)}</div>
+            ${lte.formatWarning ? `<div class="a" style="margin:-4px 0 8px">⚠ ${esc(lte.formatWarning)}</div>` : ''}
             ${kv([
                 ['Modem', lte.modem ? `${esc(lte.modem.make)} ${esc(lte.modem.model)} <span class="m">${esc(lte.modem.rev)}</span>` : '—'],
                 ['SIM / APN', `${esc(lte.sim || '—')} / ${esc(lte.apn || '—')}`],
