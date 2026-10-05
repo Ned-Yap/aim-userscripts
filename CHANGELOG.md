@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-10-05 — Fleet Tools latest v0.67: 📡 Coverage — radius circles on the landing map + "how many sites fit in a 20-mile circle" (dev only, #285)
+
+- **New 📡 Coverage section** in Fleet Tools (landing page). Circles of any diameter on the fleet map: ➕ at the map centre or 📍 by clicking the map; **drag the centre dot to move, the square on the edge to resize**; each circle shows the **sites inside** (and partially inside) live, with a click-to-list of their names and 🔗 links. Rule is selectable: a site counts when its **whole setup extent** is inside (default) or when just its **centre** is.
+- **Footprint of the picked sites** — the sites picked in Fleet Data (or every site when nothing is picked): E–W × N–S span, convex-hull area, the **smallest enclosing circle** (Ø + centre, ⭕ add it as a circle), summed site extents, and FFZ acreage when Fleet Metrics has been built. Drawn dashed on the map; 📋 copies the numbers + site list.
+- **🧠 Best spot** — for the chosen Ø, finds the centre that covers the **most** sites (exact search, not a grid guess). **🗂 Plan all** repeats it greedily: how many circles of that Ø cover every site, with a cumulative table, dashed previews on the map, ➕ add as circles, 📋 copy. Sites wider than the circle are called out instead of silently skipped.
+- **📏 Measure** — two clicks on the map → distance (mi / ft / km) + bearing. **📤 KML** downloads the circles for Google Earth.
+- Site extents come from the Site Watch snapshot index (same one the Overlap Sweep uses); sites without a snapshot fall back to their centre and are flagged "centre-only" with a ⟳ update-index button.
+
 ## 2026-10-02 — Site Setup Tools latest v4.310 + Map Styler latest v34.142: the Survey window gets tabs, in-place editing and a Contacted column (dev only, #280)
 
 - **Tabs across the top** — Summary · Aviation · Hazards · Site & LTE · Appendix — instead of one long page. The markdown on GitHub (and the future PDF) keeps the full form order unchanged; the tabs are only how AIM shows it.

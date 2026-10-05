@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.66
+// @version      0.67
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -25,6 +25,9 @@
 //     table for Google Sheets / CSV, per-type checkboxes.
 //   📊 Fleet Metrics (bones): per-site entity counts from the Site Watch
 //     snapshot index; grouped by client when the /sites/ payload carries one.
+//   📡 Coverage (#285): radius circles on the landing map (drag / resize,
+//     sites-inside counts), picked-sites footprint, 🧠 best-spot / 🗂 plan
+//     (how many Ø-mile circles cover the fleet), 📏 ruler, KML export.
 // GitHub PAT arrives over the AIM_CONTROL_CHANNEL TOKEN_VALUE broadcast
 // (the Control Panel's channel runs on the landing page — verified).
 // No hotkeys. Log tag: [AIM FLEET]
@@ -36,7 +39,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.66';
+    const SCRIPT_VERSION = '0.67';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -1186,16 +1189,20 @@
             ovSetupsG = document.createElementNS(SVG_NS, 'g');   // site geometry (bottom)
             ovKmlG = document.createElementNS(SVG_NS, 'g');      // KML layers
             ovXrefG = document.createElementNS(SVG_NS, 'g');     // cross-ref runs
+            ovCovG = document.createElementNS(SVG_NS, 'g');      // #285 coverage circles / ruler / footprint
             ovPinsG = document.createElementNS(SVG_NS, 'g');     // conflict pins (top)
             ovSvg.appendChild(ovSetupsG);
             ovSvg.appendChild(ovKmlG);
             ovSvg.appendChild(ovXrefG);
+            ovSvg.appendChild(ovCovG);
             ovSvg.appendChild(ovPinsG);
             pane.appendChild(ovSvg);
+            covBindOverlay(ovSvg, map);   // drag handles for the coverage circles (per-SVG: the SVG is rebuilt per map)
             if (ovMap !== map) {
                 map.on('zoomend viewreset', onMapZoomChanged);
                 map.on('moveend', onMapMoved);
                 map.on('move', onMapMoving);
+                map.on('click', covOnMapClick);   // #285: only consumed in pick mode (📍 place / 📏 measure)
                 ovMap = map;
                 // First refresh without waiting for a user interaction —
                 // and re-apply the chosen basemap/chart to the fresh map
@@ -1342,6 +1349,11 @@
                 });
             }
             ovXrefG.innerHTML = xHtml;
+            // --- #285 coverage: footprint / plan ghosts / circles / ruler (own try — never costs the pins) ---
+            if (ovCovG) {
+                try { ovCovG.innerHTML = covRenderSvg(map, P); }
+                catch (e) { console.warn(`${TAG} coverage overlay render failed:`, e); ovCovG.innerHTML = ''; }
+            }
             // --- conflict dots (secondary conflict locations), then pins ---
             let pHtml = '';
             dotData.forEach(dd => {
@@ -4148,7 +4160,7 @@
     let buttonEl = null;
     let panelEl = null;
     // v0.31: every section starts COLLAPSED (user request) — open what you need.
-    let openSections = { issues: false, data: false, fc: false, pilots: false, sweep: false, map: false, kml: false, xref: false, metrics: false, surveys: false };
+    let openSections = { issues: false, data: false, fc: false, pilots: false, sweep: false, map: false, cov: false, kml: false, xref: false, metrics: false, surveys: false };
     // v0.25 (#257): 🚩 Fleet Issues front door. AIM Issues owns the engine +
     // panel (one copy of the merge/Slack/role rules); we ask it for a summary
     // and open it over tab-local DOM events on `document` (NOT the
@@ -4400,7 +4412,7 @@
             dotData = [];
             pinsKey = null;
             setupGeomBySite = {};
-            ovSvg = null; ovSetupsG = null; ovKmlG = null; ovXrefG = null; ovPinsG = null; ovMap = null;
+            ovSvg = null; ovSetupsG = null; ovKmlG = null; ovXrefG = null; ovCovG = null; ovPinsG = null; ovMap = null;
             engReset(baseEng); engReset(faaEng);
             landingMapRef = null;
             return;
@@ -6239,6 +6251,584 @@
     }
 
     // ==================================================================
+    // 📡 COVERAGE (#285, v0.67) — radius circles on the landing map + the
+    // "what fits inside one circle" questions behind a radar-site decision:
+    //   · footprint of the picked sites (span, convex hull, smallest
+    //     enclosing circle, summed site extents / FFZ acreage)
+    //   · ⭕ circles of any diameter — drag the centre dot / the edge square,
+    //     live count of the sites inside (fully / partially)
+    //   · 🧠 Best spot: the centre that covers the MOST sites at a diameter
+    //     (exact: every disc centre + every pairwise disc intersection is a
+    //     candidate; the deepest cell of the arrangement has one of those
+    //     as a vertex)
+    //   · 🗂 Plan all: greedy repeat of 🧠 → how many circles cover every site
+    //   · 📏 two-click distance ruler
+    // Geometry source: the Site Watch snapshot bbox index (nbIndex) → each
+    // site = centre + enclosing radius (half the bbox diagonal). Sites with
+    // no snapshot fall back to the /sites/ centre with radius 0 and are
+    // flagged. No foreign Leaflet layers — raw SVG in our overlay pane;
+    // the map 'click' is only consumed in pick mode.
+    // ==================================================================
+    const KEY_COV = 'aim-ft-cov' + ENV_SUFFIX;
+    const COV_M_PER_MI = 1609.344;
+    const COV_PALETTE = ['#ff5fa2', '#5fd3ff', '#ffd25f', '#9fff5f', '#c58fff', '#ff9f5f', '#5fffd9', '#ff5f5f'];
+    const COV_PLAN_CAP = 60;
+    let covState = loadJson(KEY_COV, null);
+    if (!covState || !Array.isArray(covState.circles)) covState = { circles: [], seq: 1, opts: {} };
+    covState.opts = Object.assign({ scope: 'picked', rule: 'full', prodOnly: false, diaMi: 20, drawFootprint: true, showLabels: true }, covState.opts || {});
+    covState.circles = covState.circles.filter(c => c && isFinite(c.lat) && isFinite(c.lng) && isFinite(c.diaMi) && c.diaMi > 0);
+    if (!isFinite(covState.seq)) covState.seq = covState.circles.length + 1;
+    function covSave() { gmSet(KEY_COV, JSON.stringify(covState)); }
+    let covPick = null;        // { kind: 'circle' | 'ruler', pts: [] } — the next map click(s) are ours
+    let covRuler = null;       // { a, b, m } last two-click measurement
+    let covPlan = null;        // last 🧠 / 🗂 result
+    let covPlanRunning = false;
+    let covPlanSeq = 0;
+    let covOpenCircle = null;  // circle id whose site list is expanded
+    let ovCovG = null;         // our <g> in the overlay (created in ensureOverlay)
+    const covById = id => covState.circles.find(c => c.id === id);
+
+    // ---- site roster: every site in scope as a disc { lat, lng, rM } ----
+    function covRoster() {
+        const o = covState.opts;
+        const out = { sites: [], unlocated: [], scope: o.scope, pickedEmpty: false, snapshotN: 0 };
+        if (!rawSites) return out;
+        let ids = Object.keys(rawSites);
+        if (o.scope === 'picked') {
+            if (fdSelected.size) ids = ids.filter(id => fdSelected.has(id));
+            else out.pickedEmpty = true;   // nothing picked → every site, said out loud in the panel
+        }
+        ids.forEach(id => {
+            if (ftIgnore[id]) return;
+            const st = siteStatus(id);
+            if (o.prodOnly && st && st !== 'Production') return;
+            const b = nbIndex.bboxes[id];
+            let lat, lng, rM = 0, src = 'center';
+            if (b && !b.empty && isFinite(b.minLat)) {
+                lat = (b.minLat + b.maxLat) / 2;
+                lng = (b.minLng + b.maxLng) / 2;
+                rM = fcDistM({ lat: b.minLat, lng: b.minLng }, { lat: b.maxLat, lng: b.maxLng }) / 2;
+                src = 'snapshot';
+                out.snapshotN++;
+            } else {
+                const c = siteEntryCenter(rawSites[id].raw);
+                if (!c) { out.unlocated.push(id); return; }
+                lat = c.lat; lng = c.lng;
+                src = b && b.empty ? 'empty' : 'center';
+            }
+            out.sites.push({ id, name: siteName(id), lat, lng, rM, src, box: (b && !b.empty && isFinite(b.minLat)) ? b : null });
+        });
+        return out;
+    }
+    // 'in' = counts under the current rule, 'partial' = touches the circle but not fully inside
+    function covInside(site, c, R, rule) {
+        const d = fcDistM(site, c);
+        if (rule === 'center' ? d <= R : d + site.rM <= R) return 'in';
+        if (d - site.rM <= R) return 'partial';
+        return null;
+    }
+    function covCircleCounts(c, roster) {
+        const R = c.diaMi * COV_M_PER_MI / 2;
+        const rule = covState.opts.rule;
+        const inside = [], partial = [];
+        roster.sites.forEach(s => { const k = covInside(s, c, R, rule); if (k === 'in') inside.push(s); else if (k === 'partial') partial.push(s); });
+        return { inside, partial };
+    }
+
+    // ---- footprint: hull / span / enclosing circle of the whole roster ----
+    function covConvexHull(xy) {   // Andrew monotone chain → CCW hull
+        const pts = xy.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+        if (pts.length < 3) return pts;
+        const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+        const lower = [];
+        for (const p of pts) { while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop(); lower.push(p); }
+        const upper = [];
+        for (let i = pts.length - 1; i >= 0; i--) { const p = pts[i]; while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop(); upper.push(p); }
+        upper.pop(); lower.pop();
+        return lower.concat(upper);
+    }
+    function covSitePoints(sites) {   // every bbox corner (or the centre) of every site
+        const pts = [];
+        sites.forEach(s => {
+            if (s.box) pts.push({ lat: s.box.minLat, lng: s.box.minLng }, { lat: s.box.minLat, lng: s.box.maxLng }, { lat: s.box.maxLat, lng: s.box.maxLng }, { lat: s.box.maxLat, lng: s.box.minLng });
+            else pts.push({ lat: s.lat, lng: s.lng });
+        });
+        return pts;
+    }
+    function covFootprint(roster) {
+        const pts = covSitePoints(roster.sites);
+        if (!pts.length) return null;
+        const lat0 = pts.reduce((s, p) => s + p.lat, 0) / pts.length;
+        const mLat = 111320, mLng = 111320 * Math.cos(lat0 * Math.PI / 180) || 1e-9;
+        const hullXY = covConvexHull(pts.map(p => ({ x: p.lng * mLng, y: p.lat * mLat })));
+        let a = 0;
+        for (let i = 0; i < hullXY.length; i++) { const p = hullXY[i], q = hullXY[(i + 1) % hullXY.length]; a += p.x * q.y - q.x * p.y; }
+        const hull = hullXY.map(p => ({ lat: p.y / mLat, lng: p.x / mLng }));
+        const bb = ptsBbox(pts.map(p => [p.lat, p.lng]));
+        const spanEW = fcDistM({ lat: lat0, lng: bb.minLng }, { lat: lat0, lng: bb.maxLng });
+        const spanNS = fcDistM({ lat: bb.minLat, lng: bb.minLng }, { lat: bb.maxLat, lng: bb.minLng });
+        const mec = kxEnclosingCircle(pts);
+        let extentM2 = 0;   // sum of per-site bbox areas (snapshot sites only)
+        roster.sites.forEach(s => {
+            if (!s.box) return;
+            extentM2 += fcDistM({ lat: s.box.minLat, lng: s.box.minLng }, { lat: s.box.minLat, lng: s.box.maxLng })
+                * fcDistM({ lat: s.box.minLat, lng: s.box.minLng }, { lat: s.box.maxLat, lng: s.box.minLng });
+        });
+        let ffzAcres = 0, ffzN = 0;
+        roster.sites.forEach(s => { const m = mtIndex.sites[s.id] && mtIndex.sites[s.id].s; if (m && typeof m.ffzAcres === 'number') { ffzAcres += m.ffzAcres; ffzN++; } });
+        return { n: roster.sites.length, hull, hullM2: Math.abs(a) / 2, bb, spanEW, spanNS, mec, extentM2, ffzAcres, ffzN };
+    }
+    const covSqMi = m2 => (m2 / (COV_M_PER_MI * COV_M_PER_MI)).toFixed(1);
+    const covLL = (lat, lng) => `${Number(lat).toFixed(5)}, ${Number(lng).toFixed(5)}`;
+    function covFootprintReport() {
+        const roster = covRoster();
+        const fp = covFootprint(roster);
+        if (!fp) return 'no located sites in scope';
+        const o = covState.opts;
+        return [
+            `AIM Fleet Tools v${SCRIPT_VERSION} · coverage footprint · ${new Date().toISOString()} · ${ENV_LABEL}`,
+            `scope: ${o.scope === 'picked' && !roster.pickedEmpty ? 'picked sites' : 'all sites'}${o.prodOnly ? ' (Production only)' : ''} · ${fp.n} site(s) · ${roster.snapshotN} with snapshot extents · ${roster.unlocated.length} unlocated`,
+            `span: ${fmtMi(fp.spanEW)} E–W × ${fmtMi(fp.spanNS)} N–S`,
+            `convex hull: ${covSqMi(fp.hullM2)} sq mi`,
+            `smallest enclosing circle: Ø ${(fp.mec.radiusM * 2 / COV_M_PER_MI).toFixed(2)} mi at ${covLL(fp.mec.lat, fp.mec.lng)}`,
+            `site extents (bbox sum): ${covSqMi(fp.extentM2)} sq mi`,
+            fp.ffzN ? `FFZ area (Fleet Metrics, ${fp.ffzN} site(s)): ${fp.ffzAcres.toFixed(0)} ac = ${(fp.ffzAcres / 640).toFixed(2)} sq mi` : 'FFZ area: build Fleet Metrics first',
+            '',
+            'sites:',
+        ].concat(roster.sites.map(s => `  ${s.name} (${s.id}) · ${covLL(s.lat, s.lng)} · extent radius ${fmtMi(s.rM)}${s.src !== 'snapshot' ? ' · centre-only' : ''}`)).join('\n');
+    }
+
+    // ---- 🧠 best single circle: maximise sites covered at radius R ----
+    // Each site is a disc (centre, rM). Covering it FULLY means the circle
+    // centre lies within e = R − rM of the site centre; the 'center' rule
+    // uses e = R. The optimum lies in the deepest cell of the arrangement of
+    // those effective discs, which always has a vertex at a disc centre or
+    // at an intersection of two disc boundaries → finite candidate set.
+    async function covBestCircle(sites, R, rule, alive) {
+        const eff = sites.map(s => ({ s, e: R - (rule === 'full' ? s.rM : 0) })).filter(x => x.e >= 0);
+        if (!eff.length) return null;
+        const lat0 = eff.reduce((a, x) => a + x.s.lat, 0) / eff.length;
+        const mLat = 111320, mLng = 111320 * Math.cos(lat0 * Math.PI / 180) || 1e-9;
+        const P = eff.map(x => ({ x: x.s.lng * mLng, y: x.s.lat * mLat, e: x.e, s: x.s }));
+        const cands = P.map(p => ({ x: p.x, y: p.y }));
+        for (let i = 0; i < P.length; i++) {
+            for (let j = i + 1; j < P.length; j++) {
+                const a = P[i], b = P[j];
+                const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy);
+                if (d > a.e + b.e || d < 1e-6 || d < Math.abs(a.e - b.e)) continue;   // apart, or one inside the other (its centre is already a candidate)
+                const l = (a.e * a.e - b.e * b.e + d * d) / (2 * d);
+                const h = Math.sqrt(Math.max(0, a.e * a.e - l * l));
+                const mx = a.x + l * dx / d, my = a.y + l * dy / d;
+                cands.push({ x: mx + h * dy / d, y: my - h * dx / d });
+                if (h > 0) cands.push({ x: mx - h * dy / d, y: my + h * dx / d });
+            }
+            if (i % 50 === 0) { await ftYield(); if (!alive()) return null; }
+        }
+        let best = null;
+        for (let k = 0; k < cands.length; k++) {
+            const c = cands[k];
+            let n = 0, spread = 0;
+            const ids = [];
+            for (let i = 0; i < P.length; i++) {
+                const p = P[i];
+                const d = Math.hypot(p.x - c.x, p.y - c.y);
+                if (d <= p.e + 0.5) { n++; spread += p.e > 0 ? d / p.e : 0; ids.push(p.s); }
+            }
+            if (!best || n > best.n || (n === best.n && spread < best.spread)) best = { n, spread, c, sites: ids };
+            if (k % 2000 === 1999) { await ftYield(); if (!alive()) return null; }
+        }
+        if (!best || !best.n) return null;
+        // Re-centre on the covered set when the smallest circle around it still
+        // fits in R — the candidate vertex sits on the EDGE of the feasible
+        // region, the enclosing-circle centre sits in the middle of it.
+        let lat = best.c.y / mLat, lng = best.c.x / mLng;
+        const pts = rule === 'full' ? covSitePoints(best.sites) : best.sites.map(s => ({ lat: s.lat, lng: s.lng }));
+        const mec = kxEnclosingCircle(pts);
+        if (mec && mec.radiusM <= R) { lat = mec.lat; lng = mec.lng; }
+        return { lat, lng, count: best.n, ids: best.sites.map(s => s.id), names: best.sites.map(s => s.name), cands: cands.length };
+    }
+    async function covRunPlan(mode) {
+        if (covPlanRunning) return;
+        const roster = covRoster();
+        const o = covState.opts;
+        const R = o.diaMi * COV_M_PER_MI / 2;
+        if (!roster.sites.length) { setStatus('coverage: no located sites in scope'); return; }
+        covPlanRunning = true;
+        const seq = ++covPlanSeq;
+        const alive = () => seq === covPlanSeq;
+        renderPanel();
+        const t0 = Date.now();
+        try {
+            const tooBig = o.rule === 'full' ? roster.sites.filter(s => s.rM > R) : [];
+            let remaining = roster.sites.filter(s => !(o.rule === 'full' && s.rM > R));
+            const total = roster.sites.length;
+            const steps = [];
+            let cum = 0;
+            while (remaining.length && steps.length < (mode === 'best' ? 1 : COV_PLAN_CAP)) {
+                setStatus(`coverage ${mode === 'best' ? 'best spot' : 'plan'}… circle ${steps.length + 1}, ${remaining.length} site(s) left`);
+                const best = await covBestCircle(remaining, R, o.rule, alive);
+                if (!alive()) return;
+                if (!best || !best.count) break;
+                cum += best.count;
+                steps.push({ k: steps.length + 1, lat: best.lat, lng: best.lng, ids: best.ids, names: best.names, count: best.count, cum, pct: total ? cum / total * 100 : 0 });
+                const got = new Set(best.ids);
+                remaining = remaining.filter(s => !got.has(s.id));
+            }
+            covPlan = { mode, diaMi: o.diaMi, rule: o.rule, scope: o.scope === 'picked' && !roster.pickedEmpty ? 'picked' : 'all', total, steps, leftover: remaining, tooBig, at: Date.now(), capped: remaining.length > 0 && steps.length >= COV_PLAN_CAP };
+            const secs = ((Date.now() - t0) / 1000).toFixed(1);
+            if (mode === 'best') setStatus(steps.length ? `best Ø ${o.diaMi} mi spot covers ${steps[0].count} of ${total} site(s) (${secs} s)` : `no site fits a Ø ${o.diaMi} mi circle under the "${o.rule}" rule`);
+            else setStatus(`${steps.length} circle(s) of Ø ${o.diaMi} mi cover ${cum} of ${total} site(s)${tooBig.length ? ` · ${tooBig.length} site(s) larger than the circle` : ''} (${secs} s)`);
+            console.log(`${TAG} coverage ${mode}:`, covPlan);
+        } catch (e) {
+            console.warn(`${TAG} coverage plan failed:`, e);
+            setStatus(`coverage plan failed — ${String(e && e.message || e)}`);
+        } finally {
+            if (alive()) { covPlanRunning = false; renderPanel(); requestRender(); }
+        }
+    }
+    function covPlanReport() {
+        const p = covPlan;
+        if (!p) return '';
+        const out = [
+            `AIM Fleet Tools v${SCRIPT_VERSION} · coverage ${p.mode === 'best' ? 'best spot' : 'plan'} · ${new Date(p.at).toISOString()} · ${ENV_LABEL}`,
+            `circle Ø ${p.diaMi} mi · rule: ${p.rule === 'full' ? 'site fully inside' : 'site centre inside'} · scope: ${p.scope} sites (${p.total})`,
+            `result: ${p.steps.length} circle(s) cover ${p.steps.length ? p.steps[p.steps.length - 1].cum : 0} of ${p.total} site(s)`,
+            '',
+            '#\tsites\tcum\tcum %\tcentre lat\tcentre lng\tsite names',
+        ];
+        p.steps.forEach(s => out.push(`${s.k}\t${s.count}\t${s.cum}\t${s.pct.toFixed(1)}%\t${s.lat.toFixed(5)}\t${s.lng.toFixed(5)}\t${s.names.join(' | ')}`));
+        if (p.tooBig.length) out.push('', `larger than the circle (never coverable under "fully inside"): ${p.tooBig.map(s => `${s.name} (extent Ø ${fmtMi(s.rM * 2)})`).join(', ')}`);
+        if (p.leftover.length) out.push('', `not covered: ${p.leftover.map(s => s.name).join(', ')}`);
+        return out.join('\n');
+    }
+
+    // ---- circles: add / fly / pick mode / drag ----
+    function covAddCircle(lat, lng, diaMi, label, quiet) {
+        const id = `c${covState.seq++}`;
+        const c = { id, lat, lng, diaMi: Math.round(diaMi * 100) / 100, label: label || `Circle ${covState.circles.length + 1}`, color: COV_PALETTE[(covState.seq - 2) % COV_PALETTE.length] };
+        covState.circles.push(c);
+        if (!quiet) { covSave(); renderPanel(); requestRender(); setStatus(`${c.label} added — drag its centre dot on the map, the square on its edge resizes`); }
+        return c;
+    }
+    function covCircleBbox(lat, lng, diaMi) {
+        const R = diaMi * COV_M_PER_MI / 2;
+        const dLat = R / 111320, dLng = R / (111320 * Math.cos(lat * Math.PI / 180) || 1e-9);
+        return { minLat: lat - dLat, maxLat: lat + dLat, minLng: lng - dLng, maxLng: lng + dLng };
+    }
+    function covMapCenter() {
+        const map = getLandingMap();
+        try { if (map && typeof map.getCenter === 'function') { const c = map.getCenter(); if (c && isFinite(c.lat)) return { lat: c.lat, lng: c.lng }; } }
+        catch (e) { console.warn(`${TAG} map.getCenter failed:`, e); }
+        return null;
+    }
+    function covSetPick(kind) {
+        covPick = kind ? { kind, pts: [] } : null;
+        const map = getLandingMap();
+        try { const el = map && map.getContainer(); if (el) el.style.cursor = covPick ? 'crosshair' : ''; } catch (e) {}
+        if (covPick) setStatus(kind === 'circle' ? 'click the map where the circle centre goes (✕ cancel in the panel)' : 'click the first point, then the second');
+        renderPanel();
+        requestRender();
+    }
+    function covOnMapClick(ev) {
+        if (!covPick) return;
+        const ll = ev && ev.latlng;
+        if (!ll || !isFinite(ll.lat)) { console.warn(`${TAG} map click without latlng`, ev); return; }
+        try {
+            if (covPick.kind === 'circle') {
+                covPick = null;
+                try { ev.target.getContainer().style.cursor = ''; } catch (e) {}
+                covAddCircle(ll.lat, ll.lng, covState.opts.diaMi);
+                return;
+            }
+            covPick.pts.push({ lat: ll.lat, lng: ll.lng });
+            if (covPick.pts.length >= 2) {
+                const [a, b] = covPick.pts;
+                covRuler = { a, b, m: fcDistM(a, b) };
+                covPick = null;
+                try { ev.target.getContainer().style.cursor = ''; } catch (e) {}
+                setStatus(`📏 ${fmtMi(covRuler.m)}`);
+            } else setStatus('now click the second point');
+            renderPanel();
+            requestRender();
+        } catch (e) { console.warn(`${TAG} map pick failed:`, e); }
+    }
+    function covClientToLatLng(map, clientX, clientY) {
+        try {
+            const r = map.getContainer().getBoundingClientRect();
+            const pt = [clientX - r.left, clientY - r.top];
+            if (typeof map.containerPointToLatLng === 'function') return map.containerPointToLatLng(pt);
+            return map.layerPointToLatLng(map.containerPointToLayerPoint(pt));
+        } catch (e) { console.warn(`${TAG} containerPointToLatLng failed:`, e); return null; }
+    }
+    // Handles live inside the pointer-events:none overlay with their own
+    // pointer-events:auto. Stop every start event so Leaflet's Draggable on
+    // the container never sees the press (else the map pans with the dot).
+    function covBindOverlay(svg, map) {
+        const isHandle = ev => ev.target && ev.target.closest && ev.target.closest('[data-cov-handle],[data-cov-edge]');
+        ['mousedown', 'touchstart', 'click', 'dblclick', 'contextmenu'].forEach(t => svg.addEventListener(t, ev => { if (isHandle(ev)) ev.stopPropagation(); }, false));
+        svg.addEventListener('pointerdown', (ev) => {
+            const h = isHandle(ev);
+            if (!h) return;
+            ev.stopPropagation();
+            ev.preventDefault();
+            const edge = h.hasAttribute('data-cov-edge');
+            const c = covById(h.getAttribute(edge ? 'data-cov-edge' : 'data-cov-handle'));
+            if (!c) return;
+            let moved = false;
+            const onMove = (mv) => {
+                const ll = covClientToLatLng(map, mv.clientX, mv.clientY);
+                if (!ll) return;
+                moved = true;
+                if (edge) c.diaMi = Math.max(0.1, Math.round(fcDistM(c, { lat: ll.lat, lng: ll.lng }) * 2 / COV_M_PER_MI * 100) / 100);
+                else { c.lat = ll.lat; c.lng = ll.lng; }
+                requestRender();
+            };
+            const onUp = () => {
+                document.removeEventListener('pointermove', onMove);
+                document.removeEventListener('pointerup', onUp);
+                if (moved) { covSave(); renderPanel(); }
+                requestRender();
+            };
+            document.addEventListener('pointermove', onMove);
+            document.addEventListener('pointerup', onUp);
+        }, false);
+    }
+
+    // ---- overlay drawing (called from renderOverlay) ----
+    function covRenderSvg(map, P) {
+        const o = covState.opts;
+        const roster = covRoster();
+        let h = '';
+        const txt = (lat, lng, s, color) => { const xy = map.latLngToLayerPoint([lat, lng]); return `<text x="${xy.x}" y="${xy.y - 8}" text-anchor="middle" font-size="11" font-family="monospace" font-weight="bold" fill="${color}" stroke="#10141c" stroke-width="3" paint-order="stroke">${escapeHtml(s)}</text>`; };
+        const ring = (lat, lng, rM) => { let d = ''; kxCircleRing(lat, lng, rM, 96).forEach((pt, i) => { d += (i ? 'L' : 'M') + P(pt.lat, pt.lng); }); return d + 'Z'; };
+        const north = (lat, rM) => lat + rM / 111320;
+        if (o.drawFootprint && roster.sites.length > 1) {
+            const fp = covFootprint(roster);
+            if (fp && fp.hull.length >= 2) {
+                let d = '';
+                fp.hull.forEach((pt, i) => { d += (i ? 'L' : 'M') + P(pt.lat, pt.lng); });
+                h += `<path d="${d}Z" fill="#7adfe6" fill-opacity="0.04" stroke="#7adfe6" stroke-width="1.5" stroke-dasharray="6 4" stroke-opacity="0.7"/>`;
+                h += `<path d="${ring(fp.mec.lat, fp.mec.lng, fp.mec.radiusM)}" fill="none" stroke="#7adfe6" stroke-width="1.5" stroke-dasharray="2 5" stroke-opacity="0.8"/>`;
+                h += txt(north(fp.mec.lat, fp.mec.radiusM), fp.mec.lng, `${fp.n} sites · Ø ${(fp.mec.radiusM * 2 / COV_M_PER_MI).toFixed(1)} mi`, '#7adfe6');
+            }
+        }
+        if (covPlan && covPlan.steps.length) {
+            const R = covPlan.diaMi * COV_M_PER_MI / 2;
+            covPlan.steps.forEach(s => {
+                h += `<path d="${ring(s.lat, s.lng, R)}" fill="#ffffff" fill-opacity="0.05" stroke="#ffffff" stroke-width="2" stroke-dasharray="8 5" stroke-opacity="0.8"/>`;
+                h += txt(north(s.lat, R), s.lng, `${covPlan.mode === 'best' ? '🧠 best' : '#' + s.k} · ${s.count} sites`, '#ffffff');
+            });
+        }
+        covState.circles.forEach(c => {
+            const R = c.diaMi * COV_M_PER_MI / 2;
+            const cnt = covCircleCounts(c, roster);
+            h += `<path d="${ring(c.lat, c.lng, R)}" fill="${c.color}" fill-opacity="0.07" stroke="${c.color}" stroke-width="2.5" stroke-opacity="0.9"/>`;
+            if (covOpenCircle === c.id) {
+                cnt.inside.forEach(s => { const xy = map.latLngToLayerPoint([s.lat, s.lng]); h += `<circle cx="${xy.x}" cy="${xy.y}" r="4" fill="#5fff5f" stroke="#10141c" stroke-width="1"/>`; });
+                cnt.partial.forEach(s => { const xy = map.latLngToLayerPoint([s.lat, s.lng]); h += `<circle cx="${xy.x}" cy="${xy.y}" r="4" fill="#ffa030" stroke="#10141c" stroke-width="1"/>`; });
+            }
+            const cxy = map.latLngToLayerPoint([c.lat, c.lng]);
+            const exy = map.latLngToLayerPoint([c.lat, c.lng + R / (111320 * Math.cos(c.lat * Math.PI / 180) || 1e-9)]);
+            h += `<circle cx="${cxy.x}" cy="${cxy.y}" r="7" fill="${c.color}" stroke="#10141c" stroke-width="2" data-cov-handle="${c.id}" style="pointer-events:auto;cursor:grab"><title>${escapeHtml(c.label)} — drag to move</title></circle>`;
+            h += `<rect x="${exy.x - 5}" y="${exy.y - 5}" width="10" height="10" fill="${c.color}" stroke="#10141c" stroke-width="2" data-cov-edge="${c.id}" style="pointer-events:auto;cursor:ew-resize"><title>drag to resize</title></rect>`;
+            if (o.showLabels) h += txt(north(c.lat, R), c.lng, `${c.label} · Ø ${c.diaMi} mi · ${cnt.inside.length} inside${cnt.partial.length ? ` · ${cnt.partial.length} partial` : ''}`, c.color);
+        });
+        const dot = (p, color) => { const xy = map.latLngToLayerPoint([p.lat, p.lng]); return `<circle cx="${xy.x}" cy="${xy.y}" r="4" fill="${color}" stroke="#10141c" stroke-width="1.5"/>`; };
+        if (covRuler) {
+            const a = map.latLngToLayerPoint([covRuler.a.lat, covRuler.a.lng]), b = map.latLngToLayerPoint([covRuler.b.lat, covRuler.b.lng]);
+            h += `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="#ffd25f" stroke-width="2.5" stroke-dasharray="4 3"/>` + dot(covRuler.a, '#ffd25f') + dot(covRuler.b, '#ffd25f');
+            h += txt((covRuler.a.lat + covRuler.b.lat) / 2, (covRuler.a.lng + covRuler.b.lng) / 2, `📏 ${fmtMi(covRuler.m)}`, '#ffd25f');
+        }
+        if (covPick && covPick.kind === 'ruler' && covPick.pts.length) h += dot(covPick.pts[0], '#ffd25f');
+        return h;
+    }
+
+    // ---- KML of the circles (Google Earth / sharing) ----
+    function covExportKml() {
+        if (!covState.circles.length) { setStatus('no circles to export'); return; }
+        try {
+            const roster = covRoster();
+            const bgr = hex => { const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || ''); return m ? (m[3] + m[2] + m[1]).toLowerCase() : 'ffffff'; };
+            const stamp = new Date().toISOString().slice(0, 10);
+            const xml = ['<?xml version="1.0" encoding="UTF-8"?>', '<kml xmlns="http://www.opengis.net/kml/2.2">', `<Document><name>AIM coverage circles ${stamp}</name>`,
+                `<description><![CDATA[Generated by AIM Fleet Tools v${SCRIPT_VERSION} · ${stamp} · rule: site ${covState.opts.rule === 'full' ? 'fully inside' : 'centre inside'}]]></description>`];
+            covState.circles.forEach(c => {
+                const R = c.diaMi * COV_M_PER_MI / 2;
+                const cnt = covCircleCounts(c, roster);
+                const col = bgr(c.color);
+                xml.push(`<Placemark><name>${xmlEsc(c.label)} (Ø ${c.diaMi} mi)</name>`
+                    + `<description><![CDATA[Ø ${c.diaMi} mi · centre ${covLL(c.lat, c.lng)}<br>${cnt.inside.length} site(s) inside${cnt.partial.length ? `, ${cnt.partial.length} partial` : ''}<br>${cnt.inside.map(s => xmlEsc(s.name)).join('<br>')}${cnt.partial.length ? '<br><i>partial:</i> ' + cnt.partial.map(s => xmlEsc(s.name)).join(', ') : ''}]]></description>`
+                    + `<Style><LineStyle><color>ff${col}</color><width>3</width></LineStyle><PolyStyle><color>22${col}</color></PolyStyle></Style>`
+                    + `<Polygon><outerBoundaryIs><LinearRing><coordinates>${kxCoords(kxCircleRing(c.lat, c.lng, R, 96))}</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>`);
+                xml.push(`<Placemark><name>${xmlEsc(c.label)} centre</name><Point><coordinates>${c.lng},${c.lat},0</coordinates></Point></Placemark>`);
+            });
+            xml.push('</Document></kml>');
+            fdDownload(new Blob([xml.join('\n')], { type: 'application/vnd.google-earth.kml+xml' }), `AIM-coverage-circles ${stamp} (${covState.circles.length}).kml`);
+            setStatus(`${covState.circles.length} circle(s) exported as KML`);
+        } catch (e) { console.warn(`${TAG} circle KML export failed:`, e); setStatus(`KML export failed — ${e.message}`); }
+    }
+
+    // ---- panel ----
+    function covUpdateIndex() {
+        if (sweepRunning) { setStatus('an index update / sweep is already running'); return; }
+        nbIndex.checkedAt = 0;
+        sweepRunning = true;
+        renderPanel();
+        ensureNbIndex((done, total) => setStatus(`indexing site snapshots… ${done}/${total}`), true)
+            .then(notes => { setStatus(`index updated — ${Object.keys(nbIndex.bboxes).length} site(s)${notes.length ? ' · ' + notes.join(' · ') : ''}`); })
+            .catch(e => { console.warn(`${TAG} index update failed:`, e); setStatus(`index update failed — ${String(e && e.message || e)}`); })
+            .finally(() => { sweepRunning = false; renderPanel(); requestRender(); });
+    }
+    function covSiteList(list, color, title) {
+        if (!list.length) return '';
+        return `<div style="padding:2px 10px 4px 34px;color:#888;line-height:1.6"><span style="color:${color}">${title}</span> `
+            + list.slice().sort((a, b) => a.name.localeCompare(b.name)).map(s => `<span data-ft-link="${s.id}" style="cursor:pointer;color:#ccc;text-decoration:underline dotted" title="Open ${escapeHtml(s.name)}'s site setup (${s.src === 'snapshot' ? 'extent radius ' + fmtMi(s.rM) : 'centre only'})">${escapeHtml(s.name)}</span>`).join(' · ')
+            + '</div>';
+    }
+    function renderCovSection() {
+        if (!openSections.cov) return '';
+        const o = covState.opts;
+        const out = [];
+        const inp = 'background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;padding:1px 4px;';
+        const btn = (cmd, label, title, color, disabled) => `<span data-cov="${cmd}" title="${escapeHtml(title || '')}" style="cursor:${disabled ? 'default' : 'pointer'};color:${disabled ? '#555' : (color || '#7adfe6')};font-weight:bold">${label}</span>`;
+        if (!rawSites) { out.push('<div style="padding:8px 10px;color:#888">Loading your site list… <span data-ft="fd-sites" style="cursor:pointer;color:#7adfe6">⟳ retry</span></div>'); return out.join(''); }
+        const roster = covRoster();
+        const fp = covFootprint(roster);
+        const n = roster.sites.length;
+        out.push('<div style="padding:6px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + `<label>Sites <select data-cov-in="scope" style="${inp}"><option value="picked" ${o.scope === 'picked' ? 'selected' : ''}>picked in Fleet Data (${fdSelected.size})</option><option value="all" ${o.scope === 'all' ? 'selected' : ''}>all my sites</option></select></label>`
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" data-cov-in="prodOnly" ${o.prodOnly ? 'checked' : ''}> Production only</label>`
+            + `<label title="fully = the site's whole setup extent sits inside the circle · centre = only the site centre has to">Count a site when <select data-cov-in="rule" style="${inp}"><option value="full" ${o.rule === 'full' ? 'selected' : ''}>fully inside</option><option value="center" ${o.rule === 'center' ? 'selected' : ''}>centre inside</option></select></label>`
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer" title="Dashed hull + smallest enclosing circle of the sites in scope"><input type="checkbox" data-cov-in="drawFootprint" ${o.drawFootprint ? 'checked' : ''}> draw footprint</label>`
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" data-cov-in="showLabels" ${o.showLabels ? 'checked' : ''}> labels</label>`
+            + '</div>');
+        out.push(`<div style="padding:4px 10px;color:#777;border-bottom:1px solid #222834;">${roster.pickedEmpty ? '<span style="color:#ffa030">nothing picked in Fleet Data → every site</span> · ' : ''}${n} site(s) in scope · extents from the snapshot index for ${roster.snapshotN}`
+            + (roster.snapshotN < n ? ` <span style="color:#ffa030">(${n - roster.snapshotN} centre-only, extent unknown)</span> · ${btn('index', '⟳ update index', 'Fetch the Site Watch snapshot index (same index the Overlap Sweep uses)')}` : '')
+            + (roster.unlocated.length ? ` · <span style="color:#ff6a6a">${roster.unlocated.length} with no location skipped</span>` : '')
+            + '</div>');
+        if (fp) {
+            out.push('<div style="padding:6px 10px;border-bottom:1px solid #222834;line-height:1.7">'
+                + `<b style="color:#7adfe6">Footprint of ${n} site(s)</b> ${btn('fp-fly', '🎯', 'Fit the map to these sites')} ${btn('fp-copy', '📋', 'Copy the footprint numbers + site list')}<br>`
+                + `spans <b>${fmtMi(fp.spanEW)}</b> E–W × <b>${fmtMi(fp.spanNS)}</b> N–S · convex hull <b>${covSqMi(fp.hullM2)} sq mi</b><br>`
+                + `smallest enclosing circle <b>Ø ${(fp.mec.radiusM * 2 / COV_M_PER_MI).toFixed(1)} mi</b> at <span data-cov="copy|${covLL(fp.mec.lat, fp.mec.lng)}" style="cursor:pointer;color:#aaa" title="Click to copy">${covLL(fp.mec.lat, fp.mec.lng)}</span> ${btn('fp-circle', '⭕ add', 'Add that enclosing circle as an editable circle')}<br>`
+                + `site extents (bbox sum) <b>${covSqMi(fp.extentM2)} sq mi</b>${fp.ffzN ? ` · FFZ area <b>${fp.ffzAcres.toFixed(0)} ac</b> = ${(fp.ffzAcres / 640).toFixed(2)} sq mi (${fp.ffzN} site(s) with metrics)` : ' · <span style="color:#666">FFZ acreage needs ▶ Build in Fleet Metrics</span>'}`
+                + '</div>');
+        }
+        const picking = k => covPick && covPick.kind === k;
+        out.push('<div style="padding:6px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + `<label title="Diameter for new circles and for 🧠 / 🗂">Ø <input type="number" data-cov-in="diaMi" value="${o.diaMi}" min="0.1" step="1" style="width:58px;${inp}"> mi</label>`
+            + `<span>${[5, 10, 20, 40].map(d => `<span data-cov="dia-${d}" style="cursor:pointer;color:${o.diaMi === d ? '#7adfe6' : '#777'};margin-right:6px">${d}</span>`).join('')}</span>`
+            + btn('add-center', '➕ at map centre', 'Add a circle at the current map centre')
+            + btn('pick-circle', picking('circle') ? '📍 click the map…' : '📍 place by click', 'The next map click drops a circle there', picking('circle') ? '#ffd25f' : null)
+            + btn('best', covPlanRunning ? '⏳ …' : '🧠 Best spot', 'Find the centre that covers the MOST sites at this diameter', '#5fff5f', covPlanRunning)
+            + btn('plan', covPlanRunning ? '⏳ …' : '🗂 Plan all', 'Greedy: how many circles of this diameter cover every site in scope', '#5fff5f', covPlanRunning)
+            + btn('pick-ruler', picking('ruler') ? `📏 click the ${covPick.pts.length ? '2nd' : '1st'} point…` : '📏 Measure', 'Two map clicks → distance + bearing', picking('ruler') ? '#ffd25f' : null)
+            + (covPick ? btn('pick-cancel', '✕ cancel', 'Leave pick mode', '#ff6a6a') : '')
+            + (covPlanRunning ? btn('plan-abort', '✕ abort', 'Stop the search', '#ff6a6a') : '')
+            + (covState.circles.length ? btn('kml', '📤 KML', 'Download the circles as a KML (Google Earth)') : '')
+            + '</div>');
+        if (covRuler) {
+            const brg = fcBearing(covRuler.a, covRuler.b);
+            out.push(`<div style="padding:4px 10px;border-bottom:1px solid #222834;">📏 <b>${fmtMi(covRuler.m)}</b> · ${Math.round(covRuler.m * FT_PER_M).toLocaleString()} ft · ${(covRuler.m / 1000).toFixed(2)} km · bearing ${Math.round(brg)}° ${fcCompass(brg)} ${btn('ruler-clear', '✕', 'Clear the measurement', '#888')}</div>`);
+        }
+        if (covPlan) {
+            const p = covPlan;
+            const covered = p.steps.length ? p.steps[p.steps.length - 1].cum : 0;
+            out.push('<div style="padding:6px 10px;border-bottom:1px solid #222834;line-height:1.7">'
+                + `<b style="color:#5fff5f">${p.mode === 'best' ? '🧠 Best spot' : '🗂 Plan'}</b> <span style="color:#888">Ø ${p.diaMi} mi · ${p.rule === 'full' ? 'fully inside' : 'centre inside'} · ${p.scope} sites</span> — `
+                + (p.steps.length ? `<b>${p.steps.length}</b> circle(s) cover <b>${covered}</b> of ${p.total} (${(p.total ? covered / p.total * 100 : 0).toFixed(0)}%)` : 'nothing fits')
+                + ` ${btn('plan-add', p.mode === 'best' ? '➕ add as circle' : '➕ add all as circles', 'Turn the dashed result into editable circles', '#5fff5f')} ${btn('plan-copy', '📋', 'Copy the plan as a table')} ${btn('plan-clear', '✕', 'Clear the result', '#888')}`
+                + (p.capped ? ` <span style="color:#ffa030">stopped at ${COV_PLAN_CAP} circles</span>` : '')
+                + '</div>');
+            if (p.steps.length) {
+                out.push('<div style="padding:0 10px 6px 10px"><table style="border-collapse:collapse;width:100%"><tr style="color:#888"><th style="text-align:left">#</th><th style="text-align:right">sites</th><th style="text-align:right">cum</th><th style="text-align:right">cum %</th><th style="text-align:left;padding-left:8px">centre</th><th></th></tr>'
+                    + p.steps.map((s, i) => `<tr class="aim-ft-row" data-cov="plan-open|${i}" style="cursor:pointer"><td>${s.k}</td><td style="text-align:right">${s.count}</td><td style="text-align:right">${s.cum}</td><td style="text-align:right">${s.pct.toFixed(0)}%</td><td style="padding-left:8px;color:#aaa">${covLL(s.lat, s.lng)}</td><td>${btn(`plan-fly|${i}`, '🎯', 'Fit the map to this circle')}</td></tr>`
+                        + (covOpenCircle === `plan${i}` ? `<tr><td colspan="6">${covSiteList(s.ids.map((id, j) => ({ id, name: s.names[j], src: 'snapshot', rM: 0 })), '#5fff5f', 'inside:')}</td></tr>` : '')).join('')
+                    + '</table></div>');
+            }
+            if (p.tooBig.length) out.push(`<div style="padding:0 10px 4px 10px;color:#ffa030">${p.tooBig.length} site(s) are wider than the circle under "fully inside": ${p.tooBig.map(s => `${escapeHtml(s.name)} (Ø ${fmtMi(s.rM * 2)})`).join(', ')} — switch the rule to "centre inside" or widen Ø</div>`);
+            if (p.leftover.length && p.mode !== 'best') out.push(`<div style="padding:0 10px 6px 10px;color:#888">not covered: ${p.leftover.map(s => escapeHtml(s.name)).join(', ')}</div>`);
+        }
+        if (!covState.circles.length) out.push('<div style="padding:6px 10px;color:#666">No circles yet — ➕ / 📍 adds one at the Ø above. On the map: drag the centre dot to move it, the square on its edge to resize.</div>');
+        covState.circles.forEach(c => {
+            const cnt = covCircleCounts(c, roster);
+            const open = covOpenCircle === c.id;
+            out.push('<div class="aim-ft-row" style="padding:4px 10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #1c222c;">'
+                + `<input type="color" data-cov-in="color|${c.id}" value="${c.color}" style="width:22px;height:18px;padding:0;border:0;background:none;cursor:pointer" title="Colour">`
+                + `<input data-cov-in="label|${c.id}" value="${escapeHtml(c.label)}" style="width:100px;${inp}" title="Label (Enter / click away to apply)">`
+                + `<label>Ø <input type="number" data-cov-in="dia|${c.id}" value="${c.diaMi}" min="0.1" step="1" style="width:58px;${inp}"> mi</label>`
+                + `<span data-cov="copy|${covLL(c.lat, c.lng)}" style="cursor:pointer;color:#888" title="Click to copy">${covLL(c.lat, c.lng)}</span>`
+                + `<span data-cov="open|${c.id}" style="cursor:pointer;color:${open ? '#7adfe6' : '#ddd'}" title="List the sites inside (dots on the map while open)"><b>${cnt.inside.length}</b> inside${cnt.partial.length ? ` · <span style="color:#ffa030">${cnt.partial.length} partial</span>` : ''} ${open ? '▾' : '▸'}</span>`
+                + `<span style="margin-left:auto">${btn(`fly|${c.id}`, '🎯', 'Fit the map to this circle')} ${btn(`center|${c.id}`, '⌖', 'Move this circle to the map centre')} ${btn(`del|${c.id}`, '✕', 'Remove', '#ff6a6a')}</span>`
+                + '</div>');
+            if (open) out.push(covSiteList(cnt.inside, '#5fff5f', 'inside:') + covSiteList(cnt.partial, '#ffa030', 'partial:'));
+        });
+        if (covState.circles.length) out.push(`<div style="padding:4px 10px;color:#666;border-top:1px solid #222834">${btn('clear-all', '🗑 remove all circles', '', '#888')}</div>`);
+        return out.join('');
+    }
+    function covCommand(cmd) {
+        const i = cmd.indexOf('|');
+        const op = i > 0 ? cmd.slice(0, i) : cmd;
+        const arg = i > 0 ? cmd.slice(i + 1) : '';
+        const o = covState.opts;
+        try {
+            if (op.startsWith('dia-')) { const v = Number(op.slice(4)); if (isFinite(v) && v > 0) { o.diaMi = v; covSave(); renderPanel(); } return; }
+            switch (op) {
+                case 'index': covUpdateIndex(); return;
+                case 'add-center': { const c = covMapCenter(); if (!c) { setStatus('landing map not found yet — pan it once, then retry'); return; } covAddCircle(c.lat, c.lng, o.diaMi); return; }
+                case 'pick-circle': covSetPick(covPick && covPick.kind === 'circle' ? null : 'circle'); return;
+                case 'pick-ruler': covSetPick(covPick && covPick.kind === 'ruler' ? null : 'ruler'); return;
+                case 'pick-cancel': covSetPick(null); return;
+                case 'ruler-clear': covRuler = null; renderPanel(); requestRender(); return;
+                case 'best': covRunPlan('best'); return;
+                case 'plan': covRunPlan('all'); return;
+                case 'plan-abort': covPlanSeq++; covPlanRunning = false; setStatus('coverage search aborted'); renderPanel(); return;
+                case 'plan-add': {
+                    if (!covPlan) return;
+                    covPlan.steps.forEach(s => covAddCircle(s.lat, s.lng, covPlan.diaMi, covPlan.mode === 'best' ? `Best Ø${covPlan.diaMi}` : `Radar ${s.k}`, true));
+                    const n = covPlan.steps.length;
+                    covPlan = null; covSave(); renderPanel(); requestRender();
+                    setStatus(`${n} circle(s) added — drag / resize them on the map`);
+                    return;
+                }
+                case 'plan-copy': copyText(covPlanReport(), 'coverage plan copied'); return;
+                case 'plan-clear': covPlan = null; renderPanel(); requestRender(); return;
+                case 'plan-fly': { const s = covPlan && covPlan.steps[Number(arg)]; if (s) flyToBbox(covCircleBbox(s.lat, s.lng, covPlan.diaMi)); return; }
+                case 'plan-open': covOpenCircle = covOpenCircle === `plan${arg}` ? null : `plan${arg}`; renderPanel(); return;
+                case 'fp-fly': { const fp = covFootprint(covRoster()); if (fp) flyToBbox(fp.bb); return; }
+                case 'fp-circle': { const fp = covFootprint(covRoster()); if (fp) covAddCircle(fp.mec.lat, fp.mec.lng, Math.ceil(fp.mec.radiusM * 2 / COV_M_PER_MI * 10) / 10, 'Enclosing'); return; }
+                case 'fp-copy': copyText(covFootprintReport(), 'footprint copied'); return;
+                case 'kml': covExportKml(); return;
+                case 'open': covOpenCircle = covOpenCircle === arg ? null : arg; renderPanel(); requestRender(); return;
+                case 'fly': { const c = covById(arg); if (c) flyToBbox(covCircleBbox(c.lat, c.lng, c.diaMi)); return; }
+                case 'center': { const c = covById(arg); const m = covMapCenter(); if (c && m) { c.lat = m.lat; c.lng = m.lng; covSave(); renderPanel(); requestRender(); } return; }
+                case 'del': covState.circles = covState.circles.filter(c => c.id !== arg); if (covOpenCircle === arg) covOpenCircle = null; covSave(); renderPanel(); requestRender(); return;
+                case 'clear-all': covState.circles = []; covOpenCircle = null; covSave(); renderPanel(); requestRender(); setStatus('all circles removed'); return;
+                case 'copy': copyText(arg, `${arg} copied`); return;
+                default: console.warn(`${TAG} unknown coverage command:`, cmd);
+            }
+        } catch (e) { console.warn(`${TAG} coverage command ${cmd} failed:`, e); setStatus(`coverage: ${String(e && e.message || e)}`); }
+    }
+    function covInput(t) {
+        const [k, id] = t.getAttribute('data-cov-in').split('|');
+        const o = covState.opts;
+        if (id) {
+            const c = covById(id);
+            if (!c) return;
+            if (k === 'dia') { const v = Number(t.value); if (!isFinite(v) || v <= 0) return; c.diaMi = v; }
+            else if (k === 'label') c.label = t.value.trim().slice(0, 40) || c.label;
+            else if (k === 'color') c.color = t.value;
+        } else if (k === 'diaMi') { const v = Number(t.value); if (!isFinite(v) || v <= 0) return; o.diaMi = v; }
+        else if (k === 'scope') o.scope = t.value === 'all' ? 'all' : 'picked';
+        else if (k === 'rule') o.rule = t.value === 'center' ? 'center' : 'full';
+        else if (k === 'prodOnly' || k === 'drawFootprint' || k === 'showLabels') o[k] = !!t.checked;
+        else return;
+        covSave();
+        renderPanel();
+        requestRender();
+    }
+
+    // ==================================================================
     // 📄 Airspace Surveys (#280, v0.66) — reads airspace/index.json, which
     // Site Setup Tools' Airspace Validator writes on every saved survey run
     // (creation / six-month / manual). One row per surveyed site with its
@@ -6431,6 +7021,8 @@
             + renderSweepSection()
             + sectionHeader('map', '🗺', 'Map', 'basemap + airspace chart')
             + renderMapSection()
+            + sectionHeader('cov', '📡', 'Coverage', `${covState.circles.length} circle(s) · Ø ${covState.opts.diaMi} mi · footprint of the picked sites`)
+            + renderCovSection()
             + sectionHeader('kml', '📎', 'KML Layers', `${kmlLayers.length} layer(s)`)
             + renderKmlSection()
             + sectionHeader('xref', '📐', 'Cross-reference', 'KML vs sites / KML vs KML')
@@ -6506,6 +7098,8 @@
                 if (puFl && !ev.target.closest('a')) { const [sid, mid] = puFl.getAttribute('data-pu-flight').split('/'); window.open(`${location.origin}/#/site/${sid}/control-panel/past-mission/${mid}`, '_blank', 'noopener'); return; }
                 const fcRow = ev.target.closest('[data-fc-flight]');
                 if (fcRow && !ev.target.closest('a')) { const mid = Number(fcRow.getAttribute('data-fc-flight')); fcOpenFlight = fcOpenFlight === mid ? null : mid; fdRenderKeepScroll(); return; }
+                const covAct = ev.target.closest('[data-cov]');
+                if (covAct) { covCommand(covAct.getAttribute('data-cov')); return; }
                 const act = ev.target.closest('[data-ft]');
                 if (act) {
                     const cmd = act.getAttribute('data-ft');
@@ -6720,6 +7314,7 @@
             });
             panelEl.addEventListener('change', (ev) => {
                 const t = ev.target;
+                if (t.hasAttribute && t.hasAttribute('data-cov-in')) { covInput(t); return; }
                 if (t.hasAttribute && t.hasAttribute('data-fd-pick')) { const v = String(t.value || ''); const i = v.indexOf(':'); if (i > 0) fdApplyPick(v.slice(0, i), Number(v.slice(i + 1))); return; }
                 if (t.hasAttribute && t.hasAttribute('data-fd-site')) { const id = t.getAttribute('data-fd-site'); if (t.checked) fdSelected.add(id); else fdSelected.delete(id); fdRenderKeepScroll(); return; }
                 // 6. client select-all acts on the SHOWN rows of that client (what the header count shows)
