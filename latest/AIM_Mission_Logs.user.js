@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Logs
 // @namespace    http://tampermonkey.net/
-// @version      0.1
+// @version      0.2
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Logs.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Logs.user.js
-// @description  Pull a mission's log archives straight from the Mission Dashboard (no download → unzip → hunt) and extract what matters: LTE link health (modem registration, TCP/ping checks, signal, cell handovers, RTK-stream gaps), mission event timeline (stages, aborts, go-to-base), DAA aircraft with closest approach to the drone, warnings/errors by process. v0.1 (#286): POC on percepto.app/dashboard — 🔎 per mission row + floating launcher; engine (fetch → gunzip → untar → extractors) is self-contained for the later Fleet Tools site/date sweep.
+// @description  v0.2: row 🔎 anchors on the dashboard's own Get App Logs control (not table structure); prefill from the FILTER box or the single visible row only; server reply shown when a mission has no archive. Pull a mission's log archives straight from the Mission Dashboard (no download → unzip → hunt) and extract what matters: LTE link health (modem registration, TCP/ping checks, signal, cell handovers, RTK-stream gaps), mission event timeline (stages, aborts, go-to-base), DAA aircraft with closest approach to the drone, warnings/errors by process. v0.1 (#286): POC on percepto.app/dashboard — 🔎 per mission row + floating launcher; engine (fetch → gunzip → untar → extractors) is self-contained for the later Fleet Tools site/date sweep.
 // @author       Payden
 // @match        *://percepto.app/dashboard*
 // @match        *://qa.percepto.app/dashboard*
@@ -33,7 +33,7 @@
     if (window !== window.top) return;
 
     const SCRIPT_ID = 'aim-mission-logs';
-    const SCRIPT_VERSION = '0.1';
+    const SCRIPT_VERSION = '0.2';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const IS_QA = location.hostname === 'qa.percepto.app' || location.hostname.endsWith('.qa.percepto.app');
 
@@ -532,12 +532,24 @@
         else { const guess = guessFilterMissionId(); if (guess && !p.querySelector('#aim-ml-id').value) p.querySelector('#aim-ml-id').value = guess; }
     }
 
+    // Prefill order: (1) the dashboard's own mission filter box = the input right before the FILTER
+    // button, (2) the only row's ID when the table shows exactly one mission. Never a random input.
     function guessFilterMissionId() {
         try {
-            const inputs = Array.from(document.querySelectorAll('input[type="text"],input:not([type])'));
-            const hit = inputs.find(i => /^\d{4,8}$/.test((i.value || '').trim()) && !i.closest('#aim-ml-panel'));
-            return hit ? hit.value.trim() : null;
-        } catch (e) { return null; }
+            const filterBtn = Array.from(document.querySelectorAll('button, [role="button"], a')).find(b => /^\s*filter\s*$/i.test(b.textContent || '') && !b.closest('#aim-ml-panel'));
+            if (filterBtn) {
+                let scope = filterBtn.parentElement;
+                for (let i = 0; i < 4 && scope; i++, scope = scope.parentElement) {
+                    const inputs = Array.from(scope.querySelectorAll('input')).filter(x => x.compareDocumentPosition(filterBtn) & Node.DOCUMENT_POSITION_FOLLOWING);
+                    const hit = inputs.reverse().find(x => /^\d{4,9}$/.test((x.value || '').trim()));
+                    if (hit) return hit.value.trim();
+                    if (inputs.length) break;
+                }
+            }
+            const rows = findMissionRows();
+            if (rows.length === 1) return rows[0].id;
+        } catch (e) { console.warn(`${TAG} prefill guess failed`, e); }
+        return null;
     }
 
     async function analyzeMission(missionId) {
@@ -550,7 +562,7 @@
             const extra = {};
             try { extra.mission = await mlGetJson(`/missions/${missionId}/`); } catch (e) { console.warn(`${TAG} /missions/${missionId}/ failed`, e); extra.missionError = String(e.message || e); }
             const appLink = await mlGetJson(`/missions/${missionId}/logs/new_app_log/`);
-            if (!appLink || !appLink.download_link) throw new Error('no download_link in new_app_log response (no app log for this mission?)');
+            if (!appLink || !appLink.download_link) throw new Error(`mission ${missionId}: no app-log archive on the server — new_app_log replied ${JSON.stringify(appLink).slice(0, 160)}`);
             setStatus(`Downloading app logs…`);
             const appBytes = await mlFetchBinary(appLink.download_link, (l, t) => setStatus(`Downloading app logs… ${fmtMB(l)}${t ? ' / ' + fmtMB(t) : ''}`));
             setStatus(`Unpacking app logs (${fmtMB(appBytes.length)} compressed)…`);
@@ -698,28 +710,49 @@
         document.body.appendChild(b);
     }
 
-    // Per-row 🔎: locate the ID column via the header text, add a button in the LOGS DOWNLOAD cell.
-    function injectRowButtons() {
-        const tables = Array.from(document.querySelectorAll('table'));
-        for (const table of tables) {
-            const headCells = Array.from(table.querySelectorAll('thead th, thead td, tr:first-child th'));
-            if (!headCells.length) continue;
-            const idIdx = headCells.findIndex(c => (c.textContent || '').trim().toUpperCase() === 'ID');
-            const logIdx = headCells.findIndex(c => /LOGS DOWNLOAD/i.test(c.textContent || ''));
-            if (idIdx < 0 || logIdx < 0) continue;
-            const rows = Array.from(table.querySelectorAll('tbody tr'));
-            for (const tr of rows) {
-                if (tr.hasAttribute('data-aim-ml')) continue;
-                const cells = tr.children;
-                if (cells.length <= Math.max(idIdx, logIdx)) continue;
-                const id = (cells[idIdx].textContent || '').trim();
-                if (!/^\d{3,9}$/.test(id)) continue;
-                tr.setAttribute('data-aim-ml', id);
-                const btn = document.createElement('span');
-                btn.className = 'aim-ml-row-btn'; btn.textContent = '🔎 AIM'; btn.title = `Analyze logs for mission ${id} in place`;
-                btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openPanel(id); analyzeMission(id); });
-                cells[logIdx].appendChild(btn);
+    // Mission rows are anchored on the dashboard's own "Get App Logs" control (one per mission), not on
+    // <table>/<thead> structure, which the dashboard may not use. The mission ID comes from the row's
+    // ID column when a header row is found, else from the largest ≥6-digit number in the row (mission
+    // IDs are 6+ digits; mission-group IDs are shorter).
+    function findMissionRows() {
+        const out = [];
+        const anchors = Array.from(document.querySelectorAll('button, a, span, div, td')).filter(el => el.children.length === 0 && /^\s*Get App Logs\s*$/i.test(el.textContent || ''));
+        for (const a of anchors) {
+            let row = a.closest('tr, [role="row"]');
+            if (!row) { row = a.parentElement; for (let i = 0; i < 6 && row; i++) { const txt = row.textContent || ''; if (/\d{5,}/.test(txt) && /Get App Logs/.test(txt) && (txt.match(/\d{5,}/g) || []).length >= 1 && row.children.length >= 4) break; row = row.parentElement; } }
+            if (!row) continue;
+            let id = null;
+            const table = row.closest('table');
+            const headRow = table && Array.from(table.querySelectorAll('tr')).find(tr => Array.from(tr.children).some(c => (c.textContent || '').trim().toUpperCase() === 'ID'));
+            if (headRow && row.children.length === headRow.children.length) {
+                const idx = Array.from(headRow.children).findIndex(c => (c.textContent || '').trim().toUpperCase() === 'ID');
+                const v = (row.children[idx].textContent || '').trim();
+                if (/^\d{3,9}$/.test(v)) id = v;
             }
+            if (!id) {
+                const nums = (row.textContent.match(/\b\d{6,9}\b/g) || []).map(Number);
+                if (nums.length) id = String(Math.max(...nums));
+            }
+            if (id) out.push({ id, row, anchor: a });
+        }
+        return out;
+    }
+
+    let lastRowLog = '';
+    function injectRowButtons() {
+        const rows = findMissionRows();
+        const sig = rows.map(r => r.id).join(',');
+        if (sig !== lastRowLog) { lastRowLog = sig; console.log(`${TAG} mission rows detected: ${rows.length}${rows.length ? ' → ' + sig : ' (no "Get App Logs" controls on the page yet)'}`); }
+        for (const { id, row, anchor } of rows) {
+            if (row.getAttribute('data-aim-ml') === id) continue;
+            row.setAttribute('data-aim-ml', id);
+            row.querySelectorAll('.aim-ml-row-btn').forEach(b => b.remove());
+            const btn = document.createElement('span');
+            btn.className = 'aim-ml-row-btn'; btn.textContent = '🔎 AIM'; btn.title = `AIM Mission Logs — analyze mission ${id} in place`;
+            btn.setAttribute('data-aim-ml-id', id);
+            btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openPanel(id); analyzeMission(id); }, true);
+            const host = anchor.closest('td, [role="cell"]') || anchor.parentElement;
+            host.appendChild(btn);
         }
     }
 

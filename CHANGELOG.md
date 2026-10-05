@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-10-05 — AIM Mission Logs latest v0.2: first live-run fixes (dev only, #286)
+
+- The row 🔎 now anchors on the dashboard's own **Get App Logs** control instead of table structure, so it appears regardless of how the All Missions grid is built. The console logs which mission IDs were detected.
+- The launcher prefills the mission ID **only** from the dashboard's FILTER box or from a single visible row. v0.1 could pick up an unrelated numeric field (it analyzed 238553 instead of 237893).
+- When a mission has no app-log archive, the error now shows the server's reply instead of guessing.
+
 ## 2026-10-05 — NEW: AIM Mission Logs latest v0.1 — read a mission's logs in place from the Mission Dashboard (dev only, #286)
 
 - **🔎 on every row of the All Missions table** (and a floating 🔎 Logs launcher with a mission-ID box). One click fetches the mission's app-log archive (and the DAA archive) **into memory**, unpacks it, and shows the answers instead of a 30 MB download to unzip and grep.
