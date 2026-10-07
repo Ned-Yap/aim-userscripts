@@ -1,3 +1,7 @@
+## 2026-10-07
+
+- **Site Setup Tools (latest) v4.321** — 🕸 SpiderWeb generator reads reviewer-approved **avoid zones** (`avoid/<siteID>.geojson` in the data repo, exported by the Ortho Scanner review sheet: third-party pads, residences, commercial lots, buffered by the leg standoff) and treats them like NFZ rings — hubs, leg candidates and the final gate refuse to cross them. No file / no token = web built as before, logged. (#262)
+
 # Changelog
 
 Human-readable summary of what shipped in each update. Tampermonkey auto-update prompts coworkers to install new versions; this file is what they read to know *what changed*.

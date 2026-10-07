@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.320
+// @version      4.321
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.320';
+    const SCRIPT_VERSION = '4.321';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -11243,6 +11243,26 @@
             if (!bases.length) { showToast('No base found — need a type-8 base or a GM named "…base…"', 'rgba(255,96,96,0.55)'); return; }
             logL(`site ${sid}: ${assetsAll.length} assets (${skippedEmpty.length} EMPTY skipped), ${bases.length} base(s): ${bases.map(b => b.name).join(', ')} · web ${th.webDensity} · hub ratio ${th.hubGainRatio} · leg ratio ${th.legGainRatio} · base-leg ratio ${th.baseLegGainRatio}`);
             const nfzRings = ents.filter(e => e.type === 4 && entityCoords(e) && entityCoords(e).length >= 3).map(e => entityCoords(e));
+            // Avoid zones (#262 Ortho Scanner, user 2026-10-07): reviewer-approved third-party pads / properties, exported by
+            // the scan review sheet as avoid/<siteID>.geojson in the data repo, already buffered by the leg standoff.
+            // They ride the NFZ-ring path: hubs, leg candidates and the final gate all refuse to cross them.
+            const avoidRings = [];
+            try {
+                if (!elevSharedToken) logL('avoid zones: no GitHub token - skipped (set the PAT in the Control Panel to use them)');
+                else {
+                    const gj = await ghGetJson(`avoid/${sid}.geojson`);
+                    if (!gj) logL(`avoid zones: none on file (avoid/${sid}.geojson)`);
+                    else {
+                        (gj.features || []).forEach(f => {
+                            const g = f && f.geometry; if (!g) return;
+                            const polys = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
+                            polys.forEach(poly => { const ring = (poly[0] || []).map(c => ({ lat: +c[1], lng: +c[0] })); if (ring.length >= 4) avoidRings.push(ring.slice(0, -1)); });
+                        });
+                        logL(`avoid zones: ${avoidRings.length} loaded from avoid/${sid}.geojson (${(gj.features || []).length} feature(s), by ${gj.reviewer || '?'} ${gj.exported || ''})`);
+                    }
+                }
+            } catch (e) { logL(`avoid zones: load failed - ${e && e.message} (web built WITHOUT them)`); }
+            const blockRings = nfzRings.concat(avoidRings);
             // Local projector at the asset centroid.
             let cLat = 0, cLng = 0, cN = 0;
             assets.forEach(a => { const c = ringCentroid(entityCoords(a)); cLat += c.lat; cLng += c.lng; cN++; });
@@ -11271,7 +11291,7 @@
             for (let round = 0; round < 6; round++) {
                 const use = assets.filter(a => !excluded.has(a.id));
                 showToast(`🕸 SpiderWeb: building web (${use.length} assets)…`);
-                result = await swbBuildWeb(use, bases, nfzRings, th, { toXY, toLL, gXY, gAt, logL });
+                result = await swbBuildWeb(use, bases, blockRings, th, { toXY, toLL, gXY, gAt, logL });
                 // Battery gate: web distance from base to each zone (real leg lengths).
                 const over = result.zones.filter(z => !z.dropped && (z.rtbM === null || z.rtbM * M_TO_FT > limitFt));
                 if (!over.length) break;
