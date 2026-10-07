@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.146
+// @version      34.147
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.146';
+    const SCRIPT_VERSION = '34.147';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -580,6 +580,8 @@
                 { id: 'cell.towers', label: 'Tower dots', type: 'boolean', default: false },
                 { id: 'cell.towersCarrierOnly', label: 'Only the selected carrier', type: 'boolean', default: false },
                 { id: 'cell-towers-key', label: 'Set / clear OpenCelliD API key…', type: 'button', action: 'cell-towers-key' },
+                { id: 'cell-towers-gm', label: '📌 Towers → General Markers (via Site Setup Tools)', type: 'button', action: 'cell-towers-gm' },
+                { id: 'cell-towers-kml', label: '📤 Download towers as KML', type: 'button', action: 'cell-towers-kml' },
             ],
         },
         {
@@ -2425,6 +2427,12 @@
     const TOWER_MAX_REQ = 160;     // hard stop per fetch (daily budget is 1,000)
     const TOWER_CONCURRENCY = 3;
     const TOWER_CLUSTER_M = 150;   // sectors of one site are estimated within this of each other (3-decimal rounding ≈ 110 m)
+    const TOWER_RADIOS = ['LTE', 'NR'];   // v34.147: one pass per radio — 5G NR cells are the "is this site 5G?" signal
+    // FAA Digital Obstacle File (same FAA AIS org as the Airspace Validator) — registered structures with
+    // height; matched to an OpenCelliD site within TOWER_DOF_MATCH_M gives "tower 310 ft AGL, lit".
+    const TOWER_DOF_URL = 'https://services6.arcgis.com/ssFJjBXIUyZDrSYZ/arcgis/rest/services/Digital_Obstacle_File/FeatureServer/0/query';
+    const TOWER_DOF_MATCH_M = 250;
+    const TOWER_GM_CHANNEL = 'AIM_GM_STAMP';   // v34.147: hand points to Site Setup Tools' GM Stamper (preview → confirm → create-only rails)
     // MCC-MNC → carrier (US). Verizon 311-48x; AT&T 310-410/280/030/150/170/380/560/680, 311-180; T-Mobile 310-260/160/200…250/270/310/490/660/800, 311-490/660/870/880, 312-250/530 (ex-Sprint); DISH 313-340.
     const TOWER_CARRIER = (() => {
         const m = {};
@@ -2456,7 +2464,9 @@
                 best.n++; best.samples += c.samples; best.range = Math.max(best.range, c.range);
                 best.lat += (c.lat - best.lat) / best.n; best.lng += (c.lng - best.lng) / best.n;   // running mean
                 if (c.radio && !best.radios.includes(c.radio)) best.radios.push(c.radio);
-            } else towers.push({ lat: c.lat, lng: c.lng, carrier: c.carrier, mnc: c.mnc, n: 1, samples: c.samples, range: c.range, radios: c.radio ? [c.radio] : [] });
+                if (c.radio === 'NR') best.nNr++; else best.nLte++;
+                if (best.ids.length < 12 && c.cellid != null) best.ids.push(`${c.radio || ''}:${c.cellid}`);
+            } else towers.push({ lat: c.lat, lng: c.lng, carrier: c.carrier, mcc: c.mcc, mnc: c.mnc, n: 1, nLte: c.radio === 'NR' ? 0 : 1, nNr: c.radio === 'NR' ? 1 : 0, samples: c.samples, range: c.range, radios: c.radio ? [c.radio] : [], ids: c.cellid != null ? [`${c.radio || ''}:${c.cellid}`] : [] });
         });
         towers.forEach((t, i) => { t.key = `${t.carrier}|${i}`; });
         return towers;
@@ -2489,8 +2499,9 @@
             return;
         }
         const cells = [];
-        let reqs = 0, capped = false, pending = tiles.length, aborted = false, inFlight = 0;
-        const queue = tiles.slice();
+        const jobs = []; TOWER_RADIOS.forEach(radio => tiles.forEach(tile => jobs.push({ tile, radio })));
+        let reqs = 0, capped = false, pending = jobs.length, aborted = false, inFlight = 0;
+        const queue = jobs.slice();
         const fail = (msg, body) => {
             if (aborted) return;
             aborted = true;
@@ -2501,18 +2512,21 @@
         const finalize = () => {
             if (aborted) return;
             const towers = towerCluster(cells);
-            _towers = { siteID: sid, envKey, towers, loading: false, failed: false, at: Date.now(), capped, source: 'live' };
-            try { gmSet(gmEnvKey(TOWER_CACHE_PREFIX + sid), JSON.stringify({ envKey, at: _towers.at, towers, capped })); } catch (e) {}
-            console.log(`${TAG} towers: ${cells.length} OpenCelliD LTE cells → ${towers.length} towers for site ${sid} (${reqs} requests, ${tiles.length} tiles)${capped ? ' — request budget hit, some towers may be missing' : ''}`);
-            if (capped) showKMLToast(`📡 Tower fetch stopped at ${TOWER_MAX_REQ} requests — some towers may be missing; shrink "Fetch around site"`, 5000);
-            if (isActive) applyCellCoverage();
+            towerDofMatch(env, towers, (matched) => {
+                _towers = { siteID: sid, envKey, towers, loading: false, failed: false, at: Date.now(), capped, source: 'live' };
+                try { gmSet(gmEnvKey(TOWER_CACHE_PREFIX + sid), JSON.stringify({ envKey, at: _towers.at, towers, capped })); } catch (e) {}
+                console.log(`${TAG} towers: ${cells.length} OpenCelliD cells (LTE+NR) → ${towers.length} sites for site ${sid} (${reqs} requests, ${tiles.length} tiles × ${TOWER_RADIOS.length} radios, ${matched} with FAA obstacle height)${capped ? ' — request budget hit, some towers may be missing' : ''}`);
+                if (capped) showKMLToast(`📡 Tower fetch stopped at ${TOWER_MAX_REQ} requests — some towers may be missing; shrink "Fetch around site"`, 5000);
+                if (isActive) applyCellCoverage();
+            });
         };
         const tileDone = () => { inFlight--; pending--; if (pending <= 0) finalize(); else runNext(); };
-        const page = (tile, offset) => {
+        const page = (job, offset) => {
             if (aborted) return;
             if (reqs >= TOWER_MAX_REQ) { capped = true; tileDone(); return; }
             reqs++;
-            const params = new URLSearchParams({ key, BBOX: `${tile.s.toFixed(5)},${tile.w.toFixed(5)},${tile.n.toFixed(5)},${tile.e.toFixed(5)}`, format: 'json', limit: String(TOWER_LIMIT), offset: String(offset), radio: 'LTE' });
+            const tile = job.tile;
+            const params = new URLSearchParams({ key, BBOX: `${tile.s.toFixed(5)},${tile.w.toFixed(5)},${tile.n.toFixed(5)},${tile.e.toFixed(5)}`, format: 'json', limit: String(TOWER_LIMIT), offset: String(offset), radio: job.radio });
             GM_xmlhttpRequest({
                 method: 'GET', url: `${TOWER_URL}?${params.toString()}`, timeout: 30000,
                 onload: (resp) => {
@@ -2528,9 +2542,9 @@
                         const lat = Number(a.lat), lng = Number(a.lon);
                         if (!isFinite(lat) || !isFinite(lng)) return;
                         const mcc = Number(a.mcc), mnc = Number(a.mnc);
-                        cells.push({ lat, lng, mcc, mnc, carrier: towerCarrierOf(mcc, mnc), radio: a.radio || '', samples: Number(a.samples) || 0, range: Number(a.range) || 0 });
+                        cells.push({ lat, lng, mcc, mnc, carrier: towerCarrierOf(mcc, mnc), radio: a.radio || job.radio, samples: Number(a.samples) || 0, range: Number(a.range) || 0, cellid: a.cellid != null ? a.cellid : null });
                     });
-                    if (list.length >= TOWER_LIMIT) page(tile, offset + TOWER_LIMIT); else tileDone();
+                    if (list.length >= TOWER_LIMIT) page(job, offset + TOWER_LIMIT); else tileDone();
                 },
                 onerror: () => fail('network error'),
                 ontimeout: () => fail('timed out'),
@@ -2538,6 +2552,92 @@
         };
         const runNext = () => { while (!aborted && inFlight < TOWER_CONCURRENCY && queue.length) { inFlight++; page(queue.shift(), 0); } };
         runNext();
+    }
+    // FAA DOF structures in the envelope → nearest-within-250 m match per OpenCelliD site. Never blocks:
+    // on any failure the towers are kept without heights and the callback still fires.
+    function towerDofMatch(env, towers, done) {
+        let finished = false;
+        const finish = (n) => { if (!finished) { finished = true; done(n || 0); } };
+        if (!towers.length || typeof GM_xmlhttpRequest !== 'function') { finish(0); return; }
+        const params = new URLSearchParams({
+            f: 'json', geometry: `${env.w},${env.s},${env.e},${env.n}`, geometryType: 'esriGeometryEnvelope', inSR: '4326',
+            spatialRel: 'esriSpatialRelIntersects', outFields: 'OAS_Number,Type_Code,AGL,AMSL,Lighting,Lat_DD,Long_DD', returnGeometry: 'false',
+        });
+        const timer = setTimeout(() => { console.warn(`${TAG} towers: FAA DOF lookup slow — drawing without heights`); finish(0); }, 12000);
+        GM_xmlhttpRequest({
+            method: 'GET', url: `${TOWER_DOF_URL}?${params.toString()}`, timeout: 20000,
+            onload: (resp) => {
+                clearTimeout(timer);
+                let json = null;
+                try { json = JSON.parse(resp.responseText); } catch (e) {}
+                if (!json || json.error || !Array.isArray(json.features)) { console.warn(`${TAG} towers: FAA DOF query failed`, resp.status, json && json.error); finish(0); return; }
+                // Only antenna-type structures count as a cell tower match — a refinery STACK or a
+                // transmission-line T-L TWR 100 m from a cell site is not the cell tower (Port Arthur DOF: 73 stacks, 38 towers).
+                const obs = json.features.map(f => f.attributes || {}).map(a => ({ lat: Number(a.Lat_DD), lng: Number(a.Long_DD), type: String(a.Type_Code || '').trim(), agl: Number(a.AGL), amsl: Number(a.AMSL), lit: String(a.Lighting || '').trim(), oas: a.OAS_Number }))
+                    .filter(o => isFinite(o.lat) && isFinite(o.lng) && /TOWER|POLE|ANT|MONOPOLE|^TWR/i.test(o.type) && !/T-L/i.test(o.type));
+                let matched = 0;
+                towers.forEach(t => {
+                    let best = null, bestD = TOWER_DOF_MATCH_M;
+                    obs.forEach(o => {
+                        const d = Math.hypot((o.lat - t.lat) * 111320, (o.lng - t.lng) * 111320 * Math.cos(t.lat * Math.PI / 180));
+                        if (d < bestD) { best = o; bestD = d; }
+                    });
+                    if (best) { t.dof = { type: best.type, agl: best.agl, amsl: best.amsl, lit: best.lit, oas: best.oas, distM: Math.round(bestD) }; matched++; }
+                });
+                finish(matched);
+            },
+            onerror: () => { clearTimeout(timer); console.warn(`${TAG} towers: FAA DOF network error`); finish(0); },
+            ontimeout: () => { clearTimeout(timer); finish(0); },
+        });
+    }
+    function towerTechLabel(t) {
+        const has5g = (t.nNr || 0) > 0 || (t.radios || []).includes('NR');
+        const hasLte = (t.nLte || 0) > 0 || (t.radios || []).includes('LTE');
+        return has5g && hasLte ? '4G LTE + 5G' : has5g ? '5G only' : '4G LTE';
+    }
+    function towerName(t, i) { return `${t.carrier} cell site ${i != null ? i + 1 : ''}`.trim(); }
+    function towerNotes(t) {
+        const parts = [`${towerTechLabel(t)} · ${t.n} cell${t.n === 1 ? '' : 's'}`];
+        if (t.range) parts.push(`~${Math.round(t.range)} m range`);
+        if (t.samples) parts.push(`${t.samples} reports`);
+        if (t.dof) parts.push(`FAA ${t.dof.type || 'structure'} ${isFinite(t.dof.agl) ? Math.round(t.dof.agl) + ' ft AGL' : ''}${t.dof.lit && t.dof.lit !== 'N' ? ', lit' : ''}`);
+        parts.push('OpenCelliD (crowd estimate ±100 m)');
+        return parts.join(' · ');
+    }
+    function towersToKml() {
+        const list = towerVisibleList();
+        if (!list.length) { showKMLToast('📡 No towers to export — turn on Tower dots first.', 3500); return; }
+        const sid = getCurrentSiteID() || 'site';
+        const x = (s) => String(s == null ? '' : s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+        const kmlColor = (hex) => { const h = String(hex).replace('#', ''); return `ff${h.slice(4, 6)}${h.slice(2, 4)}${h.slice(0, 2)}`; };
+        const styles = Object.keys(TOWER_COLORS).map(c => `<Style id="c-${c.replace(/[^A-Za-z]/g, '')}"><IconStyle><color>${kmlColor(TOWER_COLORS[c])}</color><scale>0.9</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png</href></Icon></IconStyle></Style>`).join('');
+        const pms = list.map((t, i) => {
+            const hFt = t.dof && isFinite(t.dof.agl) ? t.dof.agl : 0;
+            return `<Placemark><name>${x(towerName(t, i))}</name><styleUrl>#c-${t.carrier.replace(/[^A-Za-z]/g, '')}</styleUrl><description>${x(towerNotes(t))}${t.ids && t.ids.length ? x(` · cells: ${t.ids.join(', ')}`) : ''}</description><Point>${hFt ? '<extrude>1</extrude><altitudeMode>relativeToGround</altitudeMode>' : ''}<coordinates>${t.lng.toFixed(6)},${t.lat.toFixed(6)},${hFt ? (hFt / 3.28084).toFixed(1) : '0'}</coordinates></Point></Placemark>`;
+        }).join('');
+        const kml = `<?xml version="1.0" encoding="UTF-8"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>Cell sites — site ${x(sid)}</name><description>${list.length} cell sites from OpenCelliD (CC BY-SA 4.0, crowd-sourced estimates ±100 m), heights from the FAA Digital Obstacle File where a registered structure sits within ${TOWER_DOF_MATCH_M} m. Generated by AIM Map Styler v${SCRIPT_VERSION}.</description>${styles}${pms}</Document></kml>`;
+        try {
+            const blob = new Blob([kml], { type: 'application/vnd.google-earth.kml+xml' });
+            const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `site-${sid}-cell-towers.kml`;
+            (window.top || window).document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+            showKMLToast(`📤 ${list.length} cell sites exported as KML`, 3000);
+        } catch (e) { console.warn(`${TAG} towers: KML download failed`, e); showKMLToast('📤 KML download failed — see console', 4000); }
+    }
+    // Hand the visible towers to Site Setup Tools' GM Stamper (it previews, confirms, creates with the
+    // create-only rails, verifies, banks Undo). The styler never writes /map_objects/ itself.
+    function towersToGmRequest() {
+        const list = towerVisibleList();
+        const sid = getCurrentSiteID();
+        if (!sid) { showKMLToast('Open a site first.', 2500); return; }
+        if (!list.length) { showKMLToast('📡 No towers to stamp — turn on Tower dots first.', 3500); return; }
+        const points = list.map((t, i) => ({ lat: Number(t.lat.toFixed(6)), lng: Number(t.lng.toFixed(6)), name: towerName(t, i), notes: towerNotes(t), kind: 'cell-tower', carrier: t.carrier, heightFt: t.dof && isFinite(t.dof.agl) ? Math.round(t.dof.agl) : null }));
+        try {
+            const ch = new BroadcastChannel(TOWER_GM_CHANNEL);
+            ch.postMessage({ type: 'GM_STAMP_REQUEST', source: SCRIPT_ID, siteId: String(sid), env: IS_QA ? 'qa' : 'prod', tabId: (() => { try { const pw = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window; return pw.top.__AIM_TAB_ID || null; } catch (e) { return null; } })(), label: `📡 ${points.length} cell site${points.length === 1 ? '' : 's'} (OpenCelliD)`, points });
+            setTimeout(() => { try { ch.close(); } catch (e) {} }, 2000);
+            showKMLToast(`📌 Sent ${points.length} cell site${points.length === 1 ? '' : 's'} to Site Setup Tools — review the preview there (needs Site Setup Tools v4.322+ open on this site).`, 6000);
+            console.log(`${TAG} towers: GM_STAMP_REQUEST sent (${points.length} points) on ${TOWER_GM_CHANNEL}`);
+        } catch (e) { console.warn(`${TAG} towers: GM request failed`, e); showKMLToast('📌 Could not reach Site Setup Tools — see console', 4000); }
     }
     function removeTowerLayers() {
         if (!_towerLayers.length) { _towerKey = ''; return; }
@@ -2554,12 +2654,12 @@
         return all;
     }
     function towerRadius(t) { return 5 + Math.min(6, Math.floor(t.n / 3)); }
-    function towerNear(map, ev) {
-        if (toggleState['cell.towers'] !== true || !_towers.towers) return null;
+    function towerNear(map, ll) {
+        if (toggleState['cell.towers'] !== true || !_towers.towers || !ll) return null;
         const list = towerVisibleList();
         if (!list.length) return null;
-        let cp; try { cp = map.mouseEventToContainerPoint(ev); } catch (e) { return null; }
-        let best = null, bestD = 14;
+        let cp; try { cp = map.latLngToContainerPoint(ll); } catch (e) { return null; }
+        let best = null, bestD = 20;
         list.forEach(t => {
             let p; try { p = map.latLngToContainerPoint([t.lat, t.lng]); } catch (e) { return; }
             const d = Math.hypot(p.x - cp.x, p.y - cp.y) - towerRadius(t);
@@ -2590,7 +2690,8 @@
         removeTowerLayers(); _towerKey = key;
         if (typeof L.circleMarker !== 'function') return;
         list.forEach(t => {
-            const opts = { radius: towerRadius(t), color: '#10161f', weight: 1.2, opacity: 0.9, fill: true, fillColor: TOWER_COLORS[t.carrier] || TOWER_COLORS.Other, fillOpacity: 0.95, interactive: false };
+            const has5g = (t.nNr || 0) > 0 || (t.radios || []).includes('NR');
+            const opts = { radius: towerRadius(t), color: has5g ? '#ffffff' : '#10161f', weight: has5g ? 2.2 : 1.2, opacity: 0.95, fill: true, fillColor: TOWER_COLORS[t.carrier] || TOWER_COLORS.Other, fillOpacity: 0.95, interactive: false };
             if (pane) opts.pane = pane;
             if (renderer) opts.renderer = renderer;
             try { const m = L.circleMarker([t.lat, t.lng], opts); m.addTo(map); _towerLayers.push(m); } catch (e) { console.warn(`${TAG} towers: marker add failed`, e); }
@@ -2800,7 +2901,7 @@
             try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
             if (!ll) return;
             const f = cellHexAt(ll.lat, ll.lng);
-            const tw = towerNear(map, ev);
+            const tw = towerNear(map, ll);
             let badge = document.getElementById(CELL_BADGE_ID);
             if (!f && !tw) { if (badge && badge.style.display !== 'none') badge.style.display = 'none'; _cellHoverId = null; return; }
             const hoverId = `${f ? f.id : ''}|${tw ? tw.key : ''}`;
@@ -2817,7 +2918,10 @@
             badge.style.transform = `translate(${Math.max(0, x)}px, ${Math.max(0, y)}px)`;
             if (_cellHoverId === hoverId && badge.style.display !== 'none') return;   // same hex/tower → position only, no rebuild
             _cellHoverId = hoverId;
-            const towerLine = tw ? `<div style="margin-top:${f ? 4 : 0}px;color:${TOWER_COLORS[tw.carrier] || TOWER_COLORS.Other}">📡 ${tw.carrier} tower · ${tw.n} cell${tw.n === 1 ? '' : 's'}${tw.radios.length ? ' · ' + tw.radios.join('/') : ''}${tw.range ? ` · ~${Math.round(tw.range)} m range` : ''} <span style="color:#8fa3b8">· ${tw.samples} reports · OpenCelliD</span></div>` : '';
+            const towerLine = tw ? `<div style="margin-top:${f ? 5 : 0}px;padding-top:${f ? 4 : 0}px;${f ? 'border-top:1px solid rgba(122,223,230,0.25);' : ''}color:${TOWER_COLORS[tw.carrier] || TOWER_COLORS.Other}">📡 <b>${tw.carrier}</b> cell site · ${towerTechLabel(tw)}</div>`
+                + `<div style="color:#dfe9f0;font-weight:500">${tw.n} cell${tw.n === 1 ? '' : 's'}${(tw.nNr || 0) ? ` (${tw.nLte || 0} LTE · ${tw.nNr} 5G)` : ''}${tw.range ? ` · reach ~${Math.round(tw.range * 3.28084 / 5280 * 10) / 10} mi` : ''} · ${tw.samples} phone reports</div>`
+                + (tw.dof ? `<div style="color:#ffd54f;font-weight:500">FAA: ${tw.dof.type || 'structure'}${isFinite(tw.dof.agl) ? ` ${Math.round(tw.dof.agl)} ft AGL` : ''}${isFinite(tw.dof.amsl) ? ` (${Math.round(tw.dof.amsl)} ft MSL top)` : ''}${tw.dof.lit && tw.dof.lit !== 'N' ? ' · lit' : ''} · ${tw.dof.distM} m from the dot</div>` : '<div style="color:#8fa3b8;font-weight:500">height: not an FAA-registered structure (short mast or rooftop)</div>')
+                + `<div style="color:#8fa3b8;font-weight:500">OpenCelliD crowd estimate (±100 m) · install date not published</div>` : '';
             if (!f) { badge.innerHTML = towerLine; badge.style.display = ''; return; }
             const rows = CELL_CARRIERS.map(c => {
                 const s = f.sig[c.key] || {};
@@ -2851,7 +2955,7 @@
         el.innerHTML = `<div style="color:#7adfe6">📶 FCC modeled signal · ${carLabel} · ${tech.label}</div>`
             + `<div style="margin:3px 0">${CELL_BANDS.map(b => sw(b.color, `${b.word} <span style="opacity:0.7">${b.label}</span>`)).join('')}${sw(CELL_NONE.color, CELL_NONE.word)} <span style="opacity:0.7">dBm</span></div>`
             + `<div style="color:#8fa3b8;font-weight:500">${n} hexes · FCC BDC via Esri Living Atlas · ${_cell.source === 'cache' ? 'cached ' : 'fetched '}${_cell.at ? new Date(_cell.at).toLocaleDateString() : ''} · carrier-modeled ground coverage, not flown LTE</div>`
-            + (toggleState['cell.towers'] === true && _towers.towers ? `<div style="margin-top:3px">📡 ${towerVisibleList().length} towers · ${['Verizon', 'AT&T', 'T-Mobile', 'DISH', 'Other'].map(c => `<span style="display:inline-flex;align-items:center;gap:3px;margin-right:7px"><i style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${TOWER_COLORS[c]}"></i>${c}</span>`).join('')}<span style="color:#8fa3b8;font-weight:500">dot size = cells · OpenCelliD (CC BY-SA 4.0)${_towers.capped ? ' · capped, shrink margin' : ''}</span></div>` : '');
+            + (toggleState['cell.towers'] === true && _towers.towers ? `<div style="margin-top:3px">📡 ${towerVisibleList().length} towers · ${['Verizon', 'AT&T', 'T-Mobile', 'DISH', 'Other'].map(c => `<span style="display:inline-flex;align-items:center;gap:3px;margin-right:7px"><i style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${TOWER_COLORS[c]}"></i>${c}</span>`).join('')}<span style="color:#8fa3b8;font-weight:500">dot size = cells · white ring = 5G · hover a dot for details · OpenCelliD (CC BY-SA 4.0)${_towers.capped ? ' · capped, shrink margin' : ''}</span></div>` : '');
         try { map.getContainer().appendChild(el); } catch (e) {}
     }
     function applyCellCoverage() {
@@ -10362,6 +10466,7 @@
                         'fleetkml-refresh',   // v34.140: view-only overlay
                         'cell-refresh',       // v34.143: view-only overlay
                         'cell-towers-key',    // v34.146: stores a key, view-only
+                        'cell-towers-kml',    // v34.147: download only
                     ];
                     if (!DV_SAFE_ACTIONS.includes(msg.actionId)) {
                         showKMLToast('That tool is Site-Setup-only — Data View is view-only.', 4000);
@@ -10421,6 +10526,8 @@
                 }
                 else if (msg.actionId === 'cell-refresh') cellRefresh();
                 else if (msg.actionId === 'cell-towers-key') towerSetKeyAction();
+                else if (msg.actionId === 'cell-towers-kml') towersToKml();
+                else if (msg.actionId === 'cell-towers-gm') towersToGmRequest();
                 else if (msg.actionId === 'refresh-asset-data') {
                     const sid = getCurrentSiteID();
                     if (sid) { console.log(`${TAG} asset-state: manual refresh requested`); fetchAssetStates(sid, true); }

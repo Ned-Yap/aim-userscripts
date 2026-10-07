@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.321
+// @version      4.322
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.321';
+    const SCRIPT_VERSION = '4.322';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22457,7 +22457,7 @@
         return null;
     }
     // ---- write: one GM via POST /map_objects/ (create-only) ----
-    async function gmtCreateGm(t, ll, sid, srcName) {
+    async function gmtCreateGm(t, ll, sid, srcName, over) {
         if (liteBlockedWrite('stamp GM')) return null;
         const csrf = getCsrfToken();
         if (!csrf) { showToast('No CSRF token yet — make one native save/edit anywhere in Percepto, then retry', 'rgba(255,96,96,0.55)'); return null; }
@@ -22483,9 +22483,9 @@
         b.name = next.name;
         b.site_id = sid;
         b.points = [{ lat: ll.lat, lng: ll.lng }];
-        b.general_marker_type = t.type;
-        b.marker_height = Math.round((t.heightFt / M_TO_FT) * 100) / 100;
-        b.description = t.description || '';
+        b.general_marker_type = (over && over.type && GMT_KNOWN_TYPES.includes(over.type)) ? over.type : t.type;   // v4.322: external per-point type
+        b.marker_height = Math.round(((over && isFinite(over.heightFt) && over.heightFt >= 0 ? over.heightFt : t.heightFt) / M_TO_FT) * 100) / 100;
+        b.description = (over && typeof over.description === 'string' && over.description) ? over.description : (t.description || '');
         b.validated = false;
         b.arcs = [];
         b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
@@ -23127,6 +23127,45 @@
     // ↩ Undo batch deletes everything this run created. ----
     const GMT_BULK_MODAL_ID = 'aim-gmt-bulk-modal';
     const GMT_BULK_NEAR_FT = 50;
+    // v4.322 — external stamp requests (Map Styler's 📡 cell towers, future tools): another AIM script
+    // broadcasts a point list on AIM_GM_STAMP; we open the SAME preview → confirm → create-only → Undo
+    // modal seeded with those points. Tab-local (tabId), site-matched, IFRAME only, Lite-gated.
+    (function setupGmStampBridge() {
+        if (CONTEXT !== 'IFRAME') return;
+        let ch = null;
+        try { ch = new BroadcastChannel('AIM_GM_STAMP'); } catch (e) { return; }
+        ch.onmessage = (ev) => {
+            const m = ev.data || {};
+            if (m.type !== 'GM_STAMP_REQUEST' || !Array.isArray(m.points) || !m.points.length) return;
+            const sid = getCurrentSiteID();
+            if (!sid || (m.siteId != null && String(m.siteId) !== String(sid))) return;
+            if (m.tabId ? m.tabId !== aimTabId() : document.hidden) return;   // tab-local — BroadcastChannel reaches every tab
+            if (LITE) { showToast('GM Stamper needs Full mode (CSM access)', 'rgba(255,180,0,0.6)'); return; }
+            if (!gmtMasterEnabled) { showToast('GM Stamper is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+            console.log(`${TAG} 📌 external stamp request from ${m.source || '?'}: ${m.points.length} point(s)`);
+            try { openGmtBulkModal({ label: String(m.label || `${m.points.length} points from ${m.source || 'another AIM tool'}`), points: m.points.slice(0, 500), source: m.source || 'external' }); }
+            catch (e) { console.warn(`${TAG} 📌 external stamp failed:`, e); showToast('Could not open the GM preview — see console', 'rgba(255,96,96,0.55)'); }
+        };
+    })();
+    function gmtExternalTargets(sid, points) {
+        const bucket = mapObjectsBySite[sid];
+        const all = (bucket && Array.isArray(bucket.entities)) ? bucket.entities : [];
+        const gms = all.filter(e => e && e.type === 19 && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number');
+        const kindType = { 'cell-tower': 'tower', tower: 'tower', hazard: 'hazard', building: 'building', pole: 'pole', general: 'general' };
+        const out = [];
+        points.forEach((p, i) => {
+            const lat = Number(p && p.lat), lng = Number(p && p.lng);
+            if (!isFinite(lat) || !isFinite(lng)) return;
+            const near = gms.find(g => approxMeters(lat, lng, g.coords[0].lat, g.coords[0].lng) * M_TO_FT < GMT_BULK_NEAR_FT);
+            const type = kindType[String(p.kind || p.type || '').toLowerCase()] || null;
+            out.push({
+                ent: { id: `ext${i}`, name: String(p.name || `Point ${i + 1}`).slice(0, 80), type: -1, extLabel: type ? `${type}${p.carrier ? ' · ' + p.carrier : ''}` : 'external point' },
+                ll: { lat, lng }, near: near ? near.name : null, checked: !near,
+                over: { description: typeof p.notes === 'string' ? p.notes.slice(0, 500) : '', type, heightFt: isFinite(Number(p.heightFt)) && Number(p.heightFt) > 0 ? Number(p.heightFt) : null },
+            });
+        });
+        return out;
+    }
     function gmtBulkTargets(sid) {
         const bucket = mapObjectsBySite[sid];
         const all = (bucket && Array.isArray(bucket.entities)) ? bucket.entities : [];
@@ -23154,19 +23193,23 @@
             if (nx) { tg.planned = nx.name; used.add(nx.name.toLowerCase()); }
         });
     }
-    function openGmtBulkModal() {
+    function openGmtBulkModal(ext) {
         if (LITE) { showToast('GM Stamper needs Full mode (CSM access)', 'rgba(255,180,0,0.6)'); return; }
         if (!gmtMasterEnabled) { showToast('GM Stamper is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
         const sid = getCurrentSiteID();
         if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
-        if (!sumPanelState.selectedIds.size) { showToast('Select rows first — e.g. filter Unshielded, then ☑ the assets to mark', 'rgba(255,179,71,0.6)'); return; }
+        if (!ext && !sumPanelState.selectedIds.size) { showToast('Select rows first — e.g. filter Unshielded, then ☑ the assets to mark', 'rgba(255,179,71,0.6)'); return; }
         gmtLoadTemplates();
-        if (!gmt.templates.length) { showToast('No templates yet — make one in 📌 GM Stamper first', 'rgba(255,179,71,0.6)'); gmtOpenPanel(); return; }
-        const targets = gmtBulkTargets(sid);
-        if (!targets.length) { showToast('None of the selected rows has a position (GM rows are skipped)', 'rgba(255,179,71,0.6)'); return; }
+        // v4.322: external requests bring their own names/notes/types — a synthetic "{name}" template
+        // (verbatim names, number only on collision) heads the list; saved templates remain selectable.
+        const extTmpl = ext ? gmtNormalizeTemplate({ id: 'ext-request', label: ext.label || 'From another AIM tool', name: '{name}', type: 'tower', description: '', heightFt: 0, start: 1, pad: 0 }) : null;
+        const templates = ext ? [extTmpl].concat(gmt.templates) : gmt.templates;
+        if (!templates.length) { showToast('No templates yet — make one in 📌 GM Stamper first', 'rgba(255,179,71,0.6)'); gmtOpenPanel(); return; }
+        const targets = ext ? gmtExternalTargets(sid, ext.points) : gmtBulkTargets(sid);
+        if (!targets.length) { showToast(ext ? 'The request had no usable positions' : 'None of the selected rows has a position (GM rows are skipped)', 'rgba(255,179,71,0.6)'); return; }
         const old = document.getElementById(GMT_BULK_MODAL_ID);
         if (old) old.remove();
-        const st = { sid, tmplId: (gmt.templates.some(t => t.id === gmt.activeId) ? gmt.activeId : gmt.templates[0].id), targets, running: false, done: false, created: [], failed: 0, batch: `b${Date.now().toString(36)}` };
+        const st = { sid, templates, tmplId: ext ? extTmpl.id : (gmt.templates.some(t => t.id === gmt.activeId) ? gmt.activeId : gmt.templates[0].id), targets, running: false, done: false, created: [], failed: 0, batch: `b${Date.now().toString(36)}` };
         const wrap = document.createElement('div');
         wrap.id = GMT_BULK_MODAL_ID;
         wrap.style.cssText = 'position:fixed;top:100px;right:80px;width:520px;max-height:76vh;z-index:2147483001;'
@@ -23175,14 +23218,14 @@
             + 'display:flex;flex-direction:column;';
         const btn = (rgb, extra) => `background:rgba(${rgb},0.15);border:1px solid rgb(${rgb});color:rgb(${rgb});border-radius:5px;padding:3px 12px;cursor:pointer;font:inherit;${extra || ''}`;
         const render = () => {
-            const t = gmt.templates.find(x => x.id === st.tmplId) || gmt.templates[0];
+            const t = st.templates.find(x => x.id === st.tmplId) || st.templates[0];
             gmtBulkPlanNames(t, st.sid, st.targets);
             const nChecked = st.targets.filter(x => x.checked).length;
-            const tmplRows = gmt.templates.map(x => `<label style="display:flex;gap:6px;align-items:center;cursor:pointer;margin:2px 0;"><input type="radio" name="aim-gmt-bulk-tmpl" value="${x.id}" ${x.id === t.id ? 'checked' : ''} ${st.running || st.done ? 'disabled' : ''}><span style="width:9px;height:9px;border-radius:50%;background:${GMT_TYPE_COLORS[x.type] || '#c39bd3'};flex:none;"></span><strong>${gmtEsc(x.label)}</strong> <span style="opacity:0.65">· ${gmtEsc(x.type)} · "${gmtEsc(x.name)}"${x.heightFt ? ` · ${x.heightFt} ft` : ''}</span></label>`).join('');
+            const tmplRows = st.templates.map(x => `<label style="display:flex;gap:6px;align-items:center;cursor:pointer;margin:2px 0;"><input type="radio" name="aim-gmt-bulk-tmpl" value="${x.id}" ${x.id === t.id ? 'checked' : ''} ${st.running || st.done ? 'disabled' : ''}><span style="width:9px;height:9px;border-radius:50%;background:${GMT_TYPE_COLORS[x.type] || '#c39bd3'};flex:none;"></span><strong>${gmtEsc(x.label)}</strong> <span style="opacity:0.65">· ${gmtEsc(x.type)} · "${gmtEsc(x.name)}"${x.heightFt ? ` · ${x.heightFt} ft` : ''}</span></label>`).join('');
             const rows = st.targets.map((tg, i) => {
                 const res = st.created.find(c => c.i === i);
                 const state = res ? `<span style="color:#5fff5f">✓ ${gmtEsc(res.name)}</span>` : (tg.failedWhy ? `<span style="color:#ff6060">✗ ${gmtEsc(tg.failedWhy)}</span>` : (tg.checked ? `<span style="color:#9ad">→ ${tg.planned ? gmtEsc(tg.planned) : '(no free name)'}</span>` : ''));
-                return `<label style="display:flex;gap:6px;align-items:baseline;margin:2px 0;cursor:pointer;"><input type="checkbox" data-gmt-bulk-chk="${i}" ${tg.checked ? 'checked' : ''} ${st.running || st.done ? 'disabled' : ''} style="flex:none;position:relative;top:2px;"><span style="flex:1;min-width:0;">${gmtEsc(tg.ent.name || `#${tg.ent.id}`)} <span style="opacity:0.55">(${gmtEsc((TYPE_REG[tg.ent.type] && TYPE_REG[tg.ent.type].long) || `type ${tg.ent.type}`)})</span> ${state}${tg.near ? `<br><span style="color:#ffb020;opacity:0.85;">⚠ existing GM "${gmtEsc(tg.near)}" within ${GMT_BULK_NEAR_FT} ft</span>` : ''}</span></label>`;
+                return `<label style="display:flex;gap:6px;align-items:baseline;margin:2px 0;cursor:pointer;"><input type="checkbox" data-gmt-bulk-chk="${i}" ${tg.checked ? 'checked' : ''} ${st.running || st.done ? 'disabled' : ''} style="flex:none;position:relative;top:2px;"><span style="flex:1;min-width:0;">${gmtEsc(tg.ent.name || `#${tg.ent.id}`)} <span style="opacity:0.55">(${gmtEsc(tg.ent.extLabel || (TYPE_REG[tg.ent.type] && TYPE_REG[tg.ent.type].long) || `type ${tg.ent.type}`)})</span> ${state}${tg.near ? `<br><span style="color:#ffb020;opacity:0.85;">⚠ existing GM "${gmtEsc(tg.near)}" within ${GMT_BULK_NEAR_FT} ft</span>` : ''}</span></label>`;
             }).join('');
             const foot = st.done
                 ? `<span style="margin-right:auto;">${st.created.length} created${st.failed ? `, <span style="color:#ff6060">${st.failed} failed</span>` : ''} — reload the page to see them natively</span>
@@ -23194,12 +23237,12 @@
                        <button data-gmt-bulk-close style="${btn('223,233,240')}">Cancel</button>
                        <button data-gmt-bulk-go ${nChecked ? '' : 'disabled'} style="${btn('95,255,95')}">Create ${nChecked}</button>`);
             wrap.innerHTML = `
-                <div style="padding:8px 12px;border-bottom:1px solid rgba(195,155,211,0.3);color:#c39bd3;font-weight:700;">📌 Bulk → GM — one marker per selected row</div>
+                <div style="padding:8px 12px;border-bottom:1px solid rgba(195,155,211,0.3);color:#c39bd3;font-weight:700;">${ext ? `📌 ${gmtEsc(ext.label)} → General Markers` : '📌 Bulk → GM — one marker per selected row'}</div>
                 <div style="padding:8px 12px;overflow-y:auto;">
                     <div style="color:#7adfe6;font-weight:700;margin-bottom:3px;">Template</div>
                     <div style="margin-bottom:8px;">${tmplRows}</div>
-                    <div style="color:#7adfe6;font-weight:700;margin-bottom:3px;">Targets (${st.targets.length} selected rows with a position)</div>
-                    <div style="opacity:0.65;margin-bottom:4px;">A GM is created at each checked row's centroid via the site-setup API (create-only — the source entity is untouched). Rows with a GM already nearby start unchecked.</div>
+                    <div style="color:#7adfe6;font-weight:700;margin-bottom:3px;">Targets (${st.targets.length} ${ext ? 'points received' : 'selected rows with a position'})</div>
+                    <div style="opacity:0.65;margin-bottom:4px;">${ext ? `Each checked point becomes a GM via the site-setup API (create-only). Names come from ${gmtEsc(ext.source || 'the sender')} (numbered only if a name is taken); notes carry the sender's details; type/height per point when supplied. Points with a GM already nearby start unchecked.` : 'A GM is created at each checked row\'s centroid via the site-setup API (create-only — the source entity is untouched). Rows with a GM already nearby start unchecked.'}</div>
                     ${rows}
                 </div>
                 <div style="padding:8px 12px;border-top:1px solid rgba(195,155,211,0.3);display:flex;gap:8px;justify-content:flex-end;align-items:center;">${foot}</div>`;
@@ -23217,7 +23260,7 @@
             if (e.target.closest('[data-gmt-bulk-abort]')) { st.abort = true; return; }
             if (e.target.closest('[data-gmt-bulk-go]') && !st.running) {
                 if (liteBlockedWrite('bulk stamp GMs')) return;
-                const t = gmt.templates.find(x => x.id === st.tmplId) || gmt.templates[0];
+                const t = st.templates.find(x => x.id === st.tmplId) || st.templates[0];
                 const chosen = st.targets.map((tg, i) => ({ tg, i })).filter(x => x.tg.checked);
                 if (!chosen.length) return;
                 st.running = true; st.abort = false; render();
@@ -23226,7 +23269,7 @@
                 for (const { tg, i } of chosen) {
                     if (st.abort) { tg.failedWhy = 'stopped'; st.failed++; render(); continue; }
                     try {
-                        const res = await gmtCreateGm(t, tg.ll, st.sid, tg.ent.name);
+                        const res = await gmtCreateGm(t, tg.ll, st.sid, tg.ent.name, tg.over);
                         if (res) {
                             const layer = gmtDrawMarker(tg.ll, res.name, t);
                             gmt.placed.push({ id: res.id, name: res.name, lat: tg.ll.lat, lng: tg.ll.lng, siteID: st.sid, layer, batch: st.batch });
@@ -23236,6 +23279,17 @@
                     render();
                 }
                 st.running = false; st.done = true; render();
+                // v4.322: refetch verify — every created id must be present on a fresh /map_objects/ read.
+                if (st.created.length) {
+                    try {
+                        await fetchMapObjects(st.sid, true);
+                        const after = (mapObjectsBySite[st.sid] && mapObjectsBySite[st.sid].entities) || [];
+                        const byId = new Set(after.map(e => e.id));
+                        const missing = st.created.filter(c => !byId.has(c.id));
+                        if (missing.length) { console.warn(`${TAG} 📌 bulk verify: ${missing.length} created GM(s) NOT found on re-fetch:`, missing.map(c => c.name)); showToast(`⚠ verify: ${missing.length} GM(s) not found on re-fetch — see console`, 'rgba(255,96,96,0.55)'); }
+                        else console.log(`${TAG} 📌 bulk verify ✓ all ${st.created.length} GM(s) present on fresh fetch`);
+                    } catch (err) { console.warn(`${TAG} 📌 bulk verify failed:`, err); }
+                }
                 gmt.ringSig = ''; gmtRingsRebuild();
                 console.log(`${TAG} 📌 bulk: ${st.created.length} created, ${st.failed} failed`);
                 showToast(st.failed ? `GMs: ${st.created.length} created, ${st.failed} FAILED — see console` : `📌 ${st.created.length} GM${st.created.length === 1 ? '' : 's'} created — reload to see them natively`, st.failed ? 'rgba(255,96,96,0.55)' : undefined);
