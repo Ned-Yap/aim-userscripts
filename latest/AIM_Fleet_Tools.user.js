@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.67
+// @version      0.68
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -39,7 +39,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.67';
+    const SCRIPT_VERSION = '0.68';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -110,6 +110,8 @@
             // (one-way distance from a site's base): Tattu / Tulip batteries.
             xrefBaseB1: 14000, xrefBaseB2: 18000,
             siteLabels: 'dark',
+            // v0.68 (#287): 📶 FCC cell coverage dots on the landing map
+            cellDots: false, cellCarrier: 'best', cellTech: 'lte',
             // Display-only view filters (never re-run the sweep): which
             // conflict classes to SHOW, and which clients are toggled off.
             view: { ffz: true, fp: true, asset: true },
@@ -134,6 +136,9 @@
             if (typeof s.xrefBaseB1 === 'number') d.xrefBaseB1 = s.xrefBaseB1;
             if (typeof s.xrefBaseB2 === 'number') d.xrefBaseB2 = s.xrefBaseB2;
             if (typeof s.siteLabels === 'string') d.siteLabels = s.siteLabels;
+            if (typeof s.cellDots === 'boolean') d.cellDots = s.cellDots;
+            if (typeof s.cellCarrier === 'string') d.cellCarrier = s.cellCarrier;
+            if (typeof s.cellTech === 'string') d.cellTech = s.cellTech;
             if (s.view) NB_CLASSES.forEach(c => {
                 if (typeof s.view[c.key] === 'boolean') d.view[c.key] = s.view[c.key];
             });
@@ -1190,11 +1195,13 @@
             ovKmlG = document.createElementNS(SVG_NS, 'g');      // KML layers
             ovXrefG = document.createElementNS(SVG_NS, 'g');     // cross-ref runs
             ovCovG = document.createElementNS(SVG_NS, 'g');      // #285 coverage circles / ruler / footprint
+            ovCellG = document.createElementNS(SVG_NS, 'g');     // #287 FCC cell coverage dots
             ovPinsG = document.createElementNS(SVG_NS, 'g');     // conflict pins (top)
             ovSvg.appendChild(ovSetupsG);
             ovSvg.appendChild(ovKmlG);
             ovSvg.appendChild(ovXrefG);
             ovSvg.appendChild(ovCovG);
+            ovSvg.appendChild(ovCellG);
             ovSvg.appendChild(ovPinsG);
             pane.appendChild(ovSvg);
             covBindOverlay(ovSvg, map);   // drag handles for the coverage circles (per-SVG: the SVG is rebuilt per map)
@@ -1353,6 +1360,11 @@
             if (ovCovG) {
                 try { ovCovG.innerHTML = covRenderSvg(map, P); }
                 catch (e) { console.warn(`${TAG} coverage overlay render failed:`, e); ovCovG.innerHTML = ''; }
+            }
+            // --- #287 FCC cell coverage dots (own try — never costs the pins) ---
+            if (ovCellG) {
+                try { ovCellG.innerHTML = ftCfg.cellDots ? cellRenderSvg(map) : ''; }
+                catch (e) { console.warn(`${TAG} cell overlay render failed:`, e); ovCellG.innerHTML = ''; }
             }
             // --- conflict dots (secondary conflict locations), then pins ---
             let pHtml = '';
@@ -4580,7 +4592,218 @@
             + `<option value="hidden" ${ftCfg.siteLabels === 'hidden' ? 'selected' : ''}>Hidden</option>`
             + '</select></label>'
             + '</div>'
+            + '<div style="padding:6px 10px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="One dot per site colored by the FCC-modeled minimum signal (−60 strong … −110 edge, grey = no modeled coverage). Build the stats under 📊 Fleet Metrics → 📶 first.">`
+            + `<input type="checkbox" data-ft-flag="cellDots" ${ftCfg.cellDots ? 'checked' : ''}> 📶 Cell coverage dots</label>`
+            + `<label>carrier <select data-ft-cell="cellCarrier" style="background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:2px 4px;font:inherit;">`
+            + [['best', 'Best of 3'], ['att', 'AT&T'], ['vz', 'Verizon'], ['tm', 'T-Mobile']].map(([v, l]) => `<option value="${v}" ${ftCfg.cellCarrier === v ? 'selected' : ''}>${l}</option>`).join('')
+            + '</select></label>'
+            + `<label>tech <select data-ft-cell="cellTech" style="background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:2px 4px;font:inherit;">`
+            + [['lte', '4G LTE'], ['nr7', '5G 7/1'], ['nr35', '5G 35/3']].map(([v, l]) => `<option value="${v}" ${ftCfg.cellTech === v ? 'selected' : ''}>${l}</option>`).join('')
+            + '</select></label>'
+            + `<span style="color:#888">${Object.keys(cellIdx.sites).length} site(s) with FCC stats${cellIdx.builtAt ? ` · built ${new Date(cellIdx.builtAt).toLocaleDateString()}` : ''}</span>`
+            + '</div>'
             + '<div style="padding:4px 10px;color:#666;border-bottom:1px solid #222834;">Applies to this landing map only — site maps keep their Map Styler controls. Full airspace checks (obstacles/LAANC/TFR) are site-scoped in the Asset Inspector.</div>';
+    }
+
+    // ==================================================================
+    // 📶 CELL COVERAGE (v0.68, feature #287) — per-site FCC Broadband Data
+    // Collection mobile coverage stats from Esri Living Atlas's public
+    // summary of the FCC National Broadband Map (H3 res-9 hexes, ~0.1 km²,
+    // carrier-reported MINIMUM signal in 10 dB bands, null = no modeled
+    // coverage; refreshed on the 10th + 25th). ONE server-side statistics
+    // query per site (count/avg/min per carrier × tech over the site
+    // envelope) → ~300 bytes back, ~0.2 s. No auth, no PAT.
+    //
+    // This is carrier PROPAGATION MODELING for an outdoor phone at ground
+    // level — not a measurement, not the air (FCC drive tests: ~62% of
+    // rural tests met the modeled speed). Read it as "where coverage is
+    // CLAIMED"; flown LTE outages (Mission Logs) are the truth layer.
+    // Own GM store (env-suffixed: QA ids are a different DB). Not part of
+    // MT_SCHEMA — nothing here comes from the Site Watch snapshots.
+    // ==================================================================
+    const KEY_CELL = 'aim-ft-cell' + ENV_SUFFIX;
+    const CELL_QUERY_URL = 'https://services.arcgis.com/jIL9msH9OI208GCb/arcgis/rest/services/FCC_Mobile_Broadband_Data_Collection/FeatureServer/0/query';
+    const CELL_FRESH_MS = 14 * 86400000;
+    const CELL_MARGIN_MI = 0.5;        // around a snapshot bbox
+    const CELL_FALLBACK_MI = 1;        // around the /sites/ center when no snapshot
+    const CELL_CONCURRENCY = 4;
+    const CELL_CARRIERS = [
+        { key: 'att', label: 'AT&T',     field: 'ATT' },
+        { key: 'vz',  label: 'Verizon',  field: 'Verizon' },
+        { key: 'tm',  label: 'T-Mobile', field: 'TMobile' },
+    ];
+    const CELL_TECHS = [
+        { key: 'lte',  label: '4G LTE',    suffix: '4GLTE' },
+        { key: 'nr7',  label: '5G 7/1',    suffix: '5GNR_7_1' },
+        { key: 'nr35', label: '5G 35/3',   suffix: '5GNR_35_3' },
+    ];
+    const CELL_BANDS = [
+        { min: -65, color: '#00e676' }, { min: -75, color: '#aeea00' }, { min: -85, color: '#ffea00' },
+        { min: -95, color: '#ffa000' }, { min: -105, color: '#ff5722' }, { min: -Infinity, color: '#d50000' },
+    ];
+    const CELL_NONE_COLOR = '#546e7a';
+    let cellIdx = loadJson(KEY_CELL, { v: 1, sites: {}, builtAt: 0 });
+    if (!cellIdx || typeof cellIdx !== 'object' || !cellIdx.sites) cellIdx = { v: 1, sites: {}, builtAt: 0 };
+    let cellBuilding = false;
+    let cellProgress = '';
+    let ovCellG = null;
+    function saveCellIdx() { gmSet(KEY_CELL, JSON.stringify(cellIdx)); }
+    function cellColor(dbm) {
+        if (typeof dbm !== 'number' || !isFinite(dbm)) return CELL_NONE_COLOR;
+        for (const b of CELL_BANDS) { if (dbm >= b.min) return b.color; }
+        return CELL_NONE_COLOR;
+    }
+    function cellGet(r, car, tech, what) {
+        const s = r.cell && r.cell.sig && r.cell.sig[car] && r.cell.sig[car][tech];
+        if (!s) return null;
+        const v = s[what];
+        return (typeof v === 'number' && isFinite(v)) ? v : null;
+    }
+    function cellFmtPct(v) {
+        if (v == null) return '<span style="color:#555">—</span>';
+        const c = v >= 95 ? '#5fff5f' : v >= 60 ? '#ffd54f' : '#ff8585';
+        return `<span style="color:${c}">${Math.round(v)}%</span>`;
+    }
+    function cellFmtDbm(v) {
+        if (v == null) return '<span style="color:#555">—</span>';
+        return `<span style="color:${cellColor(v)}">${Math.round(v)}</span>`;
+    }
+    function cellBestCarrier(r) {
+        if (!r.cell || !r.cell.sig) return '';
+        let best = null, bestV = -Infinity;
+        CELL_CARRIERS.forEach(c => { const v = cellGet(r, c.key, 'lte', 'avg'); if (v != null && v > bestV) { bestV = v; best = c.label; } });
+        return best || 'none';
+    }
+    // Site envelope for the query: snapshot bbox + margin, else a box
+    // around the /sites/ center. Returns {w,s,e,n,src} or null.
+    function cellSiteEnvelope(id) {
+        const b = nbIndex.bboxes[id];
+        let w, s, e, n, src;
+        if (b && !b.empty && isFinite(b.minLat)) { w = b.minLng; s = b.minLat; e = b.maxLng; n = b.maxLat; src = 'snapshot'; }
+        else {
+            const c = rawSites && rawSites[id] && siteEntryCenter(rawSites[id].raw);
+            if (!c) return null;
+            w = e = c.lng; s = n = c.lat; src = 'center';
+        }
+        const mi = src === 'snapshot' ? CELL_MARGIN_MI : CELL_FALLBACK_MI;
+        const dLat = mi * 1609.344 / 111320;
+        const dLng = dLat / Math.max(Math.cos(((s + n) / 2) * Math.PI / 180), 0.2);
+        return { w: w - dLng, s: s - dLat, e: e + dLng, n: n + dLat, src };
+    }
+    function cellStatsSpec() {
+        const st = [{ statisticType: 'count', onStatisticField: 'OBJECTID', outStatisticFieldName: 'n' }];
+        CELL_CARRIERS.forEach(c => CELL_TECHS.forEach(t => {
+            const f = `${c.field}_${t.suffix}_minsignal`, k = `${c.key}_${t.key}`;
+            st.push({ statisticType: 'count', onStatisticField: f, outStatisticFieldName: `${k}_n` });
+            st.push({ statisticType: 'avg', onStatisticField: f, outStatisticFieldName: `${k}_avg` });
+            st.push({ statisticType: 'min', onStatisticField: f, outStatisticFieldName: `${k}_min` });
+        }));
+        return JSON.stringify(st);
+    }
+    async function cellFetchSite(id, env) {
+        const params = new URLSearchParams({
+            f: 'json',
+            geometry: `${env.w},${env.s},${env.e},${env.n}`,
+            geometryType: 'esriGeometryEnvelope', inSR: '4326',
+            spatialRel: 'esriSpatialRelIntersects',
+            outStatistics: cellStatsSpec(),
+        });
+        // POST: the 28-statistic spec pushes a GET past the service's URL limit (HTTP 404 at ~4.6 KB).
+        const r = await fetchWithTimeout(CELL_QUERY_URL, { method: 'POST', body: params, cache: 'no-store' }, 25000);
+        if (!r.ok) throw new Error(`FCC query HTTP ${r.status}`);
+        const j = await r.json();
+        if (j.error) throw new Error(`FCC query error ${j.error.code || ''} ${j.error.message || ''}`.trim());
+        const a = (j.features && j.features[0] && j.features[0].attributes) || {};
+        const n = Number(a.n) || 0;
+        const sig = {};
+        CELL_CARRIERS.forEach(c => { sig[c.key] = {}; CELL_TECHS.forEach(t => {
+            const k = `${c.key}_${t.key}`;
+            const cn = Number(a[`${k}_n`]) || 0;
+            sig[c.key][t.key] = { pct: n ? 100 * cn / n : null, avg: cn ? a[`${k}_avg`] : null, min: cn ? a[`${k}_min`] : null };
+        }); });
+        return { at: Date.now(), n, src: env.src, env: [env.w, env.s, env.e, env.n].map(v => Math.round(v * 1e4) / 1e4), sig };
+    }
+    async function cellBuild(force) {
+        if (cellBuilding) return;
+        cellBuilding = true; cellProgress = 'starting…'; renderPanel();
+        const t0 = Date.now();
+        let done = 0, fetched = 0, skipped = 0, failed = 0, unlocated = 0;
+        try {
+            await fetchRawSites(false).catch(e => { console.warn(`${TAG} /sites/ fetch failed:`, e); });
+            if (!rawSites) throw new Error('no site list — /sites/ unavailable');
+            try { await ensureNbIndex(() => {}, false); } catch (e) { console.warn(`${TAG} cell: bbox index unavailable, centers only:`, e); }
+            const ids = Object.keys(rawSites).filter(id => !ftIgnore[id] && !(ftCfg.onlyProduction && siteStatus(id) && siteStatus(id) !== 'Production'));
+            const queue = ids.slice();
+            const total = ids.length;
+            const worker = async () => {
+                while (queue.length) {
+                    const id = queue.shift();
+                    try {
+                        const have = cellIdx.sites[id];
+                        const env = cellSiteEnvelope(id);
+                        if (!env) { unlocated++; continue; }
+                        const envKey = [env.w, env.s, env.e, env.n].map(v => Math.round(v * 1e4) / 1e4).join(',');
+                        if (!force && have && (have.env || []).join(',') === envKey && Date.now() - (have.at || 0) < CELL_FRESH_MS) { skipped++; continue; }
+                        cellIdx.sites[id] = await cellFetchSite(id, env);
+                        fetched++;
+                        if (fetched % 10 === 0) saveCellIdx();
+                    } catch (e) {
+                        failed++;
+                        console.warn(`${TAG} cell: site ${id} failed:`, e);
+                    } finally {
+                        done++;
+                        cellProgress = `${done}/${total}`;
+                        setStatus(`📶 FCC cell coverage… ${done}/${total} site(s) · ${fetched} fetched · ${skipped} fresh`);
+                        if (done % 5 === 0) renderPanel();
+                    }
+                }
+            };
+            await Promise.all(Array.from({ length: CELL_CONCURRENCY }, worker));
+            // Drop sites we no longer have access to
+            Object.keys(cellIdx.sites).forEach(id => { if (!rawSites[id]) delete cellIdx.sites[id]; });
+            cellIdx.builtAt = Date.now();
+            saveCellIdx();
+            setStatus(`📶 FCC cell coverage ready — ${Object.keys(cellIdx.sites).length} site(s) · ${fetched} fetched · ${skipped} fresh (skipped) · ${failed} failed · ${unlocated} unlocated · ${Math.round((Date.now() - t0) / 1000)} s`);
+            console.log(`${TAG} cell: build done — ${fetched} fetched, ${skipped} skipped, ${failed} failed, ${unlocated} unlocated in ${Math.round((Date.now() - t0) / 1000)} s`);
+        } catch (e) {
+            console.warn(`${TAG} cell build failed:`, e);
+            setStatus(`📶 cell coverage build failed — ${String(e && e.message || e)}`);
+        } finally {
+            cellBuilding = false; cellProgress = '';
+            renderPanel(); requestRender();
+        }
+    }
+    // Landing-map dots: one per site with stats, colored by the selected
+    // carrier/tech mean dBm (grey = no modeled coverage). pointer-events
+    // only on the dot so the <title> tooltip works inside our inert pane.
+    function cellSitePos(id) {
+        const b = nbIndex.bboxes[id];
+        if (b && !b.empty && isFinite(b.minLat)) return { lat: (b.minLat + b.maxLat) / 2, lng: (b.minLng + b.maxLng) / 2 };
+        return rawSites && rawSites[id] ? siteEntryCenter(rawSites[id].raw) : null;
+    }
+    function cellRenderSvg(map) {
+        const car = ftCfg.cellCarrier || 'best', tech = ftCfg.cellTech || 'lte';
+        let h = '';
+        Object.keys(cellIdx.sites).forEach(id => {
+            if (rawSites && !rawSites[id]) return;
+            if (ftIgnore[id]) return;
+            const rec = cellIdx.sites[id];
+            const p = cellSitePos(id);
+            if (!p || !rec || !rec.sig) return;
+            let v = null, who = '';
+            if (car === 'best') {
+                CELL_CARRIERS.forEach(c => { const s = rec.sig[c.key] && rec.sig[c.key][tech]; if (s && typeof s.avg === 'number' && (v === null || s.avg > v)) { v = s.avg; who = c.label; } });
+            } else {
+                const s = rec.sig[car] && rec.sig[car][tech];
+                if (s && typeof s.avg === 'number') v = s.avg;
+                who = (CELL_CARRIERS.find(c => c.key === car) || {}).label || car;
+            }
+            const xy = map.latLngToLayerPoint([p.lat, p.lng]);
+            const tip = CELL_CARRIERS.map(c => { const s = rec.sig[c.key] && rec.sig[c.key][tech]; return `${c.label}: ${s && typeof s.avg === 'number' ? `${Math.round(s.avg)} dBm · ${Math.round(s.pct)}%` : 'no coverage'}`; }).join('\n');
+            h += `<circle cx="${xy.x}" cy="${xy.y + 14}" r="5" fill="${cellColor(v)}" fill-opacity="0.95" stroke="#10141c" stroke-width="1.5" style="pointer-events:auto"><title>${escapeHtml(`📶 ${siteName(id)} · ${(CELL_TECHS.find(t => t.key === tech) || {}).label || tech}${car === 'best' && who ? ` · best: ${who}` : ''}\n${tip}\nFCC-modeled ground signal (not flown LTE)`)}</title></circle>`;
+        });
+        return h;
     }
 
     // ==================================================================
@@ -4947,6 +5170,23 @@
         mHrs:      { label: 'Planned h', get: r => r.m && r.m.durS / 3600, fmt: v => v == null ? '—' : v.toFixed(1), total: 'sum' },
         avgMi:     { label: 'Avg mi', get: r => r.m && r.m.withDist ? r.m.distM / r.m.withDist / MT_M_PER_MI : null, fmt: v => v == null ? '—' : v.toFixed(2), total: 'avg' },
         stepTypes: { label: 'Step mix', get: r => r.m ? mtTop(r.m.stepTypes, 5) : '', text: true },
+        // v0.68 (#287): 📶 FCC cell coverage per site — carrier-MODELED
+        // ground-level signal from the FCC Broadband Data Collection, one
+        // server-side statistics query per site (see the CELL block).
+        // pct = share of the site's hexes with any modeled coverage; dBm =
+        // mean of the carrier's minimum-signal bands over those hexes.
+        cAttPct:   { label: 'AT&T LTE %', get: r => cellGet(r, 'att', 'lte', 'pct'), fmt: cellFmtPct, total: 'avg', title: 'AT&T 4G LTE — % of site hexes with FCC-modeled coverage' },
+        cAttDbm:   { label: 'AT&T dBm', get: r => cellGet(r, 'att', 'lte', 'avg'), fmt: cellFmtDbm, total: 'avg', title: 'AT&T 4G LTE — mean modeled minimum signal (−60 strong … −110 edge)' },
+        cVzPct:    { label: 'Verizon LTE %', get: r => cellGet(r, 'vz', 'lte', 'pct'), fmt: cellFmtPct, total: 'avg', title: 'Verizon 4G LTE — % of site hexes with FCC-modeled coverage' },
+        cVzDbm:    { label: 'Verizon dBm', get: r => cellGet(r, 'vz', 'lte', 'avg'), fmt: cellFmtDbm, total: 'avg', title: 'Verizon 4G LTE — mean modeled minimum signal' },
+        cTmPct:    { label: 'T-Mobile LTE %', get: r => cellGet(r, 'tm', 'lte', 'pct'), fmt: cellFmtPct, total: 'avg', title: 'T-Mobile 4G LTE — % of site hexes with FCC-modeled coverage' },
+        cTmDbm:    { label: 'T-Mobile dBm', get: r => cellGet(r, 'tm', 'lte', 'avg'), fmt: cellFmtDbm, total: 'avg', title: 'T-Mobile 4G LTE — mean modeled minimum signal' },
+        cAtt5g:    { label: 'AT&T 5G %', get: r => cellGet(r, 'att', 'nr7', 'pct'), fmt: cellFmtPct, total: 'avg', title: 'AT&T 5G NR (7/1 Mbps tier) — % of site hexes covered' },
+        cVz5g:     { label: 'Verizon 5G %', get: r => cellGet(r, 'vz', 'nr7', 'pct'), fmt: cellFmtPct, total: 'avg', title: 'Verizon 5G NR (7/1 Mbps tier) — % of site hexes covered' },
+        cTm5g:     { label: 'T-Mobile 5G %', get: r => cellGet(r, 'tm', 'nr7', 'pct'), fmt: cellFmtPct, total: 'avg', title: 'T-Mobile 5G NR (7/1 Mbps tier) — % of site hexes covered' },
+        cBest:     { label: 'Best LTE', get: r => cellBestCarrier(r), text: true, title: 'Carrier with the strongest mean modeled LTE signal at this site' },
+        cHex:      { label: 'Hexes', get: r => r.cell ? r.cell.n : null, title: 'FCC H3 res-9 hexes (~0.1 km² each) in the site envelope' },
+        cAge:      { label: 'Cell age d', get: r => r.cell ? Math.floor((Date.now() - (r.cell.at || 0)) / 86400000) : null, title: 'Days since this site\'s FCC coverage stats were fetched' },
     };
     const MT_SETS = {
         overview:   { label: 'Overview',   cols: ['name', 'client', 'status', 'assets', 'ffz', 'fp', 'apprFp', 'nfz', 'gm', 'fpMi', 'missions', 'steps', 'vPct', 'snapAge'] },
@@ -4954,6 +5194,7 @@
         assets:     { label: 'Assets',     cols: ['name', 'assets', 'nested', 'nestParents', 'equip', 'cats', 'stNormal', 'stHY', 'stEmpty', 'stInact', 'stUnsh', 'stUnreach'] },
         missions:   { label: 'Missions',   cols: ['name', 'missions', 'mActive', 'mInactive', 'steps', 'avgSteps', 'snaps', 'orbits', 'areaMaps', 'gem', 'mMi', 'mHrs', 'avgMi', 'stepTypes'] },
         validation: { label: 'Validation', cols: ['name', 'vAsset', 'vFfz', 'vFp', 'vNfz', 'vGm', 'vPct', 'unsh', 'apprFp', 'apprArcs'] },
+        cell:       { label: '📶 Cell', cols: ['name', 'client', 'status', 'cBest', 'cAttPct', 'cAttDbm', 'cVzPct', 'cVzDbm', 'cTmPct', 'cTmDbm', 'cAtt5g', 'cVz5g', 'cTm5g', 'cHex', 'cAge'] },
         all:        { label: 'All columns', cols: Object.keys(MT_COLS) },
     };
     function mtPair(v) { return v ? `<span style="color:#5fff5f">${v[0]}</span>/<span style="color:${v[1] ? '#ff8585' : '#666'}">${v[1]}</span>` : '—'; }
@@ -4962,7 +5203,7 @@
     }
     function buildMetricsRows() {
         const rows = [];
-        const ids = new Set(Object.keys(mtIndex.sites).concat(Object.keys(mtIndex.missions)));
+        const ids = new Set(Object.keys(mtIndex.sites).concat(Object.keys(mtIndex.missions)).concat(Object.keys(cellIdx.sites)));
         ids.forEach(id => {
             if (rawSites && !rawSites[id]) return;   // snapshot-only orphan (no access) — hidden, counted by caller
             const s = mtIndex.sites[id] && !mtIndex.sites[id].empty ? mtIndex.sites[id] : null;
@@ -4977,6 +5218,7 @@
             rows.push({
                 id, name: siteName(id), client: (raw && siteEntryClient(raw)) || clientOf(siteName(id)) || '', status: siteStatus(id),
                 s, m, validPct, snapAgeD: s ? Math.floor((Date.now() - (s.at || 0)) / 86400000) : null,
+                cell: cellIdx.sites[id] || null,   // v0.68 (#287)
             });
         });
         return rows;
@@ -5230,14 +5472,16 @@
             + (mtBuilding ? '<span style="color:#ffa030">⏳ building…</span>'
                 : `<span data-ft="metrics-build" style="cursor:pointer;color:#5fff5f;font-weight:bold" title="Check every Site Watch snapshot sha and (re)compute changed sites — first run downloads everything (a few minutes)">${total ? '⟳ Update metrics' : '▶ Build metrics'}</span>`)
             + '<span data-ft="metrics-refresh" style="cursor:pointer;color:#7adfe6" title="Re-fetch /sites/ names, clients, statuses">⟳ Names</span>'
+            + (cellBuilding ? `<span style="color:#ffa030">⏳ cell ${cellProgress}</span>`
+                : `<span data-ft="cell-build" style="cursor:pointer;color:#5fff5f" title="FCC Broadband Data Collection: one statistics query per site (AT&T / Verizon / T-Mobile × LTE / 5G) — ~1 min for the fleet; sites fetched within 14 days are skipped (Shift+click to force all)">📶 ${Object.keys(cellIdx.sites).length ? 'Update' : 'Build'} cell coverage</span>`)
             + '<span data-ft="metrics-sheets" style="cursor:pointer;color:#ffd54f">📊 Copy → Sheets</span>'
             + '<span data-ft="metrics-csv" style="cursor:pointer;color:#7adfe6">📋 Copy CSV (all columns)</span>'
             + `<span data-ft="metrics-wide" style="cursor:pointer;color:#7adfe6" title="Toggle a wide panel for the table">${mtWide ? '⤡ Normal width' : '⤢ Wide'}</span>`
             + (total ? `<span data-ft="metrics-appr" style="cursor:pointer;color:#ffa030;font-weight:bold" title="Every flight path in the fleet whose arcs are flagged wait-until-approved">🛂 Approval FPs (${mtApprovalRows().fps.length})</span>` : '')
             + `<span style="color:#888">${total} site(s) indexed${orphans ? ` · ${orphans} no-access hidden` : ''}${mtIndex.builtAt ? ` · built ${new Date(mtIndex.builtAt).toLocaleString()}` : ''}</span>`
             + '</div>');
-        if (!total) {
-            out.push('<div style="padding:8px 10px;color:#888">No metrics yet — ▶ Build metrics reads every site’s Site Watch snapshot (setup + missions) once, then only changed sites re-download.</div>');
+        if (!total && !Object.keys(cellIdx.sites).length) {
+            out.push('<div style="padding:8px 10px;color:#888">No metrics yet — ▶ Build metrics reads every site’s Site Watch snapshot (setup + missions) once, then only changed sites re-download. 📶 Build cell coverage works on its own (FCC data, no snapshots needed).</div>');
             return out.join('');
         }
         const rows = mtFilteredRows();
@@ -7168,6 +7412,7 @@
                             .catch(e => { console.warn(`${TAG} metrics build failed:`, e); setStatus(`metrics build failed — ${String(e && e.message || e)}`); })
                             .finally(() => { mtBuilding = false; renderPanel(); });
                     }
+                    else if (cmd === 'cell-build') { cellBuild(!!ev.shiftKey); }
                     else if (cmd === 'metrics-refresh') {
                         fetchRawSites(true).then(() => renderPanel())
                             .catch(e => { console.warn(`${TAG} /sites/ refresh failed:`, e); setStatus('site list refresh failed — see console'); });
@@ -7402,6 +7647,14 @@
                     }
                     return;
                 }
+                const cellSel = ev.target.closest('select[data-ft-cell]');
+                if (cellSel) {
+                    const prop = cellSel.getAttribute('data-ft-cell');
+                    const v = String(cellSel.value);
+                    const ok = prop === 'cellCarrier' ? ['best', 'att', 'vz', 'tm'].includes(v) : (prop === 'cellTech' && ['lte', 'nr7', 'nr35'].includes(v));
+                    if (ok && ftCfg[prop] !== v) { ftCfg[prop] = v; saveCfg(); requestRender(); setStatus(`📶 cell dots → ${v}`); }
+                    return;
+                }
                 const bmSel = ev.target.closest('select[data-ft-basemap]');
                 if (bmSel) {
                     const v = String(bmSel.value);
@@ -7445,6 +7698,10 @@
                     } else if (prop === 'faaChart') {
                         setStatus(flag.checked ? `FAA sectional ON — chart tiles exist at zoom ${FAA_SRC.min}–${FAA_SRC.max}` : 'FAA sectional OFF');
                         updateFaaTiles();
+                    } else if (prop === 'cellDots') {
+                        const n = Object.keys(cellIdx.sites).length;
+                        setStatus(flag.checked ? (n ? `📶 cell coverage dots ON — ${n} site(s)` : '📶 cell dots ON — no FCC stats yet: 📊 Fleet Metrics → 📶 Build cell coverage') : '📶 cell coverage dots OFF');
+                        requestRender();
                     } else {
                         setStatus(`${prop === 'onlyProduction' ? '"Production only"' : prop} ${flag.checked ? 'ON' : 'OFF'} — takes effect on the next sweep`);
                         if (prop === 'onlyProduction') renderPanel();

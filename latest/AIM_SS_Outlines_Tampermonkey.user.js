@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.142
+// @version      34.143
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -20,6 +20,7 @@
 // @connect      api.github.com
 // @connect      services1.arcgis.com
 // @connect      services6.arcgis.com
+// @connect      services.arcgis.com
 // @connect      pdi.scinet.usda.gov
 // @connect      gis.rrc.texas.gov
 // @connect      webapps2.rrc.texas.gov
@@ -67,7 +68,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.142';
+    const SCRIPT_VERSION = '34.143';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -533,6 +534,43 @@
                 // zoom (the raster chart blurs past z12). OFF by default: it
                 // costs one FAA query per map area, zero when off.
                 { id: 'faachart.vectors', label: 'Airspace boundaries (vector, sharp at any zoom)', type: 'boolean', default: false },
+            ],
+        },
+        {
+            // 📶 Cell coverage (v34.143, #287) — FCC Broadband Data
+            // Collection mobile coverage hexes (carrier-reported minimum
+            // signal, dBm) read live from Esri Living Atlas's public summary
+            // of the National Broadband Map. Modeled ground-level coverage,
+            // not a measurement — see the CELL_* block for the caveats.
+            type: 'category',
+            id: 'cell-cat',
+            label: '📶 Cell coverage (FCC)',
+            meta: '(carrier-modeled signal · hexes ~0.2 mi across)',
+            master: { id: 'cell.show', default: false },
+            children: [
+                { id: 'cell.carrier', label: 'Carrier', type: 'select',
+                  options: [
+                      { value: 'best', label: 'Best of AT&T / Verizon / T-Mobile' },
+                      { value: 'att', label: 'AT&T' },
+                      { value: 'vz', label: 'Verizon' },
+                      { value: 'tm', label: 'T-Mobile' },
+                  ],
+                  default: 'best' },
+                { id: 'cell.tech', label: 'Technology', type: 'select',
+                  options: [
+                      { value: 'lte', label: '4G LTE (5/1 Mbps)' },
+                      { value: 'nr7', label: '5G NR (7/1 Mbps)' },
+                      { value: 'nr35', label: '5G NR (35/3 Mbps)' },
+                  ],
+                  default: 'lte' },
+                { id: 'cell.opacity', label: 'Fill opacity', type: 'number',
+                  min: 0.05, max: 0.9, step: 0.05, default: 0.35, unit: 'fill' },
+                { id: 'cell.marginMi', label: 'Fetch around site', type: 'number',
+                  min: 0.25, max: 5, step: 0.25, default: 1, unit: 'mi' },
+                { id: 'cell.outline', label: 'Hex outlines', type: 'boolean', default: false },
+                { id: 'cell.hover', label: 'Hover readout (all carriers)', type: 'boolean', default: true },
+                { id: 'cell.legend', label: 'Legend', type: 'boolean', default: true },
+                { id: 'cell-refresh', label: 'Re-fetch FCC data for this site', type: 'button', action: 'cell-refresh' },
             ],
         },
         {
@@ -1466,6 +1504,8 @@
         applyTxBoundaries();
         // 11h. 🌐 Fleet KML layers (data repo fleet-kml/), clipped to the site.
         applyFleetKml();
+        // 11i. 📶 FCC cell coverage hexes (v34.143).
+        applyCellCoverage();
         // 12. Flight-path vertex dots: hide / resize / recolor via CSS.
         applyVertexStyle();
 
@@ -2309,6 +2349,326 @@
     let _rrcDrawKey = '';       // geomKey + filter state of what's currently drawn
     let _rrcOperators = [];     // [{ name, count }] discovered via bulk EWA fetch
     let _rrcOpFetchKey = '';    // geomKey the bulk operator fetch ran for
+
+    // ==================================================================
+    // 📶 CELL COVERAGE (v34.143, feature #287) — FCC Broadband Data
+    // Collection mobile coverage as H3 res-9 hexes (~0.1 km², ~1,150 ft
+    // across), read LIVE from Esri Living Atlas's public summary of the
+    // FCC National Broadband Map (refreshed on the 10th + 25th). Each hex
+    // carries the carrier-reported MINIMUM signal (RSRP dBm band: -60
+    // strong … -110 edge; null = no modeled coverage) per carrier × tech.
+    //
+    // WHAT THIS IS (and isn't): carrier PROPAGATION MODELING for an
+    // outdoor phone at ground level, submitted to the FCC twice a year.
+    // Not a measurement, not the air. FCC drive tests found only ~62% of
+    // rural tests met the modeled speed. So: this is where coverage is
+    // CLAIMED. The flown LTE outages (Mission Logs) are the truth layer.
+    //
+    // No auth, no PAT: one bbox query per site (site bounds + margin),
+    // paged at the service's 2000-record cap, GM-cached 14 days per site.
+    // Hexes are drawn interactive:false in their own pane (never steal a
+    // click from the editor); the hover readout is a mousemove on the map
+    // container with a point-in-hex test, not Leaflet tooltips.
+    // ==================================================================
+    const CELL_QUERY_URL = 'https://services.arcgis.com/jIL9msH9OI208GCb/arcgis/rest/services/FCC_Mobile_Broadband_Data_Collection/FeatureServer/0/query';
+    const CELL_CACHE_PREFIX = 'aim-cell-cache-v1-';
+    const CELL_CACHE_TTL_MS = 14 * 86400000;
+    const CELL_PAGE = 2000;
+    const CELL_MAX_PAGES = 6;          // 12k hexes ≈ 1,260 km² — nothing we fly is bigger
+    const CELL_PANE = 'aimCellCov';
+    const CELL_LEGEND_ID = 'aim-cell-legend';
+    const CELL_BADGE_ID = 'aim-cell-badge';
+    const CELL_CARRIERS = [
+        { key: 'att', label: 'AT&T',     field: 'ATT' },
+        { key: 'vz',  label: 'Verizon',  field: 'Verizon' },
+        { key: 'tm',  label: 'T-Mobile', field: 'TMobile' },
+    ];
+    const CELL_TECHS = [
+        { key: 'lte',  label: '4G LTE',         suffix: '4GLTE' },
+        { key: 'nr7',  label: '5G NR 7/1',      suffix: '5GNR_7_1' },
+        { key: 'nr35', label: '5G NR 35/3',     suffix: '5GNR_35_3' },
+    ];
+    // Service values are 10 dB bands (-60 … -110). Thresholds sit between bands.
+    const CELL_BANDS = [
+        { min: -65,       label: '−60', color: '#00e676' },
+        { min: -75,       label: '−70', color: '#aeea00' },
+        { min: -85,       label: '−80', color: '#ffea00' },
+        { min: -95,       label: '−90', color: '#ffa000' },
+        { min: -105,      label: '−100', color: '#ff5722' },
+        { min: -Infinity, label: '−110', color: '#d50000' },
+    ];
+    const CELL_NONE = { label: 'none', color: '#546e7a' };
+    let _cell = { siteID: null, envKey: '', features: null, loading: false, failed: false, at: 0, source: '' };
+    let _cellLayers = [];
+    let _cellKey = '';
+    let _cellHover = null;   // { container, move, leave }
+
+    function cellField(carrier, tech) { return `${carrier.field}_${tech.suffix}_minsignal`; }
+    function cellBandFor(dbm) {
+        if (typeof dbm !== 'number' || !isFinite(dbm)) return CELL_NONE;
+        for (const b of CELL_BANDS) { if (dbm >= b.min) return b; }
+        return CELL_NONE;
+    }
+    function cellSelectedSig(f) {
+        const car = String(toggleState['cell.carrier'] || 'best');
+        const tech = String(toggleState['cell.tech'] || 'lte');
+        const sig = f.sig || {};
+        if (car === 'best') {
+            let best = null;
+            CELL_CARRIERS.forEach(c => { const v = sig[c.key] && sig[c.key][tech]; if (typeof v === 'number' && (best === null || v > best)) best = v; });
+            return best;
+        }
+        const v = sig[car] && sig[car][tech];
+        return typeof v === 'number' ? v : null;
+    }
+    // Envelope = site bounds + margin; falls back to a box around the base
+    // station(s) when the site has no setup yet (same rule as RRC wells).
+    function cellSiteEnvelope(sid) {
+        const marginMi = Number(toggleState['cell.marginMi']) || 1;
+        const dLat = marginMi * 1609.344 / 111320;
+        const bbox = rrcEnsureSiteBBox(sid);   // [minLng,minLat,maxLng,maxLat] or null while loading / failed
+        let w, s, e, n;
+        if (bbox) { w = bbox[0]; s = bbox[1]; e = bbox[2]; n = bbox[3]; }
+        else if (_rrcSiteBBox.siteID === sid && _rrcSiteBBox.failed && _rrcSiteBBox.basePts && _rrcSiteBBox.basePts.length) {
+            const b = _rrcSiteBBox.basePts[0]; w = e = b.lng; s = n = b.lat;
+        } else return null;
+        const midLat = (s + n) / 2;
+        const dLng = dLat / Math.max(Math.cos(midLat * Math.PI / 180), 0.2);
+        return { w: w - dLng, s: s - dLat, e: e + dLng, n: n + dLat };
+    }
+    function cellEnvKey(env) { return [env.w, env.s, env.e, env.n].map(v => v.toFixed(4)).join(','); }
+    function cellOutFields() {
+        const out = ['h3_res9_id'];
+        CELL_CARRIERS.forEach(c => CELL_TECHS.forEach(t => out.push(cellField(c, t))));
+        return out.join(',');
+    }
+    function cellCompactFeature(feat) {
+        const a = feat.attributes || {};
+        const ring = ((feat.geometry && feat.geometry.rings && feat.geometry.rings[0]) || []).map(xy => [Math.round(xy[1] * 1e5) / 1e5, Math.round(xy[0] * 1e5) / 1e5]);
+        if (ring.length < 3) return null;
+        let cLat = 0, cLng = 0;
+        const m = ring.length - 1 || 1;   // closed ring: last == first
+        for (let i = 0; i < m; i++) { cLat += ring[i][0]; cLng += ring[i][1]; }
+        const sig = {};
+        CELL_CARRIERS.forEach(c => { sig[c.key] = {}; CELL_TECHS.forEach(t => { const v = a[cellField(c, t)]; sig[c.key][t.key] = (typeof v === 'number') ? v : null; }); });
+        return { id: a.h3_res9_id, ring, c: [cLat / m, cLng / m], sig };
+    }
+    function cellFetch(sid, env) {
+        const envKey = cellEnvKey(env);
+        if (_cell.siteID === sid && _cell.envKey === envKey && (_cell.features || _cell.loading)) return;
+        if (_cell.siteID === sid && _cell.envKey === envKey && _cell.failed && Date.now() - _cell.at < 60000) return;   // 1-min backoff
+        _cell = { siteID: sid, envKey, features: null, loading: true, failed: false, at: Date.now(), source: '' };
+        // GM cache (per site + env; keyed with the env prefix so QA/prod ids never collide)
+        try {
+            const cached = gmGet(gmEnvKey(CELL_CACHE_PREFIX + sid), null);
+            const c = typeof cached === 'string' ? JSON.parse(cached) : cached;
+            if (c && c.envKey === envKey && Array.isArray(c.features) && Date.now() - (c.at || 0) < CELL_CACHE_TTL_MS) {
+                _cell = { siteID: sid, envKey, features: c.features, loading: false, failed: false, at: c.at, source: 'cache' };
+                console.log(`${TAG} cell: site ${sid} — ${c.features.length} hexes from cache (${new Date(c.at).toLocaleDateString()})`);
+                return;
+            }
+        } catch (e) { console.warn(`${TAG} cell: cache read failed`, e); }
+        if (typeof GM_xmlhttpRequest !== 'function') { _cell.loading = false; _cell.failed = true; console.warn(`${TAG} cell: GM_xmlhttpRequest unavailable`); return; }
+        const acc = [];
+        const page = (offset) => {
+            const params = new URLSearchParams({
+                f: 'json',
+                geometry: `${env.w},${env.s},${env.e},${env.n}`,
+                geometryType: 'esriGeometryEnvelope', inSR: '4326',
+                spatialRel: 'esriSpatialRelIntersects',
+                outFields: cellOutFields(),
+                returnGeometry: 'true', outSR: '4326', geometryPrecision: '5',
+                resultOffset: String(offset), resultRecordCount: String(CELL_PAGE),
+            });
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: `${CELL_QUERY_URL}?${params.toString()}`,
+                timeout: 30000,
+                onload: (resp) => {
+                    if (_cell.siteID !== sid || _cell.envKey !== envKey) return;   // superseded
+                    let json = null;
+                    try { json = JSON.parse(resp.responseText); } catch (e) {}
+                    if (resp.status !== 200 || !json || json.error) {
+                        _cell.loading = false; _cell.failed = true; _cell.at = Date.now();
+                        console.warn(`${TAG} cell: FCC query failed`, resp.status, json && json.error);
+                        showKMLToast('📶 FCC cell coverage fetch failed — see console', 4000);
+                        return;
+                    }
+                    (json.features || []).forEach(f => { const c = cellCompactFeature(f); if (c) acc.push(c); });
+                    const more = json.exceededTransferLimit === true && (json.features || []).length > 0;
+                    if (more && offset / CELL_PAGE + 1 < CELL_MAX_PAGES) { page(offset + CELL_PAGE); return; }
+                    if (more) console.warn(`${TAG} cell: site ${sid} envelope exceeds ${CELL_MAX_PAGES * CELL_PAGE} hexes — truncated (shrink "Fetch around site")`);
+                    _cell = { siteID: sid, envKey, features: acc, loading: false, failed: false, at: Date.now(), source: 'live' };
+                    try { gmSet(gmEnvKey(CELL_CACHE_PREFIX + sid), JSON.stringify({ envKey, at: _cell.at, features: acc })); }
+                    catch (e) { console.warn(`${TAG} cell: cache write failed`, e); }
+                    console.log(`${TAG} cell: site ${sid} — ${acc.length} FCC hexes fetched`);
+                    if (isActive) applyCellCoverage();
+                },
+                onerror: () => { if (_cell.siteID === sid) { _cell.loading = false; _cell.failed = true; _cell.at = Date.now(); } console.warn(`${TAG} cell: network error`); },
+                ontimeout: () => { if (_cell.siteID === sid) { _cell.loading = false; _cell.failed = true; _cell.at = Date.now(); } console.warn(`${TAG} cell: FCC query timed out`); },
+            });
+        };
+        page(0);
+    }
+    function cellPaneName(map) {
+        try {
+            if (typeof map.getPane === 'function' && map.getPane(CELL_PANE)) return CELL_PANE;
+            if (typeof map.createPane === 'function') {
+                const p = map.createPane(CELL_PANE);
+                if (p) { p.style.zIndex = '385'; p.style.pointerEvents = 'none'; return CELL_PANE; }   // under fleet KML (390) + overlayPane (400)
+            }
+        } catch (e) { console.warn(`${TAG} cell: pane create failed`, e); }
+        return undefined;
+    }
+    function removeCellLayers() {
+        if (!_cellLayers.length) { _cellKey = ''; return; }
+        const map = getLeafletMap();
+        _cellLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        _cellLayers = []; _cellKey = '';
+    }
+    function removeCellLegend() { const el = document.getElementById(CELL_LEGEND_ID); if (el) el.remove(); }
+    function removeCellBadge() { const el = document.getElementById(CELL_BADGE_ID); if (el) el.remove(); }
+    function cellUnbindHover() {
+        if (!_cellHover) return;
+        try { _cellHover.container.removeEventListener('mousemove', _cellHover.move); _cellHover.container.removeEventListener('mouseleave', _cellHover.leave); } catch (e) {}
+        _cellHover = null;
+        removeCellBadge();
+    }
+    function removeCellCoverage() {
+        removeCellLayers(); removeCellLegend(); cellUnbindHover();
+    }
+    function cellResetForSite() {
+        _cell = { siteID: null, envKey: '', features: null, loading: false, failed: false, at: 0, source: '' };
+    }
+    function cellRefresh() {
+        const sid = getCurrentSiteID();
+        if (!sid) { showKMLToast('Open a site first.', 2500); return; }
+        try { gmSet(gmEnvKey(CELL_CACHE_PREFIX + sid), null); } catch (e) {}
+        cellResetForSite(); removeCellLayers();
+        if (toggleState['cell.show'] !== true) { showKMLToast('📶 Cell coverage is off — turn the category on to fetch.', 3500); return; }
+        showKMLToast('📶 Re-fetching FCC cell coverage…', 2500);
+        applyCellCoverage();
+    }
+    function cellPointInRing(lat, lng, ring) {
+        let inside = false;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+            const yi = ring[i][0], xi = ring[i][1], yj = ring[j][0], xj = ring[j][1];
+            if (((yi > lat) !== (yj > lat)) && (lng < (xj - xi) * (lat - yi) / ((yj - yi) || 1e-12) + xi)) inside = !inside;
+        }
+        return inside;
+    }
+    function cellHexAt(lat, lng) {
+        const fs = _cell.features || [];
+        // nearest centroid first (hexes are ~0.0035° across), then the exact ring test
+        let best = null, bestD = 0.006 * 0.006;
+        for (const f of fs) {
+            const dLat = f.c[0] - lat, dLng = (f.c[1] - lng) * Math.cos(lat * Math.PI / 180);
+            const d = dLat * dLat + dLng * dLng;
+            if (d < bestD && cellPointInRing(lat, lng, f.ring)) { best = f; bestD = d; }
+        }
+        return best;
+    }
+    function cellFmtDbm(v) { return (typeof v === 'number') ? `${v} dBm` : '—'; }
+    function cellBindHover(map) {
+        const container = (typeof map.getContainer === 'function') ? map.getContainer() : null;
+        if (!container) return;
+        if (_cellHover && _cellHover.container === container) return;
+        cellUnbindHover();
+        let raf = 0, lastEv = null;
+        const render = () => {
+            raf = 0;
+            const ev = lastEv; if (!ev) return;
+            let ll = null;
+            try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            if (!ll) return;
+            const f = cellHexAt(ll.lat, ll.lng);
+            let badge = document.getElementById(CELL_BADGE_ID);
+            if (!f) { if (badge) badge.style.display = 'none'; return; }
+            if (!badge) {
+                badge = document.createElement('div');
+                badge.id = CELL_BADGE_ID;
+                badge.style.cssText = 'position:absolute;z-index:950;pointer-events:none;background:rgba(16,22,31,0.92);border:1px solid rgba(122,223,230,0.45);border-radius:6px;padding:5px 9px;color:#dfe9f0;font:600 11px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,0.45);white-space:nowrap;';
+                container.appendChild(badge);
+            }
+            const rect = container.getBoundingClientRect();
+            let x = ev.clientX - rect.left + 16, y = ev.clientY - rect.top + 16;
+            if (x + 230 > rect.width) x = ev.clientX - rect.left - 240;
+            if (y + 110 > rect.height) y = ev.clientY - rect.top - 110;
+            badge.style.left = `${Math.max(0, x)}px`; badge.style.top = `${Math.max(0, y)}px`;
+            const rows = CELL_CARRIERS.map(c => {
+                const s = f.sig[c.key] || {};
+                const cells = CELL_TECHS.map(t => { const b = cellBandFor(s[t.key]); return `<td style="padding:0 0 0 10px;text-align:right;color:${b.color}">${cellFmtDbm(s[t.key])}</td>`; }).join('');
+                return `<tr><td style="color:#9fb3c8">${c.label}</td>${cells}</tr>`;
+            }).join('');
+            badge.innerHTML = `<div style="color:#7adfe6;margin-bottom:2px">📶 FCC modeled signal · hex ${String(f.id || '').slice(-5)}</div>`
+                + `<table style="border-collapse:collapse"><tr><td></td>${CELL_TECHS.map(t => `<td style="padding:0 0 0 10px;text-align:right;color:#9fb3c8">${t.label}</td>`).join('')}</tr>${rows}</table>`;
+            badge.style.display = '';
+        };
+        const move = (ev) => { lastEv = ev; if (!raf) raf = requestAnimationFrame(render); };
+        const leave = () => { const b = document.getElementById(CELL_BADGE_ID); if (b) b.style.display = 'none'; };
+        container.addEventListener('mousemove', move);
+        container.addEventListener('mouseleave', leave);
+        _cellHover = { container, move, leave };
+    }
+    function renderCellLegend(map, n) {
+        removeCellLegend();
+        if (toggleState['cell.legend'] !== true) return;
+        const car = String(toggleState['cell.carrier'] || 'best');
+        const tech = CELL_TECHS.find(t => t.key === String(toggleState['cell.tech'] || 'lte')) || CELL_TECHS[0];
+        const carLabel = car === 'best' ? 'best carrier' : ((CELL_CARRIERS.find(c => c.key === car) || {}).label || car);
+        const el = document.createElement('div');
+        el.id = CELL_LEGEND_ID;
+        // Bottom-LEFT so it never collides with the terrain legend (bottom-right).
+        el.style.cssText = 'position:absolute;left:10px;bottom:30px;z-index:900;pointer-events:none;'
+            + 'background:rgba(16,22,31,0.85);border:1px solid rgba(122,223,230,0.4);border-radius:6px;'
+            + 'padding:5px 10px;color:#dfe9f0;font:600 11px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;'
+            + 'box-shadow:0 2px 8px rgba(0,0,0,0.4);';
+        const sw = (color, label) => `<span style="display:inline-flex;align-items:center;gap:3px;margin-right:7px"><i style="display:inline-block;width:11px;height:11px;border-radius:2px;background:${color}"></i>${label}</span>`;
+        el.innerHTML = `<div style="color:#7adfe6">📶 FCC modeled signal · ${carLabel} · ${tech.label}</div>`
+            + `<div style="margin:3px 0">${CELL_BANDS.map(b => sw(b.color, b.label)).join('')}${sw(CELL_NONE.color, 'no coverage')} dBm</div>`
+            + `<div style="color:#8fa3b8;font-weight:500">${n} hexes · FCC BDC via Esri Living Atlas · ${_cell.source === 'cache' ? 'cached ' : 'fetched '}${_cell.at ? new Date(_cell.at).toLocaleDateString() : ''} · carrier-modeled ground coverage, not flown LTE</div>`;
+        try { map.getContainer().appendChild(el); } catch (e) {}
+    }
+    function applyCellCoverage() {
+        const map = getLeafletMap();
+        const L = _stylerL();
+        if (!map || !L || typeof map.addLayer !== 'function' || typeof L.polygon !== 'function') return;
+        if (toggleState['cell.show'] !== true) { removeCellCoverage(); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { removeCellCoverage(); return; }
+        if (_cell.siteID && _cell.siteID !== sid) { removeCellLayers(); cellResetForSite(); }
+        const env = cellSiteEnvelope(sid);
+        if (!env) {
+            if (_rrcSiteBBox.siteID === sid && _rrcSiteBBox.failed) { removeCellCoverage(); console.warn(`${TAG} cell: site ${sid} has no geometry to bound the fetch`); }
+            return;   // bounds still loading → rrcEnsureSiteBBox re-calls us
+        }
+        cellFetch(sid, env);
+        if (!_cell.features) return;   // in flight → onload re-calls us
+        const opacity = Math.min(0.9, Math.max(0.05, Number(toggleState['cell.opacity']) || 0.35));
+        const outline = toggleState['cell.outline'] === true;
+        const key = `${sid}|${_cell.envKey}|${_cell.at}|${toggleState['cell.carrier']}|${toggleState['cell.tech']}|${opacity}|${outline}|${toggleState['cell.legend']}|${toggleState['cell.hover']}`;
+        if (key !== _cellKey) {
+            removeCellLayers();
+            _cellKey = key;
+            const pane = cellPaneName(map);
+            // One multipolygon per color band (7 layers max) — not one layer per hex.
+            const groups = new Map();
+            _cell.features.forEach(f => {
+                const b = cellBandFor(cellSelectedSig(f));
+                if (!groups.has(b.color)) groups.set(b.color, []);
+                groups.get(b.color).push([f.ring]);   // depth-3 → MultiPolygon (depth-2 would make ring 2+ holes)
+            });
+            groups.forEach((rings, color) => {
+                const opts = { stroke: outline, color: '#10161f', weight: 0.6, opacity: 0.6, fill: true, fillColor: color, fillOpacity: color === CELL_NONE.color ? opacity * 0.6 : opacity, interactive: false };
+                if (pane) opts.pane = pane;
+                try { const poly = L.polygon(rings, opts); poly.addTo(map); _cellLayers.push(poly); }
+                catch (e) { console.warn(`${TAG} cell: polygon add failed`, e); }
+            });
+            renderCellLegend(map, _cell.features.length);
+        }
+        if (toggleState['cell.hover'] === true) cellBindHover(map); else cellUnbindHover();
+    }
+
     function rrcEnsureSiteBBox(sid) {
         if (_rrcSiteBBox.siteID === sid && !_rrcSiteBBox.loading) return _rrcSiteBBox.bbox;
         if (_rrcSiteBBox.siteID === sid && _rrcSiteBBox.loading) return null;
@@ -2344,11 +2704,13 @@
                 if (!_rrcSiteBBox.bbox) console.warn(`${TAG} RRC: site ${sid} has no entity geometry — nothing to bound the well fetch`);
                 applyRrcLayers();
                 if (isActive) applyFleetKml();   // v34.140: cached fleet layers wait on these bounds too
+                if (isActive) applyCellCoverage();   // v34.143: FCC hex envelope waits on these bounds too
             })
             .catch(err => {
                 _rrcSiteBBox = { siteID: sid, bbox: null, loading: false, failed: true };
                 console.warn(`${TAG} RRC: site bounds fetch failed:`, err);
                 if (isActive) applyFleetKml();   // clears any stale layers via .failed
+                if (isActive) applyCellCoverage();
             });
         return null;
     }
@@ -9268,6 +9630,8 @@
         removeRrcLayers();
         // And the fleet KML layers.
         removeFleetKml();
+        // And the FCC cell coverage hexes + legend + hover badge.
+        removeCellCoverage();
         // Land-owner click mode + outlines.
         parcelsDisarm();
         parcelsClear();
@@ -9767,6 +10131,7 @@
                         // and data refresh work there.
                         'asset-styles-editor', 'refresh-asset-data',
                         'fleetkml-refresh',   // v34.140: view-only overlay
+                        'cell-refresh',       // v34.143: view-only overlay
                     ];
                     if (!DV_SAFE_ACTIONS.includes(msg.actionId)) {
                         showKMLToast('That tool is Site-Setup-only — Data View is view-only.', 4000);
@@ -9824,6 +10189,7 @@
                     showKMLToast('Re-listing fleet KML layers from GitHub…', 2500);
                     fkListRepo(true);
                 }
+                else if (msg.actionId === 'cell-refresh') cellRefresh();
                 else if (msg.actionId === 'refresh-asset-data') {
                     const sid = getCurrentSiteID();
                     if (sid) { console.log(`${TAG} asset-state: manual refresh requested`); fetchAssetStates(sid, true); }
@@ -10365,6 +10731,7 @@
         Object.keys(committedKmlCache).forEach(k => { delete committedKmlCache[k]; });
         loadValidatorResults();
         removeFleetKml();   // v34.140: never show the old site's clipped layers while the new bounds load
+        removeCellCoverage(); cellResetForSite();   // v34.143: same for the FCC hexes
         if (isActive && sid) {
             console.log(`${TAG} site changed to ${sid} — fetching KML`);
             fetchKMLForSite(sid);
