@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.147
+// @version      34.148
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.147';
+    const SCRIPT_VERSION = '34.148';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -2414,6 +2414,7 @@
     let _cellKey = '';
     let _cellHover = null;   // { container, move, leave }
     let _cellRenderer = null;   // v34.145: one L.canvas per map — hexes never touch the SVG DOM
+    let _cellRendererLogged = false;
     let _cellHoverId = null;
     // 📡 towers (v34.146)
     const TOWER_KEY_GM = 'aim-opencellid-key';
@@ -2805,8 +2806,23 @@
         };
         page(0);
     }
+    // v34.148 — the pane's inline pointer-events:none was not enough: Percepto's stylesheet (or
+    // Leaflet's SVG fallback) gave the painted shapes hit-testing, so a hex under a native map
+    // button swallowed the click ("have to move the map to where there's nothing below").
+    // One !important rule over the whole pane subtree makes everything we draw click-through.
+    function cellEnsurePaneStyle() {
+        const id = 'aim-cell-pane-style';
+        if (document.getElementById(id)) return;
+        try {
+            const st = document.createElement('style');
+            st.id = id;
+            st.textContent = `.leaflet-${CELL_PANE}-pane, .leaflet-${CELL_PANE}-pane *, .leaflet-${CELL_PANE}-pane canvas, .leaflet-${CELL_PANE}-pane svg, .leaflet-${CELL_PANE}-pane path { pointer-events: none !important; }`;
+            (document.head || document.documentElement).appendChild(st);
+        } catch (e) { console.warn(`${TAG} cell: pane style inject failed`, e); }
+    }
     function cellPaneName(map) {
         try {
+            cellEnsurePaneStyle();
             if (typeof map.getPane === 'function' && map.getPane(CELL_PANE)) return CELL_PANE;
             if (typeof map.createPane === 'function') {
                 const p = map.createPane(CELL_PANE);
@@ -2835,11 +2851,12 @@
     // bitmap-scaled during zoom, one cheap redraw on moveend.
     function cellRenderer(map, L, pane) {
         if (_cellRenderer) return _cellRenderer;
-        if (typeof L.canvas !== 'function') return null;   // old Leaflet → SVG fallback
+        if (typeof L.canvas !== 'function') { if (!_cellRendererLogged) { _cellRendererLogged = true; console.warn(`${TAG} cell: this Leaflet has no L.canvas — hexes fall back to the SVG renderer (slower)`); } return null; }
         try {
             const opts = { padding: 0.5 };
             if (pane) opts.pane = pane;
             _cellRenderer = L.canvas(opts);
+            if (!_cellRendererLogged) { _cellRendererLogged = true; console.log(`${TAG} cell: canvas renderer in use for hexes + towers`); }
             return _cellRenderer;
         } catch (e) { console.warn(`${TAG} cell: canvas renderer unavailable, using SVG`, e); _cellRenderer = null; return null; }
     }
