@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.45
+// @version      1.46
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -58,7 +58,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.45';
+    const VERSION = '1.46';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -586,8 +586,31 @@
         });
     }
 
+    // v1.46 — "a.b.c" numeric compare; non-numeric parts compare as 0.
+    function compareVersions(a, b) {
+        const pa = String(a).split('.').map(x => parseInt(x, 10) || 0), pb = String(b).split('.').map(x => parseInt(x, 10) || 0);
+        for (let i = 0; i < Math.max(pa.length, pb.length); i++) { const d = (pa[i] || 0) - (pb[i] || 0); if (d) return d < 0 ? -1 : 1; }
+        return 0;
+    }
+    const _ignoredOldRegs = new Set();
     function handleRegister(msg) {
         if (!msg.scriptId) return;
+        // v1.46 — version guard: a REGISTER from an OLDER copy of the same
+        // script never replaces a newer registration. BroadcastChannel reaches
+        // every tab on the origin, so a tab still running yesterday's version
+        // (or an installed prod twin beside the latest copy) re-registers on
+        // every REQUEST_REGISTRATIONS and silently stripped the newer
+        // controls from the panel ("the Cell menu keeps disappearing",
+        // 2026-10-07). Logged once per script+version so the cause is visible.
+        const prevReg = state.registry.get(msg.scriptId);
+        if (prevReg && prevReg.version && msg.version && compareVersions(msg.version, prevReg.version) < 0) {
+            const k = `${msg.scriptId}@${msg.version}`;
+            if (!_ignoredOldRegs.has(k)) {
+                _ignoredOldRegs.add(k);
+                console.warn(`${TAG} ignoring REGISTER from ${msg.scriptId} v${msg.version} (frame ${msg.frame || '?'}) — v${prevReg.version} is already registered. Another tab or an older installed copy of this script is still running: reload that tab, or uninstall the duplicate in Tampermonkey.`);
+            }
+            return;
+        }
         // NOTE: a v1.31 "defense" broadcast master=false to any CSM-only tool
         // that registered in Lite. REMOVED in v1.33 — every CSM tool now
         // self-guards (inert in Lite, never registers), so it was unnecessary

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.143
+// @version      34.144
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -68,7 +68,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.143';
+    const SCRIPT_VERSION = '34.144';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -2388,16 +2388,16 @@
         { key: 'nr7',  label: '5G NR 7/1',      suffix: '5GNR_7_1' },
         { key: 'nr35', label: '5G NR 35/3',     suffix: '5GNR_35_3' },
     ];
-    // Service values are 10 dB bands (-60 … -110). Thresholds sit between bands.
+    // Service values are 10 dB bands (-60 … -110/-120). Thresholds sit between
+    // bands. v34.144: each band carries a plain word — most people don't read dBm.
     const CELL_BANDS = [
-        { min: -65,       label: '−60', color: '#00e676' },
-        { min: -75,       label: '−70', color: '#aeea00' },
-        { min: -85,       label: '−80', color: '#ffea00' },
-        { min: -95,       label: '−90', color: '#ffa000' },
-        { min: -105,      label: '−100', color: '#ff5722' },
-        { min: -Infinity, label: '−110', color: '#d50000' },
+        { min: -75,       word: 'Strong', label: '−60 / −70', color: '#00e676' },
+        { min: -85,       word: 'Good',   label: '−80',       color: '#aeea00' },
+        { min: -95,       word: 'Fair',   label: '−90',       color: '#ffea00' },
+        { min: -105,      word: 'Weak',   label: '−100',      color: '#ffa000' },
+        { min: -Infinity, word: 'Poor',   label: '−110+',     color: '#ff3d00' },
     ];
-    const CELL_NONE = { label: 'none', color: '#546e7a' };
+    const CELL_NONE = { word: 'None', label: 'no coverage', color: '#546e7a' };
     let _cell = { siteID: null, envKey: '', features: null, loading: false, failed: false, at: 0, source: '' };
     let _cellLayers = [];
     let _cellKey = '';
@@ -2568,7 +2568,7 @@
         }
         return best;
     }
-    function cellFmtDbm(v) { return (typeof v === 'number') ? `${v} dBm` : '—'; }
+    function cellFmtDbm(v) { return (typeof v === 'number') ? `${cellBandFor(v).word} <span style="opacity:0.75">${v} dBm</span>` : '—'; }
     function cellBindHover(map) {
         const container = (typeof map.getContainer === 'function') ? map.getContainer() : null;
         if (!container) return;
@@ -2600,7 +2600,7 @@
                 const cells = CELL_TECHS.map(t => { const b = cellBandFor(s[t.key]); return `<td style="padding:0 0 0 10px;text-align:right;color:${b.color}">${cellFmtDbm(s[t.key])}</td>`; }).join('');
                 return `<tr><td style="color:#9fb3c8">${c.label}</td>${cells}</tr>`;
             }).join('');
-            badge.innerHTML = `<div style="color:#7adfe6;margin-bottom:2px">📶 FCC modeled signal · hex ${String(f.id || '').slice(-5)}</div>`
+            badge.innerHTML = `<div style="color:#7adfe6;margin-bottom:2px">📶 Carrier-modeled signal (FCC)</div>`
                 + `<table style="border-collapse:collapse"><tr><td></td>${CELL_TECHS.map(t => `<td style="padding:0 0 0 10px;text-align:right;color:#9fb3c8">${t.label}</td>`).join('')}</tr>${rows}</table>`;
             badge.style.display = '';
         };
@@ -2625,7 +2625,7 @@
             + 'box-shadow:0 2px 8px rgba(0,0,0,0.4);';
         const sw = (color, label) => `<span style="display:inline-flex;align-items:center;gap:3px;margin-right:7px"><i style="display:inline-block;width:11px;height:11px;border-radius:2px;background:${color}"></i>${label}</span>`;
         el.innerHTML = `<div style="color:#7adfe6">📶 FCC modeled signal · ${carLabel} · ${tech.label}</div>`
-            + `<div style="margin:3px 0">${CELL_BANDS.map(b => sw(b.color, b.label)).join('')}${sw(CELL_NONE.color, 'no coverage')} dBm</div>`
+            + `<div style="margin:3px 0">${CELL_BANDS.map(b => sw(b.color, `${b.word} <span style="opacity:0.7">${b.label}</span>`)).join('')}${sw(CELL_NONE.color, CELL_NONE.word)} <span style="opacity:0.7">dBm</span></div>`
             + `<div style="color:#8fa3b8;font-weight:500">${n} hexes · FCC BDC via Esri Living Atlas · ${_cell.source === 'cache' ? 'cached ' : 'fetched '}${_cell.at ? new Date(_cell.at).toLocaleDateString() : ''} · carrier-modeled ground coverage, not flown LTE</div>`;
         try { map.getContainer().appendChild(el); } catch (e) {}
     }
