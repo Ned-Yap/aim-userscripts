@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.68
+// @version      0.69
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -39,7 +39,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.68';
+    const SCRIPT_VERSION = '0.69';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -112,6 +112,7 @@
             siteLabels: 'dark',
             // v0.68 (#287): 📶 FCC cell coverage dots on the landing map
             cellDots: false, cellCarrier: 'best', cellTech: 'lte',
+            cellHeat: false, cellHeatOpacity: 0.45,   // v0.69: fleet-wide hex heat map
             // Display-only view filters (never re-run the sweep): which
             // conflict classes to SHOW, and which clients are toggled off.
             view: { ffz: true, fp: true, asset: true },
@@ -137,6 +138,8 @@
             if (typeof s.xrefBaseB2 === 'number') d.xrefBaseB2 = s.xrefBaseB2;
             if (typeof s.siteLabels === 'string') d.siteLabels = s.siteLabels;
             if (typeof s.cellDots === 'boolean') d.cellDots = s.cellDots;
+            if (typeof s.cellHeat === 'boolean') d.cellHeat = s.cellHeat;
+            if (typeof s.cellHeatOpacity === 'number') d.cellHeatOpacity = s.cellHeatOpacity;
             if (typeof s.cellCarrier === 'string') d.cellCarrier = s.cellCarrier;
             if (typeof s.cellTech === 'string') d.cellTech = s.cellTech;
             if (s.view) NB_CLASSES.forEach(c => {
@@ -1246,11 +1249,13 @@
         scheduleSetupRefresh();
         applyBasemap();
         updateFaaTiles();
+        cellHeatSchedule();       // v0.69: resolution follows zoom
     }
     function onMapMoved() {
         scheduleSetupRefresh();   // viewport culling + fetch of newly-visible sites
         applyBasemap();           // extend/prune tile grids into the new view
         updateFaaTiles();
+        cellHeatSchedule();       // v0.69: fetch when the view leaves the covered envelope
     }
     // During an active drag, top up the tile grids every 150ms so a long
     // pan never outruns the cover (moveend alone left gaps → default-map
@@ -1363,7 +1368,7 @@
             }
             // --- #287 FCC cell coverage dots (own try — never costs the pins) ---
             if (ovCellG) {
-                try { ovCellG.innerHTML = ftCfg.cellDots ? cellRenderSvg(map) : ''; }
+                try { ovCellG.innerHTML = (ftCfg.cellHeat ? cellHeatRenderSvg(map) : '') + (ftCfg.cellDots ? cellRenderSvg(map) : ''); }
                 catch (e) { console.warn(`${TAG} cell overlay render failed:`, e); ovCellG.innerHTML = ''; }
             }
             // --- conflict dots (secondary conflict locations), then pins ---
@@ -4595,6 +4600,10 @@
             + '<div style="padding:6px 10px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
             + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="One dot per site colored by the FCC-modeled minimum signal (−60 strong … −110 edge, grey = no modeled coverage). Build the stats under 📊 Fleet Metrics → 📶 first.">`
             + `<input type="checkbox" data-ft-flag="cellDots" ${ftCfg.cellDots ? 'checked' : ''}> 📶 Cell coverage dots</label>`
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="FCC-modeled coverage hexes across the whole view, colored by minimum signal (−60 strong … −110 edge, grey = no modeled coverage). Resolution follows zoom: ~4 mi hexes zoomed out → ~0.6 mi zoomed in; the current view is fetched live (one request, cached while you stay inside it).">`
+            + `<input type="checkbox" data-ft-flag="cellHeat" ${ftCfg.cellHeat ? 'checked' : ''}> 🔥 Heat map</label>`
+            + `<label>opacity <input type="number" data-ft-num="cellHeatOpacity" value="${ftCfg.cellHeatOpacity}" min="0.1" max="0.9" step="0.05" style="width:52px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:2px 4px;font:inherit;"></label>`
+            + (cellHeatState.loading ? '<span style="color:#ffa030">⏳ fetching hexes…</span>' : (ftCfg.cellHeat && cellHeatState.features.length ? `<span style="color:#888">${cellHeatState.features.length} hexes · res ${cellHeatState.res}</span>` : ''))
             + `<label>carrier <select data-ft-cell="cellCarrier" style="background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:2px 4px;font:inherit;">`
             + [['best', 'Best of 3'], ['att', 'AT&T'], ['vz', 'Verizon'], ['tm', 'T-Mobile']].map(([v, l]) => `<option value="${v}" ${ftCfg.cellCarrier === v ? 'selected' : ''}>${l}</option>`).join('')
             + '</select></label>'
@@ -4804,6 +4813,115 @@
             h += `<circle cx="${xy.x}" cy="${xy.y + 14}" r="5" fill="${cellColor(v)}" fill-opacity="0.95" stroke="#10141c" stroke-width="1.5" style="pointer-events:auto"><title>${escapeHtml(`📶 ${siteName(id)} · ${(CELL_TECHS.find(t => t.key === tech) || {}).label || tech}${car === 'best' && who ? ` · best: ${who}` : ''}\n${tip}\nFCC-modeled ground signal (not flown LTE)`)}</title></circle>`;
         });
         return h;
+    }
+    // ------------------------------------------------------------------
+    // 🔥 Fleet-wide heat map (v0.69). The same Esri summary also publishes
+    // the FCC hexes at H3 res 6 / 7 / 8 (~36 / 5.2 / 0.74 km², i.e. ~4 /
+    // 1.6 / 0.6 mi across). We fetch the CURRENT VIEW (padded 50 %) at the
+    // resolution that keeps the count under ~6k (measured: the whole
+    // Permian at res 6 = 3.2k hexes, ~1 MB, 0.7 s), page at 2000, and
+    // re-fetch only when the view leaves the padded envelope or the zoom
+    // crosses a resolution step. Render = ONE <path> per color band in
+    // the raw SVG overlay (merged rings, like the KML block) — never a
+    // node per hex. Carrier/tech/opacity re-color without a fetch.
+    // ------------------------------------------------------------------
+    const CELL_HEAT_SERVICE = 'https://services8.arcgis.com/peDZJliSvYims39Q/arcgis/rest/services/Mobile_Broadband_H3_20260915_142812/FeatureServer';
+    const CELL_HEAT_LAYERS = { 6: 0, 7: 1, 8: 2 };   // H3 res → layer id
+    const CELL_HEAT_PAGE = 2000;
+    const CELL_HEAT_MAX_PAGES = 3;
+    const cellHeatState = { env: null, res: 0, features: [], loading: false, seq: 0, failedAt: 0 };
+    let cellHeatTimer = 0;
+    function cellHeatResForZoom(z) { return z <= 8 ? 6 : (z <= 10 ? 7 : 8); }
+    function cellHeatOutFields() {
+        const out = ['h3_id'];
+        CELL_CARRIERS.forEach(c => CELL_TECHS.forEach(t => out.push(`${c.field}_${t.suffix}_minsignal`)));
+        return out.join(',');
+    }
+    function cellHeatSchedule(delayMs) {
+        if (!ftCfg.cellHeat) return;
+        clearTimeout(cellHeatTimer);
+        cellHeatTimer = setTimeout(cellHeatEnsure, delayMs == null ? 350 : delayMs);
+    }
+    async function cellHeatEnsure() {
+        if (!ftCfg.cellHeat || !ovMap) return;
+        const map = ovMap;
+        let b, z;
+        try { b = map.getBounds(); z = map.getZoom(); } catch (e) { console.warn(`${TAG} heat: map bounds unavailable`, e); return; }
+        const w = b.getWest(), s = b.getSouth(), e = b.getEast(), n = b.getNorth();
+        const res = cellHeatResForZoom(z);
+        const env = cellHeatState.env;
+        if (env && cellHeatState.res === res && w >= env.w && e <= env.e && s >= env.s && n <= env.n) return;   // still covered
+        if (cellHeatState.loading) return;
+        if (Date.now() - cellHeatState.failedAt < 30000) return;   // 30 s backoff after a failure
+        const padLng = (e - w) * 0.5, padLat = (n - s) * 0.5;
+        const fetched = { w: w - padLng, s: s - padLat, e: e + padLng, n: n + padLat };
+        const seq = ++cellHeatState.seq;
+        cellHeatState.loading = true; renderPanel();
+        const acc = [];
+        try {
+            for (let page = 0; page < CELL_HEAT_MAX_PAGES; page++) {
+                const params = new URLSearchParams({
+                    f: 'json',
+                    geometry: `${fetched.w},${fetched.s},${fetched.e},${fetched.n}`,
+                    geometryType: 'esriGeometryEnvelope', inSR: '4326',
+                    spatialRel: 'esriSpatialRelIntersects',
+                    outFields: cellHeatOutFields(),
+                    returnGeometry: 'true', outSR: '4326', geometryPrecision: '4',
+                    resultOffset: String(page * CELL_HEAT_PAGE), resultRecordCount: String(CELL_HEAT_PAGE),
+                });
+                const r = await fetchWithTimeout(`${CELL_HEAT_SERVICE}/${CELL_HEAT_LAYERS[res]}/query?${params.toString()}`, { cache: 'no-store' }, 30000);
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                const j = await r.json();
+                if (j.error) throw new Error(`${j.error.code || ''} ${j.error.message || ''}`.trim());
+                if (seq !== cellHeatState.seq) return;   // superseded by a newer view
+                (j.features || []).forEach(f => {
+                    const ring = ((f.geometry && f.geometry.rings && f.geometry.rings[0]) || []);
+                    if (ring.length < 3) return;
+                    const a = f.attributes || {}, sig = {};
+                    CELL_CARRIERS.forEach(c => { sig[c.key] = {}; CELL_TECHS.forEach(t => { const v = a[`${c.field}_${t.suffix}_minsignal`]; sig[c.key][t.key] = typeof v === 'number' ? v : null; }); });
+                    acc.push({ ring: ring.map(xy => [xy[1], xy[0]]), sig });
+                });
+                if (j.exceededTransferLimit !== true || !(j.features || []).length) break;
+                if (page === CELL_HEAT_MAX_PAGES - 1) console.warn(`${TAG} heat: view exceeds ${CELL_HEAT_MAX_PAGES * CELL_HEAT_PAGE} hexes at res ${res} — truncated (zoom in)`);
+            }
+            cellHeatState.env = fetched; cellHeatState.res = res; cellHeatState.features = acc; cellHeatState.failedAt = 0;
+            console.log(`${TAG} heat: ${acc.length} FCC hexes at res ${res} for the view (z${z})`);
+        } catch (err) {
+            if (seq !== cellHeatState.seq) return;
+            cellHeatState.failedAt = Date.now();
+            console.warn(`${TAG} heat: FCC fetch failed:`, err);
+            setStatus(`🔥 FCC heat map fetch failed — ${String(err && err.message || err)} (retries after 30 s)`);
+        } finally {
+            if (seq === cellHeatState.seq) { cellHeatState.loading = false; renderPanel(); requestRender(); }
+        }
+    }
+    function cellHeatSelectedSig(sig) {
+        const car = ftCfg.cellCarrier || 'best', tech = ftCfg.cellTech || 'lte';
+        if (car === 'best') {
+            let best = null;
+            CELL_CARRIERS.forEach(c => { const v = sig[c.key] && sig[c.key][tech]; if (typeof v === 'number' && (best === null || v > best)) best = v; });
+            return best;
+        }
+        const v = sig[car] && sig[car][tech];
+        return typeof v === 'number' ? v : null;
+    }
+    function cellHeatRenderSvg(map) {
+        const fs = cellHeatState.features;
+        if (!fs.length) return '';
+        const op = Math.min(0.9, Math.max(0.1, Number(ftCfg.cellHeatOpacity) || 0.45));
+        const byColor = {};
+        const P = (lat, lng) => { const p = map.latLngToLayerPoint([lat, lng]); return `${Math.round(p.x * 10) / 10},${Math.round(p.y * 10) / 10}`; };
+        fs.forEach(f => {
+            const color = cellColor(cellHeatSelectedSig(f.sig));
+            let d = '';
+            f.ring.forEach((pt, i) => { d += (i ? 'L' : 'M') + P(pt[0], pt[1]); });
+            byColor[color] = (byColor[color] || '') + d + 'Z';
+        });
+        let h = '<g data-cell-heat="1">';
+        Object.keys(byColor).forEach(color => {
+            h += `<path d="${byColor[color]}" fill="${color}" fill-opacity="${color === CELL_NONE_COLOR ? op * 0.55 : op}" stroke="none" fill-rule="nonzero"/>`;
+        });
+        return h + '</g>';
     }
 
     // ==================================================================
@@ -7677,6 +7795,9 @@
                         if (prop === 'faaOpacity') {
                             updateFaaTiles();
                             setStatus(`FAA chart opacity = ${v}`);
+                        } else if (prop === 'cellHeatOpacity') {
+                            requestRender();
+                            setStatus(`🔥 heat map opacity = ${v}`);
                         } else {
                             const labels = { thresholdFt: 'threshold', marginFt: 'prefilter margin', xrefB1: 'cross-ref band 1', xrefB2: 'cross-ref band 2', xrefBaseB1: 'Tattu range', xrefBaseB2: 'Tulip range' };
                             setStatus(`${labels[prop] || prop} = ${v} ft — takes effect on the next ${prop.startsWith('xref') ? 'cross-ref run' : 'sweep'}`);
@@ -7698,6 +7819,10 @@
                     } else if (prop === 'faaChart') {
                         setStatus(flag.checked ? `FAA sectional ON — chart tiles exist at zoom ${FAA_SRC.min}–${FAA_SRC.max}` : 'FAA sectional OFF');
                         updateFaaTiles();
+                    } else if (prop === 'cellHeat') {
+                        setStatus(flag.checked ? '🔥 FCC cell heat map ON — fetching the current view…' : '🔥 FCC cell heat map OFF');
+                        if (flag.checked) cellHeatSchedule(0); else requestRender();
+                        renderPanel();
                     } else if (prop === 'cellDots') {
                         const n = Object.keys(cellIdx.sites).length;
                         setStatus(flag.checked ? (n ? `📶 cell coverage dots ON — ${n} site(s)` : '📶 cell dots ON — no FCC stats yet: 📊 Fleet Metrics → 📶 Build cell coverage') : '📶 cell coverage dots OFF');
