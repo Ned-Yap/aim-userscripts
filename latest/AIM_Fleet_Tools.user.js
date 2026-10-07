@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.70
+// @version      0.71
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -39,7 +39,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.70';
+    const SCRIPT_VERSION = '0.71';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -1190,6 +1190,14 @@
                 if (pane) { pane.style.zIndex = 635; pane.style.pointerEvents = 'none'; }
             }
             if (!pane) return false;
+            // v0.71: 🔥 heat map bitmap UNDER the SVG — a viewport-sized <canvas>
+            // we own (public API only, like the SVG). Painted once per move/zoom
+            // end; a 10k-hex SVG path was re-rasterised on every change.
+            ovHeatCanvas = document.createElement('canvas');
+            ovHeatCanvas.width = 0; ovHeatCanvas.height = 0;
+            ovHeatCanvas.style.cssText = 'position:absolute;left:0;top:0;pointer-events:none;';
+            pane.appendChild(ovHeatCanvas);
+            cellHeatDrawKey = '';
             ovSvg = document.createElementNS(SVG_NS, 'svg');
             ovSvg.setAttribute('width', '1');
             ovSvg.setAttribute('height', '1');
@@ -1368,9 +1376,11 @@
             }
             // --- #287 FCC cell coverage dots (own try — never costs the pins) ---
             if (ovCellG) {
-                try { ovCellG.innerHTML = (ftCfg.cellHeat ? cellHeatRenderSvg(map) : '') + (ftCfg.cellDots ? cellRenderSvg(map) : ''); }
+                try { ovCellG.innerHTML = ftCfg.cellDots ? cellRenderSvg(map) : ''; }
                 catch (e) { console.warn(`${TAG} cell overlay render failed:`, e); ovCellG.innerHTML = ''; }
             }
+            try { cellHeatDraw(map); }
+            catch (e) { console.warn(`${TAG} heat canvas draw failed:`, e); }
             // --- conflict dots (secondary conflict locations), then pins ---
             let pHtml = '';
             dotData.forEach(dd => {
@@ -4838,8 +4848,10 @@
     const CELL_HEAT_MAX_HEXES = 10500;                      // finest resolution whose estimated count fits
     const CELL_HEAT_HEX_KM2 = { 6: 36.13, 7: 5.161, 8: 0.7373 };   // mean H3 cell area
     const CELL_HEAT_PAD = 0.25;
-    const cellHeatState = { env: null, res: 0, features: [], loading: false, seq: 0, failedAt: 0, tooWide: false };
+    const cellHeatState = { env: null, res: 0, features: [], loading: false, seq: 0, failedAt: 0, tooWide: false, dataSeq: 0 };
     let cellHeatTimer = 0;
+    let ovHeatCanvas = null;
+    let cellHeatDrawKey = '';
     // v0.70: resolution from the padded view's AREA, not the zoom level. The
     // first cut keyed on zoom and a 3,500 px monitor at z11 asked for ~30k
     // res-8 hexes; the fetch truncated at the page cap and — because the
@@ -4911,7 +4923,7 @@
                 if (j.exceededTransferLimit !== true || !(j.features || []).length) break;
                 if (page === CELL_HEAT_MAX_PAGES - 1) { console.warn(`${TAG} heat: view exceeds ${CELL_HEAT_MAX_PAGES * CELL_HEAT_PAGE} hexes at res ${res} — truncated`); setStatus('🔥 heat map: more hexes than one fetch can carry — pan a little to refetch, or zoom in'); }
             }
-            cellHeatState.env = fetched; cellHeatState.res = res; cellHeatState.features = acc; cellHeatState.failedAt = 0;
+            cellHeatState.env = fetched; cellHeatState.res = res; cellHeatState.features = acc; cellHeatState.failedAt = 0; cellHeatState.dataSeq++;
             console.log(`${TAG} heat: ${acc.length} FCC hexes at res ${res} for the view (z${z}, ~${Math.round(cellEnvAreaKm2(fetched))} km²)`);
         } catch (err) {
             if (seq !== cellHeatState.seq) return;
@@ -4932,23 +4944,60 @@
         const v = sig[car] && sig[car][tech];
         return typeof v === 'number' ? v : null;
     }
-    function cellHeatRenderSvg(map) {
+    // Paint the hexes into the canvas. Canvas covers the viewport plus 50 %
+    // on every side in LAYER coordinates (pane-local, so it pans for free
+    // with the pane); re-painted only when origin / zoom / data / style
+    // change — renderOverlay runs far more often than that.
+    function cellHeatDraw(map) {
+        const cv = ovHeatCanvas;
+        if (!cv) return;
         const fs = cellHeatState.features;
-        if (!fs.length) return '';
+        if (!ftCfg.cellHeat || !fs.length) {
+            if (cv.width || cv.height) { cv.width = 0; cv.height = 0; }
+            cellHeatDrawKey = '';
+            return;
+        }
+        const size = map.getSize();
+        const z = map.getZoom();
+        const tl = map.containerPointToLayerPoint([0, 0]);
+        const PAD = 0.35;   // 1.7× viewport each axis — enough pan headroom, bounded bitmap
+        const w = Math.ceil(size.x * (1 + 2 * PAD)), h = Math.ceil(size.y * (1 + 2 * PAD));
+        const ox = Math.round(tl.x - size.x * PAD), oy = Math.round(tl.y - size.y * PAD);
         const op = Math.min(0.9, Math.max(0.1, Number(ftCfg.cellHeatOpacity) || 0.45));
-        const byColor = {};
-        const P = (lat, lng) => { const p = map.latLngToLayerPoint([lat, lng]); return `${Math.round(p.x * 10) / 10},${Math.round(p.y * 10) / 10}`; };
+        const key = `${z}|${ox},${oy}|${w}x${h}|${cellHeatState.dataSeq}|${ftCfg.cellCarrier}|${ftCfg.cellTech}|${op}`;
+        if (key === cellHeatDrawKey) return;
+        cellHeatDrawKey = key;
+        const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+        cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+        cv.style.width = `${w}px`; cv.style.height = `${h}px`;
+        cv.style.left = `${ox}px`; cv.style.top = `${oy}px`;
+        const ctx = cv.getContext('2d');
+        if (!ctx) return;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, w, h);
+        const groups = new Map();
         fs.forEach(f => {
+            const p0 = map.latLngToLayerPoint(f.ring[0]);
+            const x0 = p0.x - ox, y0 = p0.y - oy;
+            if (x0 < -300 || x0 > w + 300 || y0 < -300 || y0 > h + 300) return;   // off-canvas hex
             const color = cellColor(cellHeatSelectedSig(f.sig));
-            let d = '';
-            f.ring.forEach((pt, i) => { d += (i ? 'L' : 'M') + P(pt[0], pt[1]); });
-            byColor[color] = (byColor[color] || '') + d + 'Z';
+            if (!groups.has(color)) groups.set(color, []);
+            groups.get(color).push(f);
         });
-        let h = '<g data-cell-heat="1">';
-        Object.keys(byColor).forEach(color => {
-            h += `<path d="${byColor[color]}" fill="${color}" fill-opacity="${color === CELL_NONE_COLOR ? op * 0.55 : op}" stroke="none" fill-rule="nonzero"/>`;
+        groups.forEach((list, color) => {
+            ctx.beginPath();
+            list.forEach(f => {
+                f.ring.forEach((pt, i) => {
+                    const p = map.latLngToLayerPoint(pt);
+                    if (i) ctx.lineTo(p.x - ox, p.y - oy); else ctx.moveTo(p.x - ox, p.y - oy);
+                });
+                ctx.closePath();
+            });
+            ctx.globalAlpha = color === CELL_NONE_COLOR ? op * 0.55 : op;
+            ctx.fillStyle = color;
+            ctx.fill();
         });
-        return h + '</g>';
+        ctx.globalAlpha = 1;
     }
 
     // ==================================================================

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.144
+// @version      34.145
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -68,7 +68,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.144';
+    const SCRIPT_VERSION = '34.145';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -2402,6 +2402,8 @@
     let _cellLayers = [];
     let _cellKey = '';
     let _cellHover = null;   // { container, move, leave }
+    let _cellRenderer = null;   // v34.145: one L.canvas per map — hexes never touch the SVG DOM
+    let _cellHoverId = null;
 
     function cellField(carrier, tech) { return `${carrier.field}_${tech.suffix}_minsignal`; }
     function cellBandFor(dbm) {
@@ -2526,6 +2528,28 @@
         _cellLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
         _cellLayers = []; _cellKey = '';
     }
+    function removeCellRenderer() {
+        if (!_cellRenderer) return;
+        const map = getLeafletMap();
+        try { if (map) map.removeLayer(_cellRenderer); } catch (e) {}
+        _cellRenderer = null;
+    }
+    // v34.145 — PERF. The first cut drew the hexes through Leaflet's SVG
+    // renderer: every pan end rewrote the <path d> of each band (our own
+    // MutationObserver watches 'd' → a full runUpdate per pan), and every
+    // zoom animation re-rasterised a viewport-sized multipolygon. The canvas
+    // renderer paints the same shapes into one bitmap: zero SVG mutations,
+    // bitmap-scaled during zoom, one cheap redraw on moveend.
+    function cellRenderer(map, L, pane) {
+        if (_cellRenderer) return _cellRenderer;
+        if (typeof L.canvas !== 'function') return null;   // old Leaflet → SVG fallback
+        try {
+            const opts = { padding: 0.5 };
+            if (pane) opts.pane = pane;
+            _cellRenderer = L.canvas(opts);
+            return _cellRenderer;
+        } catch (e) { console.warn(`${TAG} cell: canvas renderer unavailable, using SVG`, e); _cellRenderer = null; return null; }
+    }
     function removeCellLegend() { const el = document.getElementById(CELL_LEGEND_ID); if (el) el.remove(); }
     function removeCellBadge() { const el = document.getElementById(CELL_BADGE_ID); if (el) el.remove(); }
     function cellUnbindHover() {
@@ -2535,7 +2559,7 @@
         removeCellBadge();
     }
     function removeCellCoverage() {
-        removeCellLayers(); removeCellLegend(); cellUnbindHover();
+        removeCellLayers(); removeCellRenderer(); removeCellLegend(); cellUnbindHover();
     }
     function cellResetForSite() {
         _cell = { siteID: null, envKey: '', features: null, loading: false, failed: false, at: 0, source: '' };
@@ -2578,23 +2602,26 @@
         const render = () => {
             raf = 0;
             const ev = lastEv; if (!ev) return;
+            if (ev.buttons) return;   // dragging the map — leave the badge alone
             let ll = null;
             try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
             if (!ll) return;
             const f = cellHexAt(ll.lat, ll.lng);
             let badge = document.getElementById(CELL_BADGE_ID);
-            if (!f) { if (badge) badge.style.display = 'none'; return; }
+            if (!f) { if (badge && badge.style.display !== 'none') badge.style.display = 'none'; _cellHoverId = null; return; }
             if (!badge) {
                 badge = document.createElement('div');
                 badge.id = CELL_BADGE_ID;
-                badge.style.cssText = 'position:absolute;z-index:950;pointer-events:none;background:rgba(16,22,31,0.92);border:1px solid rgba(122,223,230,0.45);border-radius:6px;padding:5px 9px;color:#dfe9f0;font:600 11px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,0.45);white-space:nowrap;';
+                badge.style.cssText = 'position:absolute;left:0;top:0;will-change:transform;z-index:950;pointer-events:none;background:rgba(16,22,31,0.92);border:1px solid rgba(122,223,230,0.45);border-radius:6px;padding:5px 9px;color:#dfe9f0;font:600 11px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,0.45);white-space:nowrap;';
                 container.appendChild(badge);
             }
             const rect = container.getBoundingClientRect();
             let x = ev.clientX - rect.left + 16, y = ev.clientY - rect.top + 16;
             if (x + 230 > rect.width) x = ev.clientX - rect.left - 240;
             if (y + 110 > rect.height) y = ev.clientY - rect.top - 110;
-            badge.style.left = `${Math.max(0, x)}px`; badge.style.top = `${Math.max(0, y)}px`;
+            badge.style.transform = `translate(${Math.max(0, x)}px, ${Math.max(0, y)}px)`;
+            if (_cellHoverId === f.id && badge.style.display !== 'none') return;   // same hex → position only, no rebuild
+            _cellHoverId = f.id;
             const rows = CELL_CARRIERS.map(c => {
                 const s = f.sig[c.key] || {};
                 const cells = CELL_TECHS.map(t => { const b = cellBandFor(s[t.key]); return `<td style="padding:0 0 0 10px;text-align:right;color:${b.color}">${cellFmtDbm(s[t.key])}</td>`; }).join('');
@@ -2651,7 +2678,8 @@
             removeCellLayers();
             _cellKey = key;
             const pane = cellPaneName(map);
-            // One multipolygon per color band (7 layers max) — not one layer per hex.
+            const renderer = cellRenderer(map, L, pane);
+            // One multipolygon per color band (6 layers max) — not one layer per hex.
             const groups = new Map();
             _cell.features.forEach(f => {
                 const b = cellBandFor(cellSelectedSig(f));
@@ -2661,6 +2689,7 @@
             groups.forEach((rings, color) => {
                 const opts = { stroke: outline, color: '#10161f', weight: 0.6, opacity: 0.6, fill: true, fillColor: color, fillOpacity: color === CELL_NONE.color ? opacity * 0.6 : opacity, interactive: false };
                 if (pane) opts.pane = pane;
+                if (renderer) opts.renderer = renderer;
                 try { const poly = L.polygon(rings, opts); poly.addTo(map); _cellLayers.push(poly); }
                 catch (e) { console.warn(`${TAG} cell: polygon add failed`, e); }
             });

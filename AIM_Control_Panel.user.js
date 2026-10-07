@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.46
+// @version      1.47
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -58,7 +58,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.46';
+    const VERSION = '1.47';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -1189,6 +1189,11 @@
         const handlePanelInteract = (e) => {
             const t = e.target;
             if (!t) return;
+            // v1.47 — native <select> popups are fragile: any handler work on
+            // the pointerdown that opens one (and any re-render it causes)
+            // leaves Chrome's popup open but EMPTY. Selects are served by the
+            // 'change' listener above; nothing here needs them.
+            if (t.closest && t.closest('select, option')) return;
             // For pointerdown, only process LEFT button (button 0). Avoids
             // accidental dismissals on right-click context-menu attempts.
             if (e.type === 'pointerdown' && e.button !== 0) return;
@@ -1744,7 +1749,7 @@
                 <div style="display:flex;align-items:center;gap:8px;padding:3px 10px;color:#e6e6e6">
                     <span style="flex:1">${escapeHtml(t.label || t.id)}</span>
                     <select data-control="select" data-script="${escapeAttr(scriptId)}" data-toggle="${escapeAttr(t.id)}"
-                            style="background:#1f2228;color:#e6e6e6;border:1px solid rgba(255,255,255,0.18);border-radius:3px;padding:2px 6px;cursor:pointer;font:inherit">${opts}</select>
+                            style="background:#1f2228;color:#e6e6e6;color-scheme:dark;border:1px solid rgba(255,255,255,0.18);border-radius:3px;padding:2px 6px;cursor:pointer;font:inherit">${opts}</select>
                     ${resetIconHtml(scriptId, t, value)}
                 </div>
             `;
