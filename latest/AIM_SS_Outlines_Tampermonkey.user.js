@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.145
+// @version      34.146
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -21,6 +21,7 @@
 // @connect      services1.arcgis.com
 // @connect      services6.arcgis.com
 // @connect      services.arcgis.com
+// @connect      opencellid.org
 // @connect      pdi.scinet.usda.gov
 // @connect      gis.rrc.texas.gov
 // @connect      webapps2.rrc.texas.gov
@@ -68,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.145';
+    const SCRIPT_VERSION = '34.146';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -571,6 +572,14 @@
                 { id: 'cell.hover', label: 'Hover readout (all carriers)', type: 'boolean', default: true },
                 { id: 'cell.legend', label: 'Legend', type: 'boolean', default: true },
                 { id: 'cell-refresh', label: 'Re-fetch FCC data for this site', type: 'button', action: 'cell-refresh' },
+                // 📡 Tower dots (v34.146) — OpenCelliD crowd-sourced cell
+                // positions, one dot per tower (sectors clustered), colored by
+                // carrier. Needs a free OpenCelliD API key (opencellid.org →
+                // register); CC BY-SA 4.0, credited in the legend.
+                { type: 'header', label: '📡 Cell towers (OpenCelliD — free key needed)' },
+                { id: 'cell.towers', label: 'Tower dots', type: 'boolean', default: false },
+                { id: 'cell.towersCarrierOnly', label: 'Only the selected carrier', type: 'boolean', default: false },
+                { id: 'cell-towers-key', label: 'Set / clear OpenCelliD API key…', type: 'button', action: 'cell-towers-key' },
             ],
         },
         {
@@ -2404,6 +2413,189 @@
     let _cellHover = null;   // { container, move, leave }
     let _cellRenderer = null;   // v34.145: one L.canvas per map — hexes never touch the SVG DOM
     let _cellHoverId = null;
+    // 📡 towers (v34.146)
+    const TOWER_KEY_GM = 'aim-opencellid-key';
+    const TOWER_URL = 'https://opencellid.org/cell/getInArea';
+    const TOWER_CACHE_PREFIX = 'aim-cell-towers-v1-';
+    // OpenCelliD limits (docs 2026): BBOX ≤ 4,000,000 m², ≤ 50 cells per request (offset paging),
+    // 1,000 request credits per key per day, positions rounded to 3 decimals (~110 m).
+    const TOWER_LIMIT = 50;
+    const TOWER_TILE_KM = 1.9;     // tile edge → 3.6 km² per request box
+    const TOWER_MAX_TILES = 36;    // ~11 × 11 km envelope at most
+    const TOWER_MAX_REQ = 160;     // hard stop per fetch (daily budget is 1,000)
+    const TOWER_CONCURRENCY = 3;
+    const TOWER_CLUSTER_M = 150;   // sectors of one site are estimated within this of each other (3-decimal rounding ≈ 110 m)
+    // MCC-MNC → carrier (US). Verizon 311-48x; AT&T 310-410/280/030/150/170/380/560/680, 311-180; T-Mobile 310-260/160/200…250/270/310/490/660/800, 311-490/660/870/880, 312-250/530 (ex-Sprint); DISH 313-340.
+    const TOWER_CARRIER = (() => {
+        const m = {};
+        const set = (mcc, mncs, name) => mncs.forEach(n => { m[`${mcc}-${String(n).padStart(3, '0')}`] = name; });
+        set(311, [480, 481, 482, 483, 484, 485, 486, 487, 488, 489], 'Verizon'); set(310, [4, 10, 12, 13], 'Verizon');
+        set(310, [410, 280, 30, 150, 170, 380, 560, 680, 70, 90, 950], 'AT&T'); set(311, [180, 190], 'AT&T'); set(313, [100, 110, 120, 130, 140], 'AT&T');
+        set(310, [260, 160, 200, 210, 220, 230, 240, 250, 270, 310, 490, 660, 800, 300, 120], 'T-Mobile'); set(311, [490, 660, 870, 880, 882], 'T-Mobile'); set(312, [250, 530, 190], 'T-Mobile');
+        set(313, [340], 'DISH');
+        return m;
+    })();
+    const TOWER_COLORS = { 'Verizon': '#ff1744', 'AT&T': '#2979ff', 'T-Mobile': '#ea80fc', 'DISH': '#ffd600', 'Other': '#b0bec5' };
+    const TOWER_CARRIER_KEY = { att: 'AT&T', vz: 'Verizon', tm: 'T-Mobile' };
+    let _towers = { siteID: null, envKey: '', towers: null, loading: false, failed: false, at: 0, capped: false, source: '' };
+    let _towerLayers = [];
+    let _towerKey = '';
+    function towerApiKey() { try { return String(gmGet(TOWER_KEY_GM, '') || '').trim(); } catch (e) { return ''; } }
+    function towerCarrierOf(mcc, mnc) { return TOWER_CARRIER[`${mcc}-${String(mnc).padStart(3, '0')}`] || 'Other'; }
+    // Cluster OpenCelliD cells (one row per sector/cell, positions scattered ±100 m) into towers per carrier.
+    function towerCluster(cells) {
+        const towers = [];
+        cells.forEach(c => {
+            let best = null, bestD = TOWER_CLUSTER_M;
+            for (const t of towers) {
+                if (t.carrier !== c.carrier) continue;
+                const d = Math.hypot((t.lat - c.lat) * 111320, (t.lng - c.lng) * 111320 * Math.cos(c.lat * Math.PI / 180));
+                if (d < bestD) { best = t; bestD = d; }
+            }
+            if (best) {
+                best.n++; best.samples += c.samples; best.range = Math.max(best.range, c.range);
+                best.lat += (c.lat - best.lat) / best.n; best.lng += (c.lng - best.lng) / best.n;   // running mean
+                if (c.radio && !best.radios.includes(c.radio)) best.radios.push(c.radio);
+            } else towers.push({ lat: c.lat, lng: c.lng, carrier: c.carrier, mnc: c.mnc, n: 1, samples: c.samples, range: c.range, radios: c.radio ? [c.radio] : [] });
+        });
+        towers.forEach((t, i) => { t.key = `${t.carrier}|${i}`; });
+        return towers;
+    }
+    function towerFetch(sid, env) {
+        const envKey = cellEnvKey(env);
+        if (_towers.siteID === sid && _towers.envKey === envKey && (_towers.towers || _towers.loading)) return;
+        if (_towers.siteID === sid && _towers.envKey === envKey && _towers.failed && Date.now() - _towers.at < 60000) return;
+        const key = towerApiKey();
+        if (!key) { _towers = { siteID: sid, envKey, towers: null, loading: false, failed: true, at: Date.now(), capped: false, source: 'nokey' }; return; }
+        _towers = { siteID: sid, envKey, towers: null, loading: true, failed: false, at: Date.now(), capped: false, source: '' };
+        try {
+            const cached = gmGet(gmEnvKey(TOWER_CACHE_PREFIX + sid), null);
+            const c = typeof cached === 'string' ? JSON.parse(cached) : cached;
+            if (c && c.envKey === envKey && Array.isArray(c.towers) && Date.now() - (c.at || 0) < CELL_CACHE_TTL_MS) {
+                _towers = { siteID: sid, envKey, towers: c.towers, loading: false, failed: false, at: c.at, capped: !!c.capped, source: 'cache' };
+                return;
+            }
+        } catch (e) { console.warn(`${TAG} towers: cache read failed`, e); }
+        if (typeof GM_xmlhttpRequest !== 'function') { _towers.loading = false; _towers.failed = true; return; }
+        // Tile the envelope into ≤ 3.6 km² boxes (service cap is 4 km²) and page each at 50 cells.
+        const midLat = (env.s + env.n) / 2;
+        const dLat = TOWER_TILE_KM / 111.32, dLng = dLat / Math.max(Math.cos(midLat * Math.PI / 180), 0.2);
+        const tiles = [];
+        for (let s = env.s; s < env.n; s += dLat) for (let w = env.w; w < env.e; w += dLng) tiles.push({ s, w, n: Math.min(s + dLat, env.n), e: Math.min(w + dLng, env.e) });
+        if (tiles.length > TOWER_MAX_TILES) {
+            _towers.loading = false; _towers.failed = true; _towers.at = Date.now(); _towers.source = 'toobig';
+            console.warn(`${TAG} towers: envelope needs ${tiles.length} OpenCelliD tiles (max ${TOWER_MAX_TILES}) — shrink "Fetch around site"`);
+            showKMLToast(`📡 Site area too large for tower dots (${tiles.length} request tiles) — lower "Fetch around site"`, 6000);
+            return;
+        }
+        const cells = [];
+        let reqs = 0, capped = false, pending = tiles.length, aborted = false, inFlight = 0;
+        const queue = tiles.slice();
+        const fail = (msg, body) => {
+            if (aborted) return;
+            aborted = true;
+            _towers.loading = false; _towers.failed = true; _towers.at = Date.now();
+            console.warn(`${TAG} towers: OpenCelliD query failed:`, msg, body ? String(body).slice(0, 300) : '');
+            showKMLToast(`📡 OpenCelliD: ${msg}${/key/i.test(msg) ? ' — set the key via the Cell coverage category' : ''}`, 6000);
+        };
+        const finalize = () => {
+            if (aborted) return;
+            const towers = towerCluster(cells);
+            _towers = { siteID: sid, envKey, towers, loading: false, failed: false, at: Date.now(), capped, source: 'live' };
+            try { gmSet(gmEnvKey(TOWER_CACHE_PREFIX + sid), JSON.stringify({ envKey, at: _towers.at, towers, capped })); } catch (e) {}
+            console.log(`${TAG} towers: ${cells.length} OpenCelliD LTE cells → ${towers.length} towers for site ${sid} (${reqs} requests, ${tiles.length} tiles)${capped ? ' — request budget hit, some towers may be missing' : ''}`);
+            if (capped) showKMLToast(`📡 Tower fetch stopped at ${TOWER_MAX_REQ} requests — some towers may be missing; shrink "Fetch around site"`, 5000);
+            if (isActive) applyCellCoverage();
+        };
+        const tileDone = () => { inFlight--; pending--; if (pending <= 0) finalize(); else runNext(); };
+        const page = (tile, offset) => {
+            if (aborted) return;
+            if (reqs >= TOWER_MAX_REQ) { capped = true; tileDone(); return; }
+            reqs++;
+            const params = new URLSearchParams({ key, BBOX: `${tile.s.toFixed(5)},${tile.w.toFixed(5)},${tile.n.toFixed(5)},${tile.e.toFixed(5)}`, format: 'json', limit: String(TOWER_LIMIT), offset: String(offset), radio: 'LTE' });
+            GM_xmlhttpRequest({
+                method: 'GET', url: `${TOWER_URL}?${params.toString()}`, timeout: 30000,
+                onload: (resp) => {
+                    if (_towers.siteID !== sid || _towers.envKey !== envKey || aborted) return;
+                    let json = null;
+                    try { json = JSON.parse(resp.responseText); } catch (e) {}
+                    if (!json || json.error || (resp.status !== 200 && resp.status !== 0)) {
+                        fail(json && json.error ? `${json.error}${json.code != null ? ` (code ${json.code})` : ''}` : `HTTP ${resp.status}`, resp.responseText);
+                        return;
+                    }
+                    const list = Array.isArray(json.cells) ? json.cells : [];
+                    list.forEach(a => {
+                        const lat = Number(a.lat), lng = Number(a.lon);
+                        if (!isFinite(lat) || !isFinite(lng)) return;
+                        const mcc = Number(a.mcc), mnc = Number(a.mnc);
+                        cells.push({ lat, lng, mcc, mnc, carrier: towerCarrierOf(mcc, mnc), radio: a.radio || '', samples: Number(a.samples) || 0, range: Number(a.range) || 0 });
+                    });
+                    if (list.length >= TOWER_LIMIT) page(tile, offset + TOWER_LIMIT); else tileDone();
+                },
+                onerror: () => fail('network error'),
+                ontimeout: () => fail('timed out'),
+            });
+        };
+        const runNext = () => { while (!aborted && inFlight < TOWER_CONCURRENCY && queue.length) { inFlight++; page(queue.shift(), 0); } };
+        runNext();
+    }
+    function removeTowerLayers() {
+        if (!_towerLayers.length) { _towerKey = ''; return; }
+        const map = getLeafletMap();
+        _towerLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        _towerLayers = []; _towerKey = '';
+    }
+    function towerVisibleList() {
+        const all = (_towers.towers || []);
+        if (toggleState['cell.towersCarrierOnly'] === true) {
+            const want = TOWER_CARRIER_KEY[String(toggleState['cell.carrier'] || 'best')];
+            if (want) return all.filter(t => t.carrier === want);
+        }
+        return all;
+    }
+    function towerRadius(t) { return 5 + Math.min(6, Math.floor(t.n / 3)); }
+    function towerNear(map, ev) {
+        if (toggleState['cell.towers'] !== true || !_towers.towers) return null;
+        const list = towerVisibleList();
+        if (!list.length) return null;
+        let cp; try { cp = map.mouseEventToContainerPoint(ev); } catch (e) { return null; }
+        let best = null, bestD = 14;
+        list.forEach(t => {
+            let p; try { p = map.latLngToContainerPoint([t.lat, t.lng]); } catch (e) { return; }
+            const d = Math.hypot(p.x - cp.x, p.y - cp.y) - towerRadius(t);
+            if (d < bestD) { best = t; bestD = d; }
+        });
+        return best;
+    }
+    function towerSetKeyAction() {
+        const cur = towerApiKey();
+        const v = window.prompt('OpenCelliD API key — free at opencellid.org (register → API key). Leave empty to clear.', cur);
+        if (v === null) return;
+        try { gmSet(TOWER_KEY_GM, String(v).trim()); } catch (e) { console.warn(`${TAG} towers: key save failed`, e); }
+        _towers = { siteID: null, envKey: '', towers: null, loading: false, failed: false, at: 0, capped: false, source: '' };
+        removeTowerLayers();
+        showKMLToast(String(v).trim() ? '📡 OpenCelliD key saved — turn on Tower dots.' : '📡 OpenCelliD key cleared.', 3000);
+        if (toggleState['cell.show'] === true && toggleState['cell.towers'] === true) applyCellCoverage();
+    }
+    function applyCellTowers(map, L, sid, env, pane, renderer) {
+        if (toggleState['cell.towers'] !== true) { removeTowerLayers(); return; }
+        towerFetch(sid, env);
+        if (!_towers.towers) {
+            if (_towers.source === 'nokey' && _towerKey !== 'nokey') { _towerKey = 'nokey'; showKMLToast('📡 Tower dots need a free OpenCelliD API key — "Set / clear OpenCelliD API key…" in the Cell coverage category.', 6000); }
+            return;
+        }
+        const list = towerVisibleList();
+        const key = `${sid}|${_towers.envKey}|${_towers.at}|${list.length}|${toggleState['cell.towersCarrierOnly']}|${toggleState['cell.carrier']}`;
+        if (key === _towerKey) return;
+        removeTowerLayers(); _towerKey = key;
+        if (typeof L.circleMarker !== 'function') return;
+        list.forEach(t => {
+            const opts = { radius: towerRadius(t), color: '#10161f', weight: 1.2, opacity: 0.9, fill: true, fillColor: TOWER_COLORS[t.carrier] || TOWER_COLORS.Other, fillOpacity: 0.95, interactive: false };
+            if (pane) opts.pane = pane;
+            if (renderer) opts.renderer = renderer;
+            try { const m = L.circleMarker([t.lat, t.lng], opts); m.addTo(map); _towerLayers.push(m); } catch (e) { console.warn(`${TAG} towers: marker add failed`, e); }
+        });
+    }
 
     function cellField(carrier, tech) { return `${carrier.field}_${tech.suffix}_minsignal`; }
     function cellBandFor(dbm) {
@@ -2559,16 +2751,17 @@
         removeCellBadge();
     }
     function removeCellCoverage() {
-        removeCellLayers(); removeCellRenderer(); removeCellLegend(); cellUnbindHover();
+        removeCellLayers(); removeTowerLayers(); removeCellRenderer(); removeCellLegend(); cellUnbindHover();
     }
     function cellResetForSite() {
         _cell = { siteID: null, envKey: '', features: null, loading: false, failed: false, at: 0, source: '' };
+        _towers = { siteID: null, envKey: '', towers: null, loading: false, failed: false, at: 0, capped: false, source: '' };
     }
     function cellRefresh() {
         const sid = getCurrentSiteID();
         if (!sid) { showKMLToast('Open a site first.', 2500); return; }
-        try { gmSet(gmEnvKey(CELL_CACHE_PREFIX + sid), null); } catch (e) {}
-        cellResetForSite(); removeCellLayers();
+        try { gmSet(gmEnvKey(CELL_CACHE_PREFIX + sid), null); gmSet(gmEnvKey(TOWER_CACHE_PREFIX + sid), null); } catch (e) {}
+        cellResetForSite(); removeCellLayers(); removeTowerLayers();
         if (toggleState['cell.show'] !== true) { showKMLToast('📶 Cell coverage is off — turn the category on to fetch.', 3500); return; }
         showKMLToast('📶 Re-fetching FCC cell coverage…', 2500);
         applyCellCoverage();
@@ -2607,8 +2800,10 @@
             try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
             if (!ll) return;
             const f = cellHexAt(ll.lat, ll.lng);
+            const tw = towerNear(map, ev);
             let badge = document.getElementById(CELL_BADGE_ID);
-            if (!f) { if (badge && badge.style.display !== 'none') badge.style.display = 'none'; _cellHoverId = null; return; }
+            if (!f && !tw) { if (badge && badge.style.display !== 'none') badge.style.display = 'none'; _cellHoverId = null; return; }
+            const hoverId = `${f ? f.id : ''}|${tw ? tw.key : ''}`;
             if (!badge) {
                 badge = document.createElement('div');
                 badge.id = CELL_BADGE_ID;
@@ -2620,15 +2815,17 @@
             if (x + 230 > rect.width) x = ev.clientX - rect.left - 240;
             if (y + 110 > rect.height) y = ev.clientY - rect.top - 110;
             badge.style.transform = `translate(${Math.max(0, x)}px, ${Math.max(0, y)}px)`;
-            if (_cellHoverId === f.id && badge.style.display !== 'none') return;   // same hex → position only, no rebuild
-            _cellHoverId = f.id;
+            if (_cellHoverId === hoverId && badge.style.display !== 'none') return;   // same hex/tower → position only, no rebuild
+            _cellHoverId = hoverId;
+            const towerLine = tw ? `<div style="margin-top:${f ? 4 : 0}px;color:${TOWER_COLORS[tw.carrier] || TOWER_COLORS.Other}">📡 ${tw.carrier} tower · ${tw.n} cell${tw.n === 1 ? '' : 's'}${tw.radios.length ? ' · ' + tw.radios.join('/') : ''}${tw.range ? ` · ~${Math.round(tw.range)} m range` : ''} <span style="color:#8fa3b8">· ${tw.samples} reports · OpenCelliD</span></div>` : '';
+            if (!f) { badge.innerHTML = towerLine; badge.style.display = ''; return; }
             const rows = CELL_CARRIERS.map(c => {
                 const s = f.sig[c.key] || {};
                 const cells = CELL_TECHS.map(t => { const b = cellBandFor(s[t.key]); return `<td style="padding:0 0 0 10px;text-align:right;color:${b.color}">${cellFmtDbm(s[t.key])}</td>`; }).join('');
                 return `<tr><td style="color:#9fb3c8">${c.label}</td>${cells}</tr>`;
             }).join('');
             badge.innerHTML = `<div style="color:#7adfe6;margin-bottom:2px">📶 Carrier-modeled signal (FCC)</div>`
-                + `<table style="border-collapse:collapse"><tr><td></td>${CELL_TECHS.map(t => `<td style="padding:0 0 0 10px;text-align:right;color:#9fb3c8">${t.label}</td>`).join('')}</tr>${rows}</table>`;
+                + `<table style="border-collapse:collapse"><tr><td></td>${CELL_TECHS.map(t => `<td style="padding:0 0 0 10px;text-align:right;color:#9fb3c8">${t.label}</td>`).join('')}</tr>${rows}</table>` + towerLine;
             badge.style.display = '';
         };
         const move = (ev) => { lastEv = ev; if (!raf) raf = requestAnimationFrame(render); };
@@ -2653,7 +2850,8 @@
         const sw = (color, label) => `<span style="display:inline-flex;align-items:center;gap:3px;margin-right:7px"><i style="display:inline-block;width:11px;height:11px;border-radius:2px;background:${color}"></i>${label}</span>`;
         el.innerHTML = `<div style="color:#7adfe6">📶 FCC modeled signal · ${carLabel} · ${tech.label}</div>`
             + `<div style="margin:3px 0">${CELL_BANDS.map(b => sw(b.color, `${b.word} <span style="opacity:0.7">${b.label}</span>`)).join('')}${sw(CELL_NONE.color, CELL_NONE.word)} <span style="opacity:0.7">dBm</span></div>`
-            + `<div style="color:#8fa3b8;font-weight:500">${n} hexes · FCC BDC via Esri Living Atlas · ${_cell.source === 'cache' ? 'cached ' : 'fetched '}${_cell.at ? new Date(_cell.at).toLocaleDateString() : ''} · carrier-modeled ground coverage, not flown LTE</div>`;
+            + `<div style="color:#8fa3b8;font-weight:500">${n} hexes · FCC BDC via Esri Living Atlas · ${_cell.source === 'cache' ? 'cached ' : 'fetched '}${_cell.at ? new Date(_cell.at).toLocaleDateString() : ''} · carrier-modeled ground coverage, not flown LTE</div>`
+            + (toggleState['cell.towers'] === true && _towers.towers ? `<div style="margin-top:3px">📡 ${towerVisibleList().length} towers · ${['Verizon', 'AT&T', 'T-Mobile', 'DISH', 'Other'].map(c => `<span style="display:inline-flex;align-items:center;gap:3px;margin-right:7px"><i style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${TOWER_COLORS[c]}"></i>${c}</span>`).join('')}<span style="color:#8fa3b8;font-weight:500">dot size = cells · OpenCelliD (CC BY-SA 4.0)${_towers.capped ? ' · capped, shrink margin' : ''}</span></div>` : '');
         try { map.getContainer().appendChild(el); } catch (e) {}
     }
     function applyCellCoverage() {
@@ -2673,7 +2871,7 @@
         if (!_cell.features) return;   // in flight → onload re-calls us
         const opacity = Math.min(0.9, Math.max(0.05, Number(toggleState['cell.opacity']) || 0.35));
         const outline = toggleState['cell.outline'] === true;
-        const key = `${sid}|${_cell.envKey}|${_cell.at}|${toggleState['cell.carrier']}|${toggleState['cell.tech']}|${opacity}|${outline}|${toggleState['cell.legend']}|${toggleState['cell.hover']}`;
+        const key = `${sid}|${_cell.envKey}|${_cell.at}|${toggleState['cell.carrier']}|${toggleState['cell.tech']}|${opacity}|${outline}|${toggleState['cell.legend']}|${toggleState['cell.hover']}|${toggleState['cell.towers']}|${_towers.at}|${toggleState['cell.towersCarrierOnly']}`;
         if (key !== _cellKey) {
             removeCellLayers();
             _cellKey = key;
@@ -2695,6 +2893,8 @@
             });
             renderCellLegend(map, _cell.features.length);
         }
+        try { applyCellTowers(map, L, sid, env, cellPaneName(map), cellRenderer(map, L, cellPaneName(map))); }
+        catch (e) { console.warn(`${TAG} towers: apply failed`, e); }
         if (toggleState['cell.hover'] === true) cellBindHover(map); else cellUnbindHover();
     }
 
@@ -10161,6 +10361,7 @@
                         'asset-styles-editor', 'refresh-asset-data',
                         'fleetkml-refresh',   // v34.140: view-only overlay
                         'cell-refresh',       // v34.143: view-only overlay
+                        'cell-towers-key',    // v34.146: stores a key, view-only
                     ];
                     if (!DV_SAFE_ACTIONS.includes(msg.actionId)) {
                         showKMLToast('That tool is Site-Setup-only — Data View is view-only.', 4000);
@@ -10219,6 +10420,7 @@
                     fkListRepo(true);
                 }
                 else if (msg.actionId === 'cell-refresh') cellRefresh();
+                else if (msg.actionId === 'cell-towers-key') towerSetKeyAction();
                 else if (msg.actionId === 'refresh-asset-data') {
                     const sid = getCurrentSiteID();
                     if (sid) { console.log(`${TAG} asset-state: manual refresh requested`); fetchAssetStates(sid, true); }

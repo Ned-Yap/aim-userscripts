@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Logs
 // @namespace    http://tampermonkey.net/
-// @version      0.6
+// @version      0.7
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Logs.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Logs.user.js
-// @description  v0.6: outage detection now also uses 100%-loss ping runs, IP-lease loss (udhcpc deconfigured→bound) and LTE-manager restarts — a reconnect the TCP checks never saw (238589) was reported as 'dropped 0 times' in red; outages are tagged before takeoff / in flight / after landing and the Simple card downgrades a drop that happened on the base to amber. v0.5: Simple / Advanced view toggle (remembered) — Simple is plain English for pilots and customers: one bold bottom line per card + bullets (signal as bars, response time, packet loss, blips, tower hopping, what to do) with the full technical card under 'Technical details ▸'. v0.4: reads the older EM7565 modem's status fields (RSRP_(dBm) / PCC_RxM_RSSI / Tx_Power) — v0.3 saw no RSRP and flagged a false 33-min outage; a sample is lost only with no band / stuck handover / no cell+no RSRP; isolated 10 s TCP blips = amber POOR link (loss %, avg/worst rtt) not red; unknown formats raise a ⚠ with lte.rawSample; mission duration is ms. v0.3: LTE card gains an Outages line (each loss window with start → recovery and duration, from no-cell / stuck-handover samples and failing TCP checks) and a Coverage line (median RSRP, % weak / very weak / no cell); dropped verdict names the outages. v0.2: row 🔎 anchors on the dashboard's own Get App Logs control (not table structure); prefill from the FILTER box or the single visible row only; server reply shown when a mission has no archive. Pull a mission's log archives straight from the Mission Dashboard (no download → unzip → hunt) and extract what matters: LTE link health (modem registration, TCP/ping checks, signal, cell handovers, RTK-stream gaps), mission event timeline (stages, aborts, go-to-base), DAA aircraft with closest approach to the drone, warnings/errors by process. v0.1 (#286): POC on percepto.app/dashboard — 🔎 per mission row + floating launcher; engine (fetch → gunzip → untar → extractors) is self-contained for the later Fleet Tools site/date sweep.
+// @description  v0.7: names the CARRIER from the LTE bands the modem camped on (B13 = Verizon-only spectrum, B14/B17/B29/B30 = AT&T, B71/B41/B25/B26 = T-Mobile; shared bands prove nothing); every outage, handover and the worst-signal sample now carries the drone's position at that moment (click 📍 to copy lat,lng — paste into Map Nav 🧭); 📍 Signal KML button exports the flown track with each signal sample colored Good/Fair/Weak/Edge plus outage and handover pins (open in Google Earth or Fleet Tools → KML Layers) to see WHERE the link was bad. v0.6: outage detection now also uses 100%-loss ping runs, IP-lease loss (udhcpc deconfigured→bound) and LTE-manager restarts — a reconnect the TCP checks never saw (238589) was reported as 'dropped 0 times' in red; outages are tagged before takeoff / in flight / after landing and the Simple card downgrades a drop that happened on the base to amber. v0.5: Simple / Advanced view toggle (remembered) — Simple is plain English for pilots and customers: one bold bottom line per card + bullets (signal as bars, response time, packet loss, blips, tower hopping, what to do) with the full technical card under 'Technical details ▸'. v0.4: reads the older EM7565 modem's status fields (RSRP_(dBm) / PCC_RxM_RSSI / Tx_Power) — v0.3 saw no RSRP and flagged a false 33-min outage; a sample is lost only with no band / stuck handover / no cell+no RSRP; isolated 10 s TCP blips = amber POOR link (loss %, avg/worst rtt) not red; unknown formats raise a ⚠ with lte.rawSample; mission duration is ms. v0.3: LTE card gains an Outages line (each loss window with start → recovery and duration, from no-cell / stuck-handover samples and failing TCP checks) and a Coverage line (median RSRP, % weak / very weak / no cell); dropped verdict names the outages. v0.2: row 🔎 anchors on the dashboard's own Get App Logs control (not table structure); prefill from the FILTER box or the single visible row only; server reply shown when a mission has no archive. Pull a mission's log archives straight from the Mission Dashboard (no download → unzip → hunt) and extract what matters: LTE link health (modem registration, TCP/ping checks, signal, cell handovers, RTK-stream gaps), mission event timeline (stages, aborts, go-to-base), DAA aircraft with closest approach to the drone, warnings/errors by process. v0.1 (#286): POC on percepto.app/dashboard — 🔎 per mission row + floating launcher; engine (fetch → gunzip → untar → extractors) is self-contained for the later Fleet Tools site/date sweep.
 // @author       Payden
 // @match        *://percepto.app/dashboard*
 // @match        *://qa.percepto.app/dashboard*
@@ -35,7 +35,7 @@
     if (window !== window.top) return;
 
     const SCRIPT_ID = 'aim-mission-logs';
-    const SCRIPT_VERSION = '0.6';
+    const SCRIPT_VERSION = '0.7';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const IS_QA = location.hostname === 'qa.percepto.app' || location.hostname.endsWith('.qa.percepto.app');
 
@@ -213,6 +213,26 @@
 
     // Drone position at tMs: linear interpolation between neighbours when the log has a gap
     // (collision.log pauses for seconds at a time), else the nearest sample within 5 s.
+    // v0.7 — which network was the drone on? The logs carry no PLMN / operator
+    // name, but US LTE band ownership is near-exclusive for a few bands:
+    // B13 (700 MHz upper C) is Verizon only; B14 is FirstNet (AT&T); B17 /
+    // B29 / B30 are AT&T; B71 (600 MHz), B41, B25, B26 are T-Mobile (incl.
+    // ex-Sprint). B2 / B4 / B5 / B12 / B66 / B48 are shared and prove nothing.
+    // The drone SIMs are roaming IoT SIMs (+CREG 0,5), so the camped network
+    // can differ flight to flight — this is per-flight evidence, not a rule.
+    const ML_BAND_OWNER = { 13: 'Verizon', 14: 'AT&T', 17: 'AT&T', 29: 'AT&T', 30: 'AT&T', 71: 'T-Mobile', 41: 'T-Mobile', 25: 'T-Mobile', 26: 'T-Mobile' };
+    function mlInferCarrier(bands) {
+        const hits = {};
+        (bands || []).forEach(b => {
+            const n = parseInt(String(b).replace(/\D/g, ''), 10);
+            const who = ML_BAND_OWNER[n];
+            if (who) (hits[who] = hits[who] || []).push(`B${n}`);
+        });
+        const names = Object.keys(hits);
+        if (!names.length) return { name: null, how: (bands || []).length ? `only shared bands seen (${(bands || []).join(', ')}) — not identifiable from bands` : 'no band data in the log' };
+        if (names.length === 1) return { name: names[0], how: `from LTE band ${hits[names[0]].join(' / ')} — ${names[0]}-only spectrum` };
+        return { name: names.join(' then ') , how: `bands from more than one carrier (${names.map(n => `${n}: ${hits[n].join('/')}`).join('; ')}) — the roaming SIM switched networks during the flight` };
+    }
     function mlDroneAt(track, tMs) {
         if (!track.length) return null;
         let lo = 0, hi = track.length - 1;
@@ -344,6 +364,7 @@
         r.worstRsrq = worst('rsrq', (a, b) => a < b);
         r.bands = Array.from(new Set(r.gstatus.map(g => g.band).filter(Boolean)));
         r.modes = Array.from(new Set(r.gstatus.map(g => g.mode).filter(Boolean)));
+        r.carrier = mlInferCarrier(r.bands);
         r.lossyPings = r.pings.filter(p => p.loss >= ML_PING_LOSS_WARN && p.t && (!r.tcp.firstOk || p.t > r.tcp.firstOk));
         r.failsAfterUp = r.tcp.fails.filter(d => r.tcp.firstOk && d > r.tcp.firstOk);
         r.deconfAfterUp = r.dhcp.filter(x => x.ev !== 'bound' && r.tcp.firstOk && x.t > r.tcp.firstOk);
@@ -533,6 +554,11 @@
         const tTo = events.takeoff && events.takeoff.t ? events.takeoff.t.getTime() : null, tTd = events.touchdown && events.touchdown.t ? events.touchdown.t.getTime() : null;
         for (const w of lte.outages) w.phase = tTo == null ? '' : (w.to < tTo ? 'before takeoff' : (tTd != null && w.from > tTd) ? 'after landing' : 'in flight');
         lte.inFlightOutages = lte.outages.filter(w => w.phase === 'in flight');
+        // v0.7 — WHERE was the drone for each outage / handover / worst sample?
+        const at = (d) => { const p = d instanceof Date ? mlDroneAt(droneTrack, d.getTime()) : (typeof d === 'number' ? mlDroneAt(droneTrack, d) : null); return p ? { lat: p.lat, lon: p.lon, alt: p.alt } : null; };
+        for (const w of lte.outages) w.at = at(w.from);
+        for (const h of lte.handovers) h.at = at(h.t);
+        if (lte.worstRsrp) lte.worstRsrp.at = at(lte.worstRsrp.t);
         return { roles, files, meta, events, lte, daa, droneTrack, warnings, abortEv, extra: extra || {}, syslogLineCount: syslogLines.length };
     }
     // ===================== end [AIM_ML_ENGINE] =========================
@@ -743,13 +769,14 @@
         // --- LTE ---
         const g = lte.gstatus;
         const rows = [];
-        if (lte.handovers.length) rows.push(['Cell handovers', `${lte.handovers.length} — ${lte.handovers.slice(0, 12).map(h => `<span class="m">${mlHms(h.t)}</span> ${esc(h.from)}→${esc(h.to)}`).join(' · ')}${lte.handovers.length > 12 ? ' …' : ''}`]);
+        if (lte.handovers.length) rows.push(['Cell handovers', `${lte.handovers.length} — ${lte.handovers.slice(0, 12).map(h => `<span class="m">${mlHms(h.t)}</span> ${esc(h.from)}→${esc(h.to)}${pin(h.at)}`).join(' · ')}${lte.handovers.length > 12 ? ' …' : ''}`]);
         const lteInner = `
             <div class="aim-ml-verdict ${lv(lte.verdict.level)}" style="background:rgba(255,255,255,.03);border:1px solid #222834">${esc(lte.verdict.text)}</div>
             ${lte.formatWarning ? `<div class="a" style="margin:-4px 0 8px">⚠ ${esc(lte.formatWarning)}</div>` : ''}
             ${kv([
                 ['Modem', lte.modem ? `${esc(lte.modem.make)} ${esc(lte.modem.model)} <span class="m">${esc(lte.modem.rev)}</span>` : '—'],
                 ['SIM / APN', `${esc(lte.sim || '—')} / ${esc(lte.apn || '—')}`],
+                ['Carrier', lte.carrier && lte.carrier.name ? `<b>${esc(lte.carrier.name)}</b> <span class="m">${esc(lte.carrier.how)}${lte.creg && lte.creg['0,5'] ? ' · roaming SIM' : ''}</span>` : `<span class="m">unknown — ${esc(lte.carrier ? lte.carrier.how : 'no band data')}</span>`],
                 ['Link up', lte.tcp.firstOk ? `${mlHms(lte.tcp.firstOk)} UTC <span class="m">(first successful TCP check)</span>` : '<span class="r">never</span>'],
                 ['TCP checks', `<span class="g">${lte.tcp.ok} ok</span> · <span class="${lte.tcp.fail ? 'r' : 'm'}">${lte.tcp.fail} failed</span>${lte.failsAfterUp.length ? ' — ' + lte.failsAfterUp.map(mlHms).join(', ') : ''}`],
                 ['Ping tests', `${lte.pings.length} · <span class="${lte.lossyPings.length ? 'a' : 'm'}">${lte.lossyPings.length} with loss</span>${lte.lossyPings.length ? ' — ' + lte.lossyPings.slice(0, 8).map(p => `${mlHms(p.t)} ${p.loss}%`).join(', ') : ''}${lte.pings.filter(p => p.avg != null).length ? ` · avg rtt ${Math.round(lte.pings.filter(p => p.avg != null).reduce((s, p) => s + p.avg, 0) / lte.pings.filter(p => p.avg != null).length)} ms, worst max ${Math.round(Math.max(...lte.pings.map(p => p.max || 0)))} ms` : ''}`],
@@ -757,14 +784,14 @@
                 ['DHCP (LTE iface)', lte.dhcp.length ? lte.dhcp.map(d => `<span class="${d.ev === 'bound' ? 'g' : 'a'}">${mlHms(d.t)} ${esc(d.iface)} ${esc(d.ev)}</span>`).join(' · ') : '—'],
                 ['Modem resets', `<span class="${lte.resetCount > 1 ? 'r' : 'm'}">${lte.resetCount > 1 ? 'YES' : 'none'}</span> <span class="m">(Reset_Counter values seen: ${lte.resetCount})</span> · LTE manager starts: ${lte.managerRestarts}`],
                 ['Bands / mode', `${esc(lte.bands.join(', ') || '—')} · ${esc(lte.modes.join(', ') || '—')}`],
-                ['Outages', lte.outages.length ? lte.outages.map(w => `<span class="r">${mlHms(w.from)} → ${mlHms(w.to)}</span> <b>${w.s} s</b>${w.phase ? ` <span class="${w.phase === 'in flight' ? 'r' : 'a'}">${esc(w.phase)}</span>` : ''} <span class="m">${esc(w.kind)}, ${w.samples} sample(s)${w.unresolved ? ', never recovered in the log' : ''}</span>`).join('<br>') : '<span class="g">none — no lost cell, failed TCP check, 100%-loss ping run, IP-lease loss or modem reconnect after link-up</span>'],
+                ['Outages', lte.outages.length ? lte.outages.map(w => `<span class="r">${mlHms(w.from)} → ${mlHms(w.to)}</span> <b>${w.s} s</b>${w.phase ? ` <span class="${w.phase === 'in flight' ? 'r' : 'a'}">${esc(w.phase)}</span>` : ''}${pin(w.at)} <span class="m">${esc(w.kind)}, ${w.samples} sample(s)${w.unresolved ? ', never recovered in the log' : ''}</span>`).join('<br>') : '<span class="g">none — no lost cell, failed TCP check, 100%-loss ping run, IP-lease loss or modem reconnect after link-up</span>'],
                 ['Coverage', lte.coverage ? `median RSRP <b>${lte.coverage.median}</b> dBm · <span class="${lte.coverage.weakPct >= 50 ? 'r' : lte.coverage.weakPct >= 20 ? 'a' : 'g'}">${lte.coverage.weakPct}% of samples weak (≤ -100)</span> · <span class="${lte.coverage.veryWeakPct ? 'r' : 'm'}">${lte.coverage.veryWeakPct}% very weak (≤ -110)</span> · <span class="${lte.coverage.noCellPct ? 'r' : 'm'}">${lte.coverage.noCellPct}% no cell</span> <span class="m">(RSRP: > -90 good · -90…-100 fair · ≤ -100 weak · ≤ -110 edge of service)</span>` : '—'],
-                ['Signal (worst)', g.length ? `RSRP ${lte.worstRsrp ? `<b>${lte.worstRsrp.rsrp}</b> dBm @ ${mlHms(lte.worstRsrp.t)}` : '—'} · RSRQ ${lte.worstRsrq ? `<b>${lte.worstRsrq.rsrq}</b> dB @ ${mlHms(lte.worstRsrq.t)}` : '—'} · SINR ${lte.worstSinr ? `<b>${lte.worstSinr.sinr}</b> dB @ ${mlHms(lte.worstSinr.t)}` : '—'} <span class="m">(${g.length} samples)</span>` : '— (no GSTATUS samples)'],
+                ['Signal (worst)', g.length ? `RSRP ${lte.worstRsrp ? `<b>${lte.worstRsrp.rsrp}</b> dBm @ ${mlHms(lte.worstRsrp.t)}${pin(lte.worstRsrp.at)}` : '—'} · RSRQ ${lte.worstRsrq ? `<b>${lte.worstRsrq.rsrq}</b> dB @ ${mlHms(lte.worstRsrq.t)}` : '—'} · SINR ${lte.worstSinr ? `<b>${lte.worstSinr.sinr}</b> dB @ ${mlHms(lte.worstSinr.t)}` : '—'} <span class="m">(${g.length} samples)</span>` : '— (no GSTATUS samples)'],
                 ['RTK stream', `${lte.rtcm.packets.toLocaleString()} RTCM packets · <span class="${lte.rtcm.gaps.length ? 'a' : 'g'}">${lte.rtcm.gaps.length} gap(s) > ${ML_RTCM_GAP_S} s</span>${lte.rtcm.gaps.length ? ' — ' + lte.rtcm.gaps.slice(0, 8).map(x => `${mlHms(x.from)}→${mlHms(x.to)} (${x.s} s)`).join(', ') : ''}`],
                 ...rows,
             ])}
             ${g.length ? `<details style="margin-top:6px"><summary class="m" style="cursor:pointer">Signal samples (${g.length})</summary>${tbl(['UTC', 'Mode', 'Band', 'RSRP', 'RSRQ', 'SINR', 'Tx', '5G RSRP', '5G SINR', 'Cell', 'RRC'], g.map(s => [mlHms(s.t), esc(s.mode), esc(s.band), esc(s.rsrp), esc(s.rsrq), esc(s.sinr), esc(s.tx), esc(s.nrRsrp), esc(s.nrSinr), esc(s.cell), esc(s.rrc)]))}</details>` : ''}`;
-        addCard('lte', card('📶 LTE link', lteInner, copyBtn('lte')));
+        addCard('lte', card('📶 LTE link', lteInner, kmlBtn() + copyBtn('lte')));
         // --- Events ---
         const tl = events.timeline;
         const evInner = tl.length ? `
@@ -803,6 +830,56 @@
             const blob = new Blob([f.bytes], { type: 'application/octet-stream' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = f.base; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
         }));
         ui.body.querySelectorAll('[data-aim-ml-copy]').forEach(b => b.addEventListener('click', () => copySection(res, b.getAttribute('data-aim-ml-copy'), b)));
+        ui.body.querySelectorAll('[data-aim-ml-ll]').forEach(b => b.addEventListener('click', async () => {
+            const ll = b.getAttribute('data-aim-ml-ll');
+            try { await navigator.clipboard.writeText(ll); const old = b.textContent; b.textContent = '✓ copied'; setTimeout(() => { b.textContent = old; }, 1500); }
+            catch (e) { console.warn(`${TAG} copy failed`, e); window.prompt('Coordinates (copy):', ll); }
+        }));
+        ui.body.querySelectorAll('[data-aim-ml-kml]').forEach(b => b.addEventListener('click', () => {
+            try { downloadSignalKml(res); } catch (e) { console.warn(`${TAG} signal KML failed`, e); setStatus('Signal KML failed — see console'); }
+        }));
+    }
+    // v0.7 — 📍 coordinate chip: click copies "lat,lng" (Map Nav 🧭 / Google Maps paste).
+    const pin = (at) => at ? ` <span class="c" data-aim-ml-ll="${at.lat.toFixed(6)},${at.lon.toFixed(6)}" title="Drone position at that moment — click to copy lat,lng (paste into Map Nav 🧭)" style="cursor:pointer">📍 ${at.lat.toFixed(5)}, ${at.lon.toFixed(5)}</span>` : '';
+    const kmlBtn = () => `<button class="aim-ml-btn" data-aim-ml-kml="signal" title="KML of the flown track with every signal sample colored good → weak, plus outage and tower-switch pins — open in Google Earth or Fleet Tools → KML Layers">📍 Signal KML</button>`;
+    // Same words as the LTE card: > -90 good · -90…-100 fair · ≤ -100 weak · ≤ -110 edge. KML colors are aabbggrr.
+    const ML_SIG_STYLES = [
+        { id: 'good', min: -90, word: 'Good', kml: 'ff76e600' },
+        { id: 'fair', min: -100, word: 'Fair', kml: 'ff00eaff' },
+        { id: 'weak', min: -110, word: 'Weak', kml: 'ff00a0ff' },
+        { id: 'edge', min: -Infinity, word: 'Edge', kml: 'ff0000d5' },
+    ];
+    const mlSigStyle = (rsrp) => { if (typeof rsrp !== 'number') return { id: 'none', word: 'No signal', kml: 'ff7a6e54' }; for (const s of ML_SIG_STYLES) { if (rsrp > s.min) return s; } return ML_SIG_STYLES[ML_SIG_STYLES.length - 1]; };
+    function downloadSignalKml(res) {
+        const { lte, droneTrack } = res;
+        const x = (s) => String(s == null ? '' : s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+        const styles = ML_SIG_STYLES.concat([{ id: 'none', kml: 'ff7a6e54' }]).map(s => `<Style id="sig-${s.id}"><IconStyle><scale>0.6</scale><color>${s.kml}</color><Icon><href>http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png</href></Icon></IconStyle><LabelStyle><scale>0</scale></LabelStyle></Style>`).join('')
+            + '<Style id="outage"><IconStyle><scale>1.2</scale><color>ff2020ff</color><Icon><href>http://maps.google.com/mapfiles/kml/shapes/forbidden.png</href></Icon></IconStyle></Style>'
+            + '<Style id="handover"><IconStyle><scale>0.7</scale><color>ffffffff</color><Icon><href>http://maps.google.com/mapfiles/kml/shapes/triangle.png</href></Icon></IconStyle><LabelStyle><scale>0</scale></LabelStyle></Style>'
+            + '<Style id="track"><LineStyle><color>80ffffff</color><width>2</width></LineStyle></Style>';
+        const pm = (name, style, at, desc, when) => at ? `<Placemark><name>${x(name)}</name><styleUrl>#${style}</styleUrl>${when ? `<TimeStamp><when>${when.toISOString()}</when></TimeStamp>` : ''}${desc ? `<description>${x(desc)}</description>` : ''}<Point><altitudeMode>relativeToGround</altitudeMode><coordinates>${at.lon.toFixed(7)},${at.lat.toFixed(7)},0</coordinates></Point></Placemark>` : '';
+        const samples = [], seen = new Set();
+        let placed = 0;
+        lte.gstatus.forEach(s => {
+            const p = mlDroneAt(droneTrack, s.t.getTime());
+            if (!p) return;
+            placed++;
+            const st = mlSigStyle(s.rsrp);
+            samples.push(pm(`${st.word} ${typeof s.rsrp === 'number' ? s.rsrp + ' dBm' : ''} ${mlHms(s.t)}`, `sig-${st.id}`, p,
+                `RSRP ${s.rsrp ?? '—'} dBm · RSRQ ${s.rsrq ?? '—'} dB · SINR ${s.sinr ?? '—'} dB · band ${s.band ?? '—'} · mode ${s.mode ?? '—'} · cell ${s.cell || '—'} · ${Math.round(p.alt || 0)} m`, s.t));
+        });
+        const outages = lte.outages.map(w => pm(`Outage ${w.s} s · ${mlHms(w.from)}`, 'outage', w.at, `${w.kind} · ${w.phase || ''} · ${mlHms(w.from)} → ${mlHms(w.to)} UTC`, w.from)).join('');
+        const handovers = lte.handovers.map(h => pm(`Tower switch ${h.from}→${h.to} · ${mlHms(h.t)}`, 'handover', h.at, `cell ${h.from} → ${h.to} · band ${h.band ?? '—'} · RSRQ ${h.rsrq ?? '—'} · SINR ${h.sinr ?? '—'}`, h.t)).join('');
+        const line = droneTrack.length ? `<Placemark><name>Flown track</name><styleUrl>#track</styleUrl><LineString><tessellate>1</tessellate><coordinates>${droneTrack.filter((p, i) => i % 5 === 0).map(p => `${p.lon.toFixed(7)},${p.lat.toFixed(7)},0`).join(' ')}</coordinates></LineString></Placemark>` : '';
+        const name = `Mission ${res.missionId} — LTE signal${lte.carrier && lte.carrier.name ? ` (${lte.carrier.name})` : ''}`;
+        const kml = `<?xml version="1.0" encoding="UTF-8"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>${x(name)}</name><description>${x(lte.verdict.text)} · ${placed} of ${lte.gstatus.length} signal samples placed on the flown track · Good &gt; -90 dBm · Fair -90…-100 · Weak ≤ -100 · Edge ≤ -110 · generated by AIM Mission Logs v${SCRIPT_VERSION}</description>${styles}`
+            + `<Folder><name>Signal samples (${placed})</name>${samples.join('')}</Folder>`
+            + `<Folder><name>Outages (${lte.outages.length})</name>${outages}</Folder>`
+            + `<Folder><name>Tower switches (${lte.handovers.length})</name>${handovers}</Folder>`
+            + line + '</Document></kml>';
+        const blob = new Blob([kml], { type: 'application/vnd.google-earth.kml+xml' });
+        const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `mission-${res.missionId}-lte-signal.kml`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+        setStatus(`Signal KML: ${placed} samples, ${lte.outages.filter(w => w.at).length} outage pin(s), ${lte.handovers.filter(h => h.at).length} tower switch pin(s)${placed < lte.gstatus.length ? ` · ${lte.gstatus.length - placed} sample(s) had no position (before takeoff / after landing)` : ''}`);
     }
 
     // ---------------- Simple mode: plain English for pilots / customers ----------------
@@ -867,11 +944,14 @@
         } else if (lte.verdict.level === 'amber' && /POOR/.test(lte.verdict.text)) lteBottom = `The drone <b>stayed connected, but the connection was poor</b>: ${bars ? `${bars} of signal` : 'weak signal'}${lag ? `, ${lag} response` : ''}. Expect choppy video and delayed commands.`;
         else if (lte.verdict.level === 'amber') lteBottom = `The drone <b>stayed connected</b> with a few slow moments. Nothing a pilot would notice beyond a brief stutter.`;
         else lteBottom = `The drone <b>stayed connected the whole flight</b> with a healthy connection.`;
+        if (lte.carrier && lte.carrier.name) lteBullets.push(`<b>Carrier:</b> the drone was on <b>${esc(lte.carrier.name)}</b>'s network (worked out from the LTE bands it used${lte.creg && lte.creg['0,5'] ? '; the SIM roams, so this can differ by flight' : ''}).`);
+        else if (lte.bands.length) lteBullets.push(`<b>Carrier:</b> could not be told from this flight's bands (${esc(lte.bands.join(', '))} are shared by several carriers).`);
         if (bars) lteBullets.push(`<b>Signal:</b> ${bars} most of the flight${lte.coverage.weakPct ? `; weak for ${lte.coverage.weakPct}% of the time` : ''}${lte.worstRsrp ? `, worst at ${mlHms(lte.worstRsrp.t)}` : ''}.`);
         if (lte.avgRtt != null) lteBullets.push(`<b>Response time:</b> ${lag} (about ${lte.avgRtt} ms per round trip; a good site is near 150 ms, worst moment ${lte.worstRtt} ms).`);
         const lossShare = lte.lossShare != null ? lte.lossShare : (lte.pings.length ? Math.round(100 * lte.lossyPings.length / lte.pings.length) : 0);
         if (lte.pings.length) lteBullets.push(`<b>Packet loss:</b> ${lossShare}% of the test pings lost something${lossShare >= 25 ? ' — that is a lot' : lossShare ? ' — minor' : ' — clean'}.`);
-        if (lte.outages.length && lte.verdict.level !== 'red') lteBullets.push(`<b>Blips:</b> ${lte.outages.map(w => `${mlHms(w.from)} (${w.s} s)`).join(', ')} — came back on its own each time.`);
+        if (lte.outages.length && lte.verdict.level !== 'red') lteBullets.push(`<b>Blips:</b> ${lte.outages.map(w => `${mlHms(w.from)} (${w.s} s)${pin(w.at)}`).join(', ')} — came back on its own each time. Click 📍 to copy where it happened.`);
+        if (lte.outages.some(w => w.at) || lte.handovers.some(h => h.at)) lteBullets.push(`<b>Where:</b> 📍 Signal KML (top right of this card) maps every signal reading along the flight, colored good → weak, with the blips and tower switches pinned — open it in Google Earth or Fleet Tools → KML Layers.`);
         if (lte.handovers.length > 6) lteBullets.push(`<b>Tower hopping:</b> switched cell towers ${lte.handovers.length} times. Flying between overlapping towers usually means momentary stalls at each switch.`);
         if (lte.modes.includes('ENDC')) lteBullets.push(`<b>5G</b> was available for part of the flight.`);
         if (lte.resetCount > 1) lteBullets.push(`<b>The modem restarted</b> during the flight.`);
@@ -882,7 +962,7 @@
             : lte.verdict.level === 'red' ? `<b>What to do:</b> check whether this drop repeats at the same place on other flights; if so it is coverage, if not it may be the carrier or modem.`
             : null;
         if (advice) lteBullets.push(advice);
-        out.push(simpleCard('📶 Connection (LTE)', lteLevelOverride || lte.verdict.level, lteBottom, lteBullets, tech('lte', adv), copyBtn('lte')));
+        out.push(simpleCard('📶 Connection (LTE)', lteLevelOverride || lte.verdict.level, lteBottom, lteBullets, tech('lte', adv), kmlBtn() + copyBtn('lte')));
 
         // --- Events ---
         const stalls = events.all.filter(e => /mainLoopStall/.test(e.type)).length;
