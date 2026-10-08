@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.151
+// @version      34.152
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.151';
+    const SCRIPT_VERSION = '34.152';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1025,7 +1025,38 @@
     // v34.150 — built-in profiler (same idea as Mission Bank Tools' [perf] lines): every 5 s, if any
     // runUpdate ran, log how many, total/max ms, how many were observer-triggered, and how much of
     // that was the cell layer. "Runs like shit" needs numbers, not guesses — paste these lines back.
-    const _perf = { runs: 0, ms: 0, max: 0, obs: 0, cellMs: 0, cellMax: 0, lastLog: Date.now(), stages: {}, mut: {}, mutN: 0, stageT: 0 };
+    const _perf = { runs: 0, ms: 0, max: 0, obs: 0, cellMs: 0, cellMax: 0, lastLog: Date.now(), stages: {}, mut: {}, mutN: 0, stageT: 0, skips: 0, ignored: 0 };
+    // v34.152 — CORE SKIP memory: signature of everything steps 1–4 depend on, the base width they
+    // derived, and how many clones they left in the DOM.
+    let _coreLast = { sig: '', gbw: null, ourN: 0 };
+    // v34.152 — asset path → {d, rev, a}: point-in-polygon matching is redone only when the path's
+    // geometry or the asset data changed (3b used to re-match every asset on every run).
+    const _assetMatchMemo = new WeakMap();
+    // v34.152 — mutation batches made only of noise never schedule a run: our own clones being
+    // wiped/rebuilt (childList on <g> with only our nodes), tile <img> class flips and tile-container
+    // churn while panning, and anything inside our own panes. New layers (childList on a
+    // .leaflet-pane / .leaflet-layer) still count — hide-satellite and ortho logic need them.
+    function isNoiseMutation(m) {
+        const t = m.target;
+        if (!t) return true;
+        try {
+            if (t.nodeType === 1 && t.hasAttribute && t.hasAttribute(CUSTOM_BUFFER_ATTR)) return true;
+            if (t.closest && t.closest(`.leaflet-${CELL_PANE}-pane, .leaflet-${FK_PANE}-pane`)) return true;
+            if (m.type === 'attributes') {
+                if (t.tagName === 'IMG') return true;
+                return false;
+            }
+            if (m.type === 'childList') {
+                const cl = t.classList;
+                if (cl && (cl.contains('leaflet-tile-container') || cl.contains('leaflet-tile-pane'))) return true;
+                const nodes = [];
+                m.addedNodes.forEach(n => nodes.push(n)); m.removedNodes.forEach(n => nodes.push(n));
+                if (nodes.length && nodes.every(n => (n.nodeType === 1 && n.hasAttribute && n.hasAttribute(CUSTOM_BUFFER_ATTR)) || (n.nodeType === 1 && n.tagName === 'IMG' && n.classList && n.classList.contains('leaflet-tile')))) return true;
+                return false;
+            }
+        } catch (e) { return false; }
+        return false;
+    }
     // Stage timers: perfStage('name') charges the time since the previous mark to 'name'.
     function perfStage(name) { const now = performance.now(); if (_perf.stageT) _perf.stages[name] = (_perf.stages[name] || 0) + (now - _perf.stageT); _perf.stageT = now; }
     // Mutation tally: what on Percepto's map is changing and tripping the observer.
@@ -1048,11 +1079,11 @@
         if (!force && now - _perf.lastLog < 5000) return;
         if (_perf.runs) {
             const top = (o, n) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, n);
-            console.log(`${TAG} [perf] ${Math.round((now - _perf.lastLog) / 1000)} s: runUpdate ×${_perf.runs} (${_perf.obs} from DOM mutations) · total ${Math.round(_perf.ms)} ms · max ${Math.round(_perf.max)} ms · cell layer ${Math.round(_perf.cellMs)} ms (max ${Math.round(_perf.cellMax)})`
+            console.log(`${TAG} [perf] ${Math.round((now - _perf.lastLog) / 1000)} s: runUpdate ×${_perf.runs} (${_perf.obs} from DOM mutations, ${_perf.skips} core-skipped, ${_perf.ignored} noise batches ignored) · total ${Math.round(_perf.ms)} ms · max ${Math.round(_perf.max)} ms · cell layer ${Math.round(_perf.cellMs)} ms (max ${Math.round(_perf.cellMax)})`
                 + `\n    stages: ${top(_perf.stages, 6).map(([k, v]) => `${k} ${Math.round(v)}`).join(' · ')}`
                 + `\n    mutations ×${_perf.mutN}: ${top(_perf.mut, 5).map(([k, v]) => `${k} ×${v}`).join(' · ')}`);
         }
-        _perf.runs = 0; _perf.ms = 0; _perf.max = 0; _perf.obs = 0; _perf.cellMs = 0; _perf.cellMax = 0; _perf.lastLog = now; _perf.stages = {}; _perf.mut = {}; _perf.mutN = 0;
+        _perf.runs = 0; _perf.ms = 0; _perf.max = 0; _perf.obs = 0; _perf.cellMs = 0; _perf.cellMax = 0; _perf.lastLog = now; _perf.stages = {}; _perf.mut = {}; _perf.mutN = 0; _perf.skips = 0; _perf.ignored = 0;
     }
     setInterval(() => perfFlush(false), 5000);
     function runUpdate() {
@@ -1092,6 +1123,30 @@
         // its own .shielding sub-toggle, checked inside the per-line loop.
 
         perfStage('pre');
+        // v34.152 — CORE SKIP. Steps 1–4 (wipe clones → find refs → hide natives + tag assets → rebuild
+        // clones) depend only on the native target lines' geometry/attributes, the native buffers'
+        // state, zoom, toggles and the asset rules/data. Profiling (Motiva 2026-10-07) put them at
+        // ~90 % of a 25–40 ms run firing 4–9×/s — mostly on tile loads where nothing had changed.
+        // Signature first; when identical and our clones are still in the DOM, skip straight to step 5.
+        let coreSig = '';
+        try {
+            const sm = getLeafletMap();
+            const parts = [String(sm && typeof sm.getZoom === 'function' ? sm.getZoom() : 0), String(assetRulesRev), JSON.stringify(toggleState), String(assetStateData.siteID), String(assetStateData.polys.length), String(lineThickness), String(standardRatio), String(shieldingMult)];
+            document.querySelectorAll(ALL_TARGETS_SELECTOR).forEach(el => {
+                if (el.hasAttribute(CUSTOM_BUFFER_ATTR)) return;
+                parts.push(el.getAttribute('d') || '', el.getAttribute('stroke') || '', el.getAttribute('stroke-width') || '', el.getAttribute('class') || '', el.getAttribute('stroke-dasharray') || '', el.style.display || '');
+            });
+            document.querySelectorAll(`${BLACK_DASHED_FFZ_SELECTOR}, ${BLACK_DASHED_FP_SELECTOR}, ${GREEN_BUFFER_SELECTOR}, ${ORIGINAL_BLUE_BUFFER_SELECTOR}`).forEach(el => {
+                if (!el.hasAttribute(CUSTOM_BUFFER_ATTR)) parts.push(el.style.display || '-', el.getAttribute('stroke-width') || '');
+            });
+            coreSig = parts.join('\u0001');
+        } catch (e) { coreSig = ''; }
+        const ourNow = document.querySelectorAll(`[${CUSTOM_BUFFER_ATTR}="true"]`).length;
+        const skipCore = !!coreSig && coreSig === _coreLast.sig && ourNow > 0 && ourNow === _coreLast.ourN;
+        let globalBaseWidth = skipCore ? _coreLast.gbw : null;
+        let nativeBuffers = [];
+        perfStage('sig');
+        if (!skipCore) {
         // 1. WIPE CLEAN old buffers FIRST.
         // Must happen before the reference search: custom green buffers carry
         // stroke="var(--color-green)" and would otherwise be picked up as
@@ -1100,8 +1155,8 @@
         // during zoom mutation storms).
         document.querySelectorAll(`[${CUSTOM_BUFFER_ATTR}="true"]`).forEach(el => el.remove());
 
-        let globalBaseWidth = null;
-        let nativeBuffers = [];
+        globalBaseWidth = null;
+        nativeBuffers = [];
 
         perfStage('1 wipe');
         // 2. ROBUST REFERENCE SEARCH (only native elements remain at this point)
@@ -1146,10 +1201,11 @@
         // the user disables FFZ entirely, we restore the host app's natives.
         const ffzHide = (toggleState['ffz.show'] && toggleState['ffz.hide-native']) ? 'none' : '';
         const fpHide = (toggleState['fp.show'] && toggleState['fp.hide-native']) ? 'none' : '';
-        document.querySelectorAll(BLACK_DASHED_FFZ_SELECTOR).forEach(el => { el.style.display = ffzHide; });
-        nativeBuffers.forEach(el => { el.style.display = ffzHide; }); // collected greens
-        document.querySelectorAll(ORIGINAL_BLUE_BUFFER_SELECTOR).forEach(el => { el.style.display = fpHide; });
-        document.querySelectorAll(BLACK_DASHED_FP_SELECTOR).forEach(el => { el.style.display = fpHide; });
+        const setDisp = (el, v) => { if (el.style.display !== v) el.style.display = v; };   // v34.152: write-free when already right
+        document.querySelectorAll(BLACK_DASHED_FFZ_SELECTOR).forEach(el => setDisp(el, ffzHide));
+        nativeBuffers.forEach(el => setDisp(el, ffzHide)); // collected greens
+        document.querySelectorAll(ORIGINAL_BLUE_BUFFER_SELECTOR).forEach(el => setDisp(el, fpHide));
+        document.querySelectorAll(BLACK_DASHED_FP_SELECTOR).forEach(el => setDisp(el, fpHide));
 
         // 3b. ASSET STATE — lazy-fetch entity data + tag each white asset
         // path with its state so the per-line loop can style it per-state.
@@ -1179,16 +1235,23 @@
             if (stMap && assetStateData.siteID === sid && assetStateData.polys.length) {
                 document.querySelectorAll(`${WHITE_ASSET_SELECTOR}, ${DV_ASSET_SELECTOR}`).forEach(p => {
                     if (p.hasAttribute(CUSTOM_BUFFER_ATTR)) return; // never tag our own clones
-                    const a = matchPathAsset(p, stMap);
+                    const dNow = p.getAttribute('d') || '';
+                    let memo = _assetMatchMemo.get(p);
+                    if (!memo || memo.d !== dNow || memo.rev !== assetStateData.polys.length) {
+                        memo = { d: dNow, rev: assetStateData.polys.length, a: matchPathAsset(p, stMap) };
+                        _assetMatchMemo.set(p, memo);
+                    }
+                    const a = memo.a;
                     if (a) {
-                        if (a.state) p.setAttribute('data-aim-asset-state', a.state);
-                        if (a.equip) p.setAttribute('data-aim-asset-equip', a.equip);
+                        if (a.state && p.getAttribute('data-aim-asset-state') !== a.state) p.setAttribute('data-aim-asset-state', a.state);
+                        if (a.equip && p.getAttribute('data-aim-asset-equip') !== a.equip) p.setAttribute('data-aim-asset-equip', a.equip);
                         // v34.137: resolve the asset's style RULE (first match
                         // wins in the active preset) and tag it — the per-line
                         // loop styles off this tag. Re-resolved every run, so
                         // rule/preset edits repaint on the next update.
                         const r = assetRuleFor(a);
-                        p.setAttribute('data-aim-asset-rule', r ? r.id : '__fallback');
+                        const rid = r ? r.id : '__fallback';
+                        if (p.getAttribute('data-aim-asset-rule') !== rid) p.setAttribute('data-aim-asset-rule', rid);
                     }
                 });
             }
@@ -1540,7 +1603,9 @@
             }
         });
 
+        _coreLast = { sig: coreSig, gbw: globalBaseWidth, ourN: document.querySelectorAll(`[${CUSTOM_BUFFER_ATTR}="true"]`).length };
         perfStage('4 rebuild');
+        } else { _perf.skips++; perfStage('core-skipped'); }
         // 5. Altitude-marker purple shield circles.
         renderAltitudeShields(globalBaseWidth, lineThickness, standardRatio);
         perfStage('5 alt-shields');
@@ -10387,7 +10452,13 @@
         // recovers via a single auto-Kick. See detectStuckRender() above.
         scheduleStuckCheckAfterActivation();
         observerTarget = container;
-        observer = new MutationObserver((recs) => { _perfFromObserver = true; perfTally(recs); debouncedUpdate(); });
+        observer = new MutationObserver((recs) => {
+            perfTally(recs);
+            let relevant = false;
+            for (let i = 0; i < recs.length; i++) { if (!isNoiseMutation(recs[i])) { relevant = true; break; } }
+            if (!relevant) { _perf.ignored++; return; }
+            _perfFromObserver = true; debouncedUpdate();
+        });
         observer.observe(container, observerConfig);
         // v34.122 — Data View zoom fix: on DV, Leaflet only rewrites ITS OWN
         // layers' attributes on zoom/pan — no SS-style mutation storm reaches
