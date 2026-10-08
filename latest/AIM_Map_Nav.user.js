@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Nav
 // @namespace    http://tampermonkey.net/
-// @version      0.13
+// @version      0.14
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Map_Nav.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Map_Nav.user.js
 // @description  Keyboard nav for the Percepto map. WASD pan / Q-E zoom out-in (always-on). ALT for sprint (3x). SPACE = zoom-to-fit entire site setup. 🧭 map-tools button = go to a pasted GPS coordinate (pan/zoom + pulse marker). Other Shift/Ctrl + nav keys pass through to existing macros (Shift+D Delete etc.) and browser shortcuts. For zoom-into-area use Leaflet's native Shift+drag box-zoom. Input-guarded so typing is unaffected.
@@ -72,7 +72,7 @@
     'use strict';
 
     const TAG = '[AIM NAV]';
-    const SCRIPT_VERSION = '0.13';
+    const SCRIPT_VERSION = '0.14';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -204,16 +204,41 @@
     // release. Do the same: Leaflet 1.x's _rawPanBy (unchanged for a decade) + 'move' per frame,
     // 'moveend' on release and every DRAG_SETTLE_MS while held so tiles and vectors beyond the
     // renderer's padding catch up. Falls back to panBy if the private hook is missing.
-    const DRAG_SETTLE_MS = 450;
+    // v0.14 — the v0.13 timed settle (moveend every 450 ms while held) was itself the jerk: each
+    // moveend = Leaflet re-projects every path + Percepto + every AIM overlay react (30–40 ms),
+    // so WASD was smooth for the first 450 ms and hitched every 450 ms after. A mouse drag fires
+    // NO moveend until release and tolerates vectors being clipped past the renderer's padding.
+    // Do the same, and make the clipping a non-issue: widen Leaflet's vector renderer padding
+    // (default 0.1 = 10 % of the viewport) to RENDER_PAD so lines are already drawn well beyond
+    // the screen, and settle only when the held pan has travelled most of that margin.
+    const RENDER_PAD = 1.0;              // renderer draws 3× the viewport (1 viewport each side)
+    const SETTLE_TRAVEL_FRAC = 0.8;      // settle after panning 80 % of the smaller viewport side
     let panPending = false;
-    let lastSettleAt = 0;
+    let travelX = 0, travelY = 0;
+    let padBumpedFor = null;
+    function bumpRendererPadding(map) {
+        if (padBumpedFor === map) return;
+        padBumpedFor = map;
+        try {
+            const rs = [];
+            if (map._renderer) rs.push(map._renderer);
+            if (map._paneRenderers) Object.keys(map._paneRenderers).forEach(k => rs.push(map._paneRenderers[k]));
+            let n = 0;
+            rs.forEach(r => { if (r && r.options && typeof r.options.padding === 'number' && r.options.padding < RENDER_PAD) { r.options.padding = RENDER_PAD; n++; } });
+            if (n) console.log(`${TAG} renderer padding → ${RENDER_PAD} on ${n} renderer(s) (vectors stay drawn through a long WASD hold; applies from the next move end)`);
+        } catch (e) { console.warn(`${TAG} renderer padding bump failed:`, e); }
+    }
     function dragPan(map, dx, dy) {
         if (typeof map._rawPanBy !== 'function' || typeof map.fire !== 'function') return false;
         try {
-            if (!panPending) { panPending = true; lastSettleAt = performance.now(); try { map.fire('movestart'); } catch (e) {} }
+            bumpRendererPadding(map);
+            if (!panPending) { panPending = true; travelX = 0; travelY = 0; try { map.fire('movestart'); } catch (e) {} }
             map._rawPanBy({ x: dx, y: dy });
             map.fire('move');
-            if (performance.now() - lastSettleAt >= DRAG_SETTLE_MS) settlePan(map);
+            travelX += dx; travelY += dy;
+            let limit = 600;
+            try { const sz = map.getSize(); limit = Math.min(sz.x, sz.y) * SETTLE_TRAVEL_FRAC * Math.max(0.5, RENDER_PAD); } catch (e) {}
+            if (Math.abs(travelX) >= limit || Math.abs(travelY) >= limit) settlePan(map);
             return true;
         } catch (e) {
             console.warn(`${TAG} drag-pan failed — falling back to panBy:`, e);
@@ -223,7 +248,7 @@
     }
     function settlePan(map) {
         if (!panPending) return;
-        lastSettleAt = performance.now();
+        travelX = 0; travelY = 0;
         try { map.fire('moveend'); } catch (e) {}
     }
     function endPan() {
