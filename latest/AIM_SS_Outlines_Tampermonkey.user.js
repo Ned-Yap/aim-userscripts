@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.152
+// @version      34.153
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.152';
+    const SCRIPT_VERSION = '34.153';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1044,11 +1044,14 @@
             if (t.closest && t.closest(`.leaflet-${CELL_PANE}-pane, .leaflet-${FK_PANE}-pane`)) return true;
             if (m.type === 'attributes') {
                 if (t.tagName === 'IMG') return true;
+                // v34.153: Percepto's hover tooltips flip classes constantly (up to 1,670 per 10 s in
+                // the profiler) — nothing we style depends on a tooltip's class.
+                if (t.classList && t.classList.contains('leaflet-tooltip')) return true;
                 return false;
             }
             if (m.type === 'childList') {
                 const cl = t.classList;
-                if (cl && (cl.contains('leaflet-tile-container') || cl.contains('leaflet-tile-pane'))) return true;
+                if (cl && (cl.contains('leaflet-tile-container') || cl.contains('leaflet-tile-pane') || cl.contains('leaflet-tooltip-pane'))) return true;
                 const nodes = [];
                 m.addedNodes.forEach(n => nodes.push(n)); m.removedNodes.forEach(n => nodes.push(n));
                 if (nodes.length && nodes.every(n => (n.nodeType === 1 && n.hasAttribute && n.hasAttribute(CUSTOM_BUFFER_ATTR)) || (n.nodeType === 1 && n.tagName === 'IMG' && n.classList && n.classList.contains('leaflet-tile')))) return true;
