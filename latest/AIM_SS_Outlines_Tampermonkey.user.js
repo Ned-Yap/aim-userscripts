@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.148
+// @version      34.149
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.148';
+    const SCRIPT_VERSION = '34.149';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -576,6 +576,14 @@
                 // positions, one dot per tower (sectors clustered), colored by
                 // carrier. Needs a free OpenCelliD API key (opencellid.org →
                 // register); CC BY-SA 4.0, credited in the legend.
+                // 🏗 FCC registered towers (v34.149) — the FCC Antenna Structure Registration database
+                // (surveyed positions, height, built date, owner) pre-built into 1° grid files in the data
+                // repo by ShortKeys/AIM_FCC_ASR_Build.py. Registration is only required for structures
+                // over ~200 ft or near airports, so this is the MACRO towers; rooftops/small cells live
+                // in the OpenCelliD dots below. Fetch = data repo (PAT), no third party.
+                { type: 'header', label: '🏗 FCC registered towers (height · built · owner)' },
+                { id: 'cell.asr', label: 'Registered towers (white squares)', type: 'boolean', default: false },
+                { id: 'cell.asrLabels', label: 'Height labels', type: 'boolean', default: false },
                 { type: 'header', label: '📡 Cell towers (OpenCelliD — free key needed)' },
                 { id: 'cell.towers', label: 'Tower dots', type: 'boolean', default: false },
                 { id: 'cell.towersCarrierOnly', label: 'Only the selected carrier', type: 'boolean', default: false },
@@ -2434,6 +2442,141 @@
     const TOWER_DOF_URL = 'https://services6.arcgis.com/ssFJjBXIUyZDrSYZ/arcgis/rest/services/Digital_Obstacle_File/FeatureServer/0/query';
     const TOWER_DOF_MATCH_M = 250;
     const TOWER_GM_CHANNEL = 'AIM_GM_STAMP';   // v34.147: hand points to Site Setup Tools' GM Stamper (preview → confirm → create-only rails)
+    // 🏗 FCC ASR (v34.149): data repo fcc-asr/g<lat>_<lng>.json → {v, asOf, cell, n, towers:[[lat,lng,aglFt,amslFt,type,built,owner,regNum,status,lighting,city,state]]}
+    const ASR_DIR = 'fcc-asr';
+    const ASR_CACHE_PREFIX = 'aim-asr-cell-v1-';
+    const ASR_CACHE_TTL_MS = 7 * 86400000;
+    const ASR_MATCH_M = 250;
+    const ASR_TYPE_WORD = { TOWER: 'tower', LTOWER: 'lattice tower', MTOWER: 'monopole', GTOWER: 'guyed tower', POLE: 'pole', UPOLE: 'utility pole', MAST: 'mast', B: 'building', BANT: 'building w/ antenna', BTWR: 'building w/ tower', TANK: 'tank', TREE: 'tree-style tower', SIGN: 'sign', STACK: 'stack', PIPE: 'pipe', RIG: 'rig', SILO: 'silo', BRIDG: 'bridge' };
+    // Owner name → carrier where the registrant is the carrier itself (tower companies host everyone).
+    const ASR_OWNER_CARRIER = [[/cellco|verizon/i, 'Verizon'], [/new cingular|at&t|att mobility|southwestern bell|bellsouth/i, 'AT&T'], [/t-mobile|stc five|sprint|clearwire/i, 'T-Mobile'], [/dish wireless/i, 'DISH']];
+    let _asr = { cells: {}, loading: new Set(), failed: {} };   // cellKey → {at, towers, asOf}
+    let _asrLayers = [];
+    let _asrKey = '';
+    function asrCellKeys(env) {
+        const keys = [];
+        for (let la = Math.floor(env.s); la <= Math.floor(env.n); la++) for (let lo = Math.floor(env.w); lo <= Math.floor(env.e); lo++) keys.push(`g${la}_${lo}`);
+        return keys;
+    }
+    function asrOwnerCarrier(owner) { for (const [re, name] of ASR_OWNER_CARRIER) { if (re.test(owner || '')) return name; } return null; }
+    function asrTowerObj(row) {
+        return { lat: row[0], lng: row[1], aglFt: row[2], amslFt: row[3], type: row[4] || '', built: row[5] || '', owner: row[6] || '', reg: row[7] || '', status: row[8] || '', lighting: row[9] || '', city: row[10] || '', state: row[11] || '' };
+    }
+    // One data-repo fetch per 1° cell (Contents API, raw body), GM-cached 7 days. Returns true when every
+    // cell for the envelope is in memory; otherwise kicks off the missing fetches and returns false.
+    function asrEnsureCells(env) {
+        const keys = asrCellKeys(env);
+        let ready = true;
+        const token = cachedToken || gmGet(TOKEN_KEY, '');
+        keys.forEach(key => {
+            if (_asr.cells[key]) return;
+            try {
+                const cached = gmGet(ASR_CACHE_PREFIX + key, null);
+                const c = typeof cached === 'string' ? JSON.parse(cached) : cached;
+                if (c && Array.isArray(c.towers) && Date.now() - (c.at || 0) < ASR_CACHE_TTL_MS) { _asr.cells[key] = c; return; }
+            } catch (e) { console.warn(`${TAG} asr: cache read failed`, e); }
+            ready = false;
+            if (_asr.loading.has(key)) return;
+            if (Date.now() - (_asr.failed[key] || 0) < 120000) return;
+            if (!token) { if (!_asr.warnedNoToken) { _asr.warnedNoToken = true; showKMLToast('🏗 FCC registered towers need the GitHub token (AIM Controls → GitHub Connection).', 5000); try { controlChannel && controlChannel.postMessage({ type: 'REQUEST_TOKEN' }); } catch (e) {} } return; }
+            if (typeof GM_xmlhttpRequest !== 'function') return;
+            _asr.loading.add(key);
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${ASR_DIR}/${key}.json?ref=${KMLS_BRANCH}`,
+                headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github.raw' },
+                timeout: 30000,
+                onload: (resp) => {
+                    _asr.loading.delete(key);
+                    if (resp.status === 404) { _asr.cells[key] = { at: Date.now(), towers: [], asOf: '', empty: true }; try { gmSet(ASR_CACHE_PREFIX + key, JSON.stringify(_asr.cells[key])); } catch (e) {} if (isActive) applyCellCoverage(); return; }   // no registered structures in this 1° cell
+                    if (resp.status !== 200) { _asr.failed[key] = Date.now(); console.warn(`${TAG} asr: ${key} HTTP ${resp.status}`); if (resp.status === 401 || resp.status === 403) showKMLToast('🏗 FCC towers: GitHub denied the data-repo read — check the PAT', 5000); return; }
+                    let json = null;
+                    try { json = JSON.parse(resp.responseText); } catch (e) {}
+                    if (!json || !Array.isArray(json.towers)) { _asr.failed[key] = Date.now(); console.warn(`${TAG} asr: ${key} unexpected body`); return; }
+                    _asr.cells[key] = { at: Date.now(), towers: json.towers, asOf: json.asOf || '' };
+                    try { gmSet(ASR_CACHE_PREFIX + key, JSON.stringify(_asr.cells[key])); } catch (e) { console.warn(`${TAG} asr: cache write failed (cell too big?)`, e); }
+                    console.log(`${TAG} asr: ${key} — ${json.towers.length} FCC registered structures (as of ${json.asOf || '?'})`);
+                    if (isActive) applyCellCoverage();
+                },
+                onerror: () => { _asr.loading.delete(key); _asr.failed[key] = Date.now(); console.warn(`${TAG} asr: ${key} network error`); },
+                ontimeout: () => { _asr.loading.delete(key); _asr.failed[key] = Date.now(); console.warn(`${TAG} asr: ${key} timed out`); },
+            });
+        });
+        return ready;
+    }
+    function asrInEnvelope(env) {
+        const out = [];
+        asrCellKeys(env).forEach(key => {
+            const c = _asr.cells[key]; if (!c) return;
+            c.towers.forEach(r => { if (r[0] >= env.s && r[0] <= env.n && r[1] >= env.w && r[1] <= env.e) out.push(asrTowerObj(r)); });
+        });
+        return out;
+    }
+    function asrAsOf() { for (const k in _asr.cells) { if (_asr.cells[k].asOf) return _asr.cells[k].asOf; } return ''; }
+    function asrLine(t, prefix) {
+        const h = isFinite(t.aglFt) && t.aglFt ? `${t.aglFt} ft AGL${isFinite(t.amslFt) && t.amslFt ? ` (${t.amslFt} ft MSL top)` : ''}` : 'height not given';
+        const built = t.built ? `built ${t.built.slice(0, 4)}` : 'build date not given';
+        const car = asrOwnerCarrier(t.owner);
+        return `${prefix || '🏗'} FCC registered ${ASR_TYPE_WORD[t.type] || (t.type || 'structure').toLowerCase()} · ${h} · ${built} · <span style="color:#dfe9f0">${String(t.owner || 'owner unknown').replace(/</g, '&lt;')}</span>${car ? ` <span style="color:${TOWER_COLORS[car]}">(${car})</span>` : ''}${t.status === 'G' ? ' · <span style="color:#ffb020">granted, not yet built</span>' : ''} <span style="color:#8fa3b8">· reg ${String(t.reg).replace(/</g, '&lt;')}</span>`;
+    }
+    function removeAsrLayers() {
+        if (!_asrLayers.length) { _asrKey = ''; return; }
+        const map = getLeafletMap();
+        _asrLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        _asrLayers = []; _asrKey = '';
+    }
+    function asrNear(map, ll) {
+        if (toggleState['cell.asr'] !== true || !ll) return null;
+        const list = _asrVisible || [];
+        if (!list.length) return null;
+        let cp; try { cp = map.latLngToContainerPoint(ll); } catch (e) { return null; }
+        let best = null, bestD = 18;
+        list.forEach(t => {
+            let p; try { p = map.latLngToContainerPoint([t.lat, t.lng]); } catch (e) { return; }
+            const d = Math.hypot(p.x - cp.x, p.y - cp.y);
+            if (d < bestD) { best = t; bestD = d; }
+        });
+        return best;
+    }
+    let _asrVisible = [];
+    // Match registered structures onto OpenCelliD sites (replaces the FAA DOF guess when present —
+    // ASR has the owner and build date, DOF does not).
+    function asrAttachToTowers(towers, list) {
+        let n = 0;
+        (towers || []).forEach(t => {
+            let best = null, bestD = ASR_MATCH_M;
+            list.forEach(a => { const d = Math.hypot((a.lat - t.lat) * 111320, (a.lng - t.lng) * 111320 * Math.cos(t.lat * Math.PI / 180)); if (d < bestD) { best = a; bestD = d; } });
+            if (best) { t.asr = Object.assign({ distM: Math.round(bestD) }, best); n++; } else delete t.asr;
+        });
+        return n;
+    }
+    function applyAsrTowers(map, L, sid, env, pane, renderer) {
+        if (toggleState['cell.asr'] !== true) { removeAsrLayers(); _asrVisible = []; return; }
+        const ready = asrEnsureCells(env);
+        const list = asrInEnvelope(env);
+        _asrVisible = list;
+        if (_towers.towers) asrAttachToTowers(_towers.towers, list);
+        const labels = toggleState['cell.asrLabels'] === true;
+        const key = `${sid}|${cellEnvKey(env)}|${ready}|${list.length}|${labels}`;
+        if (key === _asrKey) return;
+        removeAsrLayers(); _asrKey = key;
+        if (!list.length) return;
+        list.forEach(t => {
+            const r = isFinite(t.aglFt) && t.aglFt ? Math.max(5, Math.min(9, 4 + t.aglFt / 120)) : 5;
+            // Square-ish marker: a 4-point polygon in pixel space is not available on a canvas circle renderer,
+            // so use a hollow white circle with a thick ring (OpenCelliD dots are filled & colored — distinct).
+            const opts = { radius: r, color: '#ffffff', weight: 2.5, opacity: 0.95, fill: true, fillColor: '#10161f', fillOpacity: t.status === 'G' ? 0.2 : 0.75, interactive: false };
+            if (pane) opts.pane = pane;
+            if (renderer) opts.renderer = renderer;
+            try { const m = L.circleMarker([t.lat, t.lng], opts); m.addTo(map); _asrLayers.push(m); } catch (e) { console.warn(`${TAG} asr: marker add failed`, e); }
+            if (labels && isFinite(t.aglFt) && t.aglFt && typeof L.marker === 'function' && typeof L.divIcon === 'function') {
+                try {
+                    const mk = L.marker([t.lat, t.lng], { interactive: false, keyboard: false, pane: pane || undefined, icon: L.divIcon({ className: 'aim-asr-label', html: `<div style="transform:translate(10px,-7px);white-space:nowrap;color:#fff;font:600 10px/1 -apple-system,Segoe UI,Roboto,sans-serif;text-shadow:0 0 3px #000,0 0 3px #000;pointer-events:none">${t.aglFt} ft</div>`, iconSize: [0, 0] }) });
+                    mk.addTo(map); _asrLayers.push(mk);
+                } catch (e) {}
+            }
+        });
+    }
     // MCC-MNC → carrier (US). Verizon 311-48x; AT&T 310-410/280/030/150/170/380/560/680, 311-180; T-Mobile 310-260/160/200…250/270/310/490/660/800, 311-490/660/870/880, 312-250/530 (ex-Sprint); DISH 313-340.
     const TOWER_CARRIER = (() => {
         const m = {};
@@ -2869,7 +3012,7 @@
         removeCellBadge();
     }
     function removeCellCoverage() {
-        removeCellLayers(); removeTowerLayers(); removeCellRenderer(); removeCellLegend(); cellUnbindHover();
+        removeCellLayers(); removeTowerLayers(); removeAsrLayers(); removeCellRenderer(); removeCellLegend(); cellUnbindHover();
     }
     function cellResetForSite() {
         _cell = { siteID: null, envKey: '', features: null, loading: false, failed: false, at: 0, source: '' };
@@ -2878,8 +3021,9 @@
     function cellRefresh() {
         const sid = getCurrentSiteID();
         if (!sid) { showKMLToast('Open a site first.', 2500); return; }
-        try { gmSet(gmEnvKey(CELL_CACHE_PREFIX + sid), null); gmSet(gmEnvKey(TOWER_CACHE_PREFIX + sid), null); } catch (e) {}
-        cellResetForSite(); removeCellLayers(); removeTowerLayers();
+        try { gmSet(gmEnvKey(CELL_CACHE_PREFIX + sid), null); gmSet(gmEnvKey(TOWER_CACHE_PREFIX + sid), null); Object.keys(_asr.cells).forEach(k => gmSet(ASR_CACHE_PREFIX + k, null)); } catch (e) {}
+        _asr = { cells: {}, loading: new Set(), failed: {} };
+        cellResetForSite(); removeCellLayers(); removeTowerLayers(); removeAsrLayers();
         if (toggleState['cell.show'] !== true) { showKMLToast('📶 Cell coverage is off — turn the category on to fetch.', 3500); return; }
         showKMLToast('📶 Re-fetching FCC cell coverage…', 2500);
         applyCellCoverage();
@@ -2919,9 +3063,10 @@
             if (!ll) return;
             const f = cellHexAt(ll.lat, ll.lng);
             const tw = towerNear(map, ll);
+            const ar = tw ? null : asrNear(map, ll);
             let badge = document.getElementById(CELL_BADGE_ID);
-            if (!f && !tw) { if (badge && badge.style.display !== 'none') badge.style.display = 'none'; _cellHoverId = null; return; }
-            const hoverId = `${f ? f.id : ''}|${tw ? tw.key : ''}`;
+            if (!f && !tw && !ar) { if (badge && badge.style.display !== 'none') badge.style.display = 'none'; _cellHoverId = null; return; }
+            const hoverId = `${f ? f.id : ''}|${tw ? tw.key : ''}|${ar ? ar.reg : ''}`;
             if (!badge) {
                 badge = document.createElement('div');
                 badge.id = CELL_BADGE_ID;
@@ -2937,9 +3082,11 @@
             _cellHoverId = hoverId;
             const towerLine = tw ? `<div style="margin-top:${f ? 5 : 0}px;padding-top:${f ? 4 : 0}px;${f ? 'border-top:1px solid rgba(122,223,230,0.25);' : ''}color:${TOWER_COLORS[tw.carrier] || TOWER_COLORS.Other}">📡 <b>${tw.carrier}</b> cell site · ${towerTechLabel(tw)}</div>`
                 + `<div style="color:#dfe9f0;font-weight:500">${tw.n} cell${tw.n === 1 ? '' : 's'}${(tw.nNr || 0) ? ` (${tw.nLte || 0} LTE · ${tw.nNr} 5G)` : ''}${tw.range ? ` · reach ~${Math.round(tw.range * 3.28084 / 5280 * 10) / 10} mi` : ''} · ${tw.samples} phone reports</div>`
-                + (tw.dof ? `<div style="color:#ffd54f;font-weight:500">FAA: ${tw.dof.type || 'structure'}${isFinite(tw.dof.agl) ? ` ${Math.round(tw.dof.agl)} ft AGL` : ''}${isFinite(tw.dof.amsl) ? ` (${Math.round(tw.dof.amsl)} ft MSL top)` : ''}${tw.dof.lit && tw.dof.lit !== 'N' ? ' · lit' : ''} · ${tw.dof.distM} m from the dot</div>` : '<div style="color:#8fa3b8;font-weight:500">height: not an FAA-registered structure (short mast or rooftop)</div>')
-                + `<div style="color:#8fa3b8;font-weight:500">OpenCelliD crowd estimate (±100 m) · install date not published</div>` : '';
-            if (!f) { badge.innerHTML = towerLine; badge.style.display = ''; return; }
+                + (tw.asr ? `<div style="color:#ffd54f;font-weight:500">${asrLine(tw.asr, '🏗')} · ${tw.asr.distM} m from the dot</div>`
+                    : tw.dof ? `<div style="color:#ffd54f;font-weight:500">FAA obstacle: ${tw.dof.type || 'structure'}${isFinite(tw.dof.agl) ? ` ${Math.round(tw.dof.agl)} ft AGL` : ''}${isFinite(tw.dof.amsl) ? ` (${Math.round(tw.dof.amsl)} ft MSL top)` : ''}${tw.dof.lit && tw.dof.lit !== 'N' ? ' · lit' : ''} · ${tw.dof.distM} m from the dot</div>`
+                    : '<div style="color:#8fa3b8;font-weight:500">no FCC-registered structure within 250 m (short mast, rooftop or small cell)</div>')
+                + `<div style="color:#8fa3b8;font-weight:500">OpenCelliD crowd estimate (±100 m)</div>` : (ar ? `<div style="color:#ffd54f;font-weight:600">${asrLine(ar, '🏗')}</div><div style="color:#8fa3b8;font-weight:500">${[ar.city, ar.state].filter(Boolean).join(', ')}${ar.lighting ? ` · lighting spec ${String(ar.lighting).replace(/</g, '&lt;')}` : ''} · FCC ASR as of ${asrAsOf() || '?'} · surveyed position</div>` : '');
+            if (!f) { badge.innerHTML = towerLine || ''; badge.style.display = ''; return; }
             const rows = CELL_CARRIERS.map(c => {
                 const s = f.sig[c.key] || {};
                 const cells = CELL_TECHS.map(t => { const b = cellBandFor(s[t.key]); return `<td style="padding:0 0 0 10px;text-align:right;color:${b.color}">${cellFmtDbm(s[t.key])}</td>`; }).join('');
@@ -2972,7 +3119,8 @@
         el.innerHTML = `<div style="color:#7adfe6">📶 FCC modeled signal · ${carLabel} · ${tech.label}</div>`
             + `<div style="margin:3px 0">${CELL_BANDS.map(b => sw(b.color, `${b.word} <span style="opacity:0.7">${b.label}</span>`)).join('')}${sw(CELL_NONE.color, CELL_NONE.word)} <span style="opacity:0.7">dBm</span></div>`
             + `<div style="color:#8fa3b8;font-weight:500">${n} hexes · FCC BDC via Esri Living Atlas · ${_cell.source === 'cache' ? 'cached ' : 'fetched '}${_cell.at ? new Date(_cell.at).toLocaleDateString() : ''} · carrier-modeled ground coverage, not flown LTE</div>`
-            + (toggleState['cell.towers'] === true && _towers.towers ? `<div style="margin-top:3px">📡 ${towerVisibleList().length} towers · ${['Verizon', 'AT&T', 'T-Mobile', 'DISH', 'Other'].map(c => `<span style="display:inline-flex;align-items:center;gap:3px;margin-right:7px"><i style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${TOWER_COLORS[c]}"></i>${c}</span>`).join('')}<span style="color:#8fa3b8;font-weight:500">dot size = cells · white ring = 5G · hover a dot for details · OpenCelliD (CC BY-SA 4.0)${_towers.capped ? ' · capped, shrink margin' : ''}</span></div>` : '');
+            + (toggleState['cell.towers'] === true && _towers.towers ? `<div style="margin-top:3px">📡 ${towerVisibleList().length} towers · ${['Verizon', 'AT&T', 'T-Mobile', 'DISH', 'Other'].map(c => `<span style="display:inline-flex;align-items:center;gap:3px;margin-right:7px"><i style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${TOWER_COLORS[c]}"></i>${c}</span>`).join('')}<span style="color:#8fa3b8;font-weight:500">dot size = cells · white ring = 5G · hover a dot for details · OpenCelliD (CC BY-SA 4.0)${_towers.capped ? ' · capped, shrink margin' : ''}</span></div>` : '')
+            + (toggleState['cell.asr'] === true ? `<div style="margin-top:3px">🏗 ${(_asrVisible || []).length} FCC registered structures <span style="display:inline-flex;align-items:center;gap:3px;margin:0 7px"><i style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#10161f;border:2px solid #fff"></i>white ring</span><span style="color:#8fa3b8;font-weight:500">height · built · owner on hover · FCC ASR as of ${asrAsOf() || '…'} (towers &gt; ~200 ft or near airports)</span></div>` : '');
         try { map.getContainer().appendChild(el); } catch (e) {}
     }
     function applyCellCoverage() {
@@ -2992,7 +3140,7 @@
         if (!_cell.features) return;   // in flight → onload re-calls us
         const opacity = Math.min(0.9, Math.max(0.05, Number(toggleState['cell.opacity']) || 0.35));
         const outline = toggleState['cell.outline'] === true;
-        const key = `${sid}|${_cell.envKey}|${_cell.at}|${toggleState['cell.carrier']}|${toggleState['cell.tech']}|${opacity}|${outline}|${toggleState['cell.legend']}|${toggleState['cell.hover']}|${toggleState['cell.towers']}|${_towers.at}|${toggleState['cell.towersCarrierOnly']}`;
+        const key = `${sid}|${_cell.envKey}|${_cell.at}|${toggleState['cell.carrier']}|${toggleState['cell.tech']}|${opacity}|${outline}|${toggleState['cell.legend']}|${toggleState['cell.hover']}|${toggleState['cell.towers']}|${_towers.at}|${toggleState['cell.towersCarrierOnly']}|${toggleState['cell.asr']}|${Object.keys(_asr.cells).length}`;
         if (key !== _cellKey) {
             removeCellLayers();
             _cellKey = key;
@@ -3016,6 +3164,8 @@
         }
         try { applyCellTowers(map, L, sid, env, cellPaneName(map), cellRenderer(map, L, cellPaneName(map))); }
         catch (e) { console.warn(`${TAG} towers: apply failed`, e); }
+        try { applyAsrTowers(map, L, sid, env, cellPaneName(map), cellRenderer(map, L, cellPaneName(map))); }
+        catch (e) { console.warn(`${TAG} asr: apply failed`, e); }
         if (toggleState['cell.hover'] === true) cellBindHover(map); else cellUnbindHover();
     }
 
