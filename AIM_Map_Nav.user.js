@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Nav
 // @namespace    http://tampermonkey.net/
-// @version      0.12
+// @version      0.14
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Map_Nav.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Map_Nav.user.js
 // @description  Keyboard nav for the Percepto map. WASD pan / Q-E zoom out-in (always-on). ALT for sprint (3x). SPACE = zoom-to-fit entire site setup. 🧭 map-tools button = go to a pasted GPS coordinate (pan/zoom + pulse marker). Other Shift/Ctrl + nav keys pass through to existing macros (Shift+D Delete etc.) and browser shortcuts. For zoom-into-area use Leaflet's native Shift+drag box-zoom. Input-guarded so typing is unaffected.
@@ -72,7 +72,7 @@
     'use strict';
 
     const TAG = '[AIM NAV]';
-    const SCRIPT_VERSION = '0.12';
+    const SCRIPT_VERSION = '0.14';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -195,9 +195,72 @@
         return false;
     }
 
+    // ------- drag-style pan (v0.13) -------
+    // v0.12 panned with map.panBy({animate:false}) once per animation frame. Every panBy fires
+    // 'moveend', and on every moveend Leaflet re-projects EVERY SVG path on the map (the Map
+    // Styler's profiler counted ~3,600 <path d> rewrites in 9 s of held W) and every
+    // observer-driven AIM script restyled → jerky WASD, on a map a mouse drag moves smoothly.
+    // A mouse drag only translates the map pane and fires 'move'; 'moveend' comes once on
+    // release. Do the same: Leaflet 1.x's _rawPanBy (unchanged for a decade) + 'move' per frame,
+    // 'moveend' on release and every DRAG_SETTLE_MS while held so tiles and vectors beyond the
+    // renderer's padding catch up. Falls back to panBy if the private hook is missing.
+    // v0.14 — the v0.13 timed settle (moveend every 450 ms while held) was itself the jerk: each
+    // moveend = Leaflet re-projects every path + Percepto + every AIM overlay react (30–40 ms),
+    // so WASD was smooth for the first 450 ms and hitched every 450 ms after. A mouse drag fires
+    // NO moveend until release and tolerates vectors being clipped past the renderer's padding.
+    // Do the same, and make the clipping a non-issue: widen Leaflet's vector renderer padding
+    // (default 0.1 = 10 % of the viewport) to RENDER_PAD so lines are already drawn well beyond
+    // the screen, and settle only when the held pan has travelled most of that margin.
+    const RENDER_PAD = 1.0;              // renderer draws 3× the viewport (1 viewport each side)
+    const SETTLE_TRAVEL_FRAC = 0.8;      // settle after panning 80 % of the smaller viewport side
+    let panPending = false;
+    let travelX = 0, travelY = 0;
+    let padBumpedFor = null;
+    function bumpRendererPadding(map) {
+        if (padBumpedFor === map) return;
+        padBumpedFor = map;
+        try {
+            const rs = [];
+            if (map._renderer) rs.push(map._renderer);
+            if (map._paneRenderers) Object.keys(map._paneRenderers).forEach(k => rs.push(map._paneRenderers[k]));
+            let n = 0;
+            rs.forEach(r => { if (r && r.options && typeof r.options.padding === 'number' && r.options.padding < RENDER_PAD) { r.options.padding = RENDER_PAD; n++; } });
+            if (n) console.log(`${TAG} renderer padding → ${RENDER_PAD} on ${n} renderer(s) (vectors stay drawn through a long WASD hold; applies from the next move end)`);
+        } catch (e) { console.warn(`${TAG} renderer padding bump failed:`, e); }
+    }
+    function dragPan(map, dx, dy) {
+        if (typeof map._rawPanBy !== 'function' || typeof map.fire !== 'function') return false;
+        try {
+            bumpRendererPadding(map);
+            if (!panPending) { panPending = true; travelX = 0; travelY = 0; try { map.fire('movestart'); } catch (e) {} }
+            map._rawPanBy({ x: dx, y: dy });
+            map.fire('move');
+            travelX += dx; travelY += dy;
+            let limit = 600;
+            try { const sz = map.getSize(); limit = Math.min(sz.x, sz.y) * SETTLE_TRAVEL_FRAC * Math.max(0.5, RENDER_PAD); } catch (e) {}
+            if (Math.abs(travelX) >= limit || Math.abs(travelY) >= limit) settlePan(map);
+            return true;
+        } catch (e) {
+            console.warn(`${TAG} drag-pan failed — falling back to panBy:`, e);
+            panPending = false;
+            return false;
+        }
+    }
+    function settlePan(map) {
+        if (!panPending) return;
+        travelX = 0; travelY = 0;
+        try { map.fire('moveend'); } catch (e) {}
+    }
+    function endPan() {
+        if (!panPending) return;
+        panPending = false;
+        const map = getLeafletMap();
+        if (map) { try { map.fire('moveend'); } catch (e) {} }
+    }
+
     // ------- rAF tick -------
     function tick() {
-        if (!motion.size) { rafId = null; return; }
+        if (!motion.size) { rafId = null; endPan(); return; }
         const map = getLeafletMap();
         if (map) {
             const mult = altHeld ? SPRINT_MULT : 1;
@@ -210,8 +273,12 @@
                 if (motion.has('a')) dx -= PAN_SPEED * mult;
                 if (motion.has('d')) dx += PAN_SPEED * mult;
                 if (dx || dy) {
-                    try { map.panBy([dx, dy], { animate: false, noMoveStart: true }); }
-                    catch (e) {}
+                    if (!dragPan(map, dx, dy)) {
+                        try { map.panBy([dx, dy], { animate: false, noMoveStart: true }); }
+                        catch (e) {}
+                    }
+                } else if (panPending) {
+                    endPan();   // pan keys released while a zoom key is still held
                 }
             }
 
@@ -220,6 +287,7 @@
                 const now = performance.now();
                 if (now - lastZoomAt >= ZOOM_INTERVAL_MS) {
                     const step = altHeld ? ZOOM_STEP_SPRINT : ZOOM_STEP_BASE;
+                    if (panPending && (motion.has('e') || motion.has('q'))) settlePan(map);   // flush the drag before a zoom resets the view
                     if (motion.has('e')) {
                         try { map.zoomIn(step, { animate: false }); lastZoomAt = now; }
                         catch (e) {}
@@ -652,6 +720,7 @@
         motion.clear();
         altHeld = false;
         if (rafId != null) { try { cancelAnimationFrame(rafId); } catch (e) {} rafId = null; }
+        endPan();
     }
 
     window.addEventListener('keydown', onKeyDown, true);

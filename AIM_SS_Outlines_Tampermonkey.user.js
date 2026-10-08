@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.139
+// @version      34.153
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -20,6 +20,8 @@
 // @connect      api.github.com
 // @connect      services1.arcgis.com
 // @connect      services6.arcgis.com
+// @connect      services.arcgis.com
+// @connect      opencellid.org
 // @connect      pdi.scinet.usda.gov
 // @connect      gis.rrc.texas.gov
 // @connect      webapps2.rrc.texas.gov
@@ -67,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.139';
+    const SCRIPT_VERSION = '34.153';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -83,7 +85,75 @@
         // buffer settings so its draw-time preview bands match the real FP
         // treatment exactly (GM storage is per-script — this is the bridge).
         else if (d.action === "FP_BUFFER_REQUEST") broadcastFpBufferSettings();
+        // v34.141: Site Setup Tools' 📄 Airspace Survey asks for the FAA
+        // sectional overlay ON just long enough to screenshot the map, then
+        // OFF again — without touching the user's faachart.show toggle.
+        else if (d.action === "CHART_PREVIEW") handleChartPreview(d);
+        // v34.142: same idea for the base layer — Esri World Imagery under the
+        // survey's setup/overview shots regardless of the user's basemap pick.
+        else if (d.action === "BASEMAP_PREVIEW") handleBasemapPreview(d);
     };
+    function handleBasemapPreview(d) {
+        const map = getLeafletMap();
+        if (!map || typeof map.addLayer !== 'function') return;   // not the map frame
+        let present = false;
+        try {
+            const want = String(d.source || 'esri');
+            if (d.on) {
+                if (toggleState['basemap.enabled'] !== false && String(toggleState['basemap.source'] || 'percepto') === want && _aimBasemapLayer) {
+                    present = true;                                  // user already on that basemap
+                } else if (_aimBasemapPreviewLayer) {
+                    present = true;
+                } else {
+                    const spec = BASEMAP_SOURCES[want] || BASEMAP_SOURCES.esri;
+                    const layer = makeAimTileLayer(spec.url, { maxNativeZoom: spec.maxNative, maxZoom: 23, zIndex: 1, attribution: spec.attribution });
+                    if (layer) {
+                        map.addLayer(layer); _aimBasemapPreviewLayer = layer; basemapPreviewActive = true; present = true;
+                        try { applyMapBackgroundVisibility(); } catch (e) {}
+                    }
+                    console.log(`${TAG} basemap preview ${present ? `ON (${want}, survey capture)` : 'unavailable'}`);
+                }
+            } else if (_aimBasemapPreviewLayer) {
+                try { map.removeLayer(_aimBasemapPreviewLayer); } catch (e) {}
+                _aimBasemapPreviewLayer = null; basemapPreviewActive = false;
+                try { applyMapBackgroundVisibility(); } catch (e) {}
+                console.log(`${TAG} basemap preview OFF`);
+            }
+        } catch (e) { console.warn(`${TAG} basemap preview failed:`, e); }
+        try { stateChannel.postMessage({ action: 'BASEMAP_PREVIEW_ACK', on: !!d.on, present }); } catch (e) {}
+    }
+    // Temporary FAA chart layer for the Airspace Survey capture (#280).
+    // No-op when the user already has the chart on. Only the frame that
+    // owns a map answers, with CHART_PREVIEW_ACK {on, present}.
+    let _aimChartPreviewLayer = null;
+    function handleChartPreview(d) {
+        const map = getLeafletMap();
+        if (!map || typeof map.addLayer !== 'function') return;   // not the map frame
+        let present = false;
+        try {
+            if (d.on) {
+                if (toggleState['faachart.show'] === true && _aimChartLayer) {
+                    present = true;                                  // user's own chart is up
+                } else if (_aimChartPreviewLayer) {
+                    present = true;
+                } else {
+                    const spec = _FAA_CHART_SOURCES.sectional;
+                    const layer = makeAimTileLayer(spec.url, {
+                        opacity: Number(d.opacity) > 0 ? Number(d.opacity) : 0.7,
+                        minNativeZoom: spec.minNativeZoom, maxNativeZoom: spec.maxNativeZoom,
+                        maxZoom: 23, zIndex: 9990, attribution: 'FAA AIS',
+                    });
+                    if (layer) { map.addLayer(layer); _aimChartPreviewLayer = layer; present = true; }
+                    console.log(`${TAG} FAA chart preview ${present ? 'ON (survey capture)' : 'unavailable'}`);
+                }
+            } else if (_aimChartPreviewLayer) {
+                try { map.removeLayer(_aimChartPreviewLayer); } catch (e) {}
+                _aimChartPreviewLayer = null;
+                console.log(`${TAG} FAA chart preview OFF`);
+            }
+        } catch (e) { console.warn(`${TAG} chart preview failed:`, e); }
+        try { stateChannel.postMessage({ action: 'CHART_PREVIEW_ACK', on: !!d.on, present }); } catch (e) {}
+    }
     // Answer FP_BUFFER_REQUEST + re-broadcast whenever an fp.* toggle changes,
     // so a consumer's cached copy stays live while the user tweaks the card.
     function broadcastFpBufferSettings() {
@@ -465,6 +535,61 @@
                 // zoom (the raster chart blurs past z12). OFF by default: it
                 // costs one FAA query per map area, zero when off.
                 { id: 'faachart.vectors', label: 'Airspace boundaries (vector, sharp at any zoom)', type: 'boolean', default: false },
+            ],
+        },
+        {
+            // 📶 Cell coverage (v34.143, #287) — FCC Broadband Data
+            // Collection mobile coverage hexes (carrier-reported minimum
+            // signal, dBm) read live from Esri Living Atlas's public summary
+            // of the National Broadband Map. Modeled ground-level coverage,
+            // not a measurement — see the CELL_* block for the caveats.
+            type: 'category',
+            id: 'cell-cat',
+            label: '📶 Cell coverage (FCC)',
+            meta: '(carrier-modeled signal · hexes ~0.2 mi across)',
+            master: { id: 'cell.show', default: false },
+            children: [
+                { id: 'cell.carrier', label: 'Carrier', type: 'select',
+                  options: [
+                      { value: 'best', label: 'Best of AT&T / Verizon / T-Mobile' },
+                      { value: 'att', label: 'AT&T' },
+                      { value: 'vz', label: 'Verizon' },
+                      { value: 'tm', label: 'T-Mobile' },
+                  ],
+                  default: 'best' },
+                { id: 'cell.tech', label: 'Technology', type: 'select',
+                  options: [
+                      { value: 'lte', label: '4G LTE (5/1 Mbps)' },
+                      { value: 'nr7', label: '5G NR (7/1 Mbps)' },
+                      { value: 'nr35', label: '5G NR (35/3 Mbps)' },
+                  ],
+                  default: 'lte' },
+                { id: 'cell.opacity', label: 'Fill opacity', type: 'number',
+                  min: 0.05, max: 0.9, step: 0.05, default: 0.35, unit: 'fill' },
+                { id: 'cell.marginMi', label: 'Fetch around site', type: 'number',
+                  min: 0.25, max: 5, step: 0.25, default: 1, unit: 'mi' },
+                { id: 'cell.outline', label: 'Hex outlines', type: 'boolean', default: false },
+                { id: 'cell.hover', label: 'Hover readout (all carriers)', type: 'boolean', default: true },
+                { id: 'cell.legend', label: 'Legend', type: 'boolean', default: true },
+                { id: 'cell-refresh', label: 'Re-fetch FCC data for this site', type: 'button', action: 'cell-refresh' },
+                // 📡 Tower dots (v34.146) — OpenCelliD crowd-sourced cell
+                // positions, one dot per tower (sectors clustered), colored by
+                // carrier. Needs a free OpenCelliD API key (opencellid.org →
+                // register); CC BY-SA 4.0, credited in the legend.
+                // 🏗 FCC registered towers (v34.149) — the FCC Antenna Structure Registration database
+                // (surveyed positions, height, built date, owner) pre-built into 1° grid files in the data
+                // repo by ShortKeys/AIM_FCC_ASR_Build.py. Registration is only required for structures
+                // over ~200 ft or near airports, so this is the MACRO towers; rooftops/small cells live
+                // in the OpenCelliD dots below. Fetch = data repo (PAT), no third party.
+                { type: 'header', label: '🏗 FCC registered towers (height · built · owner)' },
+                { id: 'cell.asr', label: 'Registered towers (white squares)', type: 'boolean', default: false },
+                { id: 'cell.asrLabels', label: 'Height labels', type: 'boolean', default: false },
+                { type: 'header', label: '📡 Cell towers (OpenCelliD — free key needed)' },
+                { id: 'cell.towers', label: 'Tower dots', type: 'boolean', default: false },
+                { id: 'cell.towersCarrierOnly', label: 'Only the selected carrier', type: 'boolean', default: false },
+                { id: 'cell-towers-key', label: 'Set / clear OpenCelliD API key…', type: 'button', action: 'cell-towers-key' },
+                { id: 'cell-towers-gm', label: '📌 Towers → General Markers (via Site Setup Tools)', type: 'button', action: 'cell-towers-gm' },
+                { id: 'cell-towers-kml', label: '📤 Download towers as KML', type: 'button', action: 'cell-towers-kml' },
             ],
         },
         {
@@ -897,8 +1022,87 @@
     }
 
     // --- Core Logic ---
+    // v34.150 — built-in profiler (same idea as Mission Bank Tools' [perf] lines): every 5 s, if any
+    // runUpdate ran, log how many, total/max ms, how many were observer-triggered, and how much of
+    // that was the cell layer. "Runs like shit" needs numbers, not guesses — paste these lines back.
+    const _perf = { runs: 0, ms: 0, max: 0, obs: 0, cellMs: 0, cellMax: 0, lastLog: Date.now(), stages: {}, mut: {}, mutN: 0, stageT: 0, skips: 0, ignored: 0 };
+    // v34.152 — CORE SKIP memory: signature of everything steps 1–4 depend on, the base width they
+    // derived, and how many clones they left in the DOM.
+    let _coreLast = { sig: '', gbw: null, ourN: 0 };
+    // v34.152 — asset path → {d, rev, a}: point-in-polygon matching is redone only when the path's
+    // geometry or the asset data changed (3b used to re-match every asset on every run).
+    const _assetMatchMemo = new WeakMap();
+    // v34.152 — mutation batches made only of noise never schedule a run: our own clones being
+    // wiped/rebuilt (childList on <g> with only our nodes), tile <img> class flips and tile-container
+    // churn while panning, and anything inside our own panes. New layers (childList on a
+    // .leaflet-pane / .leaflet-layer) still count — hide-satellite and ortho logic need them.
+    function isNoiseMutation(m) {
+        const t = m.target;
+        if (!t) return true;
+        try {
+            if (t.nodeType === 1 && t.hasAttribute && t.hasAttribute(CUSTOM_BUFFER_ATTR)) return true;
+            if (t.closest && t.closest(`.leaflet-${CELL_PANE}-pane, .leaflet-${FK_PANE}-pane`)) return true;
+            if (m.type === 'attributes') {
+                if (t.tagName === 'IMG') return true;
+                // v34.153: Percepto's hover tooltips flip classes constantly (up to 1,670 per 10 s in
+                // the profiler) — nothing we style depends on a tooltip's class.
+                if (t.classList && t.classList.contains('leaflet-tooltip')) return true;
+                return false;
+            }
+            if (m.type === 'childList') {
+                const cl = t.classList;
+                if (cl && (cl.contains('leaflet-tile-container') || cl.contains('leaflet-tile-pane') || cl.contains('leaflet-tooltip-pane'))) return true;
+                const nodes = [];
+                m.addedNodes.forEach(n => nodes.push(n)); m.removedNodes.forEach(n => nodes.push(n));
+                if (nodes.length && nodes.every(n => (n.nodeType === 1 && n.hasAttribute && n.hasAttribute(CUSTOM_BUFFER_ATTR)) || (n.nodeType === 1 && n.tagName === 'IMG' && n.classList && n.classList.contains('leaflet-tile')))) return true;
+                return false;
+            }
+        } catch (e) { return false; }
+        return false;
+    }
+    // Stage timers: perfStage('name') charges the time since the previous mark to 'name'.
+    function perfStage(name) { const now = performance.now(); if (_perf.stageT) _perf.stages[name] = (_perf.stages[name] || 0) + (now - _perf.stageT); _perf.stageT = now; }
+    // Mutation tally: what on Percepto's map is changing and tripping the observer.
+    function perfTally(recs) {
+        try {
+            for (let i = 0; i < recs.length && i < 200; i++) {
+                const m = recs[i]; const t = m.target;
+                const k = `${m.type === 'attributes' ? m.attributeName : m.type}@${t && t.tagName ? t.tagName.toLowerCase() : '?'}${t && t.classList && t.classList.length ? '.' + String(t.classList[0]).slice(0, 24) : ''}`;
+                _perf.mut[k] = (_perf.mut[k] || 0) + 1; _perf.mutN++;
+            }
+        } catch (e) {}
+    }
+    function perfTime(key, fn) {
+        const t0 = performance.now();
+        try { return fn(); }
+        finally { const d = performance.now() - t0; _perf[key + 'Ms'] += d; if (d > _perf[key + 'Max']) _perf[key + 'Max'] = d; }
+    }
+    function perfFlush(force) {
+        const now = Date.now();
+        if (!force && now - _perf.lastLog < 5000) return;
+        if (_perf.runs) {
+            const top = (o, n) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, n);
+            console.log(`${TAG} [perf] ${Math.round((now - _perf.lastLog) / 1000)} s: runUpdate ×${_perf.runs} (${_perf.obs} from DOM mutations, ${_perf.skips} core-skipped, ${_perf.ignored} noise batches ignored) · total ${Math.round(_perf.ms)} ms · max ${Math.round(_perf.max)} ms · cell layer ${Math.round(_perf.cellMs)} ms (max ${Math.round(_perf.cellMax)})`
+                + `\n    stages: ${top(_perf.stages, 6).map(([k, v]) => `${k} ${Math.round(v)}`).join(' · ')}`
+                + `\n    mutations ×${_perf.mutN}: ${top(_perf.mut, 5).map(([k, v]) => `${k} ×${v}`).join(' · ')}`);
+        }
+        _perf.runs = 0; _perf.ms = 0; _perf.max = 0; _perf.obs = 0; _perf.cellMs = 0; _perf.cellMax = 0; _perf.lastLog = now; _perf.stages = {}; _perf.mut = {}; _perf.mutN = 0; _perf.skips = 0; _perf.ignored = 0;
+    }
+    setInterval(() => perfFlush(false), 5000);
     function runUpdate() {
         if (!isActive) return;
+        const _t0 = performance.now();
+        try { runUpdateInner(); }
+        finally {
+            const d = performance.now() - _t0;
+            _perf.runs++; _perf.ms += d; if (d > _perf.max) _perf.max = d;
+            if (_perfFromObserver) { _perf.obs++; _perfFromObserver = false; }
+        }
+    }
+    let _perfFromObserver = false;
+    function runUpdateInner() {
+        if (!isActive) return;
+        _perf.stageT = performance.now();
 
         // Self-healing: if Leaflet (or the host app's React) replaced the map-pane
         // node we attached to, our observer is on a detached element and
@@ -921,6 +1125,31 @@
         // No global shielding toggle anymore — each category (FFZ, FP) has
         // its own .shielding sub-toggle, checked inside the per-line loop.
 
+        perfStage('pre');
+        // v34.152 — CORE SKIP. Steps 1–4 (wipe clones → find refs → hide natives + tag assets → rebuild
+        // clones) depend only on the native target lines' geometry/attributes, the native buffers'
+        // state, zoom, toggles and the asset rules/data. Profiling (Motiva 2026-10-07) put them at
+        // ~90 % of a 25–40 ms run firing 4–9×/s — mostly on tile loads where nothing had changed.
+        // Signature first; when identical and our clones are still in the DOM, skip straight to step 5.
+        let coreSig = '';
+        try {
+            const sm = getLeafletMap();
+            const parts = [String(sm && typeof sm.getZoom === 'function' ? sm.getZoom() : 0), String(assetRulesRev), JSON.stringify(toggleState), String(assetStateData.siteID), String(assetStateData.polys.length), String(lineThickness), String(standardRatio), String(shieldingMult)];
+            document.querySelectorAll(ALL_TARGETS_SELECTOR).forEach(el => {
+                if (el.hasAttribute(CUSTOM_BUFFER_ATTR)) return;
+                parts.push(el.getAttribute('d') || '', el.getAttribute('stroke') || '', el.getAttribute('stroke-width') || '', el.getAttribute('class') || '', el.getAttribute('stroke-dasharray') || '', el.style.display || '');
+            });
+            document.querySelectorAll(`${BLACK_DASHED_FFZ_SELECTOR}, ${BLACK_DASHED_FP_SELECTOR}, ${GREEN_BUFFER_SELECTOR}, ${ORIGINAL_BLUE_BUFFER_SELECTOR}`).forEach(el => {
+                if (!el.hasAttribute(CUSTOM_BUFFER_ATTR)) parts.push(el.style.display || '-', el.getAttribute('stroke-width') || '');
+            });
+            coreSig = parts.join('\u0001');
+        } catch (e) { coreSig = ''; }
+        const ourNow = document.querySelectorAll(`[${CUSTOM_BUFFER_ATTR}="true"]`).length;
+        const skipCore = !!coreSig && coreSig === _coreLast.sig && ourNow > 0 && ourNow === _coreLast.ourN;
+        let globalBaseWidth = skipCore ? _coreLast.gbw : null;
+        let nativeBuffers = [];
+        perfStage('sig');
+        if (!skipCore) {
         // 1. WIPE CLEAN old buffers FIRST.
         // Must happen before the reference search: custom green buffers carry
         // stroke="var(--color-green)" and would otherwise be picked up as
@@ -929,9 +1158,10 @@
         // during zoom mutation storms).
         document.querySelectorAll(`[${CUSTOM_BUFFER_ATTR}="true"]`).forEach(el => el.remove());
 
-        let globalBaseWidth = null;
-        let nativeBuffers = [];
+        globalBaseWidth = null;
+        nativeBuffers = [];
 
+        perfStage('1 wipe');
         // 2. ROBUST REFERENCE SEARCH (only native elements remain at this point)
         const allGreen = document.querySelectorAll('path.leaflet-interactive[stroke="var(--color-green)"]');
         allGreen.forEach(el => {
@@ -965,6 +1195,7 @@
             globalBaseWidth = lineThickness * standardRatio;
         }
 
+        perfStage('2 refs');
         // 3. Hide (or restore) the host app's native distractions per-category.
         // FFZ.hide-native covers the green native buffer + the dashed FFZ.
         // FP.hide-native covers the blue gradient + the dashed flight path.
@@ -973,10 +1204,11 @@
         // the user disables FFZ entirely, we restore the host app's natives.
         const ffzHide = (toggleState['ffz.show'] && toggleState['ffz.hide-native']) ? 'none' : '';
         const fpHide = (toggleState['fp.show'] && toggleState['fp.hide-native']) ? 'none' : '';
-        document.querySelectorAll(BLACK_DASHED_FFZ_SELECTOR).forEach(el => { el.style.display = ffzHide; });
-        nativeBuffers.forEach(el => { el.style.display = ffzHide; }); // collected greens
-        document.querySelectorAll(ORIGINAL_BLUE_BUFFER_SELECTOR).forEach(el => { el.style.display = fpHide; });
-        document.querySelectorAll(BLACK_DASHED_FP_SELECTOR).forEach(el => { el.style.display = fpHide; });
+        const setDisp = (el, v) => { if (el.style.display !== v) el.style.display = v; };   // v34.152: write-free when already right
+        document.querySelectorAll(BLACK_DASHED_FFZ_SELECTOR).forEach(el => setDisp(el, ffzHide));
+        nativeBuffers.forEach(el => setDisp(el, ffzHide)); // collected greens
+        document.querySelectorAll(ORIGINAL_BLUE_BUFFER_SELECTOR).forEach(el => setDisp(el, fpHide));
+        document.querySelectorAll(BLACK_DASHED_FP_SELECTOR).forEach(el => setDisp(el, fpHide));
 
         // 3b. ASSET STATE — lazy-fetch entity data + tag each white asset
         // path with its state so the per-line loop can style it per-state.
@@ -1006,21 +1238,29 @@
             if (stMap && assetStateData.siteID === sid && assetStateData.polys.length) {
                 document.querySelectorAll(`${WHITE_ASSET_SELECTOR}, ${DV_ASSET_SELECTOR}`).forEach(p => {
                     if (p.hasAttribute(CUSTOM_BUFFER_ATTR)) return; // never tag our own clones
-                    const a = matchPathAsset(p, stMap);
+                    const dNow = p.getAttribute('d') || '';
+                    let memo = _assetMatchMemo.get(p);
+                    if (!memo || memo.d !== dNow || memo.rev !== assetStateData.polys.length) {
+                        memo = { d: dNow, rev: assetStateData.polys.length, a: matchPathAsset(p, stMap) };
+                        _assetMatchMemo.set(p, memo);
+                    }
+                    const a = memo.a;
                     if (a) {
-                        if (a.state) p.setAttribute('data-aim-asset-state', a.state);
-                        if (a.equip) p.setAttribute('data-aim-asset-equip', a.equip);
+                        if (a.state && p.getAttribute('data-aim-asset-state') !== a.state) p.setAttribute('data-aim-asset-state', a.state);
+                        if (a.equip && p.getAttribute('data-aim-asset-equip') !== a.equip) p.setAttribute('data-aim-asset-equip', a.equip);
                         // v34.137: resolve the asset's style RULE (first match
                         // wins in the active preset) and tag it — the per-line
                         // loop styles off this tag. Re-resolved every run, so
                         // rule/preset edits repaint on the next update.
                         const r = assetRuleFor(a);
-                        p.setAttribute('data-aim-asset-rule', r ? r.id : '__fallback');
+                        const rid = r ? r.id : '__fallback';
+                        if (p.getAttribute('data-aim-asset-rule') !== rid) p.setAttribute('data-aim-asset-rule', rid);
                     }
                 });
             }
         }
 
+        perfStage('3 hide');
         // 4. REBUILD & ENFORCE
         const lines = document.querySelectorAll(ALL_TARGETS_SELECTOR);
 
@@ -1366,42 +1606,68 @@
             }
         });
 
+        _coreLast = { sig: coreSig, gbw: globalBaseWidth, ourN: document.querySelectorAll(`[${CUSTOM_BUFFER_ATTR}="true"]`).length };
+        perfStage('4 rebuild');
+        } else { _perf.skips++; perfStage('core-skipped'); }
         // 5. Altitude-marker purple shield circles.
         renderAltitudeShields(globalBaseWidth, lineThickness, standardRatio);
+        perfStage('5 alt-shields');
         // 6. KML shielding overlays (loaded async — render whatever's currently in kmlFeatures).
         renderShielding();
+        perfStage('6 kml-shielding');
         // 7. Violation dots — assets within Xft of FFZ/FP.
         renderViolations(globalBaseWidth, lineThickness, standardRatio);
+        perfStage('7 violations');
         // 8. Coverage Validator pins (re-projected from stored lat/lng).
         renderValidatorPins();
+        perfStage('8 validator-pins');
         // 9. Round altitude + make values copyable in altitude popups.
         enhanceAltitudePopups();
+        perfStage('9 alt-popups');
         // 10. Toggle satellite base tiles on/off per user preference.
         applyMapBackgroundVisibility();
+        perfStage('10 sat-visibility');
         // 11. Orthomosaic brightness + low-res cap (perf optimization).
         applyOrthoSettings();
+        perfStage('11 ortho-settings');
         // 11b. Full ortho hide — remove COG layers to kill their tile storm.
         applyOrthoVisibility();
+        perfStage('11b ortho-hide');
         // 11b2. Basemap switcher (replacement base under everything).
         applyBasemapLayer();
+        perfStage('11b2 basemap');
         // 11b3. USGS terrain overlay (per-view elevation render).
         applyTerrainLayer();
+        perfStage('11b3 terrain');
         // 11c. FAA airspace chart overlay (sectional / TAC tile layer).
         applyFaaChartLayer();
+        perfStage('11c faa-chart');
         // 11d. Vector airspace boundaries (Class B/C/D/E polygons).
         applyAirspaceVectors();
+        perfStage('11d airspace-vectors');
         // 11e. USDA crop-cover overlay.
         applyCropLayer();
+        perfStage('11e crops');
         // 11f. Texas RRC wells / pipelines overlay.
         applyRrcLayers();
+        perfStage('11f rrc');
         // 11g. TX boundaries (districts / counties / cities / surveys).
         applyTxBoundaries();
+        perfStage('11g tx-bounds');
+        // 11h. 🌐 Fleet KML layers (data repo fleet-kml/), clipped to the site.
+        applyFleetKml();
+        perfStage('11h fleet-kml');
+        // 11i. 📶 FCC cell coverage hexes (v34.143) — timed separately for the [perf] line.
+        perfTime('cell', applyCellCoverage);
+        perfStage('11i cell');
         // 12. Flight-path vertex dots: hide / resize / recolor via CSS.
         applyVertexStyle();
+        perfStage('12 vertex-dots');
 
         // Mark current state as rendered. Heartbeat compares against this
         // and skips re-running if nothing changed since.
         lastUpdateHash = computeUpdateHash();
+        perfStage('hash'); _perf.stageT = 0;
     }
 
     // Hides/restores the Leaflet satellite base tile layer. Driven by the
@@ -1439,6 +1705,8 @@
     // applyMapBackgroundVisibility reads it and can run before the
     // basemap block executes (same TDZ lesson as the FAA chart state).
     let basemapOverrideActive = false;
+    let basemapPreviewActive = false;      // v34.142: survey capture borrowing Esri imagery (BASEMAP_PREVIEW)
+    let _aimBasemapPreviewLayer = null;
     // FAA chart overlay state — declared up here (not next to its functions
     // further down) because applyMapBackgroundVisibility references
     // _aimChartLayer and can run early; see the TDZ lesson in
@@ -1464,7 +1732,7 @@
     function applyMapBackgroundVisibility() {
         // Hide the HERE base when the Perf Shield toggle says so OR when a
         // replacement basemap is active (both restore through _aimHidden).
-        const hide = perfHideSatellite === true || basemapOverrideActive === true;
+        const hide = perfHideSatellite === true || basemapOverrideActive === true || basemapPreviewActive === true;
         const map = getLeafletMap();
         if (!map || typeof map.eachLayer !== 'function') return;
         try {
@@ -1477,7 +1745,7 @@
                 // hide-satellite would hide the chart the moment both are
                 // on (v34.86 bug, caught by the probe). Match on the FAA
                 // AIS org id so the console-probe layer is excluded too.
-                if (layer === _aimChartLayer || layer === _aimBasemapLayer || /ssFJjBXIUyZDrSYZ/.test(url)) return;
+                if (layer === _aimChartLayer || layer === _aimBasemapLayer || layer === _aimBasemapPreviewLayer || /ssFJjBXIUyZDrSYZ/.test(url)) return;
                 // Diagnostic: print every unique tile layer URL once. Helps
                 // identify Percepto's actual satellite provider when our
                 // built-in patterns don't match. Always logs (not just when
@@ -2237,6 +2505,816 @@
     let _rrcDrawKey = '';       // geomKey + filter state of what's currently drawn
     let _rrcOperators = [];     // [{ name, count }] discovered via bulk EWA fetch
     let _rrcOpFetchKey = '';    // geomKey the bulk operator fetch ran for
+
+    // ==================================================================
+    // 📶 CELL COVERAGE (v34.143, feature #287) — FCC Broadband Data
+    // Collection mobile coverage as H3 res-9 hexes (~0.1 km², ~1,150 ft
+    // across), read LIVE from Esri Living Atlas's public summary of the
+    // FCC National Broadband Map (refreshed on the 10th + 25th). Each hex
+    // carries the carrier-reported MINIMUM signal (RSRP dBm band: -60
+    // strong … -110 edge; null = no modeled coverage) per carrier × tech.
+    //
+    // WHAT THIS IS (and isn't): carrier PROPAGATION MODELING for an
+    // outdoor phone at ground level, submitted to the FCC twice a year.
+    // Not a measurement, not the air. FCC drive tests found only ~62% of
+    // rural tests met the modeled speed. So: this is where coverage is
+    // CLAIMED. The flown LTE outages (Mission Logs) are the truth layer.
+    //
+    // No auth, no PAT: one bbox query per site (site bounds + margin),
+    // paged at the service's 2000-record cap, GM-cached 14 days per site.
+    // Hexes are drawn interactive:false in their own pane (never steal a
+    // click from the editor); the hover readout is a mousemove on the map
+    // container with a point-in-hex test, not Leaflet tooltips.
+    // ==================================================================
+    const CELL_QUERY_URL = 'https://services.arcgis.com/jIL9msH9OI208GCb/arcgis/rest/services/FCC_Mobile_Broadband_Data_Collection/FeatureServer/0/query';
+    const CELL_CACHE_PREFIX = 'aim-cell-cache-v1-';
+    const CELL_CACHE_TTL_MS = 14 * 86400000;
+    const CELL_PAGE = 2000;
+    const CELL_MAX_PAGES = 6;          // 12k hexes ≈ 1,260 km² — nothing we fly is bigger
+    const CELL_PANE = 'aimCellCov';
+    const CELL_LEGEND_ID = 'aim-cell-legend';
+    const CELL_BADGE_ID = 'aim-cell-badge';
+    const CELL_CARRIERS = [
+        { key: 'att', label: 'AT&T',     field: 'ATT' },
+        { key: 'vz',  label: 'Verizon',  field: 'Verizon' },
+        { key: 'tm',  label: 'T-Mobile', field: 'TMobile' },
+    ];
+    const CELL_TECHS = [
+        { key: 'lte',  label: '4G LTE',         suffix: '4GLTE' },
+        { key: 'nr7',  label: '5G NR 7/1',      suffix: '5GNR_7_1' },
+        { key: 'nr35', label: '5G NR 35/3',     suffix: '5GNR_35_3' },
+    ];
+    // Service values are 10 dB bands (-60 … -110/-120). Thresholds sit between
+    // bands. v34.144: each band carries a plain word — most people don't read dBm.
+    const CELL_BANDS = [
+        { min: -75,       word: 'Strong', label: '−60 / −70', color: '#00e676' },
+        { min: -85,       word: 'Good',   label: '−80',       color: '#aeea00' },
+        { min: -95,       word: 'Fair',   label: '−90',       color: '#ffea00' },
+        { min: -105,      word: 'Weak',   label: '−100',      color: '#ffa000' },
+        { min: -Infinity, word: 'Poor',   label: '−110+',     color: '#ff3d00' },
+    ];
+    const CELL_NONE = { word: 'None', label: 'no coverage', color: '#546e7a' };
+    let _cell = { siteID: null, envKey: '', features: null, loading: false, failed: false, at: 0, source: '' };
+    let _cellLayers = [];
+    let _cellKey = '';
+    let _cellHover = null;   // { container, move, leave }
+    let _cellRenderer = null;   // v34.145: one L.canvas per map — hexes never touch the SVG DOM
+    let _cellRendererLogged = false;
+    let _cellHoverId = null;
+    // 📡 towers (v34.146)
+    const TOWER_KEY_GM = 'aim-opencellid-key';
+    const TOWER_URL = 'https://opencellid.org/cell/getInArea';
+    const TOWER_CACHE_PREFIX = 'aim-cell-towers-v1-';
+    // OpenCelliD limits (docs 2026): BBOX ≤ 4,000,000 m², ≤ 50 cells per request (offset paging),
+    // 1,000 request credits per key per day, positions rounded to 3 decimals (~110 m).
+    const TOWER_LIMIT = 50;
+    const TOWER_TILE_KM = 1.9;     // tile edge → 3.6 km² per request box
+    const TOWER_MAX_TILES = 36;    // ~11 × 11 km envelope at most
+    const TOWER_MAX_REQ = 160;     // hard stop per fetch (daily budget is 1,000)
+    const TOWER_CONCURRENCY = 3;
+    const TOWER_CLUSTER_M = 150;   // sectors of one site are estimated within this of each other (3-decimal rounding ≈ 110 m)
+    const TOWER_RADIOS = ['LTE', 'NR'];   // v34.147: one pass per radio — 5G NR cells are the "is this site 5G?" signal
+    // FAA Digital Obstacle File (same FAA AIS org as the Airspace Validator) — registered structures with
+    // height; matched to an OpenCelliD site within TOWER_DOF_MATCH_M gives "tower 310 ft AGL, lit".
+    const TOWER_DOF_URL = 'https://services6.arcgis.com/ssFJjBXIUyZDrSYZ/arcgis/rest/services/Digital_Obstacle_File/FeatureServer/0/query';
+    const TOWER_DOF_MATCH_M = 250;
+    const TOWER_GM_CHANNEL = 'AIM_GM_STAMP';   // v34.147: hand points to Site Setup Tools' GM Stamper (preview → confirm → create-only rails)
+    // 🏗 FCC ASR (v34.149): data repo fcc-asr/g<lat>_<lng>.json → {v, asOf, cell, n, towers:[[lat,lng,aglFt,amslFt,type,built,owner,regNum,status,lighting,city,state]]}
+    const ASR_DIR = 'fcc-asr';
+    const ASR_CACHE_PREFIX = 'aim-asr-cell-v1-';
+    const ASR_CACHE_TTL_MS = 7 * 86400000;
+    const ASR_MATCH_M = 250;
+    const ASR_TYPE_WORD = { TOWER: 'tower', LTOWER: 'lattice tower', MTOWER: 'monopole', GTOWER: 'guyed tower', POLE: 'pole', UPOLE: 'utility pole', MAST: 'mast', B: 'building', BANT: 'building w/ antenna', BTWR: 'building w/ tower', TANK: 'tank', TREE: 'tree-style tower', SIGN: 'sign', STACK: 'stack', PIPE: 'pipe', RIG: 'rig', SILO: 'silo', BRIDG: 'bridge' };
+    // Owner name → carrier where the registrant is the carrier itself (tower companies host everyone).
+    const ASR_OWNER_CARRIER = [[/cellco|verizon/i, 'Verizon'], [/new cingular|at&t|att mobility|southwestern bell|bellsouth/i, 'AT&T'], [/t-mobile|stc five|sprint|clearwire/i, 'T-Mobile'], [/dish wireless/i, 'DISH']];
+    let _asr = { cells: {}, loading: new Set(), failed: {} };   // cellKey → {at, towers, asOf}
+    let _asrLayers = [];
+    let _asrKey = '';
+    function asrCellKeys(env) {
+        const keys = [];
+        for (let la = Math.floor(env.s); la <= Math.floor(env.n); la++) for (let lo = Math.floor(env.w); lo <= Math.floor(env.e); lo++) keys.push(`g${la}_${lo}`);
+        return keys;
+    }
+    function asrOwnerCarrier(owner) { for (const [re, name] of ASR_OWNER_CARRIER) { if (re.test(owner || '')) return name; } return null; }
+    function asrTowerObj(row) {
+        return { lat: row[0], lng: row[1], aglFt: row[2], amslFt: row[3], type: row[4] || '', built: row[5] || '', owner: row[6] || '', reg: row[7] || '', status: row[8] || '', lighting: row[9] || '', city: row[10] || '', state: row[11] || '' };
+    }
+    // One data-repo fetch per 1° cell (Contents API, raw body), GM-cached 7 days. Returns true when every
+    // cell for the envelope is in memory; otherwise kicks off the missing fetches and returns false.
+    function asrEnsureCells(env) {
+        const keys = asrCellKeys(env);
+        let ready = true;
+        const token = cachedToken || gmGet(TOKEN_KEY, '');
+        keys.forEach(key => {
+            if (_asr.cells[key]) return;
+            try {
+                const cached = gmGet(ASR_CACHE_PREFIX + key, null);
+                const c = typeof cached === 'string' ? JSON.parse(cached) : cached;
+                if (c && Array.isArray(c.towers) && Date.now() - (c.at || 0) < ASR_CACHE_TTL_MS) { _asr.cells[key] = c; return; }
+            } catch (e) { console.warn(`${TAG} asr: cache read failed`, e); }
+            ready = false;
+            if (_asr.loading.has(key)) return;
+            if (Date.now() - (_asr.failed[key] || 0) < 120000) return;
+            if (!token) { if (!_asr.warnedNoToken) { _asr.warnedNoToken = true; showKMLToast('🏗 FCC registered towers need the GitHub token (AIM Controls → GitHub Connection).', 5000); try { controlChannel && controlChannel.postMessage({ type: 'REQUEST_TOKEN' }); } catch (e) {} } return; }
+            if (typeof GM_xmlhttpRequest !== 'function') return;
+            _asr.loading.add(key);
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${ASR_DIR}/${key}.json?ref=${KMLS_BRANCH}`,
+                headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github.raw' },
+                timeout: 30000,
+                onload: (resp) => {
+                    _asr.loading.delete(key);
+                    if (resp.status === 404) { _asr.cells[key] = { at: Date.now(), towers: [], asOf: '', empty: true }; try { gmSet(ASR_CACHE_PREFIX + key, JSON.stringify(_asr.cells[key])); } catch (e) {} if (isActive) applyCellCoverage(); return; }   // no registered structures in this 1° cell
+                    if (resp.status !== 200) { _asr.failed[key] = Date.now(); console.warn(`${TAG} asr: ${key} HTTP ${resp.status}`); if (resp.status === 401 || resp.status === 403) showKMLToast('🏗 FCC towers: GitHub denied the data-repo read — check the PAT', 5000); return; }
+                    let json = null;
+                    try { json = JSON.parse(resp.responseText); } catch (e) {}
+                    if (!json || !Array.isArray(json.towers)) { _asr.failed[key] = Date.now(); console.warn(`${TAG} asr: ${key} unexpected body`); return; }
+                    _asr.cells[key] = { at: Date.now(), towers: json.towers, asOf: json.asOf || '' };
+                    try { gmSet(ASR_CACHE_PREFIX + key, JSON.stringify(_asr.cells[key])); } catch (e) { console.warn(`${TAG} asr: cache write failed (cell too big?)`, e); }
+                    console.log(`${TAG} asr: ${key} — ${json.towers.length} FCC registered structures (as of ${json.asOf || '?'})`);
+                    if (isActive) applyCellCoverage();
+                },
+                onerror: () => { _asr.loading.delete(key); _asr.failed[key] = Date.now(); console.warn(`${TAG} asr: ${key} network error`); },
+                ontimeout: () => { _asr.loading.delete(key); _asr.failed[key] = Date.now(); console.warn(`${TAG} asr: ${key} timed out`); },
+            });
+        });
+        return ready;
+    }
+    function asrInEnvelope(env) {
+        const out = [];
+        asrCellKeys(env).forEach(key => {
+            const c = _asr.cells[key]; if (!c) return;
+            c.towers.forEach(r => { if (r[0] >= env.s && r[0] <= env.n && r[1] >= env.w && r[1] <= env.e) out.push(asrTowerObj(r)); });
+        });
+        return out;
+    }
+    function asrAsOf() { for (const k in _asr.cells) { if (_asr.cells[k].asOf) return _asr.cells[k].asOf; } return ''; }
+    function asrLine(t, prefix) {
+        const h = isFinite(t.aglFt) && t.aglFt ? `${t.aglFt} ft AGL${isFinite(t.amslFt) && t.amslFt ? ` (${t.amslFt} ft MSL top)` : ''}` : 'height not given';
+        const built = t.built ? `built ${t.built.slice(0, 4)}` : 'build date not given';
+        const car = asrOwnerCarrier(t.owner);
+        return `${prefix || '🏗'} FCC registered ${ASR_TYPE_WORD[t.type] || (t.type || 'structure').toLowerCase()} · ${h} · ${built} · <span style="color:#dfe9f0">${String(t.owner || 'owner unknown').replace(/</g, '&lt;')}</span>${car ? ` <span style="color:${TOWER_COLORS[car]}">(${car})</span>` : ''}${t.status === 'G' ? ' · <span style="color:#ffb020">granted, not yet built</span>' : ''} <span style="color:#8fa3b8">· reg ${String(t.reg).replace(/</g, '&lt;')}</span>`;
+    }
+    function removeAsrLayers() {
+        if (!_asrLayers.length) { _asrKey = ''; return; }
+        const map = getLeafletMap();
+        _asrLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        _asrLayers = []; _asrKey = '';
+    }
+    function asrNear(map, ll) {
+        if (toggleState['cell.asr'] !== true || !ll) return null;
+        const list = _asrVisible || [];
+        if (!list.length) return null;
+        let cp; try { cp = map.latLngToContainerPoint(ll); } catch (e) { return null; }
+        let best = null, bestD = 18;
+        list.forEach(t => {
+            let p; try { p = map.latLngToContainerPoint([t.lat, t.lng]); } catch (e) { return; }
+            const d = Math.hypot(p.x - cp.x, p.y - cp.y);
+            if (d < bestD) { best = t; bestD = d; }
+        });
+        return best;
+    }
+    let _asrVisible = [];
+    // Match registered structures onto OpenCelliD sites (replaces the FAA DOF guess when present —
+    // ASR has the owner and build date, DOF does not).
+    function asrAttachToTowers(towers, list) {
+        let n = 0;
+        (towers || []).forEach(t => {
+            let best = null, bestD = ASR_MATCH_M;
+            list.forEach(a => { const d = Math.hypot((a.lat - t.lat) * 111320, (a.lng - t.lng) * 111320 * Math.cos(t.lat * Math.PI / 180)); if (d < bestD) { best = a; bestD = d; } });
+            if (best) { t.asr = Object.assign({ distM: Math.round(bestD) }, best); n++; } else delete t.asr;
+        });
+        return n;
+    }
+    function applyAsrTowers(map, L, sid, env, pane, renderer) {
+        if (toggleState['cell.asr'] !== true) { removeAsrLayers(); _asrVisible = []; return; }
+        const ready = asrEnsureCells(env);
+        const list = asrInEnvelope(env);
+        _asrVisible = list;
+        if (_towers.towers) asrAttachToTowers(_towers.towers, list);
+        const labels = toggleState['cell.asrLabels'] === true;
+        const key = `${sid}|${cellEnvKey(env)}|${ready}|${list.length}|${labels}`;
+        if (key === _asrKey) return;
+        removeAsrLayers(); _asrKey = key;
+        if (!list.length) return;
+        list.forEach(t => {
+            const r = isFinite(t.aglFt) && t.aglFt ? Math.max(5, Math.min(9, 4 + t.aglFt / 120)) : 5;
+            // Square-ish marker: a 4-point polygon in pixel space is not available on a canvas circle renderer,
+            // so use a hollow white circle with a thick ring (OpenCelliD dots are filled & colored — distinct).
+            const opts = { radius: r, color: '#ffffff', weight: 2.5, opacity: 0.95, fill: true, fillColor: '#10161f', fillOpacity: t.status === 'G' ? 0.2 : 0.75, interactive: false };
+            if (pane) opts.pane = pane;
+            if (renderer) opts.renderer = renderer;
+            try { const m = L.circleMarker([t.lat, t.lng], opts); m.addTo(map); _asrLayers.push(m); } catch (e) { console.warn(`${TAG} asr: marker add failed`, e); }
+            if (labels && isFinite(t.aglFt) && t.aglFt && typeof L.marker === 'function' && typeof L.divIcon === 'function') {
+                try {
+                    const mk = L.marker([t.lat, t.lng], { interactive: false, keyboard: false, pane: pane || undefined, icon: L.divIcon({ className: 'aim-asr-label', html: `<div style="transform:translate(10px,-7px);white-space:nowrap;color:#fff;font:600 10px/1 -apple-system,Segoe UI,Roboto,sans-serif;text-shadow:0 0 3px #000,0 0 3px #000;pointer-events:none">${t.aglFt} ft</div>`, iconSize: [0, 0] }) });
+                    mk.addTo(map); _asrLayers.push(mk);
+                } catch (e) {}
+            }
+        });
+    }
+    // MCC-MNC → carrier (US). Verizon 311-48x; AT&T 310-410/280/030/150/170/380/560/680, 311-180; T-Mobile 310-260/160/200…250/270/310/490/660/800, 311-490/660/870/880, 312-250/530 (ex-Sprint); DISH 313-340.
+    const TOWER_CARRIER = (() => {
+        const m = {};
+        const set = (mcc, mncs, name) => mncs.forEach(n => { m[`${mcc}-${String(n).padStart(3, '0')}`] = name; });
+        set(311, [480, 481, 482, 483, 484, 485, 486, 487, 488, 489], 'Verizon'); set(310, [4, 10, 12, 13], 'Verizon');
+        set(310, [410, 280, 30, 150, 170, 380, 560, 680, 70, 90, 950], 'AT&T'); set(311, [180, 190], 'AT&T'); set(313, [100, 110, 120, 130, 140], 'AT&T');
+        set(310, [260, 160, 200, 210, 220, 230, 240, 250, 270, 310, 490, 660, 800, 300, 120], 'T-Mobile'); set(311, [490, 660, 870, 880, 882], 'T-Mobile'); set(312, [250, 530, 190], 'T-Mobile');
+        set(313, [340], 'DISH');
+        return m;
+    })();
+    const TOWER_COLORS = { 'Verizon': '#ff1744', 'AT&T': '#2979ff', 'T-Mobile': '#ea80fc', 'DISH': '#ffd600', 'Other': '#b0bec5' };
+    const TOWER_CARRIER_KEY = { att: 'AT&T', vz: 'Verizon', tm: 'T-Mobile' };
+    let _towers = { siteID: null, envKey: '', towers: null, loading: false, failed: false, at: 0, capped: false, source: '' };
+    let _towerLayers = [];
+    let _towerKey = '';
+    function towerApiKey() { try { return String(gmGet(TOWER_KEY_GM, '') || '').trim(); } catch (e) { return ''; } }
+    function towerCarrierOf(mcc, mnc) { return TOWER_CARRIER[`${mcc}-${String(mnc).padStart(3, '0')}`] || 'Other'; }
+    // Cluster OpenCelliD cells (one row per sector/cell, positions scattered ±100 m) into towers per carrier.
+    function towerCluster(cells) {
+        const towers = [];
+        cells.forEach(c => {
+            let best = null, bestD = TOWER_CLUSTER_M;
+            for (const t of towers) {
+                if (t.carrier !== c.carrier) continue;
+                const d = Math.hypot((t.lat - c.lat) * 111320, (t.lng - c.lng) * 111320 * Math.cos(c.lat * Math.PI / 180));
+                if (d < bestD) { best = t; bestD = d; }
+            }
+            if (best) {
+                best.n++; best.samples += c.samples; best.range = Math.max(best.range, c.range);
+                best.lat += (c.lat - best.lat) / best.n; best.lng += (c.lng - best.lng) / best.n;   // running mean
+                if (c.radio && !best.radios.includes(c.radio)) best.radios.push(c.radio);
+                if (c.radio === 'NR') best.nNr++; else best.nLte++;
+                if (best.ids.length < 12 && c.cellid != null) best.ids.push(`${c.radio || ''}:${c.cellid}`);
+            } else towers.push({ lat: c.lat, lng: c.lng, carrier: c.carrier, mcc: c.mcc, mnc: c.mnc, n: 1, nLte: c.radio === 'NR' ? 0 : 1, nNr: c.radio === 'NR' ? 1 : 0, samples: c.samples, range: c.range, radios: c.radio ? [c.radio] : [], ids: c.cellid != null ? [`${c.radio || ''}:${c.cellid}`] : [] });
+        });
+        towers.forEach((t, i) => { t.key = `${t.carrier}|${i}`; });
+        return towers;
+    }
+    function towerFetch(sid, env) {
+        const envKey = cellEnvKey(env);
+        if (_towers.siteID === sid && _towers.envKey === envKey && (_towers.towers || _towers.loading)) return;
+        if (_towers.siteID === sid && _towers.envKey === envKey && _towers.failed && Date.now() - _towers.at < 60000) return;
+        const key = towerApiKey();
+        if (!key) { _towers = { siteID: sid, envKey, towers: null, loading: false, failed: true, at: Date.now(), capped: false, source: 'nokey' }; return; }
+        _towers = { siteID: sid, envKey, towers: null, loading: true, failed: false, at: Date.now(), capped: false, source: '' };
+        try {
+            const cached = gmGet(gmEnvKey(TOWER_CACHE_PREFIX + sid), null);
+            const c = typeof cached === 'string' ? JSON.parse(cached) : cached;
+            if (c && c.envKey === envKey && Array.isArray(c.towers) && Date.now() - (c.at || 0) < CELL_CACHE_TTL_MS) {
+                _towers = { siteID: sid, envKey, towers: c.towers, loading: false, failed: false, at: c.at, capped: !!c.capped, source: 'cache' };
+                return;
+            }
+        } catch (e) { console.warn(`${TAG} towers: cache read failed`, e); }
+        if (typeof GM_xmlhttpRequest !== 'function') { _towers.loading = false; _towers.failed = true; return; }
+        // Tile the envelope into ≤ 3.6 km² boxes (service cap is 4 km²) and page each at 50 cells.
+        const midLat = (env.s + env.n) / 2;
+        const dLat = TOWER_TILE_KM / 111.32, dLng = dLat / Math.max(Math.cos(midLat * Math.PI / 180), 0.2);
+        const tiles = [];
+        for (let s = env.s; s < env.n; s += dLat) for (let w = env.w; w < env.e; w += dLng) tiles.push({ s, w, n: Math.min(s + dLat, env.n), e: Math.min(w + dLng, env.e) });
+        if (tiles.length > TOWER_MAX_TILES) {
+            _towers.loading = false; _towers.failed = true; _towers.at = Date.now(); _towers.source = 'toobig';
+            console.warn(`${TAG} towers: envelope needs ${tiles.length} OpenCelliD tiles (max ${TOWER_MAX_TILES}) — shrink "Fetch around site"`);
+            showKMLToast(`📡 Site area too large for tower dots (${tiles.length} request tiles) — lower "Fetch around site"`, 6000);
+            return;
+        }
+        const cells = [];
+        const jobs = []; TOWER_RADIOS.forEach(radio => tiles.forEach(tile => jobs.push({ tile, radio })));
+        let reqs = 0, capped = false, pending = jobs.length, aborted = false, inFlight = 0;
+        const queue = jobs.slice();
+        const fail = (msg, body) => {
+            if (aborted) return;
+            aborted = true;
+            _towers.loading = false; _towers.failed = true; _towers.at = Date.now();
+            console.warn(`${TAG} towers: OpenCelliD query failed:`, msg, body ? String(body).slice(0, 300) : '');
+            showKMLToast(`📡 OpenCelliD: ${msg}${/key/i.test(msg) ? ' — set the key via the Cell coverage category' : ''}`, 6000);
+        };
+        const finalize = () => {
+            if (aborted) return;
+            const towers = towerCluster(cells);
+            towerDofMatch(env, towers, (matched) => {
+                _towers = { siteID: sid, envKey, towers, loading: false, failed: false, at: Date.now(), capped, source: 'live' };
+                try { gmSet(gmEnvKey(TOWER_CACHE_PREFIX + sid), JSON.stringify({ envKey, at: _towers.at, towers, capped })); } catch (e) {}
+                console.log(`${TAG} towers: ${cells.length} OpenCelliD cells (LTE+NR) → ${towers.length} sites for site ${sid} (${reqs} requests, ${tiles.length} tiles × ${TOWER_RADIOS.length} radios, ${matched} with FAA obstacle height)${capped ? ' — request budget hit, some towers may be missing' : ''}`);
+                if (capped) showKMLToast(`📡 Tower fetch stopped at ${TOWER_MAX_REQ} requests — some towers may be missing; shrink "Fetch around site"`, 5000);
+                if (isActive) applyCellCoverage();
+            });
+        };
+        const tileDone = () => { inFlight--; pending--; if (pending <= 0) finalize(); else runNext(); };
+        const page = (job, offset) => {
+            if (aborted) return;
+            if (reqs >= TOWER_MAX_REQ) { capped = true; tileDone(); return; }
+            reqs++;
+            const tile = job.tile;
+            const params = new URLSearchParams({ key, BBOX: `${tile.s.toFixed(5)},${tile.w.toFixed(5)},${tile.n.toFixed(5)},${tile.e.toFixed(5)}`, format: 'json', limit: String(TOWER_LIMIT), offset: String(offset), radio: job.radio });
+            GM_xmlhttpRequest({
+                method: 'GET', url: `${TOWER_URL}?${params.toString()}`, timeout: 30000,
+                onload: (resp) => {
+                    if (_towers.siteID !== sid || _towers.envKey !== envKey || aborted) return;
+                    let json = null;
+                    try { json = JSON.parse(resp.responseText); } catch (e) {}
+                    if (!json || json.error || (resp.status !== 200 && resp.status !== 0)) {
+                        fail(json && json.error ? `${json.error}${json.code != null ? ` (code ${json.code})` : ''}` : `HTTP ${resp.status}`, resp.responseText);
+                        return;
+                    }
+                    const list = Array.isArray(json.cells) ? json.cells : [];
+                    list.forEach(a => {
+                        const lat = Number(a.lat), lng = Number(a.lon);
+                        if (!isFinite(lat) || !isFinite(lng)) return;
+                        const mcc = Number(a.mcc), mnc = Number(a.mnc);
+                        cells.push({ lat, lng, mcc, mnc, carrier: towerCarrierOf(mcc, mnc), radio: a.radio || job.radio, samples: Number(a.samples) || 0, range: Number(a.range) || 0, cellid: a.cellid != null ? a.cellid : null });
+                    });
+                    if (list.length >= TOWER_LIMIT) page(job, offset + TOWER_LIMIT); else tileDone();
+                },
+                onerror: () => fail('network error'),
+                ontimeout: () => fail('timed out'),
+            });
+        };
+        const runNext = () => { while (!aborted && inFlight < TOWER_CONCURRENCY && queue.length) { inFlight++; page(queue.shift(), 0); } };
+        runNext();
+    }
+    // FAA DOF structures in the envelope → nearest-within-250 m match per OpenCelliD site. Never blocks:
+    // on any failure the towers are kept without heights and the callback still fires.
+    function towerDofMatch(env, towers, done) {
+        let finished = false;
+        const finish = (n) => { if (!finished) { finished = true; done(n || 0); } };
+        if (!towers.length || typeof GM_xmlhttpRequest !== 'function') { finish(0); return; }
+        const params = new URLSearchParams({
+            f: 'json', geometry: `${env.w},${env.s},${env.e},${env.n}`, geometryType: 'esriGeometryEnvelope', inSR: '4326',
+            spatialRel: 'esriSpatialRelIntersects', outFields: 'OAS_Number,Type_Code,AGL,AMSL,Lighting,Lat_DD,Long_DD', returnGeometry: 'false',
+        });
+        const timer = setTimeout(() => { console.warn(`${TAG} towers: FAA DOF lookup slow — drawing without heights`); finish(0); }, 12000);
+        GM_xmlhttpRequest({
+            method: 'GET', url: `${TOWER_DOF_URL}?${params.toString()}`, timeout: 20000,
+            onload: (resp) => {
+                clearTimeout(timer);
+                let json = null;
+                try { json = JSON.parse(resp.responseText); } catch (e) {}
+                if (!json || json.error || !Array.isArray(json.features)) { console.warn(`${TAG} towers: FAA DOF query failed`, resp.status, json && json.error); finish(0); return; }
+                // Only antenna-type structures count as a cell tower match — a refinery STACK or a
+                // transmission-line T-L TWR 100 m from a cell site is not the cell tower (Port Arthur DOF: 73 stacks, 38 towers).
+                const obs = json.features.map(f => f.attributes || {}).map(a => ({ lat: Number(a.Lat_DD), lng: Number(a.Long_DD), type: String(a.Type_Code || '').trim(), agl: Number(a.AGL), amsl: Number(a.AMSL), lit: String(a.Lighting || '').trim(), oas: a.OAS_Number }))
+                    .filter(o => isFinite(o.lat) && isFinite(o.lng) && /TOWER|POLE|ANT|MONOPOLE|^TWR/i.test(o.type) && !/T-L/i.test(o.type));
+                let matched = 0;
+                towers.forEach(t => {
+                    let best = null, bestD = TOWER_DOF_MATCH_M;
+                    obs.forEach(o => {
+                        const d = Math.hypot((o.lat - t.lat) * 111320, (o.lng - t.lng) * 111320 * Math.cos(t.lat * Math.PI / 180));
+                        if (d < bestD) { best = o; bestD = d; }
+                    });
+                    if (best) { t.dof = { type: best.type, agl: best.agl, amsl: best.amsl, lit: best.lit, oas: best.oas, distM: Math.round(bestD) }; matched++; }
+                });
+                finish(matched);
+            },
+            onerror: () => { clearTimeout(timer); console.warn(`${TAG} towers: FAA DOF network error`); finish(0); },
+            ontimeout: () => { clearTimeout(timer); finish(0); },
+        });
+    }
+    function towerTechLabel(t) {
+        const has5g = (t.nNr || 0) > 0 || (t.radios || []).includes('NR');
+        const hasLte = (t.nLte || 0) > 0 || (t.radios || []).includes('LTE');
+        return has5g && hasLte ? '4G LTE + 5G' : has5g ? '5G only' : '4G LTE';
+    }
+    function towerName(t, i) { return `${t.carrier} cell site ${i != null ? i + 1 : ''}`.trim(); }
+    function towerNotes(t) {
+        const parts = [`${towerTechLabel(t)} · ${t.n} cell${t.n === 1 ? '' : 's'}`];
+        if (t.range) parts.push(`~${Math.round(t.range)} m range`);
+        if (t.samples) parts.push(`${t.samples} reports`);
+        if (t.dof) parts.push(`FAA ${t.dof.type || 'structure'} ${isFinite(t.dof.agl) ? Math.round(t.dof.agl) + ' ft AGL' : ''}${t.dof.lit && t.dof.lit !== 'N' ? ', lit' : ''}`);
+        parts.push('OpenCelliD (crowd estimate ±100 m)');
+        return parts.join(' · ');
+    }
+    function towersToKml() {
+        const list = towerVisibleList();
+        if (!list.length) { showKMLToast('📡 No towers to export — turn on Tower dots first.', 3500); return; }
+        const sid = getCurrentSiteID() || 'site';
+        const x = (s) => String(s == null ? '' : s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+        const kmlColor = (hex) => { const h = String(hex).replace('#', ''); return `ff${h.slice(4, 6)}${h.slice(2, 4)}${h.slice(0, 2)}`; };
+        const styles = Object.keys(TOWER_COLORS).map(c => `<Style id="c-${c.replace(/[^A-Za-z]/g, '')}"><IconStyle><color>${kmlColor(TOWER_COLORS[c])}</color><scale>0.9</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png</href></Icon></IconStyle></Style>`).join('');
+        const pms = list.map((t, i) => {
+            const hFt = t.dof && isFinite(t.dof.agl) ? t.dof.agl : 0;
+            return `<Placemark><name>${x(towerName(t, i))}</name><styleUrl>#c-${t.carrier.replace(/[^A-Za-z]/g, '')}</styleUrl><description>${x(towerNotes(t))}${t.ids && t.ids.length ? x(` · cells: ${t.ids.join(', ')}`) : ''}</description><Point>${hFt ? '<extrude>1</extrude><altitudeMode>relativeToGround</altitudeMode>' : ''}<coordinates>${t.lng.toFixed(6)},${t.lat.toFixed(6)},${hFt ? (hFt / 3.28084).toFixed(1) : '0'}</coordinates></Point></Placemark>`;
+        }).join('');
+        const kml = `<?xml version="1.0" encoding="UTF-8"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>Cell sites — site ${x(sid)}</name><description>${list.length} cell sites from OpenCelliD (CC BY-SA 4.0, crowd-sourced estimates ±100 m), heights from the FAA Digital Obstacle File where a registered structure sits within ${TOWER_DOF_MATCH_M} m. Generated by AIM Map Styler v${SCRIPT_VERSION}.</description>${styles}${pms}</Document></kml>`;
+        try {
+            const blob = new Blob([kml], { type: 'application/vnd.google-earth.kml+xml' });
+            const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `site-${sid}-cell-towers.kml`;
+            (window.top || window).document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+            showKMLToast(`📤 ${list.length} cell sites exported as KML`, 3000);
+        } catch (e) { console.warn(`${TAG} towers: KML download failed`, e); showKMLToast('📤 KML download failed — see console', 4000); }
+    }
+    // Hand the visible towers to Site Setup Tools' GM Stamper (it previews, confirms, creates with the
+    // create-only rails, verifies, banks Undo). The styler never writes /map_objects/ itself.
+    function towersToGmRequest() {
+        const list = towerVisibleList();
+        const sid = getCurrentSiteID();
+        if (!sid) { showKMLToast('Open a site first.', 2500); return; }
+        if (!list.length) { showKMLToast('📡 No towers to stamp — turn on Tower dots first.', 3500); return; }
+        const points = list.map((t, i) => ({ lat: Number(t.lat.toFixed(6)), lng: Number(t.lng.toFixed(6)), name: towerName(t, i), notes: towerNotes(t), kind: 'cell-tower', carrier: t.carrier, heightFt: t.dof && isFinite(t.dof.agl) ? Math.round(t.dof.agl) : null }));
+        try {
+            const ch = new BroadcastChannel(TOWER_GM_CHANNEL);
+            ch.postMessage({ type: 'GM_STAMP_REQUEST', source: SCRIPT_ID, siteId: String(sid), env: IS_QA ? 'qa' : 'prod', tabId: (() => { try { const pw = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window; return pw.top.__AIM_TAB_ID || null; } catch (e) { return null; } })(), label: `📡 ${points.length} cell site${points.length === 1 ? '' : 's'} (OpenCelliD)`, points });
+            setTimeout(() => { try { ch.close(); } catch (e) {} }, 2000);
+            showKMLToast(`📌 Sent ${points.length} cell site${points.length === 1 ? '' : 's'} to Site Setup Tools — review the preview there (needs Site Setup Tools v4.322+ open on this site).`, 6000);
+            console.log(`${TAG} towers: GM_STAMP_REQUEST sent (${points.length} points) on ${TOWER_GM_CHANNEL}`);
+        } catch (e) { console.warn(`${TAG} towers: GM request failed`, e); showKMLToast('📌 Could not reach Site Setup Tools — see console', 4000); }
+    }
+    function removeTowerLayers() {
+        if (!_towerLayers.length) { _towerKey = ''; return; }
+        const map = getLeafletMap();
+        _towerLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        _towerLayers = []; _towerKey = '';
+    }
+    function towerVisibleList() {
+        const all = (_towers.towers || []);
+        if (toggleState['cell.towersCarrierOnly'] === true) {
+            const want = TOWER_CARRIER_KEY[String(toggleState['cell.carrier'] || 'best')];
+            if (want) return all.filter(t => t.carrier === want);
+        }
+        return all;
+    }
+    function towerRadius(t) { return 5 + Math.min(6, Math.floor(t.n / 3)); }
+    function towerNear(map, ll) {
+        if (toggleState['cell.towers'] !== true || !_towers.towers || !ll) return null;
+        const list = towerVisibleList();
+        if (!list.length) return null;
+        let cp; try { cp = map.latLngToContainerPoint(ll); } catch (e) { return null; }
+        let best = null, bestD = 20;
+        list.forEach(t => {
+            let p; try { p = map.latLngToContainerPoint([t.lat, t.lng]); } catch (e) { return; }
+            const d = Math.hypot(p.x - cp.x, p.y - cp.y) - towerRadius(t);
+            if (d < bestD) { best = t; bestD = d; }
+        });
+        return best;
+    }
+    function towerSetKeyAction() {
+        const cur = towerApiKey();
+        const v = window.prompt('OpenCelliD API key — free at opencellid.org (register → API key). Leave empty to clear.', cur);
+        if (v === null) return;
+        try { gmSet(TOWER_KEY_GM, String(v).trim()); } catch (e) { console.warn(`${TAG} towers: key save failed`, e); }
+        _towers = { siteID: null, envKey: '', towers: null, loading: false, failed: false, at: 0, capped: false, source: '' };
+        removeTowerLayers();
+        showKMLToast(String(v).trim() ? '📡 OpenCelliD key saved — turn on Tower dots.' : '📡 OpenCelliD key cleared.', 3000);
+        if (toggleState['cell.show'] === true && toggleState['cell.towers'] === true) applyCellCoverage();
+    }
+    function applyCellTowers(map, L, sid, env, pane, renderer) {
+        if (toggleState['cell.towers'] !== true) { removeTowerLayers(); return; }
+        towerFetch(sid, env);
+        if (!_towers.towers) {
+            if (_towers.source === 'nokey' && _towerKey !== 'nokey') { _towerKey = 'nokey'; showKMLToast('📡 Tower dots need a free OpenCelliD API key — "Set / clear OpenCelliD API key…" in the Cell coverage category.', 6000); }
+            return;
+        }
+        const list = towerVisibleList();
+        const key = `${sid}|${_towers.envKey}|${_towers.at}|${list.length}|${toggleState['cell.towersCarrierOnly']}|${toggleState['cell.carrier']}`;
+        if (key === _towerKey) return;
+        removeTowerLayers(); _towerKey = key;
+        if (typeof L.circleMarker !== 'function') return;
+        list.forEach(t => {
+            const has5g = (t.nNr || 0) > 0 || (t.radios || []).includes('NR');
+            const opts = { radius: towerRadius(t), color: has5g ? '#ffffff' : '#10161f', weight: has5g ? 2.2 : 1.2, opacity: 0.95, fill: true, fillColor: TOWER_COLORS[t.carrier] || TOWER_COLORS.Other, fillOpacity: 0.95, interactive: false };
+            if (pane) opts.pane = pane;
+            if (renderer) opts.renderer = renderer;
+            try { const m = L.circleMarker([t.lat, t.lng], opts); m.addTo(map); _towerLayers.push(m); } catch (e) { console.warn(`${TAG} towers: marker add failed`, e); }
+        });
+    }
+
+    function cellField(carrier, tech) { return `${carrier.field}_${tech.suffix}_minsignal`; }
+    function cellBandFor(dbm) {
+        if (typeof dbm !== 'number' || !isFinite(dbm)) return CELL_NONE;
+        for (const b of CELL_BANDS) { if (dbm >= b.min) return b; }
+        return CELL_NONE;
+    }
+    function cellSelectedSig(f) {
+        const car = String(toggleState['cell.carrier'] || 'best');
+        const tech = String(toggleState['cell.tech'] || 'lte');
+        const sig = f.sig || {};
+        if (car === 'best') {
+            let best = null;
+            CELL_CARRIERS.forEach(c => { const v = sig[c.key] && sig[c.key][tech]; if (typeof v === 'number' && (best === null || v > best)) best = v; });
+            return best;
+        }
+        const v = sig[car] && sig[car][tech];
+        return typeof v === 'number' ? v : null;
+    }
+    // Envelope = site bounds + margin; falls back to a box around the base
+    // station(s) when the site has no setup yet (same rule as RRC wells).
+    function cellSiteEnvelope(sid) {
+        const marginMi = Number(toggleState['cell.marginMi']) || 1;
+        const dLat = marginMi * 1609.344 / 111320;
+        const bbox = rrcEnsureSiteBBox(sid);   // [minLng,minLat,maxLng,maxLat] or null while loading / failed
+        let w, s, e, n;
+        if (bbox) { w = bbox[0]; s = bbox[1]; e = bbox[2]; n = bbox[3]; }
+        else if (_rrcSiteBBox.siteID === sid && _rrcSiteBBox.failed && _rrcSiteBBox.basePts && _rrcSiteBBox.basePts.length) {
+            const b = _rrcSiteBBox.basePts[0]; w = e = b.lng; s = n = b.lat;
+        } else return null;
+        const midLat = (s + n) / 2;
+        const dLng = dLat / Math.max(Math.cos(midLat * Math.PI / 180), 0.2);
+        return { w: w - dLng, s: s - dLat, e: e + dLng, n: n + dLat };
+    }
+    function cellEnvKey(env) { return [env.w, env.s, env.e, env.n].map(v => v.toFixed(4)).join(','); }
+    function cellOutFields() {
+        const out = ['h3_res9_id'];
+        CELL_CARRIERS.forEach(c => CELL_TECHS.forEach(t => out.push(cellField(c, t))));
+        return out.join(',');
+    }
+    function cellCompactFeature(feat) {
+        const a = feat.attributes || {};
+        const ring = ((feat.geometry && feat.geometry.rings && feat.geometry.rings[0]) || []).map(xy => [Math.round(xy[1] * 1e5) / 1e5, Math.round(xy[0] * 1e5) / 1e5]);
+        if (ring.length < 3) return null;
+        let cLat = 0, cLng = 0;
+        const m = ring.length - 1 || 1;   // closed ring: last == first
+        for (let i = 0; i < m; i++) { cLat += ring[i][0]; cLng += ring[i][1]; }
+        const sig = {};
+        CELL_CARRIERS.forEach(c => { sig[c.key] = {}; CELL_TECHS.forEach(t => { const v = a[cellField(c, t)]; sig[c.key][t.key] = (typeof v === 'number') ? v : null; }); });
+        return { id: a.h3_res9_id, ring, c: [cLat / m, cLng / m], sig };
+    }
+    function cellFetch(sid, env) {
+        const envKey = cellEnvKey(env);
+        if (_cell.siteID === sid && _cell.envKey === envKey && (_cell.features || _cell.loading)) return;
+        if (_cell.siteID === sid && _cell.envKey === envKey && _cell.failed && Date.now() - _cell.at < 60000) return;   // 1-min backoff
+        _cell = { siteID: sid, envKey, features: null, loading: true, failed: false, at: Date.now(), source: '' };
+        // GM cache (per site + env; keyed with the env prefix so QA/prod ids never collide)
+        try {
+            const cached = gmGet(gmEnvKey(CELL_CACHE_PREFIX + sid), null);
+            const c = typeof cached === 'string' ? JSON.parse(cached) : cached;
+            if (c && c.envKey === envKey && Array.isArray(c.features) && Date.now() - (c.at || 0) < CELL_CACHE_TTL_MS) {
+                _cell = { siteID: sid, envKey, features: c.features, loading: false, failed: false, at: c.at, source: 'cache' };
+                console.log(`${TAG} cell: site ${sid} — ${c.features.length} hexes from cache (${new Date(c.at).toLocaleDateString()})`);
+                return;
+            }
+        } catch (e) { console.warn(`${TAG} cell: cache read failed`, e); }
+        if (typeof GM_xmlhttpRequest !== 'function') { _cell.loading = false; _cell.failed = true; console.warn(`${TAG} cell: GM_xmlhttpRequest unavailable`); return; }
+        const acc = [];
+        const page = (offset) => {
+            const params = new URLSearchParams({
+                f: 'json',
+                geometry: `${env.w},${env.s},${env.e},${env.n}`,
+                geometryType: 'esriGeometryEnvelope', inSR: '4326',
+                spatialRel: 'esriSpatialRelIntersects',
+                outFields: cellOutFields(),
+                returnGeometry: 'true', outSR: '4326', geometryPrecision: '5',
+                resultOffset: String(offset), resultRecordCount: String(CELL_PAGE),
+            });
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: `${CELL_QUERY_URL}?${params.toString()}`,
+                timeout: 30000,
+                onload: (resp) => {
+                    if (_cell.siteID !== sid || _cell.envKey !== envKey) return;   // superseded
+                    let json = null;
+                    try { json = JSON.parse(resp.responseText); } catch (e) {}
+                    if (resp.status !== 200 || !json || json.error) {
+                        _cell.loading = false; _cell.failed = true; _cell.at = Date.now();
+                        console.warn(`${TAG} cell: FCC query failed`, resp.status, json && json.error);
+                        showKMLToast('📶 FCC cell coverage fetch failed — see console', 4000);
+                        return;
+                    }
+                    (json.features || []).forEach(f => { const c = cellCompactFeature(f); if (c) acc.push(c); });
+                    const more = json.exceededTransferLimit === true && (json.features || []).length > 0;
+                    if (more && offset / CELL_PAGE + 1 < CELL_MAX_PAGES) { page(offset + CELL_PAGE); return; }
+                    if (more) console.warn(`${TAG} cell: site ${sid} envelope exceeds ${CELL_MAX_PAGES * CELL_PAGE} hexes — truncated (shrink "Fetch around site")`);
+                    _cell = { siteID: sid, envKey, features: acc, loading: false, failed: false, at: Date.now(), source: 'live' };
+                    try { gmSet(gmEnvKey(CELL_CACHE_PREFIX + sid), JSON.stringify({ envKey, at: _cell.at, features: acc })); }
+                    catch (e) { console.warn(`${TAG} cell: cache write failed`, e); }
+                    console.log(`${TAG} cell: site ${sid} — ${acc.length} FCC hexes fetched`);
+                    if (isActive) applyCellCoverage();
+                },
+                onerror: () => { if (_cell.siteID === sid) { _cell.loading = false; _cell.failed = true; _cell.at = Date.now(); } console.warn(`${TAG} cell: network error`); },
+                ontimeout: () => { if (_cell.siteID === sid) { _cell.loading = false; _cell.failed = true; _cell.at = Date.now(); } console.warn(`${TAG} cell: FCC query timed out`); },
+            });
+        };
+        page(0);
+    }
+    // v34.148 — the pane's inline pointer-events:none was not enough: Percepto's stylesheet (or
+    // Leaflet's SVG fallback) gave the painted shapes hit-testing, so a hex under a native map
+    // button swallowed the click ("have to move the map to where there's nothing below").
+    // One !important rule over the whole pane subtree makes everything we draw click-through.
+    function cellEnsurePaneStyle() {
+        const id = 'aim-cell-pane-style';
+        if (document.getElementById(id)) return;
+        try {
+            const st = document.createElement('style');
+            st.id = id;
+            st.textContent = `.leaflet-${CELL_PANE}-pane, .leaflet-${CELL_PANE}-pane *, .leaflet-${CELL_PANE}-pane canvas, .leaflet-${CELL_PANE}-pane svg, .leaflet-${CELL_PANE}-pane path { pointer-events: none !important; }`;
+            (document.head || document.documentElement).appendChild(st);
+        } catch (e) { console.warn(`${TAG} cell: pane style inject failed`, e); }
+    }
+    function cellPaneName(map) {
+        try {
+            cellEnsurePaneStyle();
+            if (typeof map.getPane === 'function' && map.getPane(CELL_PANE)) return CELL_PANE;
+            if (typeof map.createPane === 'function') {
+                const p = map.createPane(CELL_PANE);
+                if (p) { p.style.zIndex = '385'; p.style.pointerEvents = 'none'; return CELL_PANE; }   // under fleet KML (390) + overlayPane (400)
+            }
+        } catch (e) { console.warn(`${TAG} cell: pane create failed`, e); }
+        return undefined;
+    }
+    function removeCellLayers() {
+        if (!_cellLayers.length) { _cellKey = ''; return; }
+        const map = getLeafletMap();
+        _cellLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        _cellLayers = []; _cellKey = '';
+    }
+    function removeCellRenderer() {
+        if (!_cellRenderer) return;
+        const map = getLeafletMap();
+        try { if (map) map.removeLayer(_cellRenderer); } catch (e) {}
+        _cellRenderer = null;
+    }
+    // v34.145 — PERF. The first cut drew the hexes through Leaflet's SVG
+    // renderer: every pan end rewrote the <path d> of each band (our own
+    // MutationObserver watches 'd' → a full runUpdate per pan), and every
+    // zoom animation re-rasterised a viewport-sized multipolygon. The canvas
+    // renderer paints the same shapes into one bitmap: zero SVG mutations,
+    // bitmap-scaled during zoom, one cheap redraw on moveend.
+    function cellRenderer(map, L, pane) {
+        if (_cellRenderer) return _cellRenderer;
+        if (typeof L.canvas !== 'function') { if (!_cellRendererLogged) { _cellRendererLogged = true; console.warn(`${TAG} cell: this Leaflet has no L.canvas — hexes fall back to the SVG renderer (slower)`); } return null; }
+        try {
+            const opts = { padding: 0.1 };   // v34.150: 0.5 made a 2× viewport bitmap (~80 MB on a 3,500 px monitor) that Leaflet clears + repaints on every pan end
+            if (pane) opts.pane = pane;
+            _cellRenderer = L.canvas(opts);
+            if (!_cellRendererLogged) { _cellRendererLogged = true; console.log(`${TAG} cell: canvas renderer in use for hexes + towers`); }
+            return _cellRenderer;
+        } catch (e) { console.warn(`${TAG} cell: canvas renderer unavailable, using SVG`, e); _cellRenderer = null; return null; }
+    }
+    function removeCellLegend() { const el = document.getElementById(CELL_LEGEND_ID); if (el) el.remove(); }
+    function removeCellBadge() { const el = document.getElementById(CELL_BADGE_ID); if (el) el.remove(); }
+    function cellUnbindHover() {
+        if (!_cellHover) return;
+        try { _cellHover.container.removeEventListener('mousemove', _cellHover.move); _cellHover.container.removeEventListener('mouseleave', _cellHover.leave); } catch (e) {}
+        _cellHover = null;
+        removeCellBadge();
+    }
+    function removeCellCoverage() {
+        removeCellLayers(); removeTowerLayers(); removeAsrLayers(); removeCellRenderer(); removeCellLegend(); cellUnbindHover();
+    }
+    function cellResetForSite() {
+        _cell = { siteID: null, envKey: '', features: null, loading: false, failed: false, at: 0, source: '' };
+        _towers = { siteID: null, envKey: '', towers: null, loading: false, failed: false, at: 0, capped: false, source: '' };
+    }
+    function cellRefresh() {
+        const sid = getCurrentSiteID();
+        if (!sid) { showKMLToast('Open a site first.', 2500); return; }
+        try { gmSet(gmEnvKey(CELL_CACHE_PREFIX + sid), null); gmSet(gmEnvKey(TOWER_CACHE_PREFIX + sid), null); Object.keys(_asr.cells).forEach(k => gmSet(ASR_CACHE_PREFIX + k, null)); } catch (e) {}
+        _asr = { cells: {}, loading: new Set(), failed: {} };
+        cellResetForSite(); removeCellLayers(); removeTowerLayers(); removeAsrLayers();
+        if (toggleState['cell.show'] !== true) { showKMLToast('📶 Cell coverage is off — turn the category on to fetch.', 3500); return; }
+        showKMLToast('📶 Re-fetching FCC cell coverage…', 2500);
+        applyCellCoverage();
+    }
+    function cellPointInRing(lat, lng, ring) {
+        let inside = false;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+            const yi = ring[i][0], xi = ring[i][1], yj = ring[j][0], xj = ring[j][1];
+            if (((yi > lat) !== (yj > lat)) && (lng < (xj - xi) * (lat - yi) / ((yj - yi) || 1e-12) + xi)) inside = !inside;
+        }
+        return inside;
+    }
+    function cellHexAt(lat, lng) {
+        const fs = _cell.features || [];
+        // nearest centroid first (hexes are ~0.0035° across), then the exact ring test
+        let best = null, bestD = 0.006 * 0.006;
+        for (const f of fs) {
+            const dLat = f.c[0] - lat, dLng = (f.c[1] - lng) * Math.cos(lat * Math.PI / 180);
+            const d = dLat * dLat + dLng * dLng;
+            if (d < bestD && cellPointInRing(lat, lng, f.ring)) { best = f; bestD = d; }
+        }
+        return best;
+    }
+    function cellFmtDbm(v) { return (typeof v === 'number') ? `${cellBandFor(v).word} <span style="opacity:0.75">${v} dBm</span>` : '—'; }
+    function cellBindHover(map) {
+        const container = (typeof map.getContainer === 'function') ? map.getContainer() : null;
+        if (!container) return;
+        if (_cellHover && _cellHover.container === container) return;
+        cellUnbindHover();
+        let raf = 0, lastEv = null;
+        const render = () => {
+            raf = 0;
+            const ev = lastEv; if (!ev) return;
+            if (ev.buttons) return;   // dragging the map — leave the badge alone
+            let ll = null;
+            try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            if (!ll) return;
+            const f = cellHexAt(ll.lat, ll.lng);
+            const tw = towerNear(map, ll);
+            const ar = tw ? null : asrNear(map, ll);
+            let badge = document.getElementById(CELL_BADGE_ID);
+            if (!f && !tw && !ar) { if (badge && badge.style.display !== 'none') badge.style.display = 'none'; _cellHoverId = null; return; }
+            const hoverId = `${f ? f.id : ''}|${tw ? tw.key : ''}|${ar ? ar.reg : ''}`;
+            if (!badge) {
+                badge = document.createElement('div');
+                badge.id = CELL_BADGE_ID;
+                badge.style.cssText = 'position:absolute;left:0;top:0;will-change:transform;z-index:950;pointer-events:none;background:rgba(16,22,31,0.92);border:1px solid rgba(122,223,230,0.45);border-radius:6px;padding:5px 9px;color:#dfe9f0;font:600 11px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,0.45);white-space:nowrap;';
+                container.appendChild(badge);
+            }
+            const rect = container.getBoundingClientRect();
+            let x = ev.clientX - rect.left + 16, y = ev.clientY - rect.top + 16;
+            if (x + 230 > rect.width) x = ev.clientX - rect.left - 240;
+            if (y + 110 > rect.height) y = ev.clientY - rect.top - 110;
+            badge.style.transform = `translate(${Math.max(0, x)}px, ${Math.max(0, y)}px)`;
+            if (_cellHoverId === hoverId && badge.style.display !== 'none') return;   // same hex/tower → position only, no rebuild
+            _cellHoverId = hoverId;
+            const towerLine = tw ? `<div style="margin-top:${f ? 5 : 0}px;padding-top:${f ? 4 : 0}px;${f ? 'border-top:1px solid rgba(122,223,230,0.25);' : ''}color:${TOWER_COLORS[tw.carrier] || TOWER_COLORS.Other}">📡 <b>${tw.carrier}</b> cell site · ${towerTechLabel(tw)}</div>`
+                + `<div style="color:#dfe9f0;font-weight:500">${tw.n} cell${tw.n === 1 ? '' : 's'}${(tw.nNr || 0) ? ` (${tw.nLte || 0} LTE · ${tw.nNr} 5G)` : ''}${tw.range ? ` · reach ~${Math.round(tw.range * 3.28084 / 5280 * 10) / 10} mi` : ''} · ${tw.samples} phone reports</div>`
+                + (tw.asr ? `<div style="color:#ffd54f;font-weight:500">${asrLine(tw.asr, '🏗')} · ${tw.asr.distM} m from the dot</div>`
+                    : tw.dof ? `<div style="color:#ffd54f;font-weight:500">FAA obstacle: ${tw.dof.type || 'structure'}${isFinite(tw.dof.agl) ? ` ${Math.round(tw.dof.agl)} ft AGL` : ''}${isFinite(tw.dof.amsl) ? ` (${Math.round(tw.dof.amsl)} ft MSL top)` : ''}${tw.dof.lit && tw.dof.lit !== 'N' ? ' · lit' : ''} · ${tw.dof.distM} m from the dot</div>`
+                    : '<div style="color:#8fa3b8;font-weight:500">no FCC-registered structure within 250 m (short mast, rooftop or small cell)</div>')
+                + `<div style="color:#8fa3b8;font-weight:500">OpenCelliD crowd estimate (±100 m)</div>` : (ar ? `<div style="color:#ffd54f;font-weight:600">${asrLine(ar, '🏗')}</div><div style="color:#8fa3b8;font-weight:500">${[ar.city, ar.state].filter(Boolean).join(', ')}${ar.lighting ? ` · lighting spec ${String(ar.lighting).replace(/</g, '&lt;')}` : ''} · FCC ASR as of ${asrAsOf() || '?'} · surveyed position</div>` : '');
+            if (!f) { badge.innerHTML = towerLine || ''; badge.style.display = ''; return; }
+            const rows = CELL_CARRIERS.map(c => {
+                const s = f.sig[c.key] || {};
+                const cells = CELL_TECHS.map(t => { const b = cellBandFor(s[t.key]); return `<td style="padding:0 0 0 10px;text-align:right;color:${b.color}">${cellFmtDbm(s[t.key])}</td>`; }).join('');
+                return `<tr><td style="color:#9fb3c8">${c.label}</td>${cells}</tr>`;
+            }).join('');
+            badge.innerHTML = `<div style="color:#7adfe6;margin-bottom:2px">📶 Carrier-modeled signal (FCC)</div>`
+                + `<table style="border-collapse:collapse"><tr><td></td>${CELL_TECHS.map(t => `<td style="padding:0 0 0 10px;text-align:right;color:#9fb3c8">${t.label}</td>`).join('')}</tr>${rows}</table>` + towerLine;
+            badge.style.display = '';
+        };
+        const move = (ev) => { lastEv = ev; if (!raf) raf = requestAnimationFrame(render); };
+        const leave = () => { const b = document.getElementById(CELL_BADGE_ID); if (b) b.style.display = 'none'; };
+        container.addEventListener('mousemove', move);
+        container.addEventListener('mouseleave', leave);
+        _cellHover = { container, move, leave };
+    }
+    function renderCellLegend(map, n) {
+        removeCellLegend();
+        if (toggleState['cell.legend'] !== true) return;
+        const car = String(toggleState['cell.carrier'] || 'best');
+        const tech = CELL_TECHS.find(t => t.key === String(toggleState['cell.tech'] || 'lte')) || CELL_TECHS[0];
+        const carLabel = car === 'best' ? 'best carrier' : ((CELL_CARRIERS.find(c => c.key === car) || {}).label || car);
+        const el = document.createElement('div');
+        el.id = CELL_LEGEND_ID;
+        // Bottom-LEFT so it never collides with the terrain legend (bottom-right).
+        el.style.cssText = 'position:absolute;left:10px;bottom:30px;z-index:900;pointer-events:none;'
+            + 'background:rgba(16,22,31,0.85);border:1px solid rgba(122,223,230,0.4);border-radius:6px;'
+            + 'padding:5px 10px;color:#dfe9f0;font:600 11px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;'
+            + 'box-shadow:0 2px 8px rgba(0,0,0,0.4);';
+        const sw = (color, label) => `<span style="display:inline-flex;align-items:center;gap:3px;margin-right:7px"><i style="display:inline-block;width:11px;height:11px;border-radius:2px;background:${color}"></i>${label}</span>`;
+        el.innerHTML = `<div style="color:#7adfe6">📶 FCC modeled signal · ${carLabel} · ${tech.label}</div>`
+            + `<div style="margin:3px 0">${CELL_BANDS.map(b => sw(b.color, `${b.word} <span style="opacity:0.7">${b.label}</span>`)).join('')}${sw(CELL_NONE.color, CELL_NONE.word)} <span style="opacity:0.7">dBm</span></div>`
+            + `<div style="color:#8fa3b8;font-weight:500">${n} hexes · FCC BDC via Esri Living Atlas · ${_cell.source === 'cache' ? 'cached ' : 'fetched '}${_cell.at ? new Date(_cell.at).toLocaleDateString() : ''} · carrier-modeled ground coverage, not flown LTE</div>`
+            + (toggleState['cell.towers'] === true && _towers.towers ? `<div style="margin-top:3px">📡 ${towerVisibleList().length} towers · ${['Verizon', 'AT&T', 'T-Mobile', 'DISH', 'Other'].map(c => `<span style="display:inline-flex;align-items:center;gap:3px;margin-right:7px"><i style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${TOWER_COLORS[c]}"></i>${c}</span>`).join('')}<span style="color:#8fa3b8;font-weight:500">dot size = cells · white ring = 5G · hover a dot for details · OpenCelliD (CC BY-SA 4.0)${_towers.capped ? ' · capped, shrink margin' : ''}</span></div>` : '')
+            + (toggleState['cell.asr'] === true ? `<div style="margin-top:3px">🏗 ${(_asrVisible || []).length} FCC registered structures <span style="display:inline-flex;align-items:center;gap:3px;margin:0 7px"><i style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#10161f;border:2px solid #fff"></i>white ring</span><span style="color:#8fa3b8;font-weight:500">height · built · owner on hover · FCC ASR as of ${asrAsOf() || '…'} (towers &gt; ~200 ft or near airports)</span></div>` : '');
+        try { map.getContainer().appendChild(el); } catch (e) {}
+    }
+    let _cellQuickKey = '';
+    function applyCellCoverage() {
+        // v34.151 — runUpdate fires 4–9×/s during interaction (Percepto's own DOM mutations); the
+        // profiler showed this applier costing ~3 ms per run doing envelope/ASR/tower bookkeeping
+        // that produced no change. Cheap pre-key over every input → return before any work.
+        const sid0 = getCurrentSiteID() || '';
+        const quick = toggleState['cell.show'] !== true ? `off|${_cellLayers.length}|${_towerLayers.length}|${_asrLayers.length}`
+            : `${sid0}|${toggleState['cell.carrier']}|${toggleState['cell.tech']}|${toggleState['cell.opacity']}|${toggleState['cell.marginMi']}|${toggleState['cell.outline']}|${toggleState['cell.hover']}|${toggleState['cell.legend']}|${toggleState['cell.towers']}|${toggleState['cell.towersCarrierOnly']}|${toggleState['cell.asr']}|${toggleState['cell.asrLabels']}|${_cell.siteID}|${_cell.at}|${_cell.loading}|${_cell.failed}|${_towers.at}|${_towers.loading}|${_towers.failed}|${Object.keys(_asr.cells).length}|${_asr.loading.size}|${_rrcSiteBBox.siteID}|${_rrcSiteBBox.loading}|${_rrcSiteBBox.failed}|${_cellLayers.length}|${!!_cellHover}`;
+        if (quick === _cellQuickKey && (toggleState['cell.show'] !== true ? !(_cellLayers.length || _towerLayers.length || _asrLayers.length) : _cellLayers.length > 0)) return;
+        _cellQuickKey = quick;
+        const map = getLeafletMap();
+        const L = _stylerL();
+        if (!map || !L || typeof map.addLayer !== 'function' || typeof L.polygon !== 'function') return;
+        if (toggleState['cell.show'] !== true) { removeCellCoverage(); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { removeCellCoverage(); return; }
+        if (_cell.siteID && _cell.siteID !== sid) { removeCellLayers(); cellResetForSite(); }
+        const env = cellSiteEnvelope(sid);
+        if (!env) {
+            if (_rrcSiteBBox.siteID === sid && _rrcSiteBBox.failed) { removeCellCoverage(); console.warn(`${TAG} cell: site ${sid} has no geometry to bound the fetch`); }
+            return;   // bounds still loading → rrcEnsureSiteBBox re-calls us
+        }
+        cellFetch(sid, env);
+        if (!_cell.features) return;   // in flight → onload re-calls us
+        const opacity = Math.min(0.9, Math.max(0.05, Number(toggleState['cell.opacity']) || 0.35));
+        const outline = toggleState['cell.outline'] === true;
+        const key = `${sid}|${_cell.envKey}|${_cell.at}|${toggleState['cell.carrier']}|${toggleState['cell.tech']}|${opacity}|${outline}|${toggleState['cell.legend']}|${toggleState['cell.hover']}|${toggleState['cell.towers']}|${_towers.at}|${toggleState['cell.towersCarrierOnly']}|${toggleState['cell.asr']}|${Object.keys(_asr.cells).length}`;
+        if (key !== _cellKey) {
+            removeCellLayers();
+            _cellKey = key;
+            const pane = cellPaneName(map);
+            const renderer = cellRenderer(map, L, pane);
+            // One multipolygon per color band (6 layers max) — not one layer per hex.
+            const groups = new Map();
+            _cell.features.forEach(f => {
+                const b = cellBandFor(cellSelectedSig(f));
+                if (!groups.has(b.color)) groups.set(b.color, []);
+                groups.get(b.color).push([f.ring]);   // depth-3 → MultiPolygon (depth-2 would make ring 2+ holes)
+            });
+            groups.forEach((rings, color) => {
+                const opts = { stroke: outline, color: '#10161f', weight: 0.6, opacity: 0.6, fill: true, fillColor: color, fillOpacity: color === CELL_NONE.color ? opacity * 0.6 : opacity, interactive: false };
+                if (pane) opts.pane = pane;
+                if (renderer) opts.renderer = renderer;
+                try { const poly = L.polygon(rings, opts); poly.addTo(map); _cellLayers.push(poly); }
+                catch (e) { console.warn(`${TAG} cell: polygon add failed`, e); }
+            });
+            renderCellLegend(map, _cell.features.length);
+        }
+        try { applyCellTowers(map, L, sid, env, cellPaneName(map), cellRenderer(map, L, cellPaneName(map))); }
+        catch (e) { console.warn(`${TAG} towers: apply failed`, e); }
+        try { applyAsrTowers(map, L, sid, env, cellPaneName(map), cellRenderer(map, L, cellPaneName(map))); }
+        catch (e) { console.warn(`${TAG} asr: apply failed`, e); }
+        if (toggleState['cell.hover'] === true) cellBindHover(map); else cellUnbindHover();
+    }
+
     function rrcEnsureSiteBBox(sid) {
         if (_rrcSiteBBox.siteID === sid && !_rrcSiteBBox.loading) return _rrcSiteBBox.bbox;
         if (_rrcSiteBBox.siteID === sid && _rrcSiteBBox.loading) return null;
@@ -2271,10 +3349,14 @@
                     : { siteID: sid, bbox: null, basePts, nonBaseN: 0, loading: false, failed: true };
                 if (!_rrcSiteBBox.bbox) console.warn(`${TAG} RRC: site ${sid} has no entity geometry — nothing to bound the well fetch`);
                 applyRrcLayers();
+                if (isActive) applyFleetKml();   // v34.140: cached fleet layers wait on these bounds too
+                if (isActive) applyCellCoverage();   // v34.143: FCC hex envelope waits on these bounds too
             })
             .catch(err => {
                 _rrcSiteBBox = { siteID: sid, bbox: null, loading: false, failed: true };
                 console.warn(`${TAG} RRC: site bounds fetch failed:`, err);
+                if (isActive) applyFleetKml();   // clears any stale layers via .failed
+                if (isActive) applyCellCoverage();
             });
         return null;
     }
@@ -4263,13 +5345,291 @@
     // RRC operator checkboxes spliced into their category. Posted to the
     // Control Panel on every register; the panel only re-renders when the
     // set actually changes (it signatures the payload).
+    // ==================================================================
+    // 🌐 FLEET KML LAYERS (v34.140, feature #269) — the layers Fleet Tools
+    // saves to the data repo (fleet-kml/<name>.kml|.geojson) drawn on the
+    // SITE map, clipped to the site bounds + a radius. No re-upload: the
+    // repo is the single source. Control Panel gets one show + colour per
+    // layer (dynamic children, re-registered once the list is known).
+    // Rendering = Leaflet layers in their own pane UNDER the entity pane
+    // (same apply/remove idiom as the TX boundaries), rebuilt only when
+    // the site / envelope / layer set / styles change.
+    // ==================================================================
+    const FK_DIR = 'fleet-kml';
+    const FK_LIST_KEY = 'aim-fleetkml-list';
+    const FK_CACHE_PREFIX = 'aim-fleetkml-cache-';
+    const FK_PALETTE = ['#ffd54f', '#4fc3f7', '#ff8a65', '#aed581', '#ba68c8', '#4db6ac', '#f06292', '#90a4ae'];
+    const FK_PANE = 'aimFleetKml';
+    const FK_POINT_CAP = 800;
+    let fkList = (function() { try { const v = gmGet(FK_LIST_KEY, null); const a = v ? JSON.parse(v) : []; return Array.isArray(a) ? a : []; } catch (e) { return []; } })();   // [{name, sha}]
+    let fkFeatures = {};          // name → { sha, features }
+    const fkFetching = new Set();
+    const fkFailed = new Map();   // name → ts of the last failed fetch/parse (5-min backoff; cleared by Re-list / REFETCH_KMLS)
+    const FK_FAIL_BACKOFF_MS = 5 * 60 * 1000;
+    let fkListing = false;
+    let fkListAt = 0;
+    let fkLayers = [];
+    let fkKey = '';
+    let fkWarned = false;
+
+    function fkReadGmList() { try { const v = gmGet(FK_LIST_KEY, null); const a = v ? JSON.parse(v) : []; return Array.isArray(a) ? a : []; } catch (e) { return []; } }
+    function fkSyncListFromGm() {
+        // TOP and IFRAME both register under one scriptId (last REGISTER wins) —
+        // re-read the shared GM list whenever the other frame refreshed it.
+        const at = Number(gmGet(FK_LIST_KEY + '-at', 0)) || 0;
+        if (at !== fkListAt) { fkList = fkReadGmList(); fkListAt = at; fkKey = ''; }
+    }
+    function fkSlugRaw(name) { return String(name || '').replace(/\.(kml|geojson|json)$/i, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'layer'; }
+    // Unique per list: two files whose names slug identically get -2, -3… (order = sorted list, so ids are stable).
+    function fkSlug(name) {
+        const raw = fkSlugRaw(name);
+        let seen = 0;
+        for (const l of fkList) {
+            if (l.name === name) return seen ? `${raw}-${seen + 1}` : raw;
+            if (fkSlugRaw(l.name) === raw) seen++;
+        }
+        return raw;
+    }
+    function fkLabel(name) { return String(name || '').replace(/\.(kml|geojson|json)$/i, '').replace(/[_]+/g, ' ').trim(); }
+    function fkShowId(name) { return `fleetkml.L.${fkSlug(name)}.show`; }
+    function fkColorId(name) { return `fleetkml.L.${fkSlug(name)}.color`; }
+
+    // Dynamic Control Panel category — one show + colour per repo layer.
+    function buildFleetKmlToggles() {
+        fkSyncListFromGm();
+        const children = [
+            { id: 'fleetkml.radius-mi', label: 'Show within __ mi of the site', type: 'number', default: 5, min: 0.5, max: 50, step: 0.5, unit: 'mi' },
+            { id: 'fleetkml.width', label: 'Line width', type: 'number', default: 2, min: 1, max: 8, step: 0.5, unit: 'px' },
+            { id: 'fleetkml-refresh', label: 'Re-list layers from GitHub', type: 'button', action: 'fleetkml-refresh' },
+        ];
+        if (fkList.length) children.push({ type: 'header', label: `Layers (${fkList.length})` });
+        else children.push({ type: 'header', label: cachedToken ? 'No layers listed yet — click Re-list' : 'Needs the GitHub PAT (AIM Controls → token)' });
+        fkList.forEach((l, i) => {
+            children.push({ id: fkShowId(l.name), label: fkLabel(l.name), type: 'boolean', default: false });
+            children.push({ id: fkColorId(l.name), label: `${fkLabel(l.name)} colour`, type: 'color', default: FK_PALETTE[i % FK_PALETTE.length] });
+        });
+        // toggleState defaults for ids that did not exist at load
+        children.forEach(c => { if (c.id && toggleState[c.id] === undefined) toggleState[c.id] = c.default; });
+        if (toggleState['fleetkml.show'] === undefined) toggleState['fleetkml.show'] = false;
+        return {
+            type: 'category', id: 'fleetkml-cat', label: '🌐 Fleet KML layers',
+            meta: 'layers saved from Fleet Tools (data repo fleet-kml/), drawn around this site',
+            master: { id: 'fleetkml.show', default: false },
+            children,
+        };
+    }
+
+    // ---- repo I/O (same PAT + Contents API as the shielding KMLs) ----
+    function fkListRepo(force) {
+        const token = cachedToken || gmGet(TOKEN_KEY, '');
+        if (!token) { if (!fkWarned) { fkWarned = true; console.log(`${TAG} fleet KML: no token yet — layers list when the PAT arrives`); } return; }
+        if (fkListing) return;
+        if (!force && fkList.length && Date.now() - (Number(gmGet(FK_LIST_KEY + '-at', 0)) || 0) < 6 * 3600 * 1000) return;
+        fkListing = true;
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${FK_DIR}?ref=${KMLS_BRANCH}`,
+            headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+            timeout: 20000,
+            onload: (resp) => {
+                fkListing = false;
+                try {
+                    if (resp.status === 404) { fkList = []; fkListAt = Date.now(); gmSet(FK_LIST_KEY, '[]'); gmSet(FK_LIST_KEY + '-at', String(fkListAt)); registerWithControlPanel(); fkKey = ''; if (isActive) applyFleetKml(); return; }
+                    if (resp.status !== 200) { console.warn(`${TAG} fleet KML: list HTTP ${resp.status}`); return; }
+                    const arr = JSON.parse(resp.responseText);
+                    const next = (Array.isArray(arr) ? arr : []).filter(f => f && f.type === 'file' && /\.(kml|geojson|json)$/i.test(f.name))
+                        .map(f => ({ name: f.name, sha: f.sha || null })).sort((a, b) => a.name.localeCompare(b.name));
+                    const changed = JSON.stringify(next) !== JSON.stringify(fkList);
+                    fkList = next;
+                    fkListAt = Date.now();
+                    gmSet(FK_LIST_KEY, JSON.stringify(fkList));
+                    gmSet(FK_LIST_KEY + '-at', String(fkListAt));
+                    console.log(`${TAG} fleet KML: ${fkList.length} layer(s) in ${FK_DIR}/${changed ? ' (list changed — re-registering)' : ''}`);
+                    if (changed || force) registerWithControlPanel();   // new toggle ids → CP echoes stored values
+                    fkKey = '';
+                    if (isActive) applyFleetKml();
+                } catch (e) { console.warn(`${TAG} fleet KML: list parse threw:`, e); }
+            },
+            onerror: () => { fkListing = false; console.warn(`${TAG} fleet KML: list request failed`); },
+            ontimeout: () => { fkListing = false; console.warn(`${TAG} fleet KML: list request timed out`); },
+        });
+    }
+    function fkEnsureLoaded(entry) {
+        const name = entry.name;
+        const have = fkFeatures[name];
+        if (have && (!entry.sha || have.sha === entry.sha)) return true;
+        // GM cache by sha
+        try {
+            const raw = gmGet(FK_CACHE_PREFIX + name, null);
+            if (raw) {
+                const c = JSON.parse(raw);
+                if (c && Array.isArray(c.features) && (!entry.sha || c.sha === entry.sha)) { fkFeatures[name] = { sha: c.sha, features: c.features }; return true; }
+            }
+        } catch (e) { console.warn(`${TAG} fleet KML: cache read threw for ${name}:`, e); }
+        if (fkFetching.has(name)) return false;
+        if (Date.now() - (fkFailed.get(name) || 0) < FK_FAIL_BACKOFF_MS) return false;   // don't hammer GitHub on a 404/403/parse error
+        const token = cachedToken || gmGet(TOKEN_KEY, '');
+        if (!token) return false;
+        fkFetching.add(name);
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${FK_DIR}/${encodeURIComponent(name)}?ref=${KMLS_BRANCH}`,
+            headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github.raw' },
+            timeout: 60000,
+            onload: (resp) => {
+                fkFetching.delete(name);
+                try {
+                    if (resp.status !== 200) { fkFailed.set(name, Date.now()); console.warn(`${TAG} fleet KML: ${name} HTTP ${resp.status}`); showKMLToast(`Fleet KML "${fkLabel(name)}" failed to load (HTTP ${resp.status}) — retrying in 5 min, or use Re-list`, 4000); return; }
+                    const parsed = fkParseGeoText(resp.responseText, name);
+                    fkFeatures[name] = { sha: entry.sha, features: parsed.features };
+                    try { gmSet(FK_CACHE_PREFIX + name, JSON.stringify({ sha: entry.sha, features: parsed.features, at: Date.now() })); }
+                    catch (e) { console.warn(`${TAG} fleet KML: cache write failed for ${name} (too large?):`, e); }
+                    console.log(`${TAG} fleet KML: loaded ${name} — ${parsed.features.length} feature(s), ${parsed.vertexCount} vertices`);
+                    fkKey = '';
+                    if (isActive) applyFleetKml();
+                } catch (e) { fkFailed.set(name, Date.now()); console.warn(`${TAG} fleet KML: ${name} parse threw:`, e); showKMLToast(`Fleet KML "${fkLabel(name)}" could not be parsed — ${e.message || e}`, 5000); }
+            },
+            onerror: () => { fkFetching.delete(name); fkFailed.set(name, Date.now()); console.warn(`${TAG} fleet KML: ${name} request failed`); },
+            ontimeout: () => { fkFetching.delete(name); fkFailed.set(name, Date.now()); console.warn(`${TAG} fleet KML: ${name} timed out`); },
+        });
+        return false;
+    }
+
+    // ---- parsers (ported VERBATIM from Fleet Tools parseKmlText / parseGeojsonText) ----
+    function fkParseKml(text) {
+        const doc = new DOMParser().parseFromString(text, 'text/xml');
+        if (doc.querySelector('parsererror')) throw new Error('not valid KML/XML');
+        const features = [];
+        let vertexCount = 0;
+        const parseCoords = (node) => {
+            const out = [];
+            String(node.textContent || '').trim().split(/\s+/).forEach(tok => {
+                const p = tok.split(',');
+                const lng = Number(p[0]), lat = Number(p[1]);
+                if (isFinite(lat) && isFinite(lng)) out.push([lat, lng]);
+            });
+            return out;
+        };
+        doc.querySelectorAll('Placemark').forEach(pm => {
+            let fname = '';
+            try { const n = pm.querySelector(':scope > name'); fname = (n && n.textContent.trim()) || ''; } catch (e) {}
+            pm.querySelectorAll('Point > coordinates').forEach(c => { const pts = parseCoords(c); if (pts.length) { features.push({ name: fname, type: 'point', pts: [pts[0]] }); vertexCount++; } });
+            pm.querySelectorAll('LineString > coordinates').forEach(c => { const pts = parseCoords(c); if (pts.length > 1) { features.push({ name: fname, type: 'line', pts }); vertexCount += pts.length; } });
+            pm.querySelectorAll('Polygon').forEach(pg => { const outer = pg.querySelector('outerBoundaryIs coordinates'); if (outer) { const pts = parseCoords(outer); if (pts.length > 2) { features.push({ name: fname, type: 'poly', pts }); vertexCount += pts.length; } } });
+        });
+        if (!features.length) throw new Error('no Point/LineString/Polygon placemarks found');
+        return { features, vertexCount };
+    }
+    function fkParseGeojson(text) {
+        let j;
+        try { j = JSON.parse(text); } catch (e) { throw new Error('not valid JSON'); }
+        const features = [];
+        let vertexCount = 0;
+        const conv = (coords) => coords.map(c => [Number(c[1]), Number(c[0])]).filter(p => isFinite(p[0]) && isFinite(p[1]));
+        const addGeom = (g, name) => {
+            if (!g || !g.type) return;
+            if (g.type === 'Point') { const p = conv([g.coordinates]); if (p.length) { features.push({ name, type: 'point', pts: p }); vertexCount++; } }
+            else if (g.type === 'MultiPoint') (g.coordinates || []).forEach(c => addGeom({ type: 'Point', coordinates: c }, name));
+            else if (g.type === 'LineString') { const pts = conv(g.coordinates || []); if (pts.length > 1) { features.push({ name, type: 'line', pts }); vertexCount += pts.length; } }
+            else if (g.type === 'MultiLineString') (g.coordinates || []).forEach(cs => addGeom({ type: 'LineString', coordinates: cs }, name));
+            else if (g.type === 'Polygon') { const pts = conv((g.coordinates || [])[0] || []); if (pts.length > 2) { features.push({ name, type: 'poly', pts }); vertexCount += pts.length; } }
+            else if (g.type === 'MultiPolygon') (g.coordinates || []).forEach(rings => addGeom({ type: 'Polygon', coordinates: rings }, name));
+            else if (g.type === 'GeometryCollection') (g.geometries || []).forEach(gg => addGeom(gg, name));
+        };
+        const featName = (f) => { const pr = f.properties || {}; for (const k of ['name', 'Name', 'NAME', 'label', 'id', 'ID', 'LineID', 'FacilityID']) { if (pr[k] != null && String(pr[k]).trim()) return String(pr[k]).trim(); } return ''; };
+        if (j.type === 'FeatureCollection') (j.features || []).forEach(f => f && addGeom(f.geometry, featName(f)));
+        else if (j.type === 'Feature') addGeom(j.geometry, featName(j));
+        else addGeom(j, '');
+        if (!features.length) throw new Error('no usable GeoJSON geometries found');
+        return { features, vertexCount };
+    }
+    function fkParseGeoText(text, name) {
+        const head = String(text).slice(0, 200).trim();
+        return (/\.(geojson|json)$/i.test(name) || head.startsWith('{') || head.startsWith('[')) ? fkParseGeojson(text) : fkParseKml(text);
+    }
+
+    // ---- draw ----
+    function removeFleetKml() {
+        if (!fkLayers.length) { fkKey = ''; return; }
+        const map = getLeafletMap();
+        fkLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        fkLayers = [];
+        fkKey = '';
+    }
+    function fkPaneName(map) {
+        try {
+            if (typeof map.getPane === 'function' && map.getPane(FK_PANE)) return FK_PANE;
+            if (typeof map.createPane === 'function') {
+                const p = map.createPane(FK_PANE);
+                if (p) { p.style.zIndex = '390'; p.style.pointerEvents = 'none'; return FK_PANE; }   // under overlayPane (400) → entities stay on top + clickable
+            }
+        } catch (e) { console.warn(`${TAG} fleet KML: pane creation failed, using the default pane:`, e); }
+        return undefined;
+    }
+    function applyFleetKml() {
+        const map = getLeafletMap();
+        const L = _stylerL();
+        if (!map || !L || typeof map.addLayer !== 'function') return;
+        if (toggleState['fleetkml.show'] !== true) { removeFleetKml(); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { removeFleetKml(); return; }
+        fkSyncListFromGm();
+        const on = fkList.filter(l => toggleState[fkShowId(l.name)] === true);
+        if (!on.length) { removeFleetKml(); return; }
+        const bbox = rrcEnsureSiteBBox(sid);   // shared site-bounds cache (fetches once; null while loading → next heartbeat retries)
+        if (!bbox) { if (_rrcSiteBBox.failed) removeFleetKml(); return; }
+        const radMi = Math.max(0.5, Number(toggleState['fleetkml.radius-mi']) || 5);
+        const width = Math.max(1, Number(toggleState['fleetkml.width']) || 2);
+        const midLat = (bbox[1] + bbox[3]) / 2;
+        const radFt = radMi * 5280;
+        const dLat = radFt / 364000, dLng = radFt / (364000 * Math.cos(midLat * Math.PI / 180));
+        const env = [bbox[0] - dLng, bbox[1] - dLat, bbox[2] + dLng, bbox[3] + dLat];
+        // Layers still downloading render on their arrival (fkEnsureLoaded → applyFleetKml).
+        const ready = on.filter(l => fkEnsureLoaded(l));
+        const key = `${sid}|${env.map(v => v.toFixed(5)).join(',')}|${width}|${ready.map(l => `${l.name}:${l.sha}:${toggleState[fkColorId(l.name)]}`).join(';')}`;
+        if (key === fkKey) return;
+        fkLayers.forEach(l => { try { map.removeLayer(l); } catch (e) {} });
+        fkLayers = [];
+        fkKey = key;
+        const pane = fkPaneName(map);
+        const inEnv = (p) => p[1] >= env[0] && p[1] <= env[2] && p[0] >= env[1] && p[0] <= env[3];
+        let totalDrawn = 0, capped = false;
+        ready.forEach((l, i) => {
+            const color = toggleState[fkColorId(l.name)] || FK_PALETTE[i % FK_PALETTE.length];
+            const feats = fkFeatures[l.name].features;
+            const lineRuns = [], polyRings = [], points = [];
+            feats.forEach(f => {
+                if (f.type === 'line') rrcClipPathToEnv(f.pts, env).forEach(run => { if (run.length > 1) lineRuns.push(run); });
+                else if (f.type === 'poly') {
+                    let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+                    f.pts.forEach(p => { if (p[0] < minLat) minLat = p[0]; if (p[0] > maxLat) maxLat = p[0]; if (p[1] < minLng) minLng = p[1]; if (p[1] > maxLng) maxLng = p[1]; });
+                    if (minLng <= env[2] && maxLng >= env[0] && minLat <= env[3] && maxLat >= env[1]) polyRings.push(f.pts);
+                } else if (f.type === 'point' && f.pts[0] && inEnv(f.pts[0])) points.push(f);
+            });
+            const opts = { color, weight: width, opacity: 0.9, interactive: false };
+            if (pane) opts.pane = pane;
+            const add = (mk) => { try { mk.addTo(map); fkLayers.push(mk); totalDrawn++; } catch (e) { console.warn(`${TAG} fleet KML: addTo failed:`, e); } };
+            if (lineRuns.length) add(L.polyline(lineRuns, opts));
+            // depth-3 array = MultiPolygon; a depth-2 array would make ring 2+ HOLES of ring 1
+            if (polyRings.length) add(L.polygon(polyRings.map(r => [r]), Object.assign({}, opts, { fill: true, fillColor: color, fillOpacity: 0.08 })));
+            if (points.length) {
+                const pts = points.slice(0, FK_POINT_CAP);
+                if (points.length > FK_POINT_CAP) capped = true;
+                pts.forEach(f => add(L.circleMarker([f.pts[0][0], f.pts[0][1]], Object.assign({}, opts, { radius: 4, fill: true, fillColor: color, fillOpacity: 0.85, weight: 1.5 }))));
+            }
+            console.log(`${TAG} fleet KML: "${fkLabel(l.name)}" → ${lineRuns.length} line run(s), ${polyRings.length} polygon(s), ${Math.min(points.length, FK_POINT_CAP)} point(s) within ${radMi} mi of site ${sid}`);
+        });
+        if (capped) showKMLToast(`Fleet KML: more than ${FK_POINT_CAP} points in range — showing the first ${FK_POINT_CAP}. Narrow the radius.`, 4500);
+        if (!totalDrawn && ready.length) console.log(`${TAG} fleet KML: nothing from the enabled layer(s) lies within ${radMi} mi of this site`);
+    }
+
     function buildRegistrationToggles() {
         const rrcExtra = buildRrcOperatorToggles();
-        if (!rrcExtra.length) return TOGGLES;
-        return TOGGLES.map(cat => {
+        const base = !rrcExtra.length ? TOGGLES : TOGGLES.map(cat => {
             if (cat && cat.id === 'rrc-cat' && rrcExtra.length) return { ...cat, children: [...cat.children, ...rrcExtra] };
             return cat;
         });
+        return [...base, buildFleetKmlToggles()];   // v34.140: dynamic 🌐 Fleet KML category
     }
 
     // GM storage helpers. Returns def if GM is unavailable (script grants
@@ -8914,6 +10274,10 @@
         removeCropLayer();
         // And the RRC wells/pipelines overlay.
         removeRrcLayers();
+        // And the fleet KML layers.
+        removeFleetKml();
+        // And the FCC cell coverage hexes + legend + hover badge.
+        removeCellCoverage();
         // Land-owner click mode + outlines.
         parcelsDisarm();
         parcelsClear();
@@ -9091,7 +10455,13 @@
         // recovers via a single auto-Kick. See detectStuckRender() above.
         scheduleStuckCheckAfterActivation();
         observerTarget = container;
-        observer = new MutationObserver(debouncedUpdate);
+        observer = new MutationObserver((recs) => {
+            perfTally(recs);
+            let relevant = false;
+            for (let i = 0; i < recs.length; i++) { if (!isNoiseMutation(recs[i])) { relevant = true; break; } }
+            if (!relevant) { _perf.ignored++; return; }
+            _perfFromObserver = true; debouncedUpdate();
+        });
         observer.observe(container, observerConfig);
         // v34.122 — Data View zoom fix: on DV, Leaflet only rewrites ITS OWN
         // layers' attributes on zoom/pan — no SS-style mutation storm reaches
@@ -9364,6 +10734,7 @@
                     KML_TYPES.forEach(t => { delete kmlFeatures[kmlKey(sid, t)]; });
                     fetchKMLForSite(sid, true);
                 }
+                fkFeatures = {}; fkFailed.clear(); fkKey = ''; fkListRepo(true);   // v34.140: fleet layers too
             } else if (msg.type === 'TOKEN_VALUE') {
                 // Control panel handed us the PAT (either on our REQUEST_TOKEN,
                 // or proactively after the user saved a new one). Cache in
@@ -9373,6 +10744,7 @@
                 if (cachedToken && cachedToken !== prev) {
                     const sid = getCurrentSiteID();
                     if (sid) fetchKMLForSite(sid, true);
+                    fkListRepo(false);   // v34.140: list the fleet layers once the PAT is known
                 }
             } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID && rendersInThisFrame()) {
                 // Cross-tab guard: BroadcastChannel delivers to EVERY open tab — only
@@ -9410,6 +10782,10 @@
                         // asset boxes too (DV_ASSET_SELECTOR), so the editor
                         // and data refresh work there.
                         'asset-styles-editor', 'refresh-asset-data',
+                        'fleetkml-refresh',   // v34.140: view-only overlay
+                        'cell-refresh',       // v34.143: view-only overlay
+                        'cell-towers-key',    // v34.146: stores a key, view-only
+                        'cell-towers-kml',    // v34.147: download only
                     ];
                     if (!DV_SAFE_ACTIONS.includes(msg.actionId)) {
                         showKMLToast('That tool is Site-Setup-only — Data View is view-only.', 4000);
@@ -9462,6 +10838,15 @@
                     showKMLToast('Back to site-area wells only.', 3500);
                     applyRrcLayers();
                 }
+                else if (msg.actionId === 'fleetkml-refresh') {
+                    fkFeatures = {}; fkFailed.clear(); fkKey = '';
+                    showKMLToast('Re-listing fleet KML layers from GitHub…', 2500);
+                    fkListRepo(true);
+                }
+                else if (msg.actionId === 'cell-refresh') cellRefresh();
+                else if (msg.actionId === 'cell-towers-key') towerSetKeyAction();
+                else if (msg.actionId === 'cell-towers-kml') towersToKml();
+                else if (msg.actionId === 'cell-towers-gm') towersToGmRequest();
                 else if (msg.actionId === 'refresh-asset-data') {
                     const sid = getCurrentSiteID();
                     if (sid) { console.log(`${TAG} asset-state: manual refresh requested`); fetchAssetStates(sid, true); }
@@ -9563,6 +10948,7 @@
 
     setupControlPanel();
     registerWithControlPanel();
+    fkListRepo(false);   // v34.140: no-op until the PAT arrives (TOKEN_VALUE re-tries)
     installListener();
     installAssetLockHandler();
     installKMLEditHandlers();
@@ -10001,6 +11387,8 @@
         // nav so a stale entry can never apply to the wrong site.
         Object.keys(committedKmlCache).forEach(k => { delete committedKmlCache[k]; });
         loadValidatorResults();
+        removeFleetKml();   // v34.140: never show the old site's clipped layers while the new bounds load
+        removeCellCoverage(); cellResetForSite();   // v34.143: same for the FCC hexes
         if (isActive && sid) {
             console.log(`${TAG} site changed to ${sid} — fetching KML`);
             fetchKMLForSite(sid);

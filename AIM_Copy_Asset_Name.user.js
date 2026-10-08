@@ -2,7 +2,7 @@
 // @name         AIM Copy Asset Name
 // @name:en      AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.245
+// @version      4.322
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.245';
+    const SCRIPT_VERSION = '4.322';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -138,7 +138,7 @@
         ffzAssetFt: 15, fpAssetFt: 15, ffzFfzFt: 0,
         fpOverlapFt: 6.56,                      // min shared altitude band (= 2 m, the SOP/server minimum), connected FP / FP-in-FFZ
         aglFloorMinFt: 90, aglFloorMaxFt: 210,  // floor (min alt) must sit in this AGL band
-        nfzMinFt: 30, nfzSepFt: 15,             // NFZ min side; NFZ→NFZ/FFZ separation
+        nfzMinFt: 25, nfzSepFt: 15,             // NFZ min side (25 per user 2026-08-20, was 30 — matches the NFZ drawer's min); NFZ→NFZ/FFZ separation
         bandSoftFt: 40, bandHardFt: 200,        // alt-band height (max−min): soft warn / hard flag
         gmTowerFt: 60,                          // "Tower" general-markers must stay this far from FFZ/FP
         fpFfzAngleDeg: 15,                      // FP→FFZ boundary crossing angle hard min (ideal 45°)
@@ -184,6 +184,18 @@
     // reference-faa-airspace-data). Own Control Panel card, same
     // AIM_VALIDATOR_ISSUES handoff to AIM Issues as the SOP validators. ----
     const AIRSPACE_SCRIPT_ID = 'aim-airspace-checker';
+    // ---- 📥 Asset Importer (#249) — CP card id + init-referenced state.
+    // Declared HERE (not in the importer section) because registerWithControlPanel
+    // runs at init and references them — a later const would TDZ-throw.
+    const IMP_SCRIPT_ID = 'aim-asset-importer';
+    let impMasterEnabled = true;
+    let impDupFt = 50;              // duplicate-guard proximity, CP-editable
+    // ---- 📌 GM Stamper (#271) — CP card id + init-referenced state (same TDZ reason).
+    const GMT_SCRIPT_ID = 'aim-gm-stamper';
+    let gmtMasterEnabled = true;
+    let gmtAltGate = false;         // CP toggle: require ALT+click to place (plain click stays free for Percepto)
+    let impSizeFt = 30;             // created-asset square side ft, CP-editable
+    let impDeleteGuardSeen = 0;     // ts of the last Delete Guard REGISTER seen on the control channel
     const AIR_THRESH_KEY = 'aim-airspace-thresholds';
     const AIR_ENABLE_KEY = 'aim-airspace-enabled';
     const AIR_FAA_BASE = 'https://services6.arcgis.com/ssFJjBXIUyZDrSYZ/arcgis/rest/services';
@@ -2735,6 +2747,106 @@
         if (best) airSiteStateCache[sid] = best;
         return best;
     }
+
+    // ---- ☎ NASR contacts (#279). The FAA ArcGIS airport layer has no phone
+    // field; the FAA's 28-day NASR data does (APT_CON: manager + owner).
+    // A weekly Action in the data repo turns it into faa/contacts/<ST>.json
+    // (also class-airspace flags + tower/approach facility per airport).
+    // Joined on ArcGIS IDENT == NASR ARPT_ID. Private repo → needs the PAT. ----
+    const AIR_CONTACTS_CACHE_KEY = 'aim-air-contacts-v1';
+    const AIR_CONTACTS_TTL_MS = 7 * 24 * 3600 * 1000;   // NASR cycles are 28 d; Action runs weekly
+    const airContactsMem = {};                           // st → { cycle, byId } for this session
+    async function airFetchContactsState(st) {
+        if (airContactsMem[st]) return airContactsMem[st];
+        const key = `${AIR_CONTACTS_CACHE_KEY}::${st}`;
+        try {
+            const raw = elevGmGet(key, null);
+            if (raw) {
+                const o = JSON.parse(raw);
+                if (o && o.byId && (Date.now() - (o.fetchedAt || 0)) < AIR_CONTACTS_TTL_MS) {
+                    airContactsMem[st] = o;
+                    return o;
+                }
+            }
+        } catch (e) { console.warn(`${TAG} contacts cache read threw (${st}):`, e); }
+        if (!elevSharedToken) throw new Error('no GitHub token — open the Control Panel and set the PAT');
+        const path = `faa/contacts/${st}.json`;
+        const url = `${ELEV_GITHUB_API}/repos/${ELEV_REPO}/contents/${encodeURIComponent(path)}?ref=${ELEV_REPO_BRANCH}`;
+        const r = await elevGmRequest({
+            method: 'GET', url, timeout: 25000,
+            headers: { 'Authorization': `Bearer ${elevSharedToken}`, 'Accept': 'application/vnd.github.raw+json' },
+        });
+        if (!r.ok) throw new Error(r.status === 404 ? `no contacts file for state ${st}` : `contacts ${st}: HTTP ${r.status || 'network error'}`);
+        let o;
+        try { o = JSON.parse(r.responseText); } catch (e) { throw new Error(`contacts ${st}: bad JSON`); }
+        if (!o || !o.byId) throw new Error(`contacts ${st}: unexpected shape`);
+        const store = { cycle: o.cycle, st, fetchedAt: Date.now(), byId: o.byId };
+        airContactsMem[st] = store;
+        try { elevGmSet(key, JSON.stringify(store)); }
+        catch (e) { console.warn(`${TAG} contacts cache write threw (${st}):`, e); }
+        return store;
+    }
+    // Attach NASR records to the airport entries (+ the LAANC controlling
+    // facility). Soft-fails into inventory.contacts.err — a phone number can
+    // never change a verdict, so this is never the red PARTIAL path.
+    async function airAttachContacts(inventory, siteState) {
+        const info = { cycle: null, states: [], matched: 0, total: 0, err: null };
+        inventory.contacts = info;
+        const states = new Set();
+        (inventory.airports || []).forEach(a => { if (a.state) states.add(a.state); });
+        if (inventory.laancFacility && siteState) states.add(siteState);
+        if (!states.size && siteState) states.add(siteState);
+        if (!states.size) return;
+        const files = {};
+        for (const st of states) {
+            try { files[st] = await airFetchContactsState(st); info.states.push(st); if (!info.cycle) info.cycle = files[st].cycle; }
+            catch (e) { info.err = (e && e.message) || String(e); console.warn(`${TAG} NASR contacts (${st}) unavailable:`, info.err); }
+        }
+        const lookup = (ident, st) => {
+            if (!ident) return null;
+            const f = st && files[st];
+            if (f && f.byId[ident]) return f.byId[ident];
+            for (const k in files) if (files[k].byId[ident]) return files[k].byId[ident];
+            return null;
+        };
+        (inventory.airports || []).forEach(a => {
+            info.total++;
+            const rec = lookup(a.ident, a.state);
+            if (!rec) return;
+            info.matched++;
+            a.nasr = rec;
+        });
+        if (inventory.laancFacility) {
+            const rec = lookup(inventory.laancFacility.id, siteState);
+            if (rec) inventory.laancFacility.nasr = rec;
+        }
+    }
+    // "Mgr JUSTINE RUFF 432-560-2200 · Owner CITY OF MIDLAND 432-685-7100"
+    // (plain text; the panel wraps the numbers in click-to-copy spans).
+    function airContactParts(rec) {
+        if (!rec) return [];
+        const parts = [];
+        const add = (label, c) => { if (c && (c.phone || c.name)) parts.push({ label, name: c.name || '', phone: c.phone || '' }); };
+        add('Mgr', rec.mgr);
+        add('Owner', rec.owner);
+        (rec.other || []).slice(0, 2).forEach(c => add(c.title || 'Contact', c));
+        return parts;
+    }
+    function airContactText(rec) {
+        const parts = airContactParts(rec);
+        if (!parts.length) return 'Unknown — not in NASR';
+        return parts.map(p => `${p.label} ${p.name}${p.phone ? ` ${p.phone}` : ' (no phone)'}`).join(' · ');
+    }
+    // "Class C (CLASS C SVC 0600-0000; OTHER TIMES CLASS E) · ATCT-TRACON, tower MIDLAND 0600-0000"
+    function airNasrAirspaceText(rec) {
+        if (!rec) return '';
+        const bits = [];
+        if (rec.air && rec.air.cls && rec.air.cls.length) bits.push(`Class ${rec.air.cls.join('/')}${rec.air.hrs ? ` (${rec.air.hrs})` : ''}`);
+        else bits.push('Class G (no NASR class record)');
+        if (rec.atc && rec.atc.fac && rec.atc.fac !== 'NON-ATCT') bits.push(`${rec.atc.fac}${rec.atc.twrCall ? `, tower ${rec.atc.twrCall}` : ''}${rec.atc.twrHrs ? ` ${rec.atc.twrHrs}` : ''}`);
+        else if (rec.atc && rec.atc.apch) bits.push(`no tower · approach ${rec.atc.apch}`);
+        return bits.join(' · ');
+    }
     // TFR-only check. Self-contained (builds its own site geometry) so the
     // 20-min auto-sweep can run it without a full report. Returns
     // { violations:[{shape,polygon,note,severity,kind:'tfr'}], tfrs:[…] }.
@@ -2848,7 +2960,7 @@
             : Promise.resolve(null);
         const [apRes, obRes, asRes, laRes] = await Promise.all([
             airEnabled.strips ? grab('Airports', airPointQuery('US_Airport', clat, clng, invM,
-                'IDENT,NAME,ICAO_ID,TYPE_CODE,PRIVATEUSE,ELEVATION', true)) : Promise.resolve(null),
+                'IDENT,NAME,ICAO_ID,TYPE_CODE,PRIVATEUSE,ELEVATION,STATE', true)) : Promise.resolve(null),
             airEnabled.obstacles ? grab('Obstacles', airPointQuery('Digital_Obstacle_File', clat, clng, obsInvM,
                 'OAS_Number,Type_Code,AGL,AMSL,Lighting,Quantity,City,Lat_DD,Long_DD', false)) : Promise.resolve(null),
             airEnabled.airspace ? grab('Airspace', airPointQuery('Class_Airspace', clat, clng, invM,
@@ -2947,6 +3059,7 @@
                 const entry = {
                     name: (a.NAME || a.IDENT || '?').trim(), ident: (a.IDENT || '').trim(),
                     kind, priv, distMi, distNm, brg, lat, lng,
+                    state: (a.STATE || '').trim(),          // NASR contacts file to join (#279)
                     hit: +distNm.toFixed(2) < th.stripNm,   // flag on the displayed value
                 };
                 inventory.airports.push(entry);
@@ -3012,7 +3125,7 @@
                 if (useNear.pt && typeof useNear.pt.floorM === 'number' && typeof a.AMSL === 'number') {
                     tlCleared = useNear.pt.floorM * M_TO_FT >= a.AMSL + th.tlClearFt;
                 }
-                const entry = { type, agl, lit, tb, distFt: isFinite(useDistFt) ? useDistFt : distFt, distMi: (isFinite(useNear.d) ? useNear.d : near.d) / MI_TO_M, qty: (a.Quantity || '').trim(), lat: oLat, lng: oLng, src: (useNear.pt && useNear.pt.src) || (near.pt && near.pt.src) || null, hit: false, show: false,
+                const entry = { type, agl, lit, tb, oas: (a.OAS_Number || '').trim(), distFt: isFinite(useDistFt) ? useDistFt : distFt, distMi: (isFinite(useNear.d) ? useNear.d : near.d) / MI_TO_M, qty: (a.Quantity || '').trim(), lat: oLat, lng: oLng, src: (useNear.pt && useNear.pt.src) || (near.pt && near.pt.src) || null, hit: false, show: false,
                     // Profile-view data: obstacle top MSL + the nearest flight
                     // segment's altitude band (MSL ft) and location (for DEM).
                     amsl: (typeof a.AMSL === 'number') ? a.AMSL : null,
@@ -3154,6 +3267,7 @@
                 inventory.laanc = { sev: 'ok', text: `Site is not in any LAANC facility grid (400 ft Part-107 default applies)${laancGrids.length ? ` — ${laancGrids.length} grid(s) nearby drawn on the map` : ''}` };
             } else {
                 const apt = (worst.APT1_NAME || worst.APT1_FAAID || '?').trim();
+                inventory.laancFacility = { id: (worst.APT1_FAAID || '').trim(), name: apt };
                 if (worst.CEILING < th.maxOpAglFt) {
                     boxIssue(clat, clng,
                         `violation: LAANC facility grid over the site caps drone ops at ${worst.CEILING} ft AGL (our max ${th.maxOpAglFt} ft) — controlling facility: ${apt}`,
@@ -3239,6 +3353,13 @@
         }
 
         inventory.cacheServed = airCacheHits.slice();
+        // ☎ NASR contacts join (#279) — soft; needs the PAT.
+        if (airEnabled.strips || airEnabled.laanc) {
+            let siteState = null;
+            try { siteState = await airGetSiteState(sid, clat, clng); } catch (e) { console.warn(`${TAG} site state lookup failed (contacts):`, e); }
+            try { await airAttachContacts(inventory, siteState); }
+            catch (e) { inventory.contacts = { err: (e && e.message) || String(e), states: [], matched: 0, total: 0 }; console.warn(`${TAG} airAttachContacts threw:`, e); }
+        }
         return { violations, inventory, errors, laancGrids, meta: { clat, clng, siteRadM, entCount: ents.length, ptCount: sitePts.length } };
     }
 
@@ -3298,7 +3419,7 @@
             (res.inventory.airports || []).forEach(a => {
                 if (!isFinite(a.lat)) return;
                 add(tip(L.circleMarker([a.lat, a.lng], { radius: 13, color: a.hit ? '#ff5555' : '#5fff5f', weight: 3, fillColor: a.hit ? '#ff5555' : '#5fff5f', fillOpacity: 0.15, interactive: canTip }),
-                    `<strong>${airEsc(a.name)}</strong>${a.ident ? ` (${airEsc(a.ident)})` : ''}<br>${airEsc(a.kind)}, ${a.priv} — ${a.distNm.toFixed(2)} NM ${a.brg}`));
+                    `<strong>${airEsc(a.name)}</strong>${a.ident ? ` (${airEsc(a.ident)})` : ''}<br>${airEsc(a.kind)}, ${a.priv} — ${a.distNm.toFixed(2)} NM ${a.brg}${a.nasr ? `<br>☎ ${airEsc(airContactText(a.nasr))}` : ''}`));
             });
             (res.inventory.stadiums || []).forEach(s => {
                 if (!isFinite(s.lat)) return;
@@ -3335,8 +3456,24 @@
         airClearMapHighlights();
     }
 
+    // Second line under an airport row: NASR airspace class + contacts.
+    // Phone numbers are click-to-copy (data-air-tel) and win over the row jump.
+    function airContactHtml(rec, inline) {
+        if (!rec) return '';
+        const tel = (p) => p.phone
+            ? `<span data-air-tel="${airEsc(p.phone)}" title="Click to copy" style="color:#ffd27a;cursor:copy;text-decoration:underline dotted;">${airEsc(p.phone)}</span>`
+            : '<span style="opacity:0.6;">no phone</span>';
+        const parts = airContactParts(rec);
+        const contacts = parts.length
+            ? parts.map(p => `${airEsc(p.label)} ${airEsc(p.name)} ${tel(p)}`).join(' · ')
+            : 'Unknown — not in NASR';
+        const air = airNasrAirspaceText(rec);
+        const pre = inline ? ' — ' : '<br><span style="opacity:0.82;padding-left:14px;">';
+        const post = inline ? '' : '</span>';
+        return `${pre}${air ? `${airEsc(air)} · ` : ''}☎ ${contacts}${post}`;
+    }
     // Floating inventory panel — everything found, violations first.
-    function renderAirspacePanel(res, sid, siteName) {
+    function renderAirspacePanel(res, sid, siteName, snap) {
         closeAirspacePanel();
         const inv = res.inventory;
         const th = airThresholds;
@@ -3365,6 +3502,8 @@
             : `<div style="margin:2px 0;line-height:1.45;">${sevDot(sev)} ${html}</div>`);
 
         const vioCount = res.violations.length;
+        if (snap) h.push(`<div style="margin-bottom:6px;padding:4px 8px;border:1px solid rgba(255,176,32,0.6);border-radius:5px;color:#ffb020;">📸 SAVED RUN ${airEsc(snap.runId)} (${airEsc(snap.reason || '')}${snap.takenBy ? ` · ${airEsc(snap.takenBy)}` : ''}) — read-only. Live TFRs are as of that date. <span data-air-live style="cursor:pointer;text-decoration:underline;">⟲ back to live</span></div>`);
+        h.push(`<div data-survey-status style="margin-bottom:4px;opacity:0.85;">📄 Survey: ${airEsc(surveyStatusText(sid))}</div>`);
         h.push(`<div style="margin-bottom:4px;">${vioCount
             ? `<span style="color:#ff5555;font-weight:700;">${vioCount} violation${vioCount === 1 ? '' : 's'}</span> — drawn as Validator issues (needs AIM Issues enabled)`
             : '<span style="color:#5fff5f;font-weight:700;">No airspace violations ✓</span>'}</div>`);
@@ -3401,12 +3540,18 @@
         if (airEnabled.laanc && inv.laanc) {
             section('LAANC ceiling');
             line(inv.laanc.sev, airEsc(inv.laanc.text));
+            if (inv.laancFacility && inv.laancFacility.nasr) line('info', `☎ Controlling facility ${airEsc(inv.laancFacility.name)}${airContactHtml(inv.laancFacility.nasr, true)}`);
         }
         if (airEnabled.strips) {
             section(`Airports &amp; helipads (within ${th.inventoryMi} mi · standoff ${th.stripNm} NM)`);
             if (!inv.airports.length) line('ok', 'None within range');
+            if (inv.contacts) {
+                if (inv.contacts.err) line('warn', `☎ Phone numbers unavailable — ${airEsc(inv.contacts.err)}`);
+                else if (inv.contacts.states.length) line('info', `☎ FAA NASR contacts · cycle ${airEsc(inv.contacts.cycle || '?')} · matched ${inv.contacts.matched} of ${inv.contacts.total}`);
+            }
             inv.airports.slice(0, 25).forEach(a => line(a.hit ? 'high' : 'ok',
-                `<strong>${airEsc(a.name)}</strong>${a.ident ? ` (${airEsc(a.ident)})` : ''} — ${airEsc(a.kind)}, ${a.priv} · ${a.distNm.toFixed(2)} NM / ${a.distMi.toFixed(1)} mi ${a.brg}`,
+                `<strong>${airEsc(a.name)}</strong>${a.ident ? ` (${airEsc(a.ident)})` : ''} — ${airEsc(a.kind)}, ${a.priv} · ${a.distNm.toFixed(2)} NM / ${a.distMi.toFixed(1)} mi ${a.brg}`
+                + airContactHtml(a.nasr),
                 (typeof a.lat === 'number') ? { lat: a.lat, lng: a.lng, zoom: 13 } : null));
             if (inv.airports.length > 25) line('info', `…and ${inv.airports.length - 25} more`);
         }
@@ -3465,7 +3610,8 @@
                 <span style="color:#7adfe6;font-weight:700;">🛩 Airspace Check</span>
                 <span style="opacity:0.7;">${airEsc(siteName || `site ${sid}`)}</span>
                 <span style="flex:1"></span>
-                ${((inv.obstacles || []).some(o => o.show) && !LITE) ? '<button data-air-gms title="Create General Markers at listed obstacles (flagged ones pre-checked)" style="background:none;border:1px solid rgba(95,255,95,0.5);color:#5fff5f;border-radius:5px;padding:2px 8px;cursor:pointer;">📍 Create GMs</button>' : ''}
+                <button data-air-survey title="Site survey report: history, notes, save to GitHub" style="background:none;border:1px solid rgba(255,210,122,0.5);color:#ffd27a;border-radius:5px;padding:2px 8px;cursor:pointer;">📄 Survey</button>
+                ${((inv.obstacles || []).some(o => o.show) && !LITE && !snap) ? '<button data-air-gms title="Create General Markers at listed obstacles (flagged ones pre-checked)" style="background:none;border:1px solid rgba(95,255,95,0.5);color:#5fff5f;border-radius:5px;padding:2px 8px;cursor:pointer;">📍 Create GMs</button>' : ''}
                 <button data-air-copy style="background:none;border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:5px;padding:2px 8px;cursor:pointer;">Copy report</button>
                 <button data-air-close style="background:none;border:none;color:#dfe9f0;font-size:15px;cursor:pointer;">✕</button>
             </div>
@@ -3474,12 +3620,25 @@
         wrap.addEventListener('click', (e) => {
             if (e.target.closest('[data-air-close]')) { closeAirspacePanel(); return; }
             if (e.target.closest('[data-air-gms]')) { showAirGmModal(res, sid); return; }
+            if (e.target.closest('[data-air-survey]')) { openSurveyModal(sid).catch(err => { console.warn(`${TAG} survey modal threw:`, err); showToast('Survey panel failed — see console', 'rgba(255,96,96,0.55)'); }); return; }
+            if (e.target.closest('[data-air-live]')) {
+                if (surveyLast && String(surveyLast.sid) === String(sid)) { renderAirspacePanel(surveyLast.res, sid, surveyLast.siteName); airDrawMapHighlights(surveyLast.res); }
+                else airspaceRun();
+                return;
+            }
             // 📐 sits inside a jump row — must win over data-air-jump.
             const profEl = e.target.closest('[data-air-prof],[data-air-prof-tl]');
             if (profEl) {
                 e.stopPropagation();
                 if (profEl.hasAttribute('data-air-prof')) airProfOpenObstacle(+profEl.getAttribute('data-air-prof'));
                 else airProfOpenTransline(+profEl.getAttribute('data-air-prof-tl'));
+                return;
+            }
+            const telEl = e.target.closest('[data-air-tel]');
+            if (telEl) {
+                e.stopPropagation();
+                const num = telEl.getAttribute('data-air-tel');
+                navigator.clipboard.writeText(num).then(() => showToast(`Copied ${num}`), () => showToast('Copy failed', 'rgba(255,96,96,0.55)'));
                 return;
             }
             if (e.target.closest('[data-air-copy]')) {
@@ -3539,14 +3698,21 @@
             out.push(`Transmission lines (HIFLD, within ${airThresholds.translineShowFt} ft): ${tlS.length ? '' : 'none'}`);
             tlS.slice(0, 8).forEach(t => out.push(`  - ${t.volt}${t.owner ? ` (${t.owner})` : ''} — ${t.distFt < 5000 ? `${t.distFt.toLocaleString()} ft` : `${t.distMi.toFixed(1)} mi`}${t.src ? ` from ${t.src}` : ''}`));
         }
-        if (airEnabled.laanc && inv.laanc) out.push(`LAANC: ${inv.laanc.text}`);
+        if (airEnabled.laanc && inv.laanc) {
+            out.push(`LAANC: ${inv.laanc.text}`);
+            if (inv.laancFacility && inv.laancFacility.nasr) out.push(`  ☎ controlling facility ${inv.laancFacility.name}: ${airContactText(inv.laancFacility.nasr)}`);
+        }
         if (airEnabled.stadiums && inv.stadiums.length) {
             out.push('Stadiums:');
             inv.stadiums.slice(0, 5).forEach(s => out.push(`  - ${s.name}${s.city ? `, ${s.city}` : ''} — ${s.distNm.toFixed(2)} NM ${s.brg}${s.hit ? ' (INSIDE TFR RADIUS)' : ''}`));
         }
         if (airEnabled.strips) {
-            out.push(`Airports & helipads (nearest first):`);
-            inv.airports.slice(0, 15).forEach(a => out.push(`  - ${a.name}${a.ident ? ` (${a.ident})` : ''} — ${a.kind}, ${a.priv}, ${a.distNm.toFixed(2)} NM / ${a.distMi.toFixed(1)} mi ${a.brg}`));
+            out.push(`Airports & helipads (nearest first)${inv.contacts && inv.contacts.cycle ? ` — contacts: FAA NASR ${inv.contacts.cycle}` : ''}:`);
+            if (inv.contacts && inv.contacts.err) out.push(`  ⚠ phone numbers unavailable — ${inv.contacts.err}`);
+            inv.airports.slice(0, 15).forEach(a => {
+                out.push(`  - ${a.name}${a.ident ? ` (${a.ident})` : ''} — ${a.kind}, ${a.priv}, ${a.distNm.toFixed(2)} NM / ${a.distMi.toFixed(1)} mi ${a.brg}`);
+                if (a.nasr) out.push(`      ${airNasrAirspaceText(a.nasr)} · ☎ ${airContactText(a.nasr)}`);
+            });
         }
         if (airEnabled.obstacles) {
             const oS = inv.obstacles.filter(o => o.show);
@@ -3558,6 +3724,1345 @@
         return out.join('\n');
     }
 
+    // ============================================================
+    // 📄 AIRSPACE SURVEY (#278 snapshots · #280 report) — v4.307
+    // One Airspace Validator run → a Regulations-style site survey committed
+    // to the data repo:
+    //   airspace/<siteKey>/<runId>/{survey.json, <SID>_Airspace_Survey.md,
+    //                               setup.jpg, overview.jpg, sectional.jpg}
+    //   airspace/<siteKey>/index.json   run history for the site
+    //   airspace/<siteKey>/notes.json   the manual sections (LTE, planned
+    //                                   changes, signed decision…) — folded
+    //                                   into every report, never clobbered
+    //   airspace/index.json             fleet roll-up (Fleet Tools reads it)
+    // A run auto-saves when the site has no survey yet (creation) or the
+    // last one is ≥ SURVEY_DUE_DAYS old (six-month); every other run saves
+    // only on 📄 Survey → 💾. survey.json carries the validator result
+    // VERBATIM, so a saved run re-renders in the normal panel + map
+    // highlights read-only — review without re-running (#278).
+    // Map images are re-drawn from what's on screen (tiles + SVG overlays +
+    // marker icons) — the user's own Percepto map, with the FAA sectional
+    // flipped on by Map Styler (CHART_PREVIEW, v34.141+) for the third shot.
+    // ============================================================
+    const SURVEY_DIR = 'airspace';
+    const SURVEY_DUE_DAYS = 180;
+    const SURVEY_MIN_RADIUS_MI = 5;      // form: ≥ 5 SM circle, or furthest entity + 3 SM
+    const SURVEY_PAD_RADIUS_MI = 3;
+    const SURVEY_FACILITY_MI = 10;       // form: every facility within 10 SM, else the closest 2
+    const SURVEY_IMG_MAX_W = 1400;       // capture width cap → ~150–400 KB JPEG (Contents API inlines ≤ 1 MB)
+    const SURVEY_MODAL_ID = 'aim-survey-modal';
+    const SURVEY_IDX_TTL_MS = 10 * 60 * 1000;
+    const surveyDirFor = (sid) => `${SURVEY_DIR}/${envSiteKey(sid)}`;
+    let surveyLast = null;               // { res, sid, siteName, at } — latest LIVE run this session
+    const surveyStatus = {};             // sid → { idx, at, err, msg }
+    let surveyBusy = false;
+    let surveyLogin = null;              // GitHub login of the PAT holder (takenBy)
+    let surveyStyleChannel = null;
+
+    // ---- GitHub Contents API (data repo). Segment-encoded paths, no-cache
+    // reads (a stale cached sha 409s the next PUT), one sha-race retry —
+    // Site Watch commits to this repo all day. ----
+    const ghPath = (p) => p.split('/').map(encodeURIComponent).join('/');
+    const ghContentsUrl = (p, withRef) => `${ELEV_GITHUB_API}/repos/${ELEV_REPO}/contents/${ghPath(p)}${withRef ? `?ref=${ELEV_REPO_BRANCH}&_t=${Date.now()}` : ''}`;
+    function ghHeaders(extra) {
+        return Object.assign({ 'Authorization': `Bearer ${elevSharedToken}`, 'Accept': 'application/vnd.github+json', 'Cache-Control': 'no-cache' }, extra || {});
+    }
+    async function ghGetText(path) {
+        if (!elevSharedToken) throw new Error('no GitHub token');
+        const r = await elevGmRequest({ method: 'GET', url: ghContentsUrl(path, true), headers: ghHeaders({ 'Accept': 'application/vnd.github.raw+json' }), timeout: 30000 });
+        if (r.status === 404) return null;
+        if (!r.ok) throw new Error(`GET ${path}: HTTP ${r.status || 'network error'}`);
+        return r.responseText;
+    }
+    async function ghGetJson(path) {
+        const t = await ghGetText(path);
+        if (t == null) return null;
+        try { return JSON.parse(t); } catch (e) { throw new Error(`GET ${path}: bad JSON`); }
+    }
+    async function ghGetSha(path) {
+        const r = await elevGmRequest({ method: 'GET', url: ghContentsUrl(path, true), headers: ghHeaders(), timeout: 15000 });
+        if (r.status === 404) return null;
+        if (!r.ok) throw new Error(`sha ${path}: HTTP ${r.status || 'network error'}`);
+        try { return JSON.parse(r.responseText).sha || null; } catch (e) { return null; }
+    }
+    // Binary file → data: URL for an <img> (Contents API inlines ≤ 1 MB).
+    async function ghGetDataUrl(path, mime) {
+        if (!elevSharedToken) throw new Error('no GitHub token');
+        const r = await elevGmRequest({ method: 'GET', url: ghContentsUrl(path, true), headers: ghHeaders(), timeout: 40000 });
+        if (r.status === 404) throw new Error(`${path}: not found`);
+        if (!r.ok) throw new Error(`GET ${path}: HTTP ${r.status || 'network error'}`);
+        let j; try { j = JSON.parse(r.responseText); } catch (e) { throw new Error(`${path}: bad response`); }
+        if (!j.content) throw new Error(`${path}: too large to preview inline (> 1 MB)`);
+        return `data:${mime};base64,${String(j.content).replace(/\n/g, '')}`;
+    }
+    function surveyB64(bytes) {
+        let bin = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        return btoa(bin);
+    }
+    async function ghPutFile(path, bytes, message) {
+        if (!elevSharedToken) throw new Error('no GitHub token');
+        const b64 = surveyB64(typeof bytes === 'string' ? new TextEncoder().encode(bytes) : bytes);
+        let sha = await ghGetSha(path);
+        for (let attempt = 0; attempt < 2; attempt++) {
+            const body = { message, content: b64, branch: ELEV_REPO_BRANCH };
+            if (sha) body.sha = sha;
+            const r = await elevGmRequest({ method: 'PUT', url: ghContentsUrl(path, false), headers: ghHeaders({ 'Content-Type': 'application/json' }), data: JSON.stringify(body), timeout: 90000 });
+            if (r.ok) { try { return JSON.parse(r.responseText).content.sha; } catch (e) { return null; } }
+            if ((r.status === 409 || r.status === 422) && attempt === 0) { sha = await ghGetSha(path); continue; }
+            if (r.status === 401 || r.status === 403) throw new Error(`PUT ${path}: token rejected (HTTP ${r.status})`);
+            throw new Error(`PUT ${path}: HTTP ${r.status || 'network error'}`);
+        }
+        throw new Error(`PUT ${path}: sha conflict twice`);
+    }
+    async function surveyGithubLogin() {
+        if (surveyLogin) return surveyLogin;
+        if (presetAdminLogin) { surveyLogin = presetAdminLogin; return surveyLogin; }
+        try { surveyLogin = await fetchGithubLogin(elevSharedToken); } catch (e) { surveyLogin = null; }
+        return surveyLogin;
+    }
+
+    // ---- Map capture: re-draw what's on screen onto a canvas. Tiles and
+    // marker icons are re-fetched (page fetch; the tile hosts allow CORS)
+    // because drawing the live <img>s would taint the canvas; overlay SVGs
+    // (entities, our circle + dots, Map Styler buffers) are serialized. ----
+    function surveyLayerOpacity(el, stopAt) {
+        let o = 1, n = el;
+        while (n && n !== stopAt) {
+            const cs = getComputedStyle(n);
+            if (cs.display === 'none' || cs.visibility === 'hidden') return 0;
+            const v = parseFloat(cs.opacity);
+            if (!isNaN(v)) o *= v;
+            n = n.parentElement;
+        }
+        return o;
+    }
+    function surveyLoadImg(src) {
+        return new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error('image load failed')); im.src = src; });
+    }
+    async function surveyFetchImage(src) {
+        if (/^(data|blob):/i.test(src)) return surveyLoadImg(src);
+        const r = await fetch(src, { mode: 'cors', credentials: 'same-origin' });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return createImageBitmap(await r.blob());
+    }
+    async function surveyWaitTiles(container, maxMs) {
+        const t0 = Date.now();
+        while (Date.now() - t0 < maxMs) {
+            if (!container.querySelectorAll('img.leaflet-tile:not(.leaflet-tile-loaded)').length) break;
+            await new Promise(r => setTimeout(r, 200));
+        }
+        await new Promise(r => setTimeout(r, 500));   // fade-in settle
+    }
+    async function surveyCaptureMap(map, label, allowCanvas) {
+        const container = map.getContainer();
+        const crect = container.getBoundingClientRect();
+        if (!(crect.width > 50 && crect.height > 50)) throw new Error('map container not visible');
+        const scale = Math.min(1, SURVEY_IMG_MAX_W / crect.width);
+        const W = Math.round(crect.width * scale), H = Math.round(crect.height * scale);
+        const canvas = document.createElement('canvas'); canvas.width = W; canvas.height = H;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#0b1016'; ctx.fillRect(0, 0, W, H);
+        const place = (el) => { const r = el.getBoundingClientRect(); return { x: (r.left - crect.left) * scale, y: (r.top - crect.top) * scale, w: r.width * scale, h: r.height * scale, r }; };
+        const visible = (p) => p.w > 0 && p.h > 0 && p.r.right > crect.left && p.r.left < crect.right && p.r.bottom > crect.top && p.r.top < crect.bottom;
+        let drawn = 0, failed = 0;
+        // 1. rasters — tile + image layers in z order (layer zIndex, then DOM order)
+        const rasters = [];
+        container.querySelectorAll('.leaflet-tile-pane img, .leaflet-tile-pane canvas, .leaflet-overlay-pane img.leaflet-image-layer, .leaflet-pane > img.leaflet-image-layer').forEach((el, i) => {
+            const layerDiv = el.closest('.leaflet-layer') || el.parentElement;
+            const z = parseInt(getComputedStyle(layerDiv).zIndex, 10);
+            rasters.push({ el, z: isNaN(z) ? 0 : z, i });
+        });
+        rasters.sort((a, b) => a.z - b.z || a.i - b.i);
+        const jobs = [];
+        for (const { el } of rasters) {
+            const p = place(el); if (!visible(p)) continue;
+            const op = surveyLayerOpacity(el, container); if (op <= 0.01) continue;
+            if (el.tagName === 'CANVAS') { if (allowCanvas) jobs.push({ p, op, bitmap: Promise.resolve(el) }); continue; }
+            if (!el.complete || !el.src) continue;
+            jobs.push({ p, op, bitmap: surveyFetchImage(el.src).catch(() => { failed++; return null; }) });
+        }
+        for (const j of jobs) {
+            const bm = await j.bitmap; if (!bm) continue;
+            ctx.globalAlpha = j.op;
+            try { ctx.drawImage(bm, j.p.x, j.p.y, j.p.w, j.p.h); drawn++; } catch (e) { failed++; }
+        }
+        ctx.globalAlpha = 1;
+        // 2. vectors — every overlay SVG, serialized at its on-screen box
+        for (const svg of container.querySelectorAll('.leaflet-overlay-pane svg, .leaflet-pane > svg')) {
+            const p = place(svg); if (!visible(p)) continue;
+            const op = surveyLayerOpacity(svg, container); if (op <= 0.01) continue;
+            try {
+                const clone = svg.cloneNode(true);
+                clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+                clone.setAttribute('width', String(p.r.width)); clone.setAttribute('height', String(p.r.height));
+                clone.removeAttribute('style');
+                const xml = new XMLSerializer().serializeToString(clone);
+                const im = await surveyLoadImg(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(xml)}`);
+                ctx.globalAlpha = op; ctx.drawImage(im, p.x, p.y, p.w, p.h); drawn++;
+            } catch (e) { failed++; console.warn(`${TAG} survey capture: SVG layer skipped:`, e); }
+        }
+        ctx.globalAlpha = 1;
+        // 3. marker icons (base / safe zone / GM images); divIcon text is skipped
+        for (const im of container.querySelectorAll('.leaflet-marker-pane img')) {
+            const p = place(im); if (!visible(p)) continue;
+            const op = surveyLayerOpacity(im, container); if (op <= 0.01 || !im.src) continue;
+            try { const bm = await surveyFetchImage(im.src); ctx.globalAlpha = op; ctx.drawImage(bm, p.x, p.y, p.w, p.h); drawn++; } catch (e) { failed++; }
+        }
+        ctx.globalAlpha = 1;
+        // caption strip
+        ctx.font = `${Math.round(13 * Math.max(0.8, scale))}px sans-serif`; ctx.textBaseline = 'bottom';
+        const tw = ctx.measureText(label).width + 16;
+        ctx.fillStyle = 'rgba(0,0,0,0.62)'; ctx.fillRect(0, H - 24, tw, 24);
+        ctx.fillStyle = '#fff'; ctx.fillText(label, 8, H - 6);
+        let blob;
+        try {
+            blob = await new Promise((res, rej) => { try { canvas.toBlob(b => b ? res(b) : rej(new Error('toBlob returned null')), 'image/jpeg', 0.84); } catch (e) { rej(e); } });
+        } catch (e) {
+            if (allowCanvas) { console.warn(`${TAG} survey capture: canvas tainted — retrying without canvas tiles`); return surveyCaptureMap(map, label, false); }
+            throw e;
+        }
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        // Geographic frame of the shot → the viewer can draw toggleable
+        // markers (LTE points, airports, obstacles…) over the static JPEG.
+        let geo = null;
+        try {
+            const nw = map.containerPointToLatLng([0, 0]), se = map.containerPointToLatLng([crect.width, crect.height]);
+            geo = { n: nw.lat, w: nw.lng, s: se.lat, e: se.lng, px: W, py: H, zoom: map.getZoom() };
+        } catch (e) { console.warn(`${TAG} survey capture: no geo frame (${e.message})`); }
+        console.log(`${TAG} survey capture "${label}": ${W}×${H}, ${drawn} layer(s), ${failed} skipped, ${Math.round(bytes.length / 1024)} KB`);
+        return { bytes, w: W, h: H, drawn, failed, geo };
+    }
+    // Ask Map Styler (v34.141+) for the FAA sectional on/off without touching
+    // the user's toggle. Resolves {present, err}.
+    // Ask Map Styler for a temporary layer (v34.141 CHART_PREVIEW, v34.142
+    // BASEMAP_PREVIEW) without touching the user's toggles. Resolves {present, err}.
+    const surveyStylerWaiters = {};
+    function surveyStylerRequest(action, payload) {
+        return new Promise((resolve) => {
+            try {
+                if (!surveyStyleChannel) {
+                    surveyStyleChannel = new BroadcastChannel('AIM_STYLER_CHANNEL');
+                    surveyStyleChannel.onmessage = (ev) => {
+                        const d = ev.data || {};
+                        const w = d.action && surveyStylerWaiters[d.action];
+                        if (w) { delete surveyStylerWaiters[d.action]; w(d); }
+                    };
+                }
+            } catch (e) { resolve({ present: false, err: 'BroadcastChannel unavailable' }); return; }
+            const ack = `${action}_ACK`;
+            const timer = setTimeout(() => { if (surveyStylerWaiters[ack]) { delete surveyStylerWaiters[ack]; resolve({ present: false, err: `Map Styler did not answer ${action} — needs Map Styler v34.142+` }); } }, 5000);
+            surveyStylerWaiters[ack] = (d) => { clearTimeout(timer); resolve(d); };
+            try { surveyStyleChannel.postMessage(Object.assign({ action }, payload)); }
+            catch (e) { clearTimeout(timer); delete surveyStylerWaiters[ack]; resolve({ present: false, err: 'post failed' }); }
+        });
+    }
+    const surveyChartPreview = (on) => surveyStylerRequest('CHART_PREVIEW', { on: !!on, opacity: 0.7 });
+    const surveyBasemapPreview = (on) => surveyStylerRequest('BASEMAP_PREVIEW', { on: !!on, source: 'esri' });
+    // Site geometry for the form: center = base station (type 8) else the
+    // validator centroid; circle radius = max(5 SM, furthest entity + 3 SM);
+    // red dots = asset centroids.
+    function surveyGeometry(sid, res, ents) {
+        const pts = airCollectSitePoints(ents);
+        const base = ents.find(e => e.type === 8 && entityCoords(e));
+        let lat = res.meta.clat, lng = res.meta.clng, centerSrc = 'site centroid';
+        if (base) { const c = entityCoords(base)[0]; if (c && isFinite(c.lat)) { lat = c.lat; lng = c.lng; centerSrc = `base station "${base.name || ''}"`.trim(); } }
+        let furthestM = 0, minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+        pts.forEach(p => {
+            const d = approxMeters(lat, lng, p.lat, p.lng); if (d > furthestM) furthestM = d;
+            if (p.lat < minLat) minLat = p.lat; if (p.lat > maxLat) maxLat = p.lat;
+            if (p.lng < minLng) minLng = p.lng; if (p.lng > maxLng) maxLng = p.lng;
+        });
+        const radiusMi = Math.max(SURVEY_MIN_RADIUS_MI, furthestM / MI_TO_M + SURVEY_PAD_RADIUS_MI);
+        const rM = radiusMi * MI_TO_M;
+        const dLat = rM / 110540, dLng = rM / (111320 * Math.cos(lat * Math.PI / 180));
+        const assets = [];
+        ents.forEach(e => {
+            if (e.type !== 3) return;
+            const cs = entityCoords(e); if (!cs || !cs.length) return;
+            let a = 0, b = 0, n = 0; cs.forEach(c => { if (c && isFinite(c.lat)) { a += c.lat; b += c.lng; n++; } });
+            if (n) assets.push({ lat: a / n, lng: b / n, name: e.name || '' });
+        });
+        const counts = {};
+        ents.forEach(e => { const k = typeReg(e.type).long; counts[k] = (counts[k] || 0) + 1; });
+        return {
+            lat, lng, centerSrc, radiusMi, furthestMi: furthestM / MI_TO_M, assets, counts,
+            bounds: pts.length ? [[minLat, minLng], [maxLat, maxLng]] : null,
+            circleBounds: [[lat - dLat, lng - dLng], [lat + dLat, lng + dLng]],
+        };
+    }
+    async function surveyCaptureAll(sid, res, siteName, geom, progress) {
+        const map = getLeafletMap(); const L = getLeafletL();
+        if (!map || !L) throw new Error('map not reachable in this frame');
+        const saved = { center: map.getCenter(), zoom: map.getZoom() };
+        const temp = [];
+        const add = (l) => { try { l.addTo(map); temp.push(l); } catch (e) {} };
+        const drop = (l) => { try { map.removeLayer(l); } catch (e) {} };
+        const out = {};
+        const name = siteName || `Site ${sid}`;
+        const date = new Date().toISOString().slice(0, 10);
+        try {
+            airClearMapHighlights();
+            // Esri World Imagery under the two plain shots (user 2026-10-02) —
+            // whatever basemap the user runs day to day.
+            const bm = await surveyBasemapPreview(true);
+            if (!bm || !bm.present) console.warn(`${TAG} survey: Esri basemap preview unavailable — ${(bm && bm.err) || '?'}; capturing on the current basemap`);
+            // A. site setup close-up — entities fill the frame
+            if (geom.bounds) map.fitBounds(geom.bounds, { animate: false, padding: [24, 24] });
+            await surveyWaitTiles(map.getContainer(), 10000);
+            progress('capturing site setup…');
+            out.setup = await surveyCaptureMap(map, `${name} — site setup · ${date}`, true);
+            // B. overview — yellow circle (form: "yellow circle = proposed area"), assets red, base yellow
+            let ring = L.circle([geom.lat, geom.lng], { radius: geom.radiusMi * MI_TO_M, color: '#ffd400', weight: 3, fill: false, interactive: false });
+            add(ring);
+            add(L.circleMarker([geom.lat, geom.lng], { radius: 6, color: '#ffd400', fillColor: '#ffd400', fillOpacity: 1, interactive: false }));
+            geom.assets.forEach(a => add(L.circleMarker([a.lat, a.lng], { radius: 3.5, color: '#ff2a2a', weight: 1, fillColor: '#ff2a2a', fillOpacity: 1, interactive: false })));
+            map.fitBounds(geom.circleBounds, { animate: false, padding: [12, 12] });
+            await surveyWaitTiles(map.getContainer(), 12000);
+            progress('capturing overview…');
+            out.overview = await surveyCaptureMap(map, `${name} — ${geom.radiusMi.toFixed(0)} SM radius · assets red · base yellow · ${date}`, true);
+            // C. sectional — same view, FAA chart on, RED circle (form convention)
+            drop(ring); temp.splice(temp.indexOf(ring), 1);
+            ring = L.circle([geom.lat, geom.lng], { radius: geom.radiusMi * MI_TO_M, color: '#ff2a2a', weight: 4, fill: false, interactive: false });
+            add(ring);
+            try { await surveyBasemapPreview(false); } catch (e) {}
+            const ack = await surveyChartPreview(true);
+            if (ack && ack.present) {
+                await surveyWaitTiles(map.getContainer(), 15000);
+                progress('capturing sectional…');
+                out.sectional = await surveyCaptureMap(map, `${name} — VFR sectional · red circle = area of operation · ${date}`, true);
+            } else {
+                out.sectionalErr = (ack && ack.err) || 'FAA chart overlay unavailable';
+                console.warn(`${TAG} survey: sectional skipped — ${out.sectionalErr}`);
+            }
+        } finally {
+            try { await surveyChartPreview(false); } catch (e) {}
+            try { await surveyBasemapPreview(false); } catch (e) {}
+            temp.forEach(drop);
+            try { map.setView(saved.center, saved.zoom, { animate: false }); } catch (e) {}
+            try { airDrawMapHighlights(res); } catch (e) {}
+        }
+        return out;
+    }
+
+    // ---- Survey model + markdown ----
+    // "2026-10-02 13:24 CDT" — the clock of whoever is sitting there (stamps are
+    // stored as UTC ISO for sorting; this is what people read).
+    function surveyLocalStamp(d) {
+        try {
+            const parts = new Intl.DateTimeFormat(undefined, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false, timeZoneName: 'short' }).formatToParts(d);
+            const g = (t) => (parts.find(p => p.type === t) || {}).value || '';
+            return `${g('year')}-${g('month')}-${g('day')} ${g('hour')}:${g('minute')} ${g('timeZoneName')}`.trim();
+        } catch (e) { return d.toLocaleString(); }
+    }
+    function surveyRunId(d) {
+        const p = (n) => String(n).padStart(2, '0');
+        return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}_${p(d.getUTCHours())}${p(d.getUTCMinutes())}Z`;
+    }
+    async function surveySiteInfo(sid) {
+        const cfg = await fetchSiteConfig(sid);
+        const pick = (keys) => {
+            for (const k of keys) {
+                const v = cfg && cfg[k];
+                if (typeof v === 'string' && v.trim()) return v.trim();
+                if (v && typeof v === 'object' && typeof v.name === 'string' && v.name.trim()) return v.name.trim();
+            }
+            return '';
+        };
+        return {
+            name: pick(['name', 'site_name']),
+            customer: pick(['client', 'client_name', 'company', 'company_name', 'customer', 'organization', 'account']),
+            address: pick(['address', 'street_address', 'location', 'full_address']),
+            city: pick(['city']), state: pick(['state', 'region']), timezone: pick(['timezone', 'time_zone']),
+            mountain: !!(cfg && cfg.mountain_terrain),
+        };
+    }
+    function surveyDecision(res) {
+        const v = res.violations || [];
+        const high = v.filter(x => x.severity === 'high');
+        const warn = v.length - high.length;
+        const strip = (n) => String(n || '').replace(/^violation: /, '');
+        const inv = res.inventory || {};
+        if ((inv.sua || []).some(s => s.sev === 'high')) return { value: 'Needs Additional Review', why: 'inside prohibited / restricted surface airspace' };
+        if (inv.laanc && /caps drone ops at 0 ft/.test(inv.laanc.text)) return { value: 'Needs Additional Review', why: 'LAANC ceiling 0 ft over the site' };
+        if (high.length) return { value: 'Needs Additional Review', why: `${high.length} high-severity finding${high.length === 1 ? '' : 's'}: ${high.slice(0, 3).map(x => strip(x.note)).join('; ')}${high.length > 3 ? '; …' : ''}` };
+        if (warn) return { value: 'Acceptable with limitations', why: `${warn} warning${warn === 1 ? '' : 's'}: ${v.slice(0, 3).map(x => strip(x.note)).join('; ')}${v.length > 3 ? '; …' : ''}` };
+        if ((res.errors || []).length) return { value: 'Needs Additional Review', why: `FAA data incomplete this run (${res.errors.join('; ')})` };
+        return { value: 'Acceptable without limitations', why: 'no airspace findings against the current thresholds' };
+    }
+    // Compact copy of the validator result for the file (drop render-only
+    // fields; HIFLD paths can run to hundreds of KB — keep unless huge).
+    function surveyTrimResult(res) {
+        const inv = Object.assign({}, res.inventory);
+        delete inv.cacheServed;
+        inv.obstacles = (inv.obstacles || []).map(o => { const c = Object.assign({}, o); delete c._pi; return c; });
+        inv.translines = (inv.translines || []).map(t => { const c = Object.assign({}, t); delete c._pi; return c; });
+        const out = { violations: res.violations, inventory: inv, errors: res.errors || [], laancGrids: res.laancGrids || [], meta: res.meta };
+        if (JSON.stringify(out).length > 900000) {
+            out.inventory.translines = out.inventory.translines.map(t => { const c = Object.assign({}, t); c.paths = c.paths ? [c.paths[0].slice(0, 2)] : []; c.pathsDropped = true; return c; });
+        }
+        return out;
+    }
+    function surveyBuild(o) {
+        const { sid, res, siteName, siteInfo, notes, geom, reason, runId, images, login } = o;
+        const inv = res.inventory || {};
+        const sug = surveyDecision(res);
+        const nn = surveyNormalizeNotes(notes);
+        const nf = nn.fields;
+        const nasrCycle = inv.contacts && inv.contacts.cycle || null;
+        const facilities = (inv.airports || []).filter(a => a.distMi <= SURVEY_FACILITY_MI);
+        const facList = facilities.length ? facilities : (inv.airports || []).slice(0, 2);
+        const laancMin = inv.laanc && /caps drone ops at (\d+) ft/.exec(inv.laanc.text);
+        const opAlt = Math.min(airThresholds.maxOpAglFt, laancMin ? Number(laancMin[1]) : 400);
+        const mostRestrictive = (() => {
+            const order = ['B', 'C', 'D', 'E', 'G'];
+            let best = 'G';
+            (inv.airspace || []).forEach(a => {
+                const m = /INSIDE surface Class ([BCDE])/i.exec(a.text) || (a.sev === 'high' && /Class ([BCDE])/.exec(a.text));
+                if (m && order.indexOf(m[1]) < order.indexOf(best)) best = m[1];
+            });
+            return best;
+        })();
+        const suaHits = (inv.sua || []).filter(s => /^(INSIDE|Inside) /.test(s.text));
+        return {
+            v: 1, siteId: Number(sid), siteKey: envSiteKey(sid), env: IS_QA ? 'qa' : 'prod',
+            siteName: siteName || (siteInfo && siteInfo.name) || `Site ${sid}`,
+            runId, takenAt: new Date().toISOString(), takenAtLocal: surveyLocalStamp(new Date()), takenBy: login || 'unknown', reason,
+            script: SCRIPT_VERSION, nasrCycle,
+            thresholds: Object.assign({}, airThresholds), enabled: Object.assign({}, airEnabled),
+            site: {
+                // Notes override → site record → the site NAME's first word (Percepto site
+                // names start with the client: "Diamondback Cobra 01 - Web", "Delek US - …").
+                customer: nf.customer || (siteInfo && siteInfo.customer) || ((siteName || (siteInfo && siteInfo.name) || '').trim().split(/\s+/)[0] || ''),
+                address: nf.address || [siteInfo && siteInfo.address, siteInfo && siteInfo.city, siteInfo && siteInfo.state].filter(Boolean).join(', '),
+                timezone: siteInfo && siteInfo.timezone || '', mountainTerrain: !!(siteInfo && siteInfo.mountain),
+            },
+            geometry: {
+                lat: geom.lat, lng: geom.lng, centerSrc: geom.centerSrc, radiusMi: Math.round(geom.radiusMi * 10) / 10,
+                furthestMi: Math.round(geom.furthestMi * 100) / 100, assets: geom.assets.length, counts: geom.counts,
+                clat: res.meta.clat, clng: res.meta.clng, siteRadM: res.meta.siteRadM,
+            },
+            summary: {
+                violations: (res.violations || []).length,
+                high: (res.violations || []).filter(x => x.severity === 'high').length,
+                airspaceClass: mostRestrictive, sua: suaHits.length ? suaHits.map(s => s.text).join('; ') : 'No',
+                opAltAgl: opAlt, laanc: inv.laanc ? inv.laanc.text : 'not checked',
+                facilities: facList.length, facilitiesWithin10: facilities.length,
+                obstaclesShown: (inv.obstacles || []).filter(x => x.show).length, obstaclesFlagged: (inv.obstacles || []).filter(x => x.hit).length,
+                translines: (inv.translines || []).filter(x => x.show).length, stadiums: (inv.stadiums || []).length,
+                tfrs: (inv.tfrs || []).filter(t => t.status !== 'far').length, faaErrors: (res.errors || []).length,
+            },
+            decision: { suggested: sug.value, why: sug.why, signed: nf.decision || '', signedBy: nf.decisionBy || '', limitations: nf.limitations || '' },
+            images: {
+                setup: images.setup ? 'setup.jpg' : null, overview: images.overview ? 'overview.jpg' : null,
+                sectional: images.sectional ? 'sectional.jpg' : null, sectionalErr: images.sectionalErr || null,
+                geo: { setup: images.setup && images.setup.geo || null, overview: images.overview && images.overview.geo || null, sectional: images.sectional && images.sectional.geo || null },
+            },
+            notes: nn,
+            result: surveyTrimResult(res),
+        };
+    }
+    const mdCell = (s) => String(s == null ? '' : s).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim();
+    const mdRows = (txt) => String(txt || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean).map(l => l.split('|').map(c => c.trim()));
+    function mdTable(cols, rows) {
+        const out = [`| ${cols.join(' | ')} |`, `| ${cols.map(() => '---').join(' | ')} |`];
+        if (!rows.length) out.push(`| N/A ${cols.slice(1).map(() => '| ').join('')}|`);
+        rows.forEach(r => out.push(`| ${cols.map((c, i) => mdCell(r[i])).join(' | ')} |`));
+        return out.join('\n');
+    }
+    const fmtMi = (mi) => mi < 0.95 ? `${Math.round(mi * 5280).toLocaleString()} ft` : `${mi.toFixed(1)} SM`;
+    const fmtMiNm = (mi, nm) => `${fmtMi(mi)} (${nm.toFixed(2)} NM)`;
+    // ---- v4.310: notes model v2 + section model. ONE model → markdown
+    // (GitHub / PDF, fixed order) AND the tabbed AIM viewer with in-place
+    // editing. Notes (site-level, persist across runs): scalar fields,
+    // row tables (added rows for things the data can't know) and the
+    // per-facility "Contacted" stamps. ----
+    const SURVEY_FIELDS = {
+        reference:    { label: 'Percepto reference (cover)', ph: 'e.g. SS-2026-017' },
+        writtenBy:    { label: 'Written by (cover) — name, position', ph: 'Jane Doe, Customer Success Manager' },
+        decision:     { label: 'Decision (signed)', type: 'select', opts: ['', 'Acceptable without limitations', 'Acceptable with limitations', 'Needs Additional Review'] },
+        decisionBy:   { label: 'Approved and signed by — name, position · date', ph: 'John Roe, Director of Operations · 2026-10-02' },
+        limitations:  { label: 'Limitations / what additional review needs', type: 'textarea' },
+        customer:     { label: 'Customer' },
+        address:      { label: 'Address' },
+        lteCarrier:   { label: 'LTE carrier (top performer)' },
+        lteSpeeds:    { label: 'Upload / download', ph: '12 / 45 Mbps' },
+        lteGo:        { label: 'LTE Go / No Go', ph: 'Go · Verizon' },
+        hazardReview: { label: 'Field review notes on the FAA-listed hazards', type: 'textarea' },
+        images:       { label: 'Images — links or file names, one per line', type: 'textarea' },
+        followUp:     { label: 'Follow-up — one per line', type: 'textarea' },
+    };
+    const SURVEY_TABLES = {
+        localAviation: { cols: ['Type of activity', 'Source used to identify', 'Operator', 'Contacted', 'Contacted on · by'], contactCol: 3 },
+        droneActivity: { cols: ['Type of activity', 'Source used to identify', 'Operator', 'Contacted', 'Contacted on · by'], contactCol: 3 },
+        hazards:       { cols: ['Identified hazard', 'Location / height', 'Impact on operation', 'Verified & source', 'Additional review', 'Field review'] },
+        restrictions:  { cols: ['Restriction', 'Impact on operation', 'Source used'] },
+        terrain:       { cols: ['Factor', 'Impact on operation', 'Source used'] },
+        planned:       { cols: ['Change being made', 'Status (current / planned)', 'Impact on operation', 'Source used'] },
+        lte:           { cols: ['Carrier', 'Download', 'Upload', 'Latency', 'Location (lat, lng — 📍 picks it)'], pick: 4 },
+    };
+    // Tabs group the sections for reading in AIM; the markdown keeps the
+    // flat form order (summary → … → appendix) for GitHub and the PDF.
+    const SURVEY_TABS = [
+        { id: 'summary',  label: 'Summary',   sections: ['summary', 'overview'] },
+        { id: 'aviation', label: 'Aviation',  sections: ['facilities', 'localAviation', 'droneActivity'] },
+        { id: 'hazards',  label: 'Hazards',   sections: ['hazards', 'restrictions', 'terrain'] },
+        { id: 'ops',      label: 'Site & LTE', sections: ['planned', 'lte', 'images', 'followUp'] },
+        { id: 'appendix', label: 'Appendix',  sections: ['appendix'] },
+    ];
+    function surveyEmptyNotes() { return { v: 2, fields: {}, tables: {}, contacts: {} }; }
+    function surveyNormalizeNotes(n) {
+        const out = surveyEmptyNotes();
+        if (!n || typeof n !== 'object') return out;
+        if (n.updatedAt) out.updatedAt = n.updatedAt;
+        if (n.updatedBy) out.updatedBy = n.updatedBy;
+        const f = n.fields || {};
+        Object.keys(SURVEY_FIELDS).forEach(k => { if (typeof f[k] === 'string' && f[k].trim()) out.fields[k] = f[k]; });
+        Object.keys(SURVEY_TABLES).forEach(k => {
+            const t = n.tables && n.tables[k];
+            if (Array.isArray(t)) out.tables[k] = t.filter(Array.isArray).map(r => r.map(c => String(c == null ? '' : c)));
+            else if (typeof f[k] === 'string' && f[k].trim()) out.tables[k] = mdRows(f[k]);   // v1 "a | b | c" lines
+        });
+        if (n.contacts && typeof n.contacts === 'object') {
+            Object.keys(n.contacts).forEach(id => { const c = n.contacts[id]; if (c && typeof c === 'object' && c.contacted) out.contacts[id] = { contacted: true, at: c.at || '', atLocal: c.atLocal || '', by: c.by || '' }; });
+        }
+        return out;
+    }
+    const surveyNoteRows = (notes, key) => ((notes && notes.tables && notes.tables[key]) || []).filter(r => r.some(c => String(c || '').trim()));
+    const surveyLines = (s) => String(s || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+    // Section model. Every block is one of:
+    //   decision                      suggested verdict + signed fields
+    //   kv {rows:[[label, value|{field, auto, fallback}]]}
+    //   images {items:[{key,file,label,caption}]}
+    //   text {md}
+    //   table {cols, rows:[{cells, ident?, hit?}], edit?:tableKey, contacts?:true}
+    //   field {key}                   one scalar note (textarea/select/input)
+    //   list {items, edit?:fieldKey}  bullets: auto items + one-per-line note
+    function surveySections(sv, notes) {
+        const r = sv.result, inv = r.inventory || {}, s = sv.summary, th = sv.thresholds;
+        const nf = notes.fields || {}, nc = notes.contacts || {};
+        const site = `${sv.siteName}${sv.env === 'qa' ? ' (QA)' : ''}`;
+        const fac = (inv.airports || []).filter(a => a.distMi <= SURVEY_FACILITY_MI);
+        const facList = fac.length ? fac : (inv.airports || []).slice(0, 2);
+        const S = [];
+        S.push({ id: 'summary', title: 'Summary', blocks: [
+            { t: 'decision' },
+            { t: 'kv', rows: [
+                ['Customer', { field: 'customer', auto: sv.site.customer || '', fallback: 'Unknown' }],
+                ['Site name', site],
+                ['Date and time', sv.takenAtLocal ? `${sv.takenAtLocal} (${sv.takenAt.replace('T', ' ').slice(0, 16)} UTC)` : `${sv.takenAt.replace('T', ' ').slice(0, 16)} UTC`],
+                ['Address', { field: 'address', auto: sv.site.address || '', fallback: 'Unknown' }],
+                ['GPS coordinates', `${sv.geometry.lat.toFixed(6)}, ${sv.geometry.lng.toFixed(6)} (${sv.geometry.centerSrc})`],
+                ['Airspace (most restrictive at the site)', `Class ${s.airspaceClass}`],
+                ['Special use airspace', s.sua],
+                ['Operational altitude (AGL)', `${s.opAltAgl} ft AGL — AIM max operating setting ${th.maxOpAglFt} ft · ${s.laanc}`],
+                ['LTE carrier', { field: 'lteCarrier', auto: '', fallback: 'N/A — field survey' }],
+                ['Upload / download', { field: 'lteSpeeds', auto: '', fallback: 'N/A — field survey' }],
+                ['Site setup', Object.keys(sv.geometry.counts).sort().map(k => `${sv.geometry.counts[k]} ${k}`).join(', ') || 'none'],
+            ] },
+        ] });
+        const imgs = [];
+        if (sv.images.setup) imgs.push({ key: 'setup', file: 'setup.jpg', label: 'Site setup', caption: 'Site setup as drawn in Percepto on Esri imagery (FFZ green, flight paths blue, assets white).' });
+        if (sv.images.overview) imgs.push({ key: 'overview', file: 'overview.jpg', label: 'Overview', caption: `Yellow circle = ${sv.geometry.radiusMi} SM around the ${sv.geometry.centerSrc} (furthest entity ${sv.geometry.furthestMi} SM + ${SURVEY_PAD_RADIUS_MI} SM, minimum ${SURVEY_MIN_RADIUS_MI} SM). Red dots = ${sv.geometry.assets} asset${sv.geometry.assets === 1 ? '' : 's'}, base yellow.` });
+        if (sv.images.sectional) imgs.push({ key: 'sectional', file: 'sectional.jpg', label: 'VFR sectional', caption: 'FAA VFR sectional — red circle = area of operation.' });
+        const ovBlocks = [];
+        if (sv.reason === 'preview') ovBlocks.push({ t: 'text', md: '*Map images (site setup · overview · VFR sectional) are captured when the survey is saved.*' });
+        if (imgs.length) ovBlocks.push({ t: 'images', items: imgs });
+        if (sv.reason !== 'preview' && !sv.images.sectional) ovBlocks.push({ t: 'text', md: `*VFR sectional image not captured: ${sv.images.sectionalErr || 'unavailable'}.*` });
+        ovBlocks.push({ t: 'text', md: 'Customer CSV / KML: see the Site Setup Analyzer export in AIM (🗺️ Analyzer) — the setup above is the as-built version.' });
+        S.push({ id: 'overview', title: 'Overview', blocks: ovBlocks });
+        const stamp = (c) => c && c.contacted ? `${c.atLocal || (c.at ? surveyLocalStamp(new Date(c.at)) : '')}${c.by ? ` · ${c.by}` : ''}` : '';
+        S.push({ id: 'facilities', title: 'Nearby aviation facilities', blocks: [
+            { t: 'text', md: `${fac.length ? `${fac.length} facilit${fac.length === 1 ? 'y' : 'ies'} within ${SURVEY_FACILITY_MI} SM of the ${sv.geometry.centerSrc}` : `None within ${SURVEY_FACILITY_MI} SM — closest ${facList.length} listed`}. Distances are to the nearest site entity; a facility inside the ${th.stripNm} NM standoff is **contact required** (Regulations notifies them of our operations). Phones: FAA NASR ${sv.nasrCycle || 'unavailable'}${inv.contacts && inv.contacts.err ? ` (⚠ ${inv.contacts.err})` : ''}.` },
+            { t: 'table', contacts: true, cols: ['Facility', 'Code', 'Type', 'Use', 'Phone (manager / owner)', 'Airspace', 'Distance & direction', 'Standoff', 'Contacted', 'Contacted on · by'],
+              rows: facList.map(a => ({ ident: a.ident || a.name, hit: !!a.hit, cells: [
+                  a.name, `${a.ident || '—'}${a.nasr && a.nasr.icao ? ` / ${a.nasr.icao}` : ''}`,
+                  a.nasr && a.nasr.medical ? `${a.kind} (medical)` : a.kind, a.priv,
+                  a.nasr ? airContactText(a.nasr) : 'Unknown — not in NASR',
+                  a.nasr ? airNasrAirspaceText(a.nasr) : '—',
+                  `${fmtMiNm(a.distMi, a.distNm)} ${a.brg}`,
+                  a.hit ? `⚠ inside ${th.stripNm} NM — contact required` : 'clear',
+                  nc[a.ident || a.name] && nc[a.ident || a.name].contacted ? 'Yes' : 'No',
+                  stamp(nc[a.ident || a.name]),
+              ] })) },
+        ] });
+        const privStrips = (inv.airports || []).filter(a => a.priv === 'private' && a.distMi <= SURVEY_FACILITY_MI && /airport/i.test(a.kind));
+        const stripsContacted = privStrips.filter(a => nc[a.ident || a.name] && nc[a.ident || a.name].contacted);
+        const localAuto = privStrips.length ? [['Agricultural / general aviation (possible)', `FAA airport data — ${privStrips.length} private strip${privStrips.length === 1 ? '' : 's'} within ${SURVEY_FACILITY_MI} SM: ${privStrips.slice(0, 4).map(a => a.name).join(', ')}${privStrips.length > 4 ? '…' : ''}`, privStrips.slice(0, 3).map(a => a.nasr ? airContactText(a.nasr) : a.name).join('; '),
+            stripsContacted.length === privStrips.length ? 'Yes' : stripsContacted.length ? `${stripsContacted.length} of ${privStrips.length}` : 'No', stripsContacted.map(a => `${a.ident || a.name}: ${stamp(nc[a.ident || a.name])}`).join('; ')]] : [];
+        S.push({ id: 'localAviation', title: 'Local aviation activity', edit: true, blocks: [
+            { t: 'text', md: 'Manned activity at or below 1,000 ft AGL that could affect the area (ag, mapping, utility patrol, public safety, military). Add what ADS-B, observation or the client tells you.' },
+            { t: 'table', cols: SURVEY_TABLES.localAviation.cols, rows: localAuto.map(c => ({ cells: c })), edit: 'localAviation' } ] });
+        S.push({ id: 'droneActivity', title: 'Drone activity', edit: true, blocks: [
+            { t: 'text', md: 'Other UAS operations in the area (client, NOTAMs, FRIA, Percepto neighbours).' },
+            { t: 'table', cols: SURVEY_TABLES.droneActivity.cols, rows: [], edit: 'droneActivity' } ] });
+        const hz = [];
+        (inv.obstacles || []).filter(o => o.show).forEach(o => hz.push({ cells: [
+            `${o.isWindmill ? 'Wind turbine' : o.type}${o.lit && o.lit !== 'N' ? ' (lit)' : ''}${o.qty && o.qty !== '1' ? ` ×${o.qty}` : ''}`,
+            `${o.agl != null ? `${o.agl} ft AGL` : 'height unknown'}${o.amsl != null ? ` / ${o.amsl.toLocaleString()} ft MSL` : ''} · ${o.distFt < 100 ? 'on site' : o.distFt < 5000 ? `${o.distFt.toLocaleString()} ft` : `${o.distMi.toFixed(1)} SM`} from ${o.src || 'site'} · ${o.lat.toFixed(5)}, ${o.lng.toFixed(5)}${o.tb ? ` · ${airTbText(o.tb)}` : ''}`,
+            o.hit ? `⚠ inside the ${o.isWindmill ? th.windmillFt : o.isTL ? th.tlTowerFt : th.obstacleFt} ft standoff${o.band ? ` (flight band ${o.band.floorFt}–${o.band.ceilFt != null ? o.band.ceilFt : '?'} ft MSL)` : ''}` : 'outside standoff — awareness',
+            `Yes — FAA DOF${o.oas ? ` ${o.oas}` : ''}${o.tb ? ' + USWTDB' : ''}`, o.hit ? 'Yes' : 'No', '' ] }));
+        (inv.translines || []).filter(t => t.show).forEach(t => hz.push({ cells: [
+            `Transmission line ${t.volt}${t.owner ? ` (${t.owner})` : ''}`,
+            `${t.distFt < 5000 ? `${t.distFt.toLocaleString()} ft` : `${t.distMi.toFixed(1)} SM`} from ${t.src || 'site'}${t.nearPt ? ` · ${t.nearPt[0].toFixed(5)}, ${t.nearPt[1].toFixed(5)}` : ''}`,
+            'Conductor height unknown — shielding / standoff', 'Yes — HIFLD', 'No', '' ] }));
+        (inv.stadiums || []).forEach(st => hz.push({ cells: [`Stadium ${st.name}${st.city ? `, ${st.city}` : ''}`, `${fmtMiNm(st.distMi, st.distNm)} ${st.brg}`, st.hit ? `⚠ inside the ${th.stadiumNm} NM event TFR radius` : 'event TFR awareness', 'Yes — FAA Stadiums', st.hit ? 'Yes' : 'No', ''] }));
+        (inv.tfrs || []).filter(t => t.status !== 'far').forEach(t => hz.push({ cells: [`TFR ${t.id} (${t.type})`, t.window || '', t.text, 'Yes — tfr.faa.gov (live at run time)', t.status === 'active' && t.inside ? 'Yes' : 'No', ''] }));
+        S.push({ id: 'hazards', title: 'Hazards', edit: true, blocks: [
+            { t: 'text', md: 'FAA obstacles, transmission lines, stadiums and live TFRs come from the data; add schools, prisons, venues, roads, neighbouring pads and anything else below. “Additional review = Yes” hazards get a field review during the LTE site visit.' },
+            { t: 'table', cols: SURVEY_TABLES.hazards.cols, rows: hz, edit: 'hazards' },
+            { t: 'field', key: 'hazardReview' } ] });
+        const rs = [];
+        if (inv.laanc) rs.push({ cells: ['LAANC', inv.laanc.text, `FAA UAS facility map${inv.laancFacility ? ` — ${inv.laancFacility.name}${inv.laancFacility.nasr ? `, ${airContactText(inv.laancFacility.nasr)}` : ''}` : ''}`] });
+        (inv.airspace || []).forEach(a => rs.push({ cells: ['Controlled airspace', a.text, 'FAA Class Airspace'] }));
+        (inv.sua || []).filter(x => x.sev !== 'ok').forEach(x => rs.push({ cells: ['Special use airspace', x.text, 'FAA SUA / Prohibited Areas'] }));
+        S.push({ id: 'restrictions', title: 'Restrictions', edit: true, blocks: [
+            { t: 'text', md: 'Government, client-imposed, facility-rule or landowner restrictions, permits, privacy concerns.' },
+            { t: 'table', cols: SURVEY_TABLES.restrictions.cols, rows: rs, edit: 'restrictions' } ] });
+        const tr = [];
+        if (sv.site.mountainTerrain) tr.push({ cells: ['Mountain-terrain site flag set in Percepto', 'Altitude handling per site setup', 'Percepto site record'] });
+        const wind = (inv.obstacles || []).filter(o => o.show && o.isWindmill);
+        if (wind.length) tr.push({ cells: [`Wind turbines (${wind.length} within view)`, 'Wake turbulence + rotor disc — see 📐 Profile view per turbine in AIM', 'FAA DOF + USWTDB'] });
+        S.push({ id: 'terrain', title: 'Terrain / obstacles / environment', edit: true, blocks: [
+            { t: 'text', md: 'Elevation changes, extreme weather, GNSS limitations, RF interference, large structures.' },
+            { t: 'table', cols: SURVEY_TABLES.terrain.cols, rows: tr, edit: 'terrain' } ] });
+        S.push({ id: 'planned', title: 'Planned changes', edit: true, blocks: [
+            { t: 'text', md: 'Current or planned changes in the next 24 months: construction, new equipment, expansions, shutdowns, crane work, new powerlines or pads, decommissioning.' },
+            { t: 'table', cols: SURVEY_TABLES.planned.cols, rows: [], edit: 'planned' } ] });
+        S.push({ id: 'lte', title: 'LTE survey', edit: true, blocks: [
+            { t: 'text', md: 'Per carrier and location: Chrome speed test download / upload / latency (three phones; XR60 if results are poor). The best carrier goes in the Summary. 📍 on a row picks the spot on the map; rows with coordinates draw on the Summary maps (LTE layer).' },
+            { t: 'table', cols: SURVEY_TABLES.lte.cols, rows: [], edit: 'lte' },
+            { t: 'field', key: 'lteGo' } ] });
+        S.push({ id: 'images', title: 'Images', edit: true, blocks: [
+            { t: 'text', md: 'Photos: proposed base location, access roads, nearby assets, obstacles and hazards, surrounding area.' },
+            { t: 'list', items: [], edit: 'images', link: true } ] });
+        const fuAuto = (inv.obstacles || []).filter(o => o.hit).map(o => `Hazard field review: ${o.isWindmill ? 'wind turbine' : o.type} ${o.agl != null ? `${o.agl} ft` : ''} at ${o.distFt.toLocaleString()} ft from ${o.src || 'site'}`);
+        facList.filter(a => a.hit && !(nc[a.ident || a.name] && nc[a.ident || a.name].contacted)).forEach(a => fuAuto.push(`Contact ${a.name}${a.ident ? ` (${a.ident})` : ''} — inside the ${th.stripNm} NM standoff, not yet marked contacted`));
+        S.push({ id: 'followUp', title: 'Follow-up', edit: true, blocks: [ { t: 'list', items: fuAuto, edit: 'followUp' } ] });
+        S.push({ id: 'appendix', title: 'Appendix', blocks: [ { t: 'text', md:
+            `Thresholds: strips ${th.stripNm} NM · obstacles ${th.obstacleFt} ft · turbines ${th.windmillFt} ft · T-L towers ${th.tlTowerFt} ft (fly-over clearance ${th.tlClearFt} ft) · max ops ${th.maxOpAglFt} ft AGL · stadium ${th.stadiumNm} NM · inventory ${th.inventoryMi} mi.  \n`
+            + `Checks enabled: ${Object.keys(sv.enabled).filter(k => sv.enabled[k]).join(', ')}.  \n`
+            + (r.errors && r.errors.length ? `⚠ FAA queries that failed this run (results partial): ${r.errors.join('; ')}  \n` : '')
+            + `Violations drawn as Validator issues: ${s.violations} (${s.high} high).` } ] });
+        return S;
+    }
+    // Resolved display value of a kv field cell.
+    const surveyFieldValue = (v, nf) => typeof v === 'string' ? v : (nf[v.field] || v.auto || `✎ ${v.fallback}`);
+    function surveyMarkdown(sv) {
+        const notes = surveyNormalizeNotes(sv.notes);
+        const nf = notes.fields || {};
+        const site = `${sv.siteName}${sv.env === 'qa' ? ' (QA)' : ''}`;
+        const L = [`# ${site} — Airspace Survey`, '',
+            `Site ${sv.siteId} · run \`${sv.runId}\` (${sv.reason}) · generated by AIM Site Setup Tools v${sv.script} on ${sv.takenAtLocal || `${sv.takenAt.replace('T', ' ').slice(0, 16)} UTC`} by ${sv.takenBy}  `,
+            `Data: FAA AIS (56-day chart cycle) · FAA NASR ${sv.nasrCycle || 'n/a'} · HIFLD · USGS USWTDB · LAANC facility maps · tfr.faa.gov`, '',
+            '> This survey is not the final route validation or risk assessment. Sections marked ✎ are entered by people (📄 Survey in AIM) and persist across runs; everything else is regenerated from data on each run.', ''];
+        surveySections(sv, notes).forEach(sec => {
+            L.push(`## ${sec.title}${sec.edit ? ' ✎' : ''}`); L.push('');
+            sec.blocks.forEach(b => {
+                if (b.t === 'decision') {
+                    L.push(`**Decision (signed):** ${nf.decision || '✎ _not yet signed_'}${nf.decisionBy ? ` — ${nf.decisionBy}` : ''}  `);
+                    L.push(`**Decision (AIM-suggested):** ${sv.decision.suggested} — ${sv.decision.why}  `);
+                    if (nf.limitations) L.push(`**Limitations / review needed:** ${nf.limitations}  `);
+                    if (nf.reference || nf.writtenBy) L.push(`**Percepto reference:** ${nf.reference || 'N/A'} · **Written by:** ${nf.writtenBy || 'N/A'}  `);
+                } else if (b.t === 'kv') {
+                    L.push(mdTable(['Field', 'Value'], b.rows.map(rw => [rw[0], surveyFieldValue(rw[1], nf)])));
+                } else if (b.t === 'images') {
+                    b.items.forEach(im => { L.push(`![${im.label}](${im.file})`); L.push(''); L.push(`*${im.caption}*`); L.push(''); });
+                } else if (b.t === 'text') {
+                    L.push(b.md);
+                } else if (b.t === 'table') {
+                    const rows = b.rows.map(rw => rw.cells).concat(b.edit ? surveyNoteRows(notes, b.edit).map(rw => b.cols.map((c, i) => rw[i] || '')) : []);
+                    L.push(mdTable(b.cols, rows));
+                } else if (b.t === 'field') {
+                    const v = nf[b.key]; if (v) L.push(`**${SURVEY_FIELDS[b.key].label}:** ${v}`); else L.push(`**${SURVEY_FIELDS[b.key].label}:** N/A`);
+                } else if (b.t === 'list') {
+                    const items = b.items.concat(b.edit ? surveyLines(nf[b.edit]) : []);
+                    L.push(items.length ? items.map(x => b.link && /^https?:/i.test(x) ? `- <${x}>` : `- ${x}`).join('\n') : 'N/A');
+                }
+                L.push('');
+            });
+        });
+        return L.join('\n');
+    }
+    // ---- Tabbed HTML viewer with in-place editing of the ✎ parts. ----
+    function surveyInline(t) {
+        return airEsc(t)
+            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+            .replace(/`([^`]+)`/g, '<code style="color:#ffd27a">$1</code>')
+            .replace(/&lt;(https?:[^&]+)&gt;/g, '<a href="$1" target="_blank" style="color:#7adfe6">$1</a>')
+            .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>')
+            .replace(/  \n|\n/g, '<br>');
+    }
+    const SURVEY_INPUT_CSS = 'box-sizing:border-box;background:rgba(0,0,0,0.35);color:#dfe9f0;border:1px solid rgba(255,210,122,0.45);border-radius:4px;padding:3px 6px;font:11px/1.4 inherit;';
+    const SURVEY_TD = 'padding:3px 7px;border:1px solid rgba(122,223,230,0.22);vertical-align:top;';
+    function surveyFieldInput(key, nf, extra) {
+        const f = SURVEY_FIELDS[key]; const v = nf[key] || '';
+        const attrs = `data-sn-field="${key}" ${extra || ''}`;
+        if (f.type === 'select') return `<select ${attrs} style="${SURVEY_INPUT_CSS}width:100%;">${f.opts.map(o => `<option value="${airEsc(o)}" ${o === v ? 'selected' : ''}>${o || '— not signed —'}</option>`).join('')}</select>`;
+        if (f.type === 'textarea') return `<textarea ${attrs} rows="2" placeholder="${airEsc(f.ph || '')}" style="${SURVEY_INPUT_CSS}width:100%;resize:vertical;">${airEsc(v)}</textarea>`;
+        return `<input ${attrs} type="text" value="${airEsc(v)}" placeholder="${airEsc(f.ph || '')}" style="${SURVEY_INPUT_CSS}width:100%;">`;
+    }
+    // Markers to draw over a capture, from the saved data + current notes.
+    const SURVEY_LAYERS = [
+        { id: 'lte', label: 'LTE points', color: '#ffd27a' },
+        { id: 'airports', label: 'Airports', color: '#5fff5f' },
+        { id: 'obstacles', label: 'Obstacles', color: '#ff5555' },
+        { id: 'lines', label: 'Power lines', color: '#ff9f43' },
+        { id: 'base', label: 'Base / centre', color: '#ffd400' },
+    ];
+    const surveyParseLatLng = (txt) => { const m = /^\s*(-?\d{1,2}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)/.exec(String(txt || '')); return m ? { lat: +m[1], lng: +m[2] } : null; };
+    function surveyOverlayMarkers(sv, notes, layers) {
+        const inv = (sv.result && sv.result.inventory) || {};
+        const out = [];
+        if (layers.lte) ((notes.tables && notes.tables.lte) || []).forEach(r => { const p = surveyParseLatLng(r[4]); if (p) out.push({ lat: p.lat, lng: p.lng, label: `${r[0] || 'LTE'}${r[1] || r[2] ? ` ${r[1] || '?'}/${r[2] || '?'}` : ''}`, color: '#ffd27a', shape: 'diamond' }); });
+        if (layers.airports) (inv.airports || []).forEach(a => { if (isFinite(a.lat)) out.push({ lat: a.lat, lng: a.lng, label: a.ident || a.name, color: a.hit ? '#ff5555' : '#5fff5f', shape: 'ring' }); });
+        if (layers.obstacles) (inv.obstacles || []).filter(o => o.show).forEach(o => { if (isFinite(o.lat)) out.push({ lat: o.lat, lng: o.lng, label: `${o.isWindmill ? 'WT' : o.type}${o.agl != null ? ` ${o.agl}` : ''}`, color: o.hit ? '#ff5555' : '#ff8080', shape: 'tri' }); });
+        if (layers.lines) (inv.translines || []).filter(t => t.show && t.nearPt).forEach(t => out.push({ lat: t.nearPt[0], lng: t.nearPt[1], label: t.volt, color: '#ff9f43', shape: 'dot' }));
+        if (layers.base && sv.geometry) out.push({ lat: sv.geometry.lat, lng: sv.geometry.lng, label: 'base', color: '#ffd400', shape: 'square' });
+        return out;
+    }
+    function surveyOverlaySvg(geo, markers) {
+        if (!geo || !isFinite(geo.n)) return '';
+        const mx = (lng) => lng * Math.PI / 180, my = (lat) => Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360));
+        const x0 = mx(geo.w), x1 = mx(geo.e), y0 = my(geo.n), y1 = my(geo.s);
+        const W = geo.px, H = geo.py, r = Math.max(5, Math.round(W / 220));
+        const items = [];
+        markers.forEach(m => {
+            const x = (mx(m.lng) - x0) / (x1 - x0) * W, y = (my(m.lat) - y0) / (y1 - y0) * H;
+            if (!(x >= -r && x <= W + r && y >= -r && y <= H + r)) return;
+            const stroke = `stroke="#000" stroke-width="1.2" paint-order="stroke"`;
+            let g = '';
+            if (m.shape === 'ring') g = `<circle cx="${x}" cy="${y}" r="${r * 1.6}" fill="none" stroke="${m.color}" stroke-width="3"/><circle cx="${x}" cy="${y}" r="${r * 1.6 + 1.5}" fill="none" stroke="#000" stroke-width="1" opacity="0.6"/>`;
+            else if (m.shape === 'diamond') g = `<path d="M${x} ${y - r * 1.5} L${x + r * 1.5} ${y} L${x} ${y + r * 1.5} L${x - r * 1.5} ${y} Z" fill="${m.color}" ${stroke}/>`;
+            else if (m.shape === 'tri') g = `<path d="M${x} ${y - r * 1.4} L${x + r * 1.3} ${y + r} L${x - r * 1.3} ${y + r} Z" fill="${m.color}" ${stroke}/>`;
+            else if (m.shape === 'square') g = `<rect x="${x - r}" y="${y - r}" width="${r * 2}" height="${r * 2}" fill="${m.color}" ${stroke}/>`;
+            else g = `<circle cx="${x}" cy="${y}" r="${r}" fill="${m.color}" ${stroke}/>`;
+            items.push(`${g}<text x="${x + r * 1.8}" y="${y + r * 0.5}" font-size="${r * 2.2}" font-family="sans-serif" font-weight="700" fill="${m.color}" stroke="#000" stroke-width="2.5" paint-order="stroke" stroke-linejoin="round">${airEsc(m.label)}</text>`);
+        });
+        return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;">${items.join('')}</svg>`;
+    }
+    function surveyRenderSection(sec, sv, notes, st) {
+        const nf = notes.fields || {}, nc = notes.contacts || {};
+        const h = [`<h3 style="color:#7adfe6;margin:12px 0 6px;font-size:14px;border-bottom:1px solid rgba(122,223,230,0.25);padding-bottom:2px;">${airEsc(sec.title)}${sec.edit ? ' <span style="color:#ffd27a;font-size:11px;">✎ editable</span>' : ''}</h3>`];
+        sec.blocks.forEach(b => {
+            if (b.t === 'decision') {
+                h.push(`<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;margin:4px 0 8px;">
+                    <div><div style="opacity:0.8;">AIM-suggested</div><div><strong>${airEsc(sv.decision.suggested)}</strong> — ${airEsc(sv.decision.why)}</div></div>
+                    <div><div style="opacity:0.8;">${airEsc(SURVEY_FIELDS.decision.label)}</div>${surveyFieldInput('decision', nf)}<div style="opacity:0.8;margin-top:4px;">${airEsc(SURVEY_FIELDS.decisionBy.label)}</div>${surveyFieldInput('decisionBy', nf)}</div>
+                    <div style="grid-column:1 / -1;"><div style="opacity:0.8;">${airEsc(SURVEY_FIELDS.limitations.label)}</div>${surveyFieldInput('limitations', nf)}</div>
+                    <div><div style="opacity:0.8;">${airEsc(SURVEY_FIELDS.reference.label)}</div>${surveyFieldInput('reference', nf)}</div>
+                    <div><div style="opacity:0.8;">${airEsc(SURVEY_FIELDS.writtenBy.label)}</div>${surveyFieldInput('writtenBy', nf)}</div></div>`);
+            } else if (b.t === 'kv') {
+                h.push(`<table style="border-collapse:collapse;font-size:11px;margin:4px 0;width:100%;max-width:900px;"><tbody>${b.rows.map(rw => {
+                    const v = rw[1];
+                    const cell = typeof v === 'string' ? airEsc(v)
+                        : `<input data-sn-field="${v.field}" type="text" value="${airEsc(nf[v.field] || '')}" placeholder="${airEsc(v.auto || v.fallback)}" style="${SURVEY_INPUT_CSS}width:100%;">`;
+                    return `<tr><td style="${SURVEY_TD}background:rgba(122,223,230,0.08);width:230px;">${airEsc(rw[0])}</td><td style="${SURVEY_TD}">${cell}</td></tr>`;
+                }).join('')}</tbody></table>`);
+            } else if (b.t === 'images') {
+                const cur = b.items.some(im => im.key === st.imgTab) ? st.imgTab : b.items[0].key;
+                const geos = (sv.images && sv.images.geo) || {};
+                const anyGeo = b.items.some(im => geos[im.key]);
+                const markers = anyGeo ? surveyOverlayMarkers(sv, notes, st.layers) : [];
+                const toggles = anyGeo
+                    ? SURVEY_LAYERS.map(l => `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;margin-right:10px;"><input type="checkbox" data-sn-layer="${l.id}" ${st.layers[l.id] ? 'checked' : ''}> <span style="color:${l.color}">●</span> ${airEsc(l.label)}</label>`).join('')
+                    : '<span style="opacity:0.6;">map overlays need a run saved with v4.312 or later</span>';
+                h.push(`<div style="margin:6px 0;"><div style="display:flex;gap:4px;margin-bottom:4px;align-items:center;flex-wrap:wrap;">${b.items.map(im => `<span data-sn-imgtab="${im.key}" style="cursor:pointer;padding:3px 10px;border-radius:5px 5px 0 0;border:1px solid rgba(122,223,230,0.35);border-bottom:none;${im.key === cur ? 'background:rgba(122,223,230,0.18);color:#7adfe6;' : 'opacity:0.7;'}">${airEsc(im.label)}</span>`).join('')}<span style="flex:1"></span><span style="font-size:11px;">${toggles}</span></div>`
+                    + b.items.map(im => `<div data-sn-imgpane="${im.key}" ${im.key === cur ? '' : 'hidden'}><div style="position:relative;display:inline-block;max-width:100%;"><img data-survey-img="${airEsc(im.file)}" alt="${airEsc(im.label)}" style="max-width:100%;display:block;border:1px solid rgba(122,223,230,0.3);border-radius:0 4px 4px 4px;">${surveyOverlaySvg(geos[im.key], markers)}</div><div style="opacity:0.8;margin:3px 0 6px;"><em>${airEsc(im.caption)}</em></div></div>`).join('') + '</div>');
+            } else if (b.t === 'text') {
+                h.push(`<p style="margin:4px 0;">${surveyInline(b.md)}</p>`);
+            } else if (b.t === 'table') {
+                const cols = b.cols;
+                const noteRows = b.edit ? ((notes.tables && notes.tables[b.edit]) || []) : [];
+                const head = `<thead><tr>${cols.map(c => `<th style="${SURVEY_TD}background:rgba(122,223,230,0.12);text-align:left;">${airEsc(c)}</th>`).join('')}${b.edit ? `<th style="${SURVEY_TD}background:rgba(122,223,230,0.12);"></th>` : ''}</tr></thead>`;
+                const autoRows = b.rows.map(rw => `<tr${rw.hit ? ' style="background:rgba(255,85,85,0.10);"' : ''}>${cols.map((c, i) => {
+                    if (b.contacts && c === 'Contacted') { const on = !!(nc[rw.ident] && nc[rw.ident].contacted); return `<td style="${SURVEY_TD}text-align:center;"><input type="checkbox" data-sn-contact="${airEsc(rw.ident)}" ${on ? 'checked' : ''} title="Mark contacted — stamps now + you"></td>`; }
+                    return `<td style="${SURVEY_TD}">${airEsc(rw.cells[i] || '')}</td>`;
+                }).join('')}${b.edit ? `<td style="${SURVEY_TD}opacity:0.5;">auto</td>` : ''}</tr>`).join('');
+                const pickCol = b.edit && SURVEY_TABLES[b.edit].pick;
+                const cCol = b.edit && SURVEY_TABLES[b.edit].contactCol;
+                const editRows = noteRows.map((rw, ri) => `<tr>${cols.map((c, ci) => {
+                    if (cCol != null && ci === cCol) return `<td style="${SURVEY_TD}text-align:center;"><input type="checkbox" data-sn-rowcontact="${b.edit}|${ri}" ${rw[ci] === 'Yes' ? 'checked' : ''} title="Mark contacted — stamps now + you"></td>`;
+                    if (cCol != null && ci === cCol + 1) return `<td style="${SURVEY_TD}white-space:nowrap;">${airEsc(rw[ci] || '')}</td>`;
+                    return `<td style="${SURVEY_TD}padding:2px;${pickCol === ci ? 'white-space:nowrap;' : ''}"><input data-sn-cell="${b.edit}|${ri}|${ci}" type="text" value="${airEsc(rw[ci] || '')}" style="${SURVEY_INPUT_CSS}width:${pickCol === ci ? 'calc(100% - 28px)' : '100%'};min-width:70px;">${pickCol === ci ? `<span data-sn-pick="${b.edit}|${ri}" title="Pick this spot on the map (the window hides until you click)" style="cursor:crosshair;margin-left:4px;">📍</span>` : ''}</td>`;
+                }).join('')}<td style="${SURVEY_TD}text-align:center;"><span data-sn-del="${b.edit}|${ri}" title="Remove this row" style="cursor:pointer;color:#ff8080;">✕</span></td></tr>`).join('');
+                h.push(`<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:11px;margin:4px 0;width:100%;">${head}<tbody>${autoRows}${editRows}${!autoRows && !editRows ? `<tr><td colspan="${cols.length + 1}" style="${SURVEY_TD}opacity:0.6;">N/A</td></tr>` : ''}</tbody></table></div>`
+                    + (b.edit ? `<div style="margin:2px 0 8px;"><span data-sn-add="${b.edit}" style="cursor:pointer;color:#ffd27a;border:1px solid rgba(255,210,122,0.45);border-radius:4px;padding:1px 8px;">+ add row</span></div>` : ''));
+            } else if (b.t === 'field') {
+                h.push(`<div style="margin:6px 0;max-width:900px;"><div style="opacity:0.8;margin-bottom:2px;">${airEsc(SURVEY_FIELDS[b.key].label)}</div>${surveyFieldInput(b.key, nf)}</div>`);
+            } else if (b.t === 'list') {
+                h.push(b.items.length ? `<ul style="margin:4px 0 4px 18px;padding:0;">${b.items.map(x => `<li>${airEsc(x)} <span style="opacity:0.5;">(auto)</span></li>`).join('')}</ul>` : '');
+                if (b.edit) h.push(`<div style="margin:4px 0 8px;max-width:900px;"><div style="opacity:0.8;margin-bottom:2px;">${airEsc(SURVEY_FIELDS[b.edit].label)}</div>${surveyFieldInput(b.edit, nf)}</div>`);
+            }
+        });
+        return h.join('');
+    }
+    function surveyRenderTabs(sv, notes, st) {
+        const secs = surveySections(sv, notes);
+        const byId = {}; secs.forEach(x => { byId[x.id] = x; });
+        const cur = SURVEY_TABS.some(t => t.id === st.tab) ? st.tab : SURVEY_TABS[0].id;
+        const bar = `<div style="display:flex;gap:4px;border-bottom:1px solid rgba(122,223,230,0.3);margin-bottom:6px;flex-wrap:wrap;">${SURVEY_TABS.map(t => {
+            const editable = t.sections.some(id => byId[id] && byId[id].edit);
+            return `<span data-sn-tab="${t.id}" style="cursor:pointer;padding:5px 12px;border-radius:6px 6px 0 0;border:1px solid rgba(122,223,230,0.35);border-bottom:none;${t.id === cur ? 'background:rgba(122,223,230,0.18);color:#7adfe6;font-weight:600;' : 'opacity:0.75;'}">${airEsc(t.label)}${editable ? ' <span style="color:#ffd27a;">✎</span>' : ''}</span>`;
+        }).join('')}</div>`;
+        const pane = SURVEY_TABS.find(t => t.id === cur).sections.map(id => byId[id] ? surveyRenderSection(byId[id], sv, notes, st) : '').join('');
+        return bar + `<div data-sn-pane="${cur}">${pane}</div>`;
+    }
+
+    // ---- Store: indexes, notes, commit ----
+    async function surveyLoadIndex(sid, force) {
+        const st = surveyStatus[sid];
+        if (!force && st && st.idx !== undefined && (Date.now() - st.at) < SURVEY_IDX_TTL_MS) return st.idx;
+        const idx = await ghGetJson(`${surveyDirFor(sid)}/index.json`);
+        surveyStatus[sid] = Object.assign(surveyStatus[sid] || {}, { idx, at: Date.now(), err: null });
+        return idx;
+    }
+    async function surveyLoadNotes(sid) {
+        return surveyNormalizeNotes(await ghGetJson(`${surveyDirFor(sid)}/notes.json`));
+    }
+    async function surveySaveNotes(sid, notes) {
+        const login = await surveyGithubLogin();
+        const n = surveyNormalizeNotes(notes);
+        n.updatedAt = new Date().toISOString(); n.updatedBy = login || 'unknown';
+        await ghPutFile(`${surveyDirFor(sid)}/notes.json`, JSON.stringify(n, null, 1), `[AIM airspace] site ${sid}: survey notes`);
+        return n;
+    }
+    function surveyDue(idx) {
+        const last = idx && idx.runs && idx.runs[0];
+        if (!last) return { last: null, dueAt: null, due: true, reason: 'creation' };
+        const t = Date.parse(last.takenAt);
+        const dueAt = isFinite(t) ? new Date(t + SURVEY_DUE_DAYS * 86400000) : null;
+        const due = !dueAt || dueAt.getTime() <= Date.now();
+        return { last, dueAt, due, reason: due ? 'six-month' : null };
+    }
+    async function surveyUpdateIndexes(sid, sv, entry, siteIdx) {
+        const idx = siteIdx || { v: 1, siteId: Number(sid), siteKey: envSiteKey(sid), runs: [] };
+        idx.siteName = sv.siteName; idx.customer = sv.site.customer || idx.customer || '';
+        idx.runs = [entry].concat((idx.runs || []).filter(r => r.runId !== entry.runId));
+        idx.updatedAt = sv.takenAt;
+        await ghPutFile(`${surveyDirFor(sid)}/index.json`, JSON.stringify(idx, null, 1), `[AIM airspace] site ${sid}: index (${entry.runId})`);
+        let fleet = null;
+        try { fleet = await ghGetJson(`${SURVEY_DIR}/index.json`); } catch (e) { console.warn(`${TAG} fleet survey index read failed:`, e); }
+        if (!fleet || typeof fleet !== 'object') fleet = { v: 1, sites: {} };
+        fleet.sites = fleet.sites || {};
+        fleet.sites[envSiteKey(sid)] = {
+            siteId: Number(sid), env: sv.env, siteName: sv.siteName, customer: sv.site.customer || '',
+            last: entry, runs: idx.runs.length, nextDue: new Date(Date.parse(sv.takenAt) + SURVEY_DUE_DAYS * 86400000).toISOString(),
+        };
+        fleet.updatedAt = sv.takenAt;
+        await ghPutFile(`${SURVEY_DIR}/index.json`, JSON.stringify(fleet, null, 1), `[AIM airspace] fleet index (site ${sid} ${entry.runId})`);
+        surveyStatus[sid] = Object.assign(surveyStatus[sid] || {}, { idx, at: Date.now(), err: null });
+        return idx;
+    }
+    async function surveyCommit(sid, reason) {
+        if (surveyBusy) { showToast('Survey save already running'); return null; }
+        if (!elevSharedToken) { showToast('Survey: GitHub token needed — Control Panel → token', 'rgba(255,96,96,0.55)'); return null; }
+        const live = surveyLast && String(surveyLast.sid) === String(sid) ? surveyLast : null;
+        if (!live) { showToast('Run the airspace check first', 'rgba(255,96,96,0.55)'); return null; }
+        if (CONTEXT !== 'IFRAME') { showToast('Survey save runs in the map frame', 'rgba(255,96,96,0.55)'); return null; }
+        surveyBusy = true;
+        const progress = (m) => { showToast(`📄 Survey: ${m}`); surveyRenderStatus(sid, m); };
+        try {
+            progress('reading site record + notes…');
+            const [siteInfo, notes, siteIdx, login] = await Promise.all([
+                surveySiteInfo(sid).catch(e => { console.warn(`${TAG} survey: site record failed:`, e); return null; }),
+                surveyLoadNotes(sid).catch(e => { console.warn(`${TAG} survey: notes read failed:`, e); return surveyEmptyNotes(); }),
+                surveyLoadIndex(sid, true).catch(e => { console.warn(`${TAG} survey: index read failed:`, e); return null; }),
+                surveyGithubLogin(),
+            ]);
+            const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+            const geom = surveyGeometry(sid, live.res, ents);
+            const images = await surveyCaptureAll(sid, live.res, live.siteName, geom, progress);
+            const runId = surveyRunId(new Date());
+            const sv = surveyBuild({ sid, res: live.res, siteName: live.siteName, siteInfo, notes, geom, reason, runId, images, login });
+            const md = surveyMarkdown(sv);
+            const dir = `${surveyDirFor(sid)}/${runId}`;
+            const msg = (what) => `[AIM airspace] site ${sid} ${runId} ${reason}: ${what}`;
+            let n = 0;
+            for (const k of ['setup', 'overview', 'sectional']) {
+                if (!images[k] || !images[k].bytes) continue;
+                progress(`uploading ${k}.jpg (${Math.round(images[k].bytes.length / 1024)} KB)…`);
+                await ghPutFile(`${dir}/${k}.jpg`, images[k].bytes, msg(`${k}.jpg`)); n++;
+            }
+            progress('uploading report…');
+            await ghPutFile(`${dir}/survey.json`, JSON.stringify(sv), msg('survey.json'));
+            await ghPutFile(`${dir}/${sid}_Airspace_Survey.md`, md, msg('report'));
+            progress('updating index…');
+            const entry = {
+                runId, takenAt: sv.takenAt, takenBy: sv.takenBy, reason, script: SCRIPT_VERSION,
+                decision: sv.decision.suggested, signed: sv.decision.signed, violations: sv.summary.violations, high: sv.summary.high,
+                facilities: sv.summary.facilities, obstaclesFlagged: sv.summary.obstaclesFlagged, airspaceClass: sv.summary.airspaceClass,
+                images: ['setup', 'overview', 'sectional'].filter(k => sv.images[k]), report: `${sid}_Airspace_Survey.md`,
+            };
+            await surveyUpdateIndexes(sid, sv, entry, siteIdx);
+            console.log(`${TAG} 📄 survey saved: ${dir} (${reason}, ${n} image(s))`);
+            showToast(`📄 Survey saved (${reason}) — ${runId}`, 'rgba(95,255,95,0.55)');
+            surveyRenderStatus(sid);
+            const modal = document.getElementById(SURVEY_MODAL_ID);
+            if (modal) openSurveyModal(sid, runId);
+            return entry;
+        } catch (e) {
+            console.warn(`${TAG} survey save failed:`, e);
+            showToast(`Survey save failed — ${e && e.message ? e.message : e}`, 'rgba(255,96,96,0.55)');
+            surveyRenderStatus(sid, `save failed: ${e && e.message ? e.message : e}`);
+            return null;
+        } finally { surveyBusy = false; }
+    }
+    // After every live run: remember the result, then auto-save when the
+    // site has no survey (creation) or the last one is due (six-month).
+    async function surveyAfterRun(sid, res, siteName) {
+        surveyLast = { res, sid, siteName, at: Date.now() };
+        if (CONTEXT !== 'IFRAME') return;
+        if (!elevSharedToken) { surveyRenderStatus(sid, 'no GitHub token — survey not saved'); return; }
+        let idx;
+        try { idx = await surveyLoadIndex(sid, true); }
+        catch (e) { surveyStatus[sid] = Object.assign(surveyStatus[sid] || {}, { err: e.message, at: Date.now() }); surveyRenderStatus(sid); return; }
+        const d = surveyDue(idx);
+        surveyRenderStatus(sid);
+        if (d.due && !surveyBusy) {
+            showToast(d.reason === 'creation' ? '📸 First survey for this site — saving to GitHub…' : '📸 Survey is 6+ months old — saving a fresh one…');
+            await surveyCommit(sid, d.reason);
+        }
+    }
+    function surveyStatusText(sid) {
+        const st = surveyStatus[sid];
+        if (st && st.msg) return st.msg;
+        if (st && st.err) return `survey index unavailable — ${st.err}`;
+        if (!st || st.idx === undefined) return elevSharedToken ? 'checking survey history…' : 'no GitHub token — surveys not saved';
+        const d = surveyDue(st.idx);
+        if (!d.last) return 'no survey saved yet — the next run saves one (creation)';
+        return `last saved ${surveyLocalStamp(new Date(d.last.takenAt))} (${d.last.reason}${d.last.signed ? ` · ${d.last.signed}` : ''}) · ${d.due ? '⚠ DUE — next run re-saves' : `next due ${d.dueAt.toISOString().slice(0, 10)}`} · ${st.idx.runs.length} run${st.idx.runs.length === 1 ? '' : 's'}`;
+    }
+    function surveyRenderStatus(sid, msg) {
+        if (msg !== undefined) surveyStatus[sid] = Object.assign(surveyStatus[sid] || {}, { msg });
+        else if (surveyStatus[sid]) surveyStatus[sid].msg = null;
+        const el = document.querySelector(`#${AIRSPACE_PANEL_ID} [data-survey-status]`);
+        if (el) el.textContent = `📄 Survey: ${surveyStatusText(sid)}`;
+    }
+
+    // ---- Viewer: history, read-only snapshot render, notes editor ----
+    // Minimal markdown → HTML for the report preview (headings, tables,
+    // lists, bold, images, links, blockquote). Images resolve lazily via
+    // data-survey-img → ghGetDataUrl.
+    const surveyImgCache = {};   // "<dir>/<file>" → data URL (per session; a run's images never change)
+    async function surveyImageDataUrl(dir, f) {
+        const k = `${dir}/${f}`;
+        if (!surveyImgCache[k]) surveyImgCache[k] = ghGetDataUrl(k, 'image/jpeg').catch(e => { delete surveyImgCache[k]; throw e; });
+        return surveyImgCache[k];
+    }
+    async function surveyHydrateImages(root, dir) {
+        const imgs = Array.from(root.querySelectorAll('img[data-survey-img]'));
+        await Promise.all(imgs.map(async (im) => {
+            const f = im.getAttribute('data-survey-img');
+            try { const u = await surveyImageDataUrl(dir, f); if (im.isConnected) im.src = u; }
+            catch (e) { im.alt = `${f}: ${e.message}`; im.style.minHeight = '20px'; console.warn(`${TAG} survey image ${f}:`, e); }
+        }));
+    }
+    // Re-render a saved run in the normal panel + map highlights, read-only.
+    async function surveyViewRun(sid, runId) {
+        const dir = `${surveyDirFor(sid)}/${runId}`;
+        const sv = await ghGetJson(`${dir}/survey.json`);
+        if (!sv || !sv.result) throw new Error(`survey.json missing for ${runId}`);
+        const res = sv.result;
+        res.inventory = res.inventory || {};
+        ['airports', 'obstacles', 'airspace', 'sua', 'stadiums', 'translines', 'tfrs'].forEach(k => { if (!Array.isArray(res.inventory[k])) res.inventory[k] = []; });
+        renderAirspacePanel(res, sid, sv.siteName, { runId, takenAt: sv.takenAt, reason: sv.reason, takenBy: sv.takenBy });
+        airDrawMapHighlights(res);
+        const map = getLeafletMap();
+        if (map && sv.geometry && isFinite(sv.geometry.lat)) { try { map.setView([sv.geometry.lat, sv.geometry.lng], map.getZoom()); } catch (e) {} }
+        return sv;
+    }
+
+    // ---- 🖨 PDF export (v4.313). A print-ready page in a new tab — every
+    // section in form order (same model as the markdown), the overlays
+    // currently toggled on baked INTO the images, Chrome's print dialog →
+    // "Save as PDF". No library; nothing leaves the browser. ----
+    function surveyPrintInline(t) {
+        return airEsc(t)
+            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+            .replace(/`([^`]+)`/g, '<code>$1</code>')
+            .replace(/&lt;(https?:[^&]+)&gt;/g, '<a href="$1">$1</a>')
+            .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>')
+            .replace(/  \n|\n/g, '<br>');
+    }
+    // Draw the toggled markers into a capture → JPEG data URL.
+    async function surveyBakeImage(dataUrl, geo, markers) {
+        if (!geo || !markers.length) return dataUrl;
+        const im = await surveyLoadImg(dataUrl);
+        const W = im.naturalWidth || geo.px, H = im.naturalHeight || geo.py;
+        const canvas = document.createElement('canvas'); canvas.width = W; canvas.height = H;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(im, 0, 0, W, H);
+        const svg = surveyOverlaySvg(Object.assign({}, geo, { px: W, py: H }), markers)
+            .replace('<svg ', `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" `)
+            .replace(/ style="[^"]*"/, '');
+        try {
+            const ov = await surveyLoadImg(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`);
+            ctx.drawImage(ov, 0, 0, W, H);
+        } catch (e) { console.warn(`${TAG} survey print: overlay bake failed:`, e); }
+        return canvas.toDataURL('image/jpeg', 0.9);
+    }
+    const SURVEY_ASSETS = { cover: `${SURVEY_DIR}/assets/cover.jpg`, logo: `${SURVEY_DIR}/assets/logo-white.png` };
+    const surveyAssetCache = {};
+    async function surveyAsset(key) {
+        if (surveyAssetCache[key]) return surveyAssetCache[key];
+        try { surveyAssetCache[key] = await ghGetDataUrl(SURVEY_ASSETS[key], key === 'cover' ? 'image/jpeg' : 'image/png'); }
+        catch (e) { console.warn(`${TAG} survey print: asset ${key} unavailable:`, e); surveyAssetCache[key] = ''; }
+        return surveyAssetCache[key];
+    }
+    function surveyPrintHtml(sv, notes, imgData, layersOn, assets) {
+        const nf = notes.fields || {};
+        const site = `${sv.siteName}${sv.env === 'qa' ? ' (QA)' : ''}`;
+        assets = assets || {};
+        const td = 'border:1px solid #bbb;padding:3px 6px;vertical-align:top;';
+        const tbl = (cols, rows) => `<table style="border-collapse:collapse;width:100%;font-size:9pt;margin:4px 0;page-break-inside:auto;"><thead><tr>${cols.map(c => `<th style="${td}background:#eee;text-align:left;">${airEsc(c)}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.map(r => `<tr>${cols.map((c, i) => `<td style="${td}">${surveyPrintInline(r[i] || '')}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${cols.length}" style="${td}color:#777;">N/A</td></tr>`}</tbody></table>`;
+        const out = [];
+        // Cover — the Regulations form's cover art (logo top, blue hex band
+        // bottom) with the report block in the white area and the sign-off
+        // block on the band.
+        out.push(`<section class="cover" style="${assets.cover ? `background-image:url('${assets.cover}');` : 'background:#0d4b63;'}">
+            <div class="cover-co">Percepto Robotics LTD · +972 54-4540368 │ info@percepto.co<br>Privately Held Company, ID 6476229 · 8 Haoreg St, Modi'in-Maccabim-Re'ut 7178102 Israel</div>
+            <div class="cover-title"><div class="t1">SITE SURVEY</div><div class="t2">Report</div>
+                <div class="t3">${airEsc(site)}</div>
+                <div class="t4">${airEsc(sv.site.customer || nf.customer || '')}${sv.site.customer || nf.customer ? ' · ' : ''}${airEsc((sv.takenAtLocal || sv.takenAt).slice(0, 10))}</div></div>
+            <div class="cover-band">
+                <div><span>Percepto Reference:</span> ${airEsc(nf.reference || '—')}</div>
+                <div><span>Written by:</span> ${airEsc(nf.writtenBy || sv.takenBy || '—')}</div>
+                <div><span>Approved and Signed by:</span> ${airEsc(nf.decisionBy || '—')}</div>
+                <div class="small">Decision: ${airEsc(nf.decision || 'not yet signed')} · Site ${sv.siteId} · run ${airEsc(sv.runId)}</div>
+            </div></section>`);
+        const cover = out.pop();
+        const hdr = `<div class="hdr">${assets.logo ? `<img src="${assets.logo}" alt="Percepto">` : '<strong>PERCEPTO</strong>'}<span>Site Survey Report — ${airEsc(site)}</span><span class="hdr-r">${airEsc(nf.reference || '')}${nf.reference ? ' · ' : ''}${airEsc((sv.takenAtLocal || sv.takenAt).slice(0, 10))}</span></div>`;
+        const ftr = '<div class="ftr">This document is proprietary and confidential. No part of this document may be disclosed in any manner to a third party without the prior written consent of Percepto Robotics.</div>';
+        out.push(`<h1>${airEsc(site)} — Airspace Survey</h1>`);
+        out.push(`<p class="meta">Site ${sv.siteId} · run ${airEsc(sv.runId)} (${airEsc(sv.reason)}) · generated by AIM Site Setup Tools v${airEsc(sv.script)} on ${airEsc(sv.takenAtLocal || sv.takenAt)} by ${airEsc(sv.takenBy)}<br>Data: FAA AIS (56-day chart cycle) · FAA NASR ${airEsc(sv.nasrCycle || 'n/a')} · HIFLD · USGS USWTDB · LAANC facility maps · tfr.faa.gov${layersOn.length ? `<br>Map overlays printed: ${airEsc(layersOn.join(', '))}` : ''}</p>`);
+        out.push('<p class="note">This survey is not the final route validation or risk assessment. Sections marked ✎ are entered by people in AIM and persist across runs; everything else is regenerated from data on each run.</p>');
+        surveySections(sv, notes).forEach(sec => {
+            out.push(`<h2>${airEsc(sec.title)}${sec.edit ? ' <span class="pen">✎</span>' : ''}</h2>`);
+            sec.blocks.forEach(b => {
+                if (b.t === 'decision') {
+                    out.push(`<p><strong>Decision (signed):</strong> ${nf.decision ? airEsc(nf.decision) : '<em>not yet signed</em>'}${nf.decisionBy ? ` — ${airEsc(nf.decisionBy)}` : ''}<br><strong>Decision (AIM-suggested):</strong> ${airEsc(sv.decision.suggested)} — ${airEsc(sv.decision.why)}${nf.limitations ? `<br><strong>Limitations / review needed:</strong> ${airEsc(nf.limitations)}` : ''}</p>`);
+                } else if (b.t === 'kv') {
+                    out.push(`<table style="border-collapse:collapse;width:100%;font-size:9.5pt;"><tbody>${b.rows.map(rw => `<tr><td style="${td}background:#f4f4f4;width:32%;">${airEsc(rw[0])}</td><td style="${td}">${airEsc(surveyFieldValue(rw[1], nf))}</td></tr>`).join('')}</tbody></table>`);
+                } else if (b.t === 'images') {
+                    b.items.forEach(im => {
+                        const src = imgData[im.key];
+                        out.push(`<figure>${src ? `<img src="${src}" alt="${airEsc(im.label)}">` : `<div class="missing">${airEsc(im.label)} — image unavailable</div>`}<figcaption>${airEsc(im.label)} — ${airEsc(im.caption)}</figcaption></figure>`);
+                    });
+                } else if (b.t === 'text') {
+                    out.push(`<p>${surveyPrintInline(b.md)}</p>`);
+                } else if (b.t === 'table') {
+                    const rows = b.rows.map(rw => rw.cells).concat(b.edit ? surveyNoteRows(notes, b.edit).map(rw => b.cols.map((c, i) => rw[i] || '')) : []);
+                    out.push(tbl(b.cols, rows));
+                } else if (b.t === 'field') {
+                    out.push(`<p><strong>${airEsc(SURVEY_FIELDS[b.key].label)}:</strong> ${nf[b.key] ? surveyPrintInline(nf[b.key]) : 'N/A'}</p>`);
+                } else if (b.t === 'list') {
+                    const items = b.items.concat(b.edit ? surveyLines(nf[b.edit]) : []);
+                    out.push(items.length ? `<ul>${items.map(x => `<li>${b.link && /^https?:/i.test(x) ? `<a href="${airEsc(x)}">${airEsc(x)}</a>` : airEsc(x)}</li>`).join('')}</ul>` : '<p>N/A</p>');
+                }
+            });
+        });
+        const title = `${sv.siteId}_Airspace_Survey_${sv.runId}`;
+        // thead / tfoot rows are re-printed by Chrome at the top and bottom of
+        // EVERY page the table spans — the reliable way to get a banner per page.
+        const pages = `<table class="page"><thead><tr><td>${hdr}</td></tr></thead><tfoot><tr><td>${ftr}</td></tr></tfoot><tbody><tr><td class="content">${out.join('\n')}</td></tr></tbody></table>`;
+        return `<!doctype html><html><head><meta charset="utf-8"><title>${airEsc(title)}</title><style>
+            @page { size: letter; margin: 0.5in; }
+            body { font: 10.5pt/1.4 "Segoe UI", Arial, sans-serif; color: #111; margin: 0 auto; max-width: 8.5in; padding: 12px; background: #fff; }
+            h1 { font-size: 18pt; margin: 0 0 4px; } h2 { font-size: 13pt; margin: 16px 0 6px; border-bottom: 1px solid #999; padding-bottom: 2px; page-break-after: avoid; }
+            .meta { color: #555; font-size: 9pt; margin: 0 0 6px; } .note { border-left: 3px solid #e0a800; padding: 4px 8px; background: #fff8e1; font-size: 9.5pt; }
+            .pen { color: #b8860b; font-size: 9pt; } figure { margin: 8px 0; page-break-inside: avoid; } img { max-width: 100%; border: 1px solid #ccc; }
+            figcaption { font-size: 9pt; color: #555; font-style: italic; } .missing { border: 1px dashed #bbb; padding: 20px; color: #888; text-align: center; }
+            table { page-break-inside: auto; } tr { page-break-inside: avoid; } th { font-weight: 600; } code { background: #f0f0f0; padding: 0 3px; }
+            .bar { position: sticky; top: 0; background: #0f1a24; color: #fff; padding: 8px 12px; margin: -12px -12px 12px; display: flex; gap: 10px; align-items: center; font-size: 10pt; }
+            .bar button { font: inherit; padding: 4px 12px; border-radius: 5px; border: 1px solid #7adfe6; background: #163041; color: #7adfe6; cursor: pointer; }
+            .cover { position: relative; height: 10in; width: 100%; background-size: cover; background-position: center; page-break-after: always; break-after: page; color: #0d2a36; -webkit-print-color-adjust: exact; print-color-adjust: exact; overflow: hidden; }
+            .cover-co { position: absolute; left: 0.4in; top: 1.9in; font-size: 7.5pt; color: #555; line-height: 1.5; }
+            .cover-title { position: absolute; left: 0.4in; top: 3.0in; }
+            .cover-title .t1 { font-size: 30pt; font-weight: 800; letter-spacing: 2px; } .cover-title .t2 { font-size: 20pt; font-weight: 300; margin-top: -4px; }
+            .cover-title .t3 { font-size: 15pt; font-weight: 600; margin-top: 22px; } .cover-title .t4 { font-size: 11pt; color: #444; margin-top: 4px; }
+            .cover-band { position: absolute; left: 0.4in; right: 0.4in; top: 6.2in; color: #fff; font-size: 11pt; line-height: 1.9; }
+            .cover-band span { display: inline-block; width: 2.1in; color: #cfe6ee; } .cover-band .small { font-size: 8.5pt; color: #cfe6ee; margin-top: 10px; }
+            .page { width: 100%; border-collapse: collapse; } .page > thead { display: table-header-group; } .page > tfoot { display: table-footer-group; }
+            .page td { padding: 0; } .page td.content { padding: 6px 0 10px; }
+            .hdr { display: flex; height: 0.34in; background: #0d4b63; color: #fff; align-items: center; gap: 10px; padding: 0 10px; font-size: 8.5pt; margin-bottom: 8px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+            .hdr img { height: 0.22in; } .hdr .hdr-r { margin-left: auto; color: #cfe6ee; }
+            .ftr { font-size: 7pt; color: #777; text-align: center; border-top: 1px solid #ccc; padding-top: 3px; margin-top: 8px; }
+            @media print { .bar { display: none; } body { padding: 0; } }
+            @page { @bottom-right { content: "Page " counter(page) " of " counter(pages); font: 8pt "Segoe UI", Arial, sans-serif; color: #777; } }
+        </style></head><body>
+            <div class="bar"><strong>📄 ${airEsc(site)}</strong> — survey ${airEsc(sv.runId)}<span style="flex:1"></span><button onclick="window.print()">🖨 Print / Save as PDF</button><span style="opacity:0.7">destination “Save as PDF” · tick “Background graphics” if the cover art is missing</span></div>
+            ${cover}
+            ${pages}
+        </body></html>`;
+    }
+    async function surveyExportPdf(sid, sv, notes, st) {
+        if (!sv) { showToast('Nothing to print yet'); return; }
+        showToast('🖨 Building the print page…');
+        const geos = (sv.images && sv.images.geo) || {};
+        const markers = surveyOverlayMarkers(sv, notes, st.layers);
+        const layersOn = SURVEY_LAYERS.filter(l => st.layers[l.id]).map(l => l.label);
+        const imgData = {};
+        const dir = sv.runId && sv.runId !== 'preview' ? `${surveyDirFor(sid)}/${sv.runId}` : null;
+        for (const k of ['setup', 'overview', 'sectional']) {
+            if (!sv.images || !sv.images[k] || !dir) continue;
+            try {
+                const raw = await surveyImageDataUrl(dir, sv.images[k]);
+                imgData[k] = await surveyBakeImage(raw, geos[k], markers);
+            } catch (e) { console.warn(`${TAG} survey print: image ${k} skipped:`, e); }
+        }
+        const assets = { cover: await surveyAsset('cover'), logo: await surveyAsset('logo') };
+        const html = surveyPrintHtml(sv, notes, imgData, layersOn, assets);
+        let w = null;
+        try { w = (window.top || window).open('about:blank', '_blank'); } catch (e) {}
+        if (!w) { try { w = window.open('about:blank', '_blank'); } catch (e) {} }
+        if (!w) {
+            // Pop-up blocked → hand over the HTML file instead; opening it and printing works the same.
+            const ok = downloadJSONFile(`${sid}_Airspace_Survey_${sv.runId}.html`, html);
+            showToast(ok ? 'Pop-up blocked — downloaded the print page as HTML instead (open it → Print → Save as PDF)' : 'Could not open the print page', 'rgba(255,176,32,0.55)');
+            return;
+        }
+        w.document.open(); w.document.write(html); w.document.close();
+        showToast('🖨 Print page opened in a new tab — use Print → Save as PDF', 'rgba(95,255,95,0.55)');
+    }
+    function closeSurveyModal() { const el = document.getElementById(SURVEY_MODAL_ID); if (el) el.remove(); }
+    async function openSurveyModal(sid, selectRunId) {
+        closeSurveyModal();
+        const wrap = document.createElement('div');
+        wrap.id = SURVEY_MODAL_ID;
+        // Resizable (corner handle) + remembers size/position per user.
+        let geoSaved = null;
+        try { geoSaved = JSON.parse(elevGmGet('aim-survey-window', 'null')); } catch (e) { geoSaved = null; }
+        const vw = window.innerWidth, vh = window.innerHeight;
+        const ok = geoSaved && geoSaved.w >= 600 && geoSaved.h >= 380 && geoSaved.x >= -50 && geoSaved.y >= 0 && geoSaved.x < vw - 200 && geoSaved.y < vh - 100;
+        wrap.style.cssText = `position:fixed;z-index:2147483100;${ok ? `left:${geoSaved.x}px;top:${geoSaved.y}px;width:${Math.min(geoSaved.w, vw - 20)}px;height:${Math.min(geoSaved.h, vh - 20)}px;` : 'top:40px;left:50%;transform:translateX(-50%);width:min(1180px,96vw);height:min(86vh,900px);'}`
+            + 'min-width:640px;min-height:380px;resize:both;overflow:hidden;'
+            + 'background:rgba(16,22,32,0.98);border:1px solid rgba(122,223,230,0.5);border-radius:10px;color:#dfe9f0;'
+            + 'font:12px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 10px 40px rgba(0,0,0,0.6);display:flex;flex-direction:column;';
+        const saveGeo = () => { try { const r = wrap.getBoundingClientRect(); elevGmSet('aim-survey-window', JSON.stringify({ x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) })); } catch (e) {} };
+        let geoTimer = null;
+        try { new ResizeObserver(() => { clearTimeout(geoTimer); geoTimer = setTimeout(saveGeo, 300); }).observe(wrap); } catch (e) {}
+        const btn = (attr, label, color, title) => `<button ${attr} title="${airEsc(title || '')}" style="background:none;border:1px solid ${color};color:${color};border-radius:5px;padding:2px 9px;cursor:pointer;font:inherit;">${label}</button>`;
+        const site = siteHeaderLabel(sid);
+        wrap.innerHTML = `
+            <div data-survey-drag style="cursor:move;padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid rgba(122,223,230,0.25);flex:none;flex-wrap:wrap;">
+                <span style="color:#7adfe6;font-weight:700;">📄 Airspace Survey</span><span style="opacity:0.75;">${airEsc(site)}</span>
+                <span style="flex:1"></span>
+                ${btn('data-survey-rerun', '🛩 Re-run check', '#7adfe6', 'Query the FAA data again (cached 6 h) and open the live result in the airspace panel — only needed when you want fresh data')}
+                ${btn('data-survey-notes-save', '💾 Save notes', '#ffd27a', 'Commit the ✎ edits (site-level — they fold into every report from now on)')}
+                ${btn('data-survey-save', '💾 Save survey', '#5fff5f', 'Capture the three map images, build the report from the LAST airspace run and commit a new dated run')}
+                ${btn('data-survey-pdf', '🖨 PDF', '#7adfe6', 'Print-ready page in a new tab with every section in form order and the toggled map overlays baked into the images — Print → Save as PDF')}
+                ${btn('data-survey-copy', '📋 Copy markdown', '#7adfe6', 'Full report in form order (the GitHub version)')}
+                ${btn('data-survey-open', '🔗 GitHub', '#7adfe6', 'Open airspace/<site>/ in the data repo')}
+                <button data-survey-max title="Maximize / restore" style="background:none;border:none;color:#dfe9f0;font-size:14px;cursor:pointer;">⛶</button>
+                <button data-survey-close style="background:none;border:none;color:#dfe9f0;font-size:15px;cursor:pointer;">✕</button>
+            </div>
+            <div data-survey-stat style="padding:5px 12px;border-bottom:1px solid rgba(122,223,230,0.15);opacity:0.85;flex:none;">📄 Survey: ${airEsc(surveyStatusText(sid))}</div>
+            <div style="display:flex;flex:1;min-height:0;">
+                <div style="width:230px;flex:none;border-right:1px solid rgba(122,223,230,0.2);display:flex;flex-direction:column;min-height:0;">
+                    <div style="padding:6px 10px;color:#7adfe6;font-weight:600;border-bottom:1px solid rgba(122,223,230,0.15);">🕘 History</div>
+                    <div data-survey-runs style="overflow-y:auto;flex:1;padding:4px 0;">loading…</div>
+                    <div data-survey-notes-stat style="padding:6px 10px;border-top:1px solid rgba(122,223,230,0.15);opacity:0.7;font-size:11px;">✎ notes: loading…</div>
+                </div>
+                <div data-survey-body style="flex:1;overflow-y:auto;padding:8px 14px;min-width:0;"><div style="opacity:0.7;">loading…</div></div>
+            </div>`;
+        document.body.appendChild(wrap);
+        // Inputs inside the window must win over every page-level mouse/key
+        // handler (Percepto's and our own hotkey scripts): window-capture runs
+        // first, so stop the event there for anything editable in the window.
+        // Default actions (focus, typing) are untouched.
+        const isEditable = (t) => t && t.closest && t.closest(`#${SURVEY_MODAL_ID}`) && /^(INPUT|SELECT|TEXTAREA)$/.test(t.tagName);
+        const guard = (e) => { if (isEditable(e.target)) e.stopImmediatePropagation(); };
+        ['mousedown', 'pointerdown', 'keydown', 'keyup', 'keypress'].forEach(t => window.addEventListener(t, guard, true));
+        const origRemove = wrap.remove.bind(wrap);
+        wrap.remove = () => { ['mousedown', 'pointerdown', 'keydown', 'keyup', 'keypress'].forEach(t => window.removeEventListener(t, guard, true)); try { if (longTasks) longTasks.disconnect(); } catch (e) {} origRemove(); };
+        wrap.addEventListener('mousedown', (e) => { if (isEditable(e.target)) { e.stopPropagation(); setTimeout(() => { try { if (document.activeElement !== e.target) e.target.focus(); } catch (err) {} }, 0); } });
+        let drag = null;
+        wrap.querySelector('[data-survey-drag]').addEventListener('mousedown', (e) => { if (e.target.closest('button')) return; const r = wrap.getBoundingClientRect(); drag = { dx: e.clientX - r.left, dy: e.clientY - r.top }; wrap.style.transform = 'none'; wrap.style.left = `${r.left}px`; e.preventDefault(); });
+        document.addEventListener('mousemove', (e) => { if (!drag) return; wrap.style.left = `${e.clientX - drag.dx}px`; wrap.style.top = `${e.clientY - drag.dy}px`; });
+        document.addEventListener('mouseup', () => { if (drag) { drag = null; saveGeo(); } });
+        const body = wrap.querySelector('[data-survey-body]');
+        const runsEl = wrap.querySelector('[data-survey-runs]');
+        const notesStat = wrap.querySelector('[data-survey-notes-stat]');
+        const saveNotesBtn = wrap.querySelector('[data-survey-notes-save]');
+        const st = { tab: 'summary', imgTab: 'setup', layers: { lte: true, airports: true, obstacles: true, lines: false, base: true } };
+        let notesDraft = surveyEmptyNotes(), dirty = false, viewSv = null, viewDir = null, selectedRun = null, viewLabel = '';
+        const setDirty = (d) => { dirty = d; saveNotesBtn.style.background = d ? 'rgba(255,210,122,0.18)' : 'none'; saveNotesBtn.textContent = d ? '💾 Save notes •' : '💾 Save notes'; };
+        const noteStatText = () => notesDraft.updatedAt ? `✎ notes last saved ${surveyLocalStamp(new Date(notesDraft.updatedAt))} by ${notesDraft.updatedBy || '?'}` : '✎ no notes saved yet';
+        const renderMain = () => {
+            if (!viewSv) { body.innerHTML = '<div style="opacity:0.7;">Run the airspace check, or pick a saved run on the left.</div>'; return; }
+            const t0 = performance.now();
+            body.innerHTML = `<div style="color:${viewDir ? '#7adfe6' : '#ffb020'};margin-bottom:4px;">${airEsc(viewLabel)}</div>` + surveyRenderTabs(viewSv, notesDraft, st);
+            if (viewDir) surveyHydrateImages(body, viewDir);
+            const ms = performance.now() - t0;
+            if (ms > 50) console.log(`${TAG} survey: pane render ${Math.round(ms)} ms (${st.tab})`);
+        };
+        // Diagnostics: while the window is open, log any main-thread task over
+        // 200 ms with what the page was doing — paste these if typing feels slow.
+        let longTasks = null;
+        try {
+            longTasks = new PerformanceObserver((list) => list.getEntries().forEach(en => {
+                if (en.duration < 200) return;
+                const a = (en.attribution && en.attribution[0]) || {};
+                console.warn(`${TAG} survey: long task ${Math.round(en.duration)} ms — ${a.containerType || 'window'} ${a.containerSrc || a.containerName || ''} (focus on ${document.activeElement && document.activeElement.tagName}${document.activeElement && document.activeElement.getAttribute('data-sn-field') ? ' ' + document.activeElement.getAttribute('data-sn-field') : ''})`);
+            }));
+            longTasks.observe({ entryTypes: ['longtask'] });
+        } catch (e) { longTasks = null; }
+        const markSelected = () => {
+            runsEl.querySelectorAll('[data-survey-run],[data-survey-preview]').forEach(el => {
+                const on = selectedRun ? el.getAttribute('data-survey-run') === selectedRun : el.hasAttribute('data-survey-preview');
+                el.style.background = on ? 'rgba(122,223,230,0.18)' : '';
+                el.style.borderLeft = on ? '3px solid #7adfe6' : '3px solid transparent';
+            });
+        };
+        const loadRun = async (runId) => {
+            selectedRun = runId; markSelected();
+            const dir = `${surveyDirFor(sid)}/${runId}`;
+            body.innerHTML = '<div style="opacity:0.7">loading saved run…</div>';
+            try {
+                const sv = await ghGetJson(`${dir}/survey.json`);
+                if (!sv || !sv.result) throw new Error('survey.json missing');
+                viewSv = sv; viewDir = dir; viewLabel = `Saved run ${runId} (${sv.reason}) — ✎ fields show the site's current notes`;
+                renderMain();
+            } catch (err) { body.innerHTML = `<div style="color:#ff8080">load failed — ${airEsc(err.message)}</div>`; }
+        };
+        const livePreview = async () => {
+            if (!surveyLast || String(surveyLast.sid) !== String(sid)) return;
+            selectedRun = null; markSelected();
+            body.innerHTML = '<div style="opacity:0.7">building preview…</div>';
+            try {
+                const siteInfo = await surveySiteInfo(sid).catch(() => null);
+                const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+                const geom = surveyGeometry(sid, surveyLast.res, ents);
+                viewSv = surveyBuild({ sid, res: surveyLast.res, siteName: surveyLast.siteName, siteInfo, notes: notesDraft, geom, reason: 'preview', runId: 'preview', images: {}, login: surveyLogin || '' });
+                viewDir = null; viewLabel = 'Live preview of the last airspace run — not saved; images are captured at save time';
+                renderMain();
+            } catch (e) { body.innerHTML = `<div style="color:#ff8080">preview failed — ${airEsc(e.message)}</div>`; }
+        };
+        const renderRuns = (idx) => {
+            const runs = (idx && idx.runs) || [];
+            const live = surveyLast && String(surveyLast.sid) === String(sid);
+            runsEl.innerHTML = (runs.length ? runs.map(r => `<div data-survey-run="${airEsc(r.runId)}" title="Show this saved report (with its map images)" style="padding:4px 10px;cursor:pointer;display:flex;gap:6px;align-items:center;border-left:3px solid transparent;">`
+                    + `<span style="flex:1;"><strong>📄 ${airEsc(surveyLocalStamp(new Date(r.takenAt)))}</strong> <span style="opacity:0.7">${airEsc(r.reason)}</span><br><span style="font-size:11px;opacity:0.8">${r.violations} violation${r.violations === 1 ? '' : 's'} · ${airEsc(r.signed || r.decision || '')}</span></span>`
+                    + `<button data-survey-view="${airEsc(r.runId)}" title="Re-draw this saved run in the airspace panel + map (read-only)" style="background:none;border:1px solid rgba(122,223,230,0.35);color:#7adfe6;border-radius:4px;padding:0 5px;cursor:pointer;">👁</button></div>`).join('')
+                    : '<div style="padding:4px 10px;opacity:0.6;">No saved runs yet — 💾 Save survey writes the first one.</div>')
+                + (live ? `<div data-survey-preview title="What a save would write right now (no images — those are captured at save time)" style="padding:4px 10px;cursor:pointer;color:#5fff5f;border-top:1px solid rgba(122,223,230,0.15);border-left:3px solid transparent;">▶ Live preview of the last run (${new Date(surveyLast.at).toLocaleTimeString()})</div>` : '<div style="padding:4px 10px;opacity:0.6;">Run the airspace check for a live preview.</div>');
+            markSelected();
+        };
+        const saveNotes = async () => {
+            if (!elevSharedToken) { showToast('Notes need the GitHub token (Control Panel)', 'rgba(255,96,96,0.55)'); return false; }
+            saveNotesBtn.disabled = true; saveNotesBtn.textContent = 'saving…';
+            try {
+                notesDraft = await surveySaveNotes(sid, notesDraft);
+                setDirty(false); notesStat.textContent = noteStatText();
+                showToast('Survey notes saved — they fold into the next saved run', 'rgba(95,255,95,0.55)');
+                return true;
+            } catch (err) { showToast(`Notes save failed — ${err.message}`, 'rgba(255,96,96,0.55)'); return false; }
+            finally { saveNotesBtn.disabled = false; if (!dirty) saveNotesBtn.textContent = '💾 Save notes'; else setDirty(true); }
+        };
+        // Edits: inputs write straight into the draft (no re-render); rows,
+        // contact stamps and tab switches re-render the pane.
+        wrap.addEventListener('input', (e) => {
+            const f = e.target.closest('[data-sn-field]');
+            if (f) { notesDraft.fields[f.getAttribute('data-sn-field')] = f.value; setDirty(true); return; }
+            const c = e.target.closest('[data-sn-cell]');
+            if (c) { const [k, ri, ci] = c.getAttribute('data-sn-cell').split('|'); const rows = notesDraft.tables[k] = notesDraft.tables[k] || []; rows[+ri] = rows[+ri] || []; rows[+ri][+ci] = c.value; setDirty(true); }
+        });
+        wrap.addEventListener('change', async (e) => {
+            const f = e.target.closest('select[data-sn-field]');
+            if (f) { notesDraft.fields[f.getAttribute('data-sn-field')] = f.value; setDirty(true); return; }
+            const ly = e.target.closest('[data-sn-layer]');
+            if (ly) { st.layers[ly.getAttribute('data-sn-layer')] = ly.checked; renderMain(); return; }
+            const rc = e.target.closest('[data-sn-rowcontact]');
+            if (rc) {
+                const [k, ri] = rc.getAttribute('data-sn-rowcontact').split('|');
+                const col = SURVEY_TABLES[k].contactCol;
+                const rows = notesDraft.tables[k] = notesDraft.tables[k] || []; rows[+ri] = rows[+ri] || [];
+                if (rc.checked) { const login = await surveyGithubLogin(); const now = new Date(); rows[+ri][col] = 'Yes'; rows[+ri][col + 1] = `${surveyLocalStamp(now)} · ${login || 'unknown'}`; }
+                else { rows[+ri][col] = ''; rows[+ri][col + 1] = ''; }
+                setDirty(true); renderMain(); return;
+            }
+            const ck = e.target.closest('[data-sn-contact]');
+            if (ck) {
+                const id = ck.getAttribute('data-sn-contact');
+                if (ck.checked) { const login = await surveyGithubLogin(); const now = new Date(); notesDraft.contacts[id] = { contacted: true, at: now.toISOString(), atLocal: surveyLocalStamp(now), by: login || 'unknown' }; }
+                else delete notesDraft.contacts[id];
+                setDirty(true); renderMain();
+            }
+        });
+        wrap.addEventListener('click', async (e) => {
+            if (e.target.closest('[data-survey-close]')) {
+                if (dirty && elevSharedToken) { showToast('Saving notes…'); await saveNotes(); }
+                else if (dirty) showToast('Unsaved notes discarded (no GitHub token)', 'rgba(255,176,32,0.55)');
+                closeSurveyModal(); return;
+            }
+            if (e.target.closest('[data-survey-max]')) {
+                if (wrap.dataset.max) { Object.assign(wrap.style, JSON.parse(wrap.dataset.max)); delete wrap.dataset.max; }
+                else { wrap.dataset.max = JSON.stringify({ left: wrap.style.left, top: wrap.style.top, width: wrap.style.width, height: wrap.style.height, transform: wrap.style.transform }); Object.assign(wrap.style, { left: '8px', top: '8px', width: `${window.innerWidth - 16}px`, height: `${window.innerHeight - 16}px`, transform: 'none' }); }
+                return;
+            }
+            const tab = e.target.closest('[data-sn-tab]');
+            if (tab) { st.tab = tab.getAttribute('data-sn-tab'); renderMain(); return; }
+            const it = e.target.closest('[data-sn-imgtab]');
+            if (it) { st.imgTab = it.getAttribute('data-sn-imgtab'); body.querySelectorAll('[data-sn-imgpane]').forEach(p => { p.hidden = p.getAttribute('data-sn-imgpane') !== st.imgTab; }); body.querySelectorAll('[data-sn-imgtab]').forEach(t => { const on = t.getAttribute('data-sn-imgtab') === st.imgTab; t.style.background = on ? 'rgba(122,223,230,0.18)' : ''; t.style.color = on ? '#7adfe6' : ''; t.style.opacity = on ? '1' : '0.7'; }); return; }
+            const pick = e.target.closest('[data-sn-pick]');
+            if (pick) {
+                const [k, ri] = pick.getAttribute('data-sn-pick').split('|');
+                const map = getLeafletMap();
+                if (!map || typeof map.on !== 'function') { showToast('Map not reachable from this frame', 'rgba(255,96,96,0.55)'); return; }
+                const col = SURVEY_TABLES[k].pick;
+                wrap.style.display = 'none';
+                showToast('📍 Click the spot on the map (Esc to cancel)');
+                const done = (ll) => {
+                    try { map.off('click', onClick); } catch (err) {}
+                    document.removeEventListener('keydown', onKey, true);
+                    wrap.style.display = '';
+                    if (ll) { const rows = notesDraft.tables[k] = notesDraft.tables[k] || []; rows[+ri] = rows[+ri] || []; rows[+ri][col] = `${ll.lat.toFixed(5)}, ${ll.lng.toFixed(5)}`; setDirty(true); renderMain(); }
+                };
+                const onClick = (ev) => { done(ev && ev.latlng); };
+                const onKey = (ev) => { if (ev.key === 'Escape') { ev.stopPropagation(); done(null); } };
+                map.on('click', onClick);
+                document.addEventListener('keydown', onKey, true);
+                return;
+            }
+            const add = e.target.closest('[data-sn-add]');
+            if (add) { const k = add.getAttribute('data-sn-add'); (notesDraft.tables[k] = notesDraft.tables[k] || []).push(SURVEY_TABLES[k].cols.map(() => '')); setDirty(true); renderMain(); const first = body.querySelector(`[data-sn-cell="${k}|${notesDraft.tables[k].length - 1}|0"]`); if (first) first.focus(); return; }
+            const del = e.target.closest('[data-sn-del]');
+            if (del) { const [k, ri] = del.getAttribute('data-sn-del').split('|'); if (notesDraft.tables[k]) notesDraft.tables[k].splice(+ri, 1); setDirty(true); renderMain(); return; }
+            if (e.target.closest('[data-survey-open]')) { const u = `https://github.com/${ELEV_REPO}/tree/${ELEV_REPO_BRANCH}/${surveyDirFor(sid)}`; try { GM_openInTab(u, { active: true }); } catch (err) { window.open(u, '_blank'); } return; }
+            if (e.target.closest('[data-survey-rerun]')) { if (dirty && elevSharedToken) await saveNotes(); airspaceRun(); return; }
+            if (e.target.closest('[data-survey-pdf]')) { await surveyExportPdf(sid, viewSv, notesDraft, st).catch(err => { console.warn(`${TAG} survey pdf failed:`, err); showToast(`PDF export failed — ${err.message}`, 'rgba(255,96,96,0.55)'); }); return; }
+            if (e.target.closest('[data-survey-copy]')) { if (!viewSv) { showToast('Nothing to copy yet'); return; } const md = surveyMarkdown(Object.assign({}, viewSv, { notes: notesDraft })); navigator.clipboard.writeText(md).then(() => showToast('Survey markdown copied (full form order)'), () => showToast('Copy failed', 'rgba(255,96,96,0.55)')); return; }
+            if (e.target.closest('[data-survey-save]')) { if (dirty) { const ok = await saveNotes(); if (!ok) return; } await surveyCommit(sid, 'manual'); return; }
+            if (e.target.closest('[data-survey-notes-save]')) { await saveNotes(); return; }
+            if (e.target.closest('[data-survey-preview]')) { await livePreview(); return; }
+            const viewEl = e.target.closest('[data-survey-view]');
+            if (viewEl) {
+                e.stopPropagation();
+                const runId = viewEl.getAttribute('data-survey-view');
+                showToast(`Loading survey ${runId}…`);
+                try { await surveyViewRun(sid, runId); showToast(`📸 Showing saved run ${runId} (read-only)`); }
+                catch (err) { showToast(`Load failed — ${err.message}`, 'rgba(255,96,96,0.55)'); }
+                return;
+            }
+            const runEl = e.target.closest('[data-survey-run]');
+            if (runEl) await loadRun(runEl.getAttribute('data-survey-run'));
+        });
+        if (!elevSharedToken) {
+            runsEl.innerHTML = '<div style="padding:6px 10px;color:#ff8080;">No GitHub token — open the Control Panel (gear) and set the PAT to read / save surveys.</div>';
+            notesStat.textContent = '✎ notes need the GitHub token';
+            if (surveyLast && String(surveyLast.sid) === String(sid)) livePreview();
+            return;
+        }
+        let idx = null;
+        try { idx = await surveyLoadIndex(sid, true); renderRuns(idx); } catch (e) { runsEl.innerHTML = `<div style="padding:6px 10px;color:#ff8080;">history unavailable — ${airEsc(e.message)}</div>`; }
+        try { notesDraft = await surveyLoadNotes(sid); notesStat.textContent = noteStatText(); } catch (e) { notesStat.textContent = `✎ notes unavailable — ${e.message}`; }
+        const stat = wrap.querySelector('[data-survey-stat]'); if (stat) stat.textContent = `📄 Survey: ${surveyStatusText(sid)}`;
+        const runs = (idx && idx.runs) || [];
+        const want = selectRunId && runs.some(r => r.runId === selectRunId) ? selectRunId : (runs[0] && runs[0].runId);
+        if (want) await loadRun(want);
+        else if (surveyLast && String(surveyLast.sid) === String(sid)) livePreview();
+    }
     function airspaceRun() {
         const sid = getCurrentSiteID();
         if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
@@ -3572,6 +5077,7 @@
             postValidatorIssues(sid);
             renderAirspacePanel(res, sid, getCurrentSiteName());
             airDrawMapHighlights(res);
+            surveyAfterRun(sid, res, getCurrentSiteName()).catch(err => console.warn(`${TAG} surveyAfterRun threw:`, err));
             const errNote = res.errors.length ? ` (${res.errors.length} FAA quer${res.errors.length === 1 ? 'y' : 'ies'} FAILED — partial)` : '';
             console.log(`${TAG} airspace check: ${res.violations.length} violation(s), `
                 + `${res.inventory.airports.length} airport(s), ${res.inventory.obstacles.length} obstacle(s)${errNote}`);
@@ -5506,6 +7012,21 @@
         if (!matches.length) matches = rows.filter(r => norm(r).endsWith('- ' + want) || norm(r).endsWith('– ' + want));
         if (!matches.length) matches = rows.filter(r => norm(r).indexOf(want) >= 0);
         if (!matches.length) {
+            // v4.252: pad-root rung (mirrors MBT rankMatchMissions v2.91) —
+            // sites that name missions "<PAD> _ID <n>" but assets
+            // "<Pad> <Equipment>" share only the pad-root prefix. Drop up to
+            // 3 trailing tokens and match missions that continue the root at
+            // a token boundary; 5-char floor guards against lease-wide hits.
+            const toks = want.split(/\s+/);
+            for (let drop = 1; drop <= 3 && toks.length - drop >= 1 && !matches.length; drop++) {
+                const root = toks.slice(0, toks.length - drop).join(' ');
+                if (root.length < 5) break;
+                // v4.273: "_id" glue boundary (mirrors MBT v2.92) — legacy
+                // sites name pad missions "…3806BH_ID 468" with no space.
+                matches = rows.filter(r => norm(r) === root || norm(r).startsWith(root + ' ') || norm(r).startsWith(root + '_id'));
+            }
+        }
+        if (!matches.length) {
             showToast(`No mission matching "${name}" in the list`, 'rgba(255,180,0,0.55)');
             return;
         }
@@ -6287,15 +7808,27 @@
     const TER_THRESH_DEFAULTS = {
         minAglFt: 80,     // AGL floor target (client SOP; universal — editable)
         maxAglFt: 200,    // AGL ceiling target
-        deltaFt: 30,      // max in-band terrain relief per region
+        deltaFt: 25,      // max in-band terrain relief per region (25: user SOP 2026-09-08)
         cellFt: 33,       // DEM sample cell (~10 m = native 3DEP 1/3 arc-sec)
         marginFt: 500,    // extra ring around the entity bbox
         absorbAc: 0.5,    // islands below this: silently absorbed
         nfzMaxAc: 5,      // absorbed islands up to this: NFZ candidates
         opacity: 0.55,    // overlay opacity
-        simplifyFt: 66,   // Phase 2: boundary simplification tolerance
-        nfzBufFt: 25,     // Phase 2: outward buffer around NFZ hulls
-        namePrefix: 'FFZ ', // Phase 2: created-FFZ name prefix (string)
+        namePrefix: 'FFZ ', // Build: created-FFZ name prefix (string)
+        // Unshielded Site Builder (#254) — see the 🏗 block below
+        gapMinFt: 50,           // seam gap between FFZs
+        smoothNearFt: 300,      // ≤ this far from an asset: near tolerance
+        smoothFarFt: 1500,      // ≥ this far: far tolerance (linear ramp between)
+        tolNearFt: 150,         // simplification tolerance near assets (pads get their own detour)
+        tolFarFt: 2000,         // simplification tolerance far from assets — straight edges thousands of feet long
+        tunedV: 4,              // defaults revision — stored older values are migrated in loadTerThresholds
+        standoffFt: 15,         // pad buffer for straddle bends (SOP FFZ→asset standoff)
+        pitAbsorbMaxAglFt: 250, // warn when an absorbed pit's low spot sits deeper than this under the floor
+        bridgeMergeFt: 500,     // bridge candidates closer than this merge
+        bridgeMaxSpacingFt: 2500, // longest bridgeless stretch on a seam
+        bridgeInsetFt: 75,      // bridge waypoint depth inside each FFZ
+        bridgeMinOverlapFt: 10, // min bridge band height before a staircase is built
+        maxVertsWarn: 1000,     // polygon vertex warning
         // Profile area (v4.205 — FP-heavy sites have almost no FFZ footprint,
         // so an FFZ-union mask kept ~nothing there):
         //   'hull'   — convex hull of ALL site entities + margin (default;
@@ -6309,6 +7842,9 @@
     const TER_ENABLE_DEFAULTS = {
         median: true,     // 3×3 median despeckle before banding
         floorP95: false,  // floor ref = P95 elevation instead of true max
+        deleteOldFfz: true, // Build: delete pre-existing FFZs after the new set verifies
+        deleteOldFp: true,  // Build: delete pre-existing flight paths after the new set verifies
+        absorbBumps: true,  // Build: bump islands holding assets are absorbed (parent floor rises) instead of becoming keyholed islands
     };
     function loadTerThresholds() {
         const out = { ...TER_THRESH_DEFAULTS };
@@ -6321,6 +7857,22 @@
                     if (typeof o[k] === 'number' && !isFinite(o[k])) continue;
                     out[k] = o[k];
                 }
+                // v4.262: smoothing defaults changed (tol 0/250 → 25/600, ramp 300/1500 →
+                // 200/1200) after the first live builds — lift stored copies of the OLD
+                // defaults once; values the user changed themselves are kept.
+                if (!(o.tunedV >= 3)) {
+                    // v4.267 "simple shapes" defaults: lift every stored copy of an earlier default
+                    if ([0, 25, undefined].includes(o.tolNearFt)) out.tolNearFt = TER_THRESH_DEFAULTS.tolNearFt;
+                    if ([250, 600, undefined].includes(o.tolFarFt)) out.tolFarFt = TER_THRESH_DEFAULTS.tolFarFt;
+                    if ([200, 300, undefined].includes(o.smoothNearFt)) out.smoothNearFt = TER_THRESH_DEFAULTS.smoothNearFt;
+                    if ([1200, 1500, undefined].includes(o.smoothFarFt)) out.smoothFarFt = TER_THRESH_DEFAULTS.smoothFarFt;
+                    if ([10, undefined].includes(o.gapMinFt)) out.gapMinFt = TER_THRESH_DEFAULTS.gapMinFt;
+                }
+                if (!(o.tunedV >= 4)) {
+                    // v4.272: Δ back to 25 (user: "default to 25 please" — a 30 kept coming back via the panel)
+                    if (o.deltaFt === 30 || o.deltaFt === undefined) out.deltaFt = TER_THRESH_DEFAULTS.deltaFt;
+                    out.tunedV = 4;
+                }
             }
         } catch (e) { console.warn(`${TAG} loadTerThresholds threw:`, e); }
         return out;
@@ -6328,6 +7880,19 @@
     function saveTerThresholds() {
         try { elevGmSet(TER_THRESH_KEY, JSON.stringify(terThresholds)); }
         catch (e) { console.warn(`${TAG} saveTerThresholds threw:`, e); }
+    }
+    // Single-key read-modify-write. The script runs in TWO frames (top + map
+    // iframe); a Control Panel echo landing in the stale frame used to save that
+    // frame's whole object and clobber the other frame's values (the smoothing
+    // defaults reverted on every page load, 2026-09-09).
+    function saveTerThresholdKey(key, value) {
+        try {
+            let stored = {};
+            try { const raw = elevGmGet(TER_THRESH_KEY, null); if (raw) stored = JSON.parse(raw) || {}; } catch (e) { stored = {}; }
+            stored[key] = value;
+            if (!(stored.tunedV >= TER_THRESH_DEFAULTS.tunedV)) stored.tunedV = terThresholds.tunedV;
+            elevGmSet(TER_THRESH_KEY, JSON.stringify(stored));
+        } catch (e) { console.warn(`${TAG} saveTerThresholdKey threw:`, e); }
     }
     function loadTerEnabled() {
         const out = { ...TER_ENABLE_DEFAULTS };
@@ -6344,6 +7909,7 @@
     let terMasterEnabled = true;
     let terThresholds = loadTerThresholds();
     let terEnabled = loadTerEnabled();
+    console.log(`${TAG} profiler thresholds at load: tol ${terThresholds.tolNearFt}/${terThresholds.tolFarFt} within ${terThresholds.smoothNearFt}/beyond ${terThresholds.smoothFarFt} · gap ${terThresholds.gapMinFt} · Δ ${terThresholds.deltaFt} · tunedV ${terThresholds.tunedV}`);
     let terState = null;      // full result of the last run (see terrainProfilerRun)
     let terLayer = null;      // L.imageOverlay on the map
     let terLayerMap = null;
@@ -7055,7 +8621,77 @@
         if (el) { try { el.remove(); } catch (e) {} }
     }
 
-    async function terrainProfilerRun() {
+    // Settings check BEFORE the first run of a session (user 2026-09-09: "give me
+    // the settings first … to save us from loading bad data"). Later runs go
+    // straight through; the profiler panel's ⟳ Re-run exposes the same inputs.
+    let terPreRunSeen = false;
+    function terPreRunPanel() {
+        terClosePanel();
+        { const fresh = loadTerThresholds(); for (const k in fresh) if (!(k in TER_THRESH_DEFAULTS) || typeof fresh[k] === typeof terThresholds[k]) terThresholds[k] = fresh[k]; }
+        const th = terThresholds, en = terEnabled;
+        const esc = (v) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+        const num = (id, label, step, title, w2) => `<label title="${esc(title || '')}" style="display:flex;align-items:center;justify-content:space-between;gap:8px;"><span>${label}</span><input data-ter-p="${id}" type="number" value="${th[id]}" step="${step}" style="width:${w2 || 64}px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(201,166,255,0.35);border-radius:4px;padding:2px 4px;font:inherit;"></label>`;
+        const chk = (id, label, title) => `<label title="${esc(title || '')}" style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input data-ter-e="${id}" type="checkbox" ${en[id] ? 'checked' : ''}>${label}</label>`;
+        const wrap = document.createElement('div');
+        wrap.id = TER_PANEL_ID;
+        wrap.style.cssText = 'position:fixed;top:70px;right:56px;width:400px;z-index:2147483000;background:rgba(16,22,32,0.97);border:1px solid rgba(201,166,255,0.45);border-radius:10px;color:#dfe9f0;font:12px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,0.55);';
+        wrap.innerHTML = `
+            <div style="padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid rgba(201,166,255,0.25);">
+                <span style="color:#c9a6ff;font-weight:700;">⛰ Terrain Profiler — settings check</span>
+                <span style="opacity:0.6;">v${SCRIPT_VERSION}</span><span style="flex:1"></span>
+                <button data-ter-close style="background:none;border:none;color:#dfe9f0;font-size:15px;cursor:pointer;">✕</button>
+            </div>
+            <div style="padding:8px 12px;display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;">
+                <div style="grid-column:1/3;color:#c9a6ff;font-weight:600;">Profile</div>
+                ${num('minAglFt', 'AGL floor (ft)', 5, 'Region floor = highest ground + this')}
+                ${num('maxAglFt', 'AGL ceiling (ft)', 5, 'Region ceiling = lowest ground + this')}
+                ${num('deltaFt', 'Δ max relief (ft)', 5, 'Max terrain relief inside one band')}
+                ${num('cellFt', 'DEM cell (ft)', 1, '33 ≈ native 3DEP 10 m')}
+                ${num('marginFt', 'margin (ft)', 50, 'Ring around the site hull')}
+                <label style="display:flex;align-items:center;justify-content:space-between;gap:8px;"><span>profile area</span><select data-ter-mask style="background:#0d131d;color:#dfe9f0;border:1px solid rgba(201,166,255,0.35);border-radius:4px;padding:2px 4px;font:inherit;">${[['hull', 'Site hull'], ['ffz-fp', 'FFZ + FP corridors'], ['ffz', 'FFZs only'], ['rect', 'Rectangle']].map(o => `<option value="${o[0]}" ${(th.maskMode || 'hull') === o[0] ? 'selected' : ''}>${o[1]}</option>`).join('')}</select></label>
+                ${chk('median', 'despeckle DEM', '3×3 median before banding')}
+                ${chk('floorP95', 'P95 floor reference', 'Floor from the 95th-percentile elevation instead of the true max')}
+                <div style="grid-column:1/3;color:#ffe14d;font-weight:600;margin-top:6px;">Build</div>
+                ${num('gapMinFt', 'seam gap (ft)', 5, 'Gap between neighbouring FFZs')}
+                ${num('standoffFt', 'pad standoff (ft)', 5, 'FFZ edge clearance around a pad on a seam')}
+                ${num('tolNearFt', 'tolerance near assets (ft)', 25, 'Seam simplification within the near distance of a pad')}
+                ${num('tolFarFt', 'tolerance far (ft)', 100, 'Seam simplification in open ground')}
+                ${num('smoothNearFt', 'near distance (ft)', 50, 'Near tolerance applies within this of a pad')}
+                ${num('smoothFarFt', 'far distance (ft)', 100, 'Far tolerance applies beyond this')}
+                ${num('bridgeMergeFt', 'bridge merge (ft)', 50, 'Bridge candidates closer than this merge')}
+                ${num('bridgeMaxSpacingFt', 'bridge max spacing (ft)', 250, 'Longest bridgeless stretch on a seam')}
+                ${chk('absorbBumps', 'absorb bump islands with assets', 'Parent floor rises instead of a keyholed island')}
+                ${chk('deleteOldFfz', 'delete old FFZs on commit', '')}
+                ${chk('deleteOldFp', 'delete old FPs on commit', '')}
+            </div>
+            <div style="padding:8px 12px;border-top:1px solid rgba(201,166,255,0.25);display:flex;gap:8px;align-items:center;">
+                <span style="opacity:0.7;font-size:11px;">Saved on Run. The profiler panel's ⟳ Re-run shows the same inputs afterwards.</span>
+                <span style="flex:1"></span>
+                <button data-ter-prerun style="background:rgba(201,166,255,0.15);border:1px solid rgba(201,166,255,0.5);color:#c9a6ff;border-radius:5px;padding:3px 12px;cursor:pointer;font-weight:700;">▶ Run profiler</button>
+            </div>`;
+        wrap.addEventListener('click', (e) => {
+            if (e.target.closest('[data-ter-close]')) { terClosePanel(); return; }
+            if (!e.target.closest('[data-ter-prerun]')) return;
+            let bad = null;
+            wrap.querySelectorAll('[data-ter-p]').forEach(inp => {
+                const k = inp.getAttribute('data-ter-p');
+                const v = parseFloat(inp.value);
+                if (!isFinite(v) || v < 0) { bad = k; return; }
+                terThresholds[k] = v;
+            });
+            wrap.querySelectorAll('[data-ter-e]').forEach(inp => { terEnabled[inp.getAttribute('data-ter-e')] = !!inp.checked; });
+            const mSel = wrap.querySelector('[data-ter-mask]');
+            if (mSel && mSel.value) terThresholds.maskMode = mSel.value;
+            if (bad) { showToast(`Invalid value for ${bad}`, 'rgba(255,96,96,0.55)'); return; }
+            saveTerThresholds(); saveTerEnabled();
+            terPreRunSeen = true;
+            terClosePanel();
+            terrainProfilerRun(true);
+        });
+        document.body.appendChild(wrap);
+    }
+    async function terrainProfilerRun(confirmed) {
+        if (!confirmed && !terPreRunSeen && !terState) { terPreRunPanel(); return; }
         if (terRunning) { showToast('Profiler already running…'); return; }
         const sid = getCurrentSiteID();
         if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
@@ -7148,8 +8784,10 @@
     });
 
     // ============================================================
-    // ⛰ Terrain Profiler — Phase 2: FFZ / NFZ auto-builder (v4.202,
-    // feature #203). Turns the profiled regions into REAL entities:
+    // ⛰ Terrain Profiler — Phase 2 builder (v4.202, #203), REPLACED in
+    // v4.254 by the 🏗 Unshielded Site Builder (#254) further down. The
+    // shared vectorize / simplify / slice / hull helpers below survive.
+    // Original Phase-2 notes:
     //   • vectorize the label grid into polygons whose shared borders
     //     are simplified ONCE (arc/topology approach — adjacent FFZs
     //     butt exactly, no sliver gaps/overlaps to trip the SOP checks)
@@ -7171,8 +8809,17 @@
     let terBUndoArm = 0;
 
     function terBClearStage() {
+        // Leaflet layers know their own map (l.remove()) — a stale preview
+        // survived a profiler re-run when getLeafletMap() came back with a
+        // different / null instance, and the yellow seams no longer matched
+        // the overlay (live report 2026-09-09).
         const map = getLeafletMap();
-        terBLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        let failed = 0;
+        terBLayers.forEach(l => {
+            try { if (typeof l.remove === 'function') l.remove(); else if (map) map.removeLayer(l); }
+            catch (e) { failed++; }
+        });
+        if (failed) console.warn(`${TAG} builder: ${failed} preview layer(s) could not be removed`);
         terBLayers = [];
         terBState = null;
         terBArm = 0; terBUndoArm = 0;
@@ -7184,32 +8831,6 @@
         return null;
     }
 
-    // Simplify one arc. CLOSED loops can't be DP'd with both anchors on the
-    // same point (any loop smaller than the tolerance collapses to nothing —
-    // small regions were silently vanishing): split the loop at the point
-    // farthest from pts[0], simplify both halves, and rejoin.
-    function terBSimplifyArc(A, tol) {
-        if (!A.closed || A.pts.length < 5) return terBSimplify(A.pts, tol);
-        const pts = A.pts;
-        let far = 1, farD = -1;
-        for (let i = 1; i < pts.length - 1; i++) {
-            const dx = pts[i][0] - pts[0][0], dy = pts[i][1] - pts[0][1];
-            const d = dx * dx + dy * dy;
-            if (d > farD) { farD = d; far = i; }
-        }
-        const h1 = terBSimplify(pts.slice(0, far + 1), tol);
-        const h2 = terBSimplify(pts.slice(far), tol);
-        const joined = h1.concat(h2.slice(1));
-        if (joined.length >= 5) return joined;   // ≥4 distinct points (closed dup included)
-        // Loop smaller than the tolerance — DP collapses it to a line and
-        // the region silently vanishes. Keep a coarse-but-valid ring instead.
-        if (pts.length <= 9) return pts.slice();
-        const step = Math.ceil((pts.length - 1) / 8);
-        const out = [];
-        for (let i = 0; i < pts.length - 1; i += step) out.push(pts[i]);
-        out.push(pts[pts.length - 1]);
-        return out;
-    }
 
     // --- Douglas-Peucker on [x,y] lattice points, endpoints pinned ---
     function terBSimplify(pts, tol) {
@@ -7372,7 +8993,7 @@
             }
             ringsByRegion.set(r, rings);
         });
-        return { arcs, ringsByRegion };
+        return { arcs, ringsByRegion, arcSide };
     }
 
     // Emit a ring's lattice points from its (simplified) arcs.
@@ -7404,7 +9025,7 @@
 
     // Slice a polygon-with-holes ([outer, hole…] in [lng,lat]) into
     // hole-free rings via horizontal cuts through each hole's centroid.
-    function terBSliceHoles(poly, depth) {
+    function terBSliceHoles(poly, depth, pickLat) {
         if (poly.length <= 1) return [poly[0]];
         const PC = terBPC();
         if (!PC) return [poly[0]];   // no clipping lib → drop holes (logged by caller)
@@ -7413,6 +9034,7 @@
         let clat = 0;
         hole.forEach(p => { clat += p[1]; });
         clat /= hole.length;
+        if (typeof pickLat === 'function') { try { const c2 = pickLat(clat); if (isFinite(c2)) clat = c2; } catch (e) { console.warn(`${TAG} builder: cut-line picker threw:`, e); } }
         let mnLng = Infinity, mxLng = -Infinity, mnLat = Infinity, mxLat = -Infinity;
         poly[0].forEach(p => {
             if (p[0] < mnLng) mnLng = p[0]; if (p[0] > mxLng) mxLng = p[0];
@@ -7428,7 +9050,7 @@
             let res = null;
             try { res = PC.intersection([poly], [rect]); } catch (e) { console.warn(`${TAG} builder: hole slice threw:`, e); }
             (res || []).forEach(p => {
-                terBSliceHoles(p, (depth || 0) + 1).forEach(r2 => { if (r2 && r2.length >= 3) out.push(r2); });
+                terBSliceHoles(p, (depth || 0) + 1, pickLat).forEach(r2 => { if (r2 && r2.length >= 3) out.push(r2); });
             });
         }
         return out.length ? out : [poly[0]];
@@ -7489,9 +9111,288 @@
         return out;
     }
 
-    // --- Stage: vectorize + simplify + slice + NFZ hulls → terBState ---
-    function terBStage() {
-        try { terBStageInner(); }
+    // ============================================================
+    // 🏗 UNSHIELDED SITE BUILDER (feature #254, v4.254) — replaces the
+    // Phase-2 "tile everything" Build. Model (user, 2026-09-08):
+    //   • ONE GIANT FFZ PER TERRAIN-BAND REGION (whole region) so that
+    //     from anywhere the drone can turn and fly straight to base on a
+    //     DAA event — no corridor grid, no per-pad FFZs.
+    //   • asset-free LEAF regions are dropped; asset-free regions on a
+    //     base→asset path are kept (the return crosses them)
+    //   • islands: pit w/o assets → NFZ · pit WITH assets → absorbed into
+    //     the parent (extra AGL accepted, warned past pitAbsorbMaxAglFt) ·
+    //     bump w/o assets → NFZ · bump WITH assets → own taller FFZ, and
+    //     the parent gets a KEYHOLE channel so it stays one polygon
+    //   • a pad straddling two bands goes to the TALLER band (lower
+    //     ground under a higher floor only adds AGL — never the reverse)
+    //   • seams: 10 ft gap near assets; where no assets are near the
+    //     boundary is simplified and the gap WIDENS: gap = 2·tol + 10 —
+    //     each side pulls back tol + 5 ft from the simplified seam, which
+    //     is provably on its own side of the raw seam. FFZs only ever
+    //     SHRINK, NFZs only ever GROW.
+    //   • floor/ceiling are recomputed from the DEM INSIDE EACH FINAL
+    //     POLYGON (NFZ cells excluded) — never from the band label
+    //   • bridges: where each asset's straight line to base crosses a
+    //     seam (merged at bridgeMergeFt, spacing floor per seam), short
+    //     FPs whose band = intersection of the two FFZ bands; staircase
+    //     waypoint only when a cliff makes that thinner than 10 ft
+    //   • commit: backup → FFZs → verify → NFZs → verify → bridges →
+    //     verify → DELETE the old pad FFZs + corridor FPs (plain DELETEs
+    //     so Delete Guard banks them) → verify. MSL sites only.
+    // ============================================================
+
+    // Scanline-fill a lattice polygon (float corner coords); visit(i) for
+    // every cell whose CENTER is inside.
+    function terUFill(px, w, h, visit) {
+        if (!px || px.length < 3) return;
+        let mnY = Infinity, mxY = -Infinity;
+        px.forEach(p => { if (p[1] < mnY) mnY = p[1]; if (p[1] > mxY) mxY = p[1]; });
+        const y0 = Math.max(0, Math.floor(mnY)), y1 = Math.min(h - 1, Math.ceil(mxY));
+        const xs = [];
+        for (let y = y0; y <= y1; y++) {
+            const cy = y + 0.5;
+            xs.length = 0;
+            for (let i = 0, j = px.length - 1; i < px.length; j = i++) {
+                const a = px[j], b = px[i];
+                if ((a[1] > cy) === (b[1] > cy)) continue;
+                xs.push(a[0] + (b[0] - a[0]) * (cy - a[1]) / (b[1] - a[1]));
+            }
+            if (xs.length < 2) continue;
+            xs.sort((q, r2) => q - r2);
+            for (let k = 0; k + 1 < xs.length; k += 2) {
+                const xA = Math.max(0, Math.ceil(xs[k] - 0.5)), xB = Math.min(w - 1, Math.floor(xs[k + 1] - 0.5));
+                for (let x = xA; x <= xB; x++) visit(y * w + x, x, y);
+            }
+        }
+    }
+    function terULatticeFns(dem) {
+        return {
+            toX: (lng) => (terMercX(lng) - dem.mercX1) / (dem.mercX2 - dem.mercX1) * dem.w,
+            toY: (lat) => (dem.mercY2 - terMercY(lat)) / (dem.mercY2 - dem.mercY1) * dem.h,
+        };
+    }
+    // Chamfer 3-4 distance transform (cells) from every set source cell.
+    function terUDistTransform(w, h, src) {
+        const n = w * h;
+        const INF = 1e9;
+        const d = new Float32Array(n);
+        for (let i = 0; i < n; i++) d[i] = src[i] ? 0 : INF;
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                const i = y * w + x;
+                let v = d[i];
+                if (x > 0 && d[i - 1] + 3 < v) v = d[i - 1] + 3;
+                if (y > 0) {
+                    if (d[i - w] + 3 < v) v = d[i - w] + 3;
+                    if (x > 0 && d[i - w - 1] + 4 < v) v = d[i - w - 1] + 4;
+                    if (x < w - 1 && d[i - w + 1] + 4 < v) v = d[i - w + 1] + 4;
+                }
+                d[i] = v;
+            }
+        }
+        for (let y = h - 1; y >= 0; y--) {
+            for (let x = w - 1; x >= 0; x--) {
+                const i = y * w + x;
+                let v = d[i];
+                if (x < w - 1 && d[i + 1] + 3 < v) v = d[i + 1] + 3;
+                if (y < h - 1) {
+                    if (d[i + w] + 3 < v) v = d[i + w] + 3;
+                    if (x < w - 1 && d[i + w + 1] + 4 < v) v = d[i + w + 1] + 4;
+                    if (x > 0 && d[i + w - 1] + 4 < v) v = d[i + w - 1] + 4;
+                }
+                d[i] = v;
+            }
+        }
+        for (let i = 0; i < n; i++) d[i] = d[i] >= INF ? 1e6 : d[i] / 3;
+        return d;
+    }
+    // Simplification tolerance (cells) as a function of asset distance (ft).
+    function terUTolCells(distFt, th, cellFt) {
+        const near = th.smoothNearFt, far = Math.max(th.smoothFarFt, near + 1);
+        let tolFt;
+        if (distFt <= near) tolFt = th.tolNearFt;
+        else if (distFt >= far) tolFt = th.tolFarFt;
+        else tolFt = th.tolNearFt + (th.tolFarFt - th.tolNearFt) * (distFt - near) / (far - near);
+        return Math.max(0, tolFt) / cellFt;
+    }
+    // Douglas-Peucker with a per-vertex tolerance: consecutive vertices of
+    // similar tolerance form a run, each run is simplified with the run's
+    // MINIMUM tolerance (conservative), runs are re-joined. Returns
+    // { pts, tol } (tol = per-kept-vertex tolerance in cells).
+    function terUSimplifyVar(pts, tols) {
+        const n = pts.length;
+        if (n <= 2) return { pts: pts.slice(), tol: tols.slice() };
+        const level = (t) => t < 0.25 ? 0 : Math.min(9, 1 + Math.floor(Math.log2(t + 0.25) + 1));
+        const outP = [], outT = [];
+        let s = 0;
+        while (s < n - 1) {
+            let e = s + 1;
+            const lv = level(tols[s]);
+            while (e < n - 1 && level(tols[e]) === lv) e++;
+            let mn = Infinity;
+            for (let i = s; i <= e; i++) if (tols[i] < mn) mn = tols[i];
+            const seg = pts.slice(s, e + 1);
+            const simp = terBSimplify(seg, mn);
+            // the junction vertex sits on BOTH runs — the raw seam may deviate by
+            // the coarser tolerance right next to it, so it must pull back by that
+            if (outP.length) outT[outT.length - 1] = Math.max(outT[outT.length - 1], mn);
+            const start = outP.length ? 1 : 0;
+            for (let i = start; i < simp.length; i++) { outP.push(simp[i]); outT.push(mn); }
+            s = e;
+        }
+        return { pts: outP, tol: outT };
+    }
+    // Inward miter offset of a CLOSED ring (region on the LEFT of travel in
+    // lattice y-down coords) by a per-vertex distance (cells). Where the miter
+    // would exceed 2× the distance the corner is BEVELED (two points, one per
+    // edge normal) so the offset edge is never closer than d to either raw
+    // edge — a capped miter at a sharp corner pulled back too little and let
+    // the neighbor band's spurs into the piece (Cobra, 2026-09-09).
+    function terUOffsetRing(pts, dArr) {
+        const n = pts.length;
+        const out = [];
+        for (let i = 0; i < n; i++) {
+            const p = pts[i], q = pts[(i + 1) % n], o = pts[(i + n - 1) % n];
+            let ax = p[0] - o[0], ay = p[1] - o[1];
+            let bx = q[0] - p[0], by = q[1] - p[1];
+            const la = Math.hypot(ax, ay) || 1, lb = Math.hypot(bx, by) || 1;
+            ax /= la; ay /= la; bx /= lb; by /= lb;
+            // left normals (y-down): (dy, -dx)
+            const n1x = ay, n1y = -ax, n2x = by, n2y = -bx;
+            let mx = n1x + n2x, my = n1y + n2y;
+            const lm = Math.hypot(mx, my);
+            const d = dArr[i] || 0;
+            if (lm < 1e-6) { out.push([p[0] + n2x * d, p[1] + n2y * d]); continue; }
+            mx /= lm; my /= lm;
+            const cosHalf = mx * n2x + my * n2y;
+            if (cosHalf >= 0.5) { const scale = 1 / cosHalf; out.push([p[0] + mx * d * scale, p[1] + my * d * scale]); }
+            else { out.push([p[0] + n1x * d, p[1] + n1y * d], [p[0] + n2x * d, p[1] + n2y * d]); }
+        }
+        return out;
+    }
+    // Ring cleanup via polygon-clipping self-union: returns the largest
+    // simple outer ring, or null when the lib is missing / result empty.
+    function terUCleanRing(ring) {
+        const PC = terBPC();
+        if (!PC) return null;
+        try {
+            const r = ring.slice(); r.push(r[0].slice());
+            const res = PC.union([[r]]);
+            let best = null, bestA = -1;
+            (res || []).forEach(poly => {
+                const o = terBNormRing(poly[0]);
+                const A = Math.abs(terBSignedArea(o));
+                if (A > bestA) { bestA = A; best = o; }
+            });
+            return best && best.length >= 3 ? best : null;
+        } catch (e) { console.warn(`${TAG} builder: ring clean threw:`, e); return null; }
+    }
+    // Same, but returns EVERY outer ring the self-union produces (a pinched
+    // or figure-8 ring becomes its lobes instead of being thrown away).
+    function terUCleanRings(ring, minArea) {
+        const PC = terBPC();
+        if (!PC) return null;
+        try {
+            const r = ring.slice(); r.push(r[0].slice());
+            const res = PC.union([[r]]);
+            const out = [];
+            (res || []).forEach(poly => { const o = terBNormRing(poly[0]); if (o.length >= 3 && Math.abs(terBSignedArea(o)) >= (minArea || 0)) out.push(o); });
+            return out.length ? out : null;
+        } catch (e) { console.warn(`${TAG} builder: ring clean threw:`, e); return null; }
+    }
+    // Segment intersection (lattice coords) → [x,y,tA] or null.
+    function terUSegX(a, b, c, d) {
+        const r1x = b[0] - a[0], r1y = b[1] - a[1], r2x = d[0] - c[0], r2y = d[1] - c[1];
+        const den = r1x * r2y - r1y * r2x;
+        if (Math.abs(den) < 1e-12) return null;
+        const t = ((c[0] - a[0]) * r2y - (c[1] - a[1]) * r2x) / den;
+        const u = ((c[0] - a[0]) * r1y - (c[1] - a[1]) * r1x) / den;
+        if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+        return [a[0] + t * r1x, a[1] + t * r1y, t, u];
+    }
+    function terUPolyLen(pts) { let s = 0; for (let i = 1; i < pts.length; i++) s += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]); return s; }
+    function terUPip(x, y, pts) {
+        let inside = false;
+        for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+            const xi = pts[i][0], yi = pts[i][1], xj = pts[j][0], yj = pts[j][1];
+            if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) inside = !inside;
+        }
+        return inside;
+    }
+    // Offset a ring by a per-vertex distance so that its area SHRINKS
+    // (grow=false: an FFZ pulls back) or GROWS (grow=true: an NFZ / the
+    // region side of a hole). Orientation-agnostic: tries the left offset
+    // and flips it when the area moved the wrong way.
+    function terUOffsetAuto(pts, dArr, grow) {
+        const a0 = Math.abs(terBSignedArea(pts));
+        const o1 = terUOffsetRing(pts, dArr);
+        const a1 = Math.abs(terBSignedArea(o1));
+        if (grow ? a1 >= a0 : a1 <= a0) return o1;
+        return terUOffsetRing(pts, dArr.map(d => -d));
+    }
+    // Relabel tiny 4-connected fragments (a label's non-largest components
+    // under minCells that hold no asset cell) into their majority neighbor
+    // label — hull relabels leave 2-cell slivers along old boundaries that
+    // would otherwise become bogus holes/lobes.
+    function terUCleanSpecks(lab, w, h, minCells, assetSrc) {
+        const n = w * h;
+        const comp = new Int32Array(n).fill(-1);
+        const comps = [];
+        const stack = [];
+        for (let s = 0; s < n; s++) {
+            if (comp[s] !== -1 || lab[s] < 0) continue;
+            const l = lab[s], id = comps.length;
+            const rec = { label: l, cells: [], asset: false };
+            comps.push(rec);
+            stack.length = 0; stack.push(s); comp[s] = id;
+            while (stack.length) {
+                const i = stack.pop(); rec.cells.push(i); if (assetSrc[i]) rec.asset = true;
+                const x = i % w, y = (i / w) | 0;
+                if (x > 0 && comp[i - 1] === -1 && lab[i - 1] === l) { comp[i - 1] = id; stack.push(i - 1); }
+                if (x < w - 1 && comp[i + 1] === -1 && lab[i + 1] === l) { comp[i + 1] = id; stack.push(i + 1); }
+                if (y > 0 && comp[i - w] === -1 && lab[i - w] === l) { comp[i - w] = id; stack.push(i - w); }
+                if (y < h - 1 && comp[i + w] === -1 && lab[i + w] === l) { comp[i + w] = id; stack.push(i + w); }
+            }
+        }
+        const largest = new Map();
+        comps.forEach((c, id) => { const cur = largest.get(c.label); if (!cur || c.cells.length > comps[cur].cells.length) largest.set(c.label, id); });
+        let fixed = 0;
+        comps.forEach((c, id) => {
+            if (largest.get(c.label) === id || c.asset || c.cells.length >= minCells) return;
+            const cnt = new Map();
+            c.cells.forEach(i => {
+                const x = i % w, y = (i / w) | 0;
+                [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]].forEach(([qx, qy]) => {
+                    if (qx < 0 || qy < 0 || qx >= w || qy >= h) return;
+                    const l2 = lab[qy * w + qx];
+                    if (l2 >= 0 && l2 !== c.label) cnt.set(l2, (cnt.get(l2) || 0) + 1);
+                });
+            });
+            let best = -1, bc = -1; cnt.forEach((v, l2) => { if (v > bc) { bc = v; best = l2; } });
+            if (best < 0) return;
+            c.cells.forEach(i => { lab[i] = best; });
+            fixed++;
+        });
+        return fixed;
+    }
+    function terUPtAt(pts, along) {
+        let acc = 0;
+        for (let i = 1; i < pts.length; i++) {
+            const L2 = Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+            if (acc + L2 >= along || i === pts.length - 1) {
+                const t = L2 ? Math.max(0, Math.min(1, (along - acc) / L2)) : 0;
+                return { p: [pts[i - 1][0] + (pts[i][0] - pts[i - 1][0]) * t, pts[i - 1][1] + (pts[i][1] - pts[i - 1][1]) * t], dir: [pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]], seg: i - 1 };
+            }
+            acc += L2;
+        }
+        return { p: pts[0].slice(), dir: [1, 0], seg: 0 };
+    }
+
+    // --- Stage: classify → relabel → vectorize → smooth/offset → keyhole
+    //     → recompute → NFZs → bridges → gates → terBState ---
+    async function terBStage() {
+        if (terBState && terBState.staging) { showToast('Stage already running…'); return; }
+        try { await terBStageInner(); }
         catch (e) {
             console.warn(`${TAG} builder: stage threw:`, e);
             showToast(`Stage failed — ${e && e.message ? e.message : e}`, 'rgba(255,96,96,0.55)');
@@ -7499,165 +9400,1028 @@
             terRenderPanel();
         }
     }
-    function terBStageInner() {
+    async function terBStageInner() {
         const st = terState;
         if (!st) { showToast('Run the profiler first', 'rgba(255,96,96,0.55)'); return; }
         terBClearStage();
+        terBState = { sid: st.sid, staging: true, pieces: [], nfzs: [], bridges: [], deletions: [], seams: [], gates: [], runLog: [], createdIds: [], committing: false };
+        terRenderPanel();
         const t0 = performance.now();
         const seg = st.seg, dem = st.dem, th = terThresholds;
-        const tolCells = Math.max(0, (th.simplifyFt || 0) / Math.max(1, dem.cellXft));
-        const topo = terBVectorize(seg, dem);
-        topo.arcs.forEach(A => { A.tol = tolCells; A.simp = terBSimplifyArc(A, tolCells); });
+        const w = dem.w, h = dem.h, n = w * h, vals = dem.vals;
+        const cellFt = Math.max(1, dem.cellXft);
+        const ftToCells = (ft) => ft / cellFt;
+        const { toX, toY } = terULatticeFns(dem);
         const log = [];
-        // Self-intersection repair loop: halve the tolerance of the arcs of
-        // any failing region ring and rebuild (shared arcs stay shared).
-        // HARD RAILS (v4.203 — a live run froze the tab without these):
-        //   • tolerance floor = 1 cell, NEVER raw lattice (a site-boundary
-        //     arc can be tens of thousands of stair-step vertices)
-        //   • ringSelfIntersects is O(n²) — skip rings > 1500 pts (log it)
-        //   • whole loop is time-budgeted; on overrun we bail loudly
-        const REPAIR_BUDGET_MS = 5000;
-        const repairT0 = performance.now();
-        for (let iter = 0; iter < 3; iter++) {
-            if (performance.now() - repairT0 > REPAIR_BUDGET_MS) { log.push('⚠ simplify repair: time budget hit — kept current geometry (raise simplify tolerance if a piece looks wrong)'); break; }
-            const badArcs = new Set();
-            let skippedBig = 0;
-            topo.ringsByRegion.forEach((rings, r) => {
-                rings.forEach(ring => {
-                    const pts = terBRingPoints(ring, topo.arcs);
-                    if (pts.length < 3) return;
-                    if (pts.length > 1500) { skippedBig++; return; }   // O(n²) guard
-                    const ll = pts.map(p => terBLatticeToLL(dem, p[0], p[1]));
-                    if (ringSelfIntersects(ll)) ring.arcSeq.forEach(s => badArcs.add(s.arc));
-                });
-            });
-            if (skippedBig && !iter) log.push(`${skippedBig} very large ring(s) skipped the self-intersect check (>1500 verts)`);
-            if (!badArcs.size) break;
-            let changed = 0;
-            badArcs.forEach(aId => {
-                const A = topo.arcs[aId];
-                const nt = Math.max(1, A.tol / 2);   // floor at 1 cell — never raw
-                if (nt !== A.tol) { A.tol = nt; A.simp = terBSimplifyArc(A, nt); changed++; }
-            });
-            if (!changed) break;
-            log.push(`simplify repair: relaxed ${badArcs.size} arc(s) (pass ${iter + 1})`);
-        }
-        // Build pieces per region (slicing holes).
-        const pieces = [];
-        const pieceRegion = [];
-        let droppedRegions = 0;
-        seg.order.forEach(gi => {
-            const rg = seg.regions[gi];
-            const before = pieces.length;
-            const rings = topo.ringsByRegion.get(gi) || [];
-            if (!rings.length) { droppedRegions++; return; }
-            const built = rings.map(ring => {
-                const pts = terBRingPoints(ring, topo.arcs);
-                return { pts, area: Math.abs(terBSignedArea(pts)) };
-            }).filter(r2 => r2.pts.length >= 3);
-            if (!built.length) { droppedRegions++; return; }
-            built.sort((a, b) => b.area - a.area);
-            const outer = built[0], holes = built.slice(1);
-            const toLLPair = (p) => { const q = terBLatticeToLL(dem, p[0], p[1]); return [q.lng, q.lat]; };
-            const polyLL = [outer.pts.map(toLLPair)].concat(holes.map(h2 => h2.pts.map(toLLPair)));
-            // close rings for polygon-clipping
-            polyLL.forEach(r2 => r2.push(r2[0].slice()));
-            let flat;
-            if (holes.length) {
-                flat = terBSliceHoles(polyLL, 0).map(terBNormRing);
-                log.push(`${rg.name}: ${holes.length} enclosed island(s) → sliced into ${flat.length} piece(s)`);
-            } else {
-                flat = [terBNormRing(polyLL[0])];
-            }
-            flat.forEach((ringLL, pi) => {
-                if (ringLL.length < 3) return;
-                const points = ringLL.map(p => ({ lat: p[1], lng: p[0] }));
-                if (points.length <= 1500 && ringSelfIntersects(points)) { log.push(`${rg.name}${flat.length > 1 ? String.fromCharCode(97 + pi) : ''}: self-intersecting after slicing — SKIPPED`); return; }
-                // area in acres (equirectangular)
-                const latRef = points[0].lat * Math.PI / 180;
-                let a2 = 0;
-                for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
-                    a2 += (points[j].lng * points[i].lat - points[i].lng * points[j].lat);
-                }
-                const acres = Math.abs(a2 / 2) * 111320 * Math.cos(latRef) * 110540 / 4046.8564224;
-                pieces.push({
-                    region: gi, name: `${rg.name}${flat.length > 1 ? String.fromCharCode(97 + pi) : ''}`,
-                    points, acres,
-                    floorMSL: rg.floorMSL, ceilMSL: rg.ceilMSL,
-                    bandLo: rg.bandLo, bandHi: rg.bandHi,
-                    verts: points.length,
-                    infeasible: rg.bandHeight <= 0,
-                    selected: rg.bandHeight > 0,
-                });
-                pieceRegion.push(gi);
-            });
-            if (pieces.length === before) droppedRegions++;
+        const L = (m) => { log.push(m); };
+        const ents = ((mapObjectsBySite[st.sid] || {}).entities) || [];
+        const regions = seg.regions;
+        let siteCfg = null;
+        try { siteCfg = await fetchSiteConfig(st.sid); } catch (e) { console.warn(`${TAG} builder: site-cfg fetch failed:`, e); }
+
+        // ---------- 0. inputs ----------
+        const assets = [];
+        ents.forEach(e => {
+            if (e.type !== 3) return;
+            const cs = (entityCoords(e) || []).filter(c => c && typeof c.lat === 'number');
+            if (!cs.length) return;
+            const ring = cs.length >= 3 ? simplifyPolygon(cs) : cs;
+            const px = ring.map(c => [toX(c.lng), toY(c.lat)]);
+            let cx = 0, cy = 0; px.forEach(p => { cx += p[0]; cy += p[1]; }); cx /= px.length; cy /= px.length;
+            assets.push({ e, name: e.name || `#${e.id}`, ring: cs, px, cx, cy });
         });
-        if (droppedRegions) log.push(`${droppedRegions} region(s) too small to vectorize at this tolerance — dropped (lower simplify ft to keep them)`);
-        // NFZ candidate hulls (candGrid carries candidate index + 1).
-        const nfzs = [];
-        const bufCells = Math.max(0, (th.nfzBufFt || 0) / Math.max(1, dem.cellXft));
-        const candCells = new Map();
-        const cg = seg.candGrid;
-        for (let i = 0; i < cg.length; i++) {
-            const c = cg[i];
-            if (!c) continue;
-            let list = candCells.get(c - 1);
-            if (!list) { list = []; candCells.set(c - 1, list); }
-            list.push(i);
+        if (!assets.length) throw new Error('site has no assets — nothing to build for');
+        const resolved = resolveBases(st.sid, ents);
+        let base = null;
+        if (resolved.bases.length) {
+            // several bases: the one nearest the asset cloud's centroid
+            let acx = 0, acy = 0; assets.forEach(a => { acx += a.cx; acy += a.cy; }); acx /= assets.length; acy /= assets.length;
+            let bd = Infinity;
+            resolved.bases.forEach(b => {
+                const pt = gmPoint(b); if (!pt) return;
+                const bx = toX(pt.lng), by = toY(pt.lat);
+                const d = Math.hypot(bx - acx, by - acy);
+                if (d < bd) { bd = d; base = { e: b, name: b.name || 'base', pt, x: bx, y: by }; }
+            });
+            if (resolved.bases.length > 1) L(`${resolved.bases.length} base stations — using "${base.name}" (nearest the asset cloud)`);
         }
+        if (!base) throw new Error('no base station (type 8 or a GM named "base") — the return-path model needs one');
+        const baseCell = (base.x >= 0 && base.y >= 0 && base.x < w && base.y < h) ? ((base.y | 0) * w + (base.x | 0)) : -1;
+        if (baseCell < 0 || seg.regGrid[baseCell] < 0) throw new Error(`base "${base.name}" is outside the profiled area — widen the margin / profile area and re-run`);
+
+        // ---------- 1. asset cells + distance transform ----------
+        const assetSrc = new Uint8Array(n);
+        const assetCellsOf = assets.map(a => {
+            const cells = [];
+            if (a.px.length >= 3) terUFill(a.px, w, h, (i) => { cells.push(i); assetSrc[i] = 1; });
+            if (!cells.length) { const x = a.cx | 0, y = a.cy | 0; if (x >= 0 && y >= 0 && x < w && y < h) { cells.push(y * w + x); assetSrc[y * w + x] = 1; } }
+            return cells;
+        });
+        await terYield();
+        const distC = terUDistTransform(w, h, assetSrc);   // cells to nearest asset
+        await terYield();
+        const distFtAtCorner = (x, y) => {
+            let m = 1e9;
+            for (let dy = -1; dy <= 0; dy++) for (let dx = -1; dx <= 0; dx++) {
+                const cx = x + dx, cy = y + dy;
+                if (cx < 0 || cy < 0 || cx >= w || cy >= h) continue;
+                const v = distC[cy * w + cx]; if (v < m) m = v;
+            }
+            return m * cellFt;
+        };
+
+        // ---------- 2. region graph on the raw grid ----------
+        const lab = new Int32Array(seg.regGrid);            // working labels
+        const R = regions.length;
+        const regInfo = regions.map((rg, gi) => ({ gi, name: rg.name, band: rg.band, bandLo: rg.bandLo, bandHi: rg.bandHi, floorMSL: rg.floorMSL, ceilMSL: rg.ceilMSL, cells: rg.cells, assets: [], nbr: new Map(), keep: false, dropped: false, absorbedInto: -1, nfz: false, isIsland: false, dir: '', synthetic: false }));
+        const contactScan = async () => {
+            regInfo.forEach(r => r.nbr.clear());
+            for (let y = 0; y < h; y++) {
+                if ((y & 63) === 63) await terYield();
+                for (let x = 0; x < w; x++) {
+                    const i = y * w + x, a = lab[i];
+                    if (a < 0) continue;
+                    if (x < w - 1) { const b = lab[i + 1]; if (b >= 0 && b !== a) { regInfo[a].nbr.set(b, (regInfo[a].nbr.get(b) || 0) + 1); regInfo[b].nbr.set(a, (regInfo[b].nbr.get(a) || 0) + 1); } }
+                    if (y < h - 1) { const b = lab[i + w]; if (b >= 0 && b !== a) { regInfo[a].nbr.set(b, (regInfo[a].nbr.get(b) || 0) + 1); regInfo[b].nbr.set(a, (regInfo[b].nbr.get(a) || 0) + 1); } }
+                }
+            }
+        };
+        await contactScan();
+        // asset → region (majority of its cells)
+        const assetRegion = assets.map((a, ai) => {
+            const cnt = new Map();
+            assetCellsOf[ai].forEach(i => { const l = lab[i]; if (l >= 0) cnt.set(l, (cnt.get(l) || 0) + 1); });
+            let best = -1, bc = -1; cnt.forEach((c, l) => { if (c > bc) { bc = c; best = l; } });
+            return best;
+        });
+        assets.forEach((a, ai) => { if (assetRegion[ai] >= 0) regInfo[assetRegion[ai]].assets.push(ai); });
+
+        // ---------- 3. islands (big = region with ONE neighbor; small = seg.nfzCands) ----------
+        const nfzMask = new Uint8Array(n);
+        const nfzOut = [];   // { cells:[], dir, acres, name, srcRegion|cand }
+        // vectorize the RAW grid once for island outlines (NFZ rings)
+        const topo0 = terBVectorize(seg, dem);
+        await terYield();
+        regInfo.forEach(r => {
+            if (r.nbr.size !== 1) return;
+            const parent = [...r.nbr.keys()][0];
+            r.isIsland = true;
+            r.dir = r.band > regInfo[parent].band ? 'bump' : (r.band < regInfo[parent].band ? 'pit' : 'mixed');
+            if (r.assets.length) {
+                if (r.dir === 'pit' || terEnabled.absorbBumps) {
+                    // absorb into the parent: a pit only adds AGL; a bump raises the
+                    // parent's recomputed floor (simple shapes beat a keyholed island)
+                    r.absorbedInto = parent;
+                    regInfo[parent].assets.push(...r.assets);
+                    r.assets.forEach(ai => { assetRegion[ai] = parent; });
+                    for (let i = 0; i < n; i++) if (lab[i] === r.gi) lab[i] = parent;
+                    L(`${r.name}: ${r.dir} island with ${r.assets.length} asset(s) → absorbed into ${regInfo[parent].name}${r.dir === 'pit' ? ' (higher floor, extra AGL accepted)' : ' (parent floor rises to clear it)'}`);
+                } else {
+                    L(`${r.name}: ${r.dir} island with ${r.assets.length} asset(s) → own FFZ inside ${regInfo[parent].name} (keyhole)`);
+                }
+            } else {
+                // asset-free island → NFZ, cells go to the parent FFZ
+                const rings = topo0.ringsByRegion.get(r.gi) || [];
+                let outer = null, oa = -1;
+                rings.forEach(ring => { const pts = terBRingPoints(ring, topo0.arcs); const A = Math.abs(terBSignedArea(pts)); if (A > oa) { oa = A; outer = pts; } });
+                const cells = [];
+                for (let i = 0; i < n; i++) if (lab[i] === r.gi) cells.push(i);
+                nfzOut.push({ cells, ring: outer, dir: r.dir, acres: r.cells * dem.cellAcres, parentName: regInfo[parent].name, name: `NFZ ${r.dir} ${regInfo[parent].name}` });
+                r.absorbedInto = parent; r.nfz = true;
+                cells.forEach(i => { lab[i] = parent; nfzMask[i] = 1; });
+            }
+        });
+        // small candidates (already merged into the parent by the profiler)
+        const candCells = new Map();
+        for (let i = 0; i < n; i++) { const c = seg.candGrid[i]; if (c) { let l = candCells.get(c - 1); if (!l) { l = []; candCells.set(c - 1, l); } l.push(i); } }
         seg.nfzCands.forEach((cand, ci) => {
             const cells = candCells.get(ci);
-            if (!cells || !cells.length) return;
-            const corners = [];
-            cells.forEach(i => {
-                const x = i % dem.w, y = (i / dem.w) | 0;
-                corners.push([x, y], [x + 1, y], [x, y + 1], [x + 1, y + 1]);
-            });
-            const hull = terBOffsetConvex(terBHull(corners), bufCells);
-            let ringLL = hull.map(p => { const q = terBLatticeToLL(dem, p[0], p[1]); return [q.lng, q.lat]; });
-            // containment: clip to the parent piece that holds the centroid
-            const ctr = terCandCentroid(cand);
-            let parent = -1;
-            for (let pi = 0; pi < pieces.length; pi++) {
-                if (pieces[pi].region === cand.region && pointInPolygon(ctr.lat, ctr.lng, pieces[pi].points)) { parent = pi; break; }
+            if (!cells || !cells.length || cand.region < 0) return;
+            const withAsset = cells.some(i => assetSrc[i]);
+            const dir = cand.dir === 'pit' ? 'pit' : 'bump';
+            if (!withAsset) {
+                nfzOut.push({ cells, ring: null, dir, acres: cand.acres, parentName: regInfo[cand.region].name, name: `NFZ ${dir} ${regInfo[cand.region].name}` });
+                cells.forEach(i => { nfzMask[i] = 1; });
+                return;
             }
-            if (parent === -1) { for (let pi = 0; pi < pieces.length; pi++) if (pointInPolygon(ctr.lat, ctr.lng, pieces[pi].points)) { parent = pi; break; } }
-            let clipped = false;
-            if (parent >= 0) {
-                const PC = terBPC();
-                if (PC) {
-                    try {
-                        const pp = pieces[parent].points.map(p => [p.lng, p.lat]);
-                        pp.push(pp[0].slice());
-                        const hh = ringLL.slice(); hh.push(hh[0].slice());
-                        const res = PC.intersection([[hh]], [[pp]]);
-                        let bestR = null, bestA = -1;
-                        (res || []).forEach(p => {
-                            const r2 = terBNormRing(p[0]);
-                            const A2 = Math.abs(terBSignedArea(r2));
-                            if (A2 > bestA) { bestA = A2; bestR = r2; }
-                        });
-                        if (bestR && bestR.length >= 3) {
-                            if (bestR.length !== ringLL.length) clipped = true;
-                            ringLL = bestR;
-                        }
-                    } catch (e) { console.warn(`${TAG} builder: NFZ clip threw:`, e); }
+            if (dir === 'pit' || terEnabled.absorbBumps) { L(`small ${dir} (${cand.acres.toFixed(1)} ac) in ${regInfo[cand.region].name} holds an asset → stays absorbed${dir === 'pit' ? ' (extra AGL accepted)' : ' (parent floor rises to clear it)'}`); return; }
+            // bump with an asset → carve it back out as its own region
+            const gi = regInfo.length;
+            let mx = -Infinity; cells.forEach(i => { const v = vals[i]; if (!isNaN(v) && v > mx) mx = v; });
+            regInfo.push({ gi, name: `${regInfo[cand.region].name}b${gi - R + 1}`, band: regInfo[cand.region].band + 1, bandLo: Math.round(mx), bandHi: Math.round(mx), floorMSL: Math.ceil(mx + th.minAglFt), ceilMSL: 0, cells: cells.length, assets: [], nbr: new Map(), keep: false, dropped: false, absorbedInto: -1, nfz: false, isIsland: true, dir: 'bump', synthetic: true });
+            cells.forEach(i => { lab[i] = gi; });
+            L(`small bump (${cand.acres.toFixed(1)} ac) in ${regInfo[cand.region].name} holds an asset → own taller FFZ (keyhole)`);
+        });
+        // re-assign assets after relabels
+        assets.forEach((a, ai) => {
+            const cnt = new Map();
+            assetCellsOf[ai].forEach(i => { const l = lab[i]; if (l >= 0) cnt.set(l, (cnt.get(l) || 0) + 1); });
+            let best = -1, bc = -1; cnt.forEach((c, l) => { if (c > bc) { bc = c; best = l; } });
+            assetRegion[ai] = best;
+        });
+
+        // ---------- 4. straddling pads → taller band ----------
+        // Relabeling is by cell CENTER, and standoff + gap is under one cell, so a
+        // pad corner near a cell edge could sit 2 ft from the raw seam and end up
+        // inside the pull-back gap. Grow the buffer by a cell's half-diagonal so
+        // every cell the buffered pad touches is relabeled.
+        // The seam next to a pad is simplified at tolNear and pulled back tolNear +
+        // half the gap, so the relabel margin must cover 2·tolNear on top of the
+        // standoff + gap, or a raised near tolerance clips pad corners.
+        // raster stamp = assignment only (the vector fold/carve step bends the final
+        // seams precisely) — a bigger stamp just leaves 300 ft castellations behind
+        const padBufCells = ftToCells(th.standoffFt + th.gapMinFt) + 0.75;
+        // "Taller" = the label whose ACTUAL highest ground (NFZ cells excluded)
+        // is highest — the profiler's region floors include absorbed bump
+        // cells, which would make a parent look taller than the bump itself.
+        const labMax = new Float64Array(regInfo.length).fill(-Infinity);
+        for (let i = 0; i < n; i++) { const l = lab[i]; if (l < 0 || nfzMask[i]) continue; const v = vals[i]; if (!isNaN(v) && v > labMax[l]) labMax[l] = v; }
+        let straddled = 0;
+        const straddlePass = () => assets.forEach((a, ai) => {
+            if (a.px.length < 3) return;
+            const buf = terBOffsetConvex(terBHull(a.px), padBufCells);
+            const cells = [];
+            terUFill(buf, w, h, (i) => cells.push(i));
+            const labs = new Set(); cells.forEach(i => { if (lab[i] >= 0) labs.add(lab[i]); });
+            if (labs.size <= 1) { if (labs.size === 1) assetRegion[ai] = [...labs][0]; return; }
+            let tall = -1, tf = -Infinity;
+            labs.forEach(l => { const g = isFinite(labMax[l]) ? labMax[l] : regInfo[l].floorMSL - th.minAglFt; if (g > tf) { tf = g; tall = l; } });
+            cells.forEach(i => { lab[i] = tall; nfzMask[i] = 0; });
+            assetRegion[ai] = tall;
+            if (!a.straddle) straddled++;
+            a.straddle = regInfo[tall].name;
+            a.straddleLabs = [...labs].map(l => regInfo[l].name).join('/');
+        });
+        straddlePass();
+        if (straddled) L(`${straddled} pad(s) straddle a band boundary → moved (with ${th.standoffFt + th.gapMinFt} ft margin) into the taller band`);
+        // NFZ cells never under a pad
+        assets.forEach((a, ai) => assetCellsOf[ai].forEach(i => { nfzMask[i] = 0; }));
+        // guard fragments by asset CENTROID cells only — a stray cell holding a pad
+        // corner must merge into its neighbor (it became a 0.0 ac "FFZ" live)
+        const assetCtr = new Uint8Array(n);
+        assets.forEach(a => { const x = a.cx | 0, y = a.cy | 0; if (x >= 0 && y >= 0 && x < w && y < h) assetCtr[y * w + x] = 1; });
+        const specks = terUCleanSpecks(lab, w, h, Math.max(4, Math.round(th.absorbAc / dem.cellAcres)), assetCtr);
+        if (specks) L(`${specks} sliver fragment(s) left by relabeling merged into their neighbor`);
+        straddlePass();   // cleanup can re-expose a seam under a pad — settle it again
+        await terYield();
+        regInfo.forEach(r => { r.assets = []; });
+        assets.forEach((a, ai) => { if (assetRegion[ai] >= 0) regInfo[assetRegion[ai]].assets.push(ai); });
+
+        // ---------- 5. keep set (base → asset paths) ----------
+        await contactScan();
+        const baseReg = lab[baseCell];
+        if (baseReg < 0) throw new Error('base station cell has no region after relabeling');
+        const prev = new Int32Array(regInfo.length).fill(-2);
+        prev[baseReg] = -1;
+        const q = [baseReg];
+        while (q.length) { const r = q.shift(); regInfo[r].nbr.forEach((c, nb) => { if (prev[nb] === -2) { prev[nb] = r; q.push(nb); } }); }
+        regInfo[baseReg].keep = true;
+        let unreachableRegions = 0;
+        regInfo.forEach(r => {
+            if (!r.assets.length || r.absorbedInto >= 0) return;
+            if (prev[r.gi] === -2) { unreachableRegions++; r.keep = true; return; }   // disconnected from base — keep, gate will flag
+            let cur = r.gi;
+            while (cur >= 0) { regInfo[cur].keep = true; cur = prev[cur]; }
+        });
+        let droppedN = 0, droppedAc = 0;
+        regInfo.forEach(r => {
+            if (r.keep || r.absorbedInto >= 0) return;
+            r.dropped = true; droppedN++; droppedAc += r.cells * dem.cellAcres;
+        });
+        for (let i = 0; i < n; i++) { const l = lab[i]; if (l >= 0 && regInfo[l].dropped) lab[i] = -1; }
+        if (droppedN) L(`${droppedN} asset-free leaf region(s) dropped (${Math.round(droppedAc).toLocaleString()} ac) — outside the site`);
+        if (unreachableRegions) L(`⚠ ${unreachableRegions} asset region(s) are not connected to the base region on the terrain graph`);
+        await terYield();
+
+        // ---------- 6. vectorize the working grid + per-vertex tolerance ----------
+        const topo = terBVectorize({ regGrid: lab }, dem);
+        await terYield();
+        const gapHalf = ftToCells(th.gapMinFt) / 2;
+        const gapD = gapHalf * 1.5;   // per-side pull-back: over half the gap — miter caps / node chords eat a few %
+        const simplifyArc = (A) => {
+            const tols = A.rawTol;
+            const closedSplit = A.closed && A.pts.length >= 5;
+            let simp;
+            if (closedSplit) {
+                let far = 1, farD = -1;
+                for (let i = 1; i < A.pts.length - 1; i++) { const dx = A.pts[i][0] - A.pts[0][0], dy = A.pts[i][1] - A.pts[0][1]; const d = dx * dx + dy * dy; if (d > farD) { farD = d; far = i; } }
+                const h1 = terUSimplifyVar(A.pts.slice(0, far + 1), tols.slice(0, far + 1));
+                const h2 = terUSimplifyVar(A.pts.slice(far), tols.slice(far));
+                simp = { pts: h1.pts.concat(h2.pts.slice(1)), tol: h1.tol.concat(h2.tol.slice(1)) };
+                if (simp.pts.length < 5) { simp = { pts: A.pts.slice(), tol: tols.slice() }; }
+            } else simp = terUSimplifyVar(A.pts, tols);
+            A.simp = simp.pts; A.simpTol = simp.tol;
+        };
+        const outerCap = ftToCells(Math.max(100, th.marginFt * 0.8));   // outer edges erode by their tolerance — never past the profile margin
+        topo.arcs.forEach((A, ai) => {
+            const side = topo.arcSide[ai];
+            A.seam = side.left >= 0 && side.right >= 0;
+            A.rawTol = A.pts.map(p => { const t = terUTolCells(distFtAtCorner(p[0], p[1]), th, cellFt); return A.seam ? t : Math.min(t, outerCap); });
+            A.lenCells = terUPolyLen(A.pts);
+            simplifyArc(A);
+        });
+
+        // ---------- 7. rings → inward offset → keyhole → pieces ----------
+        const ringPtsAndD = (ring, arcs, tolScale) => {
+            const P = [], D = [], S = [];
+            for (const s of ring.arcSeq) {
+                const A = arcs[s.arc];
+                const pts = s.fwd ? A.simp : A.simp.slice().reverse();
+                const tl = s.fwd ? A.simpTol : A.simpTol.slice().reverse();
+                for (let i = 0; i < pts.length; i++) {
+                    const t = tl[i] * tolScale;
+                    // seams: half the gap only — the smoothed seam may wander into the
+                    // neighbor band and the piece's floor is recomputed from the ground
+                    // it really covers. Outer (profile) edges still erode by the
+                    // tolerance so a piece never covers unprofiled ground.
+                    const d = A.seam ? gapD : t;
+                    if (i === 0 && P.length) { D[D.length - 1] = Math.max(D[D.length - 1], d); S[S.length - 1] = S[S.length - 1] || A.seam; continue; }
+                    P.push(pts[i]); D.push(d); S.push(!!A.seam);
                 }
             }
-            const points = ringLL.map(p => ({ lat: p[1], lng: p[0] }));
-            if (points.length < 3 || ringSelfIntersects(points)) return;
-            nfzs.push({
-                name: `NFZ ${cand.dir || 'outlier'} ${cand.region >= 0 ? seg.regions[cand.region].name : ''} ${nfzs.length + 1}`.replace(/\s+/g, ' ').trim(),
-                points, acres: cand.acres, dir: cand.dir, parent, clipped,
-                orphan: parent === -1,
-                selected: parent !== -1,
+            while (P.length > 1 && P[0][0] === P[P.length - 1][0] && P[0][1] === P[P.length - 1][1]) { P.pop(); D.pop(); S.pop(); }
+            return { P, D, S };
+        };
+        let pieces = [];
+        let pieceGrid = new Int16Array(n).fill(-1);
+        let keyholes = 0, sliced = 0;
+        let cuts = [];   // lattice points where an offset severed a region into lobes (this pass)
+        // Local crossing test for a keyhole merge: the channel edges vs the
+        // ring segments near the junctions (a full O(n²) check is skipped on
+        // big rings, and this is where a bad merge actually crosses).
+        const localCross = (ring, idxs) => {
+            const n2 = ring.length;
+            const segs = new Set();
+            idxs.forEach(i => { for (let k = -12; k <= 12; k++) segs.add(((i + k) % n2 + n2) % n2); });
+            const list = [...segs];
+            for (let a = 0; a < list.length; a++) for (let b2 = a + 1; b2 < list.length; b2++) {
+                const i = list[a], j = list[b2];
+                if ((i + 1) % n2 === j || (j + 1) % n2 === i) continue;
+                if (terUSegX(ring[i], ring[(i + 1) % n2], ring[j], ring[(j + 1) % n2])) return true;
+            }
+            return false;
+        };
+        const passLog = [];
+        let pending = [];
+        const buildAllPieces = async () => {
+        pieces = []; pieceGrid = new Int16Array(n).fill(-1); keyholes = 0; sliced = 0; cuts = []; passLog.length = 0; pending = [];
+        const L = (m) => passLog.push(m);
+        for (const r of regInfo) {
+            if (r.dropped || r.absorbedInto >= 0) continue;
+            const rings = topo.ringsByRegion.get(r.gi) || [];
+            if (!rings.length) { L(`${r.name}: no boundary ring — skipped`); continue; }
+            // 7a. raw (simplified) rings + classification: lobes vs holes by containment
+            const raw = rings.map(ring => { const { P, D, S } = ringPtsAndD(ring, topo.arcs, 1); return { P, D, S, area: Math.abs(terBSignedArea(P)) }; }).filter(x => x.P.length >= 3);
+            raw.sort((a, b2) => b2.area - a.area);
+            raw.forEach((x, i) => { x.parent = -1; for (let j = 0; j < i; j++) { if (raw[j].parent === -1 && terUPip(x.P[0][0], x.P[0][1], raw[j].P)) { x.parent = j; break; } } });
+            // 7b. offset each ring (lobes shrink, holes grow) with a tolerance back-off on
+            // self-intersection. Seam vertices never pull back less than half the gap;
+            // outer-edge vertices near assets may not pull back at all (a pad corner
+            // 3 ft from the profile edge must stay inside). A pinched/figure-8 result
+            // is split into its lobes rather than dropped. Returns an ARRAY of rings.
+            // Inward offsets invert every concave notch shorter than the offset
+            // distance into a tiny loop; the self-union removes them but leaves
+            // them as junk polygons (area ≲ (2·D)²). Real lobes (a neck cut by the
+            // gap) are bigger than that or hold an asset — keep those only.
+            const realLobes = (lobes, Dmax) => {
+                const minA = Math.max(4, 4 * Dmax * Dmax);
+                return lobes.filter(lb => {
+                    if (assets.some(a => terUPip(a.cx, a.cy, lb))) return true;
+                    if (Math.abs(terBSignedArea(lb)) < minA) return false;
+                    let cellsIn = 0; terUFill(lb, w, h, () => { cellsIn++; });
+                    return cellsIn >= 20;   // a real lobe covers ground; inversion junk never does
+                });
+            };
+            const offsetRing = (x, isHole) => {
+                // The pull-back MUST equal the simplification tolerance (+ half gap):
+                // an earlier version retried a self-intersecting ring at half the
+                // pull-back, which let the neighbor band's spurs into the piece
+                // (Cobra: 1,449 out-of-band cells). Self-intersections are cleaned
+                // by the self-union; when that yields nothing usable the crossing
+                // points become "cuts" and the next pass lowers the tolerance there.
+                const D = x.D.map((d, i) => x.S[i] ? Math.max(gapD * 0.5, d) : d);
+                const Dmax = D.reduce((m2, v) => v > m2 ? v : m2, 0);
+                const off = terUOffsetAuto(x.P, D, isHole);
+                const offLL = off.map(p => ({ lat: p[1], lng: p[0] }));
+                const bad = off.length <= 1500 && ringSelfIntersects(offLL);
+                if (!bad) return [off];
+                const lobes = terUCleanRings(off, 1);
+                const real = lobes && lobes.length ? realLobes(lobes, Dmax) : [];
+                if (real.length === 1) return real;
+                if (!real.length) {
+                    // nothing usable — mark the crossings as cuts for the next pass
+                    const n2 = off.length;
+                    let found = 0;
+                    for (let i = 0; i < n2 && found < 6; i++) for (let j = i + 2; j < n2 && found < 6; j++) {
+                        if ((j + 1) % n2 === i) continue;
+                        if (segProperCross(offLL[i], offLL[(i + 1) % n2], offLL[j], offLL[(j + 1) % n2])) { cuts.push(off[i]); found++; }
+                    }
+                    return null;
+                }
+                // several real lobes: record where they nearly touch (next pass lowers
+                // the tolerance there); pull each back by the gap so they never touch
+                for (let i2 = 0; i2 < real.length; i2++) for (let j2 = i2 + 1; j2 < real.length; j2++) {
+                    let bd = Infinity, bp = null;
+                    const sa = Math.max(1, Math.floor(real[i2].length / 300)), sb = Math.max(1, Math.floor(real[j2].length / 300));
+                    for (let a2 = 0; a2 < real[i2].length; a2 += sa) for (let b2 = 0; b2 < real[j2].length; b2 += sb) { const d2 = Math.hypot(real[i2][a2][0] - real[j2][b2][0], real[i2][a2][1] - real[j2][b2][1]); if (d2 < bd) { bd = d2; bp = real[i2][a2]; } }
+                    if (bp) cuts.push(bp);
+                }
+                const out = [];
+                real.forEach(lb => {
+                    const o2 = terUOffsetAuto(lb, lb.map(() => gapD), isHole);
+                    const bad2 = o2.length <= 1500 && ringSelfIntersects(o2.map(p => ({ lat: p[1], lng: p[0] })));
+                    if (!bad2) { out.push(o2); return; }
+                    const l2 = terUCleanRings(o2, 1);
+                    if (l2) out.push(...realLobes(l2, gapD));
+                });
+                return out.length ? out : null;
+            };
+            let usedKeyhole = 0, usedSlice = 0;
+            const finalRings = [];
+            raw.forEach((lobe, li) => {
+                if (lobe.parent !== -1) return;
+                const curs = offsetRing(lobe, false);
+                if (!curs) { L(`⚠ ${r.name}: a boundary ring (${lobe.P.length} verts) self-intersects even at the tightest tolerance — ring DROPPED`); return; }
+                if (curs.length > 1) L(`${r.name}: a pinched ring split into ${curs.length} lobes`);
+                const holesAll = [];
+                raw.filter(x => x.parent === li).forEach(x => { const hs = offsetRing(x, true); if (hs) holesAll.push(...hs); else L(`⚠ ${r.name}: a hole ring could not be offset — hole IGNORED (check the overlap gate)`); });
+                curs.forEach((cur0, ci) => {
+                let cur = cur0;
+                // holes belong to the lobe that contains them
+                const holes = holesAll.filter(hh => terUPip(hh[0][0], hh[0][1], cur0));
+                // Keyhole via polygon-clipping: for each hole find the shortest
+                // asset-free straight channel to the outer ring, then SUBTRACT a
+                // gap-wide rectangle along it from the polygon-with-holes. The lib
+                // owns the topology (a two-cell sliver between hole and edge is
+                // fine), and the slit is exactly the seam gap wide.
+                const PC = terBPC();
+                let mp = [[cur].concat(holes)];   // MultiPolygon in lattice coords
+                let chanOk = 0, chanFail = 0;
+                for (const hole of holes) {
+                    let best = null;
+                    const step = Math.max(1, Math.floor(hole.length / 40));
+                    for (let hi = 0; hi < hole.length; hi += step) {
+                        const hp = hole[hi];
+                        for (let oi = 0; oi < cur.length; oi++) {
+                            const op = cur[oi];
+                            const d = Math.hypot(op[0] - hp[0], op[1] - hp[1]);
+                            if (!isFinite(d) || (best && d >= best.d)) continue;
+                            let clear = true;
+                            const steps = Math.min(5000, Math.max(2, Math.ceil(d)));
+                            for (let k = 0; k <= steps && clear; k++) {
+                                const x = (hp[0] + (op[0] - hp[0]) * k / steps) | 0, y = (hp[1] + (op[1] - hp[1]) * k / steps) | 0;
+                                if (x >= 0 && y >= 0 && x < w && y < h && assetSrc[y * w + x]) clear = false;
+                            }
+                            if (clear) best = { d, hi, oi };
+                        }
+                    }
+                    if (!best || !PC) { chanFail++; continue; }
+                    const op = cur[best.oi], hp = hole[best.hi];
+                    let ux = hp[0] - op[0], uy = hp[1] - op[1];
+                    const lu = Math.hypot(ux, uy) || 1; ux /= lu; uy /= lu;
+                    const nx = -uy * gapD, ny = ux * gapD;
+                    const ext = 1.5;   // cells past each ring so the slit fully spans both
+                    const A0 = [op[0] - ux * ext, op[1] - uy * ext], B0 = [hp[0] + ux * ext, hp[1] + uy * ext];
+                    const rect = [[A0[0] + nx, A0[1] + ny], [B0[0] + nx, B0[1] + ny], [B0[0] - nx, B0[1] - ny], [A0[0] - nx, A0[1] - ny]];
+                    rect.push(rect[0].slice());
+                    try {
+                        const closed = mp.map(poly => poly.map(r2 => { const q = r2.slice(); if (q[0][0] !== q[q.length - 1][0] || q[0][1] !== q[q.length - 1][1]) q.push(q[0].slice()); return q; }));
+                        const res = PC.difference(closed, [[rect]]);
+                        if (res && res.length) { mp = res.map(poly => poly.map(terBNormRing)); chanOk++; }
+                        else chanFail++;
+                    } catch (e) { console.warn(`${TAG} builder: keyhole difference threw:`, e); chanFail++; }
+                }
+                usedKeyhole += chanOk;
+                // whatever still has holes falls back to the pad-aware slicer
+                const leftover = [];
+                mp.forEach(poly => {
+                    if (poly.length === 1) { if (poly[0].length >= 3) finalRings.push(poly[0]); return; }
+                    leftover.push(poly);
+                });
+                if (leftover.length) {
+                    const toLL = (p) => { const q = terBLatticeToLL(dem, p[0], p[1]); return [q.lng, q.lat]; };
+                    leftover.forEach(poly => {
+                        const pll = poly.map(r2 => { const q = r2.map(toLL); q.push(q[0].slice()); return q; });
+                        const flat = terBSliceHoles(pll, 0, (lat0) => {
+                            const rowOf = (lat) => Math.round(toY(lat));
+                            for (let k = 0; k < 40; k++) {
+                                const dLat = (k % 2 ? 1 : -1) * Math.ceil(k / 2) * (2 * cellFt / 364000);
+                                const y = rowOf(lat0 + dLat);
+                                let hit = false;
+                                if (y >= 0 && y < h) for (let x = 0; x < w && !hit; x++) if (assetSrc[y * w + x] && lab[y * w + x] === r.gi) hit = true;
+                                if (!hit) return lat0 + dLat;
+                            }
+                            return lat0;
+                        }).map(terBNormRing);
+                        flat.forEach(r2 => {
+                            const lat = r2.map(p => [toX(p[0]), toY(p[1])]);
+                            if (lat.length < 3) return;
+                            const o2 = terUOffsetAuto(lat, lat.map(() => gapD), false);
+                            const bad2 = o2.length <= 1500 && ringSelfIntersects(o2.map(p => ({ lat: p[1], lng: p[0] })));
+                            if (!bad2) { finalRings.push(o2); return; }
+                            const l2 = terUCleanRings(o2, 1);
+                            if (l2) finalRings.push(...realLobes(l2, gapD));
+                        });
+                        usedSlice += poly.length - 1;
+                    });
+                }
+                });
+            });
+            keyholes += usedKeyhole; sliced += usedSlice;
+            finalRings.forEach((ringPts, pi) => pending.push({ r, ringPts, pi, nRings: finalRings.length, usedKeyhole }));
+            await terYield();
+        }
+        // ---- pad detours: a pad near a smoothed seam is folded INTO its piece
+        // (union with pad + standoff) and carved OUT of every other piece (difference
+        // with pad + standoff + gap), so straight seams can cut through pad clusters
+        // without splitting a pad ----
+        const PC2 = terBPC();
+        let detours = 0;
+        if (PC2) {
+            const closeRing = (r2) => { const q = r2.map(p => p.slice()); if (q[0][0] !== q[q.length - 1][0] || q[0][1] !== q[q.length - 1][1]) q.push(q[0].slice()); return q; };
+            const sC = ftToCells(th.standoffFt), gC = ftToCells(th.standoffFt + th.gapMinFt);
+            const closeRing2 = closeRing;
+            const findTarget = (a, ai) => {
+                let target = -1, bestD = Infinity;
+                pending.forEach((e, k) => {
+                    if (e.r.gi !== assetRegion[ai] || e.dead) return;
+                    if (terUPip(a.cx, a.cy, e.ringPts)) { target = k; bestD = -1; return; }
+                    if (bestD < 0) return;
+                    let d = Infinity; for (let m = 0; m < e.ringPts.length; m += Math.max(1, Math.floor(e.ringPts.length / 200))) { const q = e.ringPts[m]; const dd = Math.hypot(q[0] - a.cx, q[1] - a.cy); if (dd < d) d = dd; }
+                    if (d < bestD) { bestD = d; target = k; }
+                });
+                return target;
+            };
+            const padHulls = assets.map((a, ai) => {
+                if (a.px.length < 3 || assetRegion[ai] < 0) return null;
+                const hull = terBHull(a.px);
+                return { hullS: terBOffsetConvex(hull, sC), hullG: terBOffsetConvex(hull, gC), target: -1 };
+            });
+            // CLUSTERS: pads whose clearance zones overlap must land in ONE piece (two
+            // pads 30 ft apart can't each keep a standoff plus the seam gap). Union-find
+            // on overlapping hullG, then the whole cluster takes the target of its
+            // tallest member — the "taller band wins" rule at cluster scale.
+            const par = assets.map((a, i) => i);
+            const find = (i) => { while (par[i] !== i) { par[i] = par[par[i]]; i = par[i]; } return i; };
+            for (let i = 0; i < assets.length; i++) {
+                if (!padHulls[i]) continue;
+                for (let j = i + 1; j < assets.length; j++) {
+                    if (!padHulls[j]) continue;
+                    if (Math.hypot(assets[i].cx - assets[j].cx, assets[i].cy - assets[j].cy) > gC * 2 + 40) continue;
+                    const o = padHulls[i].hullG.some(p => terUPip(p[0], p[1], padHulls[j].hullG)) || padHulls[j].hullG.some(p => terUPip(p[0], p[1], padHulls[i].hullG));
+                    if (o) par[find(i)] = find(j);
+                }
+            }
+            const clusterOf = new Map();
+            assets.forEach((a, ai) => { if (!padHulls[ai]) return; const c = find(ai); if (!clusterOf.has(c)) clusterOf.set(c, []); clusterOf.get(c).push(ai); });
+            clusterOf.forEach(members => {
+                // tallest member = highest actual ground under its cells
+                let tall = members[0], tg = -Infinity;
+                members.forEach(ai => { let g = -Infinity; assetCellsOf[ai].forEach(i => { const v = vals[i]; if (!isNaN(v) && v > g) g = v; }); if (g > tg) { tg = g; tall = ai; } });
+                let target = findTarget(assets[tall], tall);
+                // prefer a piece that already holds the tallest member's centroid (any region)
+                pending.forEach((e, k) => { if (!e.dead && terUPip(assets[tall].cx, assets[tall].cy, e.ringPts)) target = k; });
+                members.forEach(ai => { padHulls[ai].target = target; });
+                if (members.length > 1) members.forEach(ai => { assetRegion[ai] = pending[target] ? pending[target].r.gi : assetRegion[ai]; });
+            });
+            // pass 1 — CARVE: every piece that is not the pad's own loses pad + standoff + gap
+            padHulls.forEach((ph, ai) => {
+                if (!ph || ph.target < 0) return;
+                pending.forEach((e, k) => {
+                    if (k === ph.target || e.dead) return;
+                    const touches = ph.hullG.some(p => terUPip(p[0], p[1], e.ringPts)) || e.ringPts.some(p => terUPip(p[0], p[1], ph.hullG));
+                    if (!touches) return;
+                    try {
+                        const dRes = PC2.difference([[closeRing2(e.ringPts)]], [[closeRing2(ph.hullG)]]);
+                        const polys = (dRes || []).map(poly => terBNormRing(poly[0])).filter(o => o.length >= 3).sort((p1, p2) => Math.abs(terBSignedArea(p2)) - Math.abs(terBSignedArea(p1)));
+                        if (!polys.length) { e.dead = true; return; }
+                        e.ringPts = polys[0]; e.detour = (e.detour || 0) + 1; detours++;
+                        for (let x2 = 1; x2 < polys.length; x2++) {
+                            let cellsIn = 0; terUFill(polys[x2], w, h, () => { cellsIn++; });
+                            const holdsPad = assets.some(a2 => terUPip(a2.cx, a2.cy, polys[x2]));
+                            if (cellsIn >= 20 || holdsPad) pending.push({ r: e.r, ringPts: polys[x2], pi: e.pi, nRings: e.nRings + 1, usedKeyhole: 0, lobeOf: e.r.name });
+                        }
+                    } catch (e2) { console.warn(`${TAG} builder: pad carve threw:`, e2); }
+                });
+            });
+            // pass 2 — FOLD: every pad + standoff is unioned into its own piece
+            padHulls.forEach((ph, ai) => {
+                if (!ph || ph.target < 0) return;
+                const tgt = pending[ph.target];
+                if (tgt.dead) return;
+                if (ph.hullS.every(p => terUPip(p[0], p[1], tgt.ringPts))) return;
+                try {
+                    const u = PC2.union([[closeRing2(tgt.ringPts)]], [[closeRing2(ph.hullS)]]);
+                    if (u && u.length > 1) {
+                        // disconnected: bridge the pad to the piece with a corridor (pad hull → nearest ring vertex, standoff wide)
+                        let q = null, qd = Infinity; tgt.ringPts.forEach(p => { const d = Math.hypot(p[0] - assets[ai].cx, p[1] - assets[ai].cy); if (d < qd) { qd = d; q = p; } });
+                        if (q && qd < ftToCells(1500)) {
+                            let ux = q[0] - assets[ai].cx, uy = q[1] - assets[ai].cy; const lu = Math.hypot(ux, uy) || 1; ux /= lu; uy /= lu;
+                            const nx = -uy * sC, ny = ux * sC;
+                            const corr = [[assets[ai].cx + nx, assets[ai].cy + ny], [q[0] + nx + ux * 2, q[1] + ny + uy * 2], [q[0] - nx + ux * 2, q[1] - ny + uy * 2], [assets[ai].cx - nx, assets[ai].cy - ny]];
+                            const u2 = PC2.union(u, [[closeRing2(corr)]]);
+                            if (u2 && u2.length === 1) { tgt.ringPts = terBNormRing(u2[0][0]); tgt.detour = (tgt.detour || 0) + 1; detours++; L(`${assets[ai].name}: sat in the gap — joined to ${tgt.r.name} by a ${Math.round(qd * cellFt)} ft corridor`); return; }
+                        }
+                        L(`⚠ ${assets[ai].name}: could not be folded into ${tgt.r.name} (disconnected)`);
+                        return;
+                    }
+                    let best = null, bA = -1; (u || []).forEach(poly => { const o = terBNormRing(poly[0]); const A2 = Math.abs(terBSignedArea(o)); if (A2 > bA) { bA = A2; best = o; } });
+                    if (best) { tgt.ringPts = best; tgt.detour = (tgt.detour || 0) + 1; detours++; }
+                } catch (e2) { console.warn(`${TAG} builder: pad fold threw:`, e2); }
+            });
+            pending = pending.filter(e => !e.dead);
+        }
+        if (detours) L(`${detours} pad(s) folded into their piece / carved out of the neighbor by a seam detour`);
+        // ---- out-of-band carve: ground inside a piece that belongs to another band
+        // becomes GAP (user rule 2026-09-09: "red should be gap, not absorbed"). Each
+        // patch ≥ 6 cells is removed by its convex hull so the cut stays straight. ----
+        if (PC2) {
+            let carved = 0, carvedAc = 0;
+            const closeRing3 = (r2) => { const q = r2.map(p => p.slice()); if (q[0][0] !== q[q.length - 1][0] || q[0][1] !== q[q.length - 1][1]) q.push(q[0].slice()); return q; };
+            const seen = new Uint8Array(n);
+            for (let k = 0; k < pending.length; k++) {
+                const e = pending[k];
+                if (e.dead) continue;
+                const outs = [];
+                terUFill(e.ringPts, w, h, (i) => { if (lab[i] !== e.r.gi) outs.push(i); });
+                if (outs.length < 6) continue;
+                const outSet = new Set(outs);
+                seen.fill(0);
+                const blobs = [];
+                for (const s0 of outs) {
+                    if (seen[s0]) continue;
+                    const blob = []; const st2 = [s0]; seen[s0] = 1;
+                    while (st2.length) {
+                        const i = st2.pop(); blob.push(i);
+                        const x = i % w, y = (i / w) | 0;
+                        for (const j of [i - 1, i + 1, i - w, i + w]) {
+                            if (j < 0 || j >= n || seen[j] || !outSet.has(j)) continue;
+                            const jx = j % w; if (Math.abs(jx - x) > 1) continue;
+                            seen[j] = 1; st2.push(j);
+                        }
+                    }
+                    if (blob.length >= 6 && !blob.some(i => assetSrc[i])) blobs.push(blob);
+                }
+                if (!blobs.length) continue;
+                let mp = [[closeRing3(e.ringPts)]];
+                for (const blob of blobs) {
+                    const corners = [];
+                    blob.forEach(i => { const x = i % w, y = (i / w) | 0; corners.push([x, y], [x + 1, y], [x, y + 1], [x + 1, y + 1]); });
+                    const hull = terBOffsetConvex(terBHull(corners), gapD);
+                    try { const res = PC2.difference(mp, [[closeRing3(hull)]]); if (res && res.length) { mp = res; carved++; carvedAc += blob.length * dem.cellAcres; } } catch (e2) { console.warn(`${TAG} builder: out-of-band carve threw:`, e2); }
+                }
+                const polys = mp.map(poly => terBNormRing(poly[0])).filter(o => o.length >= 3).sort((p1, p2) => Math.abs(terBSignedArea(p2)) - Math.abs(terBSignedArea(p1)));
+                if (!polys.length) { e.dead = true; continue; }
+                e.ringPts = polys[0];
+                for (let x2 = 1; x2 < polys.length; x2++) {
+                    let cellsIn = 0; terUFill(polys[x2], w, h, () => { cellsIn++; });
+                    const holdsPad = assets.some(a2 => terUPip(a2.cx, a2.cy, polys[x2]));
+                    if (cellsIn >= 20 || holdsPad) pending.push({ r: e.r, ringPts: polys[x2], pi: e.pi, nRings: e.nRings + 1, usedKeyhole: 0, lobeOf: e.r.name });
+                }
+            }
+            pending = pending.filter(e => !e.dead);
+            if (carved) L(`${carved} out-of-band patch(es) (${Math.round(carvedAc)} ac of neighbor-band ground) carved out as gap`);
+        }
+        // names: pieces of one region get letters only when there are several
+        const perRegion = new Map();
+        pending.forEach(e => { perRegion.set(e.r.gi, (perRegion.get(e.r.gi) || 0) + 1); });
+        const idxInRegion = new Map();
+        pending.forEach(e => { const k = idxInRegion.get(e.r.gi) || 0; idxInRegion.set(e.r.gi, k + 1); pieceRecord(e.r, e.ringPts, k, perRegion.get(e.r.gi), e.usedKeyhole, e.detour || 0); });
+        };
+        const pieceRecord = (r, ringPts, pi, nRings, usedKeyhole, detourN) => {
+            {
+                if (ringPts.length < 3) return;
+                const pieceIdx = pieces.length;
+                // rasterize for the recompute + containment
+                let mx = -Infinity, mn = Infinity, cells = 0, outside = 0, nanCells = 0, nfzCells = 0, lowCell = -1;
+                const outsideCells = [];
+                terUFill(ringPts, w, h, (i) => {
+                    cells++;
+                    if (lab[i] !== r.gi) { outside++; if (outsideCells.length < 3000) outsideCells.push(i); }
+                    if (pieceGrid[i] === -1) pieceGrid[i] = pieceIdx;
+                    if (nfzMask[i]) { nfzCells++; return; }
+                    const v = vals[i];
+                    if (isNaN(v)) { nanCells++; return; }
+                    if (v > mx) mx = v;
+                    if (v < mn) { mn = v; lowCell = i; }
+                });
+                const pointsLL = ringPts.map(p => terBLatticeToLL(dem, p[0], p[1]));
+                const latRef = pointsLL[0].lat * Math.PI / 180;
+                let a2 = 0;
+                for (let i = 0, j = pointsLL.length - 1; i < pointsLL.length; j = i++) a2 += (pointsLL[j].lng * pointsLL[i].lat - pointsLL[i].lng * pointsLL[j].lat);
+                const acres = Math.abs(a2 / 2) * 111320 * Math.cos(latRef) * 110540 / 4046.8564224;
+                const flags = [];
+                let floorMSL = null, ceilMSL = null, feasible = false;
+                if (isFinite(mx) && isFinite(mn)) {
+                    floorMSL = Math.ceil(mx + th.minAglFt);
+                    ceilMSL = Math.floor(mn + th.maxAglFt);
+                    feasible = ceilMSL - floorMSL >= 40;
+                    if (ceilMSL - floorMSL < 40) flags.push(ceilMSL <= floorMSL ? 'infeasible: floor ≥ ceiling' : `thin band (${ceilMSL - floorMSL} ft)`);
+                    const aglLow = floorMSL - mn;
+                    if (aglLow > th.pitAbsorbMaxAglFt) flags.push(`AGL ${Math.round(aglLow)} ft over the lowest ground (limit ${th.pitAbsorbMaxAglFt})`);
+                } else flags.push('no valid ground cells');
+                if (outside > cells * 0.05) flags.push(`${Math.round(outside * dem.cellAcres)} ac of neighbor-band ground inside (floor recomputed)`);
+                if (nanCells) flags.push(`${nanCells} unprofiled cell(s) inside`);
+                if (ringPts.length > th.maxVertsWarn) flags.push(`${ringPts.length} vertices (warn > ${th.maxVertsWarn})`);
+                const rawVerts = (topo.ringsByRegion.get(r.gi) || []).reduce((s2, ring) => s2 + ring.arcSeq.reduce((s3, s) => s3 + topo.arcs[s.arc].pts.length, 0), 0);
+                pieces.push({
+                    region: r.gi, name: `${r.name}${nRings > 1 ? String.fromCharCode(97 + pi) : ''}`,
+                    points: pointsLL, latticePts: ringPts, acres, verts: ringPts.length, rawVerts,
+                    bandLo: r.bandLo, bandHi: r.bandHi, floorMSL, ceilMSL,
+                    groundMin: mn, groundMax: mx, nfzCells, cells,
+                    aglMin: floorMSL != null ? floorMSL - mx : null, aglMax: floorMSL != null ? floorMSL - mn : null,
+                    keyhole: usedKeyhole, detours: detourN || 0, flags, infeasible: !feasible, selected: feasible, outsideCells,
+                    assets: r.assets.length, isBase: r.gi === baseReg && pointInPolygon(base.pt.lat, base.pt.lng, pointsLL), dir: r.isIsland ? r.dir : '',
+                });
+            }
+        };
+        // Up to 4 passes: a pass that severed a region lowers the tolerance of the
+        // raw vertices around each cut (shared arcs → both neighbors stay in sync)
+        // and rebuilds everything; the last pass accepts lobes + lobe links.
+        for (let pass = 0; pass < 4; pass++) {
+            await buildAllPieces();
+            if (!cuts.length || pass === 3) break;
+            const R2 = ftToCells(th.tolFarFt) * 2;
+            let lowered = 0;
+            const touched = new Set();
+            topo.arcs.forEach((A, ai) => {
+                let hit = false;
+                A.rawTol = A.rawTol.map((t, i) => {
+                    if (t <= 0.25) return t;
+                    const p = A.pts[i];
+                    for (const c of cuts) if (Math.hypot(p[0] - c[0], p[1] - c[1]) <= R2) { hit = true; lowered++; return t * 0.5; }
+                    return t;
+                });
+                if (hit) { simplifyArc(A); touched.add(ai); }
+            });
+            L(`pass ${pass + 1}: ${cuts.length} neck cut(s) — tolerance halved on ${lowered} vertices of ${touched.size} arc(s), rebuilding`);
+        }
+        passLog.forEach(m => L(m));
+        if (keyholes) L(`${keyholes} keyhole channel(s) cut so parents stay one polygon`);
+        if (sliced) L(`${sliced} hole(s) had no asset-free channel → parent sliced instead`);
+
+        // ---------- 8. NFZ polygons (outward offset only) ----------
+        const nfzs = [];
+        nfzOut.forEach((z) => {
+            let ringL;
+            let dMin = 1e9; z.cells.forEach(i => { if (distC[i] < dMin) dMin = distC[i]; });
+            const tolC = terUTolCells(dMin * cellFt, th, cellFt);
+            {
+                // convex hull + a small buffer: the simplest shape that fully covers the island
+                const corners = [];
+                z.cells.forEach(i => { const x = i % w, y = (i / w) | 0; corners.push([x, y], [x + 1, y], [x, y + 1], [x + 1, y + 1]); });
+                ringL = terBOffsetConvex(terBHull(corners), Math.min(tolC, ftToCells(50)) + 0.05);
+            }
+            const ll = ringL.map(p => terBLatticeToLL(dem, p[0], p[1]));
+            if (ll.length < 3 || (ll.length <= 1500 && ringSelfIntersects(ll))) {
+                const cleaned = terUCleanRing(ringL);
+                if (!cleaned) { L(`${z.name}: NFZ ring invalid — skipped`); return; }
+                ringL = cleaned;
+            }
+            // a convex hull over a concave island can swallow pads sitting in its bays —
+            // cut every such pad (+ standoff + gap) back out
+            {
+                const PCn = terBPC();
+                const covered = assets.filter(a => a.px.length >= 3 && (terUPip(a.cx, a.cy, ringL) || a.px.some(p => terUPip(p[0], p[1], ringL))));
+                if (covered.length && PCn) {
+                    try {
+                        let mpN = [[ringL.concat([ringL[0].slice()])]];
+                        covered.forEach(a => {
+                            const hw = ftToCells(th.standoffFt + th.gapMinFt);
+                            const hg = terBOffsetConvex(terBHull(a.px), hw);
+                            // a pad fully inside the island would leave a HOLE (Percepto can't
+                            // store one) — add a slit from the pad to the nearest hull vertex so
+                            // the NFZ stays a single ring with the pad outside it
+                            let q = null, qd = Infinity; ringL.forEach(p => { const d = Math.hypot(p[0] - a.cx, p[1] - a.cy); if (d < qd) { qd = d; q = p; } });
+                            let cutter = [[hg.concat([hg[0].slice()])]];
+                            if (q) {
+                                let ux = q[0] - a.cx, uy = q[1] - a.cy; const lu = Math.hypot(ux, uy) || 1; ux /= lu; uy /= lu;
+                                const nx = -uy * hw, ny = ux * hw;
+                                const corr = [[a.cx + nx, a.cy + ny], [q[0] + nx + ux * 3, q[1] + ny + uy * 3], [q[0] - nx + ux * 3, q[1] - ny + uy * 3], [a.cx - nx, a.cy - ny]];
+                                try { const u = PCn.union(cutter, [[corr.concat([corr[0].slice()])]]); if (u && u.length) cutter = u; } catch (e3) { console.warn(`${TAG} builder: NFZ slit union threw:`, e3); }
+                            }
+                            const res = PCn.difference(mpN, cutter);
+                            if (res && res.length) mpN = res;
+                        });
+                        const polys = mpN.map(poly => terBNormRing(poly[0])).filter(o => o.length >= 3).sort((p1, p2) => Math.abs(terBSignedArea(p2)) - Math.abs(terBSignedArea(p1)));
+                        if (polys.length) { ringL = polys[0]; z.padsCut = covered.length; }
+                    } catch (e2) { console.warn(`${TAG} builder: NFZ pad cut threw:`, e2); }
+                }
+            }
+            const points = ringL.map(p => terBLatticeToLL(dem, p[0], p[1]));
+            // parent piece = the selected piece holding the island's centroid, else the nearest one
+            let cx2 = 0, cy2 = 0; z.cells.forEach(i => { cx2 += (i % w) + 0.5; cy2 += Math.floor(i / w) + 0.5; }); cx2 /= z.cells.length; cy2 /= z.cells.length;
+            let parent = -1, pd = Infinity;
+            pieces.forEach((p, pi) => {
+                if (!p.selected) return;
+                if (terUPip(cx2, cy2, p.latticePts)) { parent = pi; pd = -1; return; }
+                if (pd < 0) return;
+                let d = Infinity; for (let m = 0; m < p.latticePts.length; m += Math.max(1, Math.floor(p.latticePts.length / 200))) { const q = p.latticePts[m]; const dd = Math.hypot(q[0] - cx2, q[1] - cy2); if (dd < d) d = dd; }
+                if (d < pd) { pd = d; parent = pi; }
+            });
+            const far = pd > ftToCells(2000);
+            nfzs.push({ name: `${z.name} ${nfzs.length + 1}`, points, acres: z.acres, dir: z.dir, parent, orphan: parent < 0 || far, selected: parent >= 0 && !far, cells: z.cells.length, padsCut: z.padsCut || 0 });
+        });
+        if (nfzs.some(z => z.orphan)) L(`${nfzs.filter(z => z.orphan).length} NFZ(s) fall outside every FFZ piece (dropped region) — disabled`);
+        { const cut = nfzs.reduce((s2, z) => s2 + (z.padsCut || 0), 0); if (cut) L(`${cut} pad(s) cut back out of NFZ hulls`); }
+
+        // ---------- 9. bridges ----------
+        const pieceOfRegion = new Map();
+        pieces.forEach((p, pi) => { if (!pieceOfRegion.has(p.region)) pieceOfRegion.set(p.region, []); pieceOfRegion.get(p.region).push(pi); });
+        const pieceAt = (x, y) => (x >= 0 && y >= 0 && x < w && y < h) ? pieceGrid[(y | 0) * w + (x | 0)] : -1;
+        const seamArcs = topo.arcs.map((A, ai) => ({ A, ai, side: topo.arcSide[ai] })).filter(o => o.A.seam && !regInfo[o.side.left].dropped && !regInfo[o.side.right].dropped);
+        const edgeLand = (pIn, pi) => {
+            const P = pieces[pi].latticePts;
+            let best = null, bd = Infinity;
+            for (let m = 0; m < P.length; m++) {
+                const a = P[m], b = P[(m + 1) % P.length];
+                const dx = b[0] - a[0], dy = b[1] - a[1]; const l2 = dx * dx + dy * dy || 1;
+                let t = ((pIn[0] - a[0]) * dx + (pIn[1] - a[1]) * dy) / l2; t = Math.max(0, Math.min(1, t));
+                const q = [a[0] + t * dx, a[1] + t * dy];
+                const d = Math.hypot(q[0] - pIn[0], q[1] - pIn[1]);
+                if (d < bd) { bd = d; best = q; }
+            }
+            if (!best || bd < 1e-6) return pIn;
+            const nudge = ftToCells(1) / bd;
+            return [best[0] + (pIn[0] - best[0]) * nudge, best[1] + (pIn[1] - best[1]) * nudge];
+        };
+        const mergeC = ftToCells(th.bridgeMergeFt), maxSpC = ftToCells(th.bridgeMaxSpacingFt);
+        const candByArc = new Map();
+        const addCand = (ai, along, why) => { let l = candByArc.get(ai); if (!l) { l = []; candByArc.set(ai, l); } l.push({ along, why }); };
+        // straight lines asset → base
+        assets.forEach((a) => {
+            const P0 = [a.cx, a.cy], P1 = [base.x, base.y];
+            seamArcs.forEach(({ A, ai }) => {
+                let acc = 0;
+                for (let i = 1; i < A.simp.length; i++) {
+                    const s0 = A.simp[i - 1], s1 = A.simp[i];
+                    const L2 = Math.hypot(s1[0] - s0[0], s1[1] - s0[1]);
+                    const X = terUSegX(P0, P1, s0, s1);
+                    if (X) addCand(ai, acc + L2 * X[3], 'asset line');
+                    acc += L2;
+                }
             });
         });
+        // per region-pair: ensure ≥1; per arc: spacing floor
+        const pairHas = new Set();
+        candByArc.forEach((l, ai) => { const s = topo.arcSide[ai]; pairHas.add(`${Math.min(s.left, s.right)}:${Math.max(s.left, s.right)}`); });
+        const pairLongest = new Map();
+        seamArcs.forEach(({ A, ai, side }) => {
+            const k = `${Math.min(side.left, side.right)}:${Math.max(side.left, side.right)}`;
+            const cur = pairLongest.get(k);
+            if (!cur || A.lenCells > cur.len) pairLongest.set(k, { ai, len: A.lenCells });
+        });
+        pairLongest.forEach((v, k) => { if (!pairHas.has(k)) addCand(v.ai, terUPolyLen(topo.arcs[v.ai].simp) / 2, 'seam minimum'); });
+        seamArcs.forEach(({ A, ai }) => {
+            const len = terUPolyLen(A.simp);
+            const list = (candByArc.get(ai) || []).sort((p, q2) => p.along - q2.along);
+            // merge
+            const merged = [];
+            list.forEach(c => { const last = merged[merged.length - 1]; if (last && c.along - last.along < mergeC) { last.along = (last.along + c.along) / 2; last.n++; } else merged.push({ along: c.along, why: c.why, n: 1 }); });
+            // spacing floor
+            const pts2 = [0].concat(merged.map(m => m.along), [len]);
+            for (let i = 1; i < pts2.length; i++) {
+                const gap = pts2[i] - pts2[i - 1];
+                if (gap > maxSpC) { const k = Math.floor(gap / maxSpC); for (let j = 1; j <= k; j++) merged.push({ along: pts2[i - 1] + gap * j / (k + 1), why: 'spacing', n: 1 }); }
+            }
+            merged.sort((p, q2) => p.along - q2.along);
+            candByArc.set(ai, merged);
+        });
+        const bridges = [];
+        const insetTry = [th.bridgeInsetFt, th.bridgeInsetFt * 0.6, th.bridgeInsetFt * 0.35, 15];
+        let bridgeSkipped = 0;
+        candByArc.forEach((list, ai) => {
+            const A = topo.arcs[ai], side = topo.arcSide[ai];
+            list.forEach(c => {
+                const at = terUPtAt(A.simp, c.along);
+                const tolHere = A.simpTol[Math.min(at.seg, A.simpTol.length - 1)] || 0;
+                let dx = at.dir[0], dy = at.dir[1]; const ld = Math.hypot(dx, dy) || 1; dx /= ld; dy /= ld;
+                const lnx = dy, lny = -dx;   // left normal (y-down) → side.left region
+                const localGapFt = 2 * gapD * cellFt;
+                const wantFt = Math.max(th.bridgeInsetFt, localGapFt * 0.3);
+                // March from the seam crossing along the normal into each side until the
+                // point is inside a SELECTED piece of that region (true polygon test) AND
+                // at least the inset away from that piece's edge. The raster grid and the
+                // seam-based distance both mis-placed ends onto the dashed edge.
+                const landIn = (dirx, diry, regionWant) => {
+                    const maxC = ftToCells(localGapFt + wantFt * 3 + 200);
+                    for (let k = 0.5; k <= maxC; k += 0.5) {
+                        const q = [at.p[0] + dirx * k, at.p[1] + diry * k];
+                        const pi = pieceAt(q[0], q[1]);
+                        if (pi < 0 || pieces[pi].region !== regionWant || !pieces[pi].selected) continue;
+                        if (!terUPip(q[0], q[1], pieces[pi].latticePts)) continue;
+                        const ll = terBLatticeToLL(dem, q[0], q[1]);
+                        let edgeFt = Infinity;
+                        const P = pieces[pi].points;
+                        for (let m = 0; m < P.length; m++) { const d2 = pointToSegMeters(ll.lat, ll.lng, P[m], P[(m + 1) % P.length]) * M_TO_FT; if (d2 < edgeFt) edgeFt = d2; }
+                        if (edgeFt >= wantFt * 0.9) return { p: q, pi };
+                    }
+                    return null;
+                };
+                const L1 = landIn(lnx, lny, side.left), R1 = landIn(-lnx, -lny, side.right);
+                // Native convention (verified on site 1583's flight_path_4): an FP connects
+                // to an FFZ with its waypoint ON the FFZ edge. landIn proves the piece is
+                // there; the waypoint itself goes onto the nearest edge point, 1 ft in.
+                const placed = (L1 && R1) ? { pL: edgeLand(L1.p, L1.pi), pR: edgeLand(R1.p, R1.pi), piL: L1.pi, piR: R1.pi } : null;
+                if (!placed) { bridgeSkipped++; return; }
+                const PA = pieces[placed.piL], PB = pieces[placed.piR];
+                if (PA.floorMSL == null || PB.floorMSL == null) { bridgeSkipped++; return; }
+                const fl = Math.max(PA.floorMSL, PB.floorMSL), ce = Math.min(PA.ceilMSL, PB.ceilMSL);
+                const wps = [];
+                const arcs = [];
+                if (ce - fl >= th.bridgeMinOverlapFt) {
+                    wps.push(placed.pL, placed.pR);
+                    arcs.push({ lo: fl, hi: ce });
+                } else {
+                    // staircase: A-edge / B-edge waypoints, middle arc overlaps each by ≥ minOverlap
+                    const eA = placed.pL, eB = placed.pR;   // edge waypoints; the deep points become the outer ends
+                    const lower = PA.ceilMSL < PB.floorMSL + th.bridgeMinOverlapFt ? 'A' : 'B';
+                    const lo = lower === 'A' ? PA : PB, hi = lower === 'A' ? PB : PA;
+                    const mid = { lo: lo.ceilMSL - th.bridgeMinOverlapFt, hi: hi.floorMSL + th.bridgeMinOverlapFt };
+                    if (mid.hi - mid.lo < 1 || lo.ceilMSL - lo.floorMSL < th.bridgeMinOverlapFt || hi.ceilMSL - hi.floorMSL < th.bridgeMinOverlapFt) { bridgeSkipped++; return; }
+                    wps.push(L1.p, eA, eB, R1.p);
+                    arcs.push({ lo: PA.floorMSL, hi: PA.ceilMSL }, mid, { lo: PB.floorMSL, hi: PB.ceilMSL });
+                }
+                bridges.push({
+                    name: `BR ${PA.name}-${PB.name} ${bridges.length + 1}`,
+                    a: placed.piL, b: placed.piR, why: c.why,
+                    waypoints: wps.map(p => terBLatticeToLL(dem, p[0], p[1])),
+                    arcs, staircase: arcs.length > 1, bandFt: ce - fl, selected: true,
+                });
+            });
+        });
+        // Lobes of ONE region (a neck narrower than the smoothing gap was cut) share
+        // no seam arc, so bridge them at their closest points.
+        let lobeBridges = 0;
+        for (let i = 0; i < pieces.length; i++) for (let j = i + 1; j < pieces.length; j++) {
+            if (pieces[i].region !== pieces[j].region || !pieces[i].selected || !pieces[j].selected) continue;
+            const A = pieces[i].latticePts, B = pieces[j].latticePts;
+            let best = null;
+            const sa = Math.max(1, Math.floor(A.length / 600)), sb = Math.max(1, Math.floor(B.length / 600));
+            for (let a = 0; a < A.length; a += sa) for (let b2 = 0; b2 < B.length; b2 += sb) {
+                const d = Math.hypot(A[a][0] - B[b2][0], A[a][1] - B[b2][1]);
+                if (!best || d < best.d) best = { d, pa: A[a], pb: B[b2] };
+            }
+            if (!best || best.d > ftToCells(th.bridgeMergeFt)) continue;
+            let ux = best.pb[0] - best.pa[0], uy = best.pb[1] - best.pa[1];
+            const lu = Math.hypot(ux, uy) || 1; ux /= lu; uy /= lu;
+            let placed = null;
+            const landLobe = (from, dirx, diry, want) => {
+                for (let k = 0.5; k <= ftToCells(th.bridgeInsetFt * 4 + 200); k += 0.5) {
+                    const q = [from[0] + dirx * k, from[1] + diry * k];
+                    if (pieceAt(q[0], q[1]) !== want || !terUPip(q[0], q[1], pieces[want].latticePts)) continue;
+                    const ll = terBLatticeToLL(dem, q[0], q[1]);
+                    let edgeFt = Infinity; const P = pieces[want].points;
+                    for (let m = 0; m < P.length; m++) { const d2 = pointToSegMeters(ll.lat, ll.lng, P[m], P[(m + 1) % P.length]) * M_TO_FT; if (d2 < edgeFt) edgeFt = d2; }
+                    if (edgeFt >= th.bridgeInsetFt * 0.9) return q;
+                }
+                return null;
+            };
+            const pA = landLobe(best.pa, -ux, -uy, i), pB = landLobe(best.pb, ux, uy, j);
+            if (pA && pB) placed = { pA: edgeLand(pA, i), pB: edgeLand(pB, j) };
+            if (!placed) { bridgeSkipped++; continue; }
+            const PA = pieces[i], PB = pieces[j];
+            if (PA.floorMSL == null || PB.floorMSL == null) continue;
+            const fl = Math.max(PA.floorMSL, PB.floorMSL), ce = Math.min(PA.ceilMSL, PB.ceilMSL);
+            if (ce - fl < th.bridgeMinOverlapFt) { bridgeSkipped++; continue; }
+            bridges.push({ name: `BR ${PA.name}-${PB.name} ${bridges.length + 1}`, a: i, b: j, why: 'lobe link', waypoints: [placed.pA, placed.pB].map(p => terBLatticeToLL(dem, p[0], p[1])), arcs: [{ lo: fl, hi: ce }], staircase: false, bandFt: ce - fl, selected: true });
+            lobeBridges++;
+        }
+        if (lobeBridges) L(`${lobeBridges} lobe link(s) bridge pieces of one region that a narrow neck split`);
+        if (bridgeSkipped) L(`${bridgeSkipped} bridge candidate(s) skipped — no room to land both waypoints inside their FFZs`);
+
+        // ---------- 10. seams summary ----------
+        const seamMap = new Map();
+        seamArcs.forEach(({ A, ai, side }) => {
+            const k = `${Math.min(side.left, side.right)}:${Math.max(side.left, side.right)}`;
+            let s = seamMap.get(k);
+            if (!s) { s = { a: regInfo[Math.min(side.left, side.right)].name, b: regInfo[Math.max(side.left, side.right)].name, lenFt: 0, rawVerts: 0, verts: 0, gapMin: Infinity, gapMax: 0, bridges: 0 }; seamMap.set(k, s); }
+            s.lenFt += A.lenCells * cellFt; s.rawVerts += A.pts.length; s.verts += A.simp.length;
+            { const g = 2 * gapD * cellFt; if (g < s.gapMin) s.gapMin = g; if (g > s.gapMax) s.gapMax = g; }
+            s.bridges += (candByArc.get(ai) || []).length;
+        });
+        const seams = [...seamMap.values()];
+
+        // ---------- 11. deletions ----------
+        const prefixNow = genCleanName(String(th.namePrefix !== undefined ? th.namePrefix : 'FFZ ')) || '';
+        const oursRe = new RegExp('^(' + prefixNow.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\d+-\\d+ R\\d+|BR R\\d+)');
+        const deletions = ents.filter(e => (e.type === 16 || e.type === 15) && !oursRe.test(e.name || ''))
+            .sort((a, b) => (a.type === 15 ? 0 : 1) - (b.type === 15 ? 0 : 1))   // FPs first, then FFZs
+            .map(e => ({ id: e.id, name: e.name || `#${e.id}`, type: e.type, selected: e.type === 16 ? !!terEnabled.deleteOldFfz : !!terEnabled.deleteOldFp }));
+        const oursSkipped = ents.filter(e => (e.type === 16 || e.type === 15) && oursRe.test(e.name || '')).length;
+        if (oursSkipped) L(`${oursSkipped} entit${oursSkipped === 1 ? 'y' : 'ies'} look like a previous run of this builder — left out of the delete list`);
+
+        // ---------- 12. gates ----------
+        const gates = [];
+        const mt = siteCfg && typeof siteCfg.mountain_terrain === 'boolean' ? siteCfg.mountain_terrain : null;
+        gates.push({ ok: mt === true, label: mt === true ? 'MSL site (Mountain terrain ON)' : mt === false ? 'AGL site — profiler floors are MSL-only' : 'site altitude mode unknown (checked again at commit)' , soft: mt !== false });
+        gates.push({ ok: pieces.some(p => p.isBase && p.selected), label: pieces.some(p => p.isBase) ? `base "${base.name}" inside ${pieces.find(p => p.isBase).name}` : 'base station not inside any FFZ piece' });
+        // every asset inside exactly one piece, not under an NFZ
+        let aBad = [];
+        assets.forEach((a, ai) => {
+            const set = new Set(); let inNfz = false;
+            assetCellsOf[ai].forEach(i => { set.add(pieceGrid[i]); if (nfzMask[i]) inNfz = true; });
+            const vertsIn = a.ring.map(c => pieces.findIndex(p => pointInPolygon(c.lat, c.lng, p.points)));
+            const vset = new Set(vertsIn);
+            if (set.has(-1) || set.size !== 1 || vset.size !== 1 || vset.has(-1)) {
+                const names = [...new Set([...set, ...vset])].filter(x => x >= 0).map(x => pieces[x].name);
+                let why;
+                if (set.has(-1) || vset.has(-1)) {
+                    let gap = 0, off = 0;
+                    assetCellsOf[ai].forEach(i => { if (pieceGrid[i] === -1) { if (lab[i] < 0) off++; else gap++; } });
+                    why = `partly outside every FFZ (${gap} cell(s) in a seam/keyhole gap, ${off} outside the profiled area${names.length ? `; rest in ${names.join('/')}` : ''})`;
+                } else why = `split across ${names.join(' / ')}`;
+                aBad.push(`${a.name}: ${why}${a.straddle ? ` · straddled ${a.straddleLabs} → ${a.straddle}` : ` · region ${assetRegion[ai] >= 0 ? regInfo[assetRegion[ai]].name : '?'}`}`);
+            } else if (inNfz) aBad.push(`${a.name}: under an NFZ`);
+            a.piece = vset.size === 1 ? [...vset][0] : -1;
+        });
+        // per-piece asset counts + sliver pieces (never worth an FFZ) deselected
+        pieces.forEach(p => { p.assets = 0; });
+        assets.forEach(a => { if (a.piece >= 0) pieces[a.piece].assets++; });
+        pieces.forEach(p => {
+            if (p.acres < 0.25 && !p.assets) { p.selected = false; p.flags.push('sliver — deselected'); }
+            else if (!p.assets && !p.isBase && p.acres < 100) { p.selected = false; p.flags.push('no assets — deselected'); }
+        });
+        gates.push({ ok: !aBad.length, label: aBad.length ? `${aBad.length} asset(s) not cleanly inside one FFZ` : `all ${assets.length} assets inside exactly one FFZ`, detail: aBad.slice(0, 12) });
+        const missing = regInfo.filter(r => r.keep && !r.dropped && r.absorbedInto < 0 && r.assets.length && !pieces.some(p => p.region === r.gi));
+        gates.push({ ok: !missing.length, label: missing.length ? `${missing.length} asset-bearing region(s) produced no FFZ piece (see log)` : 'every asset-bearing region built a piece', detail: missing.map(r => `${r.name}: ${r.assets.length} asset(s), ${Math.round(r.cells * dem.cellAcres)} ac`) });
+        gates.push({ ok: !pieces.some(p => p.selected && p.infeasible), label: pieces.some(p => p.infeasible) ? `${pieces.filter(p => p.infeasible).length} infeasible piece(s) (deselected)` : 'all pieces feasible for the AGL band' });
+        // reachability over pieces + bridges
+        const padj = new Map(); pieces.forEach((p, pi) => padj.set(pi, new Set()));
+        bridges.forEach(b => { if (b.selected) { padj.get(b.a).add(b.b); padj.get(b.b).add(b.a); } });
+        const basePiece = pieces.findIndex(p => p.isBase && p.selected);
+        const reach = new Set();
+        if (basePiece >= 0) { const q2 = [basePiece]; reach.add(basePiece); while (q2.length) { const c = q2.shift(); padj.get(c).forEach(nb => { if (!reach.has(nb) && pieces[nb].selected) { reach.add(nb); q2.push(nb); } }); } }
+        const unreach = assets.filter(a => a.piece < 0 || !reach.has(a.piece));
+        gates.push({ ok: !unreach.length, label: unreach.length ? `${unreach.length} asset(s) unreachable from base over FFZs + bridges` : `all assets reachable from base (${bridges.length} bridge(s))`, detail: unreach.slice(0, 12).map(a => a.name) });
+        // FFZ↔FFZ overlap: a hole that was neither keyholed nor sliced would leave
+        // the parent covering the island piece — catch it here, never on the site.
+        const bbox = pieces.map(p => { let a = Infinity, b2 = -Infinity, c = Infinity, d = -Infinity; p.latticePts.forEach(q => { if (q[0] < a) a = q[0]; if (q[0] > b2) b2 = q[0]; if (q[1] < c) c = q[1]; if (q[1] > d) d = q[1]; }); return [a, b2, c, d]; });
+        const overlaps = [];
+        for (let i = 0; i < pieces.length; i++) for (let j = 0; j < pieces.length; j++) {
+            if (i === j || !pieces[i].selected || !pieces[j].selected) continue;
+            const A = bbox[i], B = bbox[j];
+            if (A[1] < B[0] || B[1] < A[0] || A[3] < B[2] || B[3] < A[2]) continue;
+            const step = Math.max(1, Math.floor(pieces[i].latticePts.length / 400));
+            let hit = 0;
+            for (let k = 0; k < pieces[i].latticePts.length; k += step) { const q = pieces[i].latticePts[k]; if (terUPip(q[0], q[1], pieces[j].latticePts)) { hit++; if (hit > 2) break; } }
+            if (hit > 2) overlaps.push(`${pieces[i].name} inside ${pieces[j].name}`);
+        }
+        gates.push({ ok: !overlaps.length, label: overlaps.length ? `${overlaps.length} FFZ overlap(s) — a hole was not carved` : 'no FFZ overlaps', detail: overlaps.slice(0, 8) });
+        const bigV = pieces.filter(p => p.verts > th.maxVertsWarn);
+        gates.push({ ok: true, warn: !!bigV.length, label: bigV.length ? `${bigV.length} piece(s) over ${th.maxVertsWarn} vertices (Percepto limit unknown — raise far tolerance if the editor chokes)` : `largest piece ${Math.max(0, ...pieces.map(p => p.verts))} vertices` });
+
         const ms = Math.round(performance.now() - t0);
-        const totalVerts = pieces.reduce((s2, p) => s2 + p.verts, 0);
-        log.unshift(`staged ${pieces.length} FFZ piece(s) (${totalVerts} vertices) + ${nfzs.length} NFZ(s) in ${ms} ms · simplify ${th.simplifyFt} ft`);
-        terBState = { sid: st.sid, pieces, nfzs, runLog: log, createdIds: [], committing: false };
+        const totalV = pieces.reduce((s2, p) => s2 + p.verts, 0), totalRaw = pieces.reduce((s2, p) => s2 + p.rawVerts, 0);
+        log.unshift(`staged ${pieces.length} FFZ · ${nfzs.length} NFZ · ${bridges.length} bridge(s) · ${deletions.length} old entities to delete · ${totalV.toLocaleString()} vertices (raw ${totalRaw.toLocaleString()}) · ${ms} ms · tol ${th.tolNearFt}/${th.tolFarFt} ft within ${th.smoothNearFt}/beyond ${th.smoothFarFt} ft · gap ${th.gapMinFt} ft`);
+        // working-grid boundaries (raw lattice arcs, every 2nd vertex) — drawn thin
+        // white in the preview so a seam the profiler overlay doesn't show is visible
+        const arcsLL = topo.arcs.map((A, ai) => {
+            const side = topo.arcSide[ai];
+            const pts = A.pts.filter((p, i) => i % 2 === 0 || i === A.pts.length - 1).map(p => terBLatticeToLL(dem, p[0], p[1]));
+            return { pts, seam: !!A.seam, l: side.left >= 0 ? regInfo[side.left].name : '', r: side.right >= 0 ? regInfo[side.right].name : '' };
+        });
+        terBState = { sid: st.sid, staging: false, arcsLL, pieces, nfzs, bridges, deletions, seams, gates, assets: assets.map(a => ({ name: a.name, piece: a.piece, straddle: a.straddle || '' })), base: { name: base.name, pt: base.pt }, runLog: log, createdIds: [], committing: false };
         terBDrawPreview();
         terRenderPanel();
         console.log(`${TAG} builder: ${log[0]}`);
@@ -7672,47 +10436,69 @@
         terBLayers.forEach(l => { try { map.removeLayer(l); } catch (e) {} });
         terBLayers = [];
         const seg = terState && terState.seg;
-        bs.pieces.forEach(p => {
-            try {
-                const c = seg ? terColorFor((p.bandLo + p.bandHi) / 2, seg.mnFt, seg.mxFt) : [255, 225, 77];
-                const col = `rgb(${c[0]},${c[1]},${c[2]})`;
-                const pl = L.polygon(p.points.map(q => [q.lat, q.lng]), {
-                    color: p.selected ? '#ffe14d' : '#666666', weight: 2.5, opacity: p.selected ? 0.95 : 0.5,
-                    dashArray: '7,5', fillColor: col, fillOpacity: p.selected ? 0.10 : 0.03, interactive: false,
-                });
-                pl.addTo(map);
-                terBLayers.push(pl);
-            } catch (e) {}
+        const add = (layer) => { try { layer.addTo(map); terBLayers.push(layer); } catch (e) {} };
+        (bs.arcsLL || []).forEach(a => {
+            if (a.pts.length < 2) return;
+            add(L.polyline(a.pts.map(q => [q.lat, q.lng]), { color: a.seam ? '#ffffff' : '#9aa0a6', weight: 1, opacity: a.seam ? 0.8 : 0.5, interactive: false }));
         });
-        bs.nfzs.forEach(z => {
-            try {
-                const pl = L.polygon(z.points.map(q => [q.lat, q.lng]), {
-                    color: '#ff35d0', weight: 2, opacity: z.selected ? 0.95 : 0.45,
-                    dashArray: '3,4', fillColor: '#ff35d0', fillOpacity: z.selected ? 0.18 : 0.05, interactive: false,
-                });
-                pl.addTo(map);
-                terBLayers.push(pl);
-            } catch (e) {}
+        // diagnostic: cells a piece covers that belong to another band (red dots)
+        const demD = terState && terState.dem;
+        (bs.pieces || []).forEach(p => {
+            if (!demD || !p.outsideCells || !p.outsideCells.length) return;
+            const step = Math.max(1, Math.floor(p.outsideCells.length / 600));
+            for (let k = 0; k < p.outsideCells.length; k += step) {
+                const i = p.outsideCells[k];
+                const q = terBLatticeToLL(demD, (i % demD.w) + 0.5, Math.floor(i / demD.w) + 0.5);
+                add(L.circleMarker([q.lat, q.lng], { radius: 2, color: '#ff2020', weight: 1, fillColor: '#ff2020', fillOpacity: 0.9, interactive: false }));
+            }
+        });
+        (bs.pieces || []).forEach(p => {
+            const c = seg ? terColorFor((p.bandLo + p.bandHi) / 2, seg.mnFt, seg.mxFt) : [255, 225, 77];
+            add(L.polygon(p.points.map(q => [q.lat, q.lng]), {
+                color: p.selected ? '#ffe14d' : '#666666', weight: 2.5, opacity: p.selected ? 0.95 : 0.5,
+                dashArray: '7,5', fillColor: `rgb(${c[0]},${c[1]},${c[2]})`, fillOpacity: p.selected ? 0.10 : 0.03, interactive: false,
+            }));
+        });
+        (bs.nfzs || []).forEach(z => {
+            add(L.polygon(z.points.map(q => [q.lat, q.lng]), {
+                color: '#ff35d0', weight: 2, opacity: z.selected ? 0.95 : 0.45, dashArray: '3,4', fillColor: '#ff35d0', fillOpacity: z.selected ? 0.18 : 0.05, interactive: false,
+            }));
+        });
+        (bs.bridges || []).forEach(b => {
+            add(L.polyline(b.waypoints.map(q => [q.lat, q.lng]), { color: b.selected ? '#00e5ff' : '#446', weight: 4, opacity: 0.95, interactive: false }));
+            b.waypoints.forEach(q => add(L.circleMarker([q.lat, q.lng], { radius: 4, color: '#00e5ff', weight: 2, fillColor: '#0d131d', fillOpacity: 1, interactive: false })));
+        });
+        const ents = ((mapObjectsBySite[bs.sid] || {}).entities) || [];
+        (bs.deletions || []).forEach(d => {
+            if (!d.selected) return;
+            const e = ents.find(x => x.id === d.id);
+            if (!e) return;
+            if (e.type === 16) { const cs = entityCoords(e); if (cs && cs.length >= 3) add(L.polygon(cs.map(q => [q.lat, q.lng]), { color: '#ff5555', weight: 1.5, opacity: 0.8, dashArray: '2,4', fill: false, interactive: false })); }
+            else if (Array.isArray(e.arcs)) e.arcs.forEach(a => { if (a.point_a && a.point_b) add(L.polyline([[a.point_a.lat, a.point_a.lng], [a.point_b.lat, a.point_b.lng]], { color: '#ff5555', weight: 2, opacity: 0.7, dashArray: '2,6', interactive: false })); });
         });
     }
 
-    // --- Commit: create-only, FFZs then NFZs, full rails ---
+    // --- Commit: backup → FFZs → verify → NFZs → verify → bridges → verify → deletions → verify ---
     async function terBCommit() {
-        if (liteBlockedWrite('build terrain FFZs/NFZs')) return;
+        if (liteBlockedWrite('build unshielded site')) return;
         const bs = terBState;
         const st = terState;
-        if (!bs || !st) { showToast('Nothing staged', 'rgba(255,96,96,0.55)'); return; }
+        if (!bs || !st || bs.staging) { showToast('Nothing staged', 'rgba(255,96,96,0.55)'); return; }
         if (bs.committing) { showToast('Commit already running…'); return; }
         const sid = getCurrentSiteID();
         if (!sid || sid !== bs.sid) { showToast('Site changed since staging — re-run the profiler', 'rgba(255,96,96,0.55)'); return; }
+        const hardFail = (bs.gates || []).filter(g => !g.ok && !g.soft);
+        if (hardFail.length) { showToast(`Gates not passed — ${hardFail[0].label}`, 'rgba(255,96,96,0.55)'); return; }
         const selP = bs.pieces.filter(p => p.selected);
         const selN = bs.nfzs.filter(z => z.selected);
-        if (!selP.length && !selN.length) { showToast('Nothing selected', 'rgba(255,96,96,0.55)'); return; }
+        const selB = bs.bridges.filter(b => b.selected && bs.pieces[b.a].selected && bs.pieces[b.b].selected);
+        const selD = bs.deletions.filter(d => d.selected);
+        if (!selP.length) { showToast('No FFZ piece selected', 'rgba(255,96,96,0.55)'); return; }
         const csrf = getCsrfToken();
         if (!csrf) { showToast('No CSRF token — make one native save/edit anywhere in Percepto first, then retry', 'rgba(255,96,96,0.55)'); return; }
         bs.committing = true;
         bs.runLog = [];
-        const logL = (m) => { bs.runLog.push(m); console.log(`${TAG} builder: ${m}`); };
+        const logL = (m) => { bs.runLog.push(m); console.log(`${TAG} builder: ${m}`); terRenderPanel(); };
         try {
             let siteCfg = null;
             try { siteCfg = await fetchSiteConfig(sid); } catch (e) { console.warn(`${TAG} builder: site-cfg fetch failed:`, e); }
@@ -7720,7 +10506,6 @@
             // === true is an MSL site (absolute altitudes) — the ONLY kind the
             // profiler's fixed MSL floors are valid on. false = AGL site, where a
             // written "2,755 ft" floor would be read as 2,755 ft ABOVE GROUND.
-            // (Pre-4.244.1 this check was inverted and refused MSL sites.)
             const mtFlag = siteCfg && typeof siteCfg.mountain_terrain === 'boolean' ? siteCfg.mountain_terrain : null;
             if (mtFlag !== true) {
                 const why = mtFlag === false
@@ -7734,98 +10519,132 @@
             const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
             const tmplFfz = ents.find(e => e.type === 16 && entityCoords(e));
             const tmplNfz = ents.find(e => e.type === 4 && entityCoords(e));
-            let tmplFfzBody = null, tmplNfzBody = null;
-            if (tmplFfz) { try { tmplFfzBody = buildWriteBody(tmplFfz, siteCfg); } catch (e) {} }
-            if (tmplNfz) { try { tmplNfzBody = buildWriteBody(tmplNfz, siteCfg); } catch (e) {} }
-            const usedF = new Set(ents.filter(e => e.type === 16 && e.name).map(e => e.name));
-            const usedN = new Set(ents.filter(e => e.type === 4 && e.name).map(e => e.name));
-            const uniq = (base, used) => { base = genCleanName(base) || 'FFZ'; if (!used.has(base)) { used.add(base); return base; } let i = 2, n2; do { n2 = `${base}_${i++}`; } while (used.has(n2)); used.add(n2); return n2; };
+            const tmplFp = ents.find(e => e.type === 15 && Array.isArray(e.arcs) && e.arcs.length);
+            let tmplFfzBody = null, tmplNfzBody = null, tmplFpBody = null;
+            if (tmplFfz) { try { tmplFfzBody = buildWriteBody(tmplFfz, siteCfg); } catch (e) { console.warn(`${TAG} builder: FFZ template failed:`, e); } }
+            if (tmplNfz) { try { tmplNfzBody = buildWriteBody(tmplNfz, siteCfg); } catch (e) { console.warn(`${TAG} builder: NFZ template failed:`, e); } }
+            if (tmplFp) { try { tmplFpBody = buildWriteBody(tmplFp, siteCfg); } catch (e) { console.warn(`${TAG} builder: FP template failed:`, e); } }
+            const tmplArc = tmplFpBody && Array.isArray(tmplFpBody.arcs) && tmplFpBody.arcs[0] ? tmplFpBody.arcs[0] : null;
+            const existingNames = (t) => new Set(ents.filter(e => e.type === t && e.name).map(e => e.name));
+            const usedF = existingNames(16), usedN = existingNames(4), usedP = existingNames(15);
+            // RESUMABLE: a staged item whose name already exists on the site was
+            // created by an earlier (interrupted) run → skip it.
+            const priorF = new Set(usedF), priorN = new Set(usedN), priorP = new Set(usedP);
+            const uniq = (base2, used) => { base2 = genCleanName(base2) || 'FFZ'; if (!used.has(base2)) { used.add(base2); return base2; } let i = 2, n2; do { n2 = `${base2}_${i++}`; } while (used.has(n2)); used.add(n2); return n2; };
             const prefix = (terThresholds.namePrefix !== undefined) ? String(terThresholds.namePrefix) : 'FFZ ';
-            // Build all bodies FIRST (backup covers exactly what we send).
-            const ffzWrites = selP.map(p => {
-                const body = genCreateBody({
-                    name: `${prefix}${p.bandLo}-${p.bandHi} ${p.name}`,
-                    points: p.points,
-                    restrictions: { minAlt: p.floorMSL / M_TO_FT, maxAlt: p.ceilMSL / M_TO_FT },
-                }, sid, siteCfg, tmplFfzBody);
+            const mtBool = !!(siteCfg && siteCfg.mountain_terrain);
+            const ffzWrites = [], nfzWrites = [], fpWrites = [];
+            let resumed = 0;
+            selP.forEach(p => {
+                const nm = genCleanName(`${prefix}${p.bandLo}-${p.bandHi} ${p.name}`);
+                if (priorF.has(nm)) { resumed++; p.createdName = nm; return; }
+                const body = genCreateBody({ name: nm, points: p.points, restrictions: { minAlt: p.floorMSL / M_TO_FT, maxAlt: p.ceilMSL / M_TO_FT } }, sid, siteCfg, tmplFfzBody);
                 body.name = uniq(body.name, usedF);
-                return { piece: p, body };
+                p.createdName = body.name;
+                ffzWrites.push({ piece: p, body });
             });
-            const nfzWrites = selN.map(z => {
+            selN.forEach(z => {
+                const nm = genCleanName(z.name);
+                if (priorN.has(nm)) { resumed++; return; }
                 let b;
                 if (tmplNfzBody) { b = JSON.parse(JSON.stringify(tmplNfzBody)); delete b.id; }
                 else b = { type: 4, description: '', custom: {}, params: {}, asset_waypoints: null, constantly_present_asset_name: false, general_marker_type: '', marker_height: 0, is_unshielded: false, restrictions: [] };
-                b.type = 4;
-                b.name = uniq(z.name, usedN);
-                b.description = '';
-                b.site_id = sid;
-                b.points = z.points;
-                b.validated = false;
-                b.arcs = [];
-                b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
-                return { zone: z, body: b };
+                b.type = 4; b.name = uniq(nm, usedN); b.description = ''; b.site_id = sid; b.points = z.points; b.validated = false; b.arcs = []; b.mountain_terrain_site = mtBool;
+                nfzWrites.push({ zone: z, body: b });
             });
-            // Backup: stash + download of everything about to be created.
-            const backup = { site: sid, at: new Date().toISOString(), ffzs: ffzWrites.map(w => w.body), nfzs: nfzWrites.map(w => w.body) };
-            try { localStorage.setItem(`aim_ter_build_backup:${sid}`, JSON.stringify(backup)); } catch (e) {}
-            try { downloadJSONFile(`terrain-build-${sid}-${Date.now()}.json`, JSON.stringify(backup, null, 1)); } catch (e) { logL('backup download failed (stash in localStorage still written)'); }
-            // Sequential creates — FFZs first.
-            const created = [];
-            const post = async (body, label) => {
+            selB.forEach(br => {
+                const nm = genCleanName(br.name);
+                if (priorP.has(nm)) { resumed++; return; }
+                let b;
+                if (tmplFpBody) { b = JSON.parse(JSON.stringify(tmplFpBody)); delete b.id; }
+                else b = { type: 15, description: '', custom: {}, params: {}, asset_waypoints: null, constantly_present_asset_name: false, general_marker_type: '', marker_height: 0, is_unshielded: false, restrictions: null };
+                b.type = 15; b.name = uniq(nm, usedP); b.description = ''; b.site_id = sid; b.validated = false; b.mountain_terrain_site = mtBool;
+                b.points = br.waypoints.map(q => ({ lat: q.lat, lng: q.lng }));
+                const emergM = (tmplArc && Number.isFinite(tmplArc.min_emergency_alt)) ? tmplArc.min_emergency_alt : 12;
+                b.arcs = br.arcs.map((band, i) => {
+                    let arc = {};
+                    if (tmplArc) { arc = JSON.parse(JSON.stringify(tmplArc)); delete arc.id; delete arc.mapobject; }
+                    const a = b.points[i], c = b.points[i + 1];
+                    arc.point_a = a; arc.point_b = c; arc.points = [a, c];
+                    arc.min_alt = Math.ceil(band.lo / M_TO_FT); arc.max_alt = Math.floor(band.hi / M_TO_FT);
+                    if (arc.max_alt - arc.min_alt < 2) arc.max_alt = arc.min_alt + 2;
+                    arc.min_emergency_alt = emergM;
+                    arc.distance = approxMeters(a.lat, a.lng, c.lat, c.lng);
+                    if (typeof arc.wait_until_approved !== 'boolean') arc.wait_until_approved = false;
+                    return arc;
+                });
+                try { bridgeArcContinuity(b.arcs); } catch (e) { console.warn(`${TAG} builder: arc continuity threw:`, e); }
+                fpWrites.push({ bridge: br, body: b });
+            });
+            if (resumed) logL(`resume: ${resumed} staged item(s) already exist on the site by name — skipped`);
+            if (!tmplFp && fpWrites.length) logL('⚠ site has no existing FP to clone as a template — bridges use a minimal body (if the server rejects them, draw one FP natively and re-run)');
+            // Backup: bodies we send + full JSON of everything we delete.
+            const delEnts = selD.map(d => ents.find(e => e.id === d.id)).filter(Boolean);
+            const backup = { site: sid, at: new Date().toISOString(), ffzs: ffzWrites.map(x => x.body), nfzs: nfzWrites.map(x => x.body), bridges: fpWrites.map(x => x.body), deleted: delEnts };
+            try { localStorage.setItem(`aim_usb_backup:${sid}`, JSON.stringify(backup)); } catch (e) { logL('⚠ localStorage backup stash failed (quota?) — download is the only copy'); }
+            try { downloadJSONFile(`unshielded-build-${sid}-${Date.now()}.json`, JSON.stringify(backup, null, 1)); } catch (e) { logL('backup download failed (stash in localStorage still written)'); }
+            const created = bs.createdIds;
+            const post = async (body) => {
                 const r = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
                 const txt = await r.text();
                 let json = null;
-                try { json = JSON.parse(txt); } catch (e) {}
+                try { json = JSON.parse(txt); } catch (e) { json = null; }
                 const saved = json && json.map_objects;
-                if (r.status === 403) { throw Object.assign(new Error('403 forbidden — write permission lost, ABORTING run'), { fatal: true }); }
+                if (r.status === 403) throw Object.assign(new Error('403 forbidden — write permission lost, ABORTING run'), { fatal: true });
                 if (r.status === 200 && saved && saved.id != null) return saved.id;
                 throw new Error(`server ${r.status} ${(txt || '').slice(0, 120)}`);
             };
-            let fOk = 0, fFail = 0;
-            for (const w2 of ffzWrites) {
-                try {
-                    const id = await post(w2.body, w2.body.name);
-                    created.push({ id, name: w2.body.name, type: 16 });
-                    fOk++;
-                    logL(`✓ FFZ "${w2.body.name}" → #${id} (floor ${w2.piece.floorMSL} / ceil ${w2.piece.ceilMSL} ft)`);
-                } catch (e) {
-                    fFail++;
-                    logL(`✗ FFZ "${w2.body.name}": ${e.message}`);
-                    if (e.fatal) throw e;
-                }
-            }
-            // Verify FFZs before touching NFZs (containment order rule).
-            await fetchMapObjects(sid, true);
-            const after = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
-            const byId = new Set(after.map(e => e.id));
-            const missing = created.filter(c => !byId.has(c.id));
-            if (missing.length) logL(`⚠ verify: ${missing.length} created FFZ(s) NOT found on re-fetch — check the site before trusting this run`);
-            else if (created.length) logL(`verify ✓ all ${created.length} FFZ(s) present on fresh fetch`);
-            let nOk = 0, nFail = 0;
-            if (nfzWrites.length && fFail === 0) {
-                for (const w2 of nfzWrites) {
+            const verify = async (label, list) => {
+                await fetchMapObjects(sid, true);
+                const after = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+                const byId = new Set(after.map(e => e.id));
+                const missing = list.filter(c => !byId.has(c.id));
+                if (missing.length) logL(`⚠ verify: ${missing.length} created ${label}(s) NOT found on re-fetch`);
+                else if (list.length) logL(`verify ✓ all ${list.length} ${label}(s) present on fresh fetch`);
+                return !missing.length;
+            };
+            const runStep = async (label, type, writes, describe) => {
+                let ok = 0, fail = 0;
+                const made = [];
+                for (const w2 of writes) {
                     try {
-                        const id = await post(w2.body, w2.body.name);
-                        created.push({ id, name: w2.body.name, type: 4 });
-                        nOk++;
-                        logL(`✓ NFZ "${w2.body.name}" → #${id}`);
+                        const id = await post(w2.body);
+                        const rec = { id, name: w2.body.name, type };
+                        created.push(rec); made.push(rec); ok++;
+                        logL(`✓ ${label} "${w2.body.name}" → #${id}${describe ? ' ' + describe(w2) : ''}`);
                     } catch (e) {
-                        nFail++;
-                        logL(`✗ NFZ "${w2.body.name}": ${e.message}`);
+                        fail++;
+                        logL(`✗ ${label} "${w2.body.name}": ${e.message}`);
                         if (e.fatal) throw e;
                     }
                 }
-                await fetchMapObjects(sid, true);
-                const after2 = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
-                const byId2 = new Set(after2.map(e => e.id));
-                const missN = created.filter(c => c.type === 4 && !byId2.has(c.id));
-                logL(missN.length ? `⚠ verify: ${missN.length} NFZ(s) missing on re-fetch` : (nOk ? `verify ✓ all ${nOk} NFZ(s) present` : 'no NFZs created'));
-            } else if (nfzWrites.length) {
-                logL(`NFZ creates SKIPPED — ${fFail} FFZ create(s) failed (fix + re-run; NFZs need their parent FFZs)`);
+                const v = await verify(label, made);
+                return { ok, fail, verified: v };
+            };
+            const f = await runStep('FFZ', 16, ffzWrites, (x) => `(floor ${x.piece.floorMSL} / ceil ${x.piece.ceilMSL} ft MSL)`);
+            if (f.fail || !f.verified) { logL(`STOP after FFZs — ${f.fail} failed${f.verified ? '' : ', verify incomplete'}. Fix + re-run Commit (already-created pieces are skipped by name).`); return; }
+            const z = await runStep('NFZ', 4, nfzWrites);
+            if (z.fail || !z.verified) { logL(`STOP after NFZs — ${z.fail} failed. Re-run Commit to resume.`); return; }
+            const b = await runStep('bridge', 15, fpWrites, (x) => `(${x.bridge.arcs.length} arc${x.bridge.arcs.length === 1 ? '' : 's'}, ${x.bridge.arcs.map(a => `${a.lo}–${a.hi}`).join(' / ')} ft)`);
+            if (b.fail || !b.verified) { logL(`STOP after bridges — ${b.fail} failed. Re-run Commit to resume (deletions NOT started).`); return; }
+            // Deletions — plain DELETEs so Delete Guard banks each one (24 h undo ring).
+            let dOk = 0, dFail = 0;
+            const createdIdSet = new Set(created.map(c => c.id));
+            for (const d of selD) {
+                if (createdIdSet.has(d.id)) continue;
+                try {
+                    const r = await fetch(`/map_objects/${d.id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
+                    if (r.status === 403) throw Object.assign(new Error('403 forbidden — ABORTING'), { fatal: true });
+                    if (r.status === 200 || r.status === 204) { dOk++; logL(`🗑 deleted ${d.type === 16 ? 'FFZ' : 'FP'} "${d.name}" (#${d.id})`); }
+                    else { dFail++; logL(`✗ delete "${d.name}": server ${r.status}`); }
+                } catch (e) { dFail++; logL(`✗ delete "${d.name}": ${e && e.message || e}`); if (e.fatal) throw e; }
             }
-            bs.createdIds = created;
-            logL(`DONE: ${fOk}/${ffzWrites.length} FFZ · ${nOk}/${nfzWrites.length} NFZ created${fFail + nFail ? ` · ${fFail + nFail} FAILED` : ''}`);
-            showToast(fFail + nFail ? `Build: ${fOk + nOk} created, ${fFail + nFail} FAILED — see panel log` : `Build ✓ ${fOk} FFZ + ${nOk} NFZ created`, fFail + nFail ? 'rgba(255,96,96,0.55)' : undefined);
+            await fetchMapObjects(sid, true);
+            const fin = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+            const still = selD.filter(d => fin.some(e => e.id === d.id)).length;
+            if (selD.length) logL(still ? `⚠ ${still} old entit${still === 1 ? 'y' : 'ies'} still present after delete` : `verify ✓ all ${dOk} old entities gone`);
+            logL(`DONE: ${f.ok} FFZ · ${z.ok} NFZ · ${b.ok} bridge(s) created · ${dOk} deleted${dFail ? ` · ${dFail} delete(s) FAILED` : ''}. Old entities are in Delete Guard's 🕘 Restore panel for 24 h.`);
+            showToast(`Unshielded build ✓ ${f.ok} FFZ + ${z.ok} NFZ + ${b.ok} bridges · ${dOk} old entities deleted`);
         } catch (e) {
             logL(`RUN ABORTED: ${e && e.message ? e.message : e}`);
             showToast('Build aborted — see panel log', 'rgba(255,96,96,0.55)');
@@ -7835,27 +10654,28 @@
         }
     }
 
-    // Undo THIS RUN: delete exactly the ids we created (NFZs first).
+    // Undo THIS RUN's creates (bridges → NFZs → FFZs). Deleted originals live in Delete Guard.
     async function terBUndo() {
         const bs = terBState;
         if (!bs || !bs.createdIds || !bs.createdIds.length) { showToast('Nothing to undo', 'rgba(255,96,96,0.55)'); return; }
-        if (liteBlockedWrite('undo terrain build')) return;
+        if (liteBlockedWrite('undo unshielded build')) return;
         const csrf = getCsrfToken();
         if (!csrf) { showToast('No CSRF token', 'rgba(255,96,96,0.55)'); return; }
         const sid = getCurrentSiteID();
         const logL = (m) => { bs.runLog.push(m); console.log(`${TAG} builder: ${m}`); };
-        const order = bs.createdIds.slice().sort((a, b) => (b.type === 4 ? 1 : 0) - (a.type === 4 ? 1 : 0));
+        const rank = { 15: 0, 4: 1, 16: 2 };
+        const order = bs.createdIds.slice().sort((a, b) => (rank[a.type] || 0) - (rank[b.type] || 0));
         let ok = 0, fail = 0;
         for (const c of order) {
             try {
                 const r = await fetch(`/map_objects/${c.id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
-                if (r.status === 200 || r.status === 204) { ok++; }
+                if (r.status === 200 || r.status === 204) ok++;
                 else { fail++; logL(`undo ✗ ${c.name} (#${c.id}): server ${r.status}`); }
             } catch (e) { fail++; logL(`undo ✗ ${c.name}: ${e && e.message || e}`); }
         }
-        logL(`UNDO: deleted ${ok}/${order.length}${fail ? ` · ${fail} failed` : ''}`);
-        bs.createdIds = bs.createdIds.filter(c => false);
-        try { await fetchMapObjects(sid, true); } catch (e) {}
+        logL(`UNDO: deleted ${ok}/${order.length}${fail ? ` · ${fail} failed` : ''}${bs.deletions.some(d => d.selected) ? ' · originals: Control Panel → Delete Guard → 🕘 Restore' : ''}`);
+        bs.createdIds = [];
+        try { await fetchMapObjects(sid, true); } catch (e) { console.warn(`${TAG} builder: refetch after undo failed:`, e); }
         showToast(fail ? `Undo: ${ok} deleted, ${fail} failed` : `Undo ✓ ${ok} deleted`, fail ? 'rgba(255,96,96,0.55)' : undefined);
         terRenderPanel();
     }
@@ -7866,37 +10686,75 @@
         const th = terThresholds;
         const bs = terBState;
         const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+        const inp = (id, label, val, step, title, w2) => `<label title="${esc(title)}" style="display:flex;align-items:center;gap:3px;">${label}<input data-ter-p="${id}" type="number" value="${val}" step="${step}" style="width:${w2 || 50}px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(255,225,77,0.35);border-radius:4px;padding:1px 3px;font:inherit;font-size:11px;">ft</label>`;
         const h = [];
-        h.push(`<div style="color:#ffe14d;font-weight:600;margin:12px 0 4px;border-bottom:1px solid rgba(255,225,77,0.3);padding-bottom:2px;">🏗 Build (Phase 2 — creates real entities)</div>`);
-        h.push(`<div style="display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;margin:4px 0 6px;">`
-            + `<label title="Boundary simplification tolerance — bigger = fewer vertices, straighter edges" style="display:flex;align-items:center;gap:4px;">simplify<input data-ter-p="simplifyFt" type="number" value="${th.simplifyFt}" step="10" style="width:58px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(255,225,77,0.35);border-radius:4px;padding:2px 4px;font:inherit;">ft</label>`
-            + `<label title="Outward buffer around each NFZ candidate hull" style="display:flex;align-items:center;gap:4px;">NFZ buf<input data-ter-p="nfzBufFt" type="number" value="${th.nfzBufFt}" step="5" style="width:52px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(255,53,208,0.35);border-radius:4px;padding:2px 4px;font:inherit;">ft</label>`
-            + `<label title="Name prefix for created FFZs" style="display:flex;align-items:center;gap:4px;">prefix<input data-ter-prefix type="text" value="${esc(th.namePrefix !== undefined ? th.namePrefix : 'FFZ ')}" style="width:70px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(255,225,77,0.35);border-radius:4px;padding:2px 4px;font:inherit;"></label>`
+        h.push(`<div style="color:#ffe14d;font-weight:600;margin:12px 0 4px;border-bottom:1px solid rgba(255,225,77,0.3);padding-bottom:2px;">🏗 Build unshielded site (giant FFZ per band + bridges) <span style="opacity:0.6;font-weight:400;">v${SCRIPT_VERSION}</span></div>`);
+        h.push(`<div style="display:flex;flex-wrap:wrap;gap:5px 9px;align-items:center;margin:4px 0 6px;font-size:11px;">`
+            + inp('gapMinFt', 'gap', th.gapMinFt, 5, 'Minimum seam gap between two FFZs (near assets)')
+            + inp('smoothNearFt', 'near', th.smoothNearFt, 50, 'Within this distance of an asset the seam follows the terrain exactly', 56)
+            + inp('smoothFarFt', 'far', th.smoothFarFt, 100, 'Beyond this distance from any asset the seam is simplified at the far tolerance', 56)
+            + inp('tolNearFt', 'tol near', th.tolNearFt, 5, 'Simplification tolerance near assets (0 = raw terrain edge)')
+            + inp('tolFarFt', 'tol far', th.tolFarFt, 25, 'Simplification tolerance far from assets — gap = 2×tol + min gap')
+            + inp('standoffFt', 'pad standoff', th.standoffFt, 5, 'Pad buffer when a pad straddles two bands (SOP FFZ→asset standoff)')
+            + inp('bridgeMergeFt', 'br merge', th.bridgeMergeFt, 50, 'Bridge candidates closer than this merge into one', 56)
+            + inp('bridgeMaxSpacingFt', 'br max spacing', th.bridgeMaxSpacingFt, 250, 'Longest bridgeless stretch allowed on a seam', 60)
+            + inp('bridgeInsetFt', 'br inset', th.bridgeInsetFt, 5, 'How far inside each FFZ a bridge waypoint lands')
+            + inp('pitAbsorbMaxAglFt', 'pit AGL warn', th.pitAbsorbMaxAglFt, 10, 'Warn when an absorbed pit puts the floor more than this above the ground', 56)
+            + `<label title="Name prefix for created FFZs" style="display:flex;align-items:center;gap:4px;">prefix<input data-ter-prefix type="text" value="${esc(th.namePrefix !== undefined ? th.namePrefix : 'FFZ ')}" style="width:56px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(255,225,77,0.35);border-radius:4px;padding:1px 3px;font:inherit;font-size:11px;"></label>`
+            + `<label style="display:flex;align-items:center;gap:3px;cursor:pointer;" title="Delete every pre-existing FFZ after the new set verifies (Delete Guard keeps them 24 h)"><input data-ter-e="deleteOldFfz" type="checkbox" ${terEnabled.deleteOldFfz ? 'checked' : ''}>delete old FFZs</label>`
+            + `<label style="display:flex;align-items:center;gap:3px;cursor:pointer;" title="Delete every pre-existing flight path after the new set verifies"><input data-ter-e="deleteOldFp" type="checkbox" ${terEnabled.deleteOldFp ? 'checked' : ''}>delete old FPs</label>`
+            + `<label style="display:flex;align-items:center;gap:3px;cursor:pointer;" title="Bump islands holding assets are absorbed into the parent (its floor rises to clear them) instead of becoming small keyholed FFZs"><input data-ter-e="absorbBumps" type="checkbox" ${terEnabled.absorbBumps ? 'checked' : ''}>absorb bumps</label>`
+            + `<button data-ter-defaults title="Reset gap / smoothing tolerances to the current defaults (${TER_THRESH_DEFAULTS.tolNearFt}/${TER_THRESH_DEFAULTS.tolFarFt} ft, ${TER_THRESH_DEFAULTS.smoothNearFt}/${TER_THRESH_DEFAULTS.smoothFarFt} ft, gap ${TER_THRESH_DEFAULTS.gapMinFt} ft)" style="background:none;border:1px solid rgba(255,225,77,0.4);color:#ffe14d;border-radius:5px;padding:2px 8px;cursor:pointer;">↺ smoothing defaults</button>`
             + `<button data-ter-stage style="background:rgba(255,225,77,0.13);border:1px solid rgba(255,225,77,0.5);color:#ffe14d;border-radius:5px;padding:2px 10px;cursor:pointer;font-weight:600;">🏗 Stage</button>`
+            + (bs && !bs.staging ? `<button data-ter-ucopy title="Copy the staged pieces, gates, seams and run log as text" style="background:none;border:1px solid rgba(255,225,77,0.4);color:#ffe14d;border-radius:5px;padding:2px 8px;cursor:pointer;">Copy build report</button>` : '')
             + `</div>`);
-        if (!bs) {
-            h.push(`<div style="opacity:0.75;">Stage to preview the FFZ polygons (dashed) + NFZ hulls (magenta) before anything is written.</div>`);
-            return h.join('');
-        }
-        const selP = bs.pieces.filter(p => p.selected).length;
-        const selN = bs.nfzs.filter(z => z.selected).length;
-        h.push(`<div style="margin:2px 0 4px;">Staged: <strong style="color:#ffe14d">${bs.pieces.length} FFZ piece(s)</strong> (${selP} selected) · <strong style="color:#ff35d0">${bs.nfzs.length} NFZ(s)</strong> (${selN} selected)</div>`);
+        if (!bs) { h.push(`<div style="opacity:0.75;">Stage to preview: giant FFZs (dashed, band color), NFZs (magenta), bridges (cyan), old entities to delete (red dashed). Nothing is written until Commit.</div>`); return h.join(''); }
+        if (bs.staging) { h.push(`<div style="color:#ffe14d;">⏳ staging…</div>`); return h.join(''); }
+        const selP = bs.pieces.filter(p => p.selected).length, selN = bs.nfzs.filter(z => z.selected).length, selB = bs.bridges.filter(b => b.selected).length, selD = bs.deletions.filter(d => d.selected).length;
+        const totalAc = bs.pieces.filter(p => p.selected).reduce((s2, p) => s2 + p.acres, 0);
+        h.push(`<div style="margin:2px 0 4px;">Staged: <strong style="color:#ffe14d">${bs.pieces.length} FFZ</strong> (${selP} sel, ${Math.round(totalAc).toLocaleString()} ac) · <strong style="color:#ff35d0">${bs.nfzs.length} NFZ</strong> (${selN}) · <strong style="color:#00e5ff">${bs.bridges.length} bridge${bs.bridges.length === 1 ? '' : 's'}</strong> (${selB}) · <strong style="color:#ff5555">${bs.deletions.length} to delete</strong> (${selD}) · base: ${esc(bs.base.name)}</div>`);
+        // gates
+        h.push(`<div style="margin:4px 0;padding:5px 7px;background:rgba(0,0,0,0.3);border-radius:6px;border:1px solid rgba(255,255,255,0.1);">`);
+        (bs.gates || []).forEach(g => {
+            const col = g.ok ? (g.warn ? '#ffb020' : '#7dffae') : (g.soft ? '#ffb020' : '#ff6b6b');
+            h.push(`<div style="color:${col};">${g.ok ? (g.warn ? '⚠' : '✓') : (g.soft ? '⚠' : '✗')} ${esc(g.label)}${g.detail && g.detail.length ? `<div style="opacity:0.8;padding-left:16px;font-size:11px;">${g.detail.map(esc).join('<br>')}</div>` : ''}</div>`);
+        });
+        h.push(`</div>`);
+        const acStr = (a) => a < 10 ? a.toFixed(1) : Math.round(a).toLocaleString();
         bs.pieces.forEach((p, i) => {
-            h.push(`<div style="margin:1px 0;line-height:1.4;${p.infeasible ? 'opacity:0.55;' : ''}">`
-                + `<label style="cursor:pointer;display:flex;align-items:flex-start;gap:5px;"><input data-ter-selp="${i}" type="checkbox" ${p.selected ? 'checked' : ''} ${p.infeasible ? 'disabled' : ''} style="margin-top:2px;">`
-                + `<span><strong style="color:#ffe14d">${esc(p.name)}</strong> · band ${p.bandLo}–${p.bandHi} · ${p.acres < 10 ? p.acres.toFixed(1) : Math.round(p.acres).toLocaleString()} ac · ${p.verts} verts · floor ${p.floorMSL.toLocaleString()} / ceil ${p.ceilMSL.toLocaleString()} ft${p.infeasible ? ' · <span style="color:#ff5555">infeasible band</span>' : ''}</span></label></div>`);
+            h.push(`<div data-ter-ujump="p:${i}" style="margin:1px 0;line-height:1.4;${p.infeasible ? 'opacity:0.55;' : ''}cursor:pointer;" onmouseover="this.style.background='rgba(255,225,77,0.08)'" onmouseout="this.style.background=''">`
+                + `<label style="display:flex;align-items:flex-start;gap:5px;"><input data-ter-selp="${i}" type="checkbox" ${p.selected ? 'checked' : ''} ${p.infeasible ? 'disabled' : ''} style="margin-top:2px;">`
+                + `<span><strong style="color:#ffe14d">${esc(p.name)}</strong>${p.isBase ? ' 🏠' : ''}${p.dir ? ` <span style="opacity:0.7">(${p.dir} island)</span>` : ''} · band ${p.bandLo}–${p.bandHi} · ${acStr(p.acres)} ac · ${p.assets} asset${p.assets === 1 ? '' : 's'} · ${p.verts.toLocaleString()} verts (raw ${p.rawVerts.toLocaleString()})`
+                + `<br><span style="opacity:0.85;">floor <strong>${p.floorMSL != null ? p.floorMSL.toLocaleString() : '—'}</strong> / ceil <strong>${p.ceilMSL != null ? p.ceilMSL.toLocaleString() : '—'}</strong> ft MSL · AGL ${p.aglMin != null ? Math.round(p.aglMin) : '—'}–${p.aglMax != null ? Math.round(p.aglMax) : '—'} ft${p.keyhole ? ` · ${p.keyhole} keyhole` : ''}${p.detours ? ` · ${p.detours} pad detour${p.detours === 1 ? '' : 's'}` : ''}${p.nfzCells ? ' · NFZ cells excluded' : ''}</span>`
+                + (p.flags.length ? `<br><span style="color:#ffb020;">⚠ ${esc(p.flags.join(' · '))}</span>` : '') + `</span></label></div>`);
         });
         bs.nfzs.forEach((z, i) => {
-            h.push(`<div style="margin:1px 0;line-height:1.4;${z.orphan ? 'opacity:0.55;' : ''}">`
-                + `<label style="cursor:pointer;display:flex;align-items:flex-start;gap:5px;"><input data-ter-seln="${i}" type="checkbox" ${z.selected ? 'checked' : ''} ${z.orphan ? 'disabled' : ''} style="margin-top:2px;">`
-                + `<span><strong style="color:#ff35d0">${esc(z.name)}</strong> · ${z.acres.toFixed(1)} ac ${esc(z.dir || '')}${z.clipped ? ' · clipped to FFZ' : ''}${z.orphan ? ' · <span style="color:#ff5555">no parent FFZ — skipped</span>' : ''}</span></label></div>`);
+            h.push(`<div data-ter-ujump="n:${i}" style="margin:1px 0;line-height:1.4;${z.orphan ? 'opacity:0.55;' : ''}cursor:pointer;" onmouseover="this.style.background='rgba(255,53,208,0.08)'" onmouseout="this.style.background=''">`
+                + `<label style="display:flex;align-items:flex-start;gap:5px;"><input data-ter-seln="${i}" type="checkbox" ${z.selected ? 'checked' : ''} ${z.orphan ? 'disabled' : ''} style="margin-top:2px;">`
+                + `<span><strong style="color:#ff35d0">${esc(z.name)}</strong> · ${z.acres.toFixed(1)} ac ${esc(z.dir || '')}${z.padsCut ? ` · ${z.padsCut} pad${z.padsCut === 1 ? '' : 's'} cut out` : ''}${z.orphan ? ' · <span style="color:#ff5555">no parent FFZ — skipped</span>' : ''}</span></label></div>`);
         });
+        bs.bridges.forEach((b, i) => {
+            h.push(`<div data-ter-ujump="b:${i}" style="margin:1px 0;line-height:1.4;cursor:pointer;" onmouseover="this.style.background='rgba(0,229,255,0.08)'" onmouseout="this.style.background=''">`
+                + `<label style="display:flex;align-items:flex-start;gap:5px;"><input data-ter-selb="${i}" type="checkbox" ${b.selected ? 'checked' : ''} style="margin-top:2px;">`
+                + `<span><strong style="color:#00e5ff">${esc(b.name)}</strong> · ${esc(b.why)} · band ${b.arcs.map(a => `${a.lo}–${a.hi}`).join(' / ')} ft${b.staircase ? ' · <span style="color:#ffb020">staircase</span>' : ` (${b.bandFt} ft)`}</span></label></div>`);
+        });
+        if (bs.seams.length) {
+            h.push(`<div style="color:#ffe14d;font-weight:600;margin:8px 0 2px;font-size:11px;">Seams</div><div style="font-size:11px;opacity:0.9;">`);
+            bs.seams.forEach(s => h.push(`<div>${esc(s.a)}↔${esc(s.b)} · ${Math.round(s.lenFt).toLocaleString()} ft · gap ${Math.round(s.gapMin)}–${Math.round(s.gapMax)} ft · verts ${s.rawVerts.toLocaleString()}→${s.verts.toLocaleString()} · ${s.bridges} bridge${s.bridges === 1 ? '' : 's'}</div>`));
+            h.push(`</div>`);
+        }
+        if (bs.deletions.length) {
+            h.push(`<div style="color:#ff5555;font-weight:600;margin:8px 0 2px;font-size:11px;">Old entities to delete after the new set verifies</div><div style="max-height:120px;overflow-y:auto;font-size:11px;">`);
+            bs.deletions.forEach((d, i) => h.push(`<label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input data-ter-seld="${i}" type="checkbox" ${d.selected ? 'checked' : ''}><span style="color:${d.selected ? '#ff8080' : '#889'}">${d.type === 16 ? 'FFZ' : 'FP'} ${esc(d.name)}</span></label>`));
+            h.push(`</div>`);
+        }
+        const gateOk = !(bs.gates || []).some(g => !g.ok && !g.soft);
         h.push(`<div style="display:flex;gap:8px;margin:8px 0 2px;align-items:center;">`
-            + `<button data-ter-commit style="background:rgba(95,255,95,0.13);border:1px solid rgba(95,255,95,0.5);color:#7dffae;border-radius:5px;padding:3px 12px;cursor:pointer;font-weight:700;">⚡ Commit ${selP + selN} (double-click)</button>`
+            + `<button data-ter-commit ${gateOk && !bs.committing ? '' : 'disabled'} style="background:rgba(95,255,95,0.13);border:1px solid rgba(95,255,95,0.5);color:#7dffae;border-radius:5px;padding:3px 12px;cursor:pointer;font-weight:700;${gateOk ? '' : 'opacity:0.4;'}">⚡ Commit ${selP + selN + selB} + delete ${selD} (double-click)</button>`
             + (bs.createdIds && bs.createdIds.length ? `<button data-ter-undo style="background:rgba(255,96,96,0.12);border:1px solid rgba(255,96,96,0.5);color:#ff8080;border-radius:5px;padding:3px 12px;cursor:pointer;">🗑 Undo run (${bs.createdIds.length}) (double-click)</button>` : '')
             + `</div>`);
         if (bs.runLog && bs.runLog.length) {
-            h.push(`<div style="margin-top:6px;max-height:140px;overflow-y:auto;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:6px 8px;font-size:11px;">`
+            h.push(`<div style="margin-top:6px;max-height:160px;overflow-y:auto;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:6px 8px;font-size:11px;">`
                 + bs.runLog.map(l2 => `<div style="margin:1px 0;">${esc(l2)}</div>`).join('') + `</div>`);
         }
         return h.join('');
@@ -7904,41 +10762,78 @@
 
     // Returns true when the click was handled by the Build section.
     function terBHandleClick(e, wrap) {
-        const stageBtn = e.target.closest('[data-ter-stage]');
-        if (stageBtn) {
-            // pull the two build params + prefix first
-            const sInp = wrap.querySelector('[data-ter-p="simplifyFt"]');
-            const bInp = wrap.querySelector('[data-ter-p="nfzBufFt"]');
-            const pInp = wrap.querySelector('[data-ter-prefix]');
-            if (sInp) { const v = parseFloat(sInp.value); if (isFinite(v) && v >= 0) terThresholds.simplifyFt = v; }
-            if (bInp) { const v = parseFloat(bInp.value); if (isFinite(v) && v >= 0) terThresholds.nfzBufFt = v; }
-            if (pInp) terThresholds.namePrefix = pInp.value;
+        if (e.target.closest('[data-ter-defaults]')) {
+            ['tolNearFt', 'tolFarFt', 'smoothNearFt', 'smoothFarFt', 'gapMinFt'].forEach(k => { terThresholds[k] = TER_THRESH_DEFAULTS[k]; });
+            terThresholds.tunedV = TER_THRESH_DEFAULTS.tunedV;
             saveTerThresholds();
+            console.log(`${TAG} profiler smoothing reset to defaults: tol ${terThresholds.tolNearFt}/${terThresholds.tolFarFt} within ${terThresholds.smoothNearFt}/beyond ${terThresholds.smoothFarFt} · gap ${terThresholds.gapMinFt}`);
+            showToast('Smoothing tunables reset to defaults — Stage again');
+            terRenderPanel();
+            return true;
+        }
+        if (e.target.closest('[data-ter-stage]')) {
+            { const fresh = loadTerThresholds(); for (const k in fresh) if (!(k in TER_THRESH_DEFAULTS) || typeof fresh[k] === typeof terThresholds[k]) terThresholds[k] = fresh[k]; }
+            wrap.querySelectorAll('[data-ter-p]').forEach(inp => {
+                const k = inp.getAttribute('data-ter-p');
+                if (!(k in TER_THRESH_DEFAULTS)) return;
+                const v = parseFloat(inp.value);
+                if (isFinite(v) && v >= 0) { if (v !== terThresholds[k]) console.log(`${TAG} profiler threshold ${k}: ${terThresholds[k]} → ${v} (panel input)`); terThresholds[k] = v; }
+            });
+            const pInp = wrap.querySelector('[data-ter-prefix]');
+            if (pInp) terThresholds.namePrefix = pInp.value;
+            wrap.querySelectorAll('[data-ter-e]').forEach(inp => { terEnabled[inp.getAttribute('data-ter-e')] = !!inp.checked; });
+            saveTerThresholds(); saveTerEnabled();
             terBStage();
             return true;
         }
-        const selP = e.target.closest('[data-ter-selp]');
-        if (selP && terBState) {
-            const p = terBState.pieces[+selP.getAttribute('data-ter-selp')];
-            if (p) { p.selected = !!selP.checked; terBDrawPreview(); }
+        const bs = terBState;
+        if (e.target.closest('[data-ter-ucopy]') && bs && !bs.staging) {
+            const out = [`UNSHIELDED BUILD — ${terState ? terState.siteLabel : ''} · ${new Date().toISOString()}`];
+            const th = terThresholds;
+            out.push(`Params: AGL ${th.minAglFt}–${th.maxAglFt} · Δ ${th.deltaFt} · gap ${th.gapMinFt} · smooth ${th.smoothNearFt}/${th.smoothFarFt} · tol ${th.tolNearFt}/${th.tolFarFt} · standoff ${th.standoffFt} · bridges merge ${th.bridgeMergeFt} / max ${th.bridgeMaxSpacingFt} / inset ${th.bridgeInsetFt}`);
+            (bs.gates || []).forEach(g => { out.push(`${g.ok ? (g.warn ? '⚠' : '✓') : '✗'} ${g.label}`); (g.detail || []).forEach(d => out.push(`    ${d}`)); });
+            bs.pieces.forEach(p => out.push(`FFZ ${p.name}${p.isBase ? ' [BASE]' : ''}${p.dir ? ` (${p.dir} island)` : ''} · band ${p.bandLo}–${p.bandHi} · ${Math.round(p.acres)} ac · ${p.assets} assets · ${p.verts} verts (raw ${p.rawVerts}) · floor ${p.floorMSL} / ceil ${p.ceilMSL} · AGL ${p.aglMin != null ? Math.round(p.aglMin) : '—'}–${p.aglMax != null ? Math.round(p.aglMax) : '—'}${p.keyhole ? ` · ${p.keyhole} keyhole` : ''}${p.flags.length ? ` · ⚠ ${p.flags.join('; ')}` : ''}`));
+            bs.nfzs.forEach(z => out.push(`NFZ ${z.name} · ${z.acres.toFixed(1)} ac ${z.dir}${z.orphan ? ' · ORPHAN' : ''}`));
+            out.push(`Bridges: ${bs.bridges.length} (${bs.bridges.filter(b => b.staircase).length} staircase)`);
+            bs.seams.forEach(s2 => out.push(`Seam ${s2.a}↔${s2.b} · ${Math.round(s2.lenFt)} ft · gap ${Math.round(s2.gapMin)}–${Math.round(s2.gapMax)} · verts ${s2.rawVerts}→${s2.verts} · ${s2.bridges} bridges`));
+            out.push(`Deletions: ${bs.deletions.length}`);
+            out.push('Log:'); (bs.runLog || []).forEach(l2 => out.push(`  ${l2}`));
+            navigator.clipboard.writeText(out.join('\n')).then(() => showToast('Build report copied'), () => showToast('Copy failed', 'rgba(255,96,96,0.55)'));
             return true;
         }
-        const selN = e.target.closest('[data-ter-seln]');
-        if (selN && terBState) {
-            const z = terBState.nfzs[+selN.getAttribute('data-ter-seln')];
-            if (z) { z.selected = !!selN.checked; terBDrawPreview(); }
+        const flip = (attr, list) => {
+            const el = e.target.closest(`[${attr}]`);
+            if (!el || !bs) return false;
+            const it = list[+el.getAttribute(attr)];
+            if (it) { it.selected = !!el.checked; terBDrawPreview(); }
+            return true;
+        };
+        if (e.target.closest('[data-ter-selp]')) return flip('data-ter-selp', bs ? bs.pieces : []);
+        if (e.target.closest('[data-ter-seln]')) return flip('data-ter-seln', bs ? bs.nfzs : []);
+        if (e.target.closest('[data-ter-selb]')) return flip('data-ter-selb', bs ? bs.bridges : []);
+        if (e.target.closest('[data-ter-seld]')) return flip('data-ter-seld', bs ? bs.deletions : []);
+        const jump = e.target.closest('[data-ter-ujump]');
+        if (jump && bs && !e.target.closest('input')) {
+            const [kind, idx] = jump.getAttribute('data-ter-ujump').split(':');
+            const it = kind === 'p' ? bs.pieces[+idx] : kind === 'n' ? bs.nfzs[+idx] : bs.bridges[+idx];
+            const pts = it && (it.points || it.waypoints);
+            const map = getLeafletMap();
+            if (!pts || !pts.length || !map) return true;
+            let la = 0, ln = 0; pts.forEach(q => { la += q.lat; ln += q.lng; }); la /= pts.length; ln /= pts.length;
+            try { map.setView([la, ln], Math.max(map.getZoom(), kind === 'b' ? 17 : 14)); } catch (err) { console.warn(`${TAG} builder: setView failed:`, err); }
+            airPulseAt(la, ln);
             return true;
         }
         if (e.target.closest('[data-ter-commit]')) {
             const now = Date.now();
-            if (now - terBArm > 1600) { terBArm = now; showToast('Click Commit again within 1.5 s to CREATE the entities'); return true; }
+            if (now - terBArm > 1600) { terBArm = now; showToast('Click Commit again within 1.5 s to CREATE the new layout + DELETE the old one'); return true; }
             terBArm = 0;
             terBCommit();
             return true;
         }
         if (e.target.closest('[data-ter-undo]')) {
             const now = Date.now();
-            if (now - terBUndoArm > 1600) { terBUndoArm = now; showToast('Click Undo again within 1.5 s to DELETE this run’s entities'); return true; }
+            if (now - terBUndoArm > 1600) { terBUndoArm = now; showToast('Click Undo again within 1.5 s to DELETE this run’s created entities'); return true; }
             terBUndoArm = 0;
             terBUndo();
             return true;
@@ -7948,8 +10843,12 @@
 
     // Idempotent (CP echoes from TOP + IFRAME — same contract as
     // handleSopToggle / handleAirspaceToggle).
+    // v4.263: the smoothing tunables re-registered under NEW Control Panel ids —
+    // the panel echoes its stored value per id on every load, which put the old
+    // 0 / 250 defaults straight back over the migrated ones.
+    const TER_CP_ALIAS = { delta2: 'deltaFt', smoothNear3: 'smoothNearFt', smoothFar3: 'smoothFarFt', tolNear3: 'tolNearFt', tolFar3: 'tolFarFt', gapMin3: 'gapMinFt', smoothNear2: 'smoothNearFt', smoothFar2: 'smoothFarFt', tolNear2: 'tolNearFt', tolFar2: 'tolFarFt' };
     function handleTerrainToggle(msg) {
-        const id = msg.toggleId;
+        const id = TER_CP_ALIAS[msg.toggleId] || msg.toggleId;
         if (id === 'ter-master') {
             const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
             if (v === terMasterEnabled) return;
@@ -7967,12 +10866,1890 @@
         // Type-matched (numbers AND strings — maskMode/namePrefix are strings).
         if (Object.prototype.hasOwnProperty.call(terThresholds, id) && typeof msg.value === typeof terThresholds[id]) {
             if (msg.value === terThresholds[id]) return;
+            if (/^(tolNearFt|tolFarFt|smoothNearFt|smoothFarFt|gapMinFt)$/.test(id)) console.log(`${TAG} profiler threshold ${id}: ${terThresholds[id]} → ${msg.value} (Control Panel toggle "${msg.toggleId}")`);
             terThresholds[id] = msg.value;
-            saveTerThresholds();
+            saveTerThresholdKey(id, msg.value);
             if (id === 'opacity' && terLayer && typeof terLayer.setOpacity === 'function') {
                 try { terLayer.setOpacity(msg.value); } catch (e) {}
             }
         }
+    }
+
+    // ============================================================
+    // 🕸 UNSHIELDED SPIDERWEB GENERATOR (feature #261, v4.274–4.296)
+    // Design doc: ShortKeys/AIM_Unshielded_SpiderWeb_Design.md.
+    // FFZ per asset (mitered outset, touching buffers unioned), straight
+    // point-to-point FPs at a 54 m floor / +20 ft band with AUTOMATIC DEM
+    // stairs (step = band − overlap), Steiner hubs for return-to-base,
+    // battery gate on web distance to base. MSL (mountain_terrain) sites
+    // only. Stage + preview + report, then Commit (create-only, dry run by default, undo by id).
+    // Prefix: swb*. Tag lines: `${TAG} spiderweb: …`.
+    // ============================================================
+    const SWB_SCRIPT_ID = 'aim-spiderweb';
+    const SWB_THRESH_KEY = 'aim-ai-spiderweb-thresholds';
+    const SWB_PANEL_ID = 'aim-swb-panel';
+    const SWB_DEFAULTS = {
+        ffzFloorAglFt: 125, ffzCeilAglFt: 196,   // zone band above highest / lowest ground in the footprint
+        ffzCeilMaxAglFt: 200,                     // a sloped zone's ceiling may rise to this (never above) when a landing arc cannot otherwise share 3 m with the zone
+        fpFloorM: 52,                            // arc floor above the HIGHEST ground under the arc (integer m) — 52 m = 170.6 ft (user 2026-09-15)
+        fpBandFt: 26,                            // arc ceiling = floor + band (52 m + 26 ft = 196.6 ft over the arc's high ground)
+        overlapM: 2,                             // overlap between connected arcs — 2 m is the target AND the hard line (user 2026-09-15)
+        corridorFt: 100,                          // a leg skimming a zone it does not end on within this is routed THROUGH that zone (one line, not two)
+        droneMaxAglFt: 200,                      // the drone flies the floor — relief inside one arc is capped so it never exceeds this
+        outsetFt: 16, endpointGapFt: 15, cornerGapFt: 10,
+        stretchMax: 1.3,                         // web distance to base ÷ straight line — add a leg back above this
+        hubMaxRtbLossPct: 3,                     // a hub may lengthen the summed return-to-base distance by at most this much
+        battery: 'tulip', sampleFt: 25, marginFt: 500, hubs: true,
+        hubRadiusFt: 3500, hubMaxSpokes: 10,      // a hub star reaches zones within this radius, at most this many
+        hubBaseReachFt: 10000,                    // a hub may spoke straight to a base zone within this (longer) reach
+        hubGainRatio: 0.1,                        // a hub must save this many ft of summed way-home per ft of new flight path (0 = any saving; 0.1 = dense web)
+        webDensity: 'full',                       // 'full' = every neighbour leg (Delaunay) under maxLegFt; 'urquhart' = drop the long side of each triangle
+        maxLegFt: 6000,                           // full mesh: neighbour legs longer than this are dropped (spanning-tree legs always stay)
+        hubKeepLegs: true,                        // hubs ADD spokes on top of the mesh (false = a star replaces the legs between its members)
+        junctions: true,                          // where two legs cross, share a waypoint so the drone can switch legs there
+        junctionMinFt: 60,                        // no junction closer than this to a leg end (would leave a stub)
+        snapNodeFt: 100,                          // a leg passing within this of a hub/junction is routed THROUGH it (kills near-parallel duplicates)
+        legGainRatio: 0,                          // same test for legs restored by the way-home pass (0 = fix any long detour)
+        baseLegGainRatio: 0,                      // same test for direct zone→base legs (0 = the base star: any zone with a long detour gets a straight shot home)
+        baseStarFt: 12000,                        // base star reach: a zone within this of a base gets a straight spoke home, threaded THROUGH any pad in the way … (0 = off)
+        baseStarGainPct: 5,                       // … when the spoke shortens that zone's way home by at least this much
+        baseStarMaxCross: 3,                      // … and its new pieces cross at most this many existing legs (each crossing becomes a junction = a stop)
+        approachFt: 100,                          // the arc that lands on a zone is at least this long when the ground allows
+        notchFt: 5,                               // fill inward notches in unioned zones up to this depth
+        mergeGapFt: 30,                           // zones closer than this are merged into one (bridged), instead of a tiny leg
+        hubClearFt: 150,                          // a hub sits at least this far from any zone edge
+        regroundPercepto: true,                   // commit: re-check every written vertex against Percepto's own DEM (floors only go UP)
+        entityPtsWarn: 150,                       // commit: warn when one flight-path entity carries more points than this
+        baseZoneFt: 120,                          // a base outside every zone gets its own square zone of this side
+        dropFailing: false,                       // test sites: legs that fail a hard gate (handoff < 2 m, cuts a zone) are cut from the web instead of blocking Commit
+    };
+    let swbThresholds = loadSwbThresholds();
+    let swbMasterEnabled = true;
+    let swbState = null;       // last staged result
+    let swbLayers = [];        // preview layers on the map
+    let swbDem = null;         // { key, dem } session raster cache
+    let swbRunning = false;
+
+    function loadSwbThresholds() {
+        const out = { ...SWB_DEFAULTS };
+        try {
+            const raw = elevGmGet(SWB_THRESH_KEY, null);
+            const st = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : null;
+            if (st && typeof st === 'object') Object.keys(SWB_DEFAULTS).forEach(k => { if (typeof st[k] === typeof SWB_DEFAULTS[k]) out[k] = st[k]; });
+            // v4.288 migration (tunedV 3): the hub gain ratio default moved 1 → 0.1 (dense web). A stored 1 was
+            // the old default, and the v4.286 migration (tunedV 2) was undone by the Control Panel echoing its own
+            // stored 1 back — so this one runs again regardless of the earlier flag.
+            if (st && !(st.tunedV >= 5)) {
+                if (out.hubGainRatio === 1 || out.hubGainRatio === 0.25) out.hubGainRatio = SWB_DEFAULTS.hubGainRatio;
+                // v4.294 (user 2026-09-15): floor 54 → 52 m, band 20 → 26 ft, overlap 3 → 2 m — only stored OLD DEFAULTS move
+                if (out.fpFloorM === 54) out.fpFloorM = SWB_DEFAULTS.fpFloorM;
+                if (out.fpBandFt === 20) out.fpBandFt = SWB_DEFAULTS.fpBandFt;
+                if (out.overlapM === 3) out.overlapM = SWB_DEFAULTS.overlapM;
+                try { const s2 = Object.assign({}, st, { hubGainRatio: out.hubGainRatio, fpFloorM: out.fpFloorM, fpBandFt: out.fpBandFt, overlapM: out.overlapM, tunedV: 5 }); elevGmSet(SWB_THRESH_KEY, JSON.stringify(s2)); } catch (e) {}
+                console.log(`${TAG} spiderweb: thresholds migrated (tunedV 5) — floor ${out.fpFloorM} m, band ${out.fpBandFt} ft, overlap ${out.overlapM} m, hub ratio ${out.hubGainRatio}`);
+            }
+        } catch (e) { console.warn(`${TAG} spiderweb: thresholds unreadable — defaults used`, e); }
+        return out;
+    }
+    function saveSwbThresholdKey(key, value) {
+        try {
+            let stored = {};
+            try { const raw = elevGmGet(SWB_THRESH_KEY, null); if (raw) stored = (typeof raw === 'string' ? JSON.parse(raw) : raw) || {}; } catch (e) { stored = {}; }
+            stored[key] = value;
+            elevGmSet(SWB_THRESH_KEY, JSON.stringify(stored));
+        } catch (e) { console.warn(`${TAG} spiderweb: could not persist ${key}`, e); }
+    }
+    // Control Panel ids that were renamed: the panel echoes ITS stored value per id on every load,
+    // so a renamed id is the only way a new default reaches users who touched the old one.
+    const SWB_CP_ALIAS = { hubGainRatio2: 'hubGainRatio', fpFloorM2: 'fpFloorM', fpBandFt2: 'fpBandFt', overlapM2: 'overlapM' };
+    // Retired ids: the panel still echoes every value it EVER stored for this script, registered or not —
+    // a retired id must be dropped on the floor or it writes the old value back over the migration.
+    const SWB_RETIRED_IDS = new Set(['hubGainRatio', 'fpFloorM', 'fpBandFt', 'overlapM']);
+    function handleSpiderwebToggle(msg) {
+        if (SWB_RETIRED_IDS.has(msg.toggleId)) return;
+        const id = SWB_CP_ALIAS[msg.toggleId] || msg.toggleId;
+        if (id === 'swb-master') {
+            const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            if (v === swbMasterEnabled) return;
+            swbMasterEnabled = v;
+            if (!v) { swbClear(); swbClosePanel(); }
+            return;
+        }
+        if (Object.prototype.hasOwnProperty.call(swbThresholds, id)) {
+            let v = (typeof SWB_DEFAULTS[id] === 'boolean') ? !!(msg.value !== undefined ? msg.value : msg.enabled) : msg.value;
+            if (id === 'overlapM' && typeof v === 'number' && v < 2) v = 2;
+            if (typeof v !== typeof SWB_DEFAULTS[id] || v === swbThresholds[id]) return;
+            swbThresholds[id] = v;
+            saveSwbThresholdKey(id, v);
+        }
+    }
+
+    // ---------- small geometry (local metres, x east / y north) ----------
+    const swbYield = () => new Promise(res => setTimeout(res, 0));
+    function swbCross(o, a, b) { return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x); }
+    function swbSegsCross(a, b, c, d) {
+        const d1 = swbCross(c, d, a), d2 = swbCross(c, d, b), d3 = swbCross(a, b, c), d4 = swbCross(a, b, d);
+        return ((d1 > 0) !== (d2 > 0)) && ((d3 > 0) !== (d4 > 0)) && d1 !== 0 && d2 !== 0 && d3 !== 0 && d4 !== 0;
+    }
+    function swbPip(p, ring) {
+        let inside = false;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+            const xi = ring[i].x, yi = ring[i].y, xj = ring[j].x, yj = ring[j].y;
+            if (((yi > p.y) !== (yj > p.y)) && (p.x < (xj - xi) * (p.y - yi) / (yj - yi) + xi)) inside = !inside;
+        }
+        return inside;
+    }
+    function swbRingArea(r) { let a = 0; for (let i = 0, j = r.length - 1; i < r.length; j = i++) a += r[j].x * r[i].y - r[i].x * r[j].y; return a / 2; }   // standard shoelace: CCW positive
+    function swbRingSelfX(r) {
+        const n = r.length;
+        for (let i = 0; i < n; i++) for (let j = i + 2; j < n; j++) {
+            if (i === 0 && j === n - 1) continue;
+            if (swbSegsCross(r[i], r[(i + 1) % n], r[j], r[(j + 1) % n])) return true;
+        }
+        return false;
+    }
+    function swbHullXY(pts) {
+        const P = pts.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+        if (P.length < 3) return P;
+        const lower = [], upper = [];
+        for (const p of P) { while (lower.length >= 2 && swbCross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop(); lower.push(p); }
+        for (let i = P.length - 1; i >= 0; i--) { const p = P[i]; while (upper.length >= 2 && swbCross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop(); upper.push(p); }
+        lower.pop(); upper.pop();
+        return lower.concat(upper);
+    }
+    // Segment a→b vs ring: crosses any edge, or lies fully inside.
+    function swbSegHitsRing(a, b, ring) {
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) if (swbSegsCross(a, b, ring[j], ring[i])) return true;
+        return swbPip({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, ring);
+    }
+    // Interior anchor: the inside grid point farthest from the ring (vertex means fall OUTSIDE L-shaped clusters).
+    function swbInteriorPoint(ring) {
+        let mx = 0, my = 0; ring.forEach(p => { mx += p.x; my += p.y; }); mx /= ring.length; my /= ring.length;
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        ring.forEach(p => { if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x; if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y; });
+        const edgeDist = (q) => { let m = Infinity; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) { const P = ring[j], Q = ring[i]; const dx = Q.x - P.x, dy = Q.y - P.y; const L2 = dx * dx + dy * dy || 1; let t = ((q.x - P.x) * dx + (q.y - P.y) * dy) / L2; t = Math.max(0, Math.min(1, t)); const d = Math.hypot(q.x - (P.x + t * dx), q.y - (P.y + t * dy)); if (d < m) m = d; } return m; };
+        let best = swbPip({ x: mx, y: my }, ring) ? { x: mx, y: my, d: edgeDist({ x: mx, y: my }) } : null;
+        const N = 14;
+        for (let i = 1; i < N; i++) for (let j = 1; j < N; j++) {
+            const q = { x: minX + (maxX - minX) * i / N, y: minY + (maxY - minY) * j / N };
+            if (!swbPip(q, ring)) continue;
+            const d = edgeDist(q);
+            if (!best || d > best.d) best = { x: q.x, y: q.y, d };
+        }
+        return best ? { x: best.x, y: best.y } : { x: mx, y: my };
+    }
+    // Mitered outward offset of a simple ring (xy) by offM. Normals come from the ring
+    // orientation, so concave (L-shaped) pads offset correctly on every edge; miters are
+    // capped at 4×off (bevel) so a sharp spike cannot shoot out.
+    function swbOffsetRing(ring, offM) {
+        const n = ring.length; if (n < 3) return ring.slice();
+        const ccw = swbRingArea(ring) > 0;
+        const nrm = [];
+        for (let i = 0; i < n; i++) { const P = ring[i], Q = ring[(i + 1) % n]; const dx = Q.x - P.x, dy = Q.y - P.y, L = Math.hypot(dx, dy) || 1; nrm.push(ccw ? { nx: dy / L, ny: -dx / L } : { nx: -dy / L, ny: dx / L }); }
+        const out = [];
+        for (let i = 0; i < n; i++) {
+            const V = ring[i], nPrev = nrm[(i - 1 + n) % n], nCur = nrm[i];
+            const a0 = { x: V.x + nPrev.nx * offM, y: V.y + nPrev.ny * offM }, a1 = { x: V.x + nCur.nx * offM, y: V.y + nCur.ny * offM };
+            const P = ring[(i - 1 + n) % n], Q = ring[(i + 1) % n];
+            const d0 = { x: V.x - P.x, y: V.y - P.y }, d1 = { x: Q.x - V.x, y: Q.y - V.y };
+            const X = lineX(a0, d0, a1, d1);
+            if (X && Math.hypot(X.x - V.x, X.y - V.y) <= offM * 4) out.push(X); else { out.push(a0); out.push(a1); }
+        }
+        return out;
+    }
+    // Fill inward notches (concave vertices within tol of the chord across them) and drop collinear
+    // vertices. Filling a notch only GROWS the polygon, so the standoff to the asset never shrinks.
+    function swbFillNotches(ring, tolM) {
+        let r = ring.slice();
+        const orient = Math.sign(swbRingArea(r)) || 1;
+        for (let pass = 0; pass < 20 && r.length > 4; pass++) {
+            let removed = false;
+            for (let i = 0; i < r.length && r.length > 4; i++) {
+                const P = r[(i - 1 + r.length) % r.length], V = r[i], Q = r[(i + 1) % r.length];
+                const cr = swbCross(P, V, Q);
+                const L = Math.hypot(Q.x - P.x, Q.y - P.y) || 1;
+                const dev = Math.abs(cr) / L;   // distance of V from chord P→Q
+                const concave = Math.sign(cr) === -orient;
+                if (dev < 0.1 || (concave && dev <= tolM)) { r.splice(i, 1); i--; removed = true; }
+            }
+            if (!removed) break;
+        }
+        return r;
+    }
+    // Geometric median (Weiszfeld) — Fermat point for 3, hub position for k.
+    function swbGeoMedian(pts) {
+        let x = 0, y = 0; pts.forEach(p => { x += p.x; y += p.y; }); x /= pts.length; y /= pts.length;
+        for (let it = 0; it < 60; it++) {
+            let sx = 0, sy = 0, sw = 0;
+            for (const p of pts) { const d = Math.hypot(p.x - x, p.y - y) || 1e-6; sx += p.x / d; sy += p.y / d; sw += 1 / d; }
+            const nx = sx / sw, ny = sy / sw;
+            const mv = Math.hypot(nx - x, ny - y); x = nx; y = ny;
+            if (mv < 0.05) break;
+        }
+        return { x, y };
+    }
+    // Bowyer–Watson Delaunay on {x,y} points → triangles as index triples.
+    function swbDelaunay(pts) {
+        const n = pts.length;
+        if (n < 3) return [];
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        pts.forEach(p => { if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x; if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y; });
+        const dmax = Math.max(maxX - minX, maxY - minY) || 1, mx = (minX + maxX) / 2, my = (minY + maxY) / 2;
+        const P = pts.map(p => ({ x: p.x, y: p.y }));
+        P.push({ x: mx - 20 * dmax, y: my - dmax }, { x: mx, y: my + 20 * dmax }, { x: mx + 20 * dmax, y: my - dmax });
+        const circum = (i, j, k) => {
+            const a = P[i], b = P[j], c = P[k];
+            const d = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+            if (Math.abs(d) < 1e-12) return null;
+            const ux = ((a.x * a.x + a.y * a.y) * (b.y - c.y) + (b.x * b.x + b.y * b.y) * (c.y - a.y) + (c.x * c.x + c.y * c.y) * (a.y - b.y)) / d;
+            const uy = ((a.x * a.x + a.y * a.y) * (c.x - b.x) + (b.x * b.x + b.y * b.y) * (a.x - c.x) + (c.x * c.x + c.y * c.y) * (b.x - a.x)) / d;
+            return { x: ux, y: uy, r2: (a.x - ux) ** 2 + (a.y - uy) ** 2 };
+        };
+        let tris = [{ v: [n, n + 1, n + 2], c: circum(n, n + 1, n + 2) }];
+        for (let i = 0; i < n; i++) {
+            const p = P[i];
+            const bad = [], keep = [];
+            for (const t of tris) { if (t.c && ((p.x - t.c.x) ** 2 + (p.y - t.c.y) ** 2) < t.c.r2) bad.push(t); else keep.push(t); }
+            const edgeCount = new Map();
+            bad.forEach(t => { for (let e = 0; e < 3; e++) { const a = t.v[e], b = t.v[(e + 1) % 3]; const k = a < b ? `${a}:${b}` : `${b}:${a}`; edgeCount.set(k, (edgeCount.get(k) || 0) + 1); } });
+            bad.forEach(t => { for (let e = 0; e < 3; e++) { const a = t.v[e], b = t.v[(e + 1) % 3]; const k = a < b ? `${a}:${b}` : `${b}:${a}`; if (edgeCount.get(k) === 1) keep.push({ v: [a, b, i], c: circum(a, b, i) }); } });
+            tris = keep;
+        }
+        return tris.filter(t => t.v.every(v => v < n)).map(t => t.v);
+    }
+    // Multi-source Dijkstra over an adjacency list [{to, w}] with a binary heap (hub search runs it thousands of times).
+    function swbDijkstra(n, adj, sources, hopsOut) {   // hopsOut (optional Int32Array): legs on the shortest path (fewest legs among equal-length paths)
+        const dist = new Float64Array(n).fill(Infinity);
+        if (hopsOut) hopsOut.fill(0);
+        const hk = [], hv = [];   // heap of (key, vertex)
+        const push = (k, v) => { hk.push(k); hv.push(v); let i = hk.length - 1; while (i > 0) { const p = (i - 1) >> 1; if (hk[p] <= hk[i]) break; [hk[p], hk[i]] = [hk[i], hk[p]]; [hv[p], hv[i]] = [hv[i], hv[p]]; i = p; } };
+        const pop = () => { const k = hk[0], v = hv[0]; const lk = hk.pop(), lv = hv.pop(); if (hk.length) { hk[0] = lk; hv[0] = lv; let i = 0; for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < hk.length && hk[l] < hk[m]) m = l; if (r < hk.length && hk[r] < hk[m]) m = r; if (m === i) break; [hk[m], hk[i]] = [hk[i], hk[m]]; [hv[m], hv[i]] = [hv[i], hv[m]]; i = m; } } return [k, v]; };
+        sources.forEach(s0 => { if (s0 >= 0 && s0 < n) { dist[s0] = 0; push(0, s0); } });
+        while (hk.length) {
+            const [k, u] = pop();
+            if (k > dist[u]) continue;
+            for (const e of adj[u]) { const nd = k + e.w; if (nd < dist[e.to]) { dist[e.to] = nd; if (hopsOut) hopsOut[e.to] = hopsOut[u] + 1; push(nd, e.to); } else if (hopsOut && nd === dist[e.to] && hopsOut[u] + 1 < hopsOut[e.to]) hopsOut[e.to] = hopsOut[u] + 1; }
+        }
+        return dist;
+    }
+    // Ground (ft) from the 3DEP raster at a lat/lng; null outside / no-data.
+    function swbGroundFt(dem, lat, lng) {
+        const bd = dem.bounds;
+        if (lat < bd.south || lat > bd.north || lng < bd.west || lng > bd.east) return null;
+        const x = Math.floor((terMercX(lng) - dem.mercX1) / (dem.mercX2 - dem.mercX1) * dem.w);
+        const y = Math.floor((dem.mercY2 - terMercY(lat)) / (dem.mercY2 - dem.mercY1) * dem.h);
+        if (x < 0 || x >= dem.w || y < 0 || y >= dem.h) return null;
+        const v = dem.vals[y * dem.w + x];
+        return Number.isFinite(v) ? v : null;
+    }
+
+
+    // Exact minimum-arc stairs: for each candidate integer floor f the set of samples an arc at f may
+    // cover is {g : f - cap <= g <= f - floorAdd}; an arc is a run of such samples. Ending an arc as far
+    // as possible never hurts (a later start has fewer samples to satisfy), so the only real choice is the
+    // floor of each arc — a DP over (sample, floor) with |Δfloor| <= step finds the fewest arcs exactly.
+    // Returns arcs [{s,e,floorM,ceilM,maxGm,minGm}] or null when no compliant stair exists.
+    function swbWalkDP(g, floorAdd, bandM, stepM, capM, rA, rB, appIdx, useApproach) {
+        const n = g.length;
+        if (n < 2) return null;
+        let gmin = Infinity, gmax = -Infinity;
+        for (const v of g) { if (v < gmin) gmin = v; if (v > gmax) gmax = v; }
+        const fLo = Math.ceil(gmin + floorAdd), fHi = Math.floor(gmax + capM);
+        if (fHi < fLo) return null;
+        const F = fHi - fLo + 1;
+        const stepI = Math.floor(stepM + 1e-9);
+        // reach[f][i] = farthest sample e such that every sample in [i..e] is valid at floor f (e >= i)
+        const reach = new Array(F);
+        for (let k = 0; k < F; k++) {
+            const f = fLo + k, lo = f - capM, hi = f - floorAdd;
+            const r = new Int32Array(n);
+            let run = -1;
+            for (let i = n - 1; i >= 0; i--) { const ok = g[i] >= lo - 1e-9 && g[i] <= hi + 1e-9; if (!ok) { run = -1; r[i] = -1; } else { if (run < 0) run = i; r[i] = run; } }
+            reach[k] = r;
+        }
+        const inRange = (f, r) => !r || (f >= r[0] && f <= r[1]);
+        const INF = 1e9;
+        const dp = new Int32Array(n * F).fill(INF), par = new Int32Array(n * F).fill(-1);
+        const idx = (i, k) => i * F + k;
+        const tryArc = (i, k, cost, from) => {
+            const e0 = reach[k][i];
+            if (e0 < i + 1) return;
+            const f = fLo + k;
+            const ends = [];
+            if (e0 >= n - 1) { if (inRange(f, rB)) ends.push(n - 1); }
+            else ends.push(e0);
+            if (useApproach && appIdx > i && e0 > appIdx) ends.push(appIdx);   // stop at the approach line so the landing arc is long
+            for (const e of ends) {
+                if (useApproach && e > appIdx && e < n - 1) continue;         // no boundary inside the approach
+                if (e === n - 1 && !inRange(f, rB)) continue;
+                const j = idx(e, k);
+                if (cost < dp[j]) { dp[j] = cost; par[j] = from; }
+            }
+        };
+        for (let k = 0; k < F; k++) if (inRange(fLo + k, rA)) tryArc(0, k, 1, -1);
+        for (let i = 1; i < n - 1; i++) {
+            for (let k = 0; k < F; k++) {
+                const c = dp[idx(i, k)]; if (c >= INF) continue;
+                for (let k2 = Math.max(0, k - stepI); k2 <= Math.min(F - 1, k + stepI); k2++) tryArc(i, k2, c + 1, idx(i, k));
+            }
+        }
+        let best = -1, bestC = INF;
+        for (let k = 0; k < F; k++) { const c = dp[idx(n - 1, k)]; if (c < bestC) { bestC = c; best = idx(n - 1, k); } }
+        if (best < 0) return null;
+        const chain = [];
+        for (let j = best; j >= 0; j = par[j]) chain.push(j);
+        chain.reverse();
+        const arcs = [];
+        let s0 = 0;
+        for (const j of chain) {
+            const e = Math.floor(j / F), f = fLo + (j % F);
+            let mx = -Infinity, mn = Infinity; for (let t = s0; t <= e; t++) { if (g[t] > mx) mx = g[t]; if (g[t] < mn) mn = g[t]; }
+            arcs.push({ s: s0, e, floorM: f, ceilM: Math.floor(f + bandM), maxGm: mx, minGm: mn });
+            s0 = e;
+        }
+        return arcs;
+    }
+
+    // ---------- stage ----------
+    async function swbStage() {
+        if (swbRunning) { showToast('SpiderWeb already running…'); return; }
+        if (!swbMasterEnabled) { showToast('SpiderWeb is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+        if (LITE) { showToast('SpiderWeb generator is a CSM (Full mode) tool', 'rgba(255,96,96,0.55)'); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
+        swbRunning = true;
+        const t0 = performance.now();
+        const log = [];
+        const logL = (s) => { log.push(s); console.log(`${TAG} spiderweb: ${s}`); };
+        try {
+            const th = { ...swbThresholds };
+            const mode = await siteAltMode(sid);
+            if (!mode || mode.mode !== 'msl') {
+                const why = mode && mode.mode === 'agl' ? 'this is an AGL site (mountain_terrain off)' : 'altitude mode unknown (site config unreadable)';
+                showToast(`SpiderWeb refused — ${why}. MSL (mountain-terrain) sites only.`, 'rgba(255,96,96,0.55)');
+                logL(`refused: ${why}`);
+                return;
+            }
+            showToast('🕸 SpiderWeb: reading site…');
+            await Promise.resolve(fetchMapObjects(sid, true));
+            const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+            const stateOf = (e) => { const s = (e.custom && e.custom.poi_type_str) || e.poi_type_str || ''; return s.split(' - ').slice(1).map(x => x.trim().toLowerCase()); };
+            const assetsAll = ents.filter(e => e.type === 3 && entityCoords(e) && entityCoords(e).length >= 3);
+            const skippedEmpty = assetsAll.filter(e => stateOf(e).some(m => m.includes('empty')));
+            let assets = assetsAll.filter(e => !skippedEmpty.includes(e));
+            const resolved = resolveBases(sid, ents);
+            const bases = resolved.bases.map(b => ({ name: b.name, pt: gmPoint(b), id: b.id }));
+            if (!assets.length) { showToast('No non-EMPTY assets on this site', 'rgba(255,96,96,0.55)'); return; }
+            if (!bases.length) { showToast('No base found — need a type-8 base or a GM named "…base…"', 'rgba(255,96,96,0.55)'); return; }
+            logL(`site ${sid}: ${assetsAll.length} assets (${skippedEmpty.length} EMPTY skipped), ${bases.length} base(s): ${bases.map(b => b.name).join(', ')} · web ${th.webDensity} · hub ratio ${th.hubGainRatio} · leg ratio ${th.legGainRatio} · base-leg ratio ${th.baseLegGainRatio}`);
+            const nfzRings = ents.filter(e => e.type === 4 && entityCoords(e) && entityCoords(e).length >= 3).map(e => entityCoords(e));
+            // Avoid zones (#262 Ortho Scanner, user 2026-10-07): reviewer-approved third-party pads / properties, exported by
+            // the scan review sheet as avoid/<siteID>.geojson in the data repo, already buffered by the leg standoff.
+            // They ride the NFZ-ring path: hubs, leg candidates and the final gate all refuse to cross them.
+            const avoidRings = [];
+            try {
+                if (!elevSharedToken) logL('avoid zones: no GitHub token - skipped (set the PAT in the Control Panel to use them)');
+                else {
+                    const gj = await ghGetJson(`avoid/${sid}.geojson`);
+                    if (!gj) logL(`avoid zones: none on file (avoid/${sid}.geojson)`);
+                    else {
+                        (gj.features || []).forEach(f => {
+                            const g = f && f.geometry; if (!g) return;
+                            const polys = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
+                            polys.forEach(poly => { const ring = (poly[0] || []).map(c => ({ lat: +c[1], lng: +c[0] })); if (ring.length >= 4) avoidRings.push(ring.slice(0, -1)); });
+                        });
+                        logL(`avoid zones: ${avoidRings.length} loaded from avoid/${sid}.geojson (${(gj.features || []).length} feature(s), by ${gj.reviewer || '?'} ${gj.exported || ''})`);
+                    }
+                }
+            } catch (e) { logL(`avoid zones: load failed - ${e && e.message} (web built WITHOUT them)`); }
+            const blockRings = nfzRings.concat(avoidRings);
+            // Local projector at the asset centroid.
+            let cLat = 0, cLng = 0, cN = 0;
+            assets.forEach(a => { const c = ringCentroid(entityCoords(a)); cLat += c.lat; cLng += c.lng; cN++; });
+            const proj = genProjector(cLat / cN, cLng / cN);
+            const toXY = (p) => proj.fwd(p);
+            const toLL = (q) => proj.inv(q);
+            // DEM raster over assets + bases + margin (session-cached per site/bbox/cell).
+            let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+            const bump = (p) => { if (p.lat < minLat) minLat = p.lat; if (p.lat > maxLat) maxLat = p.lat; if (p.lng < minLng) minLng = p.lng; if (p.lng > maxLng) maxLng = p.lng; };
+            assets.forEach(a => entityCoords(a).forEach(bump)); bases.forEach(b => bump(b.pt));
+            const mLat = th.marginFt / 364000, mLng = th.marginFt / (364000 * Math.cos(((minLat + maxLat) / 2) * Math.PI / 180));
+            const west = minLng - mLng, south = minLat - mLat, east = maxLng + mLng, north = maxLat + mLat;
+            const demKey = `${sid}|${west.toFixed(6)},${south.toFixed(6)},${east.toFixed(6)},${north.toFixed(6)}|${terThresholds.cellFt}`;
+            let dem;
+            if (swbDem && swbDem.key === demKey) dem = swbDem.dem;
+            else { showToast('🕸 SpiderWeb: fetching DEM…'); dem = await terFetchDem(west, south, east, north); swbDem = { key: demKey, dem }; }
+            logL(`DEM ${dem.w}×${dem.h} (${Math.round(dem.cellXft)} ft cells)`);
+            const gAt = (ll) => swbGroundFt(dem, ll.lat, ll.lng);
+            const gXY = (q) => gAt(toLL(q));
+
+            const bt = loadBatteryThresholds();
+            const limitFt = th.battery === 'tattu' ? bt.tattuMaxFt : bt.tulipMaxFt;
+            const excluded = new Set();   // asset ids dropped by the battery gate
+            const dropped = [];           // { name, distFt, why }
+            let result = null;
+            for (let round = 0; round < 6; round++) {
+                const use = assets.filter(a => !excluded.has(a.id));
+                showToast(`🕸 SpiderWeb: building web (${use.length} assets)…`);
+                result = await swbBuildWeb(use, bases, blockRings, th, { toXY, toLL, gXY, gAt, logL });
+                // Battery gate: web distance from base to each zone (real leg lengths).
+                const over = result.zones.filter(z => !z.dropped && (z.rtbM === null || z.rtbM * M_TO_FT > limitFt));
+                if (!over.length) break;
+                over.forEach(z => {
+                    z.assets.forEach(a => excluded.add(a.id));
+                    dropped.push({ name: z.name, distFt: z.rtbM === null ? null : Math.round(z.rtbM * M_TO_FT), why: z.rtbM === null ? 'unreachable from base' : `beyond ${th.battery} one-way limit (${limitFt.toLocaleString()} ft)` });
+                });
+                logL(`battery gate round ${round + 1}: ${over.length} zone(s) dropped, rebuilding`);
+                await swbYield();
+            }
+            result.dropped = dropped;
+            result.skippedEmpty = skippedEmpty.map(e => e.name);
+            result.bases = bases; result.sid = sid; result.limitFt = limitFt; result.thresholds = th;
+            result.runLog = log;
+            // Test-site escape hatch (user 2026-09-29, heavy UX-load site 1643: "just cut that part off"): legs that would
+            // fail a HARD gate are removed from the web so the rest can be committed. The zone keeps its FFZ and its other legs.
+            if (th.dropFailing) {
+                const bad = result.legs.filter(l => l.flags.some(f => /HANDOFF FAIL|^CROSSES/.test(f)));
+                if (bad.length) {
+                    const badSet = new Set(bad);
+                    result.legs = result.legs.filter(l => !badSet.has(l));
+                    result.totalArcs = 0; result.totalVerts = 0; result.totalLenM = 0;
+                    result.legs.forEach(l => { result.totalArcs += l.arcs.length; result.totalVerts += l.verts.length; result.totalLenM += l.lenM; });
+                    result.droppedLegs = bad.map(l => `${l.nameA} → ${l.nameB}`);
+                    logL(`✂ dropped ${bad.length} leg(s) that failed a hard gate (drop failing legs is ON): ${result.droppedLegs.join('; ')}`);
+                }
+            }
+            // Gates (preview-only build — informational until Commit exists).
+            const gates = [];
+            gates.push({ label: 'MSL site', ok: true });
+            gates.push({ label: 'web connected to base', ok: result.zones.every(z => z.rtbM !== null), detail: `${result.zones.filter(z => z.rtbM === null).length} unreachable` });
+            const redArcs = result.legs.reduce((n, l) => n + l.arcs.filter(a => a.ceilM - a.floorM < 2).length, 0);
+            gates.push({ label: 'every arc band ≥ 2 m', ok: redArcs === 0, detail: `${redArcs} thin` });
+            const handoffFail = result.legs.filter(l => l.flags.some(f => /HANDOFF FAIL/.test(f))).length;
+            const handoffSoft = result.legs.filter(l => l.flags.some(f => /^handoff with/.test(f))).length;
+            const raised = result.zones.filter(z => z.ceilRaised).length;
+            gates.push({ label: 'FP ↔ zone handoff ≥ 2 m', ok: handoffFail === 0, detail: `${handoffFail} fail · ${handoffSoft} under the ${th.overlapM} m target · ${raised} zone ceiling(s) raised toward ${th.ffzCeilMaxAglFt} ft` });
+            const manySteps = result.legs.filter(l => l.flags.some(f => /^many steps/.test(f))).length;
+            gates.push({ label: 'legs under 40 steps', ok: manySteps === 0, soft: true, detail: `${manySteps} leg(s) over` });
+            const par = result.legs.filter(l => l.flags.some(f => /^parallel to/.test(f))).length;
+            gates.push({ label: 'no parallel corridors', ok: par === 0, soft: true, detail: `${par} leg(s) share a corridor` });
+            const tiny = result.legs.filter(l => l.flags.some(f => /^tiny leg/.test(f))).length;
+            gates.push({ label: 'no legs under 30 ft', ok: tiny === 0, soft: true, detail: `${tiny} tiny leg(s)` });
+            const cliffs = result.legs.filter(l => l.flags.some(f => /cliff/.test(f))).length;
+            gates.push({ label: 'no cliff steps', ok: cliffs === 0, soft: true, detail: `${cliffs} leg(s)` });
+            const under10 = result.zones.filter(z => z.flags.some(f => /^ENDPOINTS/.test(f))).length;
+            const crowded = result.zones.filter(z => z.flags.some(f => /crowded/.test(f))).length;
+            const softGap = result.zones.filter(z => z.flags.some(f => /^endpoints/.test(f))).length;
+            gates.push({ label: 'endpoint spacing ≥ 10 ft', ok: under10 === 0, detail: `${under10} under 10 ft · ${crowded} crowded edge(s) · ${softGap} under the ${th.endpointGapFt} ft target` });
+            const noDem = result.zones.filter(z => z.flags.some(f => /DEM/.test(f))).length + result.legs.filter(l => l.flags.some(f => /DEM/.test(f))).length;
+            gates.push({ label: 'DEM coverage', ok: noDem === 0, detail: `${noDem} item(s) without ground` });
+            const crossing = result.legs.filter(l => l.flags.some(f => /^CROSSES/.test(f))).length;
+            gates.push({ label: 'no leg cuts through a zone', ok: crossing === 0, detail: `${crossing} leg(s)` });
+            const jBad = (result.junctions || []).filter(J => J.bandOk === false).length;
+            gates.push({ label: 'junction bands agree', ok: jBad === 0, detail: `${jBad} junction(s) without ${th.overlapM} m shared` });
+            result.gates = gates;
+            if (swbState && swbState.createdIds && swbState.createdIds.length && swbState.sid === sid) { result.createdIds = swbState.createdIds; result.commitLog = swbState.commitLog; }
+            result.dryRun = swbState && swbState.dryRun === false ? false : true;
+            swbState = result;
+            swbDrawPreview();
+            swbRenderPanel();
+            const ms = Math.round(performance.now() - t0);
+            logL(`staged: ${result.zones.length} zones / ${result.legs.length} legs / ${result.hubs.length} hubs / ${(result.junctions || []).length} junctions / ${result.totalArcs} arcs / ${result.totalVerts} vertices / ${(result.totalLenM * M_TO_FT / 5280).toFixed(1)} mi FP in ${ms} ms`);
+            showToast(`🕸 SpiderWeb staged: ${result.zones.length} zones, ${result.legs.length} legs, ${result.hubs.length} hubs`);
+        } catch (e) {
+            console.error(`${TAG} spiderweb: stage failed`, e);
+            showToast(`SpiderWeb failed — ${e && e.message ? e.message : e}`, 'rgba(255,96,96,0.55)');
+        } finally { swbRunning = false; }
+    }
+
+    // Build one web from the given assets. Returns zones/legs/hubs with
+    // real leg lengths + per-zone web distance to base (rtbM).
+    async function swbBuildWeb(assets, bases, nfzRings, th, ctx) {
+        const { toXY, toLL, gXY, gAt, logL } = ctx;
+        const M = (ft) => ft / M_TO_FT;
+        const outsetM = M(th.outsetFt);
+        // ---- 1. zones: mitered outset per asset, union touching buffers ----
+        const PC = terBPC();
+        const offRings = [];
+        assets.forEach(a => {
+            let ring = entityCoords(a);
+            const xy = ring.map(toXY);
+            if (swbRingSelfX(xy)) ring = swbHullXY(xy).map(toLL);   // bowtie storage (corner, wellhead, corners…) → hull
+            let offXY = swbOffsetRing(ring.map(toXY), outsetM);
+            if (swbRingSelfX(offXY)) { try { const u = PC ? PC.union([[offXY.map(p => [p.x, p.y])]]) : null; if (u && u[0] && u[0][0]) offXY = u[0][0].slice(0, -1).map(c => ({ x: c[0], y: c[1] })); else offXY = swbHullXY(offXY); } catch (e) { offXY = swbHullXY(offXY); } }
+            const off = offXY.map(toLL);
+            offRings.push({ asset: a, ring: off });
+        });
+        let zones = [];
+        let holesDropped = 0;
+        if (PC && offRings.length) {
+            const geoms = offRings.map(o => [o.ring.map(p => [p.lng, p.lat])]);
+            let uni = null;
+            try { uni = PC.union(...geoms); } catch (e) { logL(`polygon-clipping union threw (${e && e.message}) — zones fall back to per-asset buffers`); }
+            if (uni) {
+                uni.forEach(poly => {
+                    if (!poly || !poly[0] || poly[0].length < 4) return;
+                    if (poly.length > 1) holesDropped += poly.length - 1;
+                    const outer = poly[0].slice(0, -1).map(c => ({ lat: c[1], lng: c[0] }));
+                    zones.push({ points: outer, assets: [] });
+                });
+            }
+        }
+        if (!zones.length) zones = offRings.map(o => ({ points: o.ring, assets: [o.asset] }));
+        if (holesDropped) logL(`${holesDropped} interior hole(s) dropped from unioned zones`);
+        // merge zones that nearly touch (a leg of a few feet between them is useless): bridge the gap with a
+        // small rectangle between the two nearest points and union the three
+        if (PC && th.mergeGapFt > 0) {
+            const mergeM = M(th.mergeGapFt), bridgeW = 2 * outsetM;
+            let merges = 0;
+            for (let pass = 0; pass < 30; pass++) {
+                let did = false;
+                const xy = zones.map(z => z.points.map(toXY));
+                const bb = xy.map(r => { let a = Infinity, b = -Infinity, c = Infinity, d = -Infinity; r.forEach(p => { if (p.x < a) a = p.x; if (p.x > b) b = p.x; if (p.y < c) c = p.y; if (p.y > d) d = p.y; }); return [a, b, c, d]; });
+                outer: for (let i = 0; i < zones.length; i++) for (let j = i + 1; j < zones.length; j++) {
+                    if (bb[i][0] > bb[j][1] + mergeM || bb[j][0] > bb[i][1] + mergeM || bb[i][2] > bb[j][3] + mergeM || bb[j][2] > bb[i][3] + mergeM) continue;
+                    // nearest point pair (vertex → edge both ways)
+                    let best = null;
+                    const scan = (A, B, flip) => { A.forEach(p => { for (let k = 0, m = B.length - 1; k < B.length; m = k++) { const P = B[m], Q = B[k]; const dx = Q.x - P.x, dy = Q.y - P.y; const L2 = dx * dx + dy * dy || 1; let t = ((p.x - P.x) * dx + (p.y - P.y) * dy) / L2; t = Math.max(0, Math.min(1, t)); const q = { x: P.x + t * dx, y: P.y + t * dy }; const d = Math.hypot(p.x - q.x, p.y - q.y); if (!best || d < best.d) best = flip ? { d, p: q, q: p } : { d, p, q }; } }); };
+                    scan(xy[i], xy[j], false); scan(xy[j], xy[i], true);
+                    if (!best || best.d > mergeM) continue;
+                    const dxu = (best.q.x - best.p.x) / (best.d || 1), dyu = (best.q.y - best.p.y) / (best.d || 1);
+                    const nx = -dyu * bridgeW / 2, ny = dxu * bridgeW / 2, ext = 1.5;
+                    const p0 = { x: best.p.x - dxu * ext, y: best.p.y - dyu * ext }, q0 = { x: best.q.x + dxu * ext, y: best.q.y + dyu * ext };
+                    const rect = [[p0.x + nx, p0.y + ny], [q0.x + nx, q0.y + ny], [q0.x - nx, q0.y - ny], [p0.x - nx, p0.y - ny]];
+                    let u = null;
+                    try { u = PC.union([xy[i].map(p => [p.x, p.y])], [xy[j].map(p => [p.x, p.y])], [rect]); } catch (e) { logL(`zone merge union threw (${e && e.message})`); continue; }
+                    if (!u || !u.length) continue;
+                    let big = u[0]; u.forEach(poly => { if (Math.abs(swbRingArea(poly[0].map(c => ({ x: c[0], y: c[1] })))) > Math.abs(swbRingArea(big[0].map(c => ({ x: c[0], y: c[1] }))))) big = poly; });
+                    const merged = { points: big[0].slice(0, -1).map(c => toLL({ x: c[0], y: c[1] })), assets: (zones[i].assets || []).concat(zones[j].assets || []) };
+                    zones.splice(j, 1); zones.splice(i, 1); zones.push(merged);
+                    merges++; did = true; break outer;
+                }
+                if (!did) break;
+            }
+            if (merges) logL(`${merges} near-touching zone pair(s) merged (gap < ${th.mergeGapFt} ft)`);
+        }
+        // assign assets to zones by centroid pip
+        zones.forEach(z => { const raw = z.points.map(toXY); z.xy = swbFillNotches(raw, M(th.notchFt)); if (z.xy.length !== raw.length) z.points = z.xy.map(toLL); z.assets = z.assets || []; });
+        assets.forEach(a => {
+            const c = toXY(ringCentroid(entityCoords(a)));
+            const z = zones.find(zz => swbPip(c, zz.xy));
+            if (z) { if (!z.assets.includes(a)) z.assets.push(a); }
+            else logL(`⚠ asset "${a.name}" is inside no zone after union`);
+        });
+        zones = zones.filter(z => z.assets.length);
+        // Bases live inside freezones: the zone that contains a base becomes that base's zone (legs land on ITS
+        // edges, the base is reached across the zone). A base outside every zone gets a square zone of its own.
+        const baseXY = bases.map(b => toXY(b.pt));
+        bases.forEach((b, bi) => {
+            const q = baseXY[bi];
+            let z = zones.find(zz => swbPip(q, zz.points.map(toXY)));
+            if (!z) {
+                const h = M(th.baseZoneFt) / 2;
+                z = { points: [{ x: q.x - h, y: q.y - h }, { x: q.x + h, y: q.y - h }, { x: q.x + h, y: q.y + h }, { x: q.x - h, y: q.y + h }].map(toLL), assets: [], generated: true };
+                zones.push(z);
+                logL(`base "${b.name}" is outside every zone — generated a ${th.baseZoneFt} ft base zone`);
+            }
+            if (!z.bases) z.bases = [];
+            z.bases.push({ base: b, xy: q });
+        });
+        zones.forEach((z, i) => {
+            z.idx = i;
+            z.name = z.assets.length === 0 ? `Base zone ${(z.bases || []).map(b => b.base.name.trim()).join(' + ')}` : z.assets.length === 1 ? z.assets[0].name : `${z.assets[0].name} +${z.assets.length - 1}`;
+            if (z.bases) z.name = z.assets.length ? `${z.name} (base)` : z.name;
+            const anchor = swbInteriorPoint(z.xy); z.cx = anchor.x; z.cy = anchor.y;
+            z.flags = [];
+            // zone band from the ground inside the footprint (ring verts + centroid + grid)
+            let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+            z.xy.forEach(p => { if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x; if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y; });
+            const samples = z.xy.slice(); samples.push({ x: z.cx, y: z.cy });
+            const stepM = Math.max(8, Math.min(30, (maxX - minX) / 6));
+            for (let x = minX; x <= maxX; x += stepM) for (let y = minY; y <= maxY; y += stepM) { const q = { x, y }; if (swbPip(q, z.xy)) samples.push(q); }
+            let gMin = Infinity, gMax = -Infinity, missing = 0;
+            samples.forEach(q => { const g = gXY(q); if (g === null) missing++; else { if (g < gMin) gMin = g; if (g > gMax) gMax = g; } });
+            if (!Number.isFinite(gMin)) { z.flags.push('no DEM under zone'); z.floorM = null; z.ceilM = null; }
+            else {
+                if (missing) z.flags.push(`${missing} DEM gap(s)`);
+                z.gMinFt = gMin; z.gMaxFt = gMax;
+                z.floorM = M(gMax + th.ffzFloorAglFt);
+                z.ceilM = M(gMin + th.ffzCeilAglFt);
+                z.ceilRaised = false;
+                if (z.ceilM - z.floorM < th.overlapM) z.flags.push(`zone band only ${((z.ceilM - z.floorM) * M_TO_FT).toFixed(0)} ft (relief ${(gMax - gMin).toFixed(0)} ft inside footprint)`);
+            }
+        });
+        await swbYield();
+        // ---- 2. nodes + Delaunay ----
+        const gapM = M(th.endpointGapFt), cornerM = M(th.cornerGapFt);
+        const SIN15 = Math.sin(15 * Math.PI / 180);
+        const outNormal = (ring, P, Q) => { const dx = Q.x - P.x, dy = Q.y - P.y, L = Math.hypot(dx, dy) || 1; const ccw = swbRingArea(ring) > 0; return ccw ? { nx: dy / L, ny: -dx / L } : { nx: -dy / L, ny: dx / L }; };
+        const zoneEndpoint = (zn, toward, exclude) => {
+            const ring = zn.zone.xy, n = ring.length;
+            const anchors = (zn.zone.bases || []).map(b => b.xy);   // base zone: minimise base→edge→target, not edge→target
+            let best = null, fallback = null;
+            for (let i = 0; i < n; i++) {
+                if (exclude && exclude.has(i)) continue;
+                const P = ring[i], Q = ring[(i + 1) % n];
+                const dx = Q.x - P.x, dy = Q.y - P.y, L = Math.hypot(dx, dy) || 1, L2 = L * L;
+                let u = ((toward.x - P.x) * dx + (toward.y - P.y) * dy) / L2;
+                const uMin = Math.min(cornerM / L, 0.5), uMax = Math.max(1 - cornerM / L, 0.5);
+                u = Math.max(uMin, Math.min(uMax, u));
+                if (anchors.length) {   // base zone: pick the u along this edge that minimises base→p + p→target
+                    let bu = u, bd = Infinity;
+                    for (let k = 0; k <= 40; k++) { const uu = uMin + (uMax - uMin) * k / 40; const qx = P.x + uu * dx, qy = P.y + uu * dy; const dd = Math.hypot(toward.x - qx, toward.y - qy) + Math.min(...anchors.map(a => Math.hypot(a.x - qx, a.y - qy))); if (dd < bd) { bd = dd; bu = uu; } }
+                    u = bu;
+                }
+                const px = P.x + u * dx, py = P.y + u * dy;
+                const dRaw = Math.hypot(toward.x - px, toward.y - py) || 1;
+                const d = dRaw + (anchors.length ? Math.min(...anchors.map(a => Math.hypot(a.x - px, a.y - py))) : 0);
+                const { nx, ny } = outNormal(ring, P, Q);
+                const outward = ((toward.x - px) * nx + (toward.y - py) * ny) / dRaw;   // sin of the angle off the edge
+                const cand = { d, edge: i, u };
+                // the departing segment must not re-enter the zone (L-shaped clusters wrap around a corner)
+                const clear = outward >= SIN15 && !swbSegHitsRing({ x: px + nx * 0.6, y: py + ny * 0.6 }, toward, ring);
+                if (clear && (!best || d < best.d)) best = cand;
+                if (!fallback || d < fallback.d) fallback = cand;
+            }
+            if (best) return best;
+            // fallback: the edge the ray from the interior anchor to the target leaves through
+            const A = { x: zn.x, y: zn.y };
+            let ray = null;
+            for (let i = 0; i < n; i++) {
+                const P = ring[i], Q = ring[(i + 1) % n];
+                const r = { x: toward.x - A.x, y: toward.y - A.y }, sg = { x: Q.x - P.x, y: Q.y - P.y };
+                const den = r.x * sg.y - r.y * sg.x; if (Math.abs(den) < 1e-9) continue;
+                const t = ((P.x - A.x) * sg.y - (P.y - A.y) * sg.x) / den, u = ((P.x - A.x) * r.y - (P.y - A.y) * r.x) / den;
+                if (t <= 0 || u < 0 || u > 1) continue;
+                if (!ray || t > ray.t) ray = { t, u, edge: i };
+            }
+            return ray ? { edge: ray.edge, u: ray.u } : fallback;
+        };
+        // landing point (xy) of a leg from `from` onto zone node `zn` — used for crossing tests
+        const landXY = (zn, from) => { const ep = zoneEndpoint(zn, from); const ring = zn.zone.xy, P = ring[ep.edge], Q = ring[(ep.edge + 1) % ring.length]; return { x: P.x + (Q.x - P.x) * ep.u, y: P.y + (Q.y - P.y) * ep.u }; };
+
+        const nodes = zones.map(z => ({ kind: 'zone', x: z.cx, y: z.cy, zone: z }));
+        const nZ = zones.length;
+        const nfzXY = nfzRings.map(r => r.map(toXY));
+        const tris = swbDelaunay(nodes);
+        const ekey = (a, b) => a < b ? `${a}:${b}` : `${b}:${a}`;
+        const edges = new Map();   // key → { a, b, len, tris: [] }
+        tris.forEach((t, ti) => { for (let e = 0; e < 3; e++) { const a = t[e], b = t[(e + 1) % 3]; const k = ekey(a, b); if (!edges.has(k)) edges.set(k, { a: Math.min(a, b), b: Math.max(a, b), len: Math.hypot(nodes[a].x - nodes[b].x, nodes[a].y - nodes[b].y), tris: [] }); edges.get(k).tris.push(ti); } });
+        // crossing test: a leg may not cut through a zone it does not end on, nor an NFZ
+        const legBlocked = (a, b) => {
+            const A = nodes[a], B = nodes[b];
+            const pa = A.kind === 'zone' ? landXY(A, B) : A, pb = B.kind === 'zone' ? landXY(B, A) : B;
+            for (const z of zones) { if ((A.kind === 'zone' && A.zone === z) || (B.kind === 'zone' && B.zone === z)) continue; if (swbPip(A, z.xy) || swbPip(B, z.xy)) continue; if (swbSegHitsRing(pa, pb, z.xy)) return true; }
+            for (const r of nfzXY) if (swbSegHitsRing(pa, pb, r)) return true;
+            return false;
+        };
+        edges.forEach(e => { e.blocked = legBlocked(e.a, e.b); });
+        // MST (Kruskal) over unblocked edges keeps the web connected
+        const parent = nodes.map((_, i) => i);
+        const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+        const sortedE = [...edges.values()].filter(e => !e.blocked).sort((p, q) => p.len - q.len);
+        const web = new Set();
+        sortedE.forEach(e => { const ra = find(e.a), rb = find(e.b); if (ra !== rb) { parent[ra] = rb; e.mst = true; web.add(ekey(e.a, e.b)); } });
+        if (th.webDensity === 'full') {
+            // full mesh: every neighbour leg (Delaunay) that is clear and not longer than maxLegFt
+            const maxLegM = M(th.maxLegFt);
+            edges.forEach((e, k) => { if (!e.blocked && (e.len <= maxLegM || e.mst)) web.add(k); });
+        } else {
+            // Urquhart: drop the longest side of every triangle (unless MST)
+            const longest = new Set();
+            tris.forEach(t => { let bk = null, bl = -1; for (let e = 0; e < 3; e++) { const k = ekey(t[e], t[(e + 1) % 3]); const L = edges.get(k).len; if (L > bl) { bl = L; bk = k; } } longest.add(bk); });
+            edges.forEach((e, k) => { if (!e.blocked && !longest.has(k)) web.add(k); });
+        }
+        logL(`web: ${web.size} neighbour legs (${th.webDensity === 'full' ? 'full mesh ≤ ' + th.maxLegFt + ' ft' : 'Urquhart'})`);
+        await swbYield();
+        // ---- 3. stretch pass: add pruned Delaunay legs back where the return path is long ----
+        const baseIdx = nodes.map((n, i) => n.zone.bases ? i : -1).filter(i => i >= 0);   // base ZONES are the way-home sources
+        const adjOf = (keys) => { const adj = nodes.map(() => []); keys.forEach(k => { const e = edges.get(k); adj[e.a].push({ to: e.b, w: e.len }); adj[e.b].push({ to: e.a, w: e.len }); }); return adj; };
+        const straightM = nodes.map(n => { let m = Infinity; baseXY.forEach(q => n.zone.xy.forEach(p => { const d = Math.hypot(p.x - q.x, p.y - q.y); if (d < m) m = d; })); return Math.max(m, 150); });   // ring → nearest base point; 150 m floor: a zone next to (or around) the base has no meaningful ratio
+        let stretchAdded = 0;
+        // Way-home pass: for every zone whose web path to base is > stretchMax × straight, try the best
+        // pruned Delaunay leg and a direct leg to the nearest base; add the one that earns its length —
+        // Σ(zone→base) must fall by ≥ hubGainRatio ft per ft of new path (same economics as hubs), so a
+        // two-mile spoke never appears just to shave one zone's detour.
+        const buildAdjWith = (hubArr, links, webSet) => {   // adjacency over zones + hubs (spokes + hub↔hub links) for a given leg set
+            const nH = hubArr.length;
+            const adj = adjOf(webSet); for (let i = 0; i < nH; i++) adj.push([]);
+            hubArr.forEach((h, hi) => { const hid = nodes.length + hi; h.spokes.forEach(z => { const w = Math.hypot(h.x - nodes[z].x, h.y - nodes[z].y); adj[hid].push({ to: z, w }); adj[z].push({ to: hid, w }); }); });
+            links.forEach(([a, b]) => { const A = hubArr[a], B = hubArr[b]; const w = Math.hypot(A.x - B.x, A.y - B.y); adj[nodes.length + a].push({ to: nodes.length + b, w }); adj[nodes.length + b].push({ to: nodes.length + a, w }); });
+            return adj;
+        };
+        const stretchPass = (hubArr, links) => {
+            const buildAdj = (webSet) => buildAdjWith(hubArr, links, webSet);
+            const sumOf = (d) => { let t = 0; for (let i = 0; i < nZ; i++) if (Number.isFinite(d[i])) t += d[i]; return t; };
+            for (let pass = 0; pass < 6; pass++) {
+                const nAll = nodes.length + hubArr.length;
+                const dist = swbDijkstra(nAll, buildAdj(web), baseIdx);
+                const sum0 = sumOf(dist);
+                let changed = false;
+                for (let i = 0; i < nZ; i++) {
+                    if (!Number.isFinite(dist[i]) || dist[i] <= straightM[i] * th.stretchMax) continue;
+                    const cands = [];
+                    edges.forEach((e, k) => {
+                        if (web.has(k) || e.blocked || (e.a !== i && e.b !== i)) return;
+                        const o = e.a === i ? e.b : e.a;
+                        if (dist[o] + e.len < dist[i]) cands.push({ k, len: e.len });
+                    });
+                    let bb = null, bd = Infinity;
+                    baseIdx.forEach(b => { const d = Math.hypot(nodes[i].x - nodes[b].x, nodes[i].y - nodes[b].y); if (d < bd) { bd = d; bb = b; } });
+                    if (bb !== null && bd < dist[i]) { const k = ekey(i, bb); if (!edges.has(k)) { if (!legBlocked(i, bb)) cands.push({ k, len: bd, direct: bb }); } else if (!web.has(k) && !edges.get(k).blocked) cands.push({ k, len: bd }); }
+                    let best = null;
+                    for (const c of cands) {
+                        const isBase = c.direct !== undefined || (edges.has(c.k) && nodes[edges.get(c.k).a].kind === 'base' || nodes[edges.get(c.k).b].kind === 'base');
+                        const ratio = Math.max(0, isBase ? th.baseLegGainRatio : th.legGainRatio);
+                        if (c.direct !== undefined && !edges.has(c.k)) edges.set(c.k, { a: Math.min(i, c.direct), b: Math.max(i, c.direct), len: c.len, tris: [], blocked: false, direct: true });
+                        web.add(c.k);
+                        const d2 = swbDijkstra(nAll, buildAdj(web), baseIdx);
+                        web.delete(c.k);
+                        const gain = sum0 - sumOf(d2);
+                        if (gain <= 0 || gain < ratio * c.len) continue;
+                        const score = gain - ratio * c.len;
+                        if (!best || score > best.score) best = { k: c.k, score };
+                    }
+                    if (best) { web.add(best.k); edges.get(best.k).added = true; stretchAdded++; changed = true; }
+                }
+                if (!changed) break;
+            }
+        };
+        // (the way-home pass runs AFTER hubs — see stage 4 — so hubs get to earn their base spokes first)
+        await swbYield();
+        // ---- 4. hubs: star candidates scored by the summed return-to-base distance ----
+        // A hub = open-field point with spokes to every zone (and base) within hubRadiusFt whose
+        // spoke crosses nothing; the web legs between its members are replaced by the star.
+        // Accepted when Σ(zone→base) FALLS, or rises ≤ hubMaxRtbLossPct while total FP length falls.
+        // Hubs may also link straight to a base or to another hub when that shortens the sum.
+        const hubs = [];        // { x, y, spokes: [node idx…] }
+        const hubLinks = [];    // [hi, hj]
+        const nodeBlocked = (P, ni) => { const Z = nodes[ni]; const pz = Z.kind === 'zone' ? landXY(Z, P) : Z; for (const zz of zones) { if (Z.kind === 'zone' && Z.zone === zz) continue; if (swbPip(P, zz.xy)) return true; if (Z.kind !== 'zone' && swbPip(Z, zz.xy)) continue; if (swbSegHitsRing(P, pz, zz.xy)) return true; } for (const r of nfzXY) if (swbSegHitsRing(P, pz, r)) return true; return false; };
+        const ptBlocked = (P, Q) => { for (const zz of zones) { if (swbSegHitsRing(P, Q, zz.xy)) return true; } for (const r of nfzXY) if (swbSegHitsRing(P, Q, r)) return true; return false; };
+        const sumRtb = (hubArr, webSet, links) => {
+            const nH = hubArr.length, n = nodes.length + nH;
+            const adj = adjOf(webSet); for (let i = 0; i < nH; i++) adj.push([]);
+            let len = 0; webSet.forEach(k => { len += edges.get(k).len; });
+            hubArr.forEach((h, hi) => { const hid = nodes.length + hi; h.spokes.forEach(z => { const w = Math.hypot(h.x - nodes[z].x, h.y - nodes[z].y); adj[hid].push({ to: z, w }); adj[z].push({ to: hid, w }); len += w; }); });
+            links.forEach(([a, b]) => { const A = hubArr[a], B = hubArr[b]; const w = Math.hypot(A.x - B.x, A.y - B.y); adj[nodes.length + a].push({ to: nodes.length + b, w }); adj[nodes.length + b].push({ to: nodes.length + a, w }); len += w; });
+            const d = swbDijkstra(n, adj, baseIdx);
+            let sum = 0, unreachable = 0;
+            for (let i = 0; i < nZ; i++) { if (Number.isFinite(d[i])) sum += d[i]; else unreachable++; }
+            return { sum, len, unreachable };
+        };
+        let hubStats = 'off';
+        if (th.hubs) {
+            const R = M(th.hubRadiusFt), K = Math.max(3, th.hubMaxSpokes | 0);
+            // candidates: Fermat points + circumcenters of zone-only Delaunay triangles, deduped on a 300 ft grid
+            const seen = new Set(), cands = [];
+            const clearM = M(th.hubClearFt);
+            const ringDist = (p, ring) => { let m = Infinity; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) { const P = ring[j], Q = ring[i]; const dx = Q.x - P.x, dy = Q.y - P.y; const L2 = dx * dx + dy * dy || 1; let t = ((p.x - P.x) * dx + (p.y - P.y) * dy) / L2; t = Math.max(0, Math.min(1, t)); const d = Math.hypot(p.x - (P.x + t * dx), p.y - (P.y + t * dy)); if (d < m) m = d; } return m; };
+            const pushCand = (p) => { if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return; const k = `${Math.round(p.x / 90)}:${Math.round(p.y / 90)}`; if (seen.has(k)) return; if (zones.some(z => swbPip(p, z.xy) || ringDist(p, z.xy) < clearM)) return; seen.add(k); cands.push({ x: p.x, y: p.y }); };
+            tris.forEach(t => {
+                const P = t.map(v => nodes[v]);
+                pushCand(swbGeoMedian(P));
+                const a = P[0], b = P[1], c = P[2];
+                const d = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+                if (Math.abs(d) > 1e-9) {
+                    const ux = ((a.x * a.x + a.y * a.y) * (b.y - c.y) + (b.x * b.x + b.y * b.y) * (c.y - a.y) + (c.x * c.x + c.y * c.y) * (a.y - b.y)) / d;
+                    const uy = ((a.x * a.x + a.y * a.y) * (c.x - b.x) + (b.x * b.x + b.y * b.y) * (a.x - c.x) + (c.x * c.x + c.y * c.y) * (b.x - a.x)) / d;
+                    const cc = { x: ux, y: uy };
+                    if (Math.min(...P.map(p => Math.hypot(p.x - cc.x, p.y - cc.y))) < R) pushCand(cc);
+                }
+            });
+            let cur = sumRtb(hubs, web, hubLinks);
+            let accepted = 0, evaluated = 0;
+            const memberSets = new Map();
+            for (let round = 0; round < 40; round++) {
+                const picks = [];
+                for (const c of cands) {
+                    if (c.used) continue;
+                    if (hubs.some(h => Math.hypot(h.x - c.x, h.y - c.y) < 600 / M_TO_FT)) { c.used = true; continue; }
+                    // members: nearest zones (and bases) within R whose spoke is clear
+                    const near = [];
+                    const RB = M(th.hubBaseReachFt);
+                    nodes.forEach((nd, i) => { const d = Math.hypot(nd.x - c.x, nd.y - c.y); if (d <= R || (nd.zone.bases && d <= RB)) near.push({ i, d }); });
+                    near.sort((p, q) => p.d - q.d);
+                    const members = [];
+                    // base zones join whenever the spoke is clear — they do not count against the spoke cap
+                    near.forEach(m => { if (nodes[m.i].zone.bases && !nodeBlocked(c, m.i)) members.push(m.i); });
+                    for (const m of near) { if (members.length >= K + (members.filter(i => nodes[i].zone.bases).length)) break; if (members.includes(m.i) || nodeBlocked(c, m.i)) continue; members.push(m.i); }
+                    if (members.filter(i => nodes[i].kind === 'zone').length < 3) { c.used = true; continue; }
+                    const mset = new Set(members);
+                    const removed = []; if (!th.hubKeepLegs) web.forEach(k => { const e = edges.get(k); if (mset.has(e.a) && mset.has(e.b)) removed.push(k); });
+                    const trialWeb = new Set(web); removed.forEach(k => trialWeb.delete(k));
+                    const trialHubs = hubs.concat([{ x: c.x, y: c.y, spokes: members }]);
+                    const r = sumRtb(trialHubs, trialWeb, hubLinks); evaluated++;
+                    if (r.unreachable > cur.unreachable) continue;
+                    const dSum = r.sum - cur.sum, dLen = r.len - cur.len;
+                    // saves way-home (enough per foot of new path), or trades a small loss for less total path
+                    const ok = (dSum < 0 && (dLen <= 0 || -dSum >= th.hubGainRatio * dLen)) || (dSum <= cur.sum * th.hubMaxRtbLossPct / 100 && dLen < 0);
+                    if (!ok) continue;
+                    const score = dSum + 0.25 * dLen;   // prefer the biggest RTB gain, length as tiebreak
+                    picks.push({ c, members, removed, r, score });
+                }
+                if (!picks.length) break;
+                // batch: accept the best, then any others that share no member with this round's accepts (re-scored next round)
+                picks.sort((p, q) => p.score - q.score);
+                const taken = new Set();
+                let n0 = 0;
+                for (const p of picks) {
+                    if (p.members.some(m => taken.has(m))) continue;
+                    if (n0 > 0) { const chk = sumRtb(hubs.concat([{ x: p.c.x, y: p.c.y, spokes: p.members }]), (() => { const w = new Set(web); p.removed.forEach(k => w.delete(k)); return w; })(), hubLinks); const dS = chk.sum - cur.sum, dL = chk.len - cur.len; if (chk.unreachable > cur.unreachable || !((dS < 0 && (dL <= 0 || -dS >= th.hubGainRatio * dL)) || (dS <= cur.sum * th.hubMaxRtbLossPct / 100 && dL < 0))) continue; p.r = chk; }
+                    p.removed.forEach(k => web.delete(k));
+                    hubs.push({ x: p.c.x, y: p.c.y, spokes: p.members });
+                    p.c.used = true; cur = p.r; accepted++; n0++;
+                    p.members.forEach(m => taken.add(m));
+                }
+                await swbYield();
+            }
+            // spoke pruning: a spoke stays only if removing it would cost more way-home than it is worth
+            let pruned = 0;
+            for (const h of hubs) {
+                const order = h.spokes.slice().sort((a, b) => Math.hypot(h.x - nodes[b].x, h.y - nodes[b].y) - Math.hypot(h.x - nodes[a].x, h.y - nodes[a].y));
+                for (const z of order) {
+                    if (h.spokes.length <= 3) break;
+                    const keep = h.spokes.slice();
+                    h.spokes = h.spokes.filter(v => v !== z);
+                    const r = sumRtb(hubs, web, hubLinks);
+                    const spokeLen = Math.hypot(h.x - nodes[z].x, h.y - nodes[z].y);
+                    const ratio = nodes[z].zone.bases ? Math.max(0, th.baseLegGainRatio) : Math.max(0, th.hubGainRatio);   // a hub's spoke to a base is priced like a direct base leg
+                    if (r.unreachable > cur.unreachable || (r.sum - cur.sum) > ratio * spokeLen || (nodes[z].zone.bases && r.sum > cur.sum)) h.spokes = keep;
+                    else { cur = r; pruned++; }
+                }
+            }
+            if (pruned) logL(`hubs: ${pruned} spoke(s) pruned (did not earn their length)`);
+            // hub→hub links that shorten the way home
+            let linksAdded = 0;
+            for (let pass = 0; pass < 3; pass++) {
+                let changed = false;
+                for (let i = 0; i < hubs.length; i++) for (let j = i + 1; j < hubs.length; j++) {
+                    if (hubLinks.some(([a, b]) => (a === i && b === j))) continue;
+                    const A = hubs[i], B = hubs[j];
+                    if (Math.hypot(A.x - B.x, A.y - B.y) > 2 * R || ptBlocked(A, B)) continue;
+                    const trial = hubLinks.concat([[i, j]]);
+                    const r = sumRtb(hubs, web, trial);
+                    const lenL = Math.hypot(A.x - B.x, A.y - B.y);
+                    if (r.unreachable <= cur.unreachable && (cur.sum - r.sum) >= Math.max(0, th.hubGainRatio) * lenL && r.sum < cur.sum) { hubLinks.push([i, j]); cur = r; linksAdded++; changed = true; }
+                }
+                if (!changed) break;
+            }
+            hubStats = `${accepted} hubs from ${evaluated} evaluations, ${linksAdded} hub↔hub link(s), Σ way-home ${(cur.sum * M_TO_FT / 5280).toFixed(1)} mi`;
+            logL(`hubs: ${hubStats}`);
+        }
+        // ---- 4b. way-home pass (after hubs): restore legs / direct base legs only where the web is still long ----
+        stretchPass(hubs, hubLinks);
+        if (stretchAdded) logL(`way-home pass: ${stretchAdded} leg(s) added (path > ${th.stretchMax}× straight; leg ratio ${th.legGainRatio}, base-leg ratio ${th.baseLegGainRatio})`);
+        await swbYield();
+        // ---- 4c. base star reach (user 2026-09-15: "yellow is where I'd like to see segments" — open ground west of
+        // the base had no spokes: every zone there was under stretchMax, and the straight line from the base cut
+        // through the pads beside the base, so it was "blocked"). A spoke is now THREADED: the straight line
+        // base→zone is split at every zone it cuts (in order along the line), the pieces that do not exist yet
+        // are added (each must be clear), and the chain is accepted when it shortens that zone's way home by
+        // ≥ baseStarGainPct, detours ≤ 15 % over straight and its new pieces cross ≤ baseStarMaxCross legs.
+        // Best gain first; distances refreshed after every add so a spoke also serves the zones behind it. ----
+        let starAdded = 0;
+        if (th.baseStarFt > 0 && baseIdx.length) {
+            const reachM = M(th.baseStarFt), minGain = Math.max(0, th.baseStarGainPct) / 100, maxCross = Math.max(0, Math.round(th.baseStarMaxCross));
+            const nAll = nodes.length + hubs.length;
+            const zoneNode = new Map(); for (let i = 0; i < nZ; i++) zoneNode.set(nodes[i].zone, i);
+            const blockedCache = new Map();
+            const pieceBlocked = (u, v) => { const k = ekey(u, v); if (edges.has(k)) return edges.get(k).blocked; if (!blockedCache.has(k)) blockedCache.set(k, legBlocked(u, v)); return blockedCache.get(k); };
+            const orient = (p, q, r) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+            const properCross = (a, b, c, d) => orient(a, b, c) * orient(a, b, d) < 0 && orient(c, d, a) * orient(c, d, b) < 0;
+            const crossings = (u, v) => {   // existing legs + hub spokes a new piece would cut (none incident to either end)
+                const A = nodes[u], B = nodes[v]; let c = 0;
+                web.forEach(k => { const e = edges.get(k); if (e.a === u || e.b === u || e.a === v || e.b === v) return; if (properCross(A, B, nodes[e.a], nodes[e.b])) c++; });
+                hubs.forEach(h => h.spokes.forEach(z => { if (z === u || z === v) return; if (properCross(A, B, h, nodes[z])) c++; }));
+                return c;
+            };
+            const cutsOf = (u, v) => {   // zones a piece u→v cuts (neither end's own zone), ordered along the piece
+                const A = nodes[u], B = nodes[v]; const pa = landXY(A, B), pb = landXY(B, A);
+                const dx = pb.x - pa.x, dy = pb.y - pa.y, L2 = dx * dx + dy * dy || 1;
+                const cuts = [];
+                zones.forEach(z => { if (z === A.zone || z === B.zone || !zoneNode.has(z)) return; if (!swbSegHitsRing(pa, pb, z.xy)) return; let t = 0; z.xy.forEach(q => { t += ((q.x - pa.x) * dx + (q.y - pa.y) * dy) / L2; }); cuts.push({ n: zoneNode.get(z), t: t / z.xy.length }); });
+                return cuts.sort((p, q) => p.t - q.t).map(c => c.n);
+            };
+            const chainFor = (i, b) => {   // base → … → zone i, threading every blocked piece through the zones it cuts (refined until every piece is clear)
+                let chain = [b, i];
+                for (let iter = 0; iter < 6; iter++) {
+                    let changed = false;
+                    for (let s = 1; s < chain.length; s++) {
+                        const u = chain[s - 1], v = chain[s];
+                        if (web.has(ekey(u, v)) || !pieceBlocked(u, v)) continue;
+                        const cuts = cutsOf(u, v).filter(n => !chain.includes(n));
+                        if (!cuts.length) return null;                 // blocked by an NFZ or an end inside a zone — no thread through
+                        chain.splice(s, 0, ...cuts); changed = true; s += cuts.length;
+                        if (chain.length > 7) return null;             // more than 5 pads in the way = a corridor, not a spoke
+                    }
+                    if (!changed) return chain;
+                }
+                return null;
+            };
+            for (let round = 0; round < 80; round++) {
+                const dist = swbDijkstra(nAll, buildAdjWith(hubs, hubLinks, web), baseIdx);
+                let best = null;
+                for (let i = 0; i < nZ; i++) {
+                    if (nodes[i].zone.bases || !Number.isFinite(dist[i]) || dist[i] <= 0) continue;
+                    for (const b of baseIdx) {
+                        const straight = Math.hypot(nodes[i].x - nodes[b].x, nodes[i].y - nodes[b].y);
+                        if (straight > reachM || straight >= dist[i] * (1 - minGain)) continue;   // cheap bound: even a straight spoke would not earn the gain
+                        const chain = chainFor(i, b); if (!chain) continue;
+                        let chainLen = 0, cr = 0, ok = true; const fresh = [];
+                        for (let s = 1; s < chain.length && ok; s++) {
+                            const u = chain[s - 1], v = chain[s], k = ekey(u, v);
+                            const len = Math.hypot(nodes[u].x - nodes[v].x, nodes[u].y - nodes[v].y); chainLen += len;
+                            if (web.has(k)) continue;
+                            if (pieceBlocked(u, v)) { ok = false; break; }
+                            cr += crossings(u, v); if (cr > maxCross) { ok = false; break; }
+                            fresh.push({ u, v, k, len });
+                        }
+                        if (!ok || !fresh.length || chainLen > straight * 1.15) continue;
+                        const gain = (dist[i] - chainLen) / dist[i]; if (gain < minGain) continue;
+                        if (!best || gain > best.gain) best = { i, b, chain, fresh, gain, cr, chainLen };
+                    }
+                }
+                if (!best) break;
+                best.fresh.forEach(f => { if (!edges.has(f.k)) edges.set(f.k, { a: Math.min(f.u, f.v), b: Math.max(f.u, f.v), len: f.len, tris: [], blocked: false, direct: true }); const e = edges.get(f.k); e.added = true; e.star = true; web.add(f.k); });
+                starAdded += best.fresh.length;
+                logL(`base star: ${nodes[best.i].zone.name} ← ${best.chain.slice(0, -1).map(n => nodes[n].zone.name).join(' ← ')} · ${Math.round(best.chainLen * M_TO_FT).toLocaleString()} ft · way home −${Math.round(best.gain * 100)} % · ${best.fresh.length} new piece(s) crossing ${best.cr} leg(s)`);
+            }
+            logL(`base star: ${starAdded} spoke piece(s) added (zones within ${th.baseStarFt} ft of a base, way home shortened ≥ ${th.baseStarGainPct} %, ≤ ${maxCross} crossings)`);
+            await swbYield();
+        }
+        // ---- 5. legs with endpoints on zone edges ----
+        const hubNodes = hubs.map((h, hi) => ({ kind: 'hub', x: h.x, y: h.y, hub: h, hi }));
+        const allNodes = nodes.concat(hubNodes);
+        const legsRaw = [];   // { a, b } indices into allNodes
+        web.forEach(k => { const e = edges.get(k); legsRaw.push({ a: e.a, b: e.b, added: !!e.added }); });
+        hubs.forEach((h, hi) => h.spokes.forEach(z => legsRaw.push({ a: nodes.length + hi, b: z })));
+        hubLinks.forEach(([i, j]) => legsRaw.push({ a: nodes.length + i, b: nodes.length + j }));
+        // ---- 4c. corridor cleanup: a leg that skims a zone it does not end on (within corridorFt) becomes
+        //          two legs THROUGH that zone; the halves usually already exist as neighbour legs, so the net
+        //          effect is one line where there were two running side by side ----
+        if (th.corridorFt > 0) {
+            const corrM = M(th.corridorFt);
+            const pk = (a, b) => a < b ? `${a}:${b}` : `${b}:${a}`;
+            const have = new Set(legsRaw.map(l => pk(l.a, l.b)));
+            const segRingDist = (P, Q, ring) => { let m = Infinity; const dx = Q.x - P.x, dy = Q.y - P.y, L2 = dx * dx + dy * dy || 1; ring.forEach(v => { let t = ((v.x - P.x) * dx + (v.y - P.y) * dy) / L2; if (t < 0.05 || t > 0.95) return; const d = Math.hypot(v.x - (P.x + t * dx), v.y - (P.y + t * dy)); if (d < m) m = d; }); return m; };
+            let rerouted = 0, added = 0;
+            for (let pass = 0; pass < 3; pass++) {
+                let changed = false;
+                for (let i = 0; i < legsRaw.length; i++) {
+                    const l = legsRaw[i];
+                    const A = allNodes[l.a], B = allNodes[l.b];
+                    const P = A.kind === 'zone' ? landXY(A, B) : A, Q = B.kind === 'zone' ? landXY(B, A) : B;
+                    let best = null;
+                    zones.forEach((z, zi) => {
+                        if ((A.kind === 'zone' && A.zone === z) || (B.kind === 'zone' && B.zone === z)) return;
+                        const d = segRingDist(P, Q, z.xy);
+                        if (d <= corrM && (!best || d < best.d)) best = { zi, d };
+                    });
+                    if (!best) continue;
+                    const zi = best.zi, Z = nodes[zi];
+                    const detour = (Math.hypot(Z.x - A.x, Z.y - A.y) + Math.hypot(B.x - Z.x, B.y - Z.y)) / (Math.hypot(B.x - A.x, B.y - A.y) || 1);
+                    if (detour > 1.15) continue;
+                    const blk = (x, y) => (x < nodes.length && y < nodes.length) ? legBlocked(x, y) : ptBlocked(allNodes[x], allNodes[y]);
+                    if (blk(l.a, zi) || blk(zi, l.b)) continue;
+                    legsRaw.splice(i, 1); have.delete(pk(l.a, l.b)); i--; rerouted++; changed = true;
+                    [[l.a, zi], [zi, l.b]].forEach(([x, y]) => { const k = pk(x, y); if (!have.has(k)) { have.add(k); legsRaw.push({ a: x, b: y }); added++; } });
+                }
+                if (!changed) break;
+            }
+            if (rerouted) logL(`corridor cleanup: ${rerouted} leg(s) rerouted through a zone they skimmed (≤ ${th.corridorFt} ft), ${added} new half(s), ${rerouted * 2 - added} already existed`);
+        }
+        // endpoint on a zone for a leg toward `toward`: the ring point CLOSEST to the target among the
+        // edges the leg actually leaves through (direction ≥ 15° off the edge, pointing outward) — so the
+        // leg departs from the nearest outside edge and never grazes or cuts through its own zone
+        const epPoint = (zn, ep) => { const ring = zn.zone.xy, P = ring[ep.edge], Q = ring[(ep.edge + 1) % ring.length]; return { x: P.x + (Q.x - P.x) * ep.u, y: P.y + (Q.y - P.y) * ep.u }; };
+        const legs = legsRaw.map(l => {
+            const A = allNodes[l.a], B = allNodes[l.b];
+            let ea = A.kind === 'zone' ? zoneEndpoint(A, B) : null;
+            let eb = B.kind === 'zone' ? zoneEndpoint(B, A) : null;
+            // a big neighbour's anchor can sit far from where the leg really lands — re-aim at the other end's point
+            for (let it = 0; it < 3; it++) {
+                const pa = ea ? epPoint(A, ea) : A, pb = eb ? epPoint(B, eb) : B;
+                const ea2 = A.kind === 'zone' ? zoneEndpoint(A, pb) : null;
+                const eb2 = B.kind === 'zone' ? zoneEndpoint(B, pa) : null;
+                const same = (p, q) => (!p && !q) || (p && q && p.edge === q.edge && Math.abs(p.u - q.u) < 1e-6);
+                if (same(ea, ea2) && same(eb, eb2)) break;
+                ea = ea2; eb = eb2;
+            }
+            return { a: l.a, b: l.b, ea, eb, flags: [], arcs: [], added: !!l.added };
+        });
+        // spacing per zone edge: ≥ endpointGap between endpoints, ≥ cornerGap off the corners
+        const spaceZone = (z, zi, spill) => {
+            const slots = [];   // { leg, side:'ea'|'eb', edge, pos(m) }
+            legs.forEach(l => { if (l.ea && allNodes[l.a].zone === z) slots.push({ leg: l, side: 'ea', ep: l.ea }); if (l.eb && allNodes[l.b].zone === z) slots.push({ leg: l, side: 'eb', ep: l.eb }); });
+            let spilled = false;
+            const byEdge = new Map();
+            slots.forEach(s => { if (!byEdge.has(s.ep.edge)) byEdge.set(s.ep.edge, []); byEdge.get(s.ep.edge).push(s); });
+            byEdge.forEach((list, ei) => {
+                const P = z.xy[ei], Q = z.xy[(ei + 1) % z.xy.length];
+                const L = Math.hypot(Q.x - P.x, Q.y - P.y);
+                list.forEach(s => { s.pos = s.ep.u * L; });
+                list.sort((p, q) => p.pos - q.pos);
+                const lo = Math.min(cornerM, L / 2), hi = Math.max(L - cornerM, L / 2);
+                const need = (list.length - 1) * gapM;
+                if (hi - lo < need) {
+                    if (spill) {
+                        // too many legs for this edge: move the ones whose far end is least aligned with it to another edge
+                        const cap = Math.max(1, Math.floor((hi - lo) / gapM) + 1);
+                        const zn = allNodes[zi];
+                        const scored = list.map(s0 => { const other = s0.side === 'ea' ? allNodes[s0.leg.b] : allNodes[s0.leg.a]; const o = other.kind === 'zone' ? epPoint(other, s0.side === 'ea' ? s0.leg.eb : s0.leg.ea) : other; return { s0, other: o, d: Math.hypot(o.x - (P.x + Q.x) / 2, o.y - (P.y + Q.y) / 2) }; });
+                        scored.sort((p, q) => p.d - q.d);
+                        scored.slice(cap).forEach(({ s0, other }) => { const ep2 = zoneEndpoint(zn, other, new Set([ei])); if (ep2) { s0.ep.edge = ep2.edge; s0.ep.u = ep2.u; s0.moved = true; } });
+                        spilled = true; return;   // re-space from scratch
+                    }
+                    z.flags.push(`crowded edge ${ei + 1} (${list.length} legs on ${(L * M_TO_FT).toFixed(0)} ft)`); list.forEach(s => s.leg.flags.push('crowded edge'));
+                }
+                // forward pass then backward pass keeps order + gaps + bounds
+                for (let i = 0; i < list.length; i++) list[i].pos = Math.max(list[i].pos, lo + i * gapM, i ? list[i - 1].pos + gapM : -Infinity);
+                for (let i = list.length - 1; i >= 0; i--) list[i].pos = Math.min(list[i].pos, hi - (list.length - 1 - i) * gapM, i < list.length - 1 ? list[i + 1].pos - gapM : Infinity);
+                list.forEach(s => { s.ep.u = Math.max(0, Math.min(1, s.pos / L)); });
+            });
+            if (spilled) return true;
+            // endpoints on DIFFERENT edges can still sit < gap apart across a corner — push both away from it
+            const xyOf = (s0) => { const P = z.xy[s0.ep.edge], Q = z.xy[(s0.ep.edge + 1) % z.xy.length]; return { x: P.x + (Q.x - P.x) * s0.ep.u, y: P.y + (Q.y - P.y) * s0.ep.u, L: Math.hypot(Q.x - P.x, Q.y - P.y) || 1 }; };
+            for (let pass = 0; pass < 20; pass++) {
+                let moved = false;
+                for (let i = 0; i < slots.length; i++) for (let j = i + 1; j < slots.length; j++) {
+                    const a = slots[i], b = slots[j];
+                    if (a.ep.edge === b.ep.edge) continue;
+                    const pa = xyOf(a), pb = xyOf(b);
+                    const d = Math.hypot(pa.x - pb.x, pa.y - pb.y);
+                    if (d >= gapM) continue;
+                    const need = (gapM - d) + 0.5;   // over-correct: edges meet at an angle, so the gain per move is less than the move
+                    // move each away from the shared corner along its own edge
+                    [[a, pa], [b, pb]].forEach(([s0, p0]) => {
+                        const n = z.xy.length, next = (s0.ep.edge + 1) % n, prev = (s0.ep.edge - 1 + n) % n;
+                        const other = s0 === a ? b : a;
+                        const towardEnd = other.ep.edge === next;   // shared corner is at u=1 → move toward u=0
+                        const du = need / p0.L;
+                        s0.ep.u = towardEnd ? Math.max(Math.min(cornerM / p0.L, 0.5), s0.ep.u - du) : Math.min(Math.max(1 - cornerM / p0.L, 0.5), s0.ep.u + du);
+                    });
+                    moved = true;
+                }
+                if (!moved) break;
+            }
+            // report what spacing could not fix: < 10 ft is a hard problem, < gap a soft one
+            for (let i = 0; i < slots.length; i++) for (let j = i + 1; j < slots.length; j++) {
+                const pa = xyOf(slots[i]), pb = xyOf(slots[j]);
+                const d = Math.hypot(pa.x - pb.x, pa.y - pb.y);
+                if (d < 10 / M_TO_FT) z.flags.push(`ENDPOINTS ${(d * M_TO_FT).toFixed(0)} ft apart (hard minimum 10)`);
+                else if (d < gapM - 0.05) z.flags.push(`endpoints ${(d * M_TO_FT).toFixed(0)} ft apart (target ${th.endpointGapFt})`);
+            }
+            return false;
+        };
+        zones.forEach((z, zi) => { for (let k = 0; k < 3; k++) { if (!spaceZone(z, zi, k < 2)) break; } });
+        // resolve endpoint → xy, 1 ft inside the zone
+        const epXY = (zn, ep) => {
+            const ring = zn.zone.xy, P = ring[ep.edge], Q = ring[(ep.edge + 1) % ring.length];
+            const x = P.x + (Q.x - P.x) * ep.u, y = P.y + (Q.y - P.y) * ep.u;
+            const o = outNormal(ring, P, Q);
+            const inM = 1 / M_TO_FT;
+            return { x: x - o.nx * inM, y: y - o.ny * inM };
+        };
+        legs.forEach(l => {
+            const A = allNodes[l.a], B = allNodes[l.b];
+            l.pa = l.ea ? epXY(A, l.ea) : { x: A.x, y: A.y };
+            l.pb = l.eb ? epXY(B, l.eb) : { x: B.x, y: B.y };
+            l.lenM = Math.hypot(l.pb.x - l.pa.x, l.pb.y - l.pa.y);
+        });
+        // final geometry check: a leg must not cut through a zone it does not end on (endpoints moved since the
+        // topology test). Way-home extras that do are dropped; anything else is flagged hard.
+        let droppedCross = 0;
+        for (let i = legs.length - 1; i >= 0; i--) {
+            const l = legs[i], A = allNodes[l.a], B = allNodes[l.b];
+            const hit = zones.find(z => { if ((A.kind === 'zone' && A.zone === z) || (B.kind === 'zone' && B.zone === z)) return false; if (swbPip(l.pa, z.xy) || swbPip(l.pb, z.xy)) return false; return swbSegHitsRing(l.pa, l.pb, z.xy); });
+            if (!hit) continue;
+            if (l.added) { legs.splice(i, 1); droppedCross++; }
+            else l.flags.push(`CROSSES zone "${hit.name}"`);
+        }
+        if (droppedCross) logL(`${droppedCross} way-home leg(s) dropped: final line cut through a zone`);
+        // ---- 5b. junctions: where two legs cross, both get a shared waypoint there (a switch point for the
+        //          drone — a spider web, not lines passing over each other) ----
+        const junctions = [];   // { x, y, node }
+        if (th.junctions) {
+            const minM = M(th.junctionMinFt), snapM = 30 / M_TO_FT;
+            let made = 0;
+            for (let pass = 0; pass < 6; pass++) {
+                let found = false;
+                outer: for (let i = 0; i < legs.length; i++) for (let j = i + 1; j < legs.length; j++) {
+                    const L1 = legs[i], L2 = legs[j];
+                    if (L1.a === L2.a || L1.a === L2.b || L1.b === L2.a || L1.b === L2.b) continue;   // share a node already
+                    if (!swbSegsCross(L1.pa, L1.pb, L2.pa, L2.pb)) continue;
+                    const d1 = { x: L1.pb.x - L1.pa.x, y: L1.pb.y - L1.pa.y }, d2 = { x: L2.pb.x - L2.pa.x, y: L2.pb.y - L2.pa.y };
+                    const X = lineX(L1.pa, d1, L2.pa, d2);
+                    if (!X) continue;
+                    const near = (p) => Math.hypot(p.x - X.x, p.y - X.y) < minM;
+                    if (near(L1.pa) || near(L1.pb) || near(L2.pa) || near(L2.pb)) continue;   // would leave a stub — leave uncrossed
+                    // reuse a junction within 30 ft, else create one
+                    let J = junctions.find(q => Math.hypot(q.x - X.x, q.y - X.y) < snapM);
+                    if (!J) { J = { x: X.x, y: X.y, node: allNodes.length }; allNodes.push({ kind: 'junction', x: X.x, y: X.y, ji: junctions.length }); junctions.push(J); }
+                    const split = (L) => {
+                        const first = { a: L.a, b: J.node, ea: L.ea, eb: null, pa: L.pa, pb: { x: J.x, y: J.y }, flags: [], arcs: [], added: L.added };
+                        const second = { a: J.node, b: L.b, ea: null, eb: L.eb, pa: { x: J.x, y: J.y }, pb: L.pb, flags: [], arcs: [], added: L.added };
+                        [first, second].forEach(q => { q.lenM = Math.hypot(q.pb.x - q.pa.x, q.pb.y - q.pa.y); });
+                        return [first, second];
+                    };
+                    const s1 = split(L1), s2 = split(L2);
+                    legs.splice(j, 1); legs.splice(i, 1);
+                    legs.push(...s1, ...s2);
+                    made++; found = true; break outer;
+                }
+                if (!found) break;
+                pass = -1;   // keep scanning until no crossing remains (bounded by the leg count)
+                if (made > 2000) { logL('junctions: stopped at 2000 splits'); break; }
+            }
+            if (made) logL(`${made} crossing(s) turned into junctions (${junctions.length} junction points)`);
+        }
+        // ---- 5c. near-node snap: a leg that passes within snapNodeFt of a hub or junction (not its own end)
+        //          is routed through that node; the duplicate half that already exists is dropped ----
+        if (th.snapNodeFt > 0) {
+            const snapM = M(th.snapNodeFt);
+            const pairKey = (a, b) => a < b ? `${a}:${b}` : `${b}:${a}`;
+            let snapped = 0, dropped = 0;
+            for (let pass = 0; pass < 4; pass++) {
+                let changed = false;
+                const have = new Set(legs.map(l => pairKey(l.a, l.b)));
+                for (let i = 0; i < legs.length; i++) {
+                    const L = legs[i];
+                    const dx = L.pb.x - L.pa.x, dy = L.pb.y - L.pa.y, L2 = dx * dx + dy * dy || 1;
+                    let best = null;
+                    const minEndM = M(th.junctionMinFt);
+                    allNodes.forEach((nd, ni) => {
+                        if (nd.kind === 'zone' || ni === L.a || ni === L.b) return;
+                        if (L.snapped && L.snapped.has(ni)) return;                      // never re-split at a node an ancestor already used (two nodes near each other ping-pong otherwise)
+                        const t = ((nd.x - L.pa.x) * dx + (nd.y - L.pa.y) * dy) / L2;
+                        if (t < 0.03 || t > 0.97) return;
+                        const d = Math.hypot(nd.x - (L.pa.x + t * dx), nd.y - (L.pa.y + t * dy));
+                        if (d > snapM) return;
+                        if (Math.hypot(nd.x - L.pa.x, nd.y - L.pa.y) < minEndM || Math.hypot(nd.x - L.pb.x, nd.y - L.pb.y) < minEndM) return;   // would leave a stub
+                        if (!best || d < best.d) best = { ni, d, t };
+                    });
+                    if (!best) continue;
+                    if (snapped > legs.length * 3) { logL('⚠ snap pass stopped (split cap)'); break; }
+                    const nd = allNodes[best.ni];
+                    const first = { a: L.a, b: best.ni, ea: L.ea, eb: null, pa: L.pa, pb: { x: nd.x, y: nd.y }, flags: [], arcs: [], added: L.added };
+                    const second = { a: best.ni, b: L.b, ea: null, eb: L.eb, pa: { x: nd.x, y: nd.y }, pb: L.pb, flags: [], arcs: [], added: L.added };
+                    [first, second].forEach(q => { q.lenM = Math.hypot(q.pb.x - q.pa.x, q.pb.y - q.pa.y); q.snapped = new Set(L.snapped || []); q.snapped.add(best.ni); });
+                    legs.splice(i, 1); have.delete(pairKey(L.a, L.b));
+                    [first, second].forEach(q => { const k = pairKey(q.a, q.b); if (have.has(k)) { dropped++; return; } have.add(k); legs.push(q); });
+                    snapped++; changed = true; i--;
+                }
+                if (!changed) break;
+            }
+            if (snapped) logL(`${snapped} leg(s) routed through a nearby hub/junction (≤ ${th.snapNodeFt} ft), ${dropped} duplicate half(s) dropped`);
+        }
+        await swbYield();
+        // ---- 5d. parallel corridor check: two legs with no shared node, nearly parallel, within corridorFt
+        //          over a real stretch → flagged (soft gate) ----
+        if (th.corridorFt > 0) {
+            const corrM = M(th.corridorFt);
+            let pairs = 0;
+            for (let i = 0; i < legs.length; i++) for (let j = i + 1; j < legs.length; j++) {
+                const L1 = legs[i], L2 = legs[j];
+                if (L1.a === L2.a || L1.a === L2.b || L1.b === L2.a || L1.b === L2.b) continue;
+                const d1 = { x: L1.pb.x - L1.pa.x, y: L1.pb.y - L1.pa.y }, d2 = { x: L2.pb.x - L2.pa.x, y: L2.pb.y - L2.pa.y };
+                const n1 = Math.hypot(d1.x, d1.y) || 1, n2 = Math.hypot(d2.x, d2.y) || 1;
+                const cosA = Math.abs((d1.x * d2.x + d1.y * d2.y) / (n1 * n2));
+                if (cosA < Math.cos(8 * Math.PI / 180)) continue;
+                const [S, T] = n1 <= n2 ? [L1, L2] : [L2, L1];
+                const dx = T.pb.x - T.pa.x, dy = T.pb.y - T.pa.y, L2s = dx * dx + dy * dy || 1;
+                let close = 0, tot = 0;
+                for (let k = 0; k <= 6; k++) { const q = { x: S.pa.x + (S.pb.x - S.pa.x) * k / 6, y: S.pa.y + (S.pb.y - S.pa.y) * k / 6 }; const t = ((q.x - T.pa.x) * dx + (q.y - T.pa.y) * dy) / L2s; if (t < 0 || t > 1) continue; tot++; const d = Math.hypot(q.x - (T.pa.x + t * dx), q.y - (T.pa.y + t * dy)); if (d <= corrM) close++; }
+                if (tot >= 3 && close >= 3 && Math.min(n1, n2) * (close / 7) > M(300)) { pairs++; L1.flags.push(`parallel to ${L2.nameA || '?'}→${L2.nameB || '?'} within ${th.corridorFt} ft`); L2.flags.push(`parallel to ${L1.nameA || '?'}→${L1.nameB || '?'} within ${th.corridorFt} ft`); }
+            }
+            if (pairs) logL(`⚠ ${pairs} near-parallel leg pair(s) still share a corridor (flagged)`);
+        }
+        // ---- 6. stairs: walk the DEM along each leg ----
+        const bandM = M(th.fpBandFt), ovM = th.overlapM, floorAdd = th.fpFloorM;
+        const reliefMaxM = Math.max(0.5, M(th.droneMaxAglFt) - floorAdd - 1);   // −1 m rounding slack: the drone (at the floor) must stay under droneMaxAgl over the LOWEST ground of the arc
+        const stepMax = bandM - ovM;
+        const capM = M(th.droneMaxAglFt);   // drone (at the floor) may sit at most this far above the lowest ground under an arc                                             // consecutive floors may differ by at most band − overlap
+        const sampleM = M(th.sampleFt);
+        let totalArcs = 0, totalVerts = 0, totalLenM = 0;
+        // hubs and junctions: every arc meeting there must share ≥ overlap — pin a floor window of width
+        // (band − overlap) at the node, starting at the lowest legal floor over the node's own ground
+        const nodeRange = new Map();
+        allNodes.forEach((nd, i) => {
+            if (nd.kind === 'zone') return;
+            const gN = gXY(nd); if (gN === null) return;
+            const lo = Math.ceil(gN / M_TO_FT + floorAdd), hi = Math.min(Math.floor(gN / M_TO_FT + capM), lo + Math.floor(bandM - ovM + 1e-9));
+            if (hi >= lo) nodeRange.set(i, [lo, hi]);
+        });
+        legs.forEach((l, li) => {
+            const A = allNodes[l.a], B = allNodes[l.b];
+            let n = Math.max(2, Math.ceil(l.lenM / sampleM) + 1);
+            const pts = [], g = [];
+            let demGaps = 0, lastG = null;
+            for (let i = 0; i < n; i++) {
+                const t = i / (n - 1);
+                const q = { x: l.pa.x + (l.pb.x - l.pa.x) * t, y: l.pa.y + (l.pb.y - l.pa.y) * t };
+                pts.push(q);
+                let gv = gXY(q);
+                if (gv === null) { demGaps++; gv = lastG; } else lastG = gv;
+                g.push(gv === null ? null : gv / M_TO_FT);
+            }
+            for (let i = 0; i < n; i++) if (g[i] === null) { for (let j = i + 1; j < n; j++) if (g[j] !== null) { g[i] = g[j]; break; } }
+            if (g.some(v => v === null)) { l.flags.push('no DEM under leg'); l.arcs = [{ s: 0, e: n - 1, floorM: null, ceilM: null }]; l.verts = [pts[0], pts[n - 1]]; l.vertsLL = l.verts.map(toLL); totalLenM += l.lenM; return; }
+            if (demGaps) l.flags.push(`${demGaps} DEM gap(s)`);
+            // densify across cliffs: where one sample interval climbs more than a step, interpolate
+            // extra samples (the raster is bilinear, so linear ground between samples is faithful)
+            for (let i = 0; i < pts.length - 1; i++) {
+                const k = Math.ceil(Math.abs(g[i + 1] - g[i]) / Math.max(0.5, bandM - ovM - 1));   // −1 m: integer floors can round a 3 m rise into a 4 m jump
+                if (k <= 1) continue;
+                const ins = [], gin = [];
+                for (let j = 1; j < k; j++) { const t = j / k; ins.push({ x: pts[i].x + (pts[i + 1].x - pts[i].x) * t, y: pts[i].y + (pts[i + 1].y - pts[i].y) * t }); gin.push(g[i] + (g[i + 1] - g[i]) * t); }
+                pts.splice(i + 1, 0, ...ins); g.splice(i + 1, 0, ...gin); i += ins.length;
+            }
+            const zA = A.kind === 'zone' ? A.zone : null, zB = B.kind === 'zone' ? B.zone : null;
+            const zoneOv = (z, fl, ce) => (!z || z.floorM === null) ? Infinity : (Math.min(ce, z.ceilM) - Math.max(fl, z.floorM));
+            const fitsZone = (z, fl, ce) => zoneOv(z, fl, ce) >= ovM;
+            // Interval walker: an arc's floor may sit anywhere in [ceil(maxG+floorAdd), floor(minG+droneMax)]
+            // (never below 54 m over the highest ground; the drone at the floor never over droneMax AGL
+            // over the lowest ground) AND within ±stepMax of the previous arc's floor (= overlap ≥ overlapM).
+            // Extend while that intersection is non-empty; pick the floor nearest to where the ground is
+            // heading so the next arc has room — rolling ground no longer forces a step every 3 m.
+            const droneMaxM = M(th.droneMaxAglFt);
+            const zoneRange = (z) => (!z || z.floorM === null) ? null : [Math.ceil(z.floorM + ovM - bandM), Math.floor(z.ceilM - ovM)];   // floors that give ≥ overlapM with the zone band
+            const rA = zA ? zoneRange(zA) : (nodeRange.get(l.a) || null), rB = zB ? zoneRange(zB) : (nodeRange.get(l.b) || null);
+            n = pts.length;
+            // approach index: the last sample that still leaves ≥ approachFt to the end
+            const cum = [0]; for (let i = 1; i < n; i++) cum.push(cum[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y));
+            const approachM = M(th.approachFt);
+            let appIdx = n - 1; while (appIdx > 0 && cum[n - 1] - cum[appIdx] < approachM) appIdx--;
+            // exact minimum-arc stairs first; the greedy interval walk below only runs as a fallback
+            // ladder: handoff at the 3 m target with the approach rule → without it → handoff at the 2 m hard line → without approach
+            const zoneRange2 = (z) => (!z || z.floorM === null) ? null : [Math.ceil(z.floorM + 2 - bandM), Math.floor(z.ceilM - 2)];
+            const rA2 = zA ? zoneRange2(zA) : rA, rB2 = zB ? zoneRange2(zB) : rB;
+            let arcs = swbWalkDP(g, floorAdd, bandM, bandM - ovM, capM, rA, rB, appIdx, true)
+                || swbWalkDP(g, floorAdd, bandM, bandM - ovM, capM, rA, rB, appIdx, false)
+                || swbWalkDP(g, floorAdd, bandM, bandM - ovM, capM, rA2, rB2, appIdx, true)
+                || swbWalkDP(g, floorAdd, bandM, bandM - ovM, capM, rA2, rB2, appIdx, false);
+            if (!arcs) { arcs = []; l.flags.push('no exact stair found — greedy fallback'); }
+            let s = arcs.length ? n - 1 : 0, prevFloor = null, guard = 0;
+            while (s < n - 1 && guard++ < 5000) {
+                let e = s + 1, maxG = Math.max(g[s], g[e]), minG = Math.min(g[s], g[e]);
+                const range = (mx, mn, terminal) => {
+                    // hi keeps one step of head-room under the drone cap so a descent after this arc can
+                    // still step down 3 m at a time (without it the greedy walk runs into a wall on downslopes)
+                    let lo = Math.ceil(mx + floorAdd), hi = Math.floor(mn + droneMaxM - stepMax);
+                    if (prevFloor !== null) { lo = Math.max(lo, Math.ceil(prevFloor - stepMax)); hi = Math.min(hi, Math.floor(prevFloor + stepMax)); }
+                    if (s === 0 && rA) { lo = Math.max(lo, rA[0]); hi = Math.min(hi, rA[1]); }
+                    if (terminal && rB) { lo = Math.max(lo, rB[0]); hi = Math.min(hi, rB[1]); }
+                    return [lo, hi];
+                };
+                let r = range(maxG, minG, e === n - 1);
+                if (r[0] > r[1]) {
+                    // even the shortest arc cannot comply — cliff, or a zone band the floor cannot reach
+                    r = [Math.ceil(maxG + floorAdd), Math.ceil(maxG + floorAdd)];
+                    if (prevFloor !== null && Math.abs(r[0] - prevFloor) > stepMax) l.flags.push(`cliff ${(Math.hypot(pts[s].x - pts[0].x, pts[s].y - pts[0].y) * M_TO_FT).toFixed(0)} ft along the leg (floor jumps ${Math.abs(r[0] - prevFloor)} m between samples)`);
+                }
+                let tailTried = false;
+                while (e + 1 <= n - 1) {
+                    if (!tailTried && e + 1 > appIdx && e + 1 < n - 1 && zB) {
+                        // entering the approach: take the whole tail as the landing arc if it complies; otherwise
+                        // keep walking normally (the terminal constraint applies to whatever arc reaches the end)
+                        tailTried = true;
+                        let tmax = maxG, tmin = minG; for (let k = e + 1; k < n; k++) { if (g[k] > tmax) tmax = g[k]; if (g[k] < tmin) tmin = g[k]; }
+                        const tr = range(tmax, tmin, true);
+                        if (tr[0] <= tr[1]) { e = n - 1; maxG = tmax; minG = tmin; r = tr; break; }
+                    }
+                    const nmax = Math.max(maxG, g[e + 1]), nmin = Math.min(minG, g[e + 1]);
+                    const nr = range(nmax, nmin, e + 1 === n - 1);
+                    if (nr[0] > nr[1]) break;
+                    e++; maxG = nmax; minG = nmin; r = nr;
+                }
+                // floor choice inside the interval: aim at the ground ahead (next window's minimum floor)
+                const ahead = g[Math.min(n - 1, e + 2)];
+                const target = Math.ceil(Math.max(ahead, g[e]) + floorAdd);
+                const fl = Math.max(r[0], Math.min(r[1], target));
+                const ce = Math.floor(fl + bandM);
+                arcs.push({ s, e, floorM: fl, ceilM: ce, maxGm: maxG, minGm: minG });
+                prevFloor = fl; s = e;
+            }
+            // landing arc too short? re-split the last two arcs so the landing arc is as long as the ground allows
+            if (zB && arcs.length >= 2) {
+                const b = arcs[arcs.length - 1], a = arcs[arcs.length - 2];
+                if (cum[b.e] - cum[b.s] < approachM * 0.5) {
+                    const prev = arcs.length >= 3 ? arcs[arcs.length - 3].floorM : null;
+                    const rangeAt = (s0, e0, pf, terminal) => { let mx = -Infinity, mn = Infinity; for (let k = s0; k <= e0; k++) { if (g[k] > mx) mx = g[k]; if (g[k] < mn) mn = g[k]; } let lo = Math.ceil(mx + floorAdd), hi = Math.floor(mn + droneMaxM - stepMax); if (pf !== null) { lo = Math.max(lo, Math.ceil(pf - stepMax)); hi = Math.min(hi, Math.floor(pf + stepMax)); } if (s0 === 0 && rA) { lo = Math.max(lo, rA[0]); hi = Math.min(hi, rA[1]); } if (terminal && rB) { lo = Math.max(lo, rB[0]); hi = Math.min(hi, rB[1]); } return [lo, hi, mx, mn]; };
+                    for (let k = a.s + 1; k < b.s; k++) {
+                        const r1 = rangeAt(a.s, k, prev, false); if (r1[0] > r1[1]) continue;
+                        // pick the first-arc floor that gives the landing arc the most room: try the whole interval
+                        let done = false;
+                        for (let f1 = r1[1]; f1 >= r1[0] && !done; f1--) {
+                            const r2 = rangeAt(k, n - 1, f1, true); if (r2[0] > r2[1]) continue;
+                            const f2 = Math.max(r2[0], Math.min(r2[1], r2[0]));
+                            arcs.splice(arcs.length - 2, 2, { s: a.s, e: k, floorM: f1, ceilM: Math.floor(f1 + bandM), maxGm: r1[2], minGm: r1[3] }, { s: k, e: n - 1, floorM: f2, ceilM: Math.floor(f2 + bandM), maxGm: r2[2], minGm: r2[3] });
+                            done = true;
+                        }
+                        if (done) break;
+                    }
+                }
+            }
+            // merge consecutive arcs with the same band — a step vertex between them is pointless
+            for (let i = arcs.length - 1; i > 0; i--) { const a = arcs[i - 1], b = arcs[i]; if (a.floorM === b.floorM && a.ceilM === b.ceilM) { a.e = b.e; a.maxGm = Math.max(a.maxGm, b.maxGm); a.minGm = Math.min(a.minGm, b.minGm); arcs.splice(i, 1); } }
+            if (arcs.length > 40) l.flags.push(`many steps (${arcs.length})`);
+            if (zB && arcs.length > 1) { const last = arcs[arcs.length - 1]; const lenLast = cum[last.e] - cum[last.s]; if (lenLast < approachM * 0.5 && cum[n - 1] > approachM * 2) l.flags.push(`steep approach: landing arc only ${(lenLast * M_TO_FT).toFixed(0)} ft (ground near the zone forces it)`); }
+            if (l.lenM * M_TO_FT < 30) l.flags.push(`tiny leg (${(l.lenM * M_TO_FT).toFixed(0)} ft) — zones nearly touch, consider merging`);
+            // zone handoff: the arc touching each zone must share the zone band — 2 m is the hard line, overlapM the target.
+            // A sloped zone (ceiling = lowest ground + 196 ft) may raise its ceiling toward ffzCeilMaxAglFt, never above.
+            [[zA, arcs[0]], [zB, arcs[arcs.length - 1]]].forEach(([z, arc]) => {
+                if (!z || !arc) return;
+                let ov = zoneOv(z, arc.floorM, arc.ceilM);
+                if (ov < ovM && z.ceilM !== null && z.gMinFt != null) {
+                    const maxCeil = M(z.gMinFt + th.ffzCeilMaxAglFt);
+                    const want = Math.min(maxCeil, arc.floorM + ovM);
+                    if (want > z.ceilM + 1e-6) { z.ceilM = want; z.ceilRaised = true; ov = zoneOv(z, arc.floorM, arc.ceilM); }
+                }
+                if (ov < 2) l.flags.push(`HANDOFF FAIL: arc shares only ${ov.toFixed(1)} m with zone "${z.name}" (zone ${(z.floorM * M_TO_FT).toFixed(0)}–${(z.ceilM * M_TO_FT).toFixed(0)} ft, arc ${arc.floorM}–${arc.ceilM} m)`);
+                else if (ov < ovM) l.flags.push(`handoff with zone "${z.name}" only ${ov.toFixed(1)} m (target ${ovM})`);
+            });
+            l.arcs = arcs;
+            l.verts = [pts[0]].concat(arcs.map(a => pts[a.e]));
+            l.vertsLL = l.verts.map(toLL);
+            totalArcs += arcs.length; totalVerts += l.verts.length; totalLenM += l.lenM;
+        });
+        // hub band check: every spoke's arc at the hub must share ≥ overlap
+        junctions.forEach((J, ji) => {
+            let lo = -Infinity, hiB = Infinity, n = 0;
+            legs.forEach(l => { if (l.a !== J.node && l.b !== J.node) return; if (!l.arcs.length || l.arcs[0].floorM === null) return; const arc = l.a === J.node ? l.arcs[0] : l.arcs[l.arcs.length - 1]; lo = Math.max(lo, arc.floorM); hiB = Math.min(hiB, arc.ceilM); n++; });
+            J.bandOk = n === 0 || (hiB - lo) >= ovM; J.bandM = [lo, hiB];
+            if (!J.bandOk) legs.forEach(l => { if (l.a === J.node || l.b === J.node) l.flags.push(`junction ${ji + 1} bands do not share ${ovM} m`); });
+        });
+        hubs.forEach((h, hi) => {
+            const hid = nodes.length + hi;
+            let lo = -Infinity, hiB = Infinity;
+            legs.forEach(l => { if (l.a !== hid && l.b !== hid) return; if (!l.arcs.length || l.arcs[0].floorM === null) return; const arc = l.a === hid ? l.arcs[0] : l.arcs[l.arcs.length - 1]; lo = Math.max(lo, arc.floorM); hiB = Math.min(hiB, arc.ceilM); });
+            h.bandOk = (hiB - lo) >= ovM; h.bandM = [lo, hiB]; h.zones = h.spokes;
+            if (!h.bandOk) legs.forEach(l => { if (l.a === hid || l.b === hid) l.flags.push(`hub ${hi + 1} bands do not share ${ovM} m`); });
+        });
+        await swbYield();
+        // ---- 7. web distance to base per zone — endpoint graph: legs edge-to-edge,
+        //         plus the transit inside each zone between its own endpoints ----
+        const epNodes = [];   // { x, y, zone|hub|base index }
+        const epIdx = (key, x, y, owner) => { epNodes.push({ x, y, owner }); return epNodes.length - 1; };
+        const ownerEps = new Map();   // owner key → [ep index]
+        const ownerKey = (i) => `${allNodes[i].kind}:${i}`;
+        legs.forEach(l => {
+            const A = allNodes[l.a], B = allNodes[l.b];
+            const ia = A.kind === 'zone' ? epIdx(null, l.pa.x, l.pa.y, l.a) : null;
+            const ib = B.kind === 'zone' ? epIdx(null, l.pb.x, l.pb.y, l.b) : null;
+            l.epA = ia; l.epB = ib;
+            if (ia !== null) { const k = ownerKey(l.a); if (!ownerEps.has(k)) ownerEps.set(k, []); ownerEps.get(k).push(ia); }
+            if (ib !== null) { const k = ownerKey(l.b); if (!ownerEps.has(k)) ownerEps.set(k, []); ownerEps.get(k).push(ib); }
+        });
+        // hubs + bases are single points
+        const pointNode = new Map();
+        allNodes.forEach((nd, i) => { if (nd.kind !== 'zone') pointNode.set(i, epIdx(null, nd.x, nd.y, i)); });
+        const adj = epNodes.map(() => []);
+        const link = (u, v, w) => { adj[u].push({ to: v, w }); adj[v].push({ to: u, w }); };
+        legs.forEach(l => {
+            const u = l.epA !== null ? l.epA : pointNode.get(l.a);
+            const v = l.epB !== null ? l.epB : pointNode.get(l.b);
+            link(u, v, l.lenM);
+        });
+        ownerEps.forEach(list => { for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) { const a = epNodes[list[i]], b = epNodes[list[j]]; link(list[i], list[j], Math.hypot(a.x - b.x, a.y - b.y)); } });
+        // a base inside a zone is reachable from that zone's endpoints across the zone
+        const srcs = [];
+        zones.forEach((z, zi) => { (z.bases || []).forEach(b => { const bn = epIdx(null, b.xy.x, b.xy.y, zi); adj.push([]); srcs.push(bn); (ownerEps.get(ownerKey(zi)) || []).forEach(e => { const q = epNodes[e]; link(bn, e, Math.hypot(q.x - b.xy.x, q.y - b.xy.y)); }); }); });
+        if (!srcs.length) logL('⚠ no base point reached the endpoint graph');
+        const dist = swbDijkstra(epNodes.length, adj, srcs);
+        zones.forEach((z, i) => {
+            const list = ownerEps.get(ownerKey(i)) || [];
+            let best = Infinity; list.forEach(e => { if (dist[e] < best) best = dist[e]; });
+            z.rtbM = Number.isFinite(best) ? best : null; z.straightM = straightM[i]; z.dropped = false;
+        });
+        hubs.forEach((h, hi) => { h.ll = toLL(h); const e = pointNode.get(nodes.length + hi); h.rtbM = Number.isFinite(dist[e]) ? dist[e] : null; });
+        junctions.forEach(J => { J.ll = toLL(J); });
+        legs.forEach(l => { l.kindA = allNodes[l.a].kind; l.kindB = allNodes[l.b].kind; l.nameA = swbNodeName(allNodes[l.a], hubs); l.nameB = swbNodeName(allNodes[l.b], hubs); });
+        return { zones, legs, hubs, junctions, nodes: allNodes, totalArcs, totalVerts, totalLenM, stretchAdded };
+    }
+    function swbNodeName(n, hubs) {
+        if (n.kind === 'zone') return n.zone.name;
+        if (n.kind === 'base') return `Base: ${n.base.name}`;
+        if (n.kind === 'junction') return `Junction ${n.ji + 1}`;
+        return `Hub ${(n.hi != null ? n.hi : hubs.indexOf(n.hub)) + 1}`;
+    }
+
+    // ---------- preview ----------
+    function swbClear() {
+        const map = getLeafletMap();
+        let failed = 0;
+        swbLayers.forEach(l => { try { if (typeof l.remove === 'function') l.remove(); else if (map) map.removeLayer(l); } catch (e) { failed++; } });
+        if (failed) console.warn(`${TAG} spiderweb: ${failed} preview layer(s) could not be removed`);
+        swbLayers = [];
+        swbState = null;
+    }
+    function swbDrawPreview() {
+        const st = swbState;
+        const L = getLeafletL(), map = getLeafletMap();
+        if (!st || !L || !map) return;
+        swbLayers.forEach(l => { try { l.remove(); } catch (e) {} });
+        swbLayers = [];
+        const add = (layer) => { try { layer.addTo(map); swbLayers.push(layer); } catch (e) {} };
+        st.zones.forEach(z => {
+            const bad = z.flags.length > 0;
+            const col = z.bases ? '#ffe14d' : (bad ? '#ffb020' : '#5fff5f');
+            add(L.polygon(z.points.map(q => [q.lat, q.lng]), { color: col, weight: z.bases ? 3 : 2, opacity: 0.95, fillColor: col, fillOpacity: 0.08, interactive: false }));
+        });
+        st.legs.forEach(l => {
+            if (!l.vertsLL) return;
+            const bad = l.flags.length > 0;
+            add(L.polyline(l.vertsLL.map(q => [q.lat, q.lng]), { color: bad ? '#ff8c1a' : '#2b8cff', weight: 3, opacity: 0.95, interactive: false }));
+            l.vertsLL.forEach((q, i) => {
+                const end = i === 0 || i === l.vertsLL.length - 1;
+                add(L.circleMarker([q.lat, q.lng], { radius: end ? 4 : 3, color: end ? '#00e5ff' : '#ffffff', weight: 1.5, fillColor: end ? '#0d131d' : '#ffffff', fillOpacity: 1, interactive: false }));
+            });
+        });
+        st.hubs.forEach(h => add(L.circleMarker([h.ll.lat, h.ll.lng], { radius: 7, color: h.bandOk ? '#ff35d0' : '#ff2020', weight: 2, fillColor: '#ff35d0', fillOpacity: 0.9, interactive: false })));
+        (st.junctions || []).forEach(J => add(L.circleMarker([J.ll.lat, J.ll.lng], { radius: 5, color: J.bandOk === false ? '#ff2020' : '#ff35d0', weight: 2, fillColor: '#0d131d', fillOpacity: 1, interactive: false })));
+        st.bases.forEach(b => add(L.circleMarker([b.pt.lat, b.pt.lng], { radius: 8, color: '#ffe14d', weight: 3, fillColor: '#0d131d', fillOpacity: 1, interactive: false })));
+        const ents = ((mapObjectsBySite[st.sid] || {}).entities) || [];
+        st.dropped.forEach(d => {
+            const names = d.name.split(' +')[0];
+            const e = ents.find(x => x.type === 3 && x.name === names);
+            const cs = e && entityCoords(e);
+            if (cs && cs.length >= 3) add(L.polygon(cs.map(q => [q.lat, q.lng]), { color: '#ff5555', weight: 2, opacity: 0.9, dashArray: '3,5', fill: false, interactive: false }));
+        });
+    }
+
+    // ---------- panel ----------
+    function swbClosePanel() { const el = document.getElementById(SWB_PANEL_ID); if (el) el.remove(); }
+    function swbReportText() {
+        const st = swbState; if (!st) return '';
+        const th = st.thresholds;
+        const out = [];
+        out.push(`AIM SpiderWeb generator v${SCRIPT_VERSION} — site ${st.sid} — ${new Date().toISOString()}`);
+        out.push(`floor ${th.fpFloorM} m (+${(th.fpFloorM * M_TO_FT).toFixed(1)} ft) / band ${th.fpBandFt} ft / overlap ${th.overlapM} m / outset ${th.outsetFt} ft / battery ${th.battery} ${st.limitFt.toLocaleString()} ft`);
+        out.push(`zones ${st.zones.length} · legs ${st.legs.length} · hubs ${st.hubs.length} · junctions ${(st.junctions || []).length} · arcs ${st.totalArcs} · vertices ${st.totalVerts} · FP length ${(st.totalLenM * M_TO_FT / 5280).toFixed(2)} mi`);
+        out.push(`bases: ${st.bases.map(b => b.name).join(', ')} — base zones: ${st.zones.filter(z => z.bases).map(z => z.name).join(', ')}`);
+        st.gates.forEach(g => out.push(`${g.ok ? 'OK  ' : (g.soft ? 'WARN' : 'FAIL')} ${g.label}${g.detail ? ' — ' + g.detail : ''}`));
+        if (st.dropped.length) { out.push(`dropped assets (${st.dropped.length}):`); st.dropped.forEach(d => out.push(`  ${d.name} — ${d.why}${d.distFt != null ? ` (${d.distFt.toLocaleString()} ft)` : ''}`)); }
+        if (st.skippedEmpty.length) out.push(`EMPTY assets skipped (${st.skippedEmpty.length}): ${st.skippedEmpty.join(', ')}`);
+        out.push('zones:');
+        st.zones.forEach(z => out.push(`  ${z.name} · ${z.assets.length} asset(s) · floor ${z.floorM === null ? '?' : (z.floorM * M_TO_FT).toFixed(0)} / ceil ${z.ceilM === null ? '?' : (z.ceilM * M_TO_FT).toFixed(0)} ft MSL${z.ceilRaised ? ' (ceiling raised for handoff)' : ''} · ground ${z.gMinFt == null ? '?' : Math.round(z.gMinFt)}–${z.gMaxFt == null ? '?' : Math.round(z.gMaxFt)} ft · to base ${z.rtbM === null ? 'UNREACHABLE' : Math.round(z.rtbM * M_TO_FT).toLocaleString() + ' ft'} (${z.rtbM === null ? '—' : z.straightM <= 150 ? 'next to base' : (z.rtbM / z.straightM).toFixed(2) + '× straight'})${z.flags.length ? ' ⚠ ' + z.flags.join('; ') : ''}`));
+        out.push('legs:');
+        st.legs.forEach(l => out.push(`  ${l.nameA} → ${l.nameB} · ${Math.round(l.lenM * M_TO_FT).toLocaleString()} ft · ${l.arcs.length} arc(s) · ${l.arcs.map(a => a.floorM === null ? '?' : `${a.floorM}–${a.ceilM}`).join(' | ')} m MSL${l.flags.length ? ' ⚠ ' + l.flags.join('; ') : ''}`));
+        st.hubs.forEach((h, i) => out.push(`hub ${i + 1}: ${h.spokes.length} spokes · ${h.ll.lat.toFixed(6)}, ${h.ll.lng.toFixed(6)} · band ${h.bandOk ? 'OK' : 'CONFLICT'}`));
+        out.push('run log:'); st.runLog.forEach(s => out.push(`  ${s}`));
+        return out.join('\n');
+    }
+    let swbRenderTimer = null;
+    function swbRenderPanelSoon() {   // throttled re-render for log-heavy phases (commit): at most ~3/s
+        if (swbRenderTimer) return;
+        swbRenderTimer = setTimeout(() => { swbRenderTimer = null; swbRenderPanel(); }, 350);
+    }
+    function swbRenderPanel() {
+        const prev = document.getElementById(SWB_PANEL_ID);
+        const keep = prev ? { left: prev.style.left, top: prev.style.top, right: prev.style.right, scroll: (prev.querySelector('[data-swb-body]') || {}).scrollTop || 0 } : null;
+        swbClosePanel();
+        const st = swbState;
+        const th = swbThresholds;
+        const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+        const num = (id, label, step, title) => `<label title="${esc(title || '')}" style="display:flex;align-items:center;gap:4px;">${label}<input data-swb-p="${id}" type="number" value="${th[id]}" step="${step}" style="width:58px;background:#0d131d;color:#dfe9f0;border:1px solid rgba(43,140,255,0.4);border-radius:4px;padding:2px 4px;font:inherit;"></label>`;
+        const wrap = document.createElement('div');
+        wrap.id = SWB_PANEL_ID;
+        wrap.style.cssText = 'position:fixed;top:70px;right:56px;width:500px;max-height:78vh;z-index:2147483000;background:rgba(16,22,32,0.96);border:1px solid rgba(43,140,255,0.5);border-radius:10px;color:#dfe9f0;font:12px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,0.55);display:flex;flex-direction:column;';
+        let body = '';
+        if (st) {
+            const gateHtml = st.gates.map(g => `<div style="color:${g.ok ? '#7dffae' : (g.soft ? '#ffb020' : '#ff6b6b')}">${g.ok ? '✔' : (g.soft ? '⚠' : '✖')} ${esc(g.label)}${g.detail ? ` <span style="opacity:0.7">— ${esc(g.detail)}</span>` : ''}</div>`).join('');
+            const worst = st.zones.filter(z => z.rtbM !== null && z.straightM > 150).sort((a, b) => (b.rtbM / (b.straightM || 1)) - (a.rtbM / (a.straightM || 1))).slice(0, 5);
+            const worstHtml = worst.map(z => `<div><strong>${esc(z.name)}</strong> · ${Math.round(z.rtbM * M_TO_FT).toLocaleString()} ft to base · ${z.straightM <= 150 ? 'next to base' : (z.rtbM / z.straightM).toFixed(2) + '× straight'}</div>`).join('');
+            const flagged = st.legs.filter(l => l.flags.length);
+            const flagHtml = flagged.slice(0, 12).map(l => `<div style="color:#ffb020">⚠ ${esc(l.nameA)} → ${esc(l.nameB)}: ${esc(l.flags.join('; '))}</div>`).join('') + (flagged.length > 12 ? `<div style="opacity:0.7">…and ${flagged.length - 12} more flagged legs (in the report)</div>` : '');
+            const zflag = st.zones.filter(z => z.flags.length);
+            const zflagHtml = zflag.slice(0, 8).map(z => `<div style="color:#ffb020">⚠ ${esc(z.name)}: ${esc(z.flags.join('; '))}</div>`).join('') + (zflag.length > 8 ? `<div style="opacity:0.7">…and ${zflag.length - 8} more flagged zones</div>` : '');
+            const dropHtml = st.dropped.length ? `<div style="margin-top:6px;color:#ff6b6b;font-weight:600;">Dropped (${st.dropped.length})</div>` + st.dropped.slice(0, 15).map(d => `<div style="color:#ff9b9b">${esc(d.name)} — ${esc(d.why)}${d.distFt != null ? ` (${d.distFt.toLocaleString()} ft)` : ''}</div>`).join('') + (st.dropped.length > 15 ? `<div style="opacity:0.7">…and ${st.dropped.length - 15} more</div>` : '') : '';
+            const maxSteps = st.legs.reduce((m, l) => Math.max(m, l.arcs.length), 0);
+            body = `
+                <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px 10px;margin-bottom:6px;">
+                    <div><span style="opacity:0.7">zones</span><br><strong style="font-size:15px;color:#5fff5f">${st.zones.length}</strong></div>
+                    <div><span style="opacity:0.7">legs</span><br><strong style="font-size:15px;color:#2b8cff">${st.legs.length}</strong></div>
+                    <div><span style="opacity:0.7">hubs · junctions</span><br><strong style="font-size:15px;color:#ff35d0">${st.hubs.length}</strong> <span style="opacity:0.7">·</span> <strong style="font-size:15px;color:#ff35d0">${(st.junctions || []).length}</strong></div>
+                    <div><span style="opacity:0.7">FP length</span><br><strong style="font-size:15px">${(st.totalLenM * M_TO_FT / 5280).toFixed(1)} mi</strong></div>
+                    <div><span style="opacity:0.7">arcs</span><br><strong>${st.totalArcs}</strong></div>
+                    <div><span style="opacity:0.7">vertices</span><br><strong>${st.totalVerts}</strong></div>
+                    <div><span style="opacity:0.7">most steps / leg</span><br><strong>${maxSteps}</strong></div>
+                    <div><span style="opacity:0.7">bases</span><br><strong>${st.bases.length}</strong></div>
+                </div>
+                <div style="margin:4px 0;">${gateHtml}</div>
+                <div style="margin-top:6px;color:#2b8cff;font-weight:600;">Longest way home (stretch)</div>${worstHtml}
+                ${flagHtml || zflagHtml ? `<div style="margin-top:6px;color:#ffb020;font-weight:600;">Flags</div>${zflagHtml}${flagHtml}` : ''}
+                ${dropHtml}
+                <div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(43,140,255,0.25);">
+                    <div style="color:#ffe14d;font-weight:600;margin-bottom:4px;">🚀 Commit (create-only)</div>
+                    <div style="display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;font-size:11px;">
+                        <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input data-swb-dry type="checkbox" ${st.dryRun === false ? '' : 'checked'}>dry run</label>
+                        <label style="display:flex;align-items:center;gap:4px;cursor:pointer;" title="Re-check every written vertex against Percepto's own DEM; floors only go up"><input data-swb-p="regroundPercepto" type="checkbox" ${th.regroundPercepto ? 'checked' : ''}>Percepto DEM check</label>
+                        <button data-swb-commit ${st.committing ? 'disabled' : ''} style="background:rgba(255,225,77,0.13);border:1px solid rgba(255,225,77,0.5);color:#ffe14d;border-radius:5px;padding:2px 10px;cursor:pointer;font-weight:600;">${st.dryRun === false ? '🚀 Commit (click twice)' : '🧪 Dry run'}</button>
+                        <button data-swb-purge title="Delete EVERY entity on this site whose name starts with DRAFT SW (flight paths first). Delete Guard banks each one." style="background:rgba(255,96,96,0.12);border:1px solid rgba(255,96,96,0.45);color:#ff9b9b;border-radius:5px;padding:2px 10px;cursor:pointer;">🗑 Remove all DRAFT SW (click twice)</button>
+                        <button data-swb-undo ${(st.createdIds && st.createdIds.length && !st.committing) ? '' : 'disabled'} style="background:rgba(255,96,96,0.12);border:1px solid rgba(255,96,96,0.45);color:#ff9b9b;border-radius:5px;padding:2px 10px;cursor:pointer;">↶ Undo run (click twice)${st.createdIds && st.createdIds.length ? ` · ${st.createdIds.length}` : ''}</button>
+                    </div>
+                    ${(st.commitLog && st.commitLog.length) ? `<div data-swb-log style="margin-top:6px;max-height:180px;overflow:auto;font-family:ui-monospace,Menlo,monospace;font-size:10.5px;line-height:1.35;background:rgba(0,0,0,0.25);border-radius:5px;padding:4px 6px;">${st.commitLog.slice(-40).map(x => `<div>${esc(x)}</div>`).join('')}</div>` : ''}
+                </div>
+                <div style="margin-top:8px;opacity:0.7;">Preview until committed. Cyan dots = leg ends on zone edges · white dots = stair steps · magenta = hubs (filled) and junctions (rings) · yellow = base zones · orange = flagged · red dashed = dropped assets.</div>`;
+        } else {
+            body = `<div style="margin-bottom:8px;"><button data-swb-purge style="background:rgba(255,96,96,0.12);border:1px solid rgba(255,96,96,0.45);color:#ff9b9b;border-radius:5px;padding:2px 10px;cursor:pointer;">🗑 Remove all DRAFT SW on this site (click twice)</button></div><div style="opacity:0.8">Stage a web for the current site. MSL (mountain-terrain) sites only. Every non-EMPTY asset gets a zone; legs are straight, stop on the zone edge, and get automatic stair steps from the DEM. Nothing is written in this version.</div>`;
+        }
+        wrap.innerHTML = `
+            <div data-swb-drag style="cursor:move;padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid rgba(43,140,255,0.3);">
+                <span style="color:#2b8cff;font-weight:700;">🕸 SpiderWeb generator</span>
+                <span style="opacity:0.6;">v${SCRIPT_VERSION}</span>
+                <span style="flex:1"></span>
+                <button data-swb-close style="background:none;border:none;color:#dfe9f0;font-size:16px;cursor:pointer;line-height:1;">✕</button>
+            </div>
+            <div style="padding:8px 12px;display:flex;flex-wrap:wrap;gap:6px 12px;border-bottom:1px solid rgba(43,140,255,0.2);font-size:11px;">
+                ${num('fpFloorM', 'FP floor m', 1, 'Arc floor above the HIGHEST ground under the arc, integer metres (54 = 177.2 ft)')}
+                ${num('fpBandFt', 'band ft', 1, 'Arc ceiling = floor + band')}
+                ${num('overlapM', 'overlap m', 0.5, 'Overlap between connected arcs — target AND hard line (never below 2 m); steps every (band − overlap) of relief')}
+                ${num('corridorFt', 'corridor ft', 10, 'A leg skimming a zone it does not end on within this is routed through that zone; 0 = off')}
+                ${num('droneMaxAglFt', 'drone max AGL', 5, 'Relief inside one arc is capped so the drone (flying the floor) never exceeds this over the low ground')}
+                ${num('outsetFt', 'outset ft', 1, 'Asset ring → zone')}
+                ${num('ffzCeilMaxAglFt', 'zone ceil max', 1, 'A sloped zone may raise its ceiling to this (never above) when a landing arc needs the overlap')}
+                ${num('endpointGapFt', 'endpoint gap ft', 1, 'Minimum spacing between leg ends on one zone edge')}
+                ${num('stretchMax', 'stretch ×', 0.05, 'Restore a pruned leg when a zone\'s way home exceeds this × straight line')}
+                ${num('hubMaxRtbLossPct', 'hub RTB loss %', 0.5, 'A hub may lengthen the summed return-to-base distance by at most this (when it shortens total FP length)')}
+                <label style="display:flex;align-items:center;gap:4px;">web<select data-swb-p="webDensity" style="background:#0d131d;color:#dfe9f0;border:1px solid rgba(43,140,255,0.4);border-radius:4px;font:inherit;"><option value="full" ${th.webDensity === 'full' ? 'selected' : ''}>full mesh</option><option value="urquhart" ${th.webDensity === 'urquhart' ? 'selected' : ''}>thinned</option></select></label>
+                ${num('maxLegFt', 'max leg ft', 100, 'Full mesh: neighbour legs longer than this are dropped')}
+                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input data-swb-p="hubKeepLegs" type="checkbox" ${th.hubKeepLegs ? 'checked' : ''}>hubs keep mesh legs</label>
+                ${num('hubRadiusFt', 'hub radius ft', 100, 'A hub star reaches zones within this radius')}
+                ${num('hubBaseReachFt', 'hub→base reach ft', 100, 'A hub may spoke straight to a base zone within this reach')}
+                ${num('hubGainRatio', 'hub gain ratio', 0.5, 'A hub (and each spoke) must save this many ft of summed way-home per ft of new path (0 = any saving)')}
+                ${num('legGainRatio', 'leg gain ratio', 0.5, 'A leg restored to fix a long detour must save this many ft of summed way-home per ft (0 = fix any detour)')}
+                ${num('baseLegGainRatio', 'base leg ratio', 0.5, 'A direct zone→base leg must save this many ft of summed way-home per ft (0 = the base star)')}
+                ${num('baseStarFt', 'base star ft', 500, 'A zone within this of a base gets a straight spoke home, threaded through any pad in the way (0 = off)')}
+                ${num('baseStarGainPct', 'star gain %', 1, '… when the spoke shortens that zone\'s way home by at least this much')}
+                ${num('baseStarMaxCross', 'star max cross', 1, '… and its new pieces cross at most this many existing legs (each crossing becomes a junction)')}
+                ${num('hubMaxSpokes', 'max spokes', 1, 'Most spokes on one hub')}
+                ${num('approachFt', 'approach ft', 10, 'Landing arc is at least this long when the ground allows')}
+                ${num('snapNodeFt', 'snap node ft', 10, 'A leg passing within this of a hub or junction is routed through it; 0 = off')}
+                ${num('mergeGapFt', 'merge gap ft', 5, 'Zones closer than this merge into one')}
+                ${num('hubClearFt', 'hub clear ft', 10, 'A hub sits at least this far from any zone edge')}
+                ${num('baseZoneFt', 'base zone ft', 10, 'A base outside every zone gets a square zone of this side')}
+                <label style="display:flex;align-items:center;gap:4px;">battery<select data-swb-p="battery" style="background:#0d131d;color:#dfe9f0;border:1px solid rgba(43,140,255,0.4);border-radius:4px;font:inherit;"><option value="tulip" ${th.battery === 'tulip' ? 'selected' : ''}>Tulip</option><option value="tattu" ${th.battery === 'tattu' ? 'selected' : ''}>Tattu</option></select></label>
+                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input data-swb-p="hubs" type="checkbox" ${th.hubs ? 'checked' : ''}>hubs</label>
+                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input data-swb-p="junctions" type="checkbox" ${th.junctions ? 'checked' : ''}>junctions at crossings</label>
+                <label title="Test sites only: a leg that fails a hard gate (handoff under 2 m, cuts through a zone) is cut from the web instead of blocking Commit" style="display:flex;align-items:center;gap:4px;cursor:pointer;color:#ffb020;"><input data-swb-p="dropFailing" type="checkbox" ${th.dropFailing ? 'checked' : ''}>✂ drop failing legs (test sites)</label>
+            </div>
+            <div style="padding:6px 12px;display:flex;gap:8px;align-items:center;border-bottom:1px solid rgba(43,140,255,0.2);">
+                <button data-swb-stage style="background:rgba(43,140,255,0.15);border:1px solid rgba(43,140,255,0.55);color:#8ec2ff;border-radius:5px;padding:3px 12px;cursor:pointer;font-weight:600;">🕸 Stage</button>
+                <button data-swb-clear style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.25);color:#dfe9f0;border-radius:5px;padding:3px 10px;cursor:pointer;">Clear</button>
+                <button data-swb-copy ${st ? '' : 'disabled'} style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.25);color:#dfe9f0;border-radius:5px;padding:3px 10px;cursor:pointer;">Copy report</button>
+                <button data-swb-defaults title="Reset every SpiderWeb setting to the current defaults" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.25);color:#dfe9f0;border-radius:5px;padding:3px 10px;cursor:pointer;">↺ Defaults</button>
+            </div>
+            <div data-swb-body style="padding:8px 12px;overflow:auto;flex:1;">${body}</div>`;
+        // drag
+        const hdr = wrap.querySelector('[data-swb-drag]');
+        let drag = null;
+        hdr.addEventListener('mousedown', (ev) => { if (ev.target.closest('button')) return; drag = { dx: ev.clientX - wrap.offsetLeft, dy: ev.clientY - wrap.offsetTop }; ev.preventDefault(); });
+        document.addEventListener('mousemove', (ev) => { if (!drag) return; wrap.style.left = `${ev.clientX - drag.dx}px`; wrap.style.top = `${ev.clientY - drag.dy}px`; wrap.style.right = 'auto'; });
+        document.addEventListener('mouseup', () => { drag = null; });
+        wrap.addEventListener('click', (ev) => {
+            if (ev.target.closest('[data-swb-close]')) { swbClosePanel(); return; }
+            if (ev.target.closest('[data-swb-stage]')) { swbReadPanelParams(wrap); swbStage(); return; }
+            if (ev.target.closest('[data-swb-clear]')) { swbClear(); swbRenderPanel(); return; }
+            if (ev.target.closest('[data-swb-commit]')) {
+                const st2 = swbState; if (!st2) return;
+                if (st2.dryRun !== false) { swbCommit(true); return; }
+                const now = Date.now();
+                if (now - swbCommitArm > 1600) { swbCommitArm = now; showToast('Click Commit again within 1.6 s to WRITE to Percepto', 'rgba(255,225,77,0.55)'); return; }
+                swbCommitArm = 0; swbCommit(false); return;
+            }
+            if (ev.target.closest('[data-swb-purge]')) {
+                const now = Date.now();
+                if (now - swbPurgeArm > 1600) { swbPurgeArm = now; showToast('Click again within 1.6 s to delete every DRAFT SW entity on this site', 'rgba(255,96,96,0.55)'); return; }
+                swbPurgeArm = 0; swbRemoveDrafts(); return;
+            }
+            if (ev.target.closest('[data-swb-undo]')) {
+                const now = Date.now();
+                if (now - swbUndoArm > 1600) { swbUndoArm = now; showToast('Click Undo again within 1.6 s to delete this run\'s entities', 'rgba(255,96,96,0.55)'); return; }
+                swbUndoArm = 0; swbUndo(); return;
+            }
+            if (ev.target.closest('[data-swb-defaults]')) { swbThresholds = { ...SWB_DEFAULTS }; try { elevGmSet(SWB_THRESH_KEY, JSON.stringify({ ...SWB_DEFAULTS, tunedV: 5 })); } catch (e) {} showToast('SpiderWeb settings reset to defaults'); swbRenderPanel(); return; }
+            if (ev.target.closest('[data-swb-copy]')) {
+                const txt = swbReportText();
+                try { navigator.clipboard.writeText(txt).then(() => showToast('SpiderWeb report copied'), () => showToast('Copy failed', 'rgba(255,96,96,0.55)')); }
+                catch (e) { showToast('Copy failed', 'rgba(255,96,96,0.55)'); }
+            }
+        });
+        wrap.addEventListener('change', (ev) => { if (ev.target.matches('[data-swb-p]')) swbReadPanelParams(wrap); if (ev.target.matches('[data-swb-dry]') && swbState) { swbState.dryRun = !!ev.target.checked; swbRenderPanel(); } });
+        document.body.appendChild(wrap);
+        if (keep) {
+            if (keep.left) { wrap.style.left = keep.left; wrap.style.top = keep.top; wrap.style.right = keep.right; }
+            const bodyEl = wrap.querySelector('[data-swb-body]');
+            if (bodyEl) bodyEl.scrollTop = keep.scroll;
+        }
+        const logEl = wrap.querySelector('[data-swb-log]');
+        if (logEl) logEl.scrollTop = logEl.scrollHeight;   // newest line stays in view
+    }
+    function swbReadPanelParams(wrap) {
+        wrap.querySelectorAll('[data-swb-p]').forEach(inp => {
+            const id = inp.getAttribute('data-swb-p');
+            if (!Object.prototype.hasOwnProperty.call(SWB_DEFAULTS, id)) return;
+            let v;
+            if (typeof SWB_DEFAULTS[id] === 'boolean') v = !!inp.checked;
+            else if (typeof SWB_DEFAULTS[id] === 'number') { v = parseFloat(inp.value); if (!Number.isFinite(v)) return; if (id === 'overlapM' && v < 2) { v = 2; inp.value = '2'; showToast('Overlap cannot go below 2 m'); } }
+            else v = String(inp.value);
+            if (v === swbThresholds[id]) return;
+            swbThresholds[id] = v;
+            saveSwbThresholdKey(id, v);
+        });
+    }
+
+    // ---------- commit (create-only, dry run by default) ----------
+    // FFZ per zone (type 16). Flight paths: legs that meet at a hub or a junction share a waypoint, and
+    // Percepto connects arcs by shared waypoint INSIDE one entity, so every connected group of legs becomes
+    // one type-15 entity with a branching arc list (arcs reference point_a/point_b, not list order).
+    function swbFpComponents(st) {
+        const legs = st.legs.filter(l => l.vertsLL && l.arcs.length && l.arcs[0].floorM !== null);
+        const parent = legs.map((_, i) => i);
+        const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+        const byNode = new Map();
+        legs.forEach((l, i) => [l.a, l.b].forEach(n => { const nd = st.nodes[n]; if (!nd || nd.kind === 'zone') return; if (!byNode.has(n)) byNode.set(n, []); byNode.get(n).push(i); }));
+        byNode.forEach(list => { for (let k = 1; k < list.length; k++) { const a = find(list[0]), b = find(list[k]); if (a !== b) parent[a] = b; } });
+        const comps = new Map();
+        legs.forEach((l, i) => { const r = find(i); if (!comps.has(r)) comps.set(r, []); comps.get(r).push(l); });
+        return [...comps.values()];
+    }
+    function swbBuildWrites(st, sid, siteCfg, ents, log) {
+        const tmplFfz = ents.find(e => e.type === 16 && entityCoords(e));
+        const tmplFp = ents.find(e => e.type === 15 && Array.isArray(e.arcs) && e.arcs.length);
+        let tmplFfzBody = null, tmplFpBody = null;
+        if (tmplFfz) { try { tmplFfzBody = buildWriteBody(tmplFfz, siteCfg); } catch (e) { console.warn(`${TAG} spiderweb: FFZ template failed:`, e); } }
+        if (tmplFp) { try { tmplFpBody = buildWriteBody(tmplFp, siteCfg); } catch (e) { console.warn(`${TAG} spiderweb: FP template failed:`, e); } }
+        const tmplArc = tmplFpBody && Array.isArray(tmplFpBody.arcs) && tmplFpBody.arcs[0] ? tmplFpBody.arcs[0] : null;
+        const existingNames = (t) => new Set(ents.filter(e => e.type === t && e.name).map(e => e.name));
+        const usedF = existingNames(16), usedP = existingNames(15);
+        const priorF = new Set(usedF), priorP = new Set(usedP);
+        const uniq = (base2, used, fb) => { base2 = genCleanName(base2) || fb; if (!used.has(base2)) { used.add(base2); return base2; } let i = 2, n2; do { n2 = `${base2}_${i++}`; } while (used.has(n2)); used.add(n2); return n2; };
+        const mtBool = !!(siteCfg && siteCfg.mountain_terrain);
+        const ffzWrites = [], fpWrites = [], warnings = [];
+        let resumed = 0;
+        st.zones.forEach(z => {
+            if (z.floorM === null || z.ceilM === null) { warnings.push(`zone "${z.name}" has no band (no DEM) — not written`); return; }
+            const nm = genCleanName(`DRAFT SW ${z.name}`);
+            if (priorF.has(nm)) { resumed++; z.createdName = nm; return; }
+            const body = genCreateBody({ name: nm, points: z.points, restrictions: { minAlt: z.floorM, maxAlt: z.ceilM } }, sid, siteCfg, tmplFfzBody);
+            body.name = uniq(body.name, usedF, 'FFZ');
+            z.createdName = body.name;
+            ffzWrites.push({ zone: z, body });
+        });
+        const comps = swbFpComponents(st);
+        const keyOf = (p) => `${p.lat.toFixed(7)},${p.lng.toFixed(7)}`;
+        let webN = 0, maxPts = 0;
+        comps.forEach(comp => {
+            const points = [], idx = new Map();
+            const pidx = (p) => { const k = keyOf(p); if (!idx.has(k)) { idx.set(k, points.length); points.push({ lat: p.lat, lng: p.lng }); } return idx.get(k); };
+            const arcs = [];
+            const emergM = (tmplArc && Number.isFinite(tmplArc.min_emergency_alt)) ? tmplArc.min_emergency_alt : 12;
+            comp.forEach(l => {
+                for (let i = 0; i < l.arcs.length; i++) {
+                    const a = points[pidx(l.vertsLL[i])], c = points[pidx(l.vertsLL[i + 1])];
+                    let arc = {};
+                    if (tmplArc) { arc = JSON.parse(JSON.stringify(tmplArc)); delete arc.id; delete arc.mapobject; }
+                    arc.point_a = a; arc.point_b = c; arc.points = [a, c];
+                    arc.min_alt = Math.round(l.arcs[i].floorM); arc.max_alt = Math.round(l.arcs[i].ceilM);
+                    if (arc.max_alt - arc.min_alt < 2) arc.max_alt = arc.min_alt + 2;
+                    arc.min_emergency_alt = emergM;
+                    arc.distance = approxMeters(a.lat, a.lng, c.lat, c.lng);
+                    if (typeof arc.wait_until_approved !== 'boolean') arc.wait_until_approved = false;
+                    arcs.push(arc);
+                }
+            });
+            try { bridgeArcContinuity(arcs); } catch (e) { console.warn(`${TAG} spiderweb: arc continuity threw:`, e); }
+            const nm = comp.length === 1 ? genCleanName(`DRAFT SW ${comp[0].nameA} - ${comp[0].nameB}`) : genCleanName(`DRAFT SW Web ${++webN}`);
+            if (priorP.has(nm)) { resumed++; return; }
+            let b;
+            if (tmplFpBody) { b = JSON.parse(JSON.stringify(tmplFpBody)); delete b.id; }
+            // No template on the site: mirror a NATIVE flight path exactly (site 1583 dump) — `restrictions` is an
+            // empty ARRAY on a flight path and `asset_waypoints` is not sent at all. `restrictions: null` +
+            // `asset_waypoints: null` was rejected with a generic 400 on the first live commit (2026-09-14).
+            else b = { type: 15, description: '', custom: {}, params: {}, constantly_present_asset_name: false, general_marker_type: '', marker_height: 0, is_unshielded: false, restrictions: [] };
+            if (b.asset_waypoints === null) delete b.asset_waypoints;
+            if (b.restrictions === null || b.restrictions === undefined) b.restrictions = [];
+            b.type = 15; b.name = uniq(nm, usedP, 'FP'); b.description = ''; b.site_id = sid; b.validated = false; b.mountain_terrain_site = mtBool;
+            b.points = points; b.arcs = arcs;
+            if (points.length > maxPts) maxPts = points.length;
+            if (points.length > swbThresholds.entityPtsWarn) warnings.push(`"${b.name}" carries ${points.length} points / ${arcs.length} arcs (${comp.length} legs joined by hubs/junctions) — large for the native editor`);
+            fpWrites.push({ comp, body: b });
+        });
+        if (!tmplFp && fpWrites.length) warnings.push('site has no existing FP to clone as a template — minimal bodies used (if the server rejects them, draw one FP natively and re-run)');
+        if (log) log(`bodies: ${ffzWrites.length} FFZ, ${fpWrites.length} FP entities from ${comps.length} leg group(s) (largest ${maxPts} points)${resumed ? `, ${resumed} already on site by name (resume)` : ''}`);
+        return { ffzWrites, fpWrites, resumed, warnings };
+    }
+    // Percepto's DEM wins at every written vertex (err UP only): raise any arc/zone floor that its own
+    // ground says is too low. Ceilings follow the floor; connected-arc overlap is re-secured afterwards.
+    async function swbRegroundPercepto(st, log) {
+        const th = st.thresholds;
+        const keyOf = (p) => `${p.lat.toFixed(7)},${p.lng.toFixed(7)}`;
+        const pts = new Map();
+        st.legs.forEach(l => (l.vertsLL || []).forEach(p => pts.set(keyOf(p), p)));
+        st.zones.forEach(z => z.points.forEach(p => pts.set(keyOf(p), p)));
+        const list = [...pts.values()];
+        log(`Percepto DEM check: ${list.length} vertices…`);
+        let done = 0;
+        const vals = await bulkFetchElevations(list, (d, n) => { done = d; if (d % 200 === 0) showToast(`🕸 Percepto DEM ${d}/${n}`); });
+        const gm = new Map(); list.forEach((p, i) => { if (Number.isFinite(vals[i])) gm.set(keyOf(p), vals[i]); });
+        let arcsUp = 0, maxUp = 0, zonesUp = 0, missing = list.length - gm.size;
+        const floorAdd = th.fpFloorM, bandM = th.fpBandFt / M_TO_FT;
+        st.legs.forEach(l => {
+            if (!l.vertsLL || !l.arcs.length) return;
+            l.arcs.forEach((a, i) => {
+                if (a.floorM === null) return;
+                const gA = gm.get(keyOf(l.vertsLL[i])), gB = gm.get(keyOf(l.vertsLL[i + 1]));
+                const g = Math.max(gA == null ? -Infinity : gA, gB == null ? -Infinity : gB);
+                if (!Number.isFinite(g)) return;
+                const need = Math.ceil(g + floorAdd);
+                if (need > a.floorM) { const d = need - a.floorM; a.floorM = need; a.ceilM = Math.floor(need + bandM); arcsUp++; if (d > maxUp) maxUp = d; a.regroundM = d; }
+            });
+        });
+        st.zones.forEach(z => {
+            if (z.floorM === null) return;
+            let g = -Infinity; z.points.forEach(p => { const v = gm.get(keyOf(p)); if (v != null && v > g) g = v; });
+            if (!Number.isFinite(g)) return;
+            const need = g + th.ffzFloorAglFt / M_TO_FT;
+            if (need > z.floorM + 0.05) { z.floorM = need; if (z.ceilM - z.floorM < 2) z.ceilM = z.floorM + 2; zonesUp++; }
+        });
+        log(`Percepto DEM: ${arcsUp} arc floor(s) raised (max +${maxUp} m), ${zonesUp} zone floor(s) raised${missing ? `, ${missing} vertex(es) without a Percepto value (3DEP kept)` : ''}`);
+    }
+    let swbCommitArm = 0, swbUndoArm = 0;
+    async function swbCommit(dryRun) {
+        if (!dryRun && liteBlockedWrite('commit spiderweb')) return;
+        const st = swbState;
+        if (!st) { showToast('Nothing staged', 'rgba(255,96,96,0.55)'); return; }
+        if (st.committing) { showToast('Commit already running…'); return; }
+        const sid = getCurrentSiteID();
+        if (!sid || sid !== st.sid) { showToast('Site changed since staging — re-stage', 'rgba(255,96,96,0.55)'); return; }
+        const hardFail = (st.gates || []).filter(g => !g.ok && !g.soft);
+        if (hardFail.length) { showToast(`Gates not passed — ${hardFail[0].label}`, 'rgba(255,96,96,0.55)'); return; }
+        const csrf = dryRun ? null : getCsrfToken();
+        if (!dryRun && !csrf) { showToast('No CSRF token — make one native save/edit anywhere in Percepto first, then retry', 'rgba(255,96,96,0.55)'); return; }
+        st.committing = true;
+        st.commitLog = [];
+        const logL = (m) => { st.commitLog.push(m); console.log(`${TAG} spiderweb commit: ${m}`); swbRenderPanelSoon(); };
+        try {
+            logL(dryRun ? 'DRY RUN — nothing is written' : 'COMMIT — writing to Percepto');
+            let siteCfg = null;
+            try { siteCfg = await fetchSiteConfig(sid); } catch (e) { console.warn(`${TAG} spiderweb: site-cfg fetch failed:`, e); }
+            // SAFETY-CRITICAL: MSL sites only (see siteAltMode). false = AGL site where these MSL floors
+            // would be read as thousands of feet above ground.
+            const mtFlag = siteCfg && typeof siteCfg.mountain_terrain === 'boolean' ? siteCfg.mountain_terrain : null;
+            if (mtFlag !== true) { logL(`ABORT: ${mtFlag === false ? 'AGL site (Mountain terrain OFF) — SpiderWeb floors are MSL-only' : 'site altitude mode unknown (GET /sites/<id>/ failed)'}`); showToast('Aborted — see panel log', 'rgba(255,96,96,0.55)'); return; }
+            await fetchMapObjects(sid, true);
+            const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+            if (!dryRun && swbThresholds.regroundPercepto) { try { await swbRegroundPercepto(st, logL); } catch (e) { logL(`⚠ Percepto DEM check failed (${e && e.message || e}) — 3DEP floors kept`); } }
+            const w = swbBuildWrites(st, sid, siteCfg, ents, logL);
+            w.warnings.forEach(x => logL(`⚠ ${x}`));
+            st.lastWrites = w;
+            if (dryRun) {
+                const arcsN = w.fpWrites.reduce((n, x) => n + x.body.arcs.length, 0);
+                logL(`would write ${w.ffzWrites.length} FFZ + ${w.fpWrites.length} FP (${arcsN} arcs). Untick "dry run" and click Commit twice to write.`);
+                return;
+            }
+            const backup = { site: sid, at: new Date().toISOString(), ffzs: w.ffzWrites.map(x => x.body), fps: w.fpWrites.map(x => x.body) };
+            try { localStorage.setItem(`aim_swb_backup:${sid}`, JSON.stringify(backup)); } catch (e) { logL('⚠ localStorage backup stash failed (quota?) — download is the only copy'); }
+            try { downloadJSONFile(`spiderweb-${sid}-${Date.now()}.json`, JSON.stringify(backup, null, 1)); } catch (e) { logL('backup download failed (stash in localStorage still written)'); }
+            const created = st.createdIds = st.createdIds || [];
+            const post = async (body) => {
+                const r = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
+                const txt = await r.text();
+                let json = null; try { json = JSON.parse(txt); } catch (e) { json = null; }
+                const saved = json && json.map_objects;
+                if (r.status === 403) throw Object.assign(new Error('403 forbidden — write permission lost, ABORTING run'), { fatal: true });
+                if (r.status === 200 && saved && saved.id != null) return saved.id;
+                throw new Error(`server ${r.status} ${(txt || '').slice(0, 120)}`);
+            };
+            const verify = async (label, list) => {
+                await fetchMapObjects(sid, true);
+                const after = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+                const byId = new Set(after.map(e => e.id));
+                const missing = list.filter(c => !byId.has(c.id));
+                if (missing.length) logL(`⚠ verify: ${missing.length} created ${label}(s) NOT found on re-fetch`); else if (list.length) logL(`verify ✓ all ${list.length} ${label}(s) present on fresh fetch`);
+                return !missing.length;
+            };
+            const runStep = async (label, type, writes, describe) => {
+                let ok = 0, fail = 0; const made = [];
+                for (const w2 of writes) {
+                    try { const id = await post(w2.body); const rec = { id, name: w2.body.name, type }; created.push(rec); made.push(rec); ok++; logL(`✓ ${label} "${w2.body.name}" → #${id}${describe ? ' ' + describe(w2) : ''}`); }
+                    catch (e) { fail++; logL(`✗ ${label} "${w2.body.name}": ${e.message}`); if (e.fatal) throw e; }
+                }
+                const v = await verify(label, made);
+                return { ok, fail, verified: v };
+            };
+            const f = await runStep('FFZ', 16, w.ffzWrites, (x) => `(${(x.zone.floorM * M_TO_FT).toFixed(0)}–${(x.zone.ceilM * M_TO_FT).toFixed(0)} ft MSL)`);
+            if (f.fail || !f.verified) { logL(`STOP after FFZs — ${f.fail} failed${f.verified ? '' : ', verify incomplete'}. Fix + re-run Commit (already-created zones are skipped by name).`); return; }
+            const p = await runStep('FP', 15, w.fpWrites, (x) => `(${x.body.points.length} pts, ${x.body.arcs.length} arcs)`);
+            if (p.fail || !p.verified) { logL(`STOP after FPs — ${p.fail} failed. Re-run Commit to resume.`); return; }
+            logL(`DONE: ${f.ok} FFZ · ${p.ok} FP created. Reload the page to see them in Percepto's own map; ↶ Undo removes exactly these.`);
+            showToast(`🕸 SpiderWeb committed ✓ ${f.ok} FFZ + ${p.ok} FP`);
+        } catch (e) {
+            logL(`RUN ABORTED: ${e && e.message ? e.message : e}`);
+            showToast('Commit aborted — see panel log', 'rgba(255,96,96,0.55)');
+        } finally { st.committing = false; swbRenderPanel(); }
+    }
+    let swbPurgeArm = 0, swbPurging = false;
+    async function swbRemoveDrafts() {
+        if (liteBlockedWrite('remove DRAFT SW entities')) return;
+        if (swbPurging) { showToast('Purge already running…'); return; }
+        swbPurging = true;
+        try {
+        const csrf = getCsrfToken();
+        if (!csrf) { showToast('No CSRF token', 'rgba(255,96,96,0.55)'); return; }
+        const sid = getCurrentSiteID(); if (!sid) return;
+        await fetchMapObjects(sid, true);
+        const ents = ((mapObjectsBySite[sid] || {}).entities) || [];
+        const drafts = ents.filter(e => (e.type === 15 || e.type === 16) && typeof e.name === 'string' && /^DRAFT SW\b/.test(e.name));
+        if (!drafts.length) { showToast('No DRAFT SW entities on this site'); return; }
+        const st = swbState || (swbState = { sid, zones: [], legs: [], hubs: [], junctions: [], gates: [], dropped: [], skippedEmpty: [], bases: [], runLog: [], thresholds: { ...swbThresholds }, limitFt: 0, totalArcs: 0, totalVerts: 0, totalLenM: 0, nodes: [] });
+        st.commitLog = st.commitLog || [];
+        const logL = (m) => { st.commitLog.push(m); console.log(`${TAG} spiderweb purge: ${m}`); swbRenderPanelSoon(); };
+        const order = drafts.slice().sort((a, b) => (a.type === 15 ? 0 : 1) - (b.type === 15 ? 0 : 1));
+        logL(`PURGE: deleting ${order.filter(e => e.type === 15).length} FP + ${order.filter(e => e.type === 16).length} FFZ named DRAFT SW … (Delete Guard banks each)`);
+        let ok = 0, fail = 0;
+        for (const e of order) {
+            try {
+                const r = await fetch(`/map_objects/${e.id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
+                if (r.status === 200 || r.status === 204 || r.status === 404) ok++;   // 404 = already gone
+                else { fail++; logL(`✗ ${e.name} (#${e.id}): server ${r.status}`); if (r.status === 403) break; }
+            } catch (err) { fail++; logL(`✗ ${e.name}: ${err && err.message || err}`); }
+        }
+        st.createdIds = [];
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        const left = (((mapObjectsBySite[sid] || {}).entities) || []).filter(e => (e.type === 15 || e.type === 16) && typeof e.name === 'string' && /^DRAFT SW\b/.test(e.name)).length;
+        logL(`PURGE done: ${ok} deleted${fail ? `, ${fail} failed` : ''} · ${left} DRAFT SW entit${left === 1 ? 'y' : 'ies'} left on the site`);
+        showToast(fail ? `Purge: ${ok} deleted, ${fail} failed` : `Purge ✓ ${ok} deleted · ${left} left`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+        swbRenderPanel();
+        } finally { swbPurging = false; }
+    }
+    async function swbUndo() {
+        const st = swbState;
+        if (!st || !st.createdIds || !st.createdIds.length) { showToast('Nothing to undo', 'rgba(255,96,96,0.55)'); return; }
+        if (liteBlockedWrite('undo spiderweb commit')) return;
+        const csrf = getCsrfToken();
+        if (!csrf) { showToast('No CSRF token', 'rgba(255,96,96,0.55)'); return; }
+        const sid = getCurrentSiteID();
+        st.commitLog = st.commitLog || [];
+        const logL = (m) => { st.commitLog.push(m); console.log(`${TAG} spiderweb undo: ${m}`); };
+        const order = st.createdIds.slice().sort((a, b) => (a.type === 15 ? 0 : 1) - (b.type === 15 ? 0 : 1));   // FPs first
+        let ok = 0, fail = 0;
+        for (const c of order) {
+            try {
+                const r = await fetch(`/map_objects/${c.id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
+                if (r.status === 200 || r.status === 204) ok++; else { fail++; logL(`undo ✗ ${c.name} (#${c.id}): server ${r.status}`); }
+            } catch (e) { fail++; logL(`undo ✗ ${c.name}: ${e && e.message || e}`); }
+        }
+        logL(`UNDO: deleted ${ok}/${order.length}${fail ? ` · ${fail} failed` : ''}`);
+        st.createdIds = [];
+        try { await fetchMapObjects(sid, true); } catch (e) { console.warn(`${TAG} spiderweb: refetch after undo failed:`, e); }
+        showToast(fail ? `Undo: ${ok} deleted, ${fail} failed` : `Undo ✓ ${ok} deleted`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+        swbRenderPanel();
+    }
+
+    function swbOpen() {
+        if (!swbMasterEnabled) { showToast('SpiderWeb is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+        swbRenderPanel();
     }
 
     // ============================================================
@@ -8061,12 +12838,55 @@
                 if (msg.actionId === 'air-run') {
                     if (!airMasterEnabled) { showToast('Airspace Checker is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
                     airspaceRun();
+                } else if (msg.actionId === 'air-survey') {
+                    const sid = getCurrentSiteID();
+                    if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
+                    openSurveyModal(sid).catch(err => { console.warn(`${TAG} survey modal threw:`, err); showToast('Survey window failed — see console', 'rgba(255,96,96,0.55)'); });
                 } else if (msg.actionId === 'air-clear') {
                     airspaceClear();
                 }
             }
+            else if (msg.type === 'REGISTER' && msg.scriptId === 'aim-delete-guard') {
+                // 📥 importer's Delete Guard presence probe — the guard has no
+                // beacon, but it re-REGISTERs on REQUEST_REGISTRATIONS.
+                impDeleteGuardSeen = Date.now();
+            }
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === IMP_SCRIPT_ID) {
+                handleImporterToggle(msg);
+            }
+            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === IMP_SCRIPT_ID && CONTEXT === 'IFRAME') {
+                // Cross-tab guard: BroadcastChannel delivers to EVERY open tab — only
+                // the tab that pressed/clicked may act (tabId from CP v1.43+; visibility
+                // fallback under an older CP).
+                if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;
+                if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
+                if (msg.actionId === 'imp-open') {
+                    if (!impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+                    impOpenFromAction();
+                }
+            }
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === GMT_SCRIPT_ID) {
+                handleGmtToggle(msg);
+            }
+            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === GMT_SCRIPT_ID && CONTEXT === 'IFRAME') {
+                if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;   // tab-local (see importer above)
+                if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
+                if (msg.actionId === 'gmt-open') {
+                    if (!gmtMasterEnabled) { showToast('GM Stamper is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+                    gmtOpenFromAction();
+                }
+            }
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === TER_SCRIPT_ID) {
                 handleTerrainToggle(msg);
+            }
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SWB_SCRIPT_ID) {
+                handleSpiderwebToggle(msg);
+            }
+            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SWB_SCRIPT_ID && CONTEXT === 'IFRAME') {
+                if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;
+                if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
+                if (msg.actionId === 'swb-open') swbOpen();
+                else if (msg.actionId === 'swb-clear') { swbClear(); if (document.getElementById(SWB_PANEL_ID)) swbRenderPanel(); }
             }
             else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === TER_SCRIPT_ID && CONTEXT === 'IFRAME') {
                 // Cross-tab guard: BroadcastChannel delivers to EVERY open tab — only
@@ -8104,6 +12924,46 @@
             if (msg.value === airThresholds[id]) return;
             airThresholds[id] = msg.value;
             saveAirThresholds();
+        }
+    }
+    // Idempotent — the panel runs in TOP + IFRAME so duplicate SET_TOGGLE
+    // is normal (same contract as handleSopToggle below).
+    function handleImporterToggle(msg) {
+        const id = msg.toggleId;
+        if (id === 'imp-master') {
+            const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            if (v === impMasterEnabled) return;
+            impMasterEnabled = v;
+            if (!v) { try { impSetMode(null); } catch (e) {} }
+            return;
+        }
+        if (id === 'imp-dup-ft' && typeof msg.value === 'number') {
+            if (msg.value === impDupFt || msg.value < 0) return;
+            impDupFt = msg.value;
+            try { if (imp.points.length) { impComputeDups(); impRenderStaged(); impSyncUi(); } } catch (e) {}
+            return;
+        }
+        if (id === 'imp-size-ft' && typeof msg.value === 'number') {
+            if (msg.value === impSizeFt || msg.value < 5 || msg.value > 2000) return;
+            impSizeFt = msg.value;
+            try { const el = document.getElementById('aim-imp-size'); if (el) el.value = impSizeFt; } catch (e) {}
+        }
+    }
+    function handleGmtToggle(msg) {
+        const id = msg.toggleId;
+        if (id === 'gmt-master') {
+            const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            if (v === gmtMasterEnabled) return;
+            gmtMasterEnabled = v;
+            if (!v) { try { if (gmt.armed) gmtArm(false); } catch (e) {} }
+            try { const b = document.getElementById(GMT_MAP_BTN_ID); if (b) b.style.display = v ? '' : 'none'; } catch (e) {}
+            return;
+        }
+        if (id === 'gmt-alt-gate') {
+            const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            if (v === gmtAltGate) return;
+            gmtAltGate = v;
+            try { if (gmt.armed) { const t = gmtActiveTemplate(); gmtSetStatus(`armed — ${gmtAltGate ? 'ALT+click' : 'click'} the map to place "${t.label}" · Esc stops`); gmtRenderPanel(); } } catch (e) {}
         }
     }
     // Idempotent per [[feedback_set_toggle_handlers_must_be_idempotent]] —
@@ -8223,6 +13083,7 @@
                 { id: 'stadiums', label: 'Check · Stadium TFR (3 NM during events)', type: 'boolean', default: AIR_ENABLE_DEFAULTS.stadiums },
                 { id: 'stadiumNm', label: 'Stadium TFR radius', type: 'number', min: 1, max: 10, step: 0.5, default: AIR_THRESH_DEFAULTS.stadiumNm, unit: 'NM' },
                 { id: 'air-run', label: '🛩 Run airspace check', type: 'button', action: 'air-run' },
+                { id: 'air-survey', label: '📄 Open site survey (saved runs, notes, PDF — no re-run)', type: 'button', action: 'air-survey' },
                 { id: 'air-clear', label: 'Clear airspace issues', type: 'button', action: 'air-clear' },
             ],
             hotkeys: [],
@@ -8238,7 +13099,7 @@
                 { id: 'ter-master', label: 'Enable Terrain Profiler', type: 'boolean', default: true, master: true },
                 { id: 'minAglFt', label: 'Target AGL floor', type: 'number', min: 10, max: 400, step: 5, default: TER_THRESH_DEFAULTS.minAglFt, unit: 'ft' },
                 { id: 'maxAglFt', label: 'Target AGL ceiling', type: 'number', min: 50, max: 400, step: 5, default: TER_THRESH_DEFAULTS.maxAglFt, unit: 'ft' },
-                { id: 'deltaFt', label: 'Max relief per region (Δ)', type: 'number', min: 5, max: 150, step: 5, default: TER_THRESH_DEFAULTS.deltaFt, unit: 'ft' },
+                { id: 'delta2', label: 'Max relief per region (Δ)', type: 'number', min: 5, max: 150, step: 5, default: TER_THRESH_DEFAULTS.deltaFt, unit: 'ft' },
                 { id: 'cellFt', label: 'DEM cell size (33 ≈ native 10 m)', type: 'number', min: 10, max: 150, step: 1, default: TER_THRESH_DEFAULTS.cellFt, unit: 'ft' },
                 { id: 'marginFt', label: 'Margin around site bbox', type: 'number', min: 0, max: 5280, step: 50, default: TER_THRESH_DEFAULTS.marginFt, unit: 'ft' },
                 { id: 'absorbAc', label: 'Absorb islands below', type: 'number', min: 0, max: 50, step: 0.5, default: TER_THRESH_DEFAULTS.absorbAc, unit: 'ac' },
@@ -8252,11 +13113,106 @@
                     { value: 'rect', label: 'Full rectangle (no mask)' },
                 ], default: TER_THRESH_DEFAULTS.maskMode },
                 { id: 'fpCorridorFt', label: 'FP corridor width (FFZ+FP mode)', type: 'number', min: 50, max: 5000, step: 50, default: TER_THRESH_DEFAULTS.fpCorridorFt, unit: 'ft' },
-                { id: 'simplifyFt', label: 'Build · simplify tolerance', type: 'number', min: 0, max: 500, step: 10, default: TER_THRESH_DEFAULTS.simplifyFt, unit: 'ft' },
-                { id: 'nfzBufFt', label: 'Build · NFZ hull buffer', type: 'number', min: 0, max: 200, step: 5, default: TER_THRESH_DEFAULTS.nfzBufFt, unit: 'ft' },
+                { id: 'ter-build-hdr', label: '🏗 Build unshielded site', type: 'header' },
+                { id: 'gapMin3', label: 'Seam gap between FFZs', type: 'number', min: 5, max: 500, step: 5, default: TER_THRESH_DEFAULTS.gapMinFt, unit: 'ft' },
+                { id: 'smoothNear3', label: 'Near tolerance applies within … of an asset', type: 'number', min: 0, max: 5000, step: 50, default: TER_THRESH_DEFAULTS.smoothNearFt, unit: 'ft' },
+                { id: 'smoothFar3', label: 'Far tolerance applies beyond … from any asset', type: 'number', min: 0, max: 20000, step: 100, default: TER_THRESH_DEFAULTS.smoothFarFt, unit: 'ft' },
+                { id: 'tolNear3', label: 'Simplify tolerance near assets', type: 'number', min: 0, max: 1000, step: 25, default: TER_THRESH_DEFAULTS.tolNearFt, unit: 'ft' },
+                { id: 'tolFar3', label: 'Simplify tolerance far from assets (edges wander into the next band; floors are recomputed)', type: 'number', min: 0, max: 10000, step: 100, default: TER_THRESH_DEFAULTS.tolFarFt, unit: 'ft' },
+                { id: 'absorbBumps', label: 'Absorb bump islands that hold assets (parent floor rises) instead of keyholing', type: 'boolean', default: TER_ENABLE_DEFAULTS.absorbBumps },
+                { id: 'standoffFt', label: 'Pad standoff when a pad straddles two bands', type: 'number', min: 0, max: 200, step: 5, default: TER_THRESH_DEFAULTS.standoffFt, unit: 'ft' },
+                { id: 'pitAbsorbMaxAglFt', label: 'Warn when an absorbed pit sits deeper than', type: 'number', min: 50, max: 400, step: 10, default: TER_THRESH_DEFAULTS.pitAbsorbMaxAglFt, unit: 'ft AGL' },
+                { id: 'bridgeMergeFt', label: 'Merge bridge candidates closer than', type: 'number', min: 0, max: 5000, step: 50, default: TER_THRESH_DEFAULTS.bridgeMergeFt, unit: 'ft' },
+                { id: 'bridgeMaxSpacingFt', label: 'Longest bridgeless stretch on a seam', type: 'number', min: 200, max: 50000, step: 250, default: TER_THRESH_DEFAULTS.bridgeMaxSpacingFt, unit: 'ft' },
+                { id: 'bridgeInsetFt', label: 'Bridge waypoint depth inside each FFZ', type: 'number', min: 5, max: 500, step: 5, default: TER_THRESH_DEFAULTS.bridgeInsetFt, unit: 'ft' },
+                { id: 'bridgeMinOverlapFt', label: 'Min bridge band height (else staircase)', type: 'number', min: 5, max: 100, step: 5, default: TER_THRESH_DEFAULTS.bridgeMinOverlapFt, unit: 'ft' },
+                { id: 'maxVertsWarn', label: 'Warn when a piece exceeds … vertices', type: 'number', min: 100, max: 20000, step: 100, default: TER_THRESH_DEFAULTS.maxVertsWarn },
+                { id: 'deleteOldFfz', label: 'Delete old FFZs after the new set verifies', type: 'boolean', default: TER_ENABLE_DEFAULTS.deleteOldFfz },
+                { id: 'deleteOldFp', label: 'Delete old flight paths after the new set verifies', type: 'boolean', default: TER_ENABLE_DEFAULTS.deleteOldFp },
                 { id: 'opacity', label: 'Overlay opacity', type: 'number', min: 0.1, max: 1, step: 0.05, default: TER_THRESH_DEFAULTS.opacity },
                 { id: 'ter-run', label: '⛰ Run profiler', type: 'button', action: 'ter-run' },
                 { id: 'ter-clear', label: 'Clear overlay + panel', type: 'button', action: 'ter-clear' },
+            ],
+            hotkeys: [],
+        });
+        // v4.274: 🕸 Unshielded SpiderWeb generator — own card (feature #261).
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: SWB_SCRIPT_ID, name: 'SpiderWeb generator',
+            description: 'Unshielded site as a spider web: an FFZ around every non-EMPTY asset, straight high flight paths between zones with automatic DEM stair steps, hubs for the shortest way back to base. MSL sites only. Preview + report only in this version.',
+            version: SCRIPT_VERSION, group: 'Site Setup', scope: 'site-setup', priority: 35,
+            toggles: [
+                { id: 'swb-master', label: 'Enable SpiderWeb generator', type: 'boolean', default: true, master: true },
+                { id: 'fpFloorM2', label: 'FP floor above highest ground under the arc', type: 'number', min: 20, max: 120, step: 1, default: SWB_DEFAULTS.fpFloorM, unit: 'm' },
+                { id: 'fpBandFt2', label: 'FP band (ceiling = floor + band)', type: 'number', min: 7, max: 100, step: 1, default: SWB_DEFAULTS.fpBandFt, unit: 'ft' },
+                { id: 'overlapM2', label: 'Overlap between connected arcs — target and hard line (steps every band − overlap)', type: 'number', min: 2, max: 10, step: 0.5, default: SWB_DEFAULTS.overlapM, unit: 'm' },
+                { id: 'corridorFt', label: 'Route a leg through a zone it skims within … of (one line, not two; 0 = off)', type: 'number', min: 0, max: 500, step: 10, default: SWB_DEFAULTS.corridorFt, unit: 'ft' },
+                { id: 'droneMaxAglFt', label: 'Drone must stay under (caps relief per arc)', type: 'number', min: 100, max: 400, step: 5, default: SWB_DEFAULTS.droneMaxAglFt, unit: 'ft AGL' },
+                { id: 'ffzFloorAglFt', label: 'Zone floor above highest ground in footprint', type: 'number', min: 30, max: 300, step: 5, default: SWB_DEFAULTS.ffzFloorAglFt, unit: 'ft' },
+                { id: 'ffzCeilAglFt', label: 'Zone ceiling above lowest ground in footprint', type: 'number', min: 50, max: 400, step: 1, default: SWB_DEFAULTS.ffzCeilAglFt, unit: 'ft' },
+                { id: 'ffzCeilMaxAglFt', label: 'Sloped zone ceiling may rise to (for the handoff), never above', type: 'number', min: 50, max: 400, step: 1, default: SWB_DEFAULTS.ffzCeilMaxAglFt, unit: 'ft' },
+                { id: 'outsetFt', label: 'Zone outset from the asset ring', type: 'number', min: 10, max: 100, step: 1, default: SWB_DEFAULTS.outsetFt, unit: 'ft' },
+                { id: 'endpointGapFt', label: 'Minimum gap between leg ends on one zone', type: 'number', min: 10, max: 100, step: 1, default: SWB_DEFAULTS.endpointGapFt, unit: 'ft' },
+                { id: 'cornerGapFt', label: 'Leg ends stay this far from zone corners', type: 'number', min: 0, max: 100, step: 1, default: SWB_DEFAULTS.cornerGapFt, unit: 'ft' },
+                { id: 'stretchMax', label: 'Restore a leg when the way home exceeds × straight line', type: 'number', min: 1, max: 3, step: 0.05, default: SWB_DEFAULTS.stretchMax },
+                { id: 'hubMaxRtbLossPct', label: 'Hubs may lengthen the summed way home by up to', type: 'number', min: 0, max: 25, step: 0.5, default: SWB_DEFAULTS.hubMaxRtbLossPct, unit: '%' },
+                { id: 'webDensity', label: 'Web density', type: 'select', options: [ { value: 'full', label: 'Full mesh (every neighbour leg under the cap)' }, { value: 'urquhart', label: 'Thinned (drop the long side of each triangle)' } ], default: SWB_DEFAULTS.webDensity },
+                { id: 'maxLegFt', label: 'Full mesh: drop neighbour legs longer than', type: 'number', min: 1000, max: 20000, step: 250, default: SWB_DEFAULTS.maxLegFt, unit: 'ft' },
+                { id: 'hubKeepLegs', label: 'Hubs add spokes on top of the mesh (off = a star replaces the legs between its members)', type: 'boolean', default: SWB_DEFAULTS.hubKeepLegs },
+                { id: 'hubs', label: 'Propose hubs', type: 'boolean', default: SWB_DEFAULTS.hubs },
+                { id: 'junctions', label: 'Shared waypoint where two legs cross', type: 'boolean', default: SWB_DEFAULTS.junctions },
+                { id: 'dropFailing', label: '✂ Test sites: cut legs that fail a hard gate instead of blocking Commit', type: 'boolean', default: SWB_DEFAULTS.dropFailing },
+                { id: 'junctionMinFt', label: 'No junction closer than … to a leg end', type: 'number', min: 20, max: 300, step: 10, default: SWB_DEFAULTS.junctionMinFt, unit: 'ft' },
+                { id: 'snapNodeFt', label: 'Route a leg through a hub/junction it passes within … of (0 = off)', type: 'number', min: 0, max: 500, step: 10, default: SWB_DEFAULTS.snapNodeFt, unit: 'ft' },
+                { id: 'hubRadiusFt', label: 'Hub star radius', type: 'number', min: 500, max: 10000, step: 100, default: SWB_DEFAULTS.hubRadiusFt, unit: 'ft' },
+                { id: 'hubMaxSpokes', label: 'Most spokes on one hub', type: 'number', min: 3, max: 20, step: 1, default: SWB_DEFAULTS.hubMaxSpokes },
+                { id: 'hubBaseReachFt', label: 'Hub may spoke straight to a base zone within', type: 'number', min: 500, max: 20000, step: 100, default: SWB_DEFAULTS.hubBaseReachFt, unit: 'ft' },
+                { id: 'hubGainRatio2', label: 'Hub spokes must save … ft of summed way-home per ft (0 = any)', type: 'number', min: 0, max: 20, step: 0.05, default: SWB_DEFAULTS.hubGainRatio },
+                { id: 'legGainRatio', label: 'Restored legs must save … ft per ft (0 = fix any long detour)', type: 'number', min: 0, max: 20, step: 0.5, default: SWB_DEFAULTS.legGainRatio },
+                { id: 'baseLegGainRatio', label: 'Direct base legs must save … ft per ft (0 = the base star)', type: 'number', min: 0, max: 20, step: 0.5, default: SWB_DEFAULTS.baseLegGainRatio },
+                { id: 'baseStarFt', label: 'Base star reach: a zone within … of a base gets a straight spoke home, threaded through pads in the way (0 = off)', type: 'number', min: 0, max: 20000, step: 500, default: SWB_DEFAULTS.baseStarFt, unit: 'ft' },
+                { id: 'baseStarGainPct', label: '… when it shortens that zone\'s way home by at least', type: 'number', min: 0, max: 50, step: 1, default: SWB_DEFAULTS.baseStarGainPct, unit: '%' },
+                { id: 'baseStarMaxCross', label: '… and its new pieces cross at most … existing legs', type: 'number', min: 0, max: 10, step: 1, default: SWB_DEFAULTS.baseStarMaxCross },
+                { id: 'approachFt', label: 'Minimum landing arc length', type: 'number', min: 25, max: 500, step: 5, default: SWB_DEFAULTS.approachFt, unit: 'ft' },
+                { id: 'notchFt', label: 'Fill inward notches in unioned zones up to', type: 'number', min: 0, max: 30, step: 1, default: SWB_DEFAULTS.notchFt, unit: 'ft' },
+                { id: 'mergeGapFt', label: 'Merge zones closer than', type: 'number', min: 0, max: 200, step: 5, default: SWB_DEFAULTS.mergeGapFt, unit: 'ft' },
+                { id: 'hubClearFt', label: 'Hub clearance from any zone edge', type: 'number', min: 0, max: 1000, step: 10, default: SWB_DEFAULTS.hubClearFt, unit: 'ft' },
+                { id: 'baseZoneFt', label: 'Base outside every zone → square base zone of this side', type: 'number', min: 40, max: 600, step: 10, default: SWB_DEFAULTS.baseZoneFt, unit: 'ft' },
+                { id: 'battery', label: 'Battery for the one-way distance gate', type: 'select', options: [ { value: 'tulip', label: 'Tulip' }, { value: 'tattu', label: 'Tattu' } ], default: SWB_DEFAULTS.battery },
+                { id: 'sampleFt', label: 'DEM sample spacing along legs', type: 'number', min: 10, max: 100, step: 5, default: SWB_DEFAULTS.sampleFt, unit: 'ft' },
+                { id: 'marginFt', label: 'DEM margin around the site', type: 'number', min: 100, max: 5280, step: 50, default: SWB_DEFAULTS.marginFt, unit: 'ft' },
+                { id: 'regroundPercepto', label: 'Commit: re-check every vertex against Percepto DEM (floors only rise)', type: 'boolean', default: SWB_DEFAULTS.regroundPercepto },
+                { id: 'entityPtsWarn', label: 'Commit: warn when one FP entity exceeds … points', type: 'number', min: 20, max: 1000, step: 10, default: SWB_DEFAULTS.entityPtsWarn },
+                { id: 'swb-open', label: 'Open SpiderWeb panel', type: 'button', action: 'swb-open' },
+                { id: 'swb-clear', label: 'Clear SpiderWeb preview', type: 'button', action: 'swb-clear' },
+            ],
+            hotkeys: [],
+        });
+        // v4.247: 📥 Asset Importer — own card (feature #249). CSV/KML region
+        // list → staged map points → circle/lasso subset → bulk-create as
+        // assets; inverse 🗑 delete mode rides Delete Guard.
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: IMP_SCRIPT_ID, name: 'Asset Importer',
+            description: 'Load a region CSV/KML, stage its points on the map, select a subset spatially (circle / lasso / pick) and bulk-create them as real assets — create-only, dry-run + backup + verify. 🗑 Delete mode spatially selects EXISTING assets for a heavily-confirmed bulk delete (rides Delete Guard).',
+            version: SCRIPT_VERSION, group: 'Asset Importer', scope: 'site-setup', priority: 35,
+            toggles: [
+                { id: 'imp-master', label: 'Enable Asset Importer', type: 'boolean', default: true, master: true },
+                { id: 'imp-dup-ft', label: 'Duplicate guard radius (staged point near an existing asset)', type: 'number', min: 0, max: 1000, step: 5, default: 50, unit: 'ft' },
+                { id: 'imp-size-ft', label: 'Created-asset square size', type: 'number', min: 5, max: 2000, step: 5, default: 30, unit: 'ft' },
+                { id: 'imp-open', label: '📥 Open Asset Importer', type: 'button', action: 'imp-open' },
+            ],
+            hotkeys: [],
+        });
+        // v4.297: 📌 GM Stamper — own card (feature #271). Template-driven
+        // General Marker placement: arm a template, click the map, a uniquely
+        // numbered GM of the right type/notes/height is created on the spot.
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: GMT_SCRIPT_ID, name: 'GM Stamper',
+            description: 'Place General Markers from saved templates (name pattern with #, marker type/icon, notes, height) with one map click each — the # becomes the next free number on the site. Create-only via the site-setup API; ↩ Undo deletes the last one (Delete Guard banks it). 📌 button in the map toolbar.',
+            version: SCRIPT_VERSION, group: 'GM Stamper', scope: 'site-setup', priority: 36,
+            toggles: [
+                { id: 'gmt-master', label: 'Enable GM Stamper', type: 'boolean', default: true, master: true },
+                { id: 'gmt-alt-gate', label: 'Require ALT+click to place (plain clicks stay free for Percepto)', type: 'boolean', default: false },
+                { id: 'gmt-open', label: '📌 Open GM Stamper', type: 'button', action: 'gmt-open' },
             ],
             hotkeys: [],
         });
@@ -12009,6 +16965,7 @@
             injectSumButton(win.document);
             injectGenMapButton(win.document);
             injectFfdMapButton(win.document);
+            injectGmtMapButton(win.document);
             const frames = win.document.querySelectorAll('iframe');
             frames.forEach(f => { if (f.contentWindow) recursiveSumInject(f.contentWindow); });
         } catch (e) {}
@@ -15375,6 +20332,3016 @@
     }
 
     // ============================================================
+    // ⬠ NFZ DRAW — polygon trace + one-click asset stamp NFZ builder (#243).
+    // Trace: ALT+click starts, click adds vertices (Ctrl = snap exactly onto
+    // the nearest asset's boundary — trace the shape, the buffer does the
+    // rest), dbl-click/Enter = finish. The finished ring auto-GROWS outward by
+    // `bufferFt`, then pads with extra uniform offset until the footprint is
+    // ≥ `minFt` on BOTH axes (RULE: an NFZ can never be smaller than
+    // minFt×minFt), then overhanging vertices are pulled ≥15 ft INSIDE the
+    // containing FFZ (server rejects NFZ vertices outside every Free Zone —
+    // proven live in Plan Import). Stamp: ALT+click inside an asset = instant
+    // NFZ from that asset's ring + buffer. Drafts render red, autosave
+    // per-site, commit CREATE-ONLY as type 4 via POST /map_objects/ with the
+    // terrain-builder rails (template clone, unique names, backup file,
+    // verify-by-refetch, undo-this-run). Deletes ride Delete Guard when installed.
+    // ============================================================
+    const NFZ_DRAFTS_LS = 'aim_nfz_drafts:';           // + siteID
+    const NFZ_PARAMS_KEY = 'aim_nfz_params';
+    const NFZ_DEFAULTS = { bufferFt: 25, minFt: 25 };
+    const NFZ_FFZ_INSET_FT = 15;                       // pull-inside margin = SOP NFZ↔FFZ separation
+    let nfzDraw = {
+        active: false, mode: 'trace',                  // 'trace' | 'stamp'
+        drawing: false, verts: [], tentative: null,
+        bufferFt: NFZ_DEFAULTS.bufferFt, minFt: NFZ_DEFAULTS.minFt,
+        drafts: [],                                    // [{name, src, points:[{lat,lng}]}]
+        lastCreated: [],                               // ids from the most recent commit (undo)
+        committed: [], committedSite: null,            // PLACEHOLDER shapes for NFZs committed this session (visible until reload)
+        committedLayers: [],                           // …their Leaflet layers (survive modal close, cleared on site change/reload)
+        narrowLayers: [], narrowOn: false,             // ⚠ Narrow-check overlay layers + toggle state
+        layers: [], _container: null, _onDown: null, _onMove: null, _onDbl: null, _onKey: null,
+    };
+    function nfzSaveParams() { try { GM_setValue(NFZ_PARAMS_KEY, JSON.stringify({ bufferFt: nfzDraw.bufferFt, minFt: nfzDraw.minFt })); } catch (e) {} }
+    function nfzLoadParams() {
+        try {
+            const raw = GM_getValue(NFZ_PARAMS_KEY, ''); if (!raw) return;
+            const o = JSON.parse(raw); if (!o) return;
+            if (typeof o.bufferFt === 'number' && o.bufferFt >= 0) nfzDraw.bufferFt = o.bufferFt;
+            if (typeof o.minFt === 'number' && o.minFt >= 0) nfzDraw.minFt = o.minFt;
+        } catch (e) {}
+    }
+    function nfzSaveDrafts() {
+        const sid = genState.siteID; if (!sid) return;
+        try {
+            const k = NFZ_DRAFTS_LS + sid;
+            if (nfzDraw.drafts.length) localStorage.setItem(k, JSON.stringify(nfzDraw.drafts.map(d => ({ name: d.name, src: d.src, points: d.points }))));
+            else localStorage.removeItem(k);
+        } catch (e) {}
+    }
+    function nfzLoadDrafts(siteID) {
+        // ALWAYS resets — a site with no saved drafts must not inherit another site's.
+        nfzDraw.drafts = [];
+        try {
+            const arr = JSON.parse(localStorage.getItem(NFZ_DRAFTS_LS + siteID) || 'null');
+            if (Array.isArray(arr)) nfzDraw.drafts = arr.filter(d => d && Array.isArray(d.points) && d.points.length >= 3);
+        } catch (e) {}
+        // committed placeholders are per-site + per-session; site change wipes them
+        if (nfzDraw.committedSite !== String(siteID)) {
+            nfzDraw.committed = [];
+            nfzDraw.committedSite = String(siteID);
+            try { nfzClearCommittedLayers(); } catch (e) {}
+        }
+        try { nfzClearNarrowLayers(); } catch (e) {}
+        try { nfzRenderCommitted(); } catch (e) {}
+    }
+    // Outward-offset a {lat,lng} ring by offM with WINDING-corrected normals.
+    // assetOffsetRing's "away from centroid" outward test is only right for
+    // convex rings (pads) — on a CONCAVE trace (L/U shapes) it flips the
+    // normal of notch edges and offsets them INWARD, distorting the shape
+    // ("doesn't make the shape exactly as I draw", live test 2026-08-20).
+    // Signed area fixes the direction for every edge regardless of concavity.
+    function nfzOffsetRing(ring, offM) {
+        if (!offM) return ring.slice();
+        const cen = ringCentroid(ring), proj = genProjector(cen.lat, cen.lng);
+        const m = ringMeters(ring, proj), n = m.length;
+        let sa = 0;
+        for (let i = 0; i < n; i++) { const a = m[i], b = m[(i + 1) % n]; sa += a.x * b.y - b.x * a.y; }
+        const ccw = sa > 0;
+        const segN = [];
+        for (let i = 0; i < n; i++) {
+            const A = m[i], B = m[(i + 1) % n];
+            const ex = B.x - A.x, ey = B.y - A.y; const L = Math.hypot(ex, ey) || 1;
+            segN.push(ccw ? { nx: ey / L, ny: -ex / L } : { nx: -ey / L, ny: ex / L });
+        }
+        const out = [];
+        for (let i = 0; i < n; i++) {
+            const nPrev = segN[(i - 1 + n) % n], nCur = segN[i];
+            const a0 = { x: m[i].x + nPrev.nx * offM, y: m[i].y + nPrev.ny * offM };
+            const a1 = { x: m[i].x + nCur.nx * offM, y: m[i].y + nCur.ny * offM };
+            const d0 = { x: m[i].x - m[(i - 1 + n) % n].x, y: m[i].y - m[(i - 1 + n) % n].y };
+            const d1 = { x: m[(i + 1) % n].x - m[i].x, y: m[(i + 1) % n].y - m[i].y };
+            const X = lineX(a0, d0, a1, d1);
+            out.push((X && Math.hypot(X.x - m[i].x, X.y - m[i].y) <= offM * 4) ? X : a1);
+        }
+        return out.map(q => proj.inv(q));
+    }
+    // Outward-offset a {lat,lng} ring by ft, mitered; clean any loops the
+    // offset created on concave rings.
+    function nfzGrowRing(ring, ft) {
+        if (!ft) return ring.slice();
+        return cleanSelfIntersections(nfzOffsetRing(ring, ft * GEN_FT_TO_M));
+    }
+    function nfzRingSizeM(ring) {
+        const cen = ringCentroid(ring), proj = genProjector(cen.lat, cen.lng);
+        const m = ringMeters(ring, proj);
+        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+        m.forEach(p => { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); });
+        return { w: x1 - x0, h: y1 - y0 };
+    }
+    // Pad by extra UNIFORM outward offset until the bbox is ≥ minFt on both
+    // axes — keeps the drawn proportions (no axis-stretch slivers).
+    function nfzEnforceMin(ring, minFt) {
+        const sz = nfzRingSizeM(ring);
+        const minM = minFt * GEN_FT_TO_M;
+        const extraM = Math.max(0, (minM - sz.w) / 2, (minM - sz.h) / 2);
+        if (extraM <= 0.01) return { ring, paddedFt: 0 };
+        return { ring: cleanSelfIntersections(nfzOffsetRing(ring, extraM)), paddedFt: Math.round(extraM / GEN_FT_TO_M * 10) / 10 };
+    }
+    // Server rule: every NFZ vertex must lie INSIDE a Free Zone. Pick the FFZ
+    // containing most of the ring; pull outside / too-close vertices to the
+    // nearest boundary point nudged NFZ_FFZ_INSET_FT inside (the proven Plan
+    // Import approach — convexity-immune, exact for small buffer overhangs).
+    function nfzClampToFfz(ring) {
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        const ffzRings = ents.filter(e => e.type === 16).map(e => entityCoords(e)).filter(r => r && r.length >= 3);
+        if (!ffzRings.length) return { ring, moved: 0, noFfz: true };
+        let best = null, bestIn = -1;
+        for (const fr of ffzRings) {
+            const nin = ring.filter(p => pointInPolygon(p.lat, p.lng, fr)).length;
+            if (nin > bestIn) { bestIn = nin; best = fr; }
+        }
+        const cen = ringCentroid(best), proj = genProjector(cen.lat, cen.lng);
+        const fm = ringMeters(best, proj);
+        const insetM = NFZ_FFZ_INSET_FT * GEN_FT_TO_M;
+        const distToEdge = (p) => {
+            let bd = Infinity;
+            for (let i = 0; i < fm.length; i++) {
+                const A = fm[i], B = fm[(i + 1) % fm.length];
+                const ax = B.x - A.x, ay = B.y - A.y; const L2 = ax * ax + ay * ay;
+                const t = L2 ? Math.max(0, Math.min(1, ((p.x - A.x) * ax + (p.y - A.y) * ay) / L2)) : 0;
+                bd = Math.min(bd, Math.hypot(p.x - A.x - t * ax, p.y - A.y - t * ay));
+            }
+            return bd;
+        };
+        const nearestInside = (p) => {
+            let bq = null, bd = Infinity, bn = null;
+            for (let i = 0; i < fm.length; i++) {
+                const A = fm[i], B = fm[(i + 1) % fm.length];
+                const ax = B.x - A.x, ay = B.y - A.y; const L2 = ax * ax + ay * ay;
+                const t = L2 ? Math.max(0, Math.min(1, ((p.x - A.x) * ax + (p.y - A.y) * ay) / L2)) : 0;
+                const q = { x: A.x + t * ax, y: A.y + t * ay };
+                const d = Math.hypot(p.x - q.x, p.y - q.y);
+                if (d < bd) { bd = d; bq = q; const L = Math.sqrt(L2) || 1; bn = { nx: -ay / L, ny: ax / L }; }
+            }
+            const c1 = proj.inv({ x: bq.x + bn.nx * insetM, y: bq.y + bn.ny * insetM });
+            const c2 = proj.inv({ x: bq.x - bn.nx * insetM, y: bq.y - bn.ny * insetM });
+            if (pointInPolygon(c1.lat, c1.lng, best)) return c1;
+            if (pointInPolygon(c2.lat, c2.lng, best)) return c2;
+            return proj.inv(bq);   // degenerate corner — leave on-boundary, user warned via moved count
+        };
+        let moved = 0;
+        const out = ring.map(p => {
+            const pm = proj.fwd(p);
+            if (pointInPolygon(p.lat, p.lng, best) && distToEdge(pm) >= insetM * 0.98) return p;
+            moved++;
+            return nearestInside(pm);
+        });
+        return { ring: out, moved, noFfz: false };
+    }
+    // Ctrl-snap for the trace: the asset's EXACT ring (corner <40 ft wins, else edge <120 ft).
+    function nfzSnapToAsset(cursor) {
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        let bestCorner = null, bestCornerD = Infinity, bestEdge = null, bestEdgeD = Infinity;
+        for (const a of ents) {
+            if (a.type !== 3) continue;
+            const ring = entityCoords(a);
+            if (!ring || ring.length < 3) continue;
+            for (const v of ring) { const d = approxMeters(cursor.lat, cursor.lng, v.lat, v.lng); if (d < bestCornerD) { bestCornerD = d; bestCorner = v; } }
+            const np = nearestPointOnRing(cursor, ring);
+            if (np && np.d < bestEdgeD) { bestEdgeD = np.d; bestEdge = np.pt; }
+        }
+        if (bestCorner && bestCornerD < 40 * GEN_FT_TO_M) return { lat: bestCorner.lat, lng: bestCorner.lng };
+        if (bestEdge && bestEdgeD < 120 * GEN_FT_TO_M) return { lat: bestEdge.lat, lng: bestEdge.lng };
+        return cursor;
+    }
+    function nfzAssetAt(ll) {
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        for (const a of ents) {
+            if (a.type !== 3) continue;
+            const ring = entityCoords(a);
+            if (ring && ring.length >= 3 && pointInPolygon(ll.lat, ll.lng, ring)) return a;
+        }
+        return null;
+    }
+    // grow → min-size pad → FFZ clamp → bowtie gate → draft. preGrown = the
+    // ring already includes the buffer (stamp path).
+    function nfzFinalize(ring, srcName, preGrown) {
+        try {
+            let r = preGrown ? cleanSelfIntersections(ring.slice()) : nfzGrowRing(ring, nfzDraw.bufferFt);
+            if (!r || r.length < 3) { showToast('NFZ: geometry collapsed — redraw', 'rgba(255,96,96,0.55)'); return; }
+            const mm = nfzEnforceMin(r, nfzDraw.minFt);
+            r = mm.ring;
+            const cl = nfzClampToFfz(r);
+            r = cl.ring;
+            if (!r || r.length < 3 || ringSelfIntersects(r)) { showToast('NFZ BLOCKED — self-intersecting after grow/clamp; redraw simpler', 'rgba(255,96,96,0.55)'); return; }
+            const name = genCleanName(`NFZ ${srcName || 'draw'} ${nfzDraw.drafts.length + 1}`) || `NFZ ${nfzDraw.drafts.length + 1}`;
+            nfzDraw.drafts.push({ name, src: srcName || null, points: r });
+            nfzSaveDrafts(); nfzRender(); nfzSyncUi();
+            const bits = [];
+            if (!preGrown) bits.push(`grown ${nfzDraw.bufferFt} ft`);
+            if (mm.paddedFt) bits.push(`padded +${mm.paddedFt} ft to meet the ${nfzDraw.minFt}×${nfzDraw.minFt} ft minimum`);
+            if (cl.moved) bits.push(`${cl.moved} vert(s) pulled inside the FFZ`);
+            if (cl.noFfz) bits.push('⚠ NO FFZ on this site — the server rejects NFZs outside a Free Zone');
+            // auto narrow-check the fresh draft — a notch under min gets painted yellow immediately
+            let narrowWarn = false;
+            try {
+                const res = nfzNarrowParts(r, nfzDraw.minFt);
+                if (res && (res.whole || res.parts.length)) {
+                    narrowWarn = true;
+                    bits.push(res.whole ? `⚠ ENTIRE zone narrower than ${nfzDraw.minFt} ft` : `⚠ ${res.parts.length} part(s) narrower than ${nfzDraw.minFt} ft (yellow)`);
+                    const L = getLeafletL(), map = getLeafletMap();
+                    if (L && map) nfzDrawNarrowOverlay({ name, ring: r }, res, L, map);
+                }
+            } catch (e) {}
+            showToast(`NFZ draft "${name}"${bits.length ? ' — ' + bits.join(' · ') : ''}`, (cl.noFfz || narrowWarn) ? 'rgba(255,179,71,0.6)' : undefined);
+        } catch (e) { console.warn(`${TAG} nfz finalize:`, e); showToast('NFZ finalize failed — see console', 'rgba(255,96,96,0.55)'); }
+    }
+    function nfzClearLayers() {
+        const map = getLeafletMap();
+        nfzDraw.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        nfzDraw.layers = [];
+    }
+    // --- Committed PLACEHOLDERS: Percepto only renders a new NFZ after a
+    // reload, so a successful commit draws each created NFZ as a solid red
+    // locked shape (like committed FFZs) until the page reloads. Survives
+    // modal close; cleared on site change (and naturally on reload).
+    function nfzClearCommittedLayers() {
+        const map = getLeafletMap();
+        nfzDraw.committedLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        nfzDraw.committedLayers = [];
+    }
+    function nfzRenderCommitted() {
+        const L = getLeafletL(), map = getLeafletMap();
+        if (!L || !map) return;
+        nfzClearCommittedLayers();
+        nfzDraw.committed.forEach(c => {
+            try {
+                const pl = L.polygon(c.points.map(p => [p.lat, p.lng]), { color: '#ff5555', weight: 3, opacity: 0.95, fillColor: '#ff5555', fillOpacity: 0.25, interactive: false });
+                pl.addTo(map); nfzDraw.committedLayers.push(pl);
+            } catch (e) {}
+        });
+    }
+    // --- ⚠ NARROW CHECK: find every part of an NFZ narrower than minFt — a
+    // notch/tab/neck sticking out that the bbox min-size check can't see.
+    // Morphological OPEN (erode by min/2 then dilate back, same complement
+    // trick as morphCloseRing); what the opened shape fails to cover is
+    // narrower than min. Returns {whole, parts} or null when the vendored
+    // polygon-clipping lib is unavailable.
+    function nfzNarrowParts(ringLL, minFt) {
+        const PC = (typeof polygonClipping !== 'undefined') ? polygonClipping : (typeof unsafeWindow !== 'undefined' && unsafeWindow.polygonClipping);
+        if (!PC || typeof PC.union !== 'function' || !Array.isArray(ringLL) || ringLL.length < 3) return null;
+        try {
+            // 0.98: a shape EXACTLY min-sized must survive erosion, not flag
+            const d = (minFt * GEN_FT_TO_M) / 2 * 0.98, proj = genProjector(ringLL[0].lat, ringLL[0].lng);
+            const ringXY = ringLL.map(p => { const m = proj.fwd(p); return [m.x, m.y]; });
+            const closed = ringXY.slice(); closed.push(ringXY[0]);
+            const P = [[closed]];
+            const dilateMP = (mp) => {
+                const parts = [mp];
+                for (const poly of mp) for (const ring of poly) { const n = ring.length; for (let i = 0; i < n - 1; i++) { const a = ring[i], b = ring[i + 1]; const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1, nx = -dy / L * d, ny = dx / L * d; const q = [[a[0] + nx, a[1] + ny], [b[0] + nx, b[1] + ny], [b[0] - nx, b[1] - ny], [a[0] - nx, a[1] - ny]]; q.push(q[0]); parts.push([q]); const s = [[a[0] + d, a[1] + d], [a[0] + d, a[1] - d], [a[0] - d, a[1] - d], [a[0] - d, a[1] + d]]; s.push(s[0]); parts.push([s]); } }
+                return PC.union(parts[0], ...parts.slice(1));
+            };
+            let mnx = 1e18, mny = 1e18, mxx = -1e18, mxy = -1e18;
+            for (const p of ringXY) { mnx = Math.min(mnx, p[0]); mny = Math.min(mny, p[1]); mxx = Math.max(mxx, p[0]); mxy = Math.max(mxy, p[1]); }
+            const mg = d * 4, Bc = [[mnx - mg, mny - mg], [mxx + mg, mny - mg], [mxx + mg, mxy + mg], [mnx - mg, mxy + mg]]; Bc.push(Bc[0]);
+            const eroded = PC.difference([Bc], dilateMP(PC.difference([Bc], P)));
+            if (!eroded || !eroded.length) return { whole: true, parts: [] };   // nothing survives erosion — the whole shape is under min
+            const opened = dilateMP(eroded);
+            const narrow = PC.difference(P, opened);
+            const areaXY = r => { let a = 0; for (let i = 0; i < r.length; i++) { const p = r[i], q = r[(i + 1) % r.length]; a += p[0] * q[1] - q[0] * p[1]; } return Math.abs(a) / 2; };
+            // ignore corner-rounding artifacts of the square structuring element
+            const floor = Math.max(1.5, 0.1 * Math.pow(minFt * GEN_FT_TO_M, 2));
+            const parts = [];
+            (narrow || []).forEach(poly => {
+                const outer = poly[0];
+                if (!outer || outer.length < 4 || areaXY(outer) < floor) return;
+                const r2 = outer.map(c => proj.inv({ x: c[0], y: c[1] }));
+                if (r2.length > 1) { const a = r2[0], b = r2[r2.length - 1]; if (a.lat === b.lat && a.lng === b.lng) r2.pop(); }
+                if (r2.length >= 3) parts.push(r2);
+            });
+            return { whole: false, parts };
+        } catch (e) { console.warn(`${TAG} nfz narrow check:`, e); return null; }
+    }
+    function nfzClearNarrowLayers() {
+        const map = getLeafletMap();
+        nfzDraw.narrowLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        nfzDraw.narrowLayers = [];
+        nfzDraw.narrowOn = false;
+        try { const b = document.getElementById('aim-nfz-narrow'); if (b) { b.style.background = 'rgba(255,212,0,0.12)'; b.textContent = '⚠ Narrow check'; } } catch (e) {}
+    }
+    function nfzDrawNarrowOverlay(t, res, L, map) {
+        if (res.whole) {
+            try { const pl = L.polygon(t.ring.map(p => [p.lat, p.lng]), { color: '#ffd400', weight: 3, opacity: 1, dashArray: '2,4', fillColor: '#ffd400', fillOpacity: 0.25, interactive: false }); pl.addTo(map); nfzDraw.narrowLayers.push(pl); } catch (e) {}
+            return;
+        }
+        res.parts.forEach(pr => {
+            try { const pl = L.polygon(pr.map(p => [p.lat, p.lng]), { color: '#ffd400', weight: 2, opacity: 1, fillColor: '#ffd400', fillOpacity: 0.45, interactive: false }); pl.addTo(map); nfzDraw.narrowLayers.push(pl); } catch (e) {}
+        });
+    }
+    // Scan drafts + this session's committed placeholders + the site's LIVE
+    // NFZs; paint every too-narrow part yellow.
+    function nfzNarrowScan() {
+        const L = getLeafletL(), map = getLeafletMap();
+        if (!L || !map) return;
+        nfzClearNarrowLayers();
+        nfzDraw.narrowOn = true;
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        const targets = [];
+        nfzDraw.drafts.forEach(d => targets.push({ name: d.name, ring: d.points }));
+        nfzDraw.committed.forEach(c => targets.push({ name: c.name, ring: c.points }));
+        ents.filter(e => e.type === 4).forEach(e => { const r = entityCoords(e); if (r && r.length >= 3) targets.push({ name: e.name, ring: r }); });
+        let flagged = 0, wholes = 0, noPc = false;
+        const names = [];
+        targets.forEach(t => {
+            const res = nfzNarrowParts(t.ring, nfzDraw.minFt);
+            if (!res) { noPc = true; return; }
+            if (res.whole || res.parts.length) { flagged++; if (res.whole) wholes++; names.push(t.name + (res.whole ? ' (WHOLE zone under min)' : '')); nfzDrawNarrowOverlay(t, res, L, map); }
+        });
+        const resEl = document.getElementById('aim-nfz-result');
+        const msg = noPc ? 'Narrow check unavailable — polygon-clipping lib not loaded'
+            : (flagged ? `⚠ ${flagged}/${targets.length} NFZ(s) have parts narrower than ${nfzDraw.minFt} ft (yellow)${wholes ? `, ${wholes} entirely under min` : ''}: ${names.join(' · ')}` : `✓ all ${targets.length} NFZ(s) (drafts + live) are ≥ ${nfzDraw.minFt} ft wide everywhere`);
+        try { if (resEl) resEl.textContent = msg; } catch (e) {}
+        console.log(`${TAG} nfz narrow scan: ${msg}`);
+        try { const b = document.getElementById('aim-nfz-narrow'); if (b) { b.style.background = 'rgba(255,212,0,0.32)'; b.textContent = `⚠ Narrow: ${noPc ? 'n/a' : flagged + ' flagged'} (click to clear)`; } } catch (e) {}
+    }
+    function nfzRender() {
+        const L = getLeafletL(), map = getLeafletMap();
+        if (!L || !map) return;
+        nfzClearLayers();
+        nfzDraw.drafts.forEach(d => {
+            try {
+                const pl = L.polygon(d.points.map(p => [p.lat, p.lng]), { color: '#ff5555', weight: 2.5, opacity: 0.95, dashArray: '6,4', fillColor: '#ff5555', fillOpacity: 0.15, interactive: false });
+                pl.addTo(map); nfzDraw.layers.push(pl);
+            } catch (e) {}
+        });
+        if (!nfzDraw.active || nfzDraw.mode !== 'trace' || !nfzDraw.verts.length) return;
+        const pts = nfzDraw.verts.slice();
+        if (nfzDraw.tentative) pts.push(nfzDraw.tentative);
+        try { const ln = L.polyline(pts.map(p => [p.lat, p.lng]), { color: '#ff5555', weight: 2, dashArray: '4,4', interactive: false }); ln.addTo(map); nfzDraw.layers.push(ln); } catch (e) {}
+        nfzDraw.verts.forEach(v => { try { const c = L.circleMarker([v.lat, v.lng], { radius: 4, color: '#fff', fillColor: '#ff5555', fillOpacity: 1, weight: 1, interactive: false }); c.addTo(map); nfzDraw.layers.push(c); } catch (e) {} });
+        // live preview of the GROWN outline so what commits is what you see
+        if (pts.length >= 3) {
+            try {
+                const grown = nfzGrowRing(pts, nfzDraw.bufferFt);
+                if (grown && grown.length >= 3) {
+                    const gp = L.polygon(grown.map(p => [p.lat, p.lng]), { color: '#ff5555', weight: 1.5, opacity: 0.6, fillColor: '#ff5555', fillOpacity: 0.08, interactive: false });
+                    gp.addTo(map); nfzDraw.layers.push(gp);
+                }
+            } catch (e) {}
+        }
+    }
+    function nfzFinishTrace() {
+        if (nfzDraw.verts.length < 3) { showToast('NFZ trace needs at least 3 points', 'rgba(255,179,71,0.6)'); return; }
+        const verts = nfzDraw.verts.slice();
+        nfzDraw.verts = []; nfzDraw.drawing = false; nfzDraw.tentative = null;
+        let src = null;   // nearest asset name, cosmetic only
+        try { const cen = ringCentroid(verts); const a = nfzAssetAt(cen); if (a) src = a.name; } catch (e) {}
+        nfzFinalize(verts, src, false);
+    }
+    function nfzWire() {
+        const map = getLeafletMap(); if (!map) return;
+        nfzUnwire();
+        nfzDraw._container = map.getContainer();
+        nfzDraw._onMove = (ev) => {
+            if (!nfzDraw.active || nfzDraw.mode !== 'trace' || !nfzDraw.drawing) return;
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            nfzDraw.tentative = ev.ctrlKey ? nfzSnapToAsset(ll) : ll;
+            nfzRender();
+        };
+        nfzDraw._onDown = (ev) => {
+            if (!nfzDraw.active || ev.button !== 0) return;
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            if (nfzDraw.mode === 'stamp') {
+                if (!ev.altKey) return;                    // plain click stays free (pan / edit)
+                ev.preventDefault(); ev.stopPropagation();
+                const a = nfzAssetAt(ll);
+                if (!a) { showToast('⚡ Stamp: ALT+click INSIDE an asset polygon', 'rgba(255,179,71,0.6)'); return; }
+                const ring = entityCoords(a);
+                if (!ring || ring.length < 3) { showToast('Asset has no usable polygon', 'rgba(255,96,96,0.55)'); return; }
+                nfzFinalize(cleanSelfIntersections(nfzOffsetRing(ring, nfzDraw.bufferFt * GEN_FT_TO_M)), a.name, true);
+                return;
+            }
+            const drawingNow = nfzDraw.drawing && nfzDraw.verts.length > 0;
+            if (!drawingNow && !ev.altKey) return;         // ALT starts a new trace; plain m1 stays free
+            ev.preventDefault(); ev.stopPropagation();
+            nfzDraw.drawing = true;
+            nfzDraw.verts.push(ev.ctrlKey ? nfzSnapToAsset(ll) : ll);
+            nfzDraw.tentative = null;
+            nfzRender();
+        };
+        nfzDraw._onDbl = (ev) => {
+            if (!nfzDraw.active || nfzDraw.mode !== 'trace' || !nfzDraw.drawing) return;
+            ev.preventDefault(); ev.stopPropagation();
+            nfzFinishTrace();
+        };
+        nfzDraw._onKey = (ev) => {
+            if (!nfzDraw.active) return;
+            const k = (ev.key || '').toLowerCase();
+            if (k === 'escape') {
+                ev.preventDefault(); ev.stopImmediatePropagation();
+                const t = ev.target; if (t && t.blur) { try { t.blur(); } catch (e) {} }
+                if (nfzDraw.mode === 'trace' && nfzDraw.verts.length) {
+                    nfzDraw.verts.pop();
+                    nfzDraw.drawing = nfzDraw.verts.length > 0;
+                    nfzRender();
+                } else setNfzMode(null);
+                return;
+            }
+            const t = ev.target;
+            const inField = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+            if (inField) return;
+            if (k === 'enter' && nfzDraw.mode === 'trace' && nfzDraw.drawing) { ev.preventDefault(); ev.stopImmediatePropagation(); nfzFinishTrace(); }
+        };
+        nfzDraw._container.addEventListener('mousedown', nfzDraw._onDown, true);
+        nfzDraw._container.addEventListener('mousemove', nfzDraw._onMove, true);
+        nfzDraw._container.addEventListener('dblclick', nfzDraw._onDbl, true);
+        try { uwin().addEventListener('keydown', nfzDraw._onKey, true); } catch (e) {}
+        try { map.doubleClickZoom.disable(); } catch (e) {}
+        try { map.getContainer().style.cursor = 'crosshair'; } catch (e) {}
+    }
+    function nfzUnwire() {
+        const c = nfzDraw._container;
+        if (c) {
+            try { c.removeEventListener('mousedown', nfzDraw._onDown, true); } catch (e) {}
+            try { c.removeEventListener('mousemove', nfzDraw._onMove, true); } catch (e) {}
+            try { c.removeEventListener('dblclick', nfzDraw._onDbl, true); } catch (e) {}
+        }
+        try { uwin().removeEventListener('keydown', nfzDraw._onKey, true); } catch (e) {}
+        const map = getLeafletMap();
+        // restore dbl-click zoom / cursor only if Adv Draw isn't also armed
+        if (map && !advDraw.active) { try { map.doubleClickZoom.enable(); } catch (e) {} try { map.getContainer().style.cursor = ''; } catch (e) {} }
+        nfzDraw._container = null;
+    }
+    function setNfzMode(mode) {
+        nfzDraw.active = !!mode;
+        if (mode) nfzDraw.mode = mode;
+        if (nfzDraw.active) {
+            try { if (advDraw.active) setAdvDraw(false); } catch (e) {}   // mutually exclusive
+            try { if (imp.mode) impSetMode(null); } catch (e) {}          // …and with the importer's select tools
+            try { if (gmt.armed) gmtArm(false); } catch (e) {}            // …and with the 📌 GM Stamper
+            try { if (genDraw.active) { const b = document.getElementById('aim-gen-draw'); if (b) b.click(); } } catch (e) {}
+            nfzWire();
+        } else {
+            nfzDraw.drawing = false; nfzDraw.verts = []; nfzDraw.tentative = null;
+            nfzUnwire();
+        }
+        nfzRender(); nfzSyncUi();
+    }
+    function nfzSyncUi() {
+        try {
+            const bt = document.getElementById('aim-gen-nfztrace');
+            if (bt) { const on = nfzDraw.active && nfzDraw.mode === 'trace'; bt.style.background = on ? 'rgba(255,85,85,0.32)' : 'rgba(255,85,85,0.12)'; bt.textContent = on ? '⬠ NFZ Trace ON — ALT+click starts · click adds · Ctrl=snap to asset edge · dbl-click/Enter=finish · Esc=undo/off' : '⬠ NFZ Trace'; }
+            const bs = document.getElementById('aim-gen-nfzstamp');
+            if (bs) { const on = nfzDraw.active && nfzDraw.mode === 'stamp'; bs.style.background = on ? 'rgba(255,85,85,0.32)' : 'rgba(255,85,85,0.12)'; bs.textContent = on ? '⚡ NFZ Stamp ON — ALT+click inside an asset · Esc=off' : '⚡ NFZ Stamp'; }
+            const c = document.getElementById('aim-nfz-controls');
+            if (c) c.style.display = (nfzDraw.active || nfzDraw.drafts.length) ? 'block' : 'none';
+            const cnt = document.getElementById('aim-nfz-count');
+            if (cnt) cnt.textContent = String(nfzDraw.drafts.length);
+        } catch (e) {}
+    }
+    // CREATE-ONLY commit — never touches an existing NFZ. Terrain-builder rails.
+    async function nfzCommit() {
+        if (liteBlockedWrite('create NFZs')) return;
+        const sid = genState.siteID;
+        if (!sid || String(sid) !== String(getCurrentSiteID())) { showToast('Site changed — reopen the generator', 'rgba(255,96,96,0.55)'); return; }
+        if (!nfzDraw.drafts.length) { showToast('No NFZ drafts', 'rgba(255,96,96,0.55)'); return; }
+        const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
+        const resEl = document.getElementById('aim-nfz-result');
+        const logL = (m) => { try { if (resEl) resEl.textContent = m; } catch (e) {} console.log(`${TAG} nfz: ${m}`); };
+        const bad = nfzDraw.drafts.filter(d => ringSelfIntersects(d.points));
+        if (bad.length) { logL(`BLOCKED — ${bad.length} self-intersecting draft(s): ${bad.map(d => d.name).join(', ')}`); return; }
+        if (dry) { logL(`DRY RUN — would create ${nfzDraw.drafts.length} NFZ(s): ${nfzDraw.drafts.map(d => d.name).join(' · ')}. Untick Dry run to write.`); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { showToast('No CSRF token — make one native save anywhere in Percepto first, then retry', 'rgba(255,96,96,0.55)'); return; }
+        let siteCfg = null; try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        const tmplNfz = ents.find(e => e.type === 4 && entityCoords(e));
+        let tmplBody = null;
+        if (tmplNfz) { try { tmplBody = buildWriteBody(tmplNfz, siteCfg); } catch (e) {} }
+        const used = new Set(ents.filter(e => e.type === 4 && e.name).map(e => e.name));
+        const uniq = (base) => { base = genCleanName(base) || 'NFZ'; if (!used.has(base)) { used.add(base); return base; } let i = 2, n2; do { n2 = `${base}_${i++}`; } while (used.has(n2)); used.add(n2); return n2; };
+        const writes = nfzDraw.drafts.map(d => {
+            let b;
+            if (tmplBody) { b = JSON.parse(JSON.stringify(tmplBody)); delete b.id; }
+            else b = { type: 4, description: '', custom: {}, params: {}, asset_waypoints: null, constantly_present_asset_name: false, general_marker_type: '', marker_height: 0, is_unshielded: false, restrictions: [] };
+            b.type = 4; b.name = uniq(d.name); b.description = 'AIM NFZ draw';
+            b.site_id = sid; b.points = d.points; b.validated = false; b.arcs = [];
+            b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
+            return { draft: d, body: b };
+        });
+        const backup = { site: sid, at: new Date().toISOString(), nfzs: writes.map(w => w.body) };
+        try { localStorage.setItem(`aim_nfz_commit_backup:${sid}`, JSON.stringify(backup)); } catch (e) {}
+        try { downloadJSONFile(`nfz-draw-${sid}-${Date.now()}.json`, JSON.stringify(backup, null, 1)); } catch (e) { logL('backup download failed (localStorage stash still written)'); }
+        let ok = 0, fail = 0; const created = []; const failedDrafts = [];
+        for (const w of writes) {
+            try {
+                const r = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(w.body) });
+                const txt = await r.text(); let json = null; try { json = JSON.parse(txt); } catch (e) {}
+                const saved = json && json.map_objects;
+                if (r.status === 403) throw Object.assign(new Error('403 — write permission lost, ABORTING'), { fatal: true });
+                if (r.status === 200 && saved && saved.id != null) { ok++; created.push({ id: saved.id, name: w.body.name, points: w.draft.points }); logL(`✓ ${ok + fail}/${writes.length} "${w.body.name}" → #${saved.id}`); }
+                else throw new Error(`server ${r.status} ${(txt || '').slice(0, 120)}`);
+            } catch (e) {
+                fail++; failedDrafts.push(w.draft);
+                console.warn(`${TAG} nfz create "${w.body.name}":`, e.message);
+                if (e.fatal) break;
+            }
+        }
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        const after = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        const byId = new Set(after.map(e => e.id));
+        const verified = created.filter(c => byId.has(c.id));
+        nfzDraw.lastCreated = verified.map(c => c.id);
+        nfzDraw.drafts = (fail === 0 && verified.length === created.length) ? [] : failedDrafts;  // failed drafts stay retryable
+        // PLACEHOLDERS: keep every verified create visible as a solid red
+        // locked shape until reload (Percepto won't render it until then).
+        nfzDraw.committedSite = String(sid);
+        verified.forEach(c => nfzDraw.committed.push({ id: c.id, name: c.name, points: c.points }));
+        nfzRenderCommitted();
+        nfzSaveDrafts(); nfzRender(); nfzSyncUi();
+        logL(`DONE: ${ok}/${writes.length} NFZ(s) created${fail ? `, ${fail} FAILED (kept as drafts)` : ''} · verify ${verified.length}/${created.length} present · refresh to see them natively`);
+        showToast(fail ? `NFZ commit: ${ok} ok, ${fail} FAILED — see the NFZ panel` : `✓ ${ok} NFZ(s) created`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+    }
+    // Undo THIS RUN: delete exactly the ids the last commit created.
+    async function nfzUndoLast() {
+        if (liteBlockedWrite('delete NFZs (undo)')) return;
+        if (!nfzDraw.lastCreated.length) { showToast('Nothing to undo (only the most recent commit this session)', 'rgba(255,96,96,0.55)'); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { showToast('No CSRF token', 'rgba(255,96,96,0.55)'); return; }
+        if (!confirm(`Delete the ${nfzDraw.lastCreated.length} NFZ(s) created by the last commit? (Delete Guard banks each when installed)`)) return;
+        let ok = 0, fail = 0;
+        const deleted = new Set();
+        for (const id of nfzDraw.lastCreated) {
+            try {
+                const r = await fetch(`/map_objects/${id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf } });
+                if (r.ok) { ok++; deleted.add(id); } else { fail++; console.warn(`${TAG} nfz undo #${id}: server ${r.status}`); }
+            } catch (e) { fail++; console.warn(`${TAG} nfz undo #${id}:`, e.message); }
+        }
+        nfzDraw.lastCreated = nfzDraw.lastCreated.filter(id => !deleted.has(id));
+        // drop the placeholders of everything actually deleted
+        nfzDraw.committed = nfzDraw.committed.filter(c => !deleted.has(c.id));
+        nfzRenderCommitted();
+        showToast(fail ? `Undo: ${ok} deleted, ${fail} FAILED` : `↩ ${ok} NFZ(s) deleted`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+    }
+
+    // ============================================================
+    // 📥 ASSET IMPORTER (#249) — CSV/KML region list → staged preview points
+    // on the map → spatial selection (⭕ circle / 🖊 freehand lasso / ☝ pick)
+    // → bulk-CREATE the selected subset as real type-3 assets via the
+    // createAssetSquare rail (dry-run, backup manifest, verify-by-refetch,
+    // Lite gate, unique names, 120 ms gap). Inverse 🗑 Delete mode: same
+    // spatial selection over EXISTING assets → ack + slide-and-HOLD-5s
+    // ceremony → DELETE /map_objects/ (rides Delete Guard's 24h undo ring;
+    // refuses by default when Delete Guard isn't detected) + ↩ Undo batch
+    // (re-creates from our own pre-delete bank; NEW ids). Staged points are
+    // NEVER written until Commit; parse + selection are fully local.
+    // ============================================================
+    const IMP_PARAMS_KEY = 'aim_imp_params';        // GM: {radiusVal, radiusUnit, includeDups}
+    const IMP_MAPPINGS_KEY = 'aim_imp_mappings';    // GM: {headerSig: {name,lat,lng,type}} — vendor CSV remembers its mapping
+    const IMP_TYPEMAP_KEY = 'aim_imp_typemap';      // GM: {csvTypeValueLower: percepto subtype} — global dictionary
+    const IMP_DEL_MODAL_ID = 'aim-imp-del-modal';
+    const IMP_PICK_PX = 14;                         // ☝ pick hit radius (container px)
+    const IMP_MAX_RENDER = 4000;                    // staged markers drawn per viewport (perf cap, surfaced when hit)
+    let imp = {
+        siteID: null,
+        fileName: null, headers: [], rows: [],
+        mapping: null,                              // {name, lat, lng, type|null} — header names
+        points: [],                                 // [{i, name, lat, lng, typeRaw, sel, dup, dupWhy, done}]
+        invalid: 0,
+        typeMap: {},                                // loaded from GM at wire time
+        target: 'staged',                           // 'staged' | 'assets' (🗑 delete mode)
+        mode: null,                                 // null | 'circle' | 'lasso' | 'pick'
+        radiusVal: 0.5, radiusUnit: 'mi', includeDups: false,
+        // LIVE selection model (v4.250): selected = manual override ?? inside-any-shape.
+        // Shapes are movable, so membership RECOMPUTES (impRecomputeSel) instead of
+        // being stamped once. Manual picks (selManual / assetManual) are sticky —
+        // they survive shape moves and shape removal.
+        shapes: [],                                 // [{id, kind:'circle',center,radiusM} | {id, kind:'lasso',ring,handle,name?}]
+        shapeSeq: 1,
+        dragShape: null, dragLast: null,            // ALT+drag on a shape's numbered handle moves it
+        editDrag: null,                             // ✎ Edit: {s, i} vertex drag | {s, radius:true} circle resize
+        assetSel: new Set(),                        // DERIVED: selected EXISTING asset ids (delete mode)
+        assetManual: new Map(),                     // asset id → true/false manual override
+        renderer: null, layers: [], shapeLayers: [], assetLayers: [], lassoLayer: null,
+        _container: null, _onDown: null, _onMove: null, _onUp: null, _onKey: null, _onMoveEnd: null,
+        lassoRing: null, lassoDownPt: null,
+        lastCreated: [],                            // ids from the most recent import commit (↩ undo = delete them)
+        lastDelete: null,                           // {siteID, when, entities:[full bodies]} — ↩ Undo batch source
+        assetIndex: null,                           // cached [{id,name,clean,ring,bbox,centroid}] for dup-guard + delete select
+    };
+    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups })); } catch (e) {} }
+    function impLoadParams() {
+        try {
+            const raw = GM_getValue(IMP_PARAMS_KEY, ''); if (!raw) return;
+            const o = JSON.parse(raw); if (!o) return;
+            if (typeof o.radiusVal === 'number' && o.radiusVal > 0) imp.radiusVal = o.radiusVal;
+            if (o.radiusUnit === 'mi' || o.radiusUnit === 'ft') imp.radiusUnit = o.radiusUnit;
+            if (typeof o.includeDups === 'boolean') imp.includeDups = o.includeDups;
+        } catch (e) {}
+    }
+    function impLoadTypeMap() { try { imp.typeMap = JSON.parse(GM_getValue(IMP_TYPEMAP_KEY, '{}')) || {}; } catch (e) { imp.typeMap = {}; } }
+    function impSaveTypeMap() { try { GM_setValue(IMP_TYPEMAP_KEY, JSON.stringify(imp.typeMap)); } catch (e) {} }
+    function impEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+    function impStatus(msg, color) {
+        try { const el = document.getElementById('aim-imp-result'); if (el) { el.innerHTML = `<span style="color:${color || '#9ad'}">${msg}</span>`; } } catch (e) {}
+        console.log(`${TAG} 📥 ${String(msg).replace(/<[^>]*>/g, '')}`);
+    }
+    function impRadiusM() {
+        const v = Number(imp.radiusVal);
+        if (!isFinite(v) || v <= 0) return 0;
+        return imp.radiusUnit === 'mi' ? v * MI_TO_M : v * GEN_FT_TO_M;
+    }
+    // ---- CSV parse (RFC4180-ish: quoted fields, embedded commas/quotes/newlines;
+    // delimiter auto-detected among , ; \t from the header line) ----
+    function impParseCsv(text) {
+        text = String(text || '').replace(/^\uFEFF/, '');
+        const firstLine = text.slice(0, text.indexOf('\n') < 0 ? text.length : text.indexOf('\n'));
+        let delim = ',', best = -1;
+        [',', ';', '\t'].forEach(d => { const n = firstLine.split(d).length; if (n > best) { best = n; delim = d; } });
+        const rows = []; let field = '', row = [], inQ = false;
+        for (let i = 0; i < text.length; i++) {
+            const c = text[i];
+            if (inQ) {
+                if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQ = false; }
+                else field += c;
+            } else if (c === '"') inQ = true;
+            else if (c === delim) { row.push(field); field = ''; }
+            else if (c === '\n' || c === '\r') {
+                if (c === '\r' && text[i + 1] === '\n') i++;
+                row.push(field); field = '';
+                if (row.length > 1 || (row.length === 1 && row[0].trim() !== '')) rows.push(row);
+                row = [];
+            } else field += c;
+        }
+        row.push(field);
+        if (row.length > 1 || (row.length === 1 && row[0].trim() !== '')) rows.push(row);
+        if (!rows.length) return { headers: [], rows: [] };
+        const headers = rows[0].map(h => String(h || '').trim());
+        const out = rows.slice(1).map(r => { const o = {}; headers.forEach((h, i) => { o[h] = (r[i] == null ? '' : String(r[i])).trim(); }); return o; });
+        return { headers, rows: out };
+    }
+    // ---- KML parse: Placemark > Point > coordinates ("lng,lat[,alt]").
+    // name + ExtendedData (Data/value + SchemaData/SimpleData) become columns.
+    function impParseKml(text) {
+        const doc = new DOMParser().parseFromString(String(text || ''), 'text/xml');
+        if (doc.querySelector('parsererror')) throw new Error('KML parse error — file is not valid XML');
+        const headerSet = new Set(['name', 'lat', 'lng']);
+        const rows = [];
+        doc.querySelectorAll('Placemark').forEach(pm => {
+            const coordEl = pm.querySelector('Point > coordinates');
+            if (!coordEl) return;                                          // lines/polygons: not import targets
+            const parts = String(coordEl.textContent || '').trim().split(/[,\s]+/);
+            const lng = parseFloat(parts[0]), lat = parseFloat(parts[1]);
+            if (!isFinite(lat) || !isFinite(lng)) return;
+            const o = { lat: String(lat), lng: String(lng) };
+            const nmEl = pm.querySelector(':scope > name');
+            o.name = nmEl ? String(nmEl.textContent || '').trim() : '';
+            pm.querySelectorAll('ExtendedData Data').forEach(d => {
+                const k = d.getAttribute('name'); if (!k) return;
+                const v = d.querySelector('value');
+                o[k] = v ? String(v.textContent || '').trim() : '';
+                headerSet.add(k);
+            });
+            pm.querySelectorAll('ExtendedData SimpleData').forEach(d => {
+                const k = d.getAttribute('name'); if (!k) return;
+                o[k] = String(d.textContent || '').trim();
+                headerSet.add(k);
+            });
+            rows.push(o);
+        });
+        return { headers: [...headerSet], rows };
+    }
+    // ---- column mapping: remembered per header-signature, else auto-guessed ----
+    function impHeaderSig(headers) { return headers.map(h => String(h).toLowerCase()).join('|'); }
+    function impGuessMapping(headers) {
+        const lower = headers.map(h => String(h).toLowerCase());
+        const find = (cands, rx) => {
+            for (const c of cands) { const i = lower.indexOf(c); if (i >= 0) return headers[i]; }
+            if (rx) { const i = lower.findIndex(h => rx.test(h)); if (i >= 0) return headers[i]; }
+            return null;
+        };
+        return {
+            lat: find(['latitude', 'lat', 'y'], /lat/),
+            lng: find(['longitude', 'lon', 'lng', 'long', 'x'], /lon|lng/),
+            name: find(['name', 'pad_name', 'well name', 'asset name', 'asset', 'title', 'label'], /name/),
+            type: find(['type', 'pad_type', 'category', 'profiletype', 'v or h', 'designation', 'subtype', 'class'], /type/),
+        };
+    }
+    function impStoredMapping(headers) {
+        try {
+            const all = JSON.parse(GM_getValue(IMP_MAPPINGS_KEY, '{}')) || {};
+            const m = all[impHeaderSig(headers)];
+            if (m && headers.includes(m.lat) && headers.includes(m.lng)) return m;
+        } catch (e) {}
+        return null;
+    }
+    function impStoreMapping(headers, mapping) {
+        try {
+            const all = JSON.parse(GM_getValue(IMP_MAPPINGS_KEY, '{}')) || {};
+            all[impHeaderSig(headers)] = mapping;
+            GM_setValue(IMP_MAPPINGS_KEY, JSON.stringify(all));
+        } catch (e) {}
+    }
+    function impHandleFile(file) {
+        if (!file) return;
+        const rd = new FileReader();
+        rd.onload = () => {
+            try {
+                const text = String(rd.result || '');
+                const isKml = /\.kml$/i.test(file.name) || /<kml[\s>]/i.test(text.slice(0, 2000));
+                const parsed = isKml ? impParseKml(text) : impParseCsv(text);
+                let kmlShapes = [];
+                if (isKml) { try { kmlShapes = impParseKmlShapes(text); } catch (e) {} }
+                if (!parsed.rows.length) {
+                    // polygon-only KML = an access SHAPE, not a data file — route it
+                    if (kmlShapes.length) { impApplyShapeRings(kmlShapes, file.name); return; }
+                    impStatus(`"${impEsc(file.name)}" — no data rows found`, '#ff6060'); return;
+                }
+                imp.fileName = file.name;
+                imp.headers = parsed.headers;
+                imp.rows = parsed.rows;
+                imp.siteID = genState.siteID;
+                imp.points = []; imp.shapes = []; imp.assetSel.clear(); imp.invalid = 0;
+                imp.mapping = impStoredMapping(parsed.headers) || (isKml
+                    ? { name: 'name', lat: 'lat', lng: 'lng', type: impGuessMapping(parsed.headers).type }
+                    : impGuessMapping(parsed.headers));
+                impClearLayers(); impClearShapeLayers(); impClearAssetLayers();
+                impRenderMappingUi();
+                impStatus(`Loaded <b>${impEsc(file.name)}</b> — ${imp.rows.length} row(s). Confirm the column mapping, then ✓ Apply.`
+                    + (kmlShapes.length ? ` <span style="color:#ffb347">(file also carries ${kmlShapes.length} polygon(s) — load it again via ⬆ Shape to use them as the access shape)</span>` : ''));
+                impSyncUi();
+            } catch (e) {
+                console.warn(`${TAG} 📥 file parse:`, e);
+                impStatus(`Parse failed: ${impEsc(e && e.message || e)}`, '#ff6060');
+            }
+        };
+        rd.onerror = () => impStatus('File read failed', '#ff6060');
+        rd.readAsText(file);
+    }
+    // ---- staged points from rows + mapping ----
+    function impBuildPoints() {
+        const m = imp.mapping;
+        if (!m || !m.lat || !m.lng) { impStatus('Pick the Latitude and Longitude columns first', '#ff6060'); return; }
+        // a type column that is entirely empty is treated as "no type column"
+        if (m.type && !imp.rows.some(r => (r[m.type] || '').trim() !== '')) m.type = null;
+        imp.points = []; imp.invalid = 0;
+        imp.rows.forEach((r, i) => {
+            const lat = parseFloat(r[m.lat]), lng = parseFloat(r[m.lng]);
+            if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) { imp.invalid++; return; }
+            const name = m.name ? (r[m.name] || '').trim() : '';
+            imp.points.push({ i, name: name || `Import ${i + 1}`, lat, lng, typeRaw: m.type ? (r[m.type] || '').trim() : '', sel: false, dup: false, dupWhy: '', done: false });
+        });
+        impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type });
+        impBuildAssetIndex();
+        impComputeDups();
+        impRecomputeSel();          // shapes placed before the data still apply
+        impRenderStaged();
+        impRenderTypeMapUi();
+        const dupN = imp.points.filter(p => p.dup).length;
+        impStatus(`Staged <b>${imp.points.length}</b> point(s)`
+            + (imp.invalid ? ` · <span style="color:#ffb347">${imp.invalid} row(s) skipped (bad/missing coordinates)</span>` : '')
+            + (dupN ? ` · <span style="color:#ffd400">${dupN} flagged as likely duplicates</span>` : '')
+            + ' — ⭕/🖊 select a subset, then Create.');
+        impSyncUi();
+    }
+    // ---- duplicate guard vs EXISTING site assets (name OR proximity) ----
+    function impBuildAssetIndex() {
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        imp.assetIndex = ents.filter(e => e.type === 3).map(e => {
+            const ring = entityCoords(e);
+            if (!ring || ring.length < 3) return null;
+            let la0 = Infinity, lo0 = Infinity, la1 = -Infinity, lo1 = -Infinity;
+            ring.forEach(p => { la0 = Math.min(la0, p.lat); lo0 = Math.min(lo0, p.lng); la1 = Math.max(la1, p.lat); lo1 = Math.max(lo1, p.lng); });
+            return { id: e.id, name: e.name || '', clean: (genCleanName(e.name || '') || '').toLowerCase(), subtype: (e.custom && e.custom.poi_type_str) ? String(e.custom.poi_type_str).trim() : '', ring, bbox: { la0, lo0, la1, lo1 }, centroid: ringCentroid(ring) };
+        }).filter(Boolean);
+    }
+    function impComputeDups() {
+        if (!imp.assetIndex) impBuildAssetIndex();
+        const dupM = Math.max(0, impDupFt) * GEN_FT_TO_M;
+        const dLat = (dupM / 111320) * 1.05;
+        const byName = new Map();
+        imp.assetIndex.forEach(a => { if (a.clean) byName.set(a.clean, a); });
+        imp.points.forEach(p => {
+            p.dup = false; p.dupWhy = '';
+            const clean = (genCleanName(p.name) || '').toLowerCase();
+            const nm = clean && byName.get(clean);
+            if (nm) { p.dup = true; p.dupWhy = `name matches existing asset "${nm.name}"`; return; }
+            if (!dupM) return;
+            const dLng = dLat / Math.max(0.2, Math.cos(p.lat * Math.PI / 180));
+            for (const a of imp.assetIndex) {
+                if (p.lat < a.bbox.la0 - dLat || p.lat > a.bbox.la1 + dLat || p.lng < a.bbox.lo0 - dLng || p.lng > a.bbox.lo1 + dLng) continue;
+                const d = pointToPolygonMeters(p.lat, p.lng, a.ring);
+                if (d <= dupM) { p.dup = true; p.dupWhy = `${Math.round(d * M_TO_FT)} ft from existing asset "${a.name}" (guard ${impDupFt} ft)`; break; }
+            }
+        });
+    }
+    // ---- staged rendering: one shared canvas renderer, viewport-culled ----
+    function impClearLayers() {
+        const map = getLeafletMap();
+        imp.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        imp.layers = [];
+    }
+    function impClearShapeLayers() {
+        const map = getLeafletMap();
+        imp.shapeLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        imp.shapeLayers = [];
+        if (imp.lassoLayer) { try { if (map) map.removeLayer(imp.lassoLayer); } catch (e) {} imp.lassoLayer = null; }
+    }
+    function impClearAssetLayers() {
+        const map = getLeafletMap();
+        imp.assetLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        imp.assetLayers = [];
+    }
+    function impRenderStaged() {
+        const L = getLeafletL(), map = getLeafletMap();
+        if (!L || !map) return;
+        impClearLayers();
+        const live = imp.points.filter(p => !p.done);
+        if (!live.length) { impEnsureMoveEnd(false); return; }
+        impEnsureMoveEnd(true);
+        if (!imp.renderer) { try { imp.renderer = L.canvas({ padding: 0.3 }); } catch (e) { imp.renderer = null; } }
+        // Tight cull: only what's actually in view (+small pan margin) is
+        // drawn — a 10k-row region list never renders 10k markers. Markers
+        // deliberately TINY (selected slightly larger so state still reads).
+        let bounds = null; try { bounds = map.getBounds().pad(0.08); } catch (e) {}
+        let drawn = 0, culled = 0;
+        for (const p of live) {
+            if (bounds && !bounds.contains([p.lat, p.lng])) { culled++; continue; }
+            if (drawn >= IMP_MAX_RENDER) { culled++; continue; }
+            try {
+                const opts = {
+                    radius: p.sel ? 4 : 2.2,
+                    color: p.dup ? '#ff3b3b' : '#ffffff',
+                    weight: p.dup ? 1.5 : 0.6,
+                    fillColor: p.sel ? '#5fff5f' : '#ff9d00',
+                    fillOpacity: 0.9, opacity: 0.9, interactive: false,
+                };
+                if (imp.renderer) opts.renderer = imp.renderer;
+                const c = L.circleMarker([p.lat, p.lng], opts);
+                c.addTo(map); imp.layers.push(c); drawn++;
+            } catch (e) {}
+        }
+        const capEl = document.getElementById('aim-imp-render-note');
+        if (capEl) capEl.textContent = culled ? `${drawn} of ${live.length} staged points drawn in this view (${culled} off-screen / over the ${IMP_MAX_RENDER} render cap — zoom/pan to see them)` : '';
+    }
+    function impEnsureMoveEnd(on) {
+        const map = getLeafletMap(); if (!map) return;
+        if (on && !imp._onMoveEnd) {
+            imp._onMoveEnd = () => { try { impRenderStaged(); } catch (e) {} };
+            try { map.on('moveend', imp._onMoveEnd); } catch (e) { imp._onMoveEnd = null; }
+        } else if (!on && imp._onMoveEnd) {
+            try { map.off('moveend', imp._onMoveEnd); } catch (e) {}
+            imp._onMoveEnd = null;
+        }
+    }
+    function impRenderShapes() {
+        const L = getLeafletL(), map = getLeafletMap();
+        if (!L || !map) return;
+        impClearShapeLayers();
+        const col = imp.target === 'assets' ? '#ff5555' : '#7adfe6';
+        imp.shapes.forEach(s => {
+            try {
+                if (s.kind === 'circle') {
+                    const c = L.circle([s.center.lat, s.center.lng], { radius: s.radiusM, color: col, weight: 2, opacity: 0.8, dashArray: '6,5', fillColor: col, fillOpacity: 0.05, interactive: false });
+                    c.addTo(map); imp.shapeLayers.push(c);
+                } else {
+                    const pl = L.polygon(s.ring.map(p => [p.lat, p.lng]), { color: col, weight: 2, opacity: 0.8, dashArray: '6,5', fillColor: col, fillOpacity: 0.05, interactive: false });
+                    pl.addTo(map); imp.shapeLayers.push(pl);
+                }
+                // numbered grab handle (matches the Shapes list) — ALT+drag moves the shape
+                const h = s.kind === 'circle' ? s.center : s.handle;
+                const icon = L.divIcon({
+                    className: '',
+                    html: `<div style="transform:translate(-50%,-50%);width:20px;height:20px;border-radius:50%;background:#1f2228;border:2px solid ${col};color:${col};display:flex;align-items:center;justify-content:center;font:700 10px -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 1px 4px rgba(0,0,0,0.6);pointer-events:none;">${s.id}</div>`,
+                    iconSize: [0, 0],
+                });
+                const mk = L.marker([h.lat, h.lng], { icon, interactive: false });
+                mk.addTo(map); imp.shapeLayers.push(mk);
+                // ✎ Edit mode: vertex dots (ALT+drag=move, ALT+right-click=delete),
+                // midpoint dots (ALT+click/drag=insert a new vertex), circle edge
+                // dot (ALT+drag=resize). Canvas renderer — dense freehand rings
+                // would otherwise flood the SVG pane.
+                if (imp.mode === 'edit') {
+                    if (!imp.renderer) { try { imp.renderer = L.canvas({ padding: 0.3 }); } catch (e2) {} }
+                    const rOpt = imp.renderer ? { renderer: imp.renderer } : {};
+                    if (s.kind === 'circle') {
+                        const ep = impCircleEdgePoint(s);
+                        const em = L.circleMarker([ep.lat, ep.lng], Object.assign({ radius: 5, color: col, weight: 2, fillColor: '#fff', fillOpacity: 1, interactive: false }, rOpt));
+                        em.addTo(map); imp.shapeLayers.push(em);
+                    } else {
+                        const n = s.ring.length;
+                        for (let i = 0; i < n; i++) {
+                            const v = s.ring[i], w = s.ring[(i + 1) % n];
+                            const vm = L.circleMarker([v.lat, v.lng], Object.assign({ radius: 4.5, color: '#fff', weight: 1.5, fillColor: col, fillOpacity: 1, interactive: false }, rOpt));
+                            vm.addTo(map); imp.shapeLayers.push(vm);
+                            const mm = L.circleMarker([(v.lat + w.lat) / 2, (v.lng + w.lng) / 2], Object.assign({ radius: 3, color: col, weight: 1, opacity: 0.8, fillColor: '#1f2228', fillOpacity: 1, interactive: false }, rOpt));
+                            mm.addTo(map); imp.shapeLayers.push(mm);
+                        }
+                    }
+                }
+            } catch (e) {}
+        });
+        // in-progress freehand lasso
+        if (imp.lassoRing && imp.lassoRing.length >= 2) {
+            try {
+                imp.lassoLayer = L.polyline(imp.lassoRing.map(p => [p.lat, p.lng]), { color: col, weight: 2, dashArray: '4,4', interactive: false });
+                imp.lassoLayer.addTo(map);
+            } catch (e) {}
+        }
+    }
+    function impRenderAssetSel() {
+        const L = getLeafletL(), map = getLeafletMap();
+        if (!L || !map) return;
+        impClearAssetLayers();
+        if (!imp.assetIndex) return;
+        imp.assetIndex.forEach(a => {
+            if (!imp.assetSel.has(a.id)) return;
+            try {
+                const pl = L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: '#ff3b3b', weight: 3, opacity: 0.95, dashArray: '8,4', fillColor: '#ff3b3b', fillOpacity: 0.18, interactive: false });
+                pl.addTo(map); imp.assetLayers.push(pl);
+            } catch (e) {}
+        });
+    }
+    // ---- spatial selection (ADDITIVE, LIVE): shapes are geometry, selection
+    // derives from them. Moving/removing a shape recomputes; manual ☝ picks
+    // override either way and stick. ----
+    function impShapeContains(s, lat, lng) {
+        if (s.kind === 'circle') return approxMeters(s.center.lat, s.center.lng, lat, lng) <= s.radiusM;
+        return pointInPolygon(lat, lng, s.ring);
+    }
+    function impAssetInShape(s, a) {
+        if (s.kind === 'circle') return pointToPolygonMeters(s.center.lat, s.center.lng, a.ring) <= s.radiusM;
+        return pointInPolygon(a.centroid.lat, a.centroid.lng, s.ring) || a.ring.some(v => pointInPolygon(v.lat, v.lng, s.ring));
+    }
+    function impSelCount() {
+        return imp.target === 'assets' ? imp.assetSel.size : imp.points.filter(p => !p.done && p.sel).length;
+    }
+    function impRecomputeSel() {
+        if (imp.target === 'assets') {
+            if (!imp.assetIndex) impBuildAssetIndex();
+            imp.assetSel.clear();
+            imp.assetIndex.forEach(a => {
+                const man = imp.assetManual.get(a.id);
+                const on = (man !== undefined) ? man : imp.shapes.some(s => impAssetInShape(s, a));
+                if (on) imp.assetSel.add(a.id);
+            });
+        } else {
+            imp.points.forEach(p => {
+                if (p.done) { p.sel = false; return; }
+                p.sel = (p.selManual !== undefined) ? p.selManual : imp.shapes.some(s => impShapeContains(s, p.lat, p.lng));
+            });
+        }
+    }
+    function impRefreshAfterSelChange() {
+        impRecomputeSel();
+        if (imp.target === 'assets') impRenderAssetSel(); else impRenderStaged();
+        impRenderShapes(); impSyncUi();
+    }
+    function impApplyCircle(center) {
+        const rM = impRadiusM();
+        if (!rM) { showToast('Set a circle radius first', 'rgba(255,179,71,0.6)'); return; }
+        const before = impSelCount();
+        imp.shapes.push({ id: imp.shapeSeq++, kind: 'circle', center: { lat: center.lat, lng: center.lng }, radiusM: rM });
+        impRefreshAfterSelChange();
+        impStatus(`⭕ circle ${imp.shapes[imp.shapes.length - 1].id} added — <b>+${impSelCount() - before}</b> ${imp.target === 'assets' ? 'existing asset(s)' : 'point(s)'} selected. ALT+drag its numbered handle to move it.`);
+    }
+    function impApplyLasso(ring) {
+        if (!ring || ring.length < 3) { showToast('Lasso too small — ALT+drag a loop around the points', 'rgba(255,179,71,0.6)'); return; }
+        const before = impSelCount();
+        imp.shapes.push({ id: imp.shapeSeq++, kind: 'lasso', ring, handle: ringCentroid(ring) });
+        impRefreshAfterSelChange();
+        impStatus(`🖊 lasso ${imp.shapes[imp.shapes.length - 1].id} added — <b>+${impSelCount() - before}</b> ${imp.target === 'assets' ? 'existing asset(s)' : 'point(s)'} selected. ALT+drag its numbered handle to move it.`);
+    }
+    // ---- ⬆ Shape (KML): a KML polygon acts as the access shape — the exact
+    // replacement for the old external-script "outline" workflow. Every
+    // Polygon (outer boundary; MultiGeometry included) plus any CLOSED
+    // LineString (some converters draw outlines as paths) becomes one
+    // additive lasso-style shape. Target-aware like ⭕/🖊/☝.
+    function impParseKmlShapes(text) {
+        const doc = new DOMParser().parseFromString(String(text || ''), 'text/xml');
+        if (doc.querySelector('parsererror')) throw new Error('KML parse error — file is not valid XML');
+        const parseRing = (coordEl) => {
+            if (!coordEl) return null;
+            const ring = [];
+            String(coordEl.textContent || '').trim().split(/\s+/).forEach(tuple => {
+                const parts = tuple.split(',');
+                const lng = parseFloat(parts[0]), lat = parseFloat(parts[1]);
+                if (isFinite(lat) && isFinite(lng)) ring.push({ lat, lng });
+            });
+            // drop the KML closing duplicate — our rings are open like Percepto's
+            if (ring.length > 1) {
+                const a = ring[0], b = ring[ring.length - 1];
+                if (a.lat === b.lat && a.lng === b.lng) ring.pop();
+            }
+            return ring.length >= 3 ? ring : null;
+        };
+        const nameOf = (el) => {
+            const pm = el.closest ? el.closest('Placemark') : null;
+            const nm = pm && pm.querySelector(':scope > name');
+            return nm ? String(nm.textContent || '').trim() : '';
+        };
+        const shapes = [];
+        doc.querySelectorAll('Polygon').forEach(poly => {
+            const ring = parseRing(poly.querySelector('outerBoundaryIs LinearRing coordinates'));
+            if (ring) shapes.push({ name: nameOf(poly), ring });
+        });
+        doc.querySelectorAll('LineString').forEach(ls => {
+            const coordEl = ls.querySelector('coordinates');
+            if (!coordEl) return;
+            const raw = String(coordEl.textContent || '').trim().split(/\s+/);
+            if (raw.length < 4) return;
+            const first = raw[0].split(','), last = raw[raw.length - 1].split(',');
+            const closed = first[0] === last[0] && first[1] === last[1];
+            if (!closed) return;                                        // open path = not an access shape
+            const ring = parseRing(coordEl);
+            if (ring) shapes.push({ name: nameOf(ls), ring });
+        });
+        return shapes;
+    }
+    function impApplyShapeRings(shapes, srcName) {
+        if (!impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+        if (!shapes.length) { impStatus(`No usable polygon in "${impEsc(srcName)}" — the shape KML needs a Polygon (or closed path)`, '#ff6060'); return; }
+        if (imp.target === 'assets' && !imp.assetIndex) impBuildAssetIndex();
+        if (imp.target === 'staged' && !imp.points.some(p => !p.done)) {
+            impStatus(`Shape "${impEsc(srcName)}" parsed (${shapes.length} polygon(s)) but nothing is staged — load the data CSV/KML first, or tick 🗑 Delete mode to select existing assets`, '#ffb347');
+            return;
+        }
+        const before = impSelCount();
+        shapes.forEach(s => {
+            imp.shapes.push({ id: imp.shapeSeq++, kind: 'lasso', ring: s.ring, handle: ringCentroid(s.ring), name: s.name || srcName });
+        });
+        impRefreshAfterSelChange();
+        impStatus(`⬆ shape "${impEsc(srcName)}" applied — ${shapes.length} polygon(s), <b>+${impSelCount() - before}</b> ${imp.target === 'assets' ? 'existing asset(s)' : 'point(s)'} selected. ALT+drag a numbered handle to move a polygon.`);
+    }
+    function impHandleShapeFile(file) {
+        if (!file) return;
+        const rd = new FileReader();
+        rd.onload = () => {
+            try { impApplyShapeRings(impParseKmlShapes(String(rd.result || '')), file.name); }
+            catch (e) { console.warn(`${TAG} 📥 shape parse:`, e); impStatus(`Shape parse failed: ${impEsc(e && e.message || e)}`, '#ff6060'); }
+        };
+        rd.onerror = () => impStatus('Shape file read failed', '#ff6060');
+        rd.readAsText(file);
+    }
+    function impPickAt(ll) {
+        const map = getLeafletMap(); if (!map) return;
+        let cp; try { cp = map.latLngToContainerPoint([ll.lat, ll.lng]); } catch (e) { return; }
+        if (imp.target === 'assets') {
+            // inside-ring wins; else nearest centroid within the pick radius
+            let hit = imp.assetIndex.find(a => pointInPolygon(ll.lat, ll.lng, a.ring));
+            if (!hit) {
+                let bd = Infinity;
+                imp.assetIndex.forEach(a => {
+                    try { const d = cp.distanceTo(map.latLngToContainerPoint([a.centroid.lat, a.centroid.lng])); if (d < bd) { bd = d; hit = a; } } catch (e) {}
+                });
+                if (bd > IMP_PICK_PX) hit = null;
+            }
+            if (!hit) return;
+            imp.assetManual.set(hit.id, !imp.assetSel.has(hit.id));     // sticky override — survives shape moves
+            impRefreshAfterSelChange();
+        } else {
+            let best = null, bd = Infinity;
+            imp.points.forEach(p => {
+                if (p.done) return;
+                try { const d = cp.distanceTo(map.latLngToContainerPoint([p.lat, p.lng])); if (d < bd) { bd = d; best = p; } } catch (e) {}
+            });
+            if (!best || bd > IMP_PICK_PX) return;
+            best.selManual = !best.sel;                                  // sticky override — survives shape moves
+            impRefreshAfterSelChange();
+        }
+    }
+    function impShapeHandleAt(map, ll) {
+        let cp; try { cp = map.latLngToContainerPoint([ll.lat, ll.lng]); } catch (e) { return null; }
+        for (const s of imp.shapes) {
+            const h = s.kind === 'circle' ? s.center : s.handle;
+            try { if (cp.distanceTo(map.latLngToContainerPoint([h.lat, h.lng])) <= IMP_PICK_PX) return s; } catch (e) {}
+        }
+        return null;
+    }
+    function impEndShapeDrag() {
+        const s = imp.dragShape;
+        imp.dragShape = null; imp.dragLast = null;
+        if (!s) return;
+        impRefreshAfterSelChange();
+        impStatus(`${s.kind === 'circle' ? '⭕' : '🖊'} shape ${s.id} moved — <b>${impSelCount()}</b> ${imp.target === 'assets' ? 'existing asset(s)' : 'point(s)'} selected now`);
+    }
+    // ---- ✎ Edit mode helpers ----
+    function impCircleEdgePoint(s) {
+        const proj = genProjector(s.center.lat, s.center.lng);
+        return proj.inv({ x: s.radiusM, y: 0 });                         // east edge = the resize handle
+    }
+    // 24-point polygon standing in for the circle — same id, fully vertex-editable.
+    function impCircleToPolygon(s) {
+        const proj = genProjector(s.center.lat, s.center.lng);
+        const ring = [];
+        for (let k = 0; k < 24; k++) {
+            const a = (k / 24) * 2 * Math.PI;
+            ring.push(proj.inv({ x: Math.cos(a) * s.radiusM, y: Math.sin(a) * s.radiusM }));
+        }
+        s.kind = 'lasso'; s.ring = ring; s.handle = { lat: s.center.lat, lng: s.center.lng };
+        delete s.center; delete s.radiusM;
+    }
+    // What ✎ is grabbing: a vertex beats a midpoint beats a circle edge.
+    function impEditTargetAt(map, ll) {
+        let cp; try { cp = map.latLngToContainerPoint([ll.lat, ll.lng]); } catch (e) { return null; }
+        const px = (p) => { try { return cp.distanceTo(map.latLngToContainerPoint([p.lat, p.lng])); } catch (e) { return Infinity; } };
+        for (const s of imp.shapes) {
+            if (s.kind !== 'lasso') continue;
+            for (let i = 0; i < s.ring.length; i++) if (px(s.ring[i]) <= IMP_PICK_PX) return { s, i, type: 'vert' };
+        }
+        for (const s of imp.shapes) {
+            if (s.kind === 'lasso') {
+                const n = s.ring.length;
+                for (let i = 0; i < n; i++) {
+                    const v = s.ring[i], w = s.ring[(i + 1) % n];
+                    if (px({ lat: (v.lat + w.lat) / 2, lng: (v.lng + w.lng) / 2 }) <= IMP_PICK_PX) return { s, i, type: 'mid' };
+                }
+            } else if (px(impCircleEdgePoint(s)) <= IMP_PICK_PX) return { s, type: 'radius' };
+        }
+        return null;
+    }
+    function impEndEditDrag() {
+        const d = imp.editDrag;
+        imp.editDrag = null;
+        if (!d) return;
+        if (!d.radius) d.s.handle = ringCentroid(d.s.ring);
+        impRefreshAfterSelChange();
+        impStatus(`✎ shape ${d.s.id} ${d.radius ? `radius set — ${impShapeSizeLabel(d.s)}` : `reshaped (${d.s.ring.length} points)`} — <b>${impSelCount()}</b> selected now`);
+    }
+    // ---- map interaction: same capture-phase harness + ALT-gate as NFZ Trace ----
+    function impWire() {
+        const map = getLeafletMap(); if (!map) return;
+        impUnwire();
+        imp._container = map.getContainer();
+        imp._onDown = (ev) => {
+            if (!imp.mode || ev.button !== 0 || !ev.altKey) return;      // plain click stays free (pan / native edit)
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            ev.preventDefault(); ev.stopPropagation();
+            if (imp.mode === 'edit') {                                   // ✎ vertex / midpoint / circle-edge grab
+                const t = impEditTargetAt(map, ll);
+                if (t) {
+                    if (t.type === 'mid') {                              // insert a new vertex, start dragging it
+                        t.s.ring.splice(t.i + 1, 0, { lat: ll.lat, lng: ll.lng });
+                        imp.editDrag = { s: t.s, i: t.i + 1 };
+                        impRefreshAfterSelChange();
+                    } else if (t.type === 'radius') imp.editDrag = { s: t.s, radius: true };
+                    else imp.editDrag = { s: t.s, i: t.i };
+                    return;
+                }
+                const eh = impShapeHandleAt(map, ll);                    // whole-shape move still works in ✎
+                if (eh) { imp.dragShape = eh; imp.dragLast = ll; }
+                return;                                                  // ✎ never creates new shapes
+            }
+            // grabbing a shape's numbered handle beats the mode action — move it
+            const hs = impShapeHandleAt(map, ll);
+            if (hs) { imp.dragShape = hs; imp.dragLast = ll; return; }
+            if (imp.mode === 'circle') { impApplyCircle(ll); return; }
+            if (imp.mode === 'pick') { impPickAt(ll); return; }
+            imp.lassoRing = [ll];                                        // 'lasso' — freehand starts
+            imp.lassoDownPt = { x: ev.clientX, y: ev.clientY };
+        };
+        imp._onMove = (ev) => {
+            if (imp.editDrag) {                                          // ✎ vertex / radius drag in progress
+                ev.preventDefault(); ev.stopPropagation();
+                let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+                if (!(ev.buttons & 1)) { impEndEditDrag(); return; }     // released outside the container
+                const d = imp.editDrag;
+                if (d.radius) d.s.radiusM = Math.max(5, approxMeters(d.s.center.lat, d.s.center.lng, ll.lat, ll.lng));
+                else d.s.ring[d.i] = { lat: ll.lat, lng: ll.lng };
+                impRefreshAfterSelChange();                              // live counts while dragging
+                return;
+            }
+            if (imp.dragShape) {                                         // shape move in progress
+                ev.preventDefault(); ev.stopPropagation();
+                let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+                if (!(ev.buttons & 1)) { impEndShapeDrag(); return; }    // released outside the container
+                const dLat = ll.lat - imp.dragLast.lat, dLng = ll.lng - imp.dragLast.lng;
+                if (!dLat && !dLng) return;
+                const s = imp.dragShape;
+                if (s.kind === 'circle') { s.center.lat += dLat; s.center.lng += dLng; }
+                else {
+                    s.ring = s.ring.map(p => ({ lat: p.lat + dLat, lng: p.lng + dLng }));
+                    s.handle = { lat: s.handle.lat + dLat, lng: s.handle.lng + dLng };
+                }
+                imp.dragLast = ll;
+                impRefreshAfterSelChange();                              // live counts while dragging
+                return;
+            }
+            if (imp.mode !== 'lasso' || !imp.lassoRing) return;
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            ev.preventDefault(); ev.stopPropagation();
+            if (!(ev.buttons & 1)) {                                     // released outside the container — finish now
+                const ring = imp.lassoRing;
+                imp.lassoRing = null; imp.lassoDownPt = null;
+                if (ring.length >= 3) impApplyLasso(ring); else impRenderShapes();
+                return;
+            }
+            const last = imp.lassoRing[imp.lassoRing.length - 1];
+            try {
+                const a = map.latLngToContainerPoint([last.lat, last.lng]);
+                const b = map.latLngToContainerPoint([ll.lat, ll.lng]);
+                if (a.distanceTo(b) < 4) return;                         // densify by ~4px steps
+            } catch (e) {}
+            imp.lassoRing.push(ll);
+            impRenderShapes();
+        };
+        imp._onUp = (ev) => {
+            if (imp.editDrag) { ev.preventDefault(); ev.stopPropagation(); impEndEditDrag(); return; }
+            if (imp.dragShape) { ev.preventDefault(); ev.stopPropagation(); impEndShapeDrag(); return; }
+            if (imp.mode !== 'lasso' || !imp.lassoRing) return;
+            ev.preventDefault(); ev.stopPropagation();
+            const ring = imp.lassoRing;
+            imp.lassoRing = null; imp.lassoDownPt = null;
+            if (ring.length >= 3) impApplyLasso(ring);
+            else impRenderShapes();                                      // tiny drag — just clear the trail
+        };
+        imp._onKey = (ev) => {
+            if (!imp.mode) return;
+            if ((ev.key || '').toLowerCase() === 'escape') {
+                ev.preventDefault(); ev.stopImmediatePropagation();
+                if (imp.editDrag) { impEndEditDrag(); }
+                else if (imp.dragShape) { impEndShapeDrag(); }
+                else if (imp.lassoRing) { imp.lassoRing = null; impRenderShapes(); }
+                else impSetMode(null);
+            }
+        };
+        // ✎ ALT+right-click a vertex deletes it (capture — beats the inspector's
+        // right-click hit-test while Edit is armed).
+        imp._onCtx = (ev) => {
+            if (imp.mode !== 'edit' || !ev.altKey) return;
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            const t = impEditTargetAt(map, ll);
+            if (!t || t.type !== 'vert') return;
+            ev.preventDefault(); ev.stopImmediatePropagation();
+            if (t.s.ring.length <= 3) { showToast('A shape needs at least 3 points', 'rgba(255,179,71,0.6)'); return; }
+            t.s.ring.splice(t.i, 1);
+            t.s.handle = ringCentroid(t.s.ring);
+            impRefreshAfterSelChange();
+            impStatus(`✎ vertex removed from shape ${t.s.id} — ${t.s.ring.length} points, <b>${impSelCount()}</b> selected now`);
+        };
+        imp._container.addEventListener('mousedown', imp._onDown, true);
+        imp._container.addEventListener('mousemove', imp._onMove, true);
+        imp._container.addEventListener('mouseup', imp._onUp, true);
+        imp._container.addEventListener('contextmenu', imp._onCtx, true);
+        try { uwin().addEventListener('keydown', imp._onKey, true); } catch (e) {}
+        try { map.getContainer().style.cursor = 'crosshair'; } catch (e) {}
+    }
+    function impUnwire() {
+        const c = imp._container;
+        if (c) {
+            try { c.removeEventListener('mousedown', imp._onDown, true); } catch (e) {}
+            try { c.removeEventListener('mousemove', imp._onMove, true); } catch (e) {}
+            try { c.removeEventListener('mouseup', imp._onUp, true); } catch (e) {}
+            try { c.removeEventListener('contextmenu', imp._onCtx, true); } catch (e) {}
+        }
+        try { uwin().removeEventListener('keydown', imp._onKey, true); } catch (e) {}
+        const map = getLeafletMap();
+        if (map && !advDraw.active && !nfzDraw.active) { try { map.getContainer().style.cursor = ''; } catch (e) {} }
+        imp._container = null;
+        imp.lassoRing = null;
+        imp.dragShape = null; imp.dragLast = null;
+        imp.editDrag = null;
+    }
+    function impSetMode(mode) {
+        if (mode && !impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+        imp.mode = mode || null;
+        if (imp.mode) {
+            try { if (nfzDraw.active) setNfzMode(null); } catch (e) {}   // mutually exclusive with the other map tools
+            try { if (advDraw.active) setAdvDraw(false); } catch (e) {}
+            try { if (gmt.armed) gmtArm(false); } catch (e) {}
+            try { if (genDraw.active) { const b = document.getElementById('aim-gen-draw'); if (b) b.click(); } } catch (e) {}
+            impWire();
+        } else impUnwire();
+        impRenderShapes();   // ✎ vertex/midpoint dots appear only while Edit is armed
+        impSyncUi();
+    }
+    // ---- panel body (built in JS — the generator template just carries the container) ----
+    function impRenderPanelBody() {
+        const host = document.getElementById('aim-imp-controls');
+        if (!host) return;
+        const btnCss = (col) => `background:rgba(${col},0.12);color:rgb(${col});border:1px solid rgba(${col},0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px`;
+        const inCss = 'background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px;text-align:right';
+        host.innerHTML = `
+            <div style="font-size:11px;color:#7adfe6;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">📥 Asset Importer — <span id="aim-imp-file-label" style="text-transform:none;letter-spacing:0">${impEsc(imp.fileName || 'no file loaded')}</span></div>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
+                <button id="aim-imp-load" style="${btnCss('122,223,230')}">📂 Load CSV / KML</button>
+                <span style="color:#888;font-size:10px">or drag &amp; drop the file onto this panel</span>
+            </div>
+            <div id="aim-imp-mapping" style="margin-bottom:8px"></div>
+            <div id="aim-imp-selrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
+                <button id="aim-imp-circle" style="${btnCss('122,223,230')}">⭕ Circle</button>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc">r <input type="number" id="aim-imp-radius" min="0" step="0.1" style="width:56px;${inCss}">
+                    <select id="aim-imp-radius-unit" style="${inCss};text-align:left"><option value="mi">mi</option><option value="ft">ft</option></select></label>
+                <button id="aim-imp-lasso" style="${btnCss('122,223,230')}">🖊 Lasso</button>
+                <button id="aim-imp-pick" style="${btnCss('122,223,230')}">☝ Pick</button>
+                <button id="aim-imp-edit" title="Edit shapes — ALT+drag a vertex dot to move it · ALT+click a small midpoint dot to insert a new vertex there (keep dragging to place it) · ALT+right-click a vertex to delete it · ALT+drag a circle's white edge dot to resize it · numbered handles still move whole shapes. To add points to a CIRCLE, first convert it with the ⬡ button on its row below." style="${btnCss('122,223,230')}">✎ Edit</button>
+                <button id="aim-imp-shape" title="Upload a KML whose polygon(s) ARE the access shape — everything inside gets selected, exactly like a drawn lasso. Additive; works in 🗑 Delete mode too. A polygon-only KML dropped on the panel routes here automatically." style="${btnCss('186,140,255')}">⬆ Shape (KML)</button>
+                <button id="aim-imp-selall" style="${btnCss('160,160,160')}">Select all</button>
+                <button id="aim-imp-clearsel" style="${btnCss('160,160,160')}">Clear selection</button>
+                <button id="aim-imp-clearshapes" style="${btnCss('160,160,160')}">Clear shapes</button>
+            </div>
+            <div id="aim-imp-shapes" style="margin-bottom:8px"></div>
+            <div id="aim-imp-typemap" style="margin-bottom:8px"></div>
+            <div id="aim-imp-commitrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Square side of each created asset — same shape ➕ Create asset uses. Reshape in Percepto afterwards (auto-reshape is feature #251).">Size <input type="number" id="aim-imp-size" min="5" max="2000" step="5" style="width:52px;${inCss}"> ft</label>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ffd400" title="Duplicate guard: a staged point is flagged when its name matches an existing asset OR it lies within the guard radius (Control Panel → Asset Importer) of one. Flagged points are SKIPPED unless this is on."><input type="checkbox" id="aim-imp-incdups" style="accent-color:#ffd400"> include flagged duplicates</label>
+                <button id="aim-imp-commit" style="${btnCss('95,255,95')};font-weight:600">✓ Create selected</button>
+                <button id="aim-imp-undocreate" style="${btnCss('255,179,71')}" title="Delete exactly the assets the most recent import created (this session). Each delete rides Delete Guard's undo ring when installed.">↩ Undo last import</button>
+            </div>
+            <div id="aim-imp-delrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px;padding-top:8px;border-top:1px dashed rgba(255,85,85,0.35)">
+                <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#ff8a80;font-weight:600" title="Flip the ⭕/🖊/☝ tools to select EXISTING site assets instead of staged points. Deleting requires the ack + slide-and-hold ceremony and rides Delete Guard's 24h undo ring."><input type="checkbox" id="aim-imp-delmode" style="accent-color:#ff5555"> 🗑 Delete mode — select existing assets</label>
+                <button id="aim-imp-delete" style="${btnCss('255,85,85')};font-weight:600;display:none">🗑 Delete selected…</button>
+                <button id="aim-imp-undodel" style="${btnCss('255,179,71')};display:none" title="Re-create the assets from the most recent bulk delete's bank (create-only — they come back with NEW ids; mission references do NOT rebind).">↩ Undo delete batch</button>
+            </div>
+            <div id="aim-imp-render-note" style="font-size:10px;color:#7a8794;margin-bottom:4px"></div>
+            <div id="aim-imp-result" style="font-size:11px;color:#9ad;line-height:1.5">Load a region CSV or KML — points stage on the map (nothing is written), then select the subset this site's drone can cover.</div>`;
+        impWirePanelControls(host);
+        impRenderMappingUi();
+        impRenderTypeMapUi();
+        impSyncUi();
+    }
+    function impWirePanelControls(host) {
+        const q = (id) => host.querySelector('#' + id);
+        q('aim-imp-load').onclick = () => {
+            const inp = document.createElement('input');
+            inp.type = 'file';
+            inp.accept = '.csv,.kml,.txt,text/csv,application/vnd.google-earth.kml+xml';
+            inp.onchange = () => { const f = inp.files && inp.files[0]; if (f) impHandleFile(f); };
+            inp.click();
+        };
+        host.addEventListener('dragover', (ev) => { ev.preventDefault(); ev.stopPropagation(); host.style.outline = '2px dashed #7adfe6'; });
+        host.addEventListener('dragleave', () => { host.style.outline = ''; });
+        host.addEventListener('drop', (ev) => {
+            ev.preventDefault(); ev.stopPropagation(); host.style.outline = '';
+            const f = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
+            if (f) impHandleFile(f);
+        });
+        const rEl = q('aim-imp-radius'), ruEl = q('aim-imp-radius-unit');
+        rEl.value = imp.radiusVal; ruEl.value = imp.radiusUnit;
+        rEl.oninput = () => { const v = parseFloat(rEl.value); if (isFinite(v) && v > 0) { imp.radiusVal = v; impSaveParams(); } };
+        ruEl.onchange = () => { imp.radiusUnit = ruEl.value; impSaveParams(); };
+        q('aim-imp-circle').onclick = () => impSetMode(imp.mode === 'circle' ? null : 'circle');
+        q('aim-imp-lasso').onclick = () => impSetMode(imp.mode === 'lasso' ? null : 'lasso');
+        q('aim-imp-pick').onclick = () => impSetMode(imp.mode === 'pick' ? null : 'pick');
+        q('aim-imp-edit').onclick = () => impSetMode(imp.mode === 'edit' ? null : 'edit');
+        q('aim-imp-shape').onclick = () => {
+            const inp = document.createElement('input');
+            inp.type = 'file';
+            inp.accept = '.kml,application/vnd.google-earth.kml+xml';
+            inp.onchange = () => { const f = inp.files && inp.files[0]; if (f) impHandleShapeFile(f); };
+            inp.click();
+        };
+        q('aim-imp-selall').onclick = () => {
+            if (imp.target === 'assets') { (imp.assetIndex || []).forEach(a => imp.assetManual.set(a.id, true)); }
+            else imp.points.forEach(p => { if (!p.done) p.selManual = true; });
+            impRefreshAfterSelChange();
+        };
+        q('aim-imp-clearsel').onclick = () => {
+            // full reset for the active target: shapes AND manual picks
+            imp.shapes = [];
+            if (imp.target === 'assets') imp.assetManual.clear();
+            else imp.points.forEach(p => { delete p.selManual; });
+            impRefreshAfterSelChange();
+        };
+        q('aim-imp-clearshapes').onclick = () => { imp.shapes = []; impRefreshAfterSelChange(); impStatus(`shapes cleared — <b>${impSelCount()}</b> still selected via ☝ manual picks`); };
+        const szEl = q('aim-imp-size');
+        szEl.value = impSizeFt;
+        szEl.oninput = () => { const v = parseFloat(szEl.value); if (isFinite(v) && v >= 5 && v <= 2000) impSizeFt = v; };
+        const incEl = q('aim-imp-incdups');
+        incEl.checked = imp.includeDups;
+        incEl.onchange = () => { imp.includeDups = incEl.checked; impSaveParams(); impSyncUi(); };
+        q('aim-imp-commit').onclick = () => { impCommit(); };
+        q('aim-imp-undocreate').onclick = () => { impUndoCreate(); };
+        const dmEl = q('aim-imp-delmode');
+        dmEl.checked = imp.target === 'assets';
+        dmEl.onchange = () => {
+            // shapes are geometry — they carry across the switch and select
+            // the NEW target; each target keeps its own sticky manual picks.
+            imp.target = dmEl.checked ? 'assets' : 'staged';
+            if (imp.target === 'assets') { impBuildAssetIndex(); impStatus('🗑 Delete mode — the tools AND existing shapes now select EXISTING assets (red). Nothing is deleted until the confirm ceremony.', '#ff8a80'); }
+            else { impClearAssetLayers(); impStatus('Back to staged-point selection — shapes re-applied to staged points.'); }
+            impRefreshAfterSelChange();
+        };
+        q('aim-imp-delete').onclick = () => { impOpenDeleteModal(); };
+        q('aim-imp-undodel').onclick = () => { impUndoDeleteBatch(); };
+    }
+    function impRenderMappingUi() {
+        const el = document.getElementById('aim-imp-mapping');
+        if (!el) return;
+        if (!imp.headers.length) { el.innerHTML = ''; return; }
+        const m = imp.mapping || {};
+        const sel = (key, label, allowNone) => {
+            const opts = (allowNone ? `<option value="">— none —</option>` : '')
+                + imp.headers.map(h => `<option value="${impEsc(h)}"${m[key] === h ? ' selected' : ''}>${impEsc(h)}</option>`).join('');
+            return `<label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc">${label}
+                <select data-impmap="${key}" style="max-width:130px;background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px">${opts}</select></label>`;
+        };
+        el.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:6px 8px;background:rgba(122,223,230,0.05);border:1px dashed rgba(122,223,230,0.3);border-radius:3px">
+            ${sel('name', 'Name', true)} ${sel('lat', 'Lat', false)} ${sel('lng', 'Lng', false)} ${sel('type', 'Type', true)}
+            <button id="aim-imp-applymap" style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:4px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">✓ Apply</button>
+        </div>`;
+        el.querySelectorAll('select[data-impmap]').forEach(s => {
+            s.onchange = () => { if (!imp.mapping) imp.mapping = {}; imp.mapping[s.getAttribute('data-impmap')] = s.value || null; };
+        });
+        el.querySelector('#aim-imp-applymap').onclick = () => { impBuildPoints(); };
+    }
+    function impSiteSubtypes() {
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        const counts = new Map();
+        ents.filter(e => e.type === 3 && e.custom && e.custom.poi_type_str).forEach(e => {
+            const s = String(e.custom.poi_type_str).trim();
+            if (s) counts.set(s, (counts.get(s) || 0) + 1);
+        });
+        return counts;
+    }
+    function impRenderTypeMapUi() {
+        const el = document.getElementById('aim-imp-typemap');
+        if (!el) return;
+        if (!imp.points.length) { el.innerHTML = ''; return; }
+        const subCounts = impSiteSubtypes();
+        const subtypes = [...subCounts.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0]);
+        const defSub = subtypes[0] || 'well-cluster';
+        const dl = `<datalist id="aim-imp-subtype-list">${subtypes.map(s => `<option value="${impEsc(s)}"></option>`).join('')}</datalist>`;
+        const inCss = 'background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px';
+        if (!imp.mapping || !imp.mapping.type) {
+            const cur = imp.typeMap['__all__'] || defSub;
+            el.innerHTML = `<div style="padding:6px 8px;background:rgba(122,223,230,0.05);border:1px dashed rgba(122,223,230,0.3);border-radius:3px;font-size:11px;color:#cfd6dc">
+                No type column — subtype for ALL created assets:
+                <input id="aim-imp-sub-all" type="text" list="aim-imp-subtype-list" value="${impEsc(cur)}" style="${inCss};width:140px">${dl}
+                <span style="color:#888;font-size:10px">(site's existing subtypes suggested; a new value is created on the site)</span></div>`;
+            el.querySelector('#aim-imp-sub-all').oninput = function () { imp.typeMap['__all__'] = this.value.trim(); impSaveTypeMap(); impSyncUi(); };
+            return;
+        }
+        const vals = new Map();
+        imp.points.forEach(p => { const k = p.typeRaw || '(blank)'; vals.set(k, (vals.get(k) || 0) + 1); });
+        const rows = [...vals.entries()].sort((a, b) => b[1] - a[1]).map(([v, n]) => {
+            const key = v.toLowerCase();
+            const mapped = (imp.typeMap[key] || '').trim();
+            const warn = !mapped;
+            return `<div style="display:flex;gap:8px;align-items:center;padding:2px 0${warn ? ';background:rgba(255,212,0,0.08)' : ''}">
+                <span style="min-width:130px;color:${warn ? '#ffd400' : '#cfd6dc'};font-size:11px">${warn ? '⚠ ' : ''}${impEsc(v)} <span style="color:#888">×${n}</span></span>
+                <span style="color:#888">→</span>
+                <input type="text" list="aim-imp-subtype-list" data-imptype="${impEsc(key)}" value="${impEsc(mapped)}" placeholder="pick a subtype" style="${inCss};width:140px">
+            </div>`;
+        }).join('');
+        el.innerHTML = `<div style="padding:6px 8px;background:rgba(122,223,230,0.05);border:1px dashed rgba(122,223,230,0.3);border-radius:3px">
+            <div style="font-size:10px;color:#9ad;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Type mapping — CSV value → Percepto subtype <span style="color:#888;text-transform:none;letter-spacing:0">(remembered for next time; ⚠ unmapped values block Commit)</span></div>
+            ${rows}${dl}</div>`;
+        el.querySelectorAll('input[data-imptype]').forEach(inp => {
+            inp.oninput = () => {
+                const k = inp.getAttribute('data-imptype');
+                const v = inp.value.trim();
+                if (v) imp.typeMap[k] = v; else delete imp.typeMap[k];
+                impSaveTypeMap();
+                inp.parentElement.style.background = v ? '' : 'rgba(255,212,0,0.08)';
+                impSyncUi();
+            };
+        });
+    }
+    // ---- Shapes list: per-shape count / type breakdown / dups / size, ✕
+    // remove, union totals. Overlapping shapes count a point in EVERY shape
+    // it sits in; the union (what commits/deletes) counts it once.
+    function impShapeStats(s) {
+        const types = new Map();
+        let n = 0, dups = 0;
+        if (imp.target === 'assets') {
+            (imp.assetIndex || []).forEach(a => {
+                if (!impAssetInShape(s, a)) return;
+                n++;
+                const t = a.subtype || '(no subtype)';
+                types.set(t, (types.get(t) || 0) + 1);
+            });
+        } else {
+            imp.points.forEach(p => {
+                if (p.done || !impShapeContains(s, p.lat, p.lng)) return;
+                n++;
+                if (p.dup) dups++;
+                const t = p.typeRaw || '(no type)';
+                types.set(t, (types.get(t) || 0) + 1);
+            });
+        }
+        return { n, dups, types };
+    }
+    function impFmtTypes(types, max) {
+        const sorted = [...types.entries()].sort((a, b) => b[1] - a[1]);
+        const shown = sorted.slice(0, max).map(([t, c]) => `${impEsc(t)} ×${c}`).join(' · ');
+        return shown + (sorted.length > max ? ` · +${sorted.length - max} more` : '');
+    }
+    function impShapeSizeLabel(s) {
+        const AC = 4046.8564;
+        if (s.kind === 'circle') {
+            const r = s.radiusM * M_TO_FT;
+            const rTxt = r >= 1320 ? `${(s.radiusM / MI_TO_M).toFixed(2)} mi` : `${Math.round(r)} ft`;
+            return `r ${rTxt} · ${(Math.PI * s.radiusM * s.radiusM / AC).toFixed(0)} ac`;
+        }
+        let area = 0; try { area = polygonAreaM2(s.ring); } catch (e) {}
+        return `${s.ring.length} verts · ${(area / AC).toFixed(0)} ac`;
+    }
+    function impRenderShapesUi() {
+        const el = document.getElementById('aim-imp-shapes');
+        if (!el) return;
+        if (!imp.shapes.length) { el.innerHTML = ''; return; }
+        const isAssets = imp.target === 'assets';
+        const rows = imp.shapes.map(s => {
+            const st = impShapeStats(s);
+            const label = s.kind === 'circle' ? `⭕ ${s.id}` : `🖊 ${s.id}${s.name ? ` ${impEsc(s.name)}` : ''}`;
+            return `<div style="display:flex;gap:8px;align-items:baseline;padding:2px 0;border-bottom:1px solid rgba(255,255,255,0.06);font-size:11px">
+                <span style="color:${isAssets ? '#ff8a80' : '#7adfe6'};font-weight:600;min-width:44px">${label}</span>
+                <span style="color:#cfd6dc;white-space:nowrap"><b>${st.n}</b> ${isAssets ? 'asset' : 'pt'}${st.n === 1 ? '' : 's'}${st.dups ? ` <span style="color:#ffd400">(${st.dups} dup)</span>` : ''}</span>
+                <span style="color:#888;white-space:nowrap">${impShapeSizeLabel(s)}</span>
+                <span style="color:#9ad;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${st.types.size ? impFmtTypes(st.types, 4) : ''}</span>
+                ${s.kind === 'circle' ? `<button data-impshapepoly="${s.id}" title="Convert this circle to a 24-point polygon so ✎ Edit can add / move / delete its points" style="background:transparent;color:#7adfe6;border:1px solid rgba(122,223,230,0.4);border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px;flex:none">⬡</button>` : ''}
+                <button data-impshapedel="${s.id}" title="Remove this shape (manual ☝ picks survive)" style="background:transparent;color:#ff8a80;border:1px solid rgba(255,90,90,0.4);border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px;flex:none">✕</button>
+            </div>`;
+        }).join('');
+        // union totals — what will actually commit / delete
+        const selTypes = new Map();
+        let selN = 0, selDups = 0, manAdd = 0, manRem = 0;
+        if (isAssets) {
+            (imp.assetIndex || []).forEach(a => {
+                if (!imp.assetSel.has(a.id)) return;
+                selN++;
+                const t = a.subtype || '(no subtype)';
+                selTypes.set(t, (selTypes.get(t) || 0) + 1);
+            });
+            imp.assetManual.forEach(v => { if (v) manAdd++; else manRem++; });
+        } else {
+            imp.points.forEach(p => {
+                if (p.done) return;
+                if (p.selManual === true) manAdd++; else if (p.selManual === false) manRem++;
+                if (!p.sel) return;
+                selN++;
+                if (p.dup) selDups++;
+                const t = p.typeRaw || '(no type)';
+                selTypes.set(t, (selTypes.get(t) || 0) + 1);
+            });
+        }
+        el.innerHTML = `<div style="padding:6px 8px;background:rgba(122,223,230,0.05);border:1px dashed rgba(122,223,230,0.3);border-radius:3px">
+            <div style="font-size:10px;color:#9ad;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Shapes — numbered like their map handles · ALT+drag a handle to move · overlaps count in every shape, select once</div>
+            ${rows}
+            <div style="padding-top:4px;font-size:11px;color:#cfd6dc"><b style="color:${isAssets ? '#ff8a80' : '#5fff5f'}">Union: ${selN} ${isAssets ? 'existing asset(s)' : 'point(s)'} selected</b>${selDups ? ` <span style="color:#ffd400">(${selDups} dup-flagged)</span>` : ''}${(manAdd || manRem) ? ` <span style="color:#888">· ☝ manual +${manAdd} / −${manRem}</span>` : ''}${selTypes.size ? `<br><span style="color:#9ad">${impFmtTypes(selTypes, 6)}</span>` : ''}</div>
+        </div>`;
+        el.querySelectorAll('button[data-impshapepoly]').forEach(b => {
+            b.onclick = () => {
+                const s = imp.shapes.find(x => x.id === Number(b.getAttribute('data-impshapepoly')));
+                if (!s || s.kind !== 'circle') return;
+                impCircleToPolygon(s);
+                impRefreshAfterSelChange();
+                impStatus(`⭕→⬡ shape ${s.id} is now a 24-point polygon — arm ✎ Edit to add / move / delete points`);
+            };
+        });
+        el.querySelectorAll('button[data-impshapedel]').forEach(b => {
+            b.onclick = () => {
+                const id = Number(b.getAttribute('data-impshapedel'));
+                imp.shapes = imp.shapes.filter(s => s.id !== id);
+                impRefreshAfterSelChange();
+                impStatus(`shape ${id} removed — <b>${impSelCount()}</b> selected now (manual ☝ picks kept)`);
+            };
+        });
+    }
+    function impSyncUi() {
+        try {
+            impRenderShapesUi();
+            const live = imp.points.filter(p => !p.done);
+            const selN = imp.target === 'assets' ? imp.assetSel.size : live.filter(p => p.sel).length;
+            const show = (id, on, flex) => { const el = document.getElementById(id); if (el) el.style.display = on ? (flex ? 'flex' : '') : 'none'; };
+            show('aim-imp-selrow', live.length > 0 || imp.target === 'assets', true);
+            show('aim-imp-commitrow', live.length > 0 || imp.lastCreated.length > 0, true);
+            show('aim-imp-delrow', true, true);
+            const modeBtn = (id, mode, label, onLabel) => {
+                const b = document.getElementById(id); if (!b) return;
+                const on = imp.mode === mode;
+                b.style.background = on ? 'rgba(122,223,230,0.35)' : 'rgba(122,223,230,0.12)';
+                b.textContent = on ? onLabel : label;
+            };
+            modeBtn('aim-imp-circle', 'circle', '⭕ Circle', '⭕ ON — ALT+click centers a circle · Esc=off');
+            modeBtn('aim-imp-lasso', 'lasso', '🖊 Lasso', '🖊 ON — ALT+drag a loop · Esc=off');
+            modeBtn('aim-imp-pick', 'pick', '☝ Pick', '☝ ON — ALT+click toggles one · Esc=off');
+            modeBtn('aim-imp-edit', 'edit', '✎ Edit', '✎ ON — ALT+drag vertex=move · midpoint dot=add · right-click=delete · circle edge=resize · Esc=off');
+            const cb = document.getElementById('aim-imp-commit');
+            if (cb) {
+                const dupsIn = live.filter(p => p.sel && p.dup).length;
+                const n = live.filter(p => p.sel && (!p.dup || imp.includeDups)).length;
+                cb.textContent = `✓ Create ${n} asset${n === 1 ? '' : 's'}${(dupsIn && !imp.includeDups) ? ` (${dupsIn} dup skipped)` : ''}`;
+            }
+            const db = document.getElementById('aim-imp-delete');
+            if (db) { db.style.display = imp.target === 'assets' ? '' : 'none'; db.textContent = `🗑 Delete ${imp.assetSel.size} selected…`; }
+            const ub = document.getElementById('aim-imp-undodel');
+            if (ub) ub.style.display = imp.lastDelete ? '' : 'none';
+            const uc = document.getElementById('aim-imp-undocreate');
+            if (uc) uc.style.display = imp.lastCreated.length ? '' : 'none';
+            const fl = document.getElementById('aim-imp-file-label');
+            if (fl) fl.textContent = imp.fileName ? `${imp.fileName} · ${live.length} staged · ${selN} selected` : 'no file loaded';
+        } catch (e) {}
+    }
+    // ---- COMMIT: create-only, rides createAssetSquare (template clone, Lite
+    // gate, CSRF, elevation, ghost, session names) + batch rails on top ----
+    async function impCommit() {
+        if (!impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+        if (liteBlockedWrite('import assets')) return;
+        const sid = genState.siteID;
+        if (!sid || String(sid) !== String(getCurrentSiteID())) { showToast('Site changed — reopen the generator', 'rgba(255,96,96,0.55)'); return; }
+        const targets = imp.points.filter(p => !p.done && p.sel && (!p.dup || imp.includeDups));
+        const skippedDups = imp.points.filter(p => !p.done && p.sel && p.dup && !imp.includeDups).length;
+        if (!targets.length) { impStatus(`Nothing to create — select staged points first${skippedDups ? ` (${skippedDups} selected point(s) are dup-flagged; tick "include flagged duplicates" to force them)` : ''}`, '#ffb347'); return; }
+        // resolve every point's subtype BEFORE anything writes — unmapped types block loudly
+        const subCounts = impSiteSubtypes();
+        // same frequency-sorted default the type-mapping UI shows
+        const defSub = [...subCounts.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0])[0] || 'well-cluster';
+        const missing = new Set();
+        const subtypeFor = (p) => {
+            if (!imp.mapping || !imp.mapping.type) return (imp.typeMap['__all__'] || '').trim() || defSub;
+            const v = (imp.typeMap[(p.typeRaw || '(blank)').toLowerCase()] || '').trim();
+            if (!v) missing.add(p.typeRaw || '(blank)');
+            return v;
+        };
+        const plan = targets.map(p => ({ p, subtype: subtypeFor(p) }));
+        if (missing.size) { impStatus(`BLOCKED — unmapped type value(s): <b>${impEsc([...missing].join(' · '))}</b>. Map each in the Type mapping table above.`, '#ff6060'); return; }
+        const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
+        if (dry) { impStatus(`DRY RUN — would create <b>${plan.length}</b> asset(s) (${impSizeFt}×${impSizeFt} ft squares)${skippedDups ? `, skipping ${skippedDups} dup(s)` : ''}: ${impEsc(plan.slice(0, 12).map(x => x.p.name).join(' · '))}${plan.length > 12 ? ' …' : ''}. Untick Dry run to write.`); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { impStatus('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
+        // fresh entity fetch → template + used names reflect the live server
+        impStatus('Fetching fresh site data…');
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        impBuildAssetIndex();
+        const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        const usedNames = new Set(ents.filter(e => e.name).map(e => e.name));
+        (assetSessionNames.get(String(sid)) || []).forEach(n => usedNames.add(n));
+        const uniq = (base) => {
+            base = genCleanName(base) || 'Import Asset';
+            if (!usedNames.has(base)) { usedNames.add(base); return base; }
+            let i = 2, n2; do { n2 = `${base}-${i++}`; } while (usedNames.has(n2));
+            usedNames.add(n2); return n2;
+        };
+        plan.forEach(x => { x.name = uniq(x.p.name); });
+        // backup manifest BEFORE any write (rollback = delete the created ids)
+        const manifest = { site: sid, at: new Date().toISOString(), file: imp.fileName, sizeFt: impSizeFt, creates: plan.map(x => ({ name: x.name, subtype: x.subtype, lat: x.p.lat, lng: x.p.lng })) };
+        try { localStorage.setItem(`aim_imp_commit_backup:${sid}`, JSON.stringify(manifest)); } catch (e) {}
+        try { downloadJSONFile(`asset-import-${sid}-${Date.now()}.json`, JSON.stringify(manifest, null, 1)); } catch (e) { impStatus('backup manifest download failed (localStorage stash still written)'); }
+        // fresh subtypes only need new_poi_type_str on their FIRST create
+        const knownSubs = new Set([...impSiteSubtypes().keys()]);
+        let ok = 0, fail = 0, aborted = false;
+        const created = [];
+        for (let i = 0; i < plan.length; i++) {
+            const x = plan[i];
+            impStatus(`creating ${i + 1}/${plan.length} — "${impEsc(x.name)}"…`);
+            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impSizeFt, x.name, x.subtype, !knownSubs.has(x.subtype));
+            if (r && r.ok) {
+                ok++; created.push({ id: r.id, name: x.name, point: x.p });
+                knownSubs.add(x.subtype);
+                x.p.done = true; x.p.sel = false;
+            } else {
+                fail++;
+                console.warn(`${TAG} 📥 create "${x.name}" failed:`, r && r.error);
+                if (r && /Server 403/.test(r.error || '')) { aborted = true; impStatus(`ABORTED at ${i + 1}/${plan.length} — server 403 (write permission lost). ${ok} created, rest kept staged.`, '#ff6060'); break; }
+            }
+            await sleep(DELETE_GAP_MS);
+        }
+        // verify-by-refetch: every created id must exist server-side
+        impStatus('verifying against a fresh fetch…');
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        const after = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        const byId = new Set(after.map(e => e.id));
+        const verified = created.filter(c => byId.has(c.id));
+        imp.lastCreated = verified.map(c => c.id);
+        impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
+        if (!aborted) impStatus(`DONE: <b>${ok}/${plan.length}</b> asset(s) created${fail ? `, <span style="color:#ff6060">${fail} FAILED (kept staged + selected)</span>` : ''}${skippedDups ? ` · ${skippedDups} dup(s) skipped` : ''} · verify ${verified.length}/${created.length} present · reload to edit them natively`, fail ? '#ffb347' : '#5fff5f');
+        showToast(fail ? `Import: ${ok} created, ${fail} FAILED — see the importer panel` : `✓ ${ok} asset(s) created`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+    }
+    // Undo THIS import: delete exactly the ids the last commit created.
+    async function impUndoCreate() {
+        if (liteBlockedWrite('delete imported assets (undo)')) return;
+        if (!imp.lastCreated.length) { showToast('Nothing to undo (only the most recent import this session)', 'rgba(255,96,96,0.55)'); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { showToast('No CSRF token', 'rgba(255,96,96,0.55)'); return; }
+        if (!confirm(`Delete the ${imp.lastCreated.length} asset(s) created by the last import? (Delete Guard banks each when installed)`)) return;
+        let ok = 0, fail = 0;
+        const deleted = new Set();
+        for (const id of imp.lastCreated) {
+            try {
+                const r = await fetch(`/map_objects/${encodeURIComponent(id)}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
+                if (r.ok || r.status === 404) { ok++; deleted.add(id); }
+                else { fail++; console.warn(`${TAG} 📥 undo-create #${id}: server ${r.status}${r.status === 409 ? ' (Delete Guard blocked — its pre-delete backup failed)' : ''}`); }
+            } catch (e) { fail++; console.warn(`${TAG} 📥 undo-create #${id}:`, e.message); }
+            await sleep(DELETE_GAP_MS);
+        }
+        imp.lastCreated = imp.lastCreated.filter(id => !deleted.has(id));
+        try { await fetchMapObjects(genState.siteID, true); } catch (e) {}
+        impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
+        showToast(fail ? `Undo: ${ok} deleted, ${fail} FAILED` : `↩ ${ok} imported asset(s) deleted`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+    }
+    // ---- Delete Guard detection: it has no beacon — round-trip the control
+    // channel: REQUEST_REGISTRATIONS makes every script (incl. Delete Guard)
+    // re-REGISTER; setupControlPanel stamps impDeleteGuardSeen on its reply.
+    function impDetectDeleteGuard() {
+        return new Promise(resolve => {
+            if (Date.now() - impDeleteGuardSeen < 15000) { resolve(true); return; }
+            try { if (controlChannel) controlChannel.postMessage({ type: 'REQUEST_REGISTRATIONS' }); } catch (e) {}
+            setTimeout(() => resolve(Date.now() - impDeleteGuardSeen < 15000), 1300);
+        });
+    }
+    // ---- 🗑 DELETE MODE ceremony — assets are deliberately NOT in the SUM
+    // bulk-delete's DELETABLE_TYPES, so this is its own explicitly-scoped
+    // path with the same rails: fresh fetch, mission-ref scan, full backup
+    // download BEFORE arming, ack + slide-and-HOLD-5s, 120 ms gap, 403
+    // aborts, 404 = already gone, 409 = Delete Guard blocked (backup failed),
+    // verify-by-refetch, ↩ Undo batch from our own bank. Refuses when Delete
+    // Guard is absent unless the extra override is ticked.
+    async function impOpenDeleteModal() {
+        if (!impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+        if (liteBlockedWrite('bulk delete assets')) return;
+        const sid = genState.siteID;
+        if (!sid || String(sid) !== String(getCurrentSiteID())) { showToast('Site changed — reopen the generator', 'rgba(255,96,96,0.55)'); return; }
+        if (!imp.assetSel.size) { showToast('Select existing assets first (🗑 Delete mode + ⭕/🖊/☝)', 'rgba(255,85,85,0.7)'); return; }
+        const old = document.getElementById(IMP_DEL_MODAL_ID);
+        if (old) old.remove();
+        const modal = document.createElement('div');
+        modal.id = IMP_DEL_MODAL_ID;
+        modal.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2147480070;'
+            + 'width:600px;max-width:94vw;max-height:84vh;overflow-y:auto;background:#1a1214;color:#e6e6e6;'
+            + 'border:2px solid #ff5555;border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,0.75);'
+            + 'font:12px/1.5 monospace;padding:0;';
+        modal.innerHTML = ''
+            + '<div style="padding:9px 14px;border-bottom:1px solid #552;color:#ff5555;font-weight:bold;font-size:14px;">'
+            + '🗑 BULK DELETE ASSETS — this removes assets from the LIVE site'
+            + '<span id="aim-impd-close" style="float:right;cursor:pointer;color:#888">✕</span></div>'
+            + '<div id="aim-impd-body" style="padding:10px 14px;"><span style="color:#aaa">Preparing…</span></div>';
+        document.body.appendChild(modal);
+        let running = false, abortFlag = { abort: false };
+        modal.querySelector('#aim-impd-close').addEventListener('click', () => {
+            if (running) { showToast('Run in progress — use ✋ Abort first', 'rgba(255,85,85,0.7)'); return; }
+            modal.remove();
+        });
+        const body = () => modal.querySelector('#aim-impd-body');
+        try {
+            // fresh fetch FIRST — plan + backup must reflect the live server
+            body().innerHTML = '<span style="color:#aaa">Fetching fresh site data…</span>';
+            delete mapObjectsBySite[sid];
+            await fetchMapObjects(sid, true);
+            impBuildAssetIndex();
+            const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+            const rows = ents.filter(e => e.type === 3 && imp.assetSel.has(e.id)).map(e => ({ ent: e, missionRefs: [] }));
+            if (!rows.length) { body().innerHTML = '<span style="color:#ffa030">Selection no longer matches any live asset — refetch changed things. Re-select and retry.</span>'; return; }
+            // mission-reference scan (assets are heavily mission-referenced)
+            body().innerHTML = '<span style="color:#aaa">Scanning missions for references…</span>';
+            let missionScan = null;
+            try {
+                const r = await fetch(`/available_app/?site_id=${encodeURIComponent(sid)}&type=1`, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                const data = await r.json();
+                const missions = Array.isArray(data) ? data : (Array.isArray(data.results) ? data.results : []);
+                missionScan = { ok: true, count: missions.length };
+                missions.forEach(mn => {
+                    let s = ''; try { s = JSON.stringify(mn); } catch (e) { return; }
+                    rows.forEach(row => { if (new RegExp(`\\b${row.ent.id}\\b`).test(s)) row.missionRefs.push(String(mn.name || mn.id || 'unnamed mission')); });
+                });
+            } catch (e) { missionScan = { ok: false }; console.warn(`${TAG} 📥 mission scan failed:`, e); }
+            // Delete Guard presence
+            body().innerHTML = '<span style="color:#aaa">Checking for Delete Guard…</span>';
+            const dgPresent = await impDetectDeleteGuard();
+            // full backup BEFORE anything arms
+            body().innerHTML = '<span style="color:#aaa">Downloading backup…</span>';
+            const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+            const backupName = `aim-imp-predelete-site${sid}-${stamp}.json`;
+            const snap = { siteID: sid, when: new Date().toISOString(), reason: 'pre-importer-asset-delete', count: rows.length, entities: rows.map(r => r.ent) };
+            try { downloadJSONFile(backupName, JSON.stringify(snap, null, 2)); } catch (e) {}
+            const refCount = rows.filter(r => r.missionRefs.length).length;
+            const listHtml = rows.map(r => `<div style="padding:2px 6px;border-bottom:1px solid #2a1a1a;">`
+                + `<span style="color:#fff;font-weight:bold">ASSET</span> ${impEsc(String(r.ent.name || r.ent.id))}`
+                + (r.missionRefs.length ? `<br><span style="color:#ff5555;font-weight:bold">⚠ referenced by mission(s): ${impEsc(r.missionRefs.join(', '))} — a restore creates NEW ids, mission refs will NOT rebind</span>` : '')
+                + '</div>').join('');
+            const scanNote = missionScan && missionScan.ok
+                ? `mission scan: ${missionScan.count} mission(s) checked${refCount ? `, <span style="color:#ff5555">${refCount} asset(s) referenced</span>` : ', no references ✓'}`
+                : '<span style="color:#ffa030">⚠ mission scan FAILED — references unknown, proceed with extra caution</span>';
+            const dgNote = dgPresent
+                ? '<span style="color:#5fff5f">🕘 Delete Guard detected — every delete is banked to its 24h undo ring</span>'
+                : '<span style="color:#ff5555;font-weight:bold">⛔ Delete Guard NOT detected — deletes will have NO automatic undo ring. Blocked by default.</span>';
+            body().innerHTML = ''
+                + `<div style="margin-bottom:8px;">Site <b>${impEsc(String(sid))}</b> — deleting <b style="color:#ff5555">${rows.length} asset(s)</b>`
+                + `<br><span style="color:#888">${scanNote}</span>`
+                + `<br>${dgNote}`
+                + `<br><span style="color:#5fff5f">💾 backup saved: ${impEsc(backupName)}</span> <span style="color:#888">— ↩ Undo batch re-creates from this bank (NEW ids)</span></div>`
+                + `<div style="max-height:30vh;overflow-y:auto;border:1px solid #2a1a1a;margin-bottom:10px;">${listHtml}</div>`
+                + (dgPresent ? '' : '<label style="display:flex;gap:8px;align-items:center;margin-bottom:6px;cursor:pointer;color:#ff8a80;">'
+                    + '<input type="checkbox" id="aim-impd-override"> OVERRIDE: delete WITHOUT Delete Guard (only my backup file + ↩ Undo batch protect me)</label>')
+                + '<label style="display:flex;gap:8px;align-items:center;margin-bottom:10px;cursor:pointer;">'
+                + `<input type="checkbox" id="aim-impd-ack"> I understand these ${rows.length} assets will be DELETED from this site</label>`
+                + '<div id="aim-impd-slider-wrap" style="opacity:0.45;pointer-events:none;">'
+                + '<div style="color:#ff5555;font-weight:bold;margin-bottom:4px;">Slide to the end and HOLD for 5 seconds:</div>'
+                + '<div id="aim-impd-track" style="position:relative;height:38px;background:linear-gradient(90deg,#3a1518,#7a1f24);border:1px solid #ff5555;border-radius:19px;user-select:none;touch-action:none;">'
+                + '<div id="aim-impd-knob" style="position:absolute;top:2px;left:2px;width:34px;height:34px;background:#ff5555;border-radius:50%;cursor:grab;display:flex;align-items:center;justify-content:center;font-size:16px;">🗑</div>'
+                + '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#ffb3b3;pointer-events:none;">slide ➜</div>'
+                + '</div></div>'
+                + '<div id="aim-impd-countdown" style="display:none;margin-top:10px;padding:10px;background:#7a1f24;border-radius:6px;color:#fff;font-weight:bold;font-size:15px;text-align:center;"></div>'
+                + '<div id="aim-impd-status" style="margin-top:8px;min-height:18px;color:#aaa;"></div>'
+                + '<div id="aim-impd-actions" style="margin-top:8px;display:flex;gap:14px;"></div>';
+            const ack = body().querySelector('#aim-impd-ack');
+            const ovr = body().querySelector('#aim-impd-override');
+            const sliderWrap = body().querySelector('#aim-impd-slider-wrap');
+            const armed = () => ack.checked && (dgPresent || (ovr && ovr.checked));
+            const syncArm = () => {
+                const on = armed();
+                sliderWrap.style.opacity = on ? '1' : '0.45';
+                sliderWrap.style.pointerEvents = on ? 'auto' : 'none';
+            };
+            ack.addEventListener('change', syncArm);
+            if (ovr) ovr.addEventListener('change', syncArm);
+            const track = body().querySelector('#aim-impd-track');
+            const knob = body().querySelector('#aim-impd-knob');
+            const countdownEl = body().querySelector('#aim-impd-countdown');
+            const statusEl = body().querySelector('#aim-impd-status');
+            const actionsEl = body().querySelector('#aim-impd-actions');
+            let holdTimer = null, holdLeft = 0, dragging = false, fired = false;
+            const setKnob = (px) => {
+                const max = track.clientWidth - knob.offsetWidth - 4;
+                const x = Math.max(2, Math.min(max + 2, px));
+                knob.style.left = x + 'px';
+                return (x - 2) / max;
+            };
+            const cancelHold = () => { if (holdTimer) { clearInterval(holdTimer); holdTimer = null; } countdownEl.style.display = 'none'; };
+            const resetKnob = () => { cancelHold(); knob.style.left = '2px'; };
+            const ui = {
+                status: (msg, color) => { statusEl.innerHTML = `<span style="color:${color || '#aaa'}">${msg}</span>`; },
+                runStarted: () => {
+                    running = true;
+                    sliderWrap.style.display = 'none';
+                    ack.disabled = true;
+                    actionsEl.innerHTML = '<span id="aim-impd-abort" style="cursor:pointer;color:#ffa030;font-weight:bold">✋ Abort (finishes current delete, keeps the rest)</span>';
+                    actionsEl.querySelector('#aim-impd-abort').addEventListener('click', () => { abortFlag.abort = true; ui.status('aborting after the in-flight delete…', '#ffa030'); });
+                },
+                finished: (report) => {
+                    running = false;
+                    const good = !report.failed.length && !report.verifyProblems.length && !report.aborted;
+                    ui.status(`Done — <b>${report.deleted.length} deleted</b>`
+                        + (report.failed.length ? `, <span style="color:#ff5555">${report.failed.length} FAILED</span>` : '')
+                        + (report.aborted ? ', <span style="color:#ffa030">ABORTED early</span>' : '')
+                        + (report.verifyProblems.length ? `, <span style="color:#ff5555">${report.verifyProblems.length} verify problem(s)</span>` : ', all verified gone ✓'),
+                        good ? '#5fff5f' : (report.deleted.length ? '#ffa030' : '#ff5555'));
+                    actionsEl.innerHTML = '<span id="aim-impd-undo" style="cursor:pointer;color:#ffb347;font-weight:bold">↩ Undo this batch (re-create from bank — NEW ids)</span>'
+                        + `<span style="color:#888">backup: ${impEsc(backupName)} · Delete Guard 🕘 Restore also has each one${dgPresent ? '' : ' (NOT this time — no guard)'}</span>`;
+                    actionsEl.querySelector('#aim-impd-undo').addEventListener('click', () => { impUndoDeleteBatch(); });
+                },
+            };
+            knob.addEventListener('pointerdown', (ev) => { if (fired || running) return; dragging = true; knob.setPointerCapture(ev.pointerId); ev.preventDefault(); });
+            knob.addEventListener('pointermove', (ev) => {
+                if (!dragging || fired) return;
+                const r = track.getBoundingClientRect();
+                const frac = setKnob(ev.clientX - r.left - knob.offsetWidth / 2);
+                if (frac >= 0.95) {
+                    if (!holdTimer) {
+                        holdLeft = 5;
+                        countdownEl.style.display = 'block';
+                        countdownEl.textContent = `⚠ DELETING ${rows.length} ASSETS FROM SITE ${sid} IN ${holdLeft}s — RELEASE TO CANCEL`;
+                        holdTimer = setInterval(() => {
+                            holdLeft--;
+                            if (holdLeft <= 0) {
+                                cancelHold(); fired = true; dragging = false;
+                                impDeleteExecute(sid, rows, snap, abortFlag, ui);
+                                return;
+                            }
+                            countdownEl.textContent = `⚠ DELETING ${rows.length} ASSETS FROM SITE ${sid} IN ${holdLeft}s — RELEASE TO CANCEL`;
+                        }, 1000);
+                    }
+                } else cancelHold();
+            });
+            const release = () => { if (fired) return; dragging = false; resetKnob(); };
+            knob.addEventListener('pointerup', release);
+            knob.addEventListener('pointercancel', release);
+        } catch (e) {
+            console.warn(`${TAG} 📥 delete modal prepare failed:`, e);
+            body().innerHTML = `<span style="color:#ff5555">Prepare failed — ${impEsc(String(e && e.message || e))}. Nothing was deleted.</span>`;
+        }
+    }
+    async function impDeleteExecute(sid, rows, snap, abortFlag, ui) {
+        if (liteBlockedWrite('bulk delete assets')) return;
+        const csrf = getCsrfToken();
+        if (!csrf) { ui.status('no CSRF token — make one native save/edit anywhere in Percepto first, then retry', '#ff5555'); return; }
+        ui.runStarted();
+        const results = { deleted: [], failed: [], aborted: false, verifyProblems: [] };
+        for (let i = 0; i < rows.length; i++) {
+            if (abortFlag.abort) { results.aborted = true; break; }
+            const r = rows[i];
+            ui.status(`deleting ${i + 1}/${rows.length} — "${impEsc(String(r.ent.name || r.ent.id))}"…`);
+            try {
+                const resp = await fetch(`/map_objects/${encodeURIComponent(r.ent.id)}/`, {
+                    method: 'DELETE', credentials: 'same-origin',
+                    headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' },
+                });
+                if (resp.status === 403) {
+                    try { ((typeof unsafeWindow !== 'undefined') ? unsafeWindow : window).localStorage.removeItem(CSRF_LS_KEY); } catch (e2) {}
+                    results.failed.push({ id: r.ent.id, name: r.ent.name, reason: 'server 403 — CSRF rejected; banked token cleared. Make one native edit and re-run.' });
+                    results.aborted = true;
+                    break;
+                }
+                if (resp.status === 409) {
+                    // Delete Guard synthesizes 409 when its pre-delete backup fails —
+                    // the delete was BLOCKED client-side, not a server error.
+                    results.failed.push({ id: r.ent.id, name: r.ent.name, reason: 'Delete Guard blocked the delete (its backup GET failed) — entity untouched, retry later' });
+                    continue;
+                }
+                if (!resp.ok && resp.status !== 404) {
+                    const t = await resp.text();
+                    throw new Error(`server ${resp.status} — ${(t || '').slice(0, 150)}`);
+                }
+                results.deleted.push({ id: r.ent.id, name: r.ent.name, note: resp.status === 404 ? 'was already gone (404)' : '' });
+            } catch (e) {
+                console.warn(`${TAG} 📥 delete failed for "${r.ent.name}":`, e);
+                results.failed.push({ id: r.ent.id, name: r.ent.name, reason: String(e && e.message || e) });
+            }
+            await sleep(DELETE_GAP_MS);
+        }
+        ui.status('verifying against a fresh fetch…');
+        try {
+            delete mapObjectsBySite[sid];
+            await fetchMapObjects(sid, true);
+            const fresh = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+            results.deleted.forEach(d => { if (fresh.some(e => e && e.id === d.id)) results.verifyProblems.push(`"${d.name}" (id ${d.id}) still present after delete`); });
+        } catch (e) { results.verifyProblems.push('verify fetch failed — check the site manually'); }
+        // bank ONLY what actually deleted — the ↩ Undo batch source
+        const deletedIds = new Set(results.deleted.map(d => d.id));
+        imp.lastDelete = { siteID: sid, when: new Date().toISOString(), entities: snap.entities.filter(e => deletedIds.has(e.id)) };
+        // selection consumed: drop shapes + manual picks so surviving assets
+        // inside the old shapes don't come straight back as selected
+        imp.shapes = []; imp.assetManual.clear();
+        impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
+        const report = { ranAt: new Date().toISOString(), siteID: sid, deleted: results.deleted, failed: results.failed, aborted: results.aborted, verifyProblems: results.verifyProblems };
+        console.log(`${TAG} 📥 asset bulk delete done: ${results.deleted.length} deleted, ${results.failed.length} failed${results.aborted ? ' (ABORTED)' : ''}`, report);
+        ui.finished(report);
+    }
+    // ↩ Undo batch: create-only re-POST of the banked bodies. NEW ids —
+    // mission references do NOT rebind (surfaced in the ceremony + here).
+    async function impUndoDeleteBatch() {
+        if (liteBlockedWrite('restore deleted assets')) return;
+        const bank = imp.lastDelete;
+        if (!bank || !bank.entities.length) { showToast('No delete batch banked this session — use Delete Guard’s 🕘 Restore panel instead', 'rgba(255,96,96,0.55)'); return; }
+        if (String(bank.siteID) !== String(getCurrentSiteID())) { showToast('Banked batch belongs to another site', 'rgba(255,96,96,0.55)'); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { showToast('No CSRF token — make one native save anywhere in Percepto first, then retry', 'rgba(255,96,96,0.55)'); return; }
+        if (!confirm(`Re-create the ${bank.entities.length} deleted asset(s) from the bank? They come back with NEW ids — mission references will NOT rebind.`)) return;
+        let siteCfg = null;
+        try { siteCfg = await fetchSiteConfig(bank.siteID); } catch (e) { showToast('GET /sites/ failed — restore blocked (mountain_terrain_site would be wrong)', 'rgba(255,96,96,0.55)'); return; }
+        let ok = 0, fail = 0;
+        const restored = [];
+        for (const ent of bank.entities) {
+            try {
+                const b = buildWriteBody(ent, siteCfg);
+                delete b.id;
+                const r = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(b) });
+                const txt = await r.text(); let json = null; try { json = JSON.parse(txt); } catch (e) {}
+                if (r.status === 200 && json && json.map_objects && json.map_objects.id != null) { ok++; restored.push(ent.id); }
+                else throw new Error(`server ${r.status} ${(txt || '').slice(0, 120)}`);
+            } catch (e) { fail++; console.warn(`${TAG} 📥 restore "${ent.name}":`, e.message); }
+            await sleep(DELETE_GAP_MS);
+        }
+        const restoredSet = new Set(restored);
+        bank.entities = bank.entities.filter(e => !restoredSet.has(e.id));   // failed ones stay retryable
+        if (!bank.entities.length) imp.lastDelete = null;
+        try { await fetchMapObjects(bank.siteID, true); } catch (e) {}
+        impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
+        impStatus(`↩ Undo batch: <b>${ok}</b> restored${fail ? `, <span style="color:#ff6060">${fail} FAILED (kept banked — retry)</span>` : ''} · restored assets have NEW ids · reload to see them natively`, fail ? '#ffb347' : '#5fff5f');
+        showToast(fail ? `Restore: ${ok} ok, ${fail} FAILED` : `↩ ${ok} asset(s) restored`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+    }
+    // ---- teardown (closeSiteGenerator) + panel show + CP open action ----
+    function impTeardown() {
+        try { impSetMode(null); } catch (e) {}
+        impEnsureMoveEnd(false);
+        impClearLayers(); impClearShapeLayers(); impClearAssetLayers();
+        // parsed data stays in memory — reopening the generator on the SAME
+        // site restores the staged view; a different site resets it.
+    }
+    function impShowPanel() {
+        const c = document.getElementById('aim-imp-controls');
+        if (!c) return;
+        c.style.display = 'block';
+        const b = document.getElementById('aim-gen-import');
+        if (b) b.style.background = 'rgba(122,223,230,0.32)';
+    }
+    function impOpenFromAction() {
+        // TRIGGER_ACTION 'imp-open' (CP card button) — mirrors the ⊕ map-button flow
+        if (LITE) { showToast('Asset Importer needs Full mode (CSM access)', 'rgba(255,180,0,0.6)'); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
+        const go = () => {
+            try {
+                if (!document.getElementById(GEN_MODAL_ID)) openSiteGenerator(sid);
+                impShowPanel();
+            } catch (e) { console.warn(`${TAG} 📥 open failed:`, e); }
+        };
+        const bucket = mapObjectsBySite[sid];
+        if (!bucket || !bucket.entities) fetchMapObjects(sid, true).then(go);
+        else go();
+    }
+
+    // ============================================================
+    // 📌 GM STAMPER (#271) — template-driven General Marker placement.
+    // Percepto requires a unique name per General Marker and its native flow
+    // is click → pick type → type a name → notes → save, EVERY time. Here a
+    // TEMPLATE (label, name pattern with "#", marker type, notes, height) is
+    // armed once and every map click creates a real GM through the same
+    // POST /map_objects/ create rails the Airspace Checker uses (create-only,
+    // never edits existing entities). "#" becomes the next free number on the
+    // site (site-wide name uniqueness — Percepto rejects duplicate names
+    // across ALL entity types, not just markers). Templates live in GM
+    // storage (per user, carries across prod/QA); Copy / Paste JSON shares a
+    // set with coworkers. Each placed marker is drawn locally right away
+    // (Percepto only re-reads /map_objects on reload) and ↩ Undo deletes the
+    // last placed GM (Delete Guard banks the body first). Placement is
+    // click-vs-pan aware (mouseup within GMT_CLICK_PX of mousedown = place;
+    // a drag still pans) with an optional ALT+click gate from the CP card.
+    // Log tag: [AIM SITE SETUP]. Full mode only (site-write).
+    // ============================================================
+    const GMT_TEMPLATES_KEY = 'aim_gmt_templates';   // GM: [{id,label,name,type,description,heightFt,start,pad}]
+    const GMT_PANEL_ID = 'aim-gmt-panel';
+    const GMT_MAP_BTN_ID = 'aim-gmt-maptools-btn';
+    const GMT_STYLE_ID = 'aim-gmt-style';
+    const GMT_KNOWN_TYPES = ['general', 'tower', 'hazard', 'building', 'pole'];   // general_marker_type values seen live
+    const GMT_TYPE_COLORS = { general: '#c39bd3', tower: '#ff8a80', hazard: '#ffd400', building: '#7adfe6', pole: '#ffb020' };
+    const GMT_CLICK_PX = 6;                          // mouseup within this many px of mousedown = a click (a drag = pan)
+    const GMT_MAX_NUMBER_SCAN = 100000;              // "#" search cap — a template that can't find a free name in 100k fails loudly
+    const GMT_RINGS_ON_KEY = 'aim_gmt_rings_on';     // GM: '1' | '0' — show/hide every template ring
+    let gmtRingsOn = true;
+    try { gmtRingsOn = GM_getValue(GMT_RINGS_ON_KEY, '1') !== '0'; } catch (e) { console.warn(`${TAG} 📌 rings pref read failed:`, e); }
+    let gmt = {
+        siteID: null,                                // site the drawn session markers belong to
+        templates: [],
+        activeId: null,
+        armed: false,
+        editing: null,                               // template draft in the panel form (null = list view)
+        pasteOpen: false,                            // ⬆ Paste JSON textarea shown
+        placed: [],                                  // this session: [{id, name, lat, lng, siteID, layer}]
+        queue: Promise.resolve(),                    // placements run strictly in order so "#" numbering never races
+        pending: 0,
+        status: '',
+        pos: null,                                   // {left, top} after the user drags the panel
+        templatesLoaded: false,
+        ringLayers: [], ringSig: '', ringMap: null,  // ⭕ radius rings drawn around template-matched GMs
+        nativeEdit: null,                            // {input, id, ll, type, sig, layers} while Percepto's form edits a known GM
+        _container: null, _onDown: null, _onUp: null, _onClick: null, _onDbl: null, _onKey: null,
+        _down: null, _suppressClickUntil: 0,
+    };
+    function gmtNormalizeTemplate(t) {
+        const type = String(t.type || 'general').toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'general';
+        const heightFt = Number(t.heightFt);
+        const start = Number(t.start);
+        const pad = Number(t.pad);
+        const r = (t.ring && typeof t.ring === 'object') ? t.ring : {};
+        const dist = Number(r.dist), opacity = Number(r.opacity);
+        const ring = {
+            on: !!r.on,
+            dist: (isFinite(dist) && dist > 0) ? dist : 0.5,
+            unit: r.unit === 'ft' ? 'ft' : 'mi',
+            color: /^#[0-9a-f]{6}$/i.test(String(r.color || '')) ? String(r.color).toLowerCase() : '#f020a0',
+            opacity: (isFinite(opacity) && opacity >= 0 && opacity <= 1) ? Math.round(opacity * 100) / 100 : 0.25,
+            cross: r.cross !== false,
+            match: String(r.match || '').replace(/\s+/g, ' ').trim().slice(0, 300),   // extra name filter: comma-separated "contains" terms (e.g. "not shielded")
+            anyType: !!r.anyType,                                                  // contains-terms ignore the marker type
+        };
+        return {
+            id: String(t.id || gmtNewId()),
+            label: String(t.label || '').trim() || 'Untitled',
+            name: String(t.name || '').trim() || 'Marker #',
+            type,
+            description: typeof t.description === 'string' ? t.description : '',
+            heightFt: (isFinite(heightFt) && heightFt >= 0) ? heightFt : 0,
+            start: (Number.isInteger(start) && start >= 0) ? start : 1,
+            pad: (Number.isInteger(pad) && pad >= 0 && pad <= 6) ? pad : 0,
+            ring,
+        };
+    }
+    function gmtNewId() { return `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; }
+    function gmtLoadTemplates() {
+        try {
+            const raw = GM_getValue(GMT_TEMPLATES_KEY, '');
+            const arr = raw ? JSON.parse(raw) : [];
+            gmt.templates = Array.isArray(arr) ? arr.filter(t => t && typeof t === 'object').map(gmtNormalizeTemplate) : [];
+        } catch (e) { console.warn(`${TAG} 📌 template load failed:`, e); gmt.templates = []; }
+        if (gmt.activeId && !gmt.templates.some(t => t.id === gmt.activeId)) gmt.activeId = null;
+        if (!gmt.activeId && gmt.templates.length) gmt.activeId = gmt.templates[0].id;
+        gmt.templatesLoaded = true;
+    }
+    function gmtSaveTemplates() {
+        try { GM_setValue(GMT_TEMPLATES_KEY, JSON.stringify(gmt.templates)); }
+        catch (e) { console.warn(`${TAG} 📌 template save failed:`, e); showToast('Template save failed — see console', 'rgba(255,96,96,0.55)'); }
+    }
+    function gmtActiveTemplate() { return gmt.templates.find(t => t.id === gmt.activeId) || null; }
+    // ---- naming: "#" → next free number, unique against EVERY entity name on the site ----
+    function gmtUsedNames(sid) {
+        const set = new Set();
+        const bucket = mapObjectsBySite[sid];
+        (((bucket && bucket.entities) || [])).forEach(e => { if (e && e.name) set.add(String(e.name).toLowerCase()); });
+        gmt.placed.forEach(p => { if (p.siteID === sid) set.add(p.name.toLowerCase()); });
+        return set;
+    }
+    // Pattern tokens: "#" = number, "{name}" = the source entity's name (bulk
+    // stamping from the SUM panel; empty on a plain map click). A pattern with
+    // {name} and no "#" tries the plain name first and only numbers on collision.
+    function gmtRenderName(t, n, srcName) {
+        const num = t.pad ? String(n).padStart(t.pad, '0') : String(n);
+        const base = t.name.replace(/\{name\}/gi, srcName || '');
+        const pattern = /#/.test(base) ? base : `${base} #`;
+        return genCleanName(pattern.replace(/#/g, num));
+    }
+    function gmtNextName(t, sid, srcName, usedOverride) {
+        const used = usedOverride || gmtUsedNames(sid);
+        if (/\{name\}/i.test(t.name) && !/#/.test(t.name)) {
+            const plain = genCleanName(t.name.replace(/\{name\}/gi, srcName || ''));
+            if (plain && !used.has(plain.toLowerCase())) return { name: plain, n: null };
+        }
+        let n = t.start;
+        for (let guard = 0; guard < GMT_MAX_NUMBER_SCAN; guard++, n++) {
+            const name = gmtRenderName(t, n, srcName);
+            if (name && !used.has(name.toLowerCase())) return { name, n };
+        }
+        return null;
+    }
+    // ---- write: one GM via POST /map_objects/ (create-only) ----
+    async function gmtCreateGm(t, ll, sid, srcName, over) {
+        if (liteBlockedWrite('stamp GM')) return null;
+        const csrf = getCsrfToken();
+        if (!csrf) { showToast('No CSRF token yet — make one native save/edit anywhere in Percepto, then retry', 'rgba(255,96,96,0.55)'); return null; }
+        // The save invalidator wipes mapObjectsBySite after every POST /map_objects/
+        // (ours included) — re-ensure it so "#" is checked against the live site.
+        if (!mapObjectsBySite[sid] || !mapObjectsBySite[sid].entities) {
+            try { await fetchMapObjects(sid, true); } catch (e) { console.warn(`${TAG} 📌 entity refetch failed:`, e); }
+            if (!mapObjectsBySite[sid] || !mapObjectsBySite[sid].entities) { showToast('Could not load site entities — not placing (name uniqueness unverifiable)', 'rgba(255,96,96,0.55)'); return null; }
+        }
+        const next = gmtNextName(t, sid, srcName);
+        if (!next) { console.warn(`${TAG} 📌 no free name for template "${t.label}" (pattern "${t.name}")`); showToast(`No free name for "${t.label}" — change its pattern`, 'rgba(255,96,96,0.55)'); return null; }
+        let siteCfg = null;
+        try { siteCfg = await fetchSiteConfig(sid); } catch (e) { console.warn(`${TAG} 📌 site cfg fetch failed:`, e); }
+        // Clone an existing GM's write body when one exists (guarantees every
+        // field the server wants); else the minimal body the Airspace Checker uses.
+        const bucket = mapObjectsBySite[sid];
+        const tmplGm = bucket && bucket.entities && bucket.entities.find(e => e.type === 19 && Array.isArray(e.coords) && e.coords.length);
+        let b = null;
+        if (tmplGm) { try { b = buildWriteBody(tmplGm, siteCfg); } catch (e) { console.warn(`${TAG} 📌 GM body clone failed, using minimal body:`, e); } }
+        if (!b) b = { type: 19, description: '', custom: {}, params: {}, asset_waypoints: null, constantly_present_asset_name: false, restrictions: [], arcs: [], is_unshielded: false };
+        delete b.id;
+        b.type = 19;
+        b.name = next.name;
+        b.site_id = sid;
+        b.points = [{ lat: ll.lat, lng: ll.lng }];
+        b.general_marker_type = (over && over.type && GMT_KNOWN_TYPES.includes(over.type)) ? over.type : t.type;   // v4.322: external per-point type
+        b.marker_height = Math.round(((over && isFinite(over.heightFt) && over.heightFt >= 0 ? over.heightFt : t.heightFt) / M_TO_FT) * 100) / 100;
+        b.description = (over && typeof over.description === 'string' && over.description) ? over.description : (t.description || '');
+        b.validated = false;
+        b.arcs = [];
+        b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
+        let r, txt = '', json = null;
+        try {
+            r = await fetch('/map_objects/', {
+                method: 'POST', credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf },
+                body: JSON.stringify(b),
+            });
+            txt = await r.text();
+            try { json = JSON.parse(txt); } catch (e) {}
+        } catch (e) {
+            console.warn(`${TAG} 📌 create "${next.name}" threw:`, e);
+            showToast(`GM "${next.name}" NOT created — network error (see console)`, 'rgba(255,96,96,0.55)');
+            return null;
+        }
+        const saved = r.status === 200 && json && json.map_objects;
+        if (!saved) {
+            console.warn(`${TAG} 📌 create "${next.name}" failed: server ${r.status} ${(txt || '').slice(0, 300)}`);
+            showToast(`GM "${next.name}" NOT created — server ${r.status} (see console)`, 'rgba(255,96,96,0.55)');
+            return null;
+        }
+        // Keep the entity cache current so the next "#" and the right-click
+        // inspector see the new marker without a refetch.
+        const ent = Object.assign({}, saved, { site: Number(sid), type: 19, coords: (Array.isArray(saved.coords) && saved.coords.length) ? saved.coords : b.points });
+        if (bucket && Array.isArray(bucket.entities)) bucket.entities.push(ent);
+        console.log(`${TAG} 📌 created GM "${next.name}" (${t.type}) id ${saved.id} at ${ll.lat.toFixed(6)}, ${ll.lng.toFixed(6)}`);
+        return { id: saved.id, name: next.name };
+    }
+    // Delete one placed GM (Delete Guard banks the body first). Returns true on success.
+    async function gmtDeletePlaced(p, csrf) {
+        try {
+            const r = await fetch(`/map_objects/${p.id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
+            if (r.status === 200 || r.status === 204) {
+                gmt.placed = gmt.placed.filter(x => x !== p);
+                if (p.layer) { try { p.layer.remove(); } catch (e) {} }
+                const bucket = mapObjectsBySite[p.siteID];
+                if (bucket && Array.isArray(bucket.entities)) bucket.entities = bucket.entities.filter(e => e.id !== p.id);
+                console.log(`${TAG} 📌 undo: deleted GM "${p.name}" (#${p.id}) — Delete Guard banked it`);
+                return true;
+            }
+            const txt = await r.text();
+            console.warn(`${TAG} 📌 undo delete of "${p.name}" (#${p.id}) failed: server ${r.status} ${(txt || '').slice(0, 200)}`);
+            return false;
+        } catch (e) { console.warn(`${TAG} 📌 undo delete of "${p.name}" threw:`, e); return false; }
+    }
+    async function gmtUndoLast() {
+        const p = gmt.placed[gmt.placed.length - 1];
+        if (!p) { showToast('Nothing to undo'); return; }
+        if (liteBlockedWrite('undo GM')) return;
+        const csrf = getCsrfToken();
+        if (!csrf) { showToast('No CSRF token — cannot delete', 'rgba(255,96,96,0.55)'); return; }
+        const ok = await gmtDeletePlaced(p, csrf);
+        gmt.ringSig = ''; gmtRingsRebuild();
+        showToast(ok ? `↩ Deleted "${p.name}"` : 'Undo failed — see console', ok ? undefined : 'rgba(255,96,96,0.55)');
+        gmtRenderPanel();
+    }
+    // ---- local preview marker (Percepto shows the real one after a reload) ----
+    function gmtEnsureStyle() {
+        if (document.getElementById(GMT_STYLE_ID)) return;
+        const st = document.createElement('style');
+        st.id = GMT_STYLE_ID;
+        st.textContent = `
+            .aim-gmt-pin { background: none; border: none; }
+            .aim-gmt-tip { background: rgba(16,22,32,0.92); color: #dfe9f0; border: 1px solid rgba(195,155,211,0.7); border-radius: 4px; padding: 1px 5px; font: 11px/1.3 -apple-system,Segoe UI,Roboto,sans-serif; box-shadow: none; white-space: nowrap; }
+            .aim-gmt-tip::before { display: none; }
+            @keyframes aim-gmt-pulse { 0% { box-shadow: 0 0 0 0 rgba(95,255,95,0.5); } 100% { box-shadow: 0 0 0 8px rgba(95,255,95,0); } }
+            #${GMT_PANEL_ID} [data-gmt-arm].on { animation: aim-gmt-pulse 1.2s ease-out infinite; }
+            #${GMT_PANEL_ID} input, #${GMT_PANEL_ID} select, #${GMT_PANEL_ID} textarea { background: rgba(0,0,0,0.35); color: #dfe9f0; border: 1px solid rgba(122,223,230,0.35); border-radius: 4px; padding: 3px 5px; font: inherit; box-sizing: border-box; }
+            #${GMT_PANEL_ID} button { font: inherit; cursor: pointer; }
+            #${GMT_PANEL_ID} button:disabled { opacity: 0.45; cursor: default; }
+            #${GMT_PANEL_ID} [data-gmt-row]:hover { background: rgba(122,223,230,0.08); }
+        `;
+        document.head.appendChild(st);
+    }
+    function gmtDrawMarker(ll, name, t) {
+        const map = getLeafletMap();
+        const L = getLeafletL();
+        if (!map || !L) return null;
+        try {
+            gmtEnsureStyle();
+            const color = GMT_TYPE_COLORS[t.type] || '#c39bd3';
+            const icon = L.divIcon({
+                className: 'aim-gmt-pin', iconSize: [14, 14], iconAnchor: [7, 7],
+                html: `<div style="width:14px;height:14px;border-radius:50%;background:${color};border:2px solid #101620;box-shadow:0 0 0 2px ${color}88;"></div>`,
+            });
+            const mk = L.marker([ll.lat, ll.lng], { icon, interactive: false, zIndexOffset: 1000 });
+            mk.bindTooltip(name, { permanent: true, direction: 'top', offset: [0, -8], className: 'aim-gmt-tip', interactive: false });
+            mk.addTo(map);
+            return mk;
+        } catch (e) { console.warn(`${TAG} 📌 preview marker failed:`, e); return null; }
+    }
+    function gmtClearSession(reason) {
+        if (!gmt.placed.length) return;
+        gmt.placed.forEach(p => { if (p.layer) { try { p.layer.remove(); } catch (e) {} } });
+        console.log(`${TAG} 📌 cleared ${gmt.placed.length} session marker(s) (${reason})`);
+        gmt.placed = [];
+    }
+    // ---- placement queue ----
+    function gmtPlaceAt(ll) {
+        const t = gmtActiveTemplate();
+        if (!t) { showToast('Pick a template first', 'rgba(255,179,71,0.6)'); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
+        gmt.pending++;
+        gmtSetStatus(`saving${gmt.pending > 1 ? ` (${gmt.pending} queued)` : ''}…`);
+        gmt.queue = gmt.queue.then(async () => {
+            try {
+                if (gmt.siteID !== sid) { gmtClearSession('site changed'); gmt.siteID = sid; }
+                if (!mapObjectsBySite[sid] || !mapObjectsBySite[sid].entities) await fetchMapObjects(sid, true);
+                const res = await gmtCreateGm(t, ll, sid);
+                if (res) {
+                    const layer = gmtDrawMarker(ll, res.name, t);
+                    gmt.placed.push({ id: res.id, name: res.name, lat: ll.lat, lng: ll.lng, siteID: sid, layer });
+                    showToast(`📌 ${res.name} created`);
+                    gmtSetStatus(`✓ ${res.name}`);
+                    gmt.ringSig = ''; gmtRingsRebuild();
+                } else gmtSetStatus('last placement failed — see console');
+            } catch (e) {
+                console.warn(`${TAG} 📌 place failed:`, e);
+                showToast('Place failed — see console', 'rgba(255,96,96,0.55)');
+                gmtSetStatus('last placement failed — see console');
+            }
+            gmt.pending = Math.max(0, gmt.pending - 1);
+            if (!gmt.editing) gmtRenderPanel();                                 // never wipe an open template form
+        });
+    }
+    // ---- map wiring: capture-phase harness like the importer; click-vs-pan aware ----
+    function gmtWire() {
+        const map = getLeafletMap();
+        if (!map) { showToast('Map not ready — try again in a moment', 'rgba(255,179,71,0.6)'); return false; }
+        gmtUnwire();
+        const c = map.getContainer();
+        gmt._container = c;
+        gmt._onDown = (ev) => {
+            if (!gmt.armed || ev.button !== 0) { gmt._down = null; return; }
+            if (gmtAltGate && !ev.altKey) { gmt._down = null; return; }         // plain click stays free when the gate is on
+            gmt._down = { x: ev.clientX, y: ev.clientY };
+            if (gmtAltGate) { ev.preventDefault(); ev.stopPropagation(); }       // ALT+click never pans / selects
+        };
+        gmt._onUp = (ev) => {
+            const d = gmt._down; gmt._down = null;
+            if (!gmt.armed || !d || ev.button !== 0) return;
+            if (Math.hypot(ev.clientX - d.x, ev.clientY - d.y) > GMT_CLICK_PX) return;   // it was a pan
+            if (ev.target && ev.target.closest && ev.target.closest('.map-tools, .leaflet-control, button, .ant-btn')) return;
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            // NOT stopPropagation here: Leaflet's Draggable ends its (unstarted) drag on a
+            // DOCUMENT mouseup — swallowing it leaves the map glued to the cursor. The
+            // trailing 'click' (Leaflet + Percepto selection) and 'dblclick' (zoom) are eaten instead.
+            gmt._suppressClickUntil = Date.now() + 400;
+            gmtPlaceAt(ll);
+        };
+        gmt._onClick = (ev) => { if (Date.now() < gmt._suppressClickUntil) { ev.preventDefault(); ev.stopPropagation(); } };
+        gmt._onDbl = (ev) => { if (gmt.armed) { ev.preventDefault(); ev.stopPropagation(); } };
+        gmt._onKey = (ev) => {
+            if (ev.key !== 'Escape' || !gmt.armed) return;
+            ev.preventDefault(); ev.stopPropagation();
+            gmtArm(false);
+        };
+        c.addEventListener('mousedown', gmt._onDown, true);
+        c.addEventListener('mouseup', gmt._onUp, true);
+        c.addEventListener('click', gmt._onClick, true);
+        c.addEventListener('dblclick', gmt._onDbl, true);
+        try { uwin().addEventListener('keydown', gmt._onKey, true); } catch (e) {}
+        try { c.style.cursor = 'crosshair'; } catch (e) {}
+        return true;
+    }
+    function gmtUnwire() {
+        const c = gmt._container;
+        if (c) {
+            try { c.removeEventListener('mousedown', gmt._onDown, true); } catch (e) {}
+            try { c.removeEventListener('mouseup', gmt._onUp, true); } catch (e) {}
+            try { c.removeEventListener('click', gmt._onClick, true); } catch (e) {}
+            try { c.removeEventListener('dblclick', gmt._onDbl, true); } catch (e) {}
+            try { if (!advDraw.active && !nfzDraw.active && !imp.mode) c.style.cursor = ''; } catch (e) {}
+        }
+        try { uwin().removeEventListener('keydown', gmt._onKey, true); } catch (e) {}
+        gmt._container = null;
+        gmt._down = null;
+    }
+    function gmtArm(on) {
+        if (on && !gmtMasterEnabled) { showToast('GM Stamper is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+        if (on && LITE) { showToast('GM Stamper needs Full mode (CSM access)', 'rgba(255,180,0,0.6)'); return; }
+        if (on && !gmtActiveTemplate()) { showToast('Pick a template first', 'rgba(255,179,71,0.6)'); return; }
+        if (on) {
+            try { if (nfzDraw.active) setNfzMode(null); } catch (e) {}          // mutually exclusive with the other map tools
+            try { if (advDraw.active) setAdvDraw(false); } catch (e) {}
+            try { if (imp.mode) impSetMode(null); } catch (e) {}
+            try { if (genDraw.active) { const b = document.getElementById('aim-gen-draw'); if (b) b.click(); } } catch (e) {}
+            if (!gmtWire()) return;
+            gmt.armed = true;
+            const t = gmtActiveTemplate();
+            console.log(`${TAG} 📌 armed template "${t.label}" (${t.type}, pattern "${t.name}")${gmtAltGate ? ' — ALT+click gate on' : ''}`);
+            gmtSetStatus(`armed — ${gmtAltGate ? 'ALT+click' : 'click'} the map to place "${t.label}" · Esc stops`);
+        } else {
+            gmt.armed = false;
+            gmtUnwire();
+            gmtSetStatus('');
+        }
+        gmtRenderPanel();
+    }
+    function gmtSetStatus(s) {
+        gmt.status = s || '';
+        const el = document.querySelector(`#${GMT_PANEL_ID} [data-gmt-status]`);
+        if (el) el.textContent = gmt.status;
+    }
+    // ---- ⭕ radius rings: drawn around every GM on the site that MATCHES a
+    // template with ring.on (same general_marker_type + name fits the pattern:
+    // "#" → digits, "{name}" → anything). The SOP case: an unshielded asset may
+    // be used when power lines sit within 0.5 mi on 3 sides — ring + N/S/E/W
+    // cross around each hazard GM makes that a glance. Rebuilt from the entity
+    // cache whenever the site / templates / GM set change (2 s tick), so rings
+    // survive reloads and also cover GMs created natively. Read-only overlay. ----
+    function gmtRingRegex(t) {
+        const esc = String(t.name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const src = esc.replace(/\\\{name\\\}/gi, '.+').replace(/#/g, '\\d+');
+        try { return new RegExp(`^${src.trim().replace(/\s+/g, '\\s+')}$`, 'i'); } catch (e) { return null; }
+    }
+    function gmtRingMeters(r) { return r.unit === 'ft' ? r.dist / M_TO_FT : r.dist * 1609.344; }
+    function gmtRingTerms(r) { return String(r.match || '').split(/[,\n]/).map(x => x.trim().toLowerCase()).filter(Boolean); }
+    // Which ring-enabled template (from a prepared {t, re, terms} list) claims a
+    // marker with this name + type? Name pattern (+ same type) OR any "contains"
+    // term (+ same type unless anyType).
+    function gmtRingTemplateFor(name, type, tmpls) {
+        const nm = String(name || '').trim(), lo = nm.toLowerCase(), ty = String(type || 'general').toLowerCase();
+        return tmpls.find(x => (x.re && x.t.type === ty && x.re.test(nm))
+            || (x.terms.length && (x.t.ring.anyType || x.t.type === ty) && x.terms.some(term => lo.includes(term)))) || null;
+    }
+    function gmtRingPrepared(draft) {
+        return gmtRingTemplates(draft).map(t => ({ t, re: gmtRingRegex(t), terms: gmtRingTerms(t.ring) })).filter(x => x.re || x.terms.length);
+    }
+    function gmtRingDraw(map, L, c, r, preview) {
+        const m = gmtRingMeters(r);
+        const out = [];
+        const circle = L.circle([c.lat, c.lng], { radius: m, color: r.color, weight: preview ? 2.5 : 1.5, opacity: Math.min(1, r.opacity + 0.45), fillColor: r.color, fillOpacity: r.opacity, dashArray: preview ? '8,6' : null, interactive: false });
+        circle.addTo(map); out.push(circle);
+        if (r.cross) {
+            const dLat = m / 111320, dLng = m / (111320 * Math.cos(c.lat * Math.PI / 180));
+            const cross = L.polyline([[[c.lat - dLat, c.lng], [c.lat + dLat, c.lng]], [[c.lat, c.lng - dLng], [c.lat, c.lng + dLng]]], { color: r.color, weight: 1, opacity: Math.min(1, r.opacity + 0.3), dashArray: '4,6', interactive: false });
+            cross.addTo(map); out.push(cross);
+        }
+        return out;
+    }
+    function gmtRingsClear() {
+        gmt.ringLayers.forEach(l => { try { l.remove(); } catch (e) {} });
+        gmt.ringLayers = [];
+        gmt.ringSig = '';
+    }
+    function gmtRingTemplates(draft) {
+        let list = gmt.templates;
+        if (draft) list = list.some(t => t.id === draft.id) ? list.map(t => t.id === draft.id ? draft : t) : list.concat([draft]);
+        return list.filter(t => t.ring && t.ring.on);
+    }
+    function gmtRingsRebuild(draft) {
+        const map = getLeafletMap();
+        const L = getLeafletL();
+        const sid = getCurrentSiteID();
+        gmtRingsClear();
+        if (!map || !L || !sid || !gmtRingsOn) return;
+        gmt.ringMap = map;
+        const tmpls = gmtRingPrepared(draft);
+        if (!tmpls.length) return;
+        const bucket = mapObjectsBySite[sid];
+        const ents = (bucket && Array.isArray(bucket.entities)) ? bucket.entities : [];
+        let n = 0;
+        ents.forEach(g => {
+            if (!g || g.type !== 19 || !Array.isArray(g.coords) || !g.coords[0] || typeof g.coords[0].lat !== 'number') return;
+            if (gmt.nativeEdit && gmt.nativeEdit.id === g.id) return;            // the native-edit preview ring owns this one
+            const hit = gmtRingTemplateFor(g.name, g.general_marker_type, tmpls);
+            if (!hit) return;
+            try { gmt.ringLayers.push(...gmtRingDraw(map, L, g.coords[0], hit.t.ring, false)); n++; }
+            catch (e) { console.warn(`${TAG} 📌 ring draw failed for "${g.name}":`, e); }
+        });
+        if (n) console.log(`${TAG} 📌 rings: ${n} drawn on site ${sid}${draft ? ' (live preview)' : ''}`);
+    }
+    function gmtRingsSig(sid) {
+        const bucket = mapObjectsBySite[sid];
+        const ents = (bucket && Array.isArray(bucket.entities)) ? bucket.entities : null;
+        const gms = ents ? ents.filter(g => g && g.type === 19).map(g => `${g.id}:${g.name}:${g.general_marker_type}:${g.coords && g.coords[0] ? `${g.coords[0].lat},${g.coords[0].lng}` : ''}`).join(';') : 'nocache';
+        return `${sid}|${gmtRingsOn ? 1 : 0}|${JSON.stringify(gmt.templates.map(t => [t.id, t.type, t.name, t.ring]))}|${gms}`;
+    }
+    function gmtRingsTick() {
+        try {
+            if (!gmt.templatesLoaded) gmtLoadTemplates();
+            const sid = getCurrentSiteID();
+            const map = getLeafletMap();
+            if (!sid || !map) { if (gmt.ringLayers.length) gmtRingsClear(); return; }
+            if (gmt.editing) return;                                              // live preview owns the rings while a form is open
+            const any = gmtRingsOn && gmt.templates.some(t => t.ring && t.ring.on);
+            if (!any) { if (gmt.ringLayers.length) gmtRingsClear(); return; }
+            if (!mapObjectsBySite[sid] && !fetchingSites.has(sid)) { fetchMapObjects(sid).catch(e => console.warn(`${TAG} 📌 rings entity fetch failed:`, e)); return; }
+            const sig = gmtRingsSig(sid);
+            if (sig === gmt.ringSig && gmt.ringMap === map) return;
+            gmtRingsRebuild();
+            gmt.ringSig = sig;
+        } catch (e) { console.warn(`${TAG} 📌 rings tick failed:`, e); }
+    }
+    // ---- live ring while EDITING AN EXISTING GM natively: Percepto's entity
+    // form holds the name in #upsert-entity-form-name (selector banked by the
+    // inspector's editor helpers). Latch the entity by its name when the form
+    // opens (position + type from the cache), then re-match the CURRENT typed
+    // name every 500 ms and draw a dashed preview ring the moment it matches a
+    // ring template. Type is the cached one (Percepto's type picker isn't a
+    // selector we've banked) — use "any marker type" on the template if the
+    // type is changing too. Clears when the form closes; the normal ring
+    // catches up after the save (cache refetch). ----
+    function gmtNativeEditTick() {
+        try {
+            if (!gmtRingsOn || !gmt.templates.some(t => t.ring && t.ring.on)) { if (gmt.nativeEdit) gmtNativeEditClear(); return; }
+            const hits = scanAllDocs('#upsert-entity-form-name');
+            const input = hits.length ? hits[hits.length - 1].el : null;
+            if (!input) { if (gmt.nativeEdit) gmtNativeEditClear(); return; }
+            const sid = getCurrentSiteID();
+            const bucket = sid && mapObjectsBySite[sid];
+            const ents = (bucket && Array.isArray(bucket.entities)) ? bucket.entities : [];
+            const cur = String(input.value || '').trim();
+            if (!gmt.nativeEdit || gmt.nativeEdit.input !== input) {
+                // form just opened — latch the GM by its initial name
+                const g = ents.find(e => e && e.type === 19 && String(e.name || '').trim().toLowerCase() === cur.toLowerCase() && Array.isArray(e.coords) && e.coords[0]);
+                if (!g) { if (gmt.nativeEdit) gmtNativeEditClear(); return; }   // not a GM we know (new marker / other entity)
+                gmt.nativeEdit = { input, id: g.id, ll: g.coords[0], type: g.general_marker_type, sig: '', layers: [] };
+                console.log(`${TAG} 📌 native edit of GM "${g.name}" (#${g.id}) — live ring preview armed`);
+                gmt.ringSig = ''; gmtRingsRebuild();                              // hand this GM's ring to the preview
+            }
+            const ne = gmt.nativeEdit;
+            const hit = gmtRingTemplateFor(cur, ne.type, gmtRingPrepared(gmt.editing ? gmtNormalizeTemplate(gmt.editing) : null));
+            const sig = hit ? `${hit.t.id}|${JSON.stringify(hit.t.ring)}` : '';
+            if (sig === ne.sig) return;
+            ne.layers.forEach(l => { try { l.remove(); } catch (e) {} });
+            ne.layers = [];
+            ne.sig = sig;
+            if (!hit) return;
+            const map = getLeafletMap(), L = getLeafletL();
+            if (!map || !L) return;
+            ne.layers = gmtRingDraw(map, L, ne.ll, hit.t.ring, true);
+        } catch (e) { console.warn(`${TAG} 📌 native-edit ring tick failed:`, e); }
+    }
+    function gmtNativeEditClear() {
+        const ne = gmt.nativeEdit;
+        if (!ne) return;
+        ne.layers.forEach(l => { try { l.remove(); } catch (e) {} });
+        gmt.nativeEdit = null;
+        gmt.ringSig = ''; gmtRingsRebuild(gmt.editing ? gmtNormalizeTemplate(gmt.editing) : null);
+    }
+    if (CONTEXT === 'IFRAME') setInterval(gmtNativeEditTick, 500);
+    function gmtSetRingsOn(v) {
+        gmtRingsOn = !!v;
+        try { GM_setValue(GMT_RINGS_ON_KEY, gmtRingsOn ? '1' : '0'); } catch (e) { console.warn(`${TAG} 📌 rings pref save failed:`, e); }
+        gmtRingsRebuild();
+        gmt.ringSig = '';
+    }
+    // ---- panel ----
+    function gmtEsc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+    function gmtOpenPanel() {
+        if (LITE) { showToast('GM Stamper needs Full mode (CSM access)', 'rgba(255,180,0,0.6)'); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('Open a site first', 'rgba(255,179,71,0.6)'); return; }
+        gmtLoadTemplates();
+        gmtEnsureStyle();
+        let p = document.getElementById(GMT_PANEL_ID);
+        if (!p) {
+            p = document.createElement('div');
+            p.id = GMT_PANEL_ID;
+            p.style.cssText = 'position:fixed;top:110px;right:70px;width:360px;max-height:80vh;z-index:2147483000;'
+                + 'background:rgba(16,22,32,0.97);border:1px solid rgba(195,155,211,0.6);border-radius:10px;'
+                + 'color:#dfe9f0;font:12px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,0.6);'
+                + 'display:flex;flex-direction:column;overflow:hidden;';
+            if (gmt.pos) { p.style.left = `${gmt.pos.left}px`; p.style.top = `${gmt.pos.top}px`; p.style.right = 'auto'; }
+            p.addEventListener('click', gmtPanelClick);
+            p.addEventListener('change', gmtPanelChange);
+            p.addEventListener('input', gmtPanelInput);
+            p.addEventListener('mousedown', gmtPanelDragStart);
+            document.body.appendChild(p);
+        }
+        gmtRenderPanel();
+        if (!mapObjectsBySite[sid] || !mapObjectsBySite[sid].entities) {
+            gmtSetStatus('loading site entities…');
+            fetchMapObjects(sid, true).then(() => { gmtSetStatus(''); gmtRenderPanel(); })
+                .catch(err => { console.warn(`${TAG} 📌 entity fetch failed:`, err); gmtSetStatus('entity load failed — numbering may collide; see console'); });
+        }
+    }
+    function gmtClosePanel() {
+        if (gmt.armed) gmtArm(false);
+        if (gmt.editing) { gmt.editing = null; gmt.ringSig = ''; gmtRingsRebuild(); }
+        const p = document.getElementById(GMT_PANEL_ID);
+        if (p) p.remove();
+    }
+    function gmtPanelDragStart(ev) {
+        const h = ev.target.closest && ev.target.closest('[data-gmt-drag]');
+        if (!h || ev.button !== 0 || ev.target.closest('button')) return;
+        const p = document.getElementById(GMT_PANEL_ID);
+        if (!p) return;
+        ev.preventDefault();
+        const r = p.getBoundingClientRect();
+        const off = { x: ev.clientX - r.left, y: ev.clientY - r.top };
+        const move = (e) => {
+            const left = Math.max(0, Math.min(window.innerWidth - 60, e.clientX - off.x));
+            const top = Math.max(0, Math.min(window.innerHeight - 40, e.clientY - off.y));
+            p.style.left = `${left}px`; p.style.top = `${top}px`; p.style.right = 'auto';
+            gmt.pos = { left, top };
+        };
+        const up = () => { window.removeEventListener('mousemove', move, true); window.removeEventListener('mouseup', up, true); };
+        window.addEventListener('mousemove', move, true);
+        window.addEventListener('mouseup', up, true);
+    }
+    function gmtTypeSelectHtml(cur) {
+        const known = GMT_KNOWN_TYPES.includes(cur);
+        return `<select data-gmt-f="typeSel" style="width:110px">${GMT_KNOWN_TYPES.map(k => `<option value="${k}" ${k === cur ? 'selected' : ''}>${k}</option>`).join('')}<option value="__custom" ${known ? '' : 'selected'}>custom…</option></select>`
+            + `<input data-gmt-f="typeCustom" placeholder="custom type" value="${known ? '' : gmtEsc(cur)}" style="width:110px;margin-left:5px;${known ? 'display:none' : ''}">`;
+    }
+    function gmtRenderPanel() {
+        const p = document.getElementById(GMT_PANEL_ID);
+        if (!p) return;
+        const sid = getCurrentSiteID();
+        const haveEnts = !!(sid && mapObjectsBySite[sid] && mapObjectsBySite[sid].entities);
+        const active = gmtActiveTemplate();
+        const btn = (rgb, extra) => `background:rgba(${rgb},0.15);border:1px solid rgb(${rgb});color:rgb(${rgb});border-radius:5px;padding:3px 9px;${extra || ''}`;
+        let body = '';
+        if (gmt.editing) {
+            const d = gmt.editing;
+            const preview = haveEnts ? gmtNextName(gmtNormalizeTemplate(d), sid) : null;
+            body = `
+                <div style="display:grid;grid-template-columns:78px 1fr;gap:6px 8px;align-items:center;">
+                    <label>Label</label><input data-gmt-f="label" value="${gmtEsc(d.label)}" placeholder="e.g. Gate">
+                    <label title="# = next free number on the site (no # → one is appended). {name} = the source entity's name when stamping in bulk from the SUM panel (Bulk → 📌 GM).">Name pattern</label><input data-gmt-f="name" value="${gmtEsc(d.name)}" placeholder="Gate #">
+                    <label>Type (icon)</label><div>${gmtTypeSelectHtml(d.type)}</div>
+                    <label>Notes</label><textarea data-gmt-f="description" rows="3" placeholder="saved into the marker's notes/description">${gmtEsc(d.description)}</textarea>
+                    <label>Height</label><div><input data-gmt-f="heightFt" type="number" min="0" step="1" value="${gmtEsc(d.heightFt)}" style="width:70px"> ft</div>
+                    <label>Numbering</label><div>start at <input data-gmt-f="start" type="number" min="0" step="1" value="${gmtEsc(d.start)}" style="width:60px"> · pad to <input data-gmt-f="pad" type="number" min="0" max="6" step="1" value="${gmtEsc(d.pad)}" style="width:50px"> digits</div>
+                    <label style="color:#f070c0;">⭕ Ring</label><div><label style="display:inline-flex;gap:5px;align-items:center;cursor:pointer;"><input data-gmt-f="ringOn" type="checkbox" ${d.ring.on ? 'checked' : ''}> draw a radius ring around markers made from this template</label></div>
+                    <label>Radius</label><div><input data-gmt-f="ringDist" type="number" min="0" step="any" value="${gmtEsc(d.ring.dist)}" style="width:70px"> <select data-gmt-f="ringUnit"><option value="mi" ${d.ring.unit === 'mi' ? 'selected' : ''}>mi</option><option value="ft" ${d.ring.unit === 'ft' ? 'selected' : ''}>ft</option></select> · <label style="display:inline-flex;gap:4px;align-items:center;cursor:pointer;"><input data-gmt-f="ringCross" type="checkbox" ${d.ring.cross ? 'checked' : ''}> N/S/E/W cross</label></div>
+                    <label title="Also ring existing markers whose name CONTAINS any of these terms (comma-separated), whatever they were named — e.g. not shielded">Also match</label><div><input data-gmt-f="ringMatch" value="${gmtEsc(d.ring.match)}" placeholder="not shielded, unshielded" style="width:100%"><label style="display:inline-flex;gap:4px;align-items:center;cursor:pointer;margin-top:3px;"><input data-gmt-f="ringAnyType" type="checkbox" ${d.ring.anyType ? 'checked' : ''}> any marker type (otherwise only ${gmtEsc(d.type || 'this type')})</label></div>
+                    <label>Ring style</label><div style="display:flex;align-items:center;gap:6px;"><input data-gmt-f="ringColor" type="color" value="${gmtEsc(d.ring.color)}" style="width:38px;height:22px;padding:0;"> opacity <input data-gmt-f="ringOpacity" type="range" min="0" max="1" step="0.05" value="${gmtEsc(d.ring.opacity)}" style="width:90px;"> <span data-gmt-ringop>${gmtEsc(d.ring.opacity)}</span></div>
+                </div>
+                <div style="margin-top:4px;opacity:0.6;">Rings preview live on the map while you edit. A marker gets this ring when its name fits the pattern above (same type), or contains one of the "Also match" terms.</div>
+                <div style="margin-top:4px;opacity:0.6;">Tokens: <code>#</code> = next free number · <code>{name}</code> = source entity's name (Bulk → 📌 GM from the SUM panel)</div>
+                <div style="margin-top:6px;color:#9ad;">Next name here: <strong data-gmt-preview>${preview ? gmtEsc(preview.name) : (haveEnts ? '(no free name)' : '…')}</strong></div>
+                <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
+                    <button data-gmt-act="cancel-edit" style="${btn('223,233,240')}">Cancel</button>
+                    <button data-gmt-act="save-edit" style="${btn('95,255,95')}">Save template</button>
+                </div>`;
+        } else {
+            const rows = gmt.templates.map(t => {
+                const nx = haveEnts ? gmtNextName(t, sid) : null;
+                const color = GMT_TYPE_COLORS[t.type] || '#c39bd3';
+                const on = t.id === gmt.activeId;
+                return `<div data-gmt-row="${t.id}" style="display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:5px;cursor:pointer;border:1px solid ${on ? 'rgba(195,155,211,0.7)' : 'transparent'};background:${on ? 'rgba(195,155,211,0.12)' : 'transparent'};">
+                    <span style="width:10px;height:10px;border-radius:50%;background:${color};flex:none;"></span>
+                    <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><strong>${gmtEsc(t.label)}</strong> <span style="opacity:0.65">· ${gmtEsc(t.type)}${t.heightFt ? ` · ${t.heightFt} ft` : ''}</span>${t.ring.on ? ` <span style="color:${t.ring.color};font-weight:600;">⭕ ${t.ring.dist} ${t.ring.unit}${t.ring.match ? ` · "${gmtEsc(t.ring.match)}"` : ''}</span>` : ''}<br><span style="color:#9ad;">→ ${nx ? gmtEsc(nx.name) : (haveEnts ? '(no free name)' : '…')}</span>${t.description ? `<br><span style="opacity:0.55;">${gmtEsc(t.description.slice(0, 60))}${t.description.length > 60 ? '…' : ''}</span>` : ''}</span>
+                    <button data-gmt-act="ring" data-id="${t.id}" title="${t.ring.on ? 'Remove' : 'Add'} the radius ring for markers made from this template" style="background:none;border:none;color:${t.ring.on ? t.ring.color : '#667'};padding:0 3px;font-weight:700;">⭕</button>
+                    <button data-gmt-act="edit" data-id="${t.id}" title="Edit" style="background:none;border:none;color:#7adfe6;padding:0 3px;">✎</button>
+                    <button data-gmt-act="dup" data-id="${t.id}" title="Duplicate" style="background:none;border:none;color:#dfe9f0;padding:0 3px;">⧉</button>
+                    <button data-gmt-act="del" data-id="${t.id}" title="Delete template" style="background:none;border:none;color:#ff8a80;padding:0 3px;">🗑</button>
+                </div>`;
+            }).join('');
+            const recent = gmt.placed.slice(-5).reverse().map(x => `<div style="opacity:0.8;">📌 ${gmtEsc(x.name)}</div>`).join('');
+            body = `
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                    <span style="color:#7adfe6;font-weight:700;">Templates</span>
+                    <span>
+                        <button data-gmt-act="new" style="${btn('95,255,95')}">+ New</button>
+                        <button data-gmt-act="copy-json" title="Copy all templates as JSON (share with a coworker)" style="${btn('122,223,230')}">⬇ Copy JSON</button>
+                        <button data-gmt-act="paste-json" title="Paste JSON from a coworker — merges by template id" style="${btn('122,223,230')}">⬆ Paste</button>
+                    </span>
+                </div>
+                ${gmt.pasteOpen ? `<div style="margin:4px 0 8px;"><textarea data-gmt-f="pasteBox" rows="4" placeholder='[{"label":"Gate","name":"Gate #","type":"general",…}]' style="width:100%"></textarea><div style="display:flex;gap:6px;justify-content:flex-end;margin-top:4px;"><button data-gmt-act="paste-cancel" style="${btn('223,233,240')}">Cancel</button><button data-gmt-act="paste-go" style="${btn('95,255,95')}">Import</button></div></div>` : ''}
+                <div style="max-height:34vh;overflow-y:auto;margin-bottom:8px;">${rows || '<div style="opacity:0.6;padding:6px;">No templates yet — click <strong>+ New</strong>.</div>'}</div>
+                <button data-gmt-arm class="${gmt.armed ? 'on' : ''}" ${active ? '' : 'disabled'} style="${gmt.armed ? btn('95,255,95', 'font-weight:700;width:100%;padding:6px;') : btn('195,155,211', 'font-weight:700;width:100%;padding:6px;')}">${gmt.armed ? `■ PLACING "${gmtEsc(active ? active.label : '')}" — ${gmtAltGate ? 'ALT+click' : 'click'} the map · Esc / click to stop` : `▶ Arm "${gmtEsc(active ? active.label : 'template')}" — then click the map to place`}</button>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">
+                    <span>Placed this session: <strong>${gmt.placed.length}</strong>${gmt.pending ? ` <span style="color:#ffd400">(+${gmt.pending} saving)</span>` : ''}</span>
+                    <button data-gmt-act="undo" ${gmt.placed.length && !gmt.pending ? '' : 'disabled'} title="Delete the last placed marker (Delete Guard banks it)" style="${btn('255,138,128')}">↩ Undo last</button>
+                </div>
+                ${recent ? `<div style="margin-top:4px;">${recent}</div>` : ''}
+                ${gmt.placed.length ? '<div style="margin-top:6px;opacity:0.65;">Markers are real on the server now; reload the page to see them as native Percepto markers.</div>' : ''}`;
+        }
+        p.innerHTML = `
+            <div data-gmt-drag style="padding:8px 12px;border-bottom:1px solid rgba(195,155,211,0.3);color:#c39bd3;font-weight:700;display:flex;justify-content:space-between;align-items:center;cursor:move;user-select:none;">
+                <span>📌 GM Stamper <span style="opacity:0.5;font-weight:400;">site ${gmtEsc(sid || '?')}</span></span>
+                <span><button data-gmt-act="rings-toggle" title="Show / hide every template's radius ring on the map" style="background:${gmtRingsOn ? 'rgba(240,32,160,0.2)' : 'none'};border:1px solid ${gmtRingsOn ? '#f070c0' : 'rgba(223,233,240,0.35)'};color:${gmtRingsOn ? '#f070c0' : '#889'};border-radius:5px;padding:1px 7px;font-weight:600;margin-right:6px;">⭕ Rings ${gmtRingsOn ? 'ON' : 'off'}</button><button data-gmt-act="close" style="background:none;border:none;color:#dfe9f0;font-size:14px;padding:0 4px;">✕</button></span>
+            </div>
+            <div style="padding:8px 12px;overflow-y:auto;">${body}</div>
+            <div data-gmt-status style="padding:4px 12px 8px;color:#9ad;min-height:16px;">${gmtEsc(gmt.status)}</div>`;
+    }
+    function gmtReadForm() {
+        const p = document.getElementById(GMT_PANEL_ID);
+        if (!p || !gmt.editing) return;
+        const q = (f) => p.querySelector(`[data-gmt-f="${f}"]`);
+        const d = gmt.editing;
+        d.label = q('label').value;
+        d.name = q('name').value;
+        const sel = q('typeSel').value;
+        d.type = sel === '__custom' ? q('typeCustom').value : sel;
+        d.description = q('description').value;
+        d.heightFt = Number(q('heightFt').value);
+        d.start = Number(q('start').value);
+        d.pad = Number(q('pad').value);
+        d.ring = {
+            on: q('ringOn').checked,
+            dist: Number(q('ringDist').value),
+            unit: q('ringUnit').value,
+            color: q('ringColor').value,
+            opacity: Number(q('ringOpacity').value),
+            cross: q('ringCross').checked,
+            match: q('ringMatch').value,
+            anyType: q('ringAnyType').checked,
+        };
+        const op = p.querySelector('[data-gmt-ringop]');
+        if (op) op.textContent = String(d.ring.opacity);
+    }
+    function gmtPanelInput(ev) {
+        if (!gmt.editing) return;
+        gmtReadForm();
+        if (ev && ev.target && /^(ring|name|typeSel|typeCustom)/.test(ev.target.dataset.gmtF || '')) gmtRingsRebuild(gmtNormalizeTemplate(gmt.editing));   // live ring preview
+        const sid = getCurrentSiteID();
+        const prev = document.querySelector(`#${GMT_PANEL_ID} [data-gmt-preview]`);
+        if (prev && sid && mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) {
+            const nx = gmtNextName(gmtNormalizeTemplate(gmt.editing), sid);
+            prev.textContent = nx ? nx.name : '(no free name)';
+        }
+    }
+    function gmtPanelChange(ev) {
+        const sel = ev.target.closest && ev.target.closest('[data-gmt-f="typeSel"]');
+        if (sel) {
+            const custom = document.querySelector(`#${GMT_PANEL_ID} [data-gmt-f="typeCustom"]`);
+            if (custom) { custom.style.display = sel.value === '__custom' ? '' : 'none'; if (sel.value === '__custom') custom.focus(); }
+            gmtPanelInput(ev);
+            return;
+        }
+        if (ev.target.closest && ev.target.closest('[data-gmt-f="ringUnit"], [data-gmt-f="ringOn"], [data-gmt-f="ringCross"], [data-gmt-f="ringAnyType"]')) gmtPanelInput(ev);
+    }
+    function gmtPanelClick(ev) {
+        const armBtn = ev.target.closest && ev.target.closest('[data-gmt-arm]');
+        if (armBtn) { gmtArm(!gmt.armed); return; }
+        const a = ev.target.closest && ev.target.closest('[data-gmt-act]');
+        if (a) {
+            const act = a.dataset.gmtAct, id = a.dataset.id;
+            if (act === 'close') { gmtClosePanel(); return; }
+            if (act === 'rings-toggle') { gmtSetRingsOn(!gmtRingsOn); gmtRenderPanel(); return; }
+            if (act === 'ring') {
+                const t = gmt.templates.find(x => x.id === id);
+                if (t) { t.ring.on = !t.ring.on; gmtSaveTemplates(); gmt.ringSig = ''; gmtRingsRebuild(); console.log(`${TAG} 📌 ring ${t.ring.on ? 'ON' : 'off'} for "${t.label}"`); gmtRenderPanel(); }
+                return;
+            }
+            if (act === 'new') { gmt.editing = gmtNormalizeTemplate({ id: gmtNewId(), label: '', name: '', type: 'general', description: '', heightFt: 0, start: 1, pad: 0, ring: { on: false } }); gmt.editing.label = ''; gmt.editing.name = ''; gmtRenderPanel(); gmtRingsRebuild(gmtNormalizeTemplate(gmt.editing)); return; }
+            if (act === 'edit') { const t = gmt.templates.find(x => x.id === id); if (t) { gmt.editing = JSON.parse(JSON.stringify(t)); gmtRenderPanel(); gmtRingsRebuild(gmtNormalizeTemplate(gmt.editing)); } return; }
+            if (act === 'dup') {
+                const t = gmt.templates.find(x => x.id === id);
+                if (t) { const c = gmtNormalizeTemplate(Object.assign({}, t, { id: null, label: `${t.label} copy` })); gmt.templates.push(c); gmtSaveTemplates(); gmt.activeId = c.id; gmtRenderPanel(); }
+                return;
+            }
+            if (act === 'del') {
+                const t = gmt.templates.find(x => x.id === id);
+                if (t && confirm(`Delete template "${t.label}"? (Markers already placed are not affected.)`)) {
+                    gmt.templates = gmt.templates.filter(x => x.id !== id);
+                    if (gmt.activeId === id) { gmt.activeId = gmt.templates.length ? gmt.templates[0].id : null; if (gmt.armed) gmtArm(false); }
+                    gmtSaveTemplates(); gmtRenderPanel();
+                }
+                return;
+            }
+            if (act === 'cancel-edit') { gmt.editing = null; gmt.ringSig = ''; gmtRingsRebuild(); gmtRenderPanel(); return; }
+            if (act === 'save-edit') {
+                gmtReadForm();
+                const d = gmt.editing;
+                if (!d.label.trim()) { showToast('Give the template a label', 'rgba(255,179,71,0.6)'); return; }
+                if (!genCleanName(d.name.replace(/#/g, '1'))) { showToast('Name pattern needs letters or numbers (Percepto allows letters, numbers, space, _ and -)', 'rgba(255,179,71,0.6)'); return; }
+                if (!String(d.type || '').trim()) { showToast('Pick or type a marker type', 'rgba(255,179,71,0.6)'); return; }
+                const t = gmtNormalizeTemplate(d);
+                const i = gmt.templates.findIndex(x => x.id === t.id);
+                if (i >= 0) gmt.templates[i] = t; else gmt.templates.push(t);
+                gmt.activeId = t.id;
+                gmt.editing = null;
+                gmtSaveTemplates();
+                gmt.ringSig = ''; gmtRingsRebuild();
+                console.log(`${TAG} 📌 template saved: "${t.label}" pattern "${t.name}" type ${t.type}${t.ring.on ? ` ring ${t.ring.dist} ${t.ring.unit}` : ''}`);
+                gmtRenderPanel();
+                return;
+            }
+            if (act === 'copy-json') {
+                const txt = JSON.stringify(gmt.templates, null, 2);
+                const done = () => { showToast(`Copied ${gmt.templates.length} template(s) as JSON`); };
+                const fail = (e) => { console.warn(`${TAG} 📌 clipboard write failed:`, e); prompt('Copy this JSON:', txt); };
+                try { navigator.clipboard.writeText(txt).then(done, fail); } catch (e) { fail(e); }
+                return;
+            }
+            if (act === 'paste-json') { gmt.pasteOpen = true; gmtRenderPanel(); return; }
+            if (act === 'paste-cancel') { gmt.pasteOpen = false; gmtRenderPanel(); return; }
+            if (act === 'paste-go') {
+                const box = document.querySelector(`#${GMT_PANEL_ID} [data-gmt-f="pasteBox"]`);
+                let arr = null;
+                try { arr = JSON.parse(box ? box.value : ''); } catch (e) { showToast('That is not valid JSON', 'rgba(255,96,96,0.55)'); return; }
+                if (!Array.isArray(arr)) arr = [arr];
+                let added = 0, replaced = 0;
+                arr.forEach(raw => {
+                    if (!raw || typeof raw !== 'object') return;
+                    const t = gmtNormalizeTemplate(raw);
+                    const i = gmt.templates.findIndex(x => x.id === t.id);
+                    if (i >= 0) { gmt.templates[i] = t; replaced++; } else { gmt.templates.push(t); added++; }
+                });
+                gmt.pasteOpen = false;
+                if (!gmt.activeId && gmt.templates.length) gmt.activeId = gmt.templates[0].id;
+                gmtSaveTemplates();
+                showToast(`Imported ${added} new, ${replaced} updated template(s)`);
+                gmtRenderPanel();
+                return;
+            }
+            if (act === 'undo') { gmtUndoLast(); return; }
+        }
+        const row = ev.target.closest && ev.target.closest('[data-gmt-row]');
+        if (row) {
+            const id = row.dataset.gmtRow;
+            if (gmt.activeId !== id) {
+                gmt.activeId = id;
+                if (gmt.armed) { const t = gmtActiveTemplate(); gmtSetStatus(`armed — ${gmtAltGate ? 'ALT+click' : 'click'} the map to place "${t.label}" · Esc stops`); }
+                gmtRenderPanel();
+            }
+        }
+    }
+    function gmtOpenFromAction() {
+        // TRIGGER_ACTION 'gmt-open' (CP card button) — mirrors the 📌 map-button flow
+        try { gmtOpenPanel(); } catch (e) { console.warn(`${TAG} 📌 open failed:`, e); }
+    }
+    // Site changed underneath us (SPA nav) → drop the session markers + disarm.
+    function gmtSiteTick() {
+        const sid = getCurrentSiteID();
+        if (gmt.siteID && sid !== gmt.siteID) {
+            gmtClearSession('site nav');
+            gmtRingsClear();
+            gmt.siteID = sid;
+            if (gmt.armed) gmtArm(false);
+            const p = document.getElementById(GMT_PANEL_ID);
+            if (p && !gmt.editing) gmtRenderPanel();
+        }
+    }
+    // ---- Bulk → 📌 GM (SUM panel): stamp a template at every SELECTED row's
+    // centroid — e.g. filter Unshielded → select all → one GM per asset. Rows
+    // that already have a GM within GMT_BULK_NEAR_FT start unchecked (probably
+    // done on a previous run). Runs sequentially so numbering never races;
+    // ↩ Undo batch deletes everything this run created. ----
+    const GMT_BULK_MODAL_ID = 'aim-gmt-bulk-modal';
+    const GMT_BULK_NEAR_FT = 50;
+    // v4.322 — external stamp requests (Map Styler's 📡 cell towers, future tools): another AIM script
+    // broadcasts a point list on AIM_GM_STAMP; we open the SAME preview → confirm → create-only → Undo
+    // modal seeded with those points. Tab-local (tabId), site-matched, IFRAME only, Lite-gated.
+    (function setupGmStampBridge() {
+        if (CONTEXT !== 'IFRAME') return;
+        let ch = null;
+        try { ch = new BroadcastChannel('AIM_GM_STAMP'); } catch (e) { return; }
+        ch.onmessage = (ev) => {
+            const m = ev.data || {};
+            if (m.type !== 'GM_STAMP_REQUEST' || !Array.isArray(m.points) || !m.points.length) return;
+            const sid = getCurrentSiteID();
+            if (!sid || (m.siteId != null && String(m.siteId) !== String(sid))) return;
+            if (m.tabId ? m.tabId !== aimTabId() : document.hidden) return;   // tab-local — BroadcastChannel reaches every tab
+            if (LITE) { showToast('GM Stamper needs Full mode (CSM access)', 'rgba(255,180,0,0.6)'); return; }
+            if (!gmtMasterEnabled) { showToast('GM Stamper is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+            console.log(`${TAG} 📌 external stamp request from ${m.source || '?'}: ${m.points.length} point(s)`);
+            try { openGmtBulkModal({ label: String(m.label || `${m.points.length} points from ${m.source || 'another AIM tool'}`), points: m.points.slice(0, 500), source: m.source || 'external' }); }
+            catch (e) { console.warn(`${TAG} 📌 external stamp failed:`, e); showToast('Could not open the GM preview — see console', 'rgba(255,96,96,0.55)'); }
+        };
+    })();
+    function gmtExternalTargets(sid, points) {
+        const bucket = mapObjectsBySite[sid];
+        const all = (bucket && Array.isArray(bucket.entities)) ? bucket.entities : [];
+        const gms = all.filter(e => e && e.type === 19 && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number');
+        const kindType = { 'cell-tower': 'tower', tower: 'tower', hazard: 'hazard', building: 'building', pole: 'pole', general: 'general' };
+        const out = [];
+        points.forEach((p, i) => {
+            const lat = Number(p && p.lat), lng = Number(p && p.lng);
+            if (!isFinite(lat) || !isFinite(lng)) return;
+            const near = gms.find(g => approxMeters(lat, lng, g.coords[0].lat, g.coords[0].lng) * M_TO_FT < GMT_BULK_NEAR_FT);
+            const type = kindType[String(p.kind || p.type || '').toLowerCase()] || null;
+            out.push({
+                ent: { id: `ext${i}`, name: String(p.name || `Point ${i + 1}`).slice(0, 80), type: -1, extLabel: type ? `${type}${p.carrier ? ' · ' + p.carrier : ''}` : 'external point' },
+                ll: { lat, lng }, near: near ? near.name : null, checked: !near,
+                over: { description: typeof p.notes === 'string' ? p.notes.slice(0, 500) : '', type, heightFt: isFinite(Number(p.heightFt)) && Number(p.heightFt) > 0 ? Number(p.heightFt) : null },
+            });
+        });
+        return out;
+    }
+    function gmtBulkTargets(sid) {
+        const bucket = mapObjectsBySite[sid];
+        const all = (bucket && Array.isArray(bucket.entities)) ? bucket.entities : [];
+        const ids = new Set();
+        sumPanelState.selectedIds.forEach(k => ids.add(String(k).split(':')[0]));
+        const gms = all.filter(e => e && e.type === 19 && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number');
+        const out = [];
+        all.forEach(e => {
+            if (!e || !ids.has(String(e.id)) || e.type === 19) return;    // never stamp a GM on a GM
+            const c = getEntityCentroid(e);
+            if (!c) return;
+            const near = gms.find(g => approxMeters(c.lat, c.lng, g.coords[0].lat, g.coords[0].lng) * M_TO_FT < GMT_BULK_NEAR_FT);
+            out.push({ ent: e, ll: c, near: near ? near.name : null, checked: !near });
+        });
+        return out;
+    }
+    // Dry-run the numbering across the checked targets in order (a cloned used-set
+    // advances as each name is taken) so the preview matches what will be created.
+    function gmtBulkPlanNames(t, sid, targets) {
+        const used = new Set(gmtUsedNames(sid));
+        targets.forEach(tg => {
+            tg.planned = null;
+            if (!tg.checked) return;
+            const nx = gmtNextName(t, sid, tg.ent.name, used);
+            if (nx) { tg.planned = nx.name; used.add(nx.name.toLowerCase()); }
+        });
+    }
+    function openGmtBulkModal(ext) {
+        if (LITE) { showToast('GM Stamper needs Full mode (CSM access)', 'rgba(255,180,0,0.6)'); return; }
+        if (!gmtMasterEnabled) { showToast('GM Stamper is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
+        if (!ext && !sumPanelState.selectedIds.size) { showToast('Select rows first — e.g. filter Unshielded, then ☑ the assets to mark', 'rgba(255,179,71,0.6)'); return; }
+        gmtLoadTemplates();
+        // v4.322: external requests bring their own names/notes/types — a synthetic "{name}" template
+        // (verbatim names, number only on collision) heads the list; saved templates remain selectable.
+        const extTmpl = ext ? gmtNormalizeTemplate({ id: 'ext-request', label: ext.label || 'From another AIM tool', name: '{name}', type: 'tower', description: '', heightFt: 0, start: 1, pad: 0 }) : null;
+        const templates = ext ? [extTmpl].concat(gmt.templates) : gmt.templates;
+        if (!templates.length) { showToast('No templates yet — make one in 📌 GM Stamper first', 'rgba(255,179,71,0.6)'); gmtOpenPanel(); return; }
+        const targets = ext ? gmtExternalTargets(sid, ext.points) : gmtBulkTargets(sid);
+        if (!targets.length) { showToast(ext ? 'The request had no usable positions' : 'None of the selected rows has a position (GM rows are skipped)', 'rgba(255,179,71,0.6)'); return; }
+        const old = document.getElementById(GMT_BULK_MODAL_ID);
+        if (old) old.remove();
+        const st = { sid, templates, tmplId: ext ? extTmpl.id : (gmt.templates.some(t => t.id === gmt.activeId) ? gmt.activeId : gmt.templates[0].id), targets, running: false, done: false, created: [], failed: 0, batch: `b${Date.now().toString(36)}` };
+        const wrap = document.createElement('div');
+        wrap.id = GMT_BULK_MODAL_ID;
+        wrap.style.cssText = 'position:fixed;top:100px;right:80px;width:520px;max-height:76vh;z-index:2147483001;'
+            + 'background:rgba(16,22,32,0.98);border:1px solid rgba(195,155,211,0.6);border-radius:10px;'
+            + 'color:#dfe9f0;font:12px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,0.6);'
+            + 'display:flex;flex-direction:column;';
+        const btn = (rgb, extra) => `background:rgba(${rgb},0.15);border:1px solid rgb(${rgb});color:rgb(${rgb});border-radius:5px;padding:3px 12px;cursor:pointer;font:inherit;${extra || ''}`;
+        const render = () => {
+            const t = st.templates.find(x => x.id === st.tmplId) || st.templates[0];
+            gmtBulkPlanNames(t, st.sid, st.targets);
+            const nChecked = st.targets.filter(x => x.checked).length;
+            const tmplRows = st.templates.map(x => `<label style="display:flex;gap:6px;align-items:center;cursor:pointer;margin:2px 0;"><input type="radio" name="aim-gmt-bulk-tmpl" value="${x.id}" ${x.id === t.id ? 'checked' : ''} ${st.running || st.done ? 'disabled' : ''}><span style="width:9px;height:9px;border-radius:50%;background:${GMT_TYPE_COLORS[x.type] || '#c39bd3'};flex:none;"></span><strong>${gmtEsc(x.label)}</strong> <span style="opacity:0.65">· ${gmtEsc(x.type)} · "${gmtEsc(x.name)}"${x.heightFt ? ` · ${x.heightFt} ft` : ''}</span></label>`).join('');
+            const rows = st.targets.map((tg, i) => {
+                const res = st.created.find(c => c.i === i);
+                const state = res ? `<span style="color:#5fff5f">✓ ${gmtEsc(res.name)}</span>` : (tg.failedWhy ? `<span style="color:#ff6060">✗ ${gmtEsc(tg.failedWhy)}</span>` : (tg.checked ? `<span style="color:#9ad">→ ${tg.planned ? gmtEsc(tg.planned) : '(no free name)'}</span>` : ''));
+                return `<label style="display:flex;gap:6px;align-items:baseline;margin:2px 0;cursor:pointer;"><input type="checkbox" data-gmt-bulk-chk="${i}" ${tg.checked ? 'checked' : ''} ${st.running || st.done ? 'disabled' : ''} style="flex:none;position:relative;top:2px;"><span style="flex:1;min-width:0;">${gmtEsc(tg.ent.name || `#${tg.ent.id}`)} <span style="opacity:0.55">(${gmtEsc(tg.ent.extLabel || (TYPE_REG[tg.ent.type] && TYPE_REG[tg.ent.type].long) || `type ${tg.ent.type}`)})</span> ${state}${tg.near ? `<br><span style="color:#ffb020;opacity:0.85;">⚠ existing GM "${gmtEsc(tg.near)}" within ${GMT_BULK_NEAR_FT} ft</span>` : ''}</span></label>`;
+            }).join('');
+            const foot = st.done
+                ? `<span style="margin-right:auto;">${st.created.length} created${st.failed ? `, <span style="color:#ff6060">${st.failed} failed</span>` : ''} — reload the page to see them natively</span>
+                   <button data-gmt-bulk-undo ${st.created.length ? '' : 'disabled'} style="${btn('255,138,128')}">↩ Undo batch (${st.created.length})</button>
+                   <button data-gmt-bulk-close style="${btn('223,233,240')}">Close</button>`
+                : (st.running
+                    ? `<span style="margin-right:auto;color:#ffd400;">Creating… ${st.created.length + st.failed} / ${nChecked}</span><button data-gmt-bulk-abort style="${btn('255,138,128')}">Stop after this one</button>`
+                    : `<label style="margin-right:auto;display:flex;gap:5px;align-items:center;cursor:pointer;opacity:0.85;"><input type="checkbox" data-gmt-bulk-all ${nChecked === st.targets.length ? 'checked' : ''}>All</label>
+                       <button data-gmt-bulk-close style="${btn('223,233,240')}">Cancel</button>
+                       <button data-gmt-bulk-go ${nChecked ? '' : 'disabled'} style="${btn('95,255,95')}">Create ${nChecked}</button>`);
+            wrap.innerHTML = `
+                <div style="padding:8px 12px;border-bottom:1px solid rgba(195,155,211,0.3);color:#c39bd3;font-weight:700;">${ext ? `📌 ${gmtEsc(ext.label)} → General Markers` : '📌 Bulk → GM — one marker per selected row'}</div>
+                <div style="padding:8px 12px;overflow-y:auto;">
+                    <div style="color:#7adfe6;font-weight:700;margin-bottom:3px;">Template</div>
+                    <div style="margin-bottom:8px;">${tmplRows}</div>
+                    <div style="color:#7adfe6;font-weight:700;margin-bottom:3px;">Targets (${st.targets.length} ${ext ? 'points received' : 'selected rows with a position'})</div>
+                    <div style="opacity:0.65;margin-bottom:4px;">${ext ? `Each checked point becomes a GM via the site-setup API (create-only). Names come from ${gmtEsc(ext.source || 'the sender')} (numbered only if a name is taken); notes carry the sender's details; type/height per point when supplied. Points with a GM already nearby start unchecked.` : 'A GM is created at each checked row\'s centroid via the site-setup API (create-only — the source entity is untouched). Rows with a GM already nearby start unchecked.'}</div>
+                    ${rows}
+                </div>
+                <div style="padding:8px 12px;border-top:1px solid rgba(195,155,211,0.3);display:flex;gap:8px;justify-content:flex-end;align-items:center;">${foot}</div>`;
+        };
+        wrap.addEventListener('change', (e) => {
+            const r = e.target.closest('input[name="aim-gmt-bulk-tmpl"]');
+            if (r) { st.tmplId = r.value; gmt.activeId = r.value; render(); return; }
+            const all = e.target.closest('[data-gmt-bulk-all]');
+            if (all) { st.targets.forEach(tg => { tg.checked = all.checked; }); render(); return; }
+            const cb = e.target.closest('[data-gmt-bulk-chk]');
+            if (cb) { const tg = st.targets[Number(cb.dataset.gmtBulkChk)]; if (tg) tg.checked = cb.checked; render(); }
+        });
+        wrap.addEventListener('click', async (e) => {
+            if (e.target.closest('[data-gmt-bulk-close]')) { wrap.remove(); return; }
+            if (e.target.closest('[data-gmt-bulk-abort]')) { st.abort = true; return; }
+            if (e.target.closest('[data-gmt-bulk-go]') && !st.running) {
+                if (liteBlockedWrite('bulk stamp GMs')) return;
+                const t = st.templates.find(x => x.id === st.tmplId) || st.templates[0];
+                const chosen = st.targets.map((tg, i) => ({ tg, i })).filter(x => x.tg.checked);
+                if (!chosen.length) return;
+                st.running = true; st.abort = false; render();
+                if (gmt.siteID !== st.sid) { gmtClearSession('site changed'); gmt.siteID = st.sid; }
+                console.log(`${TAG} 📌 bulk: stamping "${t.label}" at ${chosen.length} entities on site ${st.sid}`);
+                for (const { tg, i } of chosen) {
+                    if (st.abort) { tg.failedWhy = 'stopped'; st.failed++; render(); continue; }
+                    try {
+                        const res = await gmtCreateGm(t, tg.ll, st.sid, tg.ent.name, tg.over);
+                        if (res) {
+                            const layer = gmtDrawMarker(tg.ll, res.name, t);
+                            gmt.placed.push({ id: res.id, name: res.name, lat: tg.ll.lat, lng: tg.ll.lng, siteID: st.sid, layer, batch: st.batch });
+                            st.created.push({ i, id: res.id, name: res.name });
+                        } else { tg.failedWhy = 'not created — see console'; st.failed++; }
+                    } catch (err) { console.warn(`${TAG} 📌 bulk create threw:`, err); tg.failedWhy = 'threw — see console'; st.failed++; }
+                    render();
+                }
+                st.running = false; st.done = true; render();
+                // v4.322: refetch verify — every created id must be present on a fresh /map_objects/ read.
+                if (st.created.length) {
+                    try {
+                        await fetchMapObjects(st.sid, true);
+                        const after = (mapObjectsBySite[st.sid] && mapObjectsBySite[st.sid].entities) || [];
+                        const byId = new Set(after.map(e => e.id));
+                        const missing = st.created.filter(c => !byId.has(c.id));
+                        if (missing.length) { console.warn(`${TAG} 📌 bulk verify: ${missing.length} created GM(s) NOT found on re-fetch:`, missing.map(c => c.name)); showToast(`⚠ verify: ${missing.length} GM(s) not found on re-fetch — see console`, 'rgba(255,96,96,0.55)'); }
+                        else console.log(`${TAG} 📌 bulk verify ✓ all ${st.created.length} GM(s) present on fresh fetch`);
+                    } catch (err) { console.warn(`${TAG} 📌 bulk verify failed:`, err); }
+                }
+                gmt.ringSig = ''; gmtRingsRebuild();
+                console.log(`${TAG} 📌 bulk: ${st.created.length} created, ${st.failed} failed`);
+                showToast(st.failed ? `GMs: ${st.created.length} created, ${st.failed} FAILED — see console` : `📌 ${st.created.length} GM${st.created.length === 1 ? '' : 's'} created — reload to see them natively`, st.failed ? 'rgba(255,96,96,0.55)' : undefined);
+                try { if (document.getElementById(GMT_PANEL_ID)) gmtRenderPanel(); } catch (err) {}
+                return;
+            }
+            if (e.target.closest('[data-gmt-bulk-undo]') && st.done && st.created.length) {
+                if (liteBlockedWrite('undo bulk GMs')) return;
+                if (!confirm(`Delete the ${st.created.length} marker(s) this run created? (Delete Guard banks each one.)`)) return;
+                const csrf = getCsrfToken();
+                if (!csrf) { showToast('No CSRF token — cannot delete', 'rgba(255,96,96,0.55)'); return; }
+                const mine = gmt.placed.filter(p => p.batch === st.batch);
+                let ok = 0, bad = 0;
+                for (const p of mine) { if (await gmtDeletePlaced(p, csrf)) ok++; else bad++; }
+                st.created = st.created.filter(c => gmt.placed.some(p => p.id === c.id));
+                st.targets.forEach(tg => { tg.failedWhy = null; });
+                showToast(bad ? `Undo: ${ok} deleted, ${bad} FAILED — see console` : `↩ Undo: ${ok} marker(s) deleted`, bad ? 'rgba(255,96,96,0.55)' : undefined);
+                render();
+                try { if (document.getElementById(GMT_PANEL_ID)) gmtRenderPanel(); } catch (err) {}
+            }
+        });
+        gmtEnsureStyle();
+        render();
+        document.body.appendChild(wrap);
+    }
+    function injectGmtMapButton(doc) {
+        gmtSiteTick();
+        gmtRingsTick();     // ⭕ rings are a read-only overlay — run in Lite too
+        if (LITE) return;   // 📌 GM Stamper = site-write, CSM-only
+        try {
+            const tools = doc.querySelector('.map-tools');
+            if (!tools) return;
+            const existing = doc.getElementById(GMT_MAP_BTN_ID);
+            if (existing) { existing.style.display = gmtMasterEnabled ? '' : 'none'; placeGenMapButton(tools, existing); return; }
+            const ref = tools.querySelector('.map-tools__button, button');
+            const btn = doc.createElement('button');
+            btn.id = GMT_MAP_BTN_ID;
+            btn.type = 'button';
+            btn.className = ref ? ref.className : 'map-tools__button';
+            btn.title = 'GM Stamper (AIM) — place General Markers from a template with one click';
+            btn.style.setProperty('color', '#c39bd3', 'important');
+            btn.innerHTML = '<span style="font-size:15px;line-height:1">📌</span>';
+            btn.onclick = (e) => {
+                e.preventDefault(); e.stopPropagation();
+                if (!gmtMasterEnabled) { showToast('GM Stamper is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+                gmtOpenPanel();
+            };
+            placeGenMapButton(tools, btn);
+        } catch (e) { console.warn(`${TAG} 📌 toolbar inject failed:`, e); }
+    }
+
+    // ============================================================
     // ✦ ADVANCED DRAW — interactive zigzag corridor FFZ builder.
     // You draw the INNER (asset-facing) edge click-by-click; each segment is a
     // box of `widthFt` extending to one side (F flips). A live shielding BAND of
@@ -15861,6 +23828,9 @@
         advDraw.active = !!on;
         if (advDraw.active) {
             try { genDraw.active = false; } catch (e) {} // mutually exclusive with the simple Draw
+            try { if (nfzDraw.active) setNfzMode(null); } catch (e) {} // …and with NFZ draw
+            try { if (imp.mode) impSetMode(null); } catch (e) {} // …and with the importer's select tools
+            try { if (gmt.armed) gmtArm(false); } catch (e) {} // …and with the 📌 GM Stamper
             if (!advDraw.verts.length) advRestore();      // resume a crash/reload in-progress draw
             try { const w = document.getElementById('aim-adv-width'); if (w) w.value = advDraw.widthFt; const o = document.getElementById('aim-adv-offset'); if (o) o.value = advDraw.offsetFt; const an = document.getElementById('aim-adv-anchor'); if (an) an.value = advDraw.anchor; } catch (e) {}
             advWire(); advRender();
@@ -17743,6 +25713,12 @@
         // Tear down Advanced Draw but DON'T clear its localStorage (so an in-progress
         // corridor survives close/reload — restored when the mode is re-armed).
         try { if (advDraw.active) { advDraw.active = false; advUnwire(); advClearLayers(); } } catch (e) {}
+        // NFZ draw: same deal — drafts stay in localStorage, layers come off the map.
+        // Committed PLACEHOLDERS deliberately stay on the map until reload/site change.
+        try { if (nfzDraw.active) { nfzDraw.active = false; nfzDraw.drawing = false; nfzDraw.verts = []; nfzDraw.tentative = null; nfzUnwire(); } nfzClearLayers(); nfzClearNarrowLayers(); } catch (e) {}
+        // 📥 importer: layers + listeners off the map; parsed data survives in
+        // memory so reopening on the same site restores the staged view.
+        try { impTeardown(); } catch (e) {}
         genDraw.active = false; genDraw.drawing = false; genDraw.pts = []; genDraw.tentative = null; genDraw.tentVertex = false; genDraw.tentOrtho = false; genDraw.lastSnap = null;
         try { const mp = getLeafletMap(); if (mp) { if (genDraw.poly) { try { mp.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(mp); clearGhost(mp); clearSnapTargets(mp); if (genDraw.onMapMove) { try { mp.off('moveend', genDraw.onMapMove); } catch (e) {} genDraw.onMapMove = null; } mp.getContainer().style.cursor = ''; try { mp.doubleClickZoom.enable(); } catch (e) {} } } catch (e) {}
     }
@@ -17813,6 +25789,9 @@
                 <button id="aim-gen-clear" style="background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Clear preview</button>
                 <button id="aim-gen-draw" style="background:rgba(255,225,77,0.12);color:#ffe14d;border:1px solid rgba(255,225,77,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✏️ Draw</button>
                 <button id="aim-gen-advdraw" title="Advanced Draw — click the inner (asset-facing) edge point-to-point to build a zigzag corridor FFZ. Live full-box preview + shielding band on the line. Shift=angle-snap 15° off the last segment · Ctrl=magnet-snap to the offset off the nearest asset · F=flip width side · double-click/Enter=finish · Esc=undo last point. Autosaves; commits as ONE FFZ via Commit." style="background:rgba(95,184,255,0.12);color:#5fb8ff;border:1px solid rgba(95,184,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✦ Advanced Draw</button>
+                <button id="aim-gen-nfztrace" title="NFZ Trace — ALT+click to start, click to add vertices around anything (trace the shape exactly — the ring auto-grows by the Buffer on finish). Ctrl=snap onto the nearest asset's boundary · dbl-click/Enter=finish · Esc=undo last point. Grows by Buffer, pads to the min footprint, pulls overhangs inside the FFZ. Commits as type-4 NFZs, create-only." style="background:rgba(255,85,85,0.12);color:#ff5555;border:1px solid rgba(255,85,85,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">⬠ NFZ Trace</button>
+                <button id="aim-gen-nfzstamp" title="NFZ Stamp — ALT+click inside any asset polygon to instantly stage an NFZ = that asset's ring grown by the Buffer (min footprint + FFZ containment applied). Rapid-fire: keep ALT+clicking assets." style="background:rgba(255,85,85,0.12);color:#ff5555;border:1px solid rgba(255,85,85,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">⚡ NFZ Stamp</button>
+                <button id="aim-gen-import" title="Asset Importer — load a region CSV or KML, stage the points on the map (nothing is written), select a subset with a circle / freehand lasso / single picks, map CSV types to Percepto subtypes, and bulk-create the selection as real assets. Create-only + dry-run + backup. Also the inverse: 🗑 Delete mode spatially selects EXISTING assets for a heavily-confirmed bulk delete that rides Delete Guard." style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Import</button>
                 <button id="aim-gen-fpsnap" title="Arm CTRL-snap for Percepto's native flight-path draw tool: hold CTRL while clicking to place a waypoint and it snaps ~50ft parallel to the nearest power line (purple dot shows where). Release CTRL = free point." style="background:rgba(186,140,255,0.12);color:#ba8cff;border:1px solid rgba(186,140,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🧲 CTRL-snap: off</button>
                 <button id="aim-gen-loadfp" title="Load the site's existing flight paths (drawn natively in Percepto) into the editable preview so they can be cleaned up." style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FPs</button>
                 <button id="aim-gen-loadffz" title="Load the site's existing FFZs (amber) into the editable preview — move / rotate / Alt-snap (auto-size) / resize them, then 💾 Save FFZ edits to write them back in place." style="background:rgba(255,179,71,0.12);color:#ffb347;border:1px solid rgba(255,179,71,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FFZs</button>
@@ -17833,6 +25812,19 @@
                 </div>
                 <div style="font-size:10px;color:#7a8794;margin-top:6px"><b style="color:#ffd24d">ALT+click</b>=start a NEW corridor (plain click edits existing shapes) · <b style="color:#ff5fff">magenta dots</b>=snap flush to an existing corridor's centerline (matches width) · then <b style="color:#fff">click</b>=add points · <b style="color:#fff">drag a dot</b>=move vertex · <b style="color:#fff">drag an outer edge</b>=widen · <b style="color:#fff">Shift</b>=angle 15° · <b style="color:#fff">Ctrl</b>=snap to asset · <b style="color:#fff">F</b>=flip · <b style="color:#fff">dbl-click</b>=finish · <b style="color:#fff">Esc</b>=undo / turn off</div>
             </div>
+            <div id="aim-nfz-controls" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(255,85,85,0.06);border:1px dashed rgba(255,85,85,0.35);border-radius:3px">
+                <div style="font-size:11px;color:#ff5555;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">⬠ NFZ Draw — <span id="aim-nfz-count">0</span> draft(s)</div>
+                <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;font-size:11px;color:#cfd6dc;margin-bottom:8px">
+                    <label style="display:inline-flex;align-items:center;gap:4px" title="Horizontal buffer: the traced/stamped ring grows outward by this much on finish — trace the shape exactly, the buffer does the safety margin.">Buffer <input type="number" id="aim-nfz-buffer" value="25" min="0" step="5" style="width:50px;background:#1a1d23;border:1px solid rgba(255,85,85,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px;text-align:right"> ft</label>
+                    <label style="display:inline-flex;align-items:center;gap:4px" title="An NFZ can never be smaller than this on either axis — smaller results get padded with extra uniform outward offset.">Min size <input type="number" id="aim-nfz-min" value="25" min="0" step="5" style="width:50px;background:#1a1d23;border:1px solid rgba(255,85,85,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px;text-align:right"> ft</label>
+                    <button id="aim-nfz-commit" title="Create the drafted NFZs on the site (type 4, CREATE-ONLY — existing NFZs are never touched). Honors the Dry run checkbox below. Backup file downloads first; verify-by-refetch after." style="background:rgba(95,255,95,0.18);color:#5fff5f;border:1px solid rgba(95,255,95,0.6);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">✓ Commit NFZs</button>
+                    <button id="aim-nfz-clear" title="Discard all NFZ drafts (local only — nothing on the server is touched)." style="background:rgba(255,90,90,0.12);color:#ff8a80;border:1px solid rgba(255,90,90,0.45);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">🗑 Clear drafts</button>
+                    <button id="aim-nfz-undo" title="Delete exactly the NFZs the most recent commit created (this session). Each delete rides Delete Guard's 24h undo ring when installed." style="background:rgba(255,179,71,0.12);color:#ffb347;border:1px solid rgba(255,179,71,0.45);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">↩ Undo last commit</button>
+                    <button id="aim-nfz-narrow" title="Paint every part of every NFZ (drafts + this session's commits + the site's live NFZs) that is NARROWER than the Min size — catches a thin notch/tab on an otherwise-large NFZ that the simple min-size check can't see. Click again to clear the yellow overlay." style="background:rgba(255,212,0,0.12);color:#ffd400;border:1px solid rgba(255,212,0,0.45);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">⚠ Narrow check</button>
+                </div>
+                <div id="aim-nfz-result" style="font-size:11px;color:#9ad;line-height:1.5">Drafts auto-grow by the Buffer, pad to the Min size, and pull inside the FFZ. Commit honors the Dry run checkbox in the Commit box.</div>
+            </div>
+            <div id="aim-imp-controls" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.35);border-radius:3px"></div>
             <div style="padding:8px 10px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25);border-radius:3px">
                 <div style="font-size:11px;color:#9ad;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Commit</div>
                 <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc;margin-bottom:8px"><input type="checkbox" id="aim-gen-dryrun" checked style="accent-color:#7adfe6"> Dry run <span style="color:#888;font-size:10px">(build + count, don't write)</span></label>
@@ -18152,6 +26144,57 @@
                 setAdvDraw(true);
             }
         };
+        // ⬠ NFZ Trace / ⚡ NFZ Stamp (feature #243)
+        nfzLoadParams();
+        nfzLoadDrafts(siteID);
+        const nfzTraceBtn = box.querySelector('#aim-gen-nfztrace');
+        if (nfzTraceBtn) nfzTraceBtn.onclick = () => {
+            if (nfzDraw.active && nfzDraw.mode === 'trace') {
+                if (nfzDraw.drawing && nfzDraw.verts.length >= 3) nfzFinishTrace();  // turning off mid-trace finishes it
+                setNfzMode(null);
+            } else setNfzMode('trace');
+        };
+        const nfzStampBtn = box.querySelector('#aim-gen-nfzstamp');
+        if (nfzStampBtn) nfzStampBtn.onclick = () => { setNfzMode(nfzDraw.active && nfzDraw.mode === 'stamp' ? null : 'stamp'); };
+        const nfzB = box.querySelector('#aim-nfz-buffer'), nfzM = box.querySelector('#aim-nfz-min');
+        if (nfzB) { nfzB.value = nfzDraw.bufferFt; nfzB.oninput = () => { const v = parseFloat(nfzB.value); if (isFinite(v) && v >= 0) { nfzDraw.bufferFt = v; nfzSaveParams(); nfzRender(); } }; }
+        if (nfzM) { nfzM.value = nfzDraw.minFt; nfzM.oninput = () => { const v = parseFloat(nfzM.value); if (isFinite(v) && v >= 0) { nfzDraw.minFt = v; nfzSaveParams(); } }; }
+        const nfzCommitBtn = box.querySelector('#aim-nfz-commit');
+        if (nfzCommitBtn) nfzCommitBtn.onclick = () => { nfzCommit(); };
+        const nfzClearBtn = box.querySelector('#aim-nfz-clear');
+        if (nfzClearBtn) nfzClearBtn.onclick = () => {
+            if (nfzDraw.drafts.length && !confirm(`Discard all ${nfzDraw.drafts.length} NFZ draft(s)? (local only — nothing on the server is touched)`)) return;
+            nfzDraw.drafts = []; nfzSaveDrafts(); nfzRender(); nfzSyncUi();
+        };
+        const nfzUndoBtn = box.querySelector('#aim-nfz-undo');
+        if (nfzUndoBtn) nfzUndoBtn.onclick = () => { nfzUndoLast(); };
+        const nfzNarrowBtn = box.querySelector('#aim-nfz-narrow');
+        if (nfzNarrowBtn) nfzNarrowBtn.onclick = () => { if (nfzDraw.narrowOn) nfzClearNarrowLayers(); else nfzNarrowScan(); };
+        nfzRender(); nfzSyncUi();   // restore autosaved drafts onto the map right away
+
+        // 📥 Asset Importer (feature #249)
+        impLoadParams(); impLoadTypeMap();
+        if (imp.siteID && String(imp.siteID) !== String(siteID)) {
+            // a different site must never inherit another site's staged points
+            imp.fileName = null; imp.headers = []; imp.rows = []; imp.mapping = null;
+            imp.points = []; imp.shapes = []; imp.shapeSeq = 1; imp.assetSel.clear(); imp.assetManual.clear();
+            imp.lastCreated = []; imp.lastDelete = null; imp.assetIndex = null;
+            imp.target = 'staged'; imp.siteID = String(siteID);
+        }
+        impRenderPanelBody();
+        const impBtn = box.querySelector('#aim-gen-import');
+        if (impBtn) impBtn.onclick = () => {
+            const c = document.getElementById('aim-imp-controls');
+            if (!c) return;
+            const opening = c.style.display === 'none';
+            c.style.display = opening ? 'block' : 'none';
+            impBtn.style.background = opening ? 'rgba(122,223,230,0.32)' : 'rgba(122,223,230,0.12)';
+            if (!opening) impSetMode(null);
+        };
+        if (imp.points.some(p => !p.done)) {           // staged points from this session → panel opens armed
+            impShowPanel(); impRenderStaged(); impRenderShapes(); impRenderAssetSel();
+        }
+
         // Advanced Draw live controls — load remembered params first so the fields show them.
         advLoadParams();
         const advAnchor = box.querySelector('#aim-adv-anchor');
@@ -18992,6 +27035,17 @@
             terrainProfilerRun();
         };
         optsRow.appendChild(terProfBtn);
+
+        // "🕸 SpiderWeb" button — Unshielded SpiderWeb generator (feature #261):
+        // FFZ per asset + high point-to-point FPs with DEM stairs + hubs.
+        // Preview-only in v4.274 but a CSM build tool → Full mode only.
+        const swbBtn = document.createElement('button');
+        swbBtn.type = 'button';
+        swbBtn.textContent = '🕸 SpiderWeb';
+        swbBtn.title = 'Unshielded SpiderWeb generator — zone around every asset, straight high flight paths with automatic stair steps, hubs for the shortest way back to base (MSL sites; preview + report)';
+        swbBtn.style.cssText = 'background:rgba(43,140,255,0.13);color:#8ec2ff;border:1px solid rgba(43,140,255,0.45);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+        swbBtn.onclick = (ev) => { ev.stopPropagation(); swbOpen(); };
+        if (!LITE) optsRow.appendChild(swbBtn);
 
         // "Generate" button — opens the Site Setup Generator modal
         // (auto-build the foundation: A1 = inspection FFZs). Inverse of
@@ -20027,6 +28081,17 @@
         delBtn.style.cssText = 'background:transparent;color:#ff5555;border:1px solid rgba(255,85,85,0.5);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
         delBtn.onclick = (ev) => { ev.stopPropagation(); openBulkDeleteModal(); };
         if (!LITE) optsRow.appendChild(delBtn);         // Bulk → Delete — write, CSM-only
+
+        // --- v4.298: Bulk → 📌 GM button (feature #271) ---
+        // One General Marker from a GM Stamper template at every selected
+        // row's centroid (e.g. filter Unshielded → select all). Create-only.
+        const gmtBtn = document.createElement('button');
+        gmtBtn.type = 'button';
+        gmtBtn.textContent = 'Bulk → 📌 GM';
+        gmtBtn.title = 'Create one General Marker from a GM Stamper template at each selected row (create-only; source entities untouched)';
+        gmtBtn.style.cssText = 'background:transparent;color:#c39bd3;border:1px solid rgba(195,155,211,0.5);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+        gmtBtn.onclick = (ev) => { ev.stopPropagation(); openGmtBulkModal(); };
+        if (!LITE) optsRow.appendChild(gmtBtn);         // Bulk → GM — write, CSM-only
 
         // Popover: pick a target (✓ Valid / ✗ Invalid), scope, and entity-
         // type filter, preview the count, then queue one validated edit per
