@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.150
+// @version      34.151
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.150';
+    const SCRIPT_VERSION = '34.151';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1025,7 +1025,19 @@
     // v34.150 — built-in profiler (same idea as Mission Bank Tools' [perf] lines): every 5 s, if any
     // runUpdate ran, log how many, total/max ms, how many were observer-triggered, and how much of
     // that was the cell layer. "Runs like shit" needs numbers, not guesses — paste these lines back.
-    const _perf = { runs: 0, ms: 0, max: 0, obs: 0, cellMs: 0, cellMax: 0, lastLog: Date.now() };
+    const _perf = { runs: 0, ms: 0, max: 0, obs: 0, cellMs: 0, cellMax: 0, lastLog: Date.now(), stages: {}, mut: {}, mutN: 0, stageT: 0 };
+    // Stage timers: perfStage('name') charges the time since the previous mark to 'name'.
+    function perfStage(name) { const now = performance.now(); if (_perf.stageT) _perf.stages[name] = (_perf.stages[name] || 0) + (now - _perf.stageT); _perf.stageT = now; }
+    // Mutation tally: what on Percepto's map is changing and tripping the observer.
+    function perfTally(recs) {
+        try {
+            for (let i = 0; i < recs.length && i < 200; i++) {
+                const m = recs[i]; const t = m.target;
+                const k = `${m.type === 'attributes' ? m.attributeName : m.type}@${t && t.tagName ? t.tagName.toLowerCase() : '?'}${t && t.classList && t.classList.length ? '.' + String(t.classList[0]).slice(0, 24) : ''}`;
+                _perf.mut[k] = (_perf.mut[k] || 0) + 1; _perf.mutN++;
+            }
+        } catch (e) {}
+    }
     function perfTime(key, fn) {
         const t0 = performance.now();
         try { return fn(); }
@@ -1035,9 +1047,12 @@
         const now = Date.now();
         if (!force && now - _perf.lastLog < 5000) return;
         if (_perf.runs) {
-            console.log(`${TAG} [perf] ${Math.round((now - _perf.lastLog) / 1000)} s: runUpdate ×${_perf.runs} (${_perf.obs} from DOM mutations) · total ${Math.round(_perf.ms)} ms · max ${Math.round(_perf.max)} ms · cell layer ${Math.round(_perf.cellMs)} ms (max ${Math.round(_perf.cellMax)})`);
+            const top = (o, n) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, n);
+            console.log(`${TAG} [perf] ${Math.round((now - _perf.lastLog) / 1000)} s: runUpdate ×${_perf.runs} (${_perf.obs} from DOM mutations) · total ${Math.round(_perf.ms)} ms · max ${Math.round(_perf.max)} ms · cell layer ${Math.round(_perf.cellMs)} ms (max ${Math.round(_perf.cellMax)})`
+                + `\n    stages: ${top(_perf.stages, 6).map(([k, v]) => `${k} ${Math.round(v)}`).join(' · ')}`
+                + `\n    mutations ×${_perf.mutN}: ${top(_perf.mut, 5).map(([k, v]) => `${k} ×${v}`).join(' · ')}`);
         }
-        _perf.runs = 0; _perf.ms = 0; _perf.max = 0; _perf.obs = 0; _perf.cellMs = 0; _perf.cellMax = 0; _perf.lastLog = now;
+        _perf.runs = 0; _perf.ms = 0; _perf.max = 0; _perf.obs = 0; _perf.cellMs = 0; _perf.cellMax = 0; _perf.lastLog = now; _perf.stages = {}; _perf.mut = {}; _perf.mutN = 0;
     }
     setInterval(() => perfFlush(false), 5000);
     function runUpdate() {
@@ -1053,6 +1068,7 @@
     let _perfFromObserver = false;
     function runUpdateInner() {
         if (!isActive) return;
+        _perf.stageT = performance.now();
 
         // Self-healing: if Leaflet (or the host app's React) replaced the map-pane
         // node we attached to, our observer is on a detached element and
@@ -1075,6 +1091,7 @@
         // No global shielding toggle anymore — each category (FFZ, FP) has
         // its own .shielding sub-toggle, checked inside the per-line loop.
 
+        perfStage('pre');
         // 1. WIPE CLEAN old buffers FIRST.
         // Must happen before the reference search: custom green buffers carry
         // stroke="var(--color-green)" and would otherwise be picked up as
@@ -1086,6 +1103,7 @@
         let globalBaseWidth = null;
         let nativeBuffers = [];
 
+        perfStage('1 wipe');
         // 2. ROBUST REFERENCE SEARCH (only native elements remain at this point)
         const allGreen = document.querySelectorAll('path.leaflet-interactive[stroke="var(--color-green)"]');
         allGreen.forEach(el => {
@@ -1119,6 +1137,7 @@
             globalBaseWidth = lineThickness * standardRatio;
         }
 
+        perfStage('2 refs');
         // 3. Hide (or restore) the host app's native distractions per-category.
         // FFZ.hide-native covers the green native buffer + the dashed FFZ.
         // FP.hide-native covers the blue gradient + the dashed flight path.
@@ -1175,6 +1194,7 @@
             }
         }
 
+        perfStage('3 hide');
         // 4. REBUILD & ENFORCE
         const lines = document.querySelectorAll(ALL_TARGETS_SELECTOR);
 
@@ -1520,46 +1540,66 @@
             }
         });
 
+        perfStage('4 rebuild');
         // 5. Altitude-marker purple shield circles.
         renderAltitudeShields(globalBaseWidth, lineThickness, standardRatio);
+        perfStage('5 alt-shields');
         // 6. KML shielding overlays (loaded async — render whatever's currently in kmlFeatures).
         renderShielding();
+        perfStage('6 kml-shielding');
         // 7. Violation dots — assets within Xft of FFZ/FP.
         renderViolations(globalBaseWidth, lineThickness, standardRatio);
+        perfStage('7 violations');
         // 8. Coverage Validator pins (re-projected from stored lat/lng).
         renderValidatorPins();
+        perfStage('8 validator-pins');
         // 9. Round altitude + make values copyable in altitude popups.
         enhanceAltitudePopups();
+        perfStage('9 alt-popups');
         // 10. Toggle satellite base tiles on/off per user preference.
         applyMapBackgroundVisibility();
+        perfStage('10 sat-visibility');
         // 11. Orthomosaic brightness + low-res cap (perf optimization).
         applyOrthoSettings();
+        perfStage('11 ortho-settings');
         // 11b. Full ortho hide — remove COG layers to kill their tile storm.
         applyOrthoVisibility();
+        perfStage('11b ortho-hide');
         // 11b2. Basemap switcher (replacement base under everything).
         applyBasemapLayer();
+        perfStage('11b2 basemap');
         // 11b3. USGS terrain overlay (per-view elevation render).
         applyTerrainLayer();
+        perfStage('11b3 terrain');
         // 11c. FAA airspace chart overlay (sectional / TAC tile layer).
         applyFaaChartLayer();
+        perfStage('11c faa-chart');
         // 11d. Vector airspace boundaries (Class B/C/D/E polygons).
         applyAirspaceVectors();
+        perfStage('11d airspace-vectors');
         // 11e. USDA crop-cover overlay.
         applyCropLayer();
+        perfStage('11e crops');
         // 11f. Texas RRC wells / pipelines overlay.
         applyRrcLayers();
+        perfStage('11f rrc');
         // 11g. TX boundaries (districts / counties / cities / surveys).
         applyTxBoundaries();
+        perfStage('11g tx-bounds');
         // 11h. 🌐 Fleet KML layers (data repo fleet-kml/), clipped to the site.
         applyFleetKml();
+        perfStage('11h fleet-kml');
         // 11i. 📶 FCC cell coverage hexes (v34.143) — timed separately for the [perf] line.
         perfTime('cell', applyCellCoverage);
+        perfStage('11i cell');
         // 12. Flight-path vertex dots: hide / resize / recolor via CSS.
         applyVertexStyle();
+        perfStage('12 vertex-dots');
 
         // Mark current state as rendered. Heartbeat compares against this
         // and skips re-running if nothing changed since.
         lastUpdateHash = computeUpdateHash();
+        perfStage('hash'); _perf.stageT = 0;
     }
 
     // Hides/restores the Leaflet satellite base tile layer. Driven by the
@@ -3152,7 +3192,16 @@
             + (toggleState['cell.asr'] === true ? `<div style="margin-top:3px">🏗 ${(_asrVisible || []).length} FCC registered structures <span style="display:inline-flex;align-items:center;gap:3px;margin:0 7px"><i style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#10161f;border:2px solid #fff"></i>white ring</span><span style="color:#8fa3b8;font-weight:500">height · built · owner on hover · FCC ASR as of ${asrAsOf() || '…'} (towers &gt; ~200 ft or near airports)</span></div>` : '');
         try { map.getContainer().appendChild(el); } catch (e) {}
     }
+    let _cellQuickKey = '';
     function applyCellCoverage() {
+        // v34.151 — runUpdate fires 4–9×/s during interaction (Percepto's own DOM mutations); the
+        // profiler showed this applier costing ~3 ms per run doing envelope/ASR/tower bookkeeping
+        // that produced no change. Cheap pre-key over every input → return before any work.
+        const sid0 = getCurrentSiteID() || '';
+        const quick = toggleState['cell.show'] !== true ? `off|${_cellLayers.length}|${_towerLayers.length}|${_asrLayers.length}`
+            : `${sid0}|${toggleState['cell.carrier']}|${toggleState['cell.tech']}|${toggleState['cell.opacity']}|${toggleState['cell.marginMi']}|${toggleState['cell.outline']}|${toggleState['cell.hover']}|${toggleState['cell.legend']}|${toggleState['cell.towers']}|${toggleState['cell.towersCarrierOnly']}|${toggleState['cell.asr']}|${toggleState['cell.asrLabels']}|${_cell.siteID}|${_cell.at}|${_cell.loading}|${_cell.failed}|${_towers.at}|${_towers.loading}|${_towers.failed}|${Object.keys(_asr.cells).length}|${_asr.loading.size}|${_rrcSiteBBox.siteID}|${_rrcSiteBBox.loading}|${_rrcSiteBBox.failed}|${_cellLayers.length}|${!!_cellHover}`;
+        if (quick === _cellQuickKey && (toggleState['cell.show'] !== true ? !(_cellLayers.length || _towerLayers.length || _asrLayers.length) : _cellLayers.length > 0)) return;
+        _cellQuickKey = quick;
         const map = getLeafletMap();
         const L = _stylerL();
         if (!map || !L || typeof map.addLayer !== 'function' || typeof L.polygon !== 'function') return;
@@ -10338,7 +10387,7 @@
         // recovers via a single auto-Kick. See detectStuckRender() above.
         scheduleStuckCheckAfterActivation();
         observerTarget = container;
-        observer = new MutationObserver(() => { _perfFromObserver = true; debouncedUpdate(); });
+        observer = new MutationObserver((recs) => { _perfFromObserver = true; perfTally(recs); debouncedUpdate(); });
         observer.observe(container, observerConfig);
         // v34.122 — Data View zoom fix: on DV, Leaflet only rewrites ITS OWN
         // layers' attributes on zoom/pan — no SS-style mutation storm reaches
