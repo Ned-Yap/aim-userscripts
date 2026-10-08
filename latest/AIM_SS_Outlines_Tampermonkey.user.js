@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.149
+// @version      34.150
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.149';
+    const SCRIPT_VERSION = '34.150';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1022,7 +1022,36 @@
     }
 
     // --- Core Logic ---
+    // v34.150 — built-in profiler (same idea as Mission Bank Tools' [perf] lines): every 5 s, if any
+    // runUpdate ran, log how many, total/max ms, how many were observer-triggered, and how much of
+    // that was the cell layer. "Runs like shit" needs numbers, not guesses — paste these lines back.
+    const _perf = { runs: 0, ms: 0, max: 0, obs: 0, cellMs: 0, cellMax: 0, lastLog: Date.now() };
+    function perfTime(key, fn) {
+        const t0 = performance.now();
+        try { return fn(); }
+        finally { const d = performance.now() - t0; _perf[key + 'Ms'] += d; if (d > _perf[key + 'Max']) _perf[key + 'Max'] = d; }
+    }
+    function perfFlush(force) {
+        const now = Date.now();
+        if (!force && now - _perf.lastLog < 5000) return;
+        if (_perf.runs) {
+            console.log(`${TAG} [perf] ${Math.round((now - _perf.lastLog) / 1000)} s: runUpdate ×${_perf.runs} (${_perf.obs} from DOM mutations) · total ${Math.round(_perf.ms)} ms · max ${Math.round(_perf.max)} ms · cell layer ${Math.round(_perf.cellMs)} ms (max ${Math.round(_perf.cellMax)})`);
+        }
+        _perf.runs = 0; _perf.ms = 0; _perf.max = 0; _perf.obs = 0; _perf.cellMs = 0; _perf.cellMax = 0; _perf.lastLog = now;
+    }
+    setInterval(() => perfFlush(false), 5000);
     function runUpdate() {
+        if (!isActive) return;
+        const _t0 = performance.now();
+        try { runUpdateInner(); }
+        finally {
+            const d = performance.now() - _t0;
+            _perf.runs++; _perf.ms += d; if (d > _perf.max) _perf.max = d;
+            if (_perfFromObserver) { _perf.obs++; _perfFromObserver = false; }
+        }
+    }
+    let _perfFromObserver = false;
+    function runUpdateInner() {
         if (!isActive) return;
 
         // Self-healing: if Leaflet (or the host app's React) replaced the map-pane
@@ -1523,8 +1552,8 @@
         applyTxBoundaries();
         // 11h. 🌐 Fleet KML layers (data repo fleet-kml/), clipped to the site.
         applyFleetKml();
-        // 11i. 📶 FCC cell coverage hexes (v34.143).
-        applyCellCoverage();
+        // 11i. 📶 FCC cell coverage hexes (v34.143) — timed separately for the [perf] line.
+        perfTime('cell', applyCellCoverage);
         // 12. Flight-path vertex dots: hide / resize / recolor via CSS.
         applyVertexStyle();
 
@@ -2996,7 +3025,7 @@
         if (_cellRenderer) return _cellRenderer;
         if (typeof L.canvas !== 'function') { if (!_cellRendererLogged) { _cellRendererLogged = true; console.warn(`${TAG} cell: this Leaflet has no L.canvas — hexes fall back to the SVG renderer (slower)`); } return null; }
         try {
-            const opts = { padding: 0.5 };
+            const opts = { padding: 0.1 };   // v34.150: 0.5 made a 2× viewport bitmap (~80 MB on a 3,500 px monitor) that Leaflet clears + repaints on every pan end
             if (pane) opts.pane = pane;
             _cellRenderer = L.canvas(opts);
             if (!_cellRendererLogged) { _cellRendererLogged = true; console.log(`${TAG} cell: canvas renderer in use for hexes + towers`); }
@@ -10309,7 +10338,7 @@
         // recovers via a single auto-Kick. See detectStuckRender() above.
         scheduleStuckCheckAfterActivation();
         observerTarget = container;
-        observer = new MutationObserver(debouncedUpdate);
+        observer = new MutationObserver(() => { _perfFromObserver = true; debouncedUpdate(); });
         observer.observe(container, observerConfig);
         // v34.122 — Data View zoom fix: on DV, Leaflet only rewrites ITS OWN
         // layers' attributes on zoom/pan — no SS-style mutation storm reaches

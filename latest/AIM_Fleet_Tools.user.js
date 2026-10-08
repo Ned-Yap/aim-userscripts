@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.71
+// @version      0.72
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -39,7 +39,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.71';
+    const SCRIPT_VERSION = '0.72';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -1197,7 +1197,7 @@
             ovHeatCanvas.width = 0; ovHeatCanvas.height = 0;
             ovHeatCanvas.style.cssText = 'position:absolute;left:0;top:0;pointer-events:none;';
             pane.appendChild(ovHeatCanvas);
-            cellHeatDrawKey = '';
+            cellHeatDrawKey = ''; cellHeatRect = null;
             ovSvg = document.createElementNS(SVG_NS, 'svg');
             ovSvg.setAttribute('width', '1');
             ovSvg.setAttribute('height', '1');
@@ -1279,7 +1279,19 @@
 
     // Projects and rebuilds the whole overlay from current data. Bounded by
     // the pin cap (300) + setup site cap (40), so a full rebuild is a few ms.
+    // v0.72 — [perf] line every 5 s when the overlay rendered: count, total/max ms, heat-canvas ms.
+    const _ovPerf = { runs: 0, ms: 0, max: 0, heatMs: 0, lastLog: Date.now() };
+    setInterval(() => {
+        const now = Date.now();
+        if (_ovPerf.runs) console.log(`${TAG} [perf] ${Math.round((now - _ovPerf.lastLog) / 1000)} s: renderOverlay ×${_ovPerf.runs} · total ${Math.round(_ovPerf.ms)} ms · max ${Math.round(_ovPerf.max)} ms · heat canvas ${Math.round(_ovPerf.heatMs)} ms`);
+        _ovPerf.runs = 0; _ovPerf.ms = 0; _ovPerf.max = 0; _ovPerf.heatMs = 0; _ovPerf.lastLog = now;
+    }, 5000);
     function renderOverlay() {
+        const _t0 = performance.now();
+        try { return renderOverlayInner(); }
+        finally { const d = performance.now() - _t0; _ovPerf.runs++; _ovPerf.ms += d; if (d > _ovPerf.max) _ovPerf.max = d; }
+    }
+    function renderOverlayInner() {
         if (!onLandingPage()) return false;
         const map = getLandingMap();
         if (!map || !ensureOverlay(map)) return false;
@@ -1379,7 +1391,7 @@
                 try { ovCellG.innerHTML = ftCfg.cellDots ? cellRenderSvg(map) : ''; }
                 catch (e) { console.warn(`${TAG} cell overlay render failed:`, e); ovCellG.innerHTML = ''; }
             }
-            try { cellHeatDraw(map); }
+            try { const _h0 = performance.now(); cellHeatDraw(map); _ovPerf.heatMs += performance.now() - _h0; }
             catch (e) { console.warn(`${TAG} heat canvas draw failed:`, e); }
             // --- conflict dots (secondary conflict locations), then pins ---
             let pHtml = '';
@@ -4852,6 +4864,7 @@
     let cellHeatTimer = 0;
     let ovHeatCanvas = null;
     let cellHeatDrawKey = '';
+    let cellHeatRect = null;   // v0.72: painted rect in layer px {styleKey, ox, oy, w, h}
     // v0.70: resolution from the padded view's AREA, not the zoom level. The
     // first cut keyed on zoom and a 3,500 px monitor at z11 asked for ~30k
     // res-8 hexes; the fetch truncated at the page cap and — because the
@@ -4954,7 +4967,7 @@
         const fs = cellHeatState.features;
         if (!ftCfg.cellHeat || !fs.length) {
             if (cv.width || cv.height) { cv.width = 0; cv.height = 0; }
-            cellHeatDrawKey = '';
+            cellHeatDrawKey = ''; cellHeatRect = null;
             return;
         }
         const size = map.getSize();
@@ -4962,12 +4975,17 @@
         const tl = map.containerPointToLayerPoint([0, 0]);
         const PAD = 0.35;   // 1.7× viewport each axis — enough pan headroom, bounded bitmap
         const w = Math.ceil(size.x * (1 + 2 * PAD)), h = Math.ceil(size.y * (1 + 2 * PAD));
-        const ox = Math.round(tl.x - size.x * PAD), oy = Math.round(tl.y - size.y * PAD);
         const op = Math.min(0.9, Math.max(0.1, Number(ftCfg.cellHeatOpacity) || 0.45));
-        const key = `${z}|${ox},${oy}|${w}x${h}|${cellHeatState.dataSeq}|${ftCfg.cellCarrier}|${ftCfg.cellTech}|${op}`;
-        if (key === cellHeatDrawKey) return;
-        cellHeatDrawKey = key;
-        const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+        // v0.72: the canvas lives in LAYER coordinates, so panning inside the painted rect needs NO
+        // repaint — v0.71 keyed on the view origin and repainted a ~100 MB bitmap on every pan end.
+        // Repaint only when the viewport leaves the painted rect, or zoom / data / style change.
+        const styleKey = `${z}|${w}x${h}|${cellHeatState.dataSeq}|${ftCfg.cellCarrier}|${ftCfg.cellTech}|${op}`;
+        const r = cellHeatRect;
+        if (r && r.styleKey === styleKey && tl.x >= r.ox && tl.y >= r.oy && tl.x + size.x <= r.ox + r.w && tl.y + size.y <= r.oy + r.h) return;
+        const ox = Math.round(tl.x - size.x * PAD), oy = Math.round(tl.y - size.y * PAD);
+        cellHeatRect = { styleKey, ox, oy, w, h };
+        cellHeatDrawKey = styleKey;
+        const dpr = 1;   // coverage shading does not need retina pixels; a 1.5× bitmap on a 3,500 px monitor was ~130 MB
         cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
         cv.style.width = `${w}px`; cv.style.height = `${h}px`;
         cv.style.left = `${ox}px`; cv.style.top = `${oy}px`;
