@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.158
+// @version      34.159
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.158';
+    const SCRIPT_VERSION = '34.159';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -5953,16 +5953,16 @@
         if (p.well_count) lines.push(`${p.well_count} well${p.well_count === 1 ? '' : 's'}${Array.isArray(p.well_status) && p.well_status.length ? ` — ${hzEsc(p.well_status.join(', '))}` : ''}`);
         if (p.first_date || p.last_date) lines.push(`<span style="opacity:0.8">${hzFmtDate(p.first_date)}${p.last_date && p.last_date !== p.first_date ? ` → ${hzFmtDate(p.last_date)}` : ''}</span>`);
         if (Array.isArray(p.permits) && p.permits.length) {
-            lines.push(`<span style="color:#ff8080">Permits (${p.permits.length}):</span>`);
+            lines.push(`<span style="color:#b71c1c;font-weight:600">Permits (${p.permits.length}):</span>`);
             p.permits.slice(0, 4).forEach(pm => lines.push(`&nbsp;• ${hzEsc(pm.name || pm.api || '')} — ${hzEsc(pm.status || '')} ${hzFmtDate(pm.approved)}${pm.expires ? ` → ${hzFmtDate(pm.expires)}` : ''}`));
             if (p.permits.length > 4) lines.push(`&nbsp;…+${p.permits.length - 4} more`);
         }
-        if (p.predicted_spud || p.predicted_frac) lines.push(`<span style="color:#ff8080">Predicted: ${p.predicted_spud ? `spud ${hzFmtDate(p.predicted_spud)}` : ''}${p.predicted_spud && p.predicted_frac ? ' · ' : ''}${p.predicted_frac ? `frac ${hzFmtDate(p.predicted_frac)}` : ''}</span>`);
+        if (p.predicted_spud || p.predicted_frac) lines.push(`<span style="color:#b71c1c;font-weight:600">Predicted: ${p.predicted_spud ? `spud ${hzFmtDate(p.predicted_spud)}` : ''}${p.predicted_spud && p.predicted_frac ? ' · ' : ''}${p.predicted_frac ? `frac ${hzFmtDate(p.predicted_frac)}` : ''}</span>`);
         if (p.contractor && p.contractor !== 'NOT REPORTED') lines.push(`<span style="opacity:0.8">${hzEsc(p.contractor)}</span>`);
         if (p.days_on_location != null) lines.push(`${p.days_on_location} days on location`);
         if (p.footprint_m2) lines.push(`${Math.round(p.footprint_m2 * 10.7639).toLocaleString()} ft²${p.building_count > 1 ? ` · ${p.building_count} buildings` : ''}`);
         if (p.owner || p.owner_pending) {
-            lines.push(`<span style="color:#c8ff4d">🏠 ${p.owner ? hzEsc(p.owner) : 'looking up owner…'}</span>`);
+            lines.push(`<span style="color:#1b5e20;font-weight:600">🏠 ${p.owner ? hzEsc(p.owner) : 'looking up owner…'}</span>`);
             if (p.legal) lines.push(`<span style="opacity:0.85">${hzEsc(p.legal)}</span>`);
             const bits = [p.acres ? `${p.acres} ac` : null, p.market_value ? `mkt $${Number(p.market_value).toLocaleString()}` : null].filter(Boolean);
             if (bits.length) lines.push(bits.join(' · '));
@@ -5970,7 +5970,7 @@
             if (p.mail) lines.push(`Mail: ${hzEsc(p.mail)}`);
             if (p.parcel_src) lines.push(`<span style="opacity:0.6">${hzEsc(p.parcel_src)}${p.parcel_year ? ` · ${hzEsc(p.parcel_year)}` : ''}</span>`);
         }
-        if (p.new_since) lines.push(`<span style="color:#ffd54f">NEW / CHANGED ${hzFmtDate(p.new_since)}${p.prev_status ? ` (was ${hzEsc(p.prev_status)})` : ''}</span>`);
+        if (p.new_since) lines.push(`<span style="color:#8d5400;font-weight:600">NEW / CHANGED ${hzFmtDate(p.new_since)}${p.prev_status ? ` (was ${hzEsc(p.prev_status)})` : ''}</span>`);
         if (Array.isArray(p.api_list) && p.api_list.length) lines.push(`<span style="opacity:0.7">${p.api_list.slice(0, 8).map(hzEsc).join(' · ')}${p.api_list.length > 8 ? ` …+${p.api_list.length - 8}` : ''}</span>`);
         lines.push(`<span style="opacity:0.55">${hzEsc(p.source || '')}${p.geom_source ? ` · ${hzEsc(p.geom_source)}` : ''} · standoff ${Number(p.standoff_ft) || 0} ft · generated ${hzFmtDate(p.generated)}${Array.isArray(p.api_list) && p.api_list.length ? ' · click = copy APIs' : ''}</span>`);
         return `<div class="aim-hz-tip">${lines.join('<br>')}</div>`;
