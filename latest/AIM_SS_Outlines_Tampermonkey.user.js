@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.154
+// @version      34.155
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.154';
+    const SCRIPT_VERSION = '34.155';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -5662,7 +5662,10 @@
         { id: 'dead',     label: '⬜ Plugged wells / expired permits (not hazards)',                         color: '#8d8d8d', opacity: 0.15, hatch: false, show: false },
     ];
     const HZ_TOGGLES = [
-        { id: 'hz.show', label: 'Show hazard layer', type: 'boolean', default: false, master: true },
+        // ON by default (v34.155): the whole point is that a CSM sees the pads
+        // before straightening a flight path through one. Sites without a
+        // hazards file draw nothing and say so in the card.
+        { id: 'hz.show', label: 'Show hazard layer', type: 'boolean', default: true, master: true },
         { type: 'header', label: 'Classes' },
         ...HZ_CLASSES.flatMap(c => [
             { id: `hz.${c.id}.show`, label: c.label, type: 'boolean', default: c.show },
