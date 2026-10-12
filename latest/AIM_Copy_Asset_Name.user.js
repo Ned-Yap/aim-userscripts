@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.322
+// @version      4.323
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.322';
+    const SCRIPT_VERSION = '4.323';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -142,6 +142,7 @@
         bandSoftFt: 40, bandHardFt: 200,        // alt-band height (max−min): soft warn / hard flag
         gmTowerFt: 60,                          // "Tower" general-markers must stay this far from FFZ/FP
         fpFfzAngleDeg: 15,                      // FP→FFZ boundary crossing angle hard min (ideal 45°)
+        hazardFt: 0,                            // 🚧 hazard standoff; 0 = per-feature value from the hazards file (50)
     };
     const SOP_ENABLE_DEFAULTS = {
         ffzAsset: true, fpAsset: true, ffzFfz: true,
@@ -149,9 +150,49 @@
         bandHeight: true, altInverted: true, fpDegenerate: true, gmTower: true,
         fpFfzAngle: true,
         gmTowerRings: true,   // ⭕ live standoff circles on Tower GMs (radius = gmTowerFt)
+        hazard: true, hazardFfz: true,   // 🚧 FP (+ FFZ) vs the Map Styler hazard layer (#288)
     };
     let sopValidatorChannel = null;
     let sopMasterEnabled = true;
+    // ---- 🚧 Hazard layer data (v4.323, #288) — shared by Map Styler over AIM_HAZARDS ----
+    // Map Styler owns the fetch (PAT + data repo hazards/<site>.geojson) and
+    // broadcasts the parsed features; the SOP check 13 reads them here. One
+    // fetch per site, both scripts see the same file.
+    const HAZARD_CHANNEL_NAME = 'AIM_HAZARDS';
+    const HAZARD_WAIT_MS = 8000;
+    let hazardChannel = null;
+    let hazardData = null;        // last HAZARDS_DATA message {siteKey, generated, stale, standoffFt, features:[{id, cls, kind, ours, name, operator, status, standoffFt, newSince, source, ring:[[lat,lng]…]}]}
+    let hazardWaiters = [];
+    function hazardSiteKey(sid) { return IS_QA ? `qa-${sid}` : String(sid); }
+    function ensureHazardChannel() {
+        if (hazardChannel) return hazardChannel;
+        try {
+            hazardChannel = new BroadcastChannel(HAZARD_CHANNEL_NAME);
+            hazardChannel.onmessage = (ev) => {
+                const m = (ev && ev.data) || {};
+                if (m.type !== 'HAZARDS_DATA' || !m.siteKey) return;
+                hazardData = m;
+                const ws = hazardWaiters; hazardWaiters = [];
+                ws.forEach(w => { try { w(m); } catch (e) {} });
+            };
+        } catch (e) { console.warn(`${TAG} hazard channel unavailable:`, e); }
+        return hazardChannel;
+    }
+    // Resolves with the hazard data for the site, or null after HAZARD_WAIT_MS.
+    function hazardFeaturesFor(sid) {
+        const key = hazardSiteKey(sid);
+        if (hazardData && hazardData.siteKey === key) return Promise.resolve(hazardData);
+        const ch = ensureHazardChannel();
+        if (!ch) return Promise.resolve(null);
+        return new Promise(resolve => {
+            let done = false;
+            const finish = (v) => { if (done) return; done = true; resolve(v && v.siteKey === key ? v : null); };
+            hazardWaiters.push(finish);
+            setTimeout(() => finish(hazardData), HAZARD_WAIT_MS);
+            try { ch.postMessage({ type: 'HAZARDS_REQUEST', siteKey: key, siteId: String(sid), source: SOP_SCRIPT_ID }); }
+            catch (e) { console.warn(`${TAG} hazard request failed:`, e); finish(null); }
+        });
+    }
     function loadSopThresholds() {
         const out = Object.assign({}, SOP_THRESH_DEFAULTS);
         try {
@@ -2178,6 +2219,96 @@
             }
         }
 
+        // 13. 🚧 Hazard layer (v4.323, #288) — flight-path segments (and FFZ
+        //     rings) vs the Map Styler's hazard features: third-party pads,
+        //     upcoming work of ANY operator (permits / rigs / frac / drilling /
+        //     infill), buildings. Plugged wells, expired permits and our own
+        //     producing pads never flag. Measures SEGMENT → ring, never vertex.
+        //     Data comes over AIM_HAZARDS from Map Styler (one fetch, shared) —
+        //     a HAZARDS_REQUEST is posted when nothing is cached yet.
+        if (sopEnabled.hazard) {
+            const hz = await hazardFeaturesFor(siteID);
+            if (!hz) {
+                console.warn(`${TAG} SOP: hazard layer data unavailable for site ${siteID} — check 13 skipped (Map Styler ≥34.154 not running, no PAT, or no hazards/${hazardSiteKey(siteID)}.geojson yet)`);
+            } else {
+                const fileTh = Number(hz.standoffFt) || 50;
+                const thFor = (f) => (sopThresholds.hazardFt > 0 ? sopThresholds.hazardFt : (Number(f.standoffFt) || fileTh));
+                const feats = (hz.features || []).filter(f => f && Array.isArray(f.ring) && f.ring.length >= 3 && (f.cls === 'work' || f.cls === 'live' || f.cls === 'building'));
+                const segSegM = (p1, p2, q1, q2) => segmentsCross(p1, p2, q1, q2) ? 0
+                    : Math.min(pointToSegMeters(p1.lat, p1.lng, q1, q2), pointToSegMeters(p2.lat, p2.lng, q1, q2),
+                               pointToSegMeters(q1.lat, q1.lng, p1, p2), pointToSegMeters(q2.lat, q2.lng, p1, p2));
+                const ringPts = (ring) => ring.map(p => ({ lat: p[0], lng: p[1] }));
+                // segment → ring: 0 when it crosses an edge or an endpoint lies inside
+                const segToRingM = (a, b, pts) => {
+                    if (pointInPolygon(a.lat, a.lng, pts) || pointInPolygon(b.lat, b.lng, pts)) return 0;
+                    let best = Infinity;
+                    for (let i = 0; i < pts.length; i++) {
+                        const q1 = pts[i], q2 = pts[(i + 1) % pts.length];
+                        const d = segSegM(a, b, q1, q2);
+                        if (d < best) { best = d; if (best === 0) break; }
+                    }
+                    return best;
+                };
+                // ring ↔ ring: 0 when any edge crosses or any vertex sits inside the other
+                const ringToRingM = (ptsA, ptsB) => {
+                    for (const p of ptsA) if (pointInPolygon(p.lat, p.lng, ptsB)) return 0;
+                    for (const p of ptsB) if (pointInPolygon(p.lat, p.lng, ptsA)) return 0;
+                    let best = Infinity;
+                    for (let i = 0; i < ptsA.length; i++) {
+                        const a = ptsA[i], b = ptsA[(i + 1) % ptsA.length];
+                        for (let j = 0; j < ptsB.length; j++) {
+                            const d = segSegM(a, b, ptsB[j], ptsB[(j + 1) % ptsB.length]);
+                            if (d < best) { best = d; if (best === 0) return 0; }
+                        }
+                    }
+                    return best;
+                };
+                const kindLabel = (f) => (f.cls === 'work' ? 'UPCOMING WORK' : (f.cls === 'building' ? 'building / property' : 'third-party pad'))
+                    + (f.kind && f.kind !== 'pad' && f.cls !== 'building' ? ` (${f.kind})` : '');
+                let flagged = 0;
+                for (let hi = 0; hi < feats.length; hi++) {
+                    const f = feats[hi];
+                    const th = thFor(f);
+                    const margM = th / M_TO_FT + 2;
+                    const ring = f.ring;
+                    const pts = ringPts(ring);
+                    const hb = bboxOfRing(pts);
+                    // bbox prefilter: expand the hazard bbox by the standoff and keep
+                    // only arcs / FFZs whose own bbox touches it.
+                    const near = (bb) => bb && !(bb.maxLat < hb.minLat - margM / 111320 || bb.minLat > hb.maxLat + margM / 111320
+                        || bb.maxLng < hb.minLng - margM / (111320 * Math.cos(hb.minLat * Math.PI / 180)) || bb.minLng > hb.maxLng + margM / (111320 * Math.cos(hb.minLat * Math.PI / 180)));
+                    let best = Infinity, bestRef = '', hits = [];
+                    for (const rec of allArcs) {
+                        if (!near(arcBox(rec.arc))) continue;
+                        const d = segToRingM(rec.arc.point_a, rec.arc.point_b, pts);
+                        const ft = Math.round(d * M_TO_FT);
+                        if (ft <= th) { hits.push(`${segRef(rec)} ${ft === 0 ? 'CROSSES' : ft + ' ft'}`); if (d < best) { best = d; bestRef = segRef(rec); } }
+                    }
+                    if (sopEnabled.hazardFfz) {
+                        for (const ffz of ffzs) {
+                            if (!near(ffzBox.get(ffz))) continue;
+                            const r = getRing(ffz); if (!r) continue;
+                            const d = ringToRingM(pts, r);
+                            const ft = Math.round(d * M_TO_FT);
+                            if (ft <= th) { hits.push(`FFZ "${nameOf(ffz)}" ${ft === 0 ? 'OVERLAPS' : ft + ' ft'}`); if (d < best) { best = d; bestRef = `FFZ "${nameOf(ffz)}"`; } }
+                        }
+                    }
+                    if (hits.length) {
+                        flagged++;
+                        const ft = Math.round(best * M_TO_FT);
+                        const who = [f.operator ? `${f.operator}${f.ours ? ' — OURS' : ''}` : (f.source === 'msbf' ? 'building footprint' : (f.source === 'cv' ? 'Ortho Scanner' : '')), f.status].filter(Boolean).join(', ');
+                        out.push({ check: 'Hazard standoff', severity: f.cls === 'work' || ft === 0 ? 'high' : sev(ft, th),
+                            distFt: ft, threshFt: th,
+                            note: `violation: ${kindLabel(f)} "${f.name || f.id}"${who ? ` (${who})` : ''} — ${ft === 0 ? `${bestRef} crosses it` : `${bestRef} ${ft} ft away`}; standoff ${th} ft${f.newSince ? ` — NEW/CHANGED ${String(f.newSince).slice(0, 10)}` : ''}${hits.length > 1 ? ` · ${hits.length} hits: ${hits.slice(0, 4).join('; ')}${hits.length > 4 ? '…' : ''}` : ''}`,
+                            polygon: ring.map(p => [p[0], p[1]]) });
+                    }
+                    await yieldMaybe(hi, feats.length);
+                }
+                console.log(`${TAG} SOP: hazard check — ${feats.length} hazard feature(s)${hz.stale ? ' (STALE file)' : ''}, ${flagged} flagged`);
+                if (hz.stale) showToast(`⚠ Hazards file is STALE (generated ${String(hz.generated || '?').slice(0, 10)}) — Hazard Layer → Refresh now`, 'rgba(255,96,96,0.55)');
+            }
+        }
+
         // 12. FP → FFZ connection angle — an FP connects to an FFZ where its
         //     segment endpoint lands ON an FFZ edge (mid-edge; never a corner).
         //     The angle between that approaching segment and the edge it meets
@@ -2259,6 +2390,7 @@
     // validator issues per message, so an independent sender would clobber the
     // SOP/Airspace/TFR batches. It posts here instead and we re-post the union.
     // IFRAME-gated — both AI contexts hear the broadcast; one union post is enough.
+    if (CONTEXT === 'IFRAME') ensureHazardChannel();   // v4.323: cache HAZARDS_DATA as Map Styler broadcasts it
     (function setupSiteDiffIssueBridge() {
         if (CONTEXT !== 'IFRAME') return;
         let ch = null;
@@ -13044,6 +13176,9 @@
                 { id: 'gmTowerRings', label: '⭕ Tower GM standoff rings on map', type: 'boolean', default: SOP_ENABLE_DEFAULTS.gmTowerRings },
                 { id: 'fpFfzAngle', label: 'Check · FP→FFZ connection angle', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpFfzAngle },
                 { id: 'fpFfzAngleDeg', label: 'FP→FFZ min angle to the edge (ideal 45°)', type: 'number', min: 0, max: 90, step: 1, default: SOP_THRESH_DEFAULTS.fpFfzAngleDeg, unit: '°' },
+                { id: 'hazard', label: 'Check · 🚧 Hazard layer — FP vs 3rd-party pads / upcoming work / buildings', type: 'boolean', default: SOP_ENABLE_DEFAULTS.hazard },
+                { id: 'hazardFfz', label: 'Hazard · also check FFZ rings', type: 'boolean', default: SOP_ENABLE_DEFAULTS.hazardFfz },
+                { id: 'hazardFt', label: 'Hazard standoff (0 = per-feature value from the file)', type: 'number', min: 0, max: 500, step: 5, default: SOP_THRESH_DEFAULTS.hazardFt, unit: 'ft' },
                 { id: 'sop-draw', label: '🚩 Draw issues (run validators)', type: 'button', action: 'sop-draw' },
                 { id: 'sop-clear', label: 'Clear validator issues', type: 'button', action: 'sop-clear' },
             ],
