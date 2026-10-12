@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.323
+// @version      4.324
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.323';
+    const SCRIPT_VERSION = '4.324';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -2233,7 +2233,7 @@
             } else {
                 const fileTh = Number(hz.standoffFt) || 50;
                 const thFor = (f) => (sopThresholds.hazardFt > 0 ? sopThresholds.hazardFt : (Number(f.standoffFt) || fileTh));
-                const feats = (hz.features || []).filter(f => f && Array.isArray(f.ring) && f.ring.length >= 3 && (f.cls === 'work' || f.cls === 'live' || f.cls === 'building'));
+                const feats = (hz.features || []).filter(f => f && Array.isArray(f.ring) && f.ring.length >= 3 && (f.cls === 'work' || f.cls === 'likely' || f.cls === 'possible' || f.cls === 'live' || f.cls === 'building'));
                 const segSegM = (p1, p2, q1, q2) => segmentsCross(p1, p2, q1, q2) ? 0
                     : Math.min(pointToSegMeters(p1.lat, p1.lng, q1, q2), pointToSegMeters(p2.lat, p2.lng, q1, q2),
                                pointToSegMeters(q1.lat, q1.lng, p1, p2), pointToSegMeters(q2.lat, q2.lng, p1, p2));
@@ -2263,7 +2263,7 @@
                     }
                     return best;
                 };
-                const kindLabel = (f) => (f.cls === 'work' ? 'UPCOMING WORK' : (f.cls === 'building' ? 'building / property' : 'third-party pad'))
+                const kindLabel = (f) => ({ work: 'WORK NOW', likely: 'LIKELY WORK', possible: 'POSSIBLE WORK (stale signal)', building: 'building / property' }[f.cls] || 'third-party pad')
                     + (f.kind && f.kind !== 'pad' && f.cls !== 'building' ? ` (${f.kind})` : '');
                 let flagged = 0;
                 for (let hi = 0; hi < feats.length; hi++) {
@@ -2297,7 +2297,8 @@
                         flagged++;
                         const ft = Math.round(best * M_TO_FT);
                         const who = [f.operator ? `${f.operator}${f.ours ? ' — OURS' : ''}` : (f.source === 'msbf' ? 'building footprint' : (f.source === 'cv' ? 'Ortho Scanner' : '')), f.status].filter(Boolean).join(', ');
-                        out.push({ check: 'Hazard standoff', severity: f.cls === 'work' || ft === 0 ? 'high' : sev(ft, th),
+                        // tiers (v4.324): work / likely = high; possible = warn only; pads / buildings by distance
+                        out.push({ check: 'Hazard standoff', severity: f.cls === 'possible' ? 'warn' : (f.cls === 'work' || f.cls === 'likely' || ft === 0 ? 'high' : sev(ft, th)),
                             distFt: ft, threshFt: th,
                             note: `violation: ${kindLabel(f)} "${f.name || f.id}"${who ? ` (${who})` : ''} — ${ft === 0 ? `${bestRef} crosses it` : `${bestRef} ${ft} ft away`}; standoff ${th} ft${f.newSince ? ` — NEW/CHANGED ${String(f.newSince).slice(0, 10)}` : ''}${hits.length > 1 ? ` · ${hits.length} hits: ${hits.slice(0, 4).join('; ')}${hits.length > 4 ? '…' : ''}` : ''}`,
                             polygon: ring.map(p => [p[0], p[1]]) });

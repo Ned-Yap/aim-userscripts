@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.161
+// @version      34.162
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.161';
+    const SCRIPT_VERSION = '34.162';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -5654,13 +5654,110 @@
     const HZ_BADGE_ID = 'aim-hazards-badge';
     const HZ_STYLE_ID = 'aim-hazards-style';
     const HZ_DRAW_CAP = 2500;
+    // Palette (user 2026-10-12): orange / yellow vanish on tan ground and green scrub and the map
+    // already uses cyan / green / pink for entities — so red, purple, white and charcoal.
     const HZ_CLASSES = [
-        { id: 'work',     label: '🟥 Upcoming work — permits · rigs · frac · drilling · infill (any operator)', color: '#ff2a2a', opacity: 0.45, hatch: true,  show: true },
-        { id: 'live',     label: '🟧 Third-party producing pads',                                            color: '#ff8a1e', opacity: 0.35, hatch: true,  show: true },
-        { id: 'building', label: '🟫 Buildings / private property',                                         color: '#d9a066', opacity: 0.35, hatch: false, show: true },
-        { id: 'ours',     label: '🟦 Our producing pads',                                                   color: '#4fc3f7', opacity: 0.10, hatch: false, show: false },
-        { id: 'dead',     label: '⬜ Plugged wells / expired permits (not hazards)',                         color: '#8d8d8d', opacity: 0.15, hatch: false, show: false },
+        { id: 'work',     label: '🟥 Work NOW — rig / frac crew / drilling on the pad (any operator)',       color: '#ff1744', opacity: 0.5,  hatch: true,  show: true },
+        { id: 'likely',   label: '🟪 Likely work — permit / DUC / infill / soaking inside its window',      color: '#b100ff', opacity: 0.45, hatch: true,  show: true },
+        { id: 'possible', label: '⬜ Possible work — stale or far-out signal (dashed white)',               color: '#ffffff', opacity: 0.35, hatch: true,  show: true, dash: '6 4', thin: true },
+        { id: 'live',     label: '⬛ Third-party producing pads (charcoal, white edge)',                    color: '#111111', opacity: 0.4,  hatch: true,  show: true, edge: '#ffffff' },
+        { id: 'building', label: '🏠 Buildings / private property (white, dark edge)',                     color: '#ffffff', opacity: 0.18, hatch: false, show: true, edge: '#222222' },
+        { id: 'ours',     label: '🟦 Our producing pads',                                                   color: '#4fc3f7', opacity: 0.10, hatch: false, show: false, dash: '6 5' },
+        { id: 'dead',     label: '▫ Plugged wells / expired permits (not hazards)',                          color: '#8d8d8d', opacity: 0.15, hatch: false, show: false, dash: '6 5' },
     ];
+    // ---- tiers (v34.162) — port of hazards_build.py tier(); the file carries `signals`,
+    // the card's windows decide work / likely / possible here so a CSM can tune them.
+    const HZ_WIN_DEFAULTS = { 'permit_likely_mo': 12, 'permit_valid_mo': 24, 'duc_mo': 12, 'infill_mo': 6, 'soak_mo': 6, 'pred_ahead_mo': 6, 'pred_missed_mo': 3, 'frac_active_days': 30, 'stale_drop_mo': 36 };
+    const HZ_WIN_TOGGLES = [
+        { id: 'hz.win.permit_likely_mo', key: 'permit_likely_mo', label: 'Permit counts as LIKELY for (months after approval)', min: 1, max: 36 },
+        { id: 'hz.win.permit_valid_mo', key: 'permit_valid_mo', label: 'Permit stays POSSIBLE until (months, TX = 24)', min: 1, max: 60 },
+        { id: 'hz.win.duc_mo', key: 'duc_mo', label: 'DUC counts as LIKELY for (months after rig release)', min: 1, max: 36 },
+        { id: 'hz.win.infill_mo', key: 'infill_mo', label: 'Infill Activity counts as LIKELY for (months after the event)', min: 1, max: 36 },
+        { id: 'hz.win.soak_mo', key: 'soak_mo', label: 'Soaking counts as LIKELY for (months after frac)', min: 1, max: 24 },
+        { id: 'hz.win.pred_ahead_mo', key: 'pred_ahead_mo', label: 'Predicted spud / frac counts when within (months ahead)', min: 1, max: 24 },
+        { id: 'hz.win.pred_missed_mo', key: 'pred_missed_mo', label: '… or missed by less than (months)', min: 0, max: 24 },
+        { id: 'hz.win.stale_drop_mo', key: 'stale_drop_mo', label: 'Ignore any signal older than (months)', min: 6, max: 120 },
+    ];
+    function hzWindows() {
+        const W = Object.assign({}, HZ_WIN_DEFAULTS);
+        HZ_WIN_TOGGLES.forEach(t => { const v = Number(toggleState[t.id]); if (isFinite(v) && v >= 0) W[t.key] = v; });
+        return W;
+    }
+    function hzMonthsAgo(iso, now) { const t = Date.parse(iso || ''); return isFinite(t) ? (now - t) / (86400000 * 30.44) : null; }
+    function hzMonthsAhead(iso, now) { const t = Date.parse(iso || ''); return isFinite(t) ? (t - now) / (86400000 * 30.44) : null; }
+    function hzTier(sig, W, now) {
+        const red = [], purple = [], white = [];
+        const ps = String(sig.pad_status || '').toUpperCase();
+        const fd = (s) => String(s || '').slice(0, 10);
+        const n = (v) => Number(v) || 0;
+        if (sig.rig_active) red.push(`rig on the pad now${Array.isArray(sig.rig_names) && sig.rig_names.filter(Boolean).length ? ` (${sig.rig_names.filter(Boolean).join(', ')})` : ''}`);
+        const fl = hzMonthsAgo(sig.frac_last, now);
+        if (sig.frac_active || (fl !== null && fl * 30.44 <= W.frac_active_days)) red.push(`frac crew on the pad (last frac day ${fd(sig.frac_last)})`);
+        if (ps === 'DRILLING' || ps === 'COMPLETING') red.push(`Enverus pad status: ${sig.pad_status}`);
+        if (n(sig.drilling_wells)) red.push(`${sig.drilling_wells} well${sig.drilling_wells > 1 ? 's' : ''} drilling / completing now`);
+        if (n(sig.telemetry_7d) > 0 || n(sig.telemetry_3d) > 0) red.push('equipment telemetry on the pad this week');
+        if (red.length) return { cls: 'work', reasons: red, window: 'work is happening now' };
+        const drop = W.stale_drop_mo;
+        let pa = hzMonthsAgo(sig.permit_latest_approved, now);
+        if (n(sig.permits_active) && pa !== null && pa > Math.max(drop, W.permit_valid_mo)) pa = null;
+        if (n(sig.permits_active) && pa !== null) {
+            const exp = sig.permit_latest_expires;
+            let txt = `${sig.permits_active} active permit${sig.permits_active > 1 ? 's' : ''} — approved ${fd(sig.permit_latest_approved)}${exp ? `, valid to ${fd(exp)}` : ''}`;
+            if (ps === 'PERMITTED' || ps === 'CONSTRUCTED') { txt = `pad ${ps.toLowerCase()}, nothing spud yet — rig is next; ` + txt; (pa <= W.permit_valid_mo ? purple : white).push(txt); }
+            else (pa <= W.permit_likely_mo ? purple : white).push(txt + (pa > W.permit_likely_mo ? ` (${Math.round(pa)} months old)` : ''));
+        } else if ((ps === 'PERMITTED' || ps === 'CONSTRUCTED') && !n(sig.permits_active)) {
+            const age = hzMonthsAgo(sig.pad_permit_approved || sig.constructed, now);
+            (age === null || age <= W.permit_valid_mo ? purple : white).push(`pad ${ps.toLowerCase()}, nothing spud yet — rig is next (permit ${fd(sig.pad_permit_approved)})`);
+        }
+        const ducAge = hzMonthsAgo(sig.duc_release_latest, now);
+        if (n(sig.duc_wells) && (ducAge === null || ducAge <= drop)) {
+            const txt = `${sig.duc_wells} well${sig.duc_wells > 1 ? 's' : ''} drilled, never completed (DUC, rig released ${fd(sig.duc_release_latest)}) — completion / frac crew expected`;
+            (ducAge !== null && ducAge <= W.duc_mo ? purple : white).push(txt + (ducAge !== null && ducAge > W.duc_mo ? ` — ${Math.round(ducAge)} months ago, no crew seen` : ''));
+        }
+        [['predicted_spud', 'spud'], ['predicted_frac', 'frac crew']].forEach(([key, label]) => {
+            const ah = hzMonthsAhead(sig[key], now);
+            if (ah === null || ah < -drop) return;
+            if (-W.pred_missed_mo <= ah && ah <= W.pred_ahead_mo) purple.push(`Enverus predicts ${label} ${fd(sig[key])}`);
+            else if (ah < 0) white.push(`Enverus predicted ${label} ${fd(sig[key])} — missed by ${Math.round(-ah)} months`);
+            else white.push(`Enverus predicts ${label} ${fd(sig[key])} — ${Math.round(ah)} months out`);
+        });
+        if (ps === 'INFILL ACTIVITY' && (hzMonthsAgo(sig.infill_event, now) || 0) <= drop) {
+            const age = hzMonthsAgo(sig.infill_event, now);
+            const txt = `Enverus pad status: Infill Activity (newest infill event ${fd(sig.infill_event) || 'unknown'})`;
+            (age !== null && age <= W.infill_mo ? purple : white).push(txt + (age !== null && age > W.infill_mo ? ` — ${Math.round(age)} months old` : ''));
+        }
+        if (ps === 'SOAKING' && (hzMonthsAgo(sig.soak_frac_date, now) || 0) <= drop) {
+            const age = hzMonthsAgo(sig.soak_frac_date, now);
+            const txt = `Enverus pad status: Soaking — completed ${fd(sig.soak_frac_date)}, flowback crews until first production`;
+            (age === null || age <= W.soak_mo ? purple : white).push(txt + (age !== null && age > W.soak_mo ? ` — ${Math.round(age)} months ago` : ''));
+        }
+        if (ps === 'DUC' && !n(sig.duc_wells)) white.push('Enverus pad status: DUC (no well-level dates)');
+        if (n(sig.spud_only_wells) && (hzMonthsAgo(sig.spud_only_latest, now) || 0) <= drop) white.push(`${sig.spud_only_wells} well${sig.spud_only_wells > 1 ? 's' : ''} with a spud date only`);
+        if (purple.length) return { cls: 'likely', reasons: purple.concat(white), window: 'within the window — plan around it' };
+        if (white.length) return { cls: 'possible', reasons: white, window: 'signal is stale or far out — treat as a normal pad unless it changes' };
+        return { cls: null, reasons: [], window: '' };
+    }
+    // Re-tier every loaded feature from its signals with the card's windows (file cls is the fallback).
+    function hzRetier() {
+        if (!hzData) return;
+        const W = hzWindows(), now = Date.now();
+        hzData.feats.forEach(f => {
+            const p = f.p;
+            if (p.kind === 'rig' || p.kind === 'frac') { f.cls = 'work'; return; }
+            if (p.signals && (p.kind === 'pad' || p.kind === 'permit' || p.kind === 'plugged')) {
+                const t = hzTier(p.signals, W, now);
+                if (t.cls) { f.cls = t.cls; f.reasons = t.reasons; f.window = t.window; return; }
+                f.reasons = null; f.window = '';
+                if (p.kind === 'permit') { f.cls = 'dead'; return; }
+                const sc = p.well_status_counts || {};
+                const allDead = Object.keys(sc).length && Object.keys(sc).every(k => /P & A|^TA$|ABANDON|EXPIRED|CANCEL/i.test(k));
+                f.cls = allDead || p.cls === 'dead' ? 'dead' : (p.ours ? 'ours' : 'live');
+                return;
+            }
+            f.cls = hzClassOf(p);
+        });
+        hzKey = '';
+    }
     const HZ_TOGGLES = [
         // ON by default (v34.155): the whole point is that a CSM sees the pads
         // before straightening a flight path through one. Sites without a
@@ -5672,6 +5769,8 @@
             { id: `hz.${c.id}.color`, label: `${c.label.slice(0, 2)} colour`, type: 'color', default: c.color },
             { id: `hz.${c.id}.opacity`, label: `${c.label.slice(0, 2)} fill opacity`, type: 'number', min: 0, max: 1, step: 0.05, default: c.opacity, unit: 'fill' },
         ]),
+        { type: 'header', label: 'Work windows — what still counts as LIKELY (purple); older = POSSIBLE (white); older than the last one = ignored' },
+        ...HZ_WIN_TOGGLES.map(t => ({ id: t.id, label: t.label, type: 'number', min: t.min, max: t.max, step: 1, default: HZ_WIN_DEFAULTS[t.key], unit: t.key.endsWith('_mo') ? 'mo' : '' })),
         { type: 'header', label: 'Display' },
         { id: 'hz.width', label: 'Outline width', type: 'number', min: 1, max: 8, step: 0.5, default: 2, unit: 'px' },
         { id: 'hz.hatch', label: 'Hatch fills (work + third-party)', type: 'boolean', default: true },
@@ -5704,7 +5803,7 @@
     }
     function hzIsStale(json) { return !json || hzDaysOld(json.generated) > HZ_STALE_DAYS || json.enverus_pull_ok === false; }
     function hzClassOf(p) {
-        if (p.cls === 'work') return 'work';
+        if (p.cls === 'work' || p.cls === 'likely' || p.cls === 'possible') return p.cls;
         if (p.cls === 'live') return p.ours ? 'ours' : 'live';
         if (p.cls === 'building') return 'building';
         if (p.cls === 'dead') return 'dead';
@@ -5766,6 +5865,7 @@
     }
     function hzAdopt(siteKey, json, etag, at, from) {
         hzData = { siteKey, json, feats: hzParse(json), etag: etag || '', at };
+        hzRetier();
         hzKey = '';
         const stale = hzIsStale(json);
         console.log(`${TAG} hazards: ${siteKey} ${from} — ${hzData.feats.length} feature(s), generated ${json.generated || '?'}${stale ? ' (STALE)' : ''}`);
@@ -5948,11 +6048,13 @@
         const esc = hzEsc;
         const fmt = hzFmtDate;
         const BANNER = {
-            work:     { bg: '#b71c1c', text: 'UPCOMING WORK — keep flight paths off this pad' },
-            live:     { bg: '#e65100', text: 'THIRD-PARTY PAD — not ours, keep off' },
-            building: { bg: '#6d4c41', text: 'BUILDING / PRIVATE PROPERTY — keep off' },
+            work:     { bg: '#c62828', text: 'WORK NOW — rig / crew on the pad, keep flight paths off' },
+            likely:   { bg: '#7b1fa2', text: 'LIKELY WORK — inside the window, plan around it' },
+            possible: { bg: '#546e7a', text: 'POSSIBLE WORK — stale or far-out signal; normal pad unless it changes' },
+            live:     { bg: '#212121', text: 'THIRD-PARTY PAD — not ours, keep off' },
+            building: { bg: '#5d4037', text: 'BUILDING / PRIVATE PROPERTY — keep off' },
             ours:     { bg: '#01579b', text: 'OUR PAD — producing' },
-            dead:     { bg: '#616161', text: 'PLUGGED / EXPIRED — not a hazard' },
+            dead:     { bg: '#757575', text: 'PLUGGED / EXPIRED — not a hazard' },
         }[f.cls] || { bg: '#616161', text: String(f.cls).toUpperCase() };
         const row = (label, html) => html ? `<div style="display:flex;gap:6px;margin-top:2px"><span style="color:#666;min-width:78px;flex:none">${label}</span><span>${html}</span></div>` : '';
         const nice = (s) => String(s || '').toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
@@ -5964,9 +6066,10 @@
         else if (p.source === 'msbf') parts.push(row('Source', 'Microsoft building footprint'));
         else if (p.source === 'cv') parts.push(row('Source', 'Ortho Scanner — graded ground with no well on record'));
         // why red
-        if (f.cls === 'work') {
-            const why = Array.isArray(p.work_reason) && p.work_reason.length ? p.work_reason : ['Enverus flags work on this pad (file predates the reason text — Reload file)'];
-            parts.push(`<div style="margin-top:5px;padding:4px 7px;background:#fdecea;border-left:3px solid #b71c1c;border-radius:3px"><div style="color:#b71c1c;font-weight:700">Why it is red</div>${why.map(w => `<div style="color:#7f1d1d">• ${esc(w)}</div>`).join('')}${p.work_updated ? `<div style="color:#8a6d3b;margin-top:2px">Enverus last updated this ${fmt(p.work_updated)}</div>` : ''}</div>`);
+        if (f.cls === 'work' || f.cls === 'likely' || f.cls === 'possible') {
+            const why = (Array.isArray(f.reasons) && f.reasons.length) ? f.reasons : (Array.isArray(p.work_reason) && p.work_reason.length ? p.work_reason : ['Enverus flags work on this pad (file predates the reason text — Reload file)']);
+            const sty = { work: ['#fdecea', '#c62828', 'Why it is red'], likely: ['#f3e5f5', '#7b1fa2', 'Why it is purple'], possible: ['#eceff1', '#546e7a', 'Why it is white (not red)'] }[f.cls];
+            parts.push(`<div style="margin-top:5px;padding:4px 7px;background:${sty[0]};border-left:3px solid ${sty[1]};border-radius:3px"><div style="color:${sty[1]};font-weight:700">${sty[2]}</div>${why.map(w => `<div style="color:#333">• ${esc(w)}</div>`).join('')}${f.window || p.work_window ? `<div style="color:#555;margin-top:2px;font-style:italic">${esc(f.window || p.work_window)}</div>` : ''}</div>`);
         }
         // wells, in words
         if (p.kind === 'pad' || p.kind === 'plugged') {
@@ -6104,7 +6207,7 @@
         const hover = toggleState['hz.hover'] !== false;
         const on = HZ_CLASSES.filter(c => toggleState[`hz.${c.id}.show`] === true);
         const styleKey = on.map(c => `${c.id}:${toggleState[`hz.${c.id}.color`]}:${toggleState[`hz.${c.id}.opacity`]}`).join(';');
-        const key = `${hzData.siteKey}|${hzData.at}|${width}|${hatchOn}|${pulse}|${standoffOn}|${standoffFt}|${hover}|${styleKey}`;
+        const key = `${hzData.siteKey}|${hzData.at}|${width}|${hatchOn}|${pulse}|${standoffOn}|${standoffFt}|${hover}|${styleKey}|${JSON.stringify(hzWindows())}`;
         if (key === hzKey) return;
         hzLayers.forEach(l => { try { map.removeLayer(l); } catch (e) {} });
         hzLayers = [];
@@ -6128,12 +6231,17 @@
             const opts = {
                 color, weight: width, opacity: 0.95, interactive: canTip,
                 fill: true, fillColor: useHatch ? `url(#${hzHatchId(f.cls)})` : color, fillOpacity: useHatch ? 1 : (isFinite(opacity) ? opacity : def.opacity),
-                dashArray: f.cls === 'ours' || f.cls === 'dead' ? '6 5' : null,
+                dashArray: def.dash || null,
                 className: isNew ? 'aim-hz-new' : undefined,
             };
+            if (def.thin) opts.weight = Math.max(1, width - 0.5);
             if (pane) opts.pane = pane;
             if (renderer) opts.renderer = renderer;
             try {
+                if (def.edge) {   // contrast edge under the real outline (charcoal on white / white on dark)
+                    const under = L.polygon([f.ring], Object.assign({ color: def.edge, weight: width + 2.5, opacity: 0.9, fill: false, interactive: false }, pane ? { pane } : {}, renderer ? { renderer } : {}));
+                    under.addTo(map); hzLayers.push(under);
+                }
                 const poly = L.polygon([f.ring], opts);
                 if (canTip) {
                     poly.bindTooltip(hzTip(f), { sticky: true, direction: 'top', opacity: 0.97, className: 'aim-hz-tt' });
@@ -6214,6 +6322,7 @@
         const newVal = msg.value !== undefined ? msg.value : msg.enabled;
         if (toggleState[msg.toggleId] === newVal) return;   // idempotent — CP echoes from TOP + IFRAME
         toggleState[msg.toggleId] = newVal;
+        if (String(msg.toggleId).indexOf('hz.win.') === 0) { hzRetier(); hzBroadcast(); }
         if (isActive) applyHazards();
     }
     function handleHazardAction(actionId) {

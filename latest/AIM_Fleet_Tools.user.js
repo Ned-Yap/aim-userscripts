@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.73
+// @version      0.74
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -39,7 +39,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.73';
+    const SCRIPT_VERSION = '0.74';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -5289,13 +5289,13 @@
     }
     function hzParseFile(json) {
         const rec = { at: Date.now(), generated: json.generated || null, pullOk: json.enverus_pull_ok !== false, ours: json.operators_ours || [],
-            work: 0, live: 0, ours3: 0, building: 0, dead: 0, newN: 0, standoffFt: Number(json.standoff_ft) || 50, rings: [] };
+            work: 0, likely: 0, possible: 0, live: 0, ours3: 0, building: 0, dead: 0, newN: 0, standoffFt: Number(json.standoff_ft) || 50, rings: [] };
         (json.features || []).forEach(f => {
             const p = (f && f.properties) || {}, g = f && f.geometry;
             const cls = p.cls === 'live' && p.ours ? 'ours' : p.cls;
-            if (cls === 'work') rec.work++; else if (cls === 'live') rec.live++; else if (cls === 'ours') rec.ours3++; else if (cls === 'building') rec.building++; else if (cls === 'dead') rec.dead++;
+            if (cls === 'work') rec.work++; else if (cls === 'likely') rec.likely++; else if (cls === 'possible') rec.possible++; else if (cls === 'live') rec.live++; else if (cls === 'ours') rec.ours3++; else if (cls === 'building') rec.building++; else if (cls === 'dead') rec.dead++;
             if (p.new_since && cls !== 'dead') rec.newN++;
-            if (!g || (cls !== 'work' && cls !== 'live' && cls !== 'building')) return;
+            if (!g || (cls !== 'work' && cls !== 'likely' && cls !== 'possible' && cls !== 'live' && cls !== 'building')) return;
             const polys = g.type === 'Polygon' ? [g.coordinates] : (g.type === 'MultiPolygon' ? g.coordinates : []);
             polys.forEach(rings => {
                 const ring = ((rings && rings[0]) || []).map(c => [Math.round(c[1] * 1e5) / 1e5, Math.round(c[0] * 1e5) / 1e5]).filter(q => isFinite(q[0]) && isFinite(q[1]));
@@ -5331,7 +5331,8 @@
             if (n) { rec.cross += n; rec.crossList.push({ cls: r.cls, name: r.name, op: r.op, segs: n, ft: Math.round(nearest * HZ_FT) }); }
         });
         rec.crossFps = fpHit.size;
-        rec.crossList.sort((x, y) => (x.cls === 'work' ? 0 : 1) - (y.cls === 'work' ? 0 : 1) || x.ft - y.ft);
+        const rank = { work: 0, likely: 1, possible: 3 };
+        rec.crossList.sort((x, y) => ((rank[x.cls] == null ? 2 : rank[x.cls]) - (rank[y.cls] == null ? 2 : rank[y.cls])) || x.ft - y.ft);
         return rec;
     }
     async function hzFetchFile(id) {
@@ -5512,7 +5513,9 @@
         cHex:      { label: 'Hexes', get: r => r.cell ? r.cell.n : null, title: 'FCC H3 res-9 hexes (~0.1 km² each) in the site envelope' },
         cAge:      { label: 'Cell age d', get: r => r.cell ? Math.floor((Date.now() - (r.cell.at || 0)) / 86400000) : null, title: 'Days since this site\'s FCC coverage stats were fetched' },
         // v0.73 (#288) — 🚧 Hazard layer (data repo hazards/<site>.geojson)
-        hzWork:    { label: '🚧 Work', get: r => r.hz ? r.hz.work : null, title: 'Upcoming work of ANY operator near the site: active permits, rigs, frac crews, drilling / soaking / infill pads' },
+        hzWork:    { label: '🚧 Work now', get: r => r.hz ? r.hz.work : null, title: 'Work happening now (any operator): rig / frac crew on the pad, drilling, completing, telemetry this week' },
+        hzLikely:  { label: 'Likely', get: r => r.hz ? (r.hz.likely == null ? null : r.hz.likely) : null, title: 'Likely work inside its window: active permit, DUC, infill, soaking, predicted spud / frac' },
+        hzPossible:{ label: 'Possible', get: r => r.hz ? (r.hz.possible == null ? null : r.hz.possible) : null, title: 'Stale or far-out work signals (white on the map)' },
         hz3p:      { label: '3P pads', get: r => r.hz ? r.hz.live : null, title: 'Third-party producing pads in the site box' },
         hzBldg:    { label: 'Bldgs', get: r => r.hz ? r.hz.building : null, title: 'Buildings / private property (Microsoft footprints + Ortho Scanner)' },
         hzNew:     { label: 'New 30 d', get: r => r.hz ? r.hz.newN : null, title: 'Hazard features new or status-changed in the last 30 days' },
@@ -5527,7 +5530,7 @@
         missions:   { label: 'Missions',   cols: ['name', 'missions', 'mActive', 'mInactive', 'steps', 'avgSteps', 'snaps', 'orbits', 'areaMaps', 'gem', 'mMi', 'mHrs', 'avgMi', 'stepTypes'] },
         validation: { label: 'Validation', cols: ['name', 'vAsset', 'vFfz', 'vFp', 'vNfz', 'vGm', 'vPct', 'unsh', 'apprFp', 'apprArcs'] },
         cell:       { label: '📶 Cell', cols: ['name', 'client', 'status', 'cBest', 'cAttPct', 'cAttDbm', 'cVzPct', 'cVzDbm', 'cTmPct', 'cTmDbm', 'cAtt5g', 'cVz5g', 'cTm5g', 'cHex', 'cAge'] },
-        hazards:    { label: '🚧 Hazards', cols: ['name', 'client', 'status', 'hzWork', 'hz3p', 'hzBldg', 'hzNew', 'hzCross', 'hzCrossFp', 'hzAge', 'fp', 'fpMi'] },
+        hazards:    { label: '🚧 Hazards', cols: ['name', 'client', 'status', 'hzWork', 'hzLikely', 'hzPossible', 'hz3p', 'hzBldg', 'hzNew', 'hzCross', 'hzCrossFp', 'hzAge', 'fp', 'fpMi'] },
         all:        { label: 'All columns', cols: Object.keys(MT_COLS) },
     };
     function mtPair(v) { return v ? `<span style="color:#5fff5f">${v[0]}</span>/<span style="color:${v[1] ? '#ff8585' : '#666'}">${v[1]}</span>` : '—'; }
@@ -5676,7 +5679,7 @@
                     <div style="color:#7adfe6;font-weight:bold">SITE SETUP ${s ? `<span style="color:#666;font-weight:normal">· indexed ${r.snapAgeD} d ago</span>` : '<span style="color:#ffa030;font-weight:normal">· no snapshot</span>'}</div>
                     ${s ? `<div>Entities <b>${s.n}</b> · assets <b>${s.counts.asset}</b> · FFZ <b>${s.counts.ffz}</b> (${s.ffzAcres} ac) · FP <b>${s.counts.fp}</b> (${s.fpArcs} arcs, ${(s.fpM / MT_M_PER_MI).toFixed(2)} mi) · NFZ <b>${s.counts.nfz}</b> (${s.nfzAcres} ac) · markers <b>${s.counts.gm}</b> · base <b>${s.counts.base}</b>${s.baseActive ? ' (active)' : ''} · safe <b>${s.counts.safe}</b> · unshielded <b>${s.unshielded}</b>${typeof s.nested === 'number' ? ` · nested <b>${s.nested}</b>` : ''}</div>
                     <div style="margin-top:3px"><span style="color:#888">Equipment:</span> ${list(s.equip)}</div>
-                    ${r.hz ? `<div style="margin-top:3px"><span style="color:#888">🚧 Hazards:</span> work <b style="color:#ff6b6b">${r.hz.work}</b> · 3P pads <b>${r.hz.live}</b> · buildings <b>${r.hz.building}</b> · new <b>${r.hz.newN}</b> · FP hits <b style="color:${r.hz.cross ? '#ff6b6b' : '#ddd'}">${typeof r.hz.cross === 'number' ? r.hz.cross : '—'}</b>${(r.hz.crossList || []).slice(0, 6).map(c => ` <span style="color:${c.cls === 'work' ? '#ff6b6b' : '#ffa030'}">${escapeHtml(c.name)}</span> <span style="color:#888">(${escapeHtml(c.op)}, ${c.ft} ft, ${c.segs} seg)</span>`).join(' ·')}${(r.hz.crossList || []).length > 6 ? ' …' : ''}</div>` : ''}
+                    ${r.hz ? `<div style="margin-top:3px"><span style="color:#888">🚧 Hazards:</span> work now <b style="color:#ff6b6b">${r.hz.work}</b> · likely <b style="color:#d48cff">${r.hz.likely == null ? '—' : r.hz.likely}</b> · possible <b>${r.hz.possible == null ? '—' : r.hz.possible}</b> · 3P pads <b>${r.hz.live}</b> · buildings <b>${r.hz.building}</b> · new <b>${r.hz.newN}</b> · FP hits <b style="color:${r.hz.cross ? '#ff6b6b' : '#ddd'}">${typeof r.hz.cross === 'number' ? r.hz.cross : '—'}</b>${(r.hz.crossList || []).slice(0, 6).map(c => ` <span style="color:${c.cls === 'work' ? '#ff6b6b' : (c.cls === 'likely' ? '#d48cff' : (c.cls === 'possible' ? '#ccc' : '#ffa030'))}">${escapeHtml(c.name)}</span> <span style="color:#888">(${escapeHtml(c.op)}, ${c.ft} ft, ${c.segs} seg)</span>`).join(' ·')}${(r.hz.crossList || []).length > 6 ? ' …' : ''}</div>` : ''}
                     <div style="margin-top:2px"><span style="color:#888">States:</span> ${list(s.states)}</div>
                     ${Object.keys(s.cats).length ? `<div style="margin-top:2px"><span style="color:#888">Categories:</span> ${list(s.cats)}</div>` : ''}
                     <div style="margin-top:2px"><span style="color:#888">Marker types:</span> ${list(s.gmTypes)}</div>
