@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.162
+// @version      34.163
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.162';
+    const SCRIPT_VERSION = '34.163';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -5645,6 +5645,7 @@
     const HZ_SCRIPT_ID = 'aim-hazards';
     const HZ_DIR = 'hazards';
     const HZ_PANE = 'aimHazards';
+    const HZ_HIT_PANE = 'aimHazardsHit';   // v34.163: outline hit bands ABOVE the entity pane — hover works inside an FFZ, interior stays Percepto's
     const HZ_CACHE_PREFIX = 'aim-hazards-cache-';
     const HZ_STALE_DAYS = 28;
     const HZ_CACHE_TTL_MS = 10 * 60 * 1000;      // re-check GitHub on every load after 10 min (If-None-Match → 304 is free); nightly commits land immediately
@@ -5986,6 +5987,7 @@
         st.id = HZ_STYLE_ID;
         st.textContent = `@keyframes aim-hz-pulse { 0% { stroke-opacity: 1; } 50% { stroke-opacity: 0.2; } 100% { stroke-opacity: 1; } }
             .aim-hz-new { animation: aim-hz-pulse 1.3s ease-in-out infinite; }
+            .aim-hz-hit { pointer-events: stroke !important; cursor: pointer; }
             .leaflet-tooltip.aim-hz-tt { white-space: normal; width: max-content; max-width: 360px; box-sizing: border-box; }
             .aim-hz-tip { font: 12px/1.35 -apple-system, Segoe UI, Roboto, sans-serif; word-break: break-word; }`;
         (document.head || document.documentElement).appendChild(st);
@@ -5999,6 +6001,25 @@
             }
         } catch (e) { console.warn(`${TAG} hazards: pane creation failed, using the default pane:`, e); }
         return undefined;
+    }
+    function hzHitPaneName(map) {
+        try {
+            if (typeof map.getPane === 'function' && map.getPane(HZ_HIT_PANE)) return HZ_HIT_PANE;
+            if (typeof map.createPane === 'function') {
+                const p = map.createPane(HZ_HIT_PANE);
+                if (p) { p.style.zIndex = '450'; return HZ_HIT_PANE; }   // above overlayPane (400), below markers (600)
+            }
+        } catch (e) { console.warn(`${TAG} hazards: hit pane creation failed:`, e); }
+        return undefined;
+    }
+    let hzHitRenderer = null;
+    function hzHitRendererFor(map, L, pane) {
+        if (hzHitRenderer && hzHitRenderer._map === map) return hzHitRenderer;
+        if (hzHitRenderer) { try { map.removeLayer(hzHitRenderer); } catch (e) {} }
+        hzHitRenderer = null;
+        if (!L.svg) return null;
+        try { hzHitRenderer = L.svg(pane ? { pane } : {}); hzHitRenderer.addTo(map); } catch (e) { console.warn(`${TAG} hazards: hit renderer failed:`, e); hzHitRenderer = null; }
+        return hzHitRenderer;
     }
     function hzRendererFor(map, L, pane) {
         // Our own SVG renderer so the hatch <pattern>s live in a <defs> we control (and so a
@@ -6216,6 +6237,17 @@
         const pane = hzPaneName(map);
         const renderer = hzRendererFor(map, L, pane);
         const canTip = hover && !!(L.Tooltip && L.Polygon && L.Polygon.prototype.bindTooltip);
+        const hitPane = canTip ? hzHitPaneName(map) : undefined;
+        const hitRenderer = hitPane ? hzHitRendererFor(map, L, hitPane) : null;
+        const wire = (layer, f) => {
+            layer.bindTooltip(hzTip(f), { sticky: true, direction: 'top', opacity: 0.97, className: 'aim-hz-tt' });
+            if (!f.p.owner && (f.cls === 'building' || (f.p.source === 'cv' && !f.p.operator))) layer.on('tooltipopen', () => hzLookupOwner(f, layer));
+            layer.on('click', () => {
+                const apis = Array.isArray(f.p.api_list) ? f.p.api_list.filter(Boolean) : [];
+                if (!apis.length) return;
+                try { navigator.clipboard.writeText(apis.join('\n')); showKMLToast(`Copied ${apis.length} API number${apis.length === 1 ? '' : 's'} — ${f.p.name || ''}`, 2000); } catch (e) { console.warn(`${TAG} hazards: clipboard write failed:`, e); }
+            });
+        };
         const fileStandoff = Number(hzData.json.standoff_ft) || 50;
         const counts = {};
         let drawn = 0, capped = false;
@@ -6243,21 +6275,17 @@
                     under.addTo(map); hzLayers.push(under);
                 }
                 const poly = L.polygon([f.ring], opts);
-                if (canTip) {
-                    poly.bindTooltip(hzTip(f), { sticky: true, direction: 'top', opacity: 0.97, className: 'aim-hz-tt' });
-                    // Buildings / CV pads with no owner in the file: look the parcel up on first hover
-                    // (TX only — same TxGIO identify as the 🏠 layer), then refresh the card.
-                    if (!f.p.owner && (f.cls === 'building' || (f.p.source === 'cv' && !f.p.operator))) {
-                        poly.on('tooltipopen', () => hzLookupOwner(f, poly));
-                    }
-                    poly.on('click', () => {
-                        const apis = Array.isArray(f.p.api_list) ? f.p.api_list.filter(Boolean) : [];
-                        if (!apis.length) return;
-                        try { navigator.clipboard.writeText(apis.join('\n')); showKMLToast(`Copied ${apis.length} API number${apis.length === 1 ? '' : 's'} — ${f.p.name || ''}`, 2000); } catch (e) { console.warn(`${TAG} hazards: clipboard write failed:`, e); }
-                    });
-                }
+                if (canTip) wire(poly, f);   // interior hover where nothing of Percepto's is on top
                 poly.addTo(map);
                 hzLayers.push(poly);
+                if (hitRenderer) {
+                    // Invisible 14 px band on the outline, in a pane ABOVE the entities: the card opens from
+                    // the outline even when the pad lies inside one of our FFZs (whose polygon eats interior hover).
+                    const hit = L.polygon([f.ring], { color: color, weight: 14, opacity: 0.01, fill: false, interactive: true, className: 'aim-hz-hit', pane: hitPane, renderer: hitRenderer });
+                    wire(hit, f);
+                    hit.addTo(map);
+                    hzLayers.push(hit);
+                }
                 if (standoffOn && f.cls !== 'dead') {
                     const ft = standoffFt > 0 ? standoffFt : (Number(f.p.standoff_ft) || fileStandoff);
                     const so = L.polygon([hzExpandRing(f.ring, ft)], Object.assign({ color, weight: 1, opacity: 0.6, fill: false, dashArray: '3 4', interactive: false }, pane ? { pane } : {}, renderer ? { renderer } : {}));
