@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.157
+// @version      34.158
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.157';
+    const SCRIPT_VERSION = '34.158';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -5886,7 +5886,7 @@
         st.id = HZ_STYLE_ID;
         st.textContent = `@keyframes aim-hz-pulse { 0% { stroke-opacity: 1; } 50% { stroke-opacity: 0.2; } 100% { stroke-opacity: 1; } }
             .aim-hz-new { animation: aim-hz-pulse 1.3s ease-in-out infinite; }
-            .leaflet-tooltip.aim-hz-tt { white-space: normal; max-width: 360px; }
+            .leaflet-tooltip.aim-hz-tt { white-space: normal; width: max-content; max-width: 360px; box-sizing: border-box; }
             .aim-hz-tip { font: 12px/1.35 -apple-system, Segoe UI, Roboto, sans-serif; word-break: break-word; }`;
         (document.head || document.documentElement).appendChild(st);
     }
