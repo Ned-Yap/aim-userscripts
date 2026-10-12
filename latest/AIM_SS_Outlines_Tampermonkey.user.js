@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.153
+// @version      34.154
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.153';
+    const SCRIPT_VERSION = '34.154';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1657,6 +1657,9 @@
         // 11h. 🌐 Fleet KML layers (data repo fleet-kml/), clipped to the site.
         applyFleetKml();
         perfStage('11h fleet-kml');
+        // 11h2. 🚧 Hazard layer (v34.154, #288) — data repo hazards/<site>.geojson.
+        applyHazards();
+        perfStage('11h2 hazards');
         // 11i. 📶 FCC cell coverage hexes (v34.143) — timed separately for the [perf] line.
         perfTime('cell', applyCellCoverage);
         perfStage('11i cell');
@@ -5622,6 +5625,503 @@
         if (capped) showKMLToast(`Fleet KML: more than ${FK_POINT_CAP} points in range — showing the first ${FK_POINT_CAP}. Narrow the radius.`, 4500);
         if (!totalDrawn && ready.length) console.log(`${TAG} fleet KML: nothing from the enabled layer(s) lies within ${radMi} mi of this site`);
     }
+
+    // ==================================================================
+    // 🚧 HAZARD LAYER (v34.154, feature #288) — third-party pads, permits,
+    // rigs, frac crews, buildings and plugged wells from the data repo's
+    // hazards/<siteID>.geojson (QA: hazards/qa-<siteID>.geojson), written
+    // by the Ortho Scanner + Enverus and refreshed by a data-repo Action.
+    // Overlay ONLY — no Percepto entities are ever created from this.
+    // Registers its OWN Control Panel card (scriptId aim-hazards) so all
+    // of its controls live in one "Hazard Layer" section. Fetch = the
+    // same PAT + Contents API path as the shielding KMLs (ETag-conditional,
+    // GM-cached per env-site). The loaded features are also broadcast on
+    // BroadcastChannel('AIM_HAZARDS') so the SOP validator (Asset
+    // Inspector) reads the same file without a second fetch.
+    // Classes: work (upcoming work, ANY operator) / live (3rd-party
+    // producing pad) / ours (our producing pad) / building / dead
+    // (plugged, expired permits — off by default). Ours never draws red.
+    // ==================================================================
+    const HZ_SCRIPT_ID = 'aim-hazards';
+    const HZ_DIR = 'hazards';
+    const HZ_PANE = 'aimHazards';
+    const HZ_CACHE_PREFIX = 'aim-hazards-cache-';
+    const HZ_STALE_DAYS = 28;
+    const HZ_CACHE_TTL_MS = 6 * 3600 * 1000;      // fresh file: re-check GitHub at most every 6 h (ETag → 304 is free)
+    const HZ_FAIL_BACKOFF_MS = 5 * 60 * 1000;
+    const HZ_WORKFLOW_FILE = 'hazards-refresh.yml';
+    const HZ_CHANNEL_NAME = 'AIM_HAZARDS';
+    const HZ_BADGE_ID = 'aim-hazards-badge';
+    const HZ_STYLE_ID = 'aim-hazards-style';
+    const HZ_DRAW_CAP = 2500;
+    const HZ_CLASSES = [
+        { id: 'work',     label: '🟥 Upcoming work — permits · rigs · frac · drilling · infill (any operator)', color: '#ff2a2a', opacity: 0.45, hatch: true,  show: true },
+        { id: 'live',     label: '🟧 Third-party producing pads',                                            color: '#ff8a1e', opacity: 0.35, hatch: true,  show: true },
+        { id: 'building', label: '🟫 Buildings / private property',                                         color: '#d9a066', opacity: 0.35, hatch: false, show: true },
+        { id: 'ours',     label: '🟦 Our producing pads',                                                   color: '#4fc3f7', opacity: 0.10, hatch: false, show: false },
+        { id: 'dead',     label: '⬜ Plugged wells / expired permits (not hazards)',                         color: '#8d8d8d', opacity: 0.15, hatch: false, show: false },
+    ];
+    const HZ_TOGGLES = [
+        { id: 'hz.show', label: 'Show hazard layer', type: 'boolean', default: false, master: true },
+        { type: 'header', label: 'Classes' },
+        ...HZ_CLASSES.flatMap(c => [
+            { id: `hz.${c.id}.show`, label: c.label, type: 'boolean', default: c.show },
+            { id: `hz.${c.id}.color`, label: `${c.label.slice(0, 2)} colour`, type: 'color', default: c.color },
+            { id: `hz.${c.id}.opacity`, label: `${c.label.slice(0, 2)} fill opacity`, type: 'number', min: 0, max: 1, step: 0.05, default: c.opacity, unit: 'fill' },
+        ]),
+        { type: 'header', label: 'Display' },
+        { id: 'hz.width', label: 'Outline width', type: 'number', min: 1, max: 8, step: 0.5, default: 2, unit: 'px' },
+        { id: 'hz.hatch', label: 'Hatch fills (work + third-party)', type: 'boolean', default: true },
+        { id: 'hz.new-pulse', label: 'Pulse features new / changed in the last 30 days', type: 'boolean', default: true },
+        { id: 'hz.standoff', label: 'Show standoff envelope (dashed)', type: 'boolean', default: false },
+        { id: 'hz.standoff-ft', label: 'Standoff (0 = value in the file)', type: 'number', min: 0, max: 1000, step: 5, default: 0, unit: 'ft' },
+        { id: 'hz.hover', label: 'Hover cards', type: 'boolean', default: true },
+        { type: 'header', label: 'Data' },
+        { id: 'hz-reload', label: '↻ Reload file from GitHub', type: 'button', action: 'hz-reload' },
+        { id: 'hz-refresh', label: '🔄 Refresh now — re-pull Enverus (GitHub Action)', type: 'button', action: 'hz-refresh' },
+        { id: 'hz-copy', label: '📋 Copy hazard summary', type: 'button', action: 'hz-copy' },
+    ];
+    HZ_TOGGLES.forEach(t => { if (t.id && toggleState[t.id] === undefined) toggleState[t.id] = t.default; });
+    let hzData = null;          // { siteKey, json, feats, etag, at }
+    let hzFetching = '';        // siteKey being fetched
+    let hzFailed = { siteKey: '', at: 0, why: '' };
+    let hzLayers = [];
+    let hzRenderer = null;
+    let hzKey = '';
+    let hzStatusLine = '';      // last status text pushed into the CP card
+    let hzWarnedToken = false;
+    let hzChannel = null;
+    const hzEsc = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    function hzSiteKey(sid) { return envSiteKey(sid); }
+    function hzFilePath(sid) { return `${HZ_DIR}/${hzSiteKey(sid)}.geojson`; }
+    function hzDaysOld(iso) {
+        const t = Date.parse(iso || '');
+        return isFinite(t) ? (Date.now() - t) / 86400000 : Infinity;
+    }
+    function hzIsStale(json) { return !json || hzDaysOld(json.generated) > HZ_STALE_DAYS || json.enverus_pull_ok === false; }
+    function hzClassOf(p) {
+        if (p.cls === 'work') return 'work';
+        if (p.cls === 'live') return p.ours ? 'ours' : 'live';
+        if (p.cls === 'building') return 'building';
+        if (p.cls === 'dead') return 'dead';
+        return p.ours ? 'ours' : 'live';
+    }
+    // GeoJSON → [{ id, cls, p, rings:[[ [lat,lng]… ]] }]
+    function hzParse(json) {
+        const out = [];
+        (json.features || []).forEach(f => {
+            const g = f && f.geometry;
+            const p = (f && f.properties) || {};
+            if (!g) return;
+            const polys = g.type === 'Polygon' ? [g.coordinates] : (g.type === 'MultiPolygon' ? g.coordinates : []);
+            polys.forEach(rings => {
+                const outer = (rings && rings[0]) || [];
+                const pts = outer.map(c => [Number(c[1]), Number(c[0])]).filter(q => isFinite(q[0]) && isFinite(q[1]));
+                if (pts.length < 3) return;
+                out.push({ id: p.id || f.id || '', cls: hzClassOf(p), p, ring: pts });
+            });
+        });
+        return out;
+    }
+    function hzSetStatus(text) {
+        if (text === hzStatusLine) return;
+        hzStatusLine = text;
+        registerWithControlPanel();   // header line in the card reflects the file state
+    }
+    function hzStatusText(sid) {
+        if (!sid) return 'Open a site to load its hazards file';
+        const token = cachedToken || gmGet(TOKEN_KEY, '');
+        if (!token) return 'Needs the GitHub PAT (AIM Controls → token)';
+        if (hzData && hzData.siteKey === hzSiteKey(sid)) {
+            const j = hzData.json;
+            const d = hzDaysOld(j.generated);
+            const n = hzData.feats.length;
+            const stale = hzIsStale(j);
+            const nNew = hzData.feats.filter(f => f.p.new_since).length;
+            return `${stale ? '⚠ STALE — ' : ''}${n} feature${n === 1 ? '' : 's'} · generated ${isFinite(d) ? Math.round(d) + ' d ago' : 'unknown'}`
+                + `${j.enverus_pull_ok === false ? ' · last Enverus pull FAILED' : ''}${nNew ? ` · ${nNew} new/changed` : ''}`
+                + ` · ours: ${(j.operators_ours || []).join(', ') || '—'}`;
+        }
+        if (hzFailed.siteKey === hzSiteKey(sid) && Date.now() - hzFailed.at < HZ_FAIL_BACKOFF_MS) return hzFailed.why;
+        if (hzFetching === hzSiteKey(sid)) return 'Loading hazards file…';
+        return 'Not loaded yet';
+    }
+    function buildHazardToggles() {
+        const sid = getCurrentSiteID();
+        return [HZ_TOGGLES[0], { type: 'header', label: `File: ${hzStatusText(sid)}` }, ...HZ_TOGGLES.slice(1)];
+    }
+
+    // ---- fetch (PAT + Contents API, ETag-conditional, GM cache per env-site) ----
+    function hzReadCache(siteKey) {
+        try {
+            const raw = gmGet(HZ_CACHE_PREFIX + siteKey, null);
+            if (!raw) return null;
+            const c = JSON.parse(raw);
+            return c && c.json && c.json.type === 'FeatureCollection' ? c : null;
+        } catch (e) { console.warn(`${TAG} hazards: cache read threw for ${siteKey}:`, e); return null; }
+    }
+    function hzAdopt(siteKey, json, etag, at, from) {
+        hzData = { siteKey, json, feats: hzParse(json), etag: etag || '', at };
+        hzKey = '';
+        const stale = hzIsStale(json);
+        console.log(`${TAG} hazards: ${siteKey} ${from} — ${hzData.feats.length} feature(s), generated ${json.generated || '?'}${stale ? ' (STALE)' : ''}`);
+        if (stale) console.warn(`${TAG} hazards: file for ${siteKey} is stale (${Math.round(hzDaysOld(json.generated))} d old${json.enverus_pull_ok === false ? ', last Enverus pull failed' : ''}) — re-fetching on every load until a newer one lands`);
+        hzSetStatus(hzStatusText(getCurrentSiteID()));
+        hzBroadcast();
+    }
+    function hzEnsureLoaded(sid, force) {
+        const siteKey = hzSiteKey(sid);
+        const have = hzData && hzData.siteKey === siteKey ? hzData : null;
+        const cache = have ? null : hzReadCache(siteKey);
+        if (!have && cache) { hzAdopt(siteKey, cache.json, cache.etag, cache.at || 0, 'from GM cache'); }
+        const cur = hzData && hzData.siteKey === siteKey ? hzData : null;
+        // A fresh file is good for HZ_CACHE_TTL_MS; a stale one is re-checked on every load.
+        if (cur && !force && !hzIsStale(cur.json) && Date.now() - cur.at < HZ_CACHE_TTL_MS) return true;
+        if (hzFetching === siteKey) return !!cur;
+        if (!force && hzFailed.siteKey === siteKey && Date.now() - hzFailed.at < HZ_FAIL_BACKOFF_MS) return !!cur;
+        const token = cachedToken || gmGet(TOKEN_KEY, '');
+        if (!token) {
+            if (!hzWarnedToken) { hzWarnedToken = true; console.log(`${TAG} hazards: no GitHub token yet — loads when the PAT arrives`); }
+            return !!cur;
+        }
+        hzFetching = siteKey;
+        const headers = { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github.raw' };
+        if (cur && cur.etag) headers['If-None-Match'] = cur.etag;
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${hzFilePath(sid)}?ref=${KMLS_BRANCH}`,
+            headers, timeout: 60000,
+            onload: (resp) => {
+                hzFetching = '';
+                try {
+                    if (resp.status === 304 && cur) {
+                        cur.at = Date.now();
+                        try { gmSet(HZ_CACHE_PREFIX + siteKey, JSON.stringify({ json: cur.json, etag: cur.etag, at: cur.at })); } catch (e) {}
+                        console.log(`${TAG} hazards: ${siteKey} unchanged on GitHub (304)`);
+                        hzSetStatus(hzStatusText(getCurrentSiteID()));
+                        return;
+                    }
+                    if (resp.status === 404) {
+                        hzFailed = { siteKey, at: Date.now(), why: `No hazards file for this site yet (${hzFilePath(sid)}) — run the Ortho Scanner export` };
+                        console.log(`${TAG} hazards: ${hzFailed.why}`);
+                        hzSetStatus(hzStatusText(getCurrentSiteID()));
+                        return;
+                    }
+                    if (resp.status !== 200) {
+                        hzFailed = { siteKey, at: Date.now(), why: `GitHub HTTP ${resp.status} loading the hazards file — retrying in 5 min` };
+                        console.warn(`${TAG} hazards: ${siteKey} HTTP ${resp.status}`);
+                        showKMLToast(`Hazard layer: ${hzFailed.why}`, 4000);
+                        hzSetStatus(hzStatusText(getCurrentSiteID()));
+                        return;
+                    }
+                    const json = JSON.parse(resp.responseText);
+                    if (!json || json.type !== 'FeatureCollection') throw new Error('not a FeatureCollection');
+                    const m = /^etag:\s*(.+)$/im.exec(resp.responseHeaders || '');
+                    const etag = m ? m[1].trim() : '';
+                    const at = Date.now();
+                    hzAdopt(siteKey, json, etag, at, 'loaded from GitHub');
+                    try { gmSet(HZ_CACHE_PREFIX + siteKey, JSON.stringify({ json, etag, at })); }
+                    catch (e) { console.warn(`${TAG} hazards: cache write failed for ${siteKey} (too large?):`, e); }
+                    if (isActive) applyHazards();
+                } catch (e) {
+                    hzFailed = { siteKey, at: Date.now(), why: `Hazards file could not be parsed — ${e.message || e}` };
+                    console.warn(`${TAG} hazards: ${siteKey} parse threw:`, e);
+                    showKMLToast(`Hazard layer: ${hzFailed.why}`, 5000);
+                    hzSetStatus(hzStatusText(getCurrentSiteID()));
+                }
+            },
+            onerror: () => { hzFetching = ''; hzFailed = { siteKey, at: Date.now(), why: 'GitHub request failed — retrying in 5 min' }; console.warn(`${TAG} hazards: ${siteKey} request failed`); hzSetStatus(hzStatusText(getCurrentSiteID())); },
+            ontimeout: () => { hzFetching = ''; hzFailed = { siteKey, at: Date.now(), why: 'GitHub request timed out — retrying in 5 min' }; console.warn(`${TAG} hazards: ${siteKey} timed out`); hzSetStatus(hzStatusText(getCurrentSiteID())); },
+        });
+        return !!cur;
+    }
+    function hzReload() {
+        const sid = getCurrentSiteID();
+        hzFailed = { siteKey: '', at: 0, why: '' };
+        hzWarnedToken = false;
+        if (hzData) hzData.at = 0;
+        hzKey = '';
+        if (sid) hzEnsureLoaded(sid, true);
+        if (isActive) applyHazards();
+    }
+
+    // ---- share with the SOP validator (Asset Inspector) ----
+    function hzChannelGet() {
+        if (hzChannel) return hzChannel;
+        try {
+            hzChannel = new BroadcastChannel(HZ_CHANNEL_NAME);
+            hzChannel.onmessage = (ev) => {
+                const msg = (ev && ev.data) || {};
+                if (msg.type === 'HAZARDS_REQUEST' && rendersInThisFrame()) {
+                    const sid = getCurrentSiteID();
+                    if (sid && hzData && hzData.siteKey === hzSiteKey(sid)) hzBroadcast();
+                    else if (sid) hzEnsureLoaded(sid, false);   // load on demand even while the layer is hidden
+                }
+            };
+        } catch (e) { console.warn(`${TAG} hazards: share channel unavailable:`, e); }
+        return hzChannel;
+    }
+    function hzBroadcast() {
+        const ch = hzChannelGet();
+        if (!ch || !hzData || !rendersInThisFrame()) return;
+        try {
+            const j = hzData.json;
+            ch.postMessage({
+                type: 'HAZARDS_DATA', source: SCRIPT_ID, siteKey: hzData.siteKey, siteId: String(j.site_id || ''), env: j.env || (IS_QA ? 'qa' : 'prod'),
+                generated: j.generated || null, stale: hzIsStale(j), operatorsOurs: j.operators_ours || [], standoffFt: Number(j.standoff_ft) || 50,
+                features: hzData.feats.map(f => ({ id: f.id, cls: f.cls, kind: f.p.kind, ours: !!f.p.ours, name: f.p.name || '', operator: f.p.operator || '',
+                    status: f.p.status || '', standoffFt: Number(f.p.standoff_ft) || 0, newSince: f.p.new_since || null, source: f.p.source || '', ring: f.ring })),
+            });
+        } catch (e) { console.warn(`${TAG} hazards: broadcast failed:`, e); }
+    }
+
+    // ---- draw ----
+    function hzEnsureStyle() {
+        if (document.getElementById(HZ_STYLE_ID)) return;
+        const st = document.createElement('style');
+        st.id = HZ_STYLE_ID;
+        st.textContent = `@keyframes aim-hz-pulse { 0% { stroke-opacity: 1; } 50% { stroke-opacity: 0.2; } 100% { stroke-opacity: 1; } }
+            .aim-hz-new { animation: aim-hz-pulse 1.3s ease-in-out infinite; }
+            .aim-hz-tip { font: 12px/1.35 -apple-system, Segoe UI, Roboto, sans-serif; max-width: 320px; }`;
+        (document.head || document.documentElement).appendChild(st);
+    }
+    function hzPaneName(map) {
+        try {
+            if (typeof map.getPane === 'function' && map.getPane(HZ_PANE)) return HZ_PANE;
+            if (typeof map.createPane === 'function') {
+                const p = map.createPane(HZ_PANE);
+                if (p) { p.style.zIndex = '395'; return HZ_PANE; }   // above fleet KML (390), under the entity overlay pane (400)
+            }
+        } catch (e) { console.warn(`${TAG} hazards: pane creation failed, using the default pane:`, e); }
+        return undefined;
+    }
+    function hzRendererFor(map, L, pane) {
+        // Our own SVG renderer so the hatch <pattern>s live in a <defs> we control (and so a
+        // canvas-preferring map can't turn url(#pattern) fills into nothing).
+        if (hzRenderer && hzRenderer._map === map) return hzRenderer;
+        if (hzRenderer) { try { map.removeLayer(hzRenderer); } catch (e) {} }
+        hzRenderer = null;
+        if (!L.svg) return null;
+        try { hzRenderer = L.svg(pane ? { pane } : {}); hzRenderer.addTo(map); } catch (e) { console.warn(`${TAG} hazards: SVG renderer failed:`, e); hzRenderer = null; }
+        return hzRenderer;
+    }
+    function hzHatchId(cls) { return `aim-hz-hatch-${cls}`; }
+    function hzEnsureHatch(renderer, cls, color, opacity) {
+        const svg = renderer && renderer._container;
+        if (!svg || !svg.namespaceURI) return false;
+        const ns = svg.namespaceURI;
+        let defs = svg.querySelector(':scope > defs');
+        if (!defs) { defs = document.createElementNS(ns, 'defs'); svg.insertBefore(defs, svg.firstChild); }
+        const id = hzHatchId(cls);
+        let pat = defs.querySelector(`#${id}`);
+        if (!pat) {
+            pat = document.createElementNS(ns, 'pattern');
+            pat.setAttribute('id', id);
+            pat.setAttribute('patternUnits', 'userSpaceOnUse');
+            pat.setAttribute('width', '10');
+            pat.setAttribute('height', '10');
+            pat.setAttribute('patternTransform', 'rotate(45)');
+            const bg = document.createElementNS(ns, 'rect');
+            bg.setAttribute('width', '10'); bg.setAttribute('height', '10'); bg.setAttribute('data-hz', 'bg');
+            const ln = document.createElementNS(ns, 'line');
+            ln.setAttribute('x1', '0'); ln.setAttribute('y1', '0'); ln.setAttribute('x2', '0'); ln.setAttribute('y2', '10'); ln.setAttribute('stroke-width', '4'); ln.setAttribute('data-hz', 'ln');
+            pat.appendChild(bg); pat.appendChild(ln);
+            defs.appendChild(pat);
+        }
+        const bg = pat.querySelector('[data-hz="bg"]'), ln = pat.querySelector('[data-hz="ln"]');
+        bg.setAttribute('fill', color); bg.setAttribute('fill-opacity', String(Math.max(0, Math.min(1, opacity * 0.3))));
+        ln.setAttribute('stroke', color); ln.setAttribute('stroke-opacity', String(Math.max(0, Math.min(1, opacity))));
+        return true;
+    }
+    function hzFmtDate(iso) {
+        if (!iso) return '';
+        const t = Date.parse(iso);
+        return isFinite(t) ? new Date(t).toISOString().slice(0, 10) : String(iso).slice(0, 10);
+    }
+    function hzTip(f) {
+        const p = f.p;
+        const clsLabel = { work: '🟥 UPCOMING WORK', live: '🟧 third-party pad', ours: '🟦 our pad', building: '🟫 building / property', dead: '⬜ not a hazard (plugged / expired)' }[f.cls] || f.cls;
+        const who = p.operator ? `${hzEsc(p.operator)} <span style="opacity:0.75">(${p.ours ? 'OURS' : '3RD PARTY'})</span>` : (p.source === 'msbf' ? 'Microsoft building footprint' : (p.source === 'cv' ? 'Ortho Scanner (CV)' : 'unknown operator'));
+        const lines = [`<strong>${hzEsc(p.name || p.kind || 'hazard')}</strong>`, `${clsLabel}`, who];
+        const stat = [p.kind, p.pad_status && p.pad_status !== p.status ? `${p.status} · pad ${p.pad_status}` : p.status].filter(Boolean).join(' · ');
+        if (stat) lines.push(hzEsc(stat));
+        if (p.well_count) lines.push(`${p.well_count} well${p.well_count === 1 ? '' : 's'}${Array.isArray(p.well_status) && p.well_status.length ? ` — ${hzEsc(p.well_status.join(', '))}` : ''}`);
+        if (p.first_date || p.last_date) lines.push(`<span style="opacity:0.8">${hzFmtDate(p.first_date)}${p.last_date && p.last_date !== p.first_date ? ` → ${hzFmtDate(p.last_date)}` : ''}</span>`);
+        if (Array.isArray(p.permits) && p.permits.length) {
+            lines.push(`<span style="color:#ff8080">Permits (${p.permits.length}):</span>`);
+            p.permits.slice(0, 4).forEach(pm => lines.push(`&nbsp;• ${hzEsc(pm.name || pm.api || '')} — ${hzEsc(pm.status || '')} ${hzFmtDate(pm.approved)}${pm.expires ? ` → ${hzFmtDate(pm.expires)}` : ''}`));
+            if (p.permits.length > 4) lines.push(`&nbsp;…+${p.permits.length - 4} more`);
+        }
+        if (p.predicted_spud || p.predicted_frac) lines.push(`<span style="color:#ff8080">Predicted: ${p.predicted_spud ? `spud ${hzFmtDate(p.predicted_spud)}` : ''}${p.predicted_spud && p.predicted_frac ? ' · ' : ''}${p.predicted_frac ? `frac ${hzFmtDate(p.predicted_frac)}` : ''}</span>`);
+        if (p.contractor && p.contractor !== 'NOT REPORTED') lines.push(`<span style="opacity:0.8">${hzEsc(p.contractor)}</span>`);
+        if (p.days_on_location != null) lines.push(`${p.days_on_location} days on location`);
+        if (p.footprint_m2) lines.push(`${Math.round(p.footprint_m2 * 10.7639).toLocaleString()} ft²${p.building_count > 1 ? ` · ${p.building_count} buildings` : ''}`);
+        if (p.new_since) lines.push(`<span style="color:#ffd54f">NEW / CHANGED ${hzFmtDate(p.new_since)}${p.prev_status ? ` (was ${hzEsc(p.prev_status)})` : ''}</span>`);
+        if (Array.isArray(p.api_list) && p.api_list.length) lines.push(`<span style="opacity:0.7">${p.api_list.slice(0, 8).map(hzEsc).join(' · ')}${p.api_list.length > 8 ? ` …+${p.api_list.length - 8}` : ''}</span>`);
+        lines.push(`<span style="opacity:0.55">${hzEsc(p.source || '')}${p.geom_source ? ` · ${hzEsc(p.geom_source)}` : ''} · standoff ${Number(p.standoff_ft) || 0} ft · generated ${hzFmtDate(p.generated)}${Array.isArray(p.api_list) && p.api_list.length ? ' · click = copy APIs' : ''}</span>`);
+        return `<div class="aim-hz-tip">${lines.join('<br>')}</div>`;
+    }
+    function hzRemoveBadge() { const el = document.getElementById(HZ_BADGE_ID); if (el) el.remove(); }
+    function hzRenderBadge(map, json) {
+        hzRemoveBadge();
+        const days = Math.round(hzDaysOld(json.generated));
+        const failed = json.enverus_pull_ok === false;
+        const el = document.createElement('div');
+        el.id = HZ_BADGE_ID;
+        el.setAttribute('data-aim-hazards', 'badge');
+        el.style.cssText = 'position:absolute;right:10px;bottom:150px;z-index:900;pointer-events:auto;cursor:pointer;'
+            + 'background:rgba(120,0,0,0.9);border:1px solid #ff5050;border-radius:6px;padding:5px 10px;color:#fff;'
+            + 'font:700 11px/1.35 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,0.5);';
+        el.innerHTML = `🚧 hazards STALE${isFinite(days) ? ` — ${days} d old` : ''}${failed ? '<br>last Enverus pull failed' : ''}<br><span style="font-weight:400;opacity:0.85">click = reload · Control Panel → Refresh now</span>`;
+        el.title = 'The hazards file for this site is older than 28 days. Click to reload it from GitHub; use "Refresh now" in the Hazard Layer card to re-pull Enverus.';
+        el.addEventListener('click', (e) => { e.stopPropagation(); hzReload(); showKMLToast('Hazard layer: reloading file from GitHub…', 2500); });
+        try { map.getContainer().appendChild(el); } catch (e) {}
+    }
+    function removeHazards() {
+        if (hzLayers.length) {
+            const map = getLeafletMap();
+            hzLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+            hzLayers = [];
+        }
+        hzRemoveBadge();
+        hzKey = '';
+    }
+    function hzExpandRing(ring, ft) {
+        let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+        ring.forEach(p => { if (p[0] < minLat) minLat = p[0]; if (p[0] > maxLat) maxLat = p[0]; if (p[1] < minLng) minLng = p[1]; if (p[1] > maxLng) maxLng = p[1]; });
+        const dLat = ft / 364000, dLng = ft / (364000 * Math.cos(((minLat + maxLat) / 2) * Math.PI / 180));
+        return [[minLat - dLat, minLng - dLng], [minLat - dLat, maxLng + dLng], [maxLat + dLat, maxLng + dLng], [maxLat + dLat, minLng - dLng]];
+    }
+    function applyHazards() {
+        const map = getLeafletMap();
+        const L = _stylerL();
+        if (!map || !L || typeof map.addLayer !== 'function') return;
+        if (toggleState['hz.show'] !== true) { removeHazards(); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { removeHazards(); return; }
+        if (!hzEnsureLoaded(sid, false) || !hzData || hzData.siteKey !== hzSiteKey(sid)) { removeHazards(); return; }
+        const width = Math.max(1, Number(toggleState['hz.width']) || 2);
+        const hatchOn = toggleState['hz.hatch'] !== false;
+        const pulse = toggleState['hz.new-pulse'] !== false;
+        const standoffOn = toggleState['hz.standoff'] === true;
+        const standoffFt = Number(toggleState['hz.standoff-ft']) || 0;
+        const hover = toggleState['hz.hover'] !== false;
+        const on = HZ_CLASSES.filter(c => toggleState[`hz.${c.id}.show`] === true);
+        const styleKey = on.map(c => `${c.id}:${toggleState[`hz.${c.id}.color`]}:${toggleState[`hz.${c.id}.opacity`]}`).join(';');
+        const key = `${hzData.siteKey}|${hzData.at}|${width}|${hatchOn}|${pulse}|${standoffOn}|${standoffFt}|${hover}|${styleKey}`;
+        if (key === hzKey) return;
+        hzLayers.forEach(l => { try { map.removeLayer(l); } catch (e) {} });
+        hzLayers = [];
+        hzKey = key;
+        hzEnsureStyle();
+        const pane = hzPaneName(map);
+        const renderer = hzRendererFor(map, L, pane);
+        const canTip = hover && !!(L.Tooltip && L.Polygon && L.Polygon.prototype.bindTooltip);
+        const fileStandoff = Number(hzData.json.standoff_ft) || 50;
+        const counts = {};
+        let drawn = 0, capped = false;
+        const onSet = new Set(on.map(c => c.id));
+        for (const f of hzData.feats) {
+            if (!onSet.has(f.cls)) continue;
+            if (drawn >= HZ_DRAW_CAP) { capped = true; break; }
+            const def = HZ_CLASSES.find(c => c.id === f.cls);
+            const color = String(toggleState[`hz.${f.cls}.color`] || def.color);
+            const opacity = Math.max(0, Math.min(1, Number(toggleState[`hz.${f.cls}.opacity`])));
+            const useHatch = hatchOn && def.hatch && renderer && hzEnsureHatch(renderer, f.cls, color, isFinite(opacity) ? opacity : def.opacity);
+            const isNew = pulse && !!f.p.new_since;
+            const opts = {
+                color, weight: width, opacity: 0.95, interactive: canTip,
+                fill: true, fillColor: useHatch ? `url(#${hzHatchId(f.cls)})` : color, fillOpacity: useHatch ? 1 : (isFinite(opacity) ? opacity : def.opacity),
+                dashArray: f.cls === 'ours' || f.cls === 'dead' ? '6 5' : null,
+                className: isNew ? 'aim-hz-new' : undefined,
+            };
+            if (pane) opts.pane = pane;
+            if (renderer) opts.renderer = renderer;
+            try {
+                const poly = L.polygon([f.ring], opts);
+                if (canTip) {
+                    poly.bindTooltip(hzTip(f), { sticky: true, direction: 'top', opacity: 0.97 });
+                    poly.on('click', () => {
+                        const apis = Array.isArray(f.p.api_list) ? f.p.api_list.filter(Boolean) : [];
+                        if (!apis.length) return;
+                        try { navigator.clipboard.writeText(apis.join('\n')); showKMLToast(`Copied ${apis.length} API number${apis.length === 1 ? '' : 's'} — ${f.p.name || ''}`, 2000); } catch (e) { console.warn(`${TAG} hazards: clipboard write failed:`, e); }
+                    });
+                }
+                poly.addTo(map);
+                hzLayers.push(poly);
+                if (standoffOn && f.cls !== 'dead') {
+                    const ft = standoffFt > 0 ? standoffFt : (Number(f.p.standoff_ft) || fileStandoff);
+                    const so = L.polygon([hzExpandRing(f.ring, ft)], Object.assign({ color, weight: 1, opacity: 0.6, fill: false, dashArray: '3 4', interactive: false }, pane ? { pane } : {}, renderer ? { renderer } : {}));
+                    so.addTo(map);
+                    hzLayers.push(so);
+                }
+                drawn++;
+                counts[f.cls] = (counts[f.cls] || 0) + 1;
+            } catch (e) { console.warn(`${TAG} hazards: draw failed for ${f.id}:`, e); }
+        }
+        if (hzIsStale(hzData.json)) hzRenderBadge(map, hzData.json); else hzRemoveBadge();
+        if (capped) showKMLToast(`Hazard layer: more than ${HZ_DRAW_CAP} features — showing the first ${HZ_DRAW_CAP}. Turn classes off.`, 4500);
+        console.log(`${TAG} hazards: drew ${drawn} feature(s) for site ${sid} — ${Object.keys(counts).map(k => `${k} ${counts[k]}`).join(', ') || 'none'}${hzIsStale(hzData.json) ? ' · STALE' : ''}`);
+    }
+    function hzCopySummary() {
+        const sid = getCurrentSiteID();
+        if (!sid || !hzData || hzData.siteKey !== hzSiteKey(sid)) { showKMLToast('Hazard layer: nothing loaded for this site yet', 2500); return; }
+        const j = hzData.json;
+        const by = {};
+        hzData.feats.forEach(f => { by[f.cls] = (by[f.cls] || 0) + 1; });
+        const rows = hzData.feats.filter(f => f.cls === 'work' || f.cls === 'live' || f.p.new_since)
+            .sort((a, b) => (a.cls === 'work' ? 0 : 1) - (b.cls === 'work' ? 0 : 1) || String(a.p.operator || '').localeCompare(String(b.p.operator || '')))
+            .map(f => `${f.cls.toUpperCase().padEnd(8)} ${String(f.p.operator || f.p.source || '').padEnd(24).slice(0, 24)} ${String(f.p.name || '').padEnd(32).slice(0, 32)} ${f.p.status || ''}${f.p.well_count ? ` · ${f.p.well_count} wells` : ''}${f.p.new_since ? ' · NEW' : ''}`);
+        const text = [`Hazard layer — site ${sid}${j.site_name ? ` (${j.site_name})` : ''} — generated ${j.generated}${hzIsStale(j) ? ' — STALE' : ''}`,
+            `Ours: ${(j.operators_ours || []).join(', ') || '—'} · ${hzData.feats.length} features: ${Object.keys(by).map(k => `${k} ${by[k]}`).join(', ')}`,
+            '', ...rows].join('\n');
+        try { navigator.clipboard.writeText(text); showKMLToast(`Copied hazard summary (${rows.length} line${rows.length === 1 ? '' : 's'})`, 2500); }
+        catch (e) { console.warn(`${TAG} hazards: clipboard write failed:`, e); showKMLToast('Clipboard write failed — see console', 3000); }
+    }
+    function hzRefreshNow() {
+        const sid = getCurrentSiteID();
+        if (!sid) { showKMLToast('Hazard layer: open a site first', 2500); return; }
+        const token = cachedToken || gmGet(TOKEN_KEY, '');
+        if (!token) { showKMLToast('Hazard layer: needs the GitHub PAT (AIM Controls → token)', 3500); return; }
+        showKMLToast(`Hazard layer: asking GitHub to re-pull Enverus for site ${sid}…`, 2500);
+        GM_xmlhttpRequest({
+            method: 'POST',
+            url: `${GITHUB_API_BASE}/repos/${KMLS_REPO}/actions/workflows/${HZ_WORKFLOW_FILE}/dispatches`,
+            headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+            data: JSON.stringify({ ref: KMLS_BRANCH, inputs: { site_id: String(sid), env: IS_QA ? 'qa' : 'prod' } }),
+            timeout: 20000,
+            onload: (resp) => {
+                if (resp.status === 204) {
+                    console.log(`${TAG} hazards: refresh workflow dispatched for ${hzSiteKey(sid)}`);
+                    showKMLToast('Refresh queued — the Action re-pulls Enverus and commits a new file in a few minutes. Then click "Reload file from GitHub".', 7000);
+                } else if (resp.status === 403) {
+                    console.warn(`${TAG} hazards: dispatch HTTP 403 — the PAT needs Actions: write on ${KMLS_REPO}`);
+                    showKMLToast('GitHub refused (403): your PAT needs "Actions: read and write" on the data repo to trigger the refresh.', 7000);
+                } else if (resp.status === 404) {
+                    console.warn(`${TAG} hazards: dispatch HTTP 404 — workflow ${HZ_WORKFLOW_FILE} not found (or PAT lacks repo access)`);
+                    showKMLToast(`GitHub 404: workflow ${HZ_WORKFLOW_FILE} not found in the data repo (or the PAT cannot see it).`, 6000);
+                } else {
+                    console.warn(`${TAG} hazards: dispatch HTTP ${resp.status}: ${String(resp.responseText || '').slice(0, 200)}`);
+                    showKMLToast(`GitHub HTTP ${resp.status} dispatching the refresh — see console`, 5000);
+                }
+            },
+            onerror: () => { console.warn(`${TAG} hazards: dispatch request failed`); showKMLToast('Refresh request failed (network) — see console', 4000); },
+            ontimeout: () => { console.warn(`${TAG} hazards: dispatch timed out`); showKMLToast('Refresh request timed out', 4000); },
+        });
+    }
+    function handleHazardToggle(msg) {
+        const newVal = msg.value !== undefined ? msg.value : msg.enabled;
+        if (toggleState[msg.toggleId] === newVal) return;   // idempotent — CP echoes from TOP + IFRAME
+        toggleState[msg.toggleId] = newVal;
+        if (isActive) applyHazards();
+    }
+    function handleHazardAction(actionId) {
+        if (actionId === 'hz-reload') { hzReload(); showKMLToast('Hazard layer: reloading file from GitHub…', 2000); }
+        else if (actionId === 'hz-refresh') hzRefreshNow();
+        else if (actionId === 'hz-copy') hzCopySummary();
+    }
+    hzChannelGet();
 
     function buildRegistrationToggles() {
         const rrcExtra = buildRrcOperatorToggles();
@@ -10276,6 +10776,7 @@
         removeRrcLayers();
         // And the fleet KML layers.
         removeFleetKml();
+        removeHazards();
         // And the FCC cell coverage hexes + legend + hover badge.
         removeCellCoverage();
         // Land-owner click mode + outlines.
@@ -10724,6 +11225,12 @@
                 } else if (isActive && prev !== newVal) {
                     runUpdate();
                 }
+            } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === HZ_SCRIPT_ID) {
+                handleHazardToggle(msg);   // v34.154: 🚧 Hazard Layer card (own scriptId)
+            } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === HZ_SCRIPT_ID && rendersInThisFrame()) {
+                if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;   // tab-local (cross-tab rule)
+                if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
+                handleHazardAction(msg.actionId);
             } else if (msg.type === 'REFETCH_KMLS') {
                 // Control panel just stored a new token (or the user clicked
                 // refresh). Drop missing-cache entries for all types and
@@ -10735,6 +11242,7 @@
                     fetchKMLForSite(sid, true);
                 }
                 fkFeatures = {}; fkFailed.clear(); fkKey = ''; fkListRepo(true);   // v34.140: fleet layers too
+                hzReload();   // v34.154: hazards file too
             } else if (msg.type === 'TOKEN_VALUE') {
                 // Control panel handed us the PAT (either on our REQUEST_TOKEN,
                 // or proactively after the user saved a new one). Cache in
@@ -10745,6 +11253,7 @@
                     const sid = getCurrentSiteID();
                     if (sid) fetchKMLForSite(sid, true);
                     fkListRepo(false);   // v34.140: list the fleet layers once the PAT is known
+                    if (isActive) applyHazards();   // v34.154: hazards file waits on the PAT too
                 }
             } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID && rendersInThisFrame()) {
                 // Cross-tab guard: BroadcastChannel delivers to EVERY open tab — only
@@ -10929,6 +11438,14 @@
             frame: FRAME_ID,
             toggles: buildRegistrationToggles(),
             hotkeys: HOTKEYS,
+        });
+        // v34.154: 🚧 Hazard Layer — its own card (scriptId aim-hazards) so every
+        // hazard control sits in one "Hazard Layer" section of the panel.
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: HZ_SCRIPT_ID, name: 'Hazard Layer',
+            description: 'Third-party pads, permits, rigs, frac crews, buildings and plugged wells around the site (Enverus + Ortho Scanner, data repo hazards/). Overlay only — never creates entities.',
+            version: SCRIPT_VERSION, frame: FRAME_ID, group: 'Hazard Layer', scope: 'site-setup', priority: 10,
+            toggles: buildHazardToggles(), hotkeys: [],
         });
         if (CONTEXT === 'IFRAME' && _rrcOperators.length) {
             try {

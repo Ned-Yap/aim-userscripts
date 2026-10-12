@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.47
+// @version      1.48
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -58,7 +58,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.47';
+    const VERSION = '1.48';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -93,6 +93,9 @@
         // pilots should see it. Its one write (📍 Create GMs) stays gated
         // inside the Asset Inspector via its own LITE guard.
         'aim-airspace-checker',
+        // v1.48: 🚧 Hazard Layer (Map Styler's second card) is read-only third-party
+        // pad / permit / rig / building info — pilots must see it.
+        'aim-hazards',
     ]);
     const REBIND_ERROR_TIMEOUT_MS = 6000;
     const TOKEN_KEY = 'aim-github-token';
@@ -2114,6 +2117,8 @@
             'aim-copy-asset': 'Site Setup',
             'aim-sop-validators': 'Site Setup',
             'aim-airspace-checker': 'Airspace Validator',
+            // Hazard Layer — Map Styler's second card (#288): its own section.
+            'aim-hazards': 'Hazard Layer',
             'aim-new-entity-macro': 'Site Setup',
             'aim-site-setup-generator': 'Site Setup',
             // Map Tools — quick one-shot map utilities.
