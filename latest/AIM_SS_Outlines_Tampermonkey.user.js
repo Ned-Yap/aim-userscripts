@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.160
+// @version      34.161
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.160';
+    const SCRIPT_VERSION = '34.161';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -5647,7 +5647,7 @@
     const HZ_PANE = 'aimHazards';
     const HZ_CACHE_PREFIX = 'aim-hazards-cache-';
     const HZ_STALE_DAYS = 28;
-    const HZ_CACHE_TTL_MS = 6 * 3600 * 1000;      // fresh file: re-check GitHub at most every 6 h (ETag → 304 is free)
+    const HZ_CACHE_TTL_MS = 10 * 60 * 1000;      // re-check GitHub on every load after 10 min (If-None-Match → 304 is free); nightly commits land immediately
     const HZ_FAIL_BACKOFF_MS = 5 * 60 * 1000;
     const HZ_WORKFLOW_FILE = 'hazards-refresh.yml';
     const HZ_CHANNEL_NAME = 'AIM_HAZARDS';
@@ -5945,43 +5945,80 @@
     }
     function hzTip(f) {
         const p = f.p;
-        const clsLabel = { work: '🟥 UPCOMING WORK', live: '🟧 third-party pad', ours: '🟦 our pad', building: '🟫 building / property', dead: '⬜ not a hazard (plugged / expired)' }[f.cls] || f.cls;
-        const who = p.operator ? `${hzEsc(p.operator)} <span style="opacity:0.75">(${p.ours ? 'OURS' : '3RD PARTY'})</span>` : (p.source === 'msbf' ? 'Microsoft building footprint' : (p.source === 'cv' ? 'Ortho Scanner (CV)' : 'unknown operator'));
-        const lines = [`<strong>${hzEsc(p.name || p.kind || 'hazard')}</strong>`, `${clsLabel}`, who];
-        const stat = [p.kind, p.pad_status && p.pad_status !== p.status ? `${p.status} · pad ${p.pad_status}` : p.status].filter(Boolean).join(' · ');
-        if (stat) lines.push(hzEsc(stat));
+        const esc = hzEsc;
+        const fmt = hzFmtDate;
+        const BANNER = {
+            work:     { bg: '#b71c1c', text: 'UPCOMING WORK — keep flight paths off this pad' },
+            live:     { bg: '#e65100', text: 'THIRD-PARTY PAD — not ours, keep off' },
+            building: { bg: '#6d4c41', text: 'BUILDING / PRIVATE PROPERTY — keep off' },
+            ours:     { bg: '#01579b', text: 'OUR PAD — producing' },
+            dead:     { bg: '#616161', text: 'PLUGGED / EXPIRED — not a hazard' },
+        }[f.cls] || { bg: '#616161', text: String(f.cls).toUpperCase() };
+        const row = (label, html) => html ? `<div style="display:flex;gap:6px;margin-top:2px"><span style="color:#666;min-width:78px;flex:none">${label}</span><span>${html}</span></div>` : '';
+        const nice = (s) => String(s || '').toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+        const parts = [];
+        parts.push(`<div style="font-weight:700;font-size:13px;margin-bottom:3px">${esc(p.name || p.kind || 'hazard')}</div>`);
+        parts.push(`<div style="background:${BANNER.bg};color:#fff;font-weight:700;padding:3px 7px;border-radius:4px;margin-bottom:5px">${BANNER.text}</div>`);
+        // who
+        if (p.operator) parts.push(row('Operator', `<b>${esc(p.operator)}</b> <span style="color:#666">(${p.ours ? 'ours' : 'third party'})</span>`));
+        else if (p.source === 'msbf') parts.push(row('Source', 'Microsoft building footprint'));
+        else if (p.source === 'cv') parts.push(row('Source', 'Ortho Scanner — graded ground with no well on record'));
+        // why red
         if (f.cls === 'work') {
-            const why = Array.isArray(p.work_reason) && p.work_reason.length ? p.work_reason : ['Enverus flags work here'];
-            why.forEach((w, i) => lines.push(`<span style="color:#b71c1c;font-weight:600">${i === 0 ? 'Why: ' : '&nbsp;&nbsp;+ '}${hzEsc(w)}</span>`));
-            if (p.work_updated) lines.push(`<span style="color:#b71c1c">Enverus last updated this ${hzFmtDate(p.work_updated)}</span>`);
+            const why = Array.isArray(p.work_reason) && p.work_reason.length ? p.work_reason : ['Enverus flags work on this pad (file predates the reason text — Reload file)'];
+            parts.push(`<div style="margin-top:5px;padding:4px 7px;background:#fdecea;border-left:3px solid #b71c1c;border-radius:3px"><div style="color:#b71c1c;font-weight:700">Why it is red</div>${why.map(w => `<div style="color:#7f1d1d">• ${esc(w)}</div>`).join('')}${p.work_updated ? `<div style="color:#8a6d3b;margin-top:2px">Enverus last updated this ${fmt(p.work_updated)}</div>` : ''}</div>`);
         }
-        if (p.well_count) lines.push(`${p.well_count} well${p.well_count === 1 ? '' : 's'}${Array.isArray(p.well_status) && p.well_status.length ? ` — ${hzEsc(p.well_status.join(', '))}` : ''}`);
-        if (p.first_date || p.last_date) {
-            const dl = p.kind === 'pad' || p.kind === 'plugged' ? 'built → first prod ' : (p.kind === 'permit' ? 'approved → expires ' : (p.kind === 'rig' ? 'spud → release ' : (p.kind === 'frac' ? 'frac days ' : '')));
-            lines.push(`<span style="opacity:0.8">${dl}${hzFmtDate(p.first_date)}${p.last_date && p.last_date !== p.first_date ? ` → ${hzFmtDate(p.last_date)}` : ''}</span>`);
+        // wells, in words
+        if (p.kind === 'pad' || p.kind === 'plugged') {
+            const sc = p.well_status_counts || {};
+            const wellsOnPad = Object.entries(sc).filter(([k]) => !/PERMIT/i.test(k));
+            const permitsOnly = Object.entries(sc).filter(([k]) => /PERMIT/i.test(k));
+            const wordFor = (k, n) => {
+                const u = String(k).toUpperCase();
+                if (u === 'PRODUCING') return `${n} producing`;
+                if (u === 'DRILLED' || u === 'DUC') return `${n} drilled, not completed`;
+                if (u === 'P & A' || u === 'TA' || /ABANDON/.test(u)) return `${n} plugged`;
+                if (u === 'INJECTING') return `${n} injection`;
+                if (/INACTIVE/.test(u)) return `${n} inactive`;
+                return `${n} ${nice(k)}`;
+            };
+            const total = wellsOnPad.reduce((t, [, n]) => t + n, 0) || p.well_count || 0;
+            if (total) parts.push(row('Wells', `<b>${total}</b>${wellsOnPad.length ? ` — ${wellsOnPad.map(([k, n]) => wordFor(k, n)).join(', ')}` : (Array.isArray(p.well_status) && p.well_status.length ? ` — ${esc(p.well_status.map(nice).join(', '))}` : '')}`));
+            if (permitsOnly.length) parts.push(row('Old permits', permitsOnly.map(([k, n]) => `${n} ${nice(k).replace('Permit ', '')}`).join(', ')));
+            if (p.pad_status) parts.push(row('Pad status', `${esc(p.pad_status)} <span style="color:#666">(Enverus)</span>`));
+            if (p.first_date) parts.push(row('Built', fmt(p.first_date) + (p.last_date && p.last_date !== p.first_date ? ` <span style="color:#666">· first production ${fmt(p.last_date)}</span>` : '')));
+        } else if (p.kind === 'permit') {
+            parts.push(row('Status', esc(p.status)));
+            if (p.first_date) parts.push(row('Approved', `${fmt(p.first_date)}${p.last_date ? ` <span style="color:#666">· expires ${fmt(p.last_date)}</span>` : ''}`));
+        } else if (p.kind === 'rig') {
+            parts.push(row('Rig', esc(p.status) + (p.days_on_location != null ? ` · ${p.days_on_location} days on location` : '')));
+            if (p.first_date) parts.push(row('Spud', `${fmt(p.first_date)}${p.last_date ? ` <span style="color:#666">· release ${fmt(p.last_date)}</span>` : ''}`));
+        } else if (p.kind === 'frac') {
+            parts.push(row('Frac crew', `${esc(p.status)}${p.frac_days ? ` · ${p.frac_days} days` : ''}`));
+            if (p.first_date) parts.push(row('On pad', `${fmt(p.first_date)}${p.last_date ? ` → ${fmt(p.last_date)}` : ''}`));
+        } else if (p.footprint_m2) {
+            parts.push(row('Footprint', `${Math.round(p.footprint_m2 * 10.7639).toLocaleString()} ft²${p.building_count > 1 ? ` · ${p.building_count} buildings` : ''}`));
         }
+        // active permits attached to a pad
         if (Array.isArray(p.permits) && p.permits.length) {
-            lines.push(`<span style="color:#b71c1c;font-weight:600">Permits (${p.permits.length}):</span>`);
-            p.permits.slice(0, 4).forEach(pm => lines.push(`&nbsp;• ${hzEsc(pm.name || pm.api || '')} — ${hzEsc(pm.status || '')} ${hzFmtDate(pm.approved)}${pm.expires ? ` → ${hzFmtDate(pm.expires)}` : ''}`));
-            if (p.permits.length > 4) lines.push(`&nbsp;…+${p.permits.length - 4} more`);
+            const ps = p.permits.slice(0, 3).map(pm => `${esc(pm.name || pm.api || '')} — ${nice(pm.status)} ${fmt(pm.approved)}${pm.expires ? ` → ${fmt(pm.expires)}` : ''}`).join('<br>');
+            parts.push(row('Permits', `<b>${p.permits.length} active</b><br>${ps}${p.permits.length > 3 ? `<br>…+${p.permits.length - 3} more` : ''}`));
         }
-        if (p.predicted_spud || p.predicted_frac) lines.push(`<span style="color:#b71c1c;font-weight:600">Predicted: ${p.predicted_spud ? `spud ${hzFmtDate(p.predicted_spud)}` : ''}${p.predicted_spud && p.predicted_frac ? ' · ' : ''}${p.predicted_frac ? `frac ${hzFmtDate(p.predicted_frac)}` : ''}</span>`);
-        if (p.contractor && p.contractor !== 'NOT REPORTED') lines.push(`<span style="opacity:0.8">${hzEsc(p.contractor)}</span>`);
-        if (p.days_on_location != null) lines.push(`${p.days_on_location} days on location`);
-        if (p.footprint_m2) lines.push(`${Math.round(p.footprint_m2 * 10.7639).toLocaleString()} ft²${p.building_count > 1 ? ` · ${p.building_count} buildings` : ''}`);
+        if (p.predicted_spud || p.predicted_frac) parts.push(row('Predicted', [p.predicted_spud ? `spud ${fmt(p.predicted_spud)}` : null, p.predicted_frac ? `frac ${fmt(p.predicted_frac)}` : null].filter(Boolean).join(' · ')));
+        if (p.contractor && p.contractor !== 'NOT REPORTED') parts.push(row('Contractor', esc(p.contractor)));
+        // land owner
         if (p.owner || p.owner_pending) {
-            lines.push(`<span style="color:#1b5e20;font-weight:600">🏠 ${p.owner ? hzEsc(p.owner) : 'looking up owner…'}</span>`);
-            if (p.legal) lines.push(`<span style="opacity:0.85">${hzEsc(p.legal)}</span>`);
-            const bits = [p.acres ? `${p.acres} ac` : null, p.market_value ? `mkt $${Number(p.market_value).toLocaleString()}` : null].filter(Boolean);
-            if (bits.length) lines.push(bits.join(' · '));
-            if (p.situs) lines.push(`Situs: ${hzEsc(p.situs)}`);
-            if (p.mail) lines.push(`Mail: ${hzEsc(p.mail)}`);
-            if (p.parcel_src) lines.push(`<span style="opacity:0.6">${hzEsc(p.parcel_src)}${p.parcel_year ? ` · ${hzEsc(p.parcel_year)}` : ''}</span>`);
+            parts.push(`<div style="margin-top:5px;padding:4px 7px;background:#edf7ed;border-left:3px solid #1b5e20;border-radius:3px">`
+                + `<div style="color:#1b5e20;font-weight:700">🏠 ${p.owner ? esc(p.owner) : 'looking up owner…'}</div>`
+                + (p.legal ? `<div style="color:#444">${esc(p.legal)}</div>` : '')
+                + ([p.acres ? `${p.acres} ac` : null, p.market_value ? `market $${Number(p.market_value).toLocaleString()}` : null].filter(Boolean).length ? `<div>${[p.acres ? `${p.acres} ac` : null, p.market_value ? `market $${Number(p.market_value).toLocaleString()}` : null].filter(Boolean).join(' · ')}</div>` : '')
+                + (p.situs ? `<div>Situs: ${esc(p.situs)}</div>` : '') + (p.mail ? `<div>Mail: ${esc(p.mail)}</div>` : '')
+                + (p.parcel_src ? `<div style="color:#666">${esc(p.parcel_src)}${p.parcel_year ? ` · ${esc(p.parcel_year)}` : ''}</div>` : '') + `</div>`);
         }
-        if (p.new_since) lines.push(`<span style="color:#8d5400;font-weight:600">NEW / CHANGED ${hzFmtDate(p.new_since)}${p.prev_status ? ` (was ${hzEsc(p.prev_status)})` : ''}</span>`);
-        if (Array.isArray(p.api_list) && p.api_list.length) lines.push(`<span style="opacity:0.7">${p.api_list.slice(0, 8).map(hzEsc).join(' · ')}${p.api_list.length > 8 ? ` …+${p.api_list.length - 8}` : ''}</span>`);
-        lines.push(`<span style="opacity:0.55">${hzEsc(p.source || '')}${p.geom_source ? ` · ${hzEsc(p.geom_source)}` : ''} · standoff ${Number(p.standoff_ft) || 0} ft · generated ${hzFmtDate(p.generated)}${Array.isArray(p.api_list) && p.api_list.length ? ' · click = copy APIs' : ''}</span>`);
-        return `<div class="aim-hz-tip">${lines.join('<br>')}</div>`;
+        if (p.new_since) parts.push(`<div style="margin-top:4px;color:#8d5400;font-weight:700">NEW / CHANGED ${fmt(p.new_since)}${p.prev_status ? ` (was ${esc(p.prev_status)})` : ''}</div>`);
+        if (Array.isArray(p.api_list) && p.api_list.length) parts.push(row('APIs', `${esc(p.api_list[0])}${p.api_list.length > 1 ? ` <span style="color:#666">+${p.api_list.length - 1} more</span>` : ''} <span style="color:#666">· click the pad to copy all</span>`));
+        parts.push(`<div style="margin-top:5px;color:#888;font-size:11px">${esc({ 'enverus-pad': 'Enverus pad outline', msbf: 'building footprint', cv: 'scanner outline' }[p.geom_source] || (/^square/.test(p.geom_source || '') ? `${p.geom_source.replace('square-', '')} square around the well${p.well_count > 1 ? 's' : ''} (no outline on record)` : p.geom_source || ''))} · standoff ${Number(p.standoff_ft) || 0} ft · file ${fmt(p.generated)}</div>`);
+        return `<div class="aim-hz-tip" style="min-width:260px">${parts.join('')}</div>`;
     }
     const hzOwnerDone = new Set();   // feature ids already looked up this session (hit or miss)
     function hzLookupOwner(f, poly) {
