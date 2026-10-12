@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.155
+// @version      34.156
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.155';
+    const SCRIPT_VERSION = '34.156';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -5886,7 +5886,8 @@
         st.id = HZ_STYLE_ID;
         st.textContent = `@keyframes aim-hz-pulse { 0% { stroke-opacity: 1; } 50% { stroke-opacity: 0.2; } 100% { stroke-opacity: 1; } }
             .aim-hz-new { animation: aim-hz-pulse 1.3s ease-in-out infinite; }
-            .aim-hz-tip { font: 12px/1.35 -apple-system, Segoe UI, Roboto, sans-serif; max-width: 320px; }`;
+            .leaflet-tooltip.aim-hz-tt { white-space: normal; max-width: 360px; }
+            .aim-hz-tip { font: 12px/1.35 -apple-system, Segoe UI, Roboto, sans-serif; word-break: break-word; }`;
         (document.head || document.documentElement).appendChild(st);
     }
     function hzPaneName(map) {
@@ -5960,10 +5961,54 @@
         if (p.contractor && p.contractor !== 'NOT REPORTED') lines.push(`<span style="opacity:0.8">${hzEsc(p.contractor)}</span>`);
         if (p.days_on_location != null) lines.push(`${p.days_on_location} days on location`);
         if (p.footprint_m2) lines.push(`${Math.round(p.footprint_m2 * 10.7639).toLocaleString()} ft²${p.building_count > 1 ? ` · ${p.building_count} buildings` : ''}`);
+        if (p.owner || p.owner_pending) {
+            lines.push(`<span style="color:#c8ff4d">🏠 ${p.owner ? hzEsc(p.owner) : 'looking up owner…'}</span>`);
+            if (p.legal) lines.push(`<span style="opacity:0.85">${hzEsc(p.legal)}</span>`);
+            const bits = [p.acres ? `${p.acres} ac` : null, p.market_value ? `mkt $${Number(p.market_value).toLocaleString()}` : null].filter(Boolean);
+            if (bits.length) lines.push(bits.join(' · '));
+            if (p.situs) lines.push(`Situs: ${hzEsc(p.situs)}`);
+            if (p.mail) lines.push(`Mail: ${hzEsc(p.mail)}`);
+            if (p.parcel_src) lines.push(`<span style="opacity:0.6">${hzEsc(p.parcel_src)}${p.parcel_year ? ` · ${hzEsc(p.parcel_year)}` : ''}</span>`);
+        }
         if (p.new_since) lines.push(`<span style="color:#ffd54f">NEW / CHANGED ${hzFmtDate(p.new_since)}${p.prev_status ? ` (was ${hzEsc(p.prev_status)})` : ''}</span>`);
         if (Array.isArray(p.api_list) && p.api_list.length) lines.push(`<span style="opacity:0.7">${p.api_list.slice(0, 8).map(hzEsc).join(' · ')}${p.api_list.length > 8 ? ` …+${p.api_list.length - 8}` : ''}</span>`);
         lines.push(`<span style="opacity:0.55">${hzEsc(p.source || '')}${p.geom_source ? ` · ${hzEsc(p.geom_source)}` : ''} · standoff ${Number(p.standoff_ft) || 0} ft · generated ${hzFmtDate(p.generated)}${Array.isArray(p.api_list) && p.api_list.length ? ' · click = copy APIs' : ''}</span>`);
         return `<div class="aim-hz-tip">${lines.join('<br>')}</div>`;
+    }
+    const hzOwnerDone = new Set();   // feature ids already looked up this session (hit or miss)
+    function hzLookupOwner(f, poly) {
+        if (hzOwnerDone.has(f.id)) return;
+        hzOwnerDone.add(f.id);
+        const ring = f.ring;
+        const lat = ring.reduce((t, q) => t + q[0], 0) / ring.length, lng = ring.reduce((t, q) => t + q[1], 0) / ring.length;
+        f.p.owner_pending = true;
+        try { poly.setTooltipContent(hzTip(f)); } catch (e) {}
+        const d = 0.01;
+        const params = new URLSearchParams({ f: 'json', geometry: `${lng},${lat}`, geometryType: 'esriGeometryPoint', sr: '4326', layers: 'all:0', tolerance: '2',
+            mapExtent: `${lng - d},${lat - d},${lng + d},${lat + d}`, imageDisplay: '800,600,96', returnGeometry: 'false' });
+        GM_xmlhttpRequest({
+            method: 'GET', url: `${PARCELS_IDENTIFY_URL}?${params.toString()}`, timeout: 25000,
+            onload: (resp) => {
+                delete f.p.owner_pending;
+                try {
+                    const j = JSON.parse(resp.responseText);
+                    const a = j && Array.isArray(j.results) && j.results[0] && j.results[0].attributes;
+                    if (!a) { console.log(`${TAG} hazards: no parcel record under "${f.p.name}"`); try { poly.setTooltipContent(hzTip(f)); } catch (e) {} return; }
+                    const num = (v) => { const x = Number(v); return isFinite(x) && x > 0 ? x : null; };
+                    f.p.owner = (a.OWNER_NAME || '').trim() || null;
+                    f.p.legal = (a.LEGAL_DESC || '').trim() || null;
+                    const ac = num(a.GIS_AREA) || num(a.LEGAL_AREA); f.p.acres = ac ? Math.round(ac * 10) / 10 : null;
+                    f.p.market_value = num(a.MKT_VALUE) ? Math.round(num(a.MKT_VALUE)) : null;
+                    f.p.situs = (a.SITUS_ADDR || '').trim().replace(/\s+,/g, ',').replace(/^[ ,]+|[ ,]+$/g, '') || null;
+                    f.p.mail = [(a.MAIL_ADDR || '').trim(), (a.MAIL_CITY || '').trim()].filter(Boolean).join(', ') || null;
+                    f.p.parcel_src = a.SOURCE || 'county appraisal'; f.p.parcel_year = a.TAX_YEAR || null;
+                    console.log(`${TAG} hazards: owner for "${f.p.name}" → ${f.p.owner || '?'} (live lookup — the nightly build writes it into the file)`);
+                } catch (e) { console.warn(`${TAG} hazards: owner lookup parse threw:`, e); }
+                try { poly.setTooltipContent(hzTip(f)); } catch (e) {}
+            },
+            onerror: () => { delete f.p.owner_pending; console.warn(`${TAG} hazards: owner lookup failed (network)`); try { poly.setTooltipContent(hzTip(f)); } catch (e) {} },
+            ontimeout: () => { delete f.p.owner_pending; console.warn(`${TAG} hazards: owner lookup timed out`); try { poly.setTooltipContent(hzTip(f)); } catch (e) {} },
+        });
     }
     function hzRemoveBadge() { const el = document.getElementById(HZ_BADGE_ID); if (el) el.remove(); }
     function hzRenderBadge(map, json) {
@@ -6044,7 +6089,12 @@
             try {
                 const poly = L.polygon([f.ring], opts);
                 if (canTip) {
-                    poly.bindTooltip(hzTip(f), { sticky: true, direction: 'top', opacity: 0.97 });
+                    poly.bindTooltip(hzTip(f), { sticky: true, direction: 'top', opacity: 0.97, className: 'aim-hz-tt' });
+                    // Buildings / CV pads with no owner in the file: look the parcel up on first hover
+                    // (TX only — same TxGIO identify as the 🏠 layer), then refresh the card.
+                    if (!f.p.owner && (f.cls === 'building' || (f.p.source === 'cv' && !f.p.operator))) {
+                        poly.on('tooltipopen', () => hzLookupOwner(f, poly));
+                    }
                     poly.on('click', () => {
                         const apis = Array.isArray(f.p.api_list) ? f.p.api_list.filter(Boolean) : [];
                         if (!apis.length) return;
