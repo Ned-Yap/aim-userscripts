@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.159
+// @version      34.160
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.159';
+    const SCRIPT_VERSION = '34.160';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -5950,8 +5950,16 @@
         const lines = [`<strong>${hzEsc(p.name || p.kind || 'hazard')}</strong>`, `${clsLabel}`, who];
         const stat = [p.kind, p.pad_status && p.pad_status !== p.status ? `${p.status} · pad ${p.pad_status}` : p.status].filter(Boolean).join(' · ');
         if (stat) lines.push(hzEsc(stat));
+        if (f.cls === 'work') {
+            const why = Array.isArray(p.work_reason) && p.work_reason.length ? p.work_reason : ['Enverus flags work here'];
+            why.forEach((w, i) => lines.push(`<span style="color:#b71c1c;font-weight:600">${i === 0 ? 'Why: ' : '&nbsp;&nbsp;+ '}${hzEsc(w)}</span>`));
+            if (p.work_updated) lines.push(`<span style="color:#b71c1c">Enverus last updated this ${hzFmtDate(p.work_updated)}</span>`);
+        }
         if (p.well_count) lines.push(`${p.well_count} well${p.well_count === 1 ? '' : 's'}${Array.isArray(p.well_status) && p.well_status.length ? ` — ${hzEsc(p.well_status.join(', '))}` : ''}`);
-        if (p.first_date || p.last_date) lines.push(`<span style="opacity:0.8">${hzFmtDate(p.first_date)}${p.last_date && p.last_date !== p.first_date ? ` → ${hzFmtDate(p.last_date)}` : ''}</span>`);
+        if (p.first_date || p.last_date) {
+            const dl = p.kind === 'pad' || p.kind === 'plugged' ? 'built → first prod ' : (p.kind === 'permit' ? 'approved → expires ' : (p.kind === 'rig' ? 'spud → release ' : (p.kind === 'frac' ? 'frac days ' : '')));
+            lines.push(`<span style="opacity:0.8">${dl}${hzFmtDate(p.first_date)}${p.last_date && p.last_date !== p.first_date ? ` → ${hzFmtDate(p.last_date)}` : ''}</span>`);
+        }
         if (Array.isArray(p.permits) && p.permits.length) {
             lines.push(`<span style="color:#b71c1c;font-weight:600">Permits (${p.permits.length}):</span>`);
             p.permits.slice(0, 4).forEach(pm => lines.push(`&nbsp;• ${hzEsc(pm.name || pm.api || '')} — ${hzEsc(pm.status || '')} ${hzFmtDate(pm.approved)}${pm.expires ? ` → ${hzFmtDate(pm.expires)}` : ''}`));
