@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.156
+// @version      34.157
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.156';
+    const SCRIPT_VERSION = '34.157';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -5999,8 +5999,10 @@
                     f.p.legal = (a.LEGAL_DESC || '').trim() || null;
                     const ac = num(a.GIS_AREA) || num(a.LEGAL_AREA); f.p.acres = ac ? Math.round(ac * 10) / 10 : null;
                     f.p.market_value = num(a.MKT_VALUE) ? Math.round(num(a.MKT_VALUE)) : null;
-                    f.p.situs = (a.SITUS_ADDR || '').trim().replace(/\s+,/g, ',').replace(/^[ ,]+|[ ,]+$/g, '') || null;
-                    f.p.mail = [(a.MAIL_ADDR || '').trim(), (a.MAIL_CITY || '').trim()].filter(Boolean).join(', ') || null;
+                    const situs = (a.SITUS_ADDR || '').trim().replace(/\s+,/g, ',').replace(/^[ ,]+|[ ,]+$/g, '');
+                    f.p.situs = situs && !/^null$/i.test(situs) ? situs : null;   // appraisal exports say the word 'Null'
+                    const mailAddr = (a.MAIL_ADDR || '').trim(), mailCity = (a.MAIL_CITY || '').trim();
+                    f.p.mail = (mailCity && mailAddr.toUpperCase().indexOf(mailCity.toUpperCase()) === -1 ? `${mailAddr}, ${mailCity}` : mailAddr) || null;
                     f.p.parcel_src = a.SOURCE || 'county appraisal'; f.p.parcel_year = a.TAX_YEAR || null;
                     console.log(`${TAG} hazards: owner for "${f.p.name}" → ${f.p.owner || '?'} (live lookup — the nightly build writes it into the file)`);
                 } catch (e) { console.warn(`${TAG} hazards: owner lookup parse threw:`, e); }

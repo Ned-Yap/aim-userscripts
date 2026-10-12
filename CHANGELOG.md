@@ -1,6 +1,6 @@
 ## 2026-10-12 — 🚧 Hazard Layer (#288): Map Styler latest v34.156 — hover cards wrap, land owner on buildings (latest only)
 
-- **Map Styler (latest) v34.156** — hover cards no longer run off the card (Leaflet tooltips are nowrap by default; ours now wrap at 360 px). Buildings / private property show the **land owner** from the TX parcel data (owner, legal, acres, market value, situs, mailing address): written into the hazards file by the builder, and looked up live on first hover when the file has none yet (same TxGIO identify as the 🏠 layer). ([#288](https://github.com/Ned-Yap/aim-userscripts-issues/issues/288))
+- **Map Styler (latest) v34.156 → v34.157** — hover cards no longer run off the card (Leaflet tooltips are nowrap by default; ours now wrap at 360 px). Buildings / private property show the **land owner** from the TX parcel data (owner, legal, acres, market value, situs, mailing address): written into the hazards file by the builder, and looked up live on first hover when the file has none yet (same TxGIO identify as the 🏠 layer). ([#288](https://github.com/Ned-Yap/aim-userscripts-issues/issues/288))
 - **Data repo** — `hazards_build.py` attaches the parcel owner to every building / CV pad (TX only; one lookup per parcel, carried over between runs).
 
 ## 2026-10-12 — 🚧 Hazard Layer (#288), Fleet Tools latest v0.73 — hazard metrics per site (latest only)
