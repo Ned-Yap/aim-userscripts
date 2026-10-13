@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.330
+// @version      4.331
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.330';
+    const SCRIPT_VERSION = '4.331';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -13422,7 +13422,7 @@
             version: SCRIPT_VERSION, group: 'Asset Importer', scope: 'site-setup', priority: 35,
             toggles: [
                 { id: 'imp-master', label: 'Enable Asset Importer', type: 'boolean', default: true, master: true },
-                { id: 'imp-dup-ft', label: 'Duplicate guard radius (staged point near an existing asset)', type: 'number', min: 0, max: 1000, step: 5, default: 50, unit: 'ft' },
+                { id: 'imp-dup-ft', label: 'Parent/child flag radius (staged point inside or within N ft of an existing asset — informational, never skipped)', type: 'number', min: 0, max: 1000, step: 5, default: 50, unit: 'ft' },
                 { id: 'imp-size-ft', label: 'Created-asset square size', type: 'number', min: 5, max: 2000, step: 5, default: 55, unit: 'ft' },
                 { id: 'imp-open', label: '📥 Open Asset Importer', type: 'button', action: 'imp-open' },
             ],
@@ -22613,12 +22613,14 @@
         siteID: null,
         fileName: null, headers: [], rows: [],
         mapping: null,                              // {name, lat, lng, type|null} — header names
-        points: [],                                 // [{i, name, lat, lng, typeRaw, sel, dup, dupWhy, done}]
+        points: [],                                 // [{i, name, lat, lng, typeRaw, notes, sel, dup, dupWhy, near, done}]  — v4.331: dup = NAME match only; near = {name, ft, inside} parent/child flag
         invalid: 0,
         typeMap: {},                                // loaded from GM at wire time
         target: 'staged',                           // 'staged' | 'assets' (🗑 delete mode)
         mode: null,                                 // null | 'circle' | 'lasso' | 'pick'
         radiusVal: 0.5, radiusUnit: 'mi', includeDups: false,
+        advOpen: false,                             // v4.331: ▸ Advanced (subset tools + delete mode) expanded — GM-remembered
+        mapOpen: false,                             // v4.331: column-mapping row expanded (auto-collapses once applied)
         // LIVE selection model (v4.250): selected = manual override ?? inside-any-shape.
         // Shapes are movable, so membership RECOMPUTES (impRecomputeSel) instead of
         // being stamped once. Manual picks (selManual / assetManual) are sticky —
@@ -22636,7 +22638,7 @@
         lastDelete: null,                           // {siteID, when, entities:[full bodies]} — ↩ Undo batch source
         assetIndex: null,                           // cached [{id,name,clean,ring,bbox,centroid}] for dup-guard + delete select
     };
-    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups })); } catch (e) {} }
+    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen })); } catch (e) {} }
     function impLoadParams() {
         try {
             const raw = GM_getValue(IMP_PARAMS_KEY, ''); if (!raw) return;
@@ -22644,6 +22646,7 @@
             if (typeof o.radiusVal === 'number' && o.radiusVal > 0) imp.radiusVal = o.radiusVal;
             if (o.radiusUnit === 'mi' || o.radiusUnit === 'ft') imp.radiusUnit = o.radiusUnit;
             if (typeof o.includeDups === 'boolean') imp.includeDups = o.includeDups;
+            if (typeof o.advOpen === 'boolean') imp.advOpen = o.advOpen;
         } catch (e) {}
     }
     function impLoadTypeMap() { try { imp.typeMap = JSON.parse(GM_getValue(IMP_TYPEMAP_KEY, '{}')) || {}; } catch (e) { imp.typeMap = {}; } }
@@ -22777,9 +22780,16 @@
                     ? { name: 'name', lat: 'lat', lng: 'lng', type: impGuessMapping(parsed.headers).type }
                     : impGuessMapping(parsed.headers));
                 impClearLayers(); impClearShapeLayers(); impClearAssetLayers();
+                // v4.331: coordinates resolved → stage straight away (mapping row collapses to one line, "edit" reopens it)
+                const auto = !!(imp.mapping && imp.mapping.lat && imp.mapping.lng);
+                imp.mapOpen = !auto;
                 impRenderMappingUi();
-                impStatus(`Loaded <b>${impEsc(file.name)}</b> — ${imp.rows.length} row(s). Confirm the column mapping, then ✓ Apply.`
-                    + (kmlShapes.length ? ` <span style="color:#ffb347">(file also carries ${kmlShapes.length} polygon(s) — load it again via ⬆ Shape to use them as the access shape)</span>` : ''));
+                if (auto) {
+                    impBuildPoints();
+                    if (kmlShapes.length) impStatus(`${document.getElementById('aim-imp-result') ? document.getElementById('aim-imp-result').innerHTML : ''} <span style="color:#ffb347">(file also carries ${kmlShapes.length} polygon(s) — load it again via ⬆ Shape to use them as the access shape)</span>`);
+                } else {
+                    impStatus(`Loaded <b>${impEsc(file.name)}</b> — ${imp.rows.length} row(s). Pick the Latitude / Longitude columns, then ✓ Apply.`, '#ffb347');
+                }
                 impSyncUi();
             } catch (e) {
                 console.warn(`${TAG} 📥 file parse:`, e);
@@ -22801,19 +22811,22 @@
             if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) { imp.invalid++; return; }
             const name = m.name ? (r[m.name] || '').trim() : '';
             const notes = m.notes ? String(r[m.notes] || '').trim() : '';
-            imp.points.push({ i, name: name || `Import ${i + 1}`, lat, lng, typeRaw: m.type ? (r[m.type] || '').trim() : '', notes, sel: false, dup: false, dupWhy: '', done: false });
+            imp.points.push({ i, name: name || `Import ${i + 1}`, lat, lng, typeRaw: m.type ? (r[m.type] || '').trim() : '', notes, sel: false, dup: false, dupWhy: '', near: null, done: false });
         });
         impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type, notes: m.notes || null });
+        imp.mapOpen = false;
+        impRenderMappingUi();
         impBuildAssetIndex();
         impComputeDups();
         impRecomputeSel();          // shapes placed before the data still apply
         impRenderStaged();
         impRenderTypeMapUi();
-        const dupN = imp.points.filter(p => p.dup).length;
-        impStatus(`Staged <b>${imp.points.length}</b> point(s)`
+        const dupN = imp.points.filter(p => p.dup).length, nearN = imp.points.filter(p => p.near).length;
+        impStatus(`Staged <b>${imp.points.length}</b> point(s), all selected`
             + (imp.invalid ? ` · <span style="color:#ffb347">${imp.invalid} row(s) skipped (bad/missing coordinates)</span>` : '')
-            + (dupN ? ` · <span style="color:#ffd400">${dupN} flagged as likely duplicates</span>` : '')
-            + ' — ⭕/🖊 select a subset, then Create.');
+            + (dupN ? ` · <span style="color:#ffd400">${dupN} name duplicate(s) of existing assets (skipped unless included)</span>` : '')
+            + (nearN ? ` · <span style="color:#b48cff">${nearN} inside/near an existing asset (parent/child — still created)</span>` : '')
+            + ' — map the type, set Size, then ✓ Create. ▸ Advanced has the subset tools.');
         impSyncUi();
     }
     // ---- duplicate guard vs EXISTING site assets (name OR proximity) ----
@@ -22834,17 +22847,21 @@
         const byName = new Map();
         imp.assetIndex.forEach(a => { if (a.clean) byName.set(a.clean, a); });
         imp.points.forEach(p => {
-            p.dup = false; p.dupWhy = '';
+            p.dup = false; p.dupWhy = ''; p.near = null;
             const clean = (genCleanName(p.name) || '').toLowerCase();
             const nm = clean && byName.get(clean);
-            if (nm) { p.dup = true; p.dupWhy = `name matches existing asset "${nm.name}"`; return; }
-            if (!dupM) return;
+            // v4.331: ONLY a name match is a duplicate. Proximity to / inside an
+            // existing asset is a parent/child flag (p.near) — informational, never skipped.
+            if (nm) { p.dup = true; p.dupWhy = `name matches existing asset "${nm.name}"`; }
             const dLng = dLat / Math.max(0.2, Math.cos(p.lat * Math.PI / 180));
+            let best = null;
             for (const a of imp.assetIndex) {
                 if (p.lat < a.bbox.la0 - dLat || p.lat > a.bbox.la1 + dLat || p.lng < a.bbox.lo0 - dLng || p.lng > a.bbox.lo1 + dLng) continue;
+                if (nm && a === nm) continue;
                 const d = pointToPolygonMeters(p.lat, p.lng, a.ring);
-                if (d <= dupM) { p.dup = true; p.dupWhy = `${Math.round(d * M_TO_FT)} ft from existing asset "${a.name}" (guard ${impDupFt} ft)`; break; }
+                if (d <= dupM && (!best || d < best.d)) best = { a, d };
             }
+            if (best) p.near = { name: best.a.name, id: best.a.id, ft: Math.round(best.d * M_TO_FT), inside: best.d === 0 };
         });
     }
     // ---- staged rendering: one shared canvas renderer, viewport-culled ----
@@ -22883,8 +22900,8 @@
             try {
                 const opts = {
                     radius: p.sel ? 4 : 2.2,
-                    color: p.dup ? '#ff3b3b' : '#ffffff',
-                    weight: p.dup ? 1.5 : 0.6,
+                    color: p.dup ? '#ff3b3b' : (p.near ? '#b48cff' : '#ffffff'),
+                    weight: (p.dup || p.near) ? 1.5 : 0.6,
                     fillColor: p.sel ? '#5fff5f' : '#ff9d00',
                     fillOpacity: 0.9, opacity: 0.9, interactive: false,
                 };
@@ -22998,9 +23015,12 @@
                 if (on) imp.assetSel.add(a.id);
             });
         } else {
+            // v4.331: with no shape drawn EVERY staged point is selected (the
+            // plain "upload this list" path); shapes narrow it, ☝ picks override.
+            const noShapes = imp.shapes.length === 0;
             imp.points.forEach(p => {
                 if (p.done) { p.sel = false; return; }
-                p.sel = (p.selManual !== undefined) ? p.selManual : imp.shapes.some(s => impShapeContains(s, p.lat, p.lng));
+                p.sel = (p.selManual !== undefined) ? p.selManual : (noShapes || imp.shapes.some(s => impShapeContains(s, p.lat, p.lng)));
             });
         }
     }
@@ -23340,6 +23360,16 @@
                 <span style="color:#888;font-size:10px">or drag &amp; drop the file onto this panel</span>
             </div>
             <div id="aim-imp-mapping" style="margin-bottom:8px"></div>
+            <div id="aim-imp-typemap" style="margin-bottom:8px"></div>
+            <div id="aim-imp-commitrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Square side of each created asset — same shape ➕ Create asset uses. Reshape in Percepto afterwards (auto-reshape is feature #251).">Size <input type="number" id="aim-imp-size" min="5" max="2000" step="5" style="width:52px;${inCss}"> ft</label>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ffd400" title="A staged point whose NAME matches an existing asset on this site is a duplicate and is SKIPPED unless this is on. Points merely inside / near an existing asset are only flagged (parent/child) and are always created."><input type="checkbox" id="aim-imp-incdups" style="accent-color:#ffd400"> include name duplicates</label>
+                <button id="aim-imp-commit" style="${btnCss('95,255,95')};font-weight:600">✓ Create selected</button>
+                <button id="aim-imp-undocreate" style="${btnCss('255,179,71')}" title="Delete exactly the assets the most recent import created (this session). Each delete rides Delete Guard's undo ring when installed.">↩ Undo last import</button>
+            </div>
+            <div id="aim-imp-flags" style="margin-bottom:8px"></div>
+            <button id="aim-imp-advhdr" style="background:none;border:none;color:#7a8794;cursor:pointer;font:inherit;font-size:11px;padding:2px 0;margin-bottom:6px;text-align:left" title="Subset selection (circle / lasso / pick / shape KML / edit) and 🗑 Delete mode for existing assets. With no shape drawn, every staged point is selected.">▸ Advanced — select a subset · edit shapes · delete existing assets</button>
+            <div id="aim-imp-adv" style="display:none">
             <div id="aim-imp-selrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
                 <button id="aim-imp-circle" style="${btnCss('122,223,230')}">⭕ Circle</button>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc">r <input type="number" id="aim-imp-radius" min="0" step="0.1" style="width:56px;${inCss}">
@@ -23353,20 +23383,14 @@
                 <button id="aim-imp-clearshapes" style="${btnCss('160,160,160')}">Clear shapes</button>
             </div>
             <div id="aim-imp-shapes" style="margin-bottom:8px"></div>
-            <div id="aim-imp-typemap" style="margin-bottom:8px"></div>
-            <div id="aim-imp-commitrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
-                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Square side of each created asset — same shape ➕ Create asset uses. Reshape in Percepto afterwards (auto-reshape is feature #251).">Size <input type="number" id="aim-imp-size" min="5" max="2000" step="5" style="width:52px;${inCss}"> ft</label>
-                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ffd400" title="Duplicate guard: a staged point is flagged when its name matches an existing asset OR it lies within the guard radius (Control Panel → Asset Importer) of one. Flagged points are SKIPPED unless this is on."><input type="checkbox" id="aim-imp-incdups" style="accent-color:#ffd400"> include flagged duplicates</label>
-                <button id="aim-imp-commit" style="${btnCss('95,255,95')};font-weight:600">✓ Create selected</button>
-                <button id="aim-imp-undocreate" style="${btnCss('255,179,71')}" title="Delete exactly the assets the most recent import created (this session). Each delete rides Delete Guard's undo ring when installed.">↩ Undo last import</button>
-            </div>
             <div id="aim-imp-delrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px;padding-top:8px;border-top:1px dashed rgba(255,85,85,0.35)">
                 <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#ff8a80;font-weight:600" title="Flip the ⭕/🖊/☝ tools to select EXISTING site assets instead of staged points. Deleting requires the ack + slide-and-hold ceremony and rides Delete Guard's 24h undo ring."><input type="checkbox" id="aim-imp-delmode" style="accent-color:#ff5555"> 🗑 Delete mode — select existing assets</label>
                 <button id="aim-imp-delete" style="${btnCss('255,85,85')};font-weight:600;display:none">🗑 Delete selected…</button>
                 <button id="aim-imp-undodel" style="${btnCss('255,179,71')};display:none" title="Re-create the assets from the most recent bulk delete's bank (create-only — they come back with NEW ids; mission references do NOT rebind).">↩ Undo delete batch</button>
             </div>
+            </div>
             <div id="aim-imp-render-note" style="font-size:10px;color:#7a8794;margin-bottom:4px"></div>
-            <div id="aim-imp-result" style="font-size:11px;color:#9ad;line-height:1.5">Load a region CSV or KML — points stage on the map (nothing is written), then select the subset this site's drone can cover.</div>`;
+            <div id="aim-imp-result" style="font-size:11px;color:#9ad;line-height:1.5">Load a CSV or KML — points stage on the map (nothing is written) with every point selected; map the type, set the size, ✓ Create. ▸ Advanced holds the subset tools for region-wide lists.</div>`;
         impWirePanelControls(host);
         impRenderMappingUi();
         impRenderTypeMapUi();
@@ -23392,6 +23416,7 @@
         rEl.value = imp.radiusVal; ruEl.value = imp.radiusUnit;
         rEl.oninput = () => { const v = parseFloat(rEl.value); if (isFinite(v) && v > 0) { imp.radiusVal = v; impSaveParams(); } };
         ruEl.onchange = () => { imp.radiusUnit = ruEl.value; impSaveParams(); };
+        q('aim-imp-advhdr').onclick = () => { imp.advOpen = !imp.advOpen; impSaveParams(); impSyncUi(); };
         q('aim-imp-circle').onclick = () => impSetMode(imp.mode === 'circle' ? null : 'circle');
         q('aim-imp-lasso').onclick = () => impSetMode(imp.mode === 'lasso' ? null : 'lasso');
         q('aim-imp-pick').onclick = () => impSetMode(imp.mode === 'pick' ? null : 'pick');
@@ -23412,10 +23437,10 @@
             // full reset for the active target: shapes AND manual picks
             imp.shapes = [];
             if (imp.target === 'assets') imp.assetManual.clear();
-            else imp.points.forEach(p => { delete p.selManual; });
+            else imp.points.forEach(p => { if (!p.done) p.selManual = false; });   // v4.331: explicit off (default is all-on)
             impRefreshAfterSelChange();
         };
-        q('aim-imp-clearshapes').onclick = () => { imp.shapes = []; impRefreshAfterSelChange(); impStatus(`shapes cleared — <b>${impSelCount()}</b> still selected via ☝ manual picks`); };
+        q('aim-imp-clearshapes').onclick = () => { imp.shapes = []; impRefreshAfterSelChange(); impStatus(imp.target === 'assets' ? `shapes cleared — <b>${impSelCount()}</b> still selected via ☝ manual picks` : `shapes cleared — <b>${impSelCount()}</b> selected (no shape = every staged point, minus ☝ manual deselects)`); };
         const szEl = q('aim-imp-size');
         szEl.value = impSizeFt;
         szEl.oninput = () => { const v = parseFloat(szEl.value); if (isFinite(v) && v >= 5 && v <= 2000) impSizeFt = v; };
@@ -23442,6 +23467,13 @@
         if (!el) return;
         if (!imp.headers.length) { el.innerHTML = ''; return; }
         const m = imp.mapping || {};
+        // v4.331: once staged, the mapping collapses to one line — "edit" reopens the pickers
+        if (!imp.mapOpen && imp.points.length && m.lat && m.lng) {
+            const part = (k, label) => `${label}=<b style="color:#cfd6dc">${impEsc(m[k] || '—')}</b>`;
+            el.innerHTML = `<div style="font-size:10px;color:#7a8794;padding:2px 0">Columns: ${part('name', 'Name')} · ${part('type', 'Type')} · ${part('notes', 'Notes')} · ${part('lat', 'Lat')} · ${part('lng', 'Lng')} <a href="#" id="aim-imp-mapedit" style="color:#7adfe6;margin-left:6px">edit</a></div>`;
+            el.querySelector('#aim-imp-mapedit').onclick = (ev) => { ev.preventDefault(); imp.mapOpen = true; impRenderMappingUi(); };
+            return;
+        }
         const sel = (key, label, allowNone) => {
             const opts = (allowNone ? `<option value="">— none —</option>` : '')
                 + imp.headers.map(h => `<option value="${impEsc(h)}"${m[key] === h ? ' selected' : ''}>${impEsc(h)}</option>`).join('');
@@ -23456,6 +23488,22 @@
             s.onchange = () => { if (!imp.mapping) imp.mapping = {}; imp.mapping[s.getAttribute('data-impmap')] = s.value || null; };
         });
         el.querySelector('#aim-imp-applymap').onclick = () => { impBuildPoints(); };
+    }
+    // v4.331: flag list — name duplicates (skipped unless included) + parent/child (inside / near an existing asset)
+    function impRenderFlagsUi(live) {
+        const el = document.getElementById('aim-imp-flags');
+        if (!el) return;
+        if (!live || !live.length) { el.innerHTML = ''; return; }
+        const dups = live.filter(p => p.dup), near = live.filter(p => p.near);
+        if (!dups.length && !near.length) { el.innerHTML = ''; return; }
+        const list = (arr, fmt, max) => impEsc(arr.slice(0, max).map(fmt).join(' · ')) + (arr.length > max ? ` … +${arr.length - max} more` : '');
+        const byParent = new Map();
+        near.forEach(p => { const k = p.near.name; if (!byParent.has(k)) byParent.set(k, []); byParent.get(k).push(p); });
+        const parents = [...byParent.entries()].sort((a, b) => b[1].length - a[1].length);
+        el.innerHTML = `<div style="padding:6px 8px;background:rgba(255,255,255,0.03);border:1px dashed rgba(122,223,230,0.25);border-radius:3px;font-size:11px;line-height:1.5">
+            ${dups.length ? `<div style="color:#ffd400">🔴 <b>${dups.length}</b> name duplicate${dups.length === 1 ? '' : 's'} (same name as an existing asset — ${imp.includeDups ? 'INCLUDED' : 'skipped'}): ${list(dups, p => p.name, 10)}</div>` : ''}
+            ${near.length ? `<div style="color:#b48cff">🟣 <b>${near.length}</b> parent/child (inside or within ${impDupFt} ft of an existing asset — created as normal, nest them afterwards if wanted): ${impEsc(parents.slice(0, 6).map(([k, v]) => `${k} ← ${v.length}`).join(' · '))}${parents.length > 6 ? ` … +${parents.length - 6} more parents` : ''}</div>` : ''}
+        </div>`;
     }
     function impSiteSubtypes() {
         const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
@@ -23620,6 +23668,12 @@
             show('aim-imp-selrow', live.length > 0 || imp.target === 'assets', true);
             show('aim-imp-commitrow', live.length > 0 || imp.lastCreated.length > 0, true);
             show('aim-imp-delrow', true, true);
+            // v4.331: ▸ Advanced block — forced open while a tool is armed, a shape exists, or delete mode is on
+            const advForced = !!imp.mode || imp.shapes.length > 0 || imp.target === 'assets';
+            show('aim-imp-adv', imp.advOpen || advForced, false);
+            const ah = document.getElementById('aim-imp-advhdr');
+            if (ah) ah.textContent = `${(imp.advOpen || advForced) ? '▾' : '▸'} Advanced — select a subset · edit shapes · delete existing assets${imp.shapes.length ? ` (${imp.shapes.length} shape${imp.shapes.length === 1 ? '' : 's'} narrowing the selection)` : ''}`;
+            impRenderFlagsUi(live);
             const modeBtn = (id, mode, label, onLabel) => {
                 const b = document.getElementById(id); if (!b) return;
                 const on = imp.mode === mode;
