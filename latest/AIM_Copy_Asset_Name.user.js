@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.335
+// @version      4.336
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.335';
+    const SCRIPT_VERSION = '4.336';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -21764,7 +21764,7 @@
     }
     const elvEsc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     const elvFt = (m) => Math.round(m * M_TO_FT);
-    const elvVk = (p) => `${Number(p.lat).toFixed(7)},${Number(p.lng).toFixed(7)}`;
+    const elvVk = (p) => `${Number(p.lat).toFixed(6)},${Number(p.lng).toFixed(6)}`;   // 6 dp = the site-wide shared-vertex model (~0.1 m)
     const elvSame = (p, q) => approxMeters(p.lat, p.lng, q.lat, q.lng) <= ELV_MATCH_M;
     // nearest point on segment a→b to p (lat/lng), with the distance in metres
     function elvProj(p, a, b) {
@@ -21909,7 +21909,7 @@
             let s = sX, lastIn = sX;
             for (let guard = 0; guard < ELV_SCAN_CAP_M; guard++) {
                 s += dir * ELV_STEP_M;
-                if (s < 0 || s > ch.len) return { s: lastIn, clamped: true };
+                if (s < 0 || s > ch.len) { const endS = dir > 0 ? ch.len : 0; return Math.abs(endS - lastIn) <= 1.5 * ELV_STEP_M ? { s: lastIn, clamped: true } : { s: lastIn, clamped: false }; }
                 if (dLine(elvAt(ch, s)) < halfM) lastIn = s;
                 else if (Math.abs(s - lastIn) >= 2 * elevM) return { s: lastIn, clamped: false };
             }
@@ -21917,6 +21917,16 @@
             return { s: lastIn, clamped: false };
         };
         const bL = walk(-1), bR = walk(1);
+        // another flight path sharing this vertex (SpiderWeb hubs / junctions) — its arc band is the neighbour
+        const otherFpAt = (p) => {
+            const k = elvVk(p);
+            for (const e of elvLiveEntities(sid)) {
+                if (!e || e.type !== 15 || e.id === it.fpId || !Array.isArray(e.arcs)) continue;
+                const a = e.arcs.find(a => a && a.point_a && a.point_b && (elvVk(a.point_a) === k || elvVk(a.point_b) === k));
+                if (a && typeof a.min_alt === 'number' && typeof a.max_alt === 'number') return { e, a };
+            }
+            return null;
+        };
         const ffzAt = (p) => {
             let best = null;
             ffzInfo.forEach(f => {
@@ -21940,18 +21950,19 @@
             const deg = atStart ? ch.startDeg : ch.endDeg, side = atStart ? 'behind' : 'ahead of';
             if (deg >= 3) { it.fail.push(`a branch vertex sits inside the bridge zone ${side} the crossing — split the path there first`); return; }
             const endP = atStart ? ch.pts[0] : ch.pts[ch.pts.length - 1];
-            const hit = ffzAt(endP);
-            if (!hit) { it.fail.push(`dangling end ${side} the crossing — the path stops within ${it.p.halfFt} ft of the line on no FFZ edge; connect or abandon it`); return; }
+            const hit = ffzAt(endP), other = hit ? null : otherFpAt(endP);
+            if (!hit && !other) { it.fail.push(`dangling end ${side} the crossing — the path stops within ${it.p.halfFt} ft of the line on no FFZ edge and no other flight path; connect or abandon it`); return; }
+            const nbName = hit ? `FFZ "${hit.f.e.name}"` : `flight path "${other.e.name}"`;
             // last line crossing on this side (merged bridges can cross several lines)
             let lastX = sX;
             if (near.length) { const endS = atStart ? 0 : ch.len; for (let s2 = endS; atStart ? s2 < sX : s2 > sX; s2 += atStart ? ELV_STEP_M : -ELV_STEP_M) { if (dLine(elvAt(ch, s2)) < 2) { lastX = s2; break; } } }
             const D = atStart ? lastX : ch.len - lastX;            // room between the last line and the pad edge
             const room = D - tailM;
-            if (room < minElevM) { it.fail.push(`only ${elvFt(D)} ft between the line and FFZ "${hit.f.e.name}" ${side} the crossing — under the ${it.p.tailFt} ft bridge tail + ${it.p.minElevFt} ft minimum elevator; abandon or reroute the path`); return; }
+            if (room < minElevM) { it.fail.push(`only ${elvFt(D)} ft between the line and ${nbName} ${side} the crossing — under the ${it.p.tailFt} ft bridge tail + ${it.p.minElevFt} ft minimum elevator; abandon or reroute the path`); return; }
             b.s = atStart ? lastX - tailM : lastX + tailM;
             b.clamped = false;
-            short[atStart ? 'start' : 'end'] = { ffz: hit.f.e.name, roomM: room, dM: D };
-            it.warn.push(`${atStart ? 'Elevator 1' : 'Elevator 2'}: FFZ "${hit.f.e.name}" is only ${elvFt(D)} ft from the line — bridge cut to ${it.p.tailFt} ft past the line, elevator ${elvFt(Math.min(elevM, room))} ft to the pad edge`);
+            short[atStart ? 'start' : 'end'] = { ffz: nbName, roomM: room, dM: D };
+            it.warn.push(`${atStart ? 'Elevator 1' : 'Elevator 2'}: ${nbName} is only ${elvFt(D)} ft from the line — bridge cut to ${it.p.tailFt} ft past the line, elevator ${elvFt(Math.min(elevM, room))} ft to ${hit ? 'the pad edge' : 'the junction'}`);
         });
         if (it.fail.length) return;
         const b1 = elvSnapS(ch, bL.s), b2 = elvSnapS(ch, bR.s);
@@ -21970,9 +21981,11 @@
             const hit = ffzAt(p);
             const r = hit && hit.f.e.restrictions;
             if (r && typeof r.minAlt === 'number' && typeof r.maxAlt === 'number') return { min: r.minAlt, max: r.maxAlt, label: `FFZ "${hit.f.e.name}" (${elvFt(r.minAlt)}–${elvFt(r.maxAlt)} ft MSL)` };
+            const other = otherFpAt(p);
+            if (other) return { min: other.a.min_alt, max: other.a.max_alt, label: `flight path "${other.e.name}" at the junction (${elvFt(other.a.min_alt)}–${elvFt(other.a.max_alt)} ft MSL)` };
             const b = bandAt(atStart ? 0 : ch.len);
-            it.warn.push(`${nm}: the path end is on no FFZ edge — floor taken from the arc's own band (${elvFt(b.min)}–${elvFt(b.max)} ft MSL)`);
-            return { min: b.min, max: b.max, label: 'the arc\'s own band (no FFZ at the path end)' };
+            it.warn.push(`${nm}: the path end is on no FFZ edge and no other flight path — floor taken from the arc's own band (${elvFt(b.min)}–${elvFt(b.max)} ft MSL)`);
+            return { min: b.min, max: b.max, label: 'the arc\'s own band (nothing at the path end)' };
         };
         // DEM along the window
         const sampleS = [];
@@ -21992,7 +22005,7 @@
         const crossed = ch.arcs[it.arcIdx];
         if (it.src === 'line' && typeof crossed.min_alt === 'number' && crossed.min_alt >= bridge.min - 0.5) {
             it.status = 'present';
-            it.geo = { ch, sX, e1, b1, b2, e2, gz: { E1: { max: mx(gE1), min: mn(gE1) }, B: { max: mx(gB), min: mn(gB) }, E2: { max: mx(gE2), min: mn(gE2) } }, gmLL: elvGmPoint(ch, (b1 + b2) / 2) };
+            it.geo = { ch, sX, e1, b1, b2, e2, direct, short, gz: { E1: { max: mx(gE1), min: mn(gE1) }, B: { max: mx(gB), min: mn(gB) }, E2: { max: mx(gE2), min: mn(gE2) } }, gmLL: elvGmPoint(ch, (b1 + b2) / 2) };
             it.warn.push(`already bridged — the crossed arc flies ${elvFt(crossed.min_alt)}–${elvFt(crossed.max_alt)} ft MSL (${elvFt(crossed.min_alt - mx(gB))} ft over the highest ground)`);
             return;
         }
