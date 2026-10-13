@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.337
+// @version      4.338
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.337';
+    const SCRIPT_VERSION = '4.338';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -21819,8 +21819,12 @@
                 const ni = at.find(i => !used.has(i));
                 if (ni == null) return 2;
                 const na = arcs[ni]; used.add(ni);
-                const fwd = elvVk(na.point_a) === elvVk(v);
-                const leg = { i: ni, a: fwd ? na.point_a : na.point_b, b: fwd ? na.point_b : na.point_a };
+                // forward: the leg starts at v; backward: the leg ENDS at v (an arc stored the other
+                // way round must be flipped — getting this wrong wrote hairpin elevators, 2026-10-13)
+                const aIsV = elvVk(na.point_a) === elvVk(v);
+                const leg = dir > 0
+                    ? { i: ni, a: aIsV ? na.point_a : na.point_b, b: aIsV ? na.point_b : na.point_a }
+                    : { i: ni, a: aIsV ? na.point_b : na.point_a, b: aIsV ? na.point_a : na.point_b };
                 if (dir > 0) legs.push(leg); else legs.unshift(leg);
             }
             return 2;
@@ -22045,18 +22049,29 @@
             if (!live) { w.fail.push('flight path no longer on the site'); writes.push(w); return; }
             const liveArcs = live.arcs.filter(a => a && a.point_a && a.point_b);
             const liveIds = new Set(liveArcs.map(a => a.id));
+            // one group per degree-2 run, whichever way each crossing happened to walk it: the key is the
+            // sorted id set, the first item's chain is canonical and a reversed chain's window is mirrored
             const chains = new Map();
-            items.forEach(it => { const key = it.geo.ch.ids.join(','); if (!chains.has(key)) chains.set(key, { ch: it.geo.ch, items: [] }); chains.get(key).items.push(it); });
+            items.forEach(it => {
+                const key = it.geo.ch.ids.slice().sort((a, b) => a - b).join(',');
+                if (!chains.has(key)) chains.set(key, { ch: it.geo.ch, items: [] });
+                const grp = chains.get(key), ch = grp.ch, g = it.geo;
+                if (ch === g.ch || ch.ids.join(',') === g.ch.ids.join(',')) it._gx = g;
+                else if (ch.ids.slice().reverse().join(',') === g.ch.ids.join(',')) it._gx = Object.assign({}, g, { sX: ch.len - g.sX, e1: ch.len - g.e2, b1: ch.len - g.b2, b2: ch.len - g.b1, e2: ch.len - g.e1, mirrored: true });
+                else { it.fail.push('crossing sits on a differently-walked chain — re-stage'); it._gx = null; }
+                grp.items.push(it);
+            });
             let out = liveArcs.map(a => Object.assign({}, a, { _live: true }));
             chains.forEach(({ ch, items: cItems }) => {
                 if (!ch.ids.every(id => liveIds.has(id))) { cItems.forEach(it => it.fail.push('the path was saved after staging (arc ids changed) — re-stage')); return; }
-                cItems.sort((x, y) => x.geo.sX - y.geo.sX);
+                cItems = cItems.filter(it => it._gx);
+                cItems.sort((x, y) => x._gx.sX - y._gx.sX);
                 const kept = [];
                 cItems.forEach(it => {
                     const last = kept[kept.length - 1];
-                    if (last && it.geo.e1 < last.geo.e2 - ELV_MATCH_M) {
+                    if (last && it._gx.e1 < last._gx.e2 - ELV_MATCH_M) {
                         // inside the earlier crossing's bridge = the same merged bridge (parallel circuits) — not a second set
-                        if (it.geo.sX >= last.geo.b1 && it.geo.sX <= last.geo.b2) { it.status = 'merged'; it.warn.push(`covered by crossing #${last.id}'s bridge (parallel line) — one staircase serves both`); }
+                        if (it._gx.sX >= last._gx.b1 && it._gx.sX <= last._gx.b2) { it.status = 'merged'; it.warn.push(`covered by crossing #${last.id}'s bridge (parallel line) — one staircase serves both`); }
                         else it.fail.push(`its window overlaps crossing #${last.id} on the same path — raise the half-width so they merge, or commit one at a time`);
                         return;
                     }
@@ -22064,14 +22079,14 @@
                 });
                 if (!kept.length) return;
                 const cuts = new Set(ch.cum.map(s => +s.toFixed(3)));
-                kept.forEach(it => [it.geo.e1, it.geo.b1, it.geo.b2, it.geo.e2].forEach(s => cuts.add(+s.toFixed(3))));
+                kept.forEach(it => [it._gx.e1, it._gx.b1, it._gx.b2, it._gx.e2].forEach(s => cuts.add(+s.toFixed(3))));
                 const S = [...cuts].sort((a, b) => a - b);
                 const zoneFor = (mid) => {
                     for (const it of kept) {
-                        const gg = it.geo;
-                        if (mid > gg.e1 && mid < gg.b1) return { b: it.bands.E1, it, zone: 'E1' };
+                        const gg = it._gx, m = gg.mirrored;   // on a mirrored window E1/E2 swap sides
+                        if (mid > gg.e1 && mid < gg.b1) return { b: m ? it.bands.E2 : it.bands.E1, it, zone: m ? 'E2' : 'E1' };
                         if (mid > gg.b1 && mid < gg.b2) return { b: it.bands.bridge, it, zone: 'bridge' };
-                        if (mid > gg.b2 && mid < gg.e2) return { b: it.bands.E2, it, zone: 'E2' };
+                        if (mid > gg.b2 && mid < gg.e2) return { b: m ? it.bands.E1 : it.bands.E2, it, zone: m ? 'E1' : 'E2' };
                     }
                     return null;
                 };
@@ -22104,6 +22119,20 @@
             const bad = [];
             byV.forEach(list => { for (let x = 0; x < list.length; x++) for (let y = x + 1; y < list.length; y++) { const P = out[list[x]], Q = out[list[y]]; if (!(P.max_alt > Q.min_alt && Q.max_alt > P.min_alt)) bad.push(`#${list[x] + 1}↔#${list[y] + 1} (${elvFt(P.min_alt)}–${elvFt(P.max_alt)} vs ${elvFt(Q.min_alt)}–${elvFt(Q.max_alt)} ft MSL)`); } });
             if (bad.length) w.fail.push(`connected arcs without a positive altitude overlap: ${bad.slice(0, 4).join(', ')}`);
+            // geometry sanity: no duplicate arcs, no arc that doubles straight back along its neighbour (the 2026-10-13 hairpin)
+            const seenArc = new Set(); let dup = 0, hairpin = 0;
+            out.forEach(a => { const k = [elvVk(a.point_a), elvVk(a.point_b)].sort().join('|'); if (seenArc.has(k)) dup++; seenArc.add(k); });
+            byV.forEach(list => { for (let x = 0; x < list.length; x++) for (let y = x + 1; y < list.length; y++) {
+                const P = out[list[x]], Q = out[list[y]]; if (!(P._new || Q._new)) continue;
+                const vP = elvVk(P.point_a) === elvVk(Q.point_a) || elvVk(P.point_a) === elvVk(Q.point_b) ? P.point_a : P.point_b;   // shared vertex
+                const oP = vP === P.point_a ? P.point_b : P.point_a, oQ = elvVk(Q.point_a) === elvVk(vP) ? Q.point_b : Q.point_a;
+                const cosLat = Math.cos(vP.lat * Math.PI / 180);
+                const ux = (oP.lng - vP.lng) * cosLat, uy = oP.lat - vP.lat, wx = (oQ.lng - vP.lng) * cosLat, wy = oQ.lat - vP.lat;
+                const c = (ux * wx + uy * wy) / ((Math.hypot(ux, uy) * Math.hypot(wx, wy)) || 1);
+                if (c > 0.999) hairpin++;   // the two arcs leave the vertex in the SAME direction = one folds back over the other
+            } });
+            if (dup) w.fail.push(`${dup} duplicate arc(s) in the rebuilt path — refusing to write (tool bug, re-stage and report)`);
+            if (hairpin) w.fail.push(`${hairpin} hairpin(s) in the rebuilt path (an arc folds back over its neighbour) — refusing to write (tool bug, re-stage and report)`);
             if (!out.some(a => a._new)) w.fail.push('nothing changes on this path');
             w.arcs = out;
             writes.push(w);
