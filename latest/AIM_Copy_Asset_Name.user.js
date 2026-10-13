@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.333
+// @version      4.334
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.333';
+    const SCRIPT_VERSION = '4.334';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22421,7 +22421,7 @@
         try { localStorage.setItem(ELV_LAST_KEY(sid), JSON.stringify(rec)); } catch (e) { console.warn(`${TAG} 🛗 last-run stash failed:`, e); }
         if (!downloadJSONFile(`elevators-backup-${sid}-${Date.now()}.json`, JSON.stringify({ site: sid, at: rec.at, flightPaths: rec.fps, ffzs: rec.ffz }, null, 1))) { elvLog('Backup download failed — refusing to write', '#ff6060'); return; }
         elv.running = true; elvRenderList();
-        let ok = 0, fail = 0, gmOk = 0, gmFail = 0, ffzOk = 0;
+        let ok = 0, fail = 0, gmOk = 0, gmFail = 0, ffzOk = 0, failText = '';
         try {
             // ---- 1. FFZ splits / raises, FFZ-first (a failure here stops everything before any path is touched) ----
             for (const sp of splits.values()) {
@@ -22467,7 +22467,7 @@
                     elvLog(`${label} ${sp.mode === 'raise' ? `ceiling raised to ${elvFt(sp.newMax)} ft MSL` : `split — "${elvEsc(sp.name)}" created with ceiling ${elvFt(sp.newMax)} ft MSL`} + verified`);
                 } catch (e) {
                     console.warn(`${TAG} 🛗 ${label.replace(/<[^>]*>/g, '')}:`, e.message);
-                    elvLog(`${label} FAILED: ${elvEsc(e.message)} — stopped before any flight path was written (↩ Undo last run reverts the ${ffzOk} FFZ change(s) already made)`, '#ff6060');
+                    failText = `${label} FAILED: ${elvEsc(e.message)} — stopped before any flight path was written${ffzOk ? ` (↩ Undo last run reverts the ${ffzOk} FFZ change(s) already made)` : ''}`;
                     fail++; todo.length = 0;   // nothing else runs
                     break;
                 }
@@ -22516,7 +22516,7 @@
                     fail++; console.warn(`${TAG} 🛗 ${label.replace(/<[^>]*>/g, '')}:`, e.message);
                     w.fail.push(`write failed: ${e.message}`);
                     w.items.forEach(it => it.warn.push(`write failed: ${e.message}`));
-                    elvLog(`${label} FAILED: ${elvEsc(e.message)} — stopped (nothing after it was written)`, '#ff6060');
+                    failText = `${label} FAILED: ${elvEsc(e.message)} — stopped (nothing after it was written)`;
                     break;   // stop on the FIRST failure
                 }
                 await new Promise(r => setTimeout(r, ELV_GAP_MS));
@@ -22524,7 +22524,7 @@
         } finally { elv.running = false; }
         elvDraw(); elvRenderList();
         const left = todo.filter(w => !w.fail.length && !w.done).length;
-        elvLog(`Elevators: ${ok} flight path(s) written + verified${fail ? `, <b style="color:#ff6060">1 FAILED</b>` : ''}${left ? ` · ${left} not attempted` : ''}${splits.size ? ` · ${ffzOk}/${splits.size} FFZ split/raise(s)` : ''} · ${gmOk} GM(s) created${gmFail ? `, <b style="color:#ff6060">${gmFail} GM(s) failed</b>` : ''} · backups: JSON download + Delete Guard ring · ↩ Undo last run restores · refresh to see them natively`, fail || gmFail ? '#ffb347' : '#5fff5f');
+        elvLog(`${failText ? `<b style="color:#ff6060">${failText}</b><br>` : ''}Elevators: ${ok} flight path(s) written + verified${fail ? `, <b style="color:#ff6060">1 FAILED</b>` : ''}${left ? ` · ${left} not attempted` : ''}${splits.size ? ` · ${ffzOk}/${splits.size} FFZ split/raise(s)` : ''} · ${gmOk} GM(s) created${gmFail ? `, <b style="color:#ff6060">${gmFail} GM(s) failed</b>` : ''} · backups: JSON download + Delete Guard ring · ↩ Undo last run restores · refresh to see them natively`, fail || gmFail ? '#ffb347' : '#5fff5f');
         showToast(fail ? `Elevators: ${ok} FP ok, stopped on a failure` : `✓ ${ok} flight path(s) elevated, ${gmOk} GM(s)`, fail ? 'rgba(255,96,96,0.55)' : undefined);
     }
     async function elvUndoLast() {

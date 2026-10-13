@@ -1,3 +1,7 @@
+## 2026-10-13 — 🛗 Elevators: commit summary keeps the failure reason — Site Setup Tools latest v4.334 (latest only)
+
+- **Site Setup Tools (latest) v4.334 — 🛗 Elevators.** The end-of-commit summary line replaced the "FAILED: <server reason>" line, so a failed run showed only "1 FAILED". The reason now heads the summary.
+
 ## 2026-10-13 — 📥 Asset Importer: file type value used as-is — Site Setup Tools latest v4.333 (latest only)
 
 - **Site Setup Tools (latest) v4.333 — 📥 Asset Importer type mapping ([#249](https://github.com/Ned-Yap/aim-userscripts-issues/issues/249)).** "BLOCKED — unmapped type value(s): Fence Lights" on a type that simply did not exist on the site yet. The file's Type value is now the subtype by default: matched to an existing site subtype ignoring case, otherwise created as a new subtype on the first asset (tagged "new subtype — created on the site" in the table). Only rows with a blank type still need a hand-picked subtype. Changing the box to something else is remembered as before; typing the file's own value back clears the override.
