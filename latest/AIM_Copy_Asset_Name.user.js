@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.326
+// @version      4.327
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.326';
+    const SCRIPT_VERSION = '4.327';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -235,6 +235,10 @@
     let sciMasterEnabled = true;
     let sciAglFt = 90;      // AGL floor at every new / moved FP vertex (blocker)
     let sciEdgeFt = 3;      // how close an FP end must be to an FFZ edge to count as "on" it
+    // v4.327: 🛗 Elevators (feature #290) — CP defaults; per-crossing copies live in elv.items[].p
+    const ELV_SCRIPT_ID = 'aim-elevators';
+    let elvMasterEnabled = true;
+    let elvCfg = { floorAgl: 200, height: 20, halfFt: 100, elevFt: 100, overlapFt: 10, gm: true };
     let impDupFt = 50;              // duplicate-guard proximity, CP-editable
     // ---- 📌 GM Stamper (#271) — CP card id + init-referenced state (same TDZ reason).
     const GMT_SCRIPT_ID = 'aim-gm-stamper';
@@ -6919,6 +6923,20 @@
             };
             footer.appendChild(addBtn);
         }
+        // v4.327: 🛗 Elevator here (feature #290) — flight paths only, needs the
+        // exact right-click point; stages a manual crossing in the Elevators panel.
+        if (entity.type === 15 && !LITE && clickLatLng && typeof clickLatLng.lat === 'number' && isSiteSetupRoute()) {
+            const elvBtn = document.createElement('button');
+            elvBtn.textContent = '🛗';
+            elvBtn.title = 'Elevator here — stage an Elevator 1 / Bridge / Elevator 2 climb-over on this flight path at the right-clicked point (bridge ±' + elvCfg.halfFt + ' ft along the path; edit in the Elevators panel)';
+            elvBtn.style.cssText = 'flex:0 0 auto;background:transparent;color:#ff9a3d;border:1px solid rgba(255,154,61,0.4);border-radius:3px;padding:5px 8px;cursor:pointer;font:inherit;font-size:12px';
+            elvBtn.onclick = (ev) => {
+                ev.stopPropagation();
+                closeInspector();
+                elvManualAt(entity, { lat: clickLatLng.lat, lng: clickLatLng.lng }).catch(e => { console.error(`${TAG} 🛗 manual stage failed:`, e); showToast(`Elevator stage failed: ${e.message || e}`, 'rgba(255,96,96,0.55)'); });
+            };
+            footer.appendChild(elvBtn);
+        }
 
         const jsonBtn = document.createElement('button');
         jsonBtn.textContent = 'Copy JSON';
@@ -13017,6 +13035,23 @@
                     sciOpenFromAction();
                 }
             }
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === ELV_SCRIPT_ID) {
+                const v = msg.value !== undefined ? msg.value : msg.enabled;
+                if (msg.toggleId === 'elv-master') { const b = !!v; if (b !== elvMasterEnabled) elvMasterEnabled = b; }
+                else if (msg.toggleId === 'elv-gm') { const b = !!v; if (b !== elvCfg.gm) elvCfg.gm = b; }
+                else {
+                    const k = { 'elv-floor': 'floorAgl', 'elv-height': 'height', 'elv-half': 'halfFt', 'elv-elev': 'elevFt', 'elv-overlap': 'overlapFt' }[msg.toggleId];
+                    if (k) { const n = Number(v); if (isFinite(n) && n >= 0 && n !== elvCfg[k]) elvCfg[k] = n; }
+                }
+            }
+            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === ELV_SCRIPT_ID && CONTEXT === 'IFRAME') {
+                if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;   // tab-local (see importer above)
+                if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
+                if (msg.actionId === 'elv-scan') {
+                    if (!elvMasterEnabled) { showToast('Elevators are disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+                    elvOpenFromAction(true);
+                }
+            }
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === GMT_SCRIPT_ID) {
                 handleGmtToggle(msg);
             }
@@ -13353,6 +13388,25 @@
                 { id: 'sci-agl-ft', label: 'AGL floor at new / moved flight-path vertices (blocks below)', type: 'number', min: 0, max: 400, step: 5, default: 90, unit: 'ft' },
                 { id: 'sci-edge-ft', label: 'FP end counts as ON an FFZ edge within', type: 'number', min: 1, max: 30, step: 1, default: 3, unit: 'ft' },
                 { id: 'sci-open', label: '🔍 Open Scan Import', type: 'button', action: 'sci-open' },
+            ],
+            hotkeys: [],
+        });
+        // v4.327: 🛗 Elevators — own card (feature #290). Climb-over staircases
+        // (Elevator 1 / Bridge / Elevator 2) spliced into flight paths at
+        // transmission-line crossings; defaults here, per-crossing edits in the panel.
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: ELV_SCRIPT_ID, name: 'Elevators',
+            description: 'Climb over transmission lines: scan every flight path against the red transmission KML lines (or right-click a flight path → 🛗 for a manual point) and splice in an Elevator 1 / Bridge / Elevator 2 staircase — bridge = the path within the half-width of ANY line (parallel circuits merge), floor above the highest ground under it, elevators = the next stretch of path with floors 10 ft under the neighbour ceiling and ceilings 10 ft over the bridge floor, all in MSL from DEM. Stage → edit per crossing → preflight → one POST per flight path with JSON + Delete Guard backups and verify, then one pole GM per crossing. ↩ Undo restores.',
+            version: SCRIPT_VERSION, group: 'Elevators', scope: 'site-setup', priority: 38,
+            toggles: [
+                { id: 'elv-master', label: 'Enable Elevators', type: 'boolean', default: true, master: true },
+                { id: 'elv-floor', label: 'Bridge floor above the highest ground under it', type: 'number', min: 100, max: 400, step: 5, default: 200, unit: 'ft' },
+                { id: 'elv-height', label: 'Bridge band height', type: 'number', min: 5, max: 100, step: 5, default: 20, unit: 'ft' },
+                { id: 'elv-half', label: 'Bridge half-width (perpendicular distance from the line)', type: 'number', min: 25, max: 500, step: 5, default: 100, unit: 'ft' },
+                { id: 'elv-elev', label: 'Elevator length along the path (climb-rate limit unknown — 100 ft is the field value)', type: 'number', min: 50, max: 500, step: 5, default: 100, unit: 'ft' },
+                { id: 'elv-overlap', label: 'Band overlap at every joint', type: 'number', min: 7, max: 50, step: 1, default: 10, unit: 'ft' },
+                { id: 'elv-gm', label: 'Create a pole GM beside every bridge ("Elevator NN - 200ft")', type: 'boolean', default: true },
+                { id: 'elv-scan', label: '🛗 Scan transmission crossings', type: 'button', action: 'elv-scan' },
             ],
             hotkeys: [],
         });
@@ -21673,6 +21727,667 @@
         sciLog(`↩ Undo: ${ok} NFZ(s) deleted${fail ? `, ${fail} FAILED (kept in the undo list)` : ''}`, fail ? '#ffb347' : '#5fff5f');
     }
     // ============================================================
+    // 🛗 ELEVATORS (feature #290, v4.327) — splice an Elevator 1 → Bridge →
+    // Elevator 2 altitude staircase into a flight path where it crosses a
+    // red transmission KML line (auto scan) or at a right-clicked FP point
+    // (manual). Bridge = the path within elvCfg.halfFt (PERPENDICULAR) of
+    // ANY transmission line — parallel circuits merge into one bridge;
+    // elevators = the next elvCfg.elevFt of path beyond each bridge end.
+    // Bands are MSL metres from DEM samples (25 ft): bridge floor = the
+    // highest ground under it + floorAgl, elevator floor = neighbour
+    // ceiling − overlap (neighbour = the untouched arc beyond, or the FFZ
+    // the path ends on), elevator ceiling = bridge floor + overlap.
+    // Stage → draw → per-crossing edit → preflight (strictly-positive band
+    // overlap at every shared vertex) → Commit: one POST per FP (untouched
+    // arcs keep ids, new arcs id-less), JSON + Delete Guard backups first,
+    // verify by refetch, stop on first failure → one pole GM per crossing
+    // ("Elevator NN - 200ft", unique, 15 ft off the path). ↩ Undo re-POSTs
+    // the backed-up FPs and deletes the GMs. Design: ShortKeys/AIM_Elevator_Design.md
+    // RULES: FPs only · a branch vertex inside the window skips the
+    // crossing · never two FPs in one request · arc ids regenerate on
+    // every save, so a path saved after staging must be re-staged.
+    // ============================================================
+    const ELV_MATCH_M = 0.6;                 // cut points this close to a vertex snap onto it
+    const ELV_SAMPLE_M = 25 * GEN_FT_TO_M;    // DEM sample spacing along the window
+    const ELV_STEP_M = 1;                     // walk step when measuring the bridge extent
+    const ELV_SCAN_CAP_M = 1609;              // a bridge never extends further than this from its crossing
+    const ELV_GM_OFFSET_FT = 15;              // GM sits this far beside the path (never ON it)
+    const ELV_GAP_MS = 150;
+    const ELV_LAST_KEY = (sid) => `aim_elv_last:${envSiteKey(sid)}`;   // localStorage: last commit {at, sid, fps:[orig entity], gms:[{id,name}]}
+    let elv = { siteID: null, items: [], layers: [], writes: [], running: false, siteCfg: null, seq: 1 };
+    function elvLog(m, color) {
+        try { const el = document.getElementById('aim-elv-result'); if (el) el.innerHTML = `<span style="color:${color || '#9ad'}">${m}</span>`; } catch (e) {}
+        console.log(`${TAG} 🛗 ${String(m).replace(/<[^>]*>/g, '')}`);
+    }
+    const elvEsc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const elvFt = (m) => Math.round(m * M_TO_FT);
+    const elvVk = (p) => `${Number(p.lat).toFixed(7)},${Number(p.lng).toFixed(7)}`;
+    const elvSame = (p, q) => approxMeters(p.lat, p.lng, q.lat, q.lng) <= ELV_MATCH_M;
+    // nearest point on segment a→b to p (lat/lng), with the distance in metres
+    function elvProj(p, a, b) {
+        const cosLat = Math.cos(p.lat * Math.PI / 180);
+        const ax = (a.lng - p.lng) * 111320 * cosLat, ay = (a.lat - p.lat) * 110540;
+        const bx = (b.lng - p.lng) * 111320 * cosLat, by = (b.lat - p.lat) * 110540;
+        const dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
+        let t = len2 ? -(ax * dx + ay * dy) / len2 : 0;
+        t = Math.max(0, Math.min(1, t));
+        const cx = ax + t * dx, cy = ay + t * dy;
+        return { d: Math.sqrt(cx * cx + cy * cy), lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t, t };
+    }
+    function elvLiveEntities(sid) { return (((mapObjectsBySite[sid] || {}).entities) || []); }
+    function elvLiveFp(sid, fpId) { return elvLiveEntities(sid).find(e => e && e.id === fpId && e.type === 15) || null; }
+    function elvFfzInfo(sid) {
+        return elvLiveEntities(sid).filter(e => e && e.type === 16 && entityCoords(e) && entityCoords(e).length >= 3)
+            .map(f => ({ e: f, ring: entityCoords(f), bbox: sciBbox(entityCoords(f)) }));
+    }
+    // ---- transmission lines (Map Styler's KML features over AIM_KML_DATA) ----
+    async function elvTransSegs(sid) {
+        const have = () => String(powerLinesKml.siteID) === String(sid) && powerLinesKml.trans.length > 0;
+        if (!have()) {
+            try { requestPowerLinesKml(String(sid)); } catch (e) { console.warn(`${TAG} 🛗 KML request failed:`, e); }
+            for (let i = 0; i < 15 && !have(); i++) await new Promise(r => setTimeout(r, 200));
+        }
+        const segs = [];
+        if (!have()) return segs;
+        // hidden lines count too — a hide is a personal view filter, the wire is still there
+        powerLinesKml.trans.forEach((f, fi) => {
+            if (!f || f.type !== 'line' || !Array.isArray(f.coords)) return;
+            for (let i = 0; i < f.coords.length - 1; i++) {
+                const a = f.coords[i], b = f.coords[i + 1];
+                if (a && b && isFinite(a.lat) && isFinite(a.lng) && isFinite(b.lat) && isFinite(b.lng)) segs.push({ a, b, fi });
+            }
+        });
+        return segs;
+    }
+    // ---- chain: the maximal degree-2 run of arcs through arcIdx (stops at path ends and branch vertices) ----
+    function elvChain(fp, arcIdx) {
+        const arcs = fp.arcs.filter(a => a && a.point_a && a.point_b);
+        const byV = new Map();
+        arcs.forEach((a, i) => [a.point_a, a.point_b].forEach(p => { const k = elvVk(p); if (!byV.has(k)) byV.set(k, []); byV.get(k).push(i); }));
+        const a0 = arcs[arcIdx];
+        const legs = [{ i: arcIdx, a: a0.point_a, b: a0.point_b }];
+        const used = new Set([arcIdx]);
+        const extend = (dir) => {   // returns the degree of the vertex the walk stopped at (1 = end, ≥3 = branch, 2 = loop closed)
+            for (let guard = 0; guard < arcs.length + 1; guard++) {
+                const edge = dir > 0 ? legs[legs.length - 1] : legs[0];
+                const v = dir > 0 ? edge.b : edge.a;
+                const at = byV.get(elvVk(v)) || [];
+                if (at.length !== 2) return at.length;
+                const ni = at.find(i => !used.has(i));
+                if (ni == null) return 2;
+                const na = arcs[ni]; used.add(ni);
+                const fwd = elvVk(na.point_a) === elvVk(v);
+                const leg = { i: ni, a: fwd ? na.point_a : na.point_b, b: fwd ? na.point_b : na.point_a };
+                if (dir > 0) legs.push(leg); else legs.unshift(leg);
+            }
+            return 2;
+        };
+        const endDeg = extend(1), startDeg = extend(-1);
+        const pts = [legs[0].a].concat(legs.map(l => l.b));
+        const cum = [0];
+        for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + approxMeters(pts[i - 1].lat, pts[i - 1].lng, pts[i].lat, pts[i].lng));
+        return { arcs, legs, pts, cum, len: cum[cum.length - 1], startDeg, endDeg, ids: legs.map(l => arcs[l.i].id) };
+    }
+    // point at arc-length s along the chain (exact vertex when s sits on one)
+    function elvAt(ch, s) {
+        s = Math.max(0, Math.min(ch.len, s));
+        let i = 0;
+        while (i < ch.cum.length - 2 && ch.cum[i + 1] < s) i++;
+        if (Math.abs(ch.cum[i] - s) < 1e-6) return { lat: ch.pts[i].lat, lng: ch.pts[i].lng, leg: i };
+        if (Math.abs(ch.cum[i + 1] - s) < 1e-6) return { lat: ch.pts[i + 1].lat, lng: ch.pts[i + 1].lng, leg: i };
+        const L = ch.cum[i + 1] - ch.cum[i], t = L > 0 ? (s - ch.cum[i]) / L : 0;
+        const p = ch.pts[i], q = ch.pts[i + 1];
+        return { lat: p.lat + (q.lat - p.lat) * t, lng: p.lng + (q.lng - p.lng) * t, leg: i };
+    }
+    function elvSnapS(ch, s) {
+        for (let i = 0; i < ch.cum.length; i++) if (Math.abs(ch.cum[i] - s) <= ELV_MATCH_M) return ch.cum[i];
+        return Math.max(0, Math.min(ch.len, s));
+    }
+    // GM point: bridge midpoint, ELV_GM_OFFSET_FT to the left of the path direction
+    function elvGmPoint(ch, s) {
+        const p = elvAt(ch, s), q = elvAt(ch, Math.min(ch.len, s + 2)), r = elvAt(ch, Math.max(0, s - 2));
+        const latM = 110540, lngM = 111320 * Math.cos(p.lat * Math.PI / 180);
+        let dx = (q.lng - r.lng) * lngM, dy = (q.lat - r.lat) * latM;
+        const L = Math.hypot(dx, dy) || 1; dx /= L; dy /= L;
+        const off = ELV_GM_OFFSET_FT * GEN_FT_TO_M;
+        return { lat: p.lat + (dx * off) / latM, lng: p.lng + (-dy * off) / lngM };
+    }
+    // ---- crossings: every FP arc × transmission segment intersection ----
+    function elvFindCrossings(fps, segs) {
+        const out = [];
+        const segBb = segs.map(sg => sciBbox([sg.a, sg.b]));
+        fps.forEach(fp => {
+            const arcs = fp.arcs.filter(a => a && a.point_a && a.point_b);
+            arcs.forEach((a, ai) => {
+                const bb = sciBbox([a.point_a, a.point_b]);
+                segs.forEach((sg, si) => {
+                    if (!sciBboxTouch(bb, segBb[si], 0)) return;
+                    if (!segmentsCross(a.point_a, a.point_b, sg.a, sg.b)) return;
+                    out.push({ fp, arcIdx: ai, X: segIntersectPoint(a.point_a, a.point_b, sg.a, sg.b), line: sg.fi });
+                });
+            });
+        });
+        return out;
+    }
+    function elvNewItem(fp, arcIdx, X, src, line) {
+        return { id: elv.seq++, fp, fpId: fp.id, fpName: fp.name, arcIdx, X, src, line: (line == null ? null : line), p: Object.assign({}, elvCfg), status: 'stage', fail: [], warn: [], geo: null, bands: null, gm: null };
+    }
+    // re-find the item's arc on the LIVE entity (arc ids regenerate on every save)
+    function elvRelocate(it, sid) {
+        const live = elvLiveFp(sid, it.fpId);
+        if (!live) { it.fail.push('flight path no longer on the site'); return false; }
+        it.fp = live; it.fpName = live.name;
+        const arcs = live.arcs.filter(a => a && a.point_a && a.point_b);
+        let best = { d: Infinity, i: -1, pt: null };
+        arcs.forEach((a, i) => { const pr = elvProj(it.X, a.point_a, a.point_b); if (pr.d < best.d) best = { d: pr.d, i, pt: pr }; });
+        if (best.i < 0 || best.d > 1.5) { it.fail.push(`crossing point is ${best.d === Infinity ? 'off' : `${elvFt(best.d)} ft off`} the live path — re-scan`); return false; }
+        it.arcIdx = best.i;
+        if (it.src === 'manual') it.X = { lat: best.pt.lat, lng: best.pt.lng };
+        return true;
+    }
+    // ---- stage one crossing: geometry (cut points), DEM, bands, checks ----
+    async function elvStageItem(it, sid, segs, ffzInfo) {
+        it.fail = []; it.warn = []; it.geo = null; it.bands = null; it.gm = null;
+        if (it.status === 'done') return;
+        it.status = 'stage';
+        if (!elvRelocate(it, sid)) return;
+        const ch = elvChain(it.fp, it.arcIdx);
+        const legPos = ch.legs.findIndex(l => l.i === it.arcIdx);
+        const A = ch.pts[legPos];
+        const sX = ch.cum[legPos] + approxMeters(A.lat, A.lng, it.X.lat, it.X.lng);
+        const halfM = it.p.halfFt * GEN_FT_TO_M, elevM = it.p.elevFt * GEN_FT_TO_M, ovM = it.p.overlapFt * GEN_FT_TO_M;
+        // transmission segments near this chain (bbox prefilter)
+        const cbb = sciBbox(ch.pts);
+        const near = it.src === 'line' ? segs.filter(sg => sciBboxTouch(cbb, sciBbox([sg.a, sg.b]), 0.004)) : [];
+        const dLine = (p) => { let b = Infinity; for (const sg of near) { const d = pointToSegMeters(p.lat, p.lng, sg.a, sg.b); if (d < b) b = d; } return b; };
+        // bridge end on one side: walk out until the path has been ≥ half-width from EVERY line for two elevator lengths
+        const walk = (dir) => {
+            if (it.src !== 'line') { const s = sX + dir * halfM; return { s, clamped: s < 0 || s > ch.len }; }
+            let s = sX, lastIn = sX;
+            for (let guard = 0; guard < ELV_SCAN_CAP_M; guard++) {
+                s += dir * ELV_STEP_M;
+                if (s < 0 || s > ch.len) return { s: lastIn, clamped: true };
+                if (dLine(elvAt(ch, s)) < halfM) lastIn = s;
+                else if (Math.abs(s - lastIn) >= 2 * elevM) return { s: lastIn, clamped: false };
+            }
+            it.warn.push(`bridge capped at ${elvFt(ELV_SCAN_CAP_M)} ft ${dir > 0 ? 'ahead of' : 'behind'} the crossing — the path runs along the line`);
+            return { s: lastIn, clamped: false };
+        };
+        const bL = walk(-1), bR = walk(1);
+        if (bL.clamped || bR.clamped) {
+            const endDeg = bL.clamped ? ch.startDeg : ch.endDeg;
+            it.fail.push(endDeg >= 3
+                ? `a branch vertex sits inside the bridge zone ${bL.clamped ? 'behind' : 'ahead of'} the crossing — split the path there first`
+                : `the path ends inside the bridge zone ${bL.clamped ? 'behind' : 'ahead of'} the crossing (within ${it.p.halfFt} ft of the line) — no room for an elevator`);
+            return;
+        }
+        const b1 = elvSnapS(ch, bL.s), b2 = elvSnapS(ch, bR.s);
+        const clampStart = b1 - elevM < 0, clampEnd = b2 + elevM > ch.len;
+        const e1 = clampStart ? 0 : elvSnapS(ch, b1 - elevM), e2 = clampEnd ? ch.len : elvSnapS(ch, b2 + elevM);
+        if (clampStart && ch.startDeg >= 3) it.fail.push('a branch vertex sits inside Elevator 1 — split the path there first');
+        if (clampEnd && ch.endDeg >= 3) it.fail.push('a branch vertex sits inside Elevator 2 — split the path there first');
+        if (it.fail.length) return;
+        if (b1 - e1 < 3 || e2 - b2 < 3) { it.fail.push(`${b1 - e1 < 3 ? 'Elevator 1' : 'Elevator 2'} would be under 10 ft long — the path ends right at the bridge`); return; }
+        // neighbour band = the untouched arc beyond the window, or the FFZ the path ends on
+        const bandAt = (s) => { const i = Math.max(0, Math.min(ch.legs.length - 1, elvAt(ch, s).leg)); const a = ch.arcs[ch.legs[i].i]; return { min: a.min_alt, max: a.max_alt }; };
+        const ffzAt = (p) => {
+            let best = null;
+            ffzInfo.forEach(f => {
+                if (!sciBboxTouch(f.bbox, { s: p.lat, n: p.lat, w: p.lng, e: p.lng }, 0.002)) return;
+                const d = sciDistToRingM(p, f.ring);
+                if (pointInPolygon(p.lat, p.lng, f.ring) || d <= sciEdgeFt * GEN_FT_TO_M) { if (!best || d < best.d) best = { f, d }; }
+            });
+            return best;
+        };
+        const neighbour = (atStart) => {
+            const nm = atStart ? 'Elevator 1' : 'Elevator 2';
+            if (!(atStart ? clampStart : clampEnd)) { const b = bandAt(atStart ? e1 - 0.01 : e2 + 0.01); return { min: b.min, max: b.max, label: `the next arc (${elvFt(b.min)}–${elvFt(b.max)} ft MSL)` }; }
+            const p = atStart ? ch.pts[0] : ch.pts[ch.pts.length - 1];
+            const hit = ffzAt(p);
+            const r = hit && hit.f.e.restrictions;
+            if (r && typeof r.minAlt === 'number' && typeof r.maxAlt === 'number') return { min: r.minAlt, max: r.maxAlt, label: `FFZ "${hit.f.e.name}" (${elvFt(r.minAlt)}–${elvFt(r.maxAlt)} ft MSL)` };
+            const b = bandAt(atStart ? 0 : ch.len);
+            it.warn.push(`${nm}: the path end is on no FFZ edge — floor taken from the arc's own band (${elvFt(b.min)}–${elvFt(b.max)} ft MSL)`);
+            return { min: b.min, max: b.max, label: 'the arc\'s own band (no FFZ at the path end)' };
+        };
+        // DEM along the window
+        const sampleS = [];
+        for (let s = e1; s < e2; s += ELV_SAMPLE_M) sampleS.push(s);
+        sampleS.push(e2, b1, b2);
+        const samples = sampleS.map(s => Object.assign(elvAt(ch, s), { s }));
+        try { await bulkFetchElevations(samples); } catch (e) { console.warn(`${TAG} 🛗 DEM fetch failed:`, e); }
+        const g = samples.map(p => ({ s: p.s, g: getElevationFromCache(p.lat, p.lng) }));
+        if (g.some(x => typeof x.g !== 'number')) { it.fail.push('DEM sample unavailable (elevation service) — try again'); return; }
+        const gIn = (lo, hi) => g.filter(x => x.s >= lo - 0.01 && x.s <= hi + 0.01).map(x => x.g);
+        const mx = (arr) => Math.max(...arr), mn = (arr) => Math.min(...arr);
+        const gB = gIn(b1, b2), gE1 = gIn(e1, b1), gE2 = gIn(b2, e2);
+        const R = fpArcAltMeters;
+        const bridge = { min: R(mx(gB) + it.p.floorAgl * GEN_FT_TO_M) };
+        bridge.max = R(bridge.min + it.p.height * GEN_FT_TO_M);
+        // already bridged? (the crossed arc's floor is at/above the target floor)
+        const crossed = ch.arcs[it.arcIdx];
+        if (it.src === 'line' && typeof crossed.min_alt === 'number' && crossed.min_alt >= bridge.min - 0.5) {
+            it.status = 'present';
+            it.geo = { ch, sX, e1, b1, b2, e2, gz: { E1: { max: mx(gE1), min: mn(gE1) }, B: { max: mx(gB), min: mn(gB) }, E2: { max: mx(gE2), min: mn(gE2) } }, gmLL: elvGmPoint(ch, (b1 + b2) / 2) };
+            it.warn.push(`already bridged — the crossed arc flies ${elvFt(crossed.min_alt)}–${elvFt(crossed.max_alt)} ft MSL (${elvFt(crossed.min_alt - mx(gB))} ft over the highest ground)`);
+            return;
+        }
+        const n1 = neighbour(true), n2 = neighbour(false);
+        const E1 = { min: R(n1.max - ovM), max: R(bridge.min + ovM), nb: n1 };
+        const E2 = { min: R(n2.max - ovM), max: R(bridge.min + ovM), nb: n2 };
+        [[E1, 'Elevator 1', gE1], [E2, 'Elevator 2', gE2]].forEach(([E, nm, gg]) => {
+            if (!(E.max > E.min)) it.fail.push(`${nm} band inverted (${elvFt(E.min)}–${elvFt(E.max)} ft MSL) — the bridge floor is below ${E.nb.label}`);
+            else {
+                if (!(E.max > E.nb.min && E.nb.max > E.min)) it.fail.push(`${nm} has no positive overlap with ${E.nb.label}`);
+                if (!(bridge.max > E.min && E.max > bridge.min)) it.fail.push(`${nm} has no positive overlap with the bridge`);
+            }
+            const spread = (mx(gg) - mn(gg)) * M_TO_FT;
+            if (spread > it.p.overlapFt) it.warn.push(`${nm}: ground changes ${Math.round(spread)} ft along it (more than the ${it.p.overlapFt} ft overlap) — consider a second band`);
+            const floorAgl = (E.min - mx(gg)) * M_TO_FT;
+            if (floorAgl < sciAglFt) it.warn.push(`${nm} floor is ${Math.round(floorAgl)} ft over its highest ground (below ${sciAglFt} ft AGL)`);
+            const lenM = nm === 'Elevator 1' ? b1 - e1 : e2 - b2;
+            if (lenM < elevM - 0.5) it.warn.push(`${nm} is only ${elvFt(lenM)} ft long (the path ends) — a steeper climb than the ${it.p.elevFt} ft default`);
+        });
+        it.bands = { E1, bridge, E2 };
+        it.geo = { ch, sX, e1, b1, b2, e2, gz: { E1: { max: mx(gE1), min: mn(gE1) }, B: { max: mx(gB), min: mn(gB) }, E2: { max: mx(gE2), min: mn(gE2) } }, gmLL: elvGmPoint(ch, (b1 + b2) / 2) };
+        if (it.p.gm) it.gm = { name: `Elevator # - ${it.p.floorAgl}ft`, ll: it.geo.gmLL };
+    }
+    // ---- per-FP arc rebuild + preflight ----
+    function elvBuildWrites(sid) {
+        const byFp = new Map();
+        elv.items.filter(i => i.status === 'stage' && !i.fail.length && i.geo && i.bands).forEach(i => { if (!byFp.has(i.fpId)) byFp.set(i.fpId, []); byFp.get(i.fpId).push(i); });
+        const writes = [];
+        byFp.forEach((items, fpId) => {
+            const live = elvLiveFp(sid, fpId);
+            const w = { fpId, fp: live, items, arcs: null, fail: [], done: false };
+            if (!live) { w.fail.push('flight path no longer on the site'); writes.push(w); return; }
+            const liveArcs = live.arcs.filter(a => a && a.point_a && a.point_b);
+            const liveIds = new Set(liveArcs.map(a => a.id));
+            const chains = new Map();
+            items.forEach(it => { const key = it.geo.ch.ids.join(','); if (!chains.has(key)) chains.set(key, { ch: it.geo.ch, items: [] }); chains.get(key).items.push(it); });
+            let out = liveArcs.map(a => Object.assign({}, a, { _live: true }));
+            chains.forEach(({ ch, items: cItems }) => {
+                if (!ch.ids.every(id => liveIds.has(id))) { cItems.forEach(it => it.fail.push('the path was saved after staging (arc ids changed) — re-stage')); return; }
+                cItems.sort((x, y) => x.geo.sX - y.geo.sX);
+                const kept = [];
+                cItems.forEach(it => {
+                    const last = kept[kept.length - 1];
+                    if (last && it.geo.e1 < last.geo.e2 - ELV_MATCH_M) {
+                        // inside the earlier crossing's bridge = the same merged bridge (parallel circuits) — not a second set
+                        if (it.geo.sX >= last.geo.b1 && it.geo.sX <= last.geo.b2) { it.status = 'merged'; it.warn.push(`covered by crossing #${last.id}'s bridge (parallel line) — one staircase serves both`); }
+                        else it.fail.push(`its window overlaps crossing #${last.id} on the same path — raise the half-width so they merge, or commit one at a time`);
+                        return;
+                    }
+                    kept.push(it);
+                });
+                if (!kept.length) return;
+                const cuts = new Set(ch.cum.map(s => +s.toFixed(3)));
+                kept.forEach(it => [it.geo.e1, it.geo.b1, it.geo.b2, it.geo.e2].forEach(s => cuts.add(+s.toFixed(3))));
+                const S = [...cuts].sort((a, b) => a - b);
+                const zoneFor = (mid) => {
+                    for (const it of kept) {
+                        const gg = it.geo;
+                        if (mid > gg.e1 && mid < gg.b1) return { b: it.bands.E1, it, zone: 'E1' };
+                        if (mid > gg.b1 && mid < gg.b2) return { b: it.bands.bridge, it, zone: 'bridge' };
+                        if (mid > gg.b2 && mid < gg.e2) return { b: it.bands.E2, it, zone: 'E2' };
+                    }
+                    return null;
+                };
+                const newArcs = [];
+                for (let i = 0; i < S.length - 1; i++) {
+                    const s0 = S[i], s1 = S[i + 1];
+                    if (s1 - s0 < 1e-3) continue;
+                    const mid = (s0 + s1) / 2, legI = elvAt(ch, mid).leg, base = ch.arcs[ch.legs[legI].i];
+                    const z = zoneFor(mid);
+                    const wholeLeg = Math.abs(s0 - ch.cum[legI]) < 2e-3 && Math.abs(s1 - ch.cum[legI + 1]) < 2e-3;
+                    if (!z && wholeLeg) { newArcs.push(Object.assign({}, base, { _live: true })); continue; }   // untouched leg keeps its id
+                    const pa = elvAt(ch, s0), pb = elvAt(ch, s1);
+                    newArcs.push(Object.assign({
+                        point_a: { lat: pa.lat, lng: pa.lng }, point_b: { lat: pb.lat, lng: pb.lng },
+                        points: [{ lat: pa.lat, lng: pa.lng }, { lat: pb.lat, lng: pb.lng }],
+                        distance: approxMeters(pa.lat, pa.lng, pb.lat, pb.lng),
+                        min_emergency_alt: (typeof base.min_emergency_alt === 'number' ? base.min_emergency_alt : 12),
+                        wait_until_approved: !!base.wait_until_approved,
+                        min_alt: z ? z.b.min : base.min_alt, max_alt: z ? z.b.max : base.max_alt,
+                    }, { _new: true, _zone: z ? z.zone : 'split', _item: z ? z.it.id : null }));
+                }
+                const firstPos = out.findIndex(a => a._live && ch.ids.includes(a.id));
+                out = out.filter(a => !(a._live && ch.ids.includes(a.id)));
+                out.splice(firstPos < 0 ? out.length : firstPos, 0, ...newArcs);
+            });
+            if (!items.some(it => !it.fail.length)) { w.fail.push('no crossing on this path passed'); writes.push(w); return; }
+            // strictly-positive band overlap at every shared vertex (server rule)
+            const byV = new Map();
+            out.forEach((a, i) => [elvVk(a.point_a), elvVk(a.point_b)].forEach(k => { if (!byV.has(k)) byV.set(k, []); byV.get(k).push(i); }));
+            const bad = [];
+            byV.forEach(list => { for (let x = 0; x < list.length; x++) for (let y = x + 1; y < list.length; y++) { const P = out[list[x]], Q = out[list[y]]; if (!(P.max_alt > Q.min_alt && Q.max_alt > P.min_alt)) bad.push(`#${list[x] + 1}↔#${list[y] + 1} (${elvFt(P.min_alt)}–${elvFt(P.max_alt)} vs ${elvFt(Q.min_alt)}–${elvFt(Q.max_alt)} ft MSL)`); } });
+            if (bad.length) w.fail.push(`connected arcs without a positive altitude overlap: ${bad.slice(0, 4).join(', ')}`);
+            if (!out.some(a => a._new)) w.fail.push('nothing changes on this path');
+            w.arcs = out;
+            writes.push(w);
+        });
+        elv.writes = writes;
+        return writes;
+    }
+    // ---- staging drivers ----
+    async function elvEnsureSite() {
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return null; }
+        if (elv.siteID !== String(sid)) { elvClearLayers(); elv = { siteID: String(sid), items: [], layers: [], writes: [], running: false, siteCfg: null, seq: 1 }; }
+        if (!elvLiveEntities(sid).length) { try { await fetchMapObjects(sid, true); } catch (e) { console.warn(`${TAG} 🛗 entity fetch failed:`, e); } }
+        if (!elvLiveEntities(sid).length) { elvLog('Could not load the site entities', '#ff6060'); return null; }
+        return String(sid);
+    }
+    async function elvStageAll(sid) {
+        const segs = await elvTransSegs(sid);
+        const ffzInfo = elvFfzInfo(sid);
+        for (const it of elv.items) {
+            try { await elvStageItem(it, sid, segs, ffzInfo); }
+            catch (e) { console.error(`${TAG} 🛗 stage #${it.id} failed:`, e); it.fail.push(`stage failed: ${e.message || e}`); }
+        }
+        elvBuildWrites(sid);
+        elvDraw(); elvRenderList();
+    }
+    async function elvScan() {
+        if (elv.running) return;
+        const sid = await elvEnsureSite(); if (!sid) return;
+        elvLog('Scanning flight paths against the transmission KML lines…');
+        try { await fetchMapObjects(sid, true); } catch (e) { console.warn(`${TAG} 🛗 refetch failed:`, e); }
+        const segs = await elvTransSegs(sid);
+        if (!segs.length) { elvLog('No transmission KML lines for this site — Map Styler must be running with the site KMLs loaded (red lines on the map)', '#ff6060'); elvRenderList(); return; }
+        const fps = elvLiveEntities(sid).filter(e => e && e.type === 15 && Array.isArray(e.arcs));
+        const found = elvFindCrossings(fps, segs);
+        let added = 0;
+        found.forEach(c => {
+            if (elv.items.some(it => it.fpId === c.fp.id && elvSame(it.X, c.X))) return;
+            elv.items.push(elvNewItem(c.fp, c.arcIdx, c.X, 'line', c.line));
+            added++;
+        });
+        elvLog(`${found.length} crossing${found.length === 1 ? '' : 's'} on ${new Set(found.map(c => c.fp.id)).size} flight path(s) · ${added} new staged${elv.items.length - added ? ` · ${elv.items.length - added} already staged` : ''}`);
+        await elvStageAll(sid);
+        elvSummary();
+    }
+    async function elvRestage() {
+        if (elv.running) return;
+        const sid = await elvEnsureSite(); if (!sid) return;
+        try { await fetchMapObjects(sid, true); } catch (e) { console.warn(`${TAG} 🛗 refetch failed:`, e); }
+        elv.items.forEach(it => { if (it.status !== 'done') it.status = 'stage'; });
+        await elvStageAll(sid);
+        elvSummary();
+    }
+    async function elvManualAt(entity, ll) {
+        const sid = await elvEnsureSite(); if (!sid) return;
+        const live = elvLiveFp(sid, entity.id) || entity;
+        const arcs = (live.arcs || []).filter(a => a && a.point_a && a.point_b);
+        let best = { d: Infinity, i: -1, pt: null };
+        arcs.forEach((a, i) => { const pr = elvProj(ll, a.point_a, a.point_b); if (pr.d < best.d) best = { d: pr.d, i, pt: pr }; });
+        if (best.i < 0) { showToast('That flight path has no arcs', 'rgba(255,96,96,0.55)'); return; }
+        try { if (!document.getElementById(GEN_MODAL_ID)) openSiteGenerator(sid); } catch (e) { console.warn(`${TAG} 🛗 open failed:`, e); }
+        elvShowPanel();
+        const X = { lat: best.pt.lat, lng: best.pt.lng };
+        if (elv.items.some(it => it.fpId === live.id && elvSame(it.X, X))) { elvLog('That point is already staged', '#ffb347'); return; }
+        elv.items.push(elvNewItem(live, best.i, X, 'manual', null));
+        elvLog(`Manual crossing staged on "${elvEsc(live.name)}" (${elvFt(best.d)} ft from your click) — bridge = ±${elvCfg.halfFt} ft along the path`);
+        await elvStageAll(sid);
+        elvSummary();
+    }
+    function elvSummary() {
+        const n = (st) => elv.items.filter(i => i.status === st).length;
+        const ok = elv.items.filter(i => i.status === 'stage' && !i.fail.length).length;
+        const bad = elv.items.filter(i => i.status === 'stage' && i.fail.length).length;
+        const wBad = (elv.writes || []).filter(w => w.fail.length).length;
+        if (!elv.items.length) { elvLog('No crossings staged. 🔍 Scan finds every flight path × red transmission line; right-click a flight path → 🛗 for a manual one.'); return; }
+        elvLog(`${ok} ready · ${bad} blocked · ${n('present')} already bridged · ${n('merged')} merged into a neighbour · ${n('done')} committed${wBad ? ` · <b style="color:#ff6060">${wBad} flight path write(s) blocked by preflight</b>` : ''} — review each card, then ✓ Commit (dry run honoured)`, bad || wBad ? '#ffb347' : '#5fff5f');
+    }
+    // ---- drawing ----
+    function elvClearLayers() { const map = getLeafletMap(); elv.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); elv.layers = []; }
+    function elvBandText(E, gz) {
+        return `${elvFt(E.min)}–${elvFt(E.max)} ft MSL · ${elvFt(E.min - gz.max)}–${elvFt(E.max - gz.min)} ft AGL`;
+    }
+    function elvDraw() {
+        elvClearLayers();
+        const L = getLeafletL(), map = getLeafletMap();
+        if (!L || !map) return;
+        const add = (l) => { try { l.addTo(map); elv.layers.push(l); } catch (e) {} };
+        const seg = (ch, s0, s1, opts, tip) => {
+            const pts = [elvAt(ch, s0)];
+            ch.cum.forEach((c, i) => { if (c > s0 + 1e-6 && c < s1 - 1e-6) pts.push(ch.pts[i]); });
+            pts.push(elvAt(ch, s1));
+            const pl = L.polyline(pts.map(p => [p.lat, p.lng]), opts);
+            if (tip) { try { pl.bindTooltip(tip, { sticky: true }); } catch (e) {} }
+            add(pl);
+        };
+        elv.items.forEach(it => {
+            if (!it.geo) { add(L.circleMarker([it.X.lat, it.X.lng], { radius: 8, color: '#ff5555', weight: 2, fillColor: '#ff5555', fillOpacity: 0.25, interactive: false })); return; }
+            const g = it.geo, bad = it.fail.length > 0, muted = it.status === 'present' || it.status === 'done' || it.status === 'merged';
+            if (it.status === 'merged') { add(L.circleMarker([it.X.lat, it.X.lng], { radius: 5, color: '#ff2a2a', weight: 2, fillColor: '#ff2a2a', fillOpacity: 0.2, interactive: false })); return; }
+            const col = (c) => bad ? '#ff5555' : muted ? '#8a8f94' : c;
+            const dash = bad ? '6 5' : muted ? '2 6' : null;
+            const tipHead = `<b>#${it.id} ${elvEsc(it.fpName)}</b> · ${it.status === 'done' ? 'committed' : it.status === 'present' ? 'already bridged' : bad ? 'blocked' : 'staged'}<br>`;
+            const bands = it.bands;
+            seg(g.ch, g.e1, g.b1, { color: col('#ffe14d'), weight: 5, opacity: 0.95, dashArray: dash }, tipHead + (bands ? `Elevator 1 (${elvFt(g.b1 - g.e1)} ft) — ${elvBandText(bands.E1, g.gz.E1)}` : 'Elevator 1'));
+            seg(g.ch, g.b1, g.b2, { color: col('#ff9a3d'), weight: 6, opacity: 0.95, dashArray: dash }, tipHead + (bands ? `Bridge (${elvFt(g.b2 - g.b1)} ft) — ${elvBandText(bands.bridge, g.gz.B)}` : 'Bridge'));
+            seg(g.ch, g.b2, g.e2, { color: col('#ffe14d'), weight: 5, opacity: 0.95, dashArray: dash }, tipHead + (bands ? `Elevator 2 (${elvFt(g.e2 - g.b2)} ft) — ${elvBandText(bands.E2, g.gz.E2)}` : 'Elevator 2'));
+            [g.e1, g.b1, g.b2, g.e2].forEach(s => { const p = elvAt(g.ch, s); add(L.circleMarker([p.lat, p.lng], { radius: 4, color: '#ffffff', weight: 1, fillColor: col('#ffe14d'), fillOpacity: 1, interactive: false })); });
+            add(L.circleMarker([it.X.lat, it.X.lng], { radius: 5, color: '#ff2a2a', weight: 2, fillColor: '#ff2a2a', fillOpacity: 0.2, interactive: false }));
+            if (it.gm && it.status === 'stage' && !bad) add(L.circleMarker([g.gmLL.lat, g.gmLL.lng], { radius: 6, color: '#c084fc', weight: 2, fillColor: '#c084fc', fillOpacity: 0.6, interactive: false }));
+        });
+    }
+    function elvPanTo(ll) { try { const map = getLeafletMap(); if (map && ll) map.setView([ll.lat, ll.lng], Math.max(map.getZoom(), 18)); } catch (e) {} }
+    // ---- panel ----
+    function elvRenderPanelBody() {
+        const host = document.getElementById('aim-elv-controls'); if (!host) return;
+        const btnCss = (col) => `background:rgba(${col},0.12);color:rgb(${col});border:1px solid rgba(${col},0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px`;
+        host.innerHTML = `
+            <div style="font-size:11px;color:#ff9a3d;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">🛗 Elevators — climb over transmission lines</div>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px">
+                <button id="aim-elv-scan" style="${btnCss('255,154,61')}" title="Find every flight path that crosses a red transmission KML line and stage an elevator set at each crossing">🔍 Scan crossings</button>
+                <button id="aim-elv-restage" style="${btnCss('160,160,160')}" title="Re-read the site and rebuild every staged crossing with the current numbers">↻ Re-stage</button>
+                <button id="aim-elv-commit" style="${btnCss('95,255,95')};font-weight:600" title="Write the staged elevators: one POST per flight path (JSON + Delete Guard backups first, verify after, stop on the first failure), then one pole GM per crossing. Honours Dry run.">✓ Commit</button>
+                <button id="aim-elv-undo" style="${btnCss('255,179,71')}" title="Re-POST the flight paths exactly as they were before the last commit on this site and delete the GMs it created">↩ Undo last run</button>
+                <button id="aim-elv-clear" style="${btnCss('255,90,90')}" title="Drop every staged crossing (local only — nothing on the server is touched)">✕ Clear</button>
+                <span style="color:#888;font-size:10px">defaults: bridge ${elvCfg.floorAgl} + ${elvCfg.height} ft AGL · ±${elvCfg.halfFt} ft of the line · elevators ${elvCfg.elevFt} ft · ${elvCfg.overlapFt} ft overlaps (Control Panel → Elevators) · right-click a flight path → 🛗 for a manual crossing</span>
+            </div>
+            <div id="aim-elv-list" style="font-size:11px;color:#cfd6dc;margin-bottom:6px"></div>
+            <div id="aim-elv-result" style="font-size:11px;color:#9ad;line-height:1.5"></div>`;
+        host.querySelector('#aim-elv-scan').onclick = () => elvScan().catch(e => { console.error(`${TAG} 🛗 scan failed:`, e); elvLog(`Scan failed: ${elvEsc(e.message || e)}`, '#ff6060'); });
+        host.querySelector('#aim-elv-restage').onclick = () => elvRestage().catch(e => { console.error(`${TAG} 🛗 re-stage failed:`, e); elvLog(`Re-stage failed: ${elvEsc(e.message || e)}`, '#ff6060'); });
+        host.querySelector('#aim-elv-commit').onclick = () => elvCommit().catch(e => { console.error(`${TAG} 🛗 commit failed:`, e); elvLog(`Commit failed: ${elvEsc(e.message || e)}`, '#ff6060'); elv.running = false; elvRenderList(); });
+        host.querySelector('#aim-elv-undo').onclick = () => elvUndoLast().catch(e => { console.error(`${TAG} 🛗 undo failed:`, e); elvLog(`Undo failed: ${elvEsc(e.message || e)}`, '#ff6060'); elv.running = false; });
+        host.querySelector('#aim-elv-clear').onclick = () => { if (elv.running) return; elv.items = []; elv.writes = []; elvClearLayers(); elvRenderList(); elvSummary(); };
+        host.addEventListener('change', (ev) => {
+            const inp = ev.target.closest('[data-elv-id][data-elv-field]'); if (!inp || elv.running) return;
+            const it = elv.items.find(i => String(i.id) === inp.dataset.elvId); if (!it) return;
+            const f = inp.dataset.elvField;
+            if (f === 'gm') it.p.gm = !!inp.checked;
+            else { const n = Number(inp.value); if (!isFinite(n) || n < 0) return; it.p[f] = n; }
+            if (it.status === 'done') return;
+            it.status = 'stage';
+            (async () => {
+                const sid = await elvEnsureSite(); if (!sid) return;
+                await elvStageAll(sid);
+                elvSummary();
+            })().catch(e => { console.error(`${TAG} 🛗 restage failed:`, e); elvLog(`Re-stage failed: ${elvEsc(e.message || e)}`, '#ff6060'); });
+        });
+        host.addEventListener('click', (ev) => {
+            const rm = ev.target.closest('[data-elv-remove]');
+            if (rm) { if (elv.running) return; elv.items = elv.items.filter(i => String(i.id) !== rm.dataset.elvRemove); elvBuildWrites(elv.siteID); elvDraw(); elvRenderList(); elvSummary(); return; }
+            const pan = ev.target.closest('[data-elv-pan]');
+            if (pan) { const [lat, lng] = pan.dataset.elvPan.split(',').map(Number); if (isFinite(lat) && isFinite(lng)) elvPanTo({ lat, lng }); }
+        });
+        elvRenderList();
+    }
+    function elvRenderList() {
+        const el = document.getElementById('aim-elv-list'); if (!el) return;
+        if (!elv.items.length) { el.innerHTML = ''; return; }
+        const num = (it, f, step, title) => `<label style="display:inline-flex;align-items:center;gap:3px" title="${elvEsc(title)}">${f === 'floorAgl' ? 'Floor' : f === 'height' ? 'Height' : f === 'halfFt' ? '± line' : f === 'elevFt' ? 'Elevator' : 'Overlap'} <input type="number" data-elv-id="${it.id}" data-elv-field="${f}" value="${it.p[f]}" min="0" step="${step}" ${it.status === 'done' ? 'disabled' : ''} style="width:52px;background:#1a1d23;border:1px solid rgba(255,154,61,0.35);color:#fff;border-radius:2px;padding:1px 3px;font:inherit;font-size:11px"> ft</label>`;
+        const wFail = (it) => { const w = (elv.writes || []).find(x => x.fpId === it.fpId); return w && w.fail.length && !it.fail.length ? w.fail : []; };
+        el.innerHTML = elv.items.map(it => {
+            const g = it.geo, b = it.bands;
+            const stCol = it.status === 'done' ? '#9ad' : it.status === 'present' || it.status === 'merged' ? '#8a8f94' : it.fail.length ? '#ff6060' : '#5fff5f';
+            const stTxt = it.status === 'done' ? '✓ committed' : it.status === 'present' ? '– already bridged' : it.status === 'merged' ? '– merged' : it.fail.length ? '✕ blocked' : wFail(it).length ? '✕ path blocked' : '● staged';
+            const lens = g ? `E1 ${elvFt(g.b1 - g.e1)} ft · bridge ${elvFt(g.b2 - g.b1)} ft · E2 ${elvFt(g.e2 - g.b2)} ft` : '';
+            const bandRow = (g && b) ? `<div style="color:#9ad;font-size:10px;line-height:1.5">
+                    <span style="color:#ffe14d">E1</span> ${elvBandText(b.E1, g.gz.E1)} &nbsp;·&nbsp; <span style="color:#ff9a3d">Bridge</span> ${elvBandText(b.bridge, g.gz.B)} (<b>${elvFt(b.bridge.max - g.gz.B.min)} ft</b> over its lowest ground) &nbsp;·&nbsp; <span style="color:#ffe14d">E2</span> ${elvBandText(b.E2, g.gz.E2)}
+                    ${it.gm ? `<br><span style="color:#c084fc">GM</span> pole "${elvEsc(it.gm.name.replace('#', 'NN'))}" ${ELV_GM_OFFSET_FT} ft beside the bridge midpoint` : ''}</div>` : '';
+            const notes = [...it.fail.map(x => `<div style="color:#ff8a80">✕ ${elvEsc(x)}</div>`), ...wFail(it).map(x => `<div style="color:#ff8a80">✕ path: ${elvEsc(x)}</div>`), ...it.warn.map(x => `<div style="color:#ffb347">⚠ ${elvEsc(x)}</div>`)].join('');
+            return `<div style="margin:4px 0;padding:5px 7px;border:1px solid rgba(255,154,61,0.25);border-radius:3px;background:rgba(255,154,61,0.04)">
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                    <span data-elv-pan="${it.X.lat},${it.X.lng}" style="cursor:pointer;color:#fff;font-weight:600" title="Pan the map here">#${it.id} ${elvEsc(it.fpName)}</span>
+                    <span style="color:#888;font-size:10px">${it.src === 'line' ? `transmission line${it.line != null ? ` ${it.line + 1}` : ''}` : 'manual point'} · ${lens}</span>
+                    <span style="color:${stCol};font-weight:600;margin-left:auto">${stTxt}</span>
+                    <button data-elv-remove="${it.id}" title="Drop this crossing from the stage" style="background:none;border:1px solid rgba(255,255,255,0.2);color:#bbb;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:11px" ${elv.running ? 'disabled' : ''}>✕</button>
+                </div>
+                <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:4px 0;font-size:11px;color:#cfd6dc">
+                    ${num(it, 'floorAgl', 5, 'Bridge floor above the highest ground under the bridge')} ${num(it, 'height', 5, 'Bridge band height')} ${num(it, 'halfFt', 5, it.src === 'line' ? 'Bridge half-width — perpendicular distance from the line' : 'Bridge half-length along the path from the clicked point')} ${num(it, 'elevFt', 5, 'Elevator length along the path beyond each bridge end')} ${num(it, 'overlapFt', 1, 'Band overlap at every joint')}
+                    <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" data-elv-id="${it.id}" data-elv-field="gm" ${it.p.gm ? 'checked' : ''} ${it.status === 'done' ? 'disabled' : ''} style="accent-color:#c084fc"> GM</label>
+                </div>
+                ${bandRow}${notes}
+            </div>`;
+        }).join('');
+    }
+    function elvShowPanel() {
+        const c = document.getElementById('aim-elv-controls'); if (!c) return;
+        c.style.display = 'block';
+        const b = document.getElementById('aim-gen-elev'); if (b) b.style.background = 'rgba(255,154,61,0.32)';
+        if (!document.getElementById('aim-elv-list')) elvRenderPanelBody();
+    }
+    function elvOpenFromAction(scan) {
+        if (LITE) { showToast('Elevators need Full mode (CSM access)', 'rgba(255,180,0,0.6)'); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
+        const go = () => {
+            try { if (!document.getElementById(GEN_MODAL_ID)) openSiteGenerator(sid); elvShowPanel(); } catch (e) { console.warn(`${TAG} 🛗 open failed:`, e); return; }
+            if (scan) elvScan().catch(e => { console.error(`${TAG} 🛗 scan failed:`, e); elvLog(`Scan failed: ${elvEsc(e.message || e)}`, '#ff6060'); });
+        };
+        const bucket = mapObjectsBySite[sid];
+        if (!bucket || !bucket.entities) fetchMapObjects(sid, true).then(go).catch(e => { console.warn(`${TAG} 🛗 entity fetch failed:`, e); go(); }); else go();
+    }
+    // ---- commit ----
+    async function elvCreateGm(it, sid) {
+        const b = it.bands, g = it.geo;
+        const t = gmtNormalizeTemplate({ id: 'elv', label: 'Elevator', name: it.gm.name, type: 'pole', heightFt: 0, start: 1, pad: 2 });
+        const description = `Elevator over a transmission line — FP "${it.fpName}": bridge ${elvFt(b.bridge.min)}–${elvFt(b.bridge.max)} ft MSL (${elvFt(b.bridge.min - g.gz.B.max)} ft over the highest ground), elevators ${it.p.elevFt} ft, climb to ${elvFt(b.E1.max)} ft MSL · auto-placed by Site Setup Tools 🛗`;
+        const res = await gmtCreateGm(t, it.gm.ll, sid, '', { type: 'pole', heightFt: 0, description });
+        return res ? { id: res.id, name: res.name, siteID: sid } : null;
+    }
+    async function elvCommit() {
+        if (elv.running) return;
+        if (liteBlockedWrite('commit elevators')) return;
+        const sid = await elvEnsureSite(); if (!sid) return;
+        try { await fetchMapObjects(sid, true); } catch (e) { console.warn(`${TAG} 🛗 refetch failed:`, e); }
+        const writes = elvBuildWrites(sid);
+        elvRenderList();
+        const todo = writes.filter(w => !w.fail.length && !w.done);
+        if (!todo.length) { elvLog('Nothing to commit — stage a crossing first (or every staged one is blocked)', '#ffb347'); return; }
+        const gmN = todo.reduce((n, w) => n + w.items.filter(it => !it.fail.length && it.gm).length, 0);
+        if (sciDry()) { elvLog(`DRY RUN — would rewrite ${todo.length} flight path(s) (${todo.reduce((n, w) => n + w.arcs.filter(a => a._new).length, 0)} new arcs) and create ${gmN} GM(s). Untick Dry run (Commit section) to write.`, '#ffe14d'); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { elvLog('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
+        if (!elv.siteCfg) { try { elv.siteCfg = await fetchSiteConfig(sid, true); } catch (e) { elvLog('Site config fetch failed — refusing to write (mountain_terrain flag unknown)', '#ff6060'); return; } }
+        if (!confirm(`Rewrite ${todo.length} flight path(s) with elevator arcs and create ${gmN} GM(s) on site ${sid}? Each path is backed up (JSON download + Delete Guard ring) before it is written.`)) return;
+        const rec = { at: new Date().toISOString(), sid, origin: location.origin, fps: todo.map(w => JSON.parse(JSON.stringify(w.fp))), gms: [] };
+        try { localStorage.setItem(ELV_LAST_KEY(sid), JSON.stringify(rec)); } catch (e) { console.warn(`${TAG} 🛗 last-run stash failed:`, e); }
+        if (!downloadJSONFile(`elevators-fp-backup-${sid}-${Date.now()}.json`, JSON.stringify({ site: sid, at: rec.at, flightPaths: rec.fps }, null, 1))) { elvLog('Backup download failed — refusing to write', '#ff6060'); return; }
+        elv.running = true; elvRenderList();
+        let ok = 0, fail = 0, gmOk = 0, gmFail = 0;
+        try {
+            for (let i = 0; i < todo.length; i++) {
+                const w = todo[i];
+                const label = `FP ${i + 1}/${todo.length} "${elvEsc(w.fp.name)}" (#${w.fp.id})`;
+                try {
+                    if (!sciBankToGuard(w.fp, sid)) throw new Error('Delete Guard bank failed — not writing');
+                    const body = buildWriteBody(w.fp, elv.siteCfg);
+                    body.arcs = w.arcs.map(a => {
+                        const o = Object.assign({}, a); delete o._live; delete o._new; delete o._zone; delete o._item;
+                        if (a._new) { delete o.id; delete o.mapobject; }
+                        o.points = [{ lat: o.point_a.lat, lng: o.point_a.lng }, { lat: o.point_b.lat, lng: o.point_b.lng }];
+                        o.min_alt = fpArcAltMeters(o.min_alt); o.max_alt = fpArcAltMeters(o.max_alt);
+                        return o;
+                    });
+                    const pts = []; body.arcs.forEach(a => [a.point_a, a.point_b].forEach(p => { if (!pts.some(q => elvSame(q, p))) pts.push({ lat: p.lat, lng: p.lng }); }));
+                    body.points = pts;
+                    const saved = await sciPostMapObject(body, csrf);
+                    try { await fetchMapObjects(sid, true); } catch (e) {}
+                    const live = elvLiveFp(sid, w.fp.id);
+                    if (!live || !Array.isArray(live.arcs)) throw new Error('flight path missing after save');
+                    const have = live.arcs.filter(a => a && a.point_a && a.point_b), want = body.arcs;
+                    if (have.length !== want.length) throw new Error(`arc count ${have.length} ≠ expected ${want.length} after save`);
+                    const missing = want.filter(a => !have.some(h => (elvSame(h.point_a, a.point_a) && elvSame(h.point_b, a.point_b)) || (elvSame(h.point_a, a.point_b) && elvSame(h.point_b, a.point_a))));
+                    if (missing.length) throw new Error(`${missing.length} arc(s) not found after save (see console)`);
+                    const bandOff = want.filter(a => { const h = have.find(h => (elvSame(h.point_a, a.point_a) && elvSame(h.point_b, a.point_b)) || (elvSame(h.point_a, a.point_b) && elvSame(h.point_b, a.point_a))); return h && (Math.abs(h.min_alt - a.min_alt) > 0.6 || Math.abs(h.max_alt - a.max_alt) > 0.6); });
+                    if (bandOff.length) console.warn(`${TAG} 🛗 ${bandOff.length} arc band(s) differ from what was sent on FP #${w.fp.id}:`, bandOff.map(a => [a.min_alt, a.max_alt]));
+                    w.done = true; ok++;
+                    elvLog(`${label} saved + verified (${w.fp.arcs.length} → ${have.length} arcs, id ${saved.id})`);
+                    for (const it of w.items) {
+                        if (it.fail.length) continue;
+                        it.status = 'done';
+                        if (!it.gm) continue;
+                        try {
+                            const gm = await elvCreateGm(it, sid);
+                            if (gm) { gmOk++; rec.gms.push(gm); it.gm.created = gm; } else gmFail++;
+                        } catch (e) { gmFail++; console.warn(`${TAG} 🛗 GM for crossing #${it.id} failed:`, e); }
+                        await new Promise(r => setTimeout(r, ELV_GAP_MS));
+                    }
+                    try { localStorage.setItem(ELV_LAST_KEY(sid), JSON.stringify(rec)); } catch (e) {}
+                } catch (e) {
+                    fail++; console.warn(`${TAG} 🛗 ${label.replace(/<[^>]*>/g, '')}:`, e.message);
+                    w.fail.push(`write failed: ${e.message}`);
+                    w.items.forEach(it => it.warn.push(`write failed: ${e.message}`));
+                    elvLog(`${label} FAILED: ${elvEsc(e.message)} — stopped (nothing after it was written)`, '#ff6060');
+                    break;   // stop on the FIRST failure
+                }
+                await new Promise(r => setTimeout(r, ELV_GAP_MS));
+            }
+        } finally { elv.running = false; }
+        elvDraw(); elvRenderList();
+        const left = todo.filter(w => !w.fail.length && !w.done).length;
+        elvLog(`Elevators: ${ok} flight path(s) written + verified${fail ? `, <b style="color:#ff6060">1 FAILED</b>` : ''}${left ? ` · ${left} not attempted` : ''} · ${gmOk} GM(s) created${gmFail ? `, <b style="color:#ff6060">${gmFail} GM(s) failed</b>` : ''} · backups: JSON download + Delete Guard ring · ↩ Undo last run restores · refresh to see them natively`, fail || gmFail ? '#ffb347' : '#5fff5f');
+        showToast(fail ? `Elevators: ${ok} FP ok, stopped on a failure` : `✓ ${ok} flight path(s) elevated, ${gmOk} GM(s)`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+    }
+    async function elvUndoLast() {
+        if (elv.running) return;
+        if (liteBlockedWrite('undo elevators')) return;
+        const sid = elv.siteID || getCurrentSiteID();
+        let rec = null; try { rec = JSON.parse(localStorage.getItem(ELV_LAST_KEY(sid)) || 'null'); } catch (e) {}
+        if (!rec || !Array.isArray(rec.fps) || !rec.fps.length) { elvLog('Nothing to undo on this site (only the most recent Elevators commit is kept)', '#ffb347'); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { elvLog('No CSRF token', '#ff6060'); return; }
+        if (!confirm(`Restore ${rec.fps.length} flight path(s) to how they were before the Elevators commit of ${rec.at} and delete ${rec.gms.length} GM(s)? (Delete Guard banks each change)`)) return;
+        if (!elv.siteCfg) { try { elv.siteCfg = await fetchSiteConfig(sid, true); } catch (e) { elvLog('Site config fetch failed — refusing to write', '#ff6060'); return; } }
+        elv.running = true;
+        let fpOk = 0, fpFail = 0, gmOk = 0, gmFail = 0;
+        try {
+            for (const gm of rec.gms) {
+                if (await gmtDeletePlaced({ id: gm.id, name: gm.name, siteID: sid }, csrf)) gmOk++; else gmFail++;
+                await new Promise(r => setTimeout(r, ELV_GAP_MS));
+            }
+            for (const orig of rec.fps) {
+                const label = `FP "${elvEsc(orig.name)}" (#${orig.id})`;
+                try {
+                    const cur = elvLiveFp(sid, orig.id);
+                    if (cur) sciBankToGuard(cur, sid);
+                    const body = buildWriteBody(orig, elv.siteCfg);
+                    body.arcs = (orig.arcs || []).filter(a => a && a.point_a && a.point_b).map(a => { const o = Object.assign({}, a); o.points = [{ lat: o.point_a.lat, lng: o.point_a.lng }, { lat: o.point_b.lat, lng: o.point_b.lng }]; o.min_alt = fpArcAltMeters(o.min_alt); o.max_alt = fpArcAltMeters(o.max_alt); return o; });
+                    const pts = []; body.arcs.forEach(a => [a.point_a, a.point_b].forEach(p => { if (!pts.some(q => elvSame(q, p))) pts.push({ lat: p.lat, lng: p.lng }); }));
+                    body.points = pts;
+                    await sciPostMapObject(body, csrf);
+                    try { await fetchMapObjects(sid, true); } catch (e) {}
+                    const live = elvLiveFp(sid, orig.id);
+                    const have = live ? live.arcs.filter(a => a && a.point_a && a.point_b).length : -1;
+                    if (have !== body.arcs.length) throw new Error(`arc count ${have} ≠ expected ${body.arcs.length} after restore`);
+                    fpOk++; elvLog(`${label} restored (${have} arcs)`);
+                } catch (e) { fpFail++; console.warn(`${TAG} 🛗 undo ${label.replace(/<[^>]*>/g, '')}:`, e.message); elvLog(`${label} restore FAILED: ${elvEsc(e.message)} — stopped`, '#ff6060'); break; }
+                await new Promise(r => setTimeout(r, ELV_GAP_MS));
+            }
+        } finally { elv.running = false; }
+        if (!fpFail) { try { localStorage.removeItem(ELV_LAST_KEY(sid)); } catch (e) {} }
+        elv.items.forEach(it => { if (it.status === 'done') it.status = 'stage'; });
+        elvLog(`Undo: ${fpOk} flight path(s) restored${fpFail ? `, <b style="color:#ff6060">1 FAILED</b> (backup JSON still has the originals)` : ''} · ${gmOk} GM(s) deleted${gmFail ? `, ${gmFail} failed` : ''} · ↻ Re-stage to rebuild`, fpFail || gmFail ? '#ffb347' : '#5fff5f');
+        showToast(fpFail ? 'Elevators undo stopped on a failure' : `↩ ${fpOk} flight path(s) restored`, fpFail ? 'rgba(255,96,96,0.55)' : undefined);
+    }
+
+    // ============================================================
     // 📥 ASSET IMPORTER (#249) — CSV/KML region list → staged preview points
     // on the map → spatial selection (⭕ circle / 🖊 freehand lasso / ☝ pick)
     // → bulk-CREATE the selected subset as real type-3 assets via the
@@ -26581,6 +27296,7 @@
                 <button id="aim-gen-nfzstamp" title="NFZ Stamp — ALT+click inside any asset polygon to instantly stage an NFZ = that asset's ring grown by the Buffer (min footprint + FFZ containment applied). Rapid-fire: keep ALT+clicking assets." style="background:rgba(255,85,85,0.12);color:#ff5555;border:1px solid rgba(255,85,85,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">⚡ NFZ Stamp</button>
                 <button id="aim-gen-import" title="Asset Importer — load a region CSV or KML, stage the points on the map (nothing is written), select a subset with a circle / freehand lasso / single picks, map CSV types to Percepto subtypes, and bulk-create the selection as real assets. Create-only + dry-run + backup. Also the inverse: 🗑 Delete mode spatially selects EXISTING assets for a heavily-confirmed bulk delete that rides Delete Guard." style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Import</button>
                 <button id="aim-gen-scan" title="Scan Import — load the Ortho Scanner review sheet's decisions JSON + scan bundle; accepted NFZs and flight-path leg changes stage on the map (green / yellow, removed legs red), preflight runs, then Apply writes them: NFZs create-only one POST each, flight paths one per request with Delete Guard backups. Nothing is written until Apply; dry run by default." style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🔍 Scan Import</button>
+                <button id="aim-gen-elev" title="Elevators — scan every flight path against the red transmission KML lines and stage an Elevator 1 / Bridge / Elevator 2 climb-over at each crossing (right-click a flight path → 🛗 for a manual point). Bands from DEM in MSL, 10 ft overlaps, preflight, one POST per flight path with backups, pole GM per crossing. Nothing is written until Commit; dry run by default." style="background:rgba(255,154,61,0.12);color:#ff9a3d;border:1px solid rgba(255,154,61,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🛗 Elevators</button>
                 <button id="aim-gen-fpsnap" title="Arm CTRL-snap for Percepto's native flight-path draw tool: hold CTRL while clicking to place a waypoint and it snaps ~50ft parallel to the nearest power line (purple dot shows where). Release CTRL = free point." style="background:rgba(186,140,255,0.12);color:#ba8cff;border:1px solid rgba(186,140,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🧲 CTRL-snap: off</button>
                 <button id="aim-gen-loadfp" title="Load the site's existing flight paths (drawn natively in Percepto) into the editable preview so they can be cleaned up." style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FPs</button>
                 <button id="aim-gen-loadffz" title="Load the site's existing FFZs (amber) into the editable preview — move / rotate / Alt-snap (auto-size) / resize them, then 💾 Save FFZ edits to write them back in place." style="background:rgba(255,179,71,0.12);color:#ffb347;border:1px solid rgba(255,179,71,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FFZs</button>
@@ -26615,6 +27331,7 @@
             </div>
             <div id="aim-imp-controls" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.35);border-radius:3px"></div>
             <div id="aim-sci-controls" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.35);border-radius:3px"></div>
+            <div id="aim-elv-controls" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(255,154,61,0.06);border:1px dashed rgba(255,154,61,0.35);border-radius:3px"></div>
             <div style="padding:8px 10px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25);border-radius:3px">
                 <div style="font-size:11px;color:#9ad;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Commit</div>
                 <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc;margin-bottom:8px"><input type="checkbox" id="aim-gen-dryrun" checked style="accent-color:#7adfe6"> Dry run <span style="color:#888;font-size:10px">(build + count, don't write)</span></label>
@@ -26984,6 +27701,18 @@
             if (opening && sci.plan) sciDraw(); else if (!opening) sciClearLayers();
         };
         if (sci.plan) { sciShowPanel(); sciDraw(); }
+        // v4.327: 🛗 Elevators panel — staged crossings survive modal close on the SAME site; a new site resets.
+        if (elv.siteID && elv.siteID !== String(siteID)) { elvClearLayers(); elv = { siteID: String(siteID), items: [], layers: [], writes: [], running: false, siteCfg: null, seq: 1 }; }
+        elvRenderPanelBody();
+        const elvBtn = box.querySelector('#aim-gen-elev');
+        if (elvBtn) elvBtn.onclick = () => {
+            const c = document.getElementById('aim-elv-controls'); if (!c) return;
+            const opening = c.style.display === 'none';
+            c.style.display = opening ? 'block' : 'none';
+            elvBtn.style.background = opening ? 'rgba(255,154,61,0.32)' : 'rgba(255,154,61,0.12)';
+            if (opening && elv.items.length) elvDraw(); else if (!opening) elvClearLayers();
+        };
+        if (elv.items.length) { elvShowPanel(); elvDraw(); elvSummary(); }
         const impBtn = box.querySelector('#aim-gen-import');
         if (impBtn) impBtn.onclick = () => {
             const c = document.getElementById('aim-imp-controls');
