@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.328
+// @version      4.329
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.328';
+    const SCRIPT_VERSION = '4.329';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -238,7 +238,7 @@
     // v4.327: 🛗 Elevators (feature #290) — CP defaults; per-crossing copies live in elv.items[].p
     const ELV_SCRIPT_ID = 'aim-elevators';
     let elvMasterEnabled = true;
-    let elvCfg = { floorAgl: 200, height: 20, halfFt: 100, elevFt: 100, overlapFt: 10, gm: true };
+    let elvCfg = { floorAgl: 200, height: 20, halfFt: 100, elevFt: 100, overlapFt: 10, gm: true, cylFt: 200, split: true };
     let impDupFt = 50;              // duplicate-guard proximity, CP-editable
     // ---- 📌 GM Stamper (#271) — CP card id + init-referenced state (same TDZ reason).
     const GMT_SCRIPT_ID = 'aim-gm-stamper';
@@ -13039,8 +13039,9 @@
                 const v = msg.value !== undefined ? msg.value : msg.enabled;
                 if (msg.toggleId === 'elv-master') { const b = !!v; if (b !== elvMasterEnabled) elvMasterEnabled = b; }
                 else if (msg.toggleId === 'elv-gm') { const b = !!v; if (b !== elvCfg.gm) elvCfg.gm = b; }
+                else if (msg.toggleId === 'elv-split') { const b = !!v; if (b !== elvCfg.split) elvCfg.split = b; }
                 else {
-                    const k = { 'elv-floor': 'floorAgl', 'elv-height': 'height', 'elv-half': 'halfFt', 'elv-elev': 'elevFt', 'elv-overlap': 'overlapFt' }[msg.toggleId];
+                    const k = { 'elv-floor': 'floorAgl', 'elv-height': 'height', 'elv-half': 'halfFt', 'elv-elev': 'elevFt', 'elv-overlap': 'overlapFt', 'elv-cyl': 'cylFt' }[msg.toggleId];
                     if (k) { const n = Number(v); if (isFinite(n) && n >= 0 && n !== elvCfg[k]) elvCfg[k] = n; }
                 }
             }
@@ -13406,6 +13407,8 @@
                 { id: 'elv-elev', label: 'Elevator length along the path (climb-rate limit unknown — 100 ft is the field value)', type: 'number', min: 50, max: 500, step: 5, default: 100, unit: 'ft' },
                 { id: 'elv-overlap', label: 'Band overlap at every joint', type: 'number', min: 7, max: 50, step: 1, default: 10, unit: 'ft' },
                 { id: 'elv-gm', label: 'Create a pole GM beside every bridge ("Elevator NN - 200ft")', type: 'boolean', default: true },
+                { id: 'elv-split', label: 'Pad inside the bridge zone with a low ceiling: split the FFZ at the cylinder and raise only the piece inside it', type: 'boolean', default: true },
+                { id: 'elv-cyl', label: 'Waiver cylinder radius around the line (airspace above 200 ft AGL is allowed inside it)', type: 'number', min: 100, max: 1000, step: 25, default: 200, unit: 'ft' },
                 { id: 'elv-scan', label: '🛗 Scan transmission crossings', type: 'button', action: 'elv-scan' },
             ],
             hotkeys: [],
@@ -21985,9 +21988,32 @@
             const f = direct[k].f.e, r = f.restrictions || {};
             if (!(typeof r.minAlt === 'number' && typeof r.maxAlt === 'number')) { it.fail.push(`${nm}: the bridge meets FFZ "${f.name}" but it has no altitude band`); return; }
             const ov = Math.min(r.maxAlt, bridge.max) - Math.max(r.minAlt, bridge.min);
-            ffzDirect[k] = { name: f.name, min: r.minAlt, max: r.maxAlt, ov };
-            if (ov < ovM - 0.01) it.fail.push(`${nm}: none — the bridge runs straight into FFZ "${f.name}" (pad within ${it.p.halfFt} ft of the line) but the FFZ band ${elvFt(r.minAlt)}–${elvFt(r.maxAlt)} ft MSL only overlaps the bridge by ${Math.max(0, elvFt(ov))} ft — raise its ceiling to ${elvFt(bridge.min + ovM)} ft MSL or abandon the path`);
-            else it.warn.push(`${nm}: none — the bridge runs straight into FFZ "${f.name}" (pad within ${it.p.halfFt} ft of the line); FFZ ceiling ${elvFt(r.maxAlt)} ft MSL clears the bridge floor by ${elvFt(ov)} ft`);
+            ffzDirect[k] = { name: f.name, min: r.minAlt, max: r.maxAlt, ov, split: null };
+            if (ov >= ovM - 0.01) { it.warn.push(`${nm}: none — the bridge runs straight into FFZ "${f.name}" (pad within ${it.p.halfFt} ft of the line); FFZ ceiling ${elvFt(r.maxAlt)} ft MSL clears the bridge floor by ${elvFt(ov)} ft`); return; }
+            const need = R(bridge.min + ovM);
+            const low = `${nm}: none — the bridge runs straight into FFZ "${f.name}" (pad within ${it.p.halfFt} ft of the line) but the FFZ band ${elvFt(r.minAlt)}–${elvFt(r.maxAlt)} ft MSL only overlaps the bridge by ${Math.max(0, elvFt(ov))} ft`;
+            if (!it.p.split) { it.fail.push(`${low} — raise its ceiling to ${elvFt(need)} ft MSL (tick ✂ Split FFZ to do it inside the cylinder) or abandon the path`); return; }
+            const P = k === 'start' ? ch.pts[0] : ch.pts[ch.pts.length - 1];
+            let sp = elv.splits.get(f.id);
+            if (sp) {
+                const touches = sp.mode === 'raise' || sciDistToRingM(P, sp.nearRing) <= sciEdgeFt * GEN_FT_TO_M + 0.5 || pointInPolygon(P.lat, P.lng, sp.nearRing);
+                if (!touches) { it.fail.push(`${low} — FFZ "${f.name}" is already being split for crossing #${sp.itemId} and this path end is outside that piece; commit, re-scan, then this one`); return; }
+                if (need > sp.newMax) sp.newMax = need;
+                sp.shared.push(it.id);
+            } else {
+                const nfzRings = elvLiveEntities(sid).filter(e => e && e.type === 4 && entityCoords(e) && entityCoords(e).length >= 3).map(e => entityCoords(e));
+                sp = elvPlanSplit(it, direct[k].f, P, near, need, nfzRings);
+                if (sp.fail) { it.fail.push(`${low} — ${sp.fail}`); return; }
+                sp.itemId = it.id; sp.shared = [it.id];
+                const used = new Set(elvLiveEntities(sid).map(e => String(e.name || '').toLowerCase()));
+                elv.splits.forEach(o => { if (o.name) used.add(o.name.toLowerCase()); });
+                const uniq = (base) => { let nmNew = genCleanName(base), i = 2; while (used.has(nmNew.toLowerCase())) nmNew = genCleanName(`${base} ${i++}`); used.add(nmNew.toLowerCase()); return nmNew; };
+                sp.name = uniq(`${f.name} ELEV`);
+                sp.extraNames = (sp.extraRings || []).map(() => uniq(`${f.name} B`));
+                elv.splits.set(f.id, sp);
+            }
+            ffzDirect[k].split = sp;
+            it.warn.push(`${nm}: none — the bridge runs straight into FFZ "${f.name}" (pad within ${it.p.halfFt} ft of the line); ${sp.mode === 'raise' ? `the whole pad sits inside the ${it.p.cylFt} ft cylinder, so its ceiling is raised` : `the ${Math.round(sp.pieceArea * 10.7639).toLocaleString()} ft² piece inside the ${it.p.cylFt} ft cylinder becomes FFZ "${sp.name}" with ceiling`} ${elvFt(sp.newMax)} ft MSL (was ${elvFt(r.maxAlt)})${sp.extraRings && sp.extraRings.length ? ` · the pad's other end${sp.extraRings.length > 1 ? 's' : ''} outside the cylinder become${sp.extraRings.length > 1 ? '' : 's'} ${sp.extraNames.map(x => `"${x}"`).join(', ')} with the original band` : ''}${sp.shared.length > 1 ? ` · shared with crossing #${sp.shared[0]}` : ''}`);
         });
         const n1 = direct.start ? null : neighbour(true), n2 = direct.end ? null : neighbour(false);
         const E1 = n1 ? { min: R(n1.max - ovM), max: R(bridge.min + ovM), nb: n1 } : null;
@@ -22009,6 +22035,75 @@
         it.bands = { E1, bridge, E2, ffz: ffzDirect };
         it.geo = { ch, sX, e1, b1, b2, e2, direct: { start: !!direct.start, end: !!direct.end }, gz: { E1: { max: mx(gE1), min: mn(gE1) }, B: { max: mx(gB), min: mn(gB) }, E2: { max: mx(gE2), min: mn(gE2) } }, gmLL: elvGmPoint(ch, (b1 + b2) / 2) };
         if (it.p.gm) it.gm = { name: `Elevator # - ${it.p.floorAgl}ft`, ll: it.geo.gmLL };
+    }
+    // ---- FFZ split: carve the part of a pad inside the waiver cylinder into its own FFZ ----
+    // A pad within the bridge zone has a ceiling under the bridge floor, but the
+    // whole pad cannot be raised: airspace above 200 ft AGL is only allowed inside
+    // the cylinder around the obstacle. So the piece of the pad inside the cylinder
+    // becomes its own FFZ carrying the raised ceiling; the rest keeps its band.
+    function elvPC() {
+        try { if (typeof polygonClipping !== 'undefined' && polygonClipping) return polygonClipping; } catch (e) {}
+        try { return unsafeWindow && unsafeWindow.polygonClipping; } catch (e) {}
+        return null;
+    }
+    function elvCapsule(proj, a, b, r) {   // [x,y] polygon around segment a→b (lat/lng) at radius r metres
+        const A = proj.fwd(a), B = proj.fwd(b);
+        let ux = B.x - A.x, uy = B.y - A.y;
+        const L = Math.hypot(ux, uy) || 1; ux /= L; uy /= L;
+        const ang = Math.atan2(ux, -uy), pts = [];   // angle of the left normal (-uy, ux)
+        const arc = (c, from, steps) => { for (let i = 0; i <= steps; i++) { const t = from + Math.PI * i / steps; pts.push([c.x + r * Math.cos(t), c.y + r * Math.sin(t)]); } };
+        arc(B, ang - Math.PI, 12);   // −n → +u → +n around B
+        arc(A, ang, 12);             // +n → −u → −n around A
+        return [pts];
+    }
+    function elvRingToXY(proj, ring) { return [ring.map(p => { const q = proj.fwd(p); return [q.x, q.y]; })]; }
+    function elvXYToRing(proj, xy) {
+        const r = xy.map(q => proj.inv({ x: q[0], y: q[1] })).map(p => ({ lat: +p.lat.toFixed(7), lng: +p.lng.toFixed(7) }));
+        if (r.length > 1 && elvSame(r[0], r[r.length - 1])) r.pop();
+        return r;
+    }
+    // Plan the split of FFZ entry `f` so the piece touching path end P carries ceiling newMax (m MSL).
+    function elvPlanSplit(it, f, P, nearSegs, newMax, nfzRings) {
+        const PC = elvPC();
+        if (!PC) return { fail: 'polygon-clipping library not loaded (refresh the page)' };
+        const cen = ringCentroid(f.ring), proj = genProjector(cen.lat, cen.lng);
+        const R = it.p.cylFt * GEN_FT_TO_M;
+        let buf;
+        try {
+            const caps = it.src === 'line' ? nearSegs.map(sg => elvCapsule(proj, sg.a, sg.b, R)) : [];
+            if (!caps.length) {   // manual crossing: the obstacle is the clicked point
+                const X = proj.fwd(it.X), ring = [];
+                for (let i = 0; i < 32; i++) ring.push([X.x + R * Math.cos(2 * Math.PI * i / 32), X.y + R * Math.sin(2 * Math.PI * i / 32)]);
+                caps.push([ring]);
+            }
+            buf = caps.length === 1 ? [caps[0]] : PC.union(...caps);
+        } catch (e) { return { fail: `cylinder buffer failed: ${e.message || e}` }; }
+        const poly = elvRingToXY(proj, f.ring);
+        let inter, far;
+        try { inter = PC.intersection([poly], buf); } catch (e) { return { fail: `clip failed: ${e.message || e}` }; }
+        const edgeTol = sciEdgeFt * GEN_FT_TO_M + 0.5;
+        const pieces = (inter || []).map(pg => pg && pg[0]).filter(r => r && r.length >= 3).map(r => elvXYToRing(proj, r));
+        const piece = pieces.find(r => sciDistToRingM(P, r) <= edgeTol || pointInPolygon(P.lat, P.lng, r));
+        if (!piece) return { fail: `no part of FFZ "${f.e.name}" inside the ${it.p.cylFt} ft cylinder touches the path end` };
+        const pieceArea = Math.abs(polygonAreaM2(piece) || 0), whole = Math.abs(polygonAreaM2(f.ring) || 0);
+        if (whole - pieceArea < 2) return { mode: 'raise', ffz: f.e, origRing: f.ring, newMax, pieceArea };   // the whole pad sits inside the cylinder
+        try { far = PC.difference([poly], [elvRingToXY(proj, piece)]); } catch (e) { return { fail: `clip failed: ${e.message || e}` }; }
+        // outside pieces: the original FFZ keeps the largest, every other one becomes its own FFZ with the original band
+        // (a cylinder across the middle of a long pad leaves both ends)
+        const farPolys = (far || []).filter(pg => pg && pg[0] && pg[0].length >= 3);
+        if (!farPolys.length) return { fail: `splitting FFZ "${f.e.name}" at the cylinder left nothing outside — split it by hand` };
+        if (farPolys.some(pg => pg.length > 1)) return { fail: `splitting FFZ "${f.e.name}" at the cylinder would leave a hole — split it by hand` };
+        const farRings = farPolys.map(pg => elvXYToRing(proj, pg[0])).filter(r => r.length >= 3 && Math.abs(polygonAreaM2(r) || 0) >= 1)
+            .sort((x, y) => Math.abs(polygonAreaM2(y)) - Math.abs(polygonAreaM2(x)));
+        if (!farRings.length) return { fail: `splitting FFZ "${f.e.name}" at the cylinder left only slivers outside — split it by hand` };
+        if (farRings.length > 3) return { fail: `splitting FFZ "${f.e.name}" at the cylinder leaves ${farRings.length} outside pieces — split it by hand` };
+        const farRing = farRings[0], extraRings = farRings.slice(1);
+        if (pieceArea < 30 || piece.length < 3) return { fail: `the piece of FFZ "${f.e.name}" inside the cylinder is only ${Math.round(pieceArea * 10.7639)} ft² — split it by hand` };
+        // NFZs inside the pad must stay whole inside one piece
+        const inOne = (nr, ring) => nr.every(p => pointInPolygon(p.lat, p.lng, ring) || sciDistToRingM(p, ring) <= 0.5);
+        const bad = nfzRings.filter(nr => nr.some(p => pointInPolygon(p.lat, p.lng, f.ring))).find(nr => !(inOne(nr, piece) || farRings.some(r => inOne(nr, r))));
+        if (bad) return { fail: `an NFZ inside FFZ "${f.e.name}" straddles the cylinder line — split it by hand` };
+        return { mode: 'split', ffz: f.e, origRing: f.ring, newMax, nearRing: piece, farRing, extraRings, pieceArea };
     }
     // ---- per-FP arc rebuild + preflight ----
     function elvBuildWrites(sid) {
@@ -22099,6 +22194,7 @@
     async function elvStageAll(sid) {
         const segs = await elvTransSegs(sid);
         const ffzInfo = elvFfzInfo(sid);
+        elv.splits = new Map();   // FFZ id → split plan (shared between crossings into the same pad)
         for (const it of elv.items) {
             try { await elvStageItem(it, sid, segs, ffzInfo); }
             catch (e) { console.error(`${TAG} 🛗 stage #${it.id} failed:`, e); it.fail.push(`stage failed: ${e.message || e}`); }
@@ -22189,6 +22285,15 @@
             [g.e1, g.b1, g.b2, g.e2].forEach(s => { const p = elvAt(g.ch, s); add(L.circleMarker([p.lat, p.lng], { radius: 4, color: '#ffffff', weight: 1, fillColor: col('#ffe14d'), fillOpacity: 1, interactive: false })); });
             add(L.circleMarker([it.X.lat, it.X.lng], { radius: 5, color: '#ff2a2a', weight: 2, fillColor: '#ff2a2a', fillOpacity: 0.2, interactive: false }));
             if (it.gm && it.status === 'stage' && !bad) add(L.circleMarker([g.gmLL.lat, g.gmLL.lng], { radius: 6, color: '#c084fc', weight: 2, fillColor: '#c084fc', fillOpacity: 0.6, interactive: false }));
+            if (bands && bands.ffz && it.status === 'stage' && !bad) Object.values(bands.ffz).forEach(d => {
+                const sp = d && d.split; if (!sp || sp.itemId !== it.id) return;   // drawn once, by the crossing that planned it
+                if (sp.mode === 'raise') { const pl = L.polygon(sp.origRing.map(p => [p.lat, p.lng]), { color: '#ff9a3d', weight: 3, dashArray: '6 4', fillColor: '#ff9a3d', fillOpacity: 0.12 }); try { pl.bindTooltip(`FFZ "${elvEsc(sp.ffz.name)}" — whole pad inside the cylinder, ceiling → ${elvFt(sp.newMax)} ft MSL`, { sticky: true }); } catch (e) {} add(pl); return; }
+                const near = L.polygon(sp.nearRing.map(p => [p.lat, p.lng]), { color: '#ff9a3d', weight: 3, fillColor: '#ff9a3d', fillOpacity: 0.3 });
+                try { near.bindTooltip(`new FFZ "${elvEsc(sp.name)}" — the piece of "${elvEsc(sp.ffz.name)}" inside the cylinder, ceiling ${elvFt(sp.newMax)} ft MSL`, { sticky: true }); } catch (e) {}
+                add(near);
+                add(L.polygon(sp.farRing.map(p => [p.lat, p.lng]), { color: '#ffb347', weight: 2, dashArray: '4 4', fillOpacity: 0, interactive: false }));
+                (sp.extraRings || []).forEach((r, x) => { const pl = L.polygon(r.map(p => [p.lat, p.lng]), { color: '#ffb347', weight: 2, dashArray: '4 4', fillColor: '#ffb347', fillOpacity: 0.1 }); try { pl.bindTooltip(`new FFZ "${elvEsc(sp.extraNames[x])}" — the pad's other end outside the cylinder, original band`, { sticky: true }); } catch (e) {} add(pl); });
+            });
         });
     }
     function elvPanTo(ll) { try { const map = getLeafletMap(); if (map && ll) map.setView([ll.lat, ll.lng], Math.max(map.getZoom(), 18)); } catch (e) {} }
@@ -22217,7 +22322,7 @@
             const inp = ev.target.closest('[data-elv-id][data-elv-field]'); if (!inp || elv.running) return;
             const it = elv.items.find(i => String(i.id) === inp.dataset.elvId); if (!it) return;
             const f = inp.dataset.elvField;
-            if (f === 'gm') it.p.gm = !!inp.checked;
+            if (f === 'gm' || f === 'split') it.p[f] = !!inp.checked;
             else { const n = Number(inp.value); if (!isFinite(n) || n < 0) return; it.p[f] = n; }
             if (it.status === 'done') return;
             it.status = 'stage';
@@ -22238,7 +22343,7 @@
     function elvRenderList() {
         const el = document.getElementById('aim-elv-list'); if (!el) return;
         if (!elv.items.length) { el.innerHTML = ''; return; }
-        const num = (it, f, step, title) => `<label style="display:inline-flex;align-items:center;gap:3px" title="${elvEsc(title)}">${f === 'floorAgl' ? 'Floor' : f === 'height' ? 'Height' : f === 'halfFt' ? '± line' : f === 'elevFt' ? 'Elevator' : 'Overlap'} <input type="number" data-elv-id="${it.id}" data-elv-field="${f}" value="${it.p[f]}" min="0" step="${step}" ${it.status === 'done' ? 'disabled' : ''} style="width:52px;background:#1a1d23;border:1px solid rgba(255,154,61,0.35);color:#fff;border-radius:2px;padding:1px 3px;font:inherit;font-size:11px"> ft</label>`;
+        const num = (it, f, step, title) => `<label style="display:inline-flex;align-items:center;gap:3px" title="${elvEsc(title)}">${f === 'floorAgl' ? 'Floor' : f === 'height' ? 'Height' : f === 'halfFt' ? '± line' : f === 'elevFt' ? 'Elevator' : f === 'cylFt' ? 'Cylinder' : 'Overlap'} <input type="number" data-elv-id="${it.id}" data-elv-field="${f}" value="${it.p[f]}" min="0" step="${step}" ${it.status === 'done' ? 'disabled' : ''} style="width:52px;background:#1a1d23;border:1px solid rgba(255,154,61,0.35);color:#fff;border-radius:2px;padding:1px 3px;font:inherit;font-size:11px"> ft</label>`;
         const wFail = (it) => { const w = (elv.writes || []).find(x => x.fpId === it.fpId); return w && w.fail.length && !it.fail.length ? w.fail : []; };
         el.innerHTML = elv.items.map(it => {
             const g = it.geo, b = it.bands;
@@ -22259,6 +22364,7 @@
                 <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:4px 0;font-size:11px;color:#cfd6dc">
                     ${num(it, 'floorAgl', 5, 'Bridge floor above the highest ground under the bridge')} ${num(it, 'height', 5, 'Bridge band height')} ${num(it, 'halfFt', 5, it.src === 'line' ? 'Bridge half-width — perpendicular distance from the line' : 'Bridge half-length along the path from the clicked point')} ${num(it, 'elevFt', 5, 'Elevator length along the path beyond each bridge end')} ${num(it, 'overlapFt', 1, 'Band overlap at every joint')}
                     <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" data-elv-id="${it.id}" data-elv-field="gm" ${it.p.gm ? 'checked' : ''} ${it.status === 'done' ? 'disabled' : ''} style="accent-color:#c084fc"> GM</label>
+                    ${g && g.direct && (g.direct.start || g.direct.end) ? `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer" title="When the pad's ceiling is under the bridge floor: split the FFZ at the ${it.p.cylFt} ft cylinder and raise only the piece inside it (written FFZ-first in the same commit)"><input type="checkbox" data-elv-id="${it.id}" data-elv-field="split" ${it.p.split ? 'checked' : ''} ${it.status === 'done' ? 'disabled' : ''} style="accent-color:#ff9a3d"> ✂ Split FFZ</label> ${num(it, 'cylFt', 25, 'Waiver cylinder radius around the line')}` : ''}
                 </div>
                 ${bandRow}${notes}
             </div>`;
@@ -22299,17 +22405,74 @@
         const todo = writes.filter(w => !w.fail.length && !w.done);
         if (!todo.length) { elvLog('Nothing to commit — stage a crossing first (or every staged one is blocked)', '#ffb347'); return; }
         const gmN = todo.reduce((n, w) => n + w.items.filter(it => !it.fail.length && it.gm).length, 0);
-        if (sciDry()) { elvLog(`DRY RUN — would rewrite ${todo.length} flight path(s) (${todo.reduce((n, w) => n + w.arcs.filter(a => a._new).length, 0)} new arcs) and create ${gmN} GM(s). Untick Dry run (Commit section) to write.`, '#ffe14d'); return; }
+        // FFZ splits / raises referenced by the paths about to be written (one per FFZ)
+        const splits = new Map();
+        todo.forEach(w => w.items.forEach(it => { if (it.fail.length || !it.bands || !it.bands.ffz) return; Object.values(it.bands.ffz).forEach(d => { if (d && d.split) splits.set(d.split.ffz.id, d.split); }); }));
+        const splitN = [...splits.values()].filter(sp => sp.mode === 'split').length, raiseN = splits.size - splitN;
+        const ffzTxt = splits.size ? ` · ${splitN} FFZ split(s) + ${raiseN} ceiling raise(s) written FIRST` : '';
+        if (sciDry()) { elvLog(`DRY RUN — would rewrite ${todo.length} flight path(s) (${todo.reduce((n, w) => n + w.arcs.filter(a => a._new).length, 0)} new arcs) and create ${gmN} GM(s)${ffzTxt}. Untick Dry run (Commit section) to write.`, '#ffe14d'); return; }
         const csrf = getCsrfToken();
         if (!csrf) { elvLog('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
         if (!elv.siteCfg) { try { elv.siteCfg = await fetchSiteConfig(sid, true); } catch (e) { elvLog('Site config fetch failed — refusing to write (mountain_terrain flag unknown)', '#ff6060'); return; } }
-        if (!confirm(`Rewrite ${todo.length} flight path(s) with elevator arcs and create ${gmN} GM(s) on site ${sid}? Each path is backed up (JSON download + Delete Guard ring) before it is written.`)) return;
-        const rec = { at: new Date().toISOString(), sid, origin: location.origin, fps: todo.map(w => JSON.parse(JSON.stringify(w.fp))), gms: [] };
+        if (!confirm(`Rewrite ${todo.length} flight path(s) with elevator arcs and create ${gmN} GM(s) on site ${sid}?${splits.size ? `\n\nFirst: ${splitN} pad FFZ(s) split at the cylinder (new FFZ for the piece inside it) and ${raiseN} pad ceiling(s) raised.` : ''}\n\nEverything touched is backed up (JSON download + Delete Guard ring) before it is written.`)) return;
+        const ffzOrig = [...splits.values()].map(sp => elvLiveEntities(sid).find(e => e && e.id === sp.ffz.id)).filter(Boolean);
+        const rec = { at: new Date().toISOString(), sid, origin: location.origin, fps: todo.map(w => JSON.parse(JSON.stringify(w.fp))), gms: [], ffz: ffzOrig.map(e => JSON.parse(JSON.stringify(e))), ffzCreated: [] };
         try { localStorage.setItem(ELV_LAST_KEY(sid), JSON.stringify(rec)); } catch (e) { console.warn(`${TAG} 🛗 last-run stash failed:`, e); }
-        if (!downloadJSONFile(`elevators-fp-backup-${sid}-${Date.now()}.json`, JSON.stringify({ site: sid, at: rec.at, flightPaths: rec.fps }, null, 1))) { elvLog('Backup download failed — refusing to write', '#ff6060'); return; }
+        if (!downloadJSONFile(`elevators-backup-${sid}-${Date.now()}.json`, JSON.stringify({ site: sid, at: rec.at, flightPaths: rec.fps, ffzs: rec.ffz }, null, 1))) { elvLog('Backup download failed — refusing to write', '#ff6060'); return; }
         elv.running = true; elvRenderList();
-        let ok = 0, fail = 0, gmOk = 0, gmFail = 0;
+        let ok = 0, fail = 0, gmOk = 0, gmFail = 0, ffzOk = 0;
         try {
+            // ---- 1. FFZ splits / raises, FFZ-first (a failure here stops everything before any path is touched) ----
+            for (const sp of splits.values()) {
+                const label = `FFZ "${elvEsc(sp.ffz.name)}" (#${sp.ffz.id})`;
+                try {
+                    const live = elvLiveEntities(sid).find(e => e && e.id === sp.ffz.id);
+                    if (!live) throw new Error('FFZ no longer on the site');
+                    const lr = entityCoords(live) || [];
+                    if (lr.length !== sp.origRing.length || !lr.every((p, i) => elvSame(p, sp.origRing[i]))) throw new Error('FFZ geometry changed since staging — re-stage');
+                    if (!sciBankToGuard(live, sid)) throw new Error('Delete Guard bank failed — not writing');
+                    const body = buildWriteBody(live, elv.siteCfg);
+                    if (!body.restrictions || typeof body.restrictions !== 'object') body.restrictions = {};
+                    if (sp.mode === 'raise') { body.restrictions.maxAlt = sp.newMax; }
+                    else { body.points = sp.farRing; body.validated = false; }
+                    body.arcs = [];
+                    await sciPostMapObject(body, csrf);
+                    try { await fetchMapObjects(sid, true); } catch (e) {}
+                    const after = elvLiveEntities(sid).find(e => e && e.id === sp.ffz.id);
+                    if (!after) throw new Error('FFZ missing after save');
+                    if (sp.mode === 'raise') { if (Math.abs(((after.restrictions || {}).maxAlt || 0) - sp.newMax) > 0.6) throw new Error(`ceiling ${(after.restrictions || {}).maxAlt} ≠ ${sp.newMax} after save`); }
+                    else {
+                        const ar = entityCoords(after) || [];
+                        if (ar.length !== sp.farRing.length) throw new Error(`${ar.length} vertices ≠ expected ${sp.farRing.length} after save`);
+                        const b2 = buildWriteBody(live, elv.siteCfg);
+                        delete b2.id; b2.name = sp.name; b2.points = sp.nearRing; b2.description = `${live.description || ''}`.trim();
+                        b2.restrictions = Object.assign({}, b2.restrictions || {}, { maxAlt: sp.newMax });
+                        b2.validated = false; b2.arcs = [];
+                        const saved = await sciPostMapObject(b2, csrf);
+                        try { await fetchMapObjects(sid, true); } catch (e) {}
+                        if (!elvLiveEntities(sid).some(e => e && e.id === saved.id)) throw new Error(`new FFZ "${sp.name}" missing after save`);
+                        rec.ffzCreated.push({ id: saved.id, name: sp.name });
+                        for (let x = 0; x < (sp.extraRings || []).length; x++) {   // the pad's other ends keep the original band
+                            const b3 = buildWriteBody(live, elv.siteCfg);
+                            delete b3.id; b3.name = sp.extraNames[x]; b3.points = sp.extraRings[x]; b3.validated = false; b3.arcs = [];
+                            const sv = await sciPostMapObject(b3, csrf);
+                            try { await fetchMapObjects(sid, true); } catch (e) {}
+                            if (!elvLiveEntities(sid).some(e => e && e.id === sv.id)) throw new Error(`new FFZ "${sp.extraNames[x]}" missing after save`);
+                            rec.ffzCreated.push({ id: sv.id, name: sp.extraNames[x] });
+                        }
+                    }
+                    try { localStorage.setItem(ELV_LAST_KEY(sid), JSON.stringify(rec)); } catch (e) {}
+                    ffzOk++;
+                    elvLog(`${label} ${sp.mode === 'raise' ? `ceiling raised to ${elvFt(sp.newMax)} ft MSL` : `split — "${elvEsc(sp.name)}" created with ceiling ${elvFt(sp.newMax)} ft MSL`} + verified`);
+                } catch (e) {
+                    console.warn(`${TAG} 🛗 ${label.replace(/<[^>]*>/g, '')}:`, e.message);
+                    elvLog(`${label} FAILED: ${elvEsc(e.message)} — stopped before any flight path was written (↩ Undo last run reverts the ${ffzOk} FFZ change(s) already made)`, '#ff6060');
+                    fail++; todo.length = 0;   // nothing else runs
+                    break;
+                }
+                await new Promise(r => setTimeout(r, ELV_GAP_MS));
+            }
+            // ---- 2. flight paths, one POST each ----
             for (let i = 0; i < todo.length; i++) {
                 const w = todo[i];
                 const label = `FP ${i + 1}/${todo.length} "${elvEsc(w.fp.name)}" (#${w.fp.id})`;
@@ -22360,7 +22523,7 @@
         } finally { elv.running = false; }
         elvDraw(); elvRenderList();
         const left = todo.filter(w => !w.fail.length && !w.done).length;
-        elvLog(`Elevators: ${ok} flight path(s) written + verified${fail ? `, <b style="color:#ff6060">1 FAILED</b>` : ''}${left ? ` · ${left} not attempted` : ''} · ${gmOk} GM(s) created${gmFail ? `, <b style="color:#ff6060">${gmFail} GM(s) failed</b>` : ''} · backups: JSON download + Delete Guard ring · ↩ Undo last run restores · refresh to see them natively`, fail || gmFail ? '#ffb347' : '#5fff5f');
+        elvLog(`Elevators: ${ok} flight path(s) written + verified${fail ? `, <b style="color:#ff6060">1 FAILED</b>` : ''}${left ? ` · ${left} not attempted` : ''}${splits.size ? ` · ${ffzOk}/${splits.size} FFZ split/raise(s)` : ''} · ${gmOk} GM(s) created${gmFail ? `, <b style="color:#ff6060">${gmFail} GM(s) failed</b>` : ''} · backups: JSON download + Delete Guard ring · ↩ Undo last run restores · refresh to see them natively`, fail || gmFail ? '#ffb347' : '#5fff5f');
         showToast(fail ? `Elevators: ${ok} FP ok, stopped on a failure` : `✓ ${ok} flight path(s) elevated, ${gmOk} GM(s)`, fail ? 'rgba(255,96,96,0.55)' : undefined);
     }
     async function elvUndoLast() {
@@ -22371,10 +22534,11 @@
         if (!rec || !Array.isArray(rec.fps) || !rec.fps.length) { elvLog('Nothing to undo on this site (only the most recent Elevators commit is kept)', '#ffb347'); return; }
         const csrf = getCsrfToken();
         if (!csrf) { elvLog('No CSRF token', '#ff6060'); return; }
-        if (!confirm(`Restore ${rec.fps.length} flight path(s) to how they were before the Elevators commit of ${rec.at} and delete ${rec.gms.length} GM(s)? (Delete Guard banks each change)`)) return;
+        const ffzList = Array.isArray(rec.ffz) ? rec.ffz : [], created = Array.isArray(rec.ffzCreated) ? rec.ffzCreated : [];
+        if (!confirm(`Restore ${rec.fps.length} flight path(s) to how they were before the Elevators commit of ${rec.at}, delete ${rec.gms.length} GM(s)${created.length ? `, delete ${created.length} split-off FFZ(s)` : ''}${ffzList.length ? ` and restore ${ffzList.length} pad FFZ(s)` : ''}? (Delete Guard banks each change)`)) return;
         if (!elv.siteCfg) { try { elv.siteCfg = await fetchSiteConfig(sid, true); } catch (e) { elvLog('Site config fetch failed — refusing to write', '#ff6060'); return; } }
         elv.running = true;
-        let fpOk = 0, fpFail = 0, gmOk = 0, gmFail = 0;
+        let fpOk = 0, fpFail = 0, gmOk = 0, gmFail = 0, ffzOk = 0, ffzFail = 0;
         try {
             for (const gm of rec.gms) {
                 if (await gmtDeletePlaced({ id: gm.id, name: gm.name, siteID: sid }, csrf)) gmOk++; else gmFail++;
@@ -22398,11 +22562,33 @@
                 } catch (e) { fpFail++; console.warn(`${TAG} 🛗 undo ${label.replace(/<[^>]*>/g, '')}:`, e.message); elvLog(`${label} restore FAILED: ${elvEsc(e.message)} — stopped`, '#ff6060'); break; }
                 await new Promise(r => setTimeout(r, ELV_GAP_MS));
             }
+            // split-off FFZ pieces go, then the pads return to their pre-commit shape + band
+            if (!fpFail) {
+                for (const c of created) {
+                    if (await gmtDeletePlaced({ id: c.id, name: c.name, siteID: sid }, csrf)) ffzOk++; else ffzFail++;
+                    await new Promise(r => setTimeout(r, ELV_GAP_MS));
+                }
+                for (const orig of ffzList) {
+                    const label = `FFZ "${elvEsc(orig.name)}" (#${orig.id})`;
+                    try {
+                        const cur = elvLiveEntities(sid).find(e => e && e.id === orig.id);
+                        if (cur) sciBankToGuard(cur, sid);
+                        const body = buildWriteBody(orig, elv.siteCfg); body.arcs = [];
+                        await sciPostMapObject(body, csrf);
+                        try { await fetchMapObjects(sid, true); } catch (e) {}
+                        const after = elvLiveEntities(sid).find(e => e && e.id === orig.id);
+                        const want = (entityCoords(orig) || []).length, have = after ? (entityCoords(after) || []).length : -1;
+                        if (have !== want) throw new Error(`${have} vertices ≠ expected ${want} after restore`);
+                        ffzOk++; elvLog(`${label} restored`);
+                    } catch (e) { ffzFail++; console.warn(`${TAG} 🛗 undo ${label.replace(/<[^>]*>/g, '')}:`, e.message); elvLog(`${label} restore FAILED: ${elvEsc(e.message)}`, '#ff6060'); }
+                    await new Promise(r => setTimeout(r, ELV_GAP_MS));
+                }
+            }
         } finally { elv.running = false; }
-        if (!fpFail) { try { localStorage.removeItem(ELV_LAST_KEY(sid)); } catch (e) {} }
+        if (!fpFail && !ffzFail) { try { localStorage.removeItem(ELV_LAST_KEY(sid)); } catch (e) {} }
         elv.items.forEach(it => { if (it.status === 'done') it.status = 'stage'; });
-        elvLog(`Undo: ${fpOk} flight path(s) restored${fpFail ? `, <b style="color:#ff6060">1 FAILED</b> (backup JSON still has the originals)` : ''} · ${gmOk} GM(s) deleted${gmFail ? `, ${gmFail} failed` : ''} · ↻ Re-stage to rebuild`, fpFail || gmFail ? '#ffb347' : '#5fff5f');
-        showToast(fpFail ? 'Elevators undo stopped on a failure' : `↩ ${fpOk} flight path(s) restored`, fpFail ? 'rgba(255,96,96,0.55)' : undefined);
+        elvLog(`Undo: ${fpOk} flight path(s) restored${fpFail ? `, <b style="color:#ff6060">1 FAILED</b> (backup JSON still has the originals)` : ''} · ${gmOk} GM(s) deleted${gmFail ? `, ${gmFail} failed` : ''}${created.length || ffzList.length ? ` · ${ffzOk} FFZ change(s) reverted${ffzFail ? `, <b style="color:#ff6060">${ffzFail} FAILED</b> (backup JSON still has the originals)` : ''}` : ''} · ↻ Re-stage to rebuild`, fpFail || gmFail || ffzFail ? '#ffb347' : '#5fff5f');
+        showToast(fpFail || ffzFail ? 'Elevators undo stopped on a failure' : `↩ ${fpOk} flight path(s) restored`, fpFail || ffzFail ? 'rgba(255,96,96,0.55)' : undefined);
     }
 
     // ============================================================
