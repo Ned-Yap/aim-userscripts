@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.58
+// @version      0.59
 // @description  Edit Percepto map entities (flight paths + FFZs) from the map. AGL VIEW (Shift+G): on Mountain-terrain (MSL) sites, an overlay over the native editor shows + edits altitudes as height-above-ground (AGL/Δ/MSL columns, color-coded, live-linked) — backend stays MSL; works for flight-path segments AND FFZ bands; also augments Percepto's hover ALT tooltip with AGL. Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH) — and on ANY other mid-path vertex it SEVERS the path there; then either delete the unwanted piece and Save, or use the red chip's "💾 Save as N separate paths" to keep BOTH pieces as independent flight paths (direct POST /map_objects/: largest piece keeps the original id+name, others created as <name>_splitN; JSON backup + create-before-trim ordering + fresh-fetch verify + mandatory refresh overlay; a validated path's pieces stay validated). After the refresh an AUTO-VERIFY re-audits the saved paths against a fresh server fetch and toasts the verdict (structure, counts, shape parity, validated flag). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -88,7 +88,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.58';
+    const SCRIPT_VERSION = '0.59';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -1919,6 +1919,54 @@
             } catch (e) {}
         }, 600);
     }
+    // v0.59: a HUD rebuild (commit, ground load) used to wipe the inputs — Tab landed on a
+    // field that was destroyed a tick later, so focus fell to the page. Rebuilds now snapshot
+    // the focused field (incl. what's being typed + caret) and put focus back; Tab / Shift+Tab
+    // walk the fields, Enter drops to the same column in the next row. Each commits on the way.
+    let aglPendingFocus = null;
+    function aglInputDesc(inp) { return inp ? { wc: inp.getAttribute('data-wc'), sig: inp.getAttribute('data-sig') || '', kind: inp.getAttribute('data-kind') || '', field: inp.getAttribute('data-field') } : null; }
+    function aglFocusSnapshot() {
+        const ae = document.activeElement;
+        if (!ae || !ae.classList || !ae.classList.contains('aim-agl-in') || !document.getElementById(AGL_HUD_ID)) return null;
+        const d = aglInputDesc(ae);
+        d.value = ae.value; d.typed = ae.value !== ae.defaultValue; d.ss = ae.selectionStart; d.se = ae.selectionEnd;
+        return d;
+    }
+    function aglFindInput(d) {
+        if (!d) return null;
+        const hud = document.getElementById(AGL_HUD_ID); if (!hud) return null;
+        return Array.from(hud.querySelectorAll('input.aim-agl-in')).find(i => i.getAttribute('data-wc') === d.wc && (i.getAttribute('data-sig') || '') === d.sig && (i.getAttribute('data-kind') || '') === d.kind && i.getAttribute('data-field') === d.field) || null;
+    }
+    function aglFocusRestore(snap) {
+        const pending = aglPendingFocus;
+        const d = pending || snap; if (!d) return;
+        const inp = aglFindInput(d); if (!inp) { aglPendingFocus = null; return; }
+        try {
+            if (!pending && snap && snap.typed) { inp.value = snap.value; inp.focus(); inp.setSelectionRange(snap.ss, snap.se); inp.dispatchEvent(new Event('input', { bubbles: true })); }
+            else { inp.focus(); inp.select(); }
+        } catch (e) {}
+        aglPendingFocus = null;
+    }
+    function aglHudKeyNav(e) {
+        const inp = e.target;
+        if (!inp || !inp.classList || !inp.classList.contains('aim-agl-in')) return;
+        if (e.key !== 'Tab' && e.key !== 'Enter') return;
+        const hud = document.getElementById(AGL_HUD_ID); if (!hud) return;
+        const all = Array.from(hud.querySelectorAll('input.aim-agl-in'));
+        const i = all.indexOf(inp); if (i < 0) return;
+        let target;
+        if (e.key === 'Tab') target = all[(i + (e.shiftKey ? -1 : 1) + all.length) % all.length];
+        else { const f = inp.getAttribute('data-field'); const col = all.filter(x => x.getAttribute('data-field') === f); target = col[(col.indexOf(inp) + 1) % col.length]; }
+        e.preventDefault(); e.stopPropagation();
+        const desc = aglInputDesc(target);
+        aglPendingFocus = desc;
+        try { inp.blur(); } catch (er) {}   // fires change → commit → rebuild → aglFocusRestore(desc)
+        if (aglPendingFocus) {              // nothing rebuilt (no change) — move directly
+            aglPendingFocus = null;
+            const t = aglFindInput(desc) || target;
+            if (t) { try { t.focus(); t.select(); } catch (er) {} }
+        }
+    }
     function buildAglHud() {
         let el = document.getElementById(AGL_HUD_ID);
         if (!el) {
@@ -1933,7 +1981,7 @@
             ['mousedown', 'click', 'keydown', 'wheel'].forEach(t => el.addEventListener(t, e => e.stopPropagation()));
             el.addEventListener('input', onAglHudInput, true);   // live cross-update as you type
             el.addEventListener('change', onAglHudChange, true);  // commit to the working copy on blur/enter
-            el.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target && e.target.classList.contains('aim-agl-in')) e.target.blur(); }, true);
+            el.addEventListener('keydown', aglHudKeyNav, true);   // Tab / Shift+Tab / Enter move between fields (commit on the way)
             el.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-aglact]'); if (b) { if (b.getAttribute('data-aglact') === 'off') setAglHud(false); } });
             document.body.appendChild(el);
         }
@@ -2030,8 +2078,7 @@
         const sig = wc.id + '|' + mode + '|' + arcs.map(a => `${arcSig(a)}:${a.min_alt}:${a.max_alt}:${arcGroundCache.get(arcSig(a))}`).join(',');
         if (sig === aglHudSig && document.getElementById(AGL_HUD_ID)) return;
         // Don't rebuild (which would steal focus) while the user is typing in a band input.
-        const ae = document.activeElement;
-        if (ae && ae.classList && ae.classList.contains('aim-agl-in') && document.getElementById(AGL_HUD_ID)) return;
+        const focusSnap = aglFocusSnapshot();   // v0.59: rebuild keeps focus + typed text instead of being skipped
         aglHudSig = sig;
         const el = buildAglHud();
         const isAgl = mode === 'agl';
@@ -2099,6 +2146,7 @@
                 </table>
             </div>`;
         positionAglHud(el);
+        aglFocusRestore(focusSnap);
     }
     // FFZ editor: ONE altitude band (restrictions.minAlt/maxAlt). Same AGL/Δ/MSL
     // live-linked editing as the FP rows, but a single row + the FFZ's polygon ground.
@@ -2111,8 +2159,7 @@
         const g = ffzGroundSync(wc.id);     // undefined = not fetched, null = no data
         const sig = 'ffz|' + wc.id + '|' + mode + '|' + minM + ':' + maxM + ':' + g;
         if (sig === aglHudSig && document.getElementById(AGL_HUD_ID)) return;
-        const ae = document.activeElement;
-        if (ae && ae.classList && ae.classList.contains('aim-agl-in') && document.getElementById(AGL_HUD_ID)) return;
+        const focusSnap = aglFocusSnapshot();   // v0.59: rebuild keeps focus + typed text instead of being skipped
         aglHudSig = sig;
         const el = buildAglHud();
         const isAgl = mode === 'agl';
@@ -2159,6 +2206,7 @@
                 </table>
             </div>`;
         positionAglHud(el);
+        aglFocusRestore(focusSnap);
     }
     // Sit EXACTLY over Percepto's native entity form (.upsert-entity__form) so it
     // reads as native, not a floating box. The SAVE/Cancel bar lives OUTSIDE the
