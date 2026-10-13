@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.327
+// @version      4.328
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.327';
+    const SCRIPT_VERSION = '4.328';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -21914,22 +21914,6 @@
             return { s: lastIn, clamped: false };
         };
         const bL = walk(-1), bR = walk(1);
-        if (bL.clamped || bR.clamped) {
-            const endDeg = bL.clamped ? ch.startDeg : ch.endDeg;
-            it.fail.push(endDeg >= 3
-                ? `a branch vertex sits inside the bridge zone ${bL.clamped ? 'behind' : 'ahead of'} the crossing — split the path there first`
-                : `the path ends inside the bridge zone ${bL.clamped ? 'behind' : 'ahead of'} the crossing (within ${it.p.halfFt} ft of the line) — no room for an elevator`);
-            return;
-        }
-        const b1 = elvSnapS(ch, bL.s), b2 = elvSnapS(ch, bR.s);
-        const clampStart = b1 - elevM < 0, clampEnd = b2 + elevM > ch.len;
-        const e1 = clampStart ? 0 : elvSnapS(ch, b1 - elevM), e2 = clampEnd ? ch.len : elvSnapS(ch, b2 + elevM);
-        if (clampStart && ch.startDeg >= 3) it.fail.push('a branch vertex sits inside Elevator 1 — split the path there first');
-        if (clampEnd && ch.endDeg >= 3) it.fail.push('a branch vertex sits inside Elevator 2 — split the path there first');
-        if (it.fail.length) return;
-        if (b1 - e1 < 3 || e2 - b2 < 3) { it.fail.push(`${b1 - e1 < 3 ? 'Elevator 1' : 'Elevator 2'} would be under 10 ft long — the path ends right at the bridge`); return; }
-        // neighbour band = the untouched arc beyond the window, or the FFZ the path ends on
-        const bandAt = (s) => { const i = Math.max(0, Math.min(ch.legs.length - 1, elvAt(ch, s).leg)); const a = ch.arcs[ch.legs[i].i]; return { min: a.min_alt, max: a.max_alt }; };
         const ffzAt = (p) => {
             let best = null;
             ffzInfo.forEach(f => {
@@ -21939,6 +21923,28 @@
             });
             return best;
         };
+        // A path end inside the bridge zone: on a pad edge → the bridge runs
+        // straight to the FFZ (no elevator that side, the FFZ band must clear
+        // the bridge floor by the overlap); a branch or a dangling end → blocked.
+        const direct = { start: null, end: null };   // {f: ffzInfo entry} when the bridge meets an FFZ on that side
+        [[bL, true], [bR, false]].forEach(([b, atStart]) => {
+            if (!b.clamped) return;
+            const deg = atStart ? ch.startDeg : ch.endDeg, side = atStart ? 'behind' : 'ahead of';
+            if (deg >= 3) { it.fail.push(`a branch vertex sits inside the bridge zone ${side} the crossing — split the path there first`); return; }
+            const hit = ffzAt(atStart ? ch.pts[0] : ch.pts[ch.pts.length - 1]);
+            if (!hit) { it.fail.push(`dangling end ${side} the crossing — the path stops within ${it.p.halfFt} ft of the line on no FFZ edge; connect or abandon it`); return; }
+            direct[atStart ? 'start' : 'end'] = hit;
+        });
+        if (it.fail.length) return;
+        const b1 = direct.start ? 0 : elvSnapS(ch, bL.s), b2 = direct.end ? ch.len : elvSnapS(ch, bR.s);
+        const clampStart = !direct.start && b1 - elevM < 0, clampEnd = !direct.end && b2 + elevM > ch.len;
+        const e1 = direct.start ? 0 : clampStart ? 0 : elvSnapS(ch, b1 - elevM), e2 = direct.end ? ch.len : clampEnd ? ch.len : elvSnapS(ch, b2 + elevM);
+        if (clampStart && ch.startDeg >= 3) it.fail.push('a branch vertex sits inside Elevator 1 — split the path there first');
+        if (clampEnd && ch.endDeg >= 3) it.fail.push('a branch vertex sits inside Elevator 2 — split the path there first');
+        if (it.fail.length) return;
+        if ((!direct.start && b1 - e1 < 3) || (!direct.end && e2 - b2 < 3)) { it.fail.push(`${!direct.start && b1 - e1 < 3 ? 'Elevator 1' : 'Elevator 2'} would be under 10 ft long — the path ends right at the bridge`); return; }
+        // neighbour band = the untouched arc beyond the window, or the FFZ the path ends on
+        const bandAt = (s) => { const i = Math.max(0, Math.min(ch.legs.length - 1, elvAt(ch, s).leg)); const a = ch.arcs[ch.legs[i].i]; return { min: a.min_alt, max: a.max_alt }; };
         const neighbour = (atStart) => {
             const nm = atStart ? 'Elevator 1' : 'Elevator 2';
             if (!(atStart ? clampStart : clampEnd)) { const b = bandAt(atStart ? e1 - 0.01 : e2 + 0.01); return { min: b.min, max: b.max, label: `the next arc (${elvFt(b.min)}–${elvFt(b.max)} ft MSL)` }; }
@@ -21960,7 +21966,7 @@
         if (g.some(x => typeof x.g !== 'number')) { it.fail.push('DEM sample unavailable (elevation service) — try again'); return; }
         const gIn = (lo, hi) => g.filter(x => x.s >= lo - 0.01 && x.s <= hi + 0.01).map(x => x.g);
         const mx = (arr) => Math.max(...arr), mn = (arr) => Math.min(...arr);
-        const gB = gIn(b1, b2), gE1 = gIn(e1, b1), gE2 = gIn(b2, e2);
+        const gB = gIn(b1, b2), gE1 = direct.start ? gB : gIn(e1, b1), gE2 = direct.end ? gB : gIn(b2, e2);
         const R = fpArcAltMeters;
         const bridge = { min: R(mx(gB) + it.p.floorAgl * GEN_FT_TO_M) };
         bridge.max = R(bridge.min + it.p.height * GEN_FT_TO_M);
@@ -21972,10 +21978,22 @@
             it.warn.push(`already bridged — the crossed arc flies ${elvFt(crossed.min_alt)}–${elvFt(crossed.max_alt)} ft MSL (${elvFt(crossed.min_alt - mx(gB))} ft over the highest ground)`);
             return;
         }
-        const n1 = neighbour(true), n2 = neighbour(false);
-        const E1 = { min: R(n1.max - ovM), max: R(bridge.min + ovM), nb: n1 };
-        const E2 = { min: R(n2.max - ovM), max: R(bridge.min + ovM), nb: n2 };
+        // bridge meets an FFZ directly: the FFZ band must overlap the bridge by the full overlap
+        const ffzDirect = {};
+        [['start', 'Elevator 1'], ['end', 'Elevator 2']].forEach(([k, nm]) => {
+            if (!direct[k]) return;
+            const f = direct[k].f.e, r = f.restrictions || {};
+            if (!(typeof r.minAlt === 'number' && typeof r.maxAlt === 'number')) { it.fail.push(`${nm}: the bridge meets FFZ "${f.name}" but it has no altitude band`); return; }
+            const ov = Math.min(r.maxAlt, bridge.max) - Math.max(r.minAlt, bridge.min);
+            ffzDirect[k] = { name: f.name, min: r.minAlt, max: r.maxAlt, ov };
+            if (ov < ovM - 0.01) it.fail.push(`${nm}: none — the bridge runs straight into FFZ "${f.name}" (pad within ${it.p.halfFt} ft of the line) but the FFZ band ${elvFt(r.minAlt)}–${elvFt(r.maxAlt)} ft MSL only overlaps the bridge by ${Math.max(0, elvFt(ov))} ft — raise its ceiling to ${elvFt(bridge.min + ovM)} ft MSL or abandon the path`);
+            else it.warn.push(`${nm}: none — the bridge runs straight into FFZ "${f.name}" (pad within ${it.p.halfFt} ft of the line); FFZ ceiling ${elvFt(r.maxAlt)} ft MSL clears the bridge floor by ${elvFt(ov)} ft`);
+        });
+        const n1 = direct.start ? null : neighbour(true), n2 = direct.end ? null : neighbour(false);
+        const E1 = n1 ? { min: R(n1.max - ovM), max: R(bridge.min + ovM), nb: n1 } : null;
+        const E2 = n2 ? { min: R(n2.max - ovM), max: R(bridge.min + ovM), nb: n2 } : null;
         [[E1, 'Elevator 1', gE1], [E2, 'Elevator 2', gE2]].forEach(([E, nm, gg]) => {
+            if (!E) return;
             if (!(E.max > E.min)) it.fail.push(`${nm} band inverted (${elvFt(E.min)}–${elvFt(E.max)} ft MSL) — the bridge floor is below ${E.nb.label}`);
             else {
                 if (!(E.max > E.nb.min && E.nb.max > E.min)) it.fail.push(`${nm} has no positive overlap with ${E.nb.label}`);
@@ -21988,8 +22006,8 @@
             const lenM = nm === 'Elevator 1' ? b1 - e1 : e2 - b2;
             if (lenM < elevM - 0.5) it.warn.push(`${nm} is only ${elvFt(lenM)} ft long (the path ends) — a steeper climb than the ${it.p.elevFt} ft default`);
         });
-        it.bands = { E1, bridge, E2 };
-        it.geo = { ch, sX, e1, b1, b2, e2, gz: { E1: { max: mx(gE1), min: mn(gE1) }, B: { max: mx(gB), min: mn(gB) }, E2: { max: mx(gE2), min: mn(gE2) } }, gmLL: elvGmPoint(ch, (b1 + b2) / 2) };
+        it.bands = { E1, bridge, E2, ffz: ffzDirect };
+        it.geo = { ch, sX, e1, b1, b2, e2, direct: { start: !!direct.start, end: !!direct.end }, gz: { E1: { max: mx(gE1), min: mn(gE1) }, B: { max: mx(gB), min: mn(gB) }, E2: { max: mx(gE2), min: mn(gE2) } }, gmLL: elvGmPoint(ch, (b1 + b2) / 2) };
         if (it.p.gm) it.gm = { name: `Elevator # - ${it.p.floorAgl}ft`, ll: it.geo.gmLL };
     }
     // ---- per-FP arc rebuild + preflight ----
@@ -22027,9 +22045,9 @@
                 const zoneFor = (mid) => {
                     for (const it of kept) {
                         const gg = it.geo;
-                        if (mid > gg.e1 && mid < gg.b1) return { b: it.bands.E1, it, zone: 'E1' };
+                        if (it.bands.E1 && mid > gg.e1 && mid < gg.b1) return { b: it.bands.E1, it, zone: 'E1' };
                         if (mid > gg.b1 && mid < gg.b2) return { b: it.bands.bridge, it, zone: 'bridge' };
-                        if (mid > gg.b2 && mid < gg.e2) return { b: it.bands.E2, it, zone: 'E2' };
+                        if (it.bands.E2 && mid > gg.b2 && mid < gg.e2) return { b: it.bands.E2, it, zone: 'E2' };
                     }
                     return null;
                 };
@@ -22165,9 +22183,9 @@
             const dash = bad ? '6 5' : muted ? '2 6' : null;
             const tipHead = `<b>#${it.id} ${elvEsc(it.fpName)}</b> · ${it.status === 'done' ? 'committed' : it.status === 'present' ? 'already bridged' : bad ? 'blocked' : 'staged'}<br>`;
             const bands = it.bands;
-            seg(g.ch, g.e1, g.b1, { color: col('#ffe14d'), weight: 5, opacity: 0.95, dashArray: dash }, tipHead + (bands ? `Elevator 1 (${elvFt(g.b1 - g.e1)} ft) — ${elvBandText(bands.E1, g.gz.E1)}` : 'Elevator 1'));
-            seg(g.ch, g.b1, g.b2, { color: col('#ff9a3d'), weight: 6, opacity: 0.95, dashArray: dash }, tipHead + (bands ? `Bridge (${elvFt(g.b2 - g.b1)} ft) — ${elvBandText(bands.bridge, g.gz.B)}` : 'Bridge'));
-            seg(g.ch, g.b2, g.e2, { color: col('#ffe14d'), weight: 5, opacity: 0.95, dashArray: dash }, tipHead + (bands ? `Elevator 2 (${elvFt(g.e2 - g.b2)} ft) — ${elvBandText(bands.E2, g.gz.E2)}` : 'Elevator 2'));
+            if (g.b1 - g.e1 > 0.01) seg(g.ch, g.e1, g.b1, { color: col('#ffe14d'), weight: 5, opacity: 0.95, dashArray: dash }, tipHead + (bands && bands.E1 ? `Elevator 1 (${elvFt(g.b1 - g.e1)} ft) — ${elvBandText(bands.E1, g.gz.E1)}` : 'Elevator 1'));
+            seg(g.ch, g.b1, g.b2, { color: col('#ff9a3d'), weight: 6, opacity: 0.95, dashArray: dash }, tipHead + (bands ? `Bridge (${elvFt(g.b2 - g.b1)} ft) — ${elvBandText(bands.bridge, g.gz.B)}${g.direct.start ? ' · meets FFZ at the start' : ''}${g.direct.end ? ' · meets FFZ at the end' : ''}` : 'Bridge'));
+            if (g.e2 - g.b2 > 0.01) seg(g.ch, g.b2, g.e2, { color: col('#ffe14d'), weight: 5, opacity: 0.95, dashArray: dash }, tipHead + (bands && bands.E2 ? `Elevator 2 (${elvFt(g.e2 - g.b2)} ft) — ${elvBandText(bands.E2, g.gz.E2)}` : 'Elevator 2'));
             [g.e1, g.b1, g.b2, g.e2].forEach(s => { const p = elvAt(g.ch, s); add(L.circleMarker([p.lat, p.lng], { radius: 4, color: '#ffffff', weight: 1, fillColor: col('#ffe14d'), fillOpacity: 1, interactive: false })); });
             add(L.circleMarker([it.X.lat, it.X.lng], { radius: 5, color: '#ff2a2a', weight: 2, fillColor: '#ff2a2a', fillOpacity: 0.2, interactive: false }));
             if (it.gm && it.status === 'stage' && !bad) add(L.circleMarker([g.gmLL.lat, g.gmLL.lng], { radius: 6, color: '#c084fc', weight: 2, fillColor: '#c084fc', fillOpacity: 0.6, interactive: false }));
@@ -22226,9 +22244,9 @@
             const g = it.geo, b = it.bands;
             const stCol = it.status === 'done' ? '#9ad' : it.status === 'present' || it.status === 'merged' ? '#8a8f94' : it.fail.length ? '#ff6060' : '#5fff5f';
             const stTxt = it.status === 'done' ? '✓ committed' : it.status === 'present' ? '– already bridged' : it.status === 'merged' ? '– merged' : it.fail.length ? '✕ blocked' : wFail(it).length ? '✕ path blocked' : '● staged';
-            const lens = g ? `E1 ${elvFt(g.b1 - g.e1)} ft · bridge ${elvFt(g.b2 - g.b1)} ft · E2 ${elvFt(g.e2 - g.b2)} ft` : '';
+            const lens = g ? `E1 ${g.direct && g.direct.start ? 'none (FFZ)' : `${elvFt(g.b1 - g.e1)} ft`} · bridge ${elvFt(g.b2 - g.b1)} ft · E2 ${g.direct && g.direct.end ? 'none (FFZ)' : `${elvFt(g.e2 - g.b2)} ft`}` : '';
             const bandRow = (g && b) ? `<div style="color:#9ad;font-size:10px;line-height:1.5">
-                    <span style="color:#ffe14d">E1</span> ${elvBandText(b.E1, g.gz.E1)} &nbsp;·&nbsp; <span style="color:#ff9a3d">Bridge</span> ${elvBandText(b.bridge, g.gz.B)} (<b>${elvFt(b.bridge.max - g.gz.B.min)} ft</b> over its lowest ground) &nbsp;·&nbsp; <span style="color:#ffe14d">E2</span> ${elvBandText(b.E2, g.gz.E2)}
+                    <span style="color:#ffe14d">E1</span> ${b.E1 ? elvBandText(b.E1, g.gz.E1) : `none — bridge → FFZ "${elvEsc(b.ffz.start ? b.ffz.start.name : '?')}"${b.ffz.start ? ` (${elvFt(b.ffz.start.min)}–${elvFt(b.ffz.start.max)} ft MSL)` : ''}`} &nbsp;·&nbsp; <span style="color:#ff9a3d">Bridge</span> ${elvBandText(b.bridge, g.gz.B)} (<b>${elvFt(b.bridge.max - g.gz.B.min)} ft</b> over its lowest ground) &nbsp;·&nbsp; <span style="color:#ffe14d">E2</span> ${b.E2 ? elvBandText(b.E2, g.gz.E2) : `none — bridge → FFZ "${elvEsc(b.ffz.end ? b.ffz.end.name : '?')}"${b.ffz.end ? ` (${elvFt(b.ffz.end.min)}–${elvFt(b.ffz.end.max)} ft MSL)` : ''}`}
                     ${it.gm ? `<br><span style="color:#c084fc">GM</span> pole "${elvEsc(it.gm.name.replace('#', 'NN'))}" ${ELV_GM_OFFSET_FT} ft beside the bridge midpoint` : ''}</div>` : '';
             const notes = [...it.fail.map(x => `<div style="color:#ff8a80">✕ ${elvEsc(x)}</div>`), ...wFail(it).map(x => `<div style="color:#ff8a80">✕ path: ${elvEsc(x)}</div>`), ...it.warn.map(x => `<div style="color:#ffb347">⚠ ${elvEsc(x)}</div>`)].join('');
             return `<div style="margin:4px 0;padding:5px 7px;border:1px solid rgba(255,154,61,0.25);border-radius:3px;background:rgba(255,154,61,0.04)">
@@ -22267,7 +22285,7 @@
     async function elvCreateGm(it, sid) {
         const b = it.bands, g = it.geo;
         const t = gmtNormalizeTemplate({ id: 'elv', label: 'Elevator', name: it.gm.name, type: 'pole', heightFt: 0, start: 1, pad: 2 });
-        const description = `Elevator over a transmission line — FP "${it.fpName}": bridge ${elvFt(b.bridge.min)}–${elvFt(b.bridge.max)} ft MSL (${elvFt(b.bridge.min - g.gz.B.max)} ft over the highest ground), elevators ${it.p.elevFt} ft, climb to ${elvFt(b.E1.max)} ft MSL · auto-placed by Site Setup Tools 🛗`;
+        const description = `Elevator over a transmission line — FP "${it.fpName}": bridge ${elvFt(b.bridge.min)}–${elvFt(b.bridge.max)} ft MSL (${elvFt(b.bridge.min - g.gz.B.max)} ft over the highest ground), ${b.E1 || b.E2 ? `elevators ${it.p.elevFt} ft, climb to ${elvFt((b.E1 || b.E2).max)} ft MSL` : 'bridge runs pad edge to pad edge'}${b.ffz.start ? `, meets FFZ "${b.ffz.start.name}"` : ''}${b.ffz.end ? `, meets FFZ "${b.ffz.end.name}"` : ''} · auto-placed by Site Setup Tools 🛗`;
         const res = await gmtCreateGm(t, it.gm.ll, sid, '', { type: 'pole', heightFt: 0, description });
         return res ? { id: res.id, name: res.name, siteID: sid } : null;
     }
