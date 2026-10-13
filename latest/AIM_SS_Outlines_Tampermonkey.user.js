@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.163
+// @version      34.164
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.163';
+    const SCRIPT_VERSION = '34.164';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -5660,7 +5660,7 @@
     const HZ_CLASSES = [
         { id: 'work',     label: '🟥 Work NOW — rig / frac crew / drilling on the pad (any operator)',       color: '#ff1744', opacity: 0.5,  hatch: true,  show: true },
         { id: 'likely',   label: '🟪 Likely work — permit / DUC / infill / soaking inside its window',      color: '#b100ff', opacity: 0.45, hatch: true,  show: true },
-        { id: 'possible', label: '⬜ Possible work — stale or far-out signal (dashed white)',               color: '#ffffff', opacity: 0.35, hatch: true,  show: true, dash: '6 4', thin: true },
+        { id: 'possible', label: '⬜ Possible work — stale or far-out signal (dashed white, dark edge)',    color: '#ffffff', opacity: 0.35, hatch: true,  show: true, dash: '6 4', edge: '#1a1a1a' },
         { id: 'live',     label: '⬛ Third-party producing pads (charcoal, white edge)',                    color: '#111111', opacity: 0.4,  hatch: true,  show: true, edge: '#ffffff' },
         { id: 'building', label: '🏠 Buildings / private property (white, dark edge)',                     color: '#ffffff', opacity: 0.18, hatch: false, show: true, edge: '#222222' },
         { id: 'ours',     label: '🟦 Our producing pads',                                                   color: '#4fc3f7', opacity: 0.10, hatch: false, show: false, dash: '6 5' },
@@ -5987,7 +5987,7 @@
         st.id = HZ_STYLE_ID;
         st.textContent = `@keyframes aim-hz-pulse { 0% { stroke-opacity: 1; } 50% { stroke-opacity: 0.2; } 100% { stroke-opacity: 1; } }
             .aim-hz-new { animation: aim-hz-pulse 1.3s ease-in-out infinite; }
-            .aim-hz-hit { pointer-events: stroke !important; cursor: pointer; }
+
             .leaflet-tooltip.aim-hz-tt { white-space: normal; width: max-content; max-width: 360px; box-sizing: border-box; }
             .aim-hz-tip { font: 12px/1.35 -apple-system, Segoe UI, Roboto, sans-serif; word-break: break-word; }`;
         (document.head || document.documentElement).appendChild(st);
@@ -6001,6 +6001,69 @@
             }
         } catch (e) { console.warn(`${TAG} hazards: pane creation failed, using the default pane:`, e); }
         return undefined;
+    }
+    // ---- hover (v34.164): Percepto's entity polygons sit in the pane above ours and eat the
+    // mouse, so hover is our own hit test on the map's mousemove — works inside an FFZ, steals
+    // no clicks. One tooltip object, moved and refilled. Shift+click copies the API list.
+    let hzDrawn = [];            // [{ f, minLat, maxLat, minLng, maxLng }] for the current draw
+    let hzTipLayer = null;
+    let hzHoverF = null;
+    let hzHoverLast = 0;
+    function hzPointIn(lat, lng, ring) {
+        let inside = false;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+            const yi = ring[i][0], xi = ring[i][1], yj = ring[j][0], xj = ring[j][1];
+            if (((yi > lat) !== (yj > lat)) && (lng < (xj - xi) * (lat - yi) / (yj - yi) + xi)) inside = !inside;
+        }
+        return inside;
+    }
+    function hzFeatureAt(lat, lng) {
+        // smallest hazard under the cursor wins (a building inside a pad outline beats the pad)
+        let best = null, bestArea = Infinity;
+        for (const d of hzDrawn) {
+            if (lat < d.minLat || lat > d.maxLat || lng < d.minLng || lng > d.maxLng) continue;
+            if (!hzPointIn(lat, lng, d.f.ring)) continue;
+            const area = (d.maxLat - d.minLat) * (d.maxLng - d.minLng);
+            if (area < bestArea) { bestArea = area; best = d.f; }
+        }
+        return best;
+    }
+    function hzHoverClear(map) {
+        hzHoverF = null;
+        if (hzTipLayer) { try { (map || getLeafletMap()).removeLayer(hzTipLayer); } catch (e) {} }
+    }
+    function hzHoverRefresh() {
+        if (hzTipLayer && hzHoverF) { try { hzTipLayer.setContent(hzTip(hzHoverF)); } catch (e) {} }
+    }
+    function hzHoverInstall(map, L) {
+        if (!map || map.__aimHzHover) return;
+        if (!L.tooltip) return;
+        map.__aimHzHover = true;
+        map.on('mousemove', (ev) => {
+            if (!ev || !ev.latlng || !hzDrawn.length) { if (hzHoverF) hzHoverClear(map); return; }
+            const now = Date.now();
+            if (now - hzHoverLast < 40) return;   // ~25 Hz is plenty for a hover test
+            hzHoverLast = now;
+            const f = hzFeatureAt(ev.latlng.lat, ev.latlng.lng);
+            if (!f) { if (hzHoverF) hzHoverClear(map); return; }
+            try {
+                if (!hzTipLayer) hzTipLayer = L.tooltip({ direction: 'top', opacity: 0.97, className: 'aim-hz-tt', offset: [0, -8] });
+                if (f !== hzHoverF) {
+                    hzHoverF = f;
+                    hzTipLayer.setContent(hzTip(f));
+                    if (!f.p.owner && (f.cls === 'building' || (f.p.source === 'cv' && !f.p.operator))) hzLookupOwner(f, { setTooltipContent: () => hzHoverRefresh() });
+                }
+                hzTipLayer.setLatLng(ev.latlng);
+                if (!map.hasLayer(hzTipLayer)) hzTipLayer.addTo(map);
+            } catch (e) { console.warn(`${TAG} hazards: hover tooltip threw:`, e); }
+        });
+        map.on('mouseout', () => hzHoverClear(map));
+        map.on('click', (ev) => {
+            if (!hzHoverF || !(ev.originalEvent && ev.originalEvent.shiftKey)) return;
+            const apis = Array.isArray(hzHoverF.p.api_list) ? hzHoverF.p.api_list.filter(Boolean) : [];
+            if (!apis.length) return;
+            try { navigator.clipboard.writeText(apis.join('\n')); showKMLToast(`Copied ${apis.length} API number${apis.length === 1 ? '' : 's'} — ${hzHoverF.p.name || ''}`, 2000); } catch (e) { console.warn(`${TAG} hazards: clipboard write failed:`, e); }
+        });
     }
     function hzHitPaneName(map) {
         try {
@@ -6140,7 +6203,8 @@
                 + (p.parcel_src ? `<div style="color:#666">${esc(p.parcel_src)}${p.parcel_year ? ` · ${esc(p.parcel_year)}` : ''}</div>` : '') + `</div>`);
         }
         if (p.new_since) parts.push(`<div style="margin-top:4px;color:#8d5400;font-weight:700">NEW / CHANGED ${fmt(p.new_since)}${p.prev_status ? ` (was ${esc(p.prev_status)})` : ''}</div>`);
-        if (Array.isArray(p.api_list) && p.api_list.length) parts.push(row('APIs', `${esc(p.api_list[0])}${p.api_list.length > 1 ? ` <span style="color:#666">+${p.api_list.length - 1} more</span>` : ''} <span style="color:#666">· click the pad to copy all</span>`));
+        if (Array.isArray(p.api_list) && p.api_list.length) parts.push(row('APIs', `${esc(p.api_list[0])}${p.api_list.length > 1 ? ` <span style="color:#666">+${p.api_list.length - 1} more</span>` : ''} <span style="color:#666">· Shift+click to copy all</span>`));
+        if (Array.isArray(p.api_list) && p.api_list.length) parts.push('');
         parts.push(`<div style="margin-top:5px;color:#888;font-size:11px">${esc({ 'enverus-pad': 'Enverus pad outline', msbf: 'building footprint', cv: 'scanner outline' }[p.geom_source] || (/^square/.test(p.geom_source || '') ? `${p.geom_source.replace('square-', '')} square around the well${p.well_count > 1 ? 's' : ''} (no outline on record)` : p.geom_source || ''))} · standoff ${Number(p.standoff_ft) || 0} ft · file ${fmt(p.generated)}</div>`);
         return `<div class="aim-hz-tip" style="min-width:260px">${parts.join('')}</div>`;
     }
@@ -6198,6 +6262,8 @@
         try { map.getContainer().appendChild(el); } catch (e) {}
     }
     function removeHazards() {
+        hzDrawn = [];
+        hzHoverClear();
         if (hzLayers.length) {
             const map = getLeafletMap();
             hzLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
@@ -6237,17 +6303,8 @@
         const pane = hzPaneName(map);
         const renderer = hzRendererFor(map, L, pane);
         const canTip = hover && !!(L.Tooltip && L.Polygon && L.Polygon.prototype.bindTooltip);
-        const hitPane = canTip ? hzHitPaneName(map) : undefined;
-        const hitRenderer = hitPane ? hzHitRendererFor(map, L, hitPane) : null;
-        const wire = (layer, f) => {
-            layer.bindTooltip(hzTip(f), { sticky: true, direction: 'top', opacity: 0.97, className: 'aim-hz-tt' });
-            if (!f.p.owner && (f.cls === 'building' || (f.p.source === 'cv' && !f.p.operator))) layer.on('tooltipopen', () => hzLookupOwner(f, layer));
-            layer.on('click', () => {
-                const apis = Array.isArray(f.p.api_list) ? f.p.api_list.filter(Boolean) : [];
-                if (!apis.length) return;
-                try { navigator.clipboard.writeText(apis.join('\n')); showKMLToast(`Copied ${apis.length} API number${apis.length === 1 ? '' : 's'} — ${f.p.name || ''}`, 2000); } catch (e) { console.warn(`${TAG} hazards: clipboard write failed:`, e); }
-            });
-        };
+        hzDrawn = [];
+        if (canTip) hzHoverInstall(map, L); else hzHoverClear(map);
         const fileStandoff = Number(hzData.json.standoff_ft) || 50;
         const counts = {};
         let drawn = 0, capped = false;
@@ -6261,7 +6318,7 @@
             const useHatch = hatchOn && def.hatch && renderer && hzEnsureHatch(renderer, f.cls, color, isFinite(opacity) ? opacity : def.opacity);
             const isNew = pulse && !!f.p.new_since;
             const opts = {
-                color, weight: width, opacity: 0.95, interactive: canTip,
+                color, weight: width, opacity: 0.95, interactive: false,   // hover + click are our own hit test (hzHoverInstall)
                 fill: true, fillColor: useHatch ? `url(#${hzHatchId(f.cls)})` : color, fillOpacity: useHatch ? 1 : (isFinite(opacity) ? opacity : def.opacity),
                 dashArray: def.dash || null,
                 className: isNew ? 'aim-hz-new' : undefined,
@@ -6275,16 +6332,12 @@
                     under.addTo(map); hzLayers.push(under);
                 }
                 const poly = L.polygon([f.ring], opts);
-                if (canTip) wire(poly, f);   // interior hover where nothing of Percepto's is on top
                 poly.addTo(map);
                 hzLayers.push(poly);
-                if (hitRenderer) {
-                    // Invisible 14 px band on the outline, in a pane ABOVE the entities: the card opens from
-                    // the outline even when the pad lies inside one of our FFZs (whose polygon eats interior hover).
-                    const hit = L.polygon([f.ring], { color: color, weight: 14, opacity: 0.01, fill: false, interactive: true, className: 'aim-hz-hit', pane: hitPane, renderer: hitRenderer });
-                    wire(hit, f);
-                    hit.addTo(map);
-                    hzLayers.push(hit);
+                if (canTip) {
+                    let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+                    f.ring.forEach(q => { if (q[0] < minLat) minLat = q[0]; if (q[0] > maxLat) maxLat = q[0]; if (q[1] < minLng) minLng = q[1]; if (q[1] > maxLng) maxLng = q[1]; });
+                    hzDrawn.push({ f, minLat, maxLat, minLng, maxLng });
                 }
                 if (standoffOn && f.cls !== 'dead') {
                     const ft = standoffFt > 0 ? standoffFt : (Number(f.p.standoff_ft) || fileStandoff);
