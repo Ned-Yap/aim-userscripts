@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.325
+// @version      4.326
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.325';
+    const SCRIPT_VERSION = '4.326';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -21624,7 +21624,13 @@
                         const want = body.arcs, have = live.arcs.filter(a => a && a.point_a && a.point_b);
                         if (have.length !== want.length) throw new Error(`arc count ${have.length} ≠ expected ${want.length} after save`);
                         const missing = want.filter(a => !have.some(h => (sciSame(h.point_a, a.point_a) && sciSame(h.point_b, a.point_b)) || (sciSame(h.point_a, a.point_b) && sciSame(h.point_b, a.point_a))));
-                        if (missing.length) throw new Error(`${missing.length} arc(s) not found after save`);
+                        if (missing.length) {
+                            // v4.326: say WHAT moved — expected endpoints vs the nearest live arc, in ft
+                            const nearest = (p) => { let b = Infinity; have.forEach(h => [h.point_a, h.point_b].forEach(q => { b = Math.min(b, approxMeters(p.lat, p.lng, q.lat, q.lng)); })); return b; };
+                            const detail = missing.map(a => `sent ${a.point_a.lat.toFixed(6)},${a.point_a.lng.toFixed(6)} → ${a.point_b.lat.toFixed(6)},${a.point_b.lng.toFixed(6)} · nearest live vertex ${(nearest(a.point_a) / GEN_FT_TO_M).toFixed(1)} ft / ${(nearest(a.point_b) / GEN_FT_TO_M).toFixed(1)} ft away`);
+                            console.warn(`${TAG} 🔍 verify mismatch on FP #${w.fp.id} "${w.fp.name}":\n  ${detail.join('\n  ')}\n  server echo arcs: ${JSON.stringify((saved.arcs || []).map(x => [x.point_a, x.point_b]))}\n  live arcs: ${JSON.stringify(have.map(x => [x.point_a, x.point_b]))}`);
+                            throw new Error(`${missing.length} arc(s) not found after save — ${detail[0]} (details in console)`);
+                        }
                         w.done = true; ok++; rep.fp.changed.push({ fpId: w.fp.id, name: w.fp.name, legs: w.legs.map(l => `${l.key} ${l.action}`), arcsBefore: w.fp.arcs.length, arcsAfter: have.length, savedId: saved.id });
                         sciLog(`${label} saved + verified (${w.fp.arcs.length} → ${have.length} arcs)`);
                     }
