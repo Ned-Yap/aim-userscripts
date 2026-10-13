@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.336
+// @version      4.337
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.336';
+    const SCRIPT_VERSION = '4.337';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -21951,7 +21951,12 @@
             if (deg >= 3) { it.fail.push(`a branch vertex sits inside the bridge zone ${side} the crossing — split the path there first`); return; }
             const endP = atStart ? ch.pts[0] : ch.pts[ch.pts.length - 1];
             const hit = ffzAt(endP), other = hit ? null : otherFpAt(endP);
-            if (!hit && !other) { it.fail.push(`dangling end ${side} the crossing — the path stops within ${it.p.halfFt} ft of the line on no FFZ edge and no other flight path; connect or abandon it`); return; }
+            if (!hit && !other) {
+                const dl = near.length ? elvFt(dLine(endP)) : null;
+                it.fail.push(`dangling end ${side} the crossing — the path stops within ${it.p.halfFt} ft of the line on no FFZ edge and no other flight path; connect or abandon it [chain ${elvFt(ch.len)} ft / ${ch.legs.length} arc(s), crossing at ${elvFt(sX)} ft along it, end vertex ${endP.lat.toFixed(6)},${endP.lng.toFixed(6)}${dl != null ? ` is ${dl} ft from the line` : ''}, degree ${deg}]`);
+                console.warn(`${TAG} 🛗 dangling diag #${it.id} FP #${it.fpId} "${it.fpName}": chain ids ${JSON.stringify(ch.ids)} pts ${JSON.stringify(ch.pts.map(p => [p.lat, p.lng]))} startDeg ${ch.startDeg} endDeg ${ch.endDeg} sX ${sX.toFixed(1)} len ${ch.len.toFixed(1)}`);
+                return;
+            }
             const nbName = hit ? `FFZ "${hit.f.e.name}"` : `flight path "${other.e.name}"`;
             // last line crossing on this side (merged bridges can cross several lines)
             let lastX = sX;
