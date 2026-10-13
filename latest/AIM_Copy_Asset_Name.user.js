@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.324
+// @version      4.325
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.324';
+    const SCRIPT_VERSION = '4.325';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -230,6 +230,11 @@
     // runs at init and references them — a later const would TDZ-throw.
     const IMP_SCRIPT_ID = 'aim-asset-importer';
     let impMasterEnabled = true;
+    // v4.325: 🔍 Scan Import (#289) — CP card ids + init-referenced lets (TDZ rule).
+    const SCI_SCRIPT_ID = 'aim-scan-import';
+    let sciMasterEnabled = true;
+    let sciAglFt = 90;      // AGL floor at every new / moved FP vertex (blocker)
+    let sciEdgeFt = 3;      // how close an FP end must be to an FFZ edge to count as "on" it
     let impDupFt = 50;              // duplicate-guard proximity, CP-editable
     // ---- 📌 GM Stamper (#271) — CP card id + init-referenced state (same TDZ reason).
     const GMT_SCRIPT_ID = 'aim-gm-stamper';
@@ -12998,6 +13003,20 @@
                     impOpenFromAction();
                 }
             }
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCI_SCRIPT_ID) {
+                const v = msg.value !== undefined ? msg.value : msg.enabled;
+                if (msg.toggleId === 'sci-master') { const b = !!v; if (b !== sciMasterEnabled) sciMasterEnabled = b; }
+                else if (msg.toggleId === 'sci-agl-ft') { const n = Number(v); if (isFinite(n) && n >= 0 && n !== sciAglFt) sciAglFt = n; }
+                else if (msg.toggleId === 'sci-edge-ft') { const n = Number(v); if (isFinite(n) && n > 0 && n !== sciEdgeFt) sciEdgeFt = n; }
+            }
+            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCI_SCRIPT_ID && CONTEXT === 'IFRAME') {
+                if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;   // tab-local (see importer above)
+                if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
+                if (msg.actionId === 'sci-open') {
+                    if (!sciMasterEnabled) { showToast('Scan Import is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+                    sciOpenFromAction();
+                }
+            }
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === GMT_SCRIPT_ID) {
                 handleGmtToggle(msg);
             }
@@ -13320,6 +13339,20 @@
                 { id: 'entityPtsWarn', label: 'Commit: warn when one FP entity exceeds … points', type: 'number', min: 20, max: 1000, step: 10, default: SWB_DEFAULTS.entityPtsWarn },
                 { id: 'swb-open', label: 'Open SpiderWeb panel', type: 'button', action: 'swb-open' },
                 { id: 'swb-clear', label: 'Clear SpiderWeb preview', type: 'button', action: 'swb-clear' },
+            ],
+            hotkeys: [],
+        });
+        // v4.325: 🔍 Scan Import — own card (feature #289). Applies the Ortho
+        // Scanner's reviewed decisions (NFZ creates + FP leg edits) to the site.
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: SCI_SCRIPT_ID, name: 'Scan Import',
+            description: 'Apply the Ortho Scanner review sheet to this site: load the decisions JSON + scan bundle, every accepted NFZ and flight-path leg change stages on the map, preflight (NFZ inside its FFZ, no self-intersections, FP ends on an FFZ edge, no leg enters an FFZ, altitude bands overlap, AGL floor at new vertices), then create-only NFZ writes and one-flight-path-per-request edits with Delete Guard backups and verify-by-refetch. Re-runs skip what is already there.',
+            version: SCRIPT_VERSION, group: 'Scan Import', scope: 'site-setup', priority: 37,
+            toggles: [
+                { id: 'sci-master', label: 'Enable Scan Import', type: 'boolean', default: true, master: true },
+                { id: 'sci-agl-ft', label: 'AGL floor at new / moved flight-path vertices (blocks below)', type: 'number', min: 0, max: 400, step: 5, default: 90, unit: 'ft' },
+                { id: 'sci-edge-ft', label: 'FP end counts as ON an FFZ edge within', type: 'number', min: 1, max: 30, step: 1, default: 3, unit: 'ft' },
+                { id: 'sci-open', label: '🔍 Open Scan Import', type: 'button', action: 'sci-open' },
             ],
             hotkeys: [],
         });
@@ -21022,6 +21055,618 @@
     }
 
     // ============================================================
+    // 🔍 SCAN IMPORT (feature #289, v4.325) — apply the Ortho Scanner's
+    // reviewed decisions to the site. Inputs: the review sheet's decisions
+    // JSON (decisions / edited_geometry / edited_routes) + the scan bundle
+    // (nfz_proposed rings, fp_conflicts proposals). Stages every action,
+    // draws it (NFZ green · FP new leg yellow, old leg dashed · removed leg
+    // dashed red), runs preflight, then applies: NFZs = one create-only
+    // POST each (NFZ Stamp rails, verify by refetch, GM undo list); FP
+    // edits = one FP per request, full entity banked to Delete Guard's 72 h
+    // ring + JSON download first, verify by refetch, stop on first failure.
+    // Re-runs are idempotent (present NFZs / already-applied legs skipped).
+    // RULES: NFZs live inside their FFZ · flight paths NEVER enter an FFZ,
+    // their end vertices sit ON an FFZ edge · never two FPs in one request.
+    // ============================================================
+    const SCI_UNDO_KEY = (sid) => `aim_sci_undo:${envSiteKey(sid)}`;   // GM: {at, runId, ids:[]} — NFZs created by the last run
+    const SCI_MATCH_M = 0.6;                                             // endpoint match tolerance (pixel round-trip in the sheet ≈ 0.3 m)
+    const SCI_SEP_FT = 15;                                               // SOP NFZ↔FFZ / NFZ↔NFZ separation (warn only)
+    const SCI_GAP_MS = 150;
+    const SCI_GUARD_KEY = 'aim-delete-history-v1';                       // Delete Guard's ring (same origin, same shape)
+    let sci = {
+        siteID: null, dec: null, scan: null, decName: null, scanName: null,
+        plan: null, layers: [], running: false, stop: false, report: null, siteCfg: null,
+    };
+    function sciLog(m, color) {
+        try { const el = document.getElementById('aim-sci-result'); if (el) el.innerHTML = `<span style="color:${color || '#9ad'}">${m}</span>`; } catch (e) {}
+        console.log(`${TAG} 🔍 ${String(m).replace(/<[^>]*>/g, '')}`);
+    }
+    function sciEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+    const sciLL = (c) => ({ lat: Number(c[1]), lng: Number(c[0]) });            // GeoJSON [lng,lat] → {lat,lng}
+    const sciSame = (p, q) => approxMeters(p.lat, p.lng, q.lat, q.lng) <= SCI_MATCH_M;
+    const sciVk = (p) => `${p.lat.toFixed(7)},${p.lng.toFixed(7)}`;
+    function sciRingFromLL(list) {
+        const r = (list || []).filter(c => Array.isArray(c) && c.length >= 2 && isFinite(c[0]) && isFinite(c[1])).map(sciLL);
+        if (r.length > 1 && sciSame(r[0], r[r.length - 1])) r.pop();            // GeoJSON closing vertex
+        return r;
+    }
+    function sciBbox(ring) {
+        let s = Infinity, w = Infinity, n = -Infinity, e = -Infinity;
+        ring.forEach(p => { if (p.lat < s) s = p.lat; if (p.lat > n) n = p.lat; if (p.lng < w) w = p.lng; if (p.lng > e) e = p.lng; });
+        return { s, w, n, e };
+    }
+    const sciBboxTouch = (a, b, padDeg) => !(a.e + padDeg < b.w || b.e + padDeg < a.w || a.n + padDeg < b.s || b.n + padDeg < a.s);
+    // min distance (m) from a point to a ring's edges
+    function sciDistToRingM(p, ring) { const np = nearestPointOnRing(p, ring); return np ? np.d : Infinity; }
+    // interior samples of a segment lie inside the polygon? (a leg crossing or ending inside an FFZ)
+    function sciSegEntersRing(a, b, ring, tolM) {
+        const inside = (p) => pointInPolygon(p.lat, p.lng, ring) && sciDistToRingM(p, ring) > tolM;
+        for (let i = 1; i < 40; i++) {
+            const t = i / 40;
+            if (inside({ lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t })) return true;
+        }
+        return false;
+    }
+    function sciRingAreaM2(ring) { try { return Math.abs(polygonAreaM2(ring)); } catch (e) { return 0; } }
+
+    // ---- file loading ----
+    function sciAcceptJson(name, obj) {
+        if (!obj || typeof obj !== 'object') { sciLog(`${sciEsc(name)}: not a JSON object`, '#ff6060'); return; }
+        if (obj.decisions && typeof obj.decisions === 'object') { sci.dec = obj; sci.decName = name; }
+        else if (obj.nfz_proposed || obj.fp_conflicts || /^aim-ortho-scan/.test(String(obj.schema || ''))) { sci.scan = obj; sci.scanName = name; }
+        else { sciLog(`${sciEsc(name)}: neither a decisions file nor a scan bundle`, '#ff6060'); return; }
+        sci.plan = null; sci.report = null; sciClearLayers();
+        sciRenderFiles();
+        if (sci.dec && sci.scan) sciBuildPlan().catch(e => { console.error(`${TAG} 🔍 stage failed:`, e); sciLog(`Stage failed: ${sciEsc(e.message || e)}`, '#ff6060'); });
+    }
+    function sciLoadFiles(files) {
+        Array.from(files || []).forEach(f => {
+            const rd = new FileReader();
+            rd.onload = () => { try { sciAcceptJson(f.name, JSON.parse(String(rd.result || ''))); } catch (e) { sciLog(`${sciEsc(f.name)}: ${sciEsc(e.message)}`, '#ff6060'); } };
+            rd.onerror = () => sciLog(`${sciEsc(f.name)}: read failed`, '#ff6060');
+            rd.readAsText(f);
+        });
+    }
+    function sciRenderFiles() {
+        const el = document.getElementById('aim-sci-files'); if (!el) return;
+        const d = sci.dec, s = sci.scan;
+        const nDec = d ? Object.keys(d.decisions || {}).length : 0;
+        el.innerHTML =
+            `<div>📝 decisions: ${d ? `<b style="color:#fff">${sciEsc(sci.decName)}</b> · run ${sciEsc(d.run_id)} · ${sciEsc(d.site_id)} · reviewer ${sciEsc(d.reviewer || '—')} · ${nDec} decisions · ${Object.keys(d.edited_geometry || {}).length} edited shapes · ${Object.keys(d.edited_routes || {}).length} edited routes · exported ${sciEsc(String(d.exported || '').slice(0, 10))}` : '<span style="color:#ffb347">not loaded</span>'}</div>`
+            + `<div>📦 scan: ${s ? `<b style="color:#fff">${sciEsc(sci.scanName)}</b> · run ${sciEsc(s.run_id)} · ${((s.nfz_proposed || {}).features || []).length} NFZ proposals · ${((s.fp_conflicts || {}).features || []).length} leg conflicts` : '<span style="color:#ffb347">not loaded</span>'}</div>`
+            + (d && s && d.run_id && s.run_id && d.run_id !== s.run_id ? `<div style="color:#ff6060">⚠ run ids differ (${sciEsc(d.run_id)} vs ${sciEsc(s.run_id)}) — decisions were graded on a different scan</div>` : '');
+    }
+
+    // ---- staging ----
+    async function sciBuildPlan() {
+        const sid = sci.siteID;
+        if (!sid || String(sid) !== String(getCurrentSiteID())) { sciLog('Site changed — reopen the generator', '#ff6060'); return; }
+        sciLog('Reading the site…');
+        try { await fetchMapObjects(sid, true); } catch (e) { sciLog(`Site read failed: ${sciEsc(e.message || e)}`, '#ff6060'); return; }
+        try { sci.siteCfg = await fetchSiteConfig(sid, true); } catch (e) { sci.siteCfg = null; }
+        const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        const ffzs = ents.filter(e => e.type === 16 && entityCoords(e) && entityCoords(e).length >= 3);
+        const fps = ents.filter(e => e.type === 15 && Array.isArray(e.arcs));
+        const nfzs = ents.filter(e => e.type === 4 && entityCoords(e));
+        const byId = new Map(ents.map(e => [String(e.id), e]));
+        const ffzByName = new Map(ffzs.map(e => [genCleanName(e.name).toLowerCase(), e]));
+        const fpByName = new Map(fps.map(e => [genCleanName(e.name).toLowerCase(), e]));
+        const resolve = (id, name, type, nameMap) => {
+            const e = byId.get(String(id));
+            if (e && e.type === type) return { e, how: 'id' };
+            const n = nameMap.get(genCleanName(name || '').toLowerCase());
+            if (n) return { e: n, how: 'name' };
+            return null;
+        };
+        // vertex → set of FP ids (shared-end detection) · FFZ bboxes
+        const vertFps = new Map();
+        fps.forEach(f => f.arcs.forEach(a => { if (a && a.point_a && a.point_b) [a.point_a, a.point_b].forEach(p => { const k = sciVk(p); if (!vertFps.has(k)) vertFps.set(k, new Set()); vertFps.get(k).add(f.id); }); }));
+        const ffzInfo = ffzs.map(f => ({ e: f, ring: entityCoords(f), bbox: sciBbox(entityCoords(f)) }));
+        const PAD = 0.002; // ~200 m in degrees
+        const edgeTolM = sciEdgeFt * GEN_FT_TO_M;
+        const plan = { siteID: sid, runId: sci.dec.run_id, nfz: [], fp: [], fpWrites: [], resolved: { id: 0, name: 0, none: 0 }, warnings: [], blockers: 0 };
+        const dec = sci.dec.decisions || {}, eg = sci.dec.edited_geometry || {}, er = sci.dec.edited_routes || {};
+        // ---- NFZs ----
+        const propByItem = new Map((((sci.scan.nfz_proposed || {}).features) || []).map(f => [String((f.properties || {}).item_id), f]));
+        const nfzKeys = new Set([...propByItem.keys()].map(k => `nfz:${k}`)); Object.keys(dec).forEach(k => { if (k.startsWith('nfz:')) nfzKeys.add(k); });
+        const usedNames = new Set(nfzs.map(e => genCleanName(e.name).toLowerCase()));
+        const newNameSeq = new Map();
+        for (const key of [...nfzKeys].sort()) {
+            const d = dec[key] || null, item = key.slice(4), f = propByItem.get(item), p = (f && f.properties) || {};
+            const it = { key, status: null, reason: '', name: p.name || '', ring: null, ffz: null, warn: [], fail: [] };
+            plan.nfz.push(it);
+            if (!d || !d.decision) { it.status = 'nodecision'; continue; }
+            if (d.decision === 'delete') { it.status = 'denied'; continue; }
+            if (d.decision !== 'accept') { it.status = 'skip'; it.reason = `decision "${d.decision}"`; continue; }
+            const g = eg[key];
+            const ring = g && Array.isArray(g.ring_ll) ? sciRingFromLL(g.ring_ll) : (f && f.geometry && f.geometry.type === 'Polygon' ? sciRingFromLL(f.geometry.coordinates[0]) : []);
+            const ffzId = (g && g.ffz_id) || p.ffz_id || d.ffz || item.split(':')[0];
+            const r = resolve(ffzId, p.ffz_name, 16, ffzByName);
+            if (!r) { plan.resolved.none++; it.status = 'skip'; it.reason = `FFZ ${ffzId} not on this site`; continue; }
+            plan.resolved[r.how]++;
+            it.ffz = r.e; it.ring = ring;
+            if (!it.name) { const base = genCleanName(`NFZ ${r.e.name || ffzId}`); const n = (newNameSeq.get(base) || 0) + 1; newNameSeq.set(base, n); it.name = `${base} new${n}`; }
+            it.name = genCleanName(it.name) || 'NFZ';
+            // idempotency: same name or same geometry already on the site
+            const present = nfzs.find(e => genCleanName(e.name).toLowerCase() === it.name.toLowerCase()
+                || (ring.length >= 3 && entityCoords(e).length === ring.length && ring.every(v => entityCoords(e).some(q => sciSame(v, q)))));
+            if (present) { it.status = 'present'; it.reason = `#${present.id} "${present.name}"`; continue; }
+            if (usedNames.has(it.name.toLowerCase())) { let i = 2, n2; do { n2 = `${it.name}_${i++}`; } while (usedNames.has(n2.toLowerCase())); it.name = n2; }
+            usedNames.add(it.name.toLowerCase());
+            it.status = 'create';
+            // preflight (blockers)
+            if (ring.length < 3 || sciRingAreaM2(ring) < 0.5) it.fail.push('ring has < 3 vertices / zero area');
+            else if (ringSelfIntersects(ring)) it.fail.push('self-intersecting ring');
+            const fr = entityCoords(r.e);
+            if (ring.length >= 3) {
+                const out = ring.filter(v => !pointInPolygon(v.lat, v.lng, fr)).length;
+                if (out) it.fail.push(`${out} vertex${out > 1 ? 'es' : ''} outside FFZ "${r.e.name}"`);
+                else {
+                    let cross = false;
+                    for (let i = 0; i < ring.length && !cross; i++) for (let j = 0; j < fr.length; j++) if (segIntersect(ring[i], ring[(i + 1) % ring.length], fr[j], fr[(j + 1) % fr.length])) { cross = true; break; }
+                    if (cross) it.fail.push(`ring crosses the FFZ edge`);
+                }
+                const minEdge = Math.min(...ring.map(v => sciDistToRingM(v, fr)));
+                if (minEdge < SCI_SEP_FT * GEN_FT_TO_M) it.warn.push(`${Math.round(minEdge / GEN_FT_TO_M)} ft from the FFZ edge (SOP ${SCI_SEP_FT})`);
+            }
+        }
+        // NFZ↔NFZ separation (staged vs staged + existing) — warn only
+        const staged = plan.nfz.filter(i => i.status === 'create' && i.ring && i.ring.length >= 3).map(i => ({ it: i, bbox: sciBbox(i.ring) }));
+        const others = nfzs.map(e => ({ ring: entityCoords(e), bbox: sciBbox(entityCoords(e)), name: e.name }));
+        const sepM = SCI_SEP_FT * GEN_FT_TO_M;
+        staged.forEach((a, ai) => {
+            const near = (b, label) => {
+                if (!sciBboxTouch(a.bbox, b.bbox, 0.0003)) return;
+                const d = Math.min(...a.it.ring.map(v => sciDistToRingM(v, b.ring)), ...b.ring.map(v => sciDistToRingM(v, a.it.ring)));
+                if (d < sepM) a.it.warn.push(`${Math.round(d / GEN_FT_TO_M)} ft from ${label}`);
+            };
+            staged.forEach((b, bi) => { if (bi !== ai) near({ ring: b.it.ring, bbox: b.bbox }, `staged "${b.it.name}"`); });
+            others.forEach(o => near(o, `existing "${o.name}"`));
+        });
+        // ---- FP legs ----
+        const confByItem = new Map((((sci.scan.fp_conflicts || {}).features) || []).map(f => [String((f.properties || {}).item_id), f]));
+        const perFp = new Map();   // fp id → {e, legs:[]}
+        for (const key of Object.keys(dec).sort()) {
+            if (!key.startsWith('fp:')) continue;
+            const d = dec[key] || {}, item = key.slice(3), f = confByItem.get(item), p = (f && f.properties) || {};
+            const it = { key, status: null, reason: '', fpName: p.fp_name || '', fp: null, action: null, oldLeg: null, newPoly: null, warn: [], fail: [] };
+            plan.fp.push(it);
+            if (!d.decision) { it.status = 'nodecision'; continue; }
+            if (d.decision === 'delete') { it.status = 'denied'; continue; }
+            if (!f) { it.status = 'skip'; it.reason = 'no matching conflict in the scan'; continue; }
+            const r = resolve(p.fp_id || item.split(':')[0], p.fp_name, 15, fpByName);
+            if (!r) { plan.resolved.none++; it.status = 'skip'; it.reason = `flight path ${p.fp_id} not on this site`; continue; }
+            plan.resolved[r.how]++;
+            it.fp = r.e; it.fpName = r.e.name;
+            const g = (f.geometry && f.geometry.type === 'LineString') ? f.geometry.coordinates.map(sciLL) : null;
+            if (!g || g.length < 2) { it.status = 'skip'; it.reason = 'conflict has no leg geometry'; continue; }
+            const A = g[0], B = g[g.length - 1];
+            const arcs = r.e.arcs.filter(a => a && a.point_a && a.point_b);
+            const arcIdx = arcs.findIndex(a => (sciSame(a.point_a, A) && sciSame(a.point_b, B)) || (sciSame(a.point_a, B) && sciSame(a.point_b, A)));
+            // decide the action
+            let action = null, newPoly = null;
+            if (d.decision === 'fix') {
+                const route = er[item] && Array.isArray(er[item].route_ll) ? er[item].route_ll.map(sciLL) : null;
+                if (!route || route.length < 2) { it.status = 'skip'; it.reason = 'fix without an edited route'; continue; }
+                action = 'fix'; newPoly = route;
+            } else if (p.proposal === 'remove') action = 'remove';
+            else if (p.proposal === 'reroute') {
+                const kind = p.reroute_kind || (Array.isArray(p.slide_ll) ? 'slide' : Array.isArray(p.detour_vertex_ll) ? 'vertex' : null);
+                if (kind === 'slide' && Array.isArray(p.slide_ll)) { action = 'slide'; newPoly = p.slide_ll.map(sciLL); }
+                else if (kind === 'vertex' && Array.isArray(p.detour_vertex_ll)) { action = 'vertex'; newPoly = [A, sciLL(p.detour_vertex_ll), B]; }
+                else { it.status = 'skip'; it.reason = 'reroute proposal without geometry'; continue; }
+            } else { it.status = 'skip'; it.reason = `proposal "${p.proposal || '?'}" — manual`; continue; }
+            if (newPoly) {
+                // snap the sheet's rounded ends onto the live arc ends; keep a moved end as-is
+                if (sciSame(newPoly[0], A)) newPoly[0] = { lat: A.lat, lng: A.lng };
+                if (sciSame(newPoly[newPoly.length - 1], B)) newPoly[newPoly.length - 1] = { lat: B.lat, lng: B.lng };
+                if (sciSame(newPoly[0], B) && sciSame(newPoly[newPoly.length - 1], A)) newPoly.reverse();   // sheet drew it backwards
+                newPoly = newPoly.filter((v, i, arr) => i === 0 || !sciSame(v, arr[i - 1]));
+                if (newPoly.length < 2) { it.status = 'skip'; it.reason = 'edited route collapsed to one point'; continue; }
+            }
+            it.action = action; it.oldLeg = [A, B]; it.newPoly = newPoly;
+            if (arcIdx < 0) {
+                // already applied? (target arcs present) — else stale/phantom
+                const applied = action === 'remove' ? false
+                    : newPoly.slice(0, -1).every((v, i) => arcs.some(a => (sciSame(a.point_a, v) && sciSame(a.point_b, newPoly[i + 1])) || (sciSame(a.point_b, v) && sciSame(a.point_a, newPoly[i + 1]))));
+                if (applied) { it.status = 'applied'; continue; }
+                const chain = (r.e.coords || []).some((c, i, arr) => i < arr.length - 1 && ((sciSame(c, A) && sciSame(arr[i + 1], B)) || (sciSame(c, B) && sciSame(arr[i + 1], A))));
+                it.status = 'skip'; it.reason = chain ? 'phantom leg — the scan read a coords pair that is not an arc (branching path)' : 'leg not on the live flight path (site changed since the scan)';
+                continue;
+            }
+            it.arcIdx = arcIdx; it.arc = arcs[arcIdx];
+            if (sciSame(it.arc.point_a, B)) { it.oldLeg = [B, A]; if (newPoly) newPoly.reverse(); }   // arc runs B→A: keep the arc's direction
+            it.status = 'stage';
+            if (!perFp.has(r.e.id)) perFp.set(r.e.id, { e: r.e, legs: [] });
+            perFp.get(r.e.id).legs.push(it);
+        }
+        // ---- per-FP edited arcs + preflight ----
+        const bandOf = (a) => ({ min_alt: a.min_alt, max_alt: a.max_alt, min_emergency_alt: (typeof a.min_emergency_alt === 'number' ? a.min_emergency_alt : 12), wait_until_approved: !!a.wait_until_approved });
+        const newVerts = [];   // {fpId, p, minAlt, leg}
+        for (const [fpId, grp] of perFp) {
+            const live = grp.e.arcs.filter(a => a && a.point_a && a.point_b);
+            let arcs = live.map(a => Object.assign({}, a, { _live: true }));
+            const w = { fp: grp.e, legs: grp.legs, arcs: null, kind: 'update', fail: [], warn: [] };
+            for (const leg of grp.legs) {
+                const i = arcs.findIndex(a => a._live && a.id === leg.arc.id);
+                if (i < 0) { leg.fail.push('arc vanished while staging'); continue; }
+                const base = arcs[i];
+                if (leg.action === 'remove') { arcs.splice(i, 1); continue; }
+                const poly = leg.newPoly;
+                // moved ends must not be shared with another FP
+                [[poly[0], leg.oldLeg[0]], [poly[poly.length - 1], leg.oldLeg[1]]].forEach(([nv, ov]) => {
+                    if (sciSame(nv, ov)) return;
+                    const users = vertFps.get(sciVk(ov));
+                    if (users && [...users].some(id => id !== grp.e.id)) leg.fail.push(`moves an end shared with another flight path (${[...users].filter(id => id !== grp.e.id).join(', ')})`);
+                    // other arcs of THIS fp that use the old end follow it
+                    arcs.forEach((a, j) => { if (j === i) return; if (sciSame(a.point_a, ov)) a.point_a = { lat: nv.lat, lng: nv.lng }; if (sciSame(a.point_b, ov)) a.point_b = { lat: nv.lat, lng: nv.lng }; });
+                    newVerts.push({ fpId, p: nv, minAlt: base.min_alt, leg });
+                });
+                const made = [];
+                for (let k = 0; k < poly.length - 1; k++) {
+                    const pa = poly[k], pb = poly[k + 1];
+                    if (k > 0) newVerts.push({ fpId, p: pa, minAlt: base.min_alt, leg });
+                    made.push(Object.assign({ point_a: { lat: pa.lat, lng: pa.lng }, point_b: { lat: pb.lat, lng: pb.lng }, points: [{ lat: pa.lat, lng: pa.lng }, { lat: pb.lat, lng: pb.lng }], distance: approxMeters(pa.lat, pa.lng, pb.lat, pb.lng) }, bandOf(base), { _new: true, _leg: leg }));
+                }
+                arcs.splice(i, 1, ...made);
+            }
+            // components (interior removal would split the path — refused)
+            const adj = new Map(); const addE = (x, y) => { if (!adj.has(x)) adj.set(x, new Set()); adj.get(x).add(y); };
+            arcs.forEach(a => { const ka = sciVk(a.point_a), kb = sciVk(a.point_b); addE(ka, kb); addE(kb, ka); });
+            const seen = new Set(); let comps = 0;
+            for (const v0 of adj.keys()) { if (seen.has(v0)) continue; comps++; const st = [v0]; while (st.length) { const x = st.pop(); if (seen.has(x)) continue; seen.add(x); adj.get(x).forEach(y => st.push(y)); } }
+            if (!arcs.length) w.kind = 'delete';
+            else if (comps > 1) w.fail.push(`removing that leg splits the path into ${comps} pieces — not supported (mark it not-removable in the review sheet)`);
+            if (w.kind === 'update') {
+                // strictly-positive band overlap on every connected pair
+                const byV = new Map(); arcs.forEach((a, i) => [sciVk(a.point_a), sciVk(a.point_b)].forEach(k => { if (!byV.has(k)) byV.set(k, []); byV.get(k).push(i); }));
+                const bad = new Set();
+                byV.forEach(list => { for (let x = 0; x < list.length; x++) for (let y = x + 1; y < list.length; y++) { const P = arcs[list[x]], Q = arcs[list[y]]; if (!(P.max_alt > Q.min_alt && Q.max_alt > P.min_alt)) bad.add(`${list[x] + 1}&${list[y] + 1}`); } });
+                if (bad.size) w.fail.push(`connected arcs without a positive altitude overlap: ${[...bad].slice(0, 6).join(', ')}`);
+                // end vertices (degree 1) ON an FFZ edge · no changed leg enters an FFZ
+                const degree = new Map(); arcs.forEach(a => [sciVk(a.point_a), sciVk(a.point_b)].forEach(k => degree.set(k, (degree.get(k) || 0) + 1)));
+                const ends = []; arcs.forEach(a => [a.point_a, a.point_b].forEach(p => { if (degree.get(sciVk(p)) === 1 && !ends.some(q => sciSame(q, p))) ends.push(p); }));
+                let contact = 0;
+                ends.forEach(p => {
+                    const onEdge = ffzInfo.some(f => sciBboxTouch(f.bbox, { s: p.lat, n: p.lat, w: p.lng, e: p.lng }, PAD) && sciDistToRingM(p, f.ring) <= edgeTolM);
+                    if (onEdge) contact++;
+                    else if (arcs.some(a => a._new && (sciSame(a.point_a, p) || sciSame(a.point_b, p)))) w.fail.push(`end ${p.lat.toFixed(5)},${p.lng.toFixed(5)} is not on an FFZ edge (tol ${sciEdgeFt} ft)`);
+                    else w.warn.push(`existing end ${p.lat.toFixed(5)},${p.lng.toFixed(5)} is off every FFZ edge (pre-existing)`);
+                });
+                if (!contact) w.fail.push('path would touch no FFZ (server rule: must connect to a free zone)');
+                arcs.filter(a => a._new).forEach(a => {
+                    const bb = sciBbox([a.point_a, a.point_b]);
+                    ffzInfo.forEach(f => { if (sciBboxTouch(f.bbox, bb, 0) && sciSegEntersRing(a.point_a, a.point_b, f.ring, edgeTolM)) a._leg.fail.push(`new leg enters FFZ "${f.e.name}"`); });
+                });
+            } else {
+                // whole-path delete: does any FFZ lose its last flight path?
+                const ends = []; live.forEach(a => [a.point_a, a.point_b].forEach(p => ends.push(p)));
+                ffzInfo.forEach(f => {
+                    if (!ends.some(p => sciDistToRingM(p, f.ring) <= edgeTolM)) return;
+                    const other = fps.some(o => o.id !== grp.e.id && o.arcs.some(a => a && a.point_a && a.point_b && (sciDistToRingM(a.point_a, f.ring) <= edgeTolM || sciDistToRingM(a.point_b, f.ring) <= edgeTolM)));
+                    if (!other) w.warn.push(`FFZ "${f.e.name}" keeps no flight path after this delete`);
+                });
+            }
+            w.arcs = arcs;
+            plan.fpWrites.push(w);
+        }
+        // AGL floor at every new / moved vertex (DEM) — blocker
+        if (newVerts.length) {
+            sciLog(`Checking ground at ${newVerts.length} new vertices…`);
+            const msl = !!(sci.siteCfg && sci.siteCfg.mountain_terrain);
+            try { await bulkFetchElevations(newVerts.map(v => v.p)); } catch (e) {}
+            for (const v of newVerts) {
+                const ground = getElevationFromCache(v.p.lat, v.p.lng);
+                const aglM = msl ? (ground == null ? null : v.minAlt - ground) : v.minAlt;
+                if (aglM == null) v.leg.warn.push(`no DEM at ${v.p.lat.toFixed(5)},${v.p.lng.toFixed(5)} — AGL unchecked`);
+                else if (aglM / GEN_FT_TO_M < sciAglFt - 0.5) v.leg.fail.push(`${Math.round(aglM / GEN_FT_TO_M)} ft AGL at ${v.p.lat.toFixed(5)},${v.p.lng.toFixed(5)} (floor ${sciAglFt})`);
+            }
+        }
+        // legs that failed poison their FP write; FP-level failures poison every leg
+        plan.fpWrites.forEach(w => { if (w.legs.some(l => l.fail.length)) w.fail.push('a staged leg failed preflight'); if (w.fail.length) w.legs.forEach(l => { if (!l.fail.length) l.fail.push('blocked by this flight path'); }); });
+        plan.blockers = plan.nfz.filter(i => i.status === 'create' && i.fail.length).length + plan.fpWrites.filter(w => w.fail.length).length;
+        sci.plan = plan;
+        sciDraw(); sciRenderPlan();
+    }
+
+    // ---- map drawing ----
+    function sciClearLayers() { const map = getLeafletMap(); sci.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); sci.layers = []; }
+    function sciDraw() {
+        sciClearLayers();
+        const L = getLeafletL(), map = getLeafletMap(), plan = sci.plan;
+        if (!L || !map || !plan) return;
+        const add = (l) => { try { l.addTo(map); sci.layers.push(l); } catch (e) {} };
+        plan.nfz.forEach(i => {
+            if (i.status !== 'create' || !i.ring || i.ring.length < 3) return;
+            const col = i.fail.length ? '#ff5555' : '#5fff5f';
+            add(L.polygon(i.ring.map(p => [p.lat, p.lng]), { color: col, weight: 2, opacity: 0.95, fillColor: col, fillOpacity: 0.22, interactive: false, dashArray: i.fail.length ? '6 4' : null }));
+        });
+        plan.fpWrites.forEach(w => {
+            w.legs.forEach(l => {
+                const bad = l.fail.length || w.fail.length;
+                if (l.action === 'remove' || w.kind === 'delete') add(L.polyline(l.oldLeg.map(p => [p.lat, p.lng]), { color: '#ff5555', weight: 4, opacity: 0.9, dashArray: '8 6', interactive: false }));
+                else {
+                    add(L.polyline(l.oldLeg.map(p => [p.lat, p.lng]), { color: '#ffe14d', weight: 2, opacity: 0.6, dashArray: '6 6', interactive: false }));
+                    add(L.polyline(l.newPoly.map(p => [p.lat, p.lng]), { color: bad ? '#ff5555' : '#ffe14d', weight: 4, opacity: 0.95, interactive: false }));
+                }
+            });
+        });
+    }
+    function sciPanTo(ll) { try { const map = getLeafletMap(); if (map && ll) map.setView([ll.lat, ll.lng], Math.max(map.getZoom(), 18)); } catch (e) {} }
+
+    // ---- panel ----
+    function sciRenderPanelBody() {
+        const host = document.getElementById('aim-sci-controls'); if (!host) return;
+        const btnCss = (col) => `background:rgba(${col},0.12);color:rgb(${col});border:1px solid rgba(${col},0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px`;
+        host.innerHTML = `
+            <div style="font-size:11px;color:#7adfe6;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">🔍 Scan Import — apply the Ortho Scanner review</div>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px">
+                <button id="aim-sci-load" style="${btnCss('122,223,230')}">📂 Load decisions + scan JSON</button>
+                <span style="color:#888;font-size:10px">both files, together or one at a time · or drop them here</span>
+                <button id="aim-sci-restage" style="${btnCss('160,160,160')}" title="Re-read the site and stage again">↻ Re-stage</button>
+            </div>
+            <div id="aim-sci-files" style="font-size:11px;color:#9ad;margin-bottom:6px;line-height:1.5"></div>
+            <div id="aim-sci-plan" style="font-size:11px;color:#cfd6dc;margin-bottom:6px"></div>
+            <div id="aim-sci-applyrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px">
+                <button id="aim-sci-apply-nfz" style="${btnCss('95,255,95')};font-weight:600">✓ Apply NFZs</button>
+                <button id="aim-sci-apply-fp" style="${btnCss('255,225,77')};font-weight:600">✓ Apply FP edits</button>
+                <button id="aim-sci-stop" style="${btnCss('255,85,85')};display:none">■ Stop</button>
+                <button id="aim-sci-report" style="${btnCss('160,160,160')};display:none">⬇ Report JSON</button>
+                <button id="aim-sci-undo" style="${btnCss('255,179,71')}" title="Delete exactly the NFZs the last Scan Import run created on this site (Delete Guard banks each)">↩ Undo NFZs</button>
+                <span style="color:#888;font-size:10px">Dry run uses the Commit checkbox below · FP restores: Control Panel → Delete Guard</span>
+            </div>
+            <div id="aim-sci-result" style="font-size:11px;color:#9ad;line-height:1.5">Load the review sheet's decisions JSON and the scan bundle — everything stages on the map, nothing is written until Apply.</div>`;
+        const pick = () => { const inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.json,application/json'; inp.multiple = true; inp.onchange = () => sciLoadFiles(inp.files); inp.click(); };
+        host.querySelector('#aim-sci-load').onclick = pick;
+        host.querySelector('#aim-sci-restage').onclick = () => { if (sci.dec && sci.scan) sciBuildPlan().catch(e => sciLog(`Stage failed: ${sciEsc(e.message || e)}`, '#ff6060')); else sciLog('Load both files first', '#ffb347'); };
+        host.querySelector('#aim-sci-apply-nfz').onclick = () => sciApplyNfz().catch(e => { console.error(`${TAG} 🔍 apply NFZ:`, e); sciLog(`Apply NFZs failed: ${sciEsc(e.message || e)}`, '#ff6060'); });
+        host.querySelector('#aim-sci-apply-fp').onclick = () => sciApplyFp().catch(e => { console.error(`${TAG} 🔍 apply FP:`, e); sciLog(`Apply FP edits failed: ${sciEsc(e.message || e)}`, '#ff6060'); });
+        host.querySelector('#aim-sci-stop').onclick = () => { sci.stop = true; sciLog('Stopping after the current write…', '#ffb347'); };
+        host.querySelector('#aim-sci-report').onclick = () => { if (sci.report) downloadJSONFile(`scan-import-${sci.siteID}-${Date.now()}.json`, JSON.stringify(sci.report, null, 1)); };
+        host.querySelector('#aim-sci-undo').onclick = () => sciUndoNfz().catch(e => sciLog(`Undo failed: ${sciEsc(e.message || e)}`, '#ff6060'));
+        host.ondragover = (ev) => { ev.preventDefault(); host.style.outline = '1px solid #7adfe6'; };
+        host.ondragleave = () => { host.style.outline = ''; };
+        host.ondrop = (ev) => { ev.preventDefault(); host.style.outline = ''; sciLoadFiles(ev.dataTransfer && ev.dataTransfer.files); };
+        host.onclick = (ev) => { const row = ev.target.closest && ev.target.closest('[data-sci-pan]'); if (!row) return; const [lat, lng] = row.getAttribute('data-sci-pan').split(',').map(Number); if (isFinite(lat)) sciPanTo({ lat, lng }); };
+        sciRenderFiles(); sciRenderPlan();
+    }
+    function sciRenderPlan() {
+        const el = document.getElementById('aim-sci-plan'), row = document.getElementById('aim-sci-applyrow'); if (!el) return;
+        const plan = sci.plan;
+        if (!plan) { el.innerHTML = ''; if (row) row.style.display = 'none'; return; }
+        const n = (st) => plan.nfz.filter(i => i.status === st).length;
+        const f = (st) => plan.fp.filter(i => i.status === st).length;
+        const act = (a) => plan.fp.filter(i => i.status === 'stage' && i.action === a).length;
+        const deletes = plan.fpWrites.filter(w => w.kind === 'delete').length;
+        const nfzBad = plan.nfz.filter(i => i.status === 'create' && i.fail.length), fpBad = plan.fpWrites.filter(w => w.fail.length);
+        const nfzWarn = plan.nfz.filter(i => i.status === 'create' && !i.fail.length && i.warn.length).length;
+        const chip = (label, v, col) => `<span style="display:inline-block;margin:1px 6px 1px 0;padding:1px 6px;border-radius:3px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12)"><b style="color:${col || '#fff'}">${v}</b> ${label}</span>`;
+        const cen = (ring) => { const c = ringCentroid(ring); return `${c.lat},${c.lng}`; };
+        const list = (items, color) => items.length ? `<div style="max-height:140px;overflow-y:auto;margin:3px 0 4px;padding:3px 6px;border:1px solid rgba(255,255,255,0.1);border-radius:3px">${items.map(x => `<div data-sci-pan="${x.pan || ''}" style="cursor:${x.pan ? 'pointer' : 'default'};color:${color};font-size:10px;line-height:1.4">${x.html}</div>`).join('')}</div>` : '';
+        const skipped = plan.fp.filter(i => i.status === 'skip');
+        el.innerHTML =
+            `<div style="margin-bottom:3px"><span style="color:#7adfe6">NFZs</span> ${chip('to create', n('create'), '#5fff5f')}${chip('already present', n('present'), '#9ad')}${chip('denied', n('denied'), '#888')}${chip('no decision', n('nodecision'), '#ffb347')}${chip('skipped', n('skip'), '#ffb347')}</div>`
+            + `<div style="margin-bottom:3px"><span style="color:#ffe14d">Legs</span> ${chip('slide', act('slide'), '#ffe14d')}${chip('detour', act('vertex'), '#ffe14d')}${chip('fixed route', act('fix'), '#ffe14d')}${chip('remove', act('remove'), '#ff8a80')}${chip('→ whole-path deletes', deletes, '#ff5555')}${chip('already applied', f('applied'), '#9ad')}${chip('denied', f('denied'), '#888')}${chip('no decision', f('nodecision'), '#ffb347')}${chip('skipped', skipped.length, '#ffb347')} · ${plan.fpWrites.length} flight path write${plan.fpWrites.length === 1 ? '' : 's'}</div>`
+            + `<div style="color:#888;font-size:10px;margin-bottom:3px">targets resolved by id ${plan.resolved.id} · by name ${plan.resolved.name} · unresolved ${plan.resolved.none}</div>`
+            + `<div style="margin-top:4px;color:${plan.blockers ? '#ff6060' : '#5fff5f'};font-weight:600">Preflight: ${plan.blockers ? `${nfzBad.length} NFZ + ${fpBad.length} flight path BLOCKED — fix or they stay out (the rest can apply)` : 'all staged items pass'}${nfzWarn ? ` · <span style="color:#ffb347;font-weight:400">${nfzWarn} NFZ warnings (SOP separation — the SOP validator will flag them)</span>` : ''}</div>`
+            + list(nfzBad.map(i => ({ pan: cen(i.ring), html: `✕ ${sciEsc(i.name)}: ${sciEsc(i.fail.join(' · '))}` })), '#ff8a80')
+            + list(fpBad.map(w => ({ pan: `${w.legs[0].oldLeg[0].lat},${w.legs[0].oldLeg[0].lng}`, html: `✕ FP "${sciEsc(w.fp.name)}": ${sciEsc([...w.fail, ...w.legs.flatMap(l => l.fail.filter(x => x !== 'blocked by this flight path').map(x => `${l.key} ${x}`))].join(' · '))}` })), '#ff8a80')
+            + list(plan.fpWrites.filter(w => !w.fail.length && w.warn.length).map(w => ({ pan: `${w.legs[0].oldLeg[0].lat},${w.legs[0].oldLeg[0].lng}`, html: `⚠ FP "${sciEsc(w.fp.name)}": ${sciEsc(w.warn.join(' · '))}` })), '#ffb347')
+            + list(skipped.map(i => ({ pan: i.oldLeg ? `${i.oldLeg[0].lat},${i.oldLeg[0].lng}` : '', html: `– ${sciEsc(i.key)} ${sciEsc(i.fpName)}: ${sciEsc(i.reason)}` })), '#9a9a9a')
+            + list(plan.nfz.filter(i => i.status === 'skip' || i.status === 'nodecision').map(i => ({ pan: i.ring && i.ring.length ? cen(i.ring) : '', html: `– ${sciEsc(i.key)}: ${sciEsc(i.status === 'nodecision' ? 'no decision' : i.reason)}` })), '#9a9a9a');
+        if (row) {
+            row.style.display = 'flex';
+            const bn = row.querySelector('#aim-sci-apply-nfz'), bf = row.querySelector('#aim-sci-apply-fp');
+            const okN = plan.nfz.filter(i => i.status === 'create' && !i.fail.length).length, okF = plan.fpWrites.filter(w => !w.fail.length).length;
+            bn.textContent = `✓ Apply NFZs (${okN})`; bn.disabled = !okN || sci.running; bn.style.opacity = bn.disabled ? 0.45 : 1;
+            bf.textContent = `✓ Apply FP edits (${okF})`; bf.disabled = !okF || sci.running; bf.style.opacity = bf.disabled ? 0.45 : 1;
+            row.querySelector('#aim-sci-report').style.display = sci.report ? '' : 'none';
+            row.querySelector('#aim-sci-stop').style.display = sci.running ? '' : 'none';
+        }
+    }
+    function sciShowPanel() {
+        const c = document.getElementById('aim-sci-controls'); if (!c) return;
+        c.style.display = 'block';
+        const b = document.getElementById('aim-gen-scan'); if (b) b.style.background = 'rgba(122,223,230,0.32)';
+    }
+    function sciTeardown() { sciClearLayers(); }
+    function sciOpenFromAction() {
+        if (LITE) { showToast('Scan Import needs Full mode (CSM access)', 'rgba(255,180,0,0.6)'); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
+        const go = () => { try { if (!document.getElementById(GEN_MODAL_ID)) openSiteGenerator(sid); sciShowPanel(); } catch (e) { console.warn(`${TAG} 🔍 open failed:`, e); } };
+        const bucket = mapObjectsBySite[sid];
+        if (!bucket || !bucket.entities) fetchMapObjects(sid, true).then(go); else go();
+    }
+
+    // ---- apply ----
+    function sciDry() { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } }
+    function sciReport() {
+        if (!sci.report || sci.report.siteID !== sci.siteID) sci.report = { siteID: sci.siteID, origin: location.origin, runId: sci.plan && sci.plan.runId, at: new Date().toISOString(), nfz: { created: [], present: [], failed: [], blocked: [], skipped: [] }, fp: { changed: [], deleted: [], applied: [], failed: [], blocked: [], skipped: [] } };
+        return sci.report;
+    }
+    async function sciPostMapObject(body, csrf) {
+        const r = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
+        const txt = await r.text(); let json = null; try { json = JSON.parse(txt); } catch (e) {}
+        if (r.status === 403) throw Object.assign(new Error('403 — write permission lost, ABORTING'), { fatal: true });
+        if (r.status !== 200 || !json || !json.map_objects) throw new Error(`server ${r.status} ${(txt || '').slice(0, 160)}`);
+        return json.map_objects;
+    }
+    async function sciApplyNfz() {
+        const plan = sci.plan; if (!plan || sci.running) return;
+        if (liteBlockedWrite('create NFZs (scan import)')) return;
+        const sid = sci.siteID;
+        if (String(sid) !== String(getCurrentSiteID())) { sciLog('Site changed — reopen the generator', '#ff6060'); return; }
+        const todo = plan.nfz.filter(i => i.status === 'create' && !i.fail.length);
+        if (!todo.length) { sciLog('No NFZs to create', '#ffb347'); return; }
+        const rep = sciReport();
+        plan.nfz.filter(i => i.status === 'create' && i.fail.length).forEach(i => rep.nfz.blocked.push({ key: i.key, name: i.name, why: i.fail }));
+        plan.nfz.filter(i => i.status === 'present').forEach(i => rep.nfz.present.push({ key: i.key, name: i.name, existing: i.reason }));
+        plan.nfz.filter(i => i.status === 'skip' || i.status === 'nodecision').forEach(i => rep.nfz.skipped.push({ key: i.key, why: i.status === 'nodecision' ? 'no decision' : i.reason }));
+        if (sciDry()) { sciLog(`DRY RUN — would create ${todo.length} NFZ(s). Untick Dry run (Commit section) to write.`, '#ffe14d'); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { sciLog('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
+        const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        const tmplNfz = ents.find(e => e.type === 4 && entityCoords(e));
+        let tmplBody = null; if (tmplNfz) { try { tmplBody = buildWriteBody(tmplNfz, sci.siteCfg); } catch (e) {} }
+        const bodies = todo.map(it => {
+            let b;
+            if (tmplBody) { b = JSON.parse(JSON.stringify(tmplBody)); delete b.id; }
+            else b = { type: 4, description: '', custom: {}, params: {}, asset_waypoints: null, constantly_present_asset_name: false, general_marker_type: '', marker_height: 0, is_unshielded: false, restrictions: [] };
+            b.type = 4; b.name = it.name; b.description = `AIM Scan Import ${plan.runId || ''}`.trim();
+            b.site_id = sid; b.points = it.ring.map(p => ({ lat: p.lat, lng: p.lng })); b.validated = false; b.arcs = [];
+            b.mountain_terrain_site = !!(sci.siteCfg && sci.siteCfg.mountain_terrain);
+            return { it, body: b };
+        });
+        const backup = { site: sid, runId: plan.runId, at: new Date().toISOString(), nfzs: bodies.map(w => w.body) };
+        try { localStorage.setItem(`aim_sci_nfz_backup:${sid}`, JSON.stringify(backup)); } catch (e) {}
+        try { downloadJSONFile(`scan-import-nfz-${sid}-${Date.now()}.json`, JSON.stringify(backup, null, 1)); } catch (e) { sciLog('backup download failed (localStorage stash still written)', '#ffb347'); }
+        sci.running = true; sci.stop = false; sciRenderPlan();
+        const created = []; let fail = 0;
+        try {
+            for (let i = 0; i < bodies.length; i++) {
+                if (sci.stop) { sciLog(`Stopped after ${i} write(s)`, '#ffb347'); break; }
+                const w = bodies[i];
+                try {
+                    const saved = await sciPostMapObject(w.body, csrf);
+                    if (saved.id == null) throw new Error('no id in response');
+                    created.push({ it: w.it, id: saved.id });
+                    sciLog(`NFZ ${i + 1}/${bodies.length} "${sciEsc(w.body.name)}" → #${saved.id}`);
+                } catch (e) {
+                    fail++; console.warn(`${TAG} 🔍 nfz create "${w.body.name}":`, e.message);
+                    rep.nfz.failed.push({ key: w.it.key, name: w.it.name, why: e.message });
+                    w.it.fail.push(`write failed: ${e.message}`);
+                    if (e.fatal) break;
+                }
+                await new Promise(r => setTimeout(r, SCI_GAP_MS));
+            }
+        } finally { sci.running = false; }
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        const after = new Set((((mapObjectsBySite[sid] || {}).entities) || []).map(e => e.id));
+        let verified = 0;
+        created.forEach(c => {
+            if (after.has(c.id)) { verified++; c.it.status = 'present'; c.it.reason = `#${c.id} (created by this run)`; rep.nfz.created.push({ key: c.it.key, id: c.id, name: c.it.name }); }
+            else { rep.nfz.failed.push({ key: c.it.key, name: c.it.name, id: c.id, why: 'not present on refetch' }); c.it.fail.push('not present on refetch'); }
+        });
+        // undo list (GM) + solid placeholders until reload (NFZ Stamp pattern)
+        try { elevGmSet(SCI_UNDO_KEY(sid), JSON.stringify({ at: new Date().toISOString(), runId: plan.runId, ids: created.filter(c => after.has(c.id)).map(c => c.id) })); } catch (e) {}
+        try { nfzDraw.committedSite = String(sid); created.filter(c => after.has(c.id)).forEach(c => nfzDraw.committed.push({ id: c.id, name: c.it.name, points: c.it.ring })); nfzRenderCommitted(); } catch (e) {}
+        sciDraw(); sciRenderPlan();
+        sciLog(`NFZs: ${verified} created + verified${fail ? `, <b style="color:#ff6060">${fail} FAILED</b>` : ''} · ${rep.nfz.present.length} already present · ↩ Undo removes exactly this run · refresh to see them natively`, fail ? '#ffb347' : '#5fff5f');
+        showToast(fail ? `Scan Import: ${verified} NFZs ok, ${fail} failed` : `✓ ${verified} NFZ(s) created`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+    }
+    // bank a full read-shape entity into Delete Guard's 72 h ring (same origin + shape; the guard's panel restores it)
+    function sciBankToGuard(entity, sid) {
+        try {
+            let hist = []; try { hist = JSON.parse(localStorage.getItem(SCI_GUARD_KEY) || '[]'); } catch (e) { hist = []; }
+            if (!Array.isArray(hist)) hist = [];
+            hist.unshift({ ts: Date.now(), iso: new Date().toISOString(), kind: 'entity', siteId: sid, entity: JSON.parse(JSON.stringify(entity)), source: 'scan-import' });
+            for (let attempt = 0; attempt < 10; attempt++) {
+                try { localStorage.setItem(SCI_GUARD_KEY, JSON.stringify(hist)); return true; }
+                catch (e) { if (hist.length <= 1) throw e; hist = hist.slice(0, hist.length - 1); }
+            }
+        } catch (e) { console.warn(`${TAG} 🔍 Delete Guard bank failed:`, e); }
+        return false;
+    }
+    async function sciApplyFp() {
+        const plan = sci.plan; if (!plan || sci.running) return;
+        if (liteBlockedWrite('edit flight paths (scan import)')) return;
+        const sid = sci.siteID;
+        if (String(sid) !== String(getCurrentSiteID())) { sciLog('Site changed — reopen the generator', '#ff6060'); return; }
+        const todo = plan.fpWrites.filter(w => !w.fail.length && !w.done);
+        if (!todo.length) { sciLog('No flight path edits to apply', '#ffb347'); return; }
+        const rep = sciReport();
+        plan.fpWrites.filter(w => w.fail.length).forEach(w => rep.fp.blocked.push({ fpId: w.fp.id, name: w.fp.name, legs: w.legs.map(l => l.key), why: [...w.fail, ...w.legs.flatMap(l => l.fail)] }));
+        plan.fp.filter(i => i.status === 'applied').forEach(i => rep.fp.applied.push({ key: i.key, fp: i.fpName }));
+        plan.fp.filter(i => i.status === 'skip' || i.status === 'nodecision').forEach(i => rep.fp.skipped.push({ key: i.key, fp: i.fpName, why: i.status === 'nodecision' ? 'no decision' : i.reason }));
+        const deletes = todo.filter(w => w.kind === 'delete').length;
+        if (sciDry()) { sciLog(`DRY RUN — would update ${todo.length - deletes} flight path(s) and delete ${deletes}. Untick Dry run (Commit section) to write.`, '#ffe14d'); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { sciLog('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
+        if (deletes && !confirm(`${deletes} flight path(s) will be DELETED (their only leg was removed). Each is banked to Delete Guard first. Continue?`)) return;
+        if (!sci.siteCfg) { try { sci.siteCfg = await fetchSiteConfig(sid, true); } catch (e) { sciLog('Site config fetch failed — refusing to write (mountain_terrain flag unknown)', '#ff6060'); return; } }
+        // one backup of every touched FP before ANY write (+ each into the guard ring)
+        const backup = { site: sid, runId: plan.runId, at: new Date().toISOString(), flightPaths: todo.map(w => w.fp) };
+        try { localStorage.setItem(`aim_sci_fp_backup:${sid}`, JSON.stringify(backup)); } catch (e) {}
+        if (!downloadJSONFile(`scan-import-fp-backup-${sid}-${Date.now()}.json`, JSON.stringify(backup, null, 1))) { sciLog('Backup download failed — refusing to write', '#ff6060'); return; }
+        sci.running = true; sci.stop = false; sciRenderPlan();
+        let ok = 0, fail = 0;
+        try {
+            for (let i = 0; i < todo.length; i++) {
+                if (sci.stop) { sciLog(`Stopped after ${i} write(s)`, '#ffb347'); break; }
+                const w = todo[i];
+                const label = `FP ${i + 1}/${todo.length} "${sciEsc(w.fp.name)}" (#${w.fp.id})`;
+                try {
+                    if (!sciBankToGuard(w.fp, sid)) throw new Error('Delete Guard bank failed — not writing');
+                    if (w.kind === 'delete') {
+                        const r = await fetch(`/map_objects/${w.fp.id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf } });
+                        if (r.status === 403) throw Object.assign(new Error('403 — write permission lost, ABORTING'), { fatal: true });
+                        if (!r.ok && r.status !== 404) throw new Error(`DELETE server ${r.status}`);
+                        try { await fetchMapObjects(sid, true); } catch (e) {}
+                        if ((((mapObjectsBySite[sid] || {}).entities) || []).some(e => e.id === w.fp.id)) throw new Error('still present after delete');
+                        w.done = true; ok++; rep.fp.deleted.push({ fpId: w.fp.id, name: w.fp.name, legs: w.legs.map(l => l.key) });
+                        sciLog(`${label} deleted + verified`);
+                    } else {
+                        const body = buildWriteBody(w.fp, sci.siteCfg);
+                        body.arcs = w.arcs.map(a => {
+                            const o = Object.assign({}, a); delete o._live; delete o._new; delete o._leg;
+                            if (a._new) { delete o.id; delete o.mapobject; }
+                            o.points = [{ lat: o.point_a.lat, lng: o.point_a.lng }, { lat: o.point_b.lat, lng: o.point_b.lng }];
+                            o.min_alt = fpArcAltMeters(o.min_alt); o.max_alt = fpArcAltMeters(o.max_alt);
+                            return o;
+                        });
+                        const pts = []; body.arcs.forEach(a => [a.point_a, a.point_b].forEach(p => { if (!pts.some(q => sciSame(q, p))) pts.push({ lat: p.lat, lng: p.lng }); }));
+                        body.points = pts;
+                        const saved = await sciPostMapObject(body, csrf);
+                        try { await fetchMapObjects(sid, true); } catch (e) {}
+                        const live = (((mapObjectsBySite[sid] || {}).entities) || []).find(e => e.id === w.fp.id);
+                        if (!live || !Array.isArray(live.arcs)) throw new Error('flight path missing after save');
+                        const want = body.arcs, have = live.arcs.filter(a => a && a.point_a && a.point_b);
+                        if (have.length !== want.length) throw new Error(`arc count ${have.length} ≠ expected ${want.length} after save`);
+                        const missing = want.filter(a => !have.some(h => (sciSame(h.point_a, a.point_a) && sciSame(h.point_b, a.point_b)) || (sciSame(h.point_a, a.point_b) && sciSame(h.point_b, a.point_a))));
+                        if (missing.length) throw new Error(`${missing.length} arc(s) not found after save`);
+                        w.done = true; ok++; rep.fp.changed.push({ fpId: w.fp.id, name: w.fp.name, legs: w.legs.map(l => `${l.key} ${l.action}`), arcsBefore: w.fp.arcs.length, arcsAfter: have.length, savedId: saved.id });
+                        sciLog(`${label} saved + verified (${w.fp.arcs.length} → ${have.length} arcs)`);
+                    }
+                    w.legs.forEach(l => { l.status = 'applied'; });
+                } catch (e) {
+                    fail++; console.warn(`${TAG} 🔍 ${label.replace(/<[^>]*>/g, '')}:`, e.message);
+                    rep.fp.failed.push({ fpId: w.fp.id, name: w.fp.name, legs: w.legs.map(l => l.key), why: e.message });
+                    w.fail.push(`write failed: ${e.message}`);
+                    sciLog(`${label} FAILED: ${sciEsc(e.message)} — stopped (nothing after it was written)`, '#ff6060');
+                    break;   // stop on the FIRST failure
+                }
+                await new Promise(r => setTimeout(r, SCI_GAP_MS));
+            }
+        } finally { sci.running = false; }
+        sciDraw(); sciRenderPlan();
+        const left = plan.fpWrites.filter(w => !w.fail.length && !w.done).length;
+        sciLog(`Flight paths: ${ok} written + verified${fail ? `, <b style="color:#ff6060">1 FAILED</b>` : ''}${left ? ` · ${left} not attempted` : ''} · backups: JSON download + Delete Guard ring (72 h) · refresh to see them natively`, fail ? '#ffb347' : '#5fff5f');
+        showToast(fail ? `Scan Import: ${ok} FP ok, stopped on a failure` : `✓ ${ok} flight path(s) updated`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+    }
+    async function sciUndoNfz() {
+        if (liteBlockedWrite('delete NFZs (scan import undo)')) return;
+        const sid = sci.siteID || getCurrentSiteID();
+        let rec = null; try { rec = JSON.parse(elevGmGet(SCI_UNDO_KEY(sid), '') || 'null'); } catch (e) {}
+        if (!rec || !Array.isArray(rec.ids) || !rec.ids.length) { sciLog('Nothing to undo on this site (only the most recent Scan Import run)', '#ffb347'); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { sciLog('No CSRF token', '#ff6060'); return; }
+        if (!confirm(`Delete the ${rec.ids.length} NFZ(s) created by the Scan Import run of ${rec.at}? (Delete Guard banks each when installed)`)) return;
+        let ok = 0, fail = 0; const left = [];
+        for (const id of rec.ids) {
+            try {
+                const r = await fetch(`/map_objects/${id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf } });
+                if (r.ok || r.status === 404) ok++; else { fail++; left.push(id); console.warn(`${TAG} 🔍 undo #${id}: server ${r.status}`); }
+            } catch (e) { fail++; left.push(id); console.warn(`${TAG} 🔍 undo #${id}:`, e.message); }
+            await new Promise(r => setTimeout(r, SCI_GAP_MS));
+        }
+        try { elevGmSet(SCI_UNDO_KEY(sid), left.length ? JSON.stringify(Object.assign({}, rec, { ids: left })) : ''); } catch (e) {}
+        try { nfzDraw.committed = nfzDraw.committed.filter(c => !rec.ids.includes(c.id) || left.includes(c.id)); nfzRenderCommitted(); } catch (e) {}
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        if (sci.dec && sci.scan) sciBuildPlan().catch(() => {});
+        sciLog(`↩ Undo: ${ok} NFZ(s) deleted${fail ? `, ${fail} FAILED (kept in the undo list)` : ''}`, fail ? '#ffb347' : '#5fff5f');
+    }
+    // ============================================================
     // 📥 ASSET IMPORTER (#249) — CSV/KML region list → staged preview points
     // on the map → spatial selection (⭕ circle / 🖊 freehand lasso / ☝ pick)
     // → bulk-CREATE the selected subset as real type-3 assets via the
@@ -25855,6 +26500,7 @@
         // 📥 importer: layers + listeners off the map; parsed data survives in
         // memory so reopening on the same site restores the staged view.
         try { impTeardown(); } catch (e) {}
+        try { sciTeardown(); } catch (e) {}
         genDraw.active = false; genDraw.drawing = false; genDraw.pts = []; genDraw.tentative = null; genDraw.tentVertex = false; genDraw.tentOrtho = false; genDraw.lastSnap = null;
         try { const mp = getLeafletMap(); if (mp) { if (genDraw.poly) { try { mp.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(mp); clearGhost(mp); clearSnapTargets(mp); if (genDraw.onMapMove) { try { mp.off('moveend', genDraw.onMapMove); } catch (e) {} genDraw.onMapMove = null; } mp.getContainer().style.cursor = ''; try { mp.doubleClickZoom.enable(); } catch (e) {} } } catch (e) {}
     }
@@ -25928,6 +26574,7 @@
                 <button id="aim-gen-nfztrace" title="NFZ Trace — ALT+click to start, click to add vertices around anything (trace the shape exactly — the ring auto-grows by the Buffer on finish). Ctrl=snap onto the nearest asset's boundary · dbl-click/Enter=finish · Esc=undo last point. Grows by Buffer, pads to the min footprint, pulls overhangs inside the FFZ. Commits as type-4 NFZs, create-only." style="background:rgba(255,85,85,0.12);color:#ff5555;border:1px solid rgba(255,85,85,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">⬠ NFZ Trace</button>
                 <button id="aim-gen-nfzstamp" title="NFZ Stamp — ALT+click inside any asset polygon to instantly stage an NFZ = that asset's ring grown by the Buffer (min footprint + FFZ containment applied). Rapid-fire: keep ALT+clicking assets." style="background:rgba(255,85,85,0.12);color:#ff5555;border:1px solid rgba(255,85,85,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">⚡ NFZ Stamp</button>
                 <button id="aim-gen-import" title="Asset Importer — load a region CSV or KML, stage the points on the map (nothing is written), select a subset with a circle / freehand lasso / single picks, map CSV types to Percepto subtypes, and bulk-create the selection as real assets. Create-only + dry-run + backup. Also the inverse: 🗑 Delete mode spatially selects EXISTING assets for a heavily-confirmed bulk delete that rides Delete Guard." style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Import</button>
+                <button id="aim-gen-scan" title="Scan Import — load the Ortho Scanner review sheet's decisions JSON + scan bundle; accepted NFZs and flight-path leg changes stage on the map (green / yellow, removed legs red), preflight runs, then Apply writes them: NFZs create-only one POST each, flight paths one per request with Delete Guard backups. Nothing is written until Apply; dry run by default." style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🔍 Scan Import</button>
                 <button id="aim-gen-fpsnap" title="Arm CTRL-snap for Percepto's native flight-path draw tool: hold CTRL while clicking to place a waypoint and it snaps ~50ft parallel to the nearest power line (purple dot shows where). Release CTRL = free point." style="background:rgba(186,140,255,0.12);color:#ba8cff;border:1px solid rgba(186,140,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🧲 CTRL-snap: off</button>
                 <button id="aim-gen-loadfp" title="Load the site's existing flight paths (drawn natively in Percepto) into the editable preview so they can be cleaned up." style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FPs</button>
                 <button id="aim-gen-loadffz" title="Load the site's existing FFZs (amber) into the editable preview — move / rotate / Alt-snap (auto-size) / resize them, then 💾 Save FFZ edits to write them back in place." style="background:rgba(255,179,71,0.12);color:#ffb347;border:1px solid rgba(255,179,71,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FFZs</button>
@@ -25961,6 +26608,7 @@
                 <div id="aim-nfz-result" style="font-size:11px;color:#9ad;line-height:1.5">Drafts auto-grow by the Buffer, pad to the Min size, and pull inside the FFZ. Commit honors the Dry run checkbox in the Commit box.</div>
             </div>
             <div id="aim-imp-controls" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.35);border-radius:3px"></div>
+            <div id="aim-sci-controls" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.35);border-radius:3px"></div>
             <div style="padding:8px 10px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25);border-radius:3px">
                 <div style="font-size:11px;color:#9ad;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Commit</div>
                 <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc;margin-bottom:8px"><input type="checkbox" id="aim-gen-dryrun" checked style="accent-color:#7adfe6"> Dry run <span style="color:#888;font-size:10px">(build + count, don't write)</span></label>
@@ -26318,6 +26966,18 @@
             imp.target = 'staged'; imp.siteID = String(siteID);
         }
         impRenderPanelBody();
+        // v4.325: 🔍 Scan Import panel — files survive modal close on the SAME site; a new site resets.
+        if (sci.siteID !== String(siteID)) { sciClearLayers(); sci = { siteID: String(siteID), dec: null, scan: null, decName: null, scanName: null, plan: null, layers: [], running: false, stop: false, report: null, siteCfg: null }; }
+        sciRenderPanelBody();
+        const sciBtn = box.querySelector('#aim-gen-scan');
+        if (sciBtn) sciBtn.onclick = () => {
+            const c = document.getElementById('aim-sci-controls'); if (!c) return;
+            const opening = c.style.display === 'none';
+            c.style.display = opening ? 'block' : 'none';
+            sciBtn.style.background = opening ? 'rgba(122,223,230,0.32)' : 'rgba(122,223,230,0.12)';
+            if (opening && sci.plan) sciDraw(); else if (!opening) sciClearLayers();
+        };
+        if (sci.plan) { sciShowPanel(); sciDraw(); }
         const impBtn = box.querySelector('#aim-gen-import');
         if (impBtn) impBtn.onclick = () => {
             const c = document.getElementById('aim-imp-controls');
