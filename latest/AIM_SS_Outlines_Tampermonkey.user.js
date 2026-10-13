@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.164
+// @version      34.165
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.164';
+    const SCRIPT_VERSION = '34.165';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -6094,6 +6094,10 @@
         try { hzRenderer = L.svg(pane ? { pane } : {}); hzRenderer.addTo(map); } catch (e) { console.warn(`${TAG} hazards: SVG renderer failed:`, e); hzRenderer = null; }
         return hzRenderer;
     }
+    function hzSafeColor(c) {
+        const v = String(c || '').trim().toLowerCase();
+        return (v === '#ffffff' || v === '#fff' || v === 'white') ? '#fefefe' : (c || '#fefefe');
+    }
     function hzHatchId(cls) { return `aim-hz-hatch-${cls}`; }
     function hzEnsureHatch(renderer, cls, color, opacity) {
         const svg = renderer && renderer._container;
@@ -6313,7 +6317,7 @@
             if (!onSet.has(f.cls)) continue;
             if (drawn >= HZ_DRAW_CAP) { capped = true; break; }
             const def = HZ_CLASSES.find(c => c.id === f.cls);
-            const color = String(toggleState[`hz.${f.cls}.color`] || def.color);
+            const color = hzSafeColor(toggleState[`hz.${f.cls}.color`] || def.color);
             const opacity = Math.max(0, Math.min(1, Number(toggleState[`hz.${f.cls}.opacity`])));
             const useHatch = hatchOn && def.hatch && renderer && hzEnsureHatch(renderer, f.cls, color, isFinite(opacity) ? opacity : def.opacity);
             const isNew = pulse && !!f.p.new_since;
@@ -6328,7 +6332,7 @@
             if (renderer) opts.renderer = renderer;
             try {
                 if (def.edge) {   // contrast edge under the real outline (charcoal on white / white on dark)
-                    const under = L.polygon([f.ring], Object.assign({ color: def.edge, weight: width + 2.5, opacity: 0.9, fill: false, interactive: false }, pane ? { pane } : {}, renderer ? { renderer } : {}));
+                    const under = L.polygon([f.ring], Object.assign({ color: hzSafeColor(def.edge), weight: width + 2.5, opacity: 0.9, fill: false, interactive: false }, pane ? { pane } : {}, renderer ? { renderer } : {}));
                     under.addTo(map); hzLayers.push(under);
                 }
                 const poly = L.polygon([f.ring], opts);
