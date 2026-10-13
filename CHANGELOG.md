@@ -1,3 +1,7 @@
+## 2026-10-13 — 🛗 Elevators: pads inside the bridge zone get a short elevator, no FFZ edits — Site Setup Tools latest v4.335 (latest only)
+
+- **Site Setup Tools (latest) v4.335 — 🛗 Elevators: the ✂ FFZ split is gone.** First live commit on the dev site: Percepto rejected the split-off piece with "This free zone intersects other free zones" — the server refuses any two FFZs that touch, so a split pad would also need a seam plus a connector FP. Replaced with the simple answer: when a pad edge sits inside the bridge zone, the bridge keeps a short **tail** past the last line crossing (20 ft, Control Panel + per card) and the rest of the room to the pad edge is the elevator, whose floor is the pad ceiling minus 10 ft — on this site a 16 ft descent over 40 ft. Under 30 ft of room (Control Panel "minimum elevator") the crossing blocks with the distance in the message. No FFZ is ever written; the commit confirm says so. Undo still knows how to revert FFZ changes from the one v4.329 run. Harness updated (pad at 60 ft → 20 ft tail + 40 ft elevator; pad at 40 ft → blocked); all pass.
+
 ## 2026-10-13 — 🛗 Elevators: commit summary keeps the failure reason — Site Setup Tools latest v4.334 (latest only)
 
 - **Site Setup Tools (latest) v4.334 — 🛗 Elevators.** The end-of-commit summary line replaced the "FAILED: <server reason>" line, so a failed run showed only "1 FAILED". The reason now heads the summary.
