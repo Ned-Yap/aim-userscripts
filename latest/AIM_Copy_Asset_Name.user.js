@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.329
+// @version      4.330
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.329';
+    const SCRIPT_VERSION = '4.330';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -244,7 +244,7 @@
     const GMT_SCRIPT_ID = 'aim-gm-stamper';
     let gmtMasterEnabled = true;
     let gmtAltGate = false;         // CP toggle: require ALT+click to place (plain click stays free for Percepto)
-    let impSizeFt = 30;             // created-asset square side ft, CP-editable
+    let impSizeFt = 55;             // created-asset square side ft, CP-editable (55 ft = field default since v4.330)
     let impDeleteGuardSeen = 0;     // ts of the last Delete Guard REGISTER seen on the control channel
     const AIR_THRESH_KEY = 'aim-airspace-thresholds';
     const AIR_ENABLE_KEY = 'aim-airspace-enabled';
@@ -6637,7 +6637,7 @@
             return false;
         }
     }
-    async function createAssetSquare(sid, lat, lng, sizeFt, name, subtype, subtypeIsNew) {
+    async function createAssetSquare(sid, lat, lng, sizeFt, name, subtype, subtypeIsNew, notes) {
         if (liteBlockedWrite('create asset')) return { ok: false, error: 'Read-only in Lite mode.' };
         try {
             const csrf = getCsrfToken();
@@ -6660,7 +6660,7 @@
             b.name = name;
             b.site_id = sid;
             b.points = assetSquarePoints(lat, lng, sizeFt);
-            b.description = '';
+            b.description = notes ? String(notes).slice(0, 2000) : '';   // v4.330: importer Notes column → asset notes
             b.restrictions = {};
             b.arcs = [];
             b.validated = false;
@@ -13423,7 +13423,7 @@
             toggles: [
                 { id: 'imp-master', label: 'Enable Asset Importer', type: 'boolean', default: true, master: true },
                 { id: 'imp-dup-ft', label: 'Duplicate guard radius (staged point near an existing asset)', type: 'number', min: 0, max: 1000, step: 5, default: 50, unit: 'ft' },
-                { id: 'imp-size-ft', label: 'Created-asset square size', type: 'number', min: 5, max: 2000, step: 5, default: 30, unit: 'ft' },
+                { id: 'imp-size-ft', label: 'Created-asset square size', type: 'number', min: 5, max: 2000, step: 5, default: 55, unit: 'ft' },
                 { id: 'imp-open', label: '📥 Open Asset Importer', type: 'button', action: 'imp-open' },
             ],
             hotkeys: [],
@@ -22703,6 +22703,9 @@
             const o = { lat: String(lat), lng: String(lng) };
             const nmEl = pm.querySelector(':scope > name');
             o.name = nmEl ? String(nmEl.textContent || '').trim() : '';
+            // v4.330: a placemark <description> becomes a "description" column (auto-maps to Notes)
+            const dsEl = pm.querySelector(':scope > description');
+            if (dsEl) { const dv = String(dsEl.textContent || '').trim(); if (dv) { o.description = dv; headerSet.add('description'); } }
             pm.querySelectorAll('ExtendedData Data').forEach(d => {
                 const k = d.getAttribute('name'); if (!k) return;
                 const v = d.querySelector('value');
@@ -22732,6 +22735,7 @@
             lng: find(['longitude', 'lon', 'lng', 'long', 'x'], /lon|lng/),
             name: find(['name', 'pad_name', 'well name', 'asset name', 'asset', 'title', 'label'], /name/),
             type: find(['type', 'pad_type', 'category', 'profiletype', 'v or h', 'designation', 'subtype', 'class'], /type/),
+            notes: find(['notes', 'note', 'description', 'comment', 'comments', 'remarks'], /note|desc|comment|remark/),   // v4.330 → asset notes
         };
     }
     function impStoredMapping(headers) {
@@ -22796,9 +22800,10 @@
             const lat = parseFloat(r[m.lat]), lng = parseFloat(r[m.lng]);
             if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) { imp.invalid++; return; }
             const name = m.name ? (r[m.name] || '').trim() : '';
-            imp.points.push({ i, name: name || `Import ${i + 1}`, lat, lng, typeRaw: m.type ? (r[m.type] || '').trim() : '', sel: false, dup: false, dupWhy: '', done: false });
+            const notes = m.notes ? String(r[m.notes] || '').trim() : '';
+            imp.points.push({ i, name: name || `Import ${i + 1}`, lat, lng, typeRaw: m.type ? (r[m.type] || '').trim() : '', notes, sel: false, dup: false, dupWhy: '', done: false });
         });
-        impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type });
+        impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type, notes: m.notes || null });
         impBuildAssetIndex();
         impComputeDups();
         impRecomputeSel();          // shapes placed before the data still apply
@@ -23444,7 +23449,7 @@
                 <select data-impmap="${key}" style="max-width:130px;background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px">${opts}</select></label>`;
         };
         el.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:6px 8px;background:rgba(122,223,230,0.05);border:1px dashed rgba(122,223,230,0.3);border-radius:3px">
-            ${sel('name', 'Name', true)} ${sel('lat', 'Lat', false)} ${sel('lng', 'Lng', false)} ${sel('type', 'Type', true)}
+            ${sel('name', 'Name', true)} ${sel('lat', 'Lat', false)} ${sel('lng', 'Lng', false)} ${sel('type', 'Type', true)} ${sel('notes', 'Notes', true)}
             <button id="aim-imp-applymap" style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:4px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">✓ Apply</button>
         </div>`;
         el.querySelectorAll('select[data-impmap]').forEach(s => {
@@ -23683,7 +23688,7 @@
         };
         plan.forEach(x => { x.name = uniq(x.p.name); });
         // backup manifest BEFORE any write (rollback = delete the created ids)
-        const manifest = { site: sid, at: new Date().toISOString(), file: imp.fileName, sizeFt: impSizeFt, creates: plan.map(x => ({ name: x.name, subtype: x.subtype, lat: x.p.lat, lng: x.p.lng })) };
+        const manifest = { site: sid, at: new Date().toISOString(), file: imp.fileName, sizeFt: impSizeFt, creates: plan.map(x => ({ name: x.name, subtype: x.subtype, lat: x.p.lat, lng: x.p.lng, notes: x.p.notes || '' })) };
         try { localStorage.setItem(`aim_imp_commit_backup:${sid}`, JSON.stringify(manifest)); } catch (e) {}
         try { downloadJSONFile(`asset-import-${sid}-${Date.now()}.json`, JSON.stringify(manifest, null, 1)); } catch (e) { impStatus('backup manifest download failed (localStorage stash still written)'); }
         // fresh subtypes only need new_poi_type_str on their FIRST create
@@ -23693,7 +23698,7 @@
         for (let i = 0; i < plan.length; i++) {
             const x = plan[i];
             impStatus(`creating ${i + 1}/${plan.length} — "${impEsc(x.name)}"…`);
-            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impSizeFt, x.name, x.subtype, !knownSubs.has(x.subtype));
+            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impSizeFt, x.name, x.subtype, !knownSubs.has(x.subtype), x.p.notes || '');
             if (r && r.ok) {
                 ok++; created.push({ id: r.id, name: x.name, point: x.p });
                 knownSubs.add(x.subtype);
