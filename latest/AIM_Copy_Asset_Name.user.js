@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.331
+// @version      4.332
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.331';
+    const SCRIPT_VERSION = '4.332';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -13135,6 +13135,7 @@
             if (msg.value === impSizeFt || msg.value < 5 || msg.value > 2000) return;
             impSizeFt = msg.value;
             try { const el = document.getElementById('aim-imp-size'); if (el) el.value = impSizeFt; } catch (e) {}
+            try { if (imp.points.length) { impComputeDups(); impRenderStaged(); impSyncUi(); } } catch (e) {}   // v4.332: parent/child uses the square footprint
         }
     }
     function handleGmtToggle(msg) {
@@ -13422,7 +13423,7 @@
             version: SCRIPT_VERSION, group: 'Asset Importer', scope: 'site-setup', priority: 35,
             toggles: [
                 { id: 'imp-master', label: 'Enable Asset Importer', type: 'boolean', default: true, master: true },
-                { id: 'imp-dup-ft', label: 'Parent/child flag radius (staged point inside or within N ft of an existing asset — informational, never skipped)', type: 'number', min: 0, max: 1000, step: 5, default: 50, unit: 'ft' },
+                { id: 'imp-dup-ft', label: 'Nearby flag radius (staged point within N ft of an existing asset, not overlapping it — informational)', type: 'number', min: 0, max: 1000, step: 5, default: 50, unit: 'ft' },
                 { id: 'imp-size-ft', label: 'Created-asset square size', type: 'number', min: 5, max: 2000, step: 5, default: 55, unit: 'ft' },
                 { id: 'imp-open', label: '📥 Open Asset Importer', type: 'button', action: 'imp-open' },
             ],
@@ -22613,7 +22614,7 @@
         siteID: null,
         fileName: null, headers: [], rows: [],
         mapping: null,                              // {name, lat, lng, type|null} — header names
-        points: [],                                 // [{i, name, lat, lng, typeRaw, notes, sel, dup, dupWhy, near, done}]  — v4.331: dup = NAME match only; near = {name, ft, inside} parent/child flag
+        points: [],                                 // [{i, name, lat, lng, typeRaw, notes, sel, dup, dupWhy, child, near, done}]  — v4.332: dup = NAME match only; child = {name,id,full} square overlaps an existing asset; near = {name,id,ft} within radius, no overlap
         invalid: 0,
         typeMap: {},                                // loaded from GM at wire time
         target: 'staged',                           // 'staged' | 'assets' (🗑 delete mode)
@@ -22811,7 +22812,7 @@
             if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) { imp.invalid++; return; }
             const name = m.name ? (r[m.name] || '').trim() : '';
             const notes = m.notes ? String(r[m.notes] || '').trim() : '';
-            imp.points.push({ i, name: name || `Import ${i + 1}`, lat, lng, typeRaw: m.type ? (r[m.type] || '').trim() : '', notes, sel: false, dup: false, dupWhy: '', near: null, done: false });
+            imp.points.push({ i, name: name || `Import ${i + 1}`, lat, lng, typeRaw: m.type ? (r[m.type] || '').trim() : '', notes, sel: false, dup: false, dupWhy: '', child: null, near: null, done: false });
         });
         impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type, notes: m.notes || null });
         imp.mapOpen = false;
@@ -22821,12 +22822,13 @@
         impRecomputeSel();          // shapes placed before the data still apply
         impRenderStaged();
         impRenderTypeMapUi();
-        const dupN = imp.points.filter(p => p.dup).length, nearN = imp.points.filter(p => p.near).length;
+        const dupN = imp.points.filter(p => p.dup).length, childN = imp.points.filter(p => p.child).length, nearN = imp.points.filter(p => p.near).length;
         impStatus(`Staged <b>${imp.points.length}</b> point(s), all selected`
             + (imp.invalid ? ` · <span style="color:#ffb347">${imp.invalid} row(s) skipped (bad/missing coordinates)</span>` : '')
-            + (dupN ? ` · <span style="color:#ffd400">${dupN} name duplicate(s) of existing assets (skipped unless included)</span>` : '')
-            + (nearN ? ` · <span style="color:#b48cff">${nearN} inside/near an existing asset (parent/child — still created)</span>` : '')
-            + ' — map the type, set Size, then ✓ Create. ▸ Advanced has the subset tools.');
+            + (dupN ? ` · <span style="color:#ffd400">${dupN} name duplicate(s)</span>` : '')
+            + (childN ? ` · <span style="color:#b48cff">${childN} parent/child</span>` : '')
+            + (nearN ? ` · <span style="color:#4fc3f7">${nearN} nearby</span>` : '')
+            + ' — map the type, set Size, then ✓ Create.');
         impSyncUi();
     }
     // ---- duplicate guard vs EXISTING site assets (name OR proximity) ----
@@ -22847,22 +22849,42 @@
         const byName = new Map();
         imp.assetIndex.forEach(a => { if (a.clean) byName.set(a.clean, a); });
         imp.points.forEach(p => {
-            p.dup = false; p.dupWhy = ''; p.near = null;
+            p.dup = false; p.dupWhy = ''; p.child = null; p.near = null;
             const clean = (genCleanName(p.name) || '').toLowerCase();
             const nm = clean && byName.get(clean);
-            // v4.331: ONLY a name match is a duplicate. Proximity to / inside an
-            // existing asset is a parent/child flag (p.near) — informational, never skipped.
+            // ONLY a name match is a duplicate (skipped unless included).
             if (nm) { p.dup = true; p.dupWhy = `name matches existing asset "${nm.name}"`; }
+            // v4.332: two informational flags, never skipped —
+            //   child = the square this point would become (Size ft) overlaps an
+            //           existing asset, partially or fully (parent/child);
+            //   near  = no overlap, but within the radius of one (nearby).
+            const sq = assetSquarePoints(p.lat, p.lng, impSizeFt);
+            const halfLat = (sq[0].lat - p.lat) * 1.05, halfLng = (sq[1].lng - p.lng) * 1.05;
             const dLng = dLat / Math.max(0.2, Math.cos(p.lat * Math.PI / 180));
-            let best = null;
+            let bestNear = null, bestChild = null;
             for (const a of imp.assetIndex) {
-                if (p.lat < a.bbox.la0 - dLat || p.lat > a.bbox.la1 + dLat || p.lng < a.bbox.lo0 - dLng || p.lng > a.bbox.lo1 + dLng) continue;
+                if (p.lat < a.bbox.la0 - dLat - halfLat || p.lat > a.bbox.la1 + dLat + halfLat || p.lng < a.bbox.lo0 - dLng - halfLng || p.lng > a.bbox.lo1 + dLng + halfLng) continue;
                 if (nm && a === nm) continue;
+                const ov = impSquareOverlap(sq, a.ring);
+                if (ov) { if (!bestChild || (ov === 'full' && bestChild.full !== true)) bestChild = { name: a.name, id: a.id, full: ov === 'full' }; continue; }
                 const d = pointToPolygonMeters(p.lat, p.lng, a.ring);
-                if (d <= dupM && (!best || d < best.d)) best = { a, d };
+                if (d <= dupM && (!bestNear || d < bestNear.d)) bestNear = { a, d };
             }
-            if (best) p.near = { name: best.a.name, id: best.a.id, ft: Math.round(best.d * M_TO_FT), inside: best.d === 0 };
+            if (bestChild) p.child = bestChild;
+            else if (bestNear) p.near = { name: bestNear.a.name, id: bestNear.a.id, ft: Math.round(bestNear.d * M_TO_FT) };
         });
+    }
+    // square (4 corners) vs existing asset ring → 'full' | 'partial' | null
+    function impSquareOverlap(sq, ring) {
+        const cornersIn = sq.filter(c => pointInPolygon(c.lat, c.lng, ring)).length;
+        if (cornersIn === 4) return 'full';
+        if (cornersIn > 0) return 'partial';
+        if (ring.some(v => pointInPolygon(v.lat, v.lng, sq))) return 'partial';     // asset vertex inside the square
+        for (let i = 0; i < 4; i++) {                                               // edge crossings (no vertex inside either)
+            const a = sq[i], b = sq[(i + 1) % 4];
+            for (let j = 0, k = ring.length - 1; j < ring.length; k = j++) if (segIntersect(a, b, ring[k], ring[j])) return 'partial';
+        }
+        return null;
     }
     // ---- staged rendering: one shared canvas renderer, viewport-culled ----
     function impClearLayers() {
@@ -22900,8 +22922,8 @@
             try {
                 const opts = {
                     radius: p.sel ? 4 : 2.2,
-                    color: p.dup ? '#ff3b3b' : (p.near ? '#b48cff' : '#ffffff'),
-                    weight: (p.dup || p.near) ? 1.5 : 0.6,
+                    color: p.dup ? '#ff3b3b' : (p.child ? '#b48cff' : (p.near ? '#4fc3f7' : '#ffffff')),
+                    weight: (p.dup || p.child || p.near) ? 1.5 : 0.6,
                     fillColor: p.sel ? '#5fff5f' : '#ff9d00',
                     fillOpacity: 0.9, opacity: 0.9, interactive: false,
                 };
@@ -23443,7 +23465,7 @@
         q('aim-imp-clearshapes').onclick = () => { imp.shapes = []; impRefreshAfterSelChange(); impStatus(imp.target === 'assets' ? `shapes cleared — <b>${impSelCount()}</b> still selected via ☝ manual picks` : `shapes cleared — <b>${impSelCount()}</b> selected (no shape = every staged point, minus ☝ manual deselects)`); };
         const szEl = q('aim-imp-size');
         szEl.value = impSizeFt;
-        szEl.oninput = () => { const v = parseFloat(szEl.value); if (isFinite(v) && v >= 5 && v <= 2000) impSizeFt = v; };
+        szEl.oninput = () => { const v = parseFloat(szEl.value); if (isFinite(v) && v >= 5 && v <= 2000) { impSizeFt = v; try { if (imp.points.length) { impComputeDups(); impRenderStaged(); impSyncUi(); } } catch (e) {} } };
         const incEl = q('aim-imp-incdups');
         incEl.checked = imp.includeDups;
         incEl.onchange = () => { imp.includeDups = incEl.checked; impSaveParams(); impSyncUi(); };
@@ -23494,15 +23516,20 @@
         const el = document.getElementById('aim-imp-flags');
         if (!el) return;
         if (!live || !live.length) { el.innerHTML = ''; return; }
-        const dups = live.filter(p => p.dup), near = live.filter(p => p.near);
-        if (!dups.length && !near.length) { el.innerHTML = ''; return; }
+        const dups = live.filter(p => p.dup), child = live.filter(p => p.child), near = live.filter(p => p.near);
+        if (!dups.length && !child.length && !near.length) { el.innerHTML = ''; return; }
         const list = (arr, fmt, max) => impEsc(arr.slice(0, max).map(fmt).join(' · ')) + (arr.length > max ? ` … +${arr.length - max} more` : '');
-        const byParent = new Map();
-        near.forEach(p => { const k = p.near.name; if (!byParent.has(k)) byParent.set(k, []); byParent.get(k).push(p); });
-        const parents = [...byParent.entries()].sort((a, b) => b[1].length - a[1].length);
+        const group = (arr, key, fmt) => {
+            const m = new Map();
+            arr.forEach(p => { const k = key(p); if (!m.has(k)) m.set(k, []); m.get(k).push(p); });
+            const g = [...m.entries()].sort((a, b) => b[1].length - a[1].length);
+            return impEsc(g.slice(0, 6).map(([k, v]) => fmt(k, v)).join(' · ')) + (g.length > 6 ? ` … +${g.length - 6} more` : '');
+        };
+        const fullN = child.filter(p => p.child.full).length;
         el.innerHTML = `<div style="padding:6px 8px;background:rgba(255,255,255,0.03);border:1px dashed rgba(122,223,230,0.25);border-radius:3px;font-size:11px;line-height:1.5">
-            ${dups.length ? `<div style="color:#ffd400">🔴 <b>${dups.length}</b> name duplicate${dups.length === 1 ? '' : 's'} (same name as an existing asset — ${imp.includeDups ? 'INCLUDED' : 'skipped'}): ${list(dups, p => p.name, 10)}</div>` : ''}
-            ${near.length ? `<div style="color:#b48cff">🟣 <b>${near.length}</b> parent/child (inside or within ${impDupFt} ft of an existing asset — created as normal, nest them afterwards if wanted): ${impEsc(parents.slice(0, 6).map(([k, v]) => `${k} ← ${v.length}`).join(' · '))}${parents.length > 6 ? ` … +${parents.length - 6} more parents` : ''}</div>` : ''}
+            ${dups.length ? `<div style="color:#ffd400">🔴 <b>${dups.length}</b> name duplicate${dups.length === 1 ? '' : 's'} — same name as an existing asset, ${imp.includeDups ? 'INCLUDED' : 'skipped'}: ${list(dups, p => p.name, 10)}</div>` : ''}
+            ${child.length ? `<div style="color:#b48cff">🟣 <b>${child.length}</b> parent/child — the ${impSizeFt} ft square lands inside an existing asset (${fullN} fully · ${child.length - fullN} partially), created as normal: ${group(child, p => p.child.name, (k, v) => `${k} ← ${v.length}`)}</div>` : ''}
+            ${near.length ? `<div style="color:#4fc3f7">🔵 <b>${near.length}</b> nearby — within ${impDupFt} ft of an existing asset, not overlapping it, created as normal: ${group(near, p => p.near.name, (k, v) => `${k} ← ${v.length}`)}</div>` : ''}
         </div>`;
     }
     function impSiteSubtypes() {
