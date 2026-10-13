@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.332
+// @version      4.333
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.332';
+    const SCRIPT_VERSION = '4.333';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23541,6 +23541,18 @@
         });
         return counts;
     }
+    // v4.333: a CSV type value maps to ITSELF by default — matched to an existing
+    // site subtype ignoring case, else created as a new subtype on first commit.
+    // Only a blank value needs a hand-picked subtype. An explicit entry in the
+    // remembered typeMap still wins.
+    function impResolveSubtype(raw, subtypes) {
+        const key = (raw || '(blank)').toLowerCase();
+        const mapped = (imp.typeMap[key] || '').trim();
+        if (mapped) return { value: mapped, source: 'map' };
+        if (!raw) return { value: '', source: 'none' };
+        const hit = (subtypes || []).find(st => st.toLowerCase() === raw.toLowerCase());
+        return hit ? { value: hit, source: 'existing' } : { value: raw, source: 'new' };
+    }
     function impRenderTypeMapUi() {
         const el = document.getElementById('aim-imp-typemap');
         if (!el) return;
@@ -23561,26 +23573,37 @@
         }
         const vals = new Map();
         imp.points.forEach(p => { const k = p.typeRaw || '(blank)'; vals.set(k, (vals.get(k) || 0) + 1); });
+        const tag = (src, val) => src === 'new' ? `<span style="color:#5fff5f;font-size:10px">new subtype — created on the site</span>`
+            : src === 'existing' ? `<span style="color:#888;font-size:10px">existing subtype</span>`
+            : src === 'map' ? `<span style="color:#888;font-size:10px">${subCounts.has(val) ? 'existing subtype' : 'new subtype — created on the site'}</span>`
+            : `<span style="color:#ffd400;font-size:10px">blank in the file — pick a subtype</span>`;
         const rows = [...vals.entries()].sort((a, b) => b[1] - a[1]).map(([v, n]) => {
+            const raw = v === '(blank)' ? '' : v;
             const key = v.toLowerCase();
-            const mapped = (imp.typeMap[key] || '').trim();
-            const warn = !mapped;
-            return `<div style="display:flex;gap:8px;align-items:center;padding:2px 0${warn ? ';background:rgba(255,212,0,0.08)' : ''}">
+            const r = impResolveSubtype(raw, subtypes);
+            const warn = !r.value;
+            return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:2px 0${warn ? ';background:rgba(255,212,0,0.08)' : ''}">
                 <span style="min-width:130px;color:${warn ? '#ffd400' : '#cfd6dc'};font-size:11px">${warn ? '⚠ ' : ''}${impEsc(v)} <span style="color:#888">×${n}</span></span>
                 <span style="color:#888">→</span>
-                <input type="text" list="aim-imp-subtype-list" data-imptype="${impEsc(key)}" value="${impEsc(mapped)}" placeholder="pick a subtype" style="${inCss};width:140px">
+                <input type="text" list="aim-imp-subtype-list" data-imptype="${impEsc(key)}" data-impraw="${impEsc(raw)}" value="${impEsc(r.value)}" placeholder="pick a subtype" style="${inCss};width:140px">
+                <span data-imptag>${tag(r.source, r.value)}</span>
             </div>`;
         }).join('');
         el.innerHTML = `<div style="padding:6px 8px;background:rgba(122,223,230,0.05);border:1px dashed rgba(122,223,230,0.3);border-radius:3px">
-            <div style="font-size:10px;color:#9ad;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Type mapping — CSV value → Percepto subtype <span style="color:#888;text-transform:none;letter-spacing:0">(remembered for next time; ⚠ unmapped values block Commit)</span></div>
+            <div style="font-size:10px;color:#9ad;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Type — CSV value → Percepto subtype <span style="color:#888;text-transform:none;letter-spacing:0">(the file's value is used as-is unless you change it; a changed value is remembered)</span></div>
             ${rows}${dl}</div>`;
         el.querySelectorAll('input[data-imptype]').forEach(inp => {
             inp.oninput = () => {
-                const k = inp.getAttribute('data-imptype');
+                const k = inp.getAttribute('data-imptype'), raw = inp.getAttribute('data-impraw') || '';
                 const v = inp.value.trim();
-                if (v) imp.typeMap[k] = v; else delete imp.typeMap[k];
+                // typing the file's own value back = no override (keeps the dictionary clean)
+                if (v && v.toLowerCase() !== raw.toLowerCase()) imp.typeMap[k] = v; else delete imp.typeMap[k];
                 impSaveTypeMap();
-                inp.parentElement.style.background = v ? '' : 'rgba(255,212,0,0.08)';
+                const r = impResolveSubtype(raw, subtypes);
+                const eff = v || r.value;
+                inp.parentElement.style.background = eff ? '' : 'rgba(255,212,0,0.08)';
+                const t = inp.parentElement.querySelector('[data-imptag]');
+                if (t) t.innerHTML = eff ? (subCounts.has(eff) || subtypes.some(st => st.toLowerCase() === eff.toLowerCase()) ? `<span style="color:#888;font-size:10px">existing subtype</span>` : `<span style="color:#5fff5f;font-size:10px">new subtype — created on the site</span>`) : tag('none', '');
                 impSyncUi();
             };
         });
@@ -23742,14 +23765,15 @@
         // same frequency-sorted default the type-mapping UI shows
         const defSub = [...subCounts.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0])[0] || 'well-cluster';
         const missing = new Set();
+        const siteSubs = [...subCounts.keys()];
         const subtypeFor = (p) => {
             if (!imp.mapping || !imp.mapping.type) return (imp.typeMap['__all__'] || '').trim() || defSub;
-            const v = (imp.typeMap[(p.typeRaw || '(blank)').toLowerCase()] || '').trim();
+            const v = impResolveSubtype(p.typeRaw || '', siteSubs).value;   // v4.333: file value as-is unless overridden
             if (!v) missing.add(p.typeRaw || '(blank)');
             return v;
         };
         const plan = targets.map(p => ({ p, subtype: subtypeFor(p) }));
-        if (missing.size) { impStatus(`BLOCKED — unmapped type value(s): <b>${impEsc([...missing].join(' · '))}</b>. Map each in the Type mapping table above.`, '#ff6060'); return; }
+        if (missing.size) { impStatus(`BLOCKED — rows with a blank type: pick a subtype for <b>${impEsc([...missing].join(' · '))}</b> in the Type table above.`, '#ff6060'); return; }
         const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
         if (dry) { impStatus(`DRY RUN — would create <b>${plan.length}</b> asset(s) (${impSizeFt}×${impSizeFt} ft squares)${skippedDups ? `, skipping ${skippedDups} dup(s)` : ''}: ${impEsc(plan.slice(0, 12).map(x => x.p.name).join(' · '))}${plan.length > 12 ? ' …' : ''}. Untick Dry run to write.`); return; }
         const csrf = getCsrfToken();

@@ -1,3 +1,7 @@
+## 2026-10-13 — 📥 Asset Importer: file type value used as-is — Site Setup Tools latest v4.333 (latest only)
+
+- **Site Setup Tools (latest) v4.333 — 📥 Asset Importer type mapping ([#249](https://github.com/Ned-Yap/aim-userscripts-issues/issues/249)).** "BLOCKED — unmapped type value(s): Fence Lights" on a type that simply did not exist on the site yet. The file's Type value is now the subtype by default: matched to an existing site subtype ignoring case, otherwise created as a new subtype on the first asset (tagged "new subtype — created on the site" in the table). Only rows with a blank type still need a hand-picked subtype. Changing the box to something else is remembered as before; typing the file's own value back clears the override.
+
 ## 2026-10-13 — 📥 Asset Importer: parent/child vs nearby — Site Setup Tools latest v4.332 (latest only)
 
 - **Site Setup Tools (latest) v4.332 — 📥 Asset Importer flags ([#249](https://github.com/Ned-Yap/aim-userscripts-issues/issues/249)).** Two separate informational flags, both still created: 🟣 **parent/child** = the square the point would become (the Size box, so it updates as you change the size) lands fully or partially inside an existing asset, listed per parent with full/partial counts; 🔵 **nearby** = no overlap but within the Control Panel radius (50 ft, relabelled "Nearby flag radius") of an existing asset. 🔴 name duplicates unchanged (skipped unless included). Staged markers: red = name dup, purple = parent/child, blue = nearby.
