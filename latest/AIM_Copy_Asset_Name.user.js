@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.338
+// @version      4.339
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.338';
+    const SCRIPT_VERSION = '4.339';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -21750,7 +21750,8 @@
     // crossing · never two FPs in one request · arc ids regenerate on
     // every save, so a path saved after staging must be re-staged.
     // ============================================================
-    const ELV_MATCH_M = 0.6;                 // cut points this close to a vertex snap onto it
+    const ELV_MATCH_M = 0.6;                 // two points this close are the same vertex
+    const ELV_SNAP_M = 2.0;                  // a cut point this close to a vertex snaps onto it (no sub-2 m arcs; the band just starts at the vertex)
     const ELV_SAMPLE_M = 25 * GEN_FT_TO_M;    // DEM sample spacing along the window
     const ELV_STEP_M = 1;                     // walk step when measuring the bridge extent
     const ELV_SCAN_CAP_M = 1609;              // a bridge never extends further than this from its crossing
@@ -21840,14 +21841,14 @@
         s = Math.max(0, Math.min(ch.len, s));
         let i = 0;
         while (i < ch.cum.length - 2 && ch.cum[i + 1] < s) i++;
-        if (Math.abs(ch.cum[i] - s) < 1e-6) return { lat: ch.pts[i].lat, lng: ch.pts[i].lng, leg: i };
-        if (Math.abs(ch.cum[i + 1] - s) < 1e-6) return { lat: ch.pts[i + 1].lat, lng: ch.pts[i + 1].lng, leg: i };
+        if (Math.abs(ch.cum[i] - s) < 1e-3) return { lat: ch.pts[i].lat, lng: ch.pts[i].lng, leg: i };
+        if (Math.abs(ch.cum[i + 1] - s) < 1e-3) return { lat: ch.pts[i + 1].lat, lng: ch.pts[i + 1].lng, leg: i };
         const L = ch.cum[i + 1] - ch.cum[i], t = L > 0 ? (s - ch.cum[i]) / L : 0;
         const p = ch.pts[i], q = ch.pts[i + 1];
         return { lat: p.lat + (q.lat - p.lat) * t, lng: p.lng + (q.lng - p.lng) * t, leg: i };
     }
     function elvSnapS(ch, s) {
-        for (let i = 0; i < ch.cum.length; i++) if (Math.abs(ch.cum[i] - s) <= ELV_MATCH_M) return ch.cum[i];
+        for (let i = 0; i < ch.cum.length; i++) if (Math.abs(ch.cum[i] - s) <= ELV_SNAP_M) return ch.cum[i];
         return Math.max(0, Math.min(ch.len, s));
     }
     // GM point: bridge midpoint, ELV_GM_OFFSET_FT to the left of the path direction
@@ -22078,9 +22079,13 @@
                     kept.push(it);
                 });
                 if (!kept.length) return;
-                const cuts = new Set(ch.cum.map(s => +s.toFixed(3)));
-                kept.forEach(it => [it._gx.e1, it._gx.b1, it._gx.b2, it._gx.e2].forEach(s => cuts.add(+s.toFixed(3))));
-                const S = [...cuts].sort((a, b) => a - b);
+                // exact positions: vertices first, then cut points; anything within 1 mm of an earlier value
+                // collapses onto it (so a cut on a vertex IS the vertex and elvAt returns its exact coordinates —
+                // rounding here wrote endpoints 0.2 mm off the original vertex, which Percepto reports as
+                // "Disconnected endpoint", 2026-10-13)
+                const S = [];
+                ch.cum.slice().concat(kept.flatMap(it => [it._gx.e1, it._gx.b1, it._gx.b2, it._gx.e2])).sort((a, b) => a - b)
+                    .forEach(v => { if (!S.length || v - S[S.length - 1] > 1e-3) S.push(v); });
                 const zoneFor = (mid) => {
                     for (const it of kept) {
                         const gg = it._gx, m = gg.mirrored;   // on a mirrored window E1/E2 swap sides
@@ -22131,6 +22136,12 @@
                 const c = (ux * wx + uy * wy) / ((Math.hypot(ux, uy) * Math.hypot(wx, wy)) || 1);
                 if (c > 0.999) hairpin++;   // the two arcs leave the vertex in the SAME direction = one folds back over the other
             } });
+            let loose = 0, looseAt = '';
+            byV.forEach((list, k) => {
+                const ref = out[list[0]], rp = elvVk(ref.point_a) === k ? ref.point_a : ref.point_b;
+                for (let x = 1; x < list.length; x++) { const q = out[list[x]], qp = elvVk(q.point_a) === k ? q.point_a : q.point_b; if (qp.lat !== rp.lat || qp.lng !== rp.lng) { loose++; if (!looseAt) looseAt = `${rp.lat},${rp.lng} vs ${qp.lat},${qp.lng}`; } }
+            });
+            if (loose) w.fail.push(`${loose} shared vertex(es) whose arcs carry different coordinates (${looseAt}) — Percepto would show "Disconnected endpoint"; refusing to write (tool bug, re-stage and report)`);
             if (dup) w.fail.push(`${dup} duplicate arc(s) in the rebuilt path — refusing to write (tool bug, re-stage and report)`);
             if (hairpin) w.fail.push(`${hairpin} hairpin(s) in the rebuilt path (an arc folds back over its neighbour) — refusing to write (tool bug, re-stage and report)`);
             if (!out.some(a => a._new)) w.fail.push('nothing changes on this path');
