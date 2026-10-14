@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.93
+// @version      2.95
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,36 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.93';
+    const SCRIPT_VERSION = '2.95';
+
+    // v2.95: the server's REASON for a rejected mission save. Percepto's
+    // saveApp throws a bare "HTTP 400" — the validation message in the
+    // response body never reaches our callers. The save hook (fetch + XHR,
+    // installSaveDiffProbe) banks every non-2xx POST /available_app/
+    // response here; saveErrText(e) appends it to our toasts / console lines
+    // when it is fresh (≤ 15 s), so a failed merge/create says WHY.
+    let lastSaveError = null;
+    function noteSaveError(status, text) {
+        lastSaveError = { status, text: String(text || '').replace(/\s+/g, ' ').trim().slice(0, 600), at: Date.now() };
+        console.warn(`${TAG} mission save rejected — HTTP ${status}: ${lastSaveError.text || '(empty response body)'}`);
+    }
+    function saveErrText(e) {
+        const base = String((e && e.message) || e);
+        const le = lastSaveError;
+        if (le && (Date.now() - le.at) < 15000 && le.text) return `${base} — server says: ${le.text}`;
+        return base;
+    }
+
+    // v2.95: Percepto rejects (HTTP 400) a mission name holding anything but
+    // letters, digits, space, '-' and '_' — live-caught 2026-10-02 when the
+    // merge panel's default "A + B" name 400'd every pad-click merge of two
+    // by-name picks. Every name WE build or send is checked first; the rail
+    // names the offending characters instead of a bare HTTP 400.
+    const MISSION_NAME_BAD_RE = /[^A-Za-z0-9 _-]/g;
+    function missionNameIssue(name) {
+        const bad = Array.from(new Set(String(name || '').match(MISSION_NAME_BAD_RE) || []));
+        return bad.length ? `name has character${bad.length === 1 ? '' : 's'} Percepto rejects: ${bad.map(c => `"${c}"`).join(' ')} (allowed: letters, digits, space, - and _)` : null;
+    }
 
     // Server model (v2.05): prod and QA are separate databases — the same
     // numeric site ID is two different sites. GM storage is shared across
@@ -6522,10 +6551,14 @@
         const takeoff = ins.find(i => i && i.type === 0) || null;
         const rh = Array.from(ins).reverse().find(i => i && i.type === 99) || null;
         const lead = [], units = [], orphans = [];
-        let unit = null, bundle = null;
+        let unit = null, bundle = null, inPlace = 0;
         ins.forEach(i => {
             if (!i || i.type === 0 || i.type === 99) return;
             const located = i.location && typeof i.location.lat === 'number';
+            // IN-PLACE snapshot (no GPS aim point — shot from the nav's own
+            // position, heading/pitch in extra_options). Not modeled here:
+            // counted so stoAnalyze can refuse the mission (see guard there).
+            if (i.type === 6 && !located) inPlace++;
             if (located && i.type === 1) {
                 unit = { nav: i, frags: [], bundles: [], others: [] };
                 units.push(unit); bundle = null;
@@ -6543,7 +6576,7 @@
                 else lead.push(i);
             }
         });
-        return { takeoff, rh, lead, units, orphans };
+        return { takeoff, rh, lead, units, orphans, inPlace };
     }
     // Standoff preference LADDER (v2.77, user-ruled after a live 87→182 ft
     // re-home — "that's TOO BIG of a swing"). 100 ft ideal, then:
@@ -6667,6 +6700,18 @@
         const cfg = stoCfg();
         const m = mc.mission;
         const parsed = stoParse(m);
+        // GUARD (v2.94 / v3.05 — live data loss 2026-10-02, mission 185239):
+        // a mission whose snapshots are IN-PLACE (type 6, location null) is
+        // invisible to this model — every snapshot files as wrap/frag glue,
+        // so every nav reads as snap-less, every stacked nav pair reads as a
+        // duplicate, and the accounting rails PASS because they expect exactly
+        // that. Apply then saved takeoff → returnHome. Refuse the mission
+        // outright until in-place snapshots are modeled.
+        if (parsed.inPlace) {
+            const e = new Error(`${parsed.inPlace} in-place snapshot(s) (no GPS aim point) — the Step Optimizer only models located snapshots and cannot safely touch this mission. Nothing changed.`);
+            e.aimUnsupported = true;
+            throw e;
+        }
         const issues = [];
         if (parsed.orphans.length) issues.push({ kind: 'orphan', text: `${parsed.orphans.length} located step(s) before the first NAV — a mission must start with a navigate. They will be re-attached to the first nav on Apply.` });
         // wrap canon = the mission's own majority pattern
@@ -7266,7 +7311,7 @@
                 rows.push({ mc, an, col: COLORS[i % COLORS.length], err: null });
             } catch (e) {
                 console.warn(`${TAG} [sto] sweep failed for "${mc.mission.name}"`, e);
-                rows.push({ mc, an: null, col: COLORS[i % COLORS.length], err: String(e && e.message || e) });
+                rows.push({ mc, an: null, col: COLORS[i % COLORS.length], err: String(e && e.message || e), unsupported: !!(e && e.aimUnsupported) });
             }
         }
         stoSweepBusy = false;
@@ -7281,7 +7326,7 @@
         el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><b style="color:#c39dff;">🪄 Site sweep</b><span style="color:#789;">${rows.length} macro(s) — sorted by route savings</span><span data-sto-sw-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
             + `<table style="border-collapse:collapse;width:100%;font-size:10.5px;"><tr style="color:#9ad;text-align:left;"><th style="padding:2px 6px;">Macro</th><th style="padding:2px 6px;">route</th><th style="padding:2px 6px;">↩</th><th style="padding:2px 6px;">wraps</th><th style="padding:2px 6px;">dups</th><th style="padding:2px 6px;">standoff</th><th style="padding:2px 6px;">stops</th><th></th></tr>`
             + rows.map(r => {
-                if (!r.an) return `<tr>${td(escapeHtml(String(r.mc.mission.name || '')))}${td(`<span style="color:#ff5252;">failed</span>`, '')}${td('')}${td('')}${td('')}${td('')}${td('')}${td('')}</tr>`;
+                if (!r.an) return `<tr>${td(escapeHtml(String(r.mc.mission.name || '')))}${td(`<span style="color:${r.unsupported ? '#ff9800' : '#ff5252'};cursor:help;" title="${escapeHtml(r.err || '')}">${r.unsupported ? 'skipped' : 'failed'}</span>`, '')}${td('')}${td('')}${td('')}${td('')}${td('')}${td('')}</tr>`;
                 const an = r.an;
                 const saved = (an.curM - an.propM) * STO_FT;
                 const routeTxt = an.keptCurrent && !an.doctrineFlips
@@ -7316,7 +7361,12 @@
         await new Promise(r => setTimeout(r, 30));   // let the toast paint
         let an;
         try { an = await stoAnalyze(mc, data); }
-        catch (e) { console.warn(`${TAG} [sto] analyze failed`, e); showToast('🪄 Analysis failed (see console).', '#ff5252', 4500); stoBusy = false; return; }
+        catch (e) {
+            console.warn(`${TAG} [sto] analyze failed`, e);
+            if (e && e.aimUnsupported) showToast(`🪄 "${mc.mission.name}" skipped: ${e.message}`, '#ff9800', 9000);
+            else showToast('🪄 Analysis failed (see console).', '#ff5252', 4500);
+            stoBusy = false; return;
+        }
         stoBusy = false;
         console.log(`${TAG} [sto] "${mc.mission.name}": ${an.parsed.units.length} navs · cur ${(an.curM * STO_FT / 1000).toFixed(1)}k ft → opt ${(an.propM * STO_FT / 1000).toFixed(1)}k ft · ${an.fallbacks} route fallback(s)`);
         sto.state = { an, col, fixWraps: (an.wrapAnoms.length + an.fragUnits.length) > 0,
@@ -7544,6 +7594,14 @@
         if (rb.acc.navs !== expNavs || rb.acc.snaps !== expSnaps) {
             console.warn(`${TAG} [sto] ABORT — rebuild accounting mismatch: navs ${rb.acc.navs}/${expNavs}, snaps ${rb.acc.snaps}/${expSnaps}`, m.name);
             showToast('🪄 Aborted: rebuilt nav/snapshot count does not match (see console). Nothing saved.', '#ff5252', 6000);
+            return;
+        }
+        // HARD RAIL (v2.94 / v3.05): whatever the analysis believed, a rebuild
+        // that leaves no navs — or no snapshots where there were some — is a
+        // wipe, not an optimization. Refuse before the backup/confirm step.
+        if (rb.acc.navs === 0 || (origSnaps > 0 && rb.acc.snaps === 0)) {
+            console.warn(`${TAG} [sto] ABORT — rebuild would leave ${rb.acc.navs} nav(s) / ${rb.acc.snaps} snapshot(s) of ${origNavs} / ${origSnaps}`, m.name);
+            showToast(`🪄 Aborted: the rebuilt mission would keep ${rb.acc.navs} nav(s) / ${rb.acc.snaps} snapshot(s) of ${origNavs} / ${origSnaps} — that is a wipe, not an optimization. Nothing saved.`, '#ff5252', 8000);
             return;
         }
         const savedFt = (an.curM - an.propM) * STO_FT;
@@ -8909,7 +8967,7 @@
     function pcmRenderPanel() {
         if (pcm.panelEl) { try { pcm.panelEl.remove(); } catch (e) {} pcm.panelEl = null; }
         const total = pcm.picks.reduce((s, pk) => s + pcmStepCount(pk.mission), 0);
-        const defName = pcm.picks.length ? ('Merged - ' + pcm.picks.map(pk => pk.asset.name).join(' + ')) : '';
+        const defName = pcm.picks.length ? ('Merged - ' + pcm.picks.map(pk => pk.asset.name).join(' AND ')) : '';
         const nameVal = pcm.customName != null ? pcm.customName : defName;
         // v2.30: rows are draggable — grab anywhere on a row (the ⠿ handle
         // telegraphs it) and drop onto another row to insert BEFORE it.
@@ -9067,6 +9125,8 @@
         const nameEl = pcm.panelEl && pcm.panelEl.querySelector('[data-pcm-name]');
         const name = ((nameEl && nameEl.value) || '').trim();
         if (!name) { showToast('Give the merged mission a name.', '#ff9800', 3000); return; }
+        const nameBad = missionNameIssue(name);
+        if (nameBad) { showToast(`🔗 Merge: ${nameBad}`, '#ff5252', 7000); console.warn(`${TAG} [pcm] refused — ${nameBad}: "${name}"`); return; }
         const exact = (pcm.missions || []).find(m => String((m && m.name) || '').trim().toLowerCase() === name.toLowerCase());
         const editing = pcm.editingName
             ? (pcm.missions || []).find(m => String((m && m.name) || '').trim().toLowerCase() === pcm.editingName.trim().toLowerCase())
@@ -9095,9 +9155,10 @@
             }
         } catch (e) {
             pcmBusy = false;
-            console.warn(`${TAG} [pcm] create failed`, e);
-            showToast(`🔗 Merge create FAILED — ${String(e && e.message || e)}`, '#ff5252', 6000);
-            if (statusEl) statusEl.textContent = 'Create failed — see console.';
+            const why = saveErrText(e);
+            console.warn(`${TAG} [pcm] create failed — ${why} (name ${name.length} chars, ${instrs.length} instructions)`, e);
+            showToast(`🔗 Merge create FAILED — ${why}`, '#ff5252', 9000);
+            if (statusEl) statusEl.textContent = `Create failed — ${why}`;
             return;
         }
         pcmBusy = false;
@@ -10580,7 +10641,7 @@
             <div class="aim-mb-rc-body">${bodyHtml}</div>
             <div class="aim-mb-rc-footer">
                 <button class="aim-mb-tbtn" data-rc-open-sum>Open in SUM →</button>
-                <button class="aim-mb-tbtn" data-rc-duplicate title="Duplicate this mission on this site (create-only — copy named with your saved qualifier, default '(copy)')">⧉ Duplicate</button>
+                <button class="aim-mb-tbtn" data-rc-duplicate title="Duplicate this mission on this site (create-only — copy named with your saved qualifier, default 'copy')">⧉ Duplicate</button>
             </div>
         `;
         document.body.appendChild(pop);
@@ -11374,7 +11435,7 @@
                 <input class="aim-mb-search" type="text" placeholder="Search by name…" value="${escapeHtml(panelState.search)}" />
                 <button class="aim-mb-tbtn" data-cols>Columns ▾</button>
                 <button class="aim-mb-tbtn" data-bulk-rename title="Find & replace text across the SELECTED missions' names (e.g. N - → NNE - )">✎ Rename ▾</button>
-                <button class="aim-mb-tbtn" data-bulk-duplicate title="Duplicate the SELECTED missions on this site — create-only, with an editable name qualifier ('(copy)' or whatever you set). For other sites use 📥 Copy from the target site.">⧉ Duplicate</button>
+                <button class="aim-mb-tbtn" data-bulk-duplicate title="Duplicate the SELECTED missions on this site — create-only, with an editable name qualifier ('copy' or whatever you set). For other sites use 📥 Copy from the target site.">⧉ Duplicate</button>
                 <button class="aim-mb-tbtn" data-bulk-delete title="Permanently delete the SELECTED missions from the server" style="color:#ff8a8a;">🗑 Delete</button>
                 <button class="aim-mb-tbtn" data-copy-missions title="Copy missions from another site into this one (create-only, dup names skipped)">📥 Copy</button>
                 <button class="aim-mb-tbtn ${pcm.on ? 'active' : ''}" data-pcm-toggle title="Merge missions by right-clicking pads on the map in order (pad name = mission name)">🔗 Merge</button>
@@ -11461,6 +11522,8 @@
         if (!m) return;
         const ctx = findMissionAppCtx();
         if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Rename: mission context not found — be on the Mission Bank page.', '#ff5252', 4000); m.name = oldName; return; }
+        const nameBad = missionNameIssue(newName);
+        if (nameBad) { showToast(`Rename refused — ${nameBad}`, '#ff5252', 7000); console.warn(`${TAG} [rename] refused "${newName}" — ${nameBad}`); m.name = oldName; try { renderTableView(); } catch (e) {} return; }
         renameSuppressAutoAgl++;
         try {
             await ctx.saveApp(m, newName);
@@ -11842,13 +11905,13 @@
     // Same-site duplicate via the proven create path (ctx.saveApp({id:null}) —
     // identical to 📥 cross-site copy / 🔗 merge). Copies are create-only;
     // originals untouched. The name qualifier appended to each copy is
-    // user-editable in the popover (default '(copy)', persisted) — a ' 2'/' 3'
+    // user-editable in the popover (default 'copy', persisted) — a ' 2'/' 3'
     // counter is added only when needed so the create never collides with an
     // existing mission name.
     const CACHE_KEY_DUP_SUFFIX = 'aim-mb-dup-suffix';
     function getDupSuffix() {
-        const s = String(gmGet(CACHE_KEY_DUP_SUFFIX, '(copy)') || '').trim();
-        return s || '(copy)';
+        const s = String(gmGet(CACHE_KEY_DUP_SUFFIX, 'copy') || '').trim();
+        return s || 'copy';
     }
     // suffix MAY be empty (e.g. find/replace alone already makes the name
     // unique) — the counter loop still guarantees no collision either way.
@@ -11874,10 +11937,12 @@
             for (let i = 0; i < pairs.length; i++) {
                 const { m, newName } = pairs[i];
                 if (statusFn) statusFn(`Duplicating ${i + 1}/${pairs.length} — ${newName}…`);
+                const nameBad = missionNameIssue(newName);
+                if (nameBad) { fail++; console.warn(`${TAG} [dup] refused "${newName}" — ${nameBad}`); showToast(`⧉ Duplicate refused "${newName}" — ${nameBad}`, '#ff5252', 7000); continue; }
                 try {
                     await ctx.saveApp({ id: null, type: 1, instructions: (m.instructions || []), data_report_object_arr: [] }, newName);
                     ok++;
-                } catch (e) { fail++; console.warn(`${TAG} [dup] failed "${m.name}"`, e); }
+                } catch (e) { fail++; console.warn(`${TAG} [dup] failed "${m.name}" — ${saveErrText(e)}`, e); }
             }
         } finally { renameSuppressAutoAgl--; }
         try { refreshMissionList(); } catch (e) {}
@@ -11911,7 +11976,7 @@
                 return { m, newName: uniqueCopyName(base, taken, suffix) };
             });
         };
-        let pairs = buildPairs(String(gmGet(CACHE_KEY_DUP_SUFFIX, '(copy)') || ''), '', '');
+        let pairs = buildPairs(String(gmGet(CACHE_KEY_DUP_SUFFIX, 'copy') || ''), '', '');
         const menu = document.createElement('div');
         menu.className = 'aim-mb-bulk-dup-pop';
         menu.style.cssText = 'position:fixed;z-index:2147483647;width:400px;min-width:320px;min-height:220px;max-height:72vh;display:flex;flex-direction:column;background:#101a1c;border:1px solid #14d2dc;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
@@ -11923,7 +11988,7 @@
             <div style="padding:8px 12px;font-size:11px;color:#9ad;border-bottom:1px solid #1e2f33;">Create-only — originals untouched. Rename copies inline afterward (click the Name cell).</div>
             <div style="padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid #1e2f33;">
                 <label style="font-size:11px;color:#7adfe6;font-weight:700;white-space:nowrap;">Name qualifier</label>
-                <input data-dup-suffix type="text" value="${escapeHtml(String(gmGet(CACHE_KEY_DUP_SUFFIX, '(copy)') || ''))}" placeholder="none — blank OK with Replace" style="flex:1;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:4px;padding:3px 6px;font-size:12px;" />
+                <input data-dup-suffix type="text" value="${escapeHtml(String(gmGet(CACHE_KEY_DUP_SUFFIX, 'copy') || ''))}" placeholder="none — blank OK with Replace" style="flex:1;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:4px;padding:3px 6px;font-size:12px;" />
             </div>
             <div style="padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid #1e2f33;">
                 <label style="font-size:11px;color:#7adfe6;font-weight:700;white-space:nowrap;">Replace</label>
@@ -14535,7 +14600,17 @@ ${snapPlacemarks}
                     // v2.13: observe the save RESPONSE (status only, body
                     // untouched) — a successful save refreshes the mission-
                     // preview overlay so its dots/badges track the edit.
-                    if (isSave) { try { p.then(r => { if (r && r.ok) mpvOnMissionSaved(); }, () => {}); } catch (e) {} }
+                    if (isSave) {
+                        try {
+                            p.then(r => {
+                                if (!r) return;
+                                if (r.ok) { mpvOnMissionSaved(); return; }
+                                // v2.95: bank the rejection reason (clone — the page still reads its own copy).
+                                try { r.clone().text().then(t => noteSaveError(r.status, t), () => noteSaveError(r.status, '')); }
+                                catch (e2) { noteSaveError(r.status, ''); }
+                            }, () => {});
+                        } catch (e) {}
+                    }
                     return p;
                 };
             }
@@ -14550,7 +14625,10 @@ ${snapPlacemarks}
                         // v2.13: successful save → refresh the preview overlay.
                         try {
                             this.addEventListener('load', function() {
-                                try { if (this.status >= 200 && this.status < 300) mpvOnMissionSaved(); } catch (e) {}
+                                try {
+                                    if (this.status >= 200 && this.status < 300) mpvOnMissionSaved();
+                                    else if (this.status >= 400) noteSaveError(this.status, this.responseText); // v2.95
+                                } catch (e) {}
                             });
                         } catch (e) {}
                         if (typeof b === 'string') {

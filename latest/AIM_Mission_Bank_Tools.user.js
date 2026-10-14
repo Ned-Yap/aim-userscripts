@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.07
+// @version      3.08
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.07';
+    const SCRIPT_VERSION = '3.08';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -143,6 +143,17 @@
         const le = lastSaveError;
         if (le && (Date.now() - le.at) < 15000 && le.text) return `${base} — server says: ${le.text}`;
         return base;
+    }
+
+    // v3.08: Percepto rejects (HTTP 400) a mission name holding anything but
+    // letters, digits, space, '-' and '_' — live-caught 2026-10-02 when the
+    // merge panel's default "A + B" name 400'd every pad-click merge of two
+    // by-name picks. Every name WE build or send is checked first; the rail
+    // names the offending characters instead of a bare HTTP 400.
+    const MISSION_NAME_BAD_RE = /[^A-Za-z0-9 _-]/g;
+    function missionNameIssue(name) {
+        const bad = Array.from(new Set(String(name || '').match(MISSION_NAME_BAD_RE) || []));
+        return bad.length ? `name has character${bad.length === 1 ? '' : 's'} Percepto rejects: ${bad.map(c => `"${c}"`).join(' ')} (allowed: letters, digits, space, - and _)` : null;
     }
 
     // Server model (v2.05): prod and QA are separate databases — the same
@@ -9347,7 +9358,7 @@
     function pcmRenderPanel() {
         if (pcm.panelEl) { try { pcm.panelEl.remove(); } catch (e) {} pcm.panelEl = null; }
         const total = pcm.picks.reduce((s, pk) => s + pcmStepCount(pk.mission), 0);
-        const defName = pcm.picks.length ? ('Merged - ' + pcm.picks.map(pk => pk.asset.name).join(' + ')) : '';
+        const defName = pcm.picks.length ? ('Merged - ' + pcm.picks.map(pk => pk.asset.name).join(' AND ')) : '';
         const nameVal = pcm.customName != null ? pcm.customName : defName;
         // v2.30: rows are draggable — grab anywhere on a row (the ⠿ handle
         // telegraphs it) and drop onto another row to insert BEFORE it.
@@ -9549,6 +9560,8 @@
         const nameEl = pcm.panelEl && pcm.panelEl.querySelector('[data-pcm-name]');
         const name = ((nameEl && nameEl.value) || '').trim();
         if (!name) { showToast('Give the merged mission a name.', '#ff9800', 3000); return; }
+        const nameBad = missionNameIssue(name);
+        if (nameBad) { showToast(`🔗 Merge: ${nameBad}`, '#ff5252', 7000); console.warn(`${TAG} [pcm] refused — ${nameBad}: "${name}"`); return; }
         const exact = (pcm.missions || []).find(m => String((m && m.name) || '').trim().toLowerCase() === name.toLowerCase());
         const editing = pcm.editingName
             ? (pcm.missions || []).find(m => String((m && m.name) || '').trim().toLowerCase() === pcm.editingName.trim().toLowerCase())
@@ -11063,7 +11076,7 @@
             <div class="aim-mb-rc-body">${bodyHtml}</div>
             <div class="aim-mb-rc-footer">
                 <button class="aim-mb-tbtn" data-rc-open-sum>Open in SUM →</button>
-                <button class="aim-mb-tbtn" data-rc-duplicate title="Duplicate this mission on this site (create-only — copy named with your saved qualifier, default '(copy)')">⧉ Duplicate</button>
+                <button class="aim-mb-tbtn" data-rc-duplicate title="Duplicate this mission on this site (create-only — copy named with your saved qualifier, default 'copy')">⧉ Duplicate</button>
             </div>
         `;
         document.body.appendChild(pop);
@@ -11857,7 +11870,7 @@
                 <input class="aim-mb-search" type="text" placeholder="Search by name…" value="${escapeHtml(panelState.search)}" />
                 <button class="aim-mb-tbtn" data-cols>Columns ▾</button>
                 <button class="aim-mb-tbtn" data-bulk-rename title="Find & replace text across the SELECTED missions' names (e.g. N - → NNE - )">✎ Rename ▾</button>
-                <button class="aim-mb-tbtn" data-bulk-duplicate title="Duplicate the SELECTED missions on this site — create-only, with an editable name qualifier ('(copy)' or whatever you set). For other sites use 📥 Copy from the target site.">⧉ Duplicate</button>
+                <button class="aim-mb-tbtn" data-bulk-duplicate title="Duplicate the SELECTED missions on this site — create-only, with an editable name qualifier ('copy' or whatever you set). For other sites use 📥 Copy from the target site.">⧉ Duplicate</button>
                 <button class="aim-mb-tbtn" data-bulk-delete title="Permanently delete the SELECTED missions from the server" style="color:#ff8a8a;">🗑 Delete</button>
                 <button class="aim-mb-tbtn" data-copy-missions title="Copy missions from another site into this one (create-only, dup names skipped)">📥 Copy</button>
                 <button class="aim-mb-tbtn ${pcm.on ? 'active' : ''}" data-pcm-toggle title="Merge missions by right-clicking pads on the map in order (pad name = mission name)">🔗 Merge</button>
@@ -11945,6 +11958,8 @@
         if (!m) return;
         const ctx = findMissionAppCtx();
         if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Rename: mission context not found — be on the Mission Bank page.', '#ff5252', 4000); m.name = oldName; return; }
+        const nameBad = missionNameIssue(newName);
+        if (nameBad) { showToast(`Rename refused — ${nameBad}`, '#ff5252', 7000); console.warn(`${TAG} [rename] refused "${newName}" — ${nameBad}`); m.name = oldName; try { renderTableView(); } catch (e) {} return; }
         renameSuppressAutoAgl++;
         try {
             await ctx.saveApp(m, newName);
@@ -12326,13 +12341,13 @@
     // Same-site duplicate via the proven create path (ctx.saveApp({id:null}) —
     // identical to 📥 cross-site copy / 🔗 merge). Copies are create-only;
     // originals untouched. The name qualifier appended to each copy is
-    // user-editable in the popover (default '(copy)', persisted) — a ' 2'/' 3'
+    // user-editable in the popover (default 'copy', persisted) — a ' 2'/' 3'
     // counter is added only when needed so the create never collides with an
     // existing mission name.
     const CACHE_KEY_DUP_SUFFIX = 'aim-mb-dup-suffix';
     function getDupSuffix() {
-        const s = String(gmGet(CACHE_KEY_DUP_SUFFIX, '(copy)') || '').trim();
-        return s || '(copy)';
+        const s = String(gmGet(CACHE_KEY_DUP_SUFFIX, 'copy') || '').trim();
+        return s || 'copy';
     }
     // suffix MAY be empty (e.g. find/replace alone already makes the name
     // unique) — the counter loop still guarantees no collision either way.
@@ -12358,10 +12373,12 @@
             for (let i = 0; i < pairs.length; i++) {
                 const { m, newName } = pairs[i];
                 if (statusFn) statusFn(`Duplicating ${i + 1}/${pairs.length} — ${newName}…`);
+                const nameBad = missionNameIssue(newName);
+                if (nameBad) { fail++; console.warn(`${TAG} [dup] refused "${newName}" — ${nameBad}`); showToast(`⧉ Duplicate refused "${newName}" — ${nameBad}`, '#ff5252', 7000); continue; }
                 try {
                     await ctx.saveApp({ id: null, type: 1, instructions: (m.instructions || []), data_report_object_arr: [] }, newName);
                     ok++;
-                } catch (e) { fail++; console.warn(`${TAG} [dup] failed "${m.name}"`, e); }
+                } catch (e) { fail++; console.warn(`${TAG} [dup] failed "${m.name}" — ${saveErrText(e)}`, e); }
             }
         } finally { renameSuppressAutoAgl--; }
         try { refreshMissionList(); } catch (e) {}
@@ -12395,7 +12412,7 @@
                 return { m, newName: uniqueCopyName(base, taken, suffix) };
             });
         };
-        let pairs = buildPairs(String(gmGet(CACHE_KEY_DUP_SUFFIX, '(copy)') || ''), '', '');
+        let pairs = buildPairs(String(gmGet(CACHE_KEY_DUP_SUFFIX, 'copy') || ''), '', '');
         const menu = document.createElement('div');
         menu.className = 'aim-mb-bulk-dup-pop';
         menu.style.cssText = 'position:fixed;z-index:2147483647;width:400px;min-width:320px;min-height:220px;max-height:72vh;display:flex;flex-direction:column;background:#101a1c;border:1px solid #14d2dc;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
@@ -12407,7 +12424,7 @@
             <div style="padding:8px 12px;font-size:11px;color:#9ad;border-bottom:1px solid #1e2f33;">Create-only — originals untouched. Rename copies inline afterward (click the Name cell).</div>
             <div style="padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid #1e2f33;">
                 <label style="font-size:11px;color:#7adfe6;font-weight:700;white-space:nowrap;">Name qualifier</label>
-                <input data-dup-suffix type="text" value="${escapeHtml(String(gmGet(CACHE_KEY_DUP_SUFFIX, '(copy)') || ''))}" placeholder="none — blank OK with Replace" style="flex:1;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:4px;padding:3px 6px;font-size:12px;" />
+                <input data-dup-suffix type="text" value="${escapeHtml(String(gmGet(CACHE_KEY_DUP_SUFFIX, 'copy') || ''))}" placeholder="none — blank OK with Replace" style="flex:1;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:4px;padding:3px 6px;font-size:12px;" />
             </div>
             <div style="padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid #1e2f33;">
                 <label style="font-size:11px;color:#7adfe6;font-weight:700;white-space:nowrap;">Replace</label>
