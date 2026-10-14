@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.339
+// @version      4.340
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.339';
+    const SCRIPT_VERSION = '4.340';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -21779,6 +21779,12 @@
         return { d: Math.sqrt(cx * cx + cy * cy), lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t, t };
     }
     function elvLiveEntities(sid) { return (((mapObjectsBySite[sid] || {}).entities) || []); }
+    // HARD RAIL (2026-10-13): this tool rewrites FLIGHT PATHS only. A pad FFZ was altered during the
+    // one day it also wrote FFZs; that code is gone and this check makes sure it stays gone.
+    async function elvPostFp(body, csrf) {
+        if (!body || body.type !== 15) throw new Error(`refusing to POST a type-${body && body.type} entity — Elevators only writes flight paths`);
+        return sciPostMapObject(body, csrf);
+    }
     function elvLiveFp(sid, fpId) { return elvLiveEntities(sid).find(e => e && e.id === fpId && e.type === 15) || null; }
     function elvFfzInfo(sid) {
         return elvLiveEntities(sid).filter(e => e && e.type === 16 && entityCoords(e) && entityCoords(e).length >= 3)
@@ -22369,7 +22375,7 @@
         if (!csrf) { elvLog('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
         if (!elv.siteCfg) { try { elv.siteCfg = await fetchSiteConfig(sid, true); } catch (e) { elvLog('Site config fetch failed — refusing to write (mountain_terrain flag unknown)', '#ff6060'); return; } }
         if (!confirm(`Rewrite ${todo.length} flight path(s) with elevator arcs and create ${gmN} GM(s) on site ${sid}?\n\nEach path is backed up (JSON download + Delete Guard ring) before it is written. No FFZ is touched.`)) return;
-        const rec = { at: new Date().toISOString(), sid, origin: location.origin, fps: todo.map(w => JSON.parse(JSON.stringify(w.fp))), gms: [], ffz: [], ffzCreated: [] };
+        const rec = { at: new Date().toISOString(), sid, origin: location.origin, fps: todo.map(w => JSON.parse(JSON.stringify(w.fp))), gms: [] };
         try { localStorage.setItem(ELV_LAST_KEY(sid), JSON.stringify(rec)); } catch (e) { console.warn(`${TAG} 🛗 last-run stash failed:`, e); }
         if (!downloadJSONFile(`elevators-backup-${sid}-${Date.now()}.json`, JSON.stringify({ site: sid, at: rec.at, flightPaths: rec.fps }, null, 1))) { elvLog('Backup download failed — refusing to write', '#ff6060'); return; }
         elv.running = true; elvRenderList();
@@ -22391,7 +22397,7 @@
                     });
                     const pts = []; body.arcs.forEach(a => [a.point_a, a.point_b].forEach(p => { if (!pts.some(q => elvSame(q, p))) pts.push({ lat: p.lat, lng: p.lng }); }));
                     body.points = pts;
-                    const saved = await sciPostMapObject(body, csrf);
+                    const saved = await elvPostFp(body, csrf);
                     try { await fetchMapObjects(sid, true); } catch (e) {}
                     const live = elvLiveFp(sid, w.fp.id);
                     if (!live || !Array.isArray(live.arcs)) throw new Error('flight path missing after save');
@@ -22437,11 +22443,10 @@
         if (!rec || !Array.isArray(rec.fps) || !rec.fps.length) { elvLog('Nothing to undo on this site (only the most recent Elevators commit is kept)', '#ffb347'); return; }
         const csrf = getCsrfToken();
         if (!csrf) { elvLog('No CSRF token', '#ff6060'); return; }
-        const ffzList = Array.isArray(rec.ffz) ? rec.ffz : [], created = Array.isArray(rec.ffzCreated) ? rec.ffzCreated : [];
-        if (!confirm(`Restore ${rec.fps.length} flight path(s) to how they were before the Elevators commit of ${rec.at}, delete ${rec.gms.length} GM(s)${created.length ? `, delete ${created.length} split-off FFZ(s)` : ''}${ffzList.length ? ` and restore ${ffzList.length} pad FFZ(s)` : ''}? (Delete Guard banks each change)`)) return;
+        if (!confirm(`Restore ${rec.fps.length} flight path(s) to how they were before the Elevators commit of ${rec.at} and delete ${rec.gms.length} GM(s)? (Delete Guard banks each change; no FFZ is touched)`)) return;
         if (!elv.siteCfg) { try { elv.siteCfg = await fetchSiteConfig(sid, true); } catch (e) { elvLog('Site config fetch failed — refusing to write', '#ff6060'); return; } }
         elv.running = true;
-        let fpOk = 0, fpFail = 0, gmOk = 0, gmFail = 0, ffzOk = 0, ffzFail = 0;
+        let fpOk = 0, fpFail = 0, gmOk = 0, gmFail = 0;
         try {
             for (const gm of rec.gms) {
                 if (await gmtDeletePlaced({ id: gm.id, name: gm.name, siteID: sid }, csrf)) gmOk++; else gmFail++;
@@ -22456,7 +22461,7 @@
                     body.arcs = (orig.arcs || []).filter(a => a && a.point_a && a.point_b).map(a => { const o = Object.assign({}, a); o.points = [{ lat: o.point_a.lat, lng: o.point_a.lng }, { lat: o.point_b.lat, lng: o.point_b.lng }]; o.min_alt = fpArcAltMeters(o.min_alt); o.max_alt = fpArcAltMeters(o.max_alt); return o; });
                     const pts = []; body.arcs.forEach(a => [a.point_a, a.point_b].forEach(p => { if (!pts.some(q => elvSame(q, p))) pts.push({ lat: p.lat, lng: p.lng }); }));
                     body.points = pts;
-                    await sciPostMapObject(body, csrf);
+                    await elvPostFp(body, csrf);
                     try { await fetchMapObjects(sid, true); } catch (e) {}
                     const live = elvLiveFp(sid, orig.id);
                     const have = live ? live.arcs.filter(a => a && a.point_a && a.point_b).length : -1;
@@ -22465,33 +22470,11 @@
                 } catch (e) { fpFail++; console.warn(`${TAG} 🛗 undo ${label.replace(/<[^>]*>/g, '')}:`, e.message); elvLog(`${label} restore FAILED: ${elvEsc(e.message)} — stopped`, '#ff6060'); break; }
                 await new Promise(r => setTimeout(r, ELV_GAP_MS));
             }
-            // split-off FFZ pieces go, then the pads return to their pre-commit shape + band
-            if (!fpFail) {
-                for (const c of created) {
-                    if (await gmtDeletePlaced({ id: c.id, name: c.name, siteID: sid }, csrf)) ffzOk++; else ffzFail++;
-                    await new Promise(r => setTimeout(r, ELV_GAP_MS));
-                }
-                for (const orig of ffzList) {
-                    const label = `FFZ "${elvEsc(orig.name)}" (#${orig.id})`;
-                    try {
-                        const cur = elvLiveEntities(sid).find(e => e && e.id === orig.id);
-                        if (cur) sciBankToGuard(cur, sid);
-                        const body = buildWriteBody(orig, elv.siteCfg); body.arcs = [];
-                        await sciPostMapObject(body, csrf);
-                        try { await fetchMapObjects(sid, true); } catch (e) {}
-                        const after = elvLiveEntities(sid).find(e => e && e.id === orig.id);
-                        const want = (entityCoords(orig) || []).length, have = after ? (entityCoords(after) || []).length : -1;
-                        if (have !== want) throw new Error(`${have} vertices ≠ expected ${want} after restore`);
-                        ffzOk++; elvLog(`${label} restored`);
-                    } catch (e) { ffzFail++; console.warn(`${TAG} 🛗 undo ${label.replace(/<[^>]*>/g, '')}:`, e.message); elvLog(`${label} restore FAILED: ${elvEsc(e.message)}`, '#ff6060'); }
-                    await new Promise(r => setTimeout(r, ELV_GAP_MS));
-                }
-            }
         } finally { elv.running = false; }
-        if (!fpFail && !ffzFail) { try { localStorage.removeItem(ELV_LAST_KEY(sid)); } catch (e) {} }
+        if (!fpFail) { try { localStorage.removeItem(ELV_LAST_KEY(sid)); } catch (e) {} }
         elv.items.forEach(it => { if (it.status === 'done') it.status = 'stage'; });
-        elvLog(`Undo: ${fpOk} flight path(s) restored${fpFail ? `, <b style="color:#ff6060">1 FAILED</b> (backup JSON still has the originals)` : ''} · ${gmOk} GM(s) deleted${gmFail ? `, ${gmFail} failed` : ''}${created.length || ffzList.length ? ` · ${ffzOk} FFZ change(s) reverted${ffzFail ? `, <b style="color:#ff6060">${ffzFail} FAILED</b> (backup JSON still has the originals)` : ''}` : ''} · ↻ Re-stage to rebuild`, fpFail || gmFail || ffzFail ? '#ffb347' : '#5fff5f');
-        showToast(fpFail || ffzFail ? 'Elevators undo stopped on a failure' : `↩ ${fpOk} flight path(s) restored`, fpFail || ffzFail ? 'rgba(255,96,96,0.55)' : undefined);
+        elvLog(`Undo: ${fpOk} flight path(s) restored${fpFail ? `, <b style="color:#ff6060">1 FAILED</b> (backup JSON still has the originals)` : ''} · ${gmOk} GM(s) deleted${gmFail ? `, ${gmFail} failed` : ''} · ↻ Re-stage to rebuild`, fpFail || gmFail ? '#ffb347' : '#5fff5f');
+        showToast(fpFail ? 'Elevators undo stopped on a failure' : `↩ ${fpOk} flight path(s) restored`, fpFail ? 'rgba(255,96,96,0.55)' : undefined);
     }
 
     // ============================================================
