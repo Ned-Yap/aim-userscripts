@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.344
+// @version      4.345
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.344';
+    const SCRIPT_VERSION = '4.345';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22639,9 +22639,89 @@
             lat: find(['latitude', 'lat', 'y'], /lat/),
             lng: find(['longitude', 'lon', 'lng', 'long', 'x'], /lon|lng/),
             name: find(['name', 'pad_name', 'well name', 'asset name', 'asset', 'title', 'label'], /name/),
-            type: find(['type', 'pad_type', 'category', 'profiletype', 'v or h', 'designation', 'subtype', 'class'], /type/),
-            notes: find(['notes', 'note', 'description', 'comment', 'comments', 'remarks'], /note|desc|comment|remark/),   // v4.330 → asset notes
+            type: find(['type', 'pad_type', 'asset_type', 'asset type', 'well_type', 'well type', 'production_method_name', 'production method', 'production_method', 'method', 'category', 'profiletype', 'v or h', 'designation', 'subtype', 'class', 'equipment', 'kind'], /type|method|categ|class|equip/),
+            notes: find(['notes', 'note', 'description', 'comment', 'comments', 'remarks'], /note|desc|comment|remark/),   // v4.330 → asset notes (v4.345: seeds the Notes checklist)
         };
+    }
+    // v4.345: Notes = any number of extra columns, each with a cleaned label, in
+    // the user's order. Composed at commit as "Label\nvalue" blocks separated
+    // by a blank line: first block = the client's ORIGINAL name verbatim, last
+    // = who / when / which file. Column choice + labels remembered per header
+    // signature with the rest of the mapping.
+    const IMP_AUTHOR_KEY = 'aim_imp_author';
+    function impAuthor() { try { return String(GM_getValue(IMP_AUTHOR_KEY, '') || '').trim(); } catch (e) { return ''; } }
+    function impSetAuthor() {
+        const cur = impAuthor();
+        const v = prompt('Your name for the "Imported by" line in every asset\'s notes:', cur || '');
+        if (v === null) return;
+        try { GM_setValue(IMP_AUTHOR_KEY, String(v).trim()); } catch (e) {}
+        impRenderMappingUi();
+    }
+    function impCleanLabel(col) {
+        let t = String(col || '').replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_\.\-]+/g, ' ').replace(/\s+/g, ' ').trim();
+        return t.split(' ').map(w => w.length ? w[0].toUpperCase() + w.slice(1).toLowerCase() : w).join(' ');
+    }
+    function impNotesCols() {
+        const m = imp.mapping; if (!m) return [];
+        if (!Array.isArray(m.notesCols)) m.notesCols = m.notes ? [{ col: m.notes, label: impCleanLabel(m.notes) }] : [];
+        m.notesCols = m.notesCols.filter(c => c && imp.headers.includes(c.col));
+        return m.notesCols;
+    }
+    function impComposeNotes(p, when) {
+        const r = imp.rows[p.i] || {};
+        const parts = [`Original name\n${p.rawName || p.name}`];
+        impNotesCols().forEach(c => { const v = String(r[c.col] == null ? '' : r[c.col]).trim(); if (v) parts.push(`${c.label || impCleanLabel(c.col)}\n${v}`); });
+        parts.push(`Imported by ${impAuthor() || 'AIM user'} on ${when} from ${imp.fileName || 'file'}`);
+        return parts.join('\n\n').slice(0, 2000);
+    }
+    function impNowStamp() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; }
+    function impRenderNotesCols(host) {
+        const el = host.querySelector('#aim-imp-notescols'); if (!el) return;
+        const m = imp.mapping || {};
+        const cols = impNotesCols();
+        const fixed = new Set([m.name, m.lat, m.lng].filter(Boolean));
+        const checked = cols.map(c => c.col);
+        const rest = imp.headers.filter(h => !fixed.has(h) && !checked.includes(h));
+        const sample = imp.rows[0] || {};
+        const inCss = 'background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:1px 4px;border-radius:3px;font:inherit;font-size:10px';
+        const row = (h, on, idx) => `<div data-impnrow="${impEsc(h)}" style="display:flex;gap:6px;align-items:center;padding:1px 0;font-size:11px;color:${on ? '#cfd6dc' : '#8a949e'}">
+            <input type="checkbox" data-impncol="${impEsc(h)}" ${on ? 'checked' : ''} style="accent-color:#7adfe6">
+            <span style="min-width:150px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${impEsc(h)}">${impEsc(h)}</span>
+            ${on ? `<span style="color:#888">as</span><input type="text" data-impnlabel="${impEsc(h)}" value="${impEsc((cols[idx] && cols[idx].label) || impCleanLabel(h))}" style="${inCss};width:140px" title="Label written above the value in the notes">
+            <button data-impnup="${impEsc(h)}" title="move up" style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:0 4px;cursor:pointer;font:inherit;font-size:10px">▲</button><button data-impndn="${impEsc(h)}" title="move down" style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:0 4px;cursor:pointer;font:inherit;font-size:10px">▼</button>` : ''}
+            <span style="color:#666;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0" title="sample value">${impEsc(String(sample[h] == null ? '' : sample[h]).slice(0, 40))}</span>
+        </div>`;
+        const first = imp.points.find(p => !p.done);
+        const preview = first ? impComposeNotes(first, impNowStamp()) : '';
+        el.innerHTML = `<div style="margin-top:8px;padding:6px 8px;background:rgba(122,223,230,0.04);border:1px dashed rgba(122,223,230,0.3);border-radius:3px">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px;font-size:11px">
+                <b style="color:#7adfe6">Notes</b><span style="color:#888;font-size:10px">tick every column that should go into each asset's notes · label above, value below, blank line between · the client's original name is always first</span>
+                <span style="flex:1"></span>
+                <button data-impnall="1" style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:1px 6px;cursor:pointer;font:inherit;font-size:10px">all</button>
+                <button data-impnnone="1" style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:1px 6px;cursor:pointer;font:inherit;font-size:10px">none</button>
+            </div>
+            ${checked.map((h, i) => row(h, true, i)).join('')}${rest.map(h => row(h, false)).join('')}
+            <div style="margin-top:6px;font-size:10px;color:#888">Stamp: <b style="color:#cfd6dc">Imported by ${impEsc(impAuthor() || 'AIM user')}</b> on &lt;date time&gt; from ${impEsc(imp.fileName || 'file')} <a href="#" data-impnauthor="1" style="color:#7adfe6;margin-left:4px">${impAuthor() ? 'change name' : 'set your name'}</a></div>
+            ${preview ? `<details style="margin-top:4px"><summary style="cursor:pointer;color:#9ad;font-size:10px">preview — first point (${preview.length} / 2000 chars)</summary><pre style="margin:4px 0 0;padding:6px 8px;background:#1a1d23;border-radius:3px;font:inherit;font-size:10px;color:#cfd6dc;white-space:pre-wrap;max-height:220px;overflow:auto">${impEsc(preview)}</pre></details>` : ''}
+        </div>`;
+        const save = () => { impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type, notesCols: impNotesCols() }); impRenderNotesCols(host); };
+        el.querySelectorAll('input[data-impncol]').forEach(cb => cb.onchange = () => {
+            const h = cb.getAttribute('data-impncol'); const cur = impNotesCols();
+            if (cb.checked) { if (!cur.some(c => c.col === h)) cur.push({ col: h, label: impCleanLabel(h) }); }
+            else m.notesCols = cur.filter(c => c.col !== h);
+            save();
+        });
+        el.querySelectorAll('input[data-impnlabel]').forEach(inp => inp.onchange = () => {
+            const h = inp.getAttribute('data-impnlabel'); const c = impNotesCols().find(x => x.col === h);
+            if (c) c.label = inp.value.trim() || impCleanLabel(h);
+            save();
+        });
+        const move = (h, d) => { const cur = impNotesCols(); const i = cur.findIndex(c => c.col === h); const j = i + d; if (i < 0 || j < 0 || j >= cur.length) return; const t = cur[i]; cur[i] = cur[j]; cur[j] = t; save(); };
+        el.querySelectorAll('button[data-impnup]').forEach(b => b.onclick = () => move(b.getAttribute('data-impnup'), -1));
+        el.querySelectorAll('button[data-impndn]').forEach(b => b.onclick = () => move(b.getAttribute('data-impndn'), 1));
+        const all = el.querySelector('button[data-impnall]'); if (all) all.onclick = () => { m.notesCols = imp.headers.filter(h => !fixed.has(h)).map(h => (impNotesCols().find(c => c.col === h)) || { col: h, label: impCleanLabel(h) }); save(); };
+        const none = el.querySelector('button[data-impnnone]'); if (none) none.onclick = () => { m.notesCols = []; save(); };
+        const au = el.querySelector('a[data-impnauthor]'); if (au) au.onclick = (ev) => { ev.preventDefault(); impSetAuthor(); };
     }
     function impStoredMapping(headers) {
         try {
@@ -22677,11 +22757,11 @@
                 imp.headers = parsed.headers;
                 imp.rows = parsed.rows;
                 imp.siteID = genState.siteID;
-                imp.points = []; imp.shapes = []; imp.assetSel.clear(); imp.invalid = 0;
+                imp.points = []; imp.assetSel.clear(); imp.invalid = 0;   // v4.345: boundaries (imp.shapes) survive a data load — fence first, then load
                 imp.mapping = impStoredMapping(parsed.headers) || (isKml
                     ? { name: 'name', lat: 'lat', lng: 'lng', type: impGuessMapping(parsed.headers).type }
                     : impGuessMapping(parsed.headers));
-                impClearLayers(); impClearShapeLayers(); impClearAssetLayers();
+                impClearLayers(); impClearAssetLayers();
                 // v4.331: coordinates resolved → stage straight away (mapping row collapses to one line, "edit" reopens it)
                 const auto = !!(imp.mapping && imp.mapping.lat && imp.mapping.lng);
                 imp.mapOpen = !auto;
@@ -22712,16 +22792,15 @@
             const lat = parseFloat(r[m.lat]), lng = parseFloat(r[m.lng]);
             if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) { imp.invalid++; return; }
             const name = m.name ? (r[m.name] || '').trim() : '';
-            const notes = m.notes ? String(r[m.notes] || '').trim() : '';
-            imp.points.push({ i, name: name || `Import ${i + 1}`, lat, lng, typeRaw: m.type ? (r[m.type] || '').trim() : '', notes, sel: false, dup: false, dupWhy: '', child: null, near: null, done: false });
+            imp.points.push({ i, name: name || `Import ${i + 1}`, rawName: name, lat, lng, typeRaw: m.type ? (r[m.type] || '').trim() : '', notes: '', sel: false, dup: false, dupWhy: '', child: null, near: null, done: false });
         });
-        impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type, notes: m.notes || null });
+        impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type, notesCols: impNotesCols() });
         imp.mapOpen = false;
         impRenderMappingUi();
         impBuildAssetIndex();
         impComputeDups();
         impRecomputeSel();          // shapes placed before the data still apply
-        impRenderStaged();
+        impRenderStaged(); impRenderShapes();
         impRenderTypeMapUi();
         const dupN = imp.points.filter(p => p.dup).length, childN = imp.points.filter(p => p.child).length, nearN = imp.points.filter(p => p.near).length;
         impStatus(`Staged <b>${imp.points.length}</b> point(s), all selected`
@@ -23149,7 +23228,18 @@
         impUnwire();
         imp._container = map.getContainer();
         imp._onDown = (ev) => {
-            if (!imp.mode || ev.button !== 0 || !ev.altKey) return;      // plain click stays free (pan / native edit)
+            if (!imp.mode || ev.button !== 0) return;
+            if (imp.mode === 'move') {                                   // v4.345: ↔ works WITHOUT Alt — a click on a dot picks it, a click away drops it, a click on nothing (nothing held) still pans
+                let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+                if (imp.moveHeld) { ev.preventDefault(); ev.stopPropagation(); impMovePointTo(imp.moveHeld, ll); impFinishMove(imp.moveHeld); return; }
+                const p = impNearestStaged(map, ll, IMP_PICK_PX * 1.5);
+                if (!p) { if (ev.altKey) { ev.preventDefault(); ev.stopPropagation(); impStatus('↔ no staged point there — click closer to a dot', '#ffb347'); } return; }
+                ev.preventDefault(); ev.stopPropagation();
+                imp.moveHeld = p; imp.moveDrag = false; imp.moveDownPt = { x: ev.clientX, y: ev.clientY };
+                impRenderStaged(); impSyncUi();
+                return;
+            }
+            if (!ev.altKey) return;                                      // every other tool: plain click stays free (pan / native edit)
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
             ev.preventDefault(); ev.stopPropagation();
             if (imp.mode === 'edit') {                                   // ✎ vertex / midpoint / circle-edge grab
@@ -23166,14 +23256,6 @@
                 const eh = impShapeHandleAt(map, ll);                    // whole-shape move still works in ✎
                 if (eh) { imp.dragShape = eh; imp.dragLast = ll; }
                 return;                                                  // ✎ never creates new shapes
-            }
-            if (imp.mode === 'move') {                                   // ↔ pick up / drop a staged point
-                if (imp.moveHeld) { impMovePointTo(imp.moveHeld, ll); impFinishMove(imp.moveHeld); return; }
-                const p = impNearestStaged(map, ll, IMP_PICK_PX * 1.5);
-                if (!p) { impStatus('↔ no staged point there — ALT+click closer to a dot', '#ffb347'); return; }
-                imp.moveHeld = p; imp.moveDrag = false; imp.moveDownPt = { x: ev.clientX, y: ev.clientY };
-                impRenderStaged(); impSyncUi();
-                return;
             }
             // grabbing a shape's numbered handle beats the mode action — move it
             const hs = impShapeHandleAt(map, ll);
@@ -23252,7 +23334,19 @@
         };
         imp._onKey = (ev) => {
             if (!imp.mode) return;
-            if ((ev.key || '').toLowerCase() === 'escape') {
+            const k = (ev.key || '').toLowerCase();
+            if (imp.mode === 'move' && imp.moveHeld && (k === 'delete' || k === 'backspace' || (k === 'b' && ev.altKey))) {   // v4.345: drop the held point from the import
+                const t = ev.target; if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+                ev.preventDefault(); ev.stopImmediatePropagation();
+                const p = imp.moveHeld;
+                if (p.orig) { p.lat = p.orig.lat; p.lng = p.orig.lng; delete p.orig; }
+                p.done = true; p.removed = true; p.sel = false;
+                imp.moveHeld = null; imp.moveDrag = false; imp.moveDownPt = null;
+                impRefreshAfterSelChange();
+                impStatus(`🗑 "${impEsc(p.name)}" removed from this import (not created) — ↩ reset moved brings removed points back too`);
+                return;
+            }
+            if (k === 'escape') {
                 ev.preventDefault(); ev.stopImmediatePropagation();
                 if (imp.moveHeld) { const p = imp.moveHeld; if (p.orig && imp.moveDrag) { p.lat = p.orig.lat; p.lng = p.orig.lng; delete p.orig; } imp.moveHeld = null; imp.moveDrag = false; imp.moveDownPt = null; impRenderStaged(); impSyncUi(); impStatus('↔ put back'); }
                 else if (imp.editDrag) { impEndEditDrag(); }
@@ -23344,7 +23438,7 @@
             <div id="aim-imp-typemap" style="margin-bottom:8px"></div>
             <div id="aim-imp-placerow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px;padding:6px 8px;background:rgba(255,95,255,0.05);border:1px dashed rgba(255,95,255,0.35);border-radius:3px">
                 <span style="font-size:11px;color:#ff5fff;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Placement</span>
-                <button id="aim-imp-move" title="Fix a point's location BEFORE it becomes an asset. ALT+click a staged point to pick it up (it turns magenta), pan/zoom freely, ALT+click where it belongs to drop it — or just ALT+drag it. Esc puts it back. Moved points keep a magenta ring; the square is created at the new spot." style="background:rgba(255,95,255,0.12);color:#ff5fff;border:1px solid rgba(255,95,255,0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">↔ Move point</button>
+                <button id="aim-imp-move" title="Fix a point's location BEFORE it becomes an asset. Click a staged point to pick it up (it turns magenta), pan/zoom freely, click where it belongs to drop it — or just drag it. No Alt needed while this is on; clicking empty map still pans. Delete / Backspace while holding a point removes it from the import. Esc puts it back. Moved points keep a magenta ring; the square is created at the new spot." style="background:rgba(255,95,255,0.12);color:#ff5fff;border:1px solid rgba(255,95,255,0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">↔ Move point</button>
                 <span id="aim-imp-move-note" style="color:#888;font-size:10px"></span>
                 <button id="aim-imp-resetmoves" style="display:none;background:transparent;color:#ffb347;border:1px solid rgba(255,179,71,0.45);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px" title="Put every moved point back where the file had it">↩ reset moved</button>
             </div>
@@ -23406,10 +23500,11 @@
         q('aim-imp-move').onclick = () => impSetMode(imp.mode === 'move' ? null : 'move');
         q('aim-imp-resetmoves').onclick = () => {
             let n = 0;
-            imp.points.forEach(p => { if (p.orig) { p.lat = p.orig.lat; p.lng = p.orig.lng; delete p.orig; n++; } });
+            let r = 0;
+            imp.points.forEach(p => { if (p.orig) { p.lat = p.orig.lat; p.lng = p.orig.lng; delete p.orig; n++; } if (p.removed) { p.removed = false; p.done = false; r++; } });
             imp.moveHeld = null; imp.moveDrag = false;
-            if (n) { try { impComputeDups(); } catch (e) {} impRefreshAfterSelChange(); }
-            impStatus(`↩ ${n} point(s) back at their file coordinates`);
+            if (n || r) { try { impComputeDups(); } catch (e) {} impRefreshAfterSelChange(); }
+            impStatus(`↩ ${n} point(s) back at their file coordinates${r ? ` · ${r} removed point(s) restored` : ''}`);
         };
         q('aim-imp-shape').onclick = () => {
             const inp = document.createElement('input');
@@ -23461,7 +23556,8 @@
         // v4.331: once staged, the mapping collapses to one line — "edit" reopens the pickers
         if (!imp.mapOpen && imp.points.length && m.lat && m.lng) {
             const part = (k, label) => `${label}=<b style="color:#cfd6dc">${impEsc(m[k] || '—')}</b>`;
-            el.innerHTML = `<div style="font-size:10px;color:#7a8794;padding:2px 0">Columns: ${part('name', 'Name')} · ${part('type', 'Type')} · ${part('notes', 'Notes')} · ${part('lat', 'Lat')} · ${part('lng', 'Lng')} <a href="#" id="aim-imp-mapedit" style="color:#7adfe6;margin-left:6px">edit</a></div>`;
+            const nc = impNotesCols();
+            el.innerHTML = `<div style="font-size:10px;color:#7a8794;padding:2px 0">Columns: ${part('name', 'Name')} · ${part('type', 'Type')} · ${part('lat', 'Lat')} · ${part('lng', 'Lng')} · Notes=<b style="color:#cfd6dc">original name${nc.length ? ` + ${nc.length} column${nc.length === 1 ? '' : 's'}` : ''} + stamp</b> <a href="#" id="aim-imp-mapedit" style="color:#7adfe6;margin-left:6px">edit</a></div>`;
             el.querySelector('#aim-imp-mapedit').onclick = (ev) => { ev.preventDefault(); imp.mapOpen = true; impRenderMappingUi(); };
             return;
         }
@@ -23472,13 +23568,15 @@
                 <select data-impmap="${key}" style="max-width:130px;background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px">${opts}</select></label>`;
         };
         el.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:6px 8px;background:rgba(122,223,230,0.05);border:1px dashed rgba(122,223,230,0.3);border-radius:3px">
-            ${sel('name', 'Name', true)} ${sel('lat', 'Lat', false)} ${sel('lng', 'Lng', false)} ${sel('type', 'Type', true)} ${sel('notes', 'Notes', true)}
+            ${sel('name', 'Name', true)} ${sel('lat', 'Lat', false)} ${sel('lng', 'Lng', false)} ${sel('type', 'Type', true)}
             <button id="aim-imp-applymap" style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:4px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">✓ Apply</button>
+            <div id="aim-imp-notescols" style="flex-basis:100%"></div>
         </div>`;
         el.querySelectorAll('select[data-impmap]').forEach(s => {
-            s.onchange = () => { if (!imp.mapping) imp.mapping = {}; imp.mapping[s.getAttribute('data-impmap')] = s.value || null; };
+            s.onchange = () => { if (!imp.mapping) imp.mapping = {}; imp.mapping[s.getAttribute('data-impmap')] = s.value || null; impRenderNotesCols(el); };
         });
         el.querySelector('#aim-imp-applymap').onclick = () => { impBuildPoints(); };
+        impRenderNotesCols(el);
     }
     // v4.331: flag list — name duplicates (skipped unless included) + parent/child (inside / near an existing asset)
     function impRenderFlagsUi(live) {
@@ -23589,6 +23687,26 @@
         }
         const vals = new Map();
         imp.points.forEach(p => { const k = p.typeRaw || '(blank)'; vals.set(k, (vals.get(k) || 0) + 1); });
+        // v4.345: values that are the same word(s) + a trailing date/number ("NEW POP - 2026-11-17" ×54)
+        // are offered as ONE subtype with a click — never prefilled, so a real distinction is never lost.
+        const fam = new Map();
+        vals.forEach((n, v) => {
+            const mm = String(v).match(/^(.*?[A-Za-z].*?)[\s\-–—:#]+(\d{4}-\d{2}-\d{2}|\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\d{1,2}[\/\-]\d{2,4}|\d+)\s*$/);
+            if (!mm) return;
+            const base = mm[1].trim();
+            if (!fam.has(base)) fam.set(base, []);
+            fam.get(base).push(v);
+        });
+        const tidy = (b) => b.toLowerCase().split(/\s+/).map(w => w ? w[0].toUpperCase() + w.slice(1) : w).join(' ');
+        const famBanners = [...fam.entries()].filter(([b, arr]) => arr.length >= 2).map(([b, arr]) => {
+            const target = tidy(b);
+            const done = arr.every(v => (imp.typeMap[v.toLowerCase()] || '').toLowerCase() === target.toLowerCase());
+            const n = arr.reduce((a, v) => a + (vals.get(v) || 0), 0);
+            return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:4px 6px;margin-bottom:4px;background:rgba(255,212,0,0.07);border:1px dashed rgba(255,212,0,0.4);border-radius:3px;font-size:11px;color:#cfd6dc">✨ <b>${arr.length}</b> values look like <b>${impEsc(b)}</b> + a date/number (${n} rows)${done ? ` — <span style="color:#5fff5f">combined as "${impEsc(target)}"</span>` : ''}
+                <button data-impfam="${impEsc(b)}" data-impfamto="${impEsc(target)}" style="background:rgba(255,212,0,0.15);color:#ffd400;border:1px solid rgba(255,212,0,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">${done ? 'Re-apply' : `Combine as "${impEsc(target)}"`}</button>
+                <input type="text" data-impfamname="${impEsc(b)}" value="${impEsc(target)}" title="the subtype they all become" style="${inCss};width:120px">
+                ${done ? `<button data-impfamundo="${impEsc(b)}" style="background:none;color:#9ad;border:1px solid rgba(255,255,255,0.15);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">split again</button>` : ''}</div>`;
+        }).join('');
         const tag = (src, val) => src === 'new' ? `<span style="color:#5fff5f;font-size:10px">new subtype — created on the site</span>`
             : src === 'existing' ? `<span style="color:#888;font-size:10px">existing subtype</span>`
             : src === 'map' ? `<span style="color:#888;font-size:10px">${subCounts.has(val) ? 'existing subtype' : 'new subtype — created on the site'}</span>`
@@ -23607,8 +23725,20 @@
         }).join('');
         el.innerHTML = `<div style="padding:6px 8px;background:rgba(122,223,230,0.05);border:1px dashed rgba(122,223,230,0.3);border-radius:3px">
             <div style="font-size:10px;color:#9ad;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Type — CSV value → Percepto subtype <span style="color:#888;text-transform:none;letter-spacing:0">(the file's value is used as-is unless you change it; a changed value is remembered)</span></div>
-            ${rows}${dl}${shieldRow}</div>`;
+            ${famBanners}${rows}${dl}${shieldRow}</div>`;
         wireShield();
+        el.querySelectorAll('button[data-impfam]').forEach(b => b.onclick = () => {
+            const base = b.getAttribute('data-impfam'); const inp = el.querySelector(`input[data-impfamname="${CSS.escape(base)}"]`);
+            const to = ((inp && inp.value.trim()) || b.getAttribute('data-impfamto') || '').trim(); if (!to) return;
+            (fam.get(base) || []).forEach(v => { imp.typeMap[v.toLowerCase()] = to; });
+            impSaveTypeMap(); impRenderTypeMapUi(); impSyncUi();
+            impStatus(`✨ ${(fam.get(base) || []).length} "${impEsc(base)} + date" values will be created as <b>${impEsc(to)}</b> (remembered)`);
+        });
+        el.querySelectorAll('button[data-impfamundo]').forEach(b => b.onclick = () => {
+            const base = b.getAttribute('data-impfamundo');
+            (fam.get(base) || []).forEach(v => { delete imp.typeMap[v.toLowerCase()]; });
+            impSaveTypeMap(); impRenderTypeMapUi(); impSyncUi();
+        });
         el.querySelectorAll('input[data-imptype]').forEach(inp => {
             inp.oninput = () => {
                 const k = inp.getAttribute('data-imptype'), raw = inp.getAttribute('data-impraw') || '';
@@ -23736,13 +23866,13 @@
             show('aim-imp-commitrow', live.length > 0 || imp.lastCreated.length > 0, true);
             show('aim-imp-placerow', live.length > 0 && imp.target !== 'assets', true);
             {
-                const moved = live.filter(p => p.orig).length;
+                const moved = live.filter(p => p.orig).length, removed = imp.points.filter(p => p.removed).length;
                 const mn = document.getElementById('aim-imp-move-note');
-                if (mn) mn.innerHTML = imp.moveHeld ? `holding <b style="color:#ff5fff">${impEsc(imp.moveHeld.name)}</b> — ALT+click the new spot · Esc=put back` : (moved ? `<b style="color:#ff5fff">${moved}</b> point${moved === 1 ? '' : 's'} moved (magenta ring) — created at the new spot` : 'ALT+click a point to pick it up, ALT+click to drop · or ALT+drag');
+                if (mn) mn.innerHTML = imp.moveHeld ? `holding <b style="color:#ff5fff">${impEsc(imp.moveHeld.name)}</b> — click the new spot · <b>Delete</b> = drop it from the import · Esc = put back` : ((moved || removed) ? `<b style="color:#ff5fff">${moved}</b> moved (magenta ring)${removed ? ` · <b style="color:#ff8a80">${removed}</b> removed` : ''}` : 'click a dot to pick it up, click where it belongs · or drag it · Delete while holding = not imported');
                 const rb = document.getElementById('aim-imp-resetmoves');
-                if (rb) rb.style.display = moved ? '' : 'none';
+                if (rb) rb.style.display = (moved || removed) ? '' : 'none';
                 const mb = document.getElementById('aim-imp-move');
-                if (mb) { const on = imp.mode === 'move'; mb.style.background = on ? 'rgba(255,95,255,0.38)' : 'rgba(255,95,255,0.12)'; mb.textContent = on ? '↔ ON — ALT+click pick · ALT+click drop · Esc=off' : '↔ Move point'; }
+                if (mb) { const on = imp.mode === 'move'; mb.style.background = on ? 'rgba(255,95,255,0.38)' : 'rgba(255,95,255,0.12)'; mb.textContent = on ? '↔ ON — click a dot, click its new spot · Delete=remove · Esc=off' : '↔ Move point'; }
             }
             show('aim-imp-delrow', true, true);
             // v4.331: ▸ Advanced block — forced open while a tool is armed, a shape exists, or delete mode is on
@@ -23844,9 +23974,10 @@
             let i = 2, n2; do { n2 = `${base}-${i++}`; } while (usedNames.has(n2));
             usedNames.add(n2); return n2;
         };
-        plan.forEach(x => { x.name = uniq(x.p.name); });
+        const stamp = impNowStamp();
+        plan.forEach(x => { x.name = uniq(x.p.name); x.notes = impComposeNotes(x.p, stamp); });   // v4.345: notes = original name + chosen columns + who/when/file
         // backup manifest BEFORE any write (rollback = delete the created ids)
-        const manifest = { site: sid, at: new Date().toISOString(), file: imp.fileName, sizeFt: impSizeFt, creates: plan.map(x => ({ name: x.name, subtype: x.subtype, lat: x.p.lat, lng: x.p.lng, notes: x.p.notes || '', movedFrom: x.p.orig || null })) };
+        const manifest = { site: sid, at: new Date().toISOString(), file: imp.fileName, sizeFt: impSizeFt, creates: plan.map(x => ({ name: x.name, subtype: x.subtype, lat: x.p.lat, lng: x.p.lng, notes: x.notes, movedFrom: x.p.orig || null })) };
         try { localStorage.setItem(`aim_imp_commit_backup:${sid}`, JSON.stringify(manifest)); } catch (e) {}
         try { downloadJSONFile(`asset-import-${sid}-${Date.now()}.json`, JSON.stringify(manifest, null, 1)); } catch (e) { impStatus('backup manifest download failed (localStorage stash still written)'); }
         // fresh subtypes only need new_poi_type_str on their FIRST create
@@ -23856,7 +23987,7 @@
         for (let i = 0; i < plan.length; i++) {
             const x = plan[i];
             impStatus(`creating ${i + 1}/${plan.length} — "${impEsc(x.name)}"…`);
-            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impSizeFt, x.name, x.subtype, !knownSubs.has(x.subtype), x.p.notes || '');
+            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impSizeFt, x.name, x.subtype, !knownSubs.has(x.subtype), x.notes || '');
             if (r && r.ok) {
                 ok++; created.push({ id: r.id, name: x.name, point: x.p });
                 knownSubs.add(x.subtype);
@@ -27590,7 +27721,7 @@
             steps: ['🔍 Scan crossings (or right-click a flight path → 🛗 for a manual point).', 'Review each staged crossing — bridge height, elevator lengths, preflight result.', 'Untick Dry run → Commit. ↩ Undo restores the flight paths and deletes the poles.'],
             test: 'Scan a site with a known transmission crossing, confirm one staged set per crossing, Commit with Dry run ON.' },
         imp: { what: 'Bring a client asset list into Percepto. Load a CSV or KML → points stage on the map (nothing written) → narrow with boundaries → map the type → ✓ Create makes real asset squares. Create-only, with dry run, backup manifest and undo.',
-            steps: ['Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: ALT+click a dot to pick it up, ALT+click where it belongs (or ALT+drag). Moved dots get a magenta ring; ↩ reset moved puts them back.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
+            steps: ['Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
             test: 'Load the list, add one boundary, confirm the selected count drops, Create with Dry run ON.' },
         sci: { what: 'Applies the Ortho Scanner review sheet\'s decisions: accepted NFZs and flight-path leg changes stage on the map (green / yellow, removed legs red), preflight runs, then Apply writes them — NFZs create-only, flight paths one POST each with Delete Guard backups.',
             steps: ['Load the decisions JSON and the scan bundle from the review sheet.', 'Check the staged plan on the map and the preflight result.', 'Untick Dry run → Apply.'],
