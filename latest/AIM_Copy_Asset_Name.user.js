@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.341
+// @version      4.342
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.341';
+    const SCRIPT_VERSION = '4.342';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23004,16 +23004,14 @@
         if (!impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
         if (!shapes.length) { impStatus(`No usable polygon in "${impEsc(srcName)}" — the shape KML needs a Polygon (or closed path)`, '#ff6060'); return; }
         if (imp.target === 'assets' && !imp.assetIndex) impBuildAssetIndex();
-        if (imp.target === 'staged' && !imp.points.some(p => !p.done)) {
-            impStatus(`Shape "${impEsc(srcName)}" parsed (${shapes.length} polygon(s)) but nothing is staged — load the data CSV/KML first, or tick 🗑 Delete mode to select existing assets`, '#ffb347');
-            return;
-        }
+        const nothingStaged = imp.target === 'staged' && !imp.points.some(p => !p.done);
         const before = impSelCount();
         shapes.forEach(s => {
             imp.shapes.push({ id: imp.shapeSeq++, kind: 'lasso', ring: s.ring, handle: ringCentroid(s.ring), name: s.name || srcName });
         });
         impRefreshAfterSelChange();
-        impStatus(`⬆ shape "${impEsc(srcName)}" applied — ${shapes.length} polygon(s), <b>+${impSelCount() - before}</b> ${imp.target === 'assets' ? 'existing asset(s)' : 'point(s)'} selected. ALT+drag a numbered handle to move a polygon.`);
+        if (nothingStaged) { impStatus(`⬆ boundary "${impEsc(srcName)}" held — ${shapes.length} polygon(s) drawn on the map. Load the data CSV/KML and only the points inside will be selected.`); return; }
+        impStatus(`⬆ boundary "${impEsc(srcName)}" applied — ${shapes.length} polygon(s), <b>+${impSelCount() - before}</b> ${imp.target === 'assets' ? 'existing asset(s)' : 'point(s)'} selected. ALT+drag a numbered handle to move a polygon.`);
     }
     function impHandleShapeFile(file) {
         if (!file) return;
@@ -23258,6 +23256,7 @@
         impSyncUi();
     }
     // ---- panel body (built in JS — the generator template just carries the container) ----
+    const IMP_BIG_BATCH = 1000;   // v4.342: creating more than this in one run needs an explicit ack
     function impRenderPanelBody() {
         const host = document.getElementById('aim-imp-controls');
         if (!host) return;
@@ -23269,9 +23268,22 @@
                 <button id="aim-imp-load" style="${btnCss('122,223,230')}">📂 Load CSV / KML</button>
                 <span style="color:#888;font-size:10px">or drag &amp; drop the file onto this panel</span>
             </div>
+            <div id="aim-imp-bounds" style="margin-bottom:8px;padding:6px 8px;background:rgba(186,140,255,0.05);border:1px dashed rgba(186,140,255,0.4);border-radius:3px">
+                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+                    <span style="font-size:11px;color:#ba8cff;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Boundaries</span>
+                    <button id="aim-imp-shape" title="Upload a KML whose polygon(s) are the boundaries — one KML with several polygons, or several KMLs one after another (they add up). Only staged points INSIDE a boundary are selected for creation. A polygon-only KML dropped on the panel routes here automatically." style="${btnCss('186,140,255')}">⬆ Load boundary KML</button>
+                    <button id="aim-imp-clearshapes" style="${btnCss('160,160,160')}">✕ Clear boundaries</button>
+                    <span id="aim-imp-bounds-note" style="color:#888;font-size:10px;flex-basis:100%">none loaded — every staged point is selected. Load one KML with one or more polygons (or several KMLs); only points inside a boundary are created.</span>
+                </div>
+                <div id="aim-imp-shapes" style="margin-top:4px"></div>
+            </div>
             <div id="aim-imp-mapping" style="margin-bottom:8px"></div>
             <div id="aim-imp-typemap" style="margin-bottom:8px"></div>
             <div id="aim-imp-commitrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
+                <div id="aim-imp-biggate" style="display:none;flex-basis:100%;padding:6px 8px;background:rgba(255,85,85,0.10);border:1px solid rgba(255,85,85,0.6);border-radius:3px;font-size:11px;color:#ff8a80;line-height:1.5">
+                    <b>⚠ <span id="aim-imp-biggate-n">0</span> assets selected — more than ${IMP_BIG_BATCH} in one run is NOT advisable.</b> Percepto's Site Setup page gets unstable with thousands of entities, the browser tab can freeze or crash mid-run, and you may have to reload the page and pick up where it stopped. Narrow the selection with a boundary KML first.<br>
+                    <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;color:#ffb3ad;margin-top:4px"><input type="checkbox" id="aim-imp-biggate-ack" style="accent-color:#ff5555"> I understand the risk — create them anyway</label>
+                </div>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Square side of each created asset — same shape ➕ Create asset uses. Reshape in Percepto afterwards (auto-reshape is feature #251).">Size <input type="number" id="aim-imp-size" min="5" max="2000" step="5" style="width:52px;${inCss}"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ffd400" title="A staged point whose NAME matches an existing asset on this site is a duplicate and is SKIPPED unless this is on. Points merely inside / near an existing asset are only flagged (parent/child) and are always created."><input type="checkbox" id="aim-imp-incdups" style="accent-color:#ffd400"> include name duplicates</label>
                 <button id="aim-imp-commit" style="${btnCss('95,255,95')};font-weight:600">✓ Create selected</button>
@@ -23287,12 +23299,9 @@
                 <button id="aim-imp-lasso" style="${btnCss('122,223,230')}">🖊 Lasso</button>
                 <button id="aim-imp-pick" style="${btnCss('122,223,230')}">☝ Pick</button>
                 <button id="aim-imp-edit" title="Edit shapes — ALT+drag a vertex dot to move it · ALT+click a small midpoint dot to insert a new vertex there (keep dragging to place it) · ALT+right-click a vertex to delete it · ALT+drag a circle's white edge dot to resize it · numbered handles still move whole shapes. To add points to a CIRCLE, first convert it with the ⬡ button on its row below." style="${btnCss('122,223,230')}">✎ Edit</button>
-                <button id="aim-imp-shape" title="Upload a KML whose polygon(s) ARE the access shape — everything inside gets selected, exactly like a drawn lasso. Additive; works in 🗑 Delete mode too. A polygon-only KML dropped on the panel routes here automatically." style="${btnCss('186,140,255')}">⬆ Shape (KML)</button>
                 <button id="aim-imp-selall" style="${btnCss('160,160,160')}">Select all</button>
                 <button id="aim-imp-clearsel" style="${btnCss('160,160,160')}">Clear selection</button>
-                <button id="aim-imp-clearshapes" style="${btnCss('160,160,160')}">Clear shapes</button>
             </div>
-            <div id="aim-imp-shapes" style="margin-bottom:8px"></div>
             <div id="aim-imp-delrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px;padding-top:8px;border-top:1px dashed rgba(255,85,85,0.35)">
                 <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#ff8a80;font-weight:600" title="Flip the ⭕/🖊/☝ tools to select EXISTING site assets instead of staged points. Deleting requires the ack + slide-and-hold ceremony and rides Delete Guard's 24h undo ring."><input type="checkbox" id="aim-imp-delmode" style="accent-color:#ff5555"> 🗑 Delete mode — select existing assets</label>
                 <button id="aim-imp-delete" style="${btnCss('255,85,85')};font-weight:600;display:none">🗑 Delete selected…</button>
@@ -23415,10 +23424,53 @@
         };
         const fullN = child.filter(p => p.child.full).length;
         el.innerHTML = `<div style="padding:6px 8px;background:rgba(255,255,255,0.03);border:1px dashed rgba(122,223,230,0.25);border-radius:3px;font-size:11px;line-height:1.5">
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px"><b style="color:#cfd6dc">Flags</b> <span style="color:#888;font-size:10px">${dups.length + child.length + near.length} of ${live.length} staged</span><span style="flex:1"></span>
+                <button data-imp-flags="sheets" title="Copy every flagged point as a table (Flag · Name · Existing asset · Detail · Type · Lat · Lng) — paste straight into Google Sheets / Excel" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Copy for Sheets</button>
+                <button data-imp-flags="csv" title="Download the same table as a CSV" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button></div>
             ${dups.length ? `<div style="color:#ffd400">🔴 <b>${dups.length}</b> name duplicate${dups.length === 1 ? '' : 's'} — same name as an existing asset, ${imp.includeDups ? 'INCLUDED' : 'skipped'}: ${list(dups, p => p.name, 10)}</div>` : ''}
             ${child.length ? `<div style="color:#b48cff">🟣 <b>${child.length}</b> parent/child — the ${impSizeFt} ft square lands inside an existing asset (${fullN} fully · ${child.length - fullN} partially), created as normal: ${group(child, p => p.child.name, (k, v) => `${k} ← ${v.length}`)}</div>` : ''}
             ${near.length ? `<div style="color:#4fc3f7">🔵 <b>${near.length}</b> nearby — within ${impDupFt} ft of an existing asset, not overlapping it, created as normal: ${group(near, p => p.near.name, (k, v) => `${k} ← ${v.length}`)}</div>` : ''}
         </div>`;
+        el.onclick = (ev) => {
+            const b = ev.target.closest('[data-imp-flags]'); if (!b) return;
+            try { impExportFlags(live, b.getAttribute('data-imp-flags')); }
+            catch (e) { console.warn(`${TAG} 📥 flags export failed:`, e); impStatus(`Flags export failed: ${impEsc(e && e.message || e)}`, '#ff6060'); }
+        };
+    }
+    // v4.342: flagged points as a table — rich HTML + TSV on the clipboard
+    // (Sheets / Excel paste) or a CSV download. One row per flag; a point that
+    // is both a name dup and inside another asset gets two rows.
+    function impExportFlags(live, how) {
+        const rows = [];
+        live.forEach(p => {
+            if (p.dup) rows.push({ flag: 'Name duplicate', name: p.name, other: p.name, detail: imp.includeDups ? 'included (same name already on the site)' : 'skipped (same name already on the site)', p });
+            if (p.child) rows.push({ flag: 'Parent/child', name: p.name, other: p.child.name, detail: p.child.full ? 'fully inside' : 'partially inside', p });
+            if (p.near) rows.push({ flag: 'Nearby', name: p.name, other: p.near.name, detail: `${Math.round(p.near.ft)} ft`, p });
+        });
+        if (!rows.length) { impStatus('No flagged points to export', '#ffb347'); return; }
+        const cols = [
+            { label: 'Flag', val: r => r.flag }, { label: 'Name', val: r => r.name }, { label: 'Existing asset', val: r => r.other },
+            { label: 'Detail', val: r => r.detail }, { label: 'Type', val: r => r.p.typeRaw || '' },
+            { label: 'Latitude', val: r => isFinite(r.p.lat) ? r.p.lat.toFixed(6) : '' }, { label: 'Longitude', val: r => isFinite(r.p.lng) ? r.p.lng.toFixed(6) : '' },
+            { label: 'File', val: () => imp.fileName || '' },
+        ];
+        const site = getCurrentSiteName() || `Site ${genState.siteID}`;
+        if (how === 'csv') {
+            const q = (v) => { const t = String(v == null ? '' : v); return /[",\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+            const csv = [cols.map(c => q(c.label)).join(',')].concat(rows.map(r => cols.map(c => q(c.val(r))).join(','))).join('\r\n');
+            const blob = new Blob(['\ufeff' + csv], { type: 'text/csv' });
+            const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `import-flags-${String(site).replace(/[^A-Za-z0-9_-]+/g, '_')}-${new Date().toISOString().slice(0, 10)}.csv`;
+            document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+            impStatus(`⬇ ${rows.length} flag row(s) downloaded as CSV`);
+            return;
+        }
+        const esc = (v) => impEsc(v);
+        const headHtml = `<tr>${cols.map(c => `<th style="background:#1f2228;color:#7adfe6;border:1px solid #cccccc;padding:2px 7px;text-align:left">${esc(c.label)}</th>`).join('')}</tr>`;
+        const bodyHtml = rows.map(r => `<tr>${cols.map(c => `<td style="border:1px solid #cccccc;padding:2px 7px">${esc(c.val(r))}</td>`).join('')}</tr>`).join('');
+        const html = `<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px">${headHtml}${bodyHtml}</table>`;
+        const text = [cols.map(c => c.label).join('\t')].concat(rows.map(r => cols.map(c => String(c.val(r)).replace(/[\t\n\r]/g, ' ')).join('\t'))).join('\n');
+        writeSheetsClipboard(html, text, `📤 ${rows.length} flag row(s) copied — paste into Sheets`);
+        impStatus(`📤 ${rows.length} flag row(s) on the clipboard (${site}) — paste into Google Sheets / Excel`);
     }
     function impSiteSubtypes() {
         const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
@@ -23607,10 +23659,18 @@
             show('aim-imp-commitrow', live.length > 0 || imp.lastCreated.length > 0, true);
             show('aim-imp-delrow', true, true);
             // v4.331: ▸ Advanced block — forced open while a tool is armed, a shape exists, or delete mode is on
-            const advForced = !!imp.mode || imp.shapes.length > 0 || imp.target === 'assets';
+            const advForced = !!imp.mode || imp.target === 'assets';
             show('aim-imp-adv', imp.advOpen || advForced, false);
             const ah = document.getElementById('aim-imp-advhdr');
-            if (ah) ah.textContent = `${(imp.advOpen || advForced) ? '▾' : '▸'} Advanced — select a subset · edit shapes · delete existing assets${imp.shapes.length ? ` (${imp.shapes.length} shape${imp.shapes.length === 1 ? '' : 's'} narrowing the selection)` : ''}`;
+            if (ah) ah.textContent = `${(imp.advOpen || advForced) ? '▾' : '▸'} Advanced — draw a circle / lasso · pick single points · edit boundaries · delete existing assets`;
+            // v4.342: Boundaries note (top-level block)
+            const bn = document.getElementById('aim-imp-bounds-note');
+            if (bn) {
+                if (!imp.shapes.length) bn.textContent = live.length ? `none loaded — all ${live.length} staged points are selected. Load one KML with one or more polygons (or several KMLs); only points inside a boundary are created.` : 'none loaded — load one KML with one or more polygons (or several KMLs); only staged points inside a boundary are created. Boundaries can be loaded before or after the data file.';
+                else bn.textContent = imp.target === 'assets' ? `${imp.shapes.length} boundar${imp.shapes.length === 1 ? 'y' : 'ies'} — selecting EXISTING assets (🗑 Delete mode)` : `${imp.shapes.length} boundar${imp.shapes.length === 1 ? 'y' : 'ies'} · ${selN} of ${live.length} staged points inside${live.length ? '' : ' (load the data file to see counts)'}`;
+            }
+            const bc = document.getElementById('aim-imp-clearshapes');
+            if (bc) bc.style.display = imp.shapes.length ? '' : 'none';
             impRenderFlagsUi(live);
             const modeBtn = (id, mode, label, onLabel) => {
                 const b = document.getElementById(id); if (!b) return;
@@ -23627,6 +23687,13 @@
                 const dupsIn = live.filter(p => p.sel && p.dup).length;
                 const n = live.filter(p => p.sel && (!p.dup || imp.includeDups)).length;
                 cb.textContent = `✓ Create ${n} asset${n === 1 ? '' : 's'}${(dupsIn && !imp.includeDups) ? ` (${dupsIn} dup skipped)` : ''}`;
+                const gate = document.getElementById('aim-imp-biggate'), gateN = document.getElementById('aim-imp-biggate-n'), gateAck = document.getElementById('aim-imp-biggate-ack');
+                if (gate) {
+                    const big = n > IMP_BIG_BATCH;
+                    gate.style.display = big ? '' : 'none';
+                    if (gateN) gateN.textContent = String(n);
+                    if (!big && gateAck) gateAck.checked = false;
+                }
             }
             const db = document.getElementById('aim-imp-delete');
             if (db) { db.style.display = imp.target === 'assets' ? '' : 'none'; db.textContent = `🗑 Delete ${imp.assetSel.size} selected…`; }
@@ -23664,6 +23731,11 @@
         if (missing.size) { impStatus(`BLOCKED — rows with a blank type: pick a subtype for <b>${impEsc([...missing].join(' · '))}</b> in the Type table above.`, '#ff6060'); return; }
         const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
         if (dry) { impStatus(`DRY RUN — would create <b>${plan.length}</b> asset(s) (${impSizeFt}×${impSizeFt} ft squares)${skippedDups ? `, skipping ${skippedDups} dup(s)` : ''}: ${impEsc(plan.slice(0, 12).map(x => x.p.name).join(' · '))}${plan.length > 12 ? ' …' : ''}. Untick Dry run to write.`); return; }
+        if (plan.length > IMP_BIG_BATCH) {
+            const ack = (() => { try { return !!document.getElementById('aim-imp-biggate-ack').checked; } catch (e) { return false; } })();
+            if (!ack) { impStatus(`BLOCKED — <b>${plan.length}</b> assets is more than ${IMP_BIG_BATCH} in one run. Narrow the selection with a boundary KML, or tick "I understand the risk" under the Create button to proceed anyway.`, '#ff6060'); return; }
+            console.warn(`${TAG} 📥 big batch acknowledged: ${plan.length} creates in one run`);
+        }
         const csrf = getCsrfToken();
         if (!csrf) { impStatus('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
         // fresh entity fetch → template + used names reflect the live server
@@ -27460,7 +27532,7 @@
         m.id = GEN_MODAL_ID;
         m.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;z-index:100000;pointer-events:none;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
         const box = document.createElement('div');
-        box.style.cssText = 'position:fixed;left:16px;top:64px;width:430px;min-width:320px;min-height:160px;max-height:86vh;overflow:auto;resize:both;pointer-events:auto;background:#1f2228;border:1px solid rgba(122,223,230,0.5);border-radius:8px;padding:12px 16px;color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.7)';
+        box.style.cssText = 'position:fixed;left:16px;top:64px;width:430px;min-width:320px;min-height:160px;max-height:86vh;overflow:auto;resize:both;pointer-events:auto;background:#1f2228;border:1px solid rgba(122,223,230,0.5);border-radius:8px;padding:0 16px 12px;color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.7)';
         const genTile = (page, icon, color, name, desc) => `<div data-gen-tile="${page}" role="button" tabindex="0"><span class="ic" style="color:${color}">${icon}</span><span><div class="nm">${name}</div><div class="ds">${desc}</div></span></div>`;
         const numField = (key, label, hint, step) => `
             <label style="display:flex;align-items:center;gap:8px;justify-content:space-between">
@@ -27468,6 +27540,7 @@
                 <span style="display:inline-flex;align-items:center;gap:5px"><input type="number" id="${GEN_MODAL_PARAM_IDS[key]}" value="${d[key]}" min="0" step="${step || 1}" style="width:64px;background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:3px 6px;border-radius:3px;font:inherit;font-size:11px;text-align:right"><span style="color:#888;font-size:10px">ft</span></span>
             </label>`;
         box.innerHTML = `
+            <div id="aim-gen-head" style="position:sticky;top:0;z-index:3;background:#1f2228;margin:0 -16px 12px;padding:12px 16px 8px;border-bottom:1px solid rgba(122,223,230,0.25);box-shadow:0 6px 12px -6px rgba(0,0,0,0.6)">
             <button id="aim-gen-x" title="Close" style="position:absolute;top:8px;right:10px;width:24px;height:24px;line-height:22px;text-align:center;background:rgba(255,90,90,0.12);color:#ff8a80;border:1px solid rgba(255,90,90,0.45);border-radius:4px;cursor:pointer;font:inherit;font-size:14px;font-weight:700;padding:0">✕</button>
             <style>
                 #${GEN_MODAL_ID} [data-gen-tile]{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-radius:6px;border:1px solid rgba(255,255,255,0.10);background:rgba(255,255,255,0.03);cursor:pointer;transition:background .12s,border-color .12s;text-align:left}
@@ -27483,7 +27556,9 @@
                 <span>⊕ Generate<span id="aim-gen-page-name" style="color:#e6e6e6"></span></span>
                 <span style="color:#666;font-size:10px;font-weight:400">— drag · resize ↘</span>
             </div>
-            <div style="color:#888;font-size:11px;margin-bottom:12px">${xmlEscape(siteName)} · ${assets.length} asset${assets.length === 1 ? '' : 's'} (${eligibleCount} eligible)</div>
+            <div style="color:#888;font-size:11px">${xmlEscape(siteName)} · ${assets.length} asset${assets.length === 1 ? '' : 's'} (${eligibleCount} eligible)</div>
+            <label data-gen-sec="tool" id="aim-gen-dryrow" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;margin-top:8px;padding:5px 10px;border-radius:3px;background:rgba(95,255,95,0.08);border:1px solid rgba(95,255,95,0.4)"><input type="checkbox" id="aim-gen-dryrun" checked style="accent-color:#5fff5f"> <b id="aim-gen-drylabel" style="color:#5fff5f">🧪 Dry run — nothing is written</b> <span style="color:#888;font-size:10px">(every tool on this panel honors it)</span></label>
+            </div>
             <div id="aim-gen-menu" data-gen-sec="menu">
                 <div style="font-size:11px;color:#9ad;line-height:1.5;margin-bottom:4px">Pick a tool. Only that tool's controls show; <b style="color:#7adfe6">‹</b> brings you back here. Staged work stays on the map until the panel is closed.</div>
                 <div class="gen-grp">Build</div>
@@ -27537,8 +27612,8 @@
             </div>
             <div data-gen-sec="fp" style="margin-bottom:12px;padding:8px 10px;background:rgba(0,229,255,0.06);border:1px dashed rgba(0,229,255,0.3);border-radius:3px;font-size:11px;color:#9ad;line-height:1.5"><b style="color:#00e5ff">🛩 Routes</b> proposes base→asset flight paths along the power lines · <b>📥 Load site FPs</b> pulls the existing paths into the editable preview · <b>✨ Snap &amp; Clean</b> pulls them ~50 ft parallel to the lines · <b>🧲 CTRL-snap</b> arms snapping inside Percepto's native draw tool.</div>
             <div data-gen-sec="routes" style="margin-bottom:12px;padding:8px 10px;background:rgba(255,145,0,0.06);border:1px dashed rgba(255,145,0,0.3);border-radius:3px;font-size:11px;color:#9ad;line-height:1.5">Converts the Map Styler's 🟠 <b>Proposed Routes</b> KML into real entities: route paths → flight paths, route polygons → FFZs. Preview, dry run and undo; create-only.</div>
-            <div id="aim-gen-stats" data-gen-sec="tool" style="color:#9ad;font-size:11px;margin-bottom:12px;padding:6px 8px;background:rgba(122,223,230,0.08);border-radius:3px">Adjust parameters, then Preview.</div>
-            <div data-gen-sec="tool" style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+            <div id="aim-gen-stats" data-gen-sec="ffz adv fp routes" style="color:#9ad;font-size:11px;margin-bottom:12px;padding:6px 8px;background:rgba(122,223,230,0.08);border-radius:3px">Adjust parameters, then Preview.</div>
+            <div data-gen-sec="ffz adv nfz fp routes" style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-bottom:14px">
                 <button id="aim-gen-close" style="background:transparent;color:#888;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Close</button>
                 <button id="aim-gen-clear" data-gen-sec="ffz fp" style="background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Clear preview</button>
                 <button id="aim-gen-draw" data-gen-sec="ffz" style="background:rgba(255,225,77,0.12);color:#ffe14d;border:1px solid rgba(255,225,77,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✏️ Draw</button>
@@ -27580,9 +27655,6 @@
             <div id="aim-imp-controls" data-gen-sec="imp" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.35);border-radius:3px"></div>
             <div id="aim-sci-controls" data-gen-sec="sci" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.35);border-radius:3px"></div>
             <div id="aim-elv-controls" data-gen-sec="elv" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(255,154,61,0.06);border:1px dashed rgba(255,154,61,0.35);border-radius:3px"></div>
-            <div data-gen-sec="tool" style="margin-bottom:10px;padding:6px 10px;background:rgba(122,223,230,0.05);border:1px solid rgba(122,223,230,0.22);border-radius:3px">
-                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc"><input type="checkbox" id="aim-gen-dryrun" checked style="accent-color:#7adfe6"> Dry run <span style="color:#888;font-size:10px">(build + count, don't write — every tool on this panel honors it)</span></label>
-            </div>
             <div data-gen-sec="ffz adv" style="padding:8px 10px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25);border-radius:3px">
                 <div style="font-size:11px;color:#9ad;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Commit</div>
                 <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc;margin-bottom:8px"><input type="checkbox" id="aim-gen-shield" style="accent-color:#ff2d2d"> Show shielding on drafts <span style="color:#888;font-size:10px">(red inner / yellow outer)</span></label>
@@ -27619,6 +27691,17 @@
             box.scrollTop = 0;
         };
         box.querySelector('#aim-gen-back').onclick = () => genShowPage('menu');
+        (() => {
+            const cbx = box.querySelector('#aim-gen-dryrun'), row = box.querySelector('#aim-gen-dryrow'), lbl = box.querySelector('#aim-gen-drylabel');
+            const paint = () => {
+                const dry = !!cbx.checked;
+                lbl.textContent = dry ? '🧪 Dry run — nothing is written' : '⚠ LIVE — commits WRITE to the server';
+                lbl.style.color = dry ? '#5fff5f' : '#ff6060';
+                row.style.background = dry ? 'rgba(95,255,95,0.08)' : 'rgba(255,85,85,0.14)';
+                row.style.borderColor = dry ? 'rgba(95,255,95,0.4)' : 'rgba(255,85,85,0.7)';
+            };
+            cbx.addEventListener('change', paint); paint();
+        })();
         box.querySelector('#aim-gen-menu').addEventListener('click', (e) => {
             const t = e.target.closest('[data-gen-tile]'); if (!t) return;
             const p = t.getAttribute('data-gen-tile');
