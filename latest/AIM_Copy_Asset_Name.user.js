@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.340
+// @version      4.341
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.340';
+    const SCRIPT_VERSION = '4.341';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -21019,8 +21019,9 @@
             if (bt) { const on = nfzDraw.active && nfzDraw.mode === 'trace'; bt.style.background = on ? 'rgba(255,85,85,0.32)' : 'rgba(255,85,85,0.12)'; bt.textContent = on ? '⬠ NFZ Trace ON — ALT+click starts · click adds · Ctrl=snap to asset edge · dbl-click/Enter=finish · Esc=undo/off' : '⬠ NFZ Trace'; }
             const bs = document.getElementById('aim-gen-nfzstamp');
             if (bs) { const on = nfzDraw.active && nfzDraw.mode === 'stamp'; bs.style.background = on ? 'rgba(255,85,85,0.32)' : 'rgba(255,85,85,0.12)'; bs.textContent = on ? '⚡ NFZ Stamp ON — ALT+click inside an asset · Esc=off' : '⚡ NFZ Stamp'; }
+            if (nfzDraw.active && genState.page && genState.page !== 'nfz') genShowPage('nfz');
             const c = document.getElementById('aim-nfz-controls');
-            if (c) c.style.display = (nfzDraw.active || nfzDraw.drafts.length) ? 'block' : 'none';
+            if (c) c.style.display = (nfzDraw.active || nfzDraw.drafts.length || genState.page === 'nfz') ? 'block' : 'none';
             const cnt = document.getElementById('aim-nfz-count');
             if (cnt) cnt.textContent = String(nfzDraw.drafts.length);
         } catch (e) {}
@@ -21523,6 +21524,7 @@
     }
     function sciShowPanel() {
         const c = document.getElementById('aim-sci-controls'); if (!c) return;
+        genShowPage('sci');
         c.style.display = 'block';
         const b = document.getElementById('aim-gen-scan'); if (b) b.style.background = 'rgba(122,223,230,0.32)';
     }
@@ -22337,6 +22339,7 @@
     }
     function elvShowPanel() {
         const c = document.getElementById('aim-elv-controls'); if (!c) return;
+        genShowPage('elv');
         c.style.display = 'block';
         const b = document.getElementById('aim-gen-elev'); if (b) b.style.background = 'rgba(255,154,61,0.32)';
         if (!document.getElementById('aim-elv-list')) elvRenderPanelBody();
@@ -24015,6 +24018,7 @@
     function impShowPanel() {
         const c = document.getElementById('aim-imp-controls');
         if (!c) return;
+        genShowPage('imp');
         c.style.display = 'block';
         const b = document.getElementById('aim-gen-import');
         if (b) b.style.background = 'rgba(122,223,230,0.32)';
@@ -25539,7 +25543,8 @@
             advUnwire(); advClearLayers(); advDraw.branchSrc = null; advDraw.reGroup = null; advDraw.snapSrcs = []; advDraw.vertSnapped = [];
         }
         try { const b = document.getElementById('aim-gen-advdraw'); if (b) { b.style.background = advDraw.active ? 'rgba(95,184,255,0.32)' : 'rgba(95,184,255,0.12)'; b.textContent = advDraw.active ? '✦ Adv Draw ON — ALT+click to START a corridor (plain click edits existing) · Shift=angle · Ctrl=asset · F=flip · dbl-click=finish · Esc=undo/off' : '✦ Advanced Draw'; } } catch (e) {}
-        try { const c = document.getElementById('aim-adv-controls'); if (c) c.style.display = advDraw.active ? 'block' : 'none'; } catch (e) {}
+        try { if (advDraw.active && genState.page && genState.page !== 'adv') genShowPage('adv'); } catch (e) {}
+        try { const c = document.getElementById('aim-adv-controls'); if (c) c.style.display = (advDraw.active || genState.page === 'adv') ? 'block' : 'none'; } catch (e) {}
     }
     // Open a slot in an FFZ ring at edge `edgeIdx` and route the corridor's open chain
     // out and back through it → one simple polygon (no boolean union, no holes on an open branch).
@@ -27393,7 +27398,17 @@
         standoffFt: 'aim-gen-standoff', depthFt: 'aim-gen-depth',
         aglFt: 'aim-gen-agl', deltaFt: 'aim-gen-delta', proximityFt: 'aim-gen-prox',
     };
-    let genState = { siteID: null, lastResult: null, lastParams: null };
+    let genState = { siteID: null, lastResult: null, lastParams: null, page: null };
+    // v4.341 Generate HUB: the modal opens on a tile menu; each tool is a page
+    // (only its own controls visible). genShowPageLive = the open modal's page
+    // switcher (closure over its box); genShowPage() is the module-level entry
+    // the tools' ShowPanel helpers / hotkey arms call to land on their page.
+    let genShowPageLive = null;
+    const GEN_PAGE_NAMES = { ffz: '⊕ Inspection FFZs', adv: '✦ Advanced Draw', nfz: '⬠ NFZs', fp: '🛩 Flight Paths', routes: '🟠 Convert Routes', elv: '🛗 Elevators', imp: '📥 Asset Import', sci: '🔍 Scan Import' };
+    function genShowPage(page) {
+        try { if (genShowPageLive) genShowPageLive(page); }
+        catch (e) { console.warn(`${GEN_TAG} page switch failed:`, e); }
+    }
     // When ON, editing an EXISTING FFZ recomputes its altitude band from the
     // modal's AGL/Δ fields on drop; OFF (default) preserves the saved band so a
     // move never silently rewrites altitude. genReadParamsLive = the open modal's
@@ -27406,6 +27421,7 @@
         if (m) m.remove();
         try { clearRoutePreview(); } catch (e) {} genRouteResult = null;
         genReadParamsLive = null;
+        genShowPageLive = null; genState.page = null;
         genAltModeOverride = null;
         try { setFpSnap(false); } catch (e) {}
         try { if (genVertEdit.active) exitGenVertEdit(false); } catch (e) {}
@@ -27445,6 +27461,7 @@
         m.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;z-index:100000;pointer-events:none;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
         const box = document.createElement('div');
         box.style.cssText = 'position:fixed;left:16px;top:64px;width:430px;min-width:320px;min-height:160px;max-height:86vh;overflow:auto;resize:both;pointer-events:auto;background:#1f2228;border:1px solid rgba(122,223,230,0.5);border-radius:8px;padding:12px 16px;color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.7)';
+        const genTile = (page, icon, color, name, desc) => `<div data-gen-tile="${page}" role="button" tabindex="0"><span class="ic" style="color:${color}">${icon}</span><span><div class="nm">${name}</div><div class="ds">${desc}</div></span></div>`;
         const numField = (key, label, hint, step) => `
             <label style="display:flex;align-items:center;gap:8px;justify-content:space-between">
                 <span style="color:#cfd6dc;font-size:12px">${label}<span style="color:#888;font-size:10px"> ${hint}</span></span>
@@ -27452,16 +27469,49 @@
             </label>`;
         box.innerHTML = `
             <button id="aim-gen-x" title="Close" style="position:absolute;top:8px;right:10px;width:24px;height:24px;line-height:22px;text-align:center;background:rgba(255,90,90,0.12);color:#ff8a80;border:1px solid rgba(255,90,90,0.45);border-radius:4px;cursor:pointer;font:inherit;font-size:14px;font-weight:700;padding:0">✕</button>
-            <div id="aim-gen-title" style="color:#7adfe6;font-weight:700;font-size:15px;margin-bottom:4px;cursor:move;user-select:none;padding-right:28px">⊕ Site Setup Generator <span style="color:#666;font-size:10px;font-weight:400">— drag · resize ↘</span></div>
-            <div style="color:#888;font-size:11px;margin-bottom:12px">${xmlEscape(siteName)} · ${assets.length} asset${assets.length === 1 ? '' : 's'} (${eligibleCount} eligible) · Phase A1 — inspection FFZs</div>
-            <div style="margin-bottom:12px;padding:8px 10px;background:rgba(95,255,95,0.06);border:1px dashed rgba(95,255,95,0.3);border-radius:3px;font-size:11px;color:#9ad;line-height:1.5">
+            <style>
+                #${GEN_MODAL_ID} [data-gen-tile]{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-radius:6px;border:1px solid rgba(255,255,255,0.10);background:rgba(255,255,255,0.03);cursor:pointer;transition:background .12s,border-color .12s;text-align:left}
+                #${GEN_MODAL_ID} [data-gen-tile]:hover{background:rgba(122,223,230,0.10);border-color:rgba(122,223,230,0.55)}
+                #${GEN_MODAL_ID} [data-gen-tile] .ic{font-size:20px;line-height:1;width:26px;text-align:center;flex:none}
+                #${GEN_MODAL_ID} [data-gen-tile] .nm{font-size:12px;font-weight:700;color:#e6e6e6}
+                #${GEN_MODAL_ID} [data-gen-tile] .ds{font-size:10px;color:#8a949e;line-height:1.35;margin-top:2px}
+                #${GEN_MODAL_ID} .gen-grp{font-size:10px;color:#9ad;text-transform:uppercase;letter-spacing:0.6px;font-weight:600;margin:10px 0 6px}
+                #${GEN_MODAL_ID} #aim-gen-back:hover{background:rgba(122,223,230,0.22)}
+            </style>
+            <div id="aim-gen-title" style="color:#7adfe6;font-weight:700;font-size:15px;margin-bottom:4px;cursor:move;user-select:none;padding-right:28px;display:flex;align-items:center;gap:8px">
+                <button id="aim-gen-back" data-gen-sec="tool" title="Back to the tool menu" style="width:24px;height:24px;line-height:20px;text-align:center;background:rgba(122,223,230,0.10);color:#7adfe6;border:1px solid rgba(122,223,230,0.45);border-radius:4px;cursor:pointer;font:inherit;font-size:16px;font-weight:700;padding:0;flex:none">‹</button>
+                <span>⊕ Generate<span id="aim-gen-page-name" style="color:#e6e6e6"></span></span>
+                <span style="color:#666;font-size:10px;font-weight:400">— drag · resize ↘</span>
+            </div>
+            <div style="color:#888;font-size:11px;margin-bottom:12px">${xmlEscape(siteName)} · ${assets.length} asset${assets.length === 1 ? '' : 's'} (${eligibleCount} eligible)</div>
+            <div id="aim-gen-menu" data-gen-sec="menu">
+                <div style="font-size:11px;color:#9ad;line-height:1.5;margin-bottom:4px">Pick a tool. Only that tool's controls show; <b style="color:#7adfe6">‹</b> brings you back here. Staged work stays on the map until the panel is closed.</div>
+                <div class="gen-grp">Build</div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px">
+                    ${genTile('ffz', '⊕', '#5fff5f', 'Inspection FFZs', 'One shielded inspection zone per asset near a power line')}
+                    ${genTile('adv', '✦', '#5fb8ff', 'Advanced Draw', 'Trace a corridor FFZ point-to-point with live shielding')}
+                    ${genTile('nfz', '⬠', '#ff5555', 'NFZs', 'Trace or stamp no-fly zones around anything')}
+                    ${genTile('fp', '🛩', '#00e5ff', 'Flight Paths', 'Route, load, snap and clean paths along the power lines')}
+                    ${genTile('routes', '🟠', '#ff9100', 'Convert Routes', 'Proposed Route KML → real FFZs and flight paths')}
+                    ${genTile('elv', '🛗', '#ff9a3d', 'Elevators', 'Climb-overs where paths cross transmission lines')}
+                    ${genTile('ext:swb', '🕸', '#8ec2ff', 'SpiderWeb', 'Unshielded site: zone per asset + high point-to-point paths')}
+                    ${genTile('ext:ter', '⛰', '#c9a6ff', 'Terrain Profiler', 'Elevation bands + proposed floors / ceilings (read-only)')}
+                </div>
+                <div class="gen-grp">Import</div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-bottom:6px">
+                    ${genTile('imp', '📥', '#7adfe6', 'Asset Import', 'CSV / KML asset list → staged points → real assets')}
+                    ${genTile('sci', '🔍', '#7adfe6', 'Scan Import', 'Apply Ortho Scanner decisions: NFZs + path legs')}
+                    ${genTile('ext:gmt', '📌', '#c39bd3', 'GM Stamper', 'Template-driven General Markers, one click each')}
+                </div>
+            </div>
+            <div data-gen-sec="ffz" style="margin-bottom:12px;padding:8px 10px;background:rgba(95,255,95,0.06);border:1px dashed rgba(95,255,95,0.3);border-radius:3px;font-size:11px;color:#9ad;line-height:1.5">
                 Builds <b>one open inspection FFZ</b> per qualifying asset — a single edge box on the <b>side nearest a power line</b> (the shield), inner edge the standoff off the asset, ≥30 ft deep. Only <b>Normal</b> assets within the proximity of a line qualify. Altitudes are <b>DEM-checked per FFZ</b>. Output is a <b>DRAFT</b> — <b>preview first, nothing is written</b> until Commit (coming next).
             </div>
-            <div id="aim-gen-pl-row" style="margin-bottom:14px;padding:6px 10px;background:rgba(255,213,79,0.06);border:1px dashed rgba(255,213,79,0.3);border-radius:3px;font-size:11px;display:flex;align-items:center;justify-content:space-between;gap:8px">
+            <div id="aim-gen-pl-row" data-gen-sec="ffz adv fp routes" style="margin-bottom:14px;padding:6px 10px;background:rgba(255,213,79,0.06);border:1px dashed rgba(255,213,79,0.3);border-radius:3px;font-size:11px;display:flex;align-items:center;justify-content:space-between;gap:8px">
                 <span><b style="color:#ffd54f">Power lines:</b> <span id="aim-gen-pl-status">checking…</span></span>
                 <button id="aim-gen-pl-refresh" style="background:transparent;color:#ffd54f;border:1px solid rgba(255,213,79,0.45);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">↻ Refresh</button>
             </div>
-            <div style="margin-bottom:14px">
+            <div data-gen-sec="ffz" style="margin-bottom:14px">
                 <div style="font-size:11px;color:#9ad;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Filters</div>
                 <div style="display:flex;flex-direction:column;gap:8px">
                     <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc"><input type="checkbox" id="aim-gen-skipbad" ${d.skipBadStates ? 'checked' : ''} style="accent-color:#7adfe6"> Skip unreachable / unshielded / empty <span style="color:#888;font-size:10px">(keeps Normal/Inactive/HY)</span></label>
@@ -27469,14 +27519,14 @@
                     ${numField('proximityFt', 'Max distance to power line', '(200 PL + 200 asset)', 25)}
                 </div>
             </div>
-            <div style="margin-bottom:14px">
+            <div data-gen-sec="ffz" style="margin-bottom:14px">
                 <div style="font-size:11px;color:#9ad;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">FFZ geometry</div>
                 <div style="display:flex;flex-direction:column;gap:8px">
                     ${numField('standoffFt', 'Standoff from asset', '(inner edge off the border)', 1)}
                     ${numField('depthFt', 'Edge depth', '(flyable thickness, ≥30)', 1)}
                 </div>
             </div>
-            <div style="margin-bottom:14px">
+            <div data-gen-sec="ffz adv" style="margin-bottom:14px">
                 <div style="font-size:11px;color:#9ad;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Altitude <span style="color:#888;text-transform:none;letter-spacing:0;font-weight:400">— floor = DEM ground + AGL, per FFZ</span></div>
                 <div style="display:flex;flex-direction:column;gap:8px">
                     ${numField('aglFt', 'AGL floor', '(above ground)', 5)}
@@ -27485,27 +27535,26 @@
                     <div id="aim-gen-altmode" style="margin-top:4px;padding:6px 8px;border-radius:3px;font-size:11px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.3);color:#9ad">Altitude reference: <span id="aim-gen-altmode-status">detecting…</span></div>
                 </div>
             </div>
-            <div id="aim-gen-stats" style="color:#9ad;font-size:11px;margin-bottom:12px;padding:6px 8px;background:rgba(122,223,230,0.08);border-radius:3px">Adjust parameters, then Preview.</div>
-            <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+            <div data-gen-sec="fp" style="margin-bottom:12px;padding:8px 10px;background:rgba(0,229,255,0.06);border:1px dashed rgba(0,229,255,0.3);border-radius:3px;font-size:11px;color:#9ad;line-height:1.5"><b style="color:#00e5ff">🛩 Routes</b> proposes base→asset flight paths along the power lines · <b>📥 Load site FPs</b> pulls the existing paths into the editable preview · <b>✨ Snap &amp; Clean</b> pulls them ~50 ft parallel to the lines · <b>🧲 CTRL-snap</b> arms snapping inside Percepto's native draw tool.</div>
+            <div data-gen-sec="routes" style="margin-bottom:12px;padding:8px 10px;background:rgba(255,145,0,0.06);border:1px dashed rgba(255,145,0,0.3);border-radius:3px;font-size:11px;color:#9ad;line-height:1.5">Converts the Map Styler's 🟠 <b>Proposed Routes</b> KML into real entities: route paths → flight paths, route polygons → FFZs. Preview, dry run and undo; create-only.</div>
+            <div id="aim-gen-stats" data-gen-sec="tool" style="color:#9ad;font-size:11px;margin-bottom:12px;padding:6px 8px;background:rgba(122,223,230,0.08);border-radius:3px">Adjust parameters, then Preview.</div>
+            <div data-gen-sec="tool" style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-bottom:14px">
                 <button id="aim-gen-close" style="background:transparent;color:#888;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Close</button>
-                <button id="aim-gen-clear" style="background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Clear preview</button>
-                <button id="aim-gen-draw" style="background:rgba(255,225,77,0.12);color:#ffe14d;border:1px solid rgba(255,225,77,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✏️ Draw</button>
-                <button id="aim-gen-advdraw" title="Advanced Draw — click the inner (asset-facing) edge point-to-point to build a zigzag corridor FFZ. Live full-box preview + shielding band on the line. Shift=angle-snap 15° off the last segment · Ctrl=magnet-snap to the offset off the nearest asset · F=flip width side · double-click/Enter=finish · Esc=undo last point. Autosaves; commits as ONE FFZ via Commit." style="background:rgba(95,184,255,0.12);color:#5fb8ff;border:1px solid rgba(95,184,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✦ Advanced Draw</button>
-                <button id="aim-gen-nfztrace" title="NFZ Trace — ALT+click to start, click to add vertices around anything (trace the shape exactly — the ring auto-grows by the Buffer on finish). Ctrl=snap onto the nearest asset's boundary · dbl-click/Enter=finish · Esc=undo last point. Grows by Buffer, pads to the min footprint, pulls overhangs inside the FFZ. Commits as type-4 NFZs, create-only." style="background:rgba(255,85,85,0.12);color:#ff5555;border:1px solid rgba(255,85,85,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">⬠ NFZ Trace</button>
-                <button id="aim-gen-nfzstamp" title="NFZ Stamp — ALT+click inside any asset polygon to instantly stage an NFZ = that asset's ring grown by the Buffer (min footprint + FFZ containment applied). Rapid-fire: keep ALT+clicking assets." style="background:rgba(255,85,85,0.12);color:#ff5555;border:1px solid rgba(255,85,85,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">⚡ NFZ Stamp</button>
-                <button id="aim-gen-import" title="Asset Importer — load a region CSV or KML, stage the points on the map (nothing is written), select a subset with a circle / freehand lasso / single picks, map CSV types to Percepto subtypes, and bulk-create the selection as real assets. Create-only + dry-run + backup. Also the inverse: 🗑 Delete mode spatially selects EXISTING assets for a heavily-confirmed bulk delete that rides Delete Guard." style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Import</button>
-                <button id="aim-gen-scan" title="Scan Import — load the Ortho Scanner review sheet's decisions JSON + scan bundle; accepted NFZs and flight-path leg changes stage on the map (green / yellow, removed legs red), preflight runs, then Apply writes them: NFZs create-only one POST each, flight paths one per request with Delete Guard backups. Nothing is written until Apply; dry run by default." style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🔍 Scan Import</button>
-                <button id="aim-gen-elev" title="Elevators — scan every flight path against the red transmission KML lines and stage an Elevator 1 / Bridge / Elevator 2 climb-over at each crossing (right-click a flight path → 🛗 for a manual point). Bands from DEM in MSL, 10 ft overlaps, preflight, one POST per flight path with backups, pole GM per crossing. Nothing is written until Commit; dry run by default." style="background:rgba(255,154,61,0.12);color:#ff9a3d;border:1px solid rgba(255,154,61,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🛗 Elevators</button>
-                <button id="aim-gen-fpsnap" title="Arm CTRL-snap for Percepto's native flight-path draw tool: hold CTRL while clicking to place a waypoint and it snaps ~50ft parallel to the nearest power line (purple dot shows where). Release CTRL = free point." style="background:rgba(186,140,255,0.12);color:#ba8cff;border:1px solid rgba(186,140,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🧲 CTRL-snap: off</button>
-                <button id="aim-gen-loadfp" title="Load the site's existing flight paths (drawn natively in Percepto) into the editable preview so they can be cleaned up." style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FPs</button>
-                <button id="aim-gen-loadffz" title="Load the site's existing FFZs (amber) into the editable preview — move / rotate / Alt-snap (auto-size) / resize them, then 💾 Save FFZ edits to write them back in place." style="background:rgba(255,179,71,0.12);color:#ffb347;border:1px solid rgba(255,179,71,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FFZs</button>
-                <button id="aim-gen-snapclean" title="Snap the whole loaded network ~50ft parallel to the power lines + clean up the vertices." style="background:rgba(186,140,255,0.14);color:#ba8cff;border:1px solid rgba(186,140,255,0.55);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✨ Snap &amp; Clean</button>
-                <button id="aim-gen-routes" style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🛩 Routes</button>
-                <button id="aim-gen-routes-json" title="Copy the last route result as JSON to the clipboard (to share for debugging)" style="background:rgba(0,229,255,0.08);color:#00e5ff;border:1px solid rgba(0,229,255,0.4);border-radius:3px;padding:8px 10px;cursor:pointer;font:inherit;font-size:12px">⧉ Copy JSON</button>
-                <button id="aim-gen-convroutes" title="Convert 🟠 Proposed Routes (drawn + committed in the Map Styler's route KML) into REAL entities: route paths → Flight Paths, route polygons → FFZs. FP endpoints auto-snap ≤50 ft to existing FP VERTICES (a shared waypoint extends that FP). Altitudes copied from the nearest existing entity. Preview + dry-run + undo; create-only." style="background:rgba(255,145,0,0.14);color:#ff9100;border:1px solid rgba(255,145,0,0.55);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🟠 Convert routes</button>
-                <button id="aim-gen-preview" style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:8px 18px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">👁 Preview on map</button>
+                <button id="aim-gen-clear" data-gen-sec="ffz fp" style="background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Clear preview</button>
+                <button id="aim-gen-draw" data-gen-sec="ffz" style="background:rgba(255,225,77,0.12);color:#ffe14d;border:1px solid rgba(255,225,77,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✏️ Draw</button>
+                <button id="aim-gen-advdraw" data-gen-sec="adv" title="Advanced Draw — click the inner (asset-facing) edge point-to-point to build a zigzag corridor FFZ. Live full-box preview + shielding band on the line. Shift=angle-snap 15° off the last segment · Ctrl=magnet-snap to the offset off the nearest asset · F=flip width side · double-click/Enter=finish · Esc=undo last point. Autosaves; commits as ONE FFZ via Commit." style="background:rgba(95,184,255,0.12);color:#5fb8ff;border:1px solid rgba(95,184,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✦ Advanced Draw</button>
+                <button id="aim-gen-nfztrace" data-gen-sec="nfz" title="NFZ Trace — ALT+click to start, click to add vertices around anything (trace the shape exactly — the ring auto-grows by the Buffer on finish). Ctrl=snap onto the nearest asset's boundary · dbl-click/Enter=finish · Esc=undo last point. Grows by Buffer, pads to the min footprint, pulls overhangs inside the FFZ. Commits as type-4 NFZs, create-only." style="background:rgba(255,85,85,0.12);color:#ff5555;border:1px solid rgba(255,85,85,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">⬠ NFZ Trace</button>
+                <button id="aim-gen-nfzstamp" data-gen-sec="nfz" title="NFZ Stamp — ALT+click inside any asset polygon to instantly stage an NFZ = that asset's ring grown by the Buffer (min footprint + FFZ containment applied). Rapid-fire: keep ALT+clicking assets." style="background:rgba(255,85,85,0.12);color:#ff5555;border:1px solid rgba(255,85,85,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">⚡ NFZ Stamp</button>
+                <button id="aim-gen-fpsnap" data-gen-sec="fp" title="Arm CTRL-snap for Percepto's native flight-path draw tool: hold CTRL while clicking to place a waypoint and it snaps ~50ft parallel to the nearest power line (purple dot shows where). Release CTRL = free point." style="background:rgba(186,140,255,0.12);color:#ba8cff;border:1px solid rgba(186,140,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🧲 CTRL-snap: off</button>
+                <button id="aim-gen-loadfp" data-gen-sec="fp" title="Load the site's existing flight paths (drawn natively in Percepto) into the editable preview so they can be cleaned up." style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FPs</button>
+                <button id="aim-gen-loadffz" data-gen-sec="ffz" title="Load the site's existing FFZs (amber) into the editable preview — move / rotate / Alt-snap (auto-size) / resize them, then 💾 Save FFZ edits to write them back in place." style="background:rgba(255,179,71,0.12);color:#ffb347;border:1px solid rgba(255,179,71,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FFZs</button>
+                <button id="aim-gen-snapclean" data-gen-sec="fp" title="Snap the whole loaded network ~50ft parallel to the power lines + clean up the vertices." style="background:rgba(186,140,255,0.14);color:#ba8cff;border:1px solid rgba(186,140,255,0.55);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✨ Snap &amp; Clean</button>
+                <button id="aim-gen-routes" data-gen-sec="fp" style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🛩 Routes</button>
+                <button id="aim-gen-routes-json" data-gen-sec="fp" title="Copy the last route result as JSON to the clipboard (to share for debugging)" style="background:rgba(0,229,255,0.08);color:#00e5ff;border:1px solid rgba(0,229,255,0.4);border-radius:3px;padding:8px 10px;cursor:pointer;font:inherit;font-size:12px">⧉ Copy JSON</button>
+                <button id="aim-gen-convroutes" data-gen-sec="routes" title="Convert 🟠 Proposed Routes (drawn + committed in the Map Styler's route KML) into REAL entities: route paths → Flight Paths, route polygons → FFZs. FP endpoints auto-snap ≤50 ft to existing FP VERTICES (a shared waypoint extends that FP). Altitudes copied from the nearest existing entity. Preview + dry-run + undo; create-only." style="background:rgba(255,145,0,0.14);color:#ff9100;border:1px solid rgba(255,145,0,0.55);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🟠 Convert routes</button>
+                <button id="aim-gen-preview" data-gen-sec="ffz" style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:8px 18px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">👁 Preview on map</button>
             </div>
-            <div id="aim-adv-controls" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(95,184,255,0.06);border:1px dashed rgba(95,184,255,0.35);border-radius:3px">
+            <div id="aim-adv-controls" data-gen-sec="adv" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(95,184,255,0.06);border:1px dashed rgba(95,184,255,0.35);border-radius:3px">
                 <div style="font-size:11px;color:#5fb8ff;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">✦ Advanced Draw</div>
                 <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;font-size:11px;color:#cfd6dc">
                     <label style="display:inline-flex;align-items:center;gap:4px" title="What the line you draw represents. FFZ inner edge = box starts at the line. Inner shielding edge = you trace around the assets and the standoff, FFZ, and outer shielding build outward.">Line <select id="aim-adv-anchor" style="background:#1a1d23;border:1px solid rgba(95,184,255,0.45);color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px"><option value="ffz-inner">= FFZ inner edge</option><option value="shielding">= shielding edge (on assets)</option></select></label>
@@ -27516,7 +27565,7 @@
                 </div>
                 <div style="font-size:10px;color:#7a8794;margin-top:6px"><b style="color:#ffd24d">ALT+click</b>=start a NEW corridor (plain click edits existing shapes) · <b style="color:#ff5fff">magenta dots</b>=snap flush to an existing corridor's centerline (matches width) · then <b style="color:#fff">click</b>=add points · <b style="color:#fff">drag a dot</b>=move vertex · <b style="color:#fff">drag an outer edge</b>=widen · <b style="color:#fff">Shift</b>=angle 15° · <b style="color:#fff">Ctrl</b>=snap to asset · <b style="color:#fff">F</b>=flip · <b style="color:#fff">dbl-click</b>=finish · <b style="color:#fff">Esc</b>=undo / turn off</div>
             </div>
-            <div id="aim-nfz-controls" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(255,85,85,0.06);border:1px dashed rgba(255,85,85,0.35);border-radius:3px">
+            <div id="aim-nfz-controls" data-gen-sec="nfz" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(255,85,85,0.06);border:1px dashed rgba(255,85,85,0.35);border-radius:3px">
                 <div style="font-size:11px;color:#ff5555;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">⬠ NFZ Draw — <span id="aim-nfz-count">0</span> draft(s)</div>
                 <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;font-size:11px;color:#cfd6dc;margin-bottom:8px">
                     <label style="display:inline-flex;align-items:center;gap:4px" title="Horizontal buffer: the traced/stamped ring grows outward by this much on finish — trace the shape exactly, the buffer does the safety margin.">Buffer <input type="number" id="aim-nfz-buffer" value="25" min="0" step="5" style="width:50px;background:#1a1d23;border:1px solid rgba(255,85,85,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px;text-align:right"> ft</label>
@@ -27526,14 +27575,16 @@
                     <button id="aim-nfz-undo" title="Delete exactly the NFZs the most recent commit created (this session). Each delete rides Delete Guard's 24h undo ring when installed." style="background:rgba(255,179,71,0.12);color:#ffb347;border:1px solid rgba(255,179,71,0.45);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">↩ Undo last commit</button>
                     <button id="aim-nfz-narrow" title="Paint every part of every NFZ (drafts + this session's commits + the site's live NFZs) that is NARROWER than the Min size — catches a thin notch/tab on an otherwise-large NFZ that the simple min-size check can't see. Click again to clear the yellow overlay." style="background:rgba(255,212,0,0.12);color:#ffd400;border:1px solid rgba(255,212,0,0.45);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">⚠ Narrow check</button>
                 </div>
-                <div id="aim-nfz-result" style="font-size:11px;color:#9ad;line-height:1.5">Drafts auto-grow by the Buffer, pad to the Min size, and pull inside the FFZ. Commit honors the Dry run checkbox in the Commit box.</div>
+                <div id="aim-nfz-result" style="font-size:11px;color:#9ad;line-height:1.5">Drafts auto-grow by the Buffer, pad to the Min size, and pull inside the FFZ. Commit honors the Dry run checkbox below.</div>
             </div>
-            <div id="aim-imp-controls" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.35);border-radius:3px"></div>
-            <div id="aim-sci-controls" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.35);border-radius:3px"></div>
-            <div id="aim-elv-controls" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(255,154,61,0.06);border:1px dashed rgba(255,154,61,0.35);border-radius:3px"></div>
-            <div style="padding:8px 10px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25);border-radius:3px">
+            <div id="aim-imp-controls" data-gen-sec="imp" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.35);border-radius:3px"></div>
+            <div id="aim-sci-controls" data-gen-sec="sci" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.35);border-radius:3px"></div>
+            <div id="aim-elv-controls" data-gen-sec="elv" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(255,154,61,0.06);border:1px dashed rgba(255,154,61,0.35);border-radius:3px"></div>
+            <div data-gen-sec="tool" style="margin-bottom:10px;padding:6px 10px;background:rgba(122,223,230,0.05);border:1px solid rgba(122,223,230,0.22);border-radius:3px">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc"><input type="checkbox" id="aim-gen-dryrun" checked style="accent-color:#7adfe6"> Dry run <span style="color:#888;font-size:10px">(build + count, don't write — every tool on this panel honors it)</span></label>
+            </div>
+            <div data-gen-sec="ffz adv" style="padding:8px 10px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25);border-radius:3px">
                 <div style="font-size:11px;color:#9ad;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Commit</div>
-                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc;margin-bottom:8px"><input type="checkbox" id="aim-gen-dryrun" checked style="accent-color:#7adfe6"> Dry run <span style="color:#888;font-size:10px">(build + count, don't write)</span></label>
                 <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc;margin-bottom:8px"><input type="checkbox" id="aim-gen-shield" style="accent-color:#ff2d2d"> Show shielding on drafts <span style="color:#888;font-size:10px">(red inner / yellow outer)</span></label>
                 <div style="display:flex;gap:8px;flex-wrap:wrap">
                     <button id="aim-gen-merge" title="Merge your drawn pieces into the final fused shapes RIGHT NOW so you can see exactly what will be created. Already-merged shapes stay; build more and merge again any time. Non-destructive." style="background:rgba(95,184,255,0.18);color:#5fb8ff;border:1px solid rgba(95,184,255,0.6);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">🔗 Merge</button>
@@ -27547,9 +27598,44 @@
         `;
         m.appendChild(box);
         document.body.appendChild(m);
+        // v4.341 HUB page switcher. Every [data-gen-sec] element lists the pages
+        // it belongs to; 'tool' = every page but the menu. Original inline
+        // display (flex / block / '') is remembered on first pass so flex rows
+        // come back as flex. Leaving the importer page disarms its select tools.
+        genState.page = null;
+        genShowPageLive = (page) => {
+            if (!GEN_PAGE_NAMES[page] && page !== 'menu') page = 'menu';
+            const prev = genState.page;
+            genState.page = page;
+            if (prev === 'imp' && page !== 'imp') { try { if (imp.mode) impSetMode(null); } catch (e) {} }
+            box.querySelectorAll('[data-gen-sec]').forEach(el => {
+                if (el.dataset.genDisplay === undefined) el.dataset.genDisplay = el.style.display === 'none' ? '' : el.style.display;
+                const secs = el.getAttribute('data-gen-sec').split(/\s+/);
+                const show = secs.includes(page) || (page !== 'menu' && secs.includes('tool'));
+                el.style.display = show ? el.dataset.genDisplay : 'none';
+            });
+            const nm = box.querySelector('#aim-gen-page-name');
+            if (nm) nm.textContent = page === 'menu' ? '' : ` · ${GEN_PAGE_NAMES[page]}`;
+            box.scrollTop = 0;
+        };
+        box.querySelector('#aim-gen-back').onclick = () => genShowPage('menu');
+        box.querySelector('#aim-gen-menu').addEventListener('click', (e) => {
+            const t = e.target.closest('[data-gen-tile]'); if (!t) return;
+            const p = t.getAttribute('data-gen-tile');
+            if (p === 'ext:swb') { try { swbOpen(); } catch (err) { console.warn(`${GEN_TAG} SpiderWeb open failed:`, err); } return; }
+            if (p === 'ext:ter') { if (!terMasterEnabled) { showToast('Terrain Profiler is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; } try { terrainProfilerRun(); } catch (err) { console.warn(`${GEN_TAG} Profiler open failed:`, err); } return; }
+            if (p === 'ext:gmt') { try { gmtOpenPanel(); } catch (err) { console.warn(`${GEN_TAG} GM Stamper open failed:`, err); } return; }
+            genShowPage(p);
+        });
+        box.querySelector('#aim-gen-menu').addEventListener('keydown', (e) => {
+            if (e.key !== 'Enter' && e.key !== ' ') return;
+            const t = e.target.closest('[data-gen-tile]'); if (!t) return;
+            e.preventDefault(); t.click();
+        });
         // Drag by the title (resize via the box's native ↘ handle).
         const titleEl = box.querySelector('#aim-gen-title');
         if (titleEl) titleEl.addEventListener('mousedown', (e) => {
+            if (e.target.closest('button')) return;   // ‹ back button lives in the drag handle
             e.preventDefault();
             const r = box.getBoundingClientRect();
             const ox = r.left, oy = r.top, sx = e.clientX, sy = e.clientY;
@@ -27924,6 +28010,7 @@
         if (imp.points.some(p => !p.done)) {           // staged points from this session → panel opens armed
             impShowPanel(); impRenderStaged(); impRenderShapes(); impRenderAssetSel();
         }
+        if (!genState.page) genShowPage('menu');       // v4.341: fresh open lands on the tile menu
 
         // Advanced Draw live controls — load remembered params first so the fields show them.
         advLoadParams();
