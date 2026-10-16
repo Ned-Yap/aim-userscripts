@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.74
+// @version      0.75
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -25,6 +25,7 @@
 //     table for Google Sheets / CSV, per-type checkboxes.
 //   📊 Fleet Metrics (bones): per-site entity counts from the Site Watch
 //     snapshot index; grouped by client when the /sites/ payload carries one.
+//     v0.75: scoped to the 📦 Fleet Data pick ("picked only", on by default).
 //   📡 Coverage (#285): radius circles on the landing map (drag / resize,
 //     sites-inside counts), picked-sites footprint, 🧠 best-spot / 🗂 plan
 //     (how many Ø-mile circles cover the fleet), 📏 ruler, KML export.
@@ -39,7 +40,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.74';
+    const SCRIPT_VERSION = '0.75';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -117,6 +118,7 @@
             // conflict classes to SHOW, and which clients are toggled off.
             view: { ffz: true, fp: true, asset: true },
             clientsOff: {},
+            mtPicked: true,          // v0.75: 📊 Fleet Metrics scoped to the 📦 Fleet Data pick (nothing picked → every site)
         };
     }
     function loadCfg() {
@@ -127,6 +129,7 @@
             if (typeof s.marginFt === 'number') d.marginFt = s.marginFt;
             if (typeof s.capPerPair === 'number') d.capPerPair = s.capPerPair;
             if (typeof s.onlyProduction === 'boolean') d.onlyProduction = s.onlyProduction;
+            if (typeof s.mtPicked === 'boolean') d.mtPicked = s.mtPicked;
             if (typeof s.showOnMap === 'boolean') d.showOnMap = s.showOnMap;
             if (typeof s.drawSetups === 'boolean') d.drawSetups = s.drawSetups;
             if (typeof s.basemap === 'string') d.basemap = s.basemap;
@@ -5570,8 +5573,12 @@
             return (na - nb) * mtSort.dir || a.name.localeCompare(b.name);
         });
     }
+    // v0.75: the 📦 Fleet Data pick scopes the metrics table, totals, exports
+    // and the approval report (same rule as 📡 Coverage: nothing picked → every site).
+    function mtPickedActive() { return !!(ftCfg.mtPicked && fdSelected.size); }
+    function mtScopeRows(rows) { return mtPickedActive() ? rows.filter(r => fdSelected.has(String(r.id))) : rows; }
     function mtFilteredRows() {
-        let rows = buildMetricsRows();
+        let rows = mtScopeRows(buildMetricsRows());
         if (ftCfg.onlyProduction) rows = rows.filter(r => !r.status || r.status === 'Production');
         const q = mtFilter.trim().toLowerCase();
         if (q) rows = rows.filter(r => r.name.toLowerCase().includes(q) || (r.client || '').toLowerCase().includes(q) || r.id === q || (r.status || '').toLowerCase().includes(q));
@@ -5624,7 +5631,7 @@
         const cols = MT_SETS[mtSet].cols;
         const th = (v) => `<th style="background:#14171b;color:#fff;padding:6px 8px;border:1px solid #444;text-align:left">${escapeHtml(v)}</th>`;
         const td = (v) => `<td style="padding:5px 8px;border:1px solid #444">${v}</td>`;
-        const out = [`<p><b>AIM Fleet Metrics — ${escapeHtml(MT_SETS[mtSet].label)}</b> — ${escapeHtml(new Date().toLocaleString())} — ${rows.length} site(s)</p>`];
+        const out = [`<p><b>AIM Fleet Metrics — ${escapeHtml(MT_SETS[mtSet].label)}</b> — ${escapeHtml(new Date().toLocaleString())} — ${rows.length} site(s)${mtPickedActive() ? ' (picked in Fleet Data)' : ''}</p>`];
         out.push('<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px"><tr>' + th('Site ID') + cols.map(k => th(MT_COLS[k].label)).join('') + '</tr>');
         rows.forEach(r => out.push('<tr>' + td(r.id) + cols.map(k => k === 'name' ? td(`<a href="${siteSetupUrl(r.id)}" style="color:#1a73e8">${escapeHtml(r.name)}</a>`) : td(escapeHtml(mtCellText(MT_COLS[k], r)))).join('') + '</tr>'));
         const tot = mtTotals(rows, cols);
@@ -5700,7 +5707,7 @@
     function mtApprovalRows() {
         const fps = [], sitesWith = new Set();
         let stale = 0;
-        buildMetricsRows().forEach(r => {
+        mtScopeRows(buildMetricsRows()).forEach(r => {
             if (!r.s) return;
             if (mtIndex.schema !== MT_SCHEMA || !Array.isArray(r.s.apprList)) { stale++; return; }   // record predates the field
             r.s.apprList.forEach(f => { fps.push({ sid: r.id, site: r.name, client: r.client, status: r.status, ageD: r.snapAgeD, live: !!r.s.live, name: f.name, id: f.id, appr: f.appr, arcs: f.arcs }); sitesWith.add(r.id); });
@@ -5828,6 +5835,8 @@
             + Object.keys(MT_SETS).map(k => `<span data-ft-mtset="${k}" style="cursor:pointer;padding:2px 8px;border-radius:10px;border:1px solid ${mtSet === k ? '#7adfe6' : '#2a3140'};color:${mtSet === k ? '#7adfe6' : '#aaa'};background:${mtSet === k ? '#1a2e33' : 'transparent'}">${MT_SETS[k].label}</span>`).join('')
             + `<input type="text" data-ft-mtfilter value="${escapeHtml(mtFilter)}" placeholder="filter site / client / status…" style="margin-left:auto;width:200px;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:2px 6px;font:inherit;">`
             + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Only sites whose /sites/ status is Production"><input type="checkbox" data-ft-flag="onlyProduction" ${ftCfg.onlyProduction ? 'checked' : ''}> Production only</label>`
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Only the sites ticked in 📦 Fleet Data (table, totals, Sheets / CSV, 🛂 Approval FPs). Nothing picked → every site."><input type="checkbox" data-ft-flag="mtPicked" ${ftCfg.mtPicked ? 'checked' : ''}> picked only <span style="color:${fdSelected.size ? '#5fff5f' : '#888'}">(${fdSelected.size})</span></label>`
+            + (ftCfg.mtPicked && !fdSelected.size ? '<span style="color:#ffa030" title="tick sites in 📦 Fleet Data to narrow the table">nothing picked → every site</span>' : '')
             + '</div>');
         const cols = MT_SETS[mtSet].cols;
         const tot = mtTotals(rows, cols);
@@ -7609,7 +7618,7 @@
             + renderKmlSection()
             + sectionHeader('xref', '📐', 'Cross-reference', 'KML vs sites / KML vs KML')
             + renderXrefSection()
-            + sectionHeader('metrics', '📊', 'Fleet Metrics', Object.keys(mtIndex.sites).length ? `${Object.keys(mtIndex.sites).length} sites · setups + missions` : 'setups + missions from Site Watch snapshots')
+            + sectionHeader('metrics', '📊', 'Fleet Metrics', Object.keys(mtIndex.sites).length ? `${Object.keys(mtIndex.sites).length} sites · setups + missions${mtPickedActive() ? ` · showing ${fdSelected.size} picked` : ''}` : 'setups + missions from Site Watch snapshots')
             + renderMetricsSection()
             + sectionHeader('surveys', '📄', 'Airspace Surveys', svIndex ? `${svRows().length} surveyed site(s) · ${svRows().filter(r => r.dueDays != null && r.dueDays < 0).length} due` : 'per-site survey reports from the Airspace Validator')
             + renderSurveysSection();
@@ -8048,6 +8057,11 @@
                         setStatus(flag.checked ? (n ? `📶 cell coverage dots ON — ${n} site(s)` : '📶 cell dots ON — no FCC stats yet: 📊 Fleet Metrics → 📶 Build cell coverage') : '📶 cell coverage dots OFF');
                         requestRender();
                     } else {
+                        if (prop === 'mtPicked') {
+                            setStatus(flag.checked ? (fdSelected.size ? `📊 metrics scoped to the ${fdSelected.size} site(s) picked in 📦 Fleet Data` : '📊 "picked only" ON — nothing picked in 📦 Fleet Data yet, showing every site') : '📊 metrics show every indexed site');
+                            renderPanel();
+                            return;
+                        }
                         setStatus(`${prop === 'onlyProduction' ? '"Production only"' : prop} ${flag.checked ? 'ON' : 'OFF'} — takes effect on the next sweep`);
                         if (prop === 'onlyProduction') renderPanel();
                     }
