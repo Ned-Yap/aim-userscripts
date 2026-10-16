@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.345
+// @version      4.346
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -15,6 +15,7 @@
 // @match        https://qa.percepto.app/static/dist/react-pages/*
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_deleteValue
 // @grant        GM_xmlhttpRequest
 // @grant        GM_openInTab
 // @require      https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/vendor/polygon-clipping-0.15.7.umd.js
@@ -89,7 +90,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.345';
+    const SCRIPT_VERSION = '4.346';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -13130,6 +13131,12 @@
             try { if (imp.points.length) { impComputeDups(); impRenderStaged(); impSyncUi(); } } catch (e) {}
             return;
         }
+        if (id === 'imp-autosave-min' && typeof msg.value === 'number') {
+            if (msg.value === impAutosaveMin || msg.value < 0) return;
+            impAutosaveMin = msg.value;
+            try { impAutosaveTimer(); } catch (e) {}
+            return;
+        }
         if (id === 'imp-size-ft' && typeof msg.value === 'number') {
             if (msg.value === impSizeFt || msg.value < 5 || msg.value > 2000) return;
             impSizeFt = msg.value;
@@ -13424,6 +13431,7 @@
                 { id: 'imp-master', label: 'Enable Asset Importer', type: 'boolean', default: true, master: true },
                 { id: 'imp-dup-ft', label: 'Nearby flag radius (staged point within N ft of an existing asset, not overlapping it — informational)', type: 'number', min: 0, max: 1000, step: 5, default: 50, unit: 'ft' },
                 { id: 'imp-size-ft', label: 'Created-asset square size', type: 'number', min: 5, max: 2000, step: 5, default: 55, unit: 'ft' },
+                { id: 'imp-autosave-min', label: 'Autosave import progress every N minutes (0 = only on change / close)', type: 'number', min: 0, max: 60, step: 1, default: 3, unit: 'min' },
                 { id: 'imp-open', label: '📥 Open Asset Importer', type: 'button', action: 'imp-open' },
             ],
             hotkeys: [],
@@ -22492,6 +22500,9 @@
     // (re-creates from our own pre-delete bank; NEW ids). Staged points are
     // NEVER written until Commit; parse + selection are fully local.
     // ============================================================
+    let impAutosaveMin = 3;                          // v4.346: CP 'imp-autosave-min' — periodic session save (0 = change/close only)
+    const IMP_SESSION_META = 'aim_imp_session_meta:';   // GM: per env-site small summary (banner)
+    const IMP_SESSION_DATA = 'aim_imp_session_data:';   // GM: per env-site full snapshot (rows + overrides + boundaries)
     const IMP_PARAMS_KEY = 'aim_imp_params';        // GM: {radiusVal, radiusUnit, includeDups}
     const IMP_MAPPINGS_KEY = 'aim_imp_mappings';    // GM: {headerSig: {name,lat,lng,type}} — vendor CSV remembers its mapping
     const IMP_TYPEMAP_KEY = 'aim_imp_typemap';      // GM: {csvTypeValueLower: percepto subtype} — global dictionary
@@ -22756,6 +22767,8 @@
                 imp.fileName = file.name;
                 imp.headers = parsed.headers;
                 imp.rows = parsed.rows;
+                imp.lastSavedAt = null;
+                try { impRenderResumeUi(); } catch (e) {}
                 imp.siteID = genState.siteID;
                 imp.points = []; imp.assetSel.clear(); imp.invalid = 0;   // v4.345: boundaries (imp.shapes) survive a data load — fence first, then load
                 imp.mapping = impStoredMapping(parsed.headers) || (isKml
@@ -22795,6 +22808,7 @@
             imp.points.push({ i, name: name || `Import ${i + 1}`, rawName: name, lat, lng, typeRaw: m.type ? (r[m.type] || '').trim() : '', notes: '', sel: false, dup: false, dupWhy: '', child: null, near: null, done: false });
         });
         impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type, notesCols: impNotesCols() });
+        impMarkDirty();
         imp.mapOpen = false;
         impRenderMappingUi();
         impBuildAssetIndex();
@@ -23028,6 +23042,7 @@
         }
     }
     function impRefreshAfterSelChange() {
+        impMarkDirty();
         impRecomputeSel();
         if (imp.target === 'assets') impRenderAssetSel(); else impRenderStaged();
         impRenderShapes(); impSyncUi();
@@ -23415,6 +23430,7 @@
         const inCss = 'background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px;text-align:right';
         host.innerHTML = `
             <div style="font-size:11px;color:#7adfe6;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">📥 Asset Importer — <span id="aim-imp-file-label" style="text-transform:none;letter-spacing:0">${impEsc(imp.fileName || 'no file loaded')}</span></div>
+            <div id="aim-imp-resume" style="display:none;margin-bottom:8px"></div>
             <div id="aim-imp-bounds" style="margin-bottom:8px;padding:6px 8px;background:rgba(186,140,255,0.05);border:1px dashed rgba(186,140,255,0.4);border-radius:3px">
                 <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
                     <span style="font-size:11px;color:#ba8cff;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Boundaries</span>
@@ -23433,6 +23449,9 @@
                 <span style="font-size:11px;color:#7adfe6;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Data</span>
                 <button id="aim-imp-load" style="${btnCss('122,223,230')}">📂 Load CSV / KML</button>
                 <span style="color:#888;font-size:10px">or drag &amp; drop the file onto this panel</span>
+                <span style="flex:1"></span>
+                <button id="aim-imp-save" title="Save everything on this page — file, mapping, moved / removed points, boundaries — so you can pick up after a reload, a crash or a day off. Also saved automatically 3 s after any change and every few minutes (Control Panel → Asset Importer)." style="${btnCss('95,255,95')};display:none">💾 Save progress</button>
+                <span id="aim-imp-saved-note" style="color:#888;font-size:10px"></span>
             </div>
             <div id="aim-imp-mapping" style="margin-bottom:8px"></div>
             <div id="aim-imp-typemap" style="margin-bottom:8px"></div>
@@ -23471,6 +23490,8 @@
         impWirePanelControls(host);
         impRenderMappingUi();
         impRenderTypeMapUi();
+        impRenderResumeUi();
+        impAutosaveTimer();
         impSyncUi();
     }
     function impWirePanelControls(host) {
@@ -23498,6 +23519,7 @@
         q('aim-imp-pick').onclick = () => impSetMode(imp.mode === 'pick' ? null : 'pick');
         q('aim-imp-edit').onclick = () => impSetMode(imp.mode === 'edit' ? null : 'edit');
         q('aim-imp-move').onclick = () => impSetMode(imp.mode === 'move' ? null : 'move');
+        q('aim-imp-save').onclick = () => { impSaveSession('manual'); };
         q('aim-imp-resetmoves').onclick = () => {
             let n = 0;
             let r = 0;
@@ -23926,6 +23948,9 @@
             if (uc) uc.style.display = imp.lastCreated.length ? '' : 'none';
             const fl = document.getElementById('aim-imp-file-label');
             if (fl) fl.textContent = imp.fileName ? `${imp.fileName} · ${live.length} staged · ${selN} selected` : 'no file loaded';
+            const sb = document.getElementById('aim-imp-save'), sn = document.getElementById('aim-imp-saved-note');
+            if (sb) sb.style.display = imp.headers.length ? '' : 'none';
+            if (sn) sn.textContent = !imp.headers.length ? '' : (imp.dirty ? 'unsaved changes — autosaves in a moment' : (imp.lastSavedAt ? `💾 saved ${impFmtWhen(imp.lastSavedAt)}` : ''));
         } catch (e) {}
     }
     // ---- COMMIT: create-only, rides createAssetSquare (template clone, Lite
@@ -24304,7 +24329,108 @@
         showToast(fail ? `Restore: ${ok} ok, ${fail} FAILED` : `↩ ${ok} asset(s) restored`, fail ? 'rgba(255,96,96,0.55)' : undefined);
     }
     // ---- teardown (closeSiteGenerator) + panel show + CP open action ----
+    // ---- v4.346: SESSION SAVE / RESUME — a multi-hour placement job must survive
+    // a crash, a reload or a day off. Snapshot = the file (headers + rows as
+    // arrays), the mapping, every per-point override (moved coords, removed,
+    // created, manual select) and the boundaries, keyed per env-site in GM
+    // (Percepto sign-out wipes localStorage; GM survives). Saved 3 s after any
+    // change, every N minutes while dirty, on 💾, and on page hide. ----
+    let impAutosaveT = null, impAutosaveIv = null;
+    function impSessionKey() { return imp.siteID ? envSiteKey(imp.siteID) : null; }
+    function impMarkDirty() {
+        if (!imp.siteID || !imp.headers.length) return;
+        imp.dirty = true;
+        clearTimeout(impAutosaveT);
+        impAutosaveT = setTimeout(() => { try { impSaveSession('auto'); } catch (e) { console.warn(`${TAG} 📥 autosave failed:`, e); } }, 3000);
+    }
+    function impAutosaveTimer() {
+        clearInterval(impAutosaveIv); impAutosaveIv = null;
+        if (impAutosaveMin > 0) impAutosaveIv = setInterval(() => { if (imp.dirty) { try { impSaveSession('timer'); } catch (e) { console.warn(`${TAG} 📥 autosave failed:`, e); } } }, impAutosaveMin * 60000);
+    }
+    function impSaveSession(why) {
+        const k = impSessionKey(); if (!k || !imp.headers.length) return false;
+        const hdr = imp.headers;
+        const data = {
+            v: 1, savedAt: new Date().toISOString(), fileName: imp.fileName, headers: hdr,
+            rows: imp.rows.map(r => hdr.map(h => r[h] == null ? '' : String(r[h]))),
+            mapping: imp.mapping, invalid: imp.invalid,
+            points: imp.points.map(p => {
+                const o = { i: p.i };
+                if (p.orig) { o.lat = p.lat; o.lng = p.lng; o.orig = p.orig; }
+                if (p.removed) o.removed = true;
+                if (p.done && !p.removed) o.created = true;
+                if (p.selManual !== undefined) o.selManual = p.selManual;
+                return (Object.keys(o).length > 1) ? o : null;
+            }).filter(Boolean),
+            shapes: imp.shapes.map(sh => sh.kind === 'circle' ? { id: sh.id, kind: 'circle', center: sh.center, radiusM: sh.radiusM, name: sh.name || '' } : { id: sh.id, kind: sh.kind, ring: sh.ring, handle: sh.handle, name: sh.name || '' }),
+            shapeSeq: imp.shapeSeq,
+        };
+        const json = JSON.stringify(data);
+        const live = imp.points.filter(p => !p.done).length;
+        const meta = { v: 1, savedAt: data.savedAt, fileName: imp.fileName, rows: imp.rows.length, live, moved: imp.points.filter(p => p.orig).length, removed: imp.points.filter(p => p.removed).length, created: imp.points.filter(p => p.done && !p.removed).length, shapes: imp.shapes.length, bytes: json.length, siteName: getCurrentSiteName() || '' };
+        try { GM_setValue(IMP_SESSION_DATA + k, json); GM_setValue(IMP_SESSION_META + k, JSON.stringify(meta)); }
+        catch (e) { console.warn(`${TAG} 📥 session save failed (${why}):`, e); impStatus(`💾 save failed: ${impEsc(e && e.message || e)}`, '#ff6060'); return false; }
+        imp.dirty = false; imp.lastSavedAt = data.savedAt;
+        clearTimeout(impAutosaveT);
+        try { impSyncUi(); } catch (e) {}
+        if (why === 'manual') impStatus(`💾 progress saved (${(json.length / 1048576).toFixed(1)} MB) — resume from the Asset Import page any time, even after a reload or sign-out`);
+        return true;
+    }
+    function impSessionMeta(k) { try { const m = JSON.parse(GM_getValue(IMP_SESSION_META + k, '') || 'null'); return m && m.v === 1 ? m : null; } catch (e) { return null; } }
+    function impDiscardSession() {
+        const k = impSessionKey(); if (!k) return;
+        try { GM_deleteValue(IMP_SESSION_DATA + k); GM_deleteValue(IMP_SESSION_META + k); } catch (e) {}
+        imp.dirty = false; imp.lastSavedAt = null;
+        impRenderResumeUi(); impSyncUi();
+    }
+    function impResumeSession() {
+        const k = impSessionKey(); if (!k) return;
+        let d; try { d = JSON.parse(GM_getValue(IMP_SESSION_DATA + k, '') || 'null'); } catch (e) { d = null; }
+        if (!d || d.v !== 1 || !Array.isArray(d.headers) || !Array.isArray(d.rows)) { impStatus('No usable saved session for this site', '#ffb347'); impDiscardSession(); return; }
+        const hdr = d.headers;
+        imp.fileName = d.fileName; imp.headers = hdr;
+        imp.rows = d.rows.map(arr => { const o = {}; hdr.forEach((h, i) => { o[h] = arr[i] == null ? '' : arr[i]; }); return o; });
+        imp.mapping = d.mapping || impGuessMapping(hdr);
+        imp.points = []; imp.assetSel.clear(); imp.assetManual.clear(); imp.invalid = 0;
+        imp.shapes = (d.shapes || []).map(sh => sh.kind === 'circle' ? { id: sh.id, kind: 'circle', center: sh.center, radiusM: sh.radiusM, name: sh.name || '' } : { id: sh.id, kind: sh.kind || 'lasso', ring: sh.ring, handle: sh.handle || ringCentroid(sh.ring), name: sh.name || '' });
+        imp.shapeSeq = Math.max(d.shapeSeq || 1, ...imp.shapes.map(sh => sh.id + 1), 1);
+        imp.mapOpen = false;
+        impRenderMappingUi();
+        impBuildPoints();                                            // rebuilds points from rows + mapping (also recomputes dups/flags)
+        const byI = new Map(imp.points.map(p => [p.i, p]));
+        let moved = 0, removed = 0, created = 0;
+        (d.points || []).forEach(o => {
+            const p = byI.get(o.i); if (!p) return;
+            if (o.orig) { p.orig = o.orig; p.lat = o.lat; p.lng = o.lng; moved++; }
+            if (o.removed) { p.removed = true; p.done = true; p.sel = false; removed++; }
+            if (o.created) { p.done = true; p.sel = false; created++; }
+            if (o.selManual !== undefined) p.selManual = o.selManual;
+        });
+        try { impComputeDups(); } catch (e) {}
+        impRefreshAfterSelChange();
+        imp.dirty = false; imp.lastSavedAt = d.savedAt;
+        impRenderResumeUi(); impRenderTypeMapUi(); impSyncUi();
+        impStatus(`↻ resumed <b>${impEsc(d.fileName || 'file')}</b> saved ${impEsc(impFmtWhen(d.savedAt))} — ${imp.points.filter(p => !p.done).length} staged · ${moved} moved · ${removed} removed · ${created} already created · ${imp.shapes.length} boundar${imp.shapes.length === 1 ? 'y' : 'ies'}`);
+    }
+    function impFmtWhen(iso) { try { const d = new Date(iso); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; } catch (e) { return String(iso || ''); } }
+    function impRenderResumeUi() {
+        const el = document.getElementById('aim-imp-resume'); if (!el) return;
+        const k = impSessionKey(); const m = k ? impSessionMeta(k) : null;
+        const inMemory = imp.headers.length > 0;
+        if (!m || inMemory) { el.innerHTML = ''; el.style.display = 'none'; return; }
+        el.style.display = '';
+        el.innerHTML = `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:6px 8px;background:rgba(95,255,95,0.07);border:1px solid rgba(95,255,95,0.45);border-radius:3px;font-size:11px;color:#cfd6dc">
+            <b style="color:#5fff5f">↻ Saved progress</b> <span>${impEsc(m.fileName || 'file')} · saved ${impEsc(impFmtWhen(m.savedAt))} · ${m.live} staged${m.moved ? ` · ${m.moved} moved` : ''}${m.removed ? ` · ${m.removed} removed` : ''}${m.created ? ` · ${m.created} created` : ''} · ${m.shapes} boundar${m.shapes === 1 ? 'y' : 'ies'} · ${(m.bytes / 1048576).toFixed(1)} MB</span>
+            <span style="flex:1"></span>
+            <button id="aim-imp-resume-go" style="background:rgba(95,255,95,0.18);color:#5fff5f;border:1px solid rgba(95,255,95,0.6);border-radius:3px;padding:3px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">↻ Resume</button>
+            <button id="aim-imp-resume-drop" style="background:transparent;color:#ff8a80;border:1px solid rgba(255,90,90,0.45);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px">Discard</button>
+        </div>`;
+        el.querySelector('#aim-imp-resume-go').onclick = () => { try { impResumeSession(); } catch (e) { console.warn(`${TAG} 📥 resume failed:`, e); impStatus(`Resume failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } };
+        el.querySelector('#aim-imp-resume-drop').onclick = () => { if (confirm(`Discard the saved import progress for this site (${m.fileName || 'file'}, saved ${impFmtWhen(m.savedAt)})?`)) impDiscardSession(); };
+    }
+    try { uwin().addEventListener('pagehide', () => { if (imp.dirty) { try { impSaveSession('pagehide'); } catch (e) {} } }, true); } catch (e) {}
     function impTeardown() {
+        if (imp.dirty) { try { impSaveSession('close'); } catch (e) {} }
         try { impSetMode(null); } catch (e) {}
         impEnsureMoveEnd(false);
         impClearLayers(); impClearShapeLayers(); impClearAssetLayers();
@@ -27721,7 +27847,7 @@
             steps: ['🔍 Scan crossings (or right-click a flight path → 🛗 for a manual point).', 'Review each staged crossing — bridge height, elevator lengths, preflight result.', 'Untick Dry run → Commit. ↩ Undo restores the flight paths and deletes the poles.'],
             test: 'Scan a site with a known transmission crossing, confirm one staged set per crossing, Commit with Dry run ON.' },
         imp: { what: 'Bring a client asset list into Percepto. Load a CSV or KML → points stage on the map (nothing written) → narrow with boundaries → map the type → ✓ Create makes real asset squares. Create-only, with dry run, backup manifest and undo.',
-            steps: ['Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
+            steps: ['Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
             test: 'Load the list, add one boundary, confirm the selected count drops, Create with Dry run ON.' },
         sci: { what: 'Applies the Ortho Scanner review sheet\'s decisions: accepted NFZs and flight-path leg changes stage on the map (green / yellow, removed legs red), preflight runs, then Apply writes them — NFZs create-only, flight paths one POST each with Delete Guard backups.',
             steps: ['Load the decisions JSON and the scan bundle from the review sheet.', 'Check the staged plan on the map and the preflight result.', 'Untick Dry run → Apply.'],
@@ -28324,12 +28450,14 @@
         // 📥 Asset Importer (feature #249)
         impLoadParams(); impLoadTypeMap();
         if (imp.siteID && String(imp.siteID) !== String(siteID)) {
+            if (imp.dirty) { try { impSaveSession('site-change'); } catch (e) {} }
             // a different site must never inherit another site's staged points
             imp.fileName = null; imp.headers = []; imp.rows = []; imp.mapping = null;
             imp.points = []; imp.shapes = []; imp.shapeSeq = 1; imp.assetSel.clear(); imp.assetManual.clear();
             imp.lastCreated = []; imp.lastDelete = null; imp.assetIndex = null;
             imp.target = 'staged'; imp.siteID = String(siteID);
         }
+        if (!imp.siteID) imp.siteID = String(siteID);   // v4.346: resume banner keys off the site
         impRenderPanelBody();
         // v4.325: 🔍 Scan Import panel — files survive modal close on the SAME site; a new site resets.
         if (sci.siteID !== String(siteID)) { sciClearLayers(); sci = { siteID: String(siteID), dec: null, scan: null, decName: null, scanName: null, plan: null, layers: [], running: false, stop: false, report: null, siteCfg: null }; }
