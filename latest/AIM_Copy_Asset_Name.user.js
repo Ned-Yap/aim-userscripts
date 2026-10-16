@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.346
+// @version      4.347
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -90,7 +90,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.346';
+    const SCRIPT_VERSION = '4.347';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22521,6 +22521,9 @@
         moveHeld: null, moveDrag: false, moveDownPt: null,   // v4.344: ↔ Move point — the staged point being carried
         radiusVal: 3, radiusUnit: 'mi', includeDups: false,   // v4.343: 3 mi = the usual base reach circle
         keepShield: true,                           // v4.343: keep "- unsh" / "shielded" modifiers in subtypes (off = strip them)
+        dupMode: 'update',                          // v4.347: name matches an existing asset → 'skip' | 'update' (type + notes only) | 'copy' (create "-N")
+        lastUpdated: [],                            // v4.347: [{id, before}] bodies from the last commit's updates — ↩ undo re-POSTs them
+        pri: { on: false, open: false, oilCol: null, waterCol: null, blpdCol: null, priCol: null, clusterFt: 100, padFt: 50, p1Min: 250, p1Max: 1500, summary: null },   // v4.347: priority tiers
         advOpen: false,                             // v4.331: ▸ Advanced (subset tools + delete mode) expanded — GM-remembered
         mapOpen: false,                             // v4.331: column-mapping row expanded (auto-collapses once applied)
         // LIVE selection model (v4.250): selected = manual override ?? inside-any-shape.
@@ -22540,7 +22543,7 @@
         lastDelete: null,                           // {siteID, when, entities:[full bodies]} — ↩ Undo batch source
         assetIndex: null,                           // cached [{id,name,clean,ring,bbox,centroid}] for dup-guard + delete select
     };
-    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield })); } catch (e) {} }
+    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open } })); } catch (e) {} }
     function impLoadParams() {
         try {
             const raw = GM_getValue(IMP_PARAMS_KEY, ''); if (!raw) return;
@@ -22550,6 +22553,10 @@
             if (typeof o.includeDups === 'boolean') imp.includeDups = o.includeDups;
             if (typeof o.advOpen === 'boolean') imp.advOpen = o.advOpen;
             if (typeof o.keepShield === 'boolean') imp.keepShield = o.keepShield;
+            if (o.dupMode === 'skip' || o.dupMode === 'update' || o.dupMode === 'copy') imp.dupMode = o.dupMode;
+            else if (typeof o.includeDups === 'boolean' && o.includeDups) imp.dupMode = 'copy';
+            if (o.pri && typeof o.pri === 'object') ['clusterFt', 'padFt', 'p1Min', 'p1Max'].forEach(k => { if (typeof o.pri[k] === 'number' && o.pri[k] >= 0) imp.pri[k] = o.pri[k]; });
+            if (o.pri && typeof o.pri.open === 'boolean') imp.pri.open = o.pri.open;
         } catch (e) {}
     }
     // v4.343: shielding modifiers on a subtype ("v - pumping rod - unsh",
@@ -22562,6 +22569,207 @@
         return t.replace(/[\s\-–—:]+$/, '').trim() || String(v || '').trim();
     }
     function impApplyShield(v) { return imp.keepShield ? v : impStripShield(v); }
+
+    // ---- v4.347 PRIORITY TIERS (client rule, confirmed with the account manager 2026-10-16) ----
+    // BLPD = oil + water per PAD (all assets on the pad summed). P3 < p1Min ·
+    // P1 p1Min..p1Max · P2 > p1Max. P1 is the MIDDLE band on purpose: the
+    // biggest producers have people on them, mid producers don't. The tier
+    // is written as a TYPE prefix ("P1 - v - pumping rod") — never the name
+    // (the name is the identity we match on next quarter) — plus a Priority /
+    // Prioritized block in the notes. Pad = the nested parent/child tree +
+    // anything within padFt of the pad polygon; brand-new points cluster by
+    // clusterFt. A pad with no numbers gets NO prefix and is flagged.
+    const IMP_TIER_RE = /^P([1-3])\s*[-–—:]\s*/i;
+    function impTierStrip(sub) { return String(sub || '').replace(IMP_TIER_RE, '').trim(); }
+    function impTierOf(sub) { const m = String(sub || '').match(IMP_TIER_RE); return m ? `P${m[1]}` : ''; }
+    function impNum(v) { if (v == null) return null; const t = String(v).replace(/[,$\s]/g, ''); if (!t) return null; const n = parseFloat(t); return isFinite(n) ? n : null; }
+    function impGuessPriCols(headers) {
+        const lower = headers.map(h => String(h).toLowerCase());
+        const pick = (rx, not) => { const i = lower.findIndex(h => rx.test(h) && !(not && not.test(h))); return i >= 0 ? headers[i] : null; };
+        const oil = pick(/\boil\b|oil_/, /api|well_origin/), water = pick(/\bwater\b|water_|\bwtr\b/, null);
+        const blpd = (oil && water) ? null : pick(/blpd|fluid|total.*prod|production.*(total|vol)|\bprod\b/, /method|name|type/);
+        let pri = null;
+        headers.forEach(h => {
+            if (pri) return;
+            const vals = imp.rows.map(r => String(r[h] == null ? '' : r[h]).trim()).filter(Boolean);
+            if (vals.length >= 3 && vals.filter(v => /^P?[1-3]$/i.test(v)).length >= vals.length * 0.8 && /pri|tier|rank/i.test(h)) pri = h;
+        });
+        return { oilCol: oil, waterCol: water, blpdCol: blpd, priCol: pri };
+    }
+    function impPriBlpd(p) {
+        const r = imp.rows[p.i] || {}; const c = imp.pri;
+        if (c.priCol) return null;
+        if (c.blpdCol) return impNum(r[c.blpdCol]);
+        const o = c.oilCol ? impNum(r[c.oilCol]) : null, w = c.waterCol ? impNum(r[c.waterCol]) : null;
+        if (o == null && w == null) return null;
+        return (o || 0) + (w || 0);
+    }
+    function impTierFromTotal(t) { const c = imp.pri; if (t == null) return ''; return t < c.p1Min ? 'P3' : (t <= c.p1Max ? 'P1' : 'P2'); }
+    function impRootOfAsset(id) {
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        if (!imp._rootCache || imp._rootCache.n !== ents.length) {
+            const byName = new Map(), byId = new Map();
+            ents.filter(e => e && e.type === 3).forEach(e => { byName.set(String(e.name || '').trim(), e); byId.set(e.id, e); });
+            const cache = new Map();
+            byId.forEach((e, eid) => {
+                let cur = e, hops = 0, root = e;
+                while (cur && hops++ < 20) { const pn = typeof cur.parent_asset_name === 'string' ? cur.parent_asset_name.trim() : ''; if (!pn) break; const par = byName.get(pn); if (!par || par.id === cur.id) break; root = par; cur = par; }
+                cache.set(eid, { id: root.id, name: root.name || '' });
+            });
+            imp._rootCache = { n: ents.length, map: cache };
+        }
+        return imp._rootCache.map.get(id) || { id, name: '' };
+    }
+    function impComputePriority() {
+        const c = imp.pri;
+        const live = imp.points.filter(p => !p.done);
+        live.forEach(p => { p.pri = null; });
+        if (!c.on || !live.length) { c.summary = null; return; }
+        const direct = !!c.priCol;
+        // 1. per-point numbers / direct tiers
+        live.forEach(p => {
+            const r = imp.rows[p.i] || {};
+            const d = direct ? String(r[c.priCol] == null ? '' : r[c.priCol]).trim().toUpperCase().replace(/^(\d)$/, 'P$1') : '';
+            p.pri = { blpd: direct ? null : impPriBlpd(p), direct: /^P[1-3]$/.test(d) ? d : '', tier: '', padKey: null, padName: '', padTotal: null, padN: 0, padWith: 0, flags: [], before: p.dup ? impTierOf(p.dupSubtype) : '' };
+        });
+        // 2. pad membership — existing pad root (dup / inside / within padFt) first
+        const rootFor = (p) => {
+            let id = null;
+            if (p.dup && p.dupId != null) id = p.dupId;
+            else if (p.child && p.child.id != null) id = p.child.id;
+            else if (p.near && p.near.id != null && p.near.ft <= c.padFt) id = p.near.id;
+            return id == null ? null : impRootOfAsset(id);
+        };
+        // 3. cluster every live point within clusterFt (union-find, lat-sorted sweep)
+        const n = live.length, parent = new Array(n).fill(0).map((_, i) => i);
+        const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+        const union = (a, b) => { a = find(a); b = find(b); if (a !== b) parent[a] = b; };
+        const order = live.map((p, i) => i).sort((a, b) => live[a].lat - live[b].lat);
+        const dLat = (c.clusterFt * GEN_FT_TO_M / 111320) * 1.02;
+        for (let a = 0; a < n; a++) {
+            const ia = order[a], pa = live[ia];
+            for (let b = a + 1; b < n; b++) {
+                const ib = order[b], pb = live[ib];
+                if (pb.lat - pa.lat > dLat) break;
+                if (approxMeters(pa.lat, pa.lng, pb.lat, pb.lng) <= c.clusterFt * GEN_FT_TO_M) union(ia, ib);
+            }
+        }
+        const comps = new Map();
+        live.forEach((p, i) => { const k = find(i); if (!comps.has(k)) comps.set(k, []); comps.get(k).push(p); });
+        // 4. pad key per component: an existing root if any member sits on one (several roots = flag), else the cluster
+        const pads = new Map();
+        let ci = 0;
+        comps.forEach((members) => {
+            ci++;
+            const roots = new Map();
+            members.forEach(p => { const r = rootFor(p); if (r) roots.set(r.id, r); });
+            const key = roots.size ? `a:${[...roots.keys()][0]}` : `c:${ci}`;
+            const padName = roots.size ? ([...roots.values()][0].name || `asset ${[...roots.keys()][0]}`) : `new pad ${ci}`;
+            const with_ = members.filter(p => direct ? p.pri.direct : p.pri.blpd != null);
+            const total = direct ? null : with_.reduce((a, p) => a + p.pri.blpd, 0);
+            let tier = direct ? '' : (with_.length ? impTierFromTotal(total) : '');
+            const flags = [];
+            if (!with_.length) flags.push(direct ? 'no priority value for this pad' : 'no production numbers for this pad');
+            else if (!direct && with_.length < members.length) flags.push(`${members.length - with_.length} of ${members.length} assets without numbers`);
+            if (roots.size > 1) flags.push(`spans ${roots.size} existing pads (${[...roots.values()].map(r => r.name).join(', ')}) — check the ${c.clusterFt} ft cluster distance`);
+            if (direct) { const set = new Set(with_.map(p => p.pri.direct)); if (set.size > 1) flags.push(`assets on one pad carry different priorities (${[...set].join(', ')})`); if (set.size === 1) tier = [...set][0]; }
+            members.forEach(p => { p.pri.padKey = key; p.pri.padName = padName; p.pri.padTotal = total; p.pri.padN = members.length; p.pri.padWith = with_.length; p.pri.tier = direct ? (p.pri.direct || tier) : tier; p.pri.flags = flags.slice(); });
+            pads.set(key, { key, name: padName, members, total, tier, flags });
+        });
+        // 5. summary
+        const cnt = { P1: 0, P2: 0, P3: 0, none: 0 }, chg = { same: 0, changed: 0, new: 0, untier: 0 };
+        live.forEach(p => {
+            cnt[p.pri.tier || 'none']++;
+            if (!p.dup) chg.new++; else if (!p.pri.tier) chg.untier++; else if (p.pri.before === p.pri.tier) chg.same++; else chg.changed++;
+        });
+        c.summary = { pads: pads.size, flagged: [...pads.values()].filter(x => x.flags.length).length, cnt, chg, padsList: [...pads.values()] };
+    }
+    function impPriNotesBlocks(p, dateStr) {
+        const c = imp.pri; if (!c.on || !p.pri) return [];
+        const fmt = (n) => n == null ? '—' : Math.round(n).toLocaleString();
+        const q = p.pri;
+        const line = q.tier
+            ? `${q.tier} · ${c.priCol ? 'from the client\'s priority column' : `pad total ${fmt(q.padTotal)} BLPD across ${q.padN} asset${q.padN === 1 ? '' : 's'}${q.padWith < q.padN ? ` (${q.padWith} with numbers)` : ''}`}${q.blpd != null ? ` · this asset ${fmt(q.blpd)} BLPD` : ''}${q.padName && !/^new pad/.test(q.padName) ? ` · pad ${q.padName}` : ''}`
+            : `not tiered — ${q.flags[0] || 'no numbers'}`;
+        return [`Priority\n${line}`, `Prioritized\n${dateStr}`];
+    }
+    function impTierPrefix(p, subtype) {
+        const base = impTierStrip(subtype);
+        if (!imp.pri.on || !p.pri || !p.pri.tier) return base;
+        return `${p.pri.tier} - ${base}`;
+    }
+    function impRenderPriUi() {
+        const el = document.getElementById('aim-imp-pri'); if (!el) return;
+        if (!imp.headers.length) { el.innerHTML = ''; return; }
+        const c = imp.pri;
+        if (c.oilCol === null && c.waterCol === null && c.blpdCol === null && c.priCol === null && !c._guessed) { Object.assign(c, impGuessPriCols(imp.headers)); c._guessed = true; }
+        const inCss = 'background:#1a1d23;border:1px solid rgba(255,179,71,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px';
+        const sel = (key, label, title) => `<label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="${impEsc(title)}">${label} <select data-impri="${key}" style="max-width:150px;${inCss}"><option value="">— none —</option>${imp.headers.map(h => `<option value="${impEsc(h)}"${c[key] === h ? ' selected' : ''}>${impEsc(h)}</option>`).join('')}</select></label>`;
+        const num = (key, label, step) => `<label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc">${label} <input type="number" data-imprin="${key}" value="${c[key]}" min="0" step="${step}" style="width:64px;${inCss};text-align:right"></label>`;
+        const S = c.summary;
+        const tierPill = (t, n, col) => `<span style="display:inline-block;padding:1px 8px;border-radius:10px;background:${col}22;border:1px solid ${col}88;color:${col};font-weight:600">${t} ${n}</span>`;
+        const summary = !c.on ? '' : (!S ? '<span style="color:#888">no points staged</span>'
+            : `${tierPill('P1', S.cnt.P1, '#ff7b00')} ${tierPill('P2', S.cnt.P2, '#ffe14d')} ${tierPill('P3', S.cnt.P3, '#9ad')} ${S.cnt.none ? tierPill('untiered', S.cnt.none, '#ff6060') : ''} <span style="color:#888">· ${S.pads} pad${S.pads === 1 ? '' : 's'}${S.flagged ? ` · <b style="color:#ffb347">${S.flagged} flagged</b>` : ''} · vs site: ${S.chg.same} same · <b style="color:${S.chg.changed ? '#ffe14d' : '#888'}">${S.chg.changed} changed</b> · ${S.chg.new} new${S.chg.untier ? ` · ${S.chg.untier} lose their tier` : ''}</span>`);
+        const flagged = S ? S.padsList.filter(x => x.flags.length) : [];
+        const flagList = flagged.length ? `<div style="margin-top:4px;font-size:10px;color:#ffb347;line-height:1.5">${flagged.slice(0, 8).map(x => `⚠ <b>${impEsc(x.name)}</b> (${x.members.length}): ${impEsc(x.flags.join(' · '))} — ${impEsc(x.members.slice(0, 4).map(p => p.name).join(', '))}${x.members.length > 4 ? ' …' : ''}`).join('<br>')}${flagged.length > 8 ? `<br>… +${flagged.length - 8} more (in the report)` : ''}</div>` : '';
+        el.innerHTML = `<button id="aim-imp-pri-hdr" style="background:none;border:none;color:${c.on ? '#ffb347' : '#7a8794'};cursor:pointer;font:inherit;font-size:11px;padding:2px 0;margin-bottom:4px;text-align:left;font-weight:${c.on ? 600 : 400}">${c.open ? '▾' : '▸'} Priority tiers — ${c.on ? 'ON' : 'off'}${c.on && S ? ` · P1 ${S.cnt.P1} · P2 ${S.cnt.P2} · P3 ${S.cnt.P3}${S.cnt.none ? ` · ${S.cnt.none} untiered` : ''}${S.chg.changed ? ` · ${S.chg.changed} changed` : ''}` : ''}</button>
+            <div id="aim-imp-pri-body" style="display:${c.open ? '' : 'none'};padding:6px 8px;background:rgba(255,179,71,0.05);border:1px dashed rgba(255,179,71,0.4);border-radius:3px;font-size:11px;color:#cfd6dc">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-bottom:6px"><input type="checkbox" data-impri-on ${c.on ? 'checked' : ''} style="accent-color:#ffb347"> <b style="color:#ffb347">Tier every asset by pad production</b> <span style="color:#888;font-size:10px">— written as a TYPE prefix ("P1 - v - pumping rod") + a Priority / Prioritized block in the notes; the name never changes, so next quarter's list updates the same assets</span></label>
+                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px">
+                    ${sel('oilCol', 'Oil', 'oil production column (summed with Water)')} ${sel('waterCol', 'Water', 'water production column (summed with Oil)')} <span style="color:#888">or</span> ${sel('blpdCol', 'BLPD', 'a single total-fluid column (used instead of Oil + Water)')} <span style="color:#888">or</span> ${sel('priCol', 'Ready-made priority', 'a column that already holds P1 / P2 / P3 — wins outright, no math')}
+                </div>
+                <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:6px">
+                    <span style="color:#888;font-size:10px">Tiers (BLPD = oil + water per pad):</span>
+                    <span style="color:#9ad">P3 &lt;</span> ${num('p1Min', '', 10)} <span style="color:#ff7b00">≤ P1 ≤</span> ${num('p1Max', '', 50)} <span style="color:#ffe14d">&lt; P2</span>
+                    <span style="color:#888;font-size:10px" title="P1 is the MIDDLE band on purpose: the biggest producers already have people on site who see big leaks; mid producers don't, so they are the priority.">ⓘ why P1 is the middle band</span>
+                </div>
+                <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:6px">
+                    <span style="color:#888;font-size:10px">Pad grouping:</span> ${num('clusterFt', 'points within', 10)} <span style="color:#888;font-size:10px">ft of each other = one pad (new points)</span> · ${num('padFt', 'within', 5)} <span style="color:#888;font-size:10px">ft of an existing pad polygon joins that pad (nested parent/child tree)</span>
+                    <button data-impri-run style="background:rgba(255,179,71,0.15);color:#ffb347;border:1px solid rgba(255,179,71,0.5);border-radius:3px;padding:2px 10px;cursor:pointer;font:inherit;font-size:10px">⟳ Recompute</button>
+                </div>
+                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">${summary}<span style="flex:1"></span>
+                    ${c.on && S ? `<button data-impri-rep="sheets" title="Every staged asset: tier, tier before (from the site), change, pad, pad BLPD, asset BLPD, assets on pad, flags — paste into Google Sheets" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Tier report for Sheets</button><button data-impri-rep="csv" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button>` : ''}
+                </div>${flagList}
+            </div>`;
+        const rerun = () => { impComputePriority(); impRenderPriUi(); impRenderStaged(); impSyncUi(); impMarkDirty(); impStoreMapping(imp.headers, { name: imp.mapping.name, lat: imp.mapping.lat, lng: imp.mapping.lng, type: imp.mapping.type, notesCols: impNotesCols(), pri: { on: c.on, oilCol: c.oilCol, waterCol: c.waterCol, blpdCol: c.blpdCol, priCol: c.priCol } }); };
+        el.querySelector('#aim-imp-pri-hdr').onclick = () => { c.open = !c.open; impSaveParams(); impRenderPriUi(); };
+        el.querySelector('input[data-impri-on]').onchange = function () { c.on = this.checked; rerun(); };
+        el.querySelectorAll('select[data-impri]').forEach(x => x.onchange = () => { c[x.getAttribute('data-impri')] = x.value || null; if (x.getAttribute('data-impri') === 'blpdCol' && x.value) { c.oilCol = null; c.waterCol = null; } if ((x.getAttribute('data-impri') === 'oilCol' || x.getAttribute('data-impri') === 'waterCol') && x.value) c.blpdCol = null; rerun(); });
+        el.querySelectorAll('input[data-imprin]').forEach(x => x.onchange = () => { const v = parseFloat(x.value); if (isFinite(v) && v >= 0) { c[x.getAttribute('data-imprin')] = v; impSaveParams(); rerun(); } });
+        const run = el.querySelector('button[data-impri-run]'); if (run) run.onclick = rerun;
+        el.querySelectorAll('button[data-impri-rep]').forEach(b => b.onclick = () => { try { impExportTiers(b.getAttribute('data-impri-rep')); } catch (e) { console.warn(`${TAG} 📥 tier report failed:`, e); impStatus(`Tier report failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } });
+    }
+    function impExportTable(rows, cols, how, fileBase, label) {
+        const site = getCurrentSiteName() || `Site ${genState.siteID}`;
+        if (how === 'csv') {
+            const q = (v) => { const t = String(v == null ? '' : v); return /[",\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+            const csv = [cols.map(c => q(c.label)).join(',')].concat(rows.map(r => cols.map(c => q(c.val(r))).join(','))).join('\r\n');
+            const blob = new Blob(['﻿' + csv], { type: 'text/csv' });
+            const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${fileBase}-${String(site).replace(/[^A-Za-z0-9_-]+/g, '_')}-${new Date().toISOString().slice(0, 10)}.csv`;
+            document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+            impStatus(`⬇ ${rows.length} ${label} row(s) downloaded as CSV`);
+            return;
+        }
+        const headHtml = `<tr>${cols.map(c => `<th style="background:#1f2228;color:#7adfe6;border:1px solid #cccccc;padding:2px 7px;text-align:left">${impEsc(c.label)}</th>`).join('')}</tr>`;
+        const bodyHtml = rows.map(r => `<tr>${cols.map(c => `<td style="border:1px solid #cccccc;padding:2px 7px">${impEsc(c.val(r))}</td>`).join('')}</tr>`).join('');
+        const html = `<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px">${headHtml}${bodyHtml}</table>`;
+        const text = [cols.map(c => c.label).join('\t')].concat(rows.map(r => cols.map(c => String(c.val(r)).replace(/[\t\n\r]/g, ' ')).join('\t'))).join('\n');
+        writeSheetsClipboard(html, text, `📤 ${rows.length} ${label} row(s) copied — paste into Sheets`);
+        impStatus(`📤 ${rows.length} ${label} row(s) on the clipboard (${site}) — paste into Google Sheets / Excel`);
+    }
+    function impExportTiers(how) {
+        const live = imp.points.filter(p => !p.done && p.pri);
+        if (!live.length) { impStatus('No tiered points to export', '#ffb347'); return; }
+        const rows = live.slice().sort((a, b) => (a.pri.padName || '').localeCompare(b.pri.padName || '') || a.name.localeCompare(b.name));
+        const change = (p) => !p.dup ? 'new asset' : (!p.pri.tier ? (p.pri.before ? `loses ${p.pri.before}` : 'untiered') : (p.pri.before === p.pri.tier ? 'same' : (p.pri.before ? `${p.pri.before} → ${p.pri.tier}` : `+${p.pri.tier}`)));
+        const fmt = (n) => n == null ? '' : Math.round(n);
+        const cols = [
+            { label: 'Name', val: p => p.name }, { label: 'Tier', val: p => p.pri.tier || '' }, { label: 'Tier before', val: p => p.pri.before || '' }, { label: 'Change', val: change },
+            { label: 'Pad', val: p => p.pri.padName || '' }, { label: 'Pad BLPD', val: p => fmt(p.pri.padTotal) }, { label: 'Asset BLPD', val: p => fmt(p.pri.blpd) }, { label: 'Assets on pad', val: p => p.pri.padN },
+            { label: 'Type', val: p => p.typeRaw || '' }, { label: 'Flags', val: p => (p.pri.flags || []).join(' · ') }, { label: 'Latitude', val: p => p.lat.toFixed(6) }, { label: 'Longitude', val: p => p.lng.toFixed(6) }, { label: 'File', val: () => imp.fileName || '' },
+        ];
+        impExportTable(rows, cols, how, 'priority-tiers', 'tier');
+    }
     function impLoadTypeMap() { try { imp.typeMap = JSON.parse(GM_getValue(IMP_TYPEMAP_KEY, '{}')) || {}; } catch (e) { imp.typeMap = {}; } }
     function impSaveTypeMap() { try { GM_setValue(IMP_TYPEMAP_KEY, JSON.stringify(imp.typeMap)); } catch (e) {} }
     function impEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -22680,7 +22888,7 @@
     }
     function impComposeNotes(p, when) {
         const r = imp.rows[p.i] || {};
-        const parts = [`Original name\n${p.rawName || p.name}`];
+        const parts = [`Original name\n${p.rawName || p.name}`].concat(impPriNotesBlocks(p, String(when).slice(0, 10)));
         impNotesCols().forEach(c => { const v = String(r[c.col] == null ? '' : r[c.col]).trim(); if (v) parts.push(`${c.label || impCleanLabel(c.col)}\n${v}`); });
         parts.push(`Imported by ${impAuthor() || 'AIM user'} on ${when} from ${imp.fileName || 'file'}`);
         return parts.join('\n\n').slice(0, 2000);
@@ -22768,6 +22976,7 @@
                 imp.headers = parsed.headers;
                 imp.rows = parsed.rows;
                 imp.lastSavedAt = null;
+                imp.pri._guessed = false; imp.pri.summary = null;
                 try { impRenderResumeUi(); } catch (e) {}
                 imp.siteID = genState.siteID;
                 imp.points = []; imp.assetSel.clear(); imp.invalid = 0;   // v4.345: boundaries (imp.shapes) survive a data load — fence first, then load
@@ -22807,7 +23016,9 @@
             const name = m.name ? (r[m.name] || '').trim() : '';
             imp.points.push({ i, name: name || `Import ${i + 1}`, rawName: name, lat, lng, typeRaw: m.type ? (r[m.type] || '').trim() : '', notes: '', sel: false, dup: false, dupWhy: '', child: null, near: null, done: false });
         });
-        impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type, notesCols: impNotesCols() });
+        if (m.pri && typeof m.pri === 'object' && !imp.pri._guessed) { ['oilCol', 'waterCol', 'blpdCol', 'priCol'].forEach(k => { imp.pri[k] = imp.headers.includes(m.pri[k]) ? m.pri[k] : null; }); if (typeof m.pri.on === 'boolean') imp.pri.on = m.pri.on; imp.pri._guessed = true; }
+        imp._rootCache = null;
+        impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type, notesCols: impNotesCols(), pri: { on: imp.pri.on, oilCol: imp.pri.oilCol, waterCol: imp.pri.waterCol, blpdCol: imp.pri.blpdCol, priCol: imp.pri.priCol } });
         impMarkDirty();
         imp.mapOpen = false;
         impRenderMappingUi();
@@ -22837,6 +23048,11 @@
         }).filter(Boolean);
     }
     function impComputeDups() {
+        impComputeDupsCore();
+        try { if (imp.pri.on) impComputePriority(); } catch (e) { console.warn(`${TAG} 📥 priority compute failed:`, e); }
+        try { impRenderPriUi(); } catch (e) {}
+    }
+    function impComputeDupsCore() {
         if (!imp.assetIndex) impBuildAssetIndex();
         const dupM = Math.max(0, impDupFt) * GEN_FT_TO_M;
         const dLat = (dupM / 111320) * 1.05;
@@ -22847,7 +23063,7 @@
             const clean = (genCleanName(p.name) || '').toLowerCase();
             const nm = clean && byName.get(clean);
             // ONLY a name match is a duplicate (skipped unless included).
-            if (nm) { p.dup = true; p.dupWhy = `name matches existing asset "${nm.name}"`; }
+            if (nm) { p.dup = true; p.dupWhy = `name matches existing asset "${nm.name}"`; p.dupId = nm.id; p.dupSubtype = nm.subtype || ''; } else { p.dupId = null; p.dupSubtype = ''; }
             // v4.332: two informational flags, never skipped —
             //   child = the square this point would become (Size ft) overlaps an
             //           existing asset, partially or fully (parent/child);
@@ -22919,7 +23135,7 @@
                     radius: held ? 7 : (p.sel ? 4 : 2.2),
                     color: held ? '#ff5fff' : (p.dup ? '#ff3b3b' : (p.child ? '#b48cff' : (p.near ? '#4fc3f7' : (p.orig ? '#ff5fff' : '#ffffff')))),
                     weight: held ? 2.5 : ((p.dup || p.child || p.near || p.orig) ? 1.5 : 0.6),
-                    fillColor: held ? '#ff5fff' : (p.sel ? '#5fff5f' : '#ff9d00'),
+                    fillColor: held ? '#ff5fff' : ((imp.pri.on && p.pri && p.pri.tier) ? ({ P1: '#ff7b00', P2: '#ffe14d', P3: '#9ad' }[p.pri.tier]) : (p.sel ? '#5fff5f' : '#ff9d00')),
                     fillOpacity: 0.9, opacity: 0.9, interactive: false,
                 };
                 if (imp.renderer) opts.renderer = imp.renderer;
@@ -23455,6 +23671,7 @@
             </div>
             <div id="aim-imp-mapping" style="margin-bottom:8px"></div>
             <div id="aim-imp-typemap" style="margin-bottom:8px"></div>
+            <div id="aim-imp-pri" style="margin-bottom:8px"></div>
             <div id="aim-imp-placerow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px;padding:6px 8px;background:rgba(255,95,255,0.05);border:1px dashed rgba(255,95,255,0.35);border-radius:3px">
                 <span style="font-size:11px;color:#ff5fff;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Placement</span>
                 <button id="aim-imp-move" title="Fix a point's location BEFORE it becomes an asset. Click a staged point to pick it up (it turns magenta), pan/zoom freely, click where it belongs to drop it — or just drag it. No Alt needed while this is on; clicking empty map still pans. Delete / Backspace while holding a point removes it from the import. Esc puts it back. Moved points keep a magenta ring; the square is created at the new spot." style="background:rgba(255,95,255,0.12);color:#ff5fff;border:1px solid rgba(255,95,255,0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">↔ Move point</button>
@@ -23467,7 +23684,7 @@
                     <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;color:#ffb3ad;margin-top:4px"><input type="checkbox" id="aim-imp-biggate-ack" style="accent-color:#ff5555"> I understand the risk — create them anyway</label>
                 </div>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Square side of each created asset — same shape ➕ Create asset uses. Reshape in Percepto afterwards (auto-reshape is feature #251).">Size <input type="number" id="aim-imp-size" min="5" max="2000" step="5" style="width:52px;${inCss}"> ft</label>
-                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ffd400" title="A staged point whose NAME matches an existing asset on this site is a duplicate and is SKIPPED unless this is on. Points merely inside / near an existing asset are only flagged (parent/child) and are always created."><input type="checkbox" id="aim-imp-incdups" style="accent-color:#ffd400"> include name duplicates</label>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ffd400" title="What happens to a staged point whose NAME matches an asset already on this site. Update = rewrite that asset's TYPE and NOTES from this file, never its shape or position (the quarterly re-run). Copy = create a second asset named …-2. Skip = leave it alone. Points merely inside / near an existing asset are only flagged and always created.">name matches <select id="aim-imp-dupmode" style="background:#1a1d23;border:1px solid rgba(255,212,0,0.45);color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px"><option value="update">update type + notes</option><option value="skip">skip</option><option value="copy">create a copy (-N)</option></select></label>
                 <button id="aim-imp-commit" style="${btnCss('95,255,95')};font-weight:600">✓ Create selected</button>
                 <button id="aim-imp-undocreate" style="${btnCss('255,179,71')}" title="Delete exactly the assets the most recent import created (this session). Each delete rides Delete Guard's undo ring when installed.">↩ Undo last import</button>
             </div>
@@ -23490,6 +23707,7 @@
         impWirePanelControls(host);
         impRenderMappingUi();
         impRenderTypeMapUi();
+        impRenderPriUi();
         impRenderResumeUi();
         impAutosaveTimer();
         impSyncUi();
@@ -23552,9 +23770,9 @@
         const szEl = q('aim-imp-size');
         szEl.value = impSizeFt;
         szEl.oninput = () => { const v = parseFloat(szEl.value); if (isFinite(v) && v >= 5 && v <= 2000) { impSizeFt = v; try { if (imp.points.length) { impComputeDups(); impRenderStaged(); impSyncUi(); } } catch (e) {} } };
-        const incEl = q('aim-imp-incdups');
-        incEl.checked = imp.includeDups;
-        incEl.onchange = () => { imp.includeDups = incEl.checked; impSaveParams(); impSyncUi(); };
+        const dmSel = q('aim-imp-dupmode');
+        dmSel.value = imp.dupMode;
+        dmSel.onchange = () => { imp.dupMode = dmSel.value; imp.includeDups = imp.dupMode === 'copy'; impSaveParams(); impSyncUi(); };
         q('aim-imp-commit').onclick = () => { impCommit(); };
         q('aim-imp-undocreate').onclick = () => { impUndoCreate(); };
         const dmEl = q('aim-imp-delmode');
@@ -23619,7 +23837,7 @@
             <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px"><b style="color:#cfd6dc">Flags</b> <span style="color:#888;font-size:10px">${dups.length + child.length + near.length} of ${live.length} staged</span><span style="flex:1"></span>
                 <button data-imp-flags="sheets" title="Copy every flagged point as a table (Flag · Name · Existing asset · Detail · Type · Lat · Lng) — paste straight into Google Sheets / Excel" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Copy for Sheets</button>
                 <button data-imp-flags="csv" title="Download the same table as a CSV" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button></div>
-            ${dups.length ? `<div style="color:#ffd400">🔴 <b>${dups.length}</b> name duplicate${dups.length === 1 ? '' : 's'} — same name as an existing asset, ${imp.includeDups ? 'INCLUDED' : 'skipped'}: ${list(dups, p => p.name, 10)}</div>` : ''}
+            ${dups.length ? `<div style="color:#ffd400">🔴 <b>${dups.length}</b> name match${dups.length === 1 ? '' : 'es'} — same name as an existing asset, ${imp.dupMode === 'update' ? 'will UPDATE type + notes (shape untouched)' : (imp.dupMode === 'copy' ? 'a COPY will be created' : 'skipped')}: ${list(dups, p => p.name, 10)}</div>` : ''}
             ${child.length ? `<div style="color:#b48cff">🟣 <b>${child.length}</b> parent/child — the ${impSizeFt} ft square lands inside an existing asset (${fullN} fully · ${child.length - fullN} partially), created as normal: ${group(child, p => p.child.name, (k, v) => `${k} ← ${v.length}`)}</div>` : ''}
             ${near.length ? `<div style="color:#4fc3f7">🔵 <b>${near.length}</b> nearby — within ${impDupFt} ft of an existing asset, not overlapping it, created as normal: ${group(near, p => p.near.name, (k, v) => `${k} ← ${v.length}`)}</div>` : ''}
         </div>`;
@@ -23635,7 +23853,7 @@
     function impExportFlags(live, how) {
         const rows = [];
         live.forEach(p => {
-            if (p.dup) rows.push({ flag: 'Name duplicate', name: p.name, other: p.name, detail: imp.includeDups ? 'included (same name already on the site)' : 'skipped (same name already on the site)', p });
+            if (p.dup) rows.push({ flag: 'Name match', name: p.name, other: p.name, detail: imp.dupMode === 'update' ? 'update type + notes' : (imp.dupMode === 'copy' ? 'copy created' : 'skipped'), p });
             if (p.child) rows.push({ flag: 'Parent/child', name: p.name, other: p.child.name, detail: p.child.full ? 'fully inside' : 'partially inside', p });
             if (p.near) rows.push({ flag: 'Nearby', name: p.name, other: p.near.name, detail: `${Math.round(p.near.ft)} ft`, p });
         });
@@ -23930,8 +24148,10 @@
             const cb = document.getElementById('aim-imp-commit');
             if (cb) {
                 const dupsIn = live.filter(p => p.sel && p.dup).length;
-                const n = live.filter(p => p.sel && (!p.dup || imp.includeDups)).length;
-                cb.textContent = `✓ Create ${n} asset${n === 1 ? '' : 's'}${(dupsIn && !imp.includeDups) ? ` (${dupsIn} dup skipped)` : ''}`;
+                const upd = imp.dupMode === 'update' ? dupsIn : 0;
+                const n = live.filter(p => p.sel && (!p.dup || imp.dupMode !== 'skip')).length;
+                const cre = n - upd;
+                cb.textContent = `✓ ${cre ? `Create ${cre}` : ''}${cre && upd ? ' + ' : ''}${upd ? `update ${upd}` : ''}${!cre && !upd ? 'Create 0' : ''} asset${(cre + upd) === 1 ? '' : 's'}${(dupsIn && imp.dupMode === 'skip') ? ` (${dupsIn} name match${dupsIn === 1 ? '' : 'es'} skipped)` : ''}`;
                 const gate = document.getElementById('aim-imp-biggate'), gateN = document.getElementById('aim-imp-biggate-n'), gateAck = document.getElementById('aim-imp-biggate-ack');
                 if (gate) {
                     const big = n > IMP_BIG_BATCH;
@@ -23945,7 +24165,7 @@
             const ub = document.getElementById('aim-imp-undodel');
             if (ub) ub.style.display = imp.lastDelete ? '' : 'none';
             const uc = document.getElementById('aim-imp-undocreate');
-            if (uc) uc.style.display = imp.lastCreated.length ? '' : 'none';
+            if (uc) { uc.style.display = (imp.lastCreated.length || imp.lastUpdated.length) ? '' : 'none'; uc.textContent = imp.lastUpdated.length ? `↩ Undo last import (${imp.lastCreated.length} created · ${imp.lastUpdated.length} updated)` : '↩ Undo last import'; }
             const fl = document.getElementById('aim-imp-file-label');
             if (fl) fl.textContent = imp.fileName ? `${imp.fileName} · ${live.length} staged · ${selN} selected` : 'no file loaded';
             const sb = document.getElementById('aim-imp-save'), sn = document.getElementById('aim-imp-saved-note');
@@ -23960,9 +24180,10 @@
         if (liteBlockedWrite('import assets')) return;
         const sid = genState.siteID;
         if (!sid || String(sid) !== String(getCurrentSiteID())) { showToast('Site changed — reopen the generator', 'rgba(255,96,96,0.55)'); return; }
-        const targets = imp.points.filter(p => !p.done && p.sel && (!p.dup || imp.includeDups));
-        const skippedDups = imp.points.filter(p => !p.done && p.sel && p.dup && !imp.includeDups).length;
-        if (!targets.length) { impStatus(`Nothing to create — select staged points first${skippedDups ? ` (${skippedDups} selected point(s) are dup-flagged; tick "include flagged duplicates" to force them)` : ''}`, '#ffb347'); return; }
+        const targets = imp.points.filter(p => !p.done && p.sel && (!p.dup || imp.dupMode !== 'skip'));
+        const skippedDups = imp.points.filter(p => !p.done && p.sel && p.dup && imp.dupMode === 'skip').length;
+        if (!targets.length) { impStatus(`Nothing to create — select staged points first${skippedDups ? ` (${skippedDups} selected point(s) match existing names; set "name matches" to update or copy)` : ''}`, '#ffb347'); return; }
+        if (imp.pri.on) { try { impComputePriority(); } catch (e) { impStatus(`Priority compute failed: ${impEsc(e && e.message || e)}`, '#ff6060'); return; } }
         // resolve every point's subtype BEFORE anything writes — unmapped types block loudly
         const subCounts = impSiteSubtypes();
         // same frequency-sorted default the type-mapping UI shows
@@ -23970,15 +24191,21 @@
         const missing = new Set();
         const siteSubs = [...subCounts.keys()];
         const subtypeFor = (p) => {
-            if (!imp.mapping || !imp.mapping.type) return impApplyShield((imp.typeMap['__all__'] || '').trim() || defSub);
-            const v = impResolveSubtype(p.typeRaw || '', siteSubs).value;   // v4.333: file value as-is unless overridden; v4.343: shielding modifier rule applied inside
-            if (!v) missing.add(p.typeRaw || '(blank)');
-            return v;
+            let v;
+            if (!imp.mapping || !imp.mapping.type) v = impApplyShield((imp.typeMap['__all__'] || '').trim() || defSub);
+            else {
+                v = impResolveSubtype(p.typeRaw || '', siteSubs).value;   // v4.333: file value as-is unless overridden; v4.343: shielding modifier rule applied inside
+                if (!v) { missing.add(p.typeRaw || '(blank)'); return v; }
+            }
+            // v4.347: on an UPDATE with no type column, keep the asset's own base type
+            if (p.dup && imp.dupMode === 'update' && (!imp.mapping || !imp.mapping.type) && p.dupSubtype) v = impApplyShield(impTierStrip(p.dupSubtype));
+            return impTierPrefix(p, v);                                     // v4.347: "P1 - " prefix when tiers are on
         };
-        const plan = targets.map(p => ({ p, subtype: subtypeFor(p) }));
+        const plan = targets.map(p => ({ p, subtype: subtypeFor(p), update: !!(p.dup && imp.dupMode === 'update' && p.dupId != null) }));
         if (missing.size) { impStatus(`BLOCKED — rows with a blank type: pick a subtype for <b>${impEsc([...missing].join(' · '))}</b> in the Type table above.`, '#ff6060'); return; }
         const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
-        if (dry) { impStatus(`DRY RUN — would create <b>${plan.length}</b> asset(s) (${impSizeFt}×${impSizeFt} ft squares)${skippedDups ? `, skipping ${skippedDups} dup(s)` : ''}: ${impEsc(plan.slice(0, 12).map(x => x.p.name).join(' · '))}${plan.length > 12 ? ' …' : ''}. Untick Dry run to write.`); return; }
+        const nUpd = plan.filter(x => x.update).length, nCre = plan.length - nUpd;
+        if (dry) { impStatus(`DRY RUN — would create <b>${nCre}</b> asset(s) (${impSizeFt}×${impSizeFt} ft squares)${nUpd ? ` and UPDATE type + notes on <b>${nUpd}</b> existing` : ''}${skippedDups ? `, skipping ${skippedDups} name match(es)` : ''}${imp.pri.on ? ` · tiers ON (${plan.filter(x => /^P[1-3] - /.test(x.subtype)).length} prefixed)` : ''}: ${impEsc(plan.slice(0, 12).map(x => `${x.update ? '↻ ' : ''}${x.p.name} [${x.subtype}]`).join(' · '))}${plan.length > 12 ? ' …' : ''}. Untick Dry run to write.`); return; }
         if (plan.length > IMP_BIG_BATCH) {
             const ack = (() => { try { return !!document.getElementById('aim-imp-biggate-ack').checked; } catch (e) { return false; } })();
             if (!ack) { impStatus(`BLOCKED — <b>${plan.length}</b> assets is more than ${IMP_BIG_BATCH} in one run. Narrow the selection with a boundary KML, or tick "I understand the risk" under the Create button to proceed anyway.`, '#ff6060'); return; }
@@ -24000,17 +24227,42 @@
             usedNames.add(n2); return n2;
         };
         const stamp = impNowStamp();
-        plan.forEach(x => { x.name = uniq(x.p.name); x.notes = impComposeNotes(x.p, stamp); });   // v4.345: notes = original name + chosen columns + who/when/file
-        // backup manifest BEFORE any write (rollback = delete the created ids)
-        const manifest = { site: sid, at: new Date().toISOString(), file: imp.fileName, sizeFt: impSizeFt, creates: plan.map(x => ({ name: x.name, subtype: x.subtype, lat: x.p.lat, lng: x.p.lng, notes: x.notes, movedFrom: x.p.orig || null })) };
+        const byIdEnt = new Map(ents.map(e => [e.id, e]));
+        plan.forEach(x => { x.name = x.update ? (byIdEnt.get(x.p.dupId) || {}).name || x.p.name : uniq(x.p.name); x.notes = impComposeNotes(x.p, stamp); });   // v4.345: notes = original name + chosen columns + who/when/file
+        let siteCfg = null;
+        if (nUpd) { try { siteCfg = await fetchSiteConfig(sid); } catch (e) {} if (!siteCfg) { impStatus('Could not read the site config (mountain-terrain flag) — updates refused, nothing written', '#ff6060'); return; } }
+        // backup manifest BEFORE any write (rollback = delete the created ids / re-POST the updated bodies)
+        const manifest = { site: sid, at: new Date().toISOString(), file: imp.fileName, sizeFt: impSizeFt,
+            creates: plan.filter(x => !x.update).map(x => ({ name: x.name, subtype: x.subtype, lat: x.p.lat, lng: x.p.lng, notes: x.notes, movedFrom: x.p.orig || null })),
+            updates: plan.filter(x => x.update).map(x => ({ id: x.p.dupId, name: x.name, after: { subtype: x.subtype, notes: x.notes }, before: byIdEnt.get(x.p.dupId) || null })) };
         try { localStorage.setItem(`aim_imp_commit_backup:${sid}`, JSON.stringify(manifest)); } catch (e) {}
         try { downloadJSONFile(`asset-import-${sid}-${Date.now()}.json`, JSON.stringify(manifest, null, 1)); } catch (e) { impStatus('backup manifest download failed (localStorage stash still written)'); }
         // fresh subtypes only need new_poi_type_str on their FIRST create
         const knownSubs = new Set([...impSiteSubtypes().keys()]);
-        let ok = 0, fail = 0, aborted = false;
-        const created = [];
+        let ok = 0, fail = 0, aborted = false, updOk = 0;
+        const created = [], updated = [];
         for (let i = 0; i < plan.length; i++) {
             const x = plan[i];
+            if (x.update) {                                              // v4.347: rewrite TYPE + NOTES on the existing asset, nothing else
+                impStatus(`updating ${i + 1}/${plan.length} — "${impEsc(x.name)}"…`);
+                const ent = byIdEnt.get(x.p.dupId);
+                if (!ent) { fail++; console.warn(`${TAG} 📥 update "${x.name}": existing asset #${x.p.dupId} not in the fresh fetch`); await sleep(DELETE_GAP_MS); continue; }
+                const body = buildWriteBody(ent, siteCfg);
+                body.description = String(x.notes || '').slice(0, 2000);
+                if (!body.custom || typeof body.custom !== 'object') body.custom = {};
+                body.custom.poi_type_str = x.subtype;
+                body.custom.new_poi_type_str = knownSubs.has(x.subtype) ? '' : x.subtype;
+                let st = 0, raw = '';
+                try { const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) }); st = rr.status; raw = await rr.text(); }
+                catch (e) { raw = String(e && e.message || e); }
+                if (st === 200) { updOk++; updated.push({ id: ent.id, name: x.name, before: JSON.parse(JSON.stringify(ent)), point: x.p, subtype: x.subtype, notes: body.description }); knownSubs.add(x.subtype); x.p.done = true; x.p.sel = false; }
+                else {
+                    fail++; console.warn(`${TAG} 📥 update "${x.name}" failed: ${st} ${raw.slice(0, 200)}`);
+                    if (st === 403) { aborted = true; impStatus(`ABORTED at ${i + 1}/${plan.length} — server 403 (write permission lost). ${ok} created, ${updOk} updated, rest kept staged.`, '#ff6060'); break; }
+                }
+                await sleep(DELETE_GAP_MS);
+                continue;
+            }
             impStatus(`creating ${i + 1}/${plan.length} — "${impEsc(x.name)}"…`);
             const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impSizeFt, x.name, x.subtype, !knownSubs.has(x.subtype), x.notes || '');
             if (r && r.ok) {
@@ -24031,17 +24283,38 @@
         const byId = new Set(after.map(e => e.id));
         const verified = created.filter(c => byId.has(c.id));
         imp.lastCreated = verified.map(c => c.id);
+        const afterById = new Map(after.map(e => [e.id, e]));
+        const updVerified = updated.filter(u => { const e = afterById.get(u.id); return e && e.custom && String(e.custom.poi_type_str || '') === u.subtype && String(e.description || '') === u.notes; });
+        imp.lastUpdated = updated.map(u => ({ id: u.id, name: u.name, before: u.before }));
+        imp._rootCache = null;
         impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
-        if (!aborted) impStatus(`DONE: <b>${ok}/${plan.length}</b> asset(s) created${fail ? `, <span style="color:#ff6060">${fail} FAILED (kept staged + selected)</span>` : ''}${skippedDups ? ` · ${skippedDups} dup(s) skipped` : ''} · verify ${verified.length}/${created.length} present · reload to edit them natively`, fail ? '#ffb347' : '#5fff5f');
-        showToast(fail ? `Import: ${ok} created, ${fail} FAILED — see the importer panel` : `✓ ${ok} asset(s) created`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+        if (!aborted) impStatus(`DONE: <b>${ok}</b> created${nUpd ? ` · <b>${updOk}/${nUpd}</b> updated (type + notes)` : ''}${fail ? ` · <span style="color:#ff6060">${fail} FAILED (kept staged + selected)</span>` : ''}${skippedDups ? ` · ${skippedDups} name match(es) skipped` : ''} · verify ${verified.length}/${created.length} created present${nUpd ? `, ${updVerified.length}/${updated.length} updates match` : ''} · reload to edit them natively`, (fail || updVerified.length !== updated.length) ? '#ffb347' : '#5fff5f');
+        showToast(fail ? `Import: ${ok} created, ${updOk} updated, ${fail} FAILED — see the importer panel` : `✓ ${ok} created${updOk ? `, ${updOk} updated` : ''}`, fail ? 'rgba(255,96,96,0.55)' : undefined);
     }
     // Undo THIS import: delete exactly the ids the last commit created.
     async function impUndoCreate() {
         if (liteBlockedWrite('delete imported assets (undo)')) return;
-        if (!imp.lastCreated.length) { showToast('Nothing to undo (only the most recent import this session)', 'rgba(255,96,96,0.55)'); return; }
+        if (!imp.lastCreated.length && !imp.lastUpdated.length) { showToast('Nothing to undo (only the most recent import this session)', 'rgba(255,96,96,0.55)'); return; }
         const csrf = getCsrfToken();
         if (!csrf) { showToast('No CSRF token', 'rgba(255,96,96,0.55)'); return; }
-        if (!confirm(`Delete the ${imp.lastCreated.length} asset(s) created by the last import? (Delete Guard banks each when installed)`)) return;
+        if (!confirm(`Undo the last import: delete ${imp.lastCreated.length} created asset(s)${imp.lastUpdated.length ? ` and put the previous type + notes back on ${imp.lastUpdated.length} updated asset(s)` : ''}? (Delete Guard banks each delete when installed)`)) return;
+        if (imp.lastUpdated.length) {                                    // v4.347: revert updates by re-POSTing the banked before-bodies
+            const sid = genState.siteID; let siteCfg = null;
+            try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
+            if (!siteCfg) { impStatus('Could not read the site config — update revert refused (creates not touched either)', '#ff6060'); return; }
+            let rOk = 0, rFail = 0; const reverted = new Set();
+            for (const u of imp.lastUpdated) {
+                try {
+                    const body = buildWriteBody(u.before, siteCfg);
+                    const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
+                    if (rr.status === 200) { rOk++; reverted.add(u.id); } else { rFail++; console.warn(`${TAG} 📥 revert #${u.id}: server ${rr.status}`); }
+                } catch (e) { rFail++; console.warn(`${TAG} 📥 revert #${u.id}:`, e.message); }
+                await sleep(DELETE_GAP_MS);
+            }
+            imp.lastUpdated = imp.lastUpdated.filter(u => !reverted.has(u.id));
+            impStatus(`↩ ${rOk} update(s) reverted${rFail ? `, <span style="color:#ff6060">${rFail} failed</span>` : ''}`);
+            if (!imp.lastCreated.length) { try { await fetchMapObjects(sid, true); } catch (e) {} imp._rootCache = null; impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange(); return; }
+        }
         let ok = 0, fail = 0;
         const deleted = new Set();
         for (const id of imp.lastCreated) {
@@ -24364,6 +24637,7 @@
             }).filter(Boolean),
             shapes: imp.shapes.map(sh => sh.kind === 'circle' ? { id: sh.id, kind: 'circle', center: sh.center, radiusM: sh.radiusM, name: sh.name || '' } : { id: sh.id, kind: sh.kind, ring: sh.ring, handle: sh.handle, name: sh.name || '' }),
             shapeSeq: imp.shapeSeq,
+            pri: { on: imp.pri.on, oilCol: imp.pri.oilCol, waterCol: imp.pri.waterCol, blpdCol: imp.pri.blpdCol, priCol: imp.pri.priCol },
         };
         const json = JSON.stringify(data);
         const live = imp.points.filter(p => !p.done).length;
@@ -24395,6 +24669,7 @@
         imp.shapes = (d.shapes || []).map(sh => sh.kind === 'circle' ? { id: sh.id, kind: 'circle', center: sh.center, radiusM: sh.radiusM, name: sh.name || '' } : { id: sh.id, kind: sh.kind || 'lasso', ring: sh.ring, handle: sh.handle || ringCentroid(sh.ring), name: sh.name || '' });
         imp.shapeSeq = Math.max(d.shapeSeq || 1, ...imp.shapes.map(sh => sh.id + 1), 1);
         imp.mapOpen = false;
+        if (d.pri) { Object.assign(imp.pri, { on: !!d.pri.on, oilCol: d.pri.oilCol || null, waterCol: d.pri.waterCol || null, blpdCol: d.pri.blpdCol || null, priCol: d.pri.priCol || null }); imp.pri._guessed = true; }
         impRenderMappingUi();
         impBuildPoints();                                            // rebuilds points from rows + mapping (also recomputes dups/flags)
         const byI = new Map(imp.points.map(p => [p.i, p]));
@@ -27847,7 +28122,7 @@
             steps: ['🔍 Scan crossings (or right-click a flight path → 🛗 for a manual point).', 'Review each staged crossing — bridge height, elevator lengths, preflight result.', 'Untick Dry run → Commit. ↩ Undo restores the flight paths and deletes the poles.'],
             test: 'Scan a site with a known transmission crossing, confirm one staged set per crossing, Commit with Dry run ON.' },
         imp: { what: 'Bring a client asset list into Percepto. Load a CSV or KML → points stage on the map (nothing written) → narrow with boundaries → map the type → ✓ Create makes real asset squares. Create-only, with dry run, backup manifest and undo.',
-            steps: ['Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
+            steps: ['Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', 'Priority tiers (▸ below the Type table): pick the oil + water columns (or a single BLPD column, or a ready-made P1/P2/P3 column); every asset on a pad shares the pad total; the tier is written as a type prefix ("P1 - …") and a Priority / Prioritized block in the notes. "name matches → update type + notes" is the quarterly re-run: load the new list, review the Tier report, Create.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
             test: 'Load the list, add one boundary, confirm the selected count drops, Create with Dry run ON.' },
         sci: { what: 'Applies the Ortho Scanner review sheet\'s decisions: accepted NFZs and flight-path leg changes stage on the map (green / yellow, removed legs red), preflight runs, then Apply writes them — NFZs create-only, flight paths one POST each with Delete Guard backups.',
             steps: ['Load the decisions JSON and the scan bundle from the review sheet.', 'Check the staged plan on the map and the preflight result.', 'Untick Dry run → Apply.'],
