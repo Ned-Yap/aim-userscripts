@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.343
+// @version      4.344
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.343';
+    const SCRIPT_VERSION = '4.344';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22506,7 +22506,8 @@
         invalid: 0,
         typeMap: {},                                // loaded from GM at wire time
         target: 'staged',                           // 'staged' | 'assets' (🗑 delete mode)
-        mode: null,                                 // null | 'circle' | 'lasso' | 'pick'
+        mode: null,                                 // null | 'circle' | 'lasso' | 'pick' | 'edit' | 'move'
+        moveHeld: null, moveDrag: false, moveDownPt: null,   // v4.344: ↔ Move point — the staged point being carried
         radiusVal: 3, radiusUnit: 'mi', includeDups: false,   // v4.343: 3 mi = the usual base reach circle
         keepShield: true,                           // v4.343: keep "- unsh" / "shielded" modifiers in subtypes (off = strip them)
         advOpen: false,                             // v4.331: ▸ Advanced (subset tools + delete mode) expanded — GM-remembered
@@ -22820,11 +22821,12 @@
             if (bounds && !bounds.contains([p.lat, p.lng])) { culled++; continue; }
             if (drawn >= IMP_MAX_RENDER) { culled++; continue; }
             try {
+                const held = imp.moveHeld === p;
                 const opts = {
-                    radius: p.sel ? 4 : 2.2,
-                    color: p.dup ? '#ff3b3b' : (p.child ? '#b48cff' : (p.near ? '#4fc3f7' : '#ffffff')),
-                    weight: (p.dup || p.child || p.near) ? 1.5 : 0.6,
-                    fillColor: p.sel ? '#5fff5f' : '#ff9d00',
+                    radius: held ? 7 : (p.sel ? 4 : 2.2),
+                    color: held ? '#ff5fff' : (p.dup ? '#ff3b3b' : (p.child ? '#b48cff' : (p.near ? '#4fc3f7' : (p.orig ? '#ff5fff' : '#ffffff')))),
+                    weight: held ? 2.5 : ((p.dup || p.child || p.near || p.orig) ? 1.5 : 0.6),
+                    fillColor: held ? '#ff5fff' : (p.sel ? '#5fff5f' : '#ff9d00'),
                     fillOpacity: 0.9, opacity: 0.9, interactive: false,
                 };
                 if (imp.renderer) opts.renderer = imp.renderer;
@@ -23023,7 +23025,7 @@
         });
         impRefreshAfterSelChange();
         if (nothingStaged) { impStatus(`⬆ boundary "${impEsc(srcName)}" held — ${shapes.length} polygon(s) drawn on the map. Load the data CSV/KML and only the points inside will be selected.`); return; }
-        impStatus(`⬆ boundary "${impEsc(srcName)}" applied — ${shapes.length} polygon(s), <b>+${impSelCount() - before}</b> ${imp.target === 'assets' ? 'existing asset(s)' : 'point(s)'} selected. ALT+drag a numbered handle to move a polygon.`);
+        impStatus(`⬆ boundary "${impEsc(srcName)}" applied — ${shapes.length} polygon(s) · <b>${impSelCount()}</b> ${imp.target === 'assets' ? 'existing asset(s)' : 'point(s)'} selected now (was ${before}). ALT+drag a numbered handle to move a polygon.`);
     }
     function impHandleShapeFile(file) {
         if (!file) return;
@@ -23034,6 +23036,27 @@
         };
         rd.onerror = () => impStatus('Shape file read failed', '#ff6060');
         rd.readAsText(file);
+    }
+    function impNearestStaged(map, ll, maxPx) {
+        let cp; try { cp = map.latLngToContainerPoint([ll.lat, ll.lng]); } catch (e) { return null; }
+        let best = null, bd = Infinity;
+        imp.points.forEach(p => {
+            if (p.done) return;
+            try { const d = cp.distanceTo(map.latLngToContainerPoint([p.lat, p.lng])); if (d < bd) { bd = d; best = p; } } catch (e) {}
+        });
+        return (best && bd <= (maxPx || IMP_PICK_PX)) ? best : null;
+    }
+    function impMovePointTo(p, ll) {
+        if (!p.orig) p.orig = { lat: p.lat, lng: p.lng };
+        p.lat = ll.lat; p.lng = ll.lng;
+        if (Math.abs(p.lat - p.orig.lat) < 1e-9 && Math.abs(p.lng - p.orig.lng) < 1e-9) delete p.orig;   // dropped back exactly where it started
+    }
+    function impFinishMove(p) {
+        imp.moveHeld = null; imp.moveDrag = false; imp.moveDownPt = null;
+        try { impComputeDups(); } catch (e) {}
+        impRefreshAfterSelChange();
+        const ft = p.orig ? Math.round(approxMeters(p.orig.lat, p.orig.lng, p.lat, p.lng) / GEN_FT_TO_M) : 0;
+        impStatus(ft ? `↔ "${impEsc(p.name)}" moved ${ft} ft — the asset will be created there${p.dup ? ' (still a name duplicate)' : ''}${p.child ? ` · now inside ${impEsc(p.child.name)}` : ''}` : `↔ "${impEsc(p.name)}" back at its file coordinates`);
     }
     function impPickAt(ll) {
         const map = getLeafletMap(); if (!map) return;
@@ -23144,6 +23167,14 @@
                 if (eh) { imp.dragShape = eh; imp.dragLast = ll; }
                 return;                                                  // ✎ never creates new shapes
             }
+            if (imp.mode === 'move') {                                   // ↔ pick up / drop a staged point
+                if (imp.moveHeld) { impMovePointTo(imp.moveHeld, ll); impFinishMove(imp.moveHeld); return; }
+                const p = impNearestStaged(map, ll, IMP_PICK_PX * 1.5);
+                if (!p) { impStatus('↔ no staged point there — ALT+click closer to a dot', '#ffb347'); return; }
+                imp.moveHeld = p; imp.moveDrag = false; imp.moveDownPt = { x: ev.clientX, y: ev.clientY };
+                impRenderStaged(); impSyncUi();
+                return;
+            }
             // grabbing a shape's numbered handle beats the mode action — move it
             const hs = impShapeHandleAt(map, ll);
             if (hs) { imp.dragShape = hs; imp.dragLast = ll; return; }
@@ -23153,6 +23184,13 @@
             imp.lassoDownPt = { x: ev.clientX, y: ev.clientY };
         };
         imp._onMove = (ev) => {
+            if (imp.mode === 'move' && imp.moveHeld && imp.moveDownPt && (ev.buttons & 1)) {   // ↔ ALT+drag carries the point live
+                if (!imp.moveDrag && Math.hypot(ev.clientX - imp.moveDownPt.x, ev.clientY - imp.moveDownPt.y) < 4) return;
+                ev.preventDefault(); ev.stopPropagation();
+                let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+                imp.moveDrag = true; impMovePointTo(imp.moveHeld, ll); impRenderStaged();
+                return;
+            }
             if (imp.editDrag) {                                          // ✎ vertex / radius drag in progress
                 ev.preventDefault(); ev.stopPropagation();
                 let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
@@ -23198,6 +23236,11 @@
             impRenderShapes();
         };
         imp._onUp = (ev) => {
+            if (imp.mode === 'move' && imp.moveHeld) {
+                if (imp.moveDrag) { ev.preventDefault(); ev.stopPropagation(); const p = imp.moveHeld; impFinishMove(p); }   // drag → drop here
+                else imp.moveDownPt = null;                               // plain click → keep holding until the next ALT+click
+                return;
+            }
             if (imp.editDrag) { ev.preventDefault(); ev.stopPropagation(); impEndEditDrag(); return; }
             if (imp.dragShape) { ev.preventDefault(); ev.stopPropagation(); impEndShapeDrag(); return; }
             if (imp.mode !== 'lasso' || !imp.lassoRing) return;
@@ -23211,7 +23254,8 @@
             if (!imp.mode) return;
             if ((ev.key || '').toLowerCase() === 'escape') {
                 ev.preventDefault(); ev.stopImmediatePropagation();
-                if (imp.editDrag) { impEndEditDrag(); }
+                if (imp.moveHeld) { const p = imp.moveHeld; if (p.orig && imp.moveDrag) { p.lat = p.orig.lat; p.lng = p.orig.lng; delete p.orig; } imp.moveHeld = null; imp.moveDrag = false; imp.moveDownPt = null; impRenderStaged(); impSyncUi(); impStatus('↔ put back'); }
+                else if (imp.editDrag) { impEndEditDrag(); }
                 else if (imp.dragShape) { impEndShapeDrag(); }
                 else if (imp.lassoRing) { imp.lassoRing = null; impRenderShapes(); }
                 else impSetMode(null);
@@ -23256,6 +23300,7 @@
     }
     function impSetMode(mode) {
         if (mode && !impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+        if (imp.moveHeld && mode !== 'move') { imp.moveHeld = null; imp.moveDrag = false; imp.moveDownPt = null; try { impRenderStaged(); } catch (e) {} }
         imp.mode = mode || null;
         if (imp.mode) {
             try { if (nfzDraw.active) setNfzMode(null); } catch (e) {}   // mutually exclusive with the other map tools
@@ -23276,10 +23321,6 @@
         const inCss = 'background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px;text-align:right';
         host.innerHTML = `
             <div style="font-size:11px;color:#7adfe6;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">📥 Asset Importer — <span id="aim-imp-file-label" style="text-transform:none;letter-spacing:0">${impEsc(imp.fileName || 'no file loaded')}</span></div>
-            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
-                <button id="aim-imp-load" style="${btnCss('122,223,230')}">📂 Load CSV / KML</button>
-                <span style="color:#888;font-size:10px">or drag &amp; drop the file onto this panel</span>
-            </div>
             <div id="aim-imp-bounds" style="margin-bottom:8px;padding:6px 8px;background:rgba(186,140,255,0.05);border:1px dashed rgba(186,140,255,0.4);border-radius:3px">
                 <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
                     <span style="font-size:11px;color:#ba8cff;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Boundaries</span>
@@ -23290,12 +23331,23 @@
                     <button id="aim-imp-lasso" title="ALT+drag a loop on the map to draw a polygon boundary freehand." style="${btnCss('186,140,255')}">🖊 Draw polygon</button>
                     <button id="aim-imp-edit" title="Edit boundaries — ALT+drag a vertex dot to move it · ALT+click a midpoint dot to insert a vertex · ALT+right-click a vertex to delete it · ALT+drag a circle's white edge dot to resize it · numbered handles move whole shapes. To reshape a CIRCLE, first convert it with ⬡ on its row." style="${btnCss('186,140,255')}">✎ Edit</button>
                     <button id="aim-imp-clearshapes" style="${btnCss('160,160,160')}">✕ Clear boundaries</button>
-                    <span id="aim-imp-bounds-note" style="color:#888;font-size:10px;flex-basis:100%">none loaded — every staged point is selected. Load one KML with one or more polygons (or several KMLs); only points inside a boundary are created.</span>
+                    <span id="aim-imp-bounds-note" style="color:#888;font-size:10px;flex-basis:100%">Boundaries first — a region-wide list stays light when only the points inside your boundaries are selected. Load one KML with one or more polygons (or several KMLs), or draw them; then load the data file below.</span>
                 </div>
                 <div id="aim-imp-shapes" style="margin-top:4px"></div>
             </div>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
+                <span style="font-size:11px;color:#7adfe6;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Data</span>
+                <button id="aim-imp-load" style="${btnCss('122,223,230')}">📂 Load CSV / KML</button>
+                <span style="color:#888;font-size:10px">or drag &amp; drop the file onto this panel</span>
+            </div>
             <div id="aim-imp-mapping" style="margin-bottom:8px"></div>
             <div id="aim-imp-typemap" style="margin-bottom:8px"></div>
+            <div id="aim-imp-placerow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px;padding:6px 8px;background:rgba(255,95,255,0.05);border:1px dashed rgba(255,95,255,0.35);border-radius:3px">
+                <span style="font-size:11px;color:#ff5fff;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Placement</span>
+                <button id="aim-imp-move" title="Fix a point's location BEFORE it becomes an asset. ALT+click a staged point to pick it up (it turns magenta), pan/zoom freely, ALT+click where it belongs to drop it — or just ALT+drag it. Esc puts it back. Moved points keep a magenta ring; the square is created at the new spot." style="background:rgba(255,95,255,0.12);color:#ff5fff;border:1px solid rgba(255,95,255,0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">↔ Move point</button>
+                <span id="aim-imp-move-note" style="color:#888;font-size:10px"></span>
+                <button id="aim-imp-resetmoves" style="display:none;background:transparent;color:#ffb347;border:1px solid rgba(255,179,71,0.45);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px" title="Put every moved point back where the file had it">↩ reset moved</button>
+            </div>
             <div id="aim-imp-commitrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
                 <div id="aim-imp-biggate" style="display:none;flex-basis:100%;padding:6px 8px;background:rgba(255,85,85,0.10);border:1px solid rgba(255,85,85,0.6);border-radius:3px;font-size:11px;color:#ff8a80;line-height:1.5">
                     <b>⚠ <span id="aim-imp-biggate-n">0</span> assets selected — more than ${IMP_BIG_BATCH} in one run is NOT advisable.</b> Percepto's Site Setup page gets unstable with thousands of entities, the browser tab can freeze or crash mid-run, and you may have to reload the page and pick up where it stopped. Narrow the selection with a boundary KML first.<br>
@@ -23351,6 +23403,14 @@
         q('aim-imp-lasso').onclick = () => impSetMode(imp.mode === 'lasso' ? null : 'lasso');
         q('aim-imp-pick').onclick = () => impSetMode(imp.mode === 'pick' ? null : 'pick');
         q('aim-imp-edit').onclick = () => impSetMode(imp.mode === 'edit' ? null : 'edit');
+        q('aim-imp-move').onclick = () => impSetMode(imp.mode === 'move' ? null : 'move');
+        q('aim-imp-resetmoves').onclick = () => {
+            let n = 0;
+            imp.points.forEach(p => { if (p.orig) { p.lat = p.orig.lat; p.lng = p.orig.lng; delete p.orig; n++; } });
+            imp.moveHeld = null; imp.moveDrag = false;
+            if (n) { try { impComputeDups(); } catch (e) {} impRefreshAfterSelChange(); }
+            impStatus(`↩ ${n} point(s) back at their file coordinates`);
+        };
         q('aim-imp-shape').onclick = () => {
             const inp = document.createElement('input');
             inp.type = 'file';
@@ -23674,6 +23734,16 @@
             const show = (id, on, flex) => { const el = document.getElementById(id); if (el) el.style.display = on ? (flex ? 'flex' : '') : 'none'; };
             show('aim-imp-selrow', live.length > 0 || imp.target === 'assets', true);
             show('aim-imp-commitrow', live.length > 0 || imp.lastCreated.length > 0, true);
+            show('aim-imp-placerow', live.length > 0 && imp.target !== 'assets', true);
+            {
+                const moved = live.filter(p => p.orig).length;
+                const mn = document.getElementById('aim-imp-move-note');
+                if (mn) mn.innerHTML = imp.moveHeld ? `holding <b style="color:#ff5fff">${impEsc(imp.moveHeld.name)}</b> — ALT+click the new spot · Esc=put back` : (moved ? `<b style="color:#ff5fff">${moved}</b> point${moved === 1 ? '' : 's'} moved (magenta ring) — created at the new spot` : 'ALT+click a point to pick it up, ALT+click to drop · or ALT+drag');
+                const rb = document.getElementById('aim-imp-resetmoves');
+                if (rb) rb.style.display = moved ? '' : 'none';
+                const mb = document.getElementById('aim-imp-move');
+                if (mb) { const on = imp.mode === 'move'; mb.style.background = on ? 'rgba(255,95,255,0.38)' : 'rgba(255,95,255,0.12)'; mb.textContent = on ? '↔ ON — ALT+click pick · ALT+click drop · Esc=off' : '↔ Move point'; }
+            }
             show('aim-imp-delrow', true, true);
             // v4.331: ▸ Advanced block — forced open while a tool is armed, a shape exists, or delete mode is on
             const advForced = !!imp.mode || imp.target === 'assets';
@@ -23683,7 +23753,7 @@
             // v4.342: Boundaries note (top-level block)
             const bn = document.getElementById('aim-imp-bounds-note');
             if (bn) {
-                if (!imp.shapes.length) bn.textContent = live.length ? `none loaded — all ${live.length} staged points are selected. Load one KML with one or more polygons (or several KMLs); only points inside a boundary are created.` : 'none loaded — load one KML with one or more polygons (or several KMLs); only staged points inside a boundary are created. Boundaries can be loaded before or after the data file.';
+                if (!imp.shapes.length) bn.textContent = live.length ? `none loaded — all ${live.length} staged points are selected. Load one KML with one or more polygons (or several KMLs), or draw one; only points inside a boundary are created.` : 'Boundaries first — a region-wide list stays light when only the points inside your boundaries are selected. Load one KML with one or more polygons (or several KMLs), or draw them; then load the data file below.';
                 else bn.textContent = imp.target === 'assets' ? `${imp.shapes.length} boundar${imp.shapes.length === 1 ? 'y' : 'ies'} — selecting EXISTING assets (🗑 Delete mode)` : `${imp.shapes.length} boundar${imp.shapes.length === 1 ? 'y' : 'ies'} · ${selN} of ${live.length} staged points inside${live.length ? '' : ' (load the data file to see counts)'}`;
             }
             const bc = document.getElementById('aim-imp-clearshapes');
@@ -23776,7 +23846,7 @@
         };
         plan.forEach(x => { x.name = uniq(x.p.name); });
         // backup manifest BEFORE any write (rollback = delete the created ids)
-        const manifest = { site: sid, at: new Date().toISOString(), file: imp.fileName, sizeFt: impSizeFt, creates: plan.map(x => ({ name: x.name, subtype: x.subtype, lat: x.p.lat, lng: x.p.lng, notes: x.p.notes || '' })) };
+        const manifest = { site: sid, at: new Date().toISOString(), file: imp.fileName, sizeFt: impSizeFt, creates: plan.map(x => ({ name: x.name, subtype: x.subtype, lat: x.p.lat, lng: x.p.lng, notes: x.p.notes || '', movedFrom: x.p.orig || null })) };
         try { localStorage.setItem(`aim_imp_commit_backup:${sid}`, JSON.stringify(manifest)); } catch (e) {}
         try { downloadJSONFile(`asset-import-${sid}-${Date.now()}.json`, JSON.stringify(manifest, null, 1)); } catch (e) { impStatus('backup manifest download failed (localStorage stash still written)'); }
         // fresh subtypes only need new_poi_type_str on their FIRST create
@@ -27520,7 +27590,7 @@
             steps: ['🔍 Scan crossings (or right-click a flight path → 🛗 for a manual point).', 'Review each staged crossing — bridge height, elevator lengths, preflight result.', 'Untick Dry run → Commit. ↩ Undo restores the flight paths and deletes the poles.'],
             test: 'Scan a site with a known transmission crossing, confirm one staged set per crossing, Commit with Dry run ON.' },
         imp: { what: 'Bring a client asset list into Percepto. Load a CSV or KML → points stage on the map (nothing written) → narrow with boundaries → map the type → ✓ Create makes real asset squares. Create-only, with dry run, backup manifest and undo.',
-            steps: ['📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', 'Boundaries: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
+            steps: ['Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: ALT+click a dot to pick it up, ALT+click where it belongs (or ALT+drag). Moved dots get a magenta ring; ↩ reset moved puts them back.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
             test: 'Load the list, add one boundary, confirm the selected count drops, Create with Dry run ON.' },
         sci: { what: 'Applies the Ortho Scanner review sheet\'s decisions: accepted NFZs and flight-path leg changes stage on the map (green / yellow, removed legs red), preflight runs, then Apply writes them — NFZs create-only, flight paths one POST each with Delete Guard backups.',
             steps: ['Load the decisions JSON and the scan bundle from the review sheet.', 'Check the staged plan on the map and the preflight result.', 'Untick Dry run → Apply.'],
