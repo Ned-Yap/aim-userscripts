@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.342
+// @version      4.343
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -89,7 +89,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.342';
+    const SCRIPT_VERSION = '4.343';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22507,7 +22507,8 @@
         typeMap: {},                                // loaded from GM at wire time
         target: 'staged',                           // 'staged' | 'assets' (🗑 delete mode)
         mode: null,                                 // null | 'circle' | 'lasso' | 'pick'
-        radiusVal: 0.5, radiusUnit: 'mi', includeDups: false,
+        radiusVal: 3, radiusUnit: 'mi', includeDups: false,   // v4.343: 3 mi = the usual base reach circle
+        keepShield: true,                           // v4.343: keep "- unsh" / "shielded" modifiers in subtypes (off = strip them)
         advOpen: false,                             // v4.331: ▸ Advanced (subset tools + delete mode) expanded — GM-remembered
         mapOpen: false,                             // v4.331: column-mapping row expanded (auto-collapses once applied)
         // LIVE selection model (v4.250): selected = manual override ?? inside-any-shape.
@@ -22527,7 +22528,7 @@
         lastDelete: null,                           // {siteID, when, entities:[full bodies]} — ↩ Undo batch source
         assetIndex: null,                           // cached [{id,name,clean,ring,bbox,centroid}] for dup-guard + delete select
     };
-    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen })); } catch (e) {} }
+    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield })); } catch (e) {} }
     function impLoadParams() {
         try {
             const raw = GM_getValue(IMP_PARAMS_KEY, ''); if (!raw) return;
@@ -22536,8 +22537,19 @@
             if (o.radiusUnit === 'mi' || o.radiusUnit === 'ft') imp.radiusUnit = o.radiusUnit;
             if (typeof o.includeDups === 'boolean') imp.includeDups = o.includeDups;
             if (typeof o.advOpen === 'boolean') imp.advOpen = o.advOpen;
+            if (typeof o.keepShield === 'boolean') imp.keepShield = o.keepShield;
         } catch (e) {}
     }
+    // v4.343: shielding modifiers on a subtype ("v - pumping rod - unsh",
+    // "Tank Battery Shielded") — stripped when the user doesn't care about
+    // shielded vs unshielded. Trailing tokens only; the base type is untouched.
+    const IMP_SHIELD_RE = /\s*[-–—:(]?\s*\b(un)?(sh|shld|shielded)\b\)?\.?\s*$/i;
+    function impStripShield(v) {
+        let t = String(v || '').trim();
+        for (let i = 0; i < 2; i++) { const n = t.replace(IMP_SHIELD_RE, '').trim(); if (n === t || !n) break; t = n; }
+        return t.replace(/[\s\-–—:]+$/, '').trim() || String(v || '').trim();
+    }
+    function impApplyShield(v) { return imp.keepShield ? v : impStripShield(v); }
     function impLoadTypeMap() { try { imp.typeMap = JSON.parse(GM_getValue(IMP_TYPEMAP_KEY, '{}')) || {}; } catch (e) { imp.typeMap = {}; } }
     function impSaveTypeMap() { try { GM_setValue(IMP_TYPEMAP_KEY, JSON.stringify(imp.typeMap)); } catch (e) {} }
     function impEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -23271,7 +23283,12 @@
             <div id="aim-imp-bounds" style="margin-bottom:8px;padding:6px 8px;background:rgba(186,140,255,0.05);border:1px dashed rgba(186,140,255,0.4);border-radius:3px">
                 <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
                     <span style="font-size:11px;color:#ba8cff;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Boundaries</span>
-                    <button id="aim-imp-shape" title="Upload a KML whose polygon(s) are the boundaries — one KML with several polygons, or several KMLs one after another (they add up). Only staged points INSIDE a boundary are selected for creation. A polygon-only KML dropped on the panel routes here automatically." style="${btnCss('186,140,255')}">⬆ Load boundary KML</button>
+                    <button id="aim-imp-shape" title="Upload KML boundaries — pick several files at once, or one KML holding several polygons (they add up). Only staged points INSIDE a boundary are selected for creation. A polygon-only KML dropped on the panel routes here automatically." style="${btnCss('186,140,255')}">⬆ Load boundary KML(s)</button>
+                    <button id="aim-imp-circle" title="ALT+click the map to drop a circle boundary of radius r (e.g. 3 mi around a base). Convert it to a polygon with ⬡ on its row to reshape it." style="${btnCss('186,140,255')}">⭕ Circle</button>
+                    <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc">r <input type="number" id="aim-imp-radius" min="0" step="0.1" style="width:56px;${inCss}">
+                        <select id="aim-imp-radius-unit" style="${inCss};text-align:left"><option value="mi">mi</option><option value="ft">ft</option></select></label>
+                    <button id="aim-imp-lasso" title="ALT+drag a loop on the map to draw a polygon boundary freehand." style="${btnCss('186,140,255')}">🖊 Draw polygon</button>
+                    <button id="aim-imp-edit" title="Edit boundaries — ALT+drag a vertex dot to move it · ALT+click a midpoint dot to insert a vertex · ALT+right-click a vertex to delete it · ALT+drag a circle's white edge dot to resize it · numbered handles move whole shapes. To reshape a CIRCLE, first convert it with ⬡ on its row." style="${btnCss('186,140,255')}">✎ Edit</button>
                     <button id="aim-imp-clearshapes" style="${btnCss('160,160,160')}">✕ Clear boundaries</button>
                     <span id="aim-imp-bounds-note" style="color:#888;font-size:10px;flex-basis:100%">none loaded — every staged point is selected. Load one KML with one or more polygons (or several KMLs); only points inside a boundary are created.</span>
                 </div>
@@ -23293,12 +23310,7 @@
             <button id="aim-imp-advhdr" style="background:none;border:none;color:#7a8794;cursor:pointer;font:inherit;font-size:11px;padding:2px 0;margin-bottom:6px;text-align:left" title="Subset selection (circle / lasso / pick / shape KML / edit) and 🗑 Delete mode for existing assets. With no shape drawn, every staged point is selected.">▸ Advanced — select a subset · edit shapes · delete existing assets</button>
             <div id="aim-imp-adv" style="display:none">
             <div id="aim-imp-selrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
-                <button id="aim-imp-circle" style="${btnCss('122,223,230')}">⭕ Circle</button>
-                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc">r <input type="number" id="aim-imp-radius" min="0" step="0.1" style="width:56px;${inCss}">
-                    <select id="aim-imp-radius-unit" style="${inCss};text-align:left"><option value="mi">mi</option><option value="ft">ft</option></select></label>
-                <button id="aim-imp-lasso" style="${btnCss('122,223,230')}">🖊 Lasso</button>
-                <button id="aim-imp-pick" style="${btnCss('122,223,230')}">☝ Pick</button>
-                <button id="aim-imp-edit" title="Edit shapes — ALT+drag a vertex dot to move it · ALT+click a small midpoint dot to insert a new vertex there (keep dragging to place it) · ALT+right-click a vertex to delete it · ALT+drag a circle's white edge dot to resize it · numbered handles still move whole shapes. To add points to a CIRCLE, first convert it with the ⬡ button on its row below." style="${btnCss('122,223,230')}">✎ Edit</button>
+                <button id="aim-imp-pick" title="ALT+click a single staged point to toggle it in or out of the selection, regardless of boundaries." style="${btnCss('122,223,230')}">☝ Pick one</button>
                 <button id="aim-imp-selall" style="${btnCss('160,160,160')}">Select all</button>
                 <button id="aim-imp-clearsel" style="${btnCss('160,160,160')}">Clear selection</button>
             </div>
@@ -23328,8 +23340,7 @@
         host.addEventListener('dragleave', () => { host.style.outline = ''; });
         host.addEventListener('drop', (ev) => {
             ev.preventDefault(); ev.stopPropagation(); host.style.outline = '';
-            const f = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
-            if (f) impHandleFile(f);
+            Array.from((ev.dataTransfer && ev.dataTransfer.files) || []).forEach(f => impHandleFile(f));   // v4.343: several files at once (polygon-only KMLs become boundaries)
         });
         const rEl = q('aim-imp-radius'), ruEl = q('aim-imp-radius-unit');
         rEl.value = imp.radiusVal; ruEl.value = imp.radiusUnit;
@@ -23343,8 +23354,9 @@
         q('aim-imp-shape').onclick = () => {
             const inp = document.createElement('input');
             inp.type = 'file';
+            inp.multiple = true;   // v4.343: several boundary KMLs in one pick
             inp.accept = '.kml,application/vnd.google-earth.kml+xml';
-            inp.onchange = () => { const f = inp.files && inp.files[0]; if (f) impHandleShapeFile(f); };
+            inp.onchange = () => { Array.from(inp.files || []).forEach(f => impHandleShapeFile(f)); };
             inp.click();
         };
         q('aim-imp-selall').onclick = () => {
@@ -23488,10 +23500,11 @@
     function impResolveSubtype(raw, subtypes) {
         const key = (raw || '(blank)').toLowerCase();
         const mapped = (imp.typeMap[key] || '').trim();
-        if (mapped) return { value: mapped, source: 'map' };
+        if (mapped) return { value: impApplyShield(mapped), source: 'map' };
         if (!raw) return { value: '', source: 'none' };
-        const hit = (subtypes || []).find(st => st.toLowerCase() === raw.toLowerCase());
-        return hit ? { value: hit, source: 'existing' } : { value: raw, source: 'new' };
+        const want = impApplyShield(raw);
+        const hit = (subtypes || []).find(st => st.toLowerCase() === want.toLowerCase());
+        return hit ? { value: hit, source: 'existing' } : { value: want, source: 'new' };
     }
     function impRenderTypeMapUi() {
         const el = document.getElementById('aim-imp-typemap');
@@ -23499,16 +23512,19 @@
         if (!imp.points.length) { el.innerHTML = ''; return; }
         const subCounts = impSiteSubtypes();
         const subtypes = [...subCounts.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0]);
-        const defSub = subtypes[0] || 'well-cluster';
+        const defSub = impApplyShield(subtypes[0] || 'well-cluster');
         const dl = `<datalist id="aim-imp-subtype-list">${subtypes.map(s => `<option value="${impEsc(s)}"></option>`).join('')}</datalist>`;
         const inCss = 'background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px';
+        const shieldRow = `<label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#cfd6dc;margin-top:6px;cursor:pointer" title="Site subtypes often carry a shielding modifier (\"v - pumping rod - unsh\", \"Tank Battery Shielded\"). Untick to drop that modifier from every subtype this import writes — assets are just assets."><input type="checkbox" id="aim-imp-keepshield" ${imp.keepShield ? 'checked' : ''} style="accent-color:#7adfe6"> keep shielded / unshielded modifiers in subtypes <span style="color:#888;font-size:10px">(untick = "v - pumping rod - unsh" → "v - pumping rod")</span></label>`;
+        const wireShield = () => { const k = el.querySelector('#aim-imp-keepshield'); if (k) k.onchange = () => { imp.keepShield = k.checked; impSaveParams(); impRenderTypeMapUi(); impSyncUi(); }; };
         if (!imp.mapping || !imp.mapping.type) {
-            const cur = imp.typeMap['__all__'] || defSub;
+            const cur = impApplyShield(imp.typeMap['__all__'] || defSub);
             el.innerHTML = `<div style="padding:6px 8px;background:rgba(122,223,230,0.05);border:1px dashed rgba(122,223,230,0.3);border-radius:3px;font-size:11px;color:#cfd6dc">
                 No type column — subtype for ALL created assets:
                 <input id="aim-imp-sub-all" type="text" list="aim-imp-subtype-list" value="${impEsc(cur)}" style="${inCss};width:140px">${dl}
-                <span style="color:#888;font-size:10px">(site's existing subtypes suggested; a new value is created on the site)</span></div>`;
+                <span style="color:#888;font-size:10px">(site's existing subtypes suggested; a new value is created on the site)</span>${shieldRow}</div>`;
             el.querySelector('#aim-imp-sub-all').oninput = function () { imp.typeMap['__all__'] = this.value.trim(); impSaveTypeMap(); impSyncUi(); };
+            wireShield();
             return;
         }
         const vals = new Map();
@@ -23531,7 +23547,8 @@
         }).join('');
         el.innerHTML = `<div style="padding:6px 8px;background:rgba(122,223,230,0.05);border:1px dashed rgba(122,223,230,0.3);border-radius:3px">
             <div style="font-size:10px;color:#9ad;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Type — CSV value → Percepto subtype <span style="color:#888;text-transform:none;letter-spacing:0">(the file's value is used as-is unless you change it; a changed value is remembered)</span></div>
-            ${rows}${dl}</div>`;
+            ${rows}${dl}${shieldRow}</div>`;
+        wireShield();
         el.querySelectorAll('input[data-imptype]').forEach(inp => {
             inp.oninput = () => {
                 const k = inp.getAttribute('data-imptype'), raw = inp.getAttribute('data-impraw') || '';
@@ -23678,10 +23695,16 @@
                 b.style.background = on ? 'rgba(122,223,230,0.35)' : 'rgba(122,223,230,0.12)';
                 b.textContent = on ? onLabel : label;
             };
-            modeBtn('aim-imp-circle', 'circle', '⭕ Circle', '⭕ ON — ALT+click centers a circle · Esc=off');
-            modeBtn('aim-imp-lasso', 'lasso', '🖊 Lasso', '🖊 ON — ALT+drag a loop · Esc=off');
-            modeBtn('aim-imp-pick', 'pick', '☝ Pick', '☝ ON — ALT+click toggles one · Esc=off');
-            modeBtn('aim-imp-edit', 'edit', '✎ Edit', '✎ ON — ALT+drag vertex=move · midpoint dot=add · right-click=delete · circle edge=resize · Esc=off');
+            const bModeBtn = (id, mode, label, onLabel) => {
+                const b = document.getElementById(id); if (!b) return;
+                const on = imp.mode === mode;
+                b.style.background = on ? 'rgba(186,140,255,0.38)' : 'rgba(186,140,255,0.12)';
+                b.textContent = on ? onLabel : label;
+            };
+            bModeBtn('aim-imp-circle', 'circle', '⭕ Circle', '⭕ ON — ALT+click the map to center a circle · Esc=off');
+            bModeBtn('aim-imp-lasso', 'lasso', '🖊 Draw polygon', '🖊 ON — ALT+drag a loop · Esc=off');
+            modeBtn('aim-imp-pick', 'pick', '☝ Pick one', '☝ ON — ALT+click toggles one · Esc=off');
+            bModeBtn('aim-imp-edit', 'edit', '✎ Edit', '✎ ON — ALT+drag vertex=move · midpoint dot=add · right-click=delete · circle edge=resize · Esc=off');
             const cb = document.getElementById('aim-imp-commit');
             if (cb) {
                 const dupsIn = live.filter(p => p.sel && p.dup).length;
@@ -23722,8 +23745,8 @@
         const missing = new Set();
         const siteSubs = [...subCounts.keys()];
         const subtypeFor = (p) => {
-            if (!imp.mapping || !imp.mapping.type) return (imp.typeMap['__all__'] || '').trim() || defSub;
-            const v = impResolveSubtype(p.typeRaw || '', siteSubs).value;   // v4.333: file value as-is unless overridden
+            if (!imp.mapping || !imp.mapping.type) return impApplyShield((imp.typeMap['__all__'] || '').trim() || defSub);
+            const v = impResolveSubtype(p.typeRaw || '', siteSubs).value;   // v4.333: file value as-is unless overridden; v4.343: shielding modifier rule applied inside
             if (!v) missing.add(p.typeRaw || '(blank)');
             return v;
         };
@@ -27476,6 +27499,33 @@
     // switcher (closure over its box); genShowPage() is the module-level entry
     // the tools' ShowPanel helpers / hotkey arms call to land on their page.
     let genShowPageLive = null;
+    // v4.343: ⓘ help per page — what the tool is for, how to use it, what to try.
+    const GEN_PAGE_HELP = {
+        ffz: { what: 'Auto-builds one DRAFT inspection FFZ per Normal asset that sits near a power line: a single edge box on the shielded side, inner edge the standoff off the asset, altitudes DEM-checked per zone. Nothing is written until Commit.',
+            steps: ['Check the Power lines row says loaded (open the Map Styler tab once if not).', '1 · Settings — standoff, edge depth, AGL floor and Min/Max delta.', '2 · 👁 Preview on map — green = clean draft, red/blue = flagged. Drag / Q·E rotate / Alt-drag re-snap any draft; ✏️ Draw adds boxes by hand; 📥 Load site FFZs pulls existing zones in for editing.', '3 · Untick Dry run in the header → ✓ Commit draft FFZs. 💾 Save FFZ edits writes loaded zones back in place.'],
+            test: 'Preview on a small site, check the draft count against the asset count, then Commit with Dry run ON to see what WOULD be written.' },
+        adv: { what: 'Trace a corridor FFZ point-to-point along the asset-facing edge; the full box and the shielding band draw live as you click. Pieces fuse with 🔗 Merge and commit as ONE FFZ.',
+            steps: ['Click ✦ Advanced Draw to arm it.', 'ALT+click to start a corridor, click to add points, double-click (or Enter) to finish. Shift = 15° angle snap · Ctrl = magnet to the nearest asset offset · F = flip the width side · Esc = undo the last point.', '🔗 Merge fuses the pieces so you see exactly what will be created (↩ Unmerge brings the pieces back).', 'Untick Dry run → ✓ Commit draft FFZs.'],
+            test: 'Trace a two-segment corridor past one pad, Merge, then Commit with Dry run ON.' },
+        nfz: { what: 'Stage no-fly zones: ⬠ Trace draws a ring around anything (it auto-grows by the Buffer); ⚡ Stamp makes one from an existing asset outline in a single ALT+click. Commits are create-only type-4 NFZs.',
+            steps: ['Set Buffer (growth on finish) and Min size.', '⬠ NFZ Trace: ALT+click to start, click vertices, double-click to finish. Ctrl snaps onto the nearest asset boundary.', '⚡ NFZ Stamp: ALT+click inside an asset polygon — keep clicking for more.', '⚠ Narrow check paints any part of any NFZ thinner than Min size.', 'Untick Dry run → ✓ Commit NFZs. ↩ Undo removes exactly what the last commit created.'],
+            test: 'Stamp one asset, run Narrow check, Commit with Dry run ON.' },
+        fp: { what: 'Flight-path helpers along the power lines. 🛩 Routes proposes base→asset paths; 📥 Load site FPs pulls the existing paths into an editable preview; ✨ Snap & Clean pulls them ~50 ft parallel to the lines; 🧲 CTRL-snap arms snapping inside Percepto\'s own draw tool. This page previews and edits — writes happen through the native editor.',
+            steps: ['Power lines must be loaded; Routes also needs a base (SUM → 📍 Base picker).', '🛩 Routes or 📥 Load site FPs → cyan preview. Orange = out of the 40–65 ft band or over a pad.', 'Drag a white dot to move · click a line to add a point · right-click a dot to delete.', '✨ Snap & Clean re-aligns the whole network. ⧉ Copy JSON exports the route result.'],
+            test: 'Load site FPs, note the orange count, Snap & Clean, see it drop.' },
+        routes: { what: 'Turns the Map Styler\'s 🟠 Proposed Routes KML into real entities: route paths → flight paths, route polygons → FFZs. Endpoints auto-snap ≤50 ft to existing flight-path vertices; altitudes copy from the nearest existing entity. Create-only, with preview, dry run and undo.',
+            steps: ['Draw + commit routes in the Map Styler\'s Proposed Routes layer first.', '🟠 Convert routes → preview on the map and a list in the status line.', 'Untick Dry run → write. ↩ Undo deletes what the conversion created.'],
+            test: 'Convert with Dry run ON and compare the preview count to the routes you drew.' },
+        elv: { what: 'Finds every flight path that crosses a red transmission line and stages a climb-over there: Elevator 1 → Bridge → Elevator 2, bands from DEM in MSL with 10 ft overlaps, plus a pole marker per crossing. Writes one POST per flight path, each with a backup.',
+            steps: ['🔍 Scan crossings (or right-click a flight path → 🛗 for a manual point).', 'Review each staged crossing — bridge height, elevator lengths, preflight result.', 'Untick Dry run → Commit. ↩ Undo restores the flight paths and deletes the poles.'],
+            test: 'Scan a site with a known transmission crossing, confirm one staged set per crossing, Commit with Dry run ON.' },
+        imp: { what: 'Bring a client asset list into Percepto. Load a CSV or KML → points stage on the map (nothing written) → narrow with boundaries → map the type → ✓ Create makes real asset squares. Create-only, with dry run, backup manifest and undo.',
+            steps: ['📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', 'Boundaries: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
+            test: 'Load the list, add one boundary, confirm the selected count drops, Create with Dry run ON.' },
+        sci: { what: 'Applies the Ortho Scanner review sheet\'s decisions: accepted NFZs and flight-path leg changes stage on the map (green / yellow, removed legs red), preflight runs, then Apply writes them — NFZs create-only, flight paths one POST each with Delete Guard backups.',
+            steps: ['Load the decisions JSON and the scan bundle from the review sheet.', 'Check the staged plan on the map and the preflight result.', 'Untick Dry run → Apply.'],
+            test: 'Load a bundle, confirm the staged counts match the sheet, Apply with Dry run ON.' },
+    };
     const GEN_PAGE_NAMES = { ffz: '⊕ Inspection FFZs', adv: '✦ Advanced Draw', nfz: '⬠ NFZs', fp: '🛩 Flight Paths', routes: '🟠 Convert Routes', elv: '🛗 Elevators', imp: '📥 Asset Import', sci: '🔍 Scan Import' };
     function genShowPage(page) {
         try { if (genShowPageLive) genShowPageLive(page); }
@@ -27554,11 +27604,13 @@
             <div id="aim-gen-title" style="color:#7adfe6;font-weight:700;font-size:15px;margin-bottom:4px;cursor:move;user-select:none;padding-right:28px;display:flex;align-items:center;gap:8px">
                 <button id="aim-gen-back" data-gen-sec="tool" title="Back to the tool menu" style="width:24px;height:24px;line-height:20px;text-align:center;background:rgba(122,223,230,0.10);color:#7adfe6;border:1px solid rgba(122,223,230,0.45);border-radius:4px;cursor:pointer;font:inherit;font-size:16px;font-weight:700;padding:0;flex:none">‹</button>
                 <span>⊕ Generate<span id="aim-gen-page-name" style="color:#e6e6e6"></span></span>
+                <button id="aim-gen-help-btn" data-gen-sec="tool" title="What this tool does, how to use it, what to try" style="width:22px;height:22px;line-height:18px;text-align:center;background:rgba(122,223,230,0.10);color:#7adfe6;border:1px solid rgba(122,223,230,0.45);border-radius:50%;cursor:pointer;font:inherit;font-size:13px;font-weight:700;padding:0;flex:none">i</button>
                 <span style="color:#666;font-size:10px;font-weight:400">— drag · resize ↘</span>
             </div>
             <div style="color:#888;font-size:11px">${xmlEscape(siteName)} · ${assets.length} asset${assets.length === 1 ? '' : 's'} (${eligibleCount} eligible)</div>
             <label data-gen-sec="tool" id="aim-gen-dryrow" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;margin-top:8px;padding:5px 10px;border-radius:3px;background:rgba(95,255,95,0.08);border:1px solid rgba(95,255,95,0.4)"><input type="checkbox" id="aim-gen-dryrun" checked style="accent-color:#5fff5f"> <b id="aim-gen-drylabel" style="color:#5fff5f">🧪 Dry run — nothing is written</b> <span style="color:#888;font-size:10px">(every tool on this panel honors it)</span></label>
             </div>
+            <div id="aim-gen-help" style="display:none;margin-bottom:12px;padding:8px 10px;background:rgba(122,223,230,0.07);border:1px solid rgba(122,223,230,0.4);border-radius:4px;font-size:11px;color:#cfd6dc;line-height:1.5"></div>
             <div id="aim-gen-menu" data-gen-sec="menu">
                 <div style="font-size:11px;color:#9ad;line-height:1.5;margin-bottom:4px">Pick a tool. Only that tool's controls show; <b style="color:#7adfe6">‹</b> brings you back here. Staged work stays on the map until the panel is closed.</div>
                 <div class="gen-grp">Build</div>
@@ -27586,7 +27638,12 @@
                 <span><b style="color:#ffd54f">Power lines:</b> <span id="aim-gen-pl-status">checking…</span></span>
                 <button id="aim-gen-pl-refresh" style="background:transparent;color:#ffd54f;border:1px solid rgba(255,213,79,0.45);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">↻ Refresh</button>
             </div>
-            <div data-gen-sec="ffz" style="margin-bottom:14px">
+            <div data-gen-sec="ffz adv" style="display:flex;align-items:center;gap:8px;margin-bottom:8px;padding-bottom:4px;border-bottom:1px solid rgba(122,223,230,0.25)">
+                <span style="font-size:12px;color:#7adfe6;font-weight:700">1 · Settings</span>
+                <button id="aim-gen-settings-toggle" style="background:none;border:none;color:#7a8794;cursor:pointer;font:inherit;font-size:11px;padding:0">▾ hide</button>
+                <span style="flex:1"></span><span style="color:#888;font-size:10px">remembered per site · defaults are the SOP values</span>
+            </div>
+            <div data-gen-sec="ffz" class="gen-settings" style="margin-bottom:14px">
                 <div style="font-size:11px;color:#9ad;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Filters</div>
                 <div style="display:flex;flex-direction:column;gap:8px">
                     <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc"><input type="checkbox" id="aim-gen-skipbad" ${d.skipBadStates ? 'checked' : ''} style="accent-color:#7adfe6"> Skip unreachable / unshielded / empty <span style="color:#888;font-size:10px">(keeps Normal/Inactive/HY)</span></label>
@@ -27594,14 +27651,14 @@
                     ${numField('proximityFt', 'Max distance to power line', '(200 PL + 200 asset)', 25)}
                 </div>
             </div>
-            <div data-gen-sec="ffz" style="margin-bottom:14px">
+            <div data-gen-sec="ffz" class="gen-settings" style="margin-bottom:14px">
                 <div style="font-size:11px;color:#9ad;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">FFZ geometry</div>
                 <div style="display:flex;flex-direction:column;gap:8px">
                     ${numField('standoffFt', 'Standoff from asset', '(inner edge off the border)', 1)}
                     ${numField('depthFt', 'Edge depth', '(flyable thickness, ≥30)', 1)}
                 </div>
             </div>
-            <div data-gen-sec="ffz adv" style="margin-bottom:14px">
+            <div data-gen-sec="ffz adv" class="gen-settings" style="margin-bottom:14px">
                 <div style="font-size:11px;color:#9ad;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Altitude <span style="color:#888;text-transform:none;letter-spacing:0;font-weight:400">— floor = DEM ground + AGL, per FFZ</span></div>
                 <div style="display:flex;flex-direction:column;gap:8px">
                     ${numField('aglFt', 'AGL floor', '(above ground)', 5)}
@@ -27613,8 +27670,11 @@
             <div data-gen-sec="fp" style="margin-bottom:12px;padding:8px 10px;background:rgba(0,229,255,0.06);border:1px dashed rgba(0,229,255,0.3);border-radius:3px;font-size:11px;color:#9ad;line-height:1.5"><b style="color:#00e5ff">🛩 Routes</b> proposes base→asset flight paths along the power lines · <b>📥 Load site FPs</b> pulls the existing paths into the editable preview · <b>✨ Snap &amp; Clean</b> pulls them ~50 ft parallel to the lines · <b>🧲 CTRL-snap</b> arms snapping inside Percepto's native draw tool.</div>
             <div data-gen-sec="routes" style="margin-bottom:12px;padding:8px 10px;background:rgba(255,145,0,0.06);border:1px dashed rgba(255,145,0,0.3);border-radius:3px;font-size:11px;color:#9ad;line-height:1.5">Converts the Map Styler's 🟠 <b>Proposed Routes</b> KML into real entities: route paths → flight paths, route polygons → FFZs. Preview, dry run and undo; create-only.</div>
             <div id="aim-gen-stats" data-gen-sec="ffz adv fp routes" style="color:#9ad;font-size:11px;margin-bottom:12px;padding:6px 8px;background:rgba(122,223,230,0.08);border-radius:3px">Adjust parameters, then Preview.</div>
-            <div data-gen-sec="ffz adv nfz fp routes" style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-bottom:14px">
-                <button id="aim-gen-close" style="background:transparent;color:#888;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Close</button>
+            <div data-gen-sec="ffz adv" style="display:flex;align-items:center;gap:8px;margin-bottom:8px;padding-bottom:4px;border-bottom:1px solid rgba(122,223,230,0.25)">
+                <span style="font-size:12px;color:#7adfe6;font-weight:700">2 · Build drafts</span>
+                <span style="color:#888;font-size:10px">preview on the map, draw by hand, or load existing zones — nothing is written yet</span>
+            </div>
+            <div data-gen-sec="ffz adv nfz fp routes" style="display:flex;justify-content:flex-start;gap:8px;flex-wrap:wrap;margin-bottom:14px">
                 <button id="aim-gen-clear" data-gen-sec="ffz fp" style="background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Clear preview</button>
                 <button id="aim-gen-draw" data-gen-sec="ffz" style="background:rgba(255,225,77,0.12);color:#ffe14d;border:1px solid rgba(255,225,77,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✏️ Draw</button>
                 <button id="aim-gen-advdraw" data-gen-sec="adv" title="Advanced Draw — click the inner (asset-facing) edge point-to-point to build a zigzag corridor FFZ. Live full-box preview + shielding band on the line. Shift=angle-snap 15° off the last segment · Ctrl=magnet-snap to the offset off the nearest asset · F=flip width side · double-click/Enter=finish · Esc=undo last point. Autosaves; commits as ONE FFZ via Commit." style="background:rgba(95,184,255,0.12);color:#5fb8ff;border:1px solid rgba(95,184,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✦ Advanced Draw</button>
@@ -27656,7 +27716,7 @@
             <div id="aim-sci-controls" data-gen-sec="sci" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.35);border-radius:3px"></div>
             <div id="aim-elv-controls" data-gen-sec="elv" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(255,154,61,0.06);border:1px dashed rgba(255,154,61,0.35);border-radius:3px"></div>
             <div data-gen-sec="ffz adv" style="padding:8px 10px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25);border-radius:3px">
-                <div style="font-size:11px;color:#9ad;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Commit</div>
+                <div style="font-size:12px;color:#7adfe6;margin-bottom:6px;font-weight:700">3 · Commit <span style="color:#888;font-size:10px;font-weight:400">— writes the drafts to the site · the 🧪 Dry run switch in the header decides whether anything is actually written</span></div>
                 <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc;margin-bottom:8px"><input type="checkbox" id="aim-gen-shield" style="accent-color:#ff2d2d"> Show shielding on drafts <span style="color:#888;font-size:10px">(red inner / yellow outer)</span></label>
                 <div style="display:flex;gap:8px;flex-wrap:wrap">
                     <button id="aim-gen-merge" title="Merge your drawn pieces into the final fused shapes RIGHT NOW so you can see exactly what will be created. Already-merged shapes stay; build more and merge again any time. Non-destructive." style="background:rgba(95,184,255,0.18);color:#5fb8ff;border:1px solid rgba(95,184,255,0.6);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">🔗 Merge</button>
@@ -27688,7 +27748,19 @@
             });
             const nm = box.querySelector('#aim-gen-page-name');
             if (nm) nm.textContent = page === 'menu' ? '' : ` · ${GEN_PAGE_NAMES[page]}`;
+            const help = box.querySelector('#aim-gen-help');
+            if (help) { help.style.display = 'none'; help.innerHTML = ''; }
             box.scrollTop = 0;
+        };
+        box.querySelector('#aim-gen-help-btn').onclick = () => {
+            const help = box.querySelector('#aim-gen-help'); const h = GEN_PAGE_HELP[genState.page];
+            if (!help || !h) return;
+            if (help.style.display !== 'none') { help.style.display = 'none'; help.innerHTML = ''; return; }
+            help.innerHTML = `<div style="color:#7adfe6;font-weight:700;margin-bottom:4px">${GEN_PAGE_NAMES[genState.page]} — what it does</div><div>${h.what}</div>
+                <div style="color:#7adfe6;font-weight:700;margin:8px 0 4px">How to use it</div><ol style="margin:0;padding-left:18px">${h.steps.map(t => `<li style="margin-bottom:2px">${t}</li>`).join('')}</ol>
+                <div style="color:#7adfe6;font-weight:700;margin:8px 0 4px">Try it</div><div>${h.test}</div>
+                <div style="color:#888;font-size:10px;margin-top:6px">🧪 Dry run in the header keeps every commit on this panel read-only — leave it on while learning a tool.</div>`;
+            help.style.display = '';
         };
         box.querySelector('#aim-gen-back').onclick = () => genShowPage('menu');
         (() => {
@@ -27792,7 +27864,8 @@
             })();
         }
         const statsEl = box.querySelector('#aim-gen-stats');
-        box.querySelector('#aim-gen-close').onclick = () => closeSiteGenerator();
+        (() => { const t = box.querySelector('#aim-gen-settings-toggle'); if (!t) return; let open = true;
+            t.onclick = () => { open = !open; t.textContent = open ? '▾ hide' : '▸ show'; box.querySelectorAll('.gen-settings').forEach(el => { if (el.style.display !== 'none' || !open) el.style.display = open ? (el.dataset.genDisplay || '') : 'none'; }); }; })();
         box.querySelector('#aim-gen-x').onclick = () => closeSiteGenerator();
         box.querySelector('#aim-gen-clear').onclick = () => {
             clearGenPreview();
