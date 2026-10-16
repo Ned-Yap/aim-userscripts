@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.347
+// @version      4.348
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -90,7 +90,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.347';
+    const SCRIPT_VERSION = '4.348';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22676,13 +22676,38 @@
             members.forEach(p => { p.pri.padKey = key; p.pri.padName = padName; p.pri.padTotal = total; p.pri.padN = members.length; p.pri.padWith = with_.length; p.pri.tier = direct ? (p.pri.direct || tier) : tier; p.pri.flags = flags.slice(); });
             pads.set(key, { key, name: padName, members, total, tier, flags });
         });
-        // 5. summary
-        const cnt = { P1: 0, P2: 0, P3: 0, none: 0 }, chg = { same: 0, changed: 0, new: 0, untier: 0 };
-        live.forEach(p => {
+        c.pads = pads;
+        impSummarizePriority();
+    }
+    // v4.348: the summary / flags / report follow the SELECTION (boundaries) —
+    // pad totals above still sum every asset on the pad, even one the boundary
+    // cuts off, so a pad on the edge keeps its true number.
+    function impSummarizePriority() {
+        const c = imp.pri;
+        if (!c.on || !c.pads) { c.summary = null; return; }
+        const sel = imp.points.filter(p => !p.done && p.sel && p.pri);
+        const cnt = { P1: 0, P2: 0, P3: 0, none: 0 }, chg = { same: 0, changed: 0, added: 0, new: 0, untier: 0 };
+        sel.forEach(p => {
             cnt[p.pri.tier || 'none']++;
-            if (!p.dup) chg.new++; else if (!p.pri.tier) chg.untier++; else if (p.pri.before === p.pri.tier) chg.same++; else chg.changed++;
+            if (!p.dup) chg.new++; else if (!p.pri.tier) chg.untier++; else if (p.pri.before === p.pri.tier) chg.same++; else if (!p.pri.before) chg.added++; else chg.changed++;
         });
-        c.summary = { pads: pads.size, flagged: [...pads.values()].filter(x => x.flags.length).length, cnt, chg, padsList: [...pads.values()] };
+        const padsList = [...c.pads.values()].map(x => ({ ...x, members: x.members.filter(p => p.sel && !p.done) })).filter(x => x.members.length);
+        c.summary = { pads: padsList.length, flagged: padsList.filter(x => x.flags.length).length, cnt, chg, padsList, selN: sel.length };
+    }
+    function impRenderPriSummary() {
+        const c = imp.pri; if (!c.on) return;
+        impSummarizePriority();
+        const S = c.summary, hdr = document.getElementById('aim-imp-pri-hdr'), sum = document.getElementById('aim-imp-pri-summary');
+        if (hdr) hdr.textContent = `${c.open ? '▾' : '▸'} Priority tiers — ON${S ? ` · P1 ${S.cnt.P1} · P2 ${S.cnt.P2} · P3 ${S.cnt.P3}${S.cnt.none ? ` · ${S.cnt.none} untiered` : ''}${(S.chg.changed + S.chg.added) ? ` · ${S.chg.changed + S.chg.added} tier change${(S.chg.changed + S.chg.added) === 1 ? '' : 's'}` : ''} · ${S.selN} selected` : ''}`;
+        if (sum) sum.innerHTML = impPriSummaryHtml();
+    }
+    function impPriSummaryHtml() {
+        const c = imp.pri, S = c.summary;
+        const tierPill = (t, n, col) => `<span style="display:inline-block;padding:1px 8px;border-radius:10px;background:${col}22;border:1px solid ${col}88;color:${col};font-weight:600">${t} ${n}</span>`;
+        if (!S || !S.selN) return '<span style="color:#888">no selected points — load the data file / check the boundaries</span>';
+        const flagged = S.padsList.filter(x => x.flags.length);
+        const flagList = flagged.length ? `<div style="margin-top:4px;font-size:10px;color:#ffb347;line-height:1.5;flex-basis:100%">${flagged.slice(0, 8).map(x => `⚠ <b>${impEsc(x.name)}</b> (${x.members.length}): ${impEsc(x.flags.join(' · '))} — ${impEsc(x.members.slice(0, 4).map(p => p.name).join(', '))}${x.members.length > 4 ? ' …' : ''}`).join('<br>')}${flagged.length > 8 ? `<br>… +${flagged.length - 8} more (in the report)` : ''}</div>` : '';
+        return `${tierPill('P1', S.cnt.P1, '#ff7b00')} ${tierPill('P2', S.cnt.P2, '#ffe14d')} ${tierPill('P3', S.cnt.P3, '#9ad')} ${S.cnt.none ? tierPill('untiered', S.cnt.none, '#ff6060') : ''} <span style="color:#888">· <b style="color:#cfd6dc">${S.selN}</b> selected on ${S.pads} pad${S.pads === 1 ? '' : 's'}${S.flagged ? ` · <b style="color:#ffb347">${S.flagged} flagged</b>` : ''} · vs site: ${S.chg.same} same · <b style="color:${S.chg.changed ? '#ffe14d' : '#888'}">${S.chg.changed} changed</b> · ${S.chg.added} newly tiered · ${S.chg.new} new asset${S.chg.new === 1 ? '' : 's'}${S.chg.untier ? ` · <b style="color:#ff6060">${S.chg.untier} lose their tier</b>` : ''}</span>${flagList}`;
     }
     function impPriNotesBlocks(p, dateStr) {
         const c = imp.pri; if (!c.on || !p.pri) return [];
@@ -22706,13 +22731,10 @@
         const inCss = 'background:#1a1d23;border:1px solid rgba(255,179,71,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px';
         const sel = (key, label, title) => `<label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="${impEsc(title)}">${label} <select data-impri="${key}" style="max-width:150px;${inCss}"><option value="">— none —</option>${imp.headers.map(h => `<option value="${impEsc(h)}"${c[key] === h ? ' selected' : ''}>${impEsc(h)}</option>`).join('')}</select></label>`;
         const num = (key, label, step) => `<label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc">${label} <input type="number" data-imprin="${key}" value="${c[key]}" min="0" step="${step}" style="width:64px;${inCss};text-align:right"></label>`;
+        if (c.on) impSummarizePriority();
         const S = c.summary;
-        const tierPill = (t, n, col) => `<span style="display:inline-block;padding:1px 8px;border-radius:10px;background:${col}22;border:1px solid ${col}88;color:${col};font-weight:600">${t} ${n}</span>`;
-        const summary = !c.on ? '' : (!S ? '<span style="color:#888">no points staged</span>'
-            : `${tierPill('P1', S.cnt.P1, '#ff7b00')} ${tierPill('P2', S.cnt.P2, '#ffe14d')} ${tierPill('P3', S.cnt.P3, '#9ad')} ${S.cnt.none ? tierPill('untiered', S.cnt.none, '#ff6060') : ''} <span style="color:#888">· ${S.pads} pad${S.pads === 1 ? '' : 's'}${S.flagged ? ` · <b style="color:#ffb347">${S.flagged} flagged</b>` : ''} · vs site: ${S.chg.same} same · <b style="color:${S.chg.changed ? '#ffe14d' : '#888'}">${S.chg.changed} changed</b> · ${S.chg.new} new${S.chg.untier ? ` · ${S.chg.untier} lose their tier` : ''}</span>`);
-        const flagged = S ? S.padsList.filter(x => x.flags.length) : [];
-        const flagList = flagged.length ? `<div style="margin-top:4px;font-size:10px;color:#ffb347;line-height:1.5">${flagged.slice(0, 8).map(x => `⚠ <b>${impEsc(x.name)}</b> (${x.members.length}): ${impEsc(x.flags.join(' · '))} — ${impEsc(x.members.slice(0, 4).map(p => p.name).join(', '))}${x.members.length > 4 ? ' …' : ''}`).join('<br>')}${flagged.length > 8 ? `<br>… +${flagged.length - 8} more (in the report)` : ''}</div>` : '';
-        el.innerHTML = `<button id="aim-imp-pri-hdr" style="background:none;border:none;color:${c.on ? '#ffb347' : '#7a8794'};cursor:pointer;font:inherit;font-size:11px;padding:2px 0;margin-bottom:4px;text-align:left;font-weight:${c.on ? 600 : 400}">${c.open ? '▾' : '▸'} Priority tiers — ${c.on ? 'ON' : 'off'}${c.on && S ? ` · P1 ${S.cnt.P1} · P2 ${S.cnt.P2} · P3 ${S.cnt.P3}${S.cnt.none ? ` · ${S.cnt.none} untiered` : ''}${S.chg.changed ? ` · ${S.chg.changed} changed` : ''}` : ''}</button>
+        const summary = c.on ? impPriSummaryHtml() : '';
+        el.innerHTML = `<button id="aim-imp-pri-hdr" style="background:none;border:none;color:${c.on ? '#ffb347' : '#7a8794'};cursor:pointer;font:inherit;font-size:11px;padding:2px 0;margin-bottom:4px;text-align:left;font-weight:${c.on ? 600 : 400}">${c.open ? '▾' : '▸'} Priority tiers — ${c.on ? 'ON' : 'off'}</button>
             <div id="aim-imp-pri-body" style="display:${c.open ? '' : 'none'};padding:6px 8px;background:rgba(255,179,71,0.05);border:1px dashed rgba(255,179,71,0.4);border-radius:3px;font-size:11px;color:#cfd6dc">
                 <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-bottom:6px"><input type="checkbox" data-impri-on ${c.on ? 'checked' : ''} style="accent-color:#ffb347"> <b style="color:#ffb347">Tier every asset by pad production</b> <span style="color:#888;font-size:10px">— written as a TYPE prefix ("P1 - v - pumping rod") + a Priority / Prioritized block in the notes; the name never changes, so next quarter's list updates the same assets</span></label>
                 <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px">
@@ -22727,10 +22749,12 @@
                     <span style="color:#888;font-size:10px">Pad grouping:</span> ${num('clusterFt', 'points within', 10)} <span style="color:#888;font-size:10px">ft of each other = one pad (new points)</span> · ${num('padFt', 'within', 5)} <span style="color:#888;font-size:10px">ft of an existing pad polygon joins that pad (nested parent/child tree)</span>
                     <button data-impri-run style="background:rgba(255,179,71,0.15);color:#ffb347;border:1px solid rgba(255,179,71,0.5);border-radius:3px;padding:2px 10px;cursor:pointer;font:inherit;font-size:10px">⟳ Recompute</button>
                 </div>
-                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">${summary}<span style="flex:1"></span>
-                    ${c.on && S ? `<button data-impri-rep="sheets" title="Every staged asset: tier, tier before (from the site), change, pad, pad BLPD, asset BLPD, assets on pad, flags — paste into Google Sheets" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Tier report for Sheets</button><button data-impri-rep="csv" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button>` : ''}
-                </div>${flagList}
+                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:4px"><span style="color:#888;font-size:10px">Counts, flags and the report cover the <b>selected</b> points (inside your boundaries); a pad's total always sums every asset on that pad.</span><span style="flex:1"></span>
+                    ${c.on ? `<button data-impri-rep="sheets" title="Every staged asset: tier, tier before (from the site), change, pad, pad BLPD, asset BLPD, assets on pad, flags — paste into Google Sheets" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Tier report for Sheets</button><button data-impri-rep="csv" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button>` : ''}
+                </div>
+                <div id="aim-imp-pri-summary" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">${summary}</div>
             </div>`;
+        if (c.on) impRenderPriSummary();
         const rerun = () => { impComputePriority(); impRenderPriUi(); impRenderStaged(); impSyncUi(); impMarkDirty(); impStoreMapping(imp.headers, { name: imp.mapping.name, lat: imp.mapping.lat, lng: imp.mapping.lng, type: imp.mapping.type, notesCols: impNotesCols(), pri: { on: c.on, oilCol: c.oilCol, waterCol: c.waterCol, blpdCol: c.blpdCol, priCol: c.priCol } }); };
         el.querySelector('#aim-imp-pri-hdr').onclick = () => { c.open = !c.open; impSaveParams(); impRenderPriUi(); };
         el.querySelector('input[data-impri-on]').onchange = function () { c.on = this.checked; rerun(); };
@@ -22758,8 +22782,8 @@
         impStatus(`📤 ${rows.length} ${label} row(s) on the clipboard (${site}) — paste into Google Sheets / Excel`);
     }
     function impExportTiers(how) {
-        const live = imp.points.filter(p => !p.done && p.pri);
-        if (!live.length) { impStatus('No tiered points to export', '#ffb347'); return; }
+        const live = imp.points.filter(p => !p.done && p.sel && p.pri);
+        if (!live.length) { impStatus('No selected tiered points to export — check the boundaries', '#ffb347'); return; }
         const rows = live.slice().sort((a, b) => (a.pri.padName || '').localeCompare(b.pri.padName || '') || a.name.localeCompare(b.name));
         const change = (p) => !p.dup ? 'new asset' : (!p.pri.tier ? (p.pri.before ? `loses ${p.pri.before}` : 'untiered') : (p.pri.before === p.pri.tier ? 'same' : (p.pri.before ? `${p.pri.before} → ${p.pri.tier}` : `+${p.pri.tier}`)));
         const fmt = (n) => n == null ? '' : Math.round(n);
@@ -24129,6 +24153,7 @@
             const bc = document.getElementById('aim-imp-clearshapes');
             if (bc) bc.style.display = imp.shapes.length ? '' : 'none';
             impRenderFlagsUi(live);
+            try { if (imp.pri.on) impRenderPriSummary(); } catch (e) {}
             const modeBtn = (id, mode, label, onLabel) => {
                 const b = document.getElementById(id); if (!b) return;
                 const on = imp.mode === mode;
