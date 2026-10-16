@@ -1,3 +1,7 @@
+## 2026-10-16 — Priority flags: click to zoom, show all — Site Setup Tools latest v4.349 (latest only)
+
+- **Site Setup Tools (latest) v4.349 — flagged pads in the Priority tiers section are clickable:** the map pans/zooms to the pad and its points pulse magenta for a few seconds; flagged points wear an orange ring on the map at all times; "▾ show all N flagged" expands the list past the first eight.
+
 ## 2026-10-16 — Priority tiers follow the boundaries — Site Setup Tools latest v4.348 (latest only)
 
 - **Site Setup Tools (latest) v4.348 — Priority tiers were counted over the whole file; now the pills, flags and the Tier report cover only the SELECTED points (inside your boundaries) and refresh as boundaries move.** A pad's total still sums every asset on that pad, so a pad the boundary cuts through keeps its true BLPD. The "vs site" line now separates "changed" (tier → other tier) from "newly tiered" (had no tier before).

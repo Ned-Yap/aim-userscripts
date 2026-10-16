@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.348
+// @version      4.349
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -90,7 +90,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.348';
+    const SCRIPT_VERSION = '4.349';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22701,12 +22701,30 @@
         if (hdr) hdr.textContent = `${c.open ? '▾' : '▸'} Priority tiers — ON${S ? ` · P1 ${S.cnt.P1} · P2 ${S.cnt.P2} · P3 ${S.cnt.P3}${S.cnt.none ? ` · ${S.cnt.none} untiered` : ''}${(S.chg.changed + S.chg.added) ? ` · ${S.chg.changed + S.chg.added} tier change${(S.chg.changed + S.chg.added) === 1 ? '' : 's'}` : ''} · ${S.selN} selected` : ''}`;
         if (sum) sum.innerHTML = impPriSummaryHtml();
     }
+    function impZoomToPad(key) {
+        const c = imp.pri; const pad = c.pads && c.pads.get(key); if (!pad) return;
+        const map = getLeafletMap(); if (!map) return;
+        const pts = pad.members.filter(p => !p.done);
+        if (!pts.length) return;
+        let la0 = Infinity, lo0 = Infinity, la1 = -Infinity, lo1 = -Infinity;
+        pts.forEach(p => { la0 = Math.min(la0, p.lat); lo0 = Math.min(lo0, p.lng); la1 = Math.max(la1, p.lat); lo1 = Math.max(lo1, p.lng); });
+        try {
+            if (pts.length === 1 || (approxMeters(la0, lo0, la1, lo1) < 15)) map.setView([(la0 + la1) / 2, (lo0 + lo1) / 2], Math.max(map.getZoom(), 18));
+            else map.fitBounds([[la0, lo0], [la1, lo1]], { padding: [70, 70], maxZoom: 19 });
+        } catch (e) { console.warn(`${TAG} 📥 zoom to pad failed:`, e); return; }
+        imp.pulse = new Set(pts);
+        clearTimeout(imp._pulseT);
+        imp._pulseT = setTimeout(() => { imp.pulse = null; try { impRenderStaged(); } catch (e) {} }, 4000);
+        setTimeout(() => { try { impRenderStaged(); } catch (e) {} }, 350);   // after the map settles (moveend re-render covers the cull)
+        impStatus(`🔎 ${impEsc(pad.name)} — ${pts.length} point${pts.length === 1 ? '' : 's'}${pad.flags.length ? ` · ⚠ ${impEsc(pad.flags.join(' · '))}` : ''}`);
+    }
     function impPriSummaryHtml() {
         const c = imp.pri, S = c.summary;
         const tierPill = (t, n, col) => `<span style="display:inline-block;padding:1px 8px;border-radius:10px;background:${col}22;border:1px solid ${col}88;color:${col};font-weight:600">${t} ${n}</span>`;
         if (!S || !S.selN) return '<span style="color:#888">no selected points — load the data file / check the boundaries</span>';
         const flagged = S.padsList.filter(x => x.flags.length);
-        const flagList = flagged.length ? `<div style="margin-top:4px;font-size:10px;color:#ffb347;line-height:1.5;flex-basis:100%">${flagged.slice(0, 8).map(x => `⚠ <b>${impEsc(x.name)}</b> (${x.members.length}): ${impEsc(x.flags.join(' · '))} — ${impEsc(x.members.slice(0, 4).map(p => p.name).join(', '))}${x.members.length > 4 ? ' …' : ''}`).join('<br>')}${flagged.length > 8 ? `<br>… +${flagged.length - 8} more (in the report)` : ''}</div>` : '';
+        const showN = c.showAllFlags ? flagged.length : 8;
+        const flagList = flagged.length ? `<div style="margin-top:4px;font-size:10px;color:#ffb347;line-height:1.5;flex-basis:100%"><div style="color:#888;margin-bottom:2px">click a pad to zoom to it (its points pulse) · flagged points wear an orange ring on the map</div>${flagged.slice(0, showN).map(x => `<div data-impri-pad="${impEsc(x.key)}" title="zoom to this pad" style="cursor:pointer;padding:1px 4px;border-radius:3px;margin-left:-4px" onmouseover="this.style.background='rgba(255,179,71,0.12)'" onmouseout="this.style.background=''">⚠ <b>${impEsc(x.name)}</b> (${x.members.length}): ${impEsc(x.flags.join(' · '))} — ${impEsc(x.members.slice(0, 4).map(p => p.name).join(', '))}${x.members.length > 4 ? ' …' : ''}</div>`).join('')}${flagged.length > 8 ? `<button data-impri-showall="1" style="margin-top:3px;background:none;border:1px solid rgba(255,179,71,0.4);color:#ffb347;border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">${c.showAllFlags ? '▴ show fewer' : `▾ show all ${flagged.length} flagged`}</button>` : ''}</div>` : '';
         return `${tierPill('P1', S.cnt.P1, '#ff7b00')} ${tierPill('P2', S.cnt.P2, '#ffe14d')} ${tierPill('P3', S.cnt.P3, '#9ad')} ${S.cnt.none ? tierPill('untiered', S.cnt.none, '#ff6060') : ''} <span style="color:#888">· <b style="color:#cfd6dc">${S.selN}</b> selected on ${S.pads} pad${S.pads === 1 ? '' : 's'}${S.flagged ? ` · <b style="color:#ffb347">${S.flagged} flagged</b>` : ''} · vs site: ${S.chg.same} same · <b style="color:${S.chg.changed ? '#ffe14d' : '#888'}">${S.chg.changed} changed</b> · ${S.chg.added} newly tiered · ${S.chg.new} new asset${S.chg.new === 1 ? '' : 's'}${S.chg.untier ? ` · <b style="color:#ff6060">${S.chg.untier} lose their tier</b>` : ''}</span>${flagList}`;
     }
     function impPriNotesBlocks(p, dateStr) {
@@ -22754,6 +22772,13 @@
                 </div>
                 <div id="aim-imp-pri-summary" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">${summary}</div>
             </div>`;
+        const sumEl = el.querySelector('#aim-imp-pri-summary');
+        if (sumEl) sumEl.onclick = (ev) => {
+            const sa = ev.target.closest('button[data-impri-showall]');
+            if (sa) { c.showAllFlags = !c.showAllFlags; impRenderPriSummary(); return; }
+            const pr = ev.target.closest('[data-impri-pad]');
+            if (pr) impZoomToPad(pr.getAttribute('data-impri-pad'));
+        };
         if (c.on) impRenderPriSummary();
         const rerun = () => { impComputePriority(); impRenderPriUi(); impRenderStaged(); impSyncUi(); impMarkDirty(); impStoreMapping(imp.headers, { name: imp.mapping.name, lat: imp.mapping.lat, lng: imp.mapping.lng, type: imp.mapping.type, notesCols: impNotesCols(), pri: { on: c.on, oilCol: c.oilCol, waterCol: c.waterCol, blpdCol: c.blpdCol, priCol: c.priCol } }); };
         el.querySelector('#aim-imp-pri-hdr').onclick = () => { c.open = !c.open; impSaveParams(); impRenderPriUi(); };
@@ -23154,11 +23179,11 @@
             if (bounds && !bounds.contains([p.lat, p.lng])) { culled++; continue; }
             if (drawn >= IMP_MAX_RENDER) { culled++; continue; }
             try {
-                const held = imp.moveHeld === p;
+                const held = imp.moveHeld === p, pulse = !!(imp.pulse && imp.pulse.has(p)), flagged = !!(imp.pri.on && p.pri && p.pri.flags && p.pri.flags.length);
                 const opts = {
-                    radius: held ? 7 : (p.sel ? 4 : 2.2),
-                    color: held ? '#ff5fff' : (p.dup ? '#ff3b3b' : (p.child ? '#b48cff' : (p.near ? '#4fc3f7' : (p.orig ? '#ff5fff' : '#ffffff')))),
-                    weight: held ? 2.5 : ((p.dup || p.child || p.near || p.orig) ? 1.5 : 0.6),
+                    radius: pulse ? 9 : (held ? 7 : (p.sel ? 4 : 2.2)),
+                    color: pulse ? '#ff5fff' : (held ? '#ff5fff' : (p.dup ? '#ff3b3b' : (p.child ? '#b48cff' : (p.near ? '#4fc3f7' : (flagged ? '#ffb347' : (p.orig ? '#ff5fff' : '#ffffff')))))),
+                    weight: pulse ? 3 : (held ? 2.5 : ((p.dup || p.child || p.near || p.orig || flagged) ? 1.5 : 0.6)),
                     fillColor: held ? '#ff5fff' : ((imp.pri.on && p.pri && p.pri.tier) ? ({ P1: '#ff7b00', P2: '#ffe14d', P3: '#9ad' }[p.pri.tier]) : (p.sel ? '#5fff5f' : '#ff9d00')),
                     fillOpacity: 0.9, opacity: 0.9, interactive: false,
                 };
