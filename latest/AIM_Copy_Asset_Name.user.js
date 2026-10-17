@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.356
+// @version      4.357
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.356';
+    const SCRIPT_VERSION = '4.357';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22525,7 +22525,7 @@
         dupMode: 'update',                          // v4.347: name matches an existing asset → 'skip' | 'update' (type + notes only) | 'copy' (create "-N")
         lastUpdated: [],                            // v4.347: [{id, before}] bodies from the last commit's updates — ↩ undo re-POSTs them
         env: { apiCol: null, open: false, notes: true, checkedAt: null, summary: null, running: false, opFilter: '' },   // v4.356: Enverus cross-check
-        pri: { on: false, open: false, oilCol: null, waterCol: null, blpdCol: null, priCol: null, clusterFt: 100, padFt: 50, p1Min: 250, p1Max: 1500, summary: null },   // v4.347: priority tiers
+        pri: { on: false, open: false, oilCol: null, waterCol: null, blpdCol: null, priCol: null, clusterFt: 100, padFt: 50, p1Min: 250, p1Max: 1500, summary: null, zeroUntier: true, envUntier: true },   // v4.347: priority tiers · v4.357: zero-production / Enverus-dead wells get no tier
         advOpen: false,                             // v4.331: ▸ Advanced (subset tools + delete mode) expanded — GM-remembered
         secOpen: { bounds: true, data: true, type: false, place: false, env: false, create: true, adv: false },   // v4.352: collapsible sections — GM-remembered
         mapOpen: false,                             // v4.331: column-mapping row expanded (auto-collapses once applied)
@@ -22546,7 +22546,7 @@
         lastDelete: null,                           // {siteID, when, entities:[full bodies]} — ↩ Undo batch source
         assetIndex: null,                           // cached [{id,name,clean,ring,bbox,centroid}] for dup-guard + delete select
     };
-    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen } })); } catch (e) {} }
+    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
     function impLoadParams() {
         try {
             const raw = GM_getValue(IMP_PARAMS_KEY, ''); if (!raw) return;
@@ -22561,6 +22561,8 @@
             if (o.pri && typeof o.pri === 'object') ['clusterFt', 'padFt', 'p1Min', 'p1Max'].forEach(k => { if (typeof o.pri[k] === 'number' && o.pri[k] >= 0) imp.pri[k] = o.pri[k]; });
             if (o.pri && typeof o.pri.open === 'boolean') imp.pri.open = o.pri.open;
             if (o.pri && typeof o.pri.setOpen === 'boolean') imp.pri.setOpen = o.pri.setOpen;
+            if (o.pri && typeof o.pri.zeroUntier === 'boolean') imp.pri.zeroUntier = o.pri.zeroUntier;
+            if (o.pri && typeof o.pri.envUntier === 'boolean') imp.pri.envUntier = o.pri.envUntier;
             if (o.secOpen && typeof o.secOpen === 'object') Object.keys(imp.secOpen).forEach(k => { if (typeof o.secOpen[k] === 'boolean') imp.secOpen[k] = o.secOpen[k]; });
         } catch (e) {}
     }
@@ -22770,7 +22772,7 @@
             const off = members.filter(p => p.pri.off > 0 && !p.dup);
             if (off.length) flags.push(`📍 ${off.length} new point${off.length === 1 ? ' sits' : 's sit'} OUTSIDE the pad polygon — ↔ Move onto it or confirm separate: ${off.slice(0, 3).map(p => `${p.name} (${p.pri.off} ft off ${p.pri.offOf})`).join(', ')}${off.length > 3 ? ` +${off.length - 3}` : ''}`);
             if (direct) { const set = new Set(with_.map(p => p.pri.direct)); if (set.size > 1) flags.push(`assets on one pad carry different priorities (${[...set].join(', ')})`); if (set.size === 1) tier = [...set][0]; }
-            members.forEach(p => { p.pri.padKey = key; p.pri.padName = padName; p.pri.padTotal = total; p.pri.padN = members.length; p.pri.padWith = with_.length; p.pri.tier = direct ? (p.pri.direct || tier) : tier; p.pri.flags = flags.slice(); });
+            members.forEach(p => { p.pri.padKey = key; p.pri.padName = padName; p.pri.padTotal = total; p.pri.padN = members.length; p.pri.padWith = with_.length; p.pri.tier = direct ? (p.pri.direct || tier) : tier; p.pri.flags = flags.slice(); impPriDemote(p); });
             if (pads.has(key)) { const ex = pads.get(key); ex.members = ex.members.concat(members); ex.flags = [...new Set(ex.flags.concat(flags))]; }
             else pads.set(key, { key, name: padName, members, total, tier, flags });
         });
@@ -22781,7 +22783,7 @@
             const total = direct ? null : with_.reduce((a, p) => a + p.pri.blpd, 0);
             const tier = direct ? pad.tier : (with_.length ? impTierFromTotal(total) : '');
             pad.total = total; pad.tier = tier;
-            pad.members.forEach(p => { p.pri.padTotal = total; p.pri.padN = pad.members.length; p.pri.padWith = with_.length; if (!direct) p.pri.tier = tier; p.pri.flags = pad.flags.slice(); });
+            pad.members.forEach(p => { p.pri.padTotal = total; p.pri.padN = pad.members.length; p.pri.padWith = with_.length; if (!direct) p.pri.tier = tier; p.pri.flags = pad.flags.slice(); impPriDemote(p); });
         });
         c.pads = pads;
         impSummarizePriority();
@@ -22799,7 +22801,7 @@
             if (!p.dup) chg.new++; else if (!p.pri.tier) chg.untier++; else if (p.pri.before === p.pri.tier) chg.same++; else if (!p.pri.before) chg.added++; else chg.changed++;
         });
         const padsList = [...c.pads.values()].map(x => ({ ...x, members: x.members.filter(p => p.sel && !p.done) })).filter(x => x.members.length);
-        c.summary = { pads: padsList.length, flagged: padsList.filter(x => x.flags.length).length, cnt, chg, padsList, selN: sel.length, off: sel.filter(p => p.pri.off > 0 && !p.dup).length, offInfo: sel.filter(p => p.pri.off > 0 && p.dup).length };
+        c.summary = { pads: padsList.length, flagged: padsList.filter(x => x.flags.length).length, cnt, chg, padsList, selN: sel.length, off: sel.filter(p => p.pri.off > 0 && !p.dup).length, offInfo: sel.filter(p => p.pri.off > 0 && p.dup).length, zero: sel.filter(p => p.pri.untier === 'zero').length, envDead: sel.filter(p => p.pri.untier === 'env').length };
     }
     function impRenderPriSummary() {
         const c = imp.pri; if (!c.on) return;
@@ -22877,7 +22879,17 @@
         const showN = c.showAllFlags ? flagged.length : 8;
         const flagList = flagged.length ? `<div style="margin-top:4px;font-size:10px;color:#ffb347;line-height:1.5;flex-basis:100%"><div style="color:#888;margin-bottom:2px">click a pad to zoom to it (its points pulse) · flagged points wear an orange ring on the map</div>${flagged.slice(0, showN).map(x => `<div data-impri-pad="${impEsc(x.key)}" title="zoom to this pad" style="cursor:pointer;padding:1px 4px;border-radius:3px;margin-left:-4px" onmouseover="this.style.background='rgba(255,179,71,0.12)'" onmouseout="this.style.background=''">⚠ <b>${impEsc(x.name)}</b> (${x.members.length}): ${impEsc(x.flags.join(' · '))} — ${impEsc(x.members.slice(0, 4).map(p => p.name).join(', '))}${x.members.length > 4 ? ' …' : ''}</div>`).join('')}${flagged.length > 8 ? `<button data-impri-showall="1" style="margin-top:3px;background:none;border:1px solid rgba(255,179,71,0.4);color:#ffb347;border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">${c.showAllFlags ? '▴ show fewer' : `▾ show all ${flagged.length} flagged`}</button>` : ''}</div>` : '';
         const flagNote = `<div style="flex-basis:100%;color:#888;font-size:10px">flagged here = no production numbers · a point between pads on no polygon · a NEW point off its pad${S.offInfo ? ` · <span style="color:#9ad">${S.offInfo} name match${S.offInfo === 1 ? '' : 'es'} with a stale client coordinate are informational → Placement › 📍 Off pad</span>` : ''}</div>`;
-        return `${flagNote}${tierPill('● P1', S.cnt.P1, IMP_TIER_COLORS.P1)} ${tierPill('● P2', S.cnt.P2, IMP_TIER_COLORS.P2)} ${tierPill('● P3', S.cnt.P3, IMP_TIER_COLORS.P3)} ${S.cnt.none ? tierPill('● untiered', S.cnt.none, IMP_TIER_COLORS.none) : ''} <span style="color:#888;font-size:10px" title="Selected dots on the map are filled with these colours while tiers are on">= dot colours on the map</span> ${S.off ? tierPill('📍 new off pad', S.off, '#ffb347') : ''} <span style="color:#888">· <b style="color:#cfd6dc">${S.selN}</b> selected on ${S.pads} pad${S.pads === 1 ? '' : 's'}${S.flagged ? ` · <b style="color:#ffb347">${S.flagged} flagged</b>` : ''} · vs site: ${S.chg.same} same · <b style="color:${S.chg.changed ? '#ffe14d' : '#888'}">${S.chg.changed} changed</b> · ${S.chg.added} newly tiered · ${S.chg.new} new asset${S.chg.new === 1 ? '' : 's'}${S.chg.untier ? ` · <b style="color:#ff6060">${S.chg.untier} lose their tier</b>` : ''}</span>${flagList}`;
+        return `${flagNote}${tierPill('● P1', S.cnt.P1, IMP_TIER_COLORS.P1)} ${tierPill('● P2', S.cnt.P2, IMP_TIER_COLORS.P2)} ${tierPill('● P3', S.cnt.P3, IMP_TIER_COLORS.P3)} ${S.cnt.none ? tierPill('● untiered', S.cnt.none, IMP_TIER_COLORS.none) : ''}${(S.zero || S.envDead) ? `<span style="color:#888;font-size:10px">(${S.zero ? `${S.zero} zero production` : ''}${S.zero && S.envDead ? ' · ' : ''}${S.envDead ? `${S.envDead} dead per Enverus` : ''})</span>` : ''} <span style="color:#888;font-size:10px" title="Selected dots on the map are filled with these colours while tiers are on">= dot colours on the map</span> ${S.off ? tierPill('📍 new off pad', S.off, '#ffb347') : ''} <span style="color:#888">· <b style="color:#cfd6dc">${S.selN}</b> selected on ${S.pads} pad${S.pads === 1 ? '' : 's'}${S.flagged ? ` · <b style="color:#ffb347">${S.flagged} flagged</b>` : ''} · vs site: ${S.chg.same} same · <b style="color:${S.chg.changed ? '#ffe14d' : '#888'}">${S.chg.changed} changed</b> · ${S.chg.added} newly tiered · ${S.chg.new} new asset${S.chg.new === 1 ? '' : 's'}${S.chg.untier ? ` · <b style="color:#ff6060">${S.chg.untier} lose their tier</b>` : ''}</span>${flagList}`;
+    }
+    // v4.357: a well with ZERO production (0 oil + 0 water in the client's own
+    // numbers) or one Enverus reports inactive / TA / plugged / expired gets NO
+    // tier — the pad keeps its total and tier for its live assets. On a re-run
+    // this strips an earlier "P3 - " off the type (impTierStrip in impTierPrefix).
+    function impPriDemote(p) {
+        const c = imp.pri; p.pri.untier = '';
+        if (!p.pri.tier) return;
+        if (c.zeroUntier && !c.priCol && p.pri.blpd === 0) { p.pri.untier = 'zero'; p.pri.tier = ''; return; }
+        if (c.envUntier && p.env && p.env.found) { const b = impEnvBucket(p.env); if (b === 'inactive' || b === 'plugged') { p.pri.untier = 'env'; p.pri.tier = ''; } }
     }
     function impPriNotesBlocks(p, dateStr) {
         const c = imp.pri; if (!c.on || !p.pri) return [];
@@ -22885,7 +22897,7 @@
         const q = p.pri;
         const line = q.tier
             ? `${q.tier} · ${c.priCol ? 'from the client\'s priority column' : `pad total ${fmt(q.padTotal)} BLPD across ${q.padN} asset${q.padN === 1 ? '' : 's'}${q.padWith < q.padN ? ` (${q.padWith} with numbers)` : ''}`}${q.blpd != null ? ` · this asset ${fmt(q.blpd)} BLPD` : ''}${q.padName && !/^new pad/.test(q.padName) ? ` · pad ${q.padName}` : ''}`
-            : `not tiered — ${q.flags[0] || 'no numbers'}`;
+            : (q.untier === 'zero' ? 'not tiered — zero production (0 BLPD in the client list)' : (q.untier === 'env' ? `not tiered — Enverus reports ${p.env && p.env.status ? p.env.status : 'inactive'}` : `not tiered — ${q.flags[0] || 'no numbers'}`));
         return [`Priority\n${line}`, `Prioritized\n${dateStr}`];
     }
     function impTierPrefix(p, subtype) {
@@ -22925,6 +22937,12 @@
                     <span style="color:#888;font-size:10px">Pad grouping:</span> ${num('clusterFt', 'points within', 10)} <span style="color:#888;font-size:10px">ft of each other = one pad (new points)</span> · ${num('padFt', 'within', 5)} <span style="color:#888;font-size:10px">ft of an existing pad polygon joins that pad (nested parent/child tree)</span>
                     <button data-impri-run style="background:rgba(255,179,71,0.15);color:#ffb347;border:1px solid rgba(255,179,71,0.5);border-radius:3px;padding:2px 10px;cursor:pointer;font:inherit;font-size:10px">⟳ Recompute</button>
                 </div>
+                <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:4px;font-size:10px;color:#cfd6dc">
+                    <span style="color:#888">No tier for:</span>
+                    <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" data-impri-zero ${c.zeroUntier ? 'checked' : ''} style="accent-color:#ffb347"> wells with ZERO production (0 oil + 0 water)</label>
+                    <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" data-impri-envdead ${c.envUntier ? 'checked' : ''} style="accent-color:#ffb347"> wells Enverus reports inactive / TA / plugged (after a 🛢 cross-check)</label>
+                    <span style="color:#888">— the pad keeps its total and tier for its live assets; on a re-run an earlier "P3 - " is removed from the type</span>
+                </div>
                 </div>
             </div>`;
         const sumEl = el.querySelector('#aim-imp-pri-summary');
@@ -22942,6 +22960,8 @@
         el.querySelectorAll('select[data-impri]').forEach(x => x.onchange = () => { c[x.getAttribute('data-impri')] = x.value || null; if (x.getAttribute('data-impri') === 'blpdCol' && x.value) { c.oilCol = null; c.waterCol = null; } if ((x.getAttribute('data-impri') === 'oilCol' || x.getAttribute('data-impri') === 'waterCol') && x.value) c.blpdCol = null; rerun(); });
         el.querySelectorAll('input[data-imprin]').forEach(x => x.onchange = () => { const v = parseFloat(x.value); if (isFinite(v) && v >= 0) { c[x.getAttribute('data-imprin')] = v; impSaveParams(); rerun(); } });
         const run = el.querySelector('button[data-impri-run]'); if (run) run.onclick = rerun;
+        const zc = el.querySelector('input[data-impri-zero]'); if (zc) zc.onchange = () => { c.zeroUntier = zc.checked; impSaveParams(); rerun(); };
+        const ec = el.querySelector('input[data-impri-envdead]'); if (ec) ec.onchange = () => { c.envUntier = ec.checked; impSaveParams(); rerun(); };
         el.querySelectorAll('button[data-impri-rep]').forEach(b => b.onclick = () => { try { impExportTiers(b.getAttribute('data-impri-rep')); } catch (e) { console.warn(`${TAG} 📥 tier report failed:`, e); impStatus(`Tier report failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } });
     }
     function impExportTable(rows, cols, how, fileBase, label) {
@@ -24143,6 +24163,7 @@
         });
         c.running = false; c.checkedAt = when;
         impEnvSummarize();
+        try { if (imp.pri.on) { impComputePriority(); impRenderPriUi(); impRenderStaged(); } } catch (e) { console.warn(`${TAG} 🛢 re-tier failed:`, e); }
         impMarkDirty();
         impRenderEnvUi(); impSyncUi();
         const S = c.summary;
@@ -24273,7 +24294,7 @@
         if (p.near) L.push(`Nearby: ${Math.round(p.near.ft)} ft from "${p.near.name}" (#${p.near.id}), not overlapping it`);
         if (p.pri) {
             if (p.pri.off > 0) L.push(`Off pad: ${p.pri.off} ft outside "${p.pri.offOf}"${p.dup ? ' — the client coordinate differs from where the asset already sits; nothing to do unless the asset itself is misplaced' : ' — move the point onto the pad, or leave it if it really is a separate location'}`);
-            if (imp.pri.on) L.push(`Tier: ${p.pri.tier || 'none'}${p.pri.padName ? ` · pad "${p.pri.padName}"` : ''}${p.pri.padTotal != null ? ` · pad total ${Math.round(p.pri.padTotal).toLocaleString()} BLPD across ${p.pri.padN}` : ''}${p.pri.blpd != null ? ` · this asset ${Math.round(p.pri.blpd).toLocaleString()} BLPD` : ''}${p.pri.before ? ` · was ${p.pri.before}` : ''}`);
+            if (imp.pri.on) L.push(`Tier: ${p.pri.tier || ('none' + (p.pri.untier === 'zero' ? ' — zero production' : (p.pri.untier === 'env' ? ' — dead per Enverus' : '')))}${p.pri.padName ? ` · pad "${p.pri.padName}"` : ''}${p.pri.padTotal != null ? ` · pad total ${Math.round(p.pri.padTotal).toLocaleString()} BLPD across ${p.pri.padN}` : ''}${p.pri.blpd != null ? ` · this asset ${Math.round(p.pri.blpd).toLocaleString()} BLPD` : ''}${p.pri.before ? ` · was ${p.pri.before}` : ''}`);
             if (p.pri.flags && p.pri.flags.length) L.push(`Pad flags: ${p.pri.flags.join(' · ')}`);
         }
         if (p.env && !p.env.noApi) L.push(p.env.found ? `Enverus: ${p.env.name || ''} · ${p.env.status}${p.env.type ? ` · ${p.env.type}` : ''}${p.env.traj ? ` · ${p.env.traj}` : ''}${p.env.op ? ` · ${p.env.op}` : ''}${p.env.spud ? ` · spud ${p.env.spud}` : ''}${p.env.plug ? ` · plugged ${p.env.plug}` : ''}${p.env.firstProd ? ` · first prod ${p.env.firstProd}` : ''}${p.env.bores > 1 ? ` · ${p.env.bores} wellbores` : ''}${p.env.distFt != null ? ` · Enverus location ${p.env.distFt} ft from the client coordinate` : ''} · API ${p.env.api}` : `Enverus: API ${p.env.api} not found`);
