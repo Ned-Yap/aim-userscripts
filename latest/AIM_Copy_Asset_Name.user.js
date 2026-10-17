@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.353
+// @version      4.354
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -90,7 +90,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.353';
+    const SCRIPT_VERSION = '4.354';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22544,7 +22544,7 @@
         lastDelete: null,                           // {siteID, when, entities:[full bodies]} — ↩ Undo batch source
         assetIndex: null,                           // cached [{id,name,clean,ring,bbox,centroid}] for dup-guard + delete select
     };
-    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open } })); } catch (e) {} }
+    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen } })); } catch (e) {} }
     function impLoadParams() {
         try {
             const raw = GM_getValue(IMP_PARAMS_KEY, ''); if (!raw) return;
@@ -22558,6 +22558,7 @@
             else if (typeof o.includeDups === 'boolean' && o.includeDups) imp.dupMode = 'copy';
             if (o.pri && typeof o.pri === 'object') ['clusterFt', 'padFt', 'p1Min', 'p1Max'].forEach(k => { if (typeof o.pri[k] === 'number' && o.pri[k] >= 0) imp.pri[k] = o.pri[k]; });
             if (o.pri && typeof o.pri.open === 'boolean') imp.pri.open = o.pri.open;
+            if (o.pri && typeof o.pri.setOpen === 'boolean') imp.pri.setOpen = o.pri.setOpen;
             if (o.secOpen && typeof o.secOpen === 'object') Object.keys(imp.secOpen).forEach(k => { if (typeof o.secOpen[k] === 'boolean') imp.secOpen[k] = o.secOpen[k]; });
         } catch (e) {}
     }
@@ -22894,9 +22895,15 @@
         if (c.on) impSummarizePriority();
         const S = c.summary;
         const summary = c.on ? impPriSummaryHtml() : '';
+        const setOpen = c.setOpen === undefined ? !c.on : !!c.setOpen;   // v4.354: settings fold away once tiers are on
         el.innerHTML = `<button id="aim-imp-pri-hdr" style="background:none;border:none;color:${c.on ? '#ffb347' : '#7a8794'};cursor:pointer;font:inherit;font-size:11px;padding:2px 0;margin-bottom:4px;text-align:left;font-weight:${c.on ? 600 : 400}">${c.open ? '▾' : '▸'} Priority tiers — ${c.on ? 'ON' : 'off'}</button>
             <div id="aim-imp-pri-body" style="display:${c.open ? '' : 'none'};padding:6px 8px;background:rgba(255,179,71,0.05);border:1px dashed rgba(255,179,71,0.4);border-radius:3px;font-size:11px;color:#cfd6dc">
                 <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-bottom:6px"><input type="checkbox" data-impri-on ${c.on ? 'checked' : ''} style="accent-color:#ffb347"> <b style="color:#ffb347">Tier every asset by pad production</b> <span style="color:#888;font-size:10px">— written as a TYPE prefix ("P1 - v - pumping rod") + a Priority / Prioritized block in the notes; the name never changes, so next quarter's list updates the same assets</span></label>
+                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:4px"><button data-impri-settings-toggle style="background:none;border:1px solid rgba(255,179,71,0.4);color:#ffb347;border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">${setOpen ? '▾' : '▸'} settings — columns · thresholds · pad grouping</button><span style="color:#888;font-size:10px" title="Counts, flags and the report cover the SELECTED points (inside your boundaries); a pad's total always sums every asset on that pad.">selected points only ⓘ</span><span style="flex:1"></span>
+                    ${c.on ? `<button data-impri-rep="sheets" title="Every staged asset: tier, tier before (from the site), change, pad, pad BLPD, asset BLPD, assets on pad, flags — paste into Google Sheets" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Tier report for Sheets</button><button data-impri-rep="csv" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button>` : ''}
+                </div>
+                <div id="aim-imp-pri-summary" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">${summary}</div>
+                <div data-impri-settings style="display:${setOpen ? '' : 'none'};margin-top:6px;padding-top:6px;border-top:1px dashed rgba(255,179,71,0.3)">
                 <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px">
                     ${sel('oilCol', 'Oil', 'oil production column (summed with Water)')} ${sel('waterCol', 'Water', 'water production column (summed with Oil)')} <span style="color:#888">or</span> ${sel('blpdCol', 'BLPD', 'a single total-fluid column (used instead of Oil + Water)')} <span style="color:#888">or</span> ${sel('priCol', 'Ready-made priority', 'a column that already holds P1 / P2 / P3 — wins outright, no math')}
                 </div>
@@ -22909,10 +22916,7 @@
                     <span style="color:#888;font-size:10px">Pad grouping:</span> ${num('clusterFt', 'points within', 10)} <span style="color:#888;font-size:10px">ft of each other = one pad (new points)</span> · ${num('padFt', 'within', 5)} <span style="color:#888;font-size:10px">ft of an existing pad polygon joins that pad (nested parent/child tree)</span>
                     <button data-impri-run style="background:rgba(255,179,71,0.15);color:#ffb347;border:1px solid rgba(255,179,71,0.5);border-radius:3px;padding:2px 10px;cursor:pointer;font:inherit;font-size:10px">⟳ Recompute</button>
                 </div>
-                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:4px"><span style="color:#888;font-size:10px">Counts, flags and the report cover the <b>selected</b> points (inside your boundaries); a pad's total always sums every asset on that pad.</span><span style="flex:1"></span>
-                    ${c.on ? `<button data-impri-rep="sheets" title="Every staged asset: tier, tier before (from the site), change, pad, pad BLPD, asset BLPD, assets on pad, flags — paste into Google Sheets" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Tier report for Sheets</button><button data-impri-rep="csv" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button>` : ''}
                 </div>
-                <div id="aim-imp-pri-summary" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">${summary}</div>
             </div>`;
         const sumEl = el.querySelector('#aim-imp-pri-summary');
         if (sumEl) sumEl.onclick = (ev) => {
@@ -22924,6 +22928,7 @@
         if (c.on) impRenderPriSummary();
         const rerun = () => { impComputePriority(); impRenderPriUi(); impRenderStaged(); impSyncUi(); impMarkDirty(); impStoreMapping(imp.headers, { name: imp.mapping.name, lat: imp.mapping.lat, lng: imp.mapping.lng, type: imp.mapping.type, notesCols: impNotesCols(), pri: { on: c.on, oilCol: c.oilCol, waterCol: c.waterCol, blpdCol: c.blpdCol, priCol: c.priCol } }); };
         el.querySelector('#aim-imp-pri-hdr').onclick = () => { c.open = !c.open; impSaveParams(); impRenderPriUi(); };
+        const stg = el.querySelector('[data-impri-settings-toggle]'); if (stg) stg.onclick = () => { c.setOpen = !setOpen; impSaveParams(); impRenderPriUi(); };
         el.querySelector('input[data-impri-on]').onchange = function () { c.on = this.checked; rerun(); };
         el.querySelectorAll('select[data-impri]').forEach(x => x.onchange = () => { c[x.getAttribute('data-impri')] = x.value || null; if (x.getAttribute('data-impri') === 'blpdCol' && x.value) { c.oilCol = null; c.waterCol = null; } if ((x.getAttribute('data-impri') === 'oilCol' || x.getAttribute('data-impri') === 'waterCol') && x.value) c.blpdCol = null; rerun(); });
         el.querySelectorAll('input[data-imprin]').forEach(x => x.onchange = () => { const v = parseFloat(x.value); if (isFinite(v) && v >= 0) { c[x.getAttribute('data-imprin')] = v; impSaveParams(); rerun(); } });
@@ -23110,7 +23115,7 @@
                 <button data-impnall="1" style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:1px 6px;cursor:pointer;font:inherit;font-size:10px">all</button>
                 <button data-impnnone="1" style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:1px 6px;cursor:pointer;font:inherit;font-size:10px">none</button>
             </div>
-            ${checked.map((h, i) => row(h, true, i)).join('')}${rest.map(h => row(h, false)).join('')}
+            <div style="max-height:200px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;padding:2px 6px;background:rgba(0,0,0,0.12)">${checked.map((h, i) => row(h, true, i)).join('')}${rest.map(h => row(h, false)).join('')}</div>
             <div style="margin-top:6px;font-size:10px;color:#888">Stamp: <b style="color:#cfd6dc">Imported by ${impEsc(impAuthor() || 'AIM user')}</b> on &lt;date time&gt; from ${impEsc(imp.fileName || 'file')} <a href="#" data-impnauthor="1" style="color:#7adfe6;margin-left:4px">${impAuthor() ? 'change name' : 'set your name'}</a></div>
             ${preview ? `<details style="margin-top:4px"><summary style="cursor:pointer;color:#9ad;font-size:10px">preview — first point (${preview.length} / 2000 chars)</summary><pre style="margin:4px 0 0;padding:6px 8px;background:#1a1d23;border-radius:3px;font:inherit;font-size:10px;color:#cfd6dc;white-space:pre-wrap;max-height:220px;overflow:auto">${impEsc(preview)}</pre></details>` : ''}
         </div>`;
@@ -23857,7 +23862,7 @@
                     <button id="aim-imp-clearshapes" style="${btnCss('160,160,160')}">✕ Clear boundaries</button>
                     <span id="aim-imp-bounds-note" style="color:#888;font-size:10px;flex-basis:100%">Boundaries first — a region-wide list stays light when only the points inside your boundaries are selected. Load one KML with one or more polygons (or several KMLs), or draw them; then load the data file below.</span>
                 </div>
-                <div id="aim-imp-shapes" style="margin-top:4px"></div>
+                <div id="aim-imp-shapes" style="margin-top:4px;max-height:190px;overflow:auto"></div>
             </div>
             ${IMP_SEC_CLOSE}
             ${impSecOpenHtml('data')}
@@ -23871,8 +23876,8 @@
             <div id="aim-imp-mapping" style="margin-bottom:8px"></div>
             ${IMP_SEC_CLOSE}
             ${impSecOpenHtml('type')}
-            <div id="aim-imp-typemap" style="margin-bottom:8px"></div>
             <div id="aim-imp-pri" style="margin-bottom:8px"></div>
+            <div id="aim-imp-typemap" style="margin-bottom:8px"></div>
             ${IMP_SEC_CLOSE}
             ${impSecOpenHtml('place')}
             <div id="aim-imp-placerow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px;padding:6px 8px;background:rgba(255,95,255,0.05);border:1px dashed rgba(255,95,255,0.35);border-radius:3px">
@@ -24039,10 +24044,13 @@
             { id: 'child', label: 'Parent/child', color: '#b48cff', items: sel.filter(p => p.child && !p.dup) },
             { id: 'near', label: 'Nearby', color: '#4fc3f7', items: sel.filter(p => p.near && !p.child && !p.dup) },
             { id: 'off', label: '📍 Off pad', color: '#ffb347', items: sel.filter(p => p.pri && p.pri.off > 0) },
+            { id: 'rev', label: '✓ Reviewed', color: '#5fff5f', items: sel.filter(p => p.reviewed && (p.dup || p.child || p.near || (p.pri && p.pri.off > 0))) },
         ];
     }
+    function impFlagKind(p) { return p.dup ? 'dup' : (p.child ? 'child' : (p.near ? 'near' : ((p.pri && p.pri.off > 0) ? 'off' : 'dup'))); }
     function impFlagShort(tab, p) {
         const ft = (v) => `${Math.round(v)} ft`;
+        if (tab === 'rev') { const k = impFlagKind(p); const lbl = { dup: 'name match', child: 'parent/child', near: 'nearby', off: 'off pad' }[k]; return `${lbl} · ${impFlagShort(k, p)}`; }
         if (tab === 'dup') return `${imp.dupMode === 'update' ? '→ update type + notes' : (imp.dupMode === 'copy' ? '→ copy -N' : '→ skipped')}${p.pri && p.pri.off > 0 ? ` · client coord ${ft(p.pri.off)} off` : ' · on its polygon'}`;
         if (tab === 'child') return `inside ${p.child.name} (${p.child.full ? 'fully' : 'partially'})`;
         if (tab === 'near') return `${ft(p.near.ft)} from ${p.near.name}`;
@@ -24082,15 +24090,15 @@
         if (!el) return;
         if (!live || !live.length) { el.innerHTML = ''; return; }
         const tabs = impFlagTabs(live);
-        const total = tabs.reduce((a, t) => a + t.items.length, 0);
+        const total = tabs.filter(t => t.id !== 'rev').reduce((a, t) => a + t.items.length, 0);
         if (!total) { el.innerHTML = `<div style="font-size:11px;color:#5fff5f;padding:4px 0">✓ no placement flags among the selected points</div>`; return; }
-        if (!imp.flagTab || !tabs.find(t => t.id === imp.flagTab && t.items.length)) imp.flagTab = (tabs.find(t => t.items.length) || tabs[0]).id;
+        if (!imp.flagTab || !tabs.find(t => t.id === imp.flagTab && (t.items.length || t.id === 'rev'))) imp.flagTab = (tabs.find(t => t.items.length) || tabs[0]).id;
         const tab = tabs.find(t => t.id === imp.flagTab);
-        const items = tab.items.slice().sort((x, y) => (x.reviewed === y.reviewed ? 0 : (x.reviewed ? 1 : -1)) || (tab.id === 'off' ? (y.pri.off - x.pri.off) : 0) || x.name.localeCompare(y.name));
-        const shown = imp.flagHideReviewed ? items.filter(p => !p.reviewed) : items;
+        const items = tab.items.slice().sort((x, y) => (tab.id === 'rev' ? 0 : (x.reviewed === y.reviewed ? 0 : (x.reviewed ? 1 : -1))) || (tab.id === 'off' ? (y.pri.off - x.pri.off) : 0) || x.name.localeCompare(y.name));
+        const shown = (imp.flagHideReviewed && tab.id !== 'rev') ? items.filter(p => !p.reviewed) : items;
         const CAP = 600;
         const rev = tab.items.filter(p => p.reviewed).length;
-        const chip = (t) => { const r = t.items.filter(p => p.reviewed).length; const on = t.id === tab.id; return `<button data-impflagtab="${t.id}" style="background:${on ? t.color + '33' : 'transparent'};border:1px solid ${t.color}${on ? 'cc' : '55'};color:${t.items.length ? t.color : '#666'};border-radius:10px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px;font-weight:${on ? 700 : 400}">${t.label} ${t.items.length}${r ? ` <span style="opacity:0.8">· ${r}✓</span>` : ''}</button>`; };
+        const chip = (t) => { const r = t.id === 'rev' ? 0 : t.items.filter(p => p.reviewed).length; const on = t.id === tab.id; return `<button data-impflagtab="${t.id}" style="background:${on ? t.color + '33' : 'transparent'};border:1px solid ${t.color}${on ? 'cc' : '55'};color:${t.items.length ? t.color : '#666'};border-radius:10px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px;font-weight:${on ? 700 : 400}${t.id === 'rev' ? ';margin-left:6px' : ''}">${t.label} ${t.items.length}${r ? ` <span style="opacity:0.8">· ${r}✓</span>` : ''}</button>`; };
         const row = (p) => `<div data-impflagrow="${p.i}" title="click = zoom to it (pulses, named on the map)" style="display:flex;align-items:center;gap:6px;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:${p.reviewed ? '#6f7a85' : '#cfd6dc'};cursor:pointer;${p.reviewed ? 'opacity:0.75' : ''}" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background=''">
             <input type="checkbox" data-impflagrev="${p.i}" ${p.reviewed ? 'checked' : ''} title="Reviewed" style="accent-color:#5fff5f;margin:0;flex:none">
             ${imp.pri.on && p.pri && p.pri.tier ? `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${IMP_TIER_COLORS[p.pri.tier]};flex:none" title="${p.pri.tier}"></span>` : ''}
@@ -24109,7 +24117,7 @@
                 <button data-imp-flags="csv" title="Download the same table as a CSV" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button>
             </div>
             <div style="display:flex;gap:8px;align-items:center;font-size:10px;color:#888;margin-bottom:3px">
-                <span style="color:${tab.color}">${tab.label}</span> · <b style="color:#5fff5f">${rev}</b> / ${tab.items.length} reviewed
+                <span style="color:${tab.color}">${tab.label}</span> · ${tab.id === 'rev' ? `<b style="color:#5fff5f">${tab.items.length}</b> done so far — untick a row to send it back` : `<b style="color:#5fff5f">${rev}</b> / ${tab.items.length} reviewed`}
                 <span style="display:inline-block;flex:1;max-width:160px;height:4px;border-radius:2px;background:rgba(255,255,255,0.08);overflow:hidden"><span style="display:block;height:100%;width:${tab.items.length ? Math.round(100 * rev / tab.items.length) : 0}%;background:#5fff5f"></span></span>
                 <span style="flex:1"></span>
                 <button data-impflagall="1" style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px" title="Mark every row shown in this tab as reviewed">✓ all shown</button>
@@ -24117,7 +24125,7 @@
                 <span style="color:#666">click a row = zoom · ⓘ = details</span>
             </div>
             <div data-impflaglist style="max-height:230px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">
-                ${shown.slice(0, CAP).map(row).join('') || `<div style="padding:6px;color:#5fff5f;font-size:10px">✓ all ${tab.items.length} reviewed</div>`}
+                ${shown.slice(0, CAP).map(row).join('') || `<div style="padding:6px;color:#5fff5f;font-size:10px">${tab.id === 'rev' ? 'nothing reviewed yet' : `✓ all ${tab.items.length} reviewed`}</div>`}
                 ${shown.length > CAP ? `<div style="padding:4px;color:#888;font-size:10px">showing the first ${CAP} of ${shown.length} — review and hide, or export the full list</div>` : ''}
             </div>
         </div>`;
@@ -24255,8 +24263,8 @@
             </div>`;
         }).join('');
         el.innerHTML = `<div style="padding:6px 8px;background:rgba(122,223,230,0.05);border:1px dashed rgba(122,223,230,0.3);border-radius:3px">
-            <div style="font-size:10px;color:#9ad;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Type — CSV value → Percepto subtype <span style="color:#888;text-transform:none;letter-spacing:0">(the file's value is used as-is unless you change it; a changed value is remembered)</span></div>
-            ${famBanners}${rows}${dl}${shieldRow}</div>`;
+            <div style="font-size:10px;color:#9ad;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Type — CSV value → Percepto subtype <span style="color:#cfd6dc;text-transform:none;letter-spacing:0">(${vals.size} value${vals.size === 1 ? '' : 's'})</span> <span style="color:#888;text-transform:none;letter-spacing:0">· the file's value is used as-is unless you change it; a changed value is remembered</span></div>
+            ${famBanners}<div style="max-height:${vals.size > 6 ? 200 : 999}px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;padding:0 6px;background:rgba(0,0,0,0.12)">${rows}</div>${dl}${shieldRow}</div>`;
         wireShield();
         el.querySelectorAll('button[data-impfam]').forEach(b => b.onclick = () => {
             const base = b.getAttribute('data-impfam'); const inp = el.querySelector(`input[data-impfamname="${CSS.escape(base)}"]`);
