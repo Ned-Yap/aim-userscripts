@@ -1,3 +1,7 @@
+## 2026-10-17 — Priority flags: name-match off-pad is informational — Site Setup Tools latest v4.355 (latest only)
+
+- **Site Setup Tools (latest) v4.355 — the tier flag count jumped (0 → 86) after v4.351 because every pad with a name-matched point whose client coordinate sits off the existing polygon counted as flagged.** Those are informational (the existing asset stays where it is; only type + notes are updated), so they no longer flag the pad in Priority tiers — they stay listed under Placement › 📍 Off pad. Only NEW points off a pad flag it. The summary now states what "flagged" means and how many name matches were set aside.
+
 ## 2026-10-17 — Asset Import: subsection cleanup + ✓ Reviewed tab — Site Setup Tools latest v4.354 (latest only)
 
 - **Site Setup Tools (latest) v4.354.** In **3 · Type & priority** the tiers now come FIRST: the tier pills / legend and the flagged-pad list sit right under the section header, and the columns / thresholds / pad-grouping controls fold away under "▸ settings" once tiers are on (they open themselves while tiers are off). The type value table shows its value count and scrolls inside its own box past six values. The Boundaries shapes list and the Notes checklist scroll inside their own boxes too. **Placement & flags** gained a **✓ Reviewed** tab listing only what you've already ticked (each row says which kind of flag it was; untick to send it back).

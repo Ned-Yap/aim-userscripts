@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.354
+// @version      4.355
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -90,7 +90,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.354';
+    const SCRIPT_VERSION = '4.355';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22759,8 +22759,11 @@
             else if (!direct && with_.length < members.length) flags.push(`${members.length - with_.length} of ${members.length} assets without numbers`);
             // (a cluster that touched several pads was split by polygon above — no flag unless a point stayed un-rooted)
             if (split > 1 && !root) flags.push(`${members.length} point${members.length === 1 ? '' : 's'} between ${split} existing pads — not on any polygon, check which pad they belong to`);
-            const off = members.filter(p => p.pri.off > 0);
-            if (off.length) flags.push(`📍 ${off.length} point${off.length === 1 ? ' sits' : 's sit'} OUTSIDE the pad polygon — ↔ Move onto it: ${off.slice(0, 3).map(p => `${p.name} (${p.pri.off} ft off ${p.pri.offOf})`).join(', ')}${off.length > 3 ? ` +${off.length - 3}` : ''}`);
+            // v4.355: only NEW points off a pad flag the pad here — a name match whose
+            // client coordinate is off its own polygon is informational (the existing
+            // asset stays put) and lives in Placement → 📍 Off pad instead.
+            const off = members.filter(p => p.pri.off > 0 && !p.dup);
+            if (off.length) flags.push(`📍 ${off.length} new point${off.length === 1 ? ' sits' : 's sit'} OUTSIDE the pad polygon — ↔ Move onto it or confirm separate: ${off.slice(0, 3).map(p => `${p.name} (${p.pri.off} ft off ${p.pri.offOf})`).join(', ')}${off.length > 3 ? ` +${off.length - 3}` : ''}`);
             if (direct) { const set = new Set(with_.map(p => p.pri.direct)); if (set.size > 1) flags.push(`assets on one pad carry different priorities (${[...set].join(', ')})`); if (set.size === 1) tier = [...set][0]; }
             members.forEach(p => { p.pri.padKey = key; p.pri.padName = padName; p.pri.padTotal = total; p.pri.padN = members.length; p.pri.padWith = with_.length; p.pri.tier = direct ? (p.pri.direct || tier) : tier; p.pri.flags = flags.slice(); });
             if (pads.has(key)) { const ex = pads.get(key); ex.members = ex.members.concat(members); ex.flags = [...new Set(ex.flags.concat(flags))]; }
@@ -22791,7 +22794,7 @@
             if (!p.dup) chg.new++; else if (!p.pri.tier) chg.untier++; else if (p.pri.before === p.pri.tier) chg.same++; else if (!p.pri.before) chg.added++; else chg.changed++;
         });
         const padsList = [...c.pads.values()].map(x => ({ ...x, members: x.members.filter(p => p.sel && !p.done) })).filter(x => x.members.length);
-        c.summary = { pads: padsList.length, flagged: padsList.filter(x => x.flags.length).length, cnt, chg, padsList, selN: sel.length, off: sel.filter(p => p.pri.off > 0).length };
+        c.summary = { pads: padsList.length, flagged: padsList.filter(x => x.flags.length).length, cnt, chg, padsList, selN: sel.length, off: sel.filter(p => p.pri.off > 0 && !p.dup).length, offInfo: sel.filter(p => p.pri.off > 0 && p.dup).length };
     }
     function impRenderPriSummary() {
         const c = imp.pri; if (!c.on) return;
@@ -22868,7 +22871,8 @@
         const flagged = S.padsList.filter(x => x.flags.length);
         const showN = c.showAllFlags ? flagged.length : 8;
         const flagList = flagged.length ? `<div style="margin-top:4px;font-size:10px;color:#ffb347;line-height:1.5;flex-basis:100%"><div style="color:#888;margin-bottom:2px">click a pad to zoom to it (its points pulse) · flagged points wear an orange ring on the map</div>${flagged.slice(0, showN).map(x => `<div data-impri-pad="${impEsc(x.key)}" title="zoom to this pad" style="cursor:pointer;padding:1px 4px;border-radius:3px;margin-left:-4px" onmouseover="this.style.background='rgba(255,179,71,0.12)'" onmouseout="this.style.background=''">⚠ <b>${impEsc(x.name)}</b> (${x.members.length}): ${impEsc(x.flags.join(' · '))} — ${impEsc(x.members.slice(0, 4).map(p => p.name).join(', '))}${x.members.length > 4 ? ' …' : ''}</div>`).join('')}${flagged.length > 8 ? `<button data-impri-showall="1" style="margin-top:3px;background:none;border:1px solid rgba(255,179,71,0.4);color:#ffb347;border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">${c.showAllFlags ? '▴ show fewer' : `▾ show all ${flagged.length} flagged`}</button>` : ''}</div>` : '';
-        return `${tierPill('● P1', S.cnt.P1, IMP_TIER_COLORS.P1)} ${tierPill('● P2', S.cnt.P2, IMP_TIER_COLORS.P2)} ${tierPill('● P3', S.cnt.P3, IMP_TIER_COLORS.P3)} ${S.cnt.none ? tierPill('● untiered', S.cnt.none, IMP_TIER_COLORS.none) : ''} <span style="color:#888;font-size:10px" title="Selected dots on the map are filled with these colours while tiers are on">= dot colours on the map</span> ${S.off ? tierPill('📍 off pad', S.off, '#ffb347') : ''} <span style="color:#888">· <b style="color:#cfd6dc">${S.selN}</b> selected on ${S.pads} pad${S.pads === 1 ? '' : 's'}${S.flagged ? ` · <b style="color:#ffb347">${S.flagged} flagged</b>` : ''} · vs site: ${S.chg.same} same · <b style="color:${S.chg.changed ? '#ffe14d' : '#888'}">${S.chg.changed} changed</b> · ${S.chg.added} newly tiered · ${S.chg.new} new asset${S.chg.new === 1 ? '' : 's'}${S.chg.untier ? ` · <b style="color:#ff6060">${S.chg.untier} lose their tier</b>` : ''}</span>${flagList}`;
+        const flagNote = `<div style="flex-basis:100%;color:#888;font-size:10px">flagged here = no production numbers · a point between pads on no polygon · a NEW point off its pad${S.offInfo ? ` · <span style="color:#9ad">${S.offInfo} name match${S.offInfo === 1 ? '' : 'es'} with a stale client coordinate are informational → Placement › 📍 Off pad</span>` : ''}</div>`;
+        return `${flagNote}${tierPill('● P1', S.cnt.P1, IMP_TIER_COLORS.P1)} ${tierPill('● P2', S.cnt.P2, IMP_TIER_COLORS.P2)} ${tierPill('● P3', S.cnt.P3, IMP_TIER_COLORS.P3)} ${S.cnt.none ? tierPill('● untiered', S.cnt.none, IMP_TIER_COLORS.none) : ''} <span style="color:#888;font-size:10px" title="Selected dots on the map are filled with these colours while tiers are on">= dot colours on the map</span> ${S.off ? tierPill('📍 new off pad', S.off, '#ffb347') : ''} <span style="color:#888">· <b style="color:#cfd6dc">${S.selN}</b> selected on ${S.pads} pad${S.pads === 1 ? '' : 's'}${S.flagged ? ` · <b style="color:#ffb347">${S.flagged} flagged</b>` : ''} · vs site: ${S.chg.same} same · <b style="color:${S.chg.changed ? '#ffe14d' : '#888'}">${S.chg.changed} changed</b> · ${S.chg.added} newly tiered · ${S.chg.new} new asset${S.chg.new === 1 ? '' : 's'}${S.chg.untier ? ` · <b style="color:#ff6060">${S.chg.untier} lose their tier</b>` : ''}</span>${flagList}`;
     }
     function impPriNotesBlocks(p, dateStr) {
         const c = imp.pri; if (!c.on || !p.pri) return [];
