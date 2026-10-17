@@ -1,3 +1,7 @@
+## 2026-10-17 — Priority flags: points sitting OFF their pad — Site Setup Tools latest v4.351 (latest only)
+
+- **Site Setup Tools (latest) v4.351 — placement flags.** A name match whose point is not inside its own asset polygon, or a new point that sits near (not on) a pad polygon, is now flagged on its pad with the distance ("📍 2 points sit OUTSIDE the pad polygon — ↔ Move onto it: ADAMS 48 1 (34 ft off ADAMS 48 1)"), counted in an "off pad" pill, and listed in the Tier report ("Off pad (ft)"). Click the pad to zoom, pulse and name them, ↔ Move each onto the pad; the flag clears on the move.
+
 ## 2026-10-17 — Priority flags: real pulse with names, zoom clear of the panel, fewer false flags — Site Setup Tools latest v4.350 (latest only)
 
 - **Site Setup Tools (latest) v4.350.** Clicking a flagged pad now puts an animated magenta pulse on each of its points with the **asset name (and tier) labelled on the map** for 8 seconds, so two dots side by side are never a guess. The zoom fits the pad into the part of the map the Generate panel is NOT covering (the panel's box is subtracted from the map area). A distance cluster that touches two existing pads is now **split by polygon** — each point goes with the pad it sits on or is nearest to, un-rooted points follow their nearest rooted neighbour — instead of being flagged; only points between pads that sit on no polygon stay flagged.
