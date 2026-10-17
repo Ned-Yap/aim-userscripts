@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.352
+// @version      4.353
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -90,7 +90,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.352';
+    const SCRIPT_VERSION = '4.353';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22608,7 +22608,8 @@
         const S = imp.pri.summary;
         set('type', !imp.points.length ? 'after the data file' : `${m.type ? `type = ${impEsc(m.type)}` : `no type column → "${impEsc(impApplyShield(imp.typeMap['__all__'] || ''))}"`}${imp.pri.on ? (S ? ` · tiers ON: <span style="color:#ff7b00">P1 ${S.cnt.P1}</span> · <span style="color:#ffe14d">P2 ${S.cnt.P2}</span> · <span style="color:#9ad">P3 ${S.cnt.P3}</span>${S.cnt.none ? ` · <span style="color:#ff6060">${S.cnt.none} untiered</span>` : ''}${S.flagged ? ` · <span style="color:#ffb347">${S.flagged} flagged</span>` : ''}` : ' · tiers ON') : ' · tiers off'}`);
         const moved = live.filter(p => p.orig).length, removed = imp.points.filter(p => p.removed).length, fl = live.filter(p => p.dup || p.child || p.near).length, off = live.filter(p => p.sel && p.pri && p.pri.off > 0).length;
-        set('place', !imp.points.length ? 'after the data file' : `${imp.mode === 'move' ? '<b style="color:#ff5fff">↔ Move ON</b> · ' : ''}${moved} moved · ${removed} removed · ${fl} flagged (${live.filter(p => p.dup).length} name matches)${off ? ` · <span style="color:#ffb347">📍 ${off} off their pad</span>` : ''}`);
+        const flSel = live.filter(p => p.sel && (p.dup || p.child || p.near || (p.pri && p.pri.off > 0))), flRev = flSel.filter(p => p.reviewed).length;
+        set('place', !imp.points.length ? 'after the data file' : `${imp.mode === 'move' ? '<b style="color:#ff5fff">↔ Move ON</b> · ' : ''}${moved} moved · ${removed} removed · ${flSel.length} flagged${flSel.length ? ` (<b style="color:#5fff5f">${flRev}</b> reviewed)` : ''}${off ? ` · <span style="color:#ffb347">📍 ${off} off their pad</span>` : ''}`);
         const dupsIn = live.filter(p => p.sel && p.dup).length, upd = imp.dupMode === 'update' ? dupsIn : 0, tot = live.filter(p => p.sel && (!p.dup || imp.dupMode !== 'skip')).length;
         let dry = true; try { dry = !!document.getElementById('aim-gen-dryrun').checked; } catch (e) {}
         set('create', !imp.points.length ? 'after the data file' : `${tot - upd ? `create ${tot - upd}` : ''}${(tot - upd) && upd ? ' + ' : ''}${upd ? `update ${upd}` : ''}${!tot ? 'nothing selected' : ''} · ${impSizeFt} ft · ${dry ? '<span style="color:#5fff5f">dry run</span>' : '<b style="color:#ff6060">LIVE</b>'}${tot > IMP_BIG_BATCH ? ' · <span style="color:#ff6060">over the 1000 gate</span>' : ''}`);
@@ -22855,17 +22856,7 @@
         const map = getLeafletMap(); if (!map) return;
         const pts = pad.members.filter(p => !p.done);
         if (!pts.length) return;
-        let la0 = Infinity, lo0 = Infinity, la1 = -Infinity, lo1 = -Infinity;
-        pts.forEach(p => { la0 = Math.min(la0, p.lat); lo0 = Math.min(lo0, p.lng); la1 = Math.max(la1, p.lat); lo1 = Math.max(lo1, p.lng); });
-        const vp = impVisiblePadding(map);
-        const ptl = [vp.l + 70, vp.t + 70], pbr = [vp.r + 70, vp.b + 70];
-        try {
-            const tight = pts.length === 1 || approxMeters(la0, lo0, la1, lo1) < 15;
-            const b = tight ? L_bounds([(la0 + la1) / 2, (lo0 + lo1) / 2]) : [[la0, lo0], [la1, lo1]];
-            map.fitBounds(b, { paddingTopLeft: ptl, paddingBottomRight: pbr, maxZoom: tight ? Math.max(map.getZoom(), 18) : 19 });
-        } catch (e) { console.warn(`${TAG} 📥 zoom to pad failed:`, e); return; }
-        impPulsePoints(pts, pad.name);
-        setTimeout(() => { try { impRenderStaged(); } catch (e) {} }, 350);   // after the map settles (moveend re-render covers the cull)
+        impZoomToPoints(pts, pad.name);
         impStatus(`🔎 ${impEsc(pad.name)} — ${pts.length} point${pts.length === 1 ? '' : 's'} (pulsing, named on the map)${pad.flags.length ? ` · ⚠ ${impEsc(pad.flags.join(' · '))}` : ''}`);
     }
     function L_bounds(ll) { const d = 0.00005; return [[ll[0] - d, ll[1] - d], [ll[0] + d, ll[1] + d]]; }
@@ -24037,32 +24028,113 @@
         impRenderNotesCols(el);
     }
     // v4.331: flag list — name duplicates (skipped unless included) + parent/child (inside / near an existing asset)
+    // v4.353: PLACEMENT & FLAGS review list — compact, tabbed by kind, its own
+    // scrollbar, a Reviewed checkbox per point (saved with the session), click a
+    // row = zoom + pulse + name on the map, ⓘ = hover details. Covers the
+    // SELECTED points only (inside the boundaries), like the tiers.
+    function impFlagTabs(live) {
+        const sel = live.filter(p => p.sel);
+        return [
+            { id: 'dup', label: 'Name matches', color: '#ffd400', items: sel.filter(p => p.dup) },
+            { id: 'child', label: 'Parent/child', color: '#b48cff', items: sel.filter(p => p.child && !p.dup) },
+            { id: 'near', label: 'Nearby', color: '#4fc3f7', items: sel.filter(p => p.near && !p.child && !p.dup) },
+            { id: 'off', label: '📍 Off pad', color: '#ffb347', items: sel.filter(p => p.pri && p.pri.off > 0) },
+        ];
+    }
+    function impFlagShort(tab, p) {
+        const ft = (v) => `${Math.round(v)} ft`;
+        if (tab === 'dup') return `${imp.dupMode === 'update' ? '→ update type + notes' : (imp.dupMode === 'copy' ? '→ copy -N' : '→ skipped')}${p.pri && p.pri.off > 0 ? ` · client coord ${ft(p.pri.off)} off` : ' · on its polygon'}`;
+        if (tab === 'child') return `inside ${p.child.name} (${p.child.full ? 'fully' : 'partially'})`;
+        if (tab === 'near') return `${ft(p.near.ft)} from ${p.near.name}`;
+        if (tab === 'off') return p.dup ? `client coord ${ft(p.pri.off)} off ${p.pri.offOf} — existing asset stays put` : `${ft(p.pri.off)} off ${p.pri.offOf} — ↔ Move onto it or confirm it is separate`;
+        return '';
+    }
+    function impFlagDetails(p) {
+        const L = [];
+        L.push(`Name: ${p.name}${p.rawName && p.rawName !== p.name ? ` (file: ${p.rawName})` : ''}`);
+        if (p.typeRaw) L.push(`Type in file: ${p.typeRaw}`);
+        L.push(`Coordinates: ${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}${p.orig ? ` (moved from ${p.orig.lat.toFixed(6)}, ${p.orig.lng.toFixed(6)})` : ''}`);
+        if (p.dup) L.push(`Name match: existing asset #${p.dupId}${p.dupSubtype ? ` · subtype "${p.dupSubtype}"` : ''} → ${imp.dupMode === 'update' ? 'its TYPE + NOTES are rewritten from this row; shape and position are not touched' : (imp.dupMode === 'copy' ? 'a second asset "-N" is created at this point' : 'skipped')}`);
+        if (p.child) L.push(`Parent/child: the ${impSizeFt} ft square lands ${p.child.full ? 'fully' : 'partially'} inside "${p.child.name}" (#${p.child.id}) — created as normal`);
+        if (p.near) L.push(`Nearby: ${Math.round(p.near.ft)} ft from "${p.near.name}" (#${p.near.id}), not overlapping it`);
+        if (p.pri) {
+            if (p.pri.off > 0) L.push(`Off pad: ${p.pri.off} ft outside "${p.pri.offOf}"${p.dup ? ' — the client coordinate differs from where the asset already sits; nothing to do unless the asset itself is misplaced' : ' — move the point onto the pad, or leave it if it really is a separate location'}`);
+            if (imp.pri.on) L.push(`Tier: ${p.pri.tier || 'none'}${p.pri.padName ? ` · pad "${p.pri.padName}"` : ''}${p.pri.padTotal != null ? ` · pad total ${Math.round(p.pri.padTotal).toLocaleString()} BLPD across ${p.pri.padN}` : ''}${p.pri.blpd != null ? ` · this asset ${Math.round(p.pri.blpd).toLocaleString()} BLPD` : ''}${p.pri.before ? ` · was ${p.pri.before}` : ''}`);
+            if (p.pri.flags && p.pri.flags.length) L.push(`Pad flags: ${p.pri.flags.join(' · ')}`);
+        }
+        if (p.reviewed) L.push('✓ reviewed');
+        return L.join('\n');
+    }
+    function impZoomToPoints(pts, label) {
+        const map = getLeafletMap(); if (!map || !pts.length) return;
+        let la0 = Infinity, lo0 = Infinity, la1 = -Infinity, lo1 = -Infinity;
+        pts.forEach(p => { la0 = Math.min(la0, p.lat); lo0 = Math.min(lo0, p.lng); la1 = Math.max(la1, p.lat); lo1 = Math.max(lo1, p.lng); });
+        const vp = impVisiblePadding(map);
+        try {
+            const tight = pts.length === 1 || approxMeters(la0, lo0, la1, lo1) < 15;
+            map.fitBounds(tight ? L_bounds([(la0 + la1) / 2, (lo0 + lo1) / 2]) : [[la0, lo0], [la1, lo1]], { paddingTopLeft: [vp.l + 70, vp.t + 70], paddingBottomRight: [vp.r + 70, vp.b + 70], maxZoom: tight ? Math.max(map.getZoom(), 18) : 19 });
+        } catch (e) { console.warn(`${TAG} 📥 zoom failed:`, e); return; }
+        impPulsePoints(pts, label);
+        setTimeout(() => { try { impRenderStaged(); } catch (e) {} }, 350);
+    }
     function impRenderFlagsUi(live) {
         const el = document.getElementById('aim-imp-flags');
         if (!el) return;
         if (!live || !live.length) { el.innerHTML = ''; return; }
-        const dups = live.filter(p => p.dup), child = live.filter(p => p.child), near = live.filter(p => p.near);
-        if (!dups.length && !child.length && !near.length) { el.innerHTML = ''; return; }
-        const list = (arr, fmt, max) => impEsc(arr.slice(0, max).map(fmt).join(' · ')) + (arr.length > max ? ` … +${arr.length - max} more` : '');
-        const group = (arr, key, fmt) => {
-            const m = new Map();
-            arr.forEach(p => { const k = key(p); if (!m.has(k)) m.set(k, []); m.get(k).push(p); });
-            const g = [...m.entries()].sort((a, b) => b[1].length - a[1].length);
-            return impEsc(g.slice(0, 6).map(([k, v]) => fmt(k, v)).join(' · ')) + (g.length > 6 ? ` … +${g.length - 6} more` : '');
-        };
-        const fullN = child.filter(p => p.child.full).length;
-        el.innerHTML = `<div style="padding:6px 8px;background:rgba(255,255,255,0.03);border:1px dashed rgba(122,223,230,0.25);border-radius:3px;font-size:11px;line-height:1.5">
-            <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px"><b style="color:#cfd6dc">Flags</b> <span style="color:#888;font-size:10px">${dups.length + child.length + near.length} of ${live.length} staged</span><span style="flex:1"></span>
-                <button data-imp-flags="sheets" title="Copy every flagged point as a table (Flag · Name · Existing asset · Detail · Type · Lat · Lng) — paste straight into Google Sheets / Excel" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Copy for Sheets</button>
-                <button data-imp-flags="csv" title="Download the same table as a CSV" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button></div>
-            ${dups.length ? `<div style="color:#ffd400">🔴 <b>${dups.length}</b> name match${dups.length === 1 ? '' : 'es'} — same name as an existing asset, ${imp.dupMode === 'update' ? 'will UPDATE type + notes (shape untouched)' : (imp.dupMode === 'copy' ? 'a COPY will be created' : 'skipped')}: ${list(dups, p => p.name, 10)}</div>` : ''}
-            ${child.length ? `<div style="color:#b48cff">🟣 <b>${child.length}</b> parent/child — the ${impSizeFt} ft square lands inside an existing asset (${fullN} fully · ${child.length - fullN} partially), created as normal: ${group(child, p => p.child.name, (k, v) => `${k} ← ${v.length}`)}</div>` : ''}
-            ${near.length ? `<div style="color:#4fc3f7">🔵 <b>${near.length}</b> nearby — within ${impDupFt} ft of an existing asset, not overlapping it, created as normal: ${group(near, p => p.near.name, (k, v) => `${k} ← ${v.length}`)}</div>` : ''}
+        const tabs = impFlagTabs(live);
+        const total = tabs.reduce((a, t) => a + t.items.length, 0);
+        if (!total) { el.innerHTML = `<div style="font-size:11px;color:#5fff5f;padding:4px 0">✓ no placement flags among the selected points</div>`; return; }
+        if (!imp.flagTab || !tabs.find(t => t.id === imp.flagTab && t.items.length)) imp.flagTab = (tabs.find(t => t.items.length) || tabs[0]).id;
+        const tab = tabs.find(t => t.id === imp.flagTab);
+        const items = tab.items.slice().sort((x, y) => (x.reviewed === y.reviewed ? 0 : (x.reviewed ? 1 : -1)) || (tab.id === 'off' ? (y.pri.off - x.pri.off) : 0) || x.name.localeCompare(y.name));
+        const shown = imp.flagHideReviewed ? items.filter(p => !p.reviewed) : items;
+        const CAP = 600;
+        const rev = tab.items.filter(p => p.reviewed).length;
+        const chip = (t) => { const r = t.items.filter(p => p.reviewed).length; const on = t.id === tab.id; return `<button data-impflagtab="${t.id}" style="background:${on ? t.color + '33' : 'transparent'};border:1px solid ${t.color}${on ? 'cc' : '55'};color:${t.items.length ? t.color : '#666'};border-radius:10px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px;font-weight:${on ? 700 : 400}">${t.label} ${t.items.length}${r ? ` <span style="opacity:0.8">· ${r}✓</span>` : ''}</button>`; };
+        const row = (p) => `<div data-impflagrow="${p.i}" title="click = zoom to it (pulses, named on the map)" style="display:flex;align-items:center;gap:6px;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:${p.reviewed ? '#6f7a85' : '#cfd6dc'};cursor:pointer;${p.reviewed ? 'opacity:0.75' : ''}" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background=''">
+            <input type="checkbox" data-impflagrev="${p.i}" ${p.reviewed ? 'checked' : ''} title="Reviewed" style="accent-color:#5fff5f;margin:0;flex:none">
+            ${imp.pri.on && p.pri && p.pri.tier ? `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${IMP_TIER_COLORS[p.pri.tier]};flex:none" title="${p.pri.tier}"></span>` : ''}
+            <b style="flex:none;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;${p.reviewed ? 'text-decoration:line-through' : ''}">${impEsc(p.name)}</b>
+            <span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(impFlagShort(tab.id, p))}</span>
+            ${p.orig ? '<span title="moved" style="color:#ff5fff;flex:none">↔</span>' : ''}
+            <span data-impflaginfo="${p.i}" title="${impEsc(impFlagDetails(p))}" style="flex:none;width:14px;height:14px;line-height:12px;text-align:center;border:1px solid rgba(122,223,230,0.5);border-radius:50%;color:#7adfe6;font-size:9px;font-weight:700;cursor:help">i</span>
         </div>`;
+        el.innerHTML = `<div style="padding:6px 8px;background:rgba(255,255,255,0.03);border:1px dashed rgba(122,223,230,0.25);border-radius:3px;font-size:11px">
+            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
+                <b style="color:#cfd6dc">Flags</b><span style="color:#888;font-size:10px">${total} on selected points</span>
+                ${tabs.map(chip).join('')}
+                <span style="flex:1"></span>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#9ad;cursor:pointer"><input type="checkbox" data-impflaghide ${imp.flagHideReviewed ? 'checked' : ''} style="accent-color:#5fff5f;margin:0"> hide reviewed</label>
+                <button data-imp-flags="sheets" title="Copy every flagged point as a table (Flag · Name · Existing asset · Detail · Reviewed · Type · Lat · Lng) — paste into Google Sheets / Excel" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Sheets</button>
+                <button data-imp-flags="csv" title="Download the same table as a CSV" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;font-size:10px;color:#888;margin-bottom:3px">
+                <span style="color:${tab.color}">${tab.label}</span> · <b style="color:#5fff5f">${rev}</b> / ${tab.items.length} reviewed
+                <span style="display:inline-block;flex:1;max-width:160px;height:4px;border-radius:2px;background:rgba(255,255,255,0.08);overflow:hidden"><span style="display:block;height:100%;width:${tab.items.length ? Math.round(100 * rev / tab.items.length) : 0}%;background:#5fff5f"></span></span>
+                <span style="flex:1"></span>
+                <button data-impflagall="1" style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px" title="Mark every row shown in this tab as reviewed">✓ all shown</button>
+                <button data-impflagnone="1" style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px" title="Clear reviewed on this tab">clear</button>
+                <span style="color:#666">click a row = zoom · ⓘ = details</span>
+            </div>
+            <div data-impflaglist style="max-height:230px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">
+                ${shown.slice(0, CAP).map(row).join('') || `<div style="padding:6px;color:#5fff5f;font-size:10px">✓ all ${tab.items.length} reviewed</div>`}
+                ${shown.length > CAP ? `<div style="padding:4px;color:#888;font-size:10px">showing the first ${CAP} of ${shown.length} — review and hide, or export the full list</div>` : ''}
+            </div>
+        </div>`;
+        const byI = new Map(live.map(p => [String(p.i), p]));
         el.onclick = (ev) => {
-            const b = ev.target.closest('[data-imp-flags]'); if (!b) return;
-            try { impExportFlags(live, b.getAttribute('data-imp-flags')); }
-            catch (e) { console.warn(`${TAG} 📥 flags export failed:`, e); impStatus(`Flags export failed: ${impEsc(e && e.message || e)}`, '#ff6060'); }
+            const ex = ev.target.closest('[data-imp-flags]');
+            if (ex) { try { impExportFlags(live.filter(p => p.sel), ex.getAttribute('data-imp-flags')); } catch (e) { console.warn(`${TAG} 📥 flags export failed:`, e); impStatus(`Flags export failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } return; }
+            const tb = ev.target.closest('[data-impflagtab]');
+            if (tb) { imp.flagTab = tb.getAttribute('data-impflagtab'); impRenderFlagsUi(live); return; }
+            if (ev.target.closest('[data-impflaghide]')) { imp.flagHideReviewed = !!ev.target.checked; impRenderFlagsUi(live); return; }
+            if (ev.target.closest('[data-impflagall]')) { shown.forEach(p => { p.reviewed = true; }); impMarkDirty(); impRenderFlagsUi(live); impSecSummaries(); return; }
+            if (ev.target.closest('[data-impflagnone]')) { tab.items.forEach(p => { p.reviewed = false; }); impMarkDirty(); impRenderFlagsUi(live); impSecSummaries(); return; }
+            const cb = ev.target.closest('[data-impflagrev]');
+            if (cb) { const p = byI.get(cb.getAttribute('data-impflagrev')); if (p) { p.reviewed = !!cb.checked; impMarkDirty(); impRenderFlagsUi(live); impSecSummaries(); } return; }
+            if (ev.target.closest('[data-impflaginfo]')) return;
+            const r = ev.target.closest('[data-impflagrow]');
+            if (r) { const p = byI.get(r.getAttribute('data-impflagrow')); if (p) { const extra = []; if (p.dup && p.dupId != null) { const a = (imp.assetIndex || []).find(x => x.id === p.dupId); if (a && a.centroid) extra.push({ lat: a.centroid.lat, lng: a.centroid.lng, name: `${p.name} (existing asset)` }); } impZoomToPoints([p].concat(extra), p.name); impStatus(`🔎 ${impEsc(p.name)} — ${impEsc(impFlagShort(tab.id, p))}`); } }
         };
     }
     // v4.342: flagged points as a table — rich HTML + TSV on the clipboard
@@ -24074,11 +24146,12 @@
             if (p.dup) rows.push({ flag: 'Name match', name: p.name, other: p.name, detail: imp.dupMode === 'update' ? 'update type + notes' : (imp.dupMode === 'copy' ? 'copy created' : 'skipped'), p });
             if (p.child) rows.push({ flag: 'Parent/child', name: p.name, other: p.child.name, detail: p.child.full ? 'fully inside' : 'partially inside', p });
             if (p.near) rows.push({ flag: 'Nearby', name: p.name, other: p.near.name, detail: `${Math.round(p.near.ft)} ft`, p });
+            if (p.pri && p.pri.off > 0) rows.push({ flag: 'Off pad', name: p.name, other: p.pri.offOf, detail: `${p.pri.off} ft outside${p.dup ? ' (client coord differs; existing asset stays)' : ' (move or confirm separate)'}`, p });
         });
         if (!rows.length) { impStatus('No flagged points to export', '#ffb347'); return; }
         const cols = [
             { label: 'Flag', val: r => r.flag }, { label: 'Name', val: r => r.name }, { label: 'Existing asset', val: r => r.other },
-            { label: 'Detail', val: r => r.detail }, { label: 'Type', val: r => r.p.typeRaw || '' },
+            { label: 'Detail', val: r => r.detail }, { label: 'Reviewed', val: r => r.p.reviewed ? 'yes' : '' }, { label: 'Type', val: r => r.p.typeRaw || '' },
             { label: 'Latitude', val: r => isFinite(r.p.lat) ? r.p.lat.toFixed(6) : '' }, { label: 'Longitude', val: r => isFinite(r.p.lng) ? r.p.lng.toFixed(6) : '' },
             { label: 'File', val: () => imp.fileName || '' },
         ];
@@ -24848,6 +24921,7 @@
                 if (p.removed) o.removed = true;
                 if (p.done && !p.removed) o.created = true;
                 if (p.selManual !== undefined) o.selManual = p.selManual;
+                if (p.reviewed) o.rv = true;
                 return (Object.keys(o).length > 1) ? o : null;
             }).filter(Boolean),
             shapes: imp.shapes.map(sh => sh.kind === 'circle' ? { id: sh.id, kind: 'circle', center: sh.center, radiusM: sh.radiusM, name: sh.name || '' } : { id: sh.id, kind: sh.kind, ring: sh.ring, handle: sh.handle, name: sh.name || '' }),
@@ -24895,6 +24969,7 @@
             if (o.removed) { p.removed = true; p.done = true; p.sel = false; removed++; }
             if (o.created) { p.done = true; p.sel = false; created++; }
             if (o.selManual !== undefined) p.selManual = o.selManual;
+            if (o.rv) p.reviewed = true;
         });
         try { impComputeDups(); } catch (e) {}
         impRefreshAfterSelChange();
