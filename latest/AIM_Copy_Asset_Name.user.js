@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.355
+// @version      4.356
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -28,6 +28,7 @@
 // @connect      services1.arcgis.com
 // @connect      tfr.faa.gov
 // @connect      energy.usgs.gov
+// @connect      api.enverus.com
 // @run-at       document-end
 // ==/UserScript==
 
@@ -90,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.355';
+    const SCRIPT_VERSION = '4.356';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22523,9 +22524,10 @@
         keepShield: true,                           // v4.343: keep "- unsh" / "shielded" modifiers in subtypes (off = strip them)
         dupMode: 'update',                          // v4.347: name matches an existing asset → 'skip' | 'update' (type + notes only) | 'copy' (create "-N")
         lastUpdated: [],                            // v4.347: [{id, before}] bodies from the last commit's updates — ↩ undo re-POSTs them
+        env: { apiCol: null, open: false, notes: true, checkedAt: null, summary: null, running: false, opFilter: '' },   // v4.356: Enverus cross-check
         pri: { on: false, open: false, oilCol: null, waterCol: null, blpdCol: null, priCol: null, clusterFt: 100, padFt: 50, p1Min: 250, p1Max: 1500, summary: null },   // v4.347: priority tiers
         advOpen: false,                             // v4.331: ▸ Advanced (subset tools + delete mode) expanded — GM-remembered
-        secOpen: { bounds: true, data: true, type: false, place: false, create: true, adv: false },   // v4.352: collapsible sections — GM-remembered
+        secOpen: { bounds: true, data: true, type: false, place: false, env: false, create: true, adv: false },   // v4.352: collapsible sections — GM-remembered
         mapOpen: false,                             // v4.331: column-mapping row expanded (auto-collapses once applied)
         // LIVE selection model (v4.250): selected = manual override ?? inside-any-shape.
         // Shapes are movable, so membership RECOMPUTES (impRecomputeSel) instead of
@@ -22568,7 +22570,8 @@
         { id: 'data', num: '2', title: 'Data file', color: '122,223,230' },
         { id: 'type', num: '3', title: 'Type & priority', color: '255,179,71' },
         { id: 'place', num: '4', title: 'Placement & flags', color: '255,95,255' },
-        { id: 'create', num: '5', title: 'Create / update', color: '95,255,95' },
+        { id: 'env', num: '5', title: 'Enverus check', color: '255,214,102' },
+        { id: 'create', num: '6', title: 'Create / update', color: '95,255,95' },
         { id: 'adv', num: '', title: 'Advanced', color: '160,160,160' },
     ];
     function impSecOpenHtml(id) {
@@ -22614,6 +22617,8 @@
         const dupsIn = live.filter(p => p.sel && p.dup).length, upd = imp.dupMode === 'update' ? dupsIn : 0, tot = live.filter(p => p.sel && (!p.dup || imp.dupMode !== 'skip')).length;
         let dry = true; try { dry = !!document.getElementById('aim-gen-dryrun').checked; } catch (e) {}
         set('create', !imp.points.length ? 'after the data file' : `${tot - upd ? `create ${tot - upd}` : ''}${(tot - upd) && upd ? ' + ' : ''}${upd ? `update ${upd}` : ''}${!tot ? 'nothing selected' : ''} · ${impSizeFt} ft · ${dry ? '<span style="color:#5fff5f">dry run</span>' : '<b style="color:#ff6060">LIVE</b>'}${tot > IMP_BIG_BATCH ? ' · <span style="color:#ff6060">over the 1000 gate</span>' : ''}`);
+        const E = imp.env.summary;
+        set('env', !imp.points.length ? 'after the data file' : (imp.env.running ? '⏳ checking…' : (!E ? `${impEnvKey() ? 'ready' : '<span style="color:#ff6060">key not set</span>'} · ${imp.env.apiCol ? `API = ${impEsc(imp.env.apiCol)}` : '<span style="color:#ffb347">pick the API column</span>'} · not run yet` : `<span style="color:#5fff5f">${E.producing} producing</span> · <span style="color:#ffb347">${E.inactive} inactive</span> · <span style="color:#ff6060">${E.plugged} plugged</span>${E.notFound ? ` · ${E.notFound} not found` : ''} · checked ${impEsc(imp.env.checkedAt || '')}`)));
         set('adv', `${imp.target === 'assets' ? '<b style="color:#ff8a80">🗑 delete mode ON</b> · ' : ''}pick single points · select all / clear · delete existing assets`);
     }
     // v4.343: shielding modifiers on a subtype ("v - pumping rod - unsh",
@@ -23088,7 +23093,7 @@
     }
     function impComposeNotes(p, when) {
         const r = imp.rows[p.i] || {};
-        const parts = [`Original name\n${p.rawName || p.name}`].concat(impPriNotesBlocks(p, String(when).slice(0, 10)));
+        const parts = [`Original name\n${p.rawName || p.name}`].concat(impPriNotesBlocks(p, String(when).slice(0, 10))).concat(impEnvNotesBlock(p));
         impNotesCols().forEach(c => { const v = String(r[c.col] == null ? '' : r[c.col]).trim(); if (v) parts.push(`${c.label || impCleanLabel(c.col)}\n${v}`); });
         parts.push(`Imported by ${impAuthor() || 'AIM user'} on ${when} from ${imp.fileName || 'file'}`);
         return parts.join('\n\n').slice(0, 2000);
@@ -23177,6 +23182,7 @@
                 imp.rows = parsed.rows;
                 imp.lastSavedAt = null;
                 imp.pri._guessed = false; imp.pri.summary = null; imp._secAdvanced = false;
+                imp.env._guessed = false; imp.env.summary = null; imp.env.checkedAt = null;
                 try { impRenderResumeUi(); } catch (e) {}
                 imp.siteID = genState.siteID;
                 imp.points = []; imp.assetSel.clear(); imp.invalid = 0;   // v4.345: boundaries (imp.shapes) survive a data load — fence first, then load
@@ -23228,6 +23234,7 @@
         impRecomputeSel();          // shapes placed before the data still apply
         impRenderStaged(); impRenderShapes();
         impRenderTypeMapUi();
+        try { impRenderEnvUi(); } catch (e) {}
         const dupN = imp.points.filter(p => p.dup).length, childN = imp.points.filter(p => p.child).length, nearN = imp.points.filter(p => p.near).length;
         impStatus(`Staged <b>${imp.points.length}</b> point(s), all selected`
             + (imp.invalid ? ` · <span style="color:#ffb347">${imp.invalid} row(s) skipped (bad/missing coordinates)</span>` : '')
@@ -23337,7 +23344,7 @@
                     radius: pulse ? 9 : (held ? 7 : (p.sel ? (tierOn ? 5.5 : 4) : 2.2)),
                     color: pulse ? '#ff5fff' : (held ? '#ff5fff' : (p.dup ? '#ff3b3b' : (p.child ? '#b48cff' : (p.near ? '#4fc3f7' : (flagged ? '#ffb347' : (p.orig ? '#ff5fff' : '#ffffff')))))),
                     weight: pulse ? 3 : (held ? 2.5 : ((p.dup || p.child || p.near || p.orig || flagged) ? 1.5 : 0.6)),
-                    fillColor: held ? '#ff5fff' : (tierOn ? (IMP_TIER_COLORS[p.pri.tier] || IMP_TIER_COLORS.none) : (p.sel ? '#5fff5f' : '#ff9d00')),
+                    fillColor: held ? '#ff5fff' : ((p.sel && p.env && p.env.found && impEnvBucket(p.env) === 'plugged') ? '#ff5252' : ((p.sel && p.env && p.env.found && impEnvBucket(p.env) === 'inactive') ? '#ffb347' : (tierOn ? (IMP_TIER_COLORS[p.pri.tier] || IMP_TIER_COLORS.none) : (p.sel ? '#5fff5f' : '#ff9d00')))),
                     fillOpacity: 0.9, opacity: 0.9, interactive: false,
                 };
                 if (imp.renderer) opts.renderer = imp.renderer;
@@ -23891,6 +23898,9 @@
             </div>
             <div id="aim-imp-flags" style="margin-bottom:8px"></div>
             ${IMP_SEC_CLOSE}
+            ${impSecOpenHtml('env')}
+            <div id="aim-imp-env" style="margin-bottom:4px"></div>
+            ${IMP_SEC_CLOSE}
             ${impSecOpenHtml('create')}
             <div id="aim-imp-commitrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
                 <div id="aim-imp-biggate" style="display:none;flex-basis:100%;padding:6px 8px;background:rgba(255,85,85,0.10);border:1px solid rgba(255,85,85,0.6);border-radius:3px;font-size:11px;color:#ff8a80;line-height:1.5">
@@ -23921,6 +23931,7 @@
         impRenderMappingUi();
         impRenderTypeMapUi();
         impRenderPriUi();
+        impRenderEnvUi();
         impRenderResumeUi();
         impAutosaveTimer();
         impSyncUi();
@@ -24037,6 +24048,195 @@
         impRenderNotesCols(el);
     }
     // v4.331: flag list — name duplicates (skipped unless included) + parent/child (inside / near an existing asset)
+    // ---- v4.356 ENVERUS CROSS-CHECK ----
+    // The client's list carries an API number per well; Enverus' `wells`
+    // dataset answers by API with one row PER WELLBORE (a re-entered well
+    // comes back 2–3×: the plugged original + the horizontal sidetracks), so
+    // rows merge per API: any PRODUCING bore wins, else the latest spud.
+    // `API_UWI_Unformatted=in(a,b,…)` takes 200 at a time (~4 s). Token from
+    // the secret key (GM-stored, prompt once), cached in memory.
+    const IMP_ENV_KEY = 'aim_imp_enverus_key';
+    const IMP_ENV_BASE = 'https://api.enverus.com/v3/direct-access/';
+    const IMP_ENV_FIELDS = 'WellName,API_UWI_Unformatted,ENVOperator,ENVWellStatus,ENVWellType,Trajectory,Latitude,Longitude,SpudDate,PlugDate,FirstProdDate,PadID,County';
+    let impEnvToken = null, impEnvTokenAt = 0;
+    function impEnvKey() { try { return String(GM_getValue(IMP_ENV_KEY, '') || '').trim(); } catch (e) { return ''; } }
+    function impEnvSetKey() {
+        const cur = impEnvKey();
+        const v = prompt('Enverus Developer API secret key (stored in Tampermonkey storage on this machine only):', cur ? '••••••••' + cur.slice(-4) : '');
+        if (v === null) return;
+        if (!/^•/.test(v)) { try { GM_setValue(IMP_ENV_KEY, String(v).trim()); } catch (e) {} impEnvToken = null; }
+        impRenderEnvUi();
+    }
+    async function impEnvFetchToken(force) {
+        if (!force && impEnvToken && (Date.now() - impEnvTokenAt) < 50 * 60000) return impEnvToken;
+        const key = impEnvKey(); if (!key) throw new Error('no Enverus key — set it in the Enverus section');
+        const r = await elevGmRequest({ method: 'POST', url: IMP_ENV_BASE + 'tokens', headers: { 'Content-Type': 'application/json' }, data: JSON.stringify({ secretKey: key }), timeout: 30000 });
+        if (!r.ok) throw new Error(`Enverus token ${r.status || 'network error'}${r.status === 401 || r.status === 403 ? ' — key refused' : ''}`);
+        let j = null; try { j = JSON.parse(r.responseText); } catch (e) {}
+        if (!j || !j.token) throw new Error('Enverus token response unreadable');
+        impEnvToken = j.token; impEnvTokenAt = Date.now();
+        return impEnvToken;
+    }
+    async function impEnvGet(query, retry) {
+        const tok = await impEnvFetchToken(false);
+        const r = await elevGmRequest({ method: 'GET', url: IMP_ENV_BASE + query, headers: { 'Authorization': 'Bearer ' + tok, 'Accept': 'application/json' }, timeout: 90000 });
+        if ((r.status === 401) && !retry) { await impEnvFetchToken(true); return impEnvGet(query, true); }
+        if (!r.ok) throw new Error(`Enverus ${r.status || 'network error'}: ${String(r.responseText || '').slice(0, 160)}`);
+        try { return JSON.parse(r.responseText); } catch (e) { throw new Error('Enverus response unreadable'); }
+    }
+    function impEnvApiOf(p) {
+        const col = imp.env.apiCol; if (!col) return '';
+        const raw = String((imp.rows[p.i] || {})[col] == null ? '' : (imp.rows[p.i] || {})[col]).replace(/\D/g, '');
+        if (raw.length >= 10) return raw.slice(0, 10);   // API10 = state+county+well; Enverus keys on the 10-digit form
+        return '';
+    }
+    function impEnvGuessApiCol(headers) {
+        const lower = headers.map(h => String(h).toLowerCase());
+        const i = lower.findIndex(h => /\bapi\b|api_|_api|uwi/.test(h) && !/type|date|method/.test(h));
+        return i >= 0 ? headers[i] : null;
+    }
+    const IMP_ENV_STATUS_RANK = { 'PRODUCING': 0, 'INJECTING': 1, 'DRILLED': 2, 'COMPLETED': 2, 'SPUD DATE ONLY': 3, 'PERMIT': 4, 'INACTIVE PRODUCER': 5, 'TA': 6, 'PERMIT EXPIRED': 7, 'PERMIT CANCELLED': 7, 'P & A': 8, 'P&A': 8, 'PLUGGED': 8 };
+    function impEnvMerge(rows) {
+        if (!rows.length) return null;
+        const rank = (r) => { const st = String(r.ENVWellStatus || '').toUpperCase(); const k = Object.keys(IMP_ENV_STATUS_RANK).find(x => st === x || st.startsWith(x)); return k ? IMP_ENV_STATUS_RANK[k] : 5; };
+        const sorted = rows.slice().sort((a, b) => rank(a) - rank(b) || String(b.SpudDate || '').localeCompare(String(a.SpudDate || '')));
+        const best = sorted[0];
+        const traj = [...new Set(rows.map(r => r.Trajectory).filter(Boolean))];
+        const d = (v) => v ? String(v).slice(0, 10) : '';
+        return { found: true, name: best.WellName || '', status: String(best.ENVWellStatus || '').toUpperCase(), type: best.ENVWellType || '', traj: traj.join('+'), op: best.ENVOperator || '', lat: best.Latitude, lng: best.Longitude, spud: d(best.SpudDate), plug: d(best.PlugDate), firstProd: d(best.FirstProdDate), pad: best.PadID || '', county: best.County || '', bores: rows.length, plugged: rows.some(r => r.PlugDate) && rank(best) >= 5 };
+    }
+    async function impEnvCheck() {
+        const c = imp.env;
+        if (c.running) return;
+        if (!imp.env.apiCol) { impStatus('Pick the API-number column in the Enverus section first', '#ffb347'); return; }
+        const pts = imp.points.filter(p => !p.done && p.sel);
+        const byApi = new Map();
+        pts.forEach(p => { const a = impEnvApiOf(p); p.env = a ? null : { found: false, noApi: true }; if (a) { if (!byApi.has(a)) byApi.set(a, []); byApi.get(a).push(p); } });
+        const apis = [...byApi.keys()];
+        if (!apis.length) { impStatus('No selected point has an API number in that column', '#ffb347'); impRenderEnvUi(); return; }
+        c.running = true; c.summary = null; impRenderEnvUi();
+        const got = new Map();
+        try {
+            await impEnvFetchToken(false);
+            for (let i = 0; i < apis.length; i += 200) {
+                const batch = apis.slice(i, i + 200);
+                impStatus(`🛢 Enverus: ${Math.min(i + 200, apis.length)} / ${apis.length} API numbers…`);
+                const rows = await impEnvGet(`wells?pagesize=1000&DeletedDate=null&API_UWI_Unformatted=in(${batch.join(',')})&fields=${IMP_ENV_FIELDS}`);
+                (rows || []).forEach(r => { const a = String(r.API_UWI_Unformatted || '').replace(/\D/g, '').slice(0, 10); if (!got.has(a)) got.set(a, []); got.get(a).push(r); });
+            }
+        } catch (e) {
+            c.running = false; impRenderEnvUi();
+            console.warn(`${TAG} 🛢 Enverus check failed:`, e);
+            impStatus(`🛢 Enverus check failed: ${impEsc(e && e.message || e)}`, '#ff6060');
+            return;
+        }
+        const when = impNowStamp();
+        byApi.forEach((list, a) => {
+            const m = impEnvMerge(got.get(a) || []);
+            list.forEach(p => {
+                if (!m) { p.env = { found: false, api: a }; return; }
+                const e = Object.assign({ api: a }, m);
+                e.distFt = (isFinite(e.lat) && isFinite(e.lng)) ? Math.round(approxMeters(p.lat, p.lng, e.lat, e.lng) / GEN_FT_TO_M) : null;
+                e.checkedAt = when;
+                p.env = e;
+            });
+        });
+        c.running = false; c.checkedAt = when;
+        impEnvSummarize();
+        impMarkDirty();
+        impRenderEnvUi(); impSyncUi();
+        const S = c.summary;
+        impStatus(`🛢 Enverus: ${S.found} of ${S.withApi} API numbers found · <span style="color:#5fff5f">${S.producing} producing</span> · <span style="color:#ffb347">${S.inactive} inactive / TA</span> · <span style="color:#ff6060">${S.plugged} plugged / expired</span>${S.notFound ? ` · ${S.notFound} not in Enverus` : ''}${S.far ? ` · ${S.far} more than 100 ft from the client coordinate` : ''}${S.otherOp ? ` · ${S.otherOp} under another operator` : ''}`);
+    }
+    function impEnvBucket(e) {
+        if (!e || e.noApi) return 'noapi';
+        if (!e.found) return 'notfound';
+        const st = e.status || '';
+        if (/^PRODUCING|^INJECTING/.test(st)) return 'producing';
+        if (/P ?& ?A|PLUGGED|EXPIRED|CANCELLED/.test(st)) return 'plugged';
+        if (/INACTIVE|^TA\b|SHUT/.test(st)) return 'inactive';
+        return 'other';
+    }
+    function impEnvSummarize() {
+        const c = imp.env;
+        const pts = imp.points.filter(p => !p.done && p.sel && p.env);
+        if (!pts.length) { c.summary = null; return; }
+        const ops = new Map();
+        pts.forEach(p => { if (p.env.found && p.env.op) ops.set(p.env.op, (ops.get(p.env.op) || 0) + 1); });
+        const mainOp = [...ops.entries()].sort((a, b) => b[1] - a[1])[0];
+        c.mainOp = mainOp ? mainOp[0] : '';
+        const S = { n: pts.length, withApi: pts.filter(p => !p.env.noApi).length, found: pts.filter(p => p.env.found).length, notFound: pts.filter(p => !p.env.found && !p.env.noApi).length, noApi: pts.filter(p => p.env.noApi).length,
+            producing: 0, inactive: 0, plugged: 0, other: 0, far: pts.filter(p => p.env.found && p.env.distFt != null && p.env.distFt > 100).length, otherOp: pts.filter(p => p.env.found && c.mainOp && p.env.op !== c.mainOp).length, mainOp: c.mainOp };
+        pts.forEach(p => { const b = impEnvBucket(p.env); if (S[b] !== undefined) S[b]++; });
+        c.summary = S;
+    }
+    function impEnvFlagged(p) {
+        const e = p.env; if (!e || e.noApi) return false;
+        if (!e.found) return true;
+        const b = impEnvBucket(e);
+        return b !== 'producing' || (e.distFt != null && e.distFt > 100) || (imp.env.mainOp && e.op !== imp.env.mainOp);
+    }
+    function impEnvShort(p) {
+        const e = p.env; if (!e) return '';
+        if (e.noApi) return 'no API number in the file';
+        if (!e.found) return `API ${e.api} not in Enverus`;
+        const bits = [e.status || '?'];
+        if (e.type) bits.push(e.type);
+        if (e.traj) bits.push(e.traj.toLowerCase());
+        if (e.plug) bits.push(`plugged ${e.plug}`);
+        if (e.distFt != null && e.distFt > 100) bits.push(`${e.distFt} ft from the client coordinate`);
+        if (imp.env.mainOp && e.op !== imp.env.mainOp) bits.push(`operator ${e.op}`);
+        return bits.join(' · ');
+    }
+    function impEnvNotesBlock(p) {
+        const e = p.env; if (!imp.env.notes || !e || !e.found) return [];
+        return [`Enverus\n${e.status || '?'}${e.type ? ` · ${e.type}` : ''}${e.traj ? ` · ${e.traj}` : ''}${e.op ? ` · ${e.op}` : ''}${e.spud ? ` · spud ${e.spud}` : ''}${e.plug ? ` · plugged ${e.plug}` : ''}${e.bores > 1 ? ` · ${e.bores} wellbores` : ''} · API ${e.api} · checked ${e.checkedAt || imp.env.checkedAt || ''}`];
+    }
+    function impRenderEnvUi() {
+        const el = document.getElementById('aim-imp-env'); if (!el) return;
+        const c = imp.env;
+        if (!imp.headers.length) { el.innerHTML = `<div style="font-size:11px;color:#888">after the data file — cross-checks every selected well against Enverus by API number (status, type, trajectory, operator, dates, location)</div>`; return; }
+        if (!c.apiCol && !c._guessed) { c.apiCol = impEnvGuessApiCol(imp.headers); c._guessed = true; }
+        const key = impEnvKey();
+        const inCss = 'background:#1a1d23;border:1px solid rgba(255,214,102,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px';
+        const S = c.summary;
+        const pill = (t, n, col) => `<span style="display:inline-block;padding:1px 8px;border-radius:10px;background:${col}22;border:1px solid ${col}88;color:${col};font-weight:600">${t} ${n}</span>`;
+        const selN = imp.points.filter(p => !p.done && p.sel).length, withApi = imp.points.filter(p => !p.done && p.sel && impEnvApiOf(p)).length;
+        el.innerHTML = `<div style="padding:6px 8px;background:rgba(255,214,102,0.05);border:1px dashed rgba(255,214,102,0.4);border-radius:3px;font-size:11px;color:#cfd6dc">
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px">
+                <span style="color:#888;font-size:10px">Key:</span> ${key ? `<span style="color:#5fff5f">set (…${impEsc(key.slice(-4))})</span>` : '<span style="color:#ff6060">not set</span>'} <a href="#" data-impenv-key style="color:#7adfe6">${key ? 'change' : 'set key'}</a>
+                <label style="display:inline-flex;align-items:center;gap:4px">API column <select data-impenv-api style="max-width:170px;${inCss}"><option value="">— none —</option>${imp.headers.map(h => `<option value="${impEsc(h)}"${c.apiCol === h ? ' selected' : ''}>${impEsc(h)}</option>`).join('')}</select></label>
+                <button data-impenv-run ${c.running || !key || !c.apiCol ? 'disabled' : ''} style="background:rgba(255,214,102,0.15);color:#ffd666;border:1px solid rgba(255,214,102,0.5);border-radius:3px;padding:3px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600${c.running || !key || !c.apiCol ? ';opacity:0.5;cursor:default' : ''}">${c.running ? '⏳ checking…' : `🛢 Cross-check ${withApi} selected well${withApi === 1 ? '' : 's'}`}</button>
+                <span style="color:#888;font-size:10px">${selN - withApi ? `${selN - withApi} selected point${selN - withApi === 1 ? ' has' : 's have'} no API (batteries etc.) · ` : ''}~${Math.ceil(withApi / 200)} request${Math.ceil(withApi / 200) === 1 ? '' : 's'}</span>
+                <span style="flex:1"></span>
+                ${S ? `<button data-impenv-rep="sheets" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Report for Sheets</button><button data-impenv-rep="csv" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button>` : ''}
+            </div>
+            ${S ? `<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:4px">
+                ${pill('● producing', S.producing, '#5fff5f')} ${pill('● inactive / TA', S.inactive, '#ffb347')} ${pill('● plugged / expired', S.plugged, '#ff5252')} ${S.other ? pill('● other', S.other, '#9ad') : ''} ${S.notFound ? pill('not in Enverus', S.notFound, '#ff8a80') : ''}
+                <span style="color:#888">· ${S.found} / ${S.withApi} found · checked ${impEsc(c.checkedAt || '')}${S.mainOp ? ` · operator mostly <b style="color:#cfd6dc">${impEsc(S.mainOp)}</b>` : ''}${S.otherOp ? ` · <span style="color:#ffb347">${S.otherOp} under another operator</span>` : ''}${S.far ? ` · <span style="color:#ffb347">${S.far} more than 100 ft off the client coordinate</span>` : ''}</span>
+            </div>
+            <div style="color:#888;font-size:10px">Everything that is not plainly producing is listed under Placement › 🛢 Enverus (click a row to zoom, ⓘ for the record). Selected dots on the map turn red when Enverus says plugged / expired and amber when inactive.</div>` : `<div style="color:#888;font-size:10px">Answers per well: status (producing / inactive / plugged…), type, vertical vs horizontal, operator, spud / plug dates and Enverus' own surface location vs the client's. Flags go to Placement › 🛢 Enverus.</div>`}
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-top:6px;font-size:10px;color:#cfd6dc"><input type="checkbox" data-impenv-notes ${c.notes ? 'checked' : ''} style="accent-color:#ffd666"> write an "Enverus" block into each checked asset's notes (status · type · trajectory · operator · dates · API · checked date)</label>
+        </div>`;
+        el.querySelector('[data-impenv-key]').onclick = (ev) => { ev.preventDefault(); impEnvSetKey(); };
+        el.querySelector('[data-impenv-api]').onchange = function () { c.apiCol = this.value || null; impMarkDirty(); impRenderEnvUi(); };
+        const run = el.querySelector('[data-impenv-run]'); if (run) run.onclick = () => { impEnvCheck().catch(e => { console.warn(`${TAG} 🛢`, e); impStatus(`🛢 ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
+        el.querySelector('[data-impenv-notes]').onchange = function () { c.notes = this.checked; impMarkDirty(); };
+        el.querySelectorAll('[data-impenv-rep]').forEach(b => b.onclick = () => { try { impExportEnv(b.getAttribute('data-impenv-rep')); } catch (e) { impStatus(`Enverus report failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } });
+    }
+    function impExportEnv(how) {
+        const pts = imp.points.filter(p => !p.done && p.sel && p.env && !p.env.noApi);
+        if (!pts.length) { impStatus('Run the cross-check first', '#ffb347'); return; }
+        const r = (p) => imp.rows[p.i] || {};
+        const cols = [
+            { label: 'Name', val: p => p.name }, { label: 'API', val: p => p.env.api || '' }, { label: 'Enverus name', val: p => p.env.name || '' }, { label: 'Enverus status', val: p => p.env.found ? p.env.status : 'NOT FOUND' },
+            { label: 'Type', val: p => p.env.type || '' }, { label: 'Trajectory', val: p => p.env.traj || '' }, { label: 'Operator', val: p => p.env.op || '' }, { label: 'Spud', val: p => p.env.spud || '' }, { label: 'Plug date', val: p => p.env.plug || '' }, { label: 'First prod', val: p => p.env.firstProd || '' },
+            { label: 'Wellbores', val: p => p.env.bores || '' }, { label: 'Offset ft (client vs Enverus)', val: p => p.env.distFt == null ? '' : p.env.distFt }, { label: 'File type', val: p => p.typeRaw || '' }, { label: 'File H/V', val: p => (imp.mapping && imp.mapping.type) ? '' : '' },
+            { label: 'Tier', val: p => (p.pri && p.pri.tier) || '' }, { label: 'Pad BLPD', val: p => (p.pri && p.pri.padTotal != null) ? Math.round(p.pri.padTotal) : '' }, { label: 'Asset BLPD', val: p => (p.pri && p.pri.blpd != null) ? Math.round(p.pri.blpd) : '' },
+            { label: 'Latitude', val: p => p.lat.toFixed(6) }, { label: 'Longitude', val: p => p.lng.toFixed(6) }, { label: 'Checked', val: p => p.env.checkedAt || '' },
+        ];
+        impExportTable(pts, cols, how, 'enverus-check', 'Enverus');
+    }
     // v4.353: PLACEMENT & FLAGS review list — compact, tabbed by kind, its own
     // scrollbar, a Reviewed checkbox per point (saved with the session), click a
     // row = zoom + pulse + name on the map, ⓘ = hover details. Covers the
@@ -24048,13 +24248,15 @@
             { id: 'child', label: 'Parent/child', color: '#b48cff', items: sel.filter(p => p.child && !p.dup) },
             { id: 'near', label: 'Nearby', color: '#4fc3f7', items: sel.filter(p => p.near && !p.child && !p.dup) },
             { id: 'off', label: '📍 Off pad', color: '#ffb347', items: sel.filter(p => p.pri && p.pri.off > 0) },
-            { id: 'rev', label: '✓ Reviewed', color: '#5fff5f', items: sel.filter(p => p.reviewed && (p.dup || p.child || p.near || (p.pri && p.pri.off > 0))) },
+            { id: 'env', label: '🛢 Enverus', color: '#ffd666', items: sel.filter(p => impEnvFlagged(p)) },
+            { id: 'rev', label: '✓ Reviewed', color: '#5fff5f', items: sel.filter(p => p.reviewed && (p.dup || p.child || p.near || (p.pri && p.pri.off > 0) || impEnvFlagged(p))) },
         ];
     }
-    function impFlagKind(p) { return p.dup ? 'dup' : (p.child ? 'child' : (p.near ? 'near' : ((p.pri && p.pri.off > 0) ? 'off' : 'dup'))); }
+    function impFlagKind(p) { return p.dup ? 'dup' : (p.child ? 'child' : (p.near ? 'near' : ((p.pri && p.pri.off > 0) ? 'off' : (impEnvFlagged(p) ? 'env' : 'dup')))); }
     function impFlagShort(tab, p) {
         const ft = (v) => `${Math.round(v)} ft`;
-        if (tab === 'rev') { const k = impFlagKind(p); const lbl = { dup: 'name match', child: 'parent/child', near: 'nearby', off: 'off pad' }[k]; return `${lbl} · ${impFlagShort(k, p)}`; }
+        if (tab === 'rev') { const k = impFlagKind(p); const lbl = { dup: 'name match', child: 'parent/child', near: 'nearby', off: 'off pad', env: 'Enverus' }[k]; return `${lbl} · ${impFlagShort(k, p)}`; }
+        if (tab === 'env') return impEnvShort(p);
         if (tab === 'dup') return `${imp.dupMode === 'update' ? '→ update type + notes' : (imp.dupMode === 'copy' ? '→ copy -N' : '→ skipped')}${p.pri && p.pri.off > 0 ? ` · client coord ${ft(p.pri.off)} off` : ' · on its polygon'}`;
         if (tab === 'child') return `inside ${p.child.name} (${p.child.full ? 'fully' : 'partially'})`;
         if (tab === 'near') return `${ft(p.near.ft)} from ${p.near.name}`;
@@ -24074,6 +24276,7 @@
             if (imp.pri.on) L.push(`Tier: ${p.pri.tier || 'none'}${p.pri.padName ? ` · pad "${p.pri.padName}"` : ''}${p.pri.padTotal != null ? ` · pad total ${Math.round(p.pri.padTotal).toLocaleString()} BLPD across ${p.pri.padN}` : ''}${p.pri.blpd != null ? ` · this asset ${Math.round(p.pri.blpd).toLocaleString()} BLPD` : ''}${p.pri.before ? ` · was ${p.pri.before}` : ''}`);
             if (p.pri.flags && p.pri.flags.length) L.push(`Pad flags: ${p.pri.flags.join(' · ')}`);
         }
+        if (p.env && !p.env.noApi) L.push(p.env.found ? `Enverus: ${p.env.name || ''} · ${p.env.status}${p.env.type ? ` · ${p.env.type}` : ''}${p.env.traj ? ` · ${p.env.traj}` : ''}${p.env.op ? ` · ${p.env.op}` : ''}${p.env.spud ? ` · spud ${p.env.spud}` : ''}${p.env.plug ? ` · plugged ${p.env.plug}` : ''}${p.env.firstProd ? ` · first prod ${p.env.firstProd}` : ''}${p.env.bores > 1 ? ` · ${p.env.bores} wellbores` : ''}${p.env.distFt != null ? ` · Enverus location ${p.env.distFt} ft from the client coordinate` : ''} · API ${p.env.api}` : `Enverus: API ${p.env.api} not found`);
         if (p.reviewed) L.push('✓ reviewed');
         return L.join('\n');
     }
@@ -24096,6 +24299,8 @@
         const tabs = impFlagTabs(live);
         const total = tabs.filter(t => t.id !== 'rev').reduce((a, t) => a + t.items.length, 0);
         if (!total) { el.innerHTML = `<div style="font-size:11px;color:#5fff5f;padding:4px 0">✓ no placement flags among the selected points</div>`; return; }
+        // zoom for an Enverus row also pulses Enverus' own surface location
+        tabs.forEach(t => { t.extra = t.id === 'env' ? (p => (p.env && p.env.found && isFinite(p.env.lat)) ? [{ lat: p.env.lat, lng: p.env.lng, name: `${p.name} (Enverus)` }] : []) : null; });
         if (!imp.flagTab || !tabs.find(t => t.id === imp.flagTab && (t.items.length || t.id === 'rev'))) imp.flagTab = (tabs.find(t => t.items.length) || tabs[0]).id;
         const tab = tabs.find(t => t.id === imp.flagTab);
         const items = tab.items.slice().sort((x, y) => (tab.id === 'rev' ? 0 : (x.reviewed === y.reviewed ? 0 : (x.reviewed ? 1 : -1))) || (tab.id === 'off' ? (y.pri.off - x.pri.off) : 0) || x.name.localeCompare(y.name));
@@ -24146,7 +24351,7 @@
             if (cb) { const p = byI.get(cb.getAttribute('data-impflagrev')); if (p) { p.reviewed = !!cb.checked; impMarkDirty(); impRenderFlagsUi(live); impSecSummaries(); } return; }
             if (ev.target.closest('[data-impflaginfo]')) return;
             const r = ev.target.closest('[data-impflagrow]');
-            if (r) { const p = byI.get(r.getAttribute('data-impflagrow')); if (p) { const extra = []; if (p.dup && p.dupId != null) { const a = (imp.assetIndex || []).find(x => x.id === p.dupId); if (a && a.centroid) extra.push({ lat: a.centroid.lat, lng: a.centroid.lng, name: `${p.name} (existing asset)` }); } impZoomToPoints([p].concat(extra), p.name); impStatus(`🔎 ${impEsc(p.name)} — ${impEsc(impFlagShort(tab.id, p))}`); } }
+            if (r) { const p = byI.get(r.getAttribute('data-impflagrow')); if (p) { const extra = []; if (p.dup && p.dupId != null) { const a = (imp.assetIndex || []).find(x => x.id === p.dupId); if (a && a.centroid) extra.push({ lat: a.centroid.lat, lng: a.centroid.lng, name: `${p.name} (existing asset)` }); } if (tab.extra) extra.push(...tab.extra(p)); impZoomToPoints([p].concat(extra), p.name); impStatus(`🔎 ${impEsc(p.name)} — ${impEsc(impFlagShort(tab.id, p))}`); } }
         };
     }
     // v4.342: flagged points as a table — rich HTML + TSV on the clipboard
@@ -24934,11 +25139,13 @@
                 if (p.done && !p.removed) o.created = true;
                 if (p.selManual !== undefined) o.selManual = p.selManual;
                 if (p.reviewed) o.rv = true;
+                if (p.env && !p.env.noApi) o.env = p.env;
                 return (Object.keys(o).length > 1) ? o : null;
             }).filter(Boolean),
             shapes: imp.shapes.map(sh => sh.kind === 'circle' ? { id: sh.id, kind: 'circle', center: sh.center, radiusM: sh.radiusM, name: sh.name || '' } : { id: sh.id, kind: sh.kind, ring: sh.ring, handle: sh.handle, name: sh.name || '' }),
             shapeSeq: imp.shapeSeq,
             pri: { on: imp.pri.on, oilCol: imp.pri.oilCol, waterCol: imp.pri.waterCol, blpdCol: imp.pri.blpdCol, priCol: imp.pri.priCol },
+            env: { apiCol: imp.env.apiCol, notes: imp.env.notes, checkedAt: imp.env.checkedAt },
         };
         const json = JSON.stringify(data);
         const live = imp.points.filter(p => !p.done).length;
@@ -24971,6 +25178,7 @@
         imp.shapeSeq = Math.max(d.shapeSeq || 1, ...imp.shapes.map(sh => sh.id + 1), 1);
         imp.mapOpen = false;
         if (d.pri) { Object.assign(imp.pri, { on: !!d.pri.on, oilCol: d.pri.oilCol || null, waterCol: d.pri.waterCol || null, blpdCol: d.pri.blpdCol || null, priCol: d.pri.priCol || null }); imp.pri._guessed = true; }
+        if (d.env) { imp.env.apiCol = d.env.apiCol || null; imp.env.notes = d.env.notes !== false; imp.env.checkedAt = d.env.checkedAt || null; imp.env._guessed = true; }
         impRenderMappingUi();
         impBuildPoints();                                            // rebuilds points from rows + mapping (also recomputes dups/flags)
         const byI = new Map(imp.points.map(p => [p.i, p]));
@@ -24982,9 +25190,11 @@
             if (o.created) { p.done = true; p.sel = false; created++; }
             if (o.selManual !== undefined) p.selManual = o.selManual;
             if (o.rv) p.reviewed = true;
+            if (o.env) p.env = o.env;
         });
         try { impComputeDups(); } catch (e) {}
         impRefreshAfterSelChange();
+        try { impEnvSummarize(); impRenderEnvUi(); } catch (e) {}
         imp.dirty = false; imp.lastSavedAt = d.savedAt;
         impRenderResumeUi(); impRenderTypeMapUi(); impSyncUi();
         impStatus(`↻ resumed <b>${impEsc(d.fileName || 'file')}</b> saved ${impEsc(impFmtWhen(d.savedAt))} — ${imp.points.filter(p => !p.done).length} staged · ${moved} moved · ${removed} removed · ${created} already created · ${imp.shapes.length} boundar${imp.shapes.length === 1 ? 'y' : 'ies'}`);
@@ -28425,7 +28635,7 @@
             steps: ['🔍 Scan crossings (or right-click a flight path → 🛗 for a manual point).', 'Review each staged crossing — bridge height, elevator lengths, preflight result.', 'Untick Dry run → Commit. ↩ Undo restores the flight paths and deletes the poles.'],
             test: 'Scan a site with a known transmission crossing, confirm one staged set per crossing, Commit with Dry run ON.' },
         imp: { what: 'Bring a client asset list into Percepto. Load a CSV or KML → points stage on the map (nothing written) → narrow with boundaries → map the type → ✓ Create makes real asset squares. Create-only, with dry run, backup manifest and undo.',
-            steps: ['The page is five numbered sections in working order (plus Advanced). Each header shows where it stands; click to open / close, or use the jump chips at the top. The status line under the title shows the latest result.', 'Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', 'Priority tiers (▸ below the Type table): pick the oil + water columns (or a single BLPD column, or a ready-made P1/P2/P3 column); every asset on a pad shares the pad total; the tier is written as a type prefix ("P1 - …") and a Priority / Prioritized block in the notes. "name matches → update type + notes" is the quarterly re-run: load the new list, review the Tier report, Create.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
+            steps: ['The page is five numbered sections in working order (plus Advanced). Each header shows where it stands; click to open / close, or use the jump chips at the top. The status line under the title shows the latest result.', 'Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', '5 · Enverus check: set the Developer API key once, pick the API-number column, Cross-check — every selected well gets its Enverus status / type / trajectory / operator / dates and location; anything not plainly producing lands in Placement › 🛢 Enverus and an "Enverus" block goes into the notes.', 'Priority tiers (in 3 · Type & priority): pick the oil + water columns (or a single BLPD column, or a ready-made P1/P2/P3 column); every asset on a pad shares the pad total; the tier is written as a type prefix ("P1 - …") and a Priority / Prioritized block in the notes. "name matches → update type + notes" is the quarterly re-run: load the new list, review the Tier report, Create.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
             test: 'Load the list, add one boundary, confirm the selected count drops, Create with Dry run ON.' },
         sci: { what: 'Applies the Ortho Scanner review sheet\'s decisions: accepted NFZs and flight-path leg changes stage on the map (green / yellow, removed legs red), preflight runs, then Apply writes them — NFZs create-only, flight paths one POST each with Delete Guard backups.',
             steps: ['Load the decisions JSON and the scan bundle from the review sheet.', 'Check the staged plan on the map and the preflight result.', 'Untick Dry run → Apply.'],
