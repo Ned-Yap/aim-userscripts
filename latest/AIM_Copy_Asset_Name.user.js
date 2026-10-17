@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.351
+// @version      4.352
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -90,7 +90,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.351';
+    const SCRIPT_VERSION = '4.352';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22525,6 +22525,7 @@
         lastUpdated: [],                            // v4.347: [{id, before}] bodies from the last commit's updates — ↩ undo re-POSTs them
         pri: { on: false, open: false, oilCol: null, waterCol: null, blpdCol: null, priCol: null, clusterFt: 100, padFt: 50, p1Min: 250, p1Max: 1500, summary: null },   // v4.347: priority tiers
         advOpen: false,                             // v4.331: ▸ Advanced (subset tools + delete mode) expanded — GM-remembered
+        secOpen: { bounds: true, data: true, type: false, place: false, create: true, adv: false },   // v4.352: collapsible sections — GM-remembered
         mapOpen: false,                             // v4.331: column-mapping row expanded (auto-collapses once applied)
         // LIVE selection model (v4.250): selected = manual override ?? inside-any-shape.
         // Shapes are movable, so membership RECOMPUTES (impRecomputeSel) instead of
@@ -22543,7 +22544,7 @@
         lastDelete: null,                           // {siteID, when, entities:[full bodies]} — ↩ Undo batch source
         assetIndex: null,                           // cached [{id,name,clean,ring,bbox,centroid}] for dup-guard + delete select
     };
-    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open } })); } catch (e) {} }
+    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open } })); } catch (e) {} }
     function impLoadParams() {
         try {
             const raw = GM_getValue(IMP_PARAMS_KEY, ''); if (!raw) return;
@@ -22557,7 +22558,61 @@
             else if (typeof o.includeDups === 'boolean' && o.includeDups) imp.dupMode = 'copy';
             if (o.pri && typeof o.pri === 'object') ['clusterFt', 'padFt', 'p1Min', 'p1Max'].forEach(k => { if (typeof o.pri[k] === 'number' && o.pri[k] >= 0) imp.pri[k] = o.pri[k]; });
             if (o.pri && typeof o.pri.open === 'boolean') imp.pri.open = o.pri.open;
+            if (o.secOpen && typeof o.secOpen === 'object') Object.keys(imp.secOpen).forEach(k => { if (typeof o.secOpen[k] === 'boolean') imp.secOpen[k] = o.secOpen[k]; });
         } catch (e) {}
+    }
+    // v4.352: section chrome — numbered, collapsible, one-line live summary in the header
+    const IMP_SECTIONS = [
+        { id: 'bounds', num: '1', title: 'Boundaries', color: '186,140,255' },
+        { id: 'data', num: '2', title: 'Data file', color: '122,223,230' },
+        { id: 'type', num: '3', title: 'Type & priority', color: '255,179,71' },
+        { id: 'place', num: '4', title: 'Placement & flags', color: '255,95,255' },
+        { id: 'create', num: '5', title: 'Create / update', color: '95,255,95' },
+        { id: 'adv', num: '', title: 'Advanced', color: '160,160,160' },
+    ];
+    function impSecOpenHtml(id) {
+        const d = IMP_SECTIONS.find(x => x.id === id);
+        return `<div class="aim-imp-sec" data-impsec="${id}" style="margin-bottom:6px;border-left:3px solid rgba(${d.color},0.55);border-radius:3px;background:rgba(255,255,255,0.015)">
+            <button data-impsechdr="${id}" style="display:flex;align-items:center;gap:8px;width:100%;text-align:left;background:rgba(${d.color},0.07);border:none;border-radius:0 3px 3px 0;color:#e6e6e6;cursor:pointer;font:inherit;font-size:12px;padding:6px 10px">
+                <span data-impsecchev style="color:rgb(${d.color});width:10px;flex:none">▸</span>
+                ${d.num ? `<span style="display:inline-block;min-width:18px;height:18px;line-height:18px;text-align:center;border-radius:50%;background:rgba(${d.color},0.25);color:rgb(${d.color});font-size:10px;font-weight:700;flex:none">${d.num}</span>` : ''}
+                <b style="color:rgb(${d.color});flex:none">${d.title}</b>
+                <span data-impsecsum="${id}" style="color:#8a949e;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0"></span>
+            </button>
+            <div data-impsecbody="${id}" style="display:none;padding:8px 10px 4px">`;
+    }
+    const IMP_SEC_CLOSE = `</div></div>`;
+    function impSetSection(id, open, scroll) {
+        imp.secOpen[id] = !!open; impSaveParams(); impApplySections();
+        if (scroll) { try { const el = document.querySelector(`[data-impsec="${id}"]`); if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); } catch (e) {} }
+    }
+    function impApplySections() {
+        const advForced = !!imp.mode || imp.target === 'assets';
+        IMP_SECTIONS.forEach(d => {
+            const open = d.id === 'adv' ? (imp.secOpen.adv || advForced) : imp.secOpen[d.id];
+            const body = document.querySelector(`[data-impsecbody="${d.id}"]`), hdr = document.querySelector(`[data-impsechdr="${d.id}"]`);
+            if (body) body.style.display = open ? '' : 'none';
+            if (hdr) { const ch = hdr.querySelector('[data-impsecchev]'); if (ch) ch.textContent = open ? '▾' : '▸'; }
+            const chip = document.querySelector(`[data-impsecjump="${d.id}"]`);
+            if (chip) chip.style.background = open ? `rgba(${d.color},0.25)` : 'transparent';
+        });
+        impSecSummaries();
+    }
+    function impSecSummaries() {
+        const live = imp.points.filter(p => !p.done);
+        const selN = imp.target === 'assets' ? imp.assetSel.size : live.filter(p => p.sel).length;
+        const set = (id, html) => { const el = document.querySelector(`[data-impsecsum="${id}"]`); if (el) el.innerHTML = html; };
+        set('bounds', !imp.shapes.length ? (live.length ? `none — all ${live.length} points selected` : 'none yet — load KMLs or draw, then load the data file') : `${imp.shapes.length} boundar${imp.shapes.length === 1 ? 'y' : 'ies'} · <b style="color:#cfd6dc">${selN}</b> of ${live.length} inside`);
+        const m = imp.mapping || {};
+        set('data', !imp.fileName ? 'no file loaded' : `${impEsc(imp.fileName)} · ${imp.rows.length} rows · ${live.length} staged${imp.invalid ? ` · <span style="color:#ffb347">${imp.invalid} without coordinates</span>` : ''}${imp.mapping && impNotesCols().length ? ` · notes ${impNotesCols().length} col${impNotesCols().length === 1 ? '' : 's'}` : ''}${imp.dirty ? ' · <span style="color:#ffb347">unsaved</span>' : (imp.lastSavedAt ? ' · 💾 saved' : '')}`);
+        const S = imp.pri.summary;
+        set('type', !imp.points.length ? 'after the data file' : `${m.type ? `type = ${impEsc(m.type)}` : `no type column → "${impEsc(impApplyShield(imp.typeMap['__all__'] || ''))}"`}${imp.pri.on ? (S ? ` · tiers ON: <span style="color:#ff7b00">P1 ${S.cnt.P1}</span> · <span style="color:#ffe14d">P2 ${S.cnt.P2}</span> · <span style="color:#9ad">P3 ${S.cnt.P3}</span>${S.cnt.none ? ` · <span style="color:#ff6060">${S.cnt.none} untiered</span>` : ''}${S.flagged ? ` · <span style="color:#ffb347">${S.flagged} flagged</span>` : ''}` : ' · tiers ON') : ' · tiers off'}`);
+        const moved = live.filter(p => p.orig).length, removed = imp.points.filter(p => p.removed).length, fl = live.filter(p => p.dup || p.child || p.near).length, off = live.filter(p => p.sel && p.pri && p.pri.off > 0).length;
+        set('place', !imp.points.length ? 'after the data file' : `${imp.mode === 'move' ? '<b style="color:#ff5fff">↔ Move ON</b> · ' : ''}${moved} moved · ${removed} removed · ${fl} flagged (${live.filter(p => p.dup).length} name matches)${off ? ` · <span style="color:#ffb347">📍 ${off} off their pad</span>` : ''}`);
+        const dupsIn = live.filter(p => p.sel && p.dup).length, upd = imp.dupMode === 'update' ? dupsIn : 0, tot = live.filter(p => p.sel && (!p.dup || imp.dupMode !== 'skip')).length;
+        let dry = true; try { dry = !!document.getElementById('aim-gen-dryrun').checked; } catch (e) {}
+        set('create', !imp.points.length ? 'after the data file' : `${tot - upd ? `create ${tot - upd}` : ''}${(tot - upd) && upd ? ' + ' : ''}${upd ? `update ${upd}` : ''}${!tot ? 'nothing selected' : ''} · ${impSizeFt} ft · ${dry ? '<span style="color:#5fff5f">dry run</span>' : '<b style="color:#ff6060">LIVE</b>'}${tot > IMP_BIG_BATCH ? ' · <span style="color:#ff6060">over the 1000 gate</span>' : ''}`);
+        set('adv', `${imp.target === 'assets' ? '<b style="color:#ff8a80">🗑 delete mode ON</b> · ' : ''}pick single points · select all / clear · delete existing assets`);
     }
     // v4.343: shielding modifiers on a subtype ("v - pumping rod - unsh",
     // "Tank Battery Shielded") — stripped when the user doesn't care about
@@ -22580,6 +22635,7 @@
     // anything within padFt of the pad polygon; brand-new points cluster by
     // clusterFt. A pad with no numbers gets NO prefix and is flagged.
     const IMP_TIER_RE = /^P([1-3])\s*[-–—:]\s*/i;
+    const IMP_TIER_COLORS = { P1: '#ff7b00', P2: '#ffe14d', P3: '#4fc3f7', none: '#ff5252' };   // v4.352: map fill per tier (P1 orange = top priority, P2 yellow, P3 blue, untiered red)
     function impTierStrip(sub) { return String(sub || '').replace(IMP_TIER_RE, '').trim(); }
     function impTierOf(sub) { const m = String(sub || '').match(IMP_TIER_RE); return m ? `P${m[1]}` : ''; }
     function impNum(v) { if (v == null) return null; const t = String(v).replace(/[,$\s]/g, ''); if (!t) return null; const n = parseFloat(t); return isFinite(n) ? n : null; }
@@ -22820,7 +22876,7 @@
         const flagged = S.padsList.filter(x => x.flags.length);
         const showN = c.showAllFlags ? flagged.length : 8;
         const flagList = flagged.length ? `<div style="margin-top:4px;font-size:10px;color:#ffb347;line-height:1.5;flex-basis:100%"><div style="color:#888;margin-bottom:2px">click a pad to zoom to it (its points pulse) · flagged points wear an orange ring on the map</div>${flagged.slice(0, showN).map(x => `<div data-impri-pad="${impEsc(x.key)}" title="zoom to this pad" style="cursor:pointer;padding:1px 4px;border-radius:3px;margin-left:-4px" onmouseover="this.style.background='rgba(255,179,71,0.12)'" onmouseout="this.style.background=''">⚠ <b>${impEsc(x.name)}</b> (${x.members.length}): ${impEsc(x.flags.join(' · '))} — ${impEsc(x.members.slice(0, 4).map(p => p.name).join(', '))}${x.members.length > 4 ? ' …' : ''}</div>`).join('')}${flagged.length > 8 ? `<button data-impri-showall="1" style="margin-top:3px;background:none;border:1px solid rgba(255,179,71,0.4);color:#ffb347;border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">${c.showAllFlags ? '▴ show fewer' : `▾ show all ${flagged.length} flagged`}</button>` : ''}</div>` : '';
-        return `${tierPill('P1', S.cnt.P1, '#ff7b00')} ${tierPill('P2', S.cnt.P2, '#ffe14d')} ${tierPill('P3', S.cnt.P3, '#9ad')} ${S.cnt.none ? tierPill('untiered', S.cnt.none, '#ff6060') : ''} ${S.off ? tierPill('📍 off pad', S.off, '#ffb347') : ''} <span style="color:#888">· <b style="color:#cfd6dc">${S.selN}</b> selected on ${S.pads} pad${S.pads === 1 ? '' : 's'}${S.flagged ? ` · <b style="color:#ffb347">${S.flagged} flagged</b>` : ''} · vs site: ${S.chg.same} same · <b style="color:${S.chg.changed ? '#ffe14d' : '#888'}">${S.chg.changed} changed</b> · ${S.chg.added} newly tiered · ${S.chg.new} new asset${S.chg.new === 1 ? '' : 's'}${S.chg.untier ? ` · <b style="color:#ff6060">${S.chg.untier} lose their tier</b>` : ''}</span>${flagList}`;
+        return `${tierPill('● P1', S.cnt.P1, IMP_TIER_COLORS.P1)} ${tierPill('● P2', S.cnt.P2, IMP_TIER_COLORS.P2)} ${tierPill('● P3', S.cnt.P3, IMP_TIER_COLORS.P3)} ${S.cnt.none ? tierPill('● untiered', S.cnt.none, IMP_TIER_COLORS.none) : ''} <span style="color:#888;font-size:10px" title="Selected dots on the map are filled with these colours while tiers are on">= dot colours on the map</span> ${S.off ? tierPill('📍 off pad', S.off, '#ffb347') : ''} <span style="color:#888">· <b style="color:#cfd6dc">${S.selN}</b> selected on ${S.pads} pad${S.pads === 1 ? '' : 's'}${S.flagged ? ` · <b style="color:#ffb347">${S.flagged} flagged</b>` : ''} · vs site: ${S.chg.same} same · <b style="color:${S.chg.changed ? '#ffe14d' : '#888'}">${S.chg.changed} changed</b> · ${S.chg.added} newly tiered · ${S.chg.new} new asset${S.chg.new === 1 ? '' : 's'}${S.chg.untier ? ` · <b style="color:#ff6060">${S.chg.untier} lose their tier</b>` : ''}</span>${flagList}`;
     }
     function impPriNotesBlocks(p, dateStr) {
         const c = imp.pri; if (!c.on || !p.pri) return [];
@@ -23120,7 +23176,7 @@
                 imp.headers = parsed.headers;
                 imp.rows = parsed.rows;
                 imp.lastSavedAt = null;
-                imp.pri._guessed = false; imp.pri.summary = null;
+                imp.pri._guessed = false; imp.pri.summary = null; imp._secAdvanced = false;
                 try { impRenderResumeUi(); } catch (e) {}
                 imp.siteID = genState.siteID;
                 imp.points = []; imp.assetSel.clear(); imp.invalid = 0;   // v4.345: boundaries (imp.shapes) survive a data load — fence first, then load
@@ -23166,6 +23222,7 @@
         impMarkDirty();
         imp.mapOpen = false;
         impRenderMappingUi();
+        if (!imp._secAdvanced) { imp._secAdvanced = true; imp.secOpen.data = false; imp.secOpen.type = true; imp.secOpen.create = true; if (imp.shapes.length) imp.secOpen.bounds = false; impSaveParams(); }
         impBuildAssetIndex();
         impComputeDups();
         impRecomputeSel();          // shapes placed before the data still apply
@@ -23275,11 +23332,12 @@
             if (drawn >= IMP_MAX_RENDER) { culled++; continue; }
             try {
                 const held = imp.moveHeld === p, pulse = !!(imp.pulse && imp.pulse.has(p)), flagged = !!(imp.pri.on && p.pri && p.pri.flags && p.pri.flags.length);
+                const tierOn = imp.pri.on && p.sel && p.pri;          // v4.352: tier colours read at a glance — selected dots grow + fill by tier
                 const opts = {
-                    radius: pulse ? 9 : (held ? 7 : (p.sel ? 4 : 2.2)),
+                    radius: pulse ? 9 : (held ? 7 : (p.sel ? (tierOn ? 5.5 : 4) : 2.2)),
                     color: pulse ? '#ff5fff' : (held ? '#ff5fff' : (p.dup ? '#ff3b3b' : (p.child ? '#b48cff' : (p.near ? '#4fc3f7' : (flagged ? '#ffb347' : (p.orig ? '#ff5fff' : '#ffffff')))))),
                     weight: pulse ? 3 : (held ? 2.5 : ((p.dup || p.child || p.near || p.orig || flagged) ? 1.5 : 0.6)),
-                    fillColor: held ? '#ff5fff' : ((imp.pri.on && p.pri && p.pri.tier) ? ({ P1: '#ff7b00', P2: '#ffe14d', P3: '#9ad' }[p.pri.tier]) : (p.sel ? '#5fff5f' : '#ff9d00')),
+                    fillColor: held ? '#ff5fff' : (tierOn ? (IMP_TIER_COLORS[p.pri.tier] || IMP_TIER_COLORS.none) : (p.sel ? '#5fff5f' : '#ff9d00')),
                     fillOpacity: 0.9, opacity: 0.9, interactive: false,
                 };
                 if (imp.renderer) opts.renderer = imp.renderer;
@@ -23771,6 +23829,7 @@
         if (mode && !impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
         if (imp.moveHeld && mode !== 'move') { imp.moveHeld = null; imp.moveDrag = false; imp.moveDownPt = null; try { impRenderStaged(); } catch (e) {} }
         imp.mode = mode || null;
+        if (imp.mode === 'move' && !imp.secOpen.place) { imp.secOpen.place = true; impSaveParams(); }
         if (imp.mode) {
             try { if (nfzDraw.active) setNfzMode(null); } catch (e) {}   // mutually exclusive with the other map tools
             try { if (advDraw.active) setAdvDraw(false); } catch (e) {}
@@ -23789,8 +23848,12 @@
         const btnCss = (col) => `background:rgba(${col},0.12);color:rgb(${col});border:1px solid rgba(${col},0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px`;
         const inCss = 'background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px;text-align:right';
         host.innerHTML = `
-            <div style="font-size:11px;color:#7adfe6;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">📥 Asset Importer — <span id="aim-imp-file-label" style="text-transform:none;letter-spacing:0">${impEsc(imp.fileName || 'no file loaded')}</span></div>
+            <div style="font-size:11px;color:#7adfe6;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">📥 Asset Importer — <span id="aim-imp-file-label" style="text-transform:none;letter-spacing:0">${impEsc(imp.fileName || 'no file loaded')}</span></div>
+            <div id="aim-imp-result" style="font-size:11px;color:#9ad;line-height:1.5;margin-bottom:6px;padding:5px 8px;background:rgba(122,223,230,0.05);border-radius:3px;min-height:16px">Boundaries first, then the data file. Points stage on the map (nothing is written); each section below collapses — its header always shows where it stands.</div>
+            <div id="aim-imp-render-note" style="font-size:10px;color:#7a8794;margin-bottom:6px"></div>
+            <div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-bottom:8px;font-size:10px;color:#888">jump: ${IMP_SECTIONS.map(d => `<button data-impsecjump="${d.id}" style="background:transparent;border:1px solid rgba(${d.color},0.45);color:rgb(${d.color});border-radius:10px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">${d.num ? d.num + ' ' : ''}${d.title}</button>`).join('')}</div>
             <div id="aim-imp-resume" style="display:none;margin-bottom:8px"></div>
+            ${impSecOpenHtml('bounds')}
             <div id="aim-imp-bounds" style="margin-bottom:8px;padding:6px 8px;background:rgba(186,140,255,0.05);border:1px dashed rgba(186,140,255,0.4);border-radius:3px">
                 <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
                     <span style="font-size:11px;color:#ba8cff;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Boundaries</span>
@@ -23805,8 +23868,9 @@
                 </div>
                 <div id="aim-imp-shapes" style="margin-top:4px"></div>
             </div>
+            ${IMP_SEC_CLOSE}
+            ${impSecOpenHtml('data')}
             <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
-                <span style="font-size:11px;color:#7adfe6;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Data</span>
                 <button id="aim-imp-load" style="${btnCss('122,223,230')}">📂 Load CSV / KML</button>
                 <span style="color:#888;font-size:10px">or drag &amp; drop the file onto this panel</span>
                 <span style="flex:1"></span>
@@ -23814,14 +23878,20 @@
                 <span id="aim-imp-saved-note" style="color:#888;font-size:10px"></span>
             </div>
             <div id="aim-imp-mapping" style="margin-bottom:8px"></div>
+            ${IMP_SEC_CLOSE}
+            ${impSecOpenHtml('type')}
             <div id="aim-imp-typemap" style="margin-bottom:8px"></div>
             <div id="aim-imp-pri" style="margin-bottom:8px"></div>
+            ${IMP_SEC_CLOSE}
+            ${impSecOpenHtml('place')}
             <div id="aim-imp-placerow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px;padding:6px 8px;background:rgba(255,95,255,0.05);border:1px dashed rgba(255,95,255,0.35);border-radius:3px">
-                <span style="font-size:11px;color:#ff5fff;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Placement</span>
                 <button id="aim-imp-move" title="Fix a point's location BEFORE it becomes an asset. Click a staged point to pick it up (it turns magenta), pan/zoom freely, click where it belongs to drop it — or just drag it. No Alt needed while this is on; clicking empty map still pans. Delete / Backspace while holding a point removes it from the import. Esc puts it back. Moved points keep a magenta ring; the square is created at the new spot." style="background:rgba(255,95,255,0.12);color:#ff5fff;border:1px solid rgba(255,95,255,0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">↔ Move point</button>
                 <span id="aim-imp-move-note" style="color:#888;font-size:10px"></span>
                 <button id="aim-imp-resetmoves" style="display:none;background:transparent;color:#ffb347;border:1px solid rgba(255,179,71,0.45);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px" title="Put every moved point back where the file had it">↩ reset moved</button>
             </div>
+            <div id="aim-imp-flags" style="margin-bottom:8px"></div>
+            ${IMP_SEC_CLOSE}
+            ${impSecOpenHtml('create')}
             <div id="aim-imp-commitrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
                 <div id="aim-imp-biggate" style="display:none;flex-basis:100%;padding:6px 8px;background:rgba(255,85,85,0.10);border:1px solid rgba(255,85,85,0.6);border-radius:3px;font-size:11px;color:#ff8a80;line-height:1.5">
                     <b>⚠ <span id="aim-imp-biggate-n">0</span> assets selected — more than ${IMP_BIG_BATCH} in one run is NOT advisable.</b> Percepto's Site Setup page gets unstable with thousands of entities, the browser tab can freeze or crash mid-run, and you may have to reload the page and pick up where it stopped. Narrow the selection with a boundary KML first.<br>
@@ -23832,9 +23902,9 @@
                 <button id="aim-imp-commit" style="${btnCss('95,255,95')};font-weight:600">✓ Create selected</button>
                 <button id="aim-imp-undocreate" style="${btnCss('255,179,71')}" title="Delete exactly the assets the most recent import created (this session). Each delete rides Delete Guard's undo ring when installed.">↩ Undo last import</button>
             </div>
-            <div id="aim-imp-flags" style="margin-bottom:8px"></div>
-            <button id="aim-imp-advhdr" style="background:none;border:none;color:#7a8794;cursor:pointer;font:inherit;font-size:11px;padding:2px 0;margin-bottom:6px;text-align:left" title="Subset selection (circle / lasso / pick / shape KML / edit) and 🗑 Delete mode for existing assets. With no shape drawn, every staged point is selected.">▸ Advanced — select a subset · edit shapes · delete existing assets</button>
-            <div id="aim-imp-adv" style="display:none">
+            ${IMP_SEC_CLOSE}
+            ${impSecOpenHtml('adv')}
+            <div id="aim-imp-adv">
             <div id="aim-imp-selrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
                 <button id="aim-imp-pick" title="ALT+click a single staged point to toggle it in or out of the selection, regardless of boundaries." style="${btnCss('122,223,230')}">☝ Pick one</button>
                 <button id="aim-imp-selall" style="${btnCss('160,160,160')}">Select all</button>
@@ -23846,8 +23916,7 @@
                 <button id="aim-imp-undodel" style="${btnCss('255,179,71')};display:none" title="Re-create the assets from the most recent bulk delete's bank (create-only — they come back with NEW ids; mission references do NOT rebind).">↩ Undo delete batch</button>
             </div>
             </div>
-            <div id="aim-imp-render-note" style="font-size:10px;color:#7a8794;margin-bottom:4px"></div>
-            <div id="aim-imp-result" style="font-size:11px;color:#9ad;line-height:1.5">Load a CSV or KML — points stage on the map (nothing is written) with every point selected; map the type, set the size, ✓ Create. ▸ Advanced holds the subset tools for region-wide lists.</div>`;
+            ${IMP_SEC_CLOSE}`;
         impWirePanelControls(host);
         impRenderMappingUi();
         impRenderTypeMapUi();
@@ -23875,7 +23944,12 @@
         rEl.value = imp.radiusVal; ruEl.value = imp.radiusUnit;
         rEl.oninput = () => { const v = parseFloat(rEl.value); if (isFinite(v) && v > 0) { imp.radiusVal = v; impSaveParams(); } };
         ruEl.onchange = () => { imp.radiusUnit = ruEl.value; impSaveParams(); };
-        q('aim-imp-advhdr').onclick = () => { imp.advOpen = !imp.advOpen; impSaveParams(); impSyncUi(); };
+        host.addEventListener('click', (ev) => {
+            const h = ev.target.closest('[data-impsechdr]');
+            if (h) { const id = h.getAttribute('data-impsechdr'); impSetSection(id, !(id === 'adv' ? (imp.secOpen.adv || !!imp.mode || imp.target === 'assets') : imp.secOpen[id]), false); return; }
+            const j = ev.target.closest('[data-impsecjump]');
+            if (j) { impSetSection(j.getAttribute('data-impsecjump'), true, true); }
+        });
         q('aim-imp-circle').onclick = () => impSetMode(imp.mode === 'circle' ? null : 'circle');
         q('aim-imp-lasso').onclick = () => impSetMode(imp.mode === 'lasso' ? null : 'lasso');
         q('aim-imp-pick').onclick = () => impSetMode(imp.mode === 'pick' ? null : 'pick');
@@ -24259,11 +24333,7 @@
                 if (mb) { const on = imp.mode === 'move'; mb.style.background = on ? 'rgba(255,95,255,0.38)' : 'rgba(255,95,255,0.12)'; mb.textContent = on ? '↔ ON — click a dot, click its new spot · Delete=remove · Esc=off' : '↔ Move point'; }
             }
             show('aim-imp-delrow', true, true);
-            // v4.331: ▸ Advanced block — forced open while a tool is armed, a shape exists, or delete mode is on
-            const advForced = !!imp.mode || imp.target === 'assets';
-            show('aim-imp-adv', imp.advOpen || advForced, false);
-            const ah = document.getElementById('aim-imp-advhdr');
-            if (ah) ah.textContent = `${(imp.advOpen || advForced) ? '▾' : '▸'} Advanced — draw a circle / lasso · pick single points · edit boundaries · delete existing assets`;
+            impApplySections();   // v4.352: collapsible sections (Advanced forced open while a tool is armed / delete mode)
             // v4.342: Boundaries note (top-level block)
             const bn = document.getElementById('aim-imp-bounds-note');
             if (bn) {
@@ -28268,7 +28338,7 @@
             steps: ['🔍 Scan crossings (or right-click a flight path → 🛗 for a manual point).', 'Review each staged crossing — bridge height, elevator lengths, preflight result.', 'Untick Dry run → Commit. ↩ Undo restores the flight paths and deletes the poles.'],
             test: 'Scan a site with a known transmission crossing, confirm one staged set per crossing, Commit with Dry run ON.' },
         imp: { what: 'Bring a client asset list into Percepto. Load a CSV or KML → points stage on the map (nothing written) → narrow with boundaries → map the type → ✓ Create makes real asset squares. Create-only, with dry run, backup manifest and undo.',
-            steps: ['Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', 'Priority tiers (▸ below the Type table): pick the oil + water columns (or a single BLPD column, or a ready-made P1/P2/P3 column); every asset on a pad shares the pad total; the tier is written as a type prefix ("P1 - …") and a Priority / Prioritized block in the notes. "name matches → update type + notes" is the quarterly re-run: load the new list, review the Tier report, Create.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
+            steps: ['The page is five numbered sections in working order (plus Advanced). Each header shows where it stands; click to open / close, or use the jump chips at the top. The status line under the title shows the latest result.', 'Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', 'Priority tiers (▸ below the Type table): pick the oil + water columns (or a single BLPD column, or a ready-made P1/P2/P3 column); every asset on a pad shares the pad total; the tier is written as a type prefix ("P1 - …") and a Priority / Prioritized block in the notes. "name matches → update type + notes" is the quarterly re-run: load the new list, review the Tier report, Create.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
             test: 'Load the list, add one boundary, confirm the selected count drops, Create with Dry run ON.' },
         sci: { what: 'Applies the Ortho Scanner review sheet\'s decisions: accepted NFZs and flight-path leg changes stage on the map (green / yellow, removed legs red), preflight runs, then Apply writes them — NFZs create-only, flight paths one POST each with Delete Guard backups.',
             steps: ['Load the decisions JSON and the scan bundle from the review sheet.', 'Check the staged plan on the map and the preflight result.', 'Untick Dry run → Apply.'],
@@ -28521,6 +28591,7 @@
                 row.style.borderColor = dry ? 'rgba(95,255,95,0.4)' : 'rgba(255,85,85,0.7)';
             };
             cbx.addEventListener('change', paint); paint();
+            cbx.addEventListener('change', () => { try { impSecSummaries(); } catch (e) {} });
         })();
         box.querySelector('#aim-gen-menu').addEventListener('click', (e) => {
             const t = e.target.closest('[data-gen-tile]'); if (!t) return;

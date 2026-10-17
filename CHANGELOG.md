@@ -1,3 +1,8 @@
+## 2026-10-17 — Asset Import: collapsible numbered sections + tier colours at a glance — Site Setup Tools latest v4.352 (latest only)
+
+- **Site Setup Tools (latest) v4.352 — the Asset Import page is now six collapsible sections in working order:** 1 Boundaries · 2 Data file · 3 Type & priority · 4 Placement & flags · 5 Create / update · Advanced. Every header carries a one-line live summary (boundaries + inside count · file / rows / staged / saved · type column + tier counts · moved / removed / flagged / off-pad · create + update counts, size, dry-run or LIVE), so a folded section still tells you where it stands. Jump chips at the top open and scroll to a section; the status line is pinned under the title instead of at the very bottom. Open / closed state is remembered; staging a file folds Boundaries + Data and opens Type and Create; arming ↔ Move opens Placement; Advanced opens itself while a tool or delete mode is armed.
+- **Tier colours readable on the map:** while tiers are on, selected dots grow and fill by tier — P1 orange · P2 yellow · P3 blue · untiered red — and the pills in the section double as the legend.
+
 ## 2026-10-17 — Priority flags: points sitting OFF their pad — Site Setup Tools latest v4.351 (latest only)
 
 - **Site Setup Tools (latest) v4.351 — placement flags.** A name match whose point is not inside its own asset polygon, or a new point that sits near (not on) a pad polygon, is now flagged on its pad with the distance ("📍 2 points sit OUTSIDE the pad polygon — ↔ Move onto it: ADAMS 48 1 (34 ft off ADAMS 48 1)"), counted in an "off pad" pill, and listed in the Tier report ("Off pad (ft)"). Click the pad to zoom, pulse and name them, ↔ Move each onto the pad; the flag clears on the move.
