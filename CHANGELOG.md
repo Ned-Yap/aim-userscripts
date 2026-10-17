@@ -1,3 +1,7 @@
+## 2026-10-17 — Priority flags: real pulse with names, zoom clear of the panel, fewer false flags — Site Setup Tools latest v4.350 (latest only)
+
+- **Site Setup Tools (latest) v4.350.** Clicking a flagged pad now puts an animated magenta pulse on each of its points with the **asset name (and tier) labelled on the map** for 8 seconds, so two dots side by side are never a guess. The zoom fits the pad into the part of the map the Generate panel is NOT covering (the panel's box is subtracted from the map area). A distance cluster that touches two existing pads is now **split by polygon** — each point goes with the pad it sits on or is nearest to, un-rooted points follow their nearest rooted neighbour — instead of being flagged; only points between pads that sit on no polygon stay flagged.
+
 ## 2026-10-16 — Priority flags: click to zoom, show all — Site Setup Tools latest v4.349 (latest only)
 
 - **Site Setup Tools (latest) v4.349 — flagged pads in the Priority tiers section are clickable:** the map pans/zooms to the pad and its points pulse magenta for a few seconds; flagged points wear an orange ring on the map at all times; "▾ show all N flagged" expands the list past the first eight.

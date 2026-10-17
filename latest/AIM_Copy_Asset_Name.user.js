@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.349
+// @version      4.350
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -90,7 +90,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.349';
+    const SCRIPT_VERSION = '4.350';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22659,22 +22659,52 @@
         // 4. pad key per component: an existing root if any member sits on one (several roots = flag), else the cluster
         const pads = new Map();
         let ci = 0;
+        // v4.350: a distance cluster that touches SEVERAL existing pads is split
+        // by polygon — each point goes with the pad it sits on / nearest to,
+        // un-rooted points follow their nearest rooted neighbour — instead of
+        // being flagged. Only a point that can't be resolved stays flagged.
+        const groups = [];
         comps.forEach((members) => {
+            const rootOf = new Map(); const roots = new Map();
+            members.forEach(p => { const r = rootFor(p); if (r) { rootOf.set(p, r); roots.set(r.id, r); } });
+            if (roots.size <= 1) { groups.push({ members, root: roots.size ? [...roots.values()][0] : null, split: 0 }); return; }
+            const rooted = members.filter(p => rootOf.has(p));
+            const byRoot = new Map();
+            members.forEach(p => {
+                let r = rootOf.get(p);
+                if (!r) { let best = null, bd = Infinity; rooted.forEach(q => { const d = approxMeters(p.lat, p.lng, q.lat, q.lng); if (d < bd) { bd = d; best = q; } }); r = best ? rootOf.get(best) : null; }
+                const k = r ? r.id : '_none';
+                if (!byRoot.has(k)) byRoot.set(k, { root: r, members: [] });
+                byRoot.get(k).members.push(p);
+            });
+            byRoot.forEach(g => groups.push({ members: g.members, root: g.root, split: roots.size }));
+        });
+        groups.forEach(({ members, root, split }) => {
             ci++;
-            const roots = new Map();
-            members.forEach(p => { const r = rootFor(p); if (r) roots.set(r.id, r); });
-            const key = roots.size ? `a:${[...roots.keys()][0]}` : `c:${ci}`;
-            const padName = roots.size ? ([...roots.values()][0].name || `asset ${[...roots.keys()][0]}`) : `new pad ${ci}`;
+            const roots = new Map(); if (root) roots.set(root.id, root);
+            const key = root ? `a:${root.id}` : `c:${ci}`;
+            const padName = root ? (root.name || `asset ${root.id}`) : `new pad ${ci}`;
             const with_ = members.filter(p => direct ? p.pri.direct : p.pri.blpd != null);
             const total = direct ? null : with_.reduce((a, p) => a + p.pri.blpd, 0);
             let tier = direct ? '' : (with_.length ? impTierFromTotal(total) : '');
             const flags = [];
             if (!with_.length) flags.push(direct ? 'no priority value for this pad' : 'no production numbers for this pad');
             else if (!direct && with_.length < members.length) flags.push(`${members.length - with_.length} of ${members.length} assets without numbers`);
-            if (roots.size > 1) flags.push(`spans ${roots.size} existing pads (${[...roots.values()].map(r => r.name).join(', ')}) — check the ${c.clusterFt} ft cluster distance`);
+            // (a cluster that touched several pads was split by polygon above — no flag unless a point stayed un-rooted)
+            if (split > 1 && !root) flags.push(`${members.length} point${members.length === 1 ? '' : 's'} between ${split} existing pads — not on any polygon, check which pad they belong to`);
             if (direct) { const set = new Set(with_.map(p => p.pri.direct)); if (set.size > 1) flags.push(`assets on one pad carry different priorities (${[...set].join(', ')})`); if (set.size === 1) tier = [...set][0]; }
             members.forEach(p => { p.pri.padKey = key; p.pri.padName = padName; p.pri.padTotal = total; p.pri.padN = members.length; p.pri.padWith = with_.length; p.pri.tier = direct ? (p.pri.direct || tier) : tier; p.pri.flags = flags.slice(); });
-            pads.set(key, { key, name: padName, members, total, tier, flags });
+            if (pads.has(key)) { const ex = pads.get(key); ex.members = ex.members.concat(members); ex.flags = [...new Set(ex.flags.concat(flags))]; }
+            else pads.set(key, { key, name: padName, members, total, tier, flags });
+        });
+        // a root reached from two distance-clusters: recompute that pad's total/tier over the merged members
+        pads.forEach(pad => {
+            if (!/^a:/.test(pad.key)) return;
+            const with_ = pad.members.filter(p => direct ? p.pri.direct : p.pri.blpd != null);
+            const total = direct ? null : with_.reduce((a, p) => a + p.pri.blpd, 0);
+            const tier = direct ? pad.tier : (with_.length ? impTierFromTotal(total) : '');
+            pad.total = total; pad.tier = tier;
+            pad.members.forEach(p => { p.pri.padTotal = total; p.pri.padN = pad.members.length; p.pri.padWith = with_.length; if (!direct) p.pri.tier = tier; p.pri.flags = pad.flags.slice(); });
         });
         c.pads = pads;
         impSummarizePriority();
@@ -22701,6 +22731,58 @@
         if (hdr) hdr.textContent = `${c.open ? '▾' : '▸'} Priority tiers — ON${S ? ` · P1 ${S.cnt.P1} · P2 ${S.cnt.P2} · P3 ${S.cnt.P3}${S.cnt.none ? ` · ${S.cnt.none} untiered` : ''}${(S.chg.changed + S.chg.added) ? ` · ${S.chg.changed + S.chg.added} tier change${(S.chg.changed + S.chg.added) === 1 ? '' : 's'}` : ''} · ${S.selN} selected` : ''}`;
         if (sum) sum.innerHTML = impPriSummaryHtml();
     }
+    // v4.350: the Generate panel floats over the map — work out which part of
+    // the map is actually visible (map rect minus the panel box) and fit the
+    // target into THAT, so a zoom never lands under the panel.
+    function impVisiblePadding(map) {
+        try {
+            const mr = map.getContainer().getBoundingClientRect();
+            const box = document.querySelector(`#${GEN_MODAL_ID} > div`);
+            const pad = { l: 0, t: 0, r: 0, b: 0 };
+            if (box) {
+                const br = box.getBoundingClientRect();
+                const ix0 = Math.max(mr.left, br.left), ix1 = Math.min(mr.right, br.right), iy0 = Math.max(mr.top, br.top), iy1 = Math.min(mr.bottom, br.bottom);
+                if (ix1 > ix0 && iy1 > iy0) {                                   // panel overlaps the map — cut off the smaller side it occupies
+                    const cutL = ix1 - mr.left, cutR = mr.right - ix0, cutT = iy1 - mr.top, cutB = mr.bottom - iy0;
+                    const opts = [['l', cutL, mr.width], ['r', cutR, mr.width], ['t', cutT, mr.height], ['b', cutB, mr.height]].filter(([, v, lim]) => v > 0 && v < lim * 0.85).sort((a, b) => a[1] - b[1]);
+                    if (opts.length) pad[opts[0][0]] = Math.ceil(opts[0][1]);
+                }
+            }
+            return pad;
+        } catch (e) { return { l: 0, t: 0, r: 0, b: 0 }; }
+    }
+    function impClearPulse() {
+        clearInterval(imp._pulseIv); imp._pulseIv = null; clearTimeout(imp._pulseT); imp._pulseT = null;
+        const map = getLeafletMap();
+        (imp._pulseLayers || []).forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        imp._pulseLayers = []; imp.pulse = null;
+    }
+    function impPulsePoints(pts, label) {
+        const L = getLeafletL(), map = getLeafletMap(); if (!L || !map) return;
+        impClearPulse();
+        imp.pulse = new Set(pts);
+        if (!imp._pulseSvg) { try { imp._pulseSvg = L.svg({ pane: 'markerPane' }); } catch (e) { imp._pulseSvg = null; } }
+        imp._pulseLayers = pts.map(p => {
+            try {
+                const m = L.circleMarker([p.lat, p.lng], { radius: 8, color: '#ff5fff', weight: 3, fill: true, fillColor: '#ff5fff', fillOpacity: 0.15, opacity: 1, interactive: false, renderer: imp._pulseSvg || undefined });
+                m.addTo(map);
+                try { m.bindTooltip(`${impEsc(p.name)}${(p.pri && p.pri.tier) ? ` · ${p.pri.tier}` : ''}`, { permanent: true, direction: 'top', offset: [0, -10], opacity: 0.95, className: 'aim-imp-pulse-tip' }).openTooltip(); } catch (e) {}
+                return m;
+            } catch (e) { return null; }
+        }).filter(Boolean);
+        if (!document.getElementById('aim-imp-pulse-css')) {
+            const st = document.createElement('style'); st.id = 'aim-imp-pulse-css';
+            st.textContent = '.aim-imp-pulse-tip{background:#1f2228!important;color:#ff9dff!important;border:1px solid #ff5fff!important;border-radius:3px!important;font:600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;padding:2px 6px!important;box-shadow:0 2px 8px rgba(0,0,0,0.6)!important;white-space:nowrap}.aim-imp-pulse-tip::before{border-top-color:#ff5fff!important}';
+            document.head.appendChild(st);
+        }
+        const t0 = Date.now();
+        imp._pulseIv = setInterval(() => {
+            const k = ((Date.now() - t0) % 900) / 900;                        // 0..1 every 0.9 s
+            const r = 6 + 14 * k, op = 1 - k;
+            imp._pulseLayers.forEach(m => { try { m.setRadius(r); m.setStyle({ opacity: op, fillOpacity: 0.25 * (1 - k) }); } catch (e) {} });
+        }, 50);
+        imp._pulseT = setTimeout(impClearPulse, 8000);
+    }
     function impZoomToPad(key) {
         const c = imp.pri; const pad = c.pads && c.pads.get(key); if (!pad) return;
         const map = getLeafletMap(); if (!map) return;
@@ -22708,16 +22790,18 @@
         if (!pts.length) return;
         let la0 = Infinity, lo0 = Infinity, la1 = -Infinity, lo1 = -Infinity;
         pts.forEach(p => { la0 = Math.min(la0, p.lat); lo0 = Math.min(lo0, p.lng); la1 = Math.max(la1, p.lat); lo1 = Math.max(lo1, p.lng); });
+        const vp = impVisiblePadding(map);
+        const ptl = [vp.l + 70, vp.t + 70], pbr = [vp.r + 70, vp.b + 70];
         try {
-            if (pts.length === 1 || (approxMeters(la0, lo0, la1, lo1) < 15)) map.setView([(la0 + la1) / 2, (lo0 + lo1) / 2], Math.max(map.getZoom(), 18));
-            else map.fitBounds([[la0, lo0], [la1, lo1]], { padding: [70, 70], maxZoom: 19 });
+            const tight = pts.length === 1 || approxMeters(la0, lo0, la1, lo1) < 15;
+            const b = tight ? L_bounds([(la0 + la1) / 2, (lo0 + lo1) / 2]) : [[la0, lo0], [la1, lo1]];
+            map.fitBounds(b, { paddingTopLeft: ptl, paddingBottomRight: pbr, maxZoom: tight ? Math.max(map.getZoom(), 18) : 19 });
         } catch (e) { console.warn(`${TAG} 📥 zoom to pad failed:`, e); return; }
-        imp.pulse = new Set(pts);
-        clearTimeout(imp._pulseT);
-        imp._pulseT = setTimeout(() => { imp.pulse = null; try { impRenderStaged(); } catch (e) {} }, 4000);
+        impPulsePoints(pts, pad.name);
         setTimeout(() => { try { impRenderStaged(); } catch (e) {} }, 350);   // after the map settles (moveend re-render covers the cull)
-        impStatus(`🔎 ${impEsc(pad.name)} — ${pts.length} point${pts.length === 1 ? '' : 's'}${pad.flags.length ? ` · ⚠ ${impEsc(pad.flags.join(' · '))}` : ''}`);
+        impStatus(`🔎 ${impEsc(pad.name)} — ${pts.length} point${pts.length === 1 ? '' : 's'} (pulsing, named on the map)${pad.flags.length ? ` · ⚠ ${impEsc(pad.flags.join(' · '))}` : ''}`);
     }
+    function L_bounds(ll) { const d = 0.00005; return [[ll[0] - d, ll[1] - d], [ll[0] + d, ll[1] + d]]; }
     function impPriSummaryHtml() {
         const c = imp.pri, S = c.summary;
         const tierPill = (t, n, col) => `<span style="display:inline-block;padding:1px 8px;border-radius:10px;background:${col}22;border:1px solid ${col}88;color:${col};font-weight:600">${t} ${n}</span>`;
@@ -24756,6 +24840,7 @@
     try { uwin().addEventListener('pagehide', () => { if (imp.dirty) { try { impSaveSession('pagehide'); } catch (e) {} } }, true); } catch (e) {}
     function impTeardown() {
         if (imp.dirty) { try { impSaveSession('close'); } catch (e) {} }
+        try { impClearPulse(); } catch (e) {}
         try { impSetMode(null); } catch (e) {}
         impEnsureMoveEnd(false);
         impClearLayers(); impClearShapeLayers(); impClearAssetLayers();
