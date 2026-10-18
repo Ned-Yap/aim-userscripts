@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.357
+// @version      4.358
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.357';
+    const SCRIPT_VERSION = '4.358';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22515,7 +22515,7 @@
         fileName: null, headers: [], rows: [],
         mapping: null,                              // {name, lat, lng, type|null} — header names
         points: [],                                 // [{i, name, lat, lng, typeRaw, notes, sel, dup, dupWhy, child, near, done}]  — v4.332: dup = NAME match only; child = {name,id,full} square overlaps an existing asset; near = {name,id,ft} within radius, no overlap
-        invalid: 0,
+        invalid: 0, invalidRows: [],                 // v4.358: rows without usable coordinates (names for the client review)
         typeMap: {},                                // loaded from GM at wire time
         target: 'staged',                           // 'staged' | 'assets' (🗑 delete mode)
         mode: null,                                 // null | 'circle' | 'lasso' | 'pick' | 'edit' | 'move'
@@ -22524,7 +22524,7 @@
         keepShield: true,                           // v4.343: keep "- unsh" / "shielded" modifiers in subtypes (off = strip them)
         dupMode: 'update',                          // v4.347: name matches an existing asset → 'skip' | 'update' (type + notes only) | 'copy' (create "-N")
         lastUpdated: [],                            // v4.347: [{id, before}] bodies from the last commit's updates — ↩ undo re-POSTs them
-        env: { apiCol: null, open: false, notes: true, checkedAt: null, summary: null, running: false, opFilter: '' },   // v4.356: Enverus cross-check
+        env: { apiCol: null, open: false, notes: true, checkedAt: null, summary: null, running: false, opFilter: '', mismatchFt: 300, scope: 'selected' },   // v4.356: Enverus cross-check · v4.358: client review report
         pri: { on: false, open: false, oilCol: null, waterCol: null, blpdCol: null, priCol: null, clusterFt: 100, padFt: 50, p1Min: 250, p1Max: 1500, summary: null, zeroUntier: true, envUntier: true },   // v4.347: priority tiers · v4.357: zero-production / Enverus-dead wells get no tier
         advOpen: false,                             // v4.331: ▸ Advanced (subset tools + delete mode) expanded — GM-remembered
         secOpen: { bounds: true, data: true, type: false, place: false, env: false, create: true, adv: false },   // v4.352: collapsible sections — GM-remembered
@@ -23235,10 +23235,10 @@
         if (!m || !m.lat || !m.lng) { impStatus('Pick the Latitude and Longitude columns first', '#ff6060'); return; }
         // a type column that is entirely empty is treated as "no type column"
         if (m.type && !imp.rows.some(r => (r[m.type] || '').trim() !== '')) m.type = null;
-        imp.points = []; imp.invalid = 0;
+        imp.points = []; imp.invalid = 0; imp.invalidRows = [];
         imp.rows.forEach((r, i) => {
             const lat = parseFloat(r[m.lat]), lng = parseFloat(r[m.lng]);
-            if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) { imp.invalid++; return; }
+            if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) { imp.invalid++; imp.invalidRows.push({ i, name: (m.name ? (r[m.name] || '').trim() : '') || `row ${i + 2}` }); return; }
             const name = m.name ? (r[m.name] || '').trim() : '';
             imp.points.push({ i, name: name || `Import ${i + 1}`, rawName: name, lat, lng, typeRaw: m.type ? (r[m.type] || '').trim() : '', notes: '', sel: false, dup: false, dupWhy: '', child: null, near: null, done: false });
         });
@@ -24238,7 +24238,25 @@
             </div>
             <div style="color:#888;font-size:10px">Everything that is not plainly producing is listed under Placement › 🛢 Enverus (click a row to zoom, ⓘ for the record). Selected dots on the map turn red when Enverus says plugged / expired and amber when inactive.</div>` : `<div style="color:#888;font-size:10px">Answers per well: status (producing / inactive / plugged…), type, vertical vs horizontal, operator, spud / plug dates and Enverus' own surface location vs the client's. Flags go to Placement › 🛢 Enverus.</div>`}
             <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-top:6px;font-size:10px;color:#cfd6dc"><input type="checkbox" data-impenv-notes ${c.notes ? 'checked' : ''} style="accent-color:#ffd666"> write an "Enverus" block into each checked asset's notes (status · type · trajectory · operator · dates · API · checked date)</label>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px;padding-top:6px;border-top:1px dashed rgba(255,214,102,0.3)">
+                <b style="color:#ffd666">📋 Client data review</b>
+                <span style="color:#888;font-size:10px">what the client needs to go check — BIG: wrong place / wrong well / not theirs · MEDIUM: status or H/V disagreement · LOW: hygiene (no coordinates, duplicate names, missing API)</span>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#cfd6dc">coordinate mismatch over <input type="number" data-impenv-mm value="${c.mismatchFt}" min="50" step="50" style="width:60px;${inCss};text-align:right"> ft</label>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#cfd6dc">scope <select data-impenv-scope style="${inCss}"><option value="selected"${c.scope === 'selected' ? ' selected' : ''}>selected points</option><option value="all"${c.scope === 'all' ? ' selected' : ''}>whole file</option></select></label>
+                <span style="flex:1"></span>
+                <button data-impenv-review="sheets" title="Summary table + one row per finding, colour-coded by severity — paste into Google Sheets and send" style="background:rgba(255,214,102,0.18);color:#ffd666;border:1px solid rgba(255,214,102,0.6);border-radius:3px;padding:3px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">📋 Report for Sheets</button>
+                <button data-impenv-review="csv" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button>
+            </div>
+            <div data-impenv-review-note style="color:#888;font-size:10px;margin-top:4px"></div>
         </div>`;
+        try {
+            const rows = impClientReviewRows();
+            const note = el.querySelector('[data-impenv-review-note]');
+            if (note) note.innerHTML = rows.length ? `${rows.filter(x => x.sev === 'BIG').length ? `<b style="color:#ff6060">${rows.filter(x => x.sev === 'BIG').length} big</b>` : '0 big'} · ${rows.filter(x => x.sev === 'MEDIUM').length} medium · ${rows.filter(x => x.sev === 'LOW').length} low${!S ? ' · <span style="color:#ffb347">run the cross-check first for the Enverus findings</span>' : ''}` : (S ? 'no findings in this scope' : 'run the cross-check for the Enverus findings — file hygiene findings show here regardless');
+        } catch (e) { console.warn(`${TAG} 📋 review preview failed:`, e); }
+        el.querySelector('[data-impenv-mm]').onchange = function () { const v = parseFloat(this.value); if (isFinite(v) && v >= 0) { c.mismatchFt = v; impMarkDirty(); impRenderEnvUi(); } };
+        el.querySelector('[data-impenv-scope]').onchange = function () { c.scope = this.value === 'all' ? 'all' : 'selected'; impRenderEnvUi(); };
+        el.querySelectorAll('[data-impenv-review]').forEach(b => b.onclick = () => { try { impExportClientReview(b.getAttribute('data-impenv-review')); } catch (e) { console.warn(`${TAG} 📋`, e); impStatus(`Client review failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } });
         el.querySelector('[data-impenv-key]').onclick = (ev) => { ev.preventDefault(); impEnvSetKey(); };
         el.querySelector('[data-impenv-api]').onchange = function () { c.apiCol = this.value || null; impMarkDirty(); impRenderEnvUi(); };
         const run = el.querySelector('[data-impenv-run]'); if (run) run.onclick = () => { impEnvCheck().catch(e => { console.warn(`${TAG} 🛢`, e); impStatus(`🛢 ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
@@ -24257,6 +24275,81 @@
             { label: 'Latitude', val: p => p.lat.toFixed(6) }, { label: 'Longitude', val: p => p.lng.toFixed(6) }, { label: 'Checked', val: p => p.env.checkedAt || '' },
         ];
         impExportTable(pts, cols, how, 'enverus-check', 'Enverus');
+    }
+    // ---- v4.358 CLIENT DATA REVIEW — the findings the client needs to go check.
+    // One row per finding, severity-ranked, client value vs Enverus / our map,
+    // suggested action. BIG = wrong place / wrong well / not theirs; MEDIUM =
+    // status or type disagreement; LOW = hygiene (no coordinates, duplicate
+    // names, missing API). Enverus rows exist only after a cross-check. ----
+    function impClientReviewRows() {
+        const c = imp.env;
+        const live = imp.points.filter(p => !p.done);
+        const pts = c.scope === 'all' ? live : live.filter(p => p.sel);
+        const rows = [];
+        const add = (sev, check, p, clientVal, otherVal, action, extra) => rows.push(Object.assign({ sev, check, name: p ? p.name : (extra && extra.name) || '', api: p ? impEnvApiOf(p) : '', clientVal, otherVal, action, lat: p ? p.lat : '', lng: p ? p.lng : '', p }, extra || {}));
+        const r = (p) => imp.rows[p.i] || {};
+        const isWellRow = (p) => !!impEnvApiOf(p) || /well|pump|lift|flow|plunger|jet|injector|pop/i.test(p.typeRaw || '');
+        const devCol = imp.headers.find(h => /deviation|h.?or.?v|traject|profile/i.test(h));
+        pts.forEach(p => {
+            const e = p.env;
+            const blpd = (p.pri && p.pri.blpd != null) ? p.pri.blpd : impPriBlpdSafe(p);
+            if (e && !e.noApi) {
+                if (!e.found) add('BIG', 'API number not in Enverus', p, `API ${e.api}`, 'no well with this API', 'confirm the API number / the well record');
+                else {
+                    if (e.distFt != null && e.distFt > c.mismatchFt) add('BIG', 'Coordinate mismatch vs Enverus', p, `${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}`, `${e.lat.toFixed(6)}, ${e.lng.toFixed(6)} (${e.distFt.toLocaleString()} ft away)`, 'confirm the surface location — the Enverus pin sits on a visible pad', { distFt: e.distFt });
+                    if (c.mainOp && e.op && e.op !== c.mainOp) add('BIG', 'Different operator in Enverus', p, c.mainOp, e.op, 'confirm this well is yours');
+                    const b = impEnvBucket(e);
+                    if (b === 'plugged' && blpd > 0) add('BIG', 'Producing in the list but plugged / expired in Enverus', p, `${Math.round(blpd)} BLPD · ${p.typeRaw || ''}`, `${e.status}${e.plug ? ` (plugged ${e.plug})` : ''}`, 'confirm which is right');
+                    else if (b === 'plugged') add('MEDIUM', 'Plugged / expired in Enverus', p, `${p.typeRaw || ''}${blpd != null ? ` · ${Math.round(blpd)} BLPD` : ''}`, `${e.status}${e.plug ? ` (plugged ${e.plug})` : ''}`, 'remove from the inspection list if dead');
+                    else if (b === 'inactive' && blpd > 0) add('MEDIUM', 'Producing in the list but inactive in Enverus', p, `${Math.round(blpd)} BLPD · ${p.typeRaw || ''}`, e.status, 'confirm the well is producing');
+                    else if (b === 'inactive') add('LOW', 'Inactive in Enverus', p, `${p.typeRaw || ''}${blpd != null ? ` · ${Math.round(blpd)} BLPD` : ''}`, e.status, 'confirm whether it should be inspected');
+                    else if (b === 'producing' && blpd === 0) add('MEDIUM', 'Zero production in the list but producing in Enverus', p, '0 BLPD', e.status, 'confirm the production numbers');
+                    if (devCol && e.traj) {
+                        const cv = String(r(p)[devCol] || '').toUpperCase();
+                        const ch = /HORIZ|^H$/.test(cv), cvv = /VERT|^V$/.test(cv);
+                        const eh = /HORIZ/.test(e.traj), ev = /VERT/.test(e.traj) && !eh;
+                        if ((ch && ev) || (cvv && eh)) add('MEDIUM', 'Horizontal / vertical disagrees with Enverus', p, cv, e.traj, 'confirm the well type (affects the inspection pattern)');
+                    }
+                    if (e.name && p.rawName && impNormName(e.name) !== impNormName(p.rawName)) add('LOW', 'Well name differs from Enverus', p, p.rawName, e.name, 'confirm the name — matched on API');
+                }
+            }
+            if (!impEnvApiOf(p) && isWellRow(p) && c.apiCol) add('LOW', 'Well row without an API number', p, p.typeRaw || '', '—', 'add the API so the well can be verified');
+            if (p.dup && p.pri && p.pri.off > 100) add('LOW', 'Coordinate differs from our mapped asset', p, `${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}`, `our asset "${p.pri.offOf}" is ${p.pri.off.toLocaleString()} ft away`, 'confirm which location is right', { distFt: p.pri.off });
+        });
+        // file-level hygiene (whole file — the client sees the list, not our boundaries)
+        (imp.invalidRows || []).forEach(x => add('LOW', 'No usable coordinates', null, '', '—', 'add latitude / longitude', { name: x.name }));
+        const seen = new Map();
+        imp.points.forEach(p => { const k = (p.rawName || p.name).trim().toUpperCase(); if (!seen.has(k)) seen.set(k, []); seen.get(k).push(p); });
+        seen.forEach((arr, k) => { if (arr.length > 1) arr.forEach(p => add('LOW', 'Duplicate name in the list', p, p.rawName || p.name, `${arr.length} rows share this name`, 'make the names unique (we match on name)')); });
+        const order = { BIG: 0, MEDIUM: 1, LOW: 2 };
+        rows.sort((a, b) => order[a.sev] - order[b.sev] || a.check.localeCompare(b.check) || String(a.name).localeCompare(String(b.name)));
+        return rows;
+    }
+    function impNormName(v) { return String(v || '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').replace(/\s+/g, ' ').trim(); }
+    function impPriBlpdSafe(p) { try { return impPriBlpd(p); } catch (e) { return null; } }
+    function impExportClientReview(how) {
+        const rows = impClientReviewRows();
+        if (!rows.length) { impStatus('Nothing to report — no findings for the client in this scope', '#5fff5f'); return; }
+        const site = getCurrentSiteName() || `Site ${genState.siteID}`;
+        const cols = [
+            { label: 'Severity', val: x => x.sev }, { label: 'Finding', val: x => x.check }, { label: 'Asset', val: x => x.name }, { label: 'API', val: x => x.api },
+            { label: 'In your list', val: x => x.clientVal }, { label: 'Enverus / our map', val: x => x.otherVal }, { label: 'Distance (ft)', val: x => x.distFt != null ? x.distFt : '' },
+            { label: 'Please', val: x => x.action }, { label: 'Latitude', val: x => x.lat === '' ? '' : Number(x.lat).toFixed(6) }, { label: 'Longitude', val: x => x.lng === '' ? '' : Number(x.lng).toFixed(6) },
+        ];
+        if (how === 'csv') { impExportTable(rows, cols, 'csv', 'client-data-review', 'review'); return; }
+        // Sheets: a summary table first, then the findings
+        const counts = new Map();
+        rows.forEach(x => { const k = `${x.sev}|${x.check}`; counts.set(k, (counts.get(k) || 0) + 1); });
+        const sevCol = { BIG: '#ffd6d6', MEDIUM: '#fff2cc', LOW: '#e8f0fe' };
+        const esc = impEsc;
+        const th = (t) => `<th style="background:#1f2228;color:#7adfe6;border:1px solid #cccccc;padding:2px 7px;text-align:left">${esc(t)}</th>`;
+        const td = (t, bg) => `<td style="border:1px solid #cccccc;padding:2px 7px${bg ? `;background:${bg}` : ''}">${esc(t)}</td>`;
+        const sumHtml = `<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px"><tr>${th('Severity')}${th('Finding')}${th('Count')}</tr>${[...counts.entries()].map(([k, n]) => { const [sev, chk] = k.split('|'); return `<tr>${td(sev, sevCol[sev])}${td(chk)}${td(n)}</tr>`; }).join('')}<tr>${td('Total')}${td(`${rows.length} finding${rows.length === 1 ? '' : 's'} · ${impEsc(site)} · ${imp.fileName || ''} · ${impNowStamp()}${imp.env.checkedAt ? ` · Enverus checked ${imp.env.checkedAt}` : ' · no Enverus check yet'}`)}${td('')}</tr></table>`;
+        const bodyHtml = rows.map(x => `<tr>${cols.map((cc, i) => td(cc.val(x), i === 0 ? sevCol[x.sev] : '')).join('')}</tr>`).join('');
+        const html = `${sumHtml}<br><table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px"><tr>${cols.map(cc => th(cc.label)).join('')}</tr>${bodyHtml}</table>`;
+        const text = [cols.map(cc => cc.label).join('\t')].concat(rows.map(x => cols.map(cc => String(cc.val(x)).replace(/[\t\n\r]/g, ' ')).join('\t'))).join('\n');
+        writeSheetsClipboard(html, text, `📋 ${rows.length} finding(s) copied — paste into Sheets (summary table + findings)`);
+        impStatus(`📋 client data review on the clipboard: <b>${rows.filter(x => x.sev === 'BIG').length}</b> big · ${rows.filter(x => x.sev === 'MEDIUM').length} medium · ${rows.filter(x => x.sev === 'LOW').length} low — paste into Google Sheets`);
     }
     // v4.353: PLACEMENT & FLAGS review list — compact, tabbed by kind, its own
     // scrollbar, a Reviewed checkbox per point (saved with the session), click a
@@ -25166,7 +25259,7 @@
             shapes: imp.shapes.map(sh => sh.kind === 'circle' ? { id: sh.id, kind: 'circle', center: sh.center, radiusM: sh.radiusM, name: sh.name || '' } : { id: sh.id, kind: sh.kind, ring: sh.ring, handle: sh.handle, name: sh.name || '' }),
             shapeSeq: imp.shapeSeq,
             pri: { on: imp.pri.on, oilCol: imp.pri.oilCol, waterCol: imp.pri.waterCol, blpdCol: imp.pri.blpdCol, priCol: imp.pri.priCol },
-            env: { apiCol: imp.env.apiCol, notes: imp.env.notes, checkedAt: imp.env.checkedAt },
+            env: { apiCol: imp.env.apiCol, notes: imp.env.notes, checkedAt: imp.env.checkedAt, mismatchFt: imp.env.mismatchFt },
         };
         const json = JSON.stringify(data);
         const live = imp.points.filter(p => !p.done).length;
@@ -25199,7 +25292,7 @@
         imp.shapeSeq = Math.max(d.shapeSeq || 1, ...imp.shapes.map(sh => sh.id + 1), 1);
         imp.mapOpen = false;
         if (d.pri) { Object.assign(imp.pri, { on: !!d.pri.on, oilCol: d.pri.oilCol || null, waterCol: d.pri.waterCol || null, blpdCol: d.pri.blpdCol || null, priCol: d.pri.priCol || null }); imp.pri._guessed = true; }
-        if (d.env) { imp.env.apiCol = d.env.apiCol || null; imp.env.notes = d.env.notes !== false; imp.env.checkedAt = d.env.checkedAt || null; imp.env._guessed = true; }
+        if (d.env) { imp.env.apiCol = d.env.apiCol || null; imp.env.notes = d.env.notes !== false; imp.env.checkedAt = d.env.checkedAt || null; if (typeof d.env.mismatchFt === 'number') imp.env.mismatchFt = d.env.mismatchFt; imp.env._guessed = true; }
         impRenderMappingUi();
         impBuildPoints();                                            // rebuilds points from rows + mapping (also recomputes dups/flags)
         const byI = new Map(imp.points.map(p => [p.i, p]));
