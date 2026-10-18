@@ -1,3 +1,7 @@
+## 2026-10-17 — Flags header counts points, not just flags — Site Setup Tools latest v4.361 (latest only)
+
+- **Site Setup Tools (latest) v4.361.** The Flags header now reads "558 flags on 473 of 475 selected points (some points carry several)" instead of a bare flag total — a name match that is also off its pad and inside a battery counts in three tabs, which is why flags could outnumber the selected points. The Placement section summary says "flagged points" for the same reason.
+
 ## 2026-10-17 — Enverus check: whole-file scope — Site Setup Tools latest v4.360 (latest only)
 
 - **Site Setup Tools (latest) v4.360 — one Scope switch for the Enverus section:** "selected points (inside boundaries)" or "WHOLE file". It drives the cross-check (the button says how many wells and roughly how long), the pills, the Placement › 🛢 Enverus flags and the 📋 client review, so a whole-file client report no longer needs the boundaries cleared. The Diamondback file is ~10,000 wells → about 50 requests, 3–4 minutes.

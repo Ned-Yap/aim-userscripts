@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.360
+// @version      4.361
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.360';
+    const SCRIPT_VERSION = '4.361';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22615,7 +22615,7 @@
         set('type', !imp.points.length ? 'after the data file' : `${m.type ? `type = ${impEsc(m.type)}` : `no type column → "${impEsc(impApplyShield(imp.typeMap['__all__'] || ''))}"`}${imp.pri.on ? (S ? ` · tiers ON: <span style="color:#ff7b00">P1 ${S.cnt.P1}</span> · <span style="color:#ffe14d">P2 ${S.cnt.P2}</span> · <span style="color:#9ad">P3 ${S.cnt.P3}</span>${S.cnt.none ? ` · <span style="color:#ff6060">${S.cnt.none} untiered</span>` : ''}${S.flagged ? ` · <span style="color:#ffb347">${S.flagged} flagged</span>` : ''}` : ' · tiers ON') : ' · tiers off'}`);
         const moved = live.filter(p => p.orig).length, removed = imp.points.filter(p => p.removed).length, fl = live.filter(p => p.dup || p.child || p.near).length, off = live.filter(p => p.sel && p.pri && p.pri.off > 0).length;
         const flSel = live.filter(p => p.sel && (p.dup || p.child || p.near || (p.pri && p.pri.off > 0))), flRev = flSel.filter(p => p.reviewed).length;
-        set('place', !imp.points.length ? 'after the data file' : `${imp.mode === 'move' ? '<b style="color:#ff5fff">↔ Move ON</b> · ' : ''}${moved} moved · ${removed} removed · ${flSel.length} flagged${flSel.length ? ` (<b style="color:#5fff5f">${flRev}</b> reviewed)` : ''}${off ? ` · <span style="color:#ffb347">📍 ${off} off their pad</span>` : ''}`);
+        set('place', !imp.points.length ? 'after the data file' : `${imp.mode === 'move' ? '<b style="color:#ff5fff">↔ Move ON</b> · ' : ''}${moved} moved · ${removed} removed · ${flSel.length} flagged point${flSel.length === 1 ? '' : 's'}${flSel.length ? ` (<b style="color:#5fff5f">${flRev}</b> reviewed)` : ''}${off ? ` · <span style="color:#ffb347">📍 ${off} off their pad</span>` : ''}`);
         const dupsIn = live.filter(p => p.sel && p.dup).length, upd = imp.dupMode === 'update' ? dupsIn : 0, tot = live.filter(p => p.sel && (!p.dup || imp.dupMode !== 'skip')).length;
         let dry = true; try { dry = !!document.getElementById('aim-gen-dryrun').checked; } catch (e) {}
         set('create', !imp.points.length ? 'after the data file' : `${tot - upd ? `create ${tot - upd}` : ''}${(tot - upd) && upd ? ' + ' : ''}${upd ? `update ${upd}` : ''}${!tot ? 'nothing selected' : ''} · ${impSizeFt} ft · ${dry ? '<span style="color:#5fff5f">dry run</span>' : '<b style="color:#ff6060">LIVE</b>'}${tot > IMP_BIG_BATCH ? ' · <span style="color:#ff6060">over the 1000 gate</span>' : ''}`);
@@ -24437,6 +24437,8 @@
         if (!live || !live.length) { el.innerHTML = ''; return; }
         const tabs = impFlagTabs(live);
         const total = tabs.filter(t => t.id !== 'rev').reduce((a, t) => a + t.items.length, 0);
+        const uniq = new Set(); tabs.filter(t => t.id !== 'rev').forEach(t => t.items.forEach(p => uniq.add(p)));
+        const selTotal = live.filter(p => p.sel).length;
         if (!total) { el.innerHTML = `<div style="font-size:11px;color:#5fff5f;padding:4px 0">✓ no placement flags among the selected points</div>`; return; }
         // zoom for an Enverus row also pulses Enverus' own surface location
         tabs.forEach(t => { t.extra = t.id === 'env' ? (p => (p.env && p.env.found && isFinite(p.env.lat)) ? [{ lat: p.env.lat, lng: p.env.lng, name: `${p.name} (Enverus)` }] : []) : null; });
@@ -24457,7 +24459,7 @@
         </div>`;
         el.innerHTML = `<div style="padding:6px 8px;background:rgba(255,255,255,0.03);border:1px dashed rgba(122,223,230,0.25);border-radius:3px;font-size:11px">
             <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
-                <b style="color:#cfd6dc">Flags</b><span style="color:#888;font-size:10px">${total} on selected points</span>
+                <b style="color:#cfd6dc">Flags</b><span style="color:#888;font-size:10px" title="A point can carry more than one flag (e.g. a name match that is also off its pad counts in both tabs), so flags can outnumber points.">${total} flag${total === 1 ? '' : 's'} on <b style="color:#cfd6dc">${uniq.size}</b> of ${selTotal} selected points${total > uniq.size ? ` <span style="color:#666">(some points carry several)</span>` : ''}</span>
                 ${tabs.map(chip).join('')}
                 <span style="flex:1"></span>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#9ad;cursor:pointer"><input type="checkbox" data-impflaghide ${imp.flagHideReviewed ? 'checked' : ''} style="accent-color:#5fff5f;margin:0"> hide reviewed</label>
