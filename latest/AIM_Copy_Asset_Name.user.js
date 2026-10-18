@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.359
+// @version      4.360
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.359';
+    const SCRIPT_VERSION = '4.360';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -24129,7 +24129,7 @@
         const c = imp.env;
         if (c.running) return;
         if (!imp.env.apiCol) { impStatus('Pick the API-number column in the Enverus section first', '#ffb347'); return; }
-        const pts = imp.points.filter(p => !p.done && p.sel);
+        const pts = imp.points.filter(p => !p.done && (c.scope === 'all' || p.sel));   // v4.360: scope = selected points or the WHOLE file
         const byApi = new Map();
         pts.forEach(p => { const a = impEnvApiOf(p); p.env = a ? null : { found: false, noApi: true }; if (a) { if (!byApi.has(a)) byApi.set(a, []); byApi.get(a).push(p); } });
         const apis = [...byApi.keys()];
@@ -24167,7 +24167,7 @@
         impMarkDirty();
         impRenderEnvUi(); impSyncUi();
         const S = c.summary;
-        impStatus(`🛢 Enverus: ${S.found} of ${S.withApi} API numbers found · <span style="color:#5fff5f">${S.producing} producing</span> · <span style="color:#ffb347">${S.inactive} inactive / TA</span> · <span style="color:#ff6060">${S.plugged} plugged / expired</span>${S.notFound ? ` · ${S.notFound} not in Enverus` : ''}${S.far ? ` · ${S.far} more than 100 ft from the client coordinate` : ''}${S.otherOp ? ` · ${S.otherOp} under another operator` : ''}`);
+        impStatus(`🛢 Enverus (${c.scope === 'all' ? 'whole file' : 'selected points'}): ${S.found} of ${S.withApi} API numbers found · <span style="color:#5fff5f">${S.producing} producing</span> · <span style="color:#ffb347">${S.inactive} inactive / TA</span> · <span style="color:#ff6060">${S.plugged} plugged / expired</span>${S.notFound ? ` · ${S.notFound} not in Enverus` : ''}${S.far ? ` · ${S.far} more than 100 ft from the client coordinate` : ''}${S.otherOp ? ` · ${S.otherOp} under another operator` : ''}`);
     }
     function impEnvBucket(e) {
         if (!e || e.noApi) return 'noapi';
@@ -24180,7 +24180,7 @@
     }
     function impEnvSummarize() {
         const c = imp.env;
-        const pts = imp.points.filter(p => !p.done && p.sel && p.env);
+        const pts = imp.points.filter(p => !p.done && (c.scope === 'all' || p.sel) && p.env);
         if (!pts.length) { c.summary = null; return; }
         const ops = new Map();
         pts.forEach(p => { if (p.env.found && p.env.op) ops.set(p.env.op, (ops.get(p.env.op) || 0) + 1); });
@@ -24222,13 +24222,15 @@
         const inCss = 'background:#1a1d23;border:1px solid rgba(255,214,102,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px';
         const S = c.summary;
         const pill = (t, n, col) => `<span style="display:inline-block;padding:1px 8px;border-radius:10px;background:${col}22;border:1px solid ${col}88;color:${col};font-weight:600">${t} ${n}</span>`;
-        const selN = imp.points.filter(p => !p.done && p.sel).length, withApi = imp.points.filter(p => !p.done && p.sel && impEnvApiOf(p)).length;
+        const inScope = (p) => !p.done && (c.scope === 'all' || p.sel);
+        const selN = imp.points.filter(inScope).length, withApi = imp.points.filter(p => inScope(p) && impEnvApiOf(p)).length;
         el.innerHTML = `<div style="padding:6px 8px;background:rgba(255,214,102,0.05);border:1px dashed rgba(255,214,102,0.4);border-radius:3px;font-size:11px;color:#cfd6dc">
             <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px">
                 <span style="color:#888;font-size:10px">Key:</span> ${key ? `<span style="color:#5fff5f">set (…${impEsc(key.slice(-4))})</span>` : '<span style="color:#ff6060">not set</span>'} <a href="#" data-impenv-key style="color:#7adfe6">${key ? 'change' : 'set key'}</a>
                 <label style="display:inline-flex;align-items:center;gap:4px">API column <select data-impenv-api style="max-width:170px;${inCss}"><option value="">— none —</option>${imp.headers.map(h => `<option value="${impEsc(h)}"${c.apiCol === h ? ' selected' : ''}>${impEsc(h)}</option>`).join('')}</select></label>
-                <button data-impenv-run ${c.running || !key || !c.apiCol ? 'disabled' : ''} style="background:rgba(255,214,102,0.15);color:#ffd666;border:1px solid rgba(255,214,102,0.5);border-radius:3px;padding:3px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600${c.running || !key || !c.apiCol ? ';opacity:0.5;cursor:default' : ''}">${c.running ? '⏳ checking…' : `🛢 Cross-check ${withApi} selected well${withApi === 1 ? '' : 's'}`}</button>
-                <span style="color:#888;font-size:10px">${selN - withApi ? `${selN - withApi} selected point${selN - withApi === 1 ? ' has' : 's have'} no API (batteries etc.) · ` : ''}~${Math.ceil(withApi / 200)} request${Math.ceil(withApi / 200) === 1 ? '' : 's'}</span>
+                <label style="display:inline-flex;align-items:center;gap:4px" title="Selected = the points inside your boundaries. Whole file = every row in the client's list, boundaries ignored — use this for the client report."><b style="color:#ffd666">Scope</b> <select data-impenv-scope style="${inCss}"><option value="selected"${c.scope === 'selected' ? ' selected' : ''}>selected points (inside boundaries)</option><option value="all"${c.scope === 'all' ? ' selected' : ''}>WHOLE file</option></select></label>
+                <button data-impenv-run ${c.running || !key || !c.apiCol ? 'disabled' : ''} style="background:rgba(255,214,102,0.15);color:#ffd666;border:1px solid rgba(255,214,102,0.5);border-radius:3px;padding:3px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600${c.running || !key || !c.apiCol ? ';opacity:0.5;cursor:default' : ''}">${c.running ? '⏳ checking…' : `🛢 Cross-check ${withApi} ${c.scope === 'all' ? 'wells in the whole file' : `selected well${withApi === 1 ? '' : 's'}`}`}</button>
+                <span style="color:#888;font-size:10px">${selN - withApi ? `${selN - withApi} ${c.scope === 'all' ? 'rows' : 'selected points'} without an API (batteries etc.) · ` : ''}~${Math.ceil(withApi / 200)} request${Math.ceil(withApi / 200) === 1 ? '' : 's'} · about ${Math.max(1, Math.round(Math.ceil(withApi / 200) * 4 / 60 * 10) / 10)} min</span>
                 <span style="flex:1"></span>
                 ${S ? `<button data-impenv-rep="sheets" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Report for Sheets</button><button data-impenv-rep="csv" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button>` : ''}
             </div>
@@ -24242,7 +24244,7 @@
                 <b style="color:#ffd666">📋 Client data review</b>
                 <span style="color:#888;font-size:10px">what the client needs to go check — High: wrong place / wrong well / not theirs · Medium: active-or-not and type disagreements, same well twice · Low: housekeeping (no coordinates, missing API, duplicate names — one line per name)</span>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#cfd6dc">coordinate mismatch over <input type="number" data-impenv-mm value="${c.mismatchFt}" min="50" step="50" style="width:60px;${inCss};text-align:right"> ft</label>
-                <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#cfd6dc">scope <select data-impenv-scope style="${inCss}"><option value="selected"${c.scope === 'selected' ? ' selected' : ''}>selected points</option><option value="all"${c.scope === 'all' ? ' selected' : ''}>whole file</option></select></label>
+                <span style="color:#888;font-size:10px">scope: <b style="color:#cfd6dc">${c.scope === 'all' ? 'WHOLE file' : 'selected points'}</b> (set above)</span>
                 <span style="flex:1"></span>
                 <button data-impenv-review="sheets" title="Summary table + one row per finding, colour-coded by severity — paste into Google Sheets and send" style="background:rgba(255,214,102,0.18);color:#ffd666;border:1px solid rgba(255,214,102,0.6);border-radius:3px;padding:3px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">📋 Report for Sheets</button>
                 <button data-impenv-review="csv" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button>
@@ -24255,7 +24257,7 @@
             if (note) note.innerHTML = rows.length ? `${rows.filter(x => x.sev === 'High').length ? `<b style="color:#ff6060">${rows.filter(x => x.sev === 'High').length} high</b>` : '0 high'} · ${rows.filter(x => x.sev === 'Medium').length} medium · ${rows.filter(x => x.sev === 'Low').length} low${!S ? ' · <span style="color:#ffb347">run the cross-check first for the Enverus findings</span>' : ''} · written for a non-technical reader: plain-English finding, what it means, what we need, map links` : (S ? 'no findings in this scope' : 'run the cross-check for the Enverus findings — file hygiene findings show here regardless');
         } catch (e) { console.warn(`${TAG} 📋 review preview failed:`, e); }
         el.querySelector('[data-impenv-mm]').onchange = function () { const v = parseFloat(this.value); if (isFinite(v) && v >= 0) { c.mismatchFt = v; impMarkDirty(); impRenderEnvUi(); } };
-        el.querySelector('[data-impenv-scope]').onchange = function () { c.scope = this.value === 'all' ? 'all' : 'selected'; impRenderEnvUi(); };
+        el.querySelector('[data-impenv-scope]').onchange = function () { c.scope = this.value === 'all' ? 'all' : 'selected'; impEnvSummarize(); impRenderEnvUi(); };
         el.querySelectorAll('[data-impenv-review]').forEach(b => b.onclick = () => { try { impExportClientReview(b.getAttribute('data-impenv-review')); } catch (e) { console.warn(`${TAG} 📋`, e); impStatus(`Client review failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } });
         el.querySelector('[data-impenv-key]').onclick = (ev) => { ev.preventDefault(); impEnvSetKey(); };
         el.querySelector('[data-impenv-api]').onchange = function () { c.apiCol = this.value || null; impMarkDirty(); impRenderEnvUi(); };

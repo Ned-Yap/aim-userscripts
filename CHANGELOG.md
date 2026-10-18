@@ -1,3 +1,7 @@
+## 2026-10-17 — Enverus check: whole-file scope — Site Setup Tools latest v4.360 (latest only)
+
+- **Site Setup Tools (latest) v4.360 — one Scope switch for the Enverus section:** "selected points (inside boundaries)" or "WHOLE file". It drives the cross-check (the button says how many wells and roughly how long), the pills, the Placement › 🛢 Enverus flags and the 📋 client review, so a whole-file client report no longer needs the boundaries cleared. The Diamondback file is ~10,000 wells → about 50 requests, 3–4 minutes.
+
 ## 2026-10-17 — Client review report written for non-technical readers — Site Setup Tools latest v4.359 (latest only)
 
 - **Site Setup Tools (latest) v4.359 — 📋 Client data review, rewritten so the client can act on it without us.** Importance High / Medium / Low with a legend; each finding in plain English ("Well is not where the list says", "Listed as producing, records say plugged", "Battery and well share one name") plus a **"What this means"** sentence and a **"What we need from you"** action; a title block (client, file, date, counts); a Google Maps link for the list coordinate and a second link for the Enverus location or the other duplicate row. **Duplicates collapsed to one line per name** and split into what they are: battery and well sharing a name (Low, we rename the battery), the same well listed twice by API (Medium, remove the extra row), the same name on different assets (Low). CSV carries the same columns.
