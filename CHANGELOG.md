@@ -1,3 +1,7 @@
+## 2026-10-17 — Client review: ready to send — Site Setup Tools latest v4.362 (latest only)
+
+- **Site Setup Tools (latest) v4.362 — 📋 Client data review, pre-send fixes.** Rows without coordinates now carry their API number and type (they were names only); the ones whose type carries a future date (NEW POP - 2026-12-03 …) are reported as **"Planned well — no location yet"** with a matching ask, the rest as "No coordinates". The 276 "battery and well share one name" rows are **left out of the client report** (our naming constraint, nothing for them to do) and summarised in one sentence in the title block; a checkbox brings them back. The leaked `"<name> BATTERY"` placeholder shows the real name. Wording: Enverus is named once in the title and "the public well records" after that; "we would inspect the wrong spot"; "Location differs from where we have it mapped".
+
 ## 2026-10-17 — Flags header counts points, not just flags — Site Setup Tools latest v4.361 (latest only)
 
 - **Site Setup Tools (latest) v4.361.** The Flags header now reads "558 flags on 473 of 475 selected points (some points carry several)" instead of a bare flag total — a name match that is also off its pad and inside a battery counts in three tabs, which is why flags could outnumber the selected points. The Placement section summary says "flagged points" for the same reason.

@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.361
+// @version      4.362
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.361';
+    const SCRIPT_VERSION = '4.362';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22524,7 +22524,7 @@
         keepShield: true,                           // v4.343: keep "- unsh" / "shielded" modifiers in subtypes (off = strip them)
         dupMode: 'update',                          // v4.347: name matches an existing asset → 'skip' | 'update' (type + notes only) | 'copy' (create "-N")
         lastUpdated: [],                            // v4.347: [{id, before}] bodies from the last commit's updates — ↩ undo re-POSTs them
-        env: { apiCol: null, open: false, notes: true, checkedAt: null, summary: null, running: false, opFilter: '', mismatchFt: 300, scope: 'selected' },   // v4.356: Enverus cross-check · v4.358: client review report
+        env: { apiCol: null, open: false, notes: true, checkedAt: null, summary: null, running: false, opFilter: '', mismatchFt: 300, scope: 'selected', includeOurs: false },   // v4.356: Enverus cross-check · v4.358: client review report
         pri: { on: false, open: false, oilCol: null, waterCol: null, blpdCol: null, priCol: null, clusterFt: 100, padFt: 50, p1Min: 250, p1Max: 1500, summary: null, zeroUntier: true, envUntier: true },   // v4.347: priority tiers · v4.357: zero-production / Enverus-dead wells get no tier
         advOpen: false,                             // v4.331: ▸ Advanced (subset tools + delete mode) expanded — GM-remembered
         secOpen: { bounds: true, data: true, type: false, place: false, env: false, create: true, adv: false },   // v4.352: collapsible sections — GM-remembered
@@ -23238,7 +23238,7 @@
         imp.points = []; imp.invalid = 0; imp.invalidRows = [];
         imp.rows.forEach((r, i) => {
             const lat = parseFloat(r[m.lat]), lng = parseFloat(r[m.lng]);
-            if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) { imp.invalid++; imp.invalidRows.push({ i, name: (m.name ? (r[m.name] || '').trim() : '') || `row ${i + 2}` }); return; }
+            if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) { imp.invalid++; imp.invalidRows.push({ i, name: (m.name ? (r[m.name] || '').trim() : '') || `row ${i + 2}`, type: m.type ? (r[m.type] || '').trim() : '' }); return; }
             const name = m.name ? (r[m.name] || '').trim() : '';
             imp.points.push({ i, name: name || `Import ${i + 1}`, rawName: name, lat, lng, typeRaw: m.type ? (r[m.type] || '').trim() : '', notes: '', sel: false, dup: false, dupWhy: '', child: null, near: null, done: false });
         });
@@ -24244,6 +24244,7 @@
                 <b style="color:#ffd666">📋 Client data review</b>
                 <span style="color:#888;font-size:10px">what the client needs to go check — High: wrong place / wrong well / not theirs · Medium: active-or-not and type disagreements, same well twice · Low: housekeeping (no coordinates, missing API, duplicate names — one line per name)</span>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#cfd6dc">coordinate mismatch over <input type="number" data-impenv-mm value="${c.mismatchFt}" min="50" step="50" style="width:60px;${inCss};text-align:right"> ft</label>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#cfd6dc" title="Battery + well sharing one name is OUR naming constraint — left out of the client report unless ticked"><input type="checkbox" data-impenv-ours ${c.includeOurs ? 'checked' : ''} style="accent-color:#ffd666"> include things we handle ourselves</label>
                 <span style="color:#888;font-size:10px">scope: <b style="color:#cfd6dc">${c.scope === 'all' ? 'WHOLE file' : 'selected points'}</b> (set above)</span>
                 <span style="flex:1"></span>
                 <button data-impenv-review="sheets" title="Summary table + one row per finding, colour-coded by severity — paste into Google Sheets and send" style="background:rgba(255,214,102,0.18);color:#ffd666;border:1px solid rgba(255,214,102,0.6);border-radius:3px;padding:3px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">📋 Report for Sheets</button>
@@ -24257,6 +24258,7 @@
             if (note) note.innerHTML = rows.length ? `${rows.filter(x => x.sev === 'High').length ? `<b style="color:#ff6060">${rows.filter(x => x.sev === 'High').length} high</b>` : '0 high'} · ${rows.filter(x => x.sev === 'Medium').length} medium · ${rows.filter(x => x.sev === 'Low').length} low${!S ? ' · <span style="color:#ffb347">run the cross-check first for the Enverus findings</span>' : ''} · written for a non-technical reader: plain-English finding, what it means, what we need, map links` : (S ? 'no findings in this scope' : 'run the cross-check for the Enverus findings — file hygiene findings show here regardless');
         } catch (e) { console.warn(`${TAG} 📋 review preview failed:`, e); }
         el.querySelector('[data-impenv-mm]').onchange = function () { const v = parseFloat(this.value); if (isFinite(v) && v >= 0) { c.mismatchFt = v; impMarkDirty(); impRenderEnvUi(); } };
+        el.querySelector('[data-impenv-ours]').onchange = function () { c.includeOurs = this.checked; impRenderEnvUi(); };
         el.querySelector('[data-impenv-scope]').onchange = function () { c.scope = this.value === 'all' ? 'all' : 'selected'; impEnvSummarize(); impRenderEnvUi(); };
         el.querySelectorAll('[data-impenv-review]').forEach(b => b.onclick = () => { try { impExportClientReview(b.getAttribute('data-impenv-review')); } catch (e) { console.warn(`${TAG} 📋`, e); impStatus(`Client review failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } });
         el.querySelector('[data-impenv-key]').onclick = (ev) => { ev.preventDefault(); impEnvSetKey(); };
@@ -24288,7 +24290,7 @@
         const live = imp.points.filter(p => !p.done);
         const pts = c.scope === 'all' ? live : live.filter(p => p.sel);
         const rows = [];
-        const RECORDS = 'Enverus (the public well database)';
+        const RECORDS = 'the public well records';   // Enverus is named once, in the report title
         // sev: High / Medium / Low. find = short plain-English finding. means = one sentence a
         // non-technical reader understands. ask = what we need from them.
         const add = (sev, find, p, clientVal, otherVal, means, ask, extra) => rows.push(Object.assign({ sev, find, name: p ? (p.rawName || p.name) : (extra && extra.name) || '', api: p ? impEnvApiOf(p) : '', clientVal, otherVal, means, ask, lat: p ? p.lat : '', lng: p ? p.lng : '', lat2: '', lng2: '', p }, extra || {}));
@@ -24302,30 +24304,30 @@
             const blpd = (p.pri && p.pri.blpd != null) ? p.pri.blpd : impPriBlpdSafe(p);
             const prodTxt = blpd == null ? '' : `${Math.round(blpd).toLocaleString()} barrels/day (oil + water)`;
             if (e && !e.noApi) {
-                if (!e.found) add('High', 'API number not found', p, `API ${e.api}`, 'no well with this API number', `${RECORDS} has no well with this API number, so we cannot verify this well at all.`, 'Check the API number for this well.');
+                if (!e.found) add('High', 'API number not found', p, `API ${e.api}`, 'no well with this API number', `${RECORDS} have no well with this API number, so we cannot verify this well at all.`, 'Check the API number for this well.');
                 else {
-                    if (e.distFt != null && e.distFt > c.mismatchFt) add('High', 'Well is not where the list says', p, ll(p.lat, p.lng), `${ll(e.lat, e.lng)} — ${ftTxt(e.distFt)} away`, `${RECORDS} places this well ${ftTxt(e.distFt)} from the coordinates in your list. The drone would be sent to the wrong spot.`, 'Confirm the correct surface location. The map links show both spots.', { distFt: e.distFt, lat2: e.lat, lng2: e.lng });
-                    if (c.mainOp && e.op && e.op !== c.mainOp) add('High', 'Operated by someone else', p, c.mainOp, e.op, `${RECORDS} lists this well under ${e.op}, not ${c.mainOp}.`, 'Confirm this well belongs to you.');
+                    if (e.distFt != null && e.distFt > c.mismatchFt) add('High', 'Well is not where the list says', p, ll(p.lat, p.lng), `${ll(e.lat, e.lng)} — ${ftTxt(e.distFt)} away`, `${RECORDS} place this well ${ftTxt(e.distFt)} from the coordinates in your list. We would inspect the wrong spot.`, 'Confirm the correct surface location. The map links show both spots.', { distFt: e.distFt, lat2: e.lat, lng2: e.lng });
+                    if (c.mainOp && e.op && e.op !== c.mainOp) add('High', 'Operated by someone else', p, c.mainOp, e.op, `${RECORDS} list this well under ${e.op}, not ${c.mainOp}.`, 'Confirm this well belongs to you.');
                     const bucket = impEnvBucket(e);
-                    if (bucket === 'plugged' && blpd > 0) add('High', 'Listed as producing, records say plugged', p, prodTxt, `${e.status}${e.plug ? ` (plugged ${e.plug})` : ''}`, `Your list shows production, but ${RECORDS} says the well is plugged or its permit expired.`, 'Confirm whether this well is still active.');
-                    else if (bucket === 'plugged') add('Medium', 'Records say plugged or expired', p, p.typeRaw || '', `${e.status}${e.plug ? ` (plugged ${e.plug})` : ''}`, `${RECORDS} says this well is plugged or its permit expired. A plugged well does not need inspection.`, 'Confirm whether it should stay on the inspection list.');
-                    else if (bucket === 'inactive' && blpd > 0) add('Medium', 'Listed as producing, records say inactive', p, prodTxt, e.status, `Your list shows production, but ${RECORDS} has the well as inactive.`, 'Confirm whether this well is producing.');
-                    else if (bucket === 'inactive') add('Low', 'Records say inactive', p, `${p.typeRaw || ''}${prodTxt ? ` · ${prodTxt}` : ''}`, e.status, `${RECORDS} has this well as inactive, and your list shows no production.`, 'Tell us if it should still be inspected; otherwise we leave it off the priority tiers.');
-                    else if (bucket === 'producing' && blpd === 0) add('Medium', 'Zero production, records say producing', p, '0 barrels/day', e.status, `Your list shows no production for this well, but ${RECORDS} has it producing. The production number drives its priority.`, 'Check the production figures for this well.');
+                    if (bucket === 'plugged' && blpd > 0) add('High', 'Listed as producing, records say plugged', p, prodTxt, `${e.status}${e.plug ? ` (plugged ${e.plug})` : ''}`, `Your list shows production, but ${RECORDS} say the well is plugged or its permit expired.`, 'Confirm whether this well is still active.');
+                    else if (bucket === 'plugged') add('Medium', 'Records say plugged or expired', p, p.typeRaw || '', `${e.status}${e.plug ? ` (plugged ${e.plug})` : ''}`, `${RECORDS} say this well is plugged or its permit expired. A plugged well does not need inspection.`, 'Confirm whether it should stay on the inspection list.');
+                    else if (bucket === 'inactive' && blpd > 0) add('Medium', 'Listed as producing, records say inactive', p, prodTxt, e.status, `Your list shows production, but ${RECORDS} have the well as inactive.`, 'Confirm whether this well is producing.');
+                    else if (bucket === 'inactive') add('Low', 'Records say inactive', p, `${p.typeRaw || ''}${prodTxt ? ` · ${prodTxt}` : ''}`, e.status, `${RECORDS} have this well as inactive, and your list shows no production.`, 'Tell us if it should still be inspected; otherwise we leave it off the priority tiers.');
+                    else if (bucket === 'producing' && blpd === 0) add('Medium', 'Zero production, records say producing', p, '0 barrels/day', e.status, `Your list shows no production for this well, but ${RECORDS} have it producing. The production number sets its inspection priority.`, 'Check the production figures for this well.');
                     if (devCol && e.traj) {
                         const cv = String(r(p)[devCol] || '').toUpperCase();
                         const ch = /HORIZ|^H$/.test(cv), cvv = /VERT|^V$/.test(cv);
                         const eh = /HORIZ/.test(e.traj), ev = /VERT/.test(e.traj) && !eh;
-                        if ((ch && ev) || (cvv && eh)) add('Medium', 'Horizontal / vertical does not match records', p, cv, e.traj, `Your list calls this well ${cv.toLowerCase()}; ${RECORDS} has it as ${e.traj.toLowerCase()}. The well type changes how we fly it.`, 'Confirm whether the well is horizontal or vertical.');
+                        if ((ch && ev) || (cvv && eh)) add('Medium', 'Horizontal / vertical does not match records', p, cv, e.traj, `Your list calls this well ${cv.toLowerCase()}; ${RECORDS} have it as ${e.traj.toLowerCase()}. The well type changes how we fly it.`, 'Confirm whether the well is horizontal or vertical.');
                     }
-                    if (e.name && p.rawName && impNormName(e.name) !== impNormName(p.rawName)) add('Low', 'Name differs from records', p, p.rawName, e.name, `We matched this well by API number; ${RECORDS} calls it "${e.name}".`, 'No action unless the name in your list is wrong.');
+                    if (e.name && p.rawName && impNormName(e.name) !== impNormName(p.rawName)) add('Low', 'Name differs from records', p, p.rawName, e.name, `We matched this well by API number; ${RECORDS} call it "${e.name}".`, 'No action unless the name in your list is wrong.');
                 }
             }
             if (!impEnvApiOf(p) && isWellRow(p) && c.apiCol) add('Low', 'Well has no API number', p, p.typeRaw || '', '—', 'Without an API number we cannot verify this well against public records.', 'Add the API number if it is a well.');
-            if (p.dup && p.pri && p.pri.off > 100) add('Low', 'Location differs from our map', p, ll(p.lat, p.lng), `${ftTxt(p.pri.off)} from our mapped asset "${p.pri.offOf}"`, `The coordinates in your list are ${ftTxt(p.pri.off)} from where this asset sits on our map today.`, 'Confirm which location is right.', { distFt: p.pri.off });
+            if (p.dup && p.pri && p.pri.off > 100) add('Low', 'Location differs from where we have it mapped', p, ll(p.lat, p.lng), `${ftTxt(p.pri.off)} from where we have "${p.pri.offOf}" mapped`, `The coordinates in your list are ${ftTxt(p.pri.off)} from where this asset sits on our map today (mapped from your earlier data).`, 'Confirm which location is right.', { distFt: p.pri.off });
         });
         // file-level hygiene — the whole list, since the client does not see our boundaries
-        (imp.invalidRows || []).forEach(x => add('Low', 'No coordinates', null, '', '—', 'This row has no latitude / longitude, so it cannot be placed on the map or inspected.', 'Add the coordinates.', { name: x.name }));
+        (imp.invalidRows || []).forEach(x => { const rr = imp.rows[x.i] || {}; const apiRaw = c.apiCol ? String(rr[c.apiCol] == null ? '' : rr[c.apiCol]).replace(/\D/g, '').slice(0, 10) : ''; const planned = /NEW POP|PLANNED|FUTURE|TBD/i.test(x.type || '') || /\d{4}-\d{2}-\d{2}/.test(x.type || ''); add('Low', planned ? 'Planned well — no location yet' : 'No coordinates', null, x.type || '', '—', planned ? 'This looks like an upcoming well (the type carries a future date) with no location yet, so it is not on the map or the inspection list for now.' : 'This row has no latitude / longitude, so it cannot be placed on the map or inspected.', planned ? 'Send the coordinates once the pad is built.' : 'Add the coordinates.', { name: x.name, api: apiRaw }); });
         const seen = new Map();
         imp.points.forEach(p => { const k = impNormName(p.rawName || p.name); if (!seen.has(k)) seen.set(k, []); seen.get(k).push(p); });
         seen.forEach((arr) => {
@@ -24335,7 +24337,7 @@
             const types = arr.map(p => (p.typeRaw || '').toUpperCase());
             const desc = arr.map(p => `${p.typeRaw || 'row'}${impEnvApiOf(p) ? ` (API ${impEnvApiOf(p)})` : ''} at ${ll(p.lat, p.lng)}`).join(' · ');
             const hasBattery = types.some(t => /BATTERY|TANK/.test(t)), hasWell = types.some(t => !/BATTERY|TANK/.test(t));
-            if (arr.length === 2 && hasBattery && hasWell) add('Low', 'Battery and well share one name', first, desc, '—', 'Two different things carry the same name: a tank battery and a well. Our system needs each asset to have its own name, so we will call the battery "<name> BATTERY".', 'No action needed unless you prefer a different battery name.', { name: first.rawName || first.name, lat2: arr[1].lat, lng2: arr[1].lng });
+            if (arr.length === 2 && hasBattery && hasWell) { if (c.includeOurs) add('Low', 'Battery and well share one name', first, desc, '—', `Two different things carry the same name: a tank battery and a well. Our system needs each asset to have its own name, so we will call the battery "${first.rawName || first.name} BATTERY".`, 'No action needed unless you prefer a different battery name.', { name: first.rawName || first.name, lat2: arr[1].lat, lng2: arr[1].lng }); else rows.ours = (rows.ours || 0) + 1; }
             else if (apis.size === 1 && arr.every(p => impEnvApiOf(p))) add('Medium', 'Same well listed twice', first, `${arr.length} rows · ${desc}`, '—', 'The same well (same API number) appears more than once in the list.', 'Remove the extra row.', { name: first.rawName || first.name, lat2: arr[1].lat, lng2: arr[1].lng });
             else add('Low', 'Same name used for different assets', first, `${arr.length} rows · ${desc}`, '—', 'More than one asset carries this name. Our system needs each asset to have its own name.', 'Give each a distinct name (for example add the well number).', { name: first.rawName || first.name, lat2: arr[1].lat, lng2: arr[1].lng });
         });
@@ -24367,7 +24369,7 @@
         const tdLink = (u) => `<td style="border:1px solid #cccccc;padding:3px 8px">${u ? `<a href="${esc(u)}">open map</a>` : ''}</td>`;
         const nHigh = rows.filter(x => x.sev === 'High').length, nMed = rows.filter(x => x.sev === 'Medium').length, nLow = rows.filter(x => x.sev === 'Low').length;
         const title = `<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px"><tr><td style="font-size:16px;font-weight:700;padding:4px 0">${esc(client)} asset list — items to check (${impNowStamp().slice(0, 10)})</td></tr>
-            <tr><td style="padding:2px 0">We compared your asset list (${esc(imp.fileName || 'file')}) against ${esc('Enverus, the public well database')}${imp.env.checkedAt ? '' : ' (not yet)'} and against our site map. ${rows.length} item${rows.length === 1 ? '' : 's'} need a look: <b>${nHigh} high</b> · ${nMed} medium · ${nLow} low.</td></tr>
+            <tr><td style="padding:2px 0">We compared your asset list (${esc(imp.fileName || 'file')}) against the public well records (Enverus)${imp.env.checkedAt ? '' : ' — not yet run'} and against our site map. ${rows.length} item${rows.length === 1 ? '' : 's'} need a look: <b>${nHigh} high</b> · ${nMed} medium · ${nLow} low.${rows.ours ? ` (${rows.ours} names are shared by a tank battery and its well — we handle that on our side, nothing needed from you.)` : ''}</td></tr>
             <tr><td style="padding:2px 0"><b>High</b> = the drone could be sent to the wrong place, or the well may not be yours / may not exist. <b>Medium</b> = the records disagree with your list about whether the well is active or what type it is. <b>Low</b> = housekeeping (missing coordinates, missing API numbers, duplicate names) — fix when convenient.</td></tr></table>`;
         const sumHtml = `<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px"><tr>${th('Importance')}${th('What we found')}${th('How many')}</tr>${[...counts.entries()].map(([k, n]) => { const [sev, f] = k.split('|'); return `<tr>${td(sev, sevCol[sev], true)}${td(f)}${td(n)}</tr>`; }).join('')}</table>`;
         const bodyHtml = rows.map(x => `<tr>${cols.slice(0, 9).map((cc, i) => td(cc.val(x), i === 0 ? sevCol[x.sev] : '', i === 0 || i === 1)).join('')}${tdLink(impMapsLink(x.lat, x.lng))}${tdLink(impMapsLink(x.lat2, x.lng2))}</tr>`).join('');
