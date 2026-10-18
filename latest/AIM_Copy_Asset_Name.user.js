@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.358
+// @version      4.359
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.358';
+    const SCRIPT_VERSION = '4.359';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -24240,7 +24240,7 @@
             <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-top:6px;font-size:10px;color:#cfd6dc"><input type="checkbox" data-impenv-notes ${c.notes ? 'checked' : ''} style="accent-color:#ffd666"> write an "Enverus" block into each checked asset's notes (status · type · trajectory · operator · dates · API · checked date)</label>
             <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px;padding-top:6px;border-top:1px dashed rgba(255,214,102,0.3)">
                 <b style="color:#ffd666">📋 Client data review</b>
-                <span style="color:#888;font-size:10px">what the client needs to go check — BIG: wrong place / wrong well / not theirs · MEDIUM: status or H/V disagreement · LOW: hygiene (no coordinates, duplicate names, missing API)</span>
+                <span style="color:#888;font-size:10px">what the client needs to go check — High: wrong place / wrong well / not theirs · Medium: active-or-not and type disagreements, same well twice · Low: housekeeping (no coordinates, missing API, duplicate names — one line per name)</span>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#cfd6dc">coordinate mismatch over <input type="number" data-impenv-mm value="${c.mismatchFt}" min="50" step="50" style="width:60px;${inCss};text-align:right"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#cfd6dc">scope <select data-impenv-scope style="${inCss}"><option value="selected"${c.scope === 'selected' ? ' selected' : ''}>selected points</option><option value="all"${c.scope === 'all' ? ' selected' : ''}>whole file</option></select></label>
                 <span style="flex:1"></span>
@@ -24252,7 +24252,7 @@
         try {
             const rows = impClientReviewRows();
             const note = el.querySelector('[data-impenv-review-note]');
-            if (note) note.innerHTML = rows.length ? `${rows.filter(x => x.sev === 'BIG').length ? `<b style="color:#ff6060">${rows.filter(x => x.sev === 'BIG').length} big</b>` : '0 big'} · ${rows.filter(x => x.sev === 'MEDIUM').length} medium · ${rows.filter(x => x.sev === 'LOW').length} low${!S ? ' · <span style="color:#ffb347">run the cross-check first for the Enverus findings</span>' : ''}` : (S ? 'no findings in this scope' : 'run the cross-check for the Enverus findings — file hygiene findings show here regardless');
+            if (note) note.innerHTML = rows.length ? `${rows.filter(x => x.sev === 'High').length ? `<b style="color:#ff6060">${rows.filter(x => x.sev === 'High').length} high</b>` : '0 high'} · ${rows.filter(x => x.sev === 'Medium').length} medium · ${rows.filter(x => x.sev === 'Low').length} low${!S ? ' · <span style="color:#ffb347">run the cross-check first for the Enverus findings</span>' : ''} · written for a non-technical reader: plain-English finding, what it means, what we need, map links` : (S ? 'no findings in this scope' : 'run the cross-check for the Enverus findings — file hygiene findings show here regardless');
         } catch (e) { console.warn(`${TAG} 📋 review preview failed:`, e); }
         el.querySelector('[data-impenv-mm]').onchange = function () { const v = parseFloat(this.value); if (isFinite(v) && v >= 0) { c.mismatchFt = v; impMarkDirty(); impRenderEnvUi(); } };
         el.querySelector('[data-impenv-scope]').onchange = function () { c.scope = this.value === 'all' ? 'all' : 'selected'; impRenderEnvUi(); };
@@ -24286,70 +24286,93 @@
         const live = imp.points.filter(p => !p.done);
         const pts = c.scope === 'all' ? live : live.filter(p => p.sel);
         const rows = [];
-        const add = (sev, check, p, clientVal, otherVal, action, extra) => rows.push(Object.assign({ sev, check, name: p ? p.name : (extra && extra.name) || '', api: p ? impEnvApiOf(p) : '', clientVal, otherVal, action, lat: p ? p.lat : '', lng: p ? p.lng : '', p }, extra || {}));
+        const RECORDS = 'Enverus (the public well database)';
+        // sev: High / Medium / Low. find = short plain-English finding. means = one sentence a
+        // non-technical reader understands. ask = what we need from them.
+        const add = (sev, find, p, clientVal, otherVal, means, ask, extra) => rows.push(Object.assign({ sev, find, name: p ? (p.rawName || p.name) : (extra && extra.name) || '', api: p ? impEnvApiOf(p) : '', clientVal, otherVal, means, ask, lat: p ? p.lat : '', lng: p ? p.lng : '', lat2: '', lng2: '', p }, extra || {}));
         const r = (p) => imp.rows[p.i] || {};
         const isWellRow = (p) => !!impEnvApiOf(p) || /well|pump|lift|flow|plunger|jet|injector|pop/i.test(p.typeRaw || '');
         const devCol = imp.headers.find(h => /deviation|h.?or.?v|traject|profile/i.test(h));
+        const ll = (la, lo) => `${Number(la).toFixed(6)}, ${Number(lo).toFixed(6)}`;
+        const ftTxt = (n) => `${Math.round(n).toLocaleString()} ft`;
         pts.forEach(p => {
             const e = p.env;
             const blpd = (p.pri && p.pri.blpd != null) ? p.pri.blpd : impPriBlpdSafe(p);
+            const prodTxt = blpd == null ? '' : `${Math.round(blpd).toLocaleString()} barrels/day (oil + water)`;
             if (e && !e.noApi) {
-                if (!e.found) add('BIG', 'API number not in Enverus', p, `API ${e.api}`, 'no well with this API', 'confirm the API number / the well record');
+                if (!e.found) add('High', 'API number not found', p, `API ${e.api}`, 'no well with this API number', `${RECORDS} has no well with this API number, so we cannot verify this well at all.`, 'Check the API number for this well.');
                 else {
-                    if (e.distFt != null && e.distFt > c.mismatchFt) add('BIG', 'Coordinate mismatch vs Enverus', p, `${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}`, `${e.lat.toFixed(6)}, ${e.lng.toFixed(6)} (${e.distFt.toLocaleString()} ft away)`, 'confirm the surface location — the Enverus pin sits on a visible pad', { distFt: e.distFt });
-                    if (c.mainOp && e.op && e.op !== c.mainOp) add('BIG', 'Different operator in Enverus', p, c.mainOp, e.op, 'confirm this well is yours');
-                    const b = impEnvBucket(e);
-                    if (b === 'plugged' && blpd > 0) add('BIG', 'Producing in the list but plugged / expired in Enverus', p, `${Math.round(blpd)} BLPD · ${p.typeRaw || ''}`, `${e.status}${e.plug ? ` (plugged ${e.plug})` : ''}`, 'confirm which is right');
-                    else if (b === 'plugged') add('MEDIUM', 'Plugged / expired in Enverus', p, `${p.typeRaw || ''}${blpd != null ? ` · ${Math.round(blpd)} BLPD` : ''}`, `${e.status}${e.plug ? ` (plugged ${e.plug})` : ''}`, 'remove from the inspection list if dead');
-                    else if (b === 'inactive' && blpd > 0) add('MEDIUM', 'Producing in the list but inactive in Enverus', p, `${Math.round(blpd)} BLPD · ${p.typeRaw || ''}`, e.status, 'confirm the well is producing');
-                    else if (b === 'inactive') add('LOW', 'Inactive in Enverus', p, `${p.typeRaw || ''}${blpd != null ? ` · ${Math.round(blpd)} BLPD` : ''}`, e.status, 'confirm whether it should be inspected');
-                    else if (b === 'producing' && blpd === 0) add('MEDIUM', 'Zero production in the list but producing in Enverus', p, '0 BLPD', e.status, 'confirm the production numbers');
+                    if (e.distFt != null && e.distFt > c.mismatchFt) add('High', 'Well is not where the list says', p, ll(p.lat, p.lng), `${ll(e.lat, e.lng)} — ${ftTxt(e.distFt)} away`, `${RECORDS} places this well ${ftTxt(e.distFt)} from the coordinates in your list. The drone would be sent to the wrong spot.`, 'Confirm the correct surface location. The map links show both spots.', { distFt: e.distFt, lat2: e.lat, lng2: e.lng });
+                    if (c.mainOp && e.op && e.op !== c.mainOp) add('High', 'Operated by someone else', p, c.mainOp, e.op, `${RECORDS} lists this well under ${e.op}, not ${c.mainOp}.`, 'Confirm this well belongs to you.');
+                    const bucket = impEnvBucket(e);
+                    if (bucket === 'plugged' && blpd > 0) add('High', 'Listed as producing, records say plugged', p, prodTxt, `${e.status}${e.plug ? ` (plugged ${e.plug})` : ''}`, `Your list shows production, but ${RECORDS} says the well is plugged or its permit expired.`, 'Confirm whether this well is still active.');
+                    else if (bucket === 'plugged') add('Medium', 'Records say plugged or expired', p, p.typeRaw || '', `${e.status}${e.plug ? ` (plugged ${e.plug})` : ''}`, `${RECORDS} says this well is plugged or its permit expired. A plugged well does not need inspection.`, 'Confirm whether it should stay on the inspection list.');
+                    else if (bucket === 'inactive' && blpd > 0) add('Medium', 'Listed as producing, records say inactive', p, prodTxt, e.status, `Your list shows production, but ${RECORDS} has the well as inactive.`, 'Confirm whether this well is producing.');
+                    else if (bucket === 'inactive') add('Low', 'Records say inactive', p, `${p.typeRaw || ''}${prodTxt ? ` · ${prodTxt}` : ''}`, e.status, `${RECORDS} has this well as inactive, and your list shows no production.`, 'Tell us if it should still be inspected; otherwise we leave it off the priority tiers.');
+                    else if (bucket === 'producing' && blpd === 0) add('Medium', 'Zero production, records say producing', p, '0 barrels/day', e.status, `Your list shows no production for this well, but ${RECORDS} has it producing. The production number drives its priority.`, 'Check the production figures for this well.');
                     if (devCol && e.traj) {
                         const cv = String(r(p)[devCol] || '').toUpperCase();
                         const ch = /HORIZ|^H$/.test(cv), cvv = /VERT|^V$/.test(cv);
                         const eh = /HORIZ/.test(e.traj), ev = /VERT/.test(e.traj) && !eh;
-                        if ((ch && ev) || (cvv && eh)) add('MEDIUM', 'Horizontal / vertical disagrees with Enverus', p, cv, e.traj, 'confirm the well type (affects the inspection pattern)');
+                        if ((ch && ev) || (cvv && eh)) add('Medium', 'Horizontal / vertical does not match records', p, cv, e.traj, `Your list calls this well ${cv.toLowerCase()}; ${RECORDS} has it as ${e.traj.toLowerCase()}. The well type changes how we fly it.`, 'Confirm whether the well is horizontal or vertical.');
                     }
-                    if (e.name && p.rawName && impNormName(e.name) !== impNormName(p.rawName)) add('LOW', 'Well name differs from Enverus', p, p.rawName, e.name, 'confirm the name — matched on API');
+                    if (e.name && p.rawName && impNormName(e.name) !== impNormName(p.rawName)) add('Low', 'Name differs from records', p, p.rawName, e.name, `We matched this well by API number; ${RECORDS} calls it "${e.name}".`, 'No action unless the name in your list is wrong.');
                 }
             }
-            if (!impEnvApiOf(p) && isWellRow(p) && c.apiCol) add('LOW', 'Well row without an API number', p, p.typeRaw || '', '—', 'add the API so the well can be verified');
-            if (p.dup && p.pri && p.pri.off > 100) add('LOW', 'Coordinate differs from our mapped asset', p, `${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}`, `our asset "${p.pri.offOf}" is ${p.pri.off.toLocaleString()} ft away`, 'confirm which location is right', { distFt: p.pri.off });
+            if (!impEnvApiOf(p) && isWellRow(p) && c.apiCol) add('Low', 'Well has no API number', p, p.typeRaw || '', '—', 'Without an API number we cannot verify this well against public records.', 'Add the API number if it is a well.');
+            if (p.dup && p.pri && p.pri.off > 100) add('Low', 'Location differs from our map', p, ll(p.lat, p.lng), `${ftTxt(p.pri.off)} from our mapped asset "${p.pri.offOf}"`, `The coordinates in your list are ${ftTxt(p.pri.off)} from where this asset sits on our map today.`, 'Confirm which location is right.', { distFt: p.pri.off });
         });
-        // file-level hygiene (whole file — the client sees the list, not our boundaries)
-        (imp.invalidRows || []).forEach(x => add('LOW', 'No usable coordinates', null, '', '—', 'add latitude / longitude', { name: x.name }));
+        // file-level hygiene — the whole list, since the client does not see our boundaries
+        (imp.invalidRows || []).forEach(x => add('Low', 'No coordinates', null, '', '—', 'This row has no latitude / longitude, so it cannot be placed on the map or inspected.', 'Add the coordinates.', { name: x.name }));
         const seen = new Map();
-        imp.points.forEach(p => { const k = (p.rawName || p.name).trim().toUpperCase(); if (!seen.has(k)) seen.set(k, []); seen.get(k).push(p); });
-        seen.forEach((arr, k) => { if (arr.length > 1) arr.forEach(p => add('LOW', 'Duplicate name in the list', p, p.rawName || p.name, `${arr.length} rows share this name`, 'make the names unique (we match on name)')); });
-        const order = { BIG: 0, MEDIUM: 1, LOW: 2 };
-        rows.sort((a, b) => order[a.sev] - order[b.sev] || a.check.localeCompare(b.check) || String(a.name).localeCompare(String(b.name)));
+        imp.points.forEach(p => { const k = impNormName(p.rawName || p.name); if (!seen.has(k)) seen.set(k, []); seen.get(k).push(p); });
+        seen.forEach((arr) => {
+            if (arr.length < 2) return;
+            const first = arr[0];
+            const apis = new Set(arr.map(p => impEnvApiOf(p)).filter(Boolean));
+            const types = arr.map(p => (p.typeRaw || '').toUpperCase());
+            const desc = arr.map(p => `${p.typeRaw || 'row'}${impEnvApiOf(p) ? ` (API ${impEnvApiOf(p)})` : ''} at ${ll(p.lat, p.lng)}`).join(' · ');
+            const hasBattery = types.some(t => /BATTERY|TANK/.test(t)), hasWell = types.some(t => !/BATTERY|TANK/.test(t));
+            if (arr.length === 2 && hasBattery && hasWell) add('Low', 'Battery and well share one name', first, desc, '—', 'Two different things carry the same name: a tank battery and a well. Our system needs each asset to have its own name, so we will call the battery "<name> BATTERY".', 'No action needed unless you prefer a different battery name.', { name: first.rawName || first.name, lat2: arr[1].lat, lng2: arr[1].lng });
+            else if (apis.size === 1 && arr.every(p => impEnvApiOf(p))) add('Medium', 'Same well listed twice', first, `${arr.length} rows · ${desc}`, '—', 'The same well (same API number) appears more than once in the list.', 'Remove the extra row.', { name: first.rawName || first.name, lat2: arr[1].lat, lng2: arr[1].lng });
+            else add('Low', 'Same name used for different assets', first, `${arr.length} rows · ${desc}`, '—', 'More than one asset carries this name. Our system needs each asset to have its own name.', 'Give each a distinct name (for example add the well number).', { name: first.rawName || first.name, lat2: arr[1].lat, lng2: arr[1].lng });
+        });
+        const order = { High: 0, Medium: 1, Low: 2 };
+        rows.sort((a, b) => order[a.sev] - order[b.sev] || a.find.localeCompare(b.find) || String(a.name).localeCompare(String(b.name)));
         return rows;
     }
     function impNormName(v) { return String(v || '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').replace(/\s+/g, ' ').trim(); }
     function impPriBlpdSafe(p) { try { return impPriBlpd(p); } catch (e) { return null; } }
+    function impMapsLink(la, lo) { return (la === '' || lo === '' || la == null || lo == null) ? '' : `https://www.google.com/maps?q=${Number(la).toFixed(6)},${Number(lo).toFixed(6)}`; }
     function impExportClientReview(how) {
         const rows = impClientReviewRows();
         if (!rows.length) { impStatus('Nothing to report — no findings for the client in this scope', '#5fff5f'); return; }
         const site = getCurrentSiteName() || `Site ${genState.siteID}`;
+        const client = String(site).split(/\s[-–—]\s|\s+Cobra|\s+\d/)[0].trim() || 'Client';
         const cols = [
-            { label: 'Severity', val: x => x.sev }, { label: 'Finding', val: x => x.check }, { label: 'Asset', val: x => x.name }, { label: 'API', val: x => x.api },
-            { label: 'In your list', val: x => x.clientVal }, { label: 'Enverus / our map', val: x => x.otherVal }, { label: 'Distance (ft)', val: x => x.distFt != null ? x.distFt : '' },
-            { label: 'Please', val: x => x.action }, { label: 'Latitude', val: x => x.lat === '' ? '' : Number(x.lat).toFixed(6) }, { label: 'Longitude', val: x => x.lng === '' ? '' : Number(x.lng).toFixed(6) },
+            { label: 'Importance', val: x => x.sev }, { label: 'What we found', val: x => x.find }, { label: 'Asset (name in your list)', val: x => x.name }, { label: 'API number', val: x => x.api },
+            { label: 'In your list', val: x => x.clientVal }, { label: 'What the records / our map show', val: x => x.otherVal }, { label: 'Distance', val: x => x.distFt != null ? `${Math.round(x.distFt).toLocaleString()} ft` : '' },
+            { label: 'What this means', val: x => x.means }, { label: 'What we need from you', val: x => x.ask },
+            { label: 'Map link (your list)', val: x => impMapsLink(x.lat, x.lng) }, { label: 'Map link (records / 2nd row)', val: x => impMapsLink(x.lat2, x.lng2) },
         ];
-        if (how === 'csv') { impExportTable(rows, cols, 'csv', 'client-data-review', 'review'); return; }
-        // Sheets: a summary table first, then the findings
+        if (how === 'csv') { impExportTable(rows, cols, 'csv', 'asset-list-review', 'review'); return; }
         const counts = new Map();
-        rows.forEach(x => { const k = `${x.sev}|${x.check}`; counts.set(k, (counts.get(k) || 0) + 1); });
-        const sevCol = { BIG: '#ffd6d6', MEDIUM: '#fff2cc', LOW: '#e8f0fe' };
+        rows.forEach(x => { const k = `${x.sev}|${x.find}`; counts.set(k, (counts.get(k) || 0) + 1); });
+        const sevCol = { High: '#ffd6d6', Medium: '#fff2cc', Low: '#e8f0fe' };
         const esc = impEsc;
-        const th = (t) => `<th style="background:#1f2228;color:#7adfe6;border:1px solid #cccccc;padding:2px 7px;text-align:left">${esc(t)}</th>`;
-        const td = (t, bg) => `<td style="border:1px solid #cccccc;padding:2px 7px${bg ? `;background:${bg}` : ''}">${esc(t)}</td>`;
-        const sumHtml = `<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px"><tr>${th('Severity')}${th('Finding')}${th('Count')}</tr>${[...counts.entries()].map(([k, n]) => { const [sev, chk] = k.split('|'); return `<tr>${td(sev, sevCol[sev])}${td(chk)}${td(n)}</tr>`; }).join('')}<tr>${td('Total')}${td(`${rows.length} finding${rows.length === 1 ? '' : 's'} · ${impEsc(site)} · ${imp.fileName || ''} · ${impNowStamp()}${imp.env.checkedAt ? ` · Enverus checked ${imp.env.checkedAt}` : ' · no Enverus check yet'}`)}${td('')}</tr></table>`;
-        const bodyHtml = rows.map(x => `<tr>${cols.map((cc, i) => td(cc.val(x), i === 0 ? sevCol[x.sev] : '')).join('')}</tr>`).join('');
-        const html = `${sumHtml}<br><table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px"><tr>${cols.map(cc => th(cc.label)).join('')}</tr>${bodyHtml}</table>`;
+        const th = (t) => `<th style="background:#1f2228;color:#ffffff;border:1px solid #cccccc;padding:3px 8px;text-align:left;font-weight:700">${esc(t)}</th>`;
+        const td = (t, bg, bold) => `<td style="border:1px solid #cccccc;padding:3px 8px;vertical-align:top${bg ? `;background:${bg}` : ''}${bold ? ';font-weight:700' : ''}">${esc(t)}</td>`;
+        const tdLink = (u) => `<td style="border:1px solid #cccccc;padding:3px 8px">${u ? `<a href="${esc(u)}">open map</a>` : ''}</td>`;
+        const nHigh = rows.filter(x => x.sev === 'High').length, nMed = rows.filter(x => x.sev === 'Medium').length, nLow = rows.filter(x => x.sev === 'Low').length;
+        const title = `<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px"><tr><td style="font-size:16px;font-weight:700;padding:4px 0">${esc(client)} asset list — items to check (${impNowStamp().slice(0, 10)})</td></tr>
+            <tr><td style="padding:2px 0">We compared your asset list (${esc(imp.fileName || 'file')}) against ${esc('Enverus, the public well database')}${imp.env.checkedAt ? '' : ' (not yet)'} and against our site map. ${rows.length} item${rows.length === 1 ? '' : 's'} need a look: <b>${nHigh} high</b> · ${nMed} medium · ${nLow} low.</td></tr>
+            <tr><td style="padding:2px 0"><b>High</b> = the drone could be sent to the wrong place, or the well may not be yours / may not exist. <b>Medium</b> = the records disagree with your list about whether the well is active or what type it is. <b>Low</b> = housekeeping (missing coordinates, missing API numbers, duplicate names) — fix when convenient.</td></tr></table>`;
+        const sumHtml = `<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px"><tr>${th('Importance')}${th('What we found')}${th('How many')}</tr>${[...counts.entries()].map(([k, n]) => { const [sev, f] = k.split('|'); return `<tr>${td(sev, sevCol[sev], true)}${td(f)}${td(n)}</tr>`; }).join('')}</table>`;
+        const bodyHtml = rows.map(x => `<tr>${cols.slice(0, 9).map((cc, i) => td(cc.val(x), i === 0 ? sevCol[x.sev] : '', i === 0 || i === 1)).join('')}${tdLink(impMapsLink(x.lat, x.lng))}${tdLink(impMapsLink(x.lat2, x.lng2))}</tr>`).join('');
+        const html = `${title}<br>${sumHtml}<br><table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px"><tr>${cols.map(cc => th(cc.label)).join('')}</tr>${bodyHtml}</table>`;
         const text = [cols.map(cc => cc.label).join('\t')].concat(rows.map(x => cols.map(cc => String(cc.val(x)).replace(/[\t\n\r]/g, ' ')).join('\t'))).join('\n');
-        writeSheetsClipboard(html, text, `📋 ${rows.length} finding(s) copied — paste into Sheets (summary table + findings)`);
-        impStatus(`📋 client data review on the clipboard: <b>${rows.filter(x => x.sev === 'BIG').length}</b> big · ${rows.filter(x => x.sev === 'MEDIUM').length} medium · ${rows.filter(x => x.sev === 'LOW').length} low — paste into Google Sheets`);
+        writeSheetsClipboard(html, text, `📋 ${rows.length} item(s) copied — paste into Sheets (title · summary · details)`);
+        impStatus(`📋 client review on the clipboard: <b style="color:#ff6060">${nHigh} high</b> · ${nMed} medium · ${nLow} low — paste into Google Sheets. Duplicate names are one line per name now.`);
     }
     // v4.353: PLACEMENT & FLAGS review list — compact, tabbed by kind, its own
     // scrollbar, a Reviewed checkbox per point (saved with the session), click a
