@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.367
+// @version      4.368
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.367';
+    const SCRIPT_VERSION = '4.368';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23401,11 +23401,11 @@
     // square (4 corners) vs existing asset ring → 'full' | 'partial' | null
     function impSquareOverlap(sq, ring) {
         const cornersIn = sq.filter(c => pointInPolygon(c.lat, c.lng, ring)).length;
-        if (cornersIn === 4) return 'full';
+        if (cornersIn === sq.length) return 'full';                                 // v4.368: any corner count (drawn outlines)
         if (cornersIn > 0) return 'partial';
-        if (ring.some(v => pointInPolygon(v.lat, v.lng, sq))) return 'partial';     // asset vertex inside the square
-        for (let i = 0; i < 4; i++) {                                               // edge crossings (no vertex inside either)
-            const a = sq[i], b = sq[(i + 1) % 4];
+        if (ring.some(v => pointInPolygon(v.lat, v.lng, sq))) return 'partial';     // asset vertex inside the square / outline
+        for (let i = 0; i < sq.length; i++) {                                       // edge crossings (no vertex inside either)
+            const a = sq[i], b = sq[(i + 1) % sq.length];
             for (let j = 0, k = ring.length - 1; j < ring.length; k = j++) if (segIntersect(a, b, ring[k], ring[j])) return 'partial';
         }
         return null;
