@@ -1,3 +1,7 @@
+## 2026-10-19 — Site Setup Tools latest v4.372 (latest only)
+
+- **v4.372** — ✏ Shape: the stroke is now **CTRL+drag** (Shift is Percepto's asset-name reveal, which hid what you were tracing); "no snap" while dragging a corner or edge is now **Alt**. Cmd works as Ctrl on a Mac.
+
 ## 2026-10-19 — Site Setup Tools latest v4.371 (latest only)
 
 - **v4.371** — the ✏ Shape button could not be pressed: it shared its element id with the "⬆ Load boundary KML(s)" button, so the click handler landed on the wrong button. Fixed (v4.369 / v4.370 were the 🛟 Safe Zone Planner from a parallel session).
