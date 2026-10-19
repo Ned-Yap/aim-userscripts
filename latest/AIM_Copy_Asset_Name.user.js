@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.365
+// @version      4.366
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.365';
+    const SCRIPT_VERSION = '4.366';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22524,7 +22524,8 @@
         keepShield: true,                           // v4.343: keep "- unsh" / "shielded" modifiers in subtypes (off = strip them)
         dupMode: 'update',                          // v4.347: name matches an existing asset → 'skip' | 'update' (type + notes only) | 'copy' (create "-N")
         lastUpdated: [],                            // v4.347: [{id, before}] bodies from the last commit's updates — ↩ undo re-POSTs them
-        env: { apiCol: null, open: false, notes: true, checkedAt: null, summary: null, running: false, opFilter: '', mismatchFt: 300, scope: 'selected', includeOurs: false },   // v4.356: Enverus cross-check · v4.358: client review report
+        env: { apiCol: null, open: false, notes: true, checkedAt: null, summary: null, running: false, opFilter: '', mismatchFt: 300, scope: 'selected', includeOurs: false,
+            missing: null, missingAt: null, missingOp: '', missingSel: new Set(), missStatus: { producing: true, drilled: true, inactive: true, plugged: false }, finding: false },   // v4.366: fill-in   // v4.356: Enverus cross-check · v4.358: client review report
         pri: { on: false, open: false, oilCol: null, waterCol: null, blpdCol: null, priCol: null, clusterFt: 100, padFt: 50, p1Min: 250, p1Max: 1500, summary: null, zeroUntier: true, envUntier: true },   // v4.347: priority tiers · v4.357: zero-production / Enverus-dead wells get no tier
         advOpen: false,                             // v4.331: ▸ Advanced (subset tools + delete mode) expanded — GM-remembered
         secOpen: { bounds: true, data: true, type: false, place: false, env: false, create: true, adv: false },   // v4.352: collapsible sections — GM-remembered
@@ -23114,7 +23115,7 @@
     const IMP_STAMP_RE = /^Imported by (.+?) on (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) from (.+?)(?: · (created|updated) by import)?\s*$/m;
     function impComposeNotes(p, when, how) {
         const r = imp.rows[p.i] || {};
-        const parts = [`Original name\n${p.rawName || p.name}`].concat(impPriNotesBlocks(p, String(when).slice(0, 10))).concat(impEnvNotesBlock(p));
+        const parts = [`Original name\n${p.rawName || p.name}`].concat(p.src === 'enverus' ? [`Source\nAdded from Enverus — not in the client's list (${imp.fileName || 'file'})`] : []).concat(impPriNotesBlocks(p, String(when).slice(0, 10))).concat(impEnvNotesBlock(p));
         impNotesCols().forEach(c => { const v = String(r[c.col] == null ? '' : r[c.col]).trim(); if (v) parts.push(`${c.label || impCleanLabel(c.col)}\n${v}`); });
         parts.push(`Imported by ${impAuthor() || 'AIM user'} on ${when} from ${imp.fileName || 'file'} · ${how === 'update' ? 'updated' : 'created'} by import`);
         return parts.join('\n\n').slice(0, 2000);
@@ -23433,7 +23434,7 @@
                 const tierOn = imp.pri.on && p.sel && p.pri;          // v4.352: tier colours read at a glance — selected dots grow + fill by tier
                 const opts = {
                     radius: pulse ? 9 : (held ? 7 : (p.sel ? (tierOn ? 5.5 : 4) : 2.2)),
-                    color: pulse ? '#ff5fff' : (held ? '#ff5fff' : (p.dup ? '#ff3b3b' : (p.child ? '#b48cff' : (p.near ? '#4fc3f7' : (flagged ? '#ffb347' : (p.orig ? '#ff5fff' : '#ffffff')))))),
+                    color: pulse ? '#ff5fff' : (held ? '#ff5fff' : (p.dup ? '#ff3b3b' : (p.child ? '#b48cff' : (p.near ? '#4fc3f7' : (flagged ? '#ffb347' : (p.orig ? '#ff5fff' : (p.src === 'enverus' ? '#ffd666' : '#ffffff'))))))),
                     weight: pulse ? 3 : (held ? 2.5 : ((p.dup || p.child || p.near || p.orig || flagged) ? 1.5 : 0.6)),
                     fillColor: held ? '#ff5fff' : ((p.sel && p.env && p.env.found && impEnvBucket(p.env) === 'plugged') ? '#ff5252' : ((p.sel && p.env && p.env.found && impEnvBucket(p.env) === 'inactive') ? '#ffb347' : (tierOn ? (IMP_TIER_COLORS[p.pri.tier] || IMP_TIER_COLORS.none) : (p.sel ? '#5fff5f' : '#ff9d00')))),
                     fillOpacity: 0.9, opacity: 0.9, interactive: false,
@@ -24150,7 +24151,7 @@
     // the secret key (GM-stored, prompt once), cached in memory.
     const IMP_ENV_KEY = 'aim_imp_enverus_key';
     const IMP_ENV_BASE = 'https://api.enverus.com/v3/direct-access/';
-    const IMP_ENV_FIELDS = 'WellName,API_UWI_Unformatted,ENVOperator,ENVWellStatus,ENVWellType,Trajectory,Latitude,Longitude,SpudDate,PlugDate,FirstProdDate,PadID,County';
+    const IMP_ENV_FIELDS = 'WellName,API_UWI_Unformatted,ENVOperator,ENVWellStatus,ENVWellType,Trajectory,Latitude,Longitude,SpudDate,PlugDate,FirstProdDate,PadID,County,StateProvince';
     let impEnvToken = null, impEnvTokenAt = 0;
     function impEnvKey() { try { return String(GM_getValue(IMP_ENV_KEY, '') || '').trim(); } catch (e) { return ''; } }
     function impEnvSetKey() {
@@ -24196,7 +24197,7 @@
         const best = sorted[0];
         const traj = [...new Set(rows.map(r => r.Trajectory).filter(Boolean))];
         const d = (v) => v ? String(v).slice(0, 10) : '';
-        return { found: true, name: best.WellName || '', status: String(best.ENVWellStatus || '').toUpperCase(), type: best.ENVWellType || '', traj: traj.join('+'), op: best.ENVOperator || '', lat: best.Latitude, lng: best.Longitude, spud: d(best.SpudDate), plug: d(best.PlugDate), firstProd: d(best.FirstProdDate), pad: best.PadID || '', county: best.County || '', bores: rows.length, plugged: rows.some(r => r.PlugDate) && rank(best) >= 5 };
+        return { found: true, name: best.WellName || '', status: String(best.ENVWellStatus || '').toUpperCase(), type: best.ENVWellType || '', traj: traj.join('+'), op: best.ENVOperator || '', lat: best.Latitude, lng: best.Longitude, spud: d(best.SpudDate), plug: d(best.PlugDate), firstProd: d(best.FirstProdDate), pad: best.PadID || '', county: best.County || '', state: best.StateProvince || '', bores: rows.length, plugged: rows.some(r => r.PlugDate) && rank(best) >= 5 };
     }
     async function impEnvCheck() {
         const c = imp.env;
@@ -24241,6 +24242,121 @@
         impRenderEnvUi(); impSyncUi();
         const S = c.summary;
         impStatus(`🛢 Enverus (${c.scope === 'all' ? 'whole file' : 'selected points'}): ${S.found} of ${S.withApi} API numbers found · <span style="color:#5fff5f">${S.producing} producing</span> · <span style="color:#ffb347">${S.inactive} inactive / TA</span> · <span style="color:#ff6060">${S.plugged} plugged / expired</span>${S.notFound ? ` · ${S.notFound} not in Enverus` : ''}${S.far ? ` · ${S.far} more than 100 ft from the client coordinate` : ''}${S.otherOp ? ` · ${S.otherOp} under another operator` : ''}`);
+    }
+    // ---- v4.366 FILL-IN: the operator's wells INSIDE the boundaries whose API is
+    // not in the client's file. One request per county (ENVOperator + County +
+    // StateProvince filter server-side; a 1000-row cap is split by status, then
+    // by API range). Boxed client-side to the boundaries (or the staged points'
+    // bbox + 0.25 mi when there are none). ----
+    function impEnvInBox(lat, lng, box) {
+        if (imp.shapes.length) return imp.shapes.some(sh => impShapeContains(sh, lat, lng));
+        return box && lat >= box.la0 && lat <= box.la1 && lng >= box.lo0 && lng <= box.lo1;
+    }
+    function impEnvStatusGroup(st) { const b = impEnvBucket({ found: true, status: String(st || '').toUpperCase() }); return b === 'producing' ? 'producing' : (b === 'inactive' ? 'inactive' : (b === 'plugged' ? 'plugged' : 'drilled')); }
+    async function impEnvFetchOperatorWells(county, state, op, log) {
+        const base = `wells?pagesize=1000&DeletedDate=null&County=${encodeURIComponent(county)}&StateProvince=${encodeURIComponent(state)}&ENVOperator=${encodeURIComponent(op)}&fields=${IMP_ENV_FIELDS}`;
+        let rows = await impEnvGet(base);
+        if (rows.length < 1000) return rows;
+        log(`${county}: over 1,000 wells — splitting by status`);
+        const out = new Map(); rows.forEach(r => out.set(r.API_UWI_Unformatted + '|' + (r.SpudDate || ''), r));
+        const statuses = [...new Set(rows.map(r => r.ENVWellStatus).filter(Boolean))].concat(['PRODUCING', 'INJECTING', 'INACTIVE PRODUCER', 'P & A', 'DRILLED', 'COMPLETED', 'DUC', 'PERMIT EXPIRED', 'TA']);
+        for (const st of [...new Set(statuses)]) {
+            const part = await impEnvGet(`${base}&ENVWellStatus=${encodeURIComponent(st)}`);
+            part.forEach(r => out.set(r.API_UWI_Unformatted + '|' + (r.SpudDate || ''), r));
+            if (part.length >= 1000) {   // still capped → quarter the county's API range
+                const pref = String(part[0].API_UWI_Unformatted || '').slice(0, 5);
+                for (let q = 0; q < 10; q++) {
+                    const lo = `${pref}${q}0000`, hi = `${pref}${q}9999`;
+                    const chunk = await impEnvGet(`${base}&ENVWellStatus=${encodeURIComponent(st)}&API_UWI_Unformatted=btw(${lo},${hi})`);
+                    chunk.forEach(r => out.set(r.API_UWI_Unformatted + '|' + (r.SpudDate || ''), r));
+                }
+            }
+        }
+        return [...out.values()];
+    }
+    async function impEnvFindMissing() {
+        const c = imp.env;
+        if (c.finding) return;
+        const op = (c.missingOp || c.mainOp || '').trim();
+        if (!op) { impStatus('Run the 🛢 cross-check first (it learns the operator and counties), or type the operator name', '#ffb347'); return; }
+        const checked = imp.points.filter(p => !p.done && p.env && p.env.found);
+        const counties = new Map();
+        checked.forEach(p => { if (p.env.county) counties.set(`${p.env.county}|${p.env.state || 'TX'}`, { county: p.env.county, state: p.env.state || 'TX' }); });
+        if (!counties.size) { impStatus('No counties known yet — run the 🛢 cross-check on some points first', '#ffb347'); return; }
+        const live = imp.points.filter(p => !p.done);
+        let box = null;
+        if (!imp.shapes.length) {
+            const sel = live.filter(p => p.sel); if (!sel.length) { impStatus('Draw a boundary (or select points) so the search has an area', '#ffb347'); return; }
+            let la0 = Infinity, lo0 = Infinity, la1 = -Infinity, lo1 = -Infinity;
+            sel.forEach(p => { la0 = Math.min(la0, p.lat); lo0 = Math.min(lo0, p.lng); la1 = Math.max(la1, p.lat); lo1 = Math.max(lo1, p.lng); });
+            const dLat = 402 / 111320, dLng = 402 / (111320 * Math.cos((la0 + la1) / 2 * Math.PI / 180));
+            box = { la0: la0 - dLat, la1: la1 + dLat, lo0: lo0 - dLng, lo1: lo1 + dLng };
+        }
+        const known = new Set();
+        imp.points.forEach(p => { const a = impEnvApiOf(p); if (a) known.add(a); });
+        (imp.invalidRows || []).forEach(x => { const rr = imp.rows[x.i] || {}; const a = c.apiCol ? String(rr[c.apiCol] == null ? '' : rr[c.apiCol]).replace(/\D/g, '').slice(0, 10) : ''; if (a) known.add(a); });
+        c.finding = true; c.missing = null; impRenderEnvUi();
+        const log = (t) => impStatus(`🔍 Enverus fill-in: ${impEsc(t)}`);
+        const byApi = new Map();
+        try {
+            await impEnvFetchToken(false);
+            for (const { county, state } of counties.values()) {
+                log(`${op} wells in ${county} County, ${state}…`);
+                const rows = await impEnvFetchOperatorWells(county, state, op, log);
+                rows.forEach(r => { const a = String(r.API_UWI_Unformatted || '').replace(/\D/g, '').slice(0, 10); if (!a) return; if (!byApi.has(a)) byApi.set(a, []); byApi.get(a).push(r); });
+            }
+        } catch (e) {
+            c.finding = false; impRenderEnvUi();
+            console.warn(`${TAG} 🔍 fill-in failed:`, e); impStatus(`🔍 fill-in failed: ${impEsc(e && e.message || e)}`, '#ff6060'); return;
+        }
+        const cands = [];
+        byApi.forEach((rows, a) => {
+            const m = impEnvMerge(rows); if (!m || !isFinite(m.lat) || !isFinite(m.lng)) return;
+            if (!impEnvInBox(m.lat, m.lng, box)) return;
+            const inFile = known.has(a);
+            // nearest existing asset / pad on the site
+            let near = null, bd = Infinity;
+            (imp.assetIndex || []).forEach(x => { const d = pointToPolygonMeters(m.lat, m.lng, x.ring); if (d < bd) { bd = d; near = x; } });
+            cands.push(Object.assign({ api: a, inFile, group: impEnvStatusGroup(m.status), nearName: near ? near.name : '', nearFt: isFinite(bd) ? Math.round(bd / GEN_FT_TO_M) : null, inside: isFinite(bd) && bd === 0 }, m));
+        });
+        c.missing = cands.filter(x => !x.inFile).sort((a, b) => (a.nearFt == null ? 1e9 : a.nearFt) - (b.nearFt == null ? 1e9 : b.nearFt) || a.name.localeCompare(b.name));
+        c.missingTotal = cands.length; c.missingAt = impNowStamp(); c.missingOp = op; c.missingSel = new Set(c.missing.filter(x => c.missStatus[x.group]).map(x => x.api));
+        c.finding = false; impMarkDirty(); impRenderEnvUi();
+        const g = (k) => c.missing.filter(x => x.group === k).length;
+        impStatus(`🔍 ${op}: <b>${cands.length}</b> wells inside the area in ${counties.size} count${counties.size === 1 ? 'y' : 'ies'} · <b style="color:#ffb347">${c.missing.length} not in the client's list</b> (${g('producing')} producing · ${g('drilled')} drilled/permitted · ${g('inactive')} inactive · ${g('plugged')} plugged) — review the list below and stage the ones to add`);
+    }
+    function impEnvStageMissing() {
+        const c = imp.env; if (!c.missing) return;
+        const pick = c.missing.filter(x => c.missingSel.has(x.api) && !x.staged);
+        if (!pick.length) { impStatus('Tick the wells to add first', '#ffb347'); return; }
+        const m = imp.mapping || {};
+        pick.forEach(x => {
+            const row = {}; imp.headers.forEach(h => { row[h] = ''; });
+            if (m.name) row[m.name] = x.name;
+            if (m.lat) row[m.lat] = String(x.lat);
+            if (m.lng) row[m.lng] = String(x.lng);
+            if (c.apiCol) row[c.apiCol] = x.api;
+            const typeRaw = m.type ? `${/HORIZ/.test(x.traj) ? 'H' : 'V'} - WELL (Enverus)` : '';
+            if (m.type) row[m.type] = typeRaw;
+            imp.rows.push(row);
+            const i = imp.rows.length - 1;
+            const p = { i, name: x.name, rawName: x.name, lat: x.lat, lng: x.lng, typeRaw, notes: '', sel: false, dup: false, dupWhy: '', child: null, near: null, done: false, src: 'enverus', env: Object.assign({ api: x.api, found: true, checkedAt: c.missingAt, distFt: 0 }, x) };
+            imp.points.push(p); x.staged = true;
+        });
+        imp._rootCache = null;
+        impBuildAssetIndex(); impComputeDups(); impRecomputeSel();
+        impRenderStaged(); impRenderShapes(); impRenderTypeMapUi(); impRenderMappingUi();
+        impMarkDirty(); impSyncUi(); impRenderEnvUi();
+        impStatus(`➕ ${pick.length} well${pick.length === 1 ? '' : 's'} from Enverus staged as new points (orange dots, source noted in their notes) — they go through the same tiers / flags / Create as the rest`);
+    }
+    function impExportMissing(how) {
+        const c = imp.env; if (!c.missing || !c.missing.length) { impStatus('Nothing to export — run the fill-in first', '#ffb347'); return; }
+        const cols = [
+            { label: 'Well (Enverus name)', val: x => x.name }, { label: 'API', val: x => x.api }, { label: 'Status', val: x => x.status }, { label: 'Type', val: x => x.type }, { label: 'Trajectory', val: x => x.traj }, { label: 'Operator', val: x => x.op },
+            { label: 'Spud', val: x => x.spud }, { label: 'First prod', val: x => x.firstProd }, { label: 'Nearest mapped asset', val: x => x.nearName }, { label: 'Distance (ft)', val: x => x.nearFt == null ? '' : x.nearFt }, { label: 'County', val: x => x.county },
+            { label: 'Latitude', val: x => Number(x.lat).toFixed(6) }, { label: 'Longitude', val: x => Number(x.lng).toFixed(6) }, { label: 'Staged', val: x => x.staged ? 'yes' : '' },
+        ];
+        impExportTable(c.missing, cols, how, 'wells-not-in-list', 'missing-well');
     }
     function impEnvBucket(e) {
         if (!e || e.noApi) return 'noapi';
@@ -24313,6 +24429,16 @@
             </div>
             <div style="color:#888;font-size:10px">Everything that is not plainly producing is listed under Placement › 🛢 Enverus (click a row to zoom, ⓘ for the record). Selected dots on the map turn red when Enverus says plugged / expired and amber when inactive.</div>` : `<div style="color:#888;font-size:10px">Answers per well: status (producing / inactive / plugged…), type, vertical vs horizontal, operator, spud / plug dates and Enverus' own surface location vs the client's. Flags go to Placement › 🛢 Enverus.</div>`}
             <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-top:6px;font-size:10px;color:#cfd6dc"><input type="checkbox" data-impenv-notes ${c.notes ? 'checked' : ''} style="accent-color:#ffd666"> write an "Enverus" block into each checked asset's notes (status · type · trajectory · operator · dates · API · checked date)</label>
+            <div style="margin-top:8px;padding-top:6px;border-top:1px dashed rgba(255,214,102,0.3)">
+                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+                    <b style="color:#ffd666">🔍 Wells the list is missing</b>
+                    <span style="color:#888;font-size:10px">the operator's wells inside your boundaries whose API is not in the file — a pad with one listed well picks up its siblings</span>
+                    <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#cfd6dc">operator <input type="text" data-impenv-op value="${impEsc(c.missingOp || c.mainOp || '')}" placeholder="from the cross-check" style="width:130px;${inCss}"></label>
+                    <button data-impenv-find ${c.finding || !key ? 'disabled' : ''} style="background:rgba(255,214,102,0.15);color:#ffd666;border:1px solid rgba(255,214,102,0.5);border-radius:3px;padding:3px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600${c.finding || !key ? ';opacity:0.5;cursor:default' : ''}">${c.finding ? '⏳ searching…' : '🔍 Find missing wells'}</button>
+                    <span style="color:#888;font-size:10px">${imp.shapes.length ? `inside the ${imp.shapes.length} boundar${imp.shapes.length === 1 ? 'y' : 'ies'}` : 'no boundary — uses the selected points\' area + ¼ mi'} · needs a cross-check first (counties come from it)</span>
+                </div>
+                <div data-impenv-missing style="margin-top:4px"></div>
+            </div>
             <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px;padding-top:6px;border-top:1px dashed rgba(255,214,102,0.3)">
                 <b style="color:#ffd666">📋 Client data review</b>
                 <span style="color:#888;font-size:10px">what the client needs to go check — High: wrong place / wrong well / not theirs · Medium: active-or-not and type disagreements, same well twice · Low: housekeeping (no coordinates, missing API, duplicate names — one line per name)</span>
@@ -24330,6 +24456,9 @@
             const note = el.querySelector('[data-impenv-review-note]');
             if (note) note.innerHTML = rows.length ? `${rows.filter(x => x.sev === 'High').length ? `<b style="color:#ff6060">${rows.filter(x => x.sev === 'High').length} high</b>` : '0 high'} · ${rows.filter(x => x.sev === 'Medium').length} medium · ${rows.filter(x => x.sev === 'Low').length} low${!S ? ' · <span style="color:#ffb347">run the cross-check first for the Enverus findings</span>' : ''} · written for a non-technical reader: plain-English finding, what it means, what we need, map links` : (S ? 'no findings in this scope' : 'run the cross-check for the Enverus findings — file hygiene findings show here regardless');
         } catch (e) { console.warn(`${TAG} 📋 review preview failed:`, e); }
+        el.querySelector('[data-impenv-op]').onchange = function () { c.missingOp = this.value.trim(); };
+        const fb = el.querySelector('[data-impenv-find]'); if (fb) fb.onclick = () => { c.missingOp = (el.querySelector('[data-impenv-op]') || {}).value || c.missingOp; impEnvFindMissing().catch(e => { console.warn(`${TAG} 🔍`, e); impStatus(`🔍 ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
+        impRenderMissingUi(el);
         el.querySelector('[data-impenv-mm]').onchange = function () { const v = parseFloat(this.value); if (isFinite(v) && v >= 0) { c.mismatchFt = v; impMarkDirty(); impRenderEnvUi(); } };
         el.querySelector('[data-impenv-ours]').onchange = function () { c.includeOurs = this.checked; impRenderEnvUi(); };
         el.querySelector('[data-impenv-scope]').onchange = function () { c.scope = this.value === 'all' ? 'all' : 'selected'; impEnvSummarize(); impRenderEnvUi(); };
@@ -24339,6 +24468,50 @@
         const run = el.querySelector('[data-impenv-run]'); if (run) run.onclick = () => { impEnvCheck().catch(e => { console.warn(`${TAG} 🛢`, e); impStatus(`🛢 ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
         el.querySelector('[data-impenv-notes]').onchange = function () { c.notes = this.checked; impMarkDirty(); };
         el.querySelectorAll('[data-impenv-rep]').forEach(b => b.onclick = () => { try { impExportEnv(b.getAttribute('data-impenv-rep')); } catch (e) { impStatus(`Enverus report failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } });
+    }
+    function impRenderMissingUi(host) {
+        const el = host.querySelector('[data-impenv-missing]'); if (!el) return;
+        const c = imp.env;
+        if (!c.missing) { el.innerHTML = ''; return; }
+        const list = c.missing;
+        if (!list.length) { el.innerHTML = `<div style="font-size:10px;color:#5fff5f">✓ every ${impEsc(c.missingOp)} well inside the area is already in the client's list (${c.missingTotal || 0} checked, ${impEsc(c.missingAt || '')})</div>`; return; }
+        const gcol = { producing: '#5fff5f', drilled: '#7adfe6', inactive: '#ffb347', plugged: '#ff5252' };
+        const glabel = { producing: 'producing / injecting', drilled: 'drilled / permitted / DUC', inactive: 'inactive / TA', plugged: 'plugged / expired' };
+        const shown = list.filter(x => c.missStatus[x.group]);
+        const nSel = shown.filter(x => c.missingSel.has(x.api) && !x.staged).length;
+        const chip = (k) => { const n = list.filter(x => x.group === k).length; return `<label style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:${gcol[k]};cursor:pointer"><input type="checkbox" data-impmiss-g="${k}" ${c.missStatus[k] ? 'checked' : ''} style="accent-color:${gcol[k]};margin:0"> ${glabel[k]} ${n}</label>`; };
+        const row = (x) => `<div data-impmiss-row="${x.api}" style="display:flex;align-items:center;gap:6px;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:${x.staged ? '#6f7a85' : '#cfd6dc'};cursor:pointer" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background=''" title="click = zoom to it">
+            <input type="checkbox" data-impmiss-sel="${x.api}" ${x.staged ? 'disabled' : (c.missingSel.has(x.api) ? 'checked' : '')} style="accent-color:#ffd666;margin:0;flex:none">
+            <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${gcol[x.group]};flex:none" title="${impEsc(x.status)}"></span>
+            <b style="flex:none;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(x.name)}</b>
+            <span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(x.status)} · ${impEsc(x.type || '')}${x.traj ? ` · ${impEsc(x.traj.toLowerCase())}` : ''} · API ${x.api}${x.nearFt != null ? ` · ${x.inside ? 'inside' : `${x.nearFt.toLocaleString()} ft from`} ${impEsc(x.nearName)}` : ' · no mapped asset nearby'}${x.staged ? ' · ✓ staged' : ''}</span>
+            <span data-impmiss-info="${x.api}" title="${impEsc(`${x.name} · API ${x.api}\n${x.status} · ${x.type || ''} · ${x.traj || ''} · ${x.op}\nspud ${x.spud || '—'} · first prod ${x.firstProd || '—'}${x.plug ? ` · plugged ${x.plug}` : ''}\n${Number(x.lat).toFixed(6)}, ${Number(x.lng).toFixed(6)} · ${x.county} County\n${x.nearName ? `${x.inside ? 'inside' : x.nearFt + ' ft from'} mapped asset "${x.nearName}"` : 'no mapped asset nearby'}${x.bores > 1 ? `\n${x.bores} wellbores` : ''}`)}" style="flex:none;width:14px;height:14px;line-height:12px;text-align:center;border:1px solid rgba(122,223,230,0.5);border-radius:50%;color:#7adfe6;font-size:9px;font-weight:700;cursor:help">i</span>
+        </div>`;
+        el.innerHTML = `<div style="padding:6px 8px;background:rgba(255,255,255,0.03);border:1px dashed rgba(255,214,102,0.3);border-radius:3px">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px;font-size:11px"><b style="color:#ffd666">${list.length}</b> <span style="color:#cfd6dc">${impEsc(c.missingOp)} wells inside the area that are NOT in the client's list</span> <span style="color:#888;font-size:10px">(of ${c.missingTotal || 0} found · ${impEsc(c.missingAt || '')})</span>
+                ${chip('producing')} ${chip('drilled')} ${chip('inactive')} ${chip('plugged')}
+                <span style="flex:1"></span>
+                <button data-impmiss-all style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px">tick all shown</button>
+                <button data-impmiss-none style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px">untick</button>
+                <button data-impmiss-rep="sheets" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Sheets</button>
+                <button data-impmiss-rep="csv" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button>
+            </div>
+            <div style="max-height:230px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">${shown.map(row).join('') || '<div style="padding:6px;color:#888;font-size:10px">nothing in the ticked status groups</div>'}</div>
+            <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
+                <button data-impmiss-stage ${nSel ? '' : 'disabled'} style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:4px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600${nSel ? '' : ';opacity:0.45;cursor:default'}">➕ Stage ${nSel} as new points</button>
+                <span style="color:#888;font-size:10px">staged wells become ordinary points: name = Enverus well name, type "H - WELL (Enverus)" / "V - WELL (Enverus)" (change it in the Type table), notes carry a "Source: added from Enverus" block; nothing is written until ✓ Create. Plugged wells are off by default.</span>
+            </div>
+        </div>`;
+        el.onclick = (ev) => {
+            const g = ev.target.closest('[data-impmiss-g]'); if (g) { c.missStatus[g.getAttribute('data-impmiss-g')] = !!g.checked; impRenderMissingUi(host); return; }
+            const cb = ev.target.closest('[data-impmiss-sel]'); if (cb) { const a = cb.getAttribute('data-impmiss-sel'); if (cb.checked) c.missingSel.add(a); else c.missingSel.delete(a); impRenderMissingUi(host); return; }
+            if (ev.target.closest('[data-impmiss-all]')) { shown.forEach(x => { if (!x.staged) c.missingSel.add(x.api); }); impRenderMissingUi(host); return; }
+            if (ev.target.closest('[data-impmiss-none]')) { c.missingSel.clear(); impRenderMissingUi(host); return; }
+            const rp = ev.target.closest('[data-impmiss-rep]'); if (rp) { try { impExportMissing(rp.getAttribute('data-impmiss-rep')); } catch (e) { impStatus(`Export failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } return; }
+            if (ev.target.closest('[data-impmiss-stage]')) { impEnvStageMissing(); return; }
+            if (ev.target.closest('[data-impmiss-info]')) return;
+            const r = ev.target.closest('[data-impmiss-row]'); if (r) { const x = list.find(y => y.api === r.getAttribute('data-impmiss-row')); if (x) { impZoomToPoints([{ lat: x.lat, lng: x.lng, name: `${x.name} (Enverus)` }], x.name); impStatus(`🔎 ${impEsc(x.name)} — ${impEsc(x.status)}${x.nearName ? ` · ${x.inside ? 'inside' : `${x.nearFt} ft from`} ${impEsc(x.nearName)}` : ''}`); } }
+        };
     }
     function impExportEnv(how) {
         const pts = imp.points.filter(p => !p.done && p.sel && p.env && !p.env.noApi);
@@ -24399,6 +24572,8 @@
             if (!impEnvApiOf(p) && isWellRow(p) && c.apiCol) add('Low', 'Well has no API number', p, p.typeRaw || '', '—', 'Without an API number we cannot verify this well against public records.', 'Add the API number if it is a well.');
             if (p.dup && p.pri && p.pri.off > 100) add('Low', 'Location differs from where we have it mapped', p, ll(p.lat, p.lng), `${ftTxt(p.pri.off)} from where we have "${p.pri.offOf}" mapped`, `The coordinates in your list are ${ftTxt(p.pri.off)} from where this asset sits on our map today (mapped from your earlier data).`, 'Confirm which location is right.', { distFt: p.pri.off });
         });
+        // wells the public records put on the client's pads but the list does not have
+        (c.missing || []).forEach(x => { if (x.group === 'plugged') return; add('Medium', 'Well on your pads that is not in the list', null, '—', `${x.name} · API ${x.api} · ${x.status}${x.type ? ` · ${x.type}` : ''}${x.traj ? ` · ${x.traj.toLowerCase()}` : ''}${x.nearName ? ` · ${x.inside ? 'inside' : `${x.nearFt.toLocaleString()} ft from`} ${x.nearName}` : ''}`, `${RECORDS} list this ${x.op} well inside your inspection area, but it is not in the asset list we received.`, 'Confirm whether it should be inspected (and add it to the list if so).', { name: x.name, api: x.api, lat: x.lat, lng: x.lng }); });
         // file-level hygiene — the whole list, since the client does not see our boundaries
         (imp.invalidRows || []).forEach(x => { const rr = imp.rows[x.i] || {}; const apiRaw = c.apiCol ? String(rr[c.apiCol] == null ? '' : rr[c.apiCol]).replace(/\D/g, '').slice(0, 10) : ''; const planned = /NEW POP|PLANNED|FUTURE|TBD/i.test(x.type || '') || /\d{4}-\d{2}-\d{2}/.test(x.type || ''); add('Low', planned ? 'Planned well — no location yet' : 'No coordinates', null, x.type || '', '—', planned ? 'This looks like an upcoming well (the type carries a future date) with no location yet, so it is not on the map or the inspection list for now.' : 'This row has no latitude / longitude, so it cannot be placed on the map or inspected.', planned ? 'Send the coordinates once the pad is built.' : 'Add the coordinates.', { name: x.name, api: apiRaw }); });
         const seen = new Map();
@@ -25391,12 +25566,13 @@
                 if (p.selManual !== undefined) o.selManual = p.selManual;
                 if (p.reviewed) o.rv = true;
                 if (p.env && !p.env.noApi) o.env = p.env;
+                if (p.src) o.src = p.src;
                 return (Object.keys(o).length > 1) ? o : null;
             }).filter(Boolean),
             shapes: imp.shapes.map(sh => sh.kind === 'circle' ? { id: sh.id, kind: 'circle', center: sh.center, radiusM: sh.radiusM, name: sh.name || '' } : { id: sh.id, kind: sh.kind, ring: sh.ring, handle: sh.handle, name: sh.name || '' }),
             shapeSeq: imp.shapeSeq,
             pri: { on: imp.pri.on, oilCol: imp.pri.oilCol, waterCol: imp.pri.waterCol, blpdCol: imp.pri.blpdCol, priCol: imp.pri.priCol },
-            env: { apiCol: imp.env.apiCol, notes: imp.env.notes, checkedAt: imp.env.checkedAt, mismatchFt: imp.env.mismatchFt },
+            env: { apiCol: imp.env.apiCol, notes: imp.env.notes, checkedAt: imp.env.checkedAt, mismatchFt: imp.env.mismatchFt, missing: imp.env.missing, missingAt: imp.env.missingAt, missingOp: imp.env.missingOp, missingTotal: imp.env.missingTotal },
             undo: { created: imp.lastCreated.slice(), updated: imp.lastUpdated.map(u => ({ id: u.id, name: u.name, before: u.before })) },   // v4.364: undo survives a reload
         };
         const json = JSON.stringify(data);
@@ -25430,7 +25606,7 @@
         imp.shapeSeq = Math.max(d.shapeSeq || 1, ...imp.shapes.map(sh => sh.id + 1), 1);
         imp.mapOpen = false;
         if (d.pri) { Object.assign(imp.pri, { on: !!d.pri.on, oilCol: d.pri.oilCol || null, waterCol: d.pri.waterCol || null, blpdCol: d.pri.blpdCol || null, priCol: d.pri.priCol || null }); imp.pri._guessed = true; }
-        if (d.env) { imp.env.apiCol = d.env.apiCol || null; imp.env.notes = d.env.notes !== false; imp.env.checkedAt = d.env.checkedAt || null; if (typeof d.env.mismatchFt === 'number') imp.env.mismatchFt = d.env.mismatchFt; imp.env._guessed = true; }
+        if (d.env) { imp.env.apiCol = d.env.apiCol || null; imp.env.notes = d.env.notes !== false; imp.env.checkedAt = d.env.checkedAt || null; if (typeof d.env.mismatchFt === 'number') imp.env.mismatchFt = d.env.mismatchFt; if (Array.isArray(d.env.missing)) { imp.env.missing = d.env.missing; imp.env.missingAt = d.env.missingAt || null; imp.env.missingOp = d.env.missingOp || ''; imp.env.missingTotal = d.env.missingTotal || 0; imp.env.missingSel = new Set(); } imp.env._guessed = true; }
         if (d.undo) { imp.lastCreated = Array.isArray(d.undo.created) ? d.undo.created.slice() : []; imp.lastUpdated = Array.isArray(d.undo.updated) ? d.undo.updated.filter(u => u && u.id != null && u.before) : []; console.log(`${TAG} 📥 resume: undo record ${imp.lastCreated.length} created / ${imp.lastUpdated.length} updated`); }
         else console.log(`${TAG} 📥 resume: no undo record in this session (saved by an older version or before any import)`);
         impRenderMappingUi();
@@ -25445,6 +25621,7 @@
             if (o.selManual !== undefined) p.selManual = o.selManual;
             if (o.rv) p.reviewed = true;
             if (o.env) p.env = o.env;
+            if (o.src) p.src = o.src;
         });
         try { impComputeDups(); } catch (e) {}
         impRefreshAfterSelChange();
@@ -28889,7 +29066,7 @@
             steps: ['🔍 Scan crossings (or right-click a flight path → 🛗 for a manual point).', 'Review each staged crossing — bridge height, elevator lengths, preflight result.', 'Untick Dry run → Commit. ↩ Undo restores the flight paths and deletes the poles.'],
             test: 'Scan a site with a known transmission crossing, confirm one staged set per crossing, Commit with Dry run ON.' },
         imp: { what: 'Bring a client asset list into Percepto. Load a CSV or KML → points stage on the map (nothing written) → narrow with boundaries → map the type → ✓ Create makes real asset squares. Create-only, with dry run, backup manifest and undo.',
-            steps: ['The page is five numbered sections in working order (plus Advanced). Each header shows where it stands; click to open / close, or use the jump chips at the top. The status line under the title shows the latest result.', 'Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', 'Undo: ↩ Undo last import reverts the last run (creates deleted, updates put back) and survives a reload via ↻ Resume. Independently, 🕘 Imports on this site lists every import found on the assets themselves (the "Imported by …" line) and can delete a run\'s created assets from any machine, any time.', '5 · Enverus check: set the Developer API key once, pick the API-number column, Cross-check — every selected well gets its Enverus status / type / trajectory / operator / dates and location; anything not plainly producing lands in Placement › 🛢 Enverus and an "Enverus" block goes into the notes.', 'Priority tiers (in 3 · Type & priority): pick the oil + water columns (or a single BLPD column, or a ready-made P1/P2/P3 column); every asset on a pad shares the pad total; the tier is written as a type prefix ("P1 - …") and a Priority / Prioritized block in the notes. "name matches → update type + notes" is the quarterly re-run: load the new list, review the Tier report, Create.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
+            steps: ['The page is five numbered sections in working order (plus Advanced). Each header shows where it stands; click to open / close, or use the jump chips at the top. The status line under the title shows the latest result.', 'Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', 'Undo: ↩ Undo last import reverts the last run (creates deleted, updates put back) and survives a reload via ↻ Resume. Independently, 🕘 Imports on this site lists every import found on the assets themselves (the "Imported by …" line) and can delete a run\'s created assets from any machine, any time.', '5 · Enverus check: set the Developer API key once, pick the API-number column, Cross-check — every selected well gets its Enverus status / type / trajectory / operator / dates and location; anything not plainly producing lands in Placement › 🛢 Enverus and an "Enverus" block goes into the notes.', '🔍 Find missing wells (same section, after a cross-check): every well the operator has inside your boundaries whose API is not in the file, with status and the nearest mapped asset — tick the ones to add, ➕ Stage, and they become ordinary points (source noted) that go through tiers, flags and Create like the rest. They also appear in the client review as "Well on your pads that is not in the list".', 'Priority tiers (in 3 · Type & priority): pick the oil + water columns (or a single BLPD column, or a ready-made P1/P2/P3 column); every asset on a pad shares the pad total; the tier is written as a type prefix ("P1 - …") and a Priority / Prioritized block in the notes. "name matches → update type + notes" is the quarterly re-run: load the new list, review the Tier report, Create.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
             test: 'Load the list, add one boundary, confirm the selected count drops, Create with Dry run ON.' },
         sci: { what: 'Applies the Ortho Scanner review sheet\'s decisions: accepted NFZs and flight-path leg changes stage on the map (green / yellow, removed legs red), preflight runs, then Apply writes them — NFZs create-only, flight paths one POST each with Delete Guard backups.',
             steps: ['Load the decisions JSON and the scan bundle from the review sheet.', 'Check the staged plan on the map and the preflight result.', 'Untick Dry run → Apply.'],
