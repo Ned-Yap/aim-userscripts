@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.11
+// @version      3.12
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.11';
+    const SCRIPT_VERSION = '3.12';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -660,9 +660,18 @@
     }
     async function covFetchJson(url) {
         const r = await fetch(url, { credentials: 'include' });
-        if (!r.ok) throw new Error(`HTTP ${r.status} ${url}`);
+        if (!r.ok) {
+            let body = ''; try { body = await r.text(); } catch (e) {}
+            const err = new Error(`HTTP ${r.status} ${url}${body ? ' — ' + body.slice(0, 160) : ''}`);
+            err.status = r.status; err.body = body;
+            throw err;
+        }
         return r.json();
     }
+    // v3.12: the server's `poi` filter only accepts assets that appear on at
+    // least one image — every other id is rejected with 400 "Select a valid
+    // choice". That is the "never flown" signal, not an error.
+    function covIsNeverFlown(e) { return !!(e && e.status === 400 && /valid choice/i.test(String(e.body || ''))); }
     async function covFetchAsset(sid, a, monthStartSec, nowSec, weekStart, pad, monthStartLocal) {
         const rec = { id: a.id, name: a.name, pad, tier: covTierOf(a.poi), poi: a.poi || '', lastAt: null, lastMission: '', monthFlies: 0, weekFlies: 0, monthImages: 0, totalImages: null, flies: [], planned: false, err: '' };
         try {
@@ -682,6 +691,7 @@
                 if (r2.length) { rec.lastAt = r2[0].created_at; rec.lastMission = r2[0].mission_name || ''; }
             }
         } catch (e) {
+            if (covIsNeverFlown(e)) { rec.totalImages = 0; return rec; }
             rec.err = (e && e.message) || String(e);
             // v3.10: surface the first few failures loudly — the ⚠ tooltip was the only place the reason lived.
             covErrLogged = (covErrLogged || 0) + 1;
