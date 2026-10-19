@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.376
+// @version      4.377
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.376';
+    const SCRIPT_VERSION = '4.377';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -24235,8 +24235,14 @@
     function impClearStrokeLayer() { const map = getLeafletMap(); if (imp.strokeLayer) { try { if (map) map.removeLayer(imp.strokeLayer); } catch (e) {} imp.strokeLayer = null; } }
     function impRenderStroke() {
         const L = getLeafletL(), map = getLeafletMap(); if (!L || !map || !imp.stroke) return;
-        impClearStrokeLayer();
-        try { imp.strokeLayer = L.polyline(imp.stroke.map(q => [q.lat, q.lng]), { color: impShapeColor, weight: 3, opacity: 0.9, dashArray: '4,4', interactive: false }).addTo(map); } catch (e) {}
+        try { if (imp.strokeLayer) { imp.strokeLayer.setLatLngs(imp.stroke.map(q => [q.lat, q.lng])); return; } imp.strokeLayer = L.polyline(imp.stroke.map(q => [q.lat, q.lng]), { renderer: impShapeRenderer(), color: impShapeColor, weight: 3, opacity: 0.9, dashArray: '4,4', interactive: false }).addTo(map); } catch (e) {}
+    }
+    // v4.377: all ✏ layers draw on ONE canvas renderer. SVG paths changed every drag frame, and the
+    // Map Styler's MutationObserver on the overlay SVG rebuilt its own overlays each time — the lag.
+    function impShapeRenderer() {
+        const L = getLeafletL(); if (!L) return undefined;
+        if (!imp.shapeRenderer) { try { imp.shapeRenderer = L.canvas({ padding: 0.5 }); } catch (e) { imp.shapeRenderer = null; } }
+        return imp.shapeRenderer || undefined;
     }
     function impClearAssetShapeLayers() { const map = getLeafletMap(); (imp.assetShapeLayers || []).forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); imp.assetShapeLayers = []; impClearHeldLayers(); }
     function impClearHeldLayers() { const map = getLeafletMap(); (imp.heldLayers || []).forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); imp.heldLayers = []; imp.heldRefs = null; if (imp._heldRaf) { cancelAnimationFrame(imp._heldRaf); imp._heldRaf = null; } }
@@ -24249,7 +24255,7 @@
         imp.points.forEach(p => {
             if (p.done || !p.shape || p === imp.shapeHeld) return;
             try {
-                const pl = L.polygon(p.shape.map(v => [v.lat, v.lng]), { color: impShapeColor, weight: 2, opacity: 0.95, fill: impShapeFill && impShapeOpacity > 0, fillColor: impShapeColor, fillOpacity: impShapeFill ? impShapeOpacity : 0, interactive: false });
+                const pl = L.polygon(p.shape.map(v => [v.lat, v.lng]), { renderer: impShapeRenderer(), color: impShapeColor, weight: 2, opacity: 0.95, fill: impShapeFill && impShapeOpacity > 0, fillColor: impShapeColor, fillOpacity: impShapeFill ? impShapeOpacity : 0, interactive: false });
                 pl.addTo(map); imp.assetShapeLayers.push(pl);
             } catch (e) {}
         });
@@ -24279,17 +24285,17 @@
         try {
             const R = { p, buf: null, poly: null, verts: [], mids: [] };
             if (imp.mode === 'shape' && imp.bufFt > 0 && impBufOpacity > 0) {
-                R.buf = L.polygon(impOffsetRing(p.shape, imp.bufFt * GEN_FT_TO_M).map(v => [v.lat, v.lng]), { color: impBufColor, weight: 1, opacity: 0.6, dashArray: '3,3', fillColor: impBufColor, fillOpacity: impBufOpacity, interactive: false });
+                R.buf = L.polygon(impOffsetRing(p.shape, imp.bufFt * GEN_FT_TO_M).map(v => [v.lat, v.lng]), { renderer: impShapeRenderer(), color: impBufColor, weight: 1, opacity: 0.6, dashArray: '3,3', fillColor: impBufColor, fillOpacity: impBufOpacity, interactive: false });
                 R.buf.addTo(map); imp.heldLayers.push(R.buf);
             }
-            R.poly = L.polygon(p.shape.map(v => [v.lat, v.lng]), { color: '#ff5fff', weight: 3, opacity: 0.95, fill: impShapeFill && impShapeOpacity > 0, fillColor: impShapeColor, fillOpacity: impShapeFill ? impShapeOpacity : 0, interactive: false });
+            R.poly = L.polygon(p.shape.map(v => [v.lat, v.lng]), { renderer: impShapeRenderer(), color: '#ff5fff', weight: 3, opacity: 0.95, fill: impShapeFill && impShapeOpacity > 0, fillColor: impShapeColor, fillOpacity: impShapeFill ? impShapeOpacity : 0, interactive: false });
             R.poly.addTo(map); imp.heldLayers.push(R.poly);
             if (editing) {
                 const n = p.shape.length;
                 for (let i = 0; i < n; i++) {
                     const v = p.shape[i], w = p.shape[(i + 1) % n];
-                    const d = L.circleMarker([v.lat, v.lng], { radius: 5, color: '#ffffff', weight: 1.5, fillColor: '#ff5fff', fillOpacity: 1, interactive: false }); d.addTo(map); imp.heldLayers.push(d); R.verts.push(d);
-                    const m = L.circleMarker([(v.lat + w.lat) / 2, (v.lng + w.lng) / 2], { radius: 4.5, color: '#ffffff', weight: 1, fillColor: impShapeColor, fillOpacity: 1, interactive: false }); m.addTo(map); imp.heldLayers.push(m); R.mids.push(m);
+                    const d = L.circleMarker([v.lat, v.lng], { renderer: impShapeRenderer(), radius: 5, color: '#ffffff', weight: 1.5, fillColor: '#ff5fff', fillOpacity: 1, interactive: false }); d.addTo(map); imp.heldLayers.push(d); R.verts.push(d);
+                    const m = L.circleMarker([(v.lat + w.lat) / 2, (v.lng + w.lng) / 2], { renderer: impShapeRenderer(), radius: 4.5, color: '#ffffff', weight: 1, fillColor: impShapeColor, fillOpacity: 1, interactive: false }); m.addTo(map); imp.heldLayers.push(m); R.mids.push(m);
                 }
             }
             imp.heldRefs = R;

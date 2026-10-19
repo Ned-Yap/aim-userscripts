@@ -1,3 +1,7 @@
+## 2026-10-19 — ✏ Shape on canvas — Site Setup Tools latest v4.377 (latest only)
+
+- **v4.377 — ✏ Shape drags still stuttered:** the outlines, buffer ring, handles and stroke preview were SVG, so every drag frame mutated SVG attributes and the Map Styler's overlay observer rebuilt its own layers each time. Every ✏ layer now draws on one canvas renderer (no DOM mutation per frame); the stroke preview updates in place too.
+
 ## 2026-10-19 — ✏ Shape: smooth edge / corner / box drags — Site Setup Tools latest v4.376 (latest only)
 
 - **v4.376 — ✏ Shape drags were laggy:** every mouse move rescanned all staged points and site assets for snap neighbours and rebuilt the handle markers. Neighbours are now found once when a drag starts, and the held outline, its buffer ring and its handles are updated in place at most once per animation frame.
