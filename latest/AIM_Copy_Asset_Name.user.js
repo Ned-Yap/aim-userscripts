@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.364
+// @version      4.365
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.364';
+    const SCRIPT_VERSION = '4.365';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23111,12 +23111,82 @@
         m.notesCols = m.notesCols.filter(c => c && imp.headers.includes(c.col));
         return m.notesCols;
     }
-    function impComposeNotes(p, when) {
+    const IMP_STAMP_RE = /^Imported by (.+?) on (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) from (.+?)(?: · (created|updated) by import)?\s*$/m;
+    function impComposeNotes(p, when, how) {
         const r = imp.rows[p.i] || {};
         const parts = [`Original name\n${p.rawName || p.name}`].concat(impPriNotesBlocks(p, String(when).slice(0, 10))).concat(impEnvNotesBlock(p));
         impNotesCols().forEach(c => { const v = String(r[c.col] == null ? '' : r[c.col]).trim(); if (v) parts.push(`${c.label || impCleanLabel(c.col)}\n${v}`); });
-        parts.push(`Imported by ${impAuthor() || 'AIM user'} on ${when} from ${imp.fileName || 'file'}`);
+        parts.push(`Imported by ${impAuthor() || 'AIM user'} on ${when} from ${imp.fileName || 'file'} · ${how === 'update' ? 'updated' : 'created'} by import`);
         return parts.join('\n\n').slice(0, 2000);
+    }
+    // ---- v4.365 UNDO BY STAMP — reads the SITE, not the session. Groups every
+    // asset whose notes end in our stamp line by (file · time · author); a
+    // group's "created" assets can be deleted as a batch (confirm + Delete
+    // Guard). "updated" assets are listed but not touched here — their previous
+    // type + notes live in the session undo record / the backup manifest. ----
+    function impScanImports() {
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        const groups = new Map();
+        ents.filter(e => e && e.type === 3 && typeof e.description === 'string').forEach(e => {
+            const m = e.description.match(IMP_STAMP_RE); if (!m) return;
+            const key = `${m[3]}|${m[2]}|${m[1]}`;
+            if (!groups.has(key)) groups.set(key, { key, file: m[3], when: m[2], who: m[1], created: [], updated: [] });
+            (m[4] === 'updated' ? groups.get(key).updated : groups.get(key).created).push(e);
+        });
+        return [...groups.values()].sort((a, b) => b.when.localeCompare(a.when));
+    }
+    function impRenderImportsUi() {
+        const el = document.getElementById('aim-imp-imports'); if (!el) return;
+        let groups = []; try { groups = impScanImports(); } catch (e) { console.warn(`${TAG} 📥 import scan failed:`, e); }
+        if (!groups.length) { el.innerHTML = `<div style="font-size:10px;color:#888;padding:2px 0">No imports found on this site (assets this tool writes carry an "Imported by …" line in their notes).</div>`; return; }
+        el.innerHTML = `<div style="padding:6px 8px;background:rgba(255,179,71,0.05);border:1px dashed rgba(255,179,71,0.4);border-radius:3px;font-size:11px;color:#cfd6dc">
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px"><b style="color:#ffb347">🕘 Imports on this site</b><span style="color:#888;font-size:10px">read from the assets themselves — works after any reload, from any machine</span><span style="flex:1"></span><button data-impimp-refresh style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">↻ refresh</button></div>
+            ${groups.slice(0, 12).map(g => `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:3px 0;border-top:1px solid rgba(255,255,255,0.06);font-size:10.5px">
+                <span style="color:#cfd6dc"><b>${impEsc(g.when)}</b> · ${impEsc(g.file)} · ${impEsc(g.who)}</span>
+                <span style="color:#888">${g.created.length} created${g.updated.length ? ` · ${g.updated.length} updated` : ''}</span>
+                <span style="flex:1"></span>
+                ${g.created.length ? `<button data-impimp-show="${impEsc(g.key)}" style="background:none;border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">🔎 show</button><button data-impimp-del="${impEsc(g.key)}" style="background:rgba(255,85,85,0.12);border:1px solid rgba(255,85,85,0.5);color:#ff8a80;border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px;font-weight:600">🗑 delete the ${g.created.length} created</button>` : '<span style="color:#666;font-size:10px">updates only — revert via the session undo / backup file</span>'}
+            </div>`).join('')}${groups.length > 12 ? `<div style="color:#888;font-size:10px">… +${groups.length - 12} older imports</div>` : ''}
+        </div>`;
+        el.querySelector('[data-impimp-refresh]').onclick = async () => { try { await fetchMapObjects(genState.siteID, true); } catch (e) {} impRenderImportsUi(); };
+        el.querySelectorAll('[data-impimp-show]').forEach(b => b.onclick = () => {
+            const g = impScanImports().find(x => x.key === b.getAttribute('data-impimp-show')); if (!g) return;
+            const pts = g.created.map(e => { const c = ringCentroid(entityCoords(e) || []); return c ? { lat: c.lat, lng: c.lng, name: e.name || '' } : null; }).filter(Boolean);
+            if (pts.length) impZoomToPoints(pts, g.file);
+            impStatus(`🔎 ${g.created.length} asset(s) created by the ${impEsc(g.when)} import: ${impEsc(g.created.slice(0, 8).map(e => e.name).join(' · '))}${g.created.length > 8 ? ' …' : ''}`);
+        });
+        el.querySelectorAll('[data-impimp-del]').forEach(b => b.onclick = () => { impDeleteImportGroup(b.getAttribute('data-impimp-del')).catch(e => { console.warn(`${TAG} 📥 import delete failed:`, e); impStatus(`Delete failed: ${impEsc(e && e.message || e)}`, '#ff6060'); }); });
+    }
+    async function impDeleteImportGroup(key) {
+        if (liteBlockedWrite('delete imported assets')) return;
+        const sid = genState.siteID;
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        const g = impScanImports().find(x => x.key === key);
+        if (!g || !g.created.length) { impStatus('That import has no created assets left on the site', '#ffb347'); impRenderImportsUi(); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { impStatus('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
+        const names = g.created.map(e => e.name);
+        if (!confirm(`Delete the ${g.created.length} asset(s) CREATED by the import on ${g.when} from ${g.file}?\n\n${names.slice(0, 12).join('\n')}${names.length > 12 ? `\n… +${names.length - 12} more` : ''}\n\nUpdated assets are not touched. Each delete is banked by Delete Guard when installed.`)) return;
+        try { downloadJSONFile(`asset-import-undo-${sid}-${Date.now()}.json`, JSON.stringify({ site: sid, import: { file: g.file, when: g.when, who: g.who }, deleted: g.created }, null, 1)); } catch (e) {}
+        let ok = 0, fail = 0;
+        const dead = new Set();
+        for (let i = 0; i < g.created.length; i++) {
+            const e = g.created[i];
+            impStatus(`deleting ${i + 1}/${g.created.length} — "${impEsc(e.name)}"…`);
+            try {
+                const r = await fetch(`/map_objects/${encodeURIComponent(e.id)}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
+                if (r.ok || r.status === 404) { ok++; dead.add(e.id); }
+                else { fail++; console.warn(`${TAG} 📥 undo-by-stamp #${e.id}: server ${r.status}${r.status === 409 ? ' (Delete Guard blocked — its pre-delete backup failed)' : ''}`); if (r.status === 403) { impStatus(`ABORTED — server 403 at ${i + 1}/${g.created.length}`, '#ff6060'); break; } }
+            } catch (err) { fail++; console.warn(`${TAG} 📥 undo-by-stamp #${e.id}:`, err.message); }
+            await sleep(DELETE_GAP_MS);
+        }
+        imp.lastCreated = imp.lastCreated.filter(id => !dead.has(id));
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        imp._rootCache = null; impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
+        try { impMarkDirty(); } catch (e) {}
+        impRenderImportsUi();
+        impStatus(`🗑 ${ok} deleted${fail ? `, <span style="color:#ff6060">${fail} failed</span>` : ''} — undo file downloaded (the deleted assets' full records)`, fail ? '#ffb347' : '#5fff5f');
+        showToast(fail ? `Undo: ${ok} deleted, ${fail} failed` : `✓ ${ok} imported asset(s) deleted`, fail ? 'rgba(255,96,96,0.55)' : undefined);
     }
     function impNowStamp() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; }
     function impRenderNotesCols(host) {
@@ -23136,7 +23206,7 @@
             <span style="color:#666;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0" title="sample value">${impEsc(String(sample[h] == null ? '' : sample[h]).slice(0, 40))}</span>
         </div>`;
         const first = imp.points.find(p => !p.done);
-        const preview = first ? impComposeNotes(first, impNowStamp()) : '';
+        const preview = first ? impComposeNotes(first, impNowStamp(), 'create') : '';
         el.innerHTML = `<div style="margin-top:8px;padding:6px 8px;background:rgba(122,223,230,0.04);border:1px dashed rgba(122,223,230,0.3);border-radius:3px">
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px;font-size:11px">
                 <b style="color:#7adfe6">Notes</b><span style="color:#888;font-size:10px">tick every column that should go into each asset's notes · label above, value below, blank line between · the client's original name is always first</span>
@@ -23933,6 +24003,7 @@
                 <button id="aim-imp-commit" style="${btnCss('95,255,95')};font-weight:600">✓ Create selected</button>
                 <button id="aim-imp-undocreate" style="${btnCss('255,179,71')}" title="Delete exactly the assets the most recent import created (this session). Each delete rides Delete Guard's undo ring when installed.">↩ Undo last import</button>
             </div>
+            <div id="aim-imp-imports" style="margin-top:6px"></div>
             ${IMP_SEC_CLOSE}
             ${impSecOpenHtml('adv')}
             <div id="aim-imp-adv">
@@ -23954,6 +24025,7 @@
         impRenderPriUi();
         impRenderEnvUi();
         impRenderResumeUi();
+        try { impRenderImportsUi(); } catch (e) {}
         impAutosaveTimer();
         impSyncUi();
     }
@@ -24909,7 +24981,7 @@
         };
         const stamp = impNowStamp();
         const byIdEnt = new Map(ents.map(e => [e.id, e]));
-        plan.forEach(x => { x.name = x.update ? (byIdEnt.get(x.p.dupId) || {}).name || x.p.name : uniq(x.p.name); x.notes = impComposeNotes(x.p, stamp); });   // v4.345: notes = original name + chosen columns + who/when/file
+        plan.forEach(x => { x.name = x.update ? (byIdEnt.get(x.p.dupId) || {}).name || x.p.name : uniq(x.p.name); x.notes = impComposeNotes(x.p, stamp, x.update ? 'update' : 'create'); });   // v4.345: notes = original name + chosen columns + who/when/file · v4.365: stamp says created / updated
         let siteCfg = null;
         if (nUpd) { try { siteCfg = await fetchSiteConfig(sid); } catch (e) {} if (!siteCfg) { impStatus('Could not read the site config (mountain-terrain flag) — updates refused, nothing written', '#ff6060'); return; } }
         // backup manifest BEFORE any write (rollback = delete the created ids / re-POST the updated bodies)
@@ -24970,6 +25042,7 @@
         imp._rootCache = null;
         impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
         try { impSaveSession('import'); } catch (e) {}   // v4.364: the undo record is on disk before the user can reload
+        try { impRenderImportsUi(); } catch (e) {}
         if (!aborted) impStatus(`DONE: <b>${ok}</b> created${nUpd ? ` · <b>${updOk}/${nUpd}</b> updated (type + notes)` : ''}${fail ? ` · <span style="color:#ff6060">${fail} FAILED (kept staged + selected)</span>` : ''}${skippedDups ? ` · ${skippedDups} name match(es) skipped` : ''} · verify ${verified.length}/${created.length} created present${nUpd ? `, ${updVerified.length}/${updated.length} updates match` : ''} · reload to edit them natively`, (fail || updVerified.length !== updated.length) ? '#ffb347' : '#5fff5f');
         showToast(fail ? `Import: ${ok} created, ${updOk} updated, ${fail} FAILED — see the importer panel` : `✓ ${ok} created${updOk ? `, ${updOk} updated` : ''}`, fail ? 'rgba(255,96,96,0.55)' : undefined);
     }
@@ -25328,7 +25401,7 @@
         };
         const json = JSON.stringify(data);
         const live = imp.points.filter(p => !p.done).length;
-        const meta = { v: 1, savedAt: data.savedAt, fileName: imp.fileName, rows: imp.rows.length, live, moved: imp.points.filter(p => p.orig).length, removed: imp.points.filter(p => p.removed).length, created: imp.points.filter(p => p.done && !p.removed).length, shapes: imp.shapes.length, bytes: json.length, siteName: getCurrentSiteName() || '' };
+        const meta = { v: 1, savedAt: data.savedAt, fileName: imp.fileName, rows: imp.rows.length, live, moved: imp.points.filter(p => p.orig).length, removed: imp.points.filter(p => p.removed).length, created: imp.points.filter(p => p.done && !p.removed).length, shapes: imp.shapes.length, bytes: json.length, siteName: getCurrentSiteName() || '', undoCreated: imp.lastCreated.length, undoUpdated: imp.lastUpdated.length };
         try { GM_setValue(IMP_SESSION_DATA + k, json); GM_setValue(IMP_SESSION_META + k, JSON.stringify(meta)); }
         catch (e) { console.warn(`${TAG} 📥 session save failed (${why}):`, e); impStatus(`💾 save failed: ${impEsc(e && e.message || e)}`, '#ff6060'); return false; }
         imp.dirty = false; imp.lastSavedAt = data.savedAt;
@@ -25358,7 +25431,8 @@
         imp.mapOpen = false;
         if (d.pri) { Object.assign(imp.pri, { on: !!d.pri.on, oilCol: d.pri.oilCol || null, waterCol: d.pri.waterCol || null, blpdCol: d.pri.blpdCol || null, priCol: d.pri.priCol || null }); imp.pri._guessed = true; }
         if (d.env) { imp.env.apiCol = d.env.apiCol || null; imp.env.notes = d.env.notes !== false; imp.env.checkedAt = d.env.checkedAt || null; if (typeof d.env.mismatchFt === 'number') imp.env.mismatchFt = d.env.mismatchFt; imp.env._guessed = true; }
-        if (d.undo) { imp.lastCreated = Array.isArray(d.undo.created) ? d.undo.created.slice() : []; imp.lastUpdated = Array.isArray(d.undo.updated) ? d.undo.updated.filter(u => u && u.id != null && u.before) : []; }
+        if (d.undo) { imp.lastCreated = Array.isArray(d.undo.created) ? d.undo.created.slice() : []; imp.lastUpdated = Array.isArray(d.undo.updated) ? d.undo.updated.filter(u => u && u.id != null && u.before) : []; console.log(`${TAG} 📥 resume: undo record ${imp.lastCreated.length} created / ${imp.lastUpdated.length} updated`); }
+        else console.log(`${TAG} 📥 resume: no undo record in this session (saved by an older version or before any import)`);
         impRenderMappingUi();
         impBuildPoints();                                            // rebuilds points from rows + mapping (also recomputes dups/flags)
         const byI = new Map(imp.points.map(p => [p.i, p]));
@@ -25387,7 +25461,7 @@
         if (!m || inMemory) { el.innerHTML = ''; el.style.display = 'none'; return; }
         el.style.display = '';
         el.innerHTML = `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:6px 8px;background:rgba(95,255,95,0.07);border:1px solid rgba(95,255,95,0.45);border-radius:3px;font-size:11px;color:#cfd6dc">
-            <b style="color:#5fff5f">↻ Saved progress</b> <span>${impEsc(m.fileName || 'file')} · saved ${impEsc(impFmtWhen(m.savedAt))} · ${m.live} staged${m.moved ? ` · ${m.moved} moved` : ''}${m.removed ? ` · ${m.removed} removed` : ''}${m.created ? ` · ${m.created} created` : ''} · ${m.shapes} boundar${m.shapes === 1 ? 'y' : 'ies'} · ${(m.bytes / 1048576).toFixed(1)} MB</span>
+            <b style="color:#5fff5f">↻ Saved progress</b> <span>${impEsc(m.fileName || 'file')} · saved ${impEsc(impFmtWhen(m.savedAt))} · ${m.live} staged${m.moved ? ` · ${m.moved} moved` : ''}${m.removed ? ` · ${m.removed} removed` : ''}${m.created ? ` · ${m.created} created` : ''} · ${m.shapes} boundar${m.shapes === 1 ? 'y' : 'ies'} · ${(m.bytes / 1048576).toFixed(1)} MB${(m.undoCreated || m.undoUpdated) ? ` · <b style="color:#ffb347">undo: ${m.undoCreated || 0} created / ${m.undoUpdated || 0} updated</b>` : ''}</span>
             <span style="flex:1"></span>
             <button id="aim-imp-resume-go" style="background:rgba(95,255,95,0.18);color:#5fff5f;border:1px solid rgba(95,255,95,0.6);border-radius:3px;padding:3px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">↻ Resume</button>
             <button id="aim-imp-resume-drop" style="background:transparent;color:#ff8a80;border:1px solid rgba(255,90,90,0.45);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px">Discard</button>
@@ -28815,7 +28889,7 @@
             steps: ['🔍 Scan crossings (or right-click a flight path → 🛗 for a manual point).', 'Review each staged crossing — bridge height, elevator lengths, preflight result.', 'Untick Dry run → Commit. ↩ Undo restores the flight paths and deletes the poles.'],
             test: 'Scan a site with a known transmission crossing, confirm one staged set per crossing, Commit with Dry run ON.' },
         imp: { what: 'Bring a client asset list into Percepto. Load a CSV or KML → points stage on the map (nothing written) → narrow with boundaries → map the type → ✓ Create makes real asset squares. Create-only, with dry run, backup manifest and undo.',
-            steps: ['The page is five numbered sections in working order (plus Advanced). Each header shows where it stands; click to open / close, or use the jump chips at the top. The status line under the title shows the latest result.', 'Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', '5 · Enverus check: set the Developer API key once, pick the API-number column, Cross-check — every selected well gets its Enverus status / type / trajectory / operator / dates and location; anything not plainly producing lands in Placement › 🛢 Enverus and an "Enverus" block goes into the notes.', 'Priority tiers (in 3 · Type & priority): pick the oil + water columns (or a single BLPD column, or a ready-made P1/P2/P3 column); every asset on a pad shares the pad total; the tier is written as a type prefix ("P1 - …") and a Priority / Prioritized block in the notes. "name matches → update type + notes" is the quarterly re-run: load the new list, review the Tier report, Create.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
+            steps: ['The page is five numbered sections in working order (plus Advanced). Each header shows where it stands; click to open / close, or use the jump chips at the top. The status line under the title shows the latest result.', 'Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', 'Undo: ↩ Undo last import reverts the last run (creates deleted, updates put back) and survives a reload via ↻ Resume. Independently, 🕘 Imports on this site lists every import found on the assets themselves (the "Imported by …" line) and can delete a run\'s created assets from any machine, any time.', '5 · Enverus check: set the Developer API key once, pick the API-number column, Cross-check — every selected well gets its Enverus status / type / trajectory / operator / dates and location; anything not plainly producing lands in Placement › 🛢 Enverus and an "Enverus" block goes into the notes.', 'Priority tiers (in 3 · Type & priority): pick the oil + water columns (or a single BLPD column, or a ready-made P1/P2/P3 column); every asset on a pad shares the pad total; the tier is written as a type prefix ("P1 - …") and a Priority / Prioritized block in the notes. "name matches → update type + notes" is the quarterly re-run: load the new list, review the Tier report, Create.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
             test: 'Load the list, add one boundary, confirm the selected count drops, Create with Dry run ON.' },
         sci: { what: 'Applies the Ortho Scanner review sheet\'s decisions: accepted NFZs and flight-path leg changes stage on the map (green / yellow, removed legs red), preflight runs, then Apply writes them — NFZs create-only, flight paths one POST each with Delete Guard backups.',
             steps: ['Load the decisions JSON and the scan bundle from the review sheet.', 'Check the staged plan on the map and the preflight result.', 'Untick Dry run → Apply.'],

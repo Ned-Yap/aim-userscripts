@@ -1,3 +1,7 @@
+## 2026-10-19 — Asset Import: undo that reads the site — Site Setup Tools latest v4.365 (latest only)
+
+- **Site Setup Tools (latest) v4.365.** Every asset the importer writes now ends its notes with "Imported by <you> on <date time> from <file> · created by import" (or "· updated by import"). A new **🕘 Imports on this site** list under the Create button reads those lines off the live assets — no session, no reload dependency, any machine — groups them per import run (time · file · author · created / updated counts), 🔎 shows a run's assets on the map, and **🗑 deletes a run's created assets** as a batch (confirm with names, a JSON of the deleted records downloads first, every delete rides Delete Guard). Updated assets are listed but only reverted via ↩ Undo last import / the backup manifest. The ↻ Resume banner now says whether a saved undo record exists, and the console says so on resume.
+
 ## 2026-10-19 — Asset Import: Undo always visible, survives a reload — Site Setup Tools latest v4.364 (latest only)
 
 - **Site Setup Tools (latest) v4.364.** "↩ Undo last import" now sits next to Create from the moment points are staged (greyed with "nothing to undo yet" until an import writes something), and the record of what the last import created / updated is saved with the session the moment the import finishes — so after a reload, ↻ Resume brings the Undo back with it. Previously the button only existed in the same page session as the import.
