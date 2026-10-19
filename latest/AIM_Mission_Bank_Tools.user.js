@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.10
+// @version      3.11
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.10';
+    const SCRIPT_VERSION = '3.11';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -663,12 +663,12 @@
         if (!r.ok) throw new Error(`HTTP ${r.status} ${url}`);
         return r.json();
     }
-    async function covFetchAsset(sid, a, monthStartSec, nowSec, weekStart, pad) {
+    async function covFetchAsset(sid, a, monthStartSec, nowSec, weekStart, pad, monthStartLocal) {
         const rec = { id: a.id, name: a.name, pad, tier: covTierOf(a.poi), poi: a.poi || '', lastAt: null, lastMission: '', monthFlies: 0, weekFlies: 0, monthImages: 0, totalImages: null, flies: [], planned: false, err: '' };
         try {
             const j = await covFetchJson(covImagesUrl(sid, a.id, monthStartSec, nowSec, 200));
-            const rows = (j && j.results) || [];
-            rec.monthImages = typeof j.count === 'number' ? j.count : rows.length;
+            const rows = ((j && j.results) || []).filter(im => im && im.created_at && new Date(im.created_at) >= monthStartLocal);
+            rec.monthImages = rows.length;
             const flies = new Map();          // "day|mission" → newest iso
             rows.forEach(im => { const k = `${covDayKey(im.created_at)}|${im.mission_name || ''}`; if (!flies.has(k) || flies.get(k) < im.created_at) flies.set(k, im.created_at); });
             rec.flies = [...flies.entries()].map(([k, at]) => ({ day: k.split('|')[0], mission: k.split('|')[1], at })).sort((x, y) => y.at < x.at ? -1 : 1);
@@ -701,13 +701,18 @@
             const now = new Date();
             const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
             const weekStart = covMonday(now);
-            const monthStartSec = Math.floor(monthStart.getTime() / 1000), nowSec = Math.floor(now.getTime() / 1000) + 60;
+            // v3.11: the server 400s unless when_after sits on a UTC day boundary
+            // (local-midnight Central = +5 h → 400, seen live). Day-align the
+            // window (floor to the UTC day that contains month start, end of
+            // today UTC) and apply the exact local month edge client-side.
+            const monthStartSec = Math.floor(monthStart.getTime() / 1000 / 86400) * 86400;
+            const nowSec = Math.floor(now.getTime() / 1000 / 86400) * 86400 + 86400 - 1;
             const recs = new Array(assets.length);
             let next = 0, done = 0;
             const worker = async () => {
                 while (next < assets.length) {
                     const i = next++;
-                    recs[i] = await covFetchAsset(sid, assets[i], monthStartSec, nowSec, weekStart, padOf(assets[i]));
+                    recs[i] = await covFetchAsset(sid, assets[i], monthStartSec, nowSec, weekStart, padOf(assets[i]), monthStart);
                     done++;
                     if (onProgress && (done % 10 === 0 || done === assets.length)) onProgress(done, assets.length);
                 }
