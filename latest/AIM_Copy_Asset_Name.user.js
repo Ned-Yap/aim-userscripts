@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.366
+// @version      4.367
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.366';
+    const SCRIPT_VERSION = '4.367';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -247,6 +247,9 @@
     let gmtMasterEnabled = true;
     let gmtAltGate = false;         // CP toggle: require ALT+click to place (plain click stays free for Percepto)
     let impSizeFt = 55;             // created-asset square side ft, CP-editable (55 ft = field default since v4.330)
+    let impShapeColor = '#c39bd3';  // v4.367: ✏ Shape — drawn asset polygons (Percepto asset purple), CP-editable
+    let impShapeOpacity = 0.25;     // v4.367: fill opacity
+    let impShapeFill = true;        // v4.367: filled or outline only
     let impDeleteGuardSeen = 0;     // ts of the last Delete Guard REGISTER seen on the control channel
     const AIR_THRESH_KEY = 'aim-airspace-thresholds';
     const AIR_ENABLE_KEY = 'aim-airspace-enabled';
@@ -6639,7 +6642,7 @@
             return false;
         }
     }
-    async function createAssetSquare(sid, lat, lng, sizeFt, name, subtype, subtypeIsNew, notes) {
+    async function createAssetSquare(sid, lat, lng, sizeFt, name, subtype, subtypeIsNew, notes, customPoints) {
         if (liteBlockedWrite('create asset')) return { ok: false, error: 'Read-only in Lite mode.' };
         try {
             const csrf = getCsrfToken();
@@ -6661,7 +6664,7 @@
             b.type = 3;
             b.name = name;
             b.site_id = sid;
-            b.points = assetSquarePoints(lat, lng, sizeFt);
+            b.points = (Array.isArray(customPoints) && customPoints.length >= 3) ? customPoints.map(v => ({ lat: v.lat, lng: v.lng })) : assetSquarePoints(lat, lng, sizeFt);   // v4.367: ✏ drawn outline wins over the square
             b.description = notes ? String(notes).slice(0, 2000) : '';   // v4.330: importer Notes column → asset notes
             b.restrictions = {};
             b.arcs = [];
@@ -13132,6 +13135,9 @@
             try { if (imp.points.length) { impComputeDups(); impRenderStaged(); impSyncUi(); } } catch (e) {}
             return;
         }
+        if (id === 'imp-shape-color' && typeof msg.value === 'string') { if (msg.value === impShapeColor) return; impShapeColor = msg.value; try { impRenderAssetShapes(); } catch (e) {} return; }
+        if (id === 'imp-shape-opacity' && typeof msg.value === 'number') { if (msg.value === impShapeOpacity) return; impShapeOpacity = Math.max(0, Math.min(1, msg.value)); try { impRenderAssetShapes(); } catch (e) {} return; }
+        if (id === 'imp-shape-fill') { const v = !!(msg.value !== undefined ? msg.value : msg.enabled); if (v === impShapeFill) return; impShapeFill = v; try { impRenderAssetShapes(); } catch (e) {} return; }
         if (id === 'imp-autosave-min' && typeof msg.value === 'number') {
             if (msg.value === impAutosaveMin || msg.value < 0) return;
             impAutosaveMin = msg.value;
@@ -13433,6 +13439,10 @@
                 { id: 'imp-dup-ft', label: 'Nearby flag radius (staged point within N ft of an existing asset, not overlapping it — informational)', type: 'number', min: 0, max: 1000, step: 5, default: 50, unit: 'ft' },
                 { id: 'imp-size-ft', label: 'Created-asset square size', type: 'number', min: 5, max: 2000, step: 5, default: 55, unit: 'ft' },
                 { id: 'imp-autosave-min', label: 'Autosave import progress every N minutes (0 = only on change / close)', type: 'number', min: 0, max: 60, step: 1, default: 3, unit: 'min' },
+                { id: 'imp-shape-hdr', label: '✏ Shape — drawn asset outlines (before Create)', type: 'header' },
+                { id: 'imp-shape-color', label: 'Outline colour', type: 'color', default: '#c39bd3' },
+                { id: 'imp-shape-opacity', label: 'Fill opacity (0 = outline only)', type: 'number', min: 0, max: 1, step: 0.05, default: 0.25 },
+                { id: 'imp-shape-fill', label: 'Fill the shapes', type: 'boolean', default: true },
                 { id: 'imp-open', label: '📥 Open Asset Importer', type: 'button', action: 'imp-open' },
             ],
             hotkeys: [],
@@ -22520,6 +22530,7 @@
         target: 'staged',                           // 'staged' | 'assets' (🗑 delete mode)
         mode: null,                                 // null | 'circle' | 'lasso' | 'pick' | 'edit' | 'move'
         moveHeld: null, moveDrag: false, moveDownPt: null,   // v4.344: ↔ Move point — the staged point being carried
+        shapeHeld: null, stroke: null, strokeLayer: null, assetShapeLayers: [], shapeEdit: null, shapeW: 30, snapFt: 10,   // v4.367: ✏ Shape
         radiusVal: 3, radiusUnit: 'mi', includeDups: false,   // v4.343: 3 mi = the usual base reach circle
         keepShield: true,                           // v4.343: keep "- unsh" / "shielded" modifiers in subtypes (off = strip them)
         dupMode: 'update',                          // v4.347: name matches an existing asset → 'skip' | 'update' (type + notes only) | 'copy' (create "-N")
@@ -22547,7 +22558,7 @@
         lastDelete: null,                           // {siteID, when, entities:[full bodies]} — ↩ Undo batch source
         assetIndex: null,                           // cached [{id,name,clean,ring,bbox,centroid}] for dup-guard + delete select
     };
-    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
+    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, shapeW: imp.shapeW, snapFt: imp.snapFt, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
     function impLoadParams() {
         try {
             const raw = GM_getValue(IMP_PARAMS_KEY, ''); if (!raw) return;
@@ -22565,6 +22576,8 @@
             if (o.pri && typeof o.pri.zeroUntier === 'boolean') imp.pri.zeroUntier = o.pri.zeroUntier;
             if (o.pri && typeof o.pri.envUntier === 'boolean') imp.pri.envUntier = o.pri.envUntier;
             if (o.secOpen && typeof o.secOpen === 'object') Object.keys(imp.secOpen).forEach(k => { if (typeof o.secOpen[k] === 'boolean') imp.secOpen[k] = o.secOpen[k]; });
+            if (typeof o.shapeW === 'number' && o.shapeW >= 5) imp.shapeW = o.shapeW;
+            if (typeof o.snapFt === 'number' && o.snapFt >= 0) imp.snapFt = o.snapFt;
         } catch (e) {}
     }
     // v4.352: section chrome — numbered, collapsible, one-line live summary in the header
@@ -23368,8 +23381,9 @@
             //   child = the square this point would become (Size ft) overlaps an
             //           existing asset, partially or fully (parent/child);
             //   near  = no overlap, but within the radius of one (nearby).
-            const sq = assetSquarePoints(p.lat, p.lng, impSizeFt);
-            const halfLat = (sq[0].lat - p.lat) * 1.05, halfLng = (sq[1].lng - p.lng) * 1.05;
+            const sq = (p.shape && p.shape.length >= 3) ? p.shape : assetSquarePoints(p.lat, p.lng, impSizeFt);   // v4.367: a drawn outline is what will be created
+            let sla0 = Infinity, sla1 = -Infinity, slo0 = Infinity, slo1 = -Infinity; sq.forEach(v => { sla0 = Math.min(sla0, v.lat); sla1 = Math.max(sla1, v.lat); slo0 = Math.min(slo0, v.lng); slo1 = Math.max(slo1, v.lng); });
+            const halfLat = Math.max(sla1 - p.lat, p.lat - sla0) * 1.05, halfLng = Math.max(slo1 - p.lng, p.lng - slo0) * 1.05;
             const dLng = dLat / Math.max(0.2, Math.cos(p.lat * Math.PI / 180));
             let bestNear = null, bestChild = null;
             for (const a of imp.assetIndex) {
@@ -23417,6 +23431,7 @@
         const L = getLeafletL(), map = getLeafletMap();
         if (!L || !map) return;
         impClearLayers();
+        try { impRenderAssetShapes(); } catch (e) {}
         const live = imp.points.filter(p => !p.done);
         if (!live.length) { impEnsureMoveEnd(false); return; }
         impEnsureMoveEnd(true);
@@ -23648,6 +23663,143 @@
         rd.onerror = () => impStatus('Shape file read failed', '#ff6060');
         rd.readAsText(file);
     }
+    // ---- v4.367 ✏ SHAPE TOOLKIT — geometry in a local metre frame ----
+    function impProj(lat0, lng0) {
+        const kx = 111320 * Math.cos(lat0 * Math.PI / 180), ky = 111320;
+        return { to: (p) => ({ x: (p.lng - lng0) * kx, y: (p.lat - lat0) * ky }), from: (q) => ({ lat: lat0 + q.y / ky, lng: lng0 + q.x / kx }) };
+    }
+    function impHull(pts) {
+        const P = pts.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+        if (P.length < 3) return P;
+        const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+        const lower = []; for (const p of P) { while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop(); lower.push(p); }
+        const upper = []; for (let i = P.length - 1; i >= 0; i--) { const p = P[i]; while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop(); upper.push(p); }
+        upper.pop(); lower.pop(); return lower.concat(upper);
+    }
+    function impRectAt(angle, pts) {                 // bbox of pts in a frame rotated by angle → 4 corners back in the original frame
+        const c = Math.cos(angle), sn = Math.sin(angle);
+        let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+        pts.forEach(p => { const u = p.x * c + p.y * sn, v = -p.x * sn + p.y * c; u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v); });
+        const back = (u, v) => ({ x: u * c - v * sn, y: u * sn + v * c });
+        return { area: (u1 - u0) * (v1 - v0), corners: [back(u0, v0), back(u1, v0), back(u1, v1), back(u0, v1)], len: u1 - u0, wid: v1 - v0 };
+    }
+    function impMinAreaRect(pts) {
+        const h = impHull(pts); if (h.length < 3) return impRectAt(0, pts);
+        let best = null;
+        for (let i = 0; i < h.length; i++) { const a = h[i], b = h[(i + 1) % h.length]; const r = impRectAt(Math.atan2(b.y - a.y, b.x - a.x), pts); if (!best || r.area < best.area) best = r; }
+        return best;
+    }
+    function impStrokeToRing(strokeLL, widthM) {
+        if (strokeLL.length < 2) return null;
+        const pr = impProj(strokeLL[0].lat, strokeLL[0].lng);
+        const pts = strokeLL.map(pr.to);
+        let mx = 0, my = 0; pts.forEach(p => { mx += p.x; my += p.y; }); mx /= pts.length; my /= pts.length;
+        let cxx = 0, cxy = 0, cyy = 0; pts.forEach(p => { const dx = p.x - mx, dy = p.y - my; cxx += dx * dx; cxy += dx * dy; cyy += dy * dy; });
+        const theta = 0.5 * Math.atan2(2 * cxy, cxx - cyy);
+        const along = impRectAt(theta, pts);
+        let corners;
+        if (along.len < 1.5) return null;                                // a click, not a stroke
+        if (along.wid > 0.35 * along.len) corners = impMinAreaRect(pts).corners;   // a loop / blob → tightest rotated rectangle around it
+        else {                                                            // a straight-ish stroke → its length × the chosen width
+            const c = Math.cos(theta), sn = Math.sin(theta);
+            let u0 = Infinity, u1 = -Infinity, vs = 0; pts.forEach(p => { const u = p.x * c + p.y * sn; u0 = Math.min(u0, u); u1 = Math.max(u1, u); vs += -p.x * sn + p.y * c; });
+            const vc = vs / pts.length, hw = widthM / 2;
+            const back = (u, v) => ({ x: u * c - v * sn, y: u * sn + v * c });
+            corners = [back(u0, vc - hw), back(u1, vc - hw), back(u1, vc + hw), back(u0, vc + hw)];
+        }
+        return corners.map(pr.from);
+    }
+    function impSegClosest(p, a, b) {                 // closest point on segment ab to p (metre frame)
+        const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy;
+        const t = l2 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2)) : 0;
+        return { x: a.x + t * dx, y: a.y + t * dy };
+    }
+    // Snap: shift `moving` vertices (metre frame) so the closest vertex↔neighbour-edge gap ≤ snapM closes. Returns the shift.
+    function impSnapShift(movingXY, neighbourRingsXY, snapM) {
+        let best = null;
+        movingXY.forEach(v => neighbourRingsXY.forEach(ring => { for (let i = 0; i < ring.length; i++) { const q = impSegClosest(v, ring[i], ring[(i + 1) % ring.length]); const d = Math.hypot(q.x - v.x, q.y - v.y); if (d <= snapM && (!best || d < best.d)) best = { d, dx: q.x - v.x, dy: q.y - v.y }; } }));
+        return best ? { dx: best.dx, dy: best.dy } : null;
+    }
+    function impNeighbourRings(p, pr, radiusM) {
+        const out = [];
+        imp.points.forEach(q => { if (q === p || q.done || !q.shape) return; if (approxMeters(p.lat, p.lng, q.lat, q.lng) > radiusM) return; out.push(q.shape.map(pr.to)); });
+        (imp.assetIndex || []).forEach(a => { if (approxMeters(p.lat, p.lng, a.centroid.lat, a.centroid.lng) > radiusM) return; out.push(a.ring.map(pr.to)); });
+        return out;
+    }
+    function impAssignShape(p, ring, how) {
+        if (!ring || ring.length < 3) return;
+        const c = ringCentroid(ring);
+        if (!p.orig) p.orig = { lat: p.lat, lng: p.lng };
+        p.shape = ring; p.lat = c.lat; p.lng = c.lng;
+        try { impComputeDups(); } catch (e) {}
+        impRefreshAfterSelChange();
+        const pr = impProj(c.lat, c.lng); const r = impMinAreaRect(ring.map(pr.to));
+        impStatus(`✏ "${impEsc(p.name)}" → ${how} · ${Math.round(r.len / GEN_FT_TO_M)} × ${Math.round(r.wid / GEN_FT_TO_M)} ft, ${ring.length} points — Create writes this outline instead of the ${impSizeFt} ft square · drag a corner / edge to adjust · Delete = back to a square`);
+    }
+    function impShapeFinishStroke() {
+        const st = imp.stroke; imp.stroke = null; impClearStrokeLayer();
+        if (!st || st.length < 2) return;
+        const ring = impStrokeToRing(st, imp.shapeW * GEN_FT_TO_M);
+        if (!ring) { impStatus('✏ too short — drag a longer stroke', '#ffb347'); return; }
+        let p = imp.shapeHeld;
+        if (!p) {                                                         // nearest unshaped dot within 150 ft of the shape centre
+            const c = ringCentroid(ring); let bd = Infinity;
+            imp.points.forEach(q => { if (q.done || q.shape) return; const d = approxMeters(c.lat, c.lng, q.lat, q.lng); if (d < bd) { bd = d; p = q; } });
+            if (!p || bd > 150 * GEN_FT_TO_M) { impStatus('✏ no unshaped dot within 150 ft of that shape — click a dot first, then SHIFT+drag', '#ffb347'); impRenderStaged(); return; }
+        }
+        // snap the new outline flush to neighbours (Shift already held for the stroke, so snapping is always on here)
+        const pr = impProj(p.lat, p.lng); const xy = ring.map(pr.to);
+        const sh = impSnapShift(xy, impNeighbourRings(p, pr, 60), imp.snapFt * GEN_FT_TO_M);
+        const snapped = sh ? xy.map(q => pr.from({ x: q.x + sh.dx, y: q.y + sh.dy })) : ring;
+        imp.shapeHeld = p;
+        impAssignShape(p, snapped, sh ? 'outline (snapped flush to a neighbour)' : 'outline');
+    }
+    function impShapeClone(src, dst, noSnap) {
+        if (!src.shape) return;
+        const pr = impProj(dst.lat, dst.lng);
+        const c = ringCentroid(src.shape);
+        const dx = dst.lng - c.lng, dy = dst.lat - c.lat;
+        let ring = src.shape.map(v => ({ lat: v.lat + dy, lng: v.lng + dx }));
+        if (!noSnap) { const xy = ring.map(pr.to); const sh = impSnapShift(xy, impNeighbourRings(dst, pr, 60), imp.snapFt * GEN_FT_TO_M); if (sh) ring = xy.map(q => pr.from({ x: q.x + sh.dx, y: q.y + sh.dy })); }
+        impAssignShape(dst, ring, `copy of "${src.name}"'s outline${noSnap ? '' : ' (snapped if a neighbour was within reach)'}`);
+    }
+    function impShapeTargetAt(map, ll) {              // vertex / edge-midpoint of the HELD shape under the cursor
+        const p = imp.shapeHeld; if (!p || !p.shape) return null;
+        let cp; try { cp = map.latLngToContainerPoint([ll.lat, ll.lng]); } catch (e) { return null; }
+        const px = (v) => { try { return cp.distanceTo(map.latLngToContainerPoint([v.lat, v.lng])); } catch (e) { return Infinity; } };
+        const n = p.shape.length;
+        for (let i = 0; i < n; i++) if (px(p.shape[i]) <= IMP_PICK_PX) return { p, i, type: 'vert' };
+        for (let i = 0; i < n; i++) { const v = p.shape[i], w = p.shape[(i + 1) % n]; if (px({ lat: (v.lat + w.lat) / 2, lng: (v.lng + w.lng) / 2 }) <= IMP_PICK_PX) return { p, i, type: 'mid' }; }
+        return null;
+    }
+    function impClearStrokeLayer() { const map = getLeafletMap(); if (imp.strokeLayer) { try { if (map) map.removeLayer(imp.strokeLayer); } catch (e) {} imp.strokeLayer = null; } }
+    function impRenderStroke() {
+        const L = getLeafletL(), map = getLeafletMap(); if (!L || !map || !imp.stroke) return;
+        impClearStrokeLayer();
+        try { imp.strokeLayer = L.polyline(imp.stroke.map(q => [q.lat, q.lng]), { color: impShapeColor, weight: 3, opacity: 0.9, dashArray: '4,4', interactive: false }).addTo(map); } catch (e) {}
+    }
+    function impClearAssetShapeLayers() { const map = getLeafletMap(); (imp.assetShapeLayers || []).forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); imp.assetShapeLayers = []; }
+    function impRenderAssetShapes() {
+        const L = getLeafletL(), map = getLeafletMap(); if (!L || !map) return;
+        impClearAssetShapeLayers();
+        const editing = imp.mode === 'shape' || imp.mode === 'edit';
+        imp.points.forEach(p => {
+            if (p.done || !p.shape) return;
+            const held = imp.shapeHeld === p;
+            try {
+                const pl = L.polygon(p.shape.map(v => [v.lat, v.lng]), { color: held ? '#ff5fff' : impShapeColor, weight: held ? 3 : 2, opacity: 0.95, fill: impShapeFill && impShapeOpacity > 0, fillColor: impShapeColor, fillOpacity: impShapeFill ? impShapeOpacity : 0, interactive: false });
+                pl.addTo(map); imp.assetShapeLayers.push(pl);
+                if (editing && held) {
+                    const n = p.shape.length;
+                    for (let i = 0; i < n; i++) {
+                        const v = p.shape[i], w = p.shape[(i + 1) % n];
+                        const d = L.circleMarker([v.lat, v.lng], { radius: 5, color: '#ffffff', weight: 1.5, fillColor: '#ff5fff', fillOpacity: 1, interactive: false }); d.addTo(map); imp.assetShapeLayers.push(d);
+                        const m = L.circleMarker([(v.lat + w.lat) / 2, (v.lng + w.lng) / 2], { radius: 3.5, color: '#ffffff', weight: 1, fillColor: impShapeColor, fillOpacity: 1, interactive: false }); m.addTo(map); imp.assetShapeLayers.push(m);
+                    }
+                }
+            } catch (e) {}
+        });
+    }
     function impNearestStaged(map, ll, maxPx) {
         let cp; try { cp = map.latLngToContainerPoint([ll.lat, ll.lng]); } catch (e) { return null; }
         let best = null, bd = Infinity;
@@ -23771,6 +23923,19 @@
                 impRenderStaged(); impSyncUi();
                 return;
             }
+            if (imp.mode === 'shape') {                                  // v4.367 ✏: SHIFT+drag = stroke · click a dot = hold · ALT+click a dot = copy the held outline · corner/edge of the held outline = drag
+                let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+                if (ev.shiftKey) { ev.preventDefault(); ev.stopPropagation(); imp.stroke = [ll]; impRenderStroke(); return; }
+                const t = impShapeTargetAt(map, ll);
+                if (t) { ev.preventDefault(); ev.stopPropagation(); imp.shapeEdit = { p: t.p, i: t.i, type: t.type, down: { x: ev.clientX, y: ev.clientY }, moved: false, start: t.p.shape.map(v => ({ lat: v.lat, lng: v.lng })) }; return; }
+                const p = impNearestStaged(map, ll, IMP_PICK_PX * 1.5);
+                if (ev.altKey) { ev.preventDefault(); ev.stopPropagation(); if (!imp.shapeHeld || !imp.shapeHeld.shape) { impStatus('✏ hold a shaped dot first (click it), then ALT+click the dots that should get the same outline', '#ffb347'); return; } if (!p) { impStatus('✏ no dot there', '#ffb347'); return; } if (p === imp.shapeHeld) return; impShapeClone(imp.shapeHeld, p, false); return; }
+                if (!p) return;                                              // empty map → pan
+                ev.preventDefault(); ev.stopPropagation();
+                imp.shapeHeld = p; impRenderStaged(); impSyncUi();
+                impStatus(`✏ holding "${impEsc(p.name)}"${p.shape ? ` (${p.shape.length}-point outline) — drag a corner or an edge · ALT+click other dots to copy this outline · Delete = back to a square` : ' — SHIFT+drag a stroke across the asset: a line becomes a rectangle, a loop becomes the tightest box'}`);
+                return;
+            }
             if (!ev.altKey) return;                                      // every other tool: plain click stays free (pan / native edit)
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
             ev.preventDefault(); ev.stopPropagation();
@@ -23798,6 +23963,38 @@
             imp.lassoDownPt = { x: ev.clientX, y: ev.clientY };
         };
         imp._onMove = (ev) => {
+            if (imp.mode === 'shape' && imp.stroke && (ev.buttons & 1)) {   // ✏ stroke in progress
+                ev.preventDefault(); ev.stopPropagation();
+                let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+                const last = imp.stroke[imp.stroke.length - 1];
+                try { if (map.latLngToContainerPoint([last.lat, last.lng]).distanceTo(map.latLngToContainerPoint([ll.lat, ll.lng])) < 3) return; } catch (e) {}
+                imp.stroke.push(ll); impRenderStroke(); return;
+            }
+            if (imp.mode === 'shape' && imp.stroke && !(ev.buttons & 1)) { impShapeFinishStroke(); return; }
+            if (imp.mode === 'shape' && imp.shapeEdit) {                   // ✏ corner / edge drag on the held outline
+                const d = imp.shapeEdit;
+                if (!(ev.buttons & 1)) { imp._onUp(ev); return; }
+                if (!d.moved && Math.hypot(ev.clientX - d.down.x, ev.clientY - d.down.y) < 4) return;
+                ev.preventDefault(); ev.stopPropagation();
+                let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+                d.moved = true;
+                const p = d.p, n = d.start.length, pr = impProj(p.lat, p.lng);
+                const ring = d.start.map(v => ({ lat: v.lat, lng: v.lng }));
+                if (d.type === 'vert') ring[d.i] = { lat: ll.lat, lng: ll.lng };
+                else {                                                       // edge: both endpoints move by the cursor delta from the midpoint → stays parallel
+                    const v = d.start[d.i], w = d.start[(d.i + 1) % n];
+                    const mid = { lat: (v.lat + w.lat) / 2, lng: (v.lng + w.lng) / 2 };
+                    const dl = ll.lat - mid.lat, dg = ll.lng - mid.lng;
+                    ring[d.i] = { lat: v.lat + dl, lng: v.lng + dg }; ring[(d.i + 1) % n] = { lat: w.lat + dl, lng: w.lng + dg };
+                }
+                if (!ev.shiftKey && imp.snapFt > 0) {                        // snap the moved corner(s) flush to a neighbour; Shift = free
+                    const idx = d.type === 'vert' ? [d.i] : [d.i, (d.i + 1) % n];
+                    const movingXY = idx.map(i => pr.to(ring[i]));
+                    const sh = impSnapShift(movingXY, impNeighbourRings(p, pr, 60), imp.snapFt * GEN_FT_TO_M);
+                    if (sh) idx.forEach(i => { const q = pr.to(ring[i]); ring[i] = pr.from({ x: q.x + sh.dx, y: q.y + sh.dy }); });
+                }
+                p.shape = ring; impRenderAssetShapes(); return;
+            }
             if (imp.mode === 'move' && imp.moveHeld && imp.moveDownPt && (ev.buttons & 1)) {   // ↔ ALT+drag carries the point live
                 if (!imp.moveDrag && Math.hypot(ev.clientX - imp.moveDownPt.x, ev.clientY - imp.moveDownPt.y) < 4) return;
                 ev.preventDefault(); ev.stopPropagation();
@@ -23850,6 +24047,20 @@
             impRenderShapes();
         };
         imp._onUp = (ev) => {
+            if (imp.mode === 'shape' && imp.stroke) { ev.preventDefault(); ev.stopPropagation(); impShapeFinishStroke(); return; }
+            if (imp.mode === 'shape' && imp.shapeEdit) {
+                const d = imp.shapeEdit; imp.shapeEdit = null;
+                ev.preventDefault(); ev.stopPropagation();
+                if (!d.moved) {
+                    if (d.type === 'mid') { const n = d.p.shape.length, v = d.p.shape[d.i], w = d.p.shape[(d.i + 1) % n]; d.p.shape.splice(d.i + 1, 0, { lat: (v.lat + w.lat) / 2, lng: (v.lng + w.lng) / 2 }); impRenderAssetShapes(); impMarkDirty(); impStatus(`✏ point added — ${d.p.shape.length} points · drag it where it belongs`); }
+                    return;
+                }
+                const c = ringCentroid(d.p.shape); d.p.lat = c.lat; d.p.lng = c.lng;
+                try { impComputeDups(); } catch (e) {}
+                impRefreshAfterSelChange();
+                impStatus(`✏ "${impEsc(d.p.name)}" outline adjusted (${d.type === 'vert' ? 'corner moved' : 'edge moved'}${ev.shiftKey ? ', no snap' : ''})`);
+                return;
+            }
             if (imp.mode === 'move' && imp.moveHeld) {
                 if (imp.moveDrag) { ev.preventDefault(); ev.stopPropagation(); const p = imp.moveHeld; impFinishMove(p); }   // drag → drop here
                 else imp.moveDownPt = null;                               // plain click → keep holding until the next ALT+click
@@ -23867,6 +24078,14 @@
         imp._onKey = (ev) => {
             if (!imp.mode) return;
             const k = (ev.key || '').toLowerCase();
+            if (imp.mode === 'shape' && imp.shapeHeld && (k === 'delete' || k === 'backspace')) {   // ✏ back to a plain square
+                const t = ev.target; if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+                ev.preventDefault(); ev.stopImmediatePropagation();
+                const p = imp.shapeHeld; if (!p.shape) return;
+                p.shape = null; try { impComputeDups(); } catch (e) {} impRefreshAfterSelChange();
+                impStatus(`✏ "${impEsc(p.name)}" outline removed — it will be created as a ${impSizeFt} ft square again`);
+                return;
+            }
             if (imp.mode === 'move' && imp.moveHeld && (k === 'delete' || k === 'backspace' || (k === 'b' && ev.altKey))) {   // v4.345: drop the held point from the import
                 const t = ev.target; if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
                 ev.preventDefault(); ev.stopImmediatePropagation();
@@ -23880,7 +24099,9 @@
             }
             if (k === 'escape') {
                 ev.preventDefault(); ev.stopImmediatePropagation();
-                if (imp.moveHeld) { const p = imp.moveHeld; if (p.orig && imp.moveDrag) { p.lat = p.orig.lat; p.lng = p.orig.lng; delete p.orig; } imp.moveHeld = null; imp.moveDrag = false; imp.moveDownPt = null; impRenderStaged(); impSyncUi(); impStatus('↔ put back'); }
+                if (imp.mode === 'shape' && (imp.stroke || imp.shapeEdit)) { if (imp.shapeEdit) { imp.shapeEdit.p.shape = imp.shapeEdit.start; imp.shapeEdit = null; } imp.stroke = null; impClearStrokeLayer(); impRenderStaged(); impStatus('✏ cancelled'); }
+                else if (imp.mode === 'shape' && imp.shapeHeld) { imp.shapeHeld = null; impRenderStaged(); impSyncUi(); impStatus('✏ released'); }
+                else if (imp.moveHeld) { const p = imp.moveHeld; if (p.orig && imp.moveDrag) { p.lat = p.orig.lat; p.lng = p.orig.lng; delete p.orig; } imp.moveHeld = null; imp.moveDrag = false; imp.moveDownPt = null; impRenderStaged(); impSyncUi(); impStatus('↔ put back'); }
                 else if (imp.editDrag) { impEndEditDrag(); }
                 else if (imp.dragShape) { impEndShapeDrag(); }
                 else if (imp.lassoRing) { imp.lassoRing = null; impRenderShapes(); }
@@ -23890,6 +24111,16 @@
         // ✎ ALT+right-click a vertex deletes it (capture — beats the inspector's
         // right-click hit-test while Edit is armed).
         imp._onCtx = (ev) => {
+            if (imp.mode === 'shape' && imp.shapeHeld && imp.shapeHeld.shape) {
+                let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+                const t = impShapeTargetAt(map, ll); if (!t || t.type !== 'vert') return;
+                ev.preventDefault(); ev.stopImmediatePropagation();
+                if (t.p.shape.length <= 3) { showToast('An outline needs at least 3 points', 'rgba(255,179,71,0.6)'); return; }
+                t.p.shape.splice(t.i, 1); const c = ringCentroid(t.p.shape); t.p.lat = c.lat; t.p.lng = c.lng;
+                try { impComputeDups(); } catch (e) {} impRefreshAfterSelChange();
+                impStatus(`✏ corner removed — ${t.p.shape.length} points`);
+                return;
+            }
             if (imp.mode !== 'edit' || !ev.altKey) return;
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
             const t = impEditTargetAt(map, ll);
@@ -23927,7 +24158,9 @@
     function impSetMode(mode) {
         if (mode && !impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
         if (imp.moveHeld && mode !== 'move') { imp.moveHeld = null; imp.moveDrag = false; imp.moveDownPt = null; try { impRenderStaged(); } catch (e) {} }
+        if (mode !== 'shape') { imp.shapeHeld = null; imp.stroke = null; imp.shapeEdit = null; impClearStrokeLayer(); }
         imp.mode = mode || null;
+        if (imp.mode === 'shape' && !imp.secOpen.place) { imp.secOpen.place = true; impSaveParams(); }
         if (imp.mode === 'move' && !imp.secOpen.place) { imp.secOpen.place = true; impSaveParams(); }
         if (imp.mode) {
             try { if (nfzDraw.active) setNfzMode(null); } catch (e) {}   // mutually exclusive with the other map tools
@@ -23984,6 +24217,10 @@
             ${IMP_SEC_CLOSE}
             ${impSecOpenHtml('place')}
             <div id="aim-imp-placerow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px;padding:6px 8px;background:rgba(255,95,255,0.05);border:1px dashed rgba(255,95,255,0.35);border-radius:3px">
+                <button id="aim-imp-shape" title="Draw the asset's real outline before it is created. Click a dot to hold it, then SHIFT+drag a stroke across the asset: a straight stroke becomes a rectangle (stroke length × the width below), a loop becomes the tightest box around it. With a shaped dot held, ALT+click other dots to give them the same outline (copies snap flush to neighbours). Drag a corner or an edge of the held outline to adjust (edges stay parallel; snaps within the snap distance, hold Shift for no snap); click an edge midpoint to add a corner, right-click a corner to remove it; Delete = back to a plain square. Esc releases." style="background:rgba(195,155,211,0.12);color:#c39bd3;border:1px solid rgba(195,155,211,0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">✏ Shape</button>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Width of the rectangle a straight stroke becomes">W <input type="number" id="aim-imp-shapew" min="5" max="500" step="5" style="width:52px;${inCss}"> ft</label>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Corners / copies within this distance of a neighbouring outline snap flush to it (0 = never; hold Shift while dragging for no snap)">snap <input type="number" id="aim-imp-snapft" min="0" max="100" step="1" style="width:46px;${inCss}"> ft</label>
+                <span id="aim-imp-shape-note" style="color:#888;font-size:10px"></span>
                 <button id="aim-imp-move" title="Fix a point's location BEFORE it becomes an asset. Click a staged point to pick it up (it turns magenta), pan/zoom freely, click where it belongs to drop it — or just drag it. No Alt needed while this is on; clicking empty map still pans. Delete / Backspace while holding a point removes it from the import. Esc puts it back. Moved points keep a magenta ring; the square is created at the new spot." style="background:rgba(255,95,255,0.12);color:#ff5fff;border:1px solid rgba(255,95,255,0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">↔ Move point</button>
                 <span id="aim-imp-move-note" style="color:#888;font-size:10px"></span>
                 <button id="aim-imp-resetmoves" style="display:none;background:transparent;color:#ffb347;border:1px solid rgba(255,179,71,0.45);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px" title="Put every moved point back where the file had it">↩ reset moved</button>
@@ -24060,6 +24297,11 @@
         q('aim-imp-pick').onclick = () => impSetMode(imp.mode === 'pick' ? null : 'pick');
         q('aim-imp-edit').onclick = () => impSetMode(imp.mode === 'edit' ? null : 'edit');
         q('aim-imp-move').onclick = () => impSetMode(imp.mode === 'move' ? null : 'move');
+        q('aim-imp-shape').onclick = () => impSetMode(imp.mode === 'shape' ? null : 'shape');
+        const swEl = q('aim-imp-shapew'), snEl = q('aim-imp-snapft');
+        swEl.value = imp.shapeW; snEl.value = imp.snapFt;
+        swEl.onchange = () => { const v = parseFloat(swEl.value); if (isFinite(v) && v >= 5) { imp.shapeW = v; impSaveParams(); } };
+        snEl.onchange = () => { const v = parseFloat(snEl.value); if (isFinite(v) && v >= 0) { imp.snapFt = v; impSaveParams(); } };
         q('aim-imp-save').onclick = () => { impSaveSession('manual'); };
         q('aim-imp-resetmoves').onclick = () => {
             let n = 0;
@@ -25038,6 +25280,10 @@
                 if (rb) rb.style.display = (moved || removed) ? '' : 'none';
                 const mb = document.getElementById('aim-imp-move');
                 if (mb) { const on = imp.mode === 'move'; mb.style.background = on ? 'rgba(255,95,255,0.38)' : 'rgba(255,95,255,0.12)'; mb.textContent = on ? '↔ ON — click a dot, click its new spot · Delete=remove · Esc=off' : '↔ Move point'; }
+                const sb2 = document.getElementById('aim-imp-shape');
+                if (sb2) { const on = imp.mode === 'shape'; sb2.style.background = on ? 'rgba(195,155,211,0.42)' : 'rgba(195,155,211,0.12)'; sb2.textContent = on ? (imp.shapeHeld ? `✏ ON — holding ${imp.shapeHeld.name.slice(0, 18)} · SHIFT+drag=outline · ALT+click=copy · Esc=release` : '✏ ON — click a dot, then SHIFT+drag across the asset · Esc=off') : '✏ Shape'; }
+                const shapedN = live.filter(p => p.shape).length, sn2 = document.getElementById('aim-imp-shape-note');
+                if (sn2) sn2.innerHTML = shapedN ? `<b style="color:#c39bd3">${shapedN}</b> with a drawn outline (created as drawn; the rest as ${impSizeFt} ft squares)` : 'no outlines drawn — every point becomes a square';
             }
             show('aim-imp-delrow', true, true);
             impApplySections();   // v4.352: collapsible sections (Advanced forced open while a tool is armed / delete mode)
@@ -25161,7 +25407,7 @@
         if (nUpd) { try { siteCfg = await fetchSiteConfig(sid); } catch (e) {} if (!siteCfg) { impStatus('Could not read the site config (mountain-terrain flag) — updates refused, nothing written', '#ff6060'); return; } }
         // backup manifest BEFORE any write (rollback = delete the created ids / re-POST the updated bodies)
         const manifest = { site: sid, at: new Date().toISOString(), file: imp.fileName, sizeFt: impSizeFt,
-            creates: plan.filter(x => !x.update).map(x => ({ name: x.name, subtype: x.subtype, lat: x.p.lat, lng: x.p.lng, notes: x.notes, movedFrom: x.p.orig || null })),
+            creates: plan.filter(x => !x.update).map(x => ({ name: x.name, subtype: x.subtype, lat: x.p.lat, lng: x.p.lng, notes: x.notes, movedFrom: x.p.orig || null, shape: x.p.shape || null })),
             updates: plan.filter(x => x.update).map(x => ({ id: x.p.dupId, name: x.name, after: { subtype: x.subtype, notes: x.notes }, before: byIdEnt.get(x.p.dupId) || null })) };
         try { localStorage.setItem(`aim_imp_commit_backup:${sid}`, JSON.stringify(manifest)); } catch (e) {}
         try { downloadJSONFile(`asset-import-${sid}-${Date.now()}.json`, JSON.stringify(manifest, null, 1)); } catch (e) { impStatus('backup manifest download failed (localStorage stash still written)'); }
@@ -25192,7 +25438,7 @@
                 continue;
             }
             impStatus(`creating ${i + 1}/${plan.length} — "${impEsc(x.name)}"…`);
-            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impSizeFt, x.name, x.subtype, !knownSubs.has(x.subtype), x.notes || '');
+            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impSizeFt, x.name, x.subtype, !knownSubs.has(x.subtype), x.notes || '', x.p.shape || null);
             if (r && r.ok) {
                 ok++; created.push({ id: r.id, name: x.name, point: x.p });
                 knownSubs.add(x.subtype);
@@ -25567,6 +25813,7 @@
                 if (p.reviewed) o.rv = true;
                 if (p.env && !p.env.noApi) o.env = p.env;
                 if (p.src) o.src = p.src;
+                if (p.shape && p.shape.length >= 3) o.shape = p.shape;
                 return (Object.keys(o).length > 1) ? o : null;
             }).filter(Boolean),
             shapes: imp.shapes.map(sh => sh.kind === 'circle' ? { id: sh.id, kind: 'circle', center: sh.center, radiusM: sh.radiusM, name: sh.name || '' } : { id: sh.id, kind: sh.kind, ring: sh.ring, handle: sh.handle, name: sh.name || '' }),
@@ -25622,6 +25869,7 @@
             if (o.rv) p.reviewed = true;
             if (o.env) p.env = o.env;
             if (o.src) p.src = o.src;
+            if (Array.isArray(o.shape) && o.shape.length >= 3) p.shape = o.shape;
         });
         try { impComputeDups(); } catch (e) {}
         impRefreshAfterSelChange();
@@ -25650,6 +25898,7 @@
     function impTeardown() {
         if (imp.dirty) { try { impSaveSession('close'); } catch (e) {} }
         try { impClearPulse(); } catch (e) {}
+        try { impClearAssetShapeLayers(); impClearStrokeLayer(); } catch (e) {}
         try { impSetMode(null); } catch (e) {}
         impEnsureMoveEnd(false);
         impClearLayers(); impClearShapeLayers(); impClearAssetLayers();
@@ -29066,7 +29315,7 @@
             steps: ['🔍 Scan crossings (or right-click a flight path → 🛗 for a manual point).', 'Review each staged crossing — bridge height, elevator lengths, preflight result.', 'Untick Dry run → Commit. ↩ Undo restores the flight paths and deletes the poles.'],
             test: 'Scan a site with a known transmission crossing, confirm one staged set per crossing, Commit with Dry run ON.' },
         imp: { what: 'Bring a client asset list into Percepto. Load a CSV or KML → points stage on the map (nothing written) → narrow with boundaries → map the type → ✓ Create makes real asset squares. Create-only, with dry run, backup manifest and undo.',
-            steps: ['The page is five numbered sections in working order (plus Advanced). Each header shows where it stands; click to open / close, or use the jump chips at the top. The status line under the title shows the latest result.', 'Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', 'Undo: ↩ Undo last import reverts the last run (creates deleted, updates put back) and survives a reload via ↻ Resume. Independently, 🕘 Imports on this site lists every import found on the assets themselves (the "Imported by …" line) and can delete a run\'s created assets from any machine, any time.', '5 · Enverus check: set the Developer API key once, pick the API-number column, Cross-check — every selected well gets its Enverus status / type / trajectory / operator / dates and location; anything not plainly producing lands in Placement › 🛢 Enverus and an "Enverus" block goes into the notes.', '🔍 Find missing wells (same section, after a cross-check): every well the operator has inside your boundaries whose API is not in the file, with status and the nearest mapped asset — tick the ones to add, ➕ Stage, and they become ordinary points (source noted) that go through tiers, flags and Create like the rest. They also appear in the client review as "Well on your pads that is not in the list".', 'Priority tiers (in 3 · Type & priority): pick the oil + water columns (or a single BLPD column, or a ready-made P1/P2/P3 column); every asset on a pad shares the pad total; the tier is written as a type prefix ("P1 - …") and a Priority / Prioritized block in the notes. "name matches → update type + notes" is the quarterly re-run: load the new list, review the Tier report, Create.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
+            steps: ['The page is five numbered sections in working order (plus Advanced). Each header shows where it stands; click to open / close, or use the jump chips at the top. The status line under the title shows the latest result.', 'Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', '✏ Shape draws the asset\'s real outline before it is created: click a dot, SHIFT+drag a stroke across the asset (a line → a rectangle of that length × W; a loop → the tightest box). ALT+click other dots to copy the held outline onto them — copies and dragged edges snap flush to neighbours (Shift = no snap). Drag corners / edges, click an edge to add a corner, right-click a corner to remove it, Delete = back to a square. Colour / fill in the Control Panel.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', 'Undo: ↩ Undo last import reverts the last run (creates deleted, updates put back) and survives a reload via ↻ Resume. Independently, 🕘 Imports on this site lists every import found on the assets themselves (the "Imported by …" line) and can delete a run\'s created assets from any machine, any time.', '5 · Enverus check: set the Developer API key once, pick the API-number column, Cross-check — every selected well gets its Enverus status / type / trajectory / operator / dates and location; anything not plainly producing lands in Placement › 🛢 Enverus and an "Enverus" block goes into the notes.', '🔍 Find missing wells (same section, after a cross-check): every well the operator has inside your boundaries whose API is not in the file, with status and the nearest mapped asset — tick the ones to add, ➕ Stage, and they become ordinary points (source noted) that go through tiers, flags and Create like the rest. They also appear in the client review as "Well on your pads that is not in the list".', 'Priority tiers (in 3 · Type & priority): pick the oil + water columns (or a single BLPD column, or a ready-made P1/P2/P3 column); every asset on a pad shares the pad total; the tier is written as a type prefix ("P1 - …") and a Priority / Prioritized block in the notes. "name matches → update type + notes" is the quarterly re-run: load the new list, review the Tier report, Create.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
             test: 'Load the list, add one boundary, confirm the selected count drops, Create with Dry run ON.' },
         sci: { what: 'Applies the Ortho Scanner review sheet\'s decisions: accepted NFZs and flight-path leg changes stage on the map (green / yellow, removed legs red), preflight runs, then Apply writes them — NFZs create-only, flight paths one POST each with Delete Guard backups.',
             steps: ['Load the decisions JSON and the scan bundle from the review sheet.', 'Check the staged plan on the map and the preflight result.', 'Untick Dry run → Apply.'],
