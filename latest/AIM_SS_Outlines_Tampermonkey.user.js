@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.166
+// @version      34.167
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.166';
+    const SCRIPT_VERSION = '34.167';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -397,6 +397,7 @@
                 { id: 'asset.cov-ok', label: 'OK fill', type: 'color', default: '#39ff14' },
                 { id: 'asset.cov-due', label: 'Due / behind fill', type: 'color', default: '#ffb300' },
                 { id: 'asset.cov-over', label: 'Overdue fill (pulses)', type: 'color', default: '#ff3b3b' },
+                { id: 'asset.cov-never', label: 'Never flown fill', type: 'color', default: '#7a0b0b' },
                 { id: 'asset.cov-fill-opacity', label: 'Coverage fill opacity', type: 'number', min: 0.05, max: 1, step: 0.05, default: 0.35, unit: 'fill' },
                 ...buildAssetStateToggles(),
             ],
@@ -1276,7 +1277,7 @@
                 });
             }
         }
-        if (covOn) { covEnsureStyle(); covRequestIfNeeded(); }
+        if (covOn) covEnsureStyle();
         try { covLegendSync(covOn && !!toggleState['asset.show']); } catch (e) {}
 
         perfStage('3 hide');
@@ -6467,7 +6468,7 @@
     const COV_LEGEND_ID = 'aim-cov-legend';
     let covChannel = null;
     let covStore = null;            // { [siteKey]: { at, day, assets } }
-    let covRequestedFor = '';
+    const covLive = {};             // v34.167: siteKeys that received data in THIS page session — paint only those (no paint-on-reload)
     function covStoreGet() {
         if (covStore) return covStore;
         const o = gmGet(COV_STORE_KEY, {});
@@ -6476,7 +6477,9 @@
     }
     function covCurrent() {
         const sid = getCurrentSiteID(); if (!sid) return null;
-        const b = covStoreGet()[envSiteKey(sid)];
+        const key = envSiteKey(sid);
+        if (!covLive[key]) return null;
+        const b = covStoreGet()[key];
         return (b && b.assets) ? b : null;
     }
     function covFor(assetId) {
@@ -6492,7 +6495,9 @@
                 if (msg.type !== 'COVERAGE' || !msg.siteKey || !msg.assets) return;
                 const store = covStoreGet();
                 const prev = store[msg.siteKey];
-                if (prev && prev.at === msg.at && Object.keys(prev.assets || {}).length === Object.keys(msg.assets).length) return;   // same payload echoed from another frame
+                const first = !covLive[msg.siteKey];
+                covLive[msg.siteKey] = true;
+                if (!first && prev && prev.at === msg.at && Object.keys(prev.assets || {}).length === Object.keys(msg.assets).length) return;   // same payload echoed from another frame
                 store[msg.siteKey] = { at: msg.at || Date.now(), day: msg.day || '', assets: msg.assets };
                 const keys = Object.keys(store);
                 if (keys.length > 12) keys.sort((a, b) => (store[a].at || 0) - (store[b].at || 0)).slice(0, keys.length - 12).forEach(k => { delete store[k]; });
@@ -6502,16 +6507,6 @@
             };
         } catch (e) { console.warn(`${TAG} coverage: channel unavailable:`, e); }
         return covChannel;
-    }
-    // Ask MBT (any tab/frame on this site) for its cached colours once per
-    // site when the toggle is on and we hold nothing yet.
-    function covRequestIfNeeded() {
-        const sid = getCurrentSiteID(); if (!sid) return;
-        const key = envSiteKey(sid);
-        if (covRequestedFor === key || covStoreGet()[key]) return;
-        covRequestedFor = key;
-        const ch = covChannelGet();
-        try { if (ch) ch.postMessage({ type: 'COVERAGE_REQUEST', siteKey: key }); } catch (e) {}
     }
     function covEnsureStyle() {
         if (document.getElementById(COV_STYLE_ID)) return;
@@ -6533,7 +6528,7 @@
         if (!el) { el = document.createElement('div'); el.id = COV_LEGEND_ID; container.appendChild(el); }
         const ring = t => `<i style="border:2px solid ${toggleState['asset.cov-' + t.toLowerCase()] || '#888'};background:transparent"></i>${t}`;
         const fill = (s, l) => `<i style="background:${toggleState['asset.cov-' + s] || '#888'}"></i>${l}`;
-        const html = `<b>📅 Coverage</b> ${b.day ? `<span style="color:#777">${b.day}</span>` : ''}<br>ring: ${ring('P1')} ${ring('P2')} ${ring('P3')} <i style="border:2px solid ${toggleState['asset.cov-none'] || '#888'}"></i>untiered<br>fill: ${fill('ok', 'OK')} ${fill('due', 'Due')} ${fill('over', 'Overdue')} <span style="color:#777">· dashed = planned this week</span>`;
+        const html = `<b>📅 Coverage</b> ${b.day ? `<span style="color:#777">${b.day}</span>` : ''}<br>ring: ${ring('P1')} ${ring('P2')} ${ring('P3')} <i style="border:2px solid ${toggleState['asset.cov-none'] || '#888'}"></i>untiered<br>fill: ${fill('ok', 'OK')} ${fill('due', 'Due')} ${fill('over', 'Overdue')} ${fill('never', 'Never flown')} <span style="color:#777">· dashed = planned this week</span>`;
         if (el.innerHTML !== html) el.innerHTML = html;
     }
 

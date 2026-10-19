@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.13
+// @version      3.14
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.13';
+    const SCRIPT_VERSION = '3.14';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -547,7 +547,7 @@
     const COV_CACHE_KEY = 'aim-mb-coverage';          // { [siteKey]: { at, day, recs } }
     const COV_CFG_KEY = 'aim-mb-coverage-cfg';
     const COV_TIER_RE = /^P([1-3])\s*[-–—:]/i;
-    const COV_POOL = 6;
+    const COV_POOL = 10;
     const COV_TTL_MS = 60 * 60 * 1000;
     const COV_BTN_ID = 'aim-mb-cov-btn';
     const COV_TIER_COLORS = { P1: '#ff4d4d', P2: '#ff9f1c', P3: '#ffe66d', none: '#8a8f98' };
@@ -616,7 +616,7 @@
         const ch = covChannelGet();
         if (!ch || !bucket) return;
         const assets = {};
-        bucket.recs.forEach(r => { assets[r.id] = { p: r.tier || '', s: r.status === 'behind' ? 'due' : (r.status === 'never' ? 'over' : r.status), planned: !!r.planned }; });
+        bucket.recs.forEach(r => { assets[r.id] = { p: r.tier || '', s: r.status === 'behind' ? 'due' : r.status, planned: !!r.planned }; });
         try { ch.postMessage({ type: 'COVERAGE', source: SCRIPT_ID, siteKey, at: bucket.at, day: bucket.day, assets }); }
         catch (e) { console.warn(`${TAG} coverage: broadcast failed:`, e); }
     }
@@ -658,8 +658,11 @@
         if (afterSec && beforeSec) { q.push(`when_after=${afterSec}`); q.push(`when_before=${beforeSec}`); }
         return `/images/?${q.join('&')}`;
     }
+    let covTimer = null;
     async function covFetchJson(url) {
+        const t = Date.now();
         const r = await fetch(url, { credentials: 'include' });
+        if (covTimer) covTimer(Date.now() - t);
         if (!r.ok) {
             let body = ''; try { body = await r.text(); } catch (e) {}
             const err = new Error(`HTTP ${r.status} ${url}${body ? ' — ' + body.slice(0, 160) : ''}`);
@@ -719,7 +722,9 @@
             const monthStartSec = Math.floor(monthStart.getTime() / 1000 / 86400) * 86400;
             const nowSec = Math.floor(now.getTime() / 1000 / 86400) * 86400 + 86400 - 1;
             const recs = new Array(assets.length);
-            let next = 0, done = 0;
+            let next = 0, done = 0, reqN = 0, reqMs = 0, reqMax = 0;
+            const t0 = Date.now();
+            covTimer = (ms) => { reqN++; reqMs += ms; if (ms > reqMax) reqMax = ms; };
             const worker = async () => {
                 while (next < assets.length) {
                     const i = next++;
@@ -735,7 +740,8 @@
             covPersist(siteKey, bucket);
             covBroadcast(siteKey, bucket);
             const errs = recs.filter(r => r.err).length;
-            console.log(`${TAG} coverage: ${recs.length} assets for site ${sid}${errs ? ` (${errs} fetch errors)` : ''}`);
+            covTimer = null;
+            console.log(`${TAG} coverage: ${recs.length} assets for site ${sid} in ${((Date.now() - t0) / 1000).toFixed(1)} s — ${reqN} requests, avg ${reqN ? Math.round(reqMs / reqN) : 0} ms, max ${reqMax} ms, pool ${COV_POOL}${errs ? ` (${errs} fetch errors)` : ''}`);
             if (errs) showToast(`Coverage: ${errs} of ${recs.length} asset reads failed — first: ${recs.find(r => r.err).err}`.slice(0, 220), '#ff5252');
             covErrLogged = 0;
             return bucket;
@@ -863,7 +869,7 @@
     function covRefresh(sid, force) {
         const siteKey = covSiteKey(sid);
         const cached = covLoadCached(siteKey);
-        if (cached && !force && Date.now() - cached.at < COV_TTL_MS) { renderCoverageView(); return; }
+        if (cached && !force && Date.now() - cached.at < COV_TTL_MS) { covRestatus(cached); covBroadcast(siteKey, cached); renderCoverageView(); return; }
         updateTitle();
         setBodyHtml(`<div style="padding:40px;text-align:center;color:#888">Reading flown coverage for site ${sid}…<div id="aim-mb-cov-prog" style="margin-top:8px;color:#14d2dc"></div></div>`);
         covFetch(sid, (done, total) => { const el = panelEl && panelEl.querySelector('#aim-mb-cov-prog'); if (el) el.textContent = `${done} / ${total} assets`; })
@@ -17293,8 +17299,7 @@ ${snapPlacemarks}
         registerWithControlPanel();
         registerMissionSop();
         registerCoverage();
-        covChannelGet();
-        if (CONTEXT === 'IFRAME') covInitBroadcast();
+        covChannelGet();   // v3.14: no broadcast on load — the map paints only once the panel is opened / 🎨 Map pressed
         // Inject the force-show-dots CSS rule into the iframe head.
         // We use a class instead of inline !important styles so cleanup
         // is just removing the class — survives Percepto DOM reuse.
