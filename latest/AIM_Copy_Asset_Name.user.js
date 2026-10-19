@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.368
+// @version      4.369
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.368';
+    const SCRIPT_VERSION = '4.369';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -250,6 +250,10 @@
     let impShapeColor = '#c39bd3';  // v4.367: ✏ Shape — drawn asset polygons (Percepto asset purple), CP-editable
     let impShapeOpacity = 0.25;     // v4.367: fill opacity
     let impShapeFill = true;        // v4.367: filled or outline only
+    // v4.369: 🛟 Safe Zone Planner (#302) — CP card id + init-referenced state (TDZ rule).
+    const SZP_SCRIPT_ID = 'aim-safe-zone-planner';
+    let szpMasterEnabled = true;
+    let szpCfg = { count: 3, standoffFt: 100, nfzFt: 30, towerFt: 100, assets: true };
     let impDeleteGuardSeen = 0;     // ts of the last Delete Guard REGISTER seen on the control channel
     const AIR_THRESH_KEY = 'aim-airspace-thresholds';
     const AIR_ENABLE_KEY = 'aim-airspace-enabled';
@@ -13057,6 +13061,23 @@
                     elvOpenFromAction(true);
                 }
             }
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SZP_SCRIPT_ID) {
+                const v = msg.value !== undefined ? msg.value : msg.enabled;
+                if (msg.toggleId === 'szp-master') { const b = !!v; if (b !== szpMasterEnabled) szpMasterEnabled = b; }
+                else if (msg.toggleId === 'szp-assets') { const b = !!v; if (b !== szpCfg.assets) { szpCfg.assets = b; szpSaveCfg(); } }
+                else {
+                    const k = { 'szp-count': 'count', 'szp-standoff': 'standoffFt', 'szp-nfz': 'nfzFt', 'szp-tower': 'towerFt' }[msg.toggleId];
+                    if (k) { const n = Number(v); if (isFinite(n) && n >= 0 && n !== szpCfg[k]) { szpCfg[k] = n; szpSaveCfg(); } }
+                }
+            }
+            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SZP_SCRIPT_ID && CONTEXT === 'IFRAME') {
+                if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;   // tab-local (see importer above)
+                if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
+                if (msg.actionId === 'szp-open') {
+                    if (!szpMasterEnabled) { showToast('Safe Zone Planner is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+                    szpOpenFromAction();
+                }
+            }
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === GMT_SCRIPT_ID) {
                 handleGmtToggle(msg);
             }
@@ -13424,6 +13445,23 @@
                 { id: 'elv-tail', label: 'Pad inside the bridge zone: bridge still runs this far past the line, the rest to the pad edge is the elevator', type: 'number', min: 0, max: 200, step: 5, default: 20, unit: 'ft' },
                 { id: 'elv-minelev', label: 'Minimum room for that elevator (less blocks the crossing)', type: 'number', min: 10, max: 200, step: 5, default: 30, unit: 'ft' },
                 { id: 'elv-scan', label: '🛗 Scan transmission crossings', type: 'button', action: 'elv-scan' },
+            ],
+            hotkeys: [],
+        });
+        // v4.369: 🛟 Safe Zone Planner — own card (feature #302). Read-only
+        // k-center over the flight envelope; see the module header.
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: SZP_SCRIPT_ID, name: 'Safe Zone Planner',
+            description: 'Where the next safe zones should go: scores every clear spot on the flight paths / FFZs by flight distance (along the envelope, not straight-line) from every point of the site — every asset included, built or not — and picks the set that shortens the LONGEST flight to a safe zone, then the average. Existing safe zones (or the bases) stay fixed. Read-only: draws + lists the spots, you place the Safe Zone in Percepto. Lives in ⊕ Generate → 🛟 Safe Zone Planner.',
+            version: SCRIPT_VERSION, group: 'Safe Zone Planner', scope: 'site-setup', priority: 39,
+            toggles: [
+                { id: 'szp-master', label: 'Enable Safe Zone Planner', type: 'boolean', default: true, master: true },
+                { id: 'szp-count', label: 'New safe zones to place', type: 'number', min: 1, max: 8, step: 1, default: 3 },
+                { id: 'szp-standoff', label: 'Keep spots this far from any asset polygon', type: 'number', min: 0, max: 1000, step: 5, default: 100, unit: 'ft' },
+                { id: 'szp-nfz', label: 'Keep spots this far from any NFZ', type: 'number', min: 0, max: 500, step: 5, default: 30, unit: 'ft' },
+                { id: 'szp-tower', label: 'Keep spots this far from tower / pole markers', type: 'number', min: 0, max: 1000, step: 5, default: 100, unit: 'ft' },
+                { id: 'szp-assets', label: 'Count every asset (unbuilt pads hop straight to the nearest path)', type: 'boolean', default: true },
+                { id: 'szp-open', label: '🛟 Open Safe Zone Planner', type: 'button', action: 'szp-open' },
             ],
             hotkeys: [],
         });
@@ -22500,6 +22538,330 @@
     }
 
     // ============================================================
+    // 🛟 SAFE ZONE PLANNER (v4.369, feature #302) — where to put the next
+    // N safe zones so the LONGEST flight any point on the site faces to
+    // reach a safe zone is as short as it can be (then the average).
+    // Distance is measured ALONG the flight envelope — flight paths, with
+    // every free-fly zone as an open crossing — never as the crow flies.
+    // Existing safe zones (type 98; else the bases, where the zones live
+    // today) stay fixed. EVERY asset joins the sample set, built into the
+    // setup or not: an asset with no envelope near it attaches by a
+    // straight hop to the nearest envelope point, so unbuilt pads still
+    // pull the answer their way (the hop is listed as "approximated").
+    // Extra lat/lng lines can be pasted for assets that are not on the
+    // site yet. READ-ONLY: it draws + lists the spots; the Safe Zone
+    // itself is placed in Percepto by hand (no known type-98 body shape).
+    // Solver = k-center: greedy seed + 1-swap local search over the
+    // candidate set (envelope points clear of assets / NFZs / towers),
+    // one Dijkstra per candidate, cooperative yields so the tab stays live.
+    // Offline twin: ShortKeys/AIM_Safe_Zone_Solve.py (same algorithm, Python).
+    // ============================================================
+    let szp = { siteID: null, result: null, layers: [], running: false, cancel: false };
+    const SZP_CFG_KEY = 'aim-szp-cfg';
+    const SZP_COLOR = '255,158,181';
+    function szpEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+    function szpLog(m, color) { const el = document.getElementById('aim-szp-result'); if (el) { el.innerHTML = m; el.style.color = color || '#9ad'; } }
+    function szpLoadCfg() {
+        try { const raw = elevGmGet(SZP_CFG_KEY, null); if (raw) { const o = typeof raw === 'string' ? JSON.parse(raw) : raw; if (o && typeof o === 'object') Object.assign(szpCfg, o); } }
+        catch (e) { console.warn(`${TAG} 🛟 cfg load failed:`, e); }
+    }
+    function szpSaveCfg() { try { elevGmSet(SZP_CFG_KEY, JSON.stringify(szpCfg)); } catch (e) { console.warn(`${TAG} 🛟 cfg save failed:`, e); } }
+    const szpMi = (m) => (m / 1609.344).toFixed(2) + ' mi';
+    const szpFt = (m) => Math.round(m * M_TO_FT).toLocaleString() + ' ft';
+    // "lat, lng [name]" / "name, lat, lng" / "lat lng" per line → [{lat,lng,name}]
+    function szpParseExtra(text) {
+        const out = [];
+        String(text || '').split(/\r?\n/).forEach((line, i) => {
+            const m = line.match(/(-?\d{1,3}\.\d+)[,\s;]+(-?\d{1,3}\.\d+)/);
+            if (!m) return;
+            const lat = Number(m[1]), lng = Number(m[2]);
+            if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return;
+            const name = line.replace(m[0], '').replace(/^[\s,;]+|[\s,;]+$/g, '') || `Extra point ${i + 1}`;
+            out.push({ lat, lng, name });
+        });
+        return out;
+    }
+    // Binary min-heap of (dist, node) — the Dijkstra frontier.
+    function szpHeap() {
+        const d = [], n = [];
+        const swap = (a, b) => { const td = d[a]; d[a] = d[b]; d[b] = td; const tn = n[a]; n[a] = n[b]; n[b] = tn; };
+        return {
+            size() { return d.length; },
+            push(dist, node) { d.push(dist); n.push(node); let i = d.length - 1; while (i > 0) { const p = (i - 1) >> 1; if (d[p] <= d[i]) break; swap(p, i); i = p; } },
+            pop() {
+                const rd = d[0], rn = n[0]; const ld = d.pop(), ln = n.pop();
+                if (d.length) { d[0] = ld; n[0] = ln; let i = 0; for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < d.length && d[l] < d[m]) m = l; if (r < d.length && d[r] < d[m]) m = r; if (m === i) break; swap(m, i); i = m; } }
+                return [rd, rn];
+            },
+        };
+    }
+    function szpDijkstra(adj, N, srcs) {
+        const dist = new Float32Array(N).fill(Infinity);
+        const h = szpHeap();
+        srcs.forEach(([s, w]) => { if (w < dist[s]) { dist[s] = w; h.push(w, s); } });
+        while (h.size()) {
+            const [dd, u] = h.pop();
+            if (dd > dist[u]) continue;
+            const a = adj[u];
+            // push the float32-ROUNDED value back, or the pop-time "dd > dist[u]" stale check skips real nodes
+            for (let k = 0; k < a.length; k += 2) { const v = a[k], nd = dd + a[k + 1]; if (nd < dist[v]) { dist[v] = nd; h.push(dist[v], v); } }
+        }
+        return dist;
+    }
+    // ---- the solver. ents = /map_objects/ list, cfg = szpCfg, extra = [{lat,lng,name}], progress(msg) ----
+    async function szpSolve(ents, cfg, extra, siteID, progress) {
+        const yieldNow = () => new Promise(r => setTimeout(r, 0));
+        const all = []; ents.forEach(e => (entityCoords(e) || []).forEach(c => { if (c && typeof c.lat === 'number') all.push(c); }));
+        if (!all.length) throw new Error('site has no geometry');
+        const lat0 = all.reduce((s, c) => s + c.lat, 0) / all.length, lng0 = all.reduce((s, c) => s + c.lng, 0) / all.length;
+        const proj = genProjector(lat0, lng0);
+        const XY = (c) => { const p = proj.fwd(c); return [p.x, p.y]; };
+        const ring = (e) => (entityCoords(e) || []).map(XY);
+        const dist2 = (ax, ay, bx, by) => Math.hypot(ax - bx, ay - by);
+        const segD = (px, py, a, b) => { const dx = b[0] - a[0], dy = b[1] - a[1], L = dx * dx + dy * dy; const t = L === 0 ? 0 : Math.max(0, Math.min(1, ((px - a[0]) * dx + (py - a[1]) * dy) / L)); return Math.hypot(px - (a[0] + t * dx), py - (a[1] + t * dy)); };
+        const pip = (px, py, poly) => { let ins = false; for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) { const yi = poly[i][1], yj = poly[j][1]; if ((yi > py) !== (yj > py) && px < (poly[j][0] - poly[i][0]) * (py - yi) / (yj - yi) + poly[i][0]) ins = !ins; } return ins; };
+        const bbox = (poly) => { let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; poly.forEach(p => { if (p[0] < x0) x0 = p[0]; if (p[0] > x1) x1 = p[0]; if (p[1] < y0) y0 = p[1]; if (p[1] > y1) y1 = p[1]; }); return [x0, y0, x1, y1]; };
+        const polyD = (px, py, poly) => { if (pip(px, py, poly)) return 0; let m = Infinity; for (let i = 0; i < poly.length; i++) { const d = segD(px, py, poly[i], poly[(i + 1) % poly.length]); if (d < m) m = d; } return m; };
+        const polys = (type) => ents.filter(e => e.type === type && (entityCoords(e) || []).length >= 3).map(e => { const r = ring(e); return { name: e.name || `#${e.id}`, r, bb: bbox(r) }; });
+        const assets = polys(3), ffzs = polys(16), nfzs = polys(4);
+        const fps = ents.filter(e => e.type === 15 && Array.isArray(e.arcs) && e.arcs.length);
+        const towers = ents.filter(e => e.type === 19 && /^(tower|pole)$/i.test(e.general_marker_type || '') && gmPoint(e)).map(e => XY(gmPoint(e)));
+        // ---- nodes + edges ----
+        const nx = [], ny = [], kind = [], ref = [], adj = [], idx = new Map();
+        const add = (x, y, k, r) => { const key = `${Math.round(x * 2)},${Math.round(y * 2)}`; let i = idx.get(key); if (i !== undefined) return i; i = nx.length; idx.set(key, i); nx.push(x); ny.push(y); kind.push(k); ref.push(r); adj.push([]); return i; };
+        const edge = (i, j, w) => { if (i === j) return; adj[i].push(j, w); adj[j].push(i, w); };
+        const STEP = 40;
+        fps.forEach(fp => fp.arcs.forEach(a => {
+            if (!a.point_a || !a.point_b) return;
+            const A = XY(a.point_a), B = XY(a.point_b), L = dist2(A[0], A[1], B[0], B[1]), n = Math.max(1, Math.ceil(L / STEP));
+            let prev = add(A[0], A[1], 'fpv', fp.name);
+            for (let k = 1; k <= n; k++) { const t = k / n; const cur = add(A[0] + (B[0] - A[0]) * t, A[1] + (B[1] - A[1]) * t, k === n ? 'fpv' : 'fps', fp.name); edge(prev, cur, L / n); prev = cur; }
+        }));
+        ffzs.forEach(f => {
+            f.r.forEach(p => add(p[0], p[1], 'ffzv', f.name));
+            const cx = f.r.reduce((s, p) => s + p[0], 0) / f.r.length, cy = f.r.reduce((s, p) => s + p[1], 0) / f.r.length;
+            if (pip(cx, cy, f.r)) add(cx, cy, 'ffzc', f.name);
+            const area = (f.bb[2] - f.bb[0]) * (f.bb[3] - f.bb[1]);
+            const step = Math.max(60, Math.sqrt(area / 150));        // ≤ ~150 grid nodes per zone, even a giant band FFZ
+            for (let gx = f.bb[0]; gx <= f.bb[2]; gx += step) for (let gy = f.bb[1]; gy <= f.bb[3]; gy += step) if (pip(gx, gy, f.r)) add(gx, gy, 'ffzg', f.name);
+        });
+        const NET = nx.length;
+        if (!NET) throw new Error('no flight paths or free-fly zones on this site');
+        // every node on/inside a zone (≤2 m) connects straight-line to the others in it (full clique up to 60 members, else 16 nearest)
+        const inFfz = new Uint8Array(NET);
+        ffzs.forEach(f => {
+            const mem = [];
+            for (let i = 0; i < NET; i++) if (nx[i] >= f.bb[0] - 3 && nx[i] <= f.bb[2] + 3 && ny[i] >= f.bb[1] - 3 && ny[i] <= f.bb[3] + 3 && polyD(nx[i], ny[i], f.r) <= 2) { mem.push(i); inFfz[i] = 1; }
+            if (mem.length <= 60) { for (let a = 0; a < mem.length; a++) for (let b = a + 1; b < mem.length; b++) edge(mem[a], mem[b], dist2(nx[mem[a]], ny[mem[a]], nx[mem[b]], ny[mem[b]])); }
+            else mem.forEach(i => { const near = mem.filter(j => j !== i).map(j => [dist2(nx[i], ny[i], nx[j], ny[j]), j]).sort((p, q) => p[0] - q[0]).slice(0, 16); near.forEach(([w, j]) => { if (i < j) edge(i, j, w); }); });
+        });
+        // cell index over envelope nodes → nearest-node lookup for attached points
+        const CELL = 250, cells = new Map();
+        for (let i = 0; i < NET; i++) { const k = `${Math.floor(nx[i] / CELL)},${Math.floor(ny[i] / CELL)}`; let a = cells.get(k); if (!a) { a = []; cells.set(k, a); } a.push(i); }
+        const nearestNet = (x, y) => {
+            const cx = Math.floor(x / CELL), cy = Math.floor(y / CELL); let best = -1, bd = Infinity;
+            for (let r = 0; r < 80; r++) {
+                for (let dx = -r; dx <= r; dx++) for (let dy = -r; dy <= r; dy++) { if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue; const a = cells.get(`${cx + dx},${cy + dy}`); if (!a) continue; a.forEach(i => { const d = dist2(x, y, nx[i], ny[i]); if (d < bd) { bd = d; best = i; } }); }
+                if (best >= 0 && bd <= r * CELL) break;            // ring r+1 starts r·CELL away — nothing out there can beat this
+            }
+            if (best < 0) for (let i = 0; i < NET; i++) { const d = dist2(x, y, nx[i], ny[i]); if (d < bd) { bd = d; best = i; } }
+            return [best, bd];
+        };
+        const attachGaps = new Map();                                      // asset name → longest hop to the envelope (m)
+        const attach = (x, y, k, name) => { const i = add(x, y, k, name); if (i >= NET && !adj[i].length) { const [j, g] = nearestNet(x, y); if (j >= 0) { edge(i, j, g); attachGaps.set(name, Math.max(attachGaps.get(name) || 0, g)); } } };
+        if (cfg.assets) assets.forEach(a => { const cx = a.r.reduce((s, p) => s + p[0], 0) / a.r.length, cy = a.r.reduce((s, p) => s + p[1], 0) / a.r.length; attach(cx, cy, 'asset', a.name); a.r.slice(0, 12).forEach(p => attach(p[0], p[1], 'asset', a.name)); });
+        (extra || []).forEach(p => { const q = XY(p); attach(q[0], q[1], 'extra', p.name); });
+        const N = nx.length;
+        progress(`Envelope: ${NET.toLocaleString()} points (${fps.length} flight paths, ${ffzs.length} FFZs) · ${(N - NET).toLocaleString()} asset / extra points attached`);
+        await yieldNow();
+        // ---- fixed safe zones: type 98, else the bases ----
+        let fixedSrc = 'type-98 safe zones';
+        let fixed = ents.filter(e => e.type === 98 && gmPoint(e)).map(e => ({ name: e.name || 'safe zone', ll: gmPoint(e) }));
+        if (!fixed.length) { const rb = resolveBases(siteID, ents); fixed = rb.bases.map(e => ({ name: `${e.name} (assumed at the base)`, ll: gmPoint(e) })); fixedSrc = fixed.length ? 'no type-98 on the site — assumed one at each base' : 'none found (no safe zones, no bases) — planning from scratch'; }
+        const srcs = fixed.map(f => { const q = XY(f.ll); const [j, g] = nearestNet(q[0], q[1]); return [j, g]; }).filter(s => s[0] >= 0);
+        const d0 = srcs.length ? szpDijkstra(adj, N, srcs) : new Float32Array(N).fill(Infinity);
+        const S = []; for (let i = 0; i < N; i++) if (!srcs.length || d0[i] < Infinity) S.push(i);
+        const unreachable = []; if (srcs.length) for (let i = 0; i < NET; i++) if (d0[i] === Infinity) unreachable.push(i);
+        if (!S.length) throw new Error('nothing reachable from the existing safe zones');
+        // ---- candidates: envelope points clear of assets / NFZs / towers ----
+        const soM = cfg.standoffFt / M_TO_FT, nfzM = cfg.nfzFt / M_TO_FT, towM = cfg.towerFt / M_TO_FT;
+        const clear = (x, y) => {
+            for (const a of assets) if (x >= a.bb[0] - soM && x <= a.bb[2] + soM && y >= a.bb[1] - soM && y <= a.bb[3] + soM && polyD(x, y, a.r) < soM) return false;
+            for (const z of nfzs) if (x >= z.bb[0] - nfzM && x <= z.bb[2] + nfzM && y >= z.bb[1] - nfzM && y <= z.bb[3] + nfzM && polyD(x, y, z.r) < nfzM) return false;
+            for (const t of towers) if (dist2(x, y, t[0], t[1]) < towM) return false;
+            return true;
+        };
+        let cands = [];
+        for (let i = 0; i < NET; i++) { if (srcs.length && d0[i] === Infinity) continue; const k = kind[i]; if (!(k === 'fpv' || k === 'ffzv' || k === 'ffzc' || k === 'ffzg' || (k === 'fps' && i % 3 === 0))) continue; if (clear(nx[i], ny[i])) cands.push(i); }
+        const CAP = 600;
+        if (cands.length > CAP) { const stride = cands.length / CAP; const sub = []; for (let t = 0; t < CAP; t++) sub.push(cands[Math.floor(t * stride)]); cands = sub; }
+        if (!cands.length) throw new Error('no candidate spot clears the asset / NFZ / tower standoffs — lower them');
+        const D = new Map();
+        for (let n = 0; n < cands.length; n++) {
+            if (szp.cancel) throw new Error('cancelled');
+            D.set(cands[n], szpDijkstra(adj, N, [[cands[n], 0]]));
+            if (n % 20 === 0) { progress(`Scoring candidate spots ${n}/${cands.length}…`); await yieldNow(); }
+        }
+        const objective = (picks) => { let mx = 0, tot = 0; const cols = picks.map(c => D.get(c)); for (let s = 0; s < S.length; s++) { const j = S[s]; let m = d0[j]; for (let k = 0; k < cols.length; k++) { const v = cols[k][j]; if (v < m) m = v; } if (m > mx) mx = m; tot += m; } return [mx, tot / S.length]; };
+        const better = (a, b) => a[0] < b[0] - 0.01 || (Math.abs(a[0] - b[0]) <= 0.01 && a[1] < b[1] - 0.01);
+        const K = Math.max(1, Math.min(8, Math.round(cfg.count)));
+        let picks = [];
+        for (let r = 0; r < K; r++) {
+            let best = null;
+            for (const c of cands) { if (picks.includes(c)) continue; const o = objective(picks.concat(c)); if (!best || better(o, best[0])) best = [o, c]; }
+            if (!best) break;
+            picks.push(best[1]); progress(`Placing zone ${r + 1} of ${K}…`); await yieldNow();
+        }
+        let cur = objective(picks), improved = true, sweeps = 0;
+        while (improved && sweeps++ < 12) {
+            improved = false;
+            for (let i = 0; i < picks.length; i++) for (const c of cands) { if (picks.includes(c)) continue; const t = picks.slice(); t[i] = c; const o = objective(t); if (better(o, cur)) { cur = o; picks = t; improved = true; } }
+            progress(`Refining (pass ${sweeps})…`); await yieldNow();
+        }
+        const base = objective([]);
+        const cols = picks.map(c => D.get(c));
+        const fin = new Float32Array(N); for (let j = 0; j < N; j++) { let m = d0[j]; for (let k = 0; k < cols.length; k++) if (cols[k][j] < m) m = cols[k][j]; fin[j] = m; }
+        const owns = new Int32Array(picks.length + 1);
+        S.forEach(j => { let bi = 0, bv = d0[j]; for (let k = 0; k < cols.length; k++) if (cols[k][j] < bv) { bv = cols[k][j]; bi = k + 1; } owns[bi]++; });
+        let worst = -1; S.forEach(j => { if (worst < 0 || fin[j] > fin[worst]) worst = j; });
+        const nearestAsset = (x, y) => { let bn = '', bd = Infinity; assets.forEach(a => { const d = polyD(x, y, a.r); if (d < bd) { bd = d; bn = a.name; } }); return [bn, bd]; };
+        const LL = (i) => proj.inv({ x: nx[i], y: ny[i] });
+        const unreachRefs = new Map(); unreachable.forEach(i => unreachRefs.set(ref[i], (unreachRefs.get(ref[i]) || 0) + 1));
+        return {
+            siteID, fixed, fixedSrc, candidates: cands.length, samples: S.length, envelope: NET, attached: N - NET,
+            before: { max: base[0], mean: base[1] }, after: { max: cur[0], mean: cur[1] },
+            picks: picks.map((c, k) => { const [an, ad] = nearestAsset(nx[c], ny[c]); const ll = LL(c); return { n: k + 1, lat: ll.lat, lng: ll.lng, kind: kind[c], ref: ref[c], inFfz: !!inFfz[c], asset: an, assetM: ad, owns: owns[k + 1] }; }),
+            fixedOwns: owns[0],
+            worst: worst >= 0 ? { ...LL(worst), m: fin[worst], ref: ref[worst], kind: kind[worst] } : null,
+            farAssets: [...attachGaps.entries()].filter(([, g]) => g > 150).sort((a, b) => b[1] - a[1]).map(([name, g]) => ({ name, gapM: g })),
+            unreachable: [...unreachRefs.entries()].sort((a, b) => b[1] - a[1]).map(([name, n]) => ({ name, n })),
+            hist: [0, 1, 2, 3, 4, 5].map(k => [S.filter(j => Math.floor(d0[j] / 1609.344) === k).length, S.filter(j => Math.floor(fin[j] / 1609.344) === k).length]),
+        };
+    }
+    // ---- map preview ----
+    function szpClearLayers() { const map = getLeafletMap(); szp.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); szp.layers = []; }
+    function szpDraw() {
+        szpClearLayers();
+        const L = getLeafletL(), map = getLeafletMap(), r = szp.result; if (!L || !map || !r) return;
+        const add = (l) => { try { l.addTo(map); szp.layers.push(l); } catch (e) { console.warn(`${TAG} 🛟 layer add failed:`, e); } };
+        r.fixed.forEach(f => { const m = L.circleMarker([f.ll.lat, f.ll.lng], { radius: 8, color: '#ffd54f', weight: 3, fillOpacity: 0.15, interactive: false }); m.bindTooltip(`fixed: ${szpEsc(f.name)}`, { permanent: false, direction: 'top' }); add(m); });
+        r.picks.forEach(p => { const m = L.circleMarker([p.lat, p.lng], { radius: 11, color: `rgb(${SZP_COLOR})`, weight: 3, fillColor: `rgb(${SZP_COLOR})`, fillOpacity: 0.35, interactive: false }); m.bindTooltip(`🛟 Safe zone ${p.n}`, { permanent: true, direction: 'top', offset: [0, -10] }); add(m); });
+        if (r.worst) { const m = L.circleMarker([r.worst.lat, r.worst.lng], { radius: 9, color: '#ff5555', weight: 2, dashArray: '4 3', fillOpacity: 0, interactive: false }); m.bindTooltip(`farthest point after planning: ${szpMi(r.worst.m)} · ${szpEsc(r.worst.ref)}`, { direction: 'top' }); add(m); }
+    }
+    function szpPanTo(ll) { try { const map = getLeafletMap(); if (map && ll) { map.setView([ll.lat, ll.lng], Math.max(map.getZoom(), 17)); airPulseAt(ll.lat, ll.lng); } } catch (e) { console.warn(`${TAG} 🛟 pan failed:`, e); } }
+    // ---- report ----
+    function szpReportText() {
+        const r = szp.result; if (!r) return '';
+        const L = [];
+        L.push(`Safe Zone Planner — site ${r.siteID} — ${new Date().toLocaleString()}`);
+        L.push(`Fixed: ${r.fixedSrc}${r.fixed.length ? ' — ' + r.fixed.map(f => `${f.name} (${f.ll.lat.toFixed(6)}, ${f.ll.lng.toFixed(6)})`).join('; ') : ''}`);
+        L.push(`Flight distance to the nearest safe zone — worst: ${szpMi(r.before.max)} → ${szpMi(r.after.max)} · average: ${szpMi(r.before.mean)} → ${szpMi(r.after.mean)}`);
+        L.push('');
+        r.picks.forEach(p => L.push(`Safe zone ${p.n}: ${p.lat.toFixed(6)}, ${p.lng.toFixed(6)} — on ${p.inFfz ? 'FFZ' : 'flight path'} "${p.ref}" · nearest asset ${p.asset} ${szpFt(p.assetM)} · covers ${p.owns.toLocaleString()} points`));
+        if (r.worst) L.push(`Farthest point after planning: ${szpMi(r.worst.m)} at ${r.worst.lat.toFixed(6)}, ${r.worst.lng.toFixed(6)} (${r.worst.ref})`);
+        if (r.farAssets.length) { L.push(''); L.push(`Assets with no envelope within 500 ft (distance approximated by a straight hop):`); r.farAssets.forEach(a => L.push(`  ${a.name} — ${szpFt(a.gapM)} to the nearest flight path / FFZ`)); }
+        if (r.unreachable.length) { L.push(''); L.push(`Not reachable from the existing safe zones (excluded):`); r.unreachable.forEach(u => L.push(`  ${u.name}`)); }
+        L.push(''); L.push(`Settings: ${r.picks.length} new zone(s) · asset standoff ${szpCfg.standoffFt} ft · NFZ clearance ${szpCfg.nfzFt} ft · tower clearance ${szpCfg.towerFt} ft · assets ${szpCfg.assets ? 'included' : 'excluded'} · ${r.candidates} candidate spots scored over ${r.samples.toLocaleString()} sample points`);
+        return L.join('\n');
+    }
+    // ---- panel ----
+    function szpRenderPanelBody() {
+        const host = document.getElementById('aim-szp-controls'); if (!host) return;
+        const btnCss = (col) => `background:rgba(${col},0.12);color:rgb(${col});border:1px solid rgba(${col},0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px`;
+        const num = (id, label, val, min, max, step, unit) => `<label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#cfd6dc">${label} <input type="number" id="${id}" value="${val}" min="${min}" max="${max}" step="${step}" style="width:58px;background:#1a1d23;border:1px solid rgba(${SZP_COLOR},0.45);color:#fff;padding:3px 6px;border-radius:3px;font:inherit;font-size:11px;text-align:right"><span style="color:#888;font-size:10px">${unit}</span></label>`;
+        host.innerHTML = `
+            <div style="font-size:11px;color:rgb(${SZP_COLOR});margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">🛟 Safe Zone Planner — where the next safe zones should go</div>
+            <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:6px">
+                ${num('aim-szp-count', 'New zones', szpCfg.count, 1, 8, 1, '')}
+                ${num('aim-szp-standoff', 'Asset standoff', szpCfg.standoffFt, 0, 1000, 5, 'ft')}
+                ${num('aim-szp-nfz', 'NFZ clearance', szpCfg.nfzFt, 0, 500, 5, 'ft')}
+                ${num('aim-szp-tower', 'Tower clearance', szpCfg.towerFt, 0, 1000, 5, 'ft')}
+                <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#cfd6dc;cursor:pointer"><input type="checkbox" id="aim-szp-assets" ${szpCfg.assets ? 'checked' : ''} style="accent-color:rgb(${SZP_COLOR})"> count every asset <span style="color:#888;font-size:10px">(unbuilt pads hop to the nearest path)</span></label>
+            </div>
+            <details style="margin-bottom:6px"><summary style="font-size:11px;color:#9ad;cursor:pointer">Extra points not on the site yet (one per line: <code>lat, lng [name]</code>)</summary>
+                <textarea id="aim-szp-extra" rows="3" placeholder="32.4123, -101.7012 New pad A" style="width:100%;box-sizing:border-box;margin-top:4px;background:#1a1d23;border:1px solid rgba(${SZP_COLOR},0.35);color:#fff;padding:4px 6px;border-radius:3px;font:inherit;font-size:11px"></textarea></details>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px">
+                <button id="aim-szp-plan" style="${btnCss(SZP_COLOR)};font-weight:600" title="Score every clear spot on the flight paths / FFZs and pick the set that shortens the longest flight to a safe zone">▶ Plan safe zones</button>
+                <button id="aim-szp-clear" style="${btnCss('255,90,90')}" title="Drop the preview (nothing on the server is touched — this tool never writes)">✕ Clear</button>
+                <button id="aim-szp-copy" style="${btnCss('160,160,160')}" title="Copy the plan as text (coordinates, before/after, caveats)">📋 Copy report</button>
+                <span style="color:#888;font-size:10px">read-only · distance follows the flight paths and FFZs · existing safe zones (or the bases) stay fixed · click a row to jump</span>
+            </div>
+            <div id="aim-szp-result" style="font-size:11px;color:#9ad;line-height:1.5;margin-bottom:6px">Pick how many zones to add, then ▶ Plan. Large sites take a few seconds.</div>
+            <div id="aim-szp-list" style="font-size:11px;color:#cfd6dc"></div>`;
+        const readCfg = () => {
+            const g = (id, d) => { const n = Number((document.getElementById(id) || {}).value); return isFinite(n) && n >= 0 ? n : d; };
+            szpCfg.count = g('aim-szp-count', szpCfg.count); szpCfg.standoffFt = g('aim-szp-standoff', szpCfg.standoffFt); szpCfg.nfzFt = g('aim-szp-nfz', szpCfg.nfzFt); szpCfg.towerFt = g('aim-szp-tower', szpCfg.towerFt);
+            const cb = document.getElementById('aim-szp-assets'); if (cb) szpCfg.assets = !!cb.checked;
+            szpSaveCfg();
+        };
+        host.querySelectorAll('input').forEach(el => el.addEventListener('change', readCfg));
+        host.querySelector('#aim-szp-plan').onclick = () => { readCfg(); szpPlan().catch(e => { console.error(`${TAG} 🛟 plan failed:`, e); szpLog(`Plan failed: ${szpEsc(e.message || e)}`, '#ff6060'); szp.running = false; }); };
+        host.querySelector('#aim-szp-clear').onclick = () => { if (szp.running) { szp.cancel = true; szpLog('Cancelling…', '#ffb347'); return; } szpClearLayers(); szp.result = null; szpRenderList(); szpLog('Cleared.'); };
+        host.querySelector('#aim-szp-copy').onclick = () => { const t = szpReportText(); if (!t) { showToast('Nothing planned yet', 'rgba(255,180,0,0.6)'); return; } navigator.clipboard.writeText(t).then(() => showToast('Safe zone plan copied'), () => showToast('Copy failed', 'rgba(255,96,96,0.55)')); };
+        host.querySelector('#aim-szp-list').onclick = (ev) => {
+            const cp = ev.target.closest && ev.target.closest('[data-szp-copy]');
+            if (cp) { ev.stopPropagation(); navigator.clipboard.writeText(cp.getAttribute('data-szp-copy')).then(() => showToast('Coordinates copied'), () => showToast('Copy failed', 'rgba(255,96,96,0.55)')); return; }
+            const row = ev.target.closest && ev.target.closest('[data-szp-pan]'); if (!row) return;
+            const [lat, lng] = row.getAttribute('data-szp-pan').split(',').map(Number); if (isFinite(lat)) szpPanTo({ lat, lng });
+        };
+        szpRenderList();
+    }
+    function szpRenderList() {
+        const el = document.getElementById('aim-szp-list'); if (!el) return;
+        const r = szp.result; if (!r) { el.innerHTML = ''; return; }
+        const row = (lat, lng, html) => `<div data-szp-pan="${lat},${lng}" title="Click to jump to it on the map" style="display:flex;gap:8px;align-items:center;padding:4px 6px;margin:2px 0;border:1px solid rgba(${SZP_COLOR},0.25);border-radius:3px;cursor:pointer" onmouseover="this.style.background='rgba(${SZP_COLOR},0.10)'" onmouseout="this.style.background=''">${html}</div>`;
+        const coord = (lat, lng) => `<code style="color:#fff">${lat.toFixed(6)}, ${lng.toFixed(6)}</code> <span data-szp-copy="${lat.toFixed(6)}, ${lng.toFixed(6)}" title="Copy coordinates" style="color:#9ad;cursor:copy">⧉</span>`;
+        const h = [];
+        h.push(`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px;margin-bottom:6px">
+            <div style="background:rgba(255,255,255,0.04);border-radius:3px;padding:5px 8px"><div style="color:#888;font-size:10px">LONGEST FLIGHT TO A SAFE ZONE</div><div style="font-size:14px;font-weight:700;color:#fff">${szpMi(r.before.max)} → <span style="color:#5fff5f">${szpMi(r.after.max)}</span></div><div style="color:#888;font-size:10px">${szpFt(r.before.max)} → ${szpFt(r.after.max)}</div></div>
+            <div style="background:rgba(255,255,255,0.04);border-radius:3px;padding:5px 8px"><div style="color:#888;font-size:10px">AVERAGE</div><div style="font-size:14px;font-weight:700;color:#fff">${szpMi(r.before.mean)} → <span style="color:#5fff5f">${szpMi(r.after.mean)}</span></div><div style="color:#888;font-size:10px">${szpFt(r.before.mean)} → ${szpFt(r.after.mean)}</div></div>
+        </div>`);
+        h.push(`<div style="color:#888;font-size:10px;margin-bottom:4px">Fixed: ${szpEsc(r.fixedSrc)}${r.fixed.length ? ` · ${r.fixed.map(f => szpEsc(f.name)).join(', ')} · cover ${r.fixedOwns.toLocaleString()} points` : ''}</div>`);
+        r.picks.forEach(p => h.push(row(p.lat, p.lng, `<span style="display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;background:rgb(${SZP_COLOR});color:#111;font-weight:700;flex:none">${p.n}</span><span style="min-width:0"><div>${coord(p.lat, p.lng)} <span style="color:#888">on ${p.inFfz ? 'FFZ' : 'path'}</span> <span style="color:#9ad">${szpEsc(p.ref)}</span></div><div style="color:#888;font-size:10px">nearest asset ${szpEsc(p.asset)} · ${szpFt(p.assetM)} · covers ${p.owns.toLocaleString()} points</div></span>`)));
+        if (r.worst) h.push(row(r.worst.lat, r.worst.lng, `<span style="color:#ff5555;flex:none">◌</span><span><div>Farthest point after planning: <b style="color:#ff8a80">${szpMi(r.worst.m)}</b> <span style="color:#9ad">${szpEsc(r.worst.ref)}</span></div><div style="color:#888;font-size:10px">add one more zone if this is too far · ${coord(r.worst.lat, r.worst.lng)}</div></span>`));
+        if (r.farAssets.length) h.push(`<div style="color:#ffb347;font-size:10px;margin-top:6px">⚠ ${r.farAssets.length} asset${r.farAssets.length === 1 ? '' : 's'} with no flight path / FFZ within 500 ft — distance approximated by a straight hop: ${r.farAssets.slice(0, 8).map(a => `${szpEsc(a.name)} (${szpFt(a.gapM)})`).join(', ')}${r.farAssets.length > 8 ? ` … +${r.farAssets.length - 8}` : ''}</div>`);
+        if (r.unreachable.length) h.push(`<div style="color:#888;font-size:10px;margin-top:4px">Not reachable from the existing safe zones, excluded: ${r.unreachable.slice(0, 10).map(u => szpEsc(u.name)).join(', ')}${r.unreachable.length > 10 ? ` … +${r.unreachable.length - 10}` : ''}</div>`);
+        h.push(`<div style="color:#666;font-size:10px;margin-top:6px">${r.candidates} candidate spots scored over ${r.samples.toLocaleString()} sample points · place each Safe Zone in Percepto by hand at the coordinates above, after a satellite check that the ground is flat and clear.</div>`);
+        el.innerHTML = h.join('');
+    }
+    async function szpPlan() {
+        if (szp.running) { showToast('Planner already running', 'rgba(255,180,0,0.6)'); return; }
+        const sid = getCurrentSiteID(); if (!sid) { szpLog('No site loaded.', '#ff6060'); return; }
+        let ents = ((mapObjectsBySite[sid] || {}).entities) || [];
+        if (!ents.length) { szpLog('Loading site entities…'); await fetchMapObjects(sid, true); ents = ((mapObjectsBySite[sid] || {}).entities) || []; }
+        if (!ents.length) { szpLog('No entities on this site.', '#ff6060'); return; }
+        const extra = szpParseExtra((document.getElementById('aim-szp-extra') || {}).value);
+        szp.running = true; szp.cancel = false; szp.siteID = String(sid);
+        console.log(`${TAG} 🛟 planning ${szpCfg.count} safe zone(s) on site ${sid} — ${ents.length} entities, ${extra.length} extra point(s)`);
+        const t0 = Date.now();
+        try {
+            szp.result = await szpSolve(ents, szpCfg, extra, sid, (m) => szpLog(szpEsc(m)));
+            szp.result.extra = extra.length;
+            szpDraw(); szpRenderList();
+            szpLog(`Done in ${((Date.now() - t0) / 1000).toFixed(1)} s — ${szp.result.picks.length} spot${szp.result.picks.length === 1 ? '' : 's'} drawn in pink on the map.`, '#5fff5f');
+            console.log(`${TAG} 🛟 plan ready:`, szp.result);
+        } catch (e) {
+            if (/cancelled/.test(String(e.message))) szpLog('Cancelled.', '#ffb347'); else throw e;
+        } finally { szp.running = false; szp.cancel = false; }
+    }
+    function szpShowPanel() {
+        const c = document.getElementById('aim-szp-controls'); if (!c) return;
+        genShowPage('szp');
+        c.style.display = 'block';
+        if (!document.getElementById('aim-szp-list')) szpRenderPanelBody();
+    }
+    function szpOpenFromAction() {
+        if (LITE) { showToast('Safe Zone Planner needs Full mode (CSM access)', 'rgba(255,180,0,0.6)'); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
+        const go = () => { try { if (!document.getElementById(GEN_MODAL_ID)) openSiteGenerator(sid); szpShowPanel(); } catch (e) { console.warn(`${TAG} 🛟 open failed:`, e); } };
+        const bucket = mapObjectsBySite[sid];
+        if (!bucket || !bucket.entities) fetchMapObjects(sid, true).then(go).catch(e => { console.warn(`${TAG} 🛟 entity fetch failed:`, e); go(); }); else go();
+    }
+    function szpTeardown() { szp.cancel = true; szpClearLayers(); }
+    szpLoadCfg();
+
+    // ============================================================
     // 📥 ASSET IMPORTER (#249) — CSV/KML region list → staged preview points
     // on the map → spatial selection (⭕ circle / 🖊 freehand lasso / ☝ pick)
     // → bulk-CREATE the selected subset as real type-3 assets via the
@@ -29314,6 +29676,9 @@
         elv: { what: 'Finds every flight path that crosses a red transmission line and stages a climb-over there: Elevator 1 → Bridge → Elevator 2, bands from DEM in MSL with 10 ft overlaps, plus a pole marker per crossing. Writes one POST per flight path, each with a backup.',
             steps: ['🔍 Scan crossings (or right-click a flight path → 🛗 for a manual point).', 'Review each staged crossing — bridge height, elevator lengths, preflight result.', 'Untick Dry run → Commit. ↩ Undo restores the flight paths and deletes the poles.'],
             test: 'Scan a site with a known transmission crossing, confirm one staged set per crossing, Commit with Dry run ON.' },
+        szp: { what: 'Finds where the next safe zones should go. Every flight path and free-fly zone is sampled, every asset joins (an unbuilt pad hops straight to the nearest path), and each clear spot is scored by the flight distance — along the paths and zones, not straight-line — that every point of the site would face to reach its nearest safe zone. The pick is the set that shortens the LONGEST flight, then the average. Existing safe zones (or the bases) stay fixed. Read-only: nothing is written.',
+            steps: ['Set how many zones to add and the standoffs (asset / NFZ / tower). Paste extra lat,lng lines for pads that are not on the site yet.', '▶ Plan safe zones — pink numbered spots on the map, before → after numbers in the panel, the farthest remaining point in red.', 'Click a row to jump, ⧉ copies its coordinates. Place the Safe Zone in Percepto by hand after a satellite check of the ground.', '📋 Copy report for the hand-off; ✕ Clear drops the preview.'],
+            test: 'Plan 3 zones on a site with one base, confirm the worst-case number drops, then plan 4 and watch the farthest point move.' },
         imp: { what: 'Bring a client asset list into Percepto. Load a CSV or KML → points stage on the map (nothing written) → narrow with boundaries → map the type → ✓ Create makes real asset squares. Create-only, with dry run, backup manifest and undo.',
             steps: ['The page is five numbered sections in working order (plus Advanced). Each header shows where it stands; click to open / close, or use the jump chips at the top. The status line under the title shows the latest result.', 'Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', '✏ Shape draws the asset\'s real outline before it is created: click a dot, SHIFT+drag a stroke across the asset (a line → a rectangle of that length × W; a loop → the tightest box). ALT+click other dots to copy the held outline onto them — copies and dragged edges snap flush to neighbours (Shift = no snap). Drag corners / edges, click an edge to add a corner, right-click a corner to remove it, Delete = back to a square. Colour / fill in the Control Panel.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', 'Undo: ↩ Undo last import reverts the last run (creates deleted, updates put back) and survives a reload via ↻ Resume. Independently, 🕘 Imports on this site lists every import found on the assets themselves (the "Imported by …" line) and can delete a run\'s created assets from any machine, any time.', '5 · Enverus check: set the Developer API key once, pick the API-number column, Cross-check — every selected well gets its Enverus status / type / trajectory / operator / dates and location; anything not plainly producing lands in Placement › 🛢 Enverus and an "Enverus" block goes into the notes.', '🔍 Find missing wells (same section, after a cross-check): every well the operator has inside your boundaries whose API is not in the file, with status and the nearest mapped asset — tick the ones to add, ➕ Stage, and they become ordinary points (source noted) that go through tiers, flags and Create like the rest. They also appear in the client review as "Well on your pads that is not in the list".', 'Priority tiers (in 3 · Type & priority): pick the oil + water columns (or a single BLPD column, or a ready-made P1/P2/P3 column); every asset on a pad shares the pad total; the tier is written as a type prefix ("P1 - …") and a Priority / Prioritized block in the notes. "name matches → update type + notes" is the quarterly re-run: load the new list, review the Tier report, Create.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
             test: 'Load the list, add one boundary, confirm the selected count drops, Create with Dry run ON.' },
@@ -29321,7 +29686,7 @@
             steps: ['Load the decisions JSON and the scan bundle from the review sheet.', 'Check the staged plan on the map and the preflight result.', 'Untick Dry run → Apply.'],
             test: 'Load a bundle, confirm the staged counts match the sheet, Apply with Dry run ON.' },
     };
-    const GEN_PAGE_NAMES = { ffz: '⊕ Inspection FFZs', adv: '✦ Advanced Draw', nfz: '⬠ NFZs', fp: '🛩 Flight Paths', routes: '🟠 Convert Routes', elv: '🛗 Elevators', imp: '📥 Asset Import', sci: '🔍 Scan Import' };
+    const GEN_PAGE_NAMES = { ffz: '⊕ Inspection FFZs', adv: '✦ Advanced Draw', nfz: '⬠ NFZs', fp: '🛩 Flight Paths', routes: '🟠 Convert Routes', elv: '🛗 Elevators', imp: '📥 Asset Import', sci: '🔍 Scan Import', szp: '🛟 Safe Zone Planner' };
     function genShowPage(page) {
         try { if (genShowPageLive) genShowPageLive(page); }
         catch (e) { console.warn(`${GEN_TAG} page switch failed:`, e); }
@@ -29354,6 +29719,7 @@
         // memory so reopening on the same site restores the staged view.
         try { impTeardown(); } catch (e) {}
         try { sciTeardown(); } catch (e) {}
+        try { szpTeardown(); } catch (e) {}
         genDraw.active = false; genDraw.drawing = false; genDraw.pts = []; genDraw.tentative = null; genDraw.tentVertex = false; genDraw.tentOrtho = false; genDraw.lastSnap = null;
         try { const mp = getLeafletMap(); if (mp) { if (genDraw.poly) { try { mp.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(mp); clearGhost(mp); clearSnapTargets(mp); if (genDraw.onMapMove) { try { mp.off('moveend', genDraw.onMapMove); } catch (e) {} genDraw.onMapMove = null; } mp.getContainer().style.cursor = ''; try { mp.doubleClickZoom.enable(); } catch (e) {} } } catch (e) {}
     }
@@ -29416,6 +29782,7 @@
                     ${genTile('fp', '🛩', '#00e5ff', 'Flight Paths', 'Route, load, snap and clean paths along the power lines')}
                     ${genTile('routes', '🟠', '#ff9100', 'Convert Routes', 'Proposed Route KML → real FFZs and flight paths')}
                     ${genTile('elv', '🛗', '#ff9a3d', 'Elevators', 'Climb-overs where paths cross transmission lines')}
+                    ${genTile('szp', '🛟', '#ff9eb5', 'Safe Zone Planner', 'Where the next safe zones go: shortest worst-case flight to one')}
                     ${genTile('ext:swb', '🕸', '#8ec2ff', 'SpiderWeb', 'Unshielded site: zone per asset + high point-to-point paths')}
                     ${genTile('ext:ter', '⛰', '#c9a6ff', 'Terrain Profiler', 'Elevation bands + proposed floors / ceilings (read-only)')}
                 </div>
@@ -29510,6 +29877,7 @@
             <div id="aim-imp-controls" data-gen-sec="imp" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.35);border-radius:3px"></div>
             <div id="aim-sci-controls" data-gen-sec="sci" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.35);border-radius:3px"></div>
             <div id="aim-elv-controls" data-gen-sec="elv" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(255,154,61,0.06);border:1px dashed rgba(255,154,61,0.35);border-radius:3px"></div>
+            <div id="aim-szp-controls" data-gen-sec="szp" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(255,158,181,0.06);border:1px dashed rgba(255,158,181,0.35);border-radius:3px"></div>
             <div data-gen-sec="ffz adv" style="padding:8px 10px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25);border-radius:3px">
                 <div style="font-size:12px;color:#7adfe6;margin-bottom:6px;font-weight:700">3 · Commit <span style="color:#888;font-size:10px;font-weight:400">— writes the drafts to the site · the 🧪 Dry run switch in the header decides whether anything is actually written</span></div>
                 <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc;margin-bottom:8px"><input type="checkbox" id="aim-gen-shield" style="accent-color:#ff2d2d"> Show shielding on drafts <span style="color:#888;font-size:10px">(red inner / yellow outer)</span></label>
@@ -29952,6 +30320,10 @@
             if (opening && elv.items.length) elvDraw(); else if (!opening) elvClearLayers();
         };
         if (elv.items.length) { elvShowPanel(); elvDraw(); elvSummary(); }
+        // v4.369: 🛟 Safe Zone Planner — a plan survives modal close on the SAME site; a new site resets.
+        if (szp.siteID && szp.siteID !== String(siteID)) { szpClearLayers(); szp = { siteID: null, result: null, layers: [], running: false, cancel: false }; }
+        szpRenderPanelBody();
+        if (szp.result) { szpShowPanel(); szpDraw(); }
         const impBtn = box.querySelector('#aim-gen-import');
         if (impBtn) impBtn.onclick = () => {
             const c = document.getElementById('aim-imp-controls');

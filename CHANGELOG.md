@@ -1,3 +1,7 @@
+## 2026-10-19 — 🛟 Safe Zone Planner — Site Setup Tools latest v4.369 (latest only)
+
+- **Site Setup Tools (latest) v4.369 — 🛟 Safe Zone Planner in ⊕ Generate (feature #302).** Where should the next safe zones go? The planner samples every flight path and free-fly zone, adds every asset (built into the setup or not — an unbuilt pad hops straight to the nearest leg) and any pasted extra lat/lng points, then scores each clear spot on the envelope by the flight distance — along the paths and zones, never straight-line — that every point of the site would face to reach its nearest safe zone. It picks the set that shortens the LONGEST flight, then the average; existing safe zones (or the bases, where the zones live today) stay fixed. Pink numbered spots on the map, before → after numbers, the farthest remaining point in red, assets with no envelope within 500 ft flagged as approximated, click-to-jump rows, ⧉ copy coordinates, 📋 Copy report. Standoffs (asset 100 ft / NFZ 30 ft / tower 100 ft) and zone count are editable in the panel or the Control Panel card. Read-only — the Safe Zone is placed in Percepto by hand. Offline twin: ShortKeys/AIM_Safe_Zone_Solve.py.
+
 ## 2026-10-19 — Site Setup Tools latest v4.368 (latest only)
 
 - **v4.368** — the parent/child overlap test now uses a drawn outline's real corner count (it assumed four), so a five-plus-corner ✏ outline inside a pad reads "fully inside" and all its edges are checked for crossings.
