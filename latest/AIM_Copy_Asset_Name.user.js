@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.379
+// @version      4.380
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.379';
+    const SCRIPT_VERSION = '4.380';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22962,6 +22962,7 @@
         keepShield: true,                           // v4.343: keep "- unsh" / "shielded" modifiers in subtypes (off = strip them)
         dupMode: 'update',                          // v4.347: name matches an existing asset → 'skip' | 'update' (type + notes only) | 'copy' (create "-N")
         lastUpdated: [],                            // v4.347: [{id, before}] bodies from the last commit's updates — ↩ undo re-POSTs them
+        ana: { movedFt: 200, scope: 'selected', result: null, tab: null },   // 📊 Analyze (quarterly compare)
         env: { apiCol: null, open: false, notes: true, checkedAt: null, summary: null, running: false, opFilter: '', mismatchFt: 300, scope: 'selected', includeOurs: false,
             missing: null, missingAt: null, missingOp: '', missingSel: new Set(), missStatus: { producing: true, drilled: true, inactive: true, plugged: false }, finding: false },   // v4.366: fill-in   // v4.356: Enverus cross-check · v4.358: client review report
         pri: { on: false, open: false, oilCol: null, waterCol: null, blpdCol: null, priCol: null, clusterFt: 100, padFt: 50, p1Min: 250, p1Max: 1500, summary: null, zeroUntier: true, envUntier: true },   // v4.347: priority tiers · v4.357: zero-production / Enverus-dead wells get no tier
@@ -22985,7 +22986,7 @@
         lastDelete: null,                           // {siteID, when, entities:[full bodies]} — ↩ Undo batch source
         assetIndex: null,                           // cached [{id,name,clean,ring,bbox,centroid}] for dup-guard + delete select
     };
-    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, shapeW: imp.shapeW, snapFt: imp.snapFt, bufFt: imp.bufFt, gapFt: imp.gapFt, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
+    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, shapeW: imp.shapeW, snapFt: imp.snapFt, bufFt: imp.bufFt, gapFt: imp.gapFt, anaMovedFt: imp.ana.movedFt, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
     function impLoadParams() {
         try {
             const raw = GM_getValue(IMP_PARAMS_KEY, ''); if (!raw) return;
@@ -23006,6 +23007,7 @@
             if (typeof o.shapeW === 'number' && o.shapeW >= 5) imp.shapeW = (o.shapeW === 30 && o.bufFt === undefined) ? 15 : o.shapeW;   // v4.373: old default 30 → 15 once
             if (typeof o.snapFt === 'number' && o.snapFt >= 0) imp.snapFt = o.snapFt;
             if (typeof o.bufFt === 'number' && o.bufFt >= 0) imp.bufFt = o.bufFt;
+            if (typeof o.anaMovedFt === 'number' && o.anaMovedFt >= 0) imp.ana.movedFt = o.anaMovedFt;
             if (typeof o.gapFt === 'number' && o.gapFt >= 0) imp.gapFt = o.gapFt;
         } catch (e) {}
     }
@@ -23578,6 +23580,100 @@
         });
         return [...groups.values()].sort((a, b) => b.when.localeCompare(a.when));
     }
+    // ---- 📊 ANALYZE — what would change if this list were applied, before anything is written.
+    // Compares the loaded list (selected points or the whole file) with the site: NEW (not on the
+    // site), GONE (on the site, inside the area, not in the list), MOVED (client coordinate more than
+    // N ft from where the asset sits), TIER / TYPE changes (what the update would rewrite), and
+    // PRODUCTION changes (this asset's BLPD vs the number our last import wrote into its notes). ----
+    function impAnalyze() {
+        const A = imp.ana;
+        const live = imp.points.filter(p => !p.done);
+        const pts = A.scope === 'all' ? live : live.filter(p => p.sel);
+        if (!imp.assetIndex) impBuildAssetIndex();
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        const byId = new Map(ents.map(e => [e.id, e]));
+        const subCounts = impSiteSubtypes(); const siteSubs = [...subCounts.keys()];
+        const defSub = impApplyShield([...subCounts.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0])[0] || 'well-cluster');
+        const baseSub = (p) => { if (!imp.mapping || !imp.mapping.type) return p.dup && p.dupSubtype ? impApplyShield(impTierStrip(p.dupSubtype)) : (impApplyShield((imp.typeMap['__all__'] || '').trim() || defSub)); return impResolveSubtype(p.typeRaw || '', siteSubs).value || ''; };
+        const R = { new: [], gone: [], moved: [], tier: [], type: [], prod: [], same: 0, n: pts.length, at: impNowStamp() };
+        const inFile = new Set(imp.points.map(p => (genCleanName(p.name) || '').toLowerCase()).filter(Boolean));
+        pts.forEach(p => {
+            if (!p.dup) { R.new.push({ p, name: p.name, detail: `${p.typeRaw || ''}${p.pri && p.pri.tier ? ` · ${p.pri.tier}` : ''}`, lat: p.lat, lng: p.lng }); return; }
+            let changed = false;
+            const a = (imp.assetIndex || []).find(x => x.id === p.dupId);
+            if (a) {
+                const dm = pointToPolygonMeters(p.lat, p.lng, a.ring);
+                const ft = isFinite(dm) ? Math.round(dm / GEN_FT_TO_M) : null;
+                if (ft != null && ft > A.movedFt) { R.moved.push({ p, name: p.name, detail: `client coordinate ${ft.toLocaleString()} ft from where "${a.name}" sits`, before: `${a.centroid.lat.toFixed(6)}, ${a.centroid.lng.toFixed(6)}`, after: `${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}`, dist: ft, lat: p.lat, lng: p.lng, lat2: a.centroid.lat, lng2: a.centroid.lng }); changed = true; }
+                const oldBase = impTierStrip(a.subtype || ''), newBase = baseSub(p);
+                if (newBase && oldBase.toLowerCase() !== newBase.toLowerCase()) { R.type.push({ p, name: p.name, detail: `type "${oldBase || '—'}" → "${newBase}"`, before: oldBase, after: newBase, lat: p.lat, lng: p.lng }); changed = true; }
+                if (imp.pri.on && p.pri) { const was = impTierOf(a.subtype || ''), now = p.pri.tier || ''; if (was !== now) { R.tier.push({ p, name: p.name, detail: `${was || 'no tier'} → ${now || 'no tier'}${p.pri.padTotal != null ? ` · pad ${Math.round(p.pri.padTotal).toLocaleString()} BLPD` : ''}`, before: was || 'none', after: now || 'none', lat: p.lat, lng: p.lng }); changed = true; } }
+                const e = byId.get(a.id);
+                const m = e && typeof e.description === 'string' ? e.description.match(/this asset ([\d,]+) BLPD/) : null;
+                const prev = m ? parseFloat(m[1].replace(/,/g, '')) : null, now = (p.pri && p.pri.blpd != null) ? p.pri.blpd : impPriBlpdSafe(p);
+                if (prev != null && now != null && Math.abs(now - prev) >= Math.max(5, 0.2 * Math.max(prev, 1))) { R.prod.push({ p, name: p.name, detail: `${Math.round(prev).toLocaleString()} → ${Math.round(now).toLocaleString()} BLPD (${now > prev ? '+' : ''}${Math.round(100 * (now - prev) / Math.max(prev, 1))}%)`, before: Math.round(prev), after: Math.round(now), lat: p.lat, lng: p.lng }); changed = true; }
+            }
+            if (!changed) R.same++;
+        });
+        // gone: site assets inside the area whose name the list does not carry (any row)
+        (imp.assetIndex || []).forEach(a => {
+            if (!a.clean || inFile.has(a.clean)) return;
+            if (imp.shapes.length && !imp.shapes.some(sh => impShapeContains(sh, a.centroid.lat, a.centroid.lng))) return;
+            if (!imp.shapes.length && A.scope !== 'all') return;             // no boundary + selected scope → no area to judge "gone" in
+            R.gone.push({ a, name: a.name, detail: `on the site (${impTierStrip(a.subtype) || 'no type'}${impTierOf(a.subtype) ? ` · ${impTierOf(a.subtype)}` : ''}) but not in the list`, lat: a.centroid.lat, lng: a.centroid.lng });
+        });
+        ['new', 'gone', 'moved', 'tier', 'type', 'prod'].forEach(k => R[k].sort((x, y) => (y.dist || 0) - (x.dist || 0) || String(x.name).localeCompare(String(y.name))));
+        A.result = R; A.tab = A.tab && R[A.tab] && R[A.tab].length ? A.tab : (['moved', 'gone', 'tier', 'type', 'prod', 'new'].find(k => R[k].length) || 'new');
+        impRenderAnalyzeUi();
+        impStatus(`📊 ${R.n} in scope vs the site: <b>${R.new.length}</b> new · <b style="color:#ff8a80">${R.gone.length}</b> gone · <b style="color:#ffb347">${R.moved.length}</b> moved &gt; ${A.movedFt} ft · <b style="color:#ffe14d">${R.tier.length}</b> tier · ${R.type.length} type · ${R.prod.length} production · ${R.same} unchanged — nothing written`);
+    }
+    function impRenderAnalyzeUi() {
+        const el = document.getElementById('aim-imp-analyze'); if (!el) return;
+        const A = imp.ana, R = A.result;
+        if (!imp.points.length) { el.innerHTML = ''; return; }
+        const inCss = 'background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px';
+        const cats = [
+            { id: 'new', label: 'New', color: '#5fff5f', hint: 'in the list, not on the site — Create makes them' },
+            { id: 'gone', label: 'Gone', color: '#ff8a80', hint: 'on the site inside the area, not in the list — nothing is deleted; decide with the client' },
+            { id: 'moved', label: `Moved > ${A.movedFt} ft`, color: '#ffb347', hint: 'the client coordinate is far from where the asset sits — the update does not move it' },
+            { id: 'tier', label: 'Tier change', color: '#ffe14d', hint: 'P prefix the update would rewrite' },
+            { id: 'type', label: 'Type change', color: '#c39bd3', hint: 'subtype the update would rewrite' },
+            { id: 'prod', label: 'Production change', color: '#7adfe6', hint: 'this asset\'s BLPD vs what our last import wrote in its notes (≥ 20 %)' },
+        ];
+        const pill = (c) => { const n = R ? R[c.id].length : 0; const on = R && A.tab === c.id; return `<button data-impana-tab="${c.id}" title="${impEsc(c.hint)}" ${R ? '' : 'disabled'} style="background:${on ? c.color + '33' : 'transparent'};border:1px solid ${c.color}${on ? 'cc' : '55'};color:${n ? c.color : '#666'};border-radius:10px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px;font-weight:${on ? 700 : 400}">${c.label} ${n}</button>`; };
+        const rows = R ? R[A.tab] : [];
+        const cat = cats.find(c => c.id === A.tab) || cats[0];
+        const row = (x, i) => `<div data-impana-row="${i}" style="display:flex;align-items:center;gap:6px;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:#cfd6dc;cursor:pointer" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background=''" title="click = zoom"><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${cat.color};flex:none"></span><b style="flex:none;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(x.name)}</b><span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(x.detail)}</span></div>`;
+        el.innerHTML = `<div style="padding:6px 8px;background:rgba(122,223,230,0.04);border:1px dashed rgba(122,223,230,0.3);border-radius:3px;margin-bottom:6px">
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:4px;font-size:11px">
+                <b style="color:#7adfe6">📊 Analyze — what this list would change</b><span style="color:#888;font-size:10px">read-only; run it on a new quarterly list before Create</span>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#cfd6dc">moved over <input type="number" data-impana-ft value="${A.movedFt}" min="0" step="50" style="width:56px;${inCss};text-align:right"> ft</label>
+                <select data-impana-scope style="${inCss}"><option value="selected"${A.scope === 'selected' ? ' selected' : ''}>selected points</option><option value="all"${A.scope === 'all' ? ' selected' : ''}>whole file</option></select>
+                <button data-impana-run style="background:rgba(122,223,230,0.15);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:3px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">⟳ Analyze</button>
+                <span style="flex:1"></span>
+                ${R ? `<span style="color:#888;font-size:10px">${impEsc(R.at)} · ${R.same} unchanged</span><button data-impana-rep="sheets" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Sheets</button><button data-impana-rep="csv" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button>` : ''}
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:4px">${cats.map(pill).join('')}</div>
+            ${R ? `<div style="font-size:10px;color:#888;margin-bottom:3px">${impEsc(cat.hint)}</div><div style="max-height:200px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">${rows.slice(0, 600).map(row).join('') || '<div style="padding:6px;color:#5fff5f;font-size:10px">none</div>'}${rows.length > 600 ? `<div style="padding:4px;color:#888;font-size:10px">first 600 of ${rows.length} — export for the full list</div>` : ''}</div>` : ''}
+        </div>`;
+        el.querySelector('[data-impana-ft]').onchange = function () { const v = parseFloat(this.value); if (isFinite(v) && v >= 0) { A.movedFt = v; impSaveParams(); if (R) impAnalyze(); else impRenderAnalyzeUi(); } };
+        el.querySelector('[data-impana-scope]').onchange = function () { A.scope = this.value === 'all' ? 'all' : 'selected'; if (R) impAnalyze(); };
+        el.querySelector('[data-impana-run]').onclick = () => { try { impAnalyze(); } catch (e) { console.warn(`${TAG} 📊`, e); impStatus(`📊 Analyze failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } };
+        el.querySelectorAll('[data-impana-tab]').forEach(b => b.onclick = () => { A.tab = b.getAttribute('data-impana-tab'); impRenderAnalyzeUi(); });
+        el.querySelectorAll('[data-impana-rep]').forEach(b => b.onclick = () => { try { impExportAnalyze(b.getAttribute('data-impana-rep')); } catch (e) { impStatus(`Export failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } });
+        el.querySelectorAll('[data-impana-row]').forEach(r => r.onclick = () => { const x = rows[Number(r.getAttribute('data-impana-row'))]; if (!x) return; const pts = [{ lat: x.lat, lng: x.lng, name: x.name }]; if (x.lat2 != null) pts.push({ lat: x.lat2, lng: x.lng2, name: `${x.name} (on the site)` }); impZoomToPoints(pts, x.name); impStatus(`🔎 ${impEsc(x.name)} — ${impEsc(x.detail)}`); });
+    }
+    function impExportAnalyze(how) {
+        const R = imp.ana.result; if (!R) { impStatus('Run ⟳ Analyze first', '#ffb347'); return; }
+        const label = { new: 'New', gone: 'Gone from the list', moved: 'Moved', tier: 'Tier change', type: 'Type change', prod: 'Production change' };
+        const rows = []; ['moved', 'gone', 'tier', 'type', 'prod', 'new'].forEach(k => R[k].forEach(x => rows.push(Object.assign({ change: label[k] }, x))));
+        if (!rows.length) { impStatus('Nothing changed — nothing to export', '#5fff5f'); return; }
+        const cols = [
+            { label: 'Change', val: x => x.change }, { label: 'Asset', val: x => x.name }, { label: 'Detail', val: x => x.detail }, { label: 'Before', val: x => x.before == null ? '' : x.before }, { label: 'After', val: x => x.after == null ? '' : x.after },
+            { label: 'Distance (ft)', val: x => x.dist == null ? '' : x.dist }, { label: 'Latitude', val: x => Number(x.lat).toFixed(6) }, { label: 'Longitude', val: x => Number(x.lng).toFixed(6) }, { label: 'File', val: () => imp.fileName || '' }, { label: 'Analyzed', val: () => R.at },
+        ];
+        impExportTable(rows, cols, how, 'list-vs-site', 'change');
+    }
     function impRenderImportsUi() {
         const el = document.getElementById('aim-imp-imports'); if (!el) return;
         let groups = []; try { groups = impScanImports(); } catch (e) { console.warn(`${TAG} 📥 import scan failed:`, e); }
@@ -23769,6 +23865,7 @@
         impRenderStaged(); impRenderShapes();
         impRenderTypeMapUi();
         try { impRenderEnvUi(); } catch (e) {}
+        imp.ana.result = null; try { impRenderAnalyzeUi(); } catch (e) {}
         const dupN = imp.points.filter(p => p.dup).length, childN = imp.points.filter(p => p.child).length, nearN = imp.points.filter(p => p.near).length;
         impStatus(`Staged <b>${imp.points.length}</b> point(s), all selected`
             + (imp.invalid ? ` · <span style="color:#ffb347">${imp.invalid} row(s) skipped (bad/missing coordinates)</span>` : '')
@@ -24758,6 +24855,7 @@
                 <button id="aim-imp-commit" style="${btnCss('95,255,95')};font-weight:600">✓ Create selected</button>
                 <button id="aim-imp-undocreate" style="${btnCss('255,179,71')}" title="Delete exactly the assets the most recent import created (this session). Each delete rides Delete Guard's undo ring when installed.">↩ Undo last import</button>
             </div>
+            <div id="aim-imp-analyze" style="margin-top:6px"></div>
             <div id="aim-imp-imports" style="margin-top:6px"></div>
             ${IMP_SEC_CLOSE}
             ${impSecOpenHtml('adv')}
@@ -24781,6 +24879,7 @@
         impRenderEnvUi();
         impRenderResumeUi();
         try { impRenderImportsUi(); } catch (e) {}
+        try { impRenderAnalyzeUi(); } catch (e) {}
         impAutosaveTimer();
         impSyncUi();
     }
@@ -29837,7 +29936,7 @@
             steps: ['Set how many zones to add, how far inside the pad edge, the hop limit for pads outside every FFZ, the small-battery size and the NFZ / tower clearances. Paste extra lat,lng lines for pads that are not on the site yet.', '▶ Plan safe zones — pink numbered spots on the map, before → after numbers in the panel, the farthest remaining point in red.', 'Click a row to jump, ⧉ copies its coordinates. Place the Safe Zone in Percepto by hand after a satellite check of the ground.', '📋 Copy report for the hand-off; ✕ Clear drops the preview.'],
             test: 'Plan 3 zones on a site with one base, confirm the worst-case number drops, then plan 4 and watch the farthest point move.' },
         imp: { what: 'Bring a client asset list into Percepto. Load a CSV or KML → points stage on the map (nothing written) → narrow with boundaries → map the type → ✓ Create makes real asset squares. Create-only, with dry run, backup manifest and undo.',
-            steps: ['The page is five numbered sections in working order (plus Advanced). Each header shows where it stands; click to open / close, or use the jump chips at the top. The status line under the title shows the latest result.', 'Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', '✏ Shape draws the asset\'s real outline before it is created: click a dot, CTRL+drag a stroke across the asset (draw along the LONG side → a rectangle that long by the narrow side, default 15 ft; a loop → the tightest box). A red buffer ring (7.5 ft, editable) shows around the outline you are holding so you can see the 15 ft you must keep; ALT+click other dots to copy the held outline onto them — copies and dragged edges snap to a 15 ft gap from neighbours (gap editable, 0 = flush; Alt while dragging = no snap). Shift is left alone so Percepto\'s asset names stay visible. Drag inside the box to move it whole, drag an edge to pull it longer or shorter, drag a corner to move that corner; click an edge midpoint to add a corner, right-click a corner to remove it, Delete = back to a square. Colour / fill in the Control Panel.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', 'Undo: ↩ Undo last import reverts the last run (creates deleted, updates put back) and survives a reload via ↻ Resume. Independently, 🕘 Imports on this site lists every import found on the assets themselves (the "Imported by …" line) and can delete a run\'s created assets from any machine, any time.', '5 · Enverus check: set the Developer API key once, pick the API-number column, Cross-check — every selected well gets its Enverus status / type / trajectory / operator / dates and location; anything not plainly producing lands in Placement › 🛢 Enverus and an "Enverus" block goes into the notes.', '🔍 Find missing wells (same section, after a cross-check): every well the operator has inside your boundaries whose API is not in the file, with status and the nearest mapped asset — tick the ones to add, ➕ Stage, and they become ordinary points (source noted) that go through tiers, flags and Create like the rest. They also appear in the client review as "Well on your pads that is not in the list".', 'Priority tiers (in 3 · Type & priority): pick the oil + water columns (or a single BLPD column, or a ready-made P1/P2/P3 column); every asset on a pad shares the pad total; the tier is written as a type prefix ("P1 - …") and a Priority / Prioritized block in the notes. "name matches → update type + notes" is the quarterly re-run: load the new list, review the Tier report, Create.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
+            steps: ['The page is five numbered sections in working order (plus Advanced). Each header shows where it stands; click to open / close, or use the jump chips at the top. The status line under the title shows the latest result.', 'Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', '✏ Shape draws the asset\'s real outline before it is created: click a dot, CTRL+drag a stroke across the asset (draw along the LONG side → a rectangle that long by the narrow side, default 15 ft; a loop → the tightest box). A red buffer ring (7.5 ft, editable) shows around the outline you are holding so you can see the 15 ft you must keep; ALT+click other dots to copy the held outline onto them — copies and dragged edges snap to a 15 ft gap from neighbours (gap editable, 0 = flush; Alt while dragging = no snap). Shift is left alone so Percepto\'s asset names stay visible. Drag inside the box to move it whole, drag an edge to pull it longer or shorter, drag a corner to move that corner; click an edge midpoint to add a corner, right-click a corner to remove it, Delete = back to a square. Colour / fill in the Control Panel.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', 'Undo: ↩ Undo last import reverts the last run (creates deleted, updates put back) and survives a reload via ↻ Resume. Independently, 🕘 Imports on this site lists every import found on the assets themselves (the "Imported by …" line) and can delete a run\'s created assets from any machine, any time.', '📊 Analyze (in Create / update): the quarterly compare — run it on a new list before Create to see what would change: new · gone (on the site but not in the list; nothing is deleted) · moved over N ft · tier / type changes · production changes vs our last notes. Click a row to zoom; 📤 Sheets for the review.', '5 · Enverus check: set the Developer API key once, pick the API-number column, Cross-check — every selected well gets its Enverus status / type / trajectory / operator / dates and location; anything not plainly producing lands in Placement › 🛢 Enverus and an "Enverus" block goes into the notes.', '🔍 Find missing wells (same section, after a cross-check): every well the operator has inside your boundaries whose API is not in the file, with status and the nearest mapped asset — tick the ones to add, ➕ Stage, and they become ordinary points (source noted) that go through tiers, flags and Create like the rest. They also appear in the client review as "Well on your pads that is not in the list".', 'Priority tiers (in 3 · Type & priority): pick the oil + water columns (or a single BLPD column, or a ready-made P1/P2/P3 column); every asset on a pad shares the pad total; the tier is written as a type prefix ("P1 - …") and a Priority / Prioritized block in the notes. "name matches → update type + notes" is the quarterly re-run: load the new list, review the Tier report, Create.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
             test: 'Load the list, add one boundary, confirm the selected count drops, Create with Dry run ON.' },
         sci: { what: 'Applies the Ortho Scanner review sheet\'s decisions: accepted NFZs and flight-path leg changes stage on the map (green / yellow, removed legs red), preflight runs, then Apply writes them — NFZs create-only, flight paths one POST each with Delete Guard backups.',
             steps: ['Load the decisions JSON and the scan bundle from the review sheet.', 'Check the staged plan on the map and the preflight result.', 'Untick Dry run → Apply.'],

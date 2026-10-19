@@ -1,3 +1,7 @@
+## 2026-10-19 — 📊 Analyze: the quarterly compare — Site Setup Tools latest v4.380 (latest only)
+
+- **v4.380 — 📊 Analyze in 6 · Create / update.** Read-only compare of the loaded list (selected points or the whole file) with the site: **New** (not on the site), **Gone** (on the site inside the boundaries but no longer in the list — nothing is deleted), **Moved** over N ft (default 200, editable: the client coordinate vs where the asset sits), **Tier change** and **Type change** (what the update would rewrite), **Production change** (this asset's BLPD vs the number our last import wrote into its notes, ≥ 20 %). Pills per category, a clickable list (zoom + pulse; moved rows pulse both spots), 📤 Sheets / ⬇ CSV with Change · Asset · Detail · Before · After · Distance.
+
 ## 2026-10-19 — ✏ Shape: buffer band inside and outside — Site Setup Tools latest v4.379 (latest only)
 
 - **v4.379** — the red buffer band now straddles the held outline: 7.5 ft outside and 7.5 ft inside, with the centre of the box left clear. A box narrower than twice the buffer fills solid (there is no clear centre to show).
