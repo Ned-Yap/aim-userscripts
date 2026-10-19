@@ -1,3 +1,7 @@
+## 2026-10-19 — ✏ Shape: buffer as a band — Site Setup Tools latest v4.378 (latest only)
+
+- **v4.378** — the red buffer around the held outline is now a **band** between the outline and the 7.5 ft offset (the outline is a hole in it), so the inside of the box stays clear and you can see the asset and the box's real size. Band opacity default 0.3 (Control Panel).
+
 ## 2026-10-19 — ✏ Shape on canvas — Site Setup Tools latest v4.377 (latest only)
 
 - **v4.377 — ✏ Shape drags still stuttered:** the outlines, buffer ring, handles and stroke preview were SVG, so every drag frame mutated SVG attributes and the Map Styler's overlay observer rebuilt its own layers each time. Every ✏ layer now draws on one canvas renderer (no DOM mutation per frame); the stroke preview updates in place too.

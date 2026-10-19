@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.377
+// @version      4.378
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.377';
+    const SCRIPT_VERSION = '4.378';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -251,7 +251,7 @@
     let impShapeOpacity = 0.25;     // v4.367: fill opacity
     let impShapeFill = true;        // v4.367: filled or outline only
     let impBufColor = '#ff2d2d';    // v4.373: red buffer ring around outlines while shaping (7.5 ft each side = 15 ft between assets)
-    let impBufOpacity = 0.18;       // v4.373: buffer fill opacity
+    let impBufOpacity = 0.3;        // v4.373: buffer band fill opacity (v4.378: band, not a full fill)
     // v4.369: 🛟 Safe Zone Planner (#302) — CP card id + init-referenced state (TDZ rule).
     const SZP_SCRIPT_ID = 'aim-safe-zone-planner';
     let szpMasterEnabled = true;
@@ -13492,7 +13492,7 @@
                 { id: 'imp-shape-opacity', label: 'Fill opacity (0 = outline only)', type: 'number', min: 0, max: 1, step: 0.05, default: 0.25 },
                 { id: 'imp-shape-fill', label: 'Fill the shapes', type: 'boolean', default: true },
                 { id: 'imp-buf-color', label: 'Buffer ring colour (shown while ✏ Shape is on)', type: 'color', default: '#ff2d2d' },
-                { id: 'imp-buf-opacity', label: 'Buffer ring fill opacity', type: 'number', min: 0, max: 1, step: 0.05, default: 0.18 },
+                { id: 'imp-buf-opacity', label: 'Buffer band fill opacity', type: 'number', min: 0, max: 1, step: 0.05, default: 0.3 },
                 { id: 'imp-open', label: '📥 Open Asset Importer', type: 'button', action: 'imp-open' },
             ],
             hotkeys: [],
@@ -24271,7 +24271,7 @@
             if (!p || !p.shape || !R || R.p !== p || R.verts.length !== p.shape.length) { impRenderHeldShape(); return; }
             try {
                 const n = p.shape.length;
-                if (R.buf) R.buf.setLatLngs(impOffsetRing(p.shape, imp.bufFt * GEN_FT_TO_M).map(v => [v.lat, v.lng]));
+                if (R.buf) R.buf.setLatLngs([impOffsetRing(p.shape, imp.bufFt * GEN_FT_TO_M).map(v => [v.lat, v.lng]), p.shape.map(v => [v.lat, v.lng])]);
                 R.poly.setLatLngs(p.shape.map(v => [v.lat, v.lng]));
                 for (let i = 0; i < n; i++) { const v = p.shape[i], w = p.shape[(i + 1) % n]; R.verts[i].setLatLng([v.lat, v.lng]); if (R.mids[i]) R.mids[i].setLatLng([(v.lat + w.lat) / 2, (v.lng + w.lng) / 2]); }
             } catch (e) { impRenderHeldShape(); }
@@ -24285,7 +24285,8 @@
         try {
             const R = { p, buf: null, poly: null, verts: [], mids: [] };
             if (imp.mode === 'shape' && imp.bufFt > 0 && impBufOpacity > 0) {
-                R.buf = L.polygon(impOffsetRing(p.shape, imp.bufFt * GEN_FT_TO_M).map(v => [v.lat, v.lng]), { renderer: impShapeRenderer(), color: impBufColor, weight: 1, opacity: 0.6, dashArray: '3,3', fillColor: impBufColor, fillOpacity: impBufOpacity, interactive: false });
+                // v4.378: the buffer is a BAND (outer offset ring with the outline as a hole) — the inside of the box stays clear
+                R.buf = L.polygon([impOffsetRing(p.shape, imp.bufFt * GEN_FT_TO_M).map(v => [v.lat, v.lng]), p.shape.map(v => [v.lat, v.lng])], { renderer: impShapeRenderer(), color: impBufColor, weight: 1, opacity: 0.7, dashArray: '3,3', fillColor: impBufColor, fillOpacity: impBufOpacity, fillRule: 'evenodd', interactive: false });
                 R.buf.addTo(map); imp.heldLayers.push(R.buf);
             }
             R.poly = L.polygon(p.shape.map(v => [v.lat, v.lng]), { renderer: impShapeRenderer(), color: '#ff5fff', weight: 3, opacity: 0.95, fill: impShapeFill && impShapeOpacity > 0, fillColor: impShapeColor, fillOpacity: impShapeFill ? impShapeOpacity : 0, interactive: false });
