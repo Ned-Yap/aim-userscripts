@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.14
+// @version      3.15
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.14';
+    const SCRIPT_VERSION = '3.15';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -547,7 +547,8 @@
     const COV_CACHE_KEY = 'aim-mb-coverage';          // { [siteKey]: { at, day, recs } }
     const COV_CFG_KEY = 'aim-mb-coverage-cfg';
     const COV_TIER_RE = /^P([1-3])\s*[-–—:]/i;
-    const COV_POOL = 10;
+    const COV_POOL = 12;
+    const COV_WINDOW_DAYS = 92;   // v3.15: one read per asset covers the last ~3 months; the all-time probe only runs when that is empty
     const COV_TTL_MS = 60 * 60 * 1000;
     const COV_BTN_ID = 'aim-mb-cov-btn';
     const COV_TIER_COLORS = { P1: '#ff4d4d', P2: '#ff9f1c', P3: '#ffe66d', none: '#8a8f98' };
@@ -676,16 +677,16 @@
     // choice". That is the "never flown" signal, not an error.
     function covIsNeverFlown(e) { return !!(e && e.status === 400 && /valid choice/i.test(String(e.body || ''))); }
     async function covFetchAsset(sid, a, monthStartSec, nowSec, weekStart, pad, monthStartLocal) {
-        const rec = { id: a.id, poiId: a.poiId, name: a.name, pad, tier: covTierOf(a.poi), poi: a.poi || '', lastAt: null, lastMission: '', monthFlies: 0, weekFlies: 0, monthImages: 0, totalImages: null, flies: [], planned: false, err: '' };
+        const rec = { id: a.id, poiId: a.poiId, name: a.name, pad, tier: covTierOf(a.poi), poi: a.poi || '', lastAt: null, lastMission: '', lm: null, monthFlies: 0, weekFlies: 0, monthImages: 0, totalImages: null, flies: [], planned: false, err: '' };
         if (a.poiId == null) { rec.err = 'asset has no custom.poi_id — cannot query images'; return rec; }
         try {
             const j = await covFetchJson(covImagesUrl(sid, a.poiId, monthStartSec, nowSec, 200));
-            const rows = ((j && j.results) || []).filter(im => im && im.created_at && new Date(im.created_at) >= monthStartLocal);
-            rec.monthImages = rows.length;
-            const flies = new Map();          // "day|mission" → newest iso
+            const rows = ((j && j.results) || []).filter(im => im && im.created_at);
+            const flies = new Map();          // "day|mission" → newest iso (whole window; month/week counted below)
             rows.forEach(im => { const k = `${covDayKey(im.created_at)}|${im.mission_name || ''}`; if (!flies.has(k) || flies.get(k) < im.created_at) flies.set(k, im.created_at); });
             rec.flies = [...flies.entries()].map(([k, at]) => ({ day: k.split('|')[0], mission: k.split('|')[1], at })).sort((x, y) => y.at < x.at ? -1 : 1);
-            rec.monthFlies = rec.flies.length;
+            rec.monthImages = rows.filter(im => new Date(im.created_at) >= monthStartLocal).length;
+            rec.monthFlies = rec.flies.filter(f => new Date(f.at) >= monthStartLocal).length;
             rec.weekFlies = rec.flies.filter(f => new Date(f.at) >= weekStart).length;
             if (rows.length) { rec.lastAt = rows[0].created_at; rec.lastMission = rows[0].mission_name || ''; }
             else {
@@ -704,6 +705,52 @@
         return rec;
     }
     let covErrLogged = 0;
+    // v3.15: attach the LAST mission's takeoff record (id / group / pilot /
+    // image progress) and planned-vs-captured asset counts to each record.
+    // Images carry only the mission NAME, so the takeoff mission is the log
+    // row with that app name whose start is closest before the image.
+    function covJoinMissions(sid, ent, recs) {
+        const logRows = (logBySite[sid] && logBySite[sid].rows) ? buildLogRows(sid) : [];
+        const byName = new Map();
+        logRows.forEach(r => { if (!r.name || !r.whenMs) return; const k = r.name.toUpperCase(); if (!byName.has(k)) byName.set(k, []); byName.get(k).push(r); });
+        byName.forEach(list => list.sort((a, b) => a.whenMs - b.whenMs));
+        const findTakeoff = (name, atIso) => {
+            const list = byName.get(String(name || '').toUpperCase()); if (!list) return null;
+            const at = Date.parse(atIso); let best = null;
+            for (const r of list) { if (r.whenMs <= at + 10 * 60000 && (!best || r.whenMs > best.whenMs)) best = r; }
+            if (best && at - best.whenMs > 12 * 3600000) return null;   // nothing within 12 h → unknown
+            return best;
+        };
+        // planned assets per mission NAME: pads the Mission Bank app visits + every asset nested under them
+        const apps = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
+        const plannedByName = new Map();
+        if (apps.length && ent && ent.assets) {
+            let det = null;
+            try { det = mcvDetect(ent, apps); } catch (e) { console.warn(`${TAG} coverage: mcvDetect failed`, e); }
+            const byId = new Map(ent.assets.map(a => [a.id, a]));
+            const padsOf = new Map();
+            ((det && det.macros) || []).forEach(x => padsOf.set(x.mission.id, x.pads));
+            ((det && det.solos) || []).forEach(x => padsOf.set(x.mission.id, [x.pad]));
+            apps.forEach(app => {
+                const pads = padsOf.get(app.id) || [];
+                const set = new Set();
+                pads.forEach(p => { set.add(p.id); const a = byId.get(p.id); (a && a.descendants || []).forEach(d => set.add(d)); });
+                plannedByName.set(String(app.name || '').toUpperCase(), set.size);
+            });
+        }
+        // captured so far = assets holding ≥1 image from (mission name, day)
+        const capturedByKey = new Map();
+        recs.forEach(r => (r.flies || []).forEach(f => { const k = `${String(f.mission).toUpperCase()}|${f.day}`; capturedByKey.set(k, (capturedByKey.get(k) || 0) + 1); }));
+        recs.forEach(r => {
+            r.lm = null;
+            if (!r.lastAt || !r.lastMission) return;
+            const t = findTakeoff(r.lastMission, r.lastAt);
+            const key = `${r.lastMission.toUpperCase()}|${covDayKey(r.lastAt)}`;
+            r.lm = { id: t ? t.id : null, group: t ? t.missionGroup : '', pilot: t ? t.createdBy : '', state: t ? t.stateLabel : '', images: t ? t.images : null, plannedImages: t ? t.plannedImages : null,
+                plannedAssets: plannedByName.has(r.lastMission.toUpperCase()) ? plannedByName.get(r.lastMission.toUpperCase()) : null, captured: capturedByKey.get(key) || 0 };
+        });
+    }
+    function covMissionUrl(sid, mid) { return `${location.origin}/#/site/${sid}/control-panel/past-mission/${mid}`; }
     function covFetch(sid, onProgress) {
         const siteKey = covSiteKey(sid);
         if (covInFlight && covInFlight.siteKey === siteKey) return covInFlight.p;
@@ -719,8 +766,13 @@
             // (local-midnight Central = +5 h → 400, seen live). Day-align the
             // window (floor to the UTC day that contains month start, end of
             // today UTC) and apply the exact local month edge client-side.
-            const monthStartSec = Math.floor(monthStart.getTime() / 1000 / 86400) * 86400;
+            const winStart = new Date(now.getTime() - COV_WINDOW_DAYS * 86400000);
+            const monthStartSec = Math.floor(Math.min(monthStart.getTime(), winStart.getTime()) / 1000 / 86400) * 86400;
             const nowSec = Math.floor(now.getTime() / 1000 / 86400) * 86400 + 86400 - 1;
+            // v3.15: mission log (takeoff missions: id / group / pilot / images / planned images)
+            // + Mission Bank apps (planned assets per mission) load alongside the image reads.
+            const logP = new Promise(res => { if (logBySite[sid]) return res(); fetchMissionLog(sid, () => res(), (e) => { console.warn(`${TAG} coverage: mission log unavailable — ${e}`); res(); }); });
+            const appsP = new Promise(res => { if (missionsBySite[sid]) return res(); fetchMissions(sid, () => res(), (e) => { console.warn(`${TAG} coverage: missions unavailable — ${e}`); res(); }); });
             const recs = new Array(assets.length);
             let next = 0, done = 0, reqN = 0, reqMs = 0, reqMax = 0;
             const t0 = Date.now();
@@ -734,6 +786,8 @@
                 }
             };
             await Promise.all(Array.from({ length: Math.min(COV_POOL, assets.length) }, worker));
+            await Promise.all([logP, appsP]);
+            try { covJoinMissions(sid, ent, recs); } catch (e) { console.warn(`${TAG} coverage: mission join failed`, e); }
             const bucket = { at: Date.now(), day: covDayKey(now.toISOString()), monthStart: monthStart.toISOString(), weekStart: weekStart.toISOString(), recs };
             covRestatus(bucket);
             covBySite[siteKey] = bucket;
@@ -769,12 +823,15 @@
     function covVisibleRecs(bucket) {
         const st = panelState.cov || (panelState.cov = { tier: '', status: '', search: '' });
         const q = (panelState.search || '').trim().toLowerCase();
+        const lmStr = r => r.lm ? `${r.lm.id || ''} ${r.lm.group || ''} ${r.lm.pilot || ''}`.toLowerCase() : '';
         let rows = bucket.recs.filter(r => (!st.tier || (r.tier || 'none') === st.tier) && (!st.status || r.status === st.status)
-            && (!q || r.name.toLowerCase().includes(q) || (r.pad || '').toLowerCase().includes(q) || (r.lastMission || '').toLowerCase().includes(q)));
+            && (!q || r.name.toLowerCase().includes(q) || (r.pad || '').toLowerCase().includes(q) || (r.lastMission || '').toLowerCase().includes(q) || lmStr(r).includes(q)));
         const key = panelState.sortKey || 'status', dir = panelState.sortDir === 'asc' ? 1 : -1;
         const sRank = { never: 0, over: 1, due: 2, behind: 3, ok: 4 };
         const tRank = { P1: 0, P2: 1, P3: 2, '': 3 };
+        const lm = r => r.lm || {};
         const val = r => key === 'name' ? r.name.toLowerCase() : key === 'pad' ? (r.pad || '').toLowerCase() : key === 'tier' ? tRank[r.tier] : key === 'last' ? (r.lastAt || '') : key === 'mission' ? (r.lastMission || '').toLowerCase()
+            : key === 'mid' ? (lm(r).id || 0) : key === 'group' ? (lm(r).group || 0) : key === 'pilot' ? (lm(r).pilot || '').toLowerCase() : key === 'captured' ? (lm(r).captured || 0)
             : key === 'month' ? r.monthFlies : key === 'week' ? r.weekFlies : key === 'status' ? sRank[r.status] : r.name.toLowerCase();
         rows.sort((a, b) => { const x = val(a), y = val(b); return (x < y ? -1 : x > y ? 1 : a.name.localeCompare(b.name)) * dir; });
         return rows;
@@ -805,12 +862,21 @@
         const body = rows.map(r => {
             const sc = COV_STATUS_COLORS[r.status], tc = COV_TIER_COLORS[r.tier || 'none'];
             const age = covDaysAgo(r.lastAt);
+            const lm = r.lm;
+            const inProg = lm && lm.plannedImages && lm.images != null && lm.images < lm.plannedImages;
+            const capTxt = lm ? `${lm.captured}${lm.plannedAssets != null ? ` / ${lm.plannedAssets}` : ''}` : '';
+            const imgTxt = lm && lm.images != null ? `${lm.images}${lm.plannedImages ? ` / ${lm.plannedImages}` : ''}` : '';
             return `<tr data-cov-id="${r.id}" title="${escapeHtml(r.poi || '')}${r.err ? ' · fetch error: ' + escapeHtml(r.err) : ''}">
                 <td style="color:#e6e6e6">${escapeHtml(r.name)}${r.err ? ' <span style="color:#ff5252">⚠</span>' : ''}</td>
                 <td style="color:#9aa">${escapeHtml(r.pad || '')}</td>
                 <td><span style="display:inline-block;min-width:22px;text-align:center;border:1px solid ${tc};color:${tc};border-radius:3px;padding:0 4px;font-weight:700">${r.tier || '—'}</span></td>
                 <td title="${escapeHtml(r.lastAt || '')}">${covFmtDate(r.lastAt)}${age != null ? ` <span style="color:#777">(${age}d)</span>` : ''}</td>
                 <td style="color:#9aa">${escapeHtml(r.lastMission || '')}</td>
+                <td>${lm && lm.id ? `<a href="${covMissionUrl(sid, lm.id)}" target="_blank" data-cov-link style="color:#14d2dc;text-decoration:underline" title="Open Mission Playback for ${lm.id}${lm.state ? ' · ' + escapeHtml(lm.state) : ''}">${lm.id}</a>` : (lm ? '<span style="color:#666" title="No takeoff mission with this name within 12 h of the image">?</span>' : '')}</td>
+                <td style="color:#9aa">${lm ? escapeHtml(String(lm.group || '')) : ''}</td>
+                <td style="color:#9aa">${lm ? escapeHtml(lm.pilot || '') : ''}</td>
+                <td style="text-align:center" title="Assets with an image from that mission that day / assets the Mission Bank mission plans to visit (pads + nested)">${capTxt}</td>
+                <td style="text-align:center;color:${inProg ? '#ffb300' : '#9aa'}" title="Images uploaded / planned${inProg ? ' — still capturing' : ''}">${imgTxt}${inProg ? ' ⏳' : ''}</td>
                 <td style="text-align:center">${r.monthFlies}</td>
                 <td style="text-align:center">${r.weekFlies}</td>
                 <td><span style="color:${sc};font-weight:700">${COV_STATUS_LABEL[r.status]}</span></td>
@@ -824,7 +890,7 @@
                 <button class="aim-mb-tbtn" data-cov-act="refresh" title="Re-read every asset's images from Percepto (${bucket.recs.length} assets)">↻ Refresh <span style="opacity:.7">${ageMin < 1 ? 'now' : ageMin + ' min ago'}</span></button>
                 <button class="aim-mb-tbtn" data-cov-act="sheets" title="Rich table → paste into Google Sheets">📤 Sheets</button>
                 <button class="aim-mb-tbtn" data-cov-act="csv">⬇ CSV</button>
-                <button class="aim-mb-tbtn" data-cov-act="paint" title="Push these colours to the map (Map Styler → Assets → Coverage colours)">🎨 Map</button>
+                <button class="aim-mb-tbtn${st.paint === false ? '' : ' active'}" data-cov-act="paint" title="Paint these colours on the map (needs Map Styler → Assets → 📅 Coverage colours ON). Click to toggle.">🎨 Map ${st.paint === false ? 'off' : 'on'}</button>
             </div>
             <div style="padding:5px 10px;border-bottom:1px solid #2a2a2a;font-size:11px;color:#bbb;display:flex;flex-wrap:wrap;gap:4px 0;align-items:center">
                 ${sum}
@@ -833,8 +899,8 @@
             </div>
             <div class="aim-mb-table-wrap">
                 <table>
-                    <thead><tr>${th('name', 'Asset')}${th('pad', 'Pad')}${th('tier', 'Tier', 'From the asset type prefix (P1 - …)')}${th('last', 'Last flown')}${th('mission', 'Last mission')}${th('month', '# this month', 'Distinct day + mission with an image of this asset')}${th('week', '# this week', 'Mon–Sun')}${th('status', 'Status')}</tr></thead>
-                    <tbody>${body || `<tr><td colspan="8" style="color:#777;padding:14px">No assets match.</td></tr>`}</tbody>
+                    <thead><tr>${th('name', 'Asset')}${th('pad', 'Pad')}${th('tier', 'Tier', 'From the asset type prefix (P1 - …)')}${th('last', 'Last flown')}${th('mission', 'Last mission')}${th('mid', 'ID', 'Takeoff mission id — opens Mission Playback')}${th('group', 'Group', 'Mission group id')}${th('pilot', 'Pilot')}${th('captured', 'Assets', 'captured so far / planned in the mission')}${th('imgs', 'Images', 'uploaded / planned')}${th('month', '# month', 'Distinct day + mission with an image of this asset, this calendar month')}${th('week', '# week', 'Mon–Sun')}${th('status', 'Status')}</tr></thead>
+                    <tbody>${body || `<tr><td colspan="13" style="color:#777;padding:14px">No assets match.</td></tr>`}</tbody>
                 </table>
             </div>
             <div style="padding:4px 10px;border-top:1px solid #2a2a2a;font-size:10px;color:#777">${rows.length} of ${bucket.recs.length} assets · click a row to pan the map · tier colours = ring on the map, status = fill</div>`;
@@ -848,14 +914,20 @@
         body.querySelectorAll('[data-cov-tier]').forEach(b => { b.onclick = () => { const st = panelState.cov; st.tier = st.tier === b.dataset.covTier ? '' : b.dataset.covTier; renderCoverageView(); }; });
         body.querySelectorAll('[data-cov-status]').forEach(b => { b.onclick = () => { const st = panelState.cov; st.status = st.status === b.dataset.covStatus ? '' : b.dataset.covStatus; renderCoverageView(); }; });
         body.querySelectorAll('th[data-cov-sort]').forEach(h => { h.onclick = () => { const k = h.dataset.covSort; if (panelState.sortKey === k) panelState.sortDir = panelState.sortDir === 'asc' ? 'desc' : 'asc'; else { panelState.sortKey = k; panelState.sortDir = (k === 'name' || k === 'pad' || k === 'tier' || k === 'mission') ? 'asc' : 'desc'; } renderCoverageView(); }; });
-        body.querySelectorAll('tr[data-cov-id]').forEach(tr => { tr.onclick = () => covPanTo(sid, Number(tr.dataset.covId)); });
+        body.querySelectorAll('tr[data-cov-id]').forEach(tr => { tr.onclick = (e) => { if (e.target && e.target.closest && e.target.closest('[data-cov-link]')) return; covPanTo(sid, Number(tr.dataset.covId)); }; });
         body.querySelectorAll('[data-cov-act]').forEach(b => {
             b.onclick = () => {
                 const act = b.dataset.covAct;
                 if (act === 'refresh') { covRefresh(sid, true); }
                 else if (act === 'sheets') { covExport(bucket, 'sheets'); }
                 else if (act === 'csv') { covExport(bucket, 'csv'); }
-                else if (act === 'paint') { covBroadcast(covSiteKey(sid), bucket); showToast('Coverage colours sent to the map — turn on Map Styler → Assets → 📅 Coverage colours.', '#14d2dc'); }
+                else if (act === 'paint') {
+                    const st = panelState.cov; st.paint = st.paint === false;
+                    if (st.paint) covBroadcast(covSiteKey(sid), bucket);
+                    try { const ch = covChannelGet(); if (ch) ch.postMessage({ type: 'COVERAGE_PAINT', siteKey: covSiteKey(sid), on: st.paint }); } catch (e) {}
+                    showToast(st.paint ? 'Map colours ON (Map Styler → Assets → 📅 Coverage colours must be on).' : 'Map colours OFF for this site until re-enabled.', '#14d2dc');
+                    renderCoverageView();
+                }
             };
         });
     }
@@ -869,7 +941,7 @@
     function covRefresh(sid, force) {
         const siteKey = covSiteKey(sid);
         const cached = covLoadCached(siteKey);
-        if (cached && !force && Date.now() - cached.at < COV_TTL_MS) { covRestatus(cached); covBroadcast(siteKey, cached); renderCoverageView(); return; }
+        if (cached && !force && Date.now() - cached.at < COV_TTL_MS) { covRestatus(cached); if (!panelState.cov || panelState.cov.paint !== false) covBroadcast(siteKey, cached); renderCoverageView(); return; }
         updateTitle();
         setBodyHtml(`<div style="padding:40px;text-align:center;color:#888">Reading flown coverage for site ${sid}…<div id="aim-mb-cov-prog" style="margin-top:8px;color:#14d2dc"></div></div>`);
         covFetch(sid, (done, total) => { const el = panelEl && panelEl.querySelector('#aim-mb-cov-prog'); if (el) el.textContent = `${done} / ${total} assets`; })
@@ -878,8 +950,8 @@
     }
     function covExport(bucket, kind) {
         const rows = covVisibleRecs(bucket);
-        const cols = ['Asset', 'Pad', 'Tier', 'Last flown', 'Days ago', 'Last mission', 'Flies this month', 'Flies this week', 'Status', 'Type'];
-        const vals = r => [r.name, r.pad || '', r.tier || '', r.lastAt ? covDayKey(r.lastAt) : '', covDaysAgo(r.lastAt) == null ? '' : covDaysAgo(r.lastAt), r.lastMission || '', r.monthFlies, r.weekFlies, COV_STATUS_LABEL[r.status], r.poi || ''];
+        const cols = ['Asset', 'Pad', 'Tier', 'Last flown', 'Days ago', 'Last mission', 'Mission ID', 'Group', 'Pilot', 'Assets captured', 'Assets planned', 'Images', 'Images planned', 'Flies this month', 'Flies this week', 'Status', 'Type'];
+        const vals = r => { const lm = r.lm || {}; return [r.name, r.pad || '', r.tier || '', r.lastAt ? covDayKey(r.lastAt) : '', covDaysAgo(r.lastAt) == null ? '' : covDaysAgo(r.lastAt), r.lastMission || '', lm.id || '', lm.group || '', lm.pilot || '', r.lm ? lm.captured : '', lm.plannedAssets == null ? '' : lm.plannedAssets, lm.images == null ? '' : lm.images, lm.plannedImages == null ? '' : lm.plannedImages, r.monthFlies, r.weekFlies, COV_STATUS_LABEL[r.status], r.poi || '']; };
         const title = `Coverage — ${getCurrentSiteName() || 'site ' + getCurrentSiteID()} — ${bucket.day}`;
         if (kind === 'csv') {
             const esc = v => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
@@ -889,7 +961,7 @@
         }
         const th = 'background:#1a1a1a;color:#14d2dc;border:1px solid #444;padding:3px 6px;font-weight:700';
         const td = 'border:1px solid #444;padding:3px 6px';
-        const html = `<table style="border-collapse:collapse;font-family:Arial;font-size:11px"><tr><td colspan="${cols.length}" style="font-weight:700;padding:2px 6px">${escapeHtml(title)}</td></tr><tr>${cols.map(c => `<th style="${th}">${escapeHtml(c)}</th>`).join('')}</tr>${rows.map(r => `<tr>${vals(r).map((v, i) => `<td style="${td}${i === 8 ? `;color:${COV_STATUS_COLORS[r.status]};font-weight:700` : i === 2 ? `;color:${COV_TIER_COLORS[r.tier || 'none']};font-weight:700` : ''}">${escapeHtml(String(v))}</td>`).join('')}</tr>`).join('')}</table>`;
+        const html = `<table style="border-collapse:collapse;font-family:Arial;font-size:11px"><tr><td colspan="${cols.length}" style="font-weight:700;padding:2px 6px">${escapeHtml(title)}</td></tr><tr>${cols.map(c => `<th style="${th}">${escapeHtml(c)}</th>`).join('')}</tr>${rows.map(r => `<tr>${vals(r).map((v, i) => `<td style="${td}${i === 15 ? `;color:${COV_STATUS_COLORS[r.status]};font-weight:700` : i === 2 ? `;color:${COV_TIER_COLORS[r.tier || 'none']};font-weight:700` : ''}">${escapeHtml(String(v))}</td>`).join('')}</tr>`).join('')}</table>`;
         const tsv = [title, cols.join('\t')].concat(rows.map(r => vals(r).map(v => String(v).replace(/[\t\n]/g, ' ')).join('\t'))).join('\n');
         try {
             navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([html], { type: 'text/html' }), 'text/plain': new Blob([tsv], { type: 'text/plain' }) })])
@@ -1634,6 +1706,7 @@
             landed: m.landed || '',
             landingFailed: m.landing_is_failed,
             images: m.image_count != null ? m.image_count : 0,
+            plannedImages: m.uploader_planned_images_count != null ? m.uploader_planned_images_count : null,   // v3.15 coverage progress
             videoCount: Array.isArray(m.videos) ? m.videos.length : 0,
             isMedia: !!m.is_media_mission,
             createdBy: m.created_by_username || '',

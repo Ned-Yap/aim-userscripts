@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.167
+// @version      34.168
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.167';
+    const SCRIPT_VERSION = '34.168';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -6492,6 +6492,12 @@
             covChannel = new BroadcastChannel(COV_CHANNEL_NAME);
             covChannel.onmessage = (ev) => {
                 const msg = (ev && ev.data) || {};
+                if (msg.type === 'COVERAGE_PAINT' && msg.siteKey) {   // v34.168: the panel's 🎨 Map toggle
+                    covLive[msg.siteKey] = !!msg.on;
+                    assetRulesRev++;
+                    if (rendersInThisFrame()) { try { runUpdate(); } catch (e) { console.warn(`${TAG} coverage: repaint failed`, e); } }
+                    return;
+                }
                 if (msg.type !== 'COVERAGE' || !msg.siteKey || !msg.assets) return;
                 const store = covStoreGet();
                 const prev = store[msg.siteKey];
