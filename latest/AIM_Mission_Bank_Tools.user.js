@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.12
+// @version      3.13
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.12';
+    const SCRIPT_VERSION = '3.13';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -673,9 +673,10 @@
     // choice". That is the "never flown" signal, not an error.
     function covIsNeverFlown(e) { return !!(e && e.status === 400 && /valid choice/i.test(String(e.body || ''))); }
     async function covFetchAsset(sid, a, monthStartSec, nowSec, weekStart, pad, monthStartLocal) {
-        const rec = { id: a.id, name: a.name, pad, tier: covTierOf(a.poi), poi: a.poi || '', lastAt: null, lastMission: '', monthFlies: 0, weekFlies: 0, monthImages: 0, totalImages: null, flies: [], planned: false, err: '' };
+        const rec = { id: a.id, poiId: a.poiId, name: a.name, pad, tier: covTierOf(a.poi), poi: a.poi || '', lastAt: null, lastMission: '', monthFlies: 0, weekFlies: 0, monthImages: 0, totalImages: null, flies: [], planned: false, err: '' };
+        if (a.poiId == null) { rec.err = 'asset has no custom.poi_id — cannot query images'; return rec; }
         try {
-            const j = await covFetchJson(covImagesUrl(sid, a.id, monthStartSec, nowSec, 200));
+            const j = await covFetchJson(covImagesUrl(sid, a.poiId, monthStartSec, nowSec, 200));
             const rows = ((j && j.results) || []).filter(im => im && im.created_at && new Date(im.created_at) >= monthStartLocal);
             rec.monthImages = rows.length;
             const flies = new Map();          // "day|mission" → newest iso
@@ -685,7 +686,7 @@
             rec.weekFlies = rec.flies.filter(f => new Date(f.at) >= weekStart).length;
             if (rows.length) { rec.lastAt = rows[0].created_at; rec.lastMission = rows[0].mission_name || ''; }
             else {
-                const j2 = await covFetchJson(covImagesUrl(sid, a.id, 0, 0, 1));
+                const j2 = await covFetchJson(covImagesUrl(sid, a.poiId, 0, 0, 1));
                 const r2 = (j2 && j2.results) || [];
                 rec.totalImages = typeof j2.count === 'number' ? j2.count : r2.length;
                 if (r2.length) { rec.lastAt = r2[0].created_at; rec.lastMission = r2[0].mission_name || ''; }
@@ -3967,7 +3968,8 @@
                         // children / descendants / parentId only reference assets that survive the ≥3-coords filter above
                         const kept = ids => ids.filter(id => keptAsset.has(id));
                         // v3.03: is_unshielded is a TOP-LEVEL entity field (was read from custom.* → always false).
-                        return { id: e.id, name: e.name || '', ring: ring(e), poi: (e.custom && e.custom.poi_type_str) || '', unshielded: !!e.is_unshielded,
+                        // v3.13: custom.poi_id = the asset's id in the POI/image tables (what /images/?poi= and annotations.assets[].id use) — NOT the map-object id.
+                        return { id: e.id, name: e.name || '', ring: ring(e), poi: (e.custom && e.custom.poi_type_str) || '', poiId: (e.custom && e.custom.poi_id != null) ? e.custom.poi_id : null, unshielded: !!e.is_unshielded,
                             parentName: nn ? (nn.parentName || '') : '', parentId: nn && nn.parentId !== null && keptAsset.has(nn.parentId) ? nn.parentId : null, rootId: nn && keptAsset.has(nn.rootId) ? nn.rootId : e.id,
                             nestDepth: nn ? nn.depth : 0, children: nn ? kept(nn.children) : [], descendants: nn ? kept(nn.descendants) : [] };
                     });
