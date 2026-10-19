@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.373
+// @version      4.374
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.373';
+    const SCRIPT_VERSION = '4.374';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -24222,6 +24222,14 @@
         const n = p.shape.length;
         for (let i = 0; i < n; i++) if (px(p.shape[i]) <= IMP_PICK_PX) return { p, i, type: 'vert' };
         for (let i = 0; i < n; i++) { const v = p.shape[i], w = p.shape[(i + 1) % n]; if (px({ lat: (v.lat + w.lat) / 2, lng: (v.lng + w.lng) / 2 }) <= IMP_PICK_PX) return { p, i, type: 'mid' }; }
+        // v4.374: anywhere along an edge drags that edge; anywhere inside moves the whole box
+        const toPx = (v) => { try { return map.latLngToContainerPoint([v.lat, v.lng]); } catch (e) { return null; } };
+        for (let i = 0; i < n; i++) {
+            const a = toPx(p.shape[i]), b = toPx(p.shape[(i + 1) % n]); if (!a || !b) continue;
+            const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy; const t = l2 ? Math.max(0, Math.min(1, ((cp.x - a.x) * dx + (cp.y - a.y) * dy) / l2)) : 0;
+            if (Math.hypot(a.x + t * dx - cp.x, a.y + t * dy - cp.y) <= 7) return { p, i, type: 'edge' };
+        }
+        if (pointInPolygon(ll.lat, ll.lng, p.shape)) return { p, i: -1, type: 'move' };
         return null;
     }
     function impClearStrokeLayer() { const map = getLeafletMap(); if (imp.strokeLayer) { try { if (map) map.removeLayer(imp.strokeLayer); } catch (e) {} imp.strokeLayer = null; } }
@@ -24253,7 +24261,7 @@
                     for (let i = 0; i < n; i++) {
                         const v = p.shape[i], w = p.shape[(i + 1) % n];
                         const d = L.circleMarker([v.lat, v.lng], { radius: 5, color: '#ffffff', weight: 1.5, fillColor: '#ff5fff', fillOpacity: 1, interactive: false }); d.addTo(map); imp.assetShapeLayers.push(d);
-                        const m = L.circleMarker([(v.lat + w.lat) / 2, (v.lng + w.lng) / 2], { radius: 3.5, color: '#ffffff', weight: 1, fillColor: impShapeColor, fillOpacity: 1, interactive: false }); m.addTo(map); imp.assetShapeLayers.push(m);
+                        const m = L.circleMarker([(v.lat + w.lat) / 2, (v.lng + w.lng) / 2], { radius: 4.5, color: '#ffffff', weight: 1, fillColor: impShapeColor, fillOpacity: 1, interactive: false }); m.addTo(map); imp.assetShapeLayers.push(m);
                     }
                 }
             } catch (e) {}
@@ -24386,13 +24394,13 @@
                 let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
                 if (ev.ctrlKey || ev.metaKey) { ev.preventDefault(); ev.stopPropagation(); imp.stroke = [ll]; impRenderStroke(); return; }   // CTRL (Shift is Percepto's name reveal)
                 const t = impShapeTargetAt(map, ll);
-                if (t) { ev.preventDefault(); ev.stopPropagation(); imp.shapeEdit = { p: t.p, i: t.i, type: t.type, down: { x: ev.clientX, y: ev.clientY }, moved: false, start: t.p.shape.map(v => ({ lat: v.lat, lng: v.lng })) }; return; }
+                if (t) { ev.preventDefault(); ev.stopPropagation(); imp.shapeEdit = { p: t.p, i: t.i, type: t.type, down: { x: ev.clientX, y: ev.clientY }, downLL: ll, moved: false, start: t.p.shape.map(v => ({ lat: v.lat, lng: v.lng })) }; return; }
                 const p = impNearestStaged(map, ll, IMP_PICK_PX * 1.5);
                 if (ev.altKey) { ev.preventDefault(); ev.stopPropagation(); if (!imp.shapeHeld || !imp.shapeHeld.shape) { impStatus('✏ hold a shaped dot first (click it), then ALT+click the dots that should get the same outline', '#ffb347'); return; } if (!p) { impStatus('✏ no dot there', '#ffb347'); return; } if (p === imp.shapeHeld) return; impShapeClone(imp.shapeHeld, p, false); return; }
                 if (!p) return;                                              // empty map → pan
                 ev.preventDefault(); ev.stopPropagation();
                 imp.shapeHeld = p; impRenderStaged(); impSyncUi();
-                impStatus(`✏ holding "${impEsc(p.name)}"${p.shape ? ` (${p.shape.length}-point outline) — drag a corner or an edge · ALT+click other dots to copy this outline · Delete = back to a square` : ' — CTRL+drag a stroke across the asset: a line becomes a rectangle, a loop becomes the tightest box'}`);
+                impStatus(`✏ holding "${impEsc(p.name)}"${p.shape ? ` (${p.shape.length}-point outline) — drag inside = move the box · drag an edge = pull it · drag a corner = that corner · ALT+click other dots to copy this outline · Delete = back to a square` : ' — CTRL+drag a stroke across the asset: a line becomes a rectangle, a loop becomes the tightest box'}`);
                 return;
             }
             if (!ev.altKey) return;                                      // every other tool: plain click stays free (pan / native edit)
@@ -24439,15 +24447,19 @@
                 d.moved = true;
                 const p = d.p, n = d.start.length, pr = impProj(p.lat, p.lng);
                 const ring = d.start.map(v => ({ lat: v.lat, lng: v.lng }));
+                if (!d.downLL) d.downLL = ll;
                 if (d.type === 'vert') ring[d.i] = { lat: ll.lat, lng: ll.lng };
-                else {                                                       // edge: both endpoints move by the cursor delta from the midpoint → stays parallel
+                else if (d.type === 'move') {                                // v4.374: whole box follows the cursor, size and rotation untouched
+                    const dl = ll.lat - d.downLL.lat, dg = ll.lng - d.downLL.lng;
+                    for (let i = 0; i < n; i++) ring[i] = { lat: d.start[i].lat + dl, lng: d.start[i].lng + dg };
+                }
+                else {                                                       // edge / midpoint: both endpoints move by the cursor delta from where the drag started → stays parallel
                     const v = d.start[d.i], w = d.start[(d.i + 1) % n];
-                    const mid = { lat: (v.lat + w.lat) / 2, lng: (v.lng + w.lng) / 2 };
-                    const dl = ll.lat - mid.lat, dg = ll.lng - mid.lng;
+                    const dl = ll.lat - d.downLL.lat, dg = ll.lng - d.downLL.lng;
                     ring[d.i] = { lat: v.lat + dl, lng: v.lng + dg }; ring[(d.i + 1) % n] = { lat: w.lat + dl, lng: w.lng + dg };
                 }
-                if (!ev.altKey && imp.snapFt > 0) {                          // snap the moved corner(s) flush to a neighbour; Alt = free (was Shift)
-                    const idx = d.type === 'vert' ? [d.i] : [d.i, (d.i + 1) % n];
+                if (!ev.altKey && imp.snapFt > 0) {                          // snap the moved corner(s) to the gap from a neighbour; Alt = free
+                    const idx = d.type === 'vert' ? [d.i] : (d.type === 'move' ? ring.map((_, i) => i) : [d.i, (d.i + 1) % n]);
                     const movingXY = idx.map(i => pr.to(ring[i]));
                     const sh = impSnapShift(movingXY, impNeighbourRings(p, pr, 60), imp.snapFt * GEN_FT_TO_M, imp.gapFt * GEN_FT_TO_M);
                     if (sh) idx.forEach(i => { const q = pr.to(ring[i]); ring[i] = pr.from({ x: q.x + sh.dx, y: q.y + sh.dy }); });
@@ -24517,7 +24529,7 @@
                 const c = ringCentroid(d.p.shape); d.p.lat = c.lat; d.p.lng = c.lng;
                 try { impComputeDups(); } catch (e) {}
                 impRefreshAfterSelChange();
-                impStatus(`✏ "${impEsc(d.p.name)}" outline adjusted (${d.type === 'vert' ? 'corner moved' : 'edge moved'}${ev.altKey ? ', no snap' : ''})`);
+                impStatus(`✏ "${impEsc(d.p.name)}" ${d.type === 'move' ? 'box moved (same size)' : (d.type === 'vert' ? 'corner moved' : 'edge pulled')}${ev.altKey ? ' · no snap' : ''}`);
                 return;
             }
             if (imp.mode === 'move' && imp.moveHeld) {
@@ -24676,7 +24688,7 @@
             ${IMP_SEC_CLOSE}
             ${impSecOpenHtml('place')}
             <div id="aim-imp-placerow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px;padding:6px 8px;background:rgba(255,95,255,0.05);border:1px dashed rgba(255,95,255,0.35);border-radius:3px">
-                <button id="aim-imp-outline" title="Draw the asset's real outline before it is created. Click a dot to hold it, then CTRL+drag a stroke across the asset: a straight stroke along the LONG side of the asset becomes a rectangle that long by the narrow-side width (default 15 ft); a loop becomes the tightest box around it. A red buffer ring (default 7.5 ft) shows around every outline while this is on; snapping holds the gap (default 15 ft) to the neighbour instead of touching it. With a shaped dot held, ALT+click other dots to give them the same outline (copies snap flush to neighbours). Drag a corner or an edge of the held outline to adjust (edges stay parallel; snaps within the snap distance, hold Alt for no snap); click an edge midpoint to add a corner, right-click a corner to remove it; Delete = back to a plain square. Esc releases." style="background:rgba(195,155,211,0.12);color:#c39bd3;border:1px solid rgba(195,155,211,0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">✏ Shape</button>
+                <button id="aim-imp-outline" title="Draw the asset's real outline before it is created. Click a dot to hold it, then CTRL+drag a stroke across the asset: a straight stroke along the LONG side of the asset becomes a rectangle that long by the narrow-side width (default 15 ft); a loop becomes the tightest box around it. A red buffer ring (default 7.5 ft) shows around every outline while this is on; snapping holds the gap (default 15 ft) to the neighbour instead of touching it. With a shaped dot held, ALT+click other dots to give them the same outline (copies snap flush to neighbours). Drag anywhere INSIDE the held outline to move the whole box (size and angle kept); drag anywhere along an edge to pull it longer / shorter (it stays parallel); drag a corner to move just that corner — all snap to the gap from a neighbour, hold Alt for no snap. Click an edge midpoint dot to add a corner, right-click a corner to remove it; Delete = back to a plain square. Esc releases." style="background:rgba(195,155,211,0.12);color:#c39bd3;border:1px solid rgba(195,155,211,0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">✏ Shape</button>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="The NARROW side of the rectangle: draw the stroke along the LONG side of the asset and the box is that long by this wide">narrow side <input type="number" id="aim-imp-shapew" min="5" max="500" step="1" style="width:52px;${inCss}"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ff6b6b" title="Red ring drawn this far outside every outline (and nearby existing assets) while ✏ Shape is on — two rings touching = the gap you must keep. Colour / opacity in the Control Panel.">buffer <input type="number" id="aim-imp-bufft" min="0" max="100" step="0.5" style="width:52px;${inCss}"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Snapping holds THIS distance between an outline and its neighbour (0 = flush). Default 15 ft = two 7.5 ft buffers touching.">gap <input type="number" id="aim-imp-gapft" min="0" max="200" step="1" style="width:46px;${inCss}"> ft</label>
@@ -29781,7 +29793,7 @@
             steps: ['Set how many zones to add, how far inside the pad edge, the hop limit for pads outside every FFZ, the small-battery size and the NFZ / tower clearances. Paste extra lat,lng lines for pads that are not on the site yet.', '▶ Plan safe zones — pink numbered spots on the map, before → after numbers in the panel, the farthest remaining point in red.', 'Click a row to jump, ⧉ copies its coordinates. Place the Safe Zone in Percepto by hand after a satellite check of the ground.', '📋 Copy report for the hand-off; ✕ Clear drops the preview.'],
             test: 'Plan 3 zones on a site with one base, confirm the worst-case number drops, then plan 4 and watch the farthest point move.' },
         imp: { what: 'Bring a client asset list into Percepto. Load a CSV or KML → points stage on the map (nothing written) → narrow with boundaries → map the type → ✓ Create makes real asset squares. Create-only, with dry run, backup manifest and undo.',
-            steps: ['The page is five numbered sections in working order (plus Advanced). Each header shows where it stands; click to open / close, or use the jump chips at the top. The status line under the title shows the latest result.', 'Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', '✏ Shape draws the asset\'s real outline before it is created: click a dot, CTRL+drag a stroke across the asset (draw along the LONG side → a rectangle that long by the narrow side, default 15 ft; a loop → the tightest box). A red buffer ring (7.5 ft, editable) shows around every outline so you can see the 15 ft you must keep; ALT+click other dots to copy the held outline onto them — copies and dragged edges snap to a 15 ft gap from neighbours (gap editable, 0 = flush; Alt while dragging = no snap). Shift is left alone so Percepto\'s asset names stay visible. Drag corners / edges, click an edge to add a corner, right-click a corner to remove it, Delete = back to a square. Colour / fill in the Control Panel.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', 'Undo: ↩ Undo last import reverts the last run (creates deleted, updates put back) and survives a reload via ↻ Resume. Independently, 🕘 Imports on this site lists every import found on the assets themselves (the "Imported by …" line) and can delete a run\'s created assets from any machine, any time.', '5 · Enverus check: set the Developer API key once, pick the API-number column, Cross-check — every selected well gets its Enverus status / type / trajectory / operator / dates and location; anything not plainly producing lands in Placement › 🛢 Enverus and an "Enverus" block goes into the notes.', '🔍 Find missing wells (same section, after a cross-check): every well the operator has inside your boundaries whose API is not in the file, with status and the nearest mapped asset — tick the ones to add, ➕ Stage, and they become ordinary points (source noted) that go through tiers, flags and Create like the rest. They also appear in the client review as "Well on your pads that is not in the list".', 'Priority tiers (in 3 · Type & priority): pick the oil + water columns (or a single BLPD column, or a ready-made P1/P2/P3 column); every asset on a pad shares the pad total; the tier is written as a type prefix ("P1 - …") and a Priority / Prioritized block in the notes. "name matches → update type + notes" is the quarterly re-run: load the new list, review the Tier report, Create.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
+            steps: ['The page is five numbered sections in working order (plus Advanced). Each header shows where it stands; click to open / close, or use the jump chips at the top. The status line under the title shows the latest result.', 'Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', '✏ Shape draws the asset\'s real outline before it is created: click a dot, CTRL+drag a stroke across the asset (draw along the LONG side → a rectangle that long by the narrow side, default 15 ft; a loop → the tightest box). A red buffer ring (7.5 ft, editable) shows around every outline so you can see the 15 ft you must keep; ALT+click other dots to copy the held outline onto them — copies and dragged edges snap to a 15 ft gap from neighbours (gap editable, 0 = flush; Alt while dragging = no snap). Shift is left alone so Percepto\'s asset names stay visible. Drag inside the box to move it whole, drag an edge to pull it longer or shorter, drag a corner to move that corner; click an edge midpoint to add a corner, right-click a corner to remove it, Delete = back to a square. Colour / fill in the Control Panel.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', 'Undo: ↩ Undo last import reverts the last run (creates deleted, updates put back) and survives a reload via ↻ Resume. Independently, 🕘 Imports on this site lists every import found on the assets themselves (the "Imported by …" line) and can delete a run\'s created assets from any machine, any time.', '5 · Enverus check: set the Developer API key once, pick the API-number column, Cross-check — every selected well gets its Enverus status / type / trajectory / operator / dates and location; anything not plainly producing lands in Placement › 🛢 Enverus and an "Enverus" block goes into the notes.', '🔍 Find missing wells (same section, after a cross-check): every well the operator has inside your boundaries whose API is not in the file, with status and the nearest mapped asset — tick the ones to add, ➕ Stage, and they become ordinary points (source noted) that go through tiers, flags and Create like the rest. They also appear in the client review as "Well on your pads that is not in the list".', 'Priority tiers (in 3 · Type & priority): pick the oil + water columns (or a single BLPD column, or a ready-made P1/P2/P3 column); every asset on a pad shares the pad total; the tier is written as a type prefix ("P1 - …") and a Priority / Prioritized block in the notes. "name matches → update type + notes" is the quarterly re-run: load the new list, review the Tier report, Create.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
             test: 'Load the list, add one boundary, confirm the selected count drops, Create with Dry run ON.' },
         sci: { what: 'Applies the Ortho Scanner review sheet\'s decisions: accepted NFZs and flight-path leg changes stage on the map (green / yellow, removed legs red), preflight runs, then Apply writes them — NFZs create-only, flight paths one POST each with Delete Guard backups.',
             steps: ['Load the decisions JSON and the scan bundle from the review sheet.', 'Check the staged plan on the map and the preflight result.', 'Untick Dry run → Apply.'],

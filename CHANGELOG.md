@@ -1,3 +1,7 @@
+## 2026-10-19 — ✏ Shape: move the whole box, pull any edge — Site Setup Tools latest v4.374 (latest only)
+
+- **v4.374 — ✏ Shape.** Drag anywhere **inside** the held outline to move the whole box with its size and angle untouched; drag anywhere **along an edge** (not just the midpoint dot) to pull it longer or shorter while it stays parallel; drag a corner to move that corner. All three snap to the gap from a neighbour (Alt = no snap). Midpoint dots are bigger; clicking one still adds a corner.
+
 ## 2026-10-19 — ✏ Shape: buffer rings, 15 ft gap, narrow-side width — Site Setup Tools latest v4.373 (latest only)
 
 - **v4.373 — ✏ Shape.** While Shape is on, a **red buffer ring** (default 7.5 ft, editable; colour and opacity in the Control Panel) is drawn around every outline and around existing assets near the held one, so two rings touching = the 15 ft you must keep. **Snapping now holds a gap** (default 15 ft, editable, 0 = flush) between an outline and its neighbour instead of pulling them together — a copy or a dragged edge that lands near a neighbour settles at exactly that distance, and one that is too close is pushed back out. The width box is now labelled **narrow side** and defaults to **15 ft**: draw the stroke along the LONG side of the asset and the box is that long by 15 ft wide (an old saved 30 ft default is migrated to 15 once).
