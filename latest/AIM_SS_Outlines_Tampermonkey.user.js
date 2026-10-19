@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.165
+// @version      34.166
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.165';
+    const SCRIPT_VERSION = '34.166';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -387,6 +387,17 @@
                 { id: 'asset.force-thickness', label: 'Force line thickness', type: 'boolean', default: true },
                 { id: 'asset.edit-mode', label: 'Show in edit mode', type: 'boolean', default: true },
                 { id: 'asset.locked', label: 'Lock assets (Shift+click to interact)', type: 'boolean', default: false },
+                { id: 'asset.cov-header', label: '📅 Coverage colours (SLA tiers — data from Mission Bank Tools)', type: 'header' },
+                { id: 'asset.coverage', label: 'Coverage colours: ring = tier, fill = status', type: 'boolean', default: false },
+                { id: 'asset.cov-legend', label: 'Show coverage legend on the map', type: 'boolean', default: true },
+                { id: 'asset.cov-p1', label: 'P1 ring', type: 'color', default: '#ff4d4d' },
+                { id: 'asset.cov-p2', label: 'P2 ring', type: 'color', default: '#ff9f1c' },
+                { id: 'asset.cov-p3', label: 'P3 ring', type: 'color', default: '#ffe66d' },
+                { id: 'asset.cov-none', label: 'Untiered ring', type: 'color', default: '#8a8f98' },
+                { id: 'asset.cov-ok', label: 'OK fill', type: 'color', default: '#39ff14' },
+                { id: 'asset.cov-due', label: 'Due / behind fill', type: 'color', default: '#ffb300' },
+                { id: 'asset.cov-over', label: 'Overdue fill (pulses)', type: 'color', default: '#ff3b3b' },
+                { id: 'asset.cov-fill-opacity', label: 'Coverage fill opacity', type: 'number', min: 0.05, max: 1, step: 0.05, default: 0.35, unit: 'fill' },
                 ...buildAssetStateToggles(),
             ],
         },
@@ -1226,6 +1237,8 @@
         // type/state suggestion lists populate from it. Fetch is cached +
         // idempotent per site, so calling it each run is cheap.
         const assetByStateOn = !!(toggleState['asset.show'] && toggleState['asset.by-state']);
+        const covOn = !!(toggleState['asset.show'] && toggleState['asset.coverage']);   // v34.166 coverage colours
+        // Coverage needs the asset polygons too, even when custom styles are off.
         const assetDataWanted = !!toggleState['asset.show'];
         if (assetDataWanted) {
             const sid = getCurrentSiteID();
@@ -1255,10 +1268,16 @@
                         const r = assetRuleFor(a);
                         const rid = r ? r.id : '__fallback';
                         if (p.getAttribute('data-aim-asset-rule') !== rid) p.setAttribute('data-aim-asset-rule', rid);
+                        // v34.166 (#292): coverage tag "P1:ok:0" → consumed by the per-line styling below.
+                        const cv = covOn ? covFor(a.id) : null;
+                        const ct = cv ? `${cv.p || ''}:${cv.s || ''}:${cv.planned ? 1 : 0}` : '';
+                        if ((p.getAttribute('data-aim-cov') || '') !== ct) { if (ct) p.setAttribute('data-aim-cov', ct); else p.removeAttribute('data-aim-cov'); }
                     }
                 });
             }
         }
+        if (covOn) { covEnsureStyle(); covRequestIfNeeded(); }
+        try { covLegendSync(covOn && !!toggleState['asset.show']); } catch (e) {}
 
         perfStage('3 hide');
         // 4. REBUILD & ENFORCE
@@ -1354,8 +1373,16 @@
                     line.style.strokeOpacity = '';
                 }
             } else if (isWhiteAsset) {
+                const covTag = covOn ? (line.getAttribute('data-aim-cov') || '') : '';
+                const covParts = covTag ? covTag.split(':') : null;      // [tier, status, planned]
                 if (toggleState['asset.show']) {
-                    if (assetStyle) {
+                    if (covParts) {
+                        // v34.166 coverage: ring = tier colour, dashed when planned this week.
+                        const tierKey = covParts[0] ? covParts[0].toLowerCase() : 'none';
+                        line.style.stroke = toggleState['asset.cov-' + tierKey] || toggleState['asset.cov-none'] || '';
+                        line.style.strokeOpacity = '';
+                        line.style.strokeDasharray = covParts[2] === '1' ? '6,4' : '';
+                    } else if (assetStyle) {
                         // Per-rule: rule color + line opacity + optional dash.
                         line.style.stroke = assetStyle.color || '';
                         line.style.strokeOpacity = assetStyle.lineOpacity >= 1 ? '' : String(assetStyle.lineOpacity);
@@ -1441,7 +1468,16 @@
             // we leave the host app's default fill alone (restore empty style).
             // When asset.fill is on, applies user-chosen fill color + opacity.
             if (isWhiteAsset) {
-                if (toggleState['asset.show']) {
+                const covTag2 = covOn ? (line.getAttribute('data-aim-cov') || '') : '';
+                const covStatus = covTag2 ? covTag2.split(':')[1] : '';
+                const isOver = covStatus === 'over';
+                if ((line.getAttribute('data-aim-cov-over') === '1') !== isOver) { if (isOver) line.setAttribute('data-aim-cov-over', '1'); else line.removeAttribute('data-aim-cov-over'); }
+                if (toggleState['asset.show'] && covStatus) {
+                    // v34.166 coverage: fill = status colour (overdue pulses via CSS).
+                    line.style.fill = toggleState['asset.cov-' + covStatus] || '';
+                    const fo = Number(toggleState['asset.cov-fill-opacity']);
+                    line.style.fillOpacity = isNaN(fo) ? '0.35' : String(fo);
+                } else if (toggleState['asset.show']) {
                     // Per-state fill when tagged; otherwise the uniform asset.* fill.
                     const fillOn = assetStyle ? assetStyle.fill : (toggleState['asset.fill'] !== false);
                     if (!fillOn) {
@@ -5277,6 +5313,7 @@
                     pts.forEach(p => { sLat += p.lat; sLng += p.lng; });
                     const eq = classifyAssetEquipment(e);
                     polys.push({
+                        id: e.id,
                         name: e.name || (e.id != null ? `#${e.id}` : '?'),
                         state: classifyAssetState(e),
                         equip: eq.slug,
@@ -6415,7 +6452,93 @@
         else if (actionId === 'hz-refresh') hzRefreshNow();
         else if (actionId === 'hz-copy') hzCopySummary();
     }
+    // ========================================================
+    // 📅 COVERAGE COLOURS (#292, v34.166) — fed by Mission Bank Tools
+    // ========================================================
+    // MBT reads every asset's flown history from Percepto's image tags and
+    // broadcasts { assets: { id: { p: 'P1'|'P2'|'P3'|'', s: 'ok'|'due'|'over',
+    // planned } } } on AIM_COVERAGE_STATE. When "Coverage colours" is on,
+    // the asset RING takes the tier colour and the FILL the status colour
+    // (overdue pulses; planned-this-week = dashed ring). Stored per siteKey
+    // in this script's own GM (per-script storage) so a reload still paints.
+    const COV_CHANNEL_NAME = 'AIM_COVERAGE_STATE';
+    const COV_STORE_KEY = 'aim-cov-store';
+    const COV_STYLE_ID = 'aim-cov-style';
+    const COV_LEGEND_ID = 'aim-cov-legend';
+    let covChannel = null;
+    let covStore = null;            // { [siteKey]: { at, day, assets } }
+    let covRequestedFor = '';
+    function covStoreGet() {
+        if (covStore) return covStore;
+        const o = gmGet(COV_STORE_KEY, {});
+        covStore = (o && typeof o === 'object') ? o : {};
+        return covStore;
+    }
+    function covCurrent() {
+        const sid = getCurrentSiteID(); if (!sid) return null;
+        const b = covStoreGet()[envSiteKey(sid)];
+        return (b && b.assets) ? b : null;
+    }
+    function covFor(assetId) {
+        const b = covCurrent(); if (!b || assetId == null) return null;
+        return b.assets[assetId] || b.assets[String(assetId)] || null;
+    }
+    function covChannelGet() {
+        if (covChannel) return covChannel;
+        try {
+            covChannel = new BroadcastChannel(COV_CHANNEL_NAME);
+            covChannel.onmessage = (ev) => {
+                const msg = (ev && ev.data) || {};
+                if (msg.type !== 'COVERAGE' || !msg.siteKey || !msg.assets) return;
+                const store = covStoreGet();
+                const prev = store[msg.siteKey];
+                if (prev && prev.at === msg.at && Object.keys(prev.assets || {}).length === Object.keys(msg.assets).length) return;   // same payload echoed from another frame
+                store[msg.siteKey] = { at: msg.at || Date.now(), day: msg.day || '', assets: msg.assets };
+                const keys = Object.keys(store);
+                if (keys.length > 12) keys.sort((a, b) => (store[a].at || 0) - (store[b].at || 0)).slice(0, keys.length - 12).forEach(k => { delete store[k]; });
+                try { gmSet(COV_STORE_KEY, store); } catch (e) { console.warn(`${TAG} coverage: persist failed`, e); }
+                assetRulesRev++;   // repaint key — the path→asset memo is untouched (identity, not colour)
+                if (rendersInThisFrame()) { try { runUpdate(); } catch (e) { console.warn(`${TAG} coverage: repaint failed`, e); } }
+            };
+        } catch (e) { console.warn(`${TAG} coverage: channel unavailable:`, e); }
+        return covChannel;
+    }
+    // Ask MBT (any tab/frame on this site) for its cached colours once per
+    // site when the toggle is on and we hold nothing yet.
+    function covRequestIfNeeded() {
+        const sid = getCurrentSiteID(); if (!sid) return;
+        const key = envSiteKey(sid);
+        if (covRequestedFor === key || covStoreGet()[key]) return;
+        covRequestedFor = key;
+        const ch = covChannelGet();
+        try { if (ch) ch.postMessage({ type: 'COVERAGE_REQUEST', siteKey: key }); } catch (e) {}
+    }
+    function covEnsureStyle() {
+        if (document.getElementById(COV_STYLE_ID)) return;
+        const st = document.createElement('style');
+        st.id = COV_STYLE_ID;
+        st.textContent = `@keyframes aim-cov-pulse { 0% { fill-opacity: 0.55; } 50% { fill-opacity: 0.15; } 100% { fill-opacity: 0.55; } }
+            path[data-aim-cov-over="1"] { animation: aim-cov-pulse 1.4s ease-in-out infinite; }
+            #${COV_LEGEND_ID} { position: absolute; left: 10px; bottom: 28px; z-index: 1000; background: rgba(10,12,16,0.88); color: #ddd; font: 11px/1.5 'Lato','Segoe UI',sans-serif; padding: 6px 9px; border: 1px solid #333; border-radius: 5px; pointer-events: none; }
+            #${COV_LEGEND_ID} b { color: #14d2dc; }
+            #${COV_LEGEND_ID} i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 4px -1px 0; }`;
+        (document.head || document.documentElement).appendChild(st);
+    }
+    function covLegendSync(on) {
+        const container = document.querySelector('.leaflet-container');
+        let el = document.getElementById(COV_LEGEND_ID);
+        const b = on ? covCurrent() : null;
+        if (!on || !b || !container || !toggleState['asset.cov-legend']) { if (el) el.remove(); return; }
+        covEnsureStyle();
+        if (!el) { el = document.createElement('div'); el.id = COV_LEGEND_ID; container.appendChild(el); }
+        const ring = t => `<i style="border:2px solid ${toggleState['asset.cov-' + t.toLowerCase()] || '#888'};background:transparent"></i>${t}`;
+        const fill = (s, l) => `<i style="background:${toggleState['asset.cov-' + s] || '#888'}"></i>${l}`;
+        const html = `<b>📅 Coverage</b> ${b.day ? `<span style="color:#777">${b.day}</span>` : ''}<br>ring: ${ring('P1')} ${ring('P2')} ${ring('P3')} <i style="border:2px solid ${toggleState['asset.cov-none'] || '#888'}"></i>untiered<br>fill: ${fill('ok', 'OK')} ${fill('due', 'Due')} ${fill('over', 'Overdue')} <span style="color:#777">· dashed = planned this week</span>`;
+        if (el.innerHTML !== html) el.innerHTML = html;
+    }
+
     hzChannelGet();
+    covChannelGet();
 
     function buildRegistrationToggles() {
         const rrcExtra = buildRrcOperatorToggles();

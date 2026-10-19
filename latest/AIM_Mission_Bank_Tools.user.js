@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.08
+// @version      3.09
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.08';
+    const SCRIPT_VERSION = '3.09';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -359,6 +359,7 @@
             if (msg.type === 'REQUEST_REGISTRATIONS') {
                 registerWithControlPanel();
                 registerMissionSop();
+                registerCoverage();
             } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
                 if (msg.toggleId === 'master') {
                     masterEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
@@ -472,6 +473,8 @@
                 if (CONTEXT === 'IFRAME' && msg.hotkeyId === 'toggle-click-add') { try { caSetMode(!caModeOn); } catch (e) {} }
             } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === MISSION_SOP_SCRIPT_ID) {
                 handleMissionSopToggle(msg);
+            } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === COV_SCRIPT_ID) {
+                handleCoverageToggle(msg);
             } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === MISSION_SOP_SCRIPT_ID) {
                 // Cross-tab guard: BroadcastChannel delivers to EVERY open tab — only
                 // the tab that pressed/clicked may act (tabId from CP v1.43+; visibility
@@ -524,6 +527,396 @@
                 { id: 'toggle-click-add', label: 'Toggle Click-to-Add mode (mission editor)', default: '' },
             ],
         });
+    }
+
+    // ========================================================
+    // 📅 COVERAGE (#292, v3.09) — per-asset flown coverage vs SLA tiers
+    // ========================================================
+    // Source of truth = Percepto's Data Map images: every image is tagged
+    // with the assets it covers, so GET /images/?site&poi=<assetId> with a
+    // when_after/when_before window (epoch seconds) is the asset's flown
+    // history. One call per asset for the current calendar month (limit
+    // 200 rows → distinct day+mission = "flies"); a second limit=1 call
+    // only when the month is empty, for "last flown ever".
+    // Tier = the asset TYPE prefix the Asset Importer stamps
+    // (custom.poi_type_str = "P1 - v - pumping rod"); never the name.
+    // Results persist per envSiteKey (GM) and broadcast on
+    // AIM_COVERAGE_STATE so the Map Styler colours the pads.
+    const COV_SCRIPT_ID = 'aim-mb-coverage';
+    const COV_CHANNEL_NAME = 'AIM_COVERAGE_STATE';
+    const COV_CACHE_KEY = 'aim-mb-coverage';          // { [siteKey]: { at, day, recs } }
+    const COV_CFG_KEY = 'aim-mb-coverage-cfg';
+    const COV_TIER_RE = /^P([1-3])\s*[-–—:]/i;
+    const COV_POOL = 6;
+    const COV_TTL_MS = 60 * 60 * 1000;
+    const COV_BTN_ID = 'aim-mb-cov-btn';
+    const COV_TIER_COLORS = { P1: '#ff4d4d', P2: '#ff9f1c', P3: '#ffe66d', none: '#8a8f98' };
+    const COV_STATUS_COLORS = { ok: '#39ff14', due: '#ffb300', behind: '#ffb300', over: '#ff3b3b', never: '#ff3b3b' };
+    const COV_STATUS_LABEL = { ok: 'OK', due: 'Due', behind: 'Behind target', over: 'Overdue', never: 'Never flown' };
+    // Rulebooks. floorDays = hard: red when the last fly is older than this
+    // (never inside the current calendar month for the Diamondback book).
+    // weekTarget = soft: amber when this Mon–Sun week has fewer flies.
+    const COV_DEFAULT_CFG = {
+        rulebook: 'diamondback',
+        p1WeekTarget: 2, p2WeekTarget: 1,              // Diamondback: promoted cadence
+        p3FloorDays: 31,                               // 31 = monthly · 92 = quarterly (their fine print)
+        intP1Days: 7, intP2Days: 14, intP3Days: 31,    // internal SLA rolling windows
+        noneDays: 31,
+        dueWithinDays: 7,                              // amber once this close to the floor
+    };
+    let covCfgCache = null;
+    function covCfg() {
+        if (covCfgCache) return covCfgCache;
+        const o = gmGet(COV_CFG_KEY, {});
+        covCfgCache = Object.assign({}, COV_DEFAULT_CFG, (o && typeof o === 'object') ? o : {});
+        return covCfgCache;
+    }
+    function covCfgSet(k, v) { const c = covCfg(); if (c[k] === v) return; c[k] = v; gmSet(COV_CFG_KEY, c); }
+    const covBySite = {};                                 // siteKey → { at, day, recs: [...] }
+    let covInFlight = null;
+    let covChannel = null;
+    function covSiteKey(sid) { return envSiteKey(sid); }
+    function covTierOf(poi) { const m = String(poi || '').match(COV_TIER_RE); return m ? `P${m[1]}` : ''; }
+    function covMonday(d) { const x = new Date(d.getFullYear(), d.getMonth(), d.getDate()); const dow = (x.getDay() + 6) % 7; x.setDate(x.getDate() - dow); return x; }
+    function covDayKey(iso) { const d = new Date(iso); return isNaN(d) ? '' : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+    function covFmtDate(iso) { if (!iso) return '—'; const d = new Date(iso); return isNaN(d) ? '—' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); }
+    function covDaysAgo(iso) { if (!iso) return null; const d = new Date(iso); return isNaN(d) ? null : Math.floor((Date.now() - d.getTime()) / 86400000); }
+
+    function covChannelGet() {
+        if (covChannel) return covChannel;
+        try {
+            covChannel = new BroadcastChannel(COV_CHANNEL_NAME);
+            covChannel.onmessage = (ev) => {
+                const msg = (ev && ev.data) || {};
+                if (msg.type === 'COVERAGE_REQUEST' && msg.siteKey) {
+                    const b = covBySite[msg.siteKey] || covLoadCached(msg.siteKey);
+                    if (b) covBroadcast(msg.siteKey, b);
+                }
+            };
+        } catch (e) { console.warn(`${TAG} coverage: channel unavailable:`, e); }
+        return covChannel;
+    }
+    function covLoadCached(siteKey) {
+        if (covBySite[siteKey]) return covBySite[siteKey];
+        const all = gmGet(COV_CACHE_KEY, {});
+        const b = all && all[siteKey];
+        if (b && Array.isArray(b.recs)) { covBySite[siteKey] = b; return b; }
+        return null;
+    }
+    function covPersist(siteKey, bucket) {
+        const all = gmGet(COV_CACHE_KEY, {});
+        const o = (all && typeof all === 'object') ? all : {};
+        o[siteKey] = bucket;
+        // keep the store small: at most 12 sites
+        const keys = Object.keys(o);
+        if (keys.length > 12) keys.sort((a, b) => (o[a].at || 0) - (o[b].at || 0)).slice(0, keys.length - 12).forEach(k => { delete o[k]; });
+        gmSet(COV_CACHE_KEY, o);
+    }
+    function covBroadcast(siteKey, bucket) {
+        const ch = covChannelGet();
+        if (!ch || !bucket) return;
+        const assets = {};
+        bucket.recs.forEach(r => { assets[r.id] = { p: r.tier || '', s: r.status === 'behind' ? 'due' : (r.status === 'never' ? 'over' : r.status), planned: !!r.planned }; });
+        try { ch.postMessage({ type: 'COVERAGE', source: SCRIPT_ID, siteKey, at: bucket.at, day: bucket.day, assets }); }
+        catch (e) { console.warn(`${TAG} coverage: broadcast failed:`, e); }
+    }
+
+    // ---- status ----
+    function covStatusFor(rec, cfg, now) {
+        const t = rec.tier;
+        const last = rec.lastAt ? new Date(rec.lastAt) : null;
+        if (!last) return 'never';
+        const ageDays = Math.floor((now - last.getTime()) / 86400000);
+        if (cfg.rulebook === 'internal') {
+            const win = t === 'P1' ? cfg.intP1Days : t === 'P2' ? cfg.intP2Days : t === 'P3' ? cfg.intP3Days : cfg.noneDays;
+            if (ageDays > win) return 'over';
+            if (ageDays > win - cfg.dueWithinDays) return 'due';
+            return 'ok';
+        }
+        // Diamondback book: floor = at least one fly per calendar month
+        // (P3 optionally quarterly); targets promote P1/P2 within the week.
+        const floorDays = t === 'P3' ? cfg.p3FloorDays : 31;
+        const floorMet = floorDays > 31 ? ageDays <= floorDays : rec.monthFlies > 0;
+        if (!floorMet) {
+            if (ageDays > floorDays) return 'over';
+            const d = new Date(now); const daysLeft = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate() - d.getDate();
+            return (floorDays <= 31 && daysLeft < cfg.dueWithinDays) ? 'over' : 'due';
+        }
+        const target = t === 'P1' ? cfg.p1WeekTarget : t === 'P2' ? cfg.p2WeekTarget : 0;
+        if (target > 0 && rec.weekFlies < target) return 'behind';
+        return 'ok';
+    }
+    function covRestatus(bucket) {
+        const cfg = covCfg(); const now = Date.now();
+        bucket.recs.forEach(r => { r.status = covStatusFor(r, cfg, now); });
+    }
+
+    // ---- fetch ----
+    function covImagesUrl(sid, assetId, afterSec, beforeSec, limit) {
+        const q = [`site=${encodeURIComponent(sid)}`, `poi=${encodeURIComponent(assetId)}`, `limit=${limit}`, 'only=id,created_at,mission_name,type'];
+        if (afterSec) q.push(`when_after=${afterSec}`);
+        if (beforeSec) q.push(`when_before=${beforeSec}`);
+        return `/images/?${q.join('&')}`;
+    }
+    async function covFetchJson(url) {
+        const r = await fetch(url, { credentials: 'include' });
+        if (!r.ok) throw new Error(`HTTP ${r.status} ${url}`);
+        return r.json();
+    }
+    async function covFetchAsset(sid, a, monthStartSec, nowSec, weekStart, pad) {
+        const rec = { id: a.id, name: a.name, pad, tier: covTierOf(a.poi), poi: a.poi || '', lastAt: null, lastMission: '', monthFlies: 0, weekFlies: 0, monthImages: 0, totalImages: null, flies: [], planned: false, err: '' };
+        try {
+            const j = await covFetchJson(covImagesUrl(sid, a.id, monthStartSec, nowSec, 200));
+            const rows = (j && j.results) || [];
+            rec.monthImages = typeof j.count === 'number' ? j.count : rows.length;
+            const flies = new Map();          // "day|mission" → newest iso
+            rows.forEach(im => { const k = `${covDayKey(im.created_at)}|${im.mission_name || ''}`; if (!flies.has(k) || flies.get(k) < im.created_at) flies.set(k, im.created_at); });
+            rec.flies = [...flies.entries()].map(([k, at]) => ({ day: k.split('|')[0], mission: k.split('|')[1], at })).sort((x, y) => y.at < x.at ? -1 : 1);
+            rec.monthFlies = rec.flies.length;
+            rec.weekFlies = rec.flies.filter(f => new Date(f.at) >= weekStart).length;
+            if (rows.length) { rec.lastAt = rows[0].created_at; rec.lastMission = rows[0].mission_name || ''; }
+            else {
+                const j2 = await covFetchJson(covImagesUrl(sid, a.id, 0, 0, 1));
+                const r2 = (j2 && j2.results) || [];
+                rec.totalImages = typeof j2.count === 'number' ? j2.count : r2.length;
+                if (r2.length) { rec.lastAt = r2[0].created_at; rec.lastMission = r2[0].mission_name || ''; }
+            }
+        } catch (e) { rec.err = e.message || String(e); }
+        return rec;
+    }
+    function covFetch(sid, onProgress) {
+        const siteKey = covSiteKey(sid);
+        if (covInFlight && covInFlight.siteKey === siteKey) return covInFlight.p;
+        const p = (async () => {
+            const ent = await genFetchEntities(sid);
+            const assets = ent.assets || [];
+            const byId = new Map(assets.map(a => [a.id, a]));
+            const padOf = a => { let cur = a, guard = 0; while (cur && cur.parentId != null && byId.has(cur.parentId) && guard++ < 10) cur = byId.get(cur.parentId); return cur && cur !== a ? cur.name : (a.children && a.children.length ? a.name : ''); };
+            const now = new Date();
+            const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+            const weekStart = covMonday(now);
+            const monthStartSec = Math.floor(monthStart.getTime() / 1000), nowSec = Math.floor(now.getTime() / 1000) + 60;
+            const recs = new Array(assets.length);
+            let next = 0, done = 0;
+            const worker = async () => {
+                while (next < assets.length) {
+                    const i = next++;
+                    recs[i] = await covFetchAsset(sid, assets[i], monthStartSec, nowSec, weekStart, padOf(assets[i]));
+                    done++;
+                    if (onProgress && (done % 10 === 0 || done === assets.length)) onProgress(done, assets.length);
+                }
+            };
+            await Promise.all(Array.from({ length: Math.min(COV_POOL, assets.length) }, worker));
+            const bucket = { at: Date.now(), day: covDayKey(now.toISOString()), monthStart: monthStart.toISOString(), weekStart: weekStart.toISOString(), recs };
+            covRestatus(bucket);
+            covBySite[siteKey] = bucket;
+            covPersist(siteKey, bucket);
+            covBroadcast(siteKey, bucket);
+            const errs = recs.filter(r => r.err).length;
+            console.log(`${TAG} coverage: ${recs.length} assets for site ${sid}${errs ? ` (${errs} fetch errors)` : ''}`);
+            return bucket;
+        })();
+        covInFlight = { siteKey, p };
+        p.finally(() => { if (covInFlight && covInFlight.p === p) covInFlight = null; });
+        return p;
+    }
+
+    // ---- launcher button (Mission Bank toolbar row, next to SUM) ----
+    function injectCovButton(doc, row) {
+        if (doc.getElementById(COV_BTN_ID)) return;
+        const btn = doc.createElement('button');
+        btn.id = COV_BTN_ID; btn.type = 'button';
+        btn.className = 'ant-btn';
+        btn.textContent = '📅 Coverage';
+        btn.title = 'Per-asset flown coverage vs SLA tiers (AIM Mission Bank Tools)';
+        Object.assign(btn.style, { minWidth: 'unset', padding: '0 12px', height: '26px', fontSize: '11px', fontWeight: '700', borderRadius: '4px', background: '#14d2dc', border: '1px solid #14d2dc', color: '#000', cursor: 'pointer' });
+        try { btn.style.setProperty('color', '#000', 'important'); btn.style.setProperty('-webkit-text-fill-color', '#000', 'important'); } catch (e) {}
+        btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); openPanel('coverage'); };
+        row.appendChild(btn);
+    }
+
+    // ---- render ----
+    function covVisibleRecs(bucket) {
+        const st = panelState.cov || (panelState.cov = { tier: '', status: '', search: '' });
+        const q = (panelState.search || '').trim().toLowerCase();
+        let rows = bucket.recs.filter(r => (!st.tier || (r.tier || 'none') === st.tier) && (!st.status || r.status === st.status)
+            && (!q || r.name.toLowerCase().includes(q) || (r.pad || '').toLowerCase().includes(q) || (r.lastMission || '').toLowerCase().includes(q)));
+        const key = panelState.sortKey || 'status', dir = panelState.sortDir === 'asc' ? 1 : -1;
+        const sRank = { never: 0, over: 1, due: 2, behind: 3, ok: 4 };
+        const tRank = { P1: 0, P2: 1, P3: 2, '': 3 };
+        const val = r => key === 'name' ? r.name.toLowerCase() : key === 'pad' ? (r.pad || '').toLowerCase() : key === 'tier' ? tRank[r.tier] : key === 'last' ? (r.lastAt || '') : key === 'mission' ? (r.lastMission || '').toLowerCase()
+            : key === 'month' ? r.monthFlies : key === 'week' ? r.weekFlies : key === 'status' ? sRank[r.status] : r.name.toLowerCase();
+        rows.sort((a, b) => { const x = val(a), y = val(b); return (x < y ? -1 : x > y ? 1 : a.name.localeCompare(b.name)) * dir; });
+        return rows;
+    }
+    function covStats(bucket) {
+        const out = {};
+        ['P1', 'P2', 'P3', ''].forEach(t => { out[t] = { n: 0, ok: 0, due: 0, over: 0 }; });
+        bucket.recs.forEach(r => { const o = out[r.tier] || out['']; o.n++; if (r.status === 'ok') o.ok++; else if (r.status === 'due' || r.status === 'behind') o.due++; else o.over++; });
+        return out;
+    }
+    function renderCoverageView() {
+        const sid = getCurrentSiteID(); if (!sid) return;
+        panelState.drillId = null;
+        updateTitle();
+        const bucket = covBySite[covSiteKey(sid)];
+        if (!bucket) { setBodyHtml('<div style="padding:40px;text-align:center;color:#888">No coverage data — press ↻ Refresh.</div>'); return; }
+        covRestatus(bucket);
+        const st = panelState.cov || (panelState.cov = { tier: '', status: '', search: '' });
+        const rows = covVisibleRecs(bucket);
+        const stats = covStats(bucket);
+        const cfg = covCfg();
+        const ageMin = Math.round((Date.now() - bucket.at) / 60000);
+        const chip = (label, active, attr, color) => `<button class="aim-mb-tbtn${active ? ' active' : ''}" ${attr} style="${color && !active ? `border-color:${color};color:${color}` : ''}">${label}</button>`;
+        const tierChips = ['P1', 'P2', 'P3', 'none'].map(t => chip(`${t === 'none' ? 'Untiered' : t} <span style="opacity:.7">${stats[t === 'none' ? '' : t].n}</span>`, st.tier === t, `data-cov-tier="${t}"`, COV_TIER_COLORS[t])).join('');
+        const statChips = ['ok', 'due', 'behind', 'over', 'never'].map(s => chip(COV_STATUS_LABEL[s], st.status === s, `data-cov-status="${s}"`, COV_STATUS_COLORS[s])).join('');
+        const th = (k, label, title) => `<th data-cov-sort="${k}" class="${panelState.sortKey === k ? 'sorted' : ''}" title="${title || ''}">${label}${panelState.sortKey === k ? (panelState.sortDir === 'asc' ? ' ▲' : ' ▼') : ''}</th>`;
+        const sum = ['P1', 'P2', 'P3', ''].map(t => { const o = stats[t]; if (!o.n) return ''; return `<span style="margin-right:14px;color:${COV_TIER_COLORS[t || 'none']}"><b>${t || 'Untiered'}</b> ${o.n} · <span style="color:#39ff14">${o.ok} ok</span> · <span style="color:#ffb300">${o.due} due</span> · <span style="color:#ff3b3b">${o.over} overdue</span></span>`; }).join('');
+        const body = rows.map(r => {
+            const sc = COV_STATUS_COLORS[r.status], tc = COV_TIER_COLORS[r.tier || 'none'];
+            const age = covDaysAgo(r.lastAt);
+            return `<tr data-cov-id="${r.id}" title="${escapeHtml(r.poi || '')}${r.err ? ' · fetch error: ' + escapeHtml(r.err) : ''}">
+                <td style="color:#e6e6e6">${escapeHtml(r.name)}${r.err ? ' <span style="color:#ff5252">⚠</span>' : ''}</td>
+                <td style="color:#9aa">${escapeHtml(r.pad || '')}</td>
+                <td><span style="display:inline-block;min-width:22px;text-align:center;border:1px solid ${tc};color:${tc};border-radius:3px;padding:0 4px;font-weight:700">${r.tier || '—'}</span></td>
+                <td title="${escapeHtml(r.lastAt || '')}">${covFmtDate(r.lastAt)}${age != null ? ` <span style="color:#777">(${age}d)</span>` : ''}</td>
+                <td style="color:#9aa">${escapeHtml(r.lastMission || '')}</td>
+                <td style="text-align:center">${r.monthFlies}</td>
+                <td style="text-align:center">${r.weekFlies}</td>
+                <td><span style="color:${sc};font-weight:700">${COV_STATUS_LABEL[r.status]}</span></td>
+            </tr>`;
+        }).join('');
+        const html = `
+            <div class="aim-mb-toolbar">
+                <input class="aim-mb-search" type="text" placeholder="Search asset / pad / mission…" value="${escapeHtml(panelState.search || '')}" />
+                ${tierChips}<span style="width:6px"></span>${statChips}
+                <span style="flex:1"></span>
+                <button class="aim-mb-tbtn" data-cov-act="refresh" title="Re-read every asset's images from Percepto (${bucket.recs.length} assets)">↻ Refresh <span style="opacity:.7">${ageMin < 1 ? 'now' : ageMin + ' min ago'}</span></button>
+                <button class="aim-mb-tbtn" data-cov-act="sheets" title="Rich table → paste into Google Sheets">📤 Sheets</button>
+                <button class="aim-mb-tbtn" data-cov-act="csv">⬇ CSV</button>
+                <button class="aim-mb-tbtn" data-cov-act="paint" title="Push these colours to the map (Map Styler → Assets → Coverage colours)">🎨 Map</button>
+            </div>
+            <div style="padding:5px 10px;border-bottom:1px solid #2a2a2a;font-size:11px;color:#bbb;display:flex;flex-wrap:wrap;gap:4px 0;align-items:center">
+                ${sum}
+                <span style="flex:1"></span>
+                <span style="color:#777">Rulebook: <b style="color:#14d2dc">${cfg.rulebook === 'internal' ? 'Internal SLA (P1 7d · P2 14d · P3 31d)' : `Diamondback (floor monthly${cfg.p3FloorDays > 31 ? ', P3 quarterly' : ''} · P1 ${cfg.p1WeekTarget}×/wk · P2 ${cfg.p2WeekTarget}×/wk)`}</b> · month from ${covFmtDate(bucket.monthStart)} · week from ${covFmtDate(bucket.weekStart)}</span>
+            </div>
+            <div class="aim-mb-table-wrap">
+                <table>
+                    <thead><tr>${th('name', 'Asset')}${th('pad', 'Pad')}${th('tier', 'Tier', 'From the asset type prefix (P1 - …)')}${th('last', 'Last flown')}${th('mission', 'Last mission')}${th('month', '# this month', 'Distinct day + mission with an image of this asset')}${th('week', '# this week', 'Mon–Sun')}${th('status', 'Status')}</tr></thead>
+                    <tbody>${body || `<tr><td colspan="8" style="color:#777;padding:14px">No assets match.</td></tr>`}</tbody>
+                </table>
+            </div>
+            <div style="padding:4px 10px;border-top:1px solid #2a2a2a;font-size:10px;color:#777">${rows.length} of ${bucket.recs.length} assets · click a row to pan the map · tier colours = ring on the map, status = fill</div>`;
+        setBodyHtml(html);
+        wireCoverageEvents(sid, bucket);
+    }
+    function wireCoverageEvents(sid, bucket) {
+        const body = panelEl.querySelector('#aim-mb-body'); if (!body) return;
+        const search = body.querySelector('.aim-mb-search');
+        if (search) { search.oninput = () => { panelState.search = search.value; const wrap = body.querySelector('.aim-mb-table-wrap'); const y = wrap ? wrap.scrollTop : 0; renderCoverageView(); const w2 = panelEl.querySelector('.aim-mb-table-wrap'); if (w2) w2.scrollTop = y; const s2 = panelEl.querySelector('.aim-mb-search'); if (s2) { s2.focus(); s2.setSelectionRange(s2.value.length, s2.value.length); } }; }
+        body.querySelectorAll('[data-cov-tier]').forEach(b => { b.onclick = () => { const st = panelState.cov; st.tier = st.tier === b.dataset.covTier ? '' : b.dataset.covTier; renderCoverageView(); }; });
+        body.querySelectorAll('[data-cov-status]').forEach(b => { b.onclick = () => { const st = panelState.cov; st.status = st.status === b.dataset.covStatus ? '' : b.dataset.covStatus; renderCoverageView(); }; });
+        body.querySelectorAll('th[data-cov-sort]').forEach(h => { h.onclick = () => { const k = h.dataset.covSort; if (panelState.sortKey === k) panelState.sortDir = panelState.sortDir === 'asc' ? 'desc' : 'asc'; else { panelState.sortKey = k; panelState.sortDir = (k === 'name' || k === 'pad' || k === 'tier' || k === 'mission') ? 'asc' : 'desc'; } renderCoverageView(); }; });
+        body.querySelectorAll('tr[data-cov-id]').forEach(tr => { tr.onclick = () => covPanTo(sid, Number(tr.dataset.covId)); });
+        body.querySelectorAll('[data-cov-act]').forEach(b => {
+            b.onclick = () => {
+                const act = b.dataset.covAct;
+                if (act === 'refresh') { covRefresh(sid, true); }
+                else if (act === 'sheets') { covExport(bucket, 'sheets'); }
+                else if (act === 'csv') { covExport(bucket, 'csv'); }
+                else if (act === 'paint') { covBroadcast(covSiteKey(sid), bucket); showToast('Coverage colours sent to the map — turn on Map Styler → Assets → 📅 Coverage colours.', '#14d2dc'); }
+            };
+        });
+    }
+    function covPanTo(sid, assetId) {
+        const ent = genEntCache[sid]; const a = ent && ent.assets.find(x => x.id === assetId);
+        const map = getLeafletMap();
+        if (!a || !map) { showToast(a ? 'No map in this view to pan.' : 'Asset not in the entity cache.', '#ff9800'); return; }
+        const c = genCentroid(a.ring);
+        try { map.setView([c.lat, c.lng], Math.max(map.getZoom(), 17)); } catch (e) { console.warn(`${TAG} coverage: pan failed`, e); }
+    }
+    function covRefresh(sid, force) {
+        const siteKey = covSiteKey(sid);
+        const cached = covLoadCached(siteKey);
+        if (cached && !force && Date.now() - cached.at < COV_TTL_MS) { renderCoverageView(); return; }
+        updateTitle();
+        setBodyHtml(`<div style="padding:40px;text-align:center;color:#888">Reading flown coverage for site ${sid}…<div id="aim-mb-cov-prog" style="margin-top:8px;color:#14d2dc"></div></div>`);
+        covFetch(sid, (done, total) => { const el = panelEl && panelEl.querySelector('#aim-mb-cov-prog'); if (el) el.textContent = `${done} / ${total} assets`; })
+            .then(() => { if (panelState && panelState.mode === 'coverage') renderCoverageView(); })
+            .catch(e => { console.error(`${TAG} coverage: fetch failed`, e); setBodyHtml(`<div style="padding:40px;text-align:center;color:#ff5252">Coverage read failed: ${escapeHtml(e.message || String(e))}</div>`); });
+    }
+    function covExport(bucket, kind) {
+        const rows = covVisibleRecs(bucket);
+        const cols = ['Asset', 'Pad', 'Tier', 'Last flown', 'Days ago', 'Last mission', 'Flies this month', 'Flies this week', 'Status', 'Type'];
+        const vals = r => [r.name, r.pad || '', r.tier || '', r.lastAt ? covDayKey(r.lastAt) : '', covDaysAgo(r.lastAt) == null ? '' : covDaysAgo(r.lastAt), r.lastMission || '', r.monthFlies, r.weekFlies, COV_STATUS_LABEL[r.status], r.poi || ''];
+        const title = `Coverage — ${getCurrentSiteName() || 'site ' + getCurrentSiteID()} — ${bucket.day}`;
+        if (kind === 'csv') {
+            const esc = v => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+            const csv = [cols.join(',')].concat(rows.map(r => vals(r).map(esc).join(','))).join('\n');
+            try { downloadTextFile(`coverage-${getCurrentSiteID()}-${bucket.day}.csv`, csv, 'text/csv'); } catch (e) { copyToClipboard(csv); showToast('Download blocked — CSV copied to clipboard.', '#ff9800'); }
+            return;
+        }
+        const th = 'background:#1a1a1a;color:#14d2dc;border:1px solid #444;padding:3px 6px;font-weight:700';
+        const td = 'border:1px solid #444;padding:3px 6px';
+        const html = `<table style="border-collapse:collapse;font-family:Arial;font-size:11px"><tr><td colspan="${cols.length}" style="font-weight:700;padding:2px 6px">${escapeHtml(title)}</td></tr><tr>${cols.map(c => `<th style="${th}">${escapeHtml(c)}</th>`).join('')}</tr>${rows.map(r => `<tr>${vals(r).map((v, i) => `<td style="${td}${i === 8 ? `;color:${COV_STATUS_COLORS[r.status]};font-weight:700` : i === 2 ? `;color:${COV_TIER_COLORS[r.tier || 'none']};font-weight:700` : ''}">${escapeHtml(String(v))}</td>`).join('')}</tr>`).join('')}</table>`;
+        const tsv = [title, cols.join('\t')].concat(rows.map(r => vals(r).map(v => String(v).replace(/[\t\n]/g, ' ')).join('\t'))).join('\n');
+        try {
+            navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([html], { type: 'text/html' }), 'text/plain': new Blob([tsv], { type: 'text/plain' }) })])
+                .then(() => showToast(`Coverage (${rows.length} rows) copied — paste into Google Sheets.`, '#5fff5f'), (e) => { console.warn(`${TAG} coverage: rich copy failed`, e); copyToClipboard(tsv); showToast('Copied as plain text (TSV).', '#ff9800'); });
+        } catch (e) { console.warn(`${TAG} coverage: ClipboardItem unavailable`, e); copyToClipboard(tsv); showToast('Copied as plain text (TSV).', '#ff9800'); }
+    }
+    function downloadTextFile(name, text, mime) {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([text], { type: mime || 'text/plain' }));
+        a.download = name; document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => { try { URL.revokeObjectURL(a.href); } catch (e) {} }, 2000);
+    }
+
+    // ---- Control Panel card ----
+    function registerCoverage() {
+        if (!controlChannel) return;
+        const c = covCfg();
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: COV_SCRIPT_ID, name: '📅 Coverage (SLA tiers)',
+            description: 'Per-asset flown coverage from Percepto image tags vs the priority tier stamped on the asset type (P1/P2/P3). Opens from the 📅 Coverage button on the Mission Bank; colours the map through Map Styler → Assets → Coverage colours.',
+            version: SCRIPT_VERSION, group: 'Mission Bank Macros', scope: 'mission-bank', priority: 25,
+            toggles: [
+                { id: 'rulebook', label: 'Rulebook', type: 'select', default: c.rulebook, options: [
+                    { value: 'diamondback', label: 'Diamondback — floor monthly, P1 2×/wk, P2 weekly' },
+                    { value: 'internal', label: 'Internal SLA — P1 weekly, P2 biweekly, P3 monthly' }] },
+                { id: 'db-header', label: 'Diamondback book', type: 'header' },
+                { id: 'p1WeekTarget', label: 'P1 target flies per week', type: 'number', min: 0, max: 7, step: 1, default: c.p1WeekTarget },
+                { id: 'p2WeekTarget', label: 'P2 target flies per week', type: 'number', min: 0, max: 7, step: 1, default: c.p2WeekTarget },
+                { id: 'p3FloorDays', label: 'P3 floor (31 = monthly · 92 = quarterly)', type: 'number', min: 7, max: 120, step: 1, default: c.p3FloorDays, unit: 'days' },
+                { id: 'int-header', label: 'Internal SLA book (rolling windows)', type: 'header' },
+                { id: 'intP1Days', label: 'P1 window', type: 'number', min: 1, max: 120, step: 1, default: c.intP1Days, unit: 'days' },
+                { id: 'intP2Days', label: 'P2 window', type: 'number', min: 1, max: 120, step: 1, default: c.intP2Days, unit: 'days' },
+                { id: 'intP3Days', label: 'P3 window', type: 'number', min: 1, max: 120, step: 1, default: c.intP3Days, unit: 'days' },
+                { id: 'noneDays', label: 'Untiered window', type: 'number', min: 1, max: 120, step: 1, default: c.noneDays, unit: 'days' },
+                { id: 'dueWithinDays', label: 'Show "Due" this many days before the floor', type: 'number', min: 0, max: 30, step: 1, default: c.dueWithinDays, unit: 'days' },
+            ],
+        });
+    }
+    function handleCoverageToggle(msg) {
+        const id = msg.toggleId;
+        const val = msg.value !== undefined ? msg.value : msg.enabled;
+        if (!Object.prototype.hasOwnProperty.call(COV_DEFAULT_CFG, id)) return;
+        const v = id === 'rulebook' ? String(val) : Number(val);
+        if (id !== 'rulebook' && !isFinite(v)) return;
+        if (covCfg()[id] === v) return;
+        covCfgSet(id, v);
+        Object.keys(covBySite).forEach(k => { covRestatus(covBySite[k]); covBroadcast(k, covBySite[k]); });
+        if (panelState && panelState.mode === 'coverage') { try { renderCoverageView(); } catch (e) {} }
+    }
+    // Re-broadcast cached colours for the current site on load so the map
+    // is painted after a reload without opening the panel.
+    function covInitBroadcast() {
+        try {
+            const sid = getCurrentSiteID(); if (!sid) return;
+            const b = covLoadCached(covSiteKey(sid)); if (!b) return;
+            covRestatus(b); covBroadcast(covSiteKey(sid), b);
+        } catch (e) { console.warn(`${TAG} coverage: init broadcast failed`, e); }
     }
 
     // ========================================================
@@ -1566,6 +1959,7 @@
             });
             header.parentNode.insertBefore(row, header.nextSibling);
         }
+        try { injectCovButton(doc, row); } catch (e) { console.warn(`${TAG} coverage button:`, e); }   // v3.09 📅 Coverage
         const existing = doc.getElementById(SUM_BTN_ID);
         if (existing && row.contains(existing)) return; // already placed
         if (existing) existing.remove();
@@ -11264,6 +11658,7 @@
         if (!panelEl) buildPanelChrome();
         panelEl.style.display = 'flex';
         if (panelGeom.snap) snapPanel(panelGeom.snap); // re-fit dock to current map size
+        if (mode === 'coverage') { covRefresh(siteID, false); return; }   // v3.09 (#292)
         if (mode === 'log') {
             const bucket = logBySite[siteID];
             if (!bucket) {
@@ -11296,7 +11691,7 @@
         mode = mode || 'bank';
         panelState = {
             mode,
-            sortKey: mode === 'log' ? 'timeCT' : 'flightDistance', // log: newest first
+            sortKey: mode === 'log' ? 'timeCT' : mode === 'coverage' ? 'status' : 'flightDistance', // log: newest first
             sortDir: 'desc',
             search: '',
             selectedIds: new Set(),
@@ -11830,7 +12225,7 @@
         const name = getCurrentSiteName();
         const sid = getCurrentSiteID();
         const site = name || (sid ? `Site ${sid}` : '?');
-        const prefix = (panelState && panelState.mode === 'log') ? '📋 Mission Log' : '📋 Mission Bank Summary';
+        const prefix = (panelState && panelState.mode === 'log') ? '📋 Mission Log' : (panelState && panelState.mode === 'coverage') ? '📅 Coverage — flown vs SLA' : '📋 Mission Bank Summary';
         if (titleEl) titleEl.innerHTML = `${prefix} — <span data-site>${escapeHtml(site)}</span>`;
     }
 
@@ -11852,6 +12247,7 @@
         if (!sid) return;
         if (!panelState) initPanelState();
         if (panelState.mode === 'log') { renderLogTableView(); return; }
+        if (panelState.mode === 'coverage') { renderCoverageView(); return; }
         panelState.drillId = null;
         updateTitle();
         // Rebuild dynamic step-type columns from the loaded missions so
@@ -16871,6 +17267,9 @@ ${snapPlacemarks}
         setupControlPanel();
         registerWithControlPanel();
         registerMissionSop();
+        registerCoverage();
+        covChannelGet();
+        if (CONTEXT === 'IFRAME') covInitBroadcast();
         // Inject the force-show-dots CSS rule into the iframe head.
         // We use a class instead of inline !important styles so cleanup
         // is just removing the class — survives Percepto DOM reuse.
