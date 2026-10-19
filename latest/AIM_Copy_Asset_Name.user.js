@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.363
+// @version      4.364
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.363';
+    const SCRIPT_VERSION = '4.364';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -24840,7 +24840,13 @@
             const ub = document.getElementById('aim-imp-undodel');
             if (ub) ub.style.display = imp.lastDelete ? '' : 'none';
             const uc = document.getElementById('aim-imp-undocreate');
-            if (uc) { uc.style.display = (imp.lastCreated.length || imp.lastUpdated.length) ? '' : 'none'; uc.textContent = imp.lastUpdated.length ? `↩ Undo last import (${imp.lastCreated.length} created · ${imp.lastUpdated.length} updated)` : '↩ Undo last import'; }
+            if (uc) {
+                const can = !!(imp.lastCreated.length || imp.lastUpdated.length);
+                uc.style.display = (live.length || can) ? '' : 'none';
+                uc.disabled = !can; uc.style.opacity = can ? '1' : '0.45'; uc.style.cursor = can ? 'pointer' : 'default';
+                uc.title = can ? 'Delete exactly the assets the last import created and put the previous type + notes back on the ones it updated. Survives a reload (saved with the session). Each delete also rides Delete Guard\'s undo ring.' : 'Nothing to undo yet — appears live once an import has written something';
+                uc.textContent = can ? `↩ Undo last import (${imp.lastCreated.length} created${imp.lastUpdated.length ? ` · ${imp.lastUpdated.length} updated` : ''})` : '↩ Undo last import';
+            }
             const fl = document.getElementById('aim-imp-file-label');
             if (fl) fl.textContent = imp.fileName ? `${imp.fileName} · ${live.length} staged · ${selN} selected` : 'no file loaded';
             const sb = document.getElementById('aim-imp-save'), sn = document.getElementById('aim-imp-saved-note');
@@ -24963,6 +24969,7 @@
         imp.lastUpdated = updated.map(u => ({ id: u.id, name: u.name, before: u.before }));
         imp._rootCache = null;
         impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
+        try { impSaveSession('import'); } catch (e) {}   // v4.364: the undo record is on disk before the user can reload
         if (!aborted) impStatus(`DONE: <b>${ok}</b> created${nUpd ? ` · <b>${updOk}/${nUpd}</b> updated (type + notes)` : ''}${fail ? ` · <span style="color:#ff6060">${fail} FAILED (kept staged + selected)</span>` : ''}${skippedDups ? ` · ${skippedDups} name match(es) skipped` : ''} · verify ${verified.length}/${created.length} created present${nUpd ? `, ${updVerified.length}/${updated.length} updates match` : ''} · reload to edit them natively`, (fail || updVerified.length !== updated.length) ? '#ffb347' : '#5fff5f');
         showToast(fail ? `Import: ${ok} created, ${updOk} updated, ${fail} FAILED — see the importer panel` : `✓ ${ok} created${updOk ? `, ${updOk} updated` : ''}`, fail ? 'rgba(255,96,96,0.55)' : undefined);
     }
@@ -25001,6 +25008,7 @@
             await sleep(DELETE_GAP_MS);
         }
         imp.lastCreated = imp.lastCreated.filter(id => !deleted.has(id));
+        try { impMarkDirty(); } catch (e) {}
         try { await fetchMapObjects(genState.siteID, true); } catch (e) {}
         impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
         showToast(fail ? `Undo: ${ok} deleted, ${fail} FAILED` : `↩ ${ok} imported asset(s) deleted`, fail ? 'rgba(255,96,96,0.55)' : undefined);
@@ -25316,6 +25324,7 @@
             shapeSeq: imp.shapeSeq,
             pri: { on: imp.pri.on, oilCol: imp.pri.oilCol, waterCol: imp.pri.waterCol, blpdCol: imp.pri.blpdCol, priCol: imp.pri.priCol },
             env: { apiCol: imp.env.apiCol, notes: imp.env.notes, checkedAt: imp.env.checkedAt, mismatchFt: imp.env.mismatchFt },
+            undo: { created: imp.lastCreated.slice(), updated: imp.lastUpdated.map(u => ({ id: u.id, name: u.name, before: u.before })) },   // v4.364: undo survives a reload
         };
         const json = JSON.stringify(data);
         const live = imp.points.filter(p => !p.done).length;
@@ -25349,6 +25358,7 @@
         imp.mapOpen = false;
         if (d.pri) { Object.assign(imp.pri, { on: !!d.pri.on, oilCol: d.pri.oilCol || null, waterCol: d.pri.waterCol || null, blpdCol: d.pri.blpdCol || null, priCol: d.pri.priCol || null }); imp.pri._guessed = true; }
         if (d.env) { imp.env.apiCol = d.env.apiCol || null; imp.env.notes = d.env.notes !== false; imp.env.checkedAt = d.env.checkedAt || null; if (typeof d.env.mismatchFt === 'number') imp.env.mismatchFt = d.env.mismatchFt; imp.env._guessed = true; }
+        if (d.undo) { imp.lastCreated = Array.isArray(d.undo.created) ? d.undo.created.slice() : []; imp.lastUpdated = Array.isArray(d.undo.updated) ? d.undo.updated.filter(u => u && u.id != null && u.before) : []; }
         impRenderMappingUi();
         impBuildPoints();                                            // rebuilds points from rows + mapping (also recomputes dups/flags)
         const byI = new Map(imp.points.map(p => [p.i, p]));

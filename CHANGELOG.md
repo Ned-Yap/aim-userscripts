@@ -1,3 +1,7 @@
+## 2026-10-19 — Asset Import: Undo always visible, survives a reload — Site Setup Tools latest v4.364 (latest only)
+
+- **Site Setup Tools (latest) v4.364.** "↩ Undo last import" now sits next to Create from the moment points are staged (greyed with "nothing to undo yet" until an import writes something), and the record of what the last import created / updated is saved with the session the moment the import finishes — so after a reload, ↻ Resume brings the Undo back with it. Previously the button only existed in the same page session as the import.
+
 ## 2026-10-18 — Asset Import: shared names resolved before Create — Site Setup Tools latest v4.363 (latest only)
 
 - **Site Setup Tools (latest) v4.363.** The client's list reuses names (276 cases in the Diamondback file: a tank battery named after its single well). Before anything is matched against the site: a battery + well pair sharing a name → the battery is created as **"<name> BATTERY"** (what the client report says we do); any other repeat → the 2nd+ row gets **"-DUP"** and both rows show in a new **Placement › Same name in file** tab (click = both pulse, ⓘ = which is which). The renamed battery is then matched against the site by its new name, so an existing "X BATTERY" asset is still an update. The Data section header counts the renames.
