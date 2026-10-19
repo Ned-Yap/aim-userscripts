@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.362
+// @version      4.363
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.362';
+    const SCRIPT_VERSION = '4.363';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22610,11 +22610,11 @@
         const set = (id, html) => { const el = document.querySelector(`[data-impsecsum="${id}"]`); if (el) el.innerHTML = html; };
         set('bounds', !imp.shapes.length ? (live.length ? `none — all ${live.length} points selected` : 'none yet — load KMLs or draw, then load the data file') : `${imp.shapes.length} boundar${imp.shapes.length === 1 ? 'y' : 'ies'} · <b style="color:#cfd6dc">${selN}</b> of ${live.length} inside`);
         const m = imp.mapping || {};
-        set('data', !imp.fileName ? 'no file loaded' : `${impEsc(imp.fileName)} · ${imp.rows.length} rows · ${live.length} staged${imp.invalid ? ` · <span style="color:#ffb347">${imp.invalid} without coordinates</span>` : ''}${imp.mapping && impNotesCols().length ? ` · notes ${impNotesCols().length} col${impNotesCols().length === 1 ? '' : 's'}` : ''}${imp.dirty ? ' · <span style="color:#ffb347">unsaved</span>' : (imp.lastSavedAt ? ' · 💾 saved' : '')}`);
+        set('data', !imp.fileName ? 'no file loaded' : `${impEsc(imp.fileName)} · ${imp.rows.length} rows · ${live.length} staged${imp.invalid ? ` · <span style="color:#ffb347">${imp.invalid} without coordinates</span>` : ''}${imp.mapping && impNotesCols().length ? ` · notes ${impNotesCols().length} col${impNotesCols().length === 1 ? '' : 's'}` : ''}${imp.points.some(p => p.fileDup && p.fileDup.kind === 'battery') ? ` · ${imp.points.filter(p => p.fileDup && p.fileDup.kind === 'battery').length} batteries renamed "… BATTERY"` : ''}${imp.points.some(p => /-DUP\d*$/.test(p.name)) ? ` · <span style="color:#ff9d00">${imp.points.filter(p => /-DUP\d*$/.test(p.name)).length} rows suffixed -DUP</span>` : ''}${imp.dirty ? ' · <span style="color:#ffb347">unsaved</span>' : (imp.lastSavedAt ? ' · 💾 saved' : '')}`);
         const S = imp.pri.summary;
         set('type', !imp.points.length ? 'after the data file' : `${m.type ? `type = ${impEsc(m.type)}` : `no type column → "${impEsc(impApplyShield(imp.typeMap['__all__'] || ''))}"`}${imp.pri.on ? (S ? ` · tiers ON: <span style="color:#ff7b00">P1 ${S.cnt.P1}</span> · <span style="color:#ffe14d">P2 ${S.cnt.P2}</span> · <span style="color:#9ad">P3 ${S.cnt.P3}</span>${S.cnt.none ? ` · <span style="color:#ff6060">${S.cnt.none} untiered</span>` : ''}${S.flagged ? ` · <span style="color:#ffb347">${S.flagged} flagged</span>` : ''}` : ' · tiers ON') : ' · tiers off'}`);
         const moved = live.filter(p => p.orig).length, removed = imp.points.filter(p => p.removed).length, fl = live.filter(p => p.dup || p.child || p.near).length, off = live.filter(p => p.sel && p.pri && p.pri.off > 0).length;
-        const flSel = live.filter(p => p.sel && (p.dup || p.child || p.near || (p.pri && p.pri.off > 0))), flRev = flSel.filter(p => p.reviewed).length;
+        const flSel = live.filter(p => p.sel && (p.dup || p.child || p.near || (p.pri && p.pri.off > 0) || (p.fileDup && p.fileDup.kind === 'same'))), flRev = flSel.filter(p => p.reviewed).length;
         set('place', !imp.points.length ? 'after the data file' : `${imp.mode === 'move' ? '<b style="color:#ff5fff">↔ Move ON</b> · ' : ''}${moved} moved · ${removed} removed · ${flSel.length} flagged point${flSel.length === 1 ? '' : 's'}${flSel.length ? ` (<b style="color:#5fff5f">${flRev}</b> reviewed)` : ''}${off ? ` · <span style="color:#ffb347">📍 ${off} off their pad</span>` : ''}`);
         const dupsIn = live.filter(p => p.sel && p.dup).length, upd = imp.dupMode === 'update' ? dupsIn : 0, tot = live.filter(p => p.sel && (!p.dup || imp.dupMode !== 'skip')).length;
         let dry = true; try { dry = !!document.getElementById('aim-gen-dryrun').checked; } catch (e) {}
@@ -23242,6 +23242,7 @@
             const name = m.name ? (r[m.name] || '').trim() : '';
             imp.points.push({ i, name: name || `Import ${i + 1}`, rawName: name, lat, lng, typeRaw: m.type ? (r[m.type] || '').trim() : '', notes: '', sel: false, dup: false, dupWhy: '', child: null, near: null, done: false });
         });
+        impResolveFileDuplicates();   // v4.363: battery + well sharing a name → "<name> BATTERY"; other repeats → "-DUP"
         if (m.pri && typeof m.pri === 'object' && !imp.pri._guessed) { ['oilCol', 'waterCol', 'blpdCol', 'priCol'].forEach(k => { imp.pri[k] = imp.headers.includes(m.pri[k]) ? m.pri[k] : null; }); if (typeof m.pri.on === 'boolean') imp.pri.on = m.pri.on; imp.pri._guessed = true; }
         imp._rootCache = null;
         impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type, notesCols: impNotesCols(), pri: { on: imp.pri.on, oilCol: imp.pri.oilCol, waterCol: imp.pri.waterCol, blpdCol: imp.pri.blpdCol, priCol: imp.pri.priCol } });
@@ -24346,6 +24347,29 @@
         return rows;
     }
     function impNormName(v) { return String(v || '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').replace(/\s+/g, ' ').trim(); }
+    // v4.363: the client's list reuses names. Percepto needs one name per asset
+    // and we match on name, so: a battery + a well sharing a name → the battery
+    // becomes "<name> BATTERY" (what we told the client); any other repeat → the
+    // 2nd+ row gets "-DUP" and both rows are flagged (Placement › Same name) so
+    // they are easy to find and fix before Create. Names are matched against
+    // the site AFTER this, so an existing "X BATTERY" asset is still an update.
+    function impResolveFileDuplicates() {
+        const groups = new Map();
+        imp.points.forEach(p => { p.fileDup = null; const base = p.rawName || p.name; const k = impNormName(base); if (!k) return; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(p); });
+        let renamed = 0, dupped = 0;
+        groups.forEach(arr => {
+            if (arr.length < 2) return;
+            const isBatt = (p) => /BATTERY|TANK/i.test(p.typeRaw || '');
+            const batts = arr.filter(isBatt), wells = arr.filter(p => !isBatt(p));
+            if (arr.length === 2 && batts.length === 1 && wells.length === 1) {
+                const b = batts[0];
+                if (!/BATTERY\s*$/i.test(b.rawName || b.name)) { b.name = `${(b.rawName || b.name).trim()} BATTERY`; b.fileDup = { kind: 'battery', other: wells[0] }; wells[0].fileDup = { kind: 'well', other: b }; renamed++; }
+                return;
+            }
+            arr.forEach((p, i) => { p.fileDup = { kind: 'same', others: arr.filter(x => x !== p), n: arr.length }; if (i > 0) { p.name = `${(p.rawName || p.name).trim()}-DUP${i > 1 ? i : ''}`; dupped++; } });
+        });
+        if (renamed || dupped) console.log(`${TAG} 📥 file duplicates: ${renamed} batter${renamed === 1 ? 'y' : 'ies'} renamed "<name> BATTERY", ${dupped} row(s) suffixed -DUP`);
+    }
     function impPriBlpdSafe(p) { try { return impPriBlpd(p); } catch (e) { return null; } }
     function impMapsLink(la, lo) { return (la === '' || lo === '' || la == null || lo == null) ? '' : `https://www.google.com/maps?q=${Number(la).toFixed(6)},${Number(lo).toFixed(6)}`; }
     function impExportClientReview(how) {
@@ -24389,15 +24413,17 @@
             { id: 'child', label: 'Parent/child', color: '#b48cff', items: sel.filter(p => p.child && !p.dup) },
             { id: 'near', label: 'Nearby', color: '#4fc3f7', items: sel.filter(p => p.near && !p.child && !p.dup) },
             { id: 'off', label: '📍 Off pad', color: '#ffb347', items: sel.filter(p => p.pri && p.pri.off > 0) },
+            { id: 'same', label: 'Same name in file', color: '#ff9d00', items: sel.filter(p => p.fileDup && p.fileDup.kind === 'same') },
             { id: 'env', label: '🛢 Enverus', color: '#ffd666', items: sel.filter(p => impEnvFlagged(p)) },
-            { id: 'rev', label: '✓ Reviewed', color: '#5fff5f', items: sel.filter(p => p.reviewed && (p.dup || p.child || p.near || (p.pri && p.pri.off > 0) || impEnvFlagged(p))) },
+            { id: 'rev', label: '✓ Reviewed', color: '#5fff5f', items: sel.filter(p => p.reviewed && (p.dup || p.child || p.near || (p.pri && p.pri.off > 0) || impEnvFlagged(p) || (p.fileDup && p.fileDup.kind === 'same'))) },
         ];
     }
-    function impFlagKind(p) { return p.dup ? 'dup' : (p.child ? 'child' : (p.near ? 'near' : ((p.pri && p.pri.off > 0) ? 'off' : (impEnvFlagged(p) ? 'env' : 'dup')))); }
+    function impFlagKind(p) { return p.dup ? 'dup' : (p.child ? 'child' : (p.near ? 'near' : ((p.pri && p.pri.off > 0) ? 'off' : (impEnvFlagged(p) ? 'env' : ((p.fileDup && p.fileDup.kind === 'same') ? 'same' : 'dup'))))); }
     function impFlagShort(tab, p) {
         const ft = (v) => `${Math.round(v)} ft`;
-        if (tab === 'rev') { const k = impFlagKind(p); const lbl = { dup: 'name match', child: 'parent/child', near: 'nearby', off: 'off pad', env: 'Enverus' }[k]; return `${lbl} · ${impFlagShort(k, p)}`; }
+        if (tab === 'rev') { const k = impFlagKind(p); const lbl = { dup: 'name match', child: 'parent/child', near: 'nearby', off: 'off pad', env: 'Enverus', same: 'same name' }[k]; return `${lbl} · ${impFlagShort(k, p)}`; }
         if (tab === 'env') return impEnvShort(p);
+        if (tab === 'same') { const f = p.fileDup; return `${f.n} rows share "${p.rawName || p.name}" → created as "${p.name}" · ${f.others.map(o => `${o.typeRaw || 'row'} ${Math.round(approxMeters(p.lat, p.lng, o.lat, o.lng) / GEN_FT_TO_M).toLocaleString()} ft away`).join(', ')}`; }
         if (tab === 'dup') return `${imp.dupMode === 'update' ? '→ update type + notes' : (imp.dupMode === 'copy' ? '→ copy -N' : '→ skipped')}${p.pri && p.pri.off > 0 ? ` · client coord ${ft(p.pri.off)} off` : ' · on its polygon'}`;
         if (tab === 'child') return `inside ${p.child.name} (${p.child.full ? 'fully' : 'partially'})`;
         if (tab === 'near') return `${ft(p.near.ft)} from ${p.near.name}`;
@@ -24417,6 +24443,7 @@
             if (imp.pri.on) L.push(`Tier: ${p.pri.tier || ('none' + (p.pri.untier === 'zero' ? ' — zero production' : (p.pri.untier === 'env' ? ' — dead per Enverus' : '')))}${p.pri.padName ? ` · pad "${p.pri.padName}"` : ''}${p.pri.padTotal != null ? ` · pad total ${Math.round(p.pri.padTotal).toLocaleString()} BLPD across ${p.pri.padN}` : ''}${p.pri.blpd != null ? ` · this asset ${Math.round(p.pri.blpd).toLocaleString()} BLPD` : ''}${p.pri.before ? ` · was ${p.pri.before}` : ''}`);
             if (p.pri.flags && p.pri.flags.length) L.push(`Pad flags: ${p.pri.flags.join(' · ')}`);
         }
+        if (p.fileDup) L.push(p.fileDup.kind === 'same' ? `Same name in the file: ${p.fileDup.n} rows — this one is created as "${p.name}"` : (p.fileDup.kind === 'battery' ? `Battery renamed "${p.name}" (shares its name with the well ${Math.round(approxMeters(p.lat, p.lng, p.fileDup.other.lat, p.fileDup.other.lng) / GEN_FT_TO_M)} ft away)` : `Shares its name with a battery (renamed "${p.fileDup.other.name}")`));
         if (p.env && !p.env.noApi) L.push(p.env.found ? `Enverus: ${p.env.name || ''} · ${p.env.status}${p.env.type ? ` · ${p.env.type}` : ''}${p.env.traj ? ` · ${p.env.traj}` : ''}${p.env.op ? ` · ${p.env.op}` : ''}${p.env.spud ? ` · spud ${p.env.spud}` : ''}${p.env.plug ? ` · plugged ${p.env.plug}` : ''}${p.env.firstProd ? ` · first prod ${p.env.firstProd}` : ''}${p.env.bores > 1 ? ` · ${p.env.bores} wellbores` : ''}${p.env.distFt != null ? ` · Enverus location ${p.env.distFt} ft from the client coordinate` : ''} · API ${p.env.api}` : `Enverus: API ${p.env.api} not found`);
         if (p.reviewed) L.push('✓ reviewed');
         return L.join('\n');
@@ -24443,7 +24470,7 @@
         const selTotal = live.filter(p => p.sel).length;
         if (!total) { el.innerHTML = `<div style="font-size:11px;color:#5fff5f;padding:4px 0">✓ no placement flags among the selected points</div>`; return; }
         // zoom for an Enverus row also pulses Enverus' own surface location
-        tabs.forEach(t => { t.extra = t.id === 'env' ? (p => (p.env && p.env.found && isFinite(p.env.lat)) ? [{ lat: p.env.lat, lng: p.env.lng, name: `${p.name} (Enverus)` }] : []) : null; });
+        tabs.forEach(t => { t.extra = t.id === 'env' ? (p => (p.env && p.env.found && isFinite(p.env.lat)) ? [{ lat: p.env.lat, lng: p.env.lng, name: `${p.name} (Enverus)` }] : []) : (t.id === 'same' ? (p => (p.fileDup && p.fileDup.others ? p.fileDup.others.map(o => ({ lat: o.lat, lng: o.lng, name: o.name })) : [])) : null); });
         if (!imp.flagTab || !tabs.find(t => t.id === imp.flagTab && (t.items.length || t.id === 'rev'))) imp.flagTab = (tabs.find(t => t.items.length) || tabs[0]).id;
         const tab = tabs.find(t => t.id === imp.flagTab);
         const items = tab.items.slice().sort((x, y) => (tab.id === 'rev' ? 0 : (x.reviewed === y.reviewed ? 0 : (x.reviewed ? 1 : -1))) || (tab.id === 'off' ? (y.pri.off - x.pri.off) : 0) || x.name.localeCompare(y.name));
