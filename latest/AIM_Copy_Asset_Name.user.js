@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.378
+// @version      4.379
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.378';
+    const SCRIPT_VERSION = '4.379';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -24172,6 +24172,15 @@
         return out;
     }
     function impOffsetRing(ring, dM) { const c = ringCentroid(ring); const pr = impProj(c.lat, c.lng); return impOffsetRingXY(ring.map(pr.to), dM).map(pr.from); }
+    // v4.379: outer ring (+buf) with the inner ring (−buf) as its hole → a band of 2×buf centred on the outline.
+    // A box narrower than 2×buf has no clear centre: the inner ring would turn inside out, so it is dropped (solid fill).
+    function impBufferRings(ring) {
+        const d = imp.bufFt * GEN_FT_TO_M;
+        const outer = impOffsetRing(ring, d).map(v => [v.lat, v.lng]);
+        const c = ringCentroid(ring), pr = impProj(c.lat, c.lng), r = impMinAreaRect(ring.map(pr.to));
+        if (r.wid <= 2 * d + 0.3) return [outer];
+        return [outer, impOffsetRing(ring, -d).map(v => [v.lat, v.lng])];
+    }
     function impNeighbourRings(p, pr, radiusM) {
         const out = [];
         imp.points.forEach(q => { if (q === p || q.done || !q.shape) return; if (approxMeters(p.lat, p.lng, q.lat, q.lng) > radiusM) return; out.push(q.shape.map(pr.to)); });
@@ -24271,7 +24280,7 @@
             if (!p || !p.shape || !R || R.p !== p || R.verts.length !== p.shape.length) { impRenderHeldShape(); return; }
             try {
                 const n = p.shape.length;
-                if (R.buf) R.buf.setLatLngs([impOffsetRing(p.shape, imp.bufFt * GEN_FT_TO_M).map(v => [v.lat, v.lng]), p.shape.map(v => [v.lat, v.lng])]);
+                if (R.buf) R.buf.setLatLngs(impBufferRings(p.shape));
                 R.poly.setLatLngs(p.shape.map(v => [v.lat, v.lng]));
                 for (let i = 0; i < n; i++) { const v = p.shape[i], w = p.shape[(i + 1) % n]; R.verts[i].setLatLng([v.lat, v.lng]); if (R.mids[i]) R.mids[i].setLatLng([(v.lat + w.lat) / 2, (v.lng + w.lng) / 2]); }
             } catch (e) { impRenderHeldShape(); }
@@ -24285,8 +24294,8 @@
         try {
             const R = { p, buf: null, poly: null, verts: [], mids: [] };
             if (imp.mode === 'shape' && imp.bufFt > 0 && impBufOpacity > 0) {
-                // v4.378: the buffer is a BAND (outer offset ring with the outline as a hole) — the inside of the box stays clear
-                R.buf = L.polygon([impOffsetRing(p.shape, imp.bufFt * GEN_FT_TO_M).map(v => [v.lat, v.lng]), p.shape.map(v => [v.lat, v.lng])], { renderer: impShapeRenderer(), color: impBufColor, weight: 1, opacity: 0.7, dashArray: '3,3', fillColor: impBufColor, fillOpacity: impBufOpacity, fillRule: 'evenodd', interactive: false });
+                // v4.379: the buffer is a BAND straddling the outline — bufFt outside AND bufFt inside; the centre of the box stays clear
+                R.buf = L.polygon(impBufferRings(p.shape), { renderer: impShapeRenderer(), color: impBufColor, weight: 1, opacity: 0.7, dashArray: '3,3', fillColor: impBufColor, fillOpacity: impBufOpacity, fillRule: 'evenodd', interactive: false });
                 R.buf.addTo(map); imp.heldLayers.push(R.buf);
             }
             R.poly = L.polygon(p.shape.map(v => [v.lat, v.lng]), { renderer: impShapeRenderer(), color: '#ff5fff', weight: 3, opacity: 0.95, fill: impShapeFill && impShapeOpacity > 0, fillColor: impShapeColor, fillOpacity: impShapeFill ? impShapeOpacity : 0, interactive: false });
@@ -24725,7 +24734,7 @@
             <div id="aim-imp-placerow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px;padding:6px 8px;background:rgba(255,95,255,0.05);border:1px dashed rgba(255,95,255,0.35);border-radius:3px">
                 <button id="aim-imp-outline" title="Draw the asset's real outline before it is created. Click a dot to hold it, then CTRL+drag a stroke across the asset: a straight stroke along the LONG side of the asset becomes a rectangle that long by the narrow-side width (default 15 ft); a loop becomes the tightest box around it. A red buffer ring (default 7.5 ft) shows around the outline you are holding; snapping holds the gap (default 15 ft) to the neighbour instead of touching it. With a shaped dot held, ALT+click other dots to give them the same outline (copies snap flush to neighbours). Drag anywhere INSIDE the held outline to move the whole box (size and angle kept); drag anywhere along an edge to pull it longer / shorter (it stays parallel); drag a corner to move just that corner — all snap to the gap from a neighbour, hold Alt for no snap. Click an edge midpoint dot to add a corner, right-click a corner to remove it; Delete = back to a plain square. Esc releases." style="background:rgba(195,155,211,0.12);color:#c39bd3;border:1px solid rgba(195,155,211,0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">✏ Shape</button>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="The NARROW side of the rectangle: draw the stroke along the LONG side of the asset and the box is that long by this wide">narrow side <input type="number" id="aim-imp-shapew" min="5" max="500" step="1" style="width:52px;${inCss}"> ft</label>
-                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ff6b6b" title="Red ring drawn this far outside the outline you are holding while ✏ Shape is on — a neighbour closer than two of these = too close. Colour / opacity in the Control Panel.">buffer <input type="number" id="aim-imp-bufft" min="0" max="100" step="0.5" style="width:52px;${inCss}"> ft</label>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ff6b6b" title="Red band drawn this far outside AND inside the outline you are holding while ✏ Shape is on (the box's centre stays clear) — a neighbour closer than two of these = too close. Colour / opacity in the Control Panel.">buffer <input type="number" id="aim-imp-bufft" min="0" max="100" step="0.5" style="width:52px;${inCss}"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Snapping holds THIS distance between an outline and its neighbour (0 = flush). Default 15 ft = two 7.5 ft buffers touching.">gap <input type="number" id="aim-imp-gapft" min="0" max="200" step="1" style="width:46px;${inCss}"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Corners / copies within this distance of a neighbouring outline snap flush to it (0 = never; hold Alt while dragging for no snap)">snap <input type="number" id="aim-imp-snapft" min="0" max="100" step="1" style="width:46px;${inCss}"> ft</label>
                 <span id="aim-imp-shape-note" style="color:#888;font-size:10px"></span>

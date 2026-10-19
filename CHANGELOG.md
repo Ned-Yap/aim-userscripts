@@ -1,3 +1,7 @@
+## 2026-10-19 — ✏ Shape: buffer band inside and outside — Site Setup Tools latest v4.379 (latest only)
+
+- **v4.379** — the red buffer band now straddles the held outline: 7.5 ft outside and 7.5 ft inside, with the centre of the box left clear. A box narrower than twice the buffer fills solid (there is no clear centre to show).
+
 ## 2026-10-19 — ✏ Shape: buffer as a band — Site Setup Tools latest v4.378 (latest only)
 
 - **v4.378** — the red buffer around the held outline is now a **band** between the outline and the 7.5 ft offset (the outline is a hole in it), so the inside of the box stays clear and you can see the asset and the box's real size. Band opacity default 0.3 (Control Panel).
