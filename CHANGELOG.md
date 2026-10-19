@@ -1,3 +1,7 @@
+## 2026-10-19 — Site Setup Tools latest v4.371 (latest only)
+
+- **v4.371** — the ✏ Shape button could not be pressed: it shared its element id with the "⬆ Load boundary KML(s)" button, so the click handler landed on the wrong button. Fixed (v4.369 / v4.370 were the 🛟 Safe Zone Planner from a parallel session).
+
 ## 2026-10-19 — 📅 Coverage: flown vs SLA tiers — Mission Bank Tools latest v3.09 + Map Styler latest v34.166 (latest only, feature #292)
 
 - **Mission Bank Tools (latest) v3.09 — 📅 Coverage panel.** New **📅 Coverage** button next to Mission Bank Summary. For every asset on the site it reads Percepto's own image tags (the Data Map's asset filter) and shows **last flown · last mission · flies this calendar month · flies this Mon–Sun week · status**, with the asset's priority tier taken from the type prefix the Asset Importer stamps (`P1 - …`). Tier and status chips, search, sortable columns, click a row to pan, ↻ Refresh (results cached an hour per site), 📤 Sheets / ⬇ CSV export. Two rulebooks in the new **📅 Coverage (SLA tiers)** Control Panel card: **Diamondback** (floor = at least one fly per calendar month, P3 optionally quarterly; targets P1 2×/week, P2 weekly → "Behind target") and **Internal SLA** (rolling 7 / 14 / 31 days). Every number is editable.

@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.370
+// @version      4.371
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.370';
+    const SCRIPT_VERSION = '4.371';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -24638,7 +24638,7 @@
             ${IMP_SEC_CLOSE}
             ${impSecOpenHtml('place')}
             <div id="aim-imp-placerow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px;padding:6px 8px;background:rgba(255,95,255,0.05);border:1px dashed rgba(255,95,255,0.35);border-radius:3px">
-                <button id="aim-imp-shape" title="Draw the asset's real outline before it is created. Click a dot to hold it, then SHIFT+drag a stroke across the asset: a straight stroke becomes a rectangle (stroke length × the width below), a loop becomes the tightest box around it. With a shaped dot held, ALT+click other dots to give them the same outline (copies snap flush to neighbours). Drag a corner or an edge of the held outline to adjust (edges stay parallel; snaps within the snap distance, hold Shift for no snap); click an edge midpoint to add a corner, right-click a corner to remove it; Delete = back to a plain square. Esc releases." style="background:rgba(195,155,211,0.12);color:#c39bd3;border:1px solid rgba(195,155,211,0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">✏ Shape</button>
+                <button id="aim-imp-outline" title="Draw the asset's real outline before it is created. Click a dot to hold it, then SHIFT+drag a stroke across the asset: a straight stroke becomes a rectangle (stroke length × the width below), a loop becomes the tightest box around it. With a shaped dot held, ALT+click other dots to give them the same outline (copies snap flush to neighbours). Drag a corner or an edge of the held outline to adjust (edges stay parallel; snaps within the snap distance, hold Shift for no snap); click an edge midpoint to add a corner, right-click a corner to remove it; Delete = back to a plain square. Esc releases." style="background:rgba(195,155,211,0.12);color:#c39bd3;border:1px solid rgba(195,155,211,0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">✏ Shape</button>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Width of the rectangle a straight stroke becomes">W <input type="number" id="aim-imp-shapew" min="5" max="500" step="5" style="width:52px;${inCss}"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Corners / copies within this distance of a neighbouring outline snap flush to it (0 = never; hold Shift while dragging for no snap)">snap <input type="number" id="aim-imp-snapft" min="0" max="100" step="1" style="width:46px;${inCss}"> ft</label>
                 <span id="aim-imp-shape-note" style="color:#888;font-size:10px"></span>
@@ -24718,7 +24718,7 @@
         q('aim-imp-pick').onclick = () => impSetMode(imp.mode === 'pick' ? null : 'pick');
         q('aim-imp-edit').onclick = () => impSetMode(imp.mode === 'edit' ? null : 'edit');
         q('aim-imp-move').onclick = () => impSetMode(imp.mode === 'move' ? null : 'move');
-        q('aim-imp-shape').onclick = () => impSetMode(imp.mode === 'shape' ? null : 'shape');
+        q('aim-imp-outline').onclick = () => impSetMode(imp.mode === 'shape' ? null : 'shape');
         const swEl = q('aim-imp-shapew'), snEl = q('aim-imp-snapft');
         swEl.value = imp.shapeW; snEl.value = imp.snapFt;
         swEl.onchange = () => { const v = parseFloat(swEl.value); if (isFinite(v) && v >= 5) { imp.shapeW = v; impSaveParams(); } };
@@ -25701,7 +25701,7 @@
                 if (rb) rb.style.display = (moved || removed) ? '' : 'none';
                 const mb = document.getElementById('aim-imp-move');
                 if (mb) { const on = imp.mode === 'move'; mb.style.background = on ? 'rgba(255,95,255,0.38)' : 'rgba(255,95,255,0.12)'; mb.textContent = on ? '↔ ON — click a dot, click its new spot · Delete=remove · Esc=off' : '↔ Move point'; }
-                const sb2 = document.getElementById('aim-imp-shape');
+                const sb2 = document.getElementById('aim-imp-outline');
                 if (sb2) { const on = imp.mode === 'shape'; sb2.style.background = on ? 'rgba(195,155,211,0.42)' : 'rgba(195,155,211,0.12)'; sb2.textContent = on ? (imp.shapeHeld ? `✏ ON — holding ${imp.shapeHeld.name.slice(0, 18)} · SHIFT+drag=outline · ALT+click=copy · Esc=release` : '✏ ON — click a dot, then SHIFT+drag across the asset · Esc=off') : '✏ Shape'; }
                 const shapedN = live.filter(p => p.shape).length, sn2 = document.getElementById('aim-imp-shape-note');
                 if (sn2) sn2.innerHTML = shapedN ? `<b style="color:#c39bd3">${shapedN}</b> with a drawn outline (created as drawn; the rest as ${impSizeFt} ft squares)` : 'no outlines drawn — every point becomes a square';
