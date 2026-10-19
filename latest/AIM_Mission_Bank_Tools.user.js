@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.09
+// @version      3.10
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.09';
+    const SCRIPT_VERSION = '3.10';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -654,8 +654,8 @@
     // ---- fetch ----
     function covImagesUrl(sid, assetId, afterSec, beforeSec, limit) {
         const q = [`site=${encodeURIComponent(sid)}`, `poi=${encodeURIComponent(assetId)}`, `limit=${limit}`, 'only=id,created_at,mission_name,type'];
-        if (afterSec) q.push(`when_after=${afterSec}`);
-        if (beforeSec) q.push(`when_before=${beforeSec}`);
+        // Server 500s on when_after WITHOUT when_before (seen live 2026-10-19) — always send both or neither.
+        if (afterSec && beforeSec) { q.push(`when_after=${afterSec}`); q.push(`when_before=${beforeSec}`); }
         return `/images/?${q.join('&')}`;
     }
     async function covFetchJson(url) {
@@ -681,9 +681,15 @@
                 rec.totalImages = typeof j2.count === 'number' ? j2.count : r2.length;
                 if (r2.length) { rec.lastAt = r2[0].created_at; rec.lastMission = r2[0].mission_name || ''; }
             }
-        } catch (e) { rec.err = e.message || String(e); }
+        } catch (e) {
+            rec.err = (e && e.message) || String(e);
+            // v3.10: surface the first few failures loudly — the ⚠ tooltip was the only place the reason lived.
+            covErrLogged = (covErrLogged || 0) + 1;
+            if (covErrLogged <= 5) console.warn(`${TAG} coverage: asset ${a.id} "${a.name}" failed:`, rec.err, e);
+        }
         return rec;
     }
+    let covErrLogged = 0;
     function covFetch(sid, onProgress) {
         const siteKey = covSiteKey(sid);
         if (covInFlight && covInFlight.siteKey === siteKey) return covInFlight.p;
@@ -714,6 +720,8 @@
             covBroadcast(siteKey, bucket);
             const errs = recs.filter(r => r.err).length;
             console.log(`${TAG} coverage: ${recs.length} assets for site ${sid}${errs ? ` (${errs} fetch errors)` : ''}`);
+            if (errs) showToast(`Coverage: ${errs} of ${recs.length} asset reads failed — first: ${recs.find(r => r.err).err}`.slice(0, 220), '#ff5252');
+            covErrLogged = 0;
             return bucket;
         })();
         covInFlight = { siteKey, p };
