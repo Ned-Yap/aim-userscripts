@@ -1,3 +1,7 @@
+## 2026-10-19 — ✏ Shape: performance — Site Setup Tools latest v4.375 (latest only)
+
+- **v4.375 — ✏ Shape ran like sludge once several outlines existed:** every drag frame redrew every outline plus a buffer ring for each of them and for every nearby existing asset. Now the buffer ring is drawn for the **held outline only**, and while dragging only that outline (with its ring and handles) is redrawn; the other outlines stay as static layers until the set changes.
+
 ## 2026-10-19 — ✏ Shape: move the whole box, pull any edge — Site Setup Tools latest v4.374 (latest only)
 
 - **v4.374 — ✏ Shape.** Drag anywhere **inside** the held outline to move the whole box with its size and angle untouched; drag anywhere **along an edge** (not just the midpoint dot) to pull it longer or shorter while it stays parallel; drag a corner to move that corner. All three snap to the gap from a neighbour (Alt = no snap). Midpoint dots are bigger; clicking one still adds a corner.
