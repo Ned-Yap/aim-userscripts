@@ -1,3 +1,7 @@
+## 2026-10-19 — ✏ Shape: smooth edge / corner / box drags — Site Setup Tools latest v4.376 (latest only)
+
+- **v4.376 — ✏ Shape drags were laggy:** every mouse move rescanned all staged points and site assets for snap neighbours and rebuilt the handle markers. Neighbours are now found once when a drag starts, and the held outline, its buffer ring and its handles are updated in place at most once per animation frame.
+
 ## 2026-10-19 — ✏ Shape: performance — Site Setup Tools latest v4.375 (latest only)
 
 - **v4.375 — ✏ Shape ran like sludge once several outlines existed:** every drag frame redrew every outline plus a buffer ring for each of them and for every nearby existing asset. Now the buffer ring is drawn for the **held outline only**, and while dragging only that outline (with its ring and handles) is redrawn; the other outlines stay as static layers until the set changes.

@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.375
+// @version      4.376
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.375';
+    const SCRIPT_VERSION = '4.376';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -24239,7 +24239,7 @@
         try { imp.strokeLayer = L.polyline(imp.stroke.map(q => [q.lat, q.lng]), { color: impShapeColor, weight: 3, opacity: 0.9, dashArray: '4,4', interactive: false }).addTo(map); } catch (e) {}
     }
     function impClearAssetShapeLayers() { const map = getLeafletMap(); (imp.assetShapeLayers || []).forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); imp.assetShapeLayers = []; impClearHeldLayers(); }
-    function impClearHeldLayers() { const map = getLeafletMap(); (imp.heldLayers || []).forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); imp.heldLayers = []; }
+    function impClearHeldLayers() { const map = getLeafletMap(); (imp.heldLayers || []).forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); imp.heldLayers = []; imp.heldRefs = null; if (imp._heldRaf) { cancelAnimationFrame(imp._heldRaf); imp._heldRaf = null; } }
     // v4.375: two layer sets — the static outlines (redrawn only when the set changes) and the HELD
     // outline with its buffer ring + handles (the only thing redrawn while dragging). The buffer is
     // drawn for the held outline only.
@@ -24255,27 +24255,45 @@
         });
         impRenderHeldShape();
     }
+    // v4.376: drag frames update the held layers IN PLACE (setLatLngs) at most once per animation
+    // frame; a full rebuild only when the vertex count changed or nothing is drawn yet.
+    function impUpdateHeldLive() {
+        if (imp._heldRaf) return;
+        imp._heldRaf = requestAnimationFrame(() => {
+            imp._heldRaf = null;
+            const p = imp.shapeHeld, R = imp.heldRefs;
+            if (!p || !p.shape || !R || R.p !== p || R.verts.length !== p.shape.length) { impRenderHeldShape(); return; }
+            try {
+                const n = p.shape.length;
+                if (R.buf) R.buf.setLatLngs(impOffsetRing(p.shape, imp.bufFt * GEN_FT_TO_M).map(v => [v.lat, v.lng]));
+                R.poly.setLatLngs(p.shape.map(v => [v.lat, v.lng]));
+                for (let i = 0; i < n; i++) { const v = p.shape[i], w = p.shape[(i + 1) % n]; R.verts[i].setLatLng([v.lat, v.lng]); if (R.mids[i]) R.mids[i].setLatLng([(v.lat + w.lat) / 2, (v.lng + w.lng) / 2]); }
+            } catch (e) { impRenderHeldShape(); }
+        });
+    }
     function impRenderHeldShape() {
         const L = getLeafletL(), map = getLeafletMap(); if (!L || !map) return;
-        impClearHeldLayers();
+        impClearHeldLayers(); imp.heldRefs = null;
         const p = imp.shapeHeld; if (!p || p.done || !p.shape) return;
         const editing = imp.mode === 'shape' || imp.mode === 'edit';
         try {
+            const R = { p, buf: null, poly: null, verts: [], mids: [] };
             if (imp.mode === 'shape' && imp.bufFt > 0 && impBufOpacity > 0) {
-                const bl = L.polygon(impOffsetRing(p.shape, imp.bufFt * GEN_FT_TO_M).map(v => [v.lat, v.lng]), { color: impBufColor, weight: 1, opacity: 0.6, dashArray: '3,3', fillColor: impBufColor, fillOpacity: impBufOpacity, interactive: false });
-                bl.addTo(map); imp.heldLayers.push(bl);
+                R.buf = L.polygon(impOffsetRing(p.shape, imp.bufFt * GEN_FT_TO_M).map(v => [v.lat, v.lng]), { color: impBufColor, weight: 1, opacity: 0.6, dashArray: '3,3', fillColor: impBufColor, fillOpacity: impBufOpacity, interactive: false });
+                R.buf.addTo(map); imp.heldLayers.push(R.buf);
             }
-            const pl = L.polygon(p.shape.map(v => [v.lat, v.lng]), { color: '#ff5fff', weight: 3, opacity: 0.95, fill: impShapeFill && impShapeOpacity > 0, fillColor: impShapeColor, fillOpacity: impShapeFill ? impShapeOpacity : 0, interactive: false });
-            pl.addTo(map); imp.heldLayers.push(pl);
+            R.poly = L.polygon(p.shape.map(v => [v.lat, v.lng]), { color: '#ff5fff', weight: 3, opacity: 0.95, fill: impShapeFill && impShapeOpacity > 0, fillColor: impShapeColor, fillOpacity: impShapeFill ? impShapeOpacity : 0, interactive: false });
+            R.poly.addTo(map); imp.heldLayers.push(R.poly);
             if (editing) {
                 const n = p.shape.length;
                 for (let i = 0; i < n; i++) {
                     const v = p.shape[i], w = p.shape[(i + 1) % n];
-                    const d = L.circleMarker([v.lat, v.lng], { radius: 5, color: '#ffffff', weight: 1.5, fillColor: '#ff5fff', fillOpacity: 1, interactive: false }); d.addTo(map); imp.heldLayers.push(d);
-                    const m = L.circleMarker([(v.lat + w.lat) / 2, (v.lng + w.lng) / 2], { radius: 4.5, color: '#ffffff', weight: 1, fillColor: impShapeColor, fillOpacity: 1, interactive: false }); m.addTo(map); imp.heldLayers.push(m);
+                    const d = L.circleMarker([v.lat, v.lng], { radius: 5, color: '#ffffff', weight: 1.5, fillColor: '#ff5fff', fillOpacity: 1, interactive: false }); d.addTo(map); imp.heldLayers.push(d); R.verts.push(d);
+                    const m = L.circleMarker([(v.lat + w.lat) / 2, (v.lng + w.lng) / 2], { radius: 4.5, color: '#ffffff', weight: 1, fillColor: impShapeColor, fillOpacity: 1, interactive: false }); m.addTo(map); imp.heldLayers.push(m); R.mids.push(m);
                 }
             }
-        } catch (e) {}
+            imp.heldRefs = R;
+        } catch (e) { imp.heldRefs = null; }
     }
     function impNearestStaged(map, ll, maxPx) {
         let cp; try { cp = map.latLngToContainerPoint([ll.lat, ll.lng]); } catch (e) { return null; }
@@ -24404,7 +24422,7 @@
                 let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
                 if (ev.ctrlKey || ev.metaKey) { ev.preventDefault(); ev.stopPropagation(); imp.stroke = [ll]; impRenderStroke(); return; }   // CTRL (Shift is Percepto's name reveal)
                 const t = impShapeTargetAt(map, ll);
-                if (t) { ev.preventDefault(); ev.stopPropagation(); imp.shapeEdit = { p: t.p, i: t.i, type: t.type, down: { x: ev.clientX, y: ev.clientY }, downLL: ll, moved: false, start: t.p.shape.map(v => ({ lat: v.lat, lng: v.lng })) }; return; }
+                if (t) { ev.preventDefault(); ev.stopPropagation(); const pr0 = impProj(t.p.lat, t.p.lng); imp.shapeEdit = { p: t.p, i: t.i, type: t.type, down: { x: ev.clientX, y: ev.clientY }, downLL: ll, moved: false, start: t.p.shape.map(v => ({ lat: v.lat, lng: v.lng })), pr: pr0, neigh: impNeighbourRings(t.p, pr0, 60) }; return; }   // v4.376: neighbours found ONCE per drag
                 const p = impNearestStaged(map, ll, IMP_PICK_PX * 1.5);
                 if (ev.altKey) { ev.preventDefault(); ev.stopPropagation(); if (!imp.shapeHeld || !imp.shapeHeld.shape) { impStatus('✏ hold a shaped dot first (click it), then ALT+click the dots that should get the same outline', '#ffb347'); return; } if (!p) { impStatus('✏ no dot there', '#ffb347'); return; } if (p === imp.shapeHeld) return; impShapeClone(imp.shapeHeld, p, false); return; }
                 if (!p) return;                                              // empty map → pan
@@ -24455,7 +24473,7 @@
                 ev.preventDefault(); ev.stopPropagation();
                 let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
                 d.moved = true;
-                const p = d.p, n = d.start.length, pr = impProj(p.lat, p.lng);
+                const p = d.p, n = d.start.length, pr = d.pr;
                 const ring = d.start.map(v => ({ lat: v.lat, lng: v.lng }));
                 if (!d.downLL) d.downLL = ll;
                 if (d.type === 'vert') ring[d.i] = { lat: ll.lat, lng: ll.lng };
@@ -24471,10 +24489,10 @@
                 if (!ev.altKey && imp.snapFt > 0) {                          // snap the moved corner(s) to the gap from a neighbour; Alt = free
                     const idx = d.type === 'vert' ? [d.i] : (d.type === 'move' ? ring.map((_, i) => i) : [d.i, (d.i + 1) % n]);
                     const movingXY = idx.map(i => pr.to(ring[i]));
-                    const sh = impSnapShift(movingXY, impNeighbourRings(p, pr, 60), imp.snapFt * GEN_FT_TO_M, imp.gapFt * GEN_FT_TO_M);
+                    const sh = impSnapShift(movingXY, d.neigh, imp.snapFt * GEN_FT_TO_M, imp.gapFt * GEN_FT_TO_M);
                     if (sh) idx.forEach(i => { const q = pr.to(ring[i]); ring[i] = pr.from({ x: q.x + sh.dx, y: q.y + sh.dy }); });
                 }
-                p.shape = ring; impRenderHeldShape(); return;
+                p.shape = ring; impUpdateHeldLive(); return;
             }
             if (imp.mode === 'move' && imp.moveHeld && imp.moveDownPt && (ev.buttons & 1)) {   // ↔ ALT+drag carries the point live
                 if (!imp.moveDrag && Math.hypot(ev.clientX - imp.moveDownPt.x, ev.clientY - imp.moveDownPt.y) < 4) return;
