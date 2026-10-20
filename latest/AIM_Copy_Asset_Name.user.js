@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.383
+// @version      4.384
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.383';
+    const SCRIPT_VERSION = '4.384';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -30245,6 +30245,7 @@
         controlChannel.postMessage({ type: 'REGISTER', scriptId: RIG_SCRIPT_ID, name: '🏗 Rigs & cranes (temporary NFZs)', version: SCRIPT_VERSION, group: 'Site Setup', scope: 'site-setup', priority: 46,
             description: 'Daily rig / crane sheet → NFZ per pad (pad ∩ FFZ inset) with a verify-before-delete lifecycle. Opens from ⊕ Generate → 🏗 Rigs & cranes.',
             toggles: [
+                { id: 'rig-header', label: '🏗 Rigs & cranes — temporary NFZs (⊕ Generate → 🏗)', type: 'header' },
                 { id: 'nearPadFt', label: 'Match a well to the nearest pad within', type: 'number', min: 50, max: 2000, step: 10, default: c.nearPadFt, unit: 'ft' },
                 { id: 'insetFt', label: 'NFZ inset from a custom FFZ edge', type: 'number', min: 0, max: 100, step: 1, default: c.insetFt, unit: 'ft' },
                 { id: 'graceDays', label: 'Days a row may be missing before "verify"', type: 'number', min: 0, max: 10, step: 1, default: c.graceDays, unit: 'days' },
