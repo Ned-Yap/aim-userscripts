@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.33
+// @version      3.34
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.33';
+    const SCRIPT_VERSION = '3.34';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -1824,7 +1824,7 @@
     const AIM_SMART_PLANNER = (function () {
         'use strict';
 
-        const VERSION = '0.2';
+        const VERSION = '0.3';
         const FT_PER_M = 3.28084;
         const DEFAULT_TIER_REGEX = '^P\\s*([0-9]+\\+?)\\s*[-\\u2013\\u2014:]';
 
@@ -2092,7 +2092,6 @@
             });
 
             // -- spur walk over targets (doctrine from MBT lasso v2.36), one partition per base
-            const JUMP_TOL_FT = 500;
             const planned = new Set();
             const defer = []; // pads skipped on a day for weather/blocks → retried next day
             function planPartition(baseObj, padIds) {
@@ -2156,11 +2155,35 @@
                 slot.totals.wallClockMin = Math.round(wallClock - (Number(turn.chargeMin) || 0));
             }
 
+            // BRANCH WALK (doctrine from MBT lasso v2.62): the visit ORDER never looks at battery.
+            // Start at the deepest pad; next = the remaining pad whose legal route shares the deepest
+            // junction with the current one (junction depth = (dBase(a)+dBase(b)-dPad(a,b))/2), ties
+            // within 500 ft → the deeper pad. Finish one side of a Y before jumping. Flights are then
+            // CUT along that order by the battery/time sim, so consecutive flights work the same area.
+            const JUNC_TOL_FT = 500;
+            function branchWalk(list) {
+                const rem = new Set(list.map(p => p.padId));
+                const dB = new Map(); const db = id => { if (!dB.has(id)) dB.set(id, dBase(id)); return dB.get(id); };
+                const junc = (a, b) => Math.max(0, (db(a) + db(b) - dist(a, b)) / 2);
+                const order = []; let cur = null;
+                while (rem.size) {
+                    let pick = null;
+                    if (cur == null) rem.forEach(id => { if (pick == null || db(id) > db(pick)) pick = id; });
+                    else {
+                        let maxJ = -Infinity; const js = new Map();
+                        rem.forEach(id => { const jv = junc(cur, id); js.set(id, jv); if (jv > maxJ) maxJ = jv; });
+                        rem.forEach(id => { if (js.get(id) >= maxJ - JUNC_TOL_FT && (pick == null || db(id) > db(pick))) pick = id; });
+                    }
+                    order.push(pick); rem.delete(pick); cur = pick;
+                }
+                return order;
+            }
             let guard = 0;
             let dayIdx = 0;
+            let order = [], oi = 0, orderDay = null;
             while (dayIdx < horizonDays && guard++ < 10000) {
                 const dayMs = dayStartMs(day, tz, ops.start);
-                let targets = targetsNow(dayMs);
+                const targets = targetsNow(dayMs);
                 if (!targets.length) {
                     // nothing targetable today — fillers alone are never worth a day (they ride on target
                     // flights). Roll to the next day only if a block lifts inside the horizon.
@@ -2169,49 +2192,30 @@
                     if (!liftsLater) break;
                     nextDay(); dayIdx++; continue;
                 }
+                if (orderDay !== day) { order = branchWalk(targets); oi = 0; orderDay = day; }
                 if (!slot) newSlot();
                 if (slotDay.budgetMin <= 0) { slot.warnings.push('no flyable hours'); nextDay(); dayIdx++; continue; }
-                // build one flight
+                if (wallClock + (Number(turn.flightMin) || 22) > slotDay.budgetMin) { nextDay(); dayIdx++; continue; }
+                // build one flight along the order
                 const flight = { n: slot.flights.length + 1, pads: [], distanceFt: 0, minutes: 0, energyPct: 0, cur: 'base', lastHome: { pct: 0, min: 0, ft: 0 } };
                 const flightStartMs = dayMs + wallClock * 60000;
-                // does another flight fit the day?
-                if (wallClock + (Number(turn.flightMin) || 22) > slotDay.budgetMin) { nextDay(); dayIdx++; continue; }
                 let cur = 'base';
-                let spurDepth = null;
                 let endFlight = false;
                 while (!endFlight && guard++ < 10000) {
-                    targets = targetsNow(dayMs).filter(p => !flight.pads.find(x => x.padId === p.padId));
-                    let next = null;
-                    if (targets.length) {
-                        if (cur === 'base' || spurDepth == null) {
-                            next = targets.reduce((a, b) => dBase(b.padId) > dBase(a.padId) ? b : a); // deepest = new area
-                        } else {
-                            const cands = targets.filter(p => dBase(p.padId) <= spurDepth + JUMP_TOL_FT);
-                            if (cands.length) {
-                                const nn = cands.reduce((a, b) => dist(cur, b.padId) < dist(cur, a.padId) ? b : a);
-                                next = dist(cur, nn.padId) > dBase(nn.padId) ? targets.reduce((a, b) => dBase(b.padId) > dBase(a.padId) ? b : a) : nn;
-                            } else next = targets.reduce((a, b) => dBase(b.padId) > dBase(a.padId) ? b : a);
-                        }
-                    }
+                    while (oi < order.length && (!remaining.has(order[oi]) || availableOn(padById.get(order[oi]), dayMs))) oi++;
+                    const next = oi < order.length ? padById.get(order[oi]) : null;
                     let took = false;
                     if (next) {
                         const f = fits(flight, cur, next, flightStartMs + flight.minutes * 60000);
-                        if (f.ok) {
-                            visit(flight, next, f, next.overdueDays >= 0 ? 'due' : 'target');
-                            cur = next.padId; spurDepth = dBase(cur); took = true;
-                        } else if (cur === 'base') {
-                            // the deepest target does not fit from base at all → try the nearest target that does
-                            const alt = targets.map(p => ({ p, f: fits(flight, cur, p, flightStartMs) })).filter(x => x.f.ok)
-                                .sort((a, b) => dBase(b.p.padId) - dBase(a.p.padId))[0];
-                            if (alt) { visit(flight, alt.p, alt.f, alt.p.overdueDays >= 0 ? 'due' : 'target'); cur = alt.p.padId; spurDepth = dBase(cur); took = true; }
-                            else {
-                                targets.forEach(p => { if (!defer.find(d => d.padId === p.padId)) { defer.push({ padId: p.padId, why: 'out-of-range' }); remaining.delete(p.padId); } });
-                                endFlight = true;
-                            }
+                        if (f.ok) { visit(flight, next, f, next.overdueDays >= 0 ? 'due' : 'target'); cur = next.padId; oi++; took = true; }
+                        else if (cur === 'base') {
+                            // does not fit even as the only pad of a fresh flight → out of range for this battery
+                            if (!defer.find(d => d.padId === next.padId)) defer.push({ padId: next.padId, why: 'out-of-range' });
+                            remaining.delete(next.padId); oi++; continue;
                         }
                     }
                     if (!took) {
-                        // next target does not fit (or none left) → opportunistic fill, then go home
+                        // next target does not fit (or none left) → opportunistic fill near here, then go home
                         let filled = flight.pads.length > 0; // fillers only ride on a flight that has a target
                         while (filled && guard++ < 10000) {
                             filled = false;
@@ -2517,7 +2521,9 @@
     function renderSmartView() {
         const sid = getCurrentSiteID(); if (!sid) return;
         panelState.drillId = null; updateTitle();
-        const st = panelState.smt || (panelState.smt = { open: new Set(), showCfg: false, overlay: false });
+        const st = panelState.smt || (panelState.smt = { open: new Set(), hidden: new Set(), showCfg: false, overlay: false });
+        if (!st.hidden) st.hidden = new Set();
+        const basic = (smtCfg().view || 'basic') === 'basic';
         const cur = smtBySite[covSiteKey(sid)];
         if (!cur) { setBodyHtml('<div style="padding:40px;text-align:center;color:#888">No plan yet — press ↻ Replan.</div>'); return; }
         const { plan, meta } = cur;
@@ -2531,16 +2537,20 @@
             const col = SMT_SLOT_COLORS[si % SMT_SLOT_COLORS.length];
             const open = st.open.has(s.name);
             const byTier = Object.keys(s.totals.byTier).sort((a, b) => (tiers.find(t => t.id === a) || {}).rank - (tiers.find(t => t.id === b) || {}).rank).map(t => `${tierPill(t)} ${s.totals.byTier[t]}`).join(' ');
-            const flights = s.flights.map(f => `
+            const flights = s.flights.map(f => basic ? `
+                <div style="margin:6px 0 2px 10px;color:#ccc;font-size:12px"><span style="color:${col};font-weight:700">Flight ${f.n}</span> <span style="color:#888">· ${f.pads.length} pad${f.pads.length === 1 ? '' : 's'} · ${smtFmtMin(f.minutes)} · ${f.energyPct}% battery</span></div>
+                <div style="margin-left:18px;display:flex;flex-wrap:wrap;gap:4px 10px">${f.pads.map((p, pi) => `<span data-smt-pad="${escapeHtml(p.padId)}" title="${escapeHtml(`due ${p.dueOn} · ${p.reason} · ${smtFmtFt(p.transitFt)} transit · lands with ${p.batteryPctAtLanding}%`)}" style="cursor:pointer;white-space:nowrap"><b style="color:${col}">${pi + 1}</b> ${escapeHtml(p.name)} ${tierPill(p.tier)}${p.reason === 'filler' ? ' <span style="color:#ffb300;font-size:10px">filler</span>' : ''}${p.overdueDays > 0 ? ` <span style="color:#ff5252;font-size:10px">overdue</span>` : ''}</span>`).join('')}</div>` : `
                 <div style="margin:4px 0 2px 10px;color:#aaa;font-size:11px">🔋 Flight ${f.n} — ${f.pads.length} pad(s) · ${smtFmtFt(f.distanceFt)} · ${smtFmtMin(f.minutes)} · ${f.energyPct}% used</div>
                 <table class="aim-mb-table" style="margin-left:10px;width:calc(100% - 10px)"><thead><tr><th style="width:28px">#</th><th>Pad</th><th style="width:40px">Tier</th><th style="width:84px">Due</th><th style="width:60px">Why</th><th style="width:70px">Transit</th><th style="width:62px">ETA</th><th style="width:72px">Land at</th><th style="width:48px">Wind</th></tr></thead><tbody>
                 ${f.pads.map((p, pi) => `<tr data-smt-pad="${escapeHtml(p.padId)}" style="cursor:pointer"><td style="color:${col};font-weight:700">${pi + 1}</td><td>${escapeHtml(p.name)}</td><td>${tierPill(p.tier)}</td><td style="color:${p.overdueDays > 0 ? '#ff5252' : p.overdueDays > -1 ? '#ffb300' : '#9ad'}">${p.dueOn}${p.overdueDays > 0 ? ` <span style="font-size:10px">+${p.overdueDays} d</span>` : ''}</td><td style="color:${p.reason === 'filler' ? '#ffb300' : '#5fff5f'}">${SMT_REASON_LABEL[p.reason] || p.reason}</td><td>${smtFmtFt(p.transitFt)}</td><td>+${smtFmtMin(p.etaMin)}</td><td style="color:${p.batteryPctAtLanding < 30 ? '#ffb300' : '#5fff5f'}">${p.batteryPctAtLanding}%</td><td style="color:${p.windFactor > 1.1 ? '#ff9800' : p.windFactor < 0.9 ? '#5fff5f' : '#888'}">×${p.windFactor}</td></tr>`).join('')}
                 </tbody></table>`).join('');
+            const vis = !st.hidden.has(s.name);
             return `<div style="border:1px solid #2a3340;border-left:4px solid ${col};border-radius:4px;margin:6px 0;background:#121820">
                 <div data-smt-slot="${escapeHtml(s.name)}" style="display:flex;align-items:center;gap:10px;padding:6px 10px;cursor:pointer;user-select:none">
+                    <span data-smt-vis="${escapeHtml(s.name)}" title="${vis ? 'Hide this slot on the map' : 'Show this slot on the map'}" style="cursor:pointer;font-size:13px;opacity:${vis ? 1 : 0.35}">${st.overlay ? '👁' : ''}</span>
                     <span style="color:${col};font-weight:700;font-size:13px">${open ? '▾' : '▸'} ${escapeHtml(s.name)}</span>
-                    <span style="color:#ccc">${s.day}${s.frozen ? ' · <span style="color:#ffb300">frozen (flying today)</span>' : ''}</span>
-                    <span style="color:#888">${s.totals.flights} flight(s) · ${s.totals.pads} pads · ${smtFmtMin(s.totals.wallClockMin)} of ${smtFmtMin(s.budgetMin)}${s.lostHours ? ` · <span style="color:#ff9800">${s.lostHours} h lost to weather</span>` : ''}</span>
+                    <span style="color:#ccc">${s.day}${s.base ? ` · 🏠 ${escapeHtml(s.base.name)}` : ''}${s.frozen ? ' · <span style="color:#ffb300">frozen (flying today)</span>' : ''}</span>
+                    <span style="color:#888">${s.totals.flights} flight${s.totals.flights === 1 ? '' : 's'} · ${s.totals.pads} pads · ${smtFmtMin(s.totals.wallClockMin)}${basic ? '' : ` of ${smtFmtMin(s.budgetMin)}`}${s.lostHours ? ` · <span style="color:#ff9800">${s.lostHours} h lost to weather</span>` : ''}</span>
                     <span style="flex:1"></span><span>${byTier}</span>
                 </div>
                 ${open ? `<div style="padding:0 8px 8px">${s.warnings.length ? `<div style="color:#ff9800;font-size:11px;margin:2px 0 4px 10px">${s.warnings.map(escapeHtml).join(' · ')}</div>` : ''}${flights || '<div style="color:#888;margin-left:10px">no flights</div>'}</div>` : ''}
@@ -2555,20 +2565,22 @@
         const html = `
             <div class="aim-mb-toolbar">
                 <button class="aim-mb-tbtn" data-smt-act="replan" title="Re-read site data (entities, coverage, missions, rigs, weather) and plan again">↻ Replan <span style="opacity:.7">${ageMin < 1 ? 'now' : ageMin + ' min ago'}</span></button>
-                <button class="aim-mb-tbtn${st.overlay ? ' active' : ''}" data-smt-act="overlay" title="Draw the slot routes + visit numbers on the map">🗺 Map</button>
+                <button class="aim-mb-tbtn${st.overlay ? ' active' : ''}" data-smt-act="overlay" title="Draw the slot routes + visit numbers on the map">🗺 Map</button>${st.overlay ? `<button class="aim-mb-tbtn" data-smt-act="vis-all" title="Show every slot on the map">All</button><button class="aim-mb-tbtn" data-smt-act="vis-none" title="Hide every slot on the map (then 👁 the ones you want)">None</button>` : ''}
+                <button class="aim-mb-tbtn" data-smt-act="view" title="${basic ? 'Show every number (transit, ETA, landing battery, wind, budgets, notes)' : 'Back to the simple view'}">${basic ? '🔬 Advanced' : '🔎 Basic'}</button>
                 <button class="aim-mb-tbtn${st.showCfg ? ' active' : ''}" data-smt-act="cfg" title="Tiers, cadence and flight rules — edits re-plan instantly">⚙ Tiers &amp; rules</button>
                 <button class="aim-mb-tbtn" data-smt-act="report" title="Copy the plan as a table for Google Sheets">📋 Report</button>
                 <span style="flex:1"></span>
-                <span style="color:#888;font-size:11px">${plan.slots.length} slot(s) · ${totFlights} flight(s) · ${totPads} pads · horizon ${plan.horizonDays} d · ${meta.withMicro}/${meta.pads} pads have a micro</span>
+                <span style="color:#888;font-size:11px">${plan.slots.length} slot(s) · ${totFlights} flight(s) · ${totPads} pads · horizon ${plan.horizonDays} d${basic ? '' : ` · ${meta.withMicro}/${meta.pads} pads have a micro`}</span>
             </div>
-            <div style="padding:6px 10px;background:#2a1f00;border-bottom:1px solid #5a4200;color:#ffd54f;font-size:11px">⚠ ${escapeHtml(plan.assumptions.join(' '))} Phase 1 — read-only: nothing is written to the Mission Bank.</div>
+            ${basic ? `<div style="padding:6px 10px;background:#141a22;border-bottom:1px solid #2a3340;color:#aaa;font-size:11px">Each slot = one day's mission from one base, named as it would appear in the Mission Bank. Flights are listed in flying order with their pads in visit order. ⚠ Assumes no mechanical or technical faults — read-only preview.</div>`
+                   : `<div style="padding:6px 10px;background:#2a1f00;border-bottom:1px solid #5a4200;color:#ffd54f;font-size:11px">⚠ ${escapeHtml(plan.assumptions.join(' '))} Phase 1 — read-only: nothing is written to the Mission Bank.</div>`}
             ${cfgHtml}
             <div class="aim-mb-table-wrap" style="padding:6px 10px">
                 ${slotHtml || '<div style="color:#888">Nothing to plan — no owed, targetable pads with a micro mission.</div>'}
                 ${owedHtml}
-                ${plan.ignored.length ? `<div style="margin-top:8px;color:#888;font-size:11px">${plan.ignored.length} pad(s) not considered: ${escapeHtml(Object.entries(plan.ignored.reduce((m, i) => { m[i.why] = (m[i.why] || 0) + 1; return m; }, {})).map(([k, v]) => `${v} × ${k}`).join(' · '))}</div>` : ''}
-                ${plan.pending.length ? `<div style="margin-top:4px;color:#888;font-size:11px">${plan.pending.length} pad(s) pending (flown, images not in yet): ${escapeHtml(plan.pending.map(p => p.name).slice(0, 12).join(', '))}${plan.pending.length > 12 ? '…' : ''}</div>` : ''}
-                <div style="margin-top:8px;color:#777;font-size:11px">${notes.map(escapeHtml).join('<br>')}</div>
+                ${!basic && plan.ignored.length ? `<div style="margin-top:8px;color:#888;font-size:11px">${plan.ignored.length} pad(s) not considered: ${escapeHtml(Object.entries(plan.ignored.reduce((m, i) => { m[i.why] = (m[i.why] || 0) + 1; return m; }, {})).map(([k, v]) => `${v} × ${k}`).join(' · '))}</div>` : ''}
+                ${!basic && plan.pending.length ? `<div style="margin-top:4px;color:#888;font-size:11px">${plan.pending.length} pad(s) pending (flown, images not in yet): ${escapeHtml(plan.pending.map(p => p.name).slice(0, 12).join(', '))}${plan.pending.length > 12 ? '…' : ''}</div>` : ''}
+                ${basic ? '' : `<div style="margin-top:8px;color:#777;font-size:11px">${notes.map(escapeHtml).join('<br>')}</div>`}
             </div>`;
         setBodyHtml(html);
         const body = panelEl.querySelector('.aim-mb-body');
@@ -2578,7 +2590,11 @@
             else if (act === 'cfg') { st.showCfg = !st.showCfg; renderSmartView(); }
             else if (act === 'report') smtReport(sid);
             else if (act === 'overlay') { st.overlay = !st.overlay; if (st.overlay) smtDrawOverlay(sid); else smtClearOverlay(); renderSmartView(); }
+            else if (act === 'vis-all') { st.hidden.clear(); renderSmartView(); }
+            else if (act === 'vis-none') { plan.slots.forEach(s => st.hidden.add(s.name)); renderSmartView(); }
+            else if (act === 'view') { smtCfgSave({ view: basic ? 'advanced' : 'basic' }); renderSmartView(); }
         }; });
+        body.querySelectorAll('[data-smt-vis]').forEach(el => { el.onclick = (e) => { e.stopPropagation(); const k = el.dataset.smtVis; if (st.hidden.has(k)) st.hidden.delete(k); else st.hidden.add(k); renderSmartView(); }; });
         body.querySelectorAll('[data-smt-slot]').forEach(h => { h.onclick = () => { const k = h.dataset.smtSlot; if (st.open.has(k)) st.open.delete(k); else st.open.add(k); renderSmartView(); }; });
         body.querySelectorAll('[data-smt-pad]').forEach(r => { r.onclick = () => { const id = Number(r.dataset.smtPad); covPanTo(sid, id); }; });
         smtBindCfg(body, sid);
@@ -2677,7 +2693,9 @@
         const layers = [];
         let straight = 0;
         const ll = id => { if (/^base:/.test(id)) { const b = baseById.get(id); return b ? [b.lat, b.lng] : null; } const p = padById.get(id); return p ? [p.lat, p.lng] : null; };
+        const hidden = (panelState && panelState.smt && panelState.smt.hidden) || new Set();
         cur.plan.slots.forEach((s, si) => {
+            if (hidden.has(s.name)) return;
             const col = SMT_SLOT_COLORS[si % SMT_SLOT_COLORS.length];
             const homeId = s.base ? s.base.id : (cur.plan.bases && cur.plan.bases[0] ? cur.plan.bases[0].id : null);
             let n = 0;
