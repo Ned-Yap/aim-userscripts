@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.380
+// @version      4.381
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.380';
+    const SCRIPT_VERSION = '4.381';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -12927,7 +12927,7 @@
         catch (e) { return; }
         controlChannel.onmessage = (ev) => {
             const msg = ev.data || {};
-            if (msg.type === 'REQUEST_REGISTRATIONS') registerWithControlPanel();
+            if (msg.type === 'REQUEST_REGISTRATIONS') { registerWithControlPanel(); try { rigRegisterCP(); } catch (e) {} }
             else if (msg.type === 'TOKEN_VALUE') {
                 // PAT broadcast — caches in memory for shared elevation
                 // cache pulls/pushes. Same pattern Map Styler + MBT use.
@@ -13018,6 +13018,7 @@
                 // beacon, but it re-REGISTERs on REQUEST_REGISTRATIONS.
                 impDeleteGuardSeen = Date.now();
             }
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === RIG_SCRIPT_ID) { rigHandleToggle(msg); }
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === IMP_SCRIPT_ID) {
                 handleImporterToggle(msg);
             }
@@ -13514,6 +13515,7 @@
     }
     setupControlPanel();
     registerWithControlPanel();
+    try { rigRegisterCP(); } catch (e) { console.warn(`${RIG_TAG} CP register failed`, e); }
     // AGL hover tooltip: map + native tooltips live in the iframe; give the
     // map time to mount, then watch. (siteAltModeCache/elev helpers are
     // consts defined later in the IIFE — fine, the timeout fires long after.)
@@ -29913,6 +29915,340 @@
     // the tools' ShowPanel helpers / hotkey arms call to land on their page.
     let genShowPageLive = null;
     // v4.343: ⓘ help per page — what the tool is for, how to use it, what to try.
+    // ========================================================
+    // 🏗 RIGS & CRANES (#291, v4.381) — temporary NFZs from the daily sheet
+    // ========================================================
+    // Diamondback emails a daily CSV of wells with a crane / big rig on them
+    // (WELL_NAME, SURFACE_LATITUDE, SURFACE_LONGITUDE, JOB_TYPE_CATEGORY,
+    // START_DATE, END_DATE). Rows are WELLS: match each to a PAD here (GPS in a
+    // root pad polygon → nearest pad within N ft → exact child name → prefix),
+    // stage an NFZ = pad ∩ inset(FFZ, 15 ft) (standard FFZ ⇒ the pad exactly),
+    // commit create-only, and NEVER delete without a click: END_DATE passing or
+    // the row dropping off the sheet turns the row "ending" until a CSM confirms
+    // the equipment is gone. RPIC-spotted obstructions are added by hand and
+    // follow the same lifecycle; "mission pulled" is recorded so the restore is
+    // not forgotten (LILLY 49 UNIT 3LS lost a month that way, 2026-09-22).
+    // Source today = CSV dropped on the panel; the Apps Script bridge feeds the
+    // same ingest later. State per site in GM (`aim-rig-state:<env-sid>`).
+    const RIG_SCRIPT_ID = 'aim-rig-nfz';
+    const RIG_TAG = '[AIM RIG]';
+    const RIG_TAG_PREFIX = 'AIM RIG NFZ|';
+    const RIG_COLS = ['WELL_NAME', 'SURFACE_LATITUDE', 'SURFACE_LONGITUDE', 'JOB_TYPE_CATEGORY', 'START_DATE', 'END_DATE'];
+    const RIG_DEFAULT_CFG = { nearPadFt: 500, insetFt: 15, graceDays: 1, snoozeDays: 3, exclude: '' };
+    const RIG_STATUS_LABEL = { upcoming: 'Upcoming', staged: 'Staged', active: 'Active NFZ', ending: 'VERIFY — gone?', cleared: 'Cleared', unmatched: 'Unmatched', offsite: 'Off-site' };
+    const RIG_STATUS_COLOR = { upcoming: '#ffb300', staged: '#7adfe6', active: '#ff5555', ending: '#ff9100', cleared: '#8a8f98', unmatched: '#ff6060', offsite: '#666' };
+    let rigCfgCache = null, rigLayers = [], rigRowsByKey = null, rigStateSid = null;
+    function rigCfg() { if (rigCfgCache) return rigCfgCache; const o = elevGmGet('aim-rig-cfg', {}); rigCfgCache = Object.assign({}, RIG_DEFAULT_CFG, (o && typeof o === 'object') ? o : {}); return rigCfgCache; }
+    function rigCfgSet(k, v) { const c = rigCfg(); if (c[k] === v) return; c[k] = v; elevGmSet('aim-rig-cfg', c); }
+    function rigEnvKey(sid) { return `${/(^|\.)qa\.percepto\.app$/.test(location.hostname) ? 'qa-' : ''}${sid}`; }
+    function rigStateLoad(sid) {
+        if (rigRowsByKey && rigStateSid === String(sid)) return rigRowsByKey;
+        const o = elevGmGet(`aim-rig-state:${rigEnvKey(sid)}`, null);
+        rigRowsByKey = (o && typeof o === 'object' && o.rows) ? o : { day: '', rows: {}, log: [] };
+        rigStateSid = String(sid);
+        return rigRowsByKey;
+    }
+    function rigStateSave(sid) { if (!rigRowsByKey) return; try { elevGmSet(`aim-rig-state:${rigEnvKey(sid)}`, rigRowsByKey); } catch (e) { console.warn(`${RIG_TAG} state save failed`, e); } }
+    function rigToday() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+    function rigAddDays(day, n) { const d = new Date(day + 'T12:00:00'); d.setDate(d.getDate() + n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+    function rigNorm(s) { return String(s || '').toUpperCase().replace(/[\s\-_]+/g, ' ').trim(); }
+    function rigLog(sid, msg) { const st = rigStateLoad(sid); st.log.unshift(`${new Date().toISOString().slice(0, 16).replace('T', ' ')} ${msg}`); st.log = st.log.slice(0, 200); console.log(`${RIG_TAG} ${msg}`); }
+
+    // ---- CSV ----
+    function rigParseCsv(text) {
+        const lines = String(text || '').replace(/^﻿/, '').split(/\r?\n/).filter(l => l.trim());
+        if (!lines.length) throw new Error('empty file');
+        const split = (l) => { const out = []; let cur = '', q = false; for (const ch of l) { if (ch === '"') q = !q; else if (ch === ',' && !q) { out.push(cur); cur = ''; } else cur += ch; } out.push(cur); return out.map(v => v.trim().replace(/^"|"$/g, '')); };
+        const hdr = split(lines[0]).map(h => h.toUpperCase());
+        const idx = RIG_COLS.map(c => hdr.findIndex(h => h === c || h.replace(/[^A-Z]/g, '') === c.replace(/[^A-Z]/g, '')));
+        const missing = RIG_COLS.filter((c, i) => idx[i] < 0);
+        if (missing.length) throw new Error(`missing columns: ${missing.join(', ')} (got ${hdr.join(', ')})`);
+        const dayRe = /^(\d{4})-(\d{2})-(\d{2})/;
+        const day = v => { const m = String(v || '').match(dayRe); if (m) return `${m[1]}-${m[2]}-${m[3]}`; const m2 = String(v || '').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/); return m2 ? `${m2[3]}-${m2[1].padStart(2, '0')}-${m2[2].padStart(2, '0')}` : ''; };
+        return lines.slice(1).map(split).filter(r => r.some(v => v)).map(r => ({ well: r[idx[0]] || '', lat: parseFloat(r[idx[1]]), lng: parseFloat(r[idx[2]]), job: r[idx[3]] || '', start: day(r[idx[4]]), end: day(r[idx[5]]) }))
+            .filter(r => r.well).map(r => { if (!isFinite(r.lat) || !isFinite(r.lng)) { r.lat = null; r.lng = null; } return r; });
+    }
+    function rigDayFromFilename(name) { const m = String(name || '').match(/(\d{1,2})[._-](\d{1,2})[._-](\d{2,4})/); if (!m) return rigToday(); const y = m[3].length === 2 ? '20' + m[3] : m[3]; return `${y}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`; }
+
+    // ---- matching ----
+    function rigPads(sid) {
+        const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        const tree = buildAssetTree(ents);
+        const assets = ents.filter(e => e && e.type === 3);
+        const rootOf = (e) => { let cur = e, g = 0; while (cur && g++ < 10) { const nn = tree.byId.get(cur.id); if (!nn || nn.parentId == null) return cur; const p = assets.find(a => a.id === nn.parentId); if (!p) return cur; cur = p; } return cur; };
+        return { assets, roots: assets.filter(e => { const nn = tree.byId.get(e.id); return !nn || nn.parentId == null; }).filter(e => (entityCoords(e) || []).length >= 3), rootOf };
+    }
+    function rigMatchRow(sid, row) {
+        const { assets, roots, rootOf } = rigPads(sid);
+        const cfg = rigCfg();
+        const res = { padId: null, padName: '', how: '', flag: '' };
+        let gpsPad = null, namePad = null;
+        if (row.lat != null) {
+            const inside = roots.filter(p => pointInPolygon(row.lat, row.lng, entityCoords(p)));
+            if (inside.length) gpsPad = inside[0];
+            else { let best = null, bd = Infinity; roots.forEach(p => { const d = pointToPolygonMeters(row.lat, row.lng, entityCoords(p)) * 3.28084; if (d < bd) { bd = d; best = p; } }); if (best && bd <= cfg.nearPadFt) { gpsPad = best; res.flag = `near pad edge (${Math.round(bd)} ft), not inside`; } }
+        }
+        const nw = rigNorm(row.well);
+        const exact = assets.find(a => rigNorm(a.name) === nw);
+        if (exact) namePad = rootOf(exact);
+        else { const pre = nw.split(' ').slice(0, 2).join(' '); const cand = assets.filter(a => rigNorm(a.name) === pre || rigNorm(a.name).startsWith(pre + ' ')); if (cand.length) { namePad = rootOf(cand[0]); res.flag = (res.flag ? res.flag + ' · ' : '') + `name matched by prefix "${pre}"`; } }
+        const pad = gpsPad || namePad;
+        if (!pad) { res.how = row.lat != null ? 'no pad near the GPS and no name match' : 'no GPS and no name match'; return res; }
+        res.padId = pad.id; res.padName = pad.name || `#${pad.id}`;
+        res.how = gpsPad && namePad ? (gpsPad.id === namePad.id ? 'GPS + name agree' : 'GPS') : gpsPad ? 'GPS only' : 'name only';
+        if (gpsPad && namePad && gpsPad.id !== namePad.id) res.flag = (res.flag ? res.flag + ' · ' : '') + `⚠ name points at "${namePad.name}" but GPS is on "${gpsPad.name}" — GPS used`;
+        return res;
+    }
+
+    // ---- geometry: pad ∩ inset(FFZ) ----
+    function rigInsetRing(ring, ft) {
+        // Offset every edge inward by ft and intersect consecutive offset lines.
+        const n = ring.length; if (n < 3) return null;
+        const lat0 = ring[0].lat, kx = Math.cos(lat0 * Math.PI / 180) * 364000, ky = 364000;   // deg → ft
+        const P = ring.map(p => ({ x: (p.lng - ring[0].lng) * kx, y: (p.lat - lat0) * ky }));
+        let area = 0; for (let i = 0; i < n; i++) { const a = P[i], b = P[(i + 1) % n]; area += a.x * b.y - b.x * a.y; }
+        const sgn = area > 0 ? 1 : -1;   // CCW ⇒ inward normal is left of the edge
+        const lines = P.map((a, i) => { const b = P[(i + 1) % n]; const dx = b.x - a.x, dy = b.y - a.y, L = Math.hypot(dx, dy) || 1; const nx = -dy / L * sgn, ny = dx / L * sgn; return { ax: a.x + nx * ft, ay: a.y + ny * ft, dx, dy }; });
+        const out = [];
+        for (let i = 0; i < n; i++) {
+            const l1 = lines[(i - 1 + n) % n], l2 = lines[i];
+            const det = l1.dx * l2.dy - l1.dy * l2.dx; if (Math.abs(det) < 1e-9) return null;
+            const t = ((l2.ax - l1.ax) * l2.dy - (l2.ay - l1.ay) * l2.dx) / det;
+            out.push({ lat: lat0 + (l1.ay + l1.dy * t) / ky, lng: ring[0].lng + (l1.ax + l1.dx * t) / kx });
+        }
+        return ringSelfIntersects(out) ? null : out;
+    }
+    function rigGeometry(sid, padId) {
+        const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        const pad = ents.find(e => e.id === padId); const ring = pad && entityCoords(pad); if (!ring || ring.length < 3) return null;
+        const c = ring.reduce((a, p) => ({ lat: a.lat + p.lat / ring.length, lng: a.lng + p.lng / ring.length }), { lat: 0, lng: 0 });
+        const ffz = ents.find(e => e.type === 16 && (entityCoords(e) || []).length >= 3 && pointInPolygon(c.lat, c.lng, entityCoords(e)));
+        if (!ffz) return { points: ring.map(p => ({ lat: p.lat, lng: p.lng })), note: 'no FFZ around the pad → pad outline' };
+        const inset = rigInsetRing(entityCoords(ffz), rigCfg().insetFt);
+        if (!inset) return { points: ring.map(p => ({ lat: p.lat, lng: p.lng })), note: `FFZ "${ffz.name}" inset failed (concave) → pad outline` };
+        const pc = terBPC();
+        if (!pc) return { points: ring.map(p => ({ lat: p.lat, lng: p.lng })), note: 'polygon-clipping unavailable → pad outline' };
+        try {
+            const r = pc.intersection([ring.map(p => [p.lng, p.lat])], [inset.map(p => [p.lng, p.lat])]);
+            const best = (r || []).map(poly => poly[0]).filter(x => x && x.length >= 4).sort((a, b) => b.length - a.length)[0];
+            if (!best) return { points: ring.map(p => ({ lat: p.lat, lng: p.lng })), note: 'intersection empty → pad outline' };
+            const pts = best.slice(0, -1).map(([lng, lat]) => ({ lat, lng }));
+            const same = pts.length === ring.length && pts.every((p, i) => Math.abs(p.lat - ring[i].lat) < 1e-7 && Math.abs(p.lng - ring[i].lng) < 1e-7);
+            return { points: pts, note: same ? `pad outline (FFZ "${ffz.name}" is the standard 15 ft ring)` : `pad ∩ "${ffz.name}" inset ${rigCfg().insetFt} ft` };
+        } catch (e) { console.warn(`${RIG_TAG} clip failed`, e); return { points: ring.map(p => ({ lat: p.lat, lng: p.lng })), note: 'clip error → pad outline' }; }
+    }
+
+    // ---- ingest + lifecycle ----
+    function rigKey(row) { return rigNorm(row.well); }
+    function rigIngest(sid, rows, day) {
+        const st = rigStateLoad(sid); const today = rigToday();
+        const excl = String(rigCfg().exclude || '').split(/[,;\n]/).map(s => s.trim().toUpperCase()).filter(Boolean);
+        const seen = new Set(); let added = 0, changed = 0, dropped = 0, excluded = 0;
+        rows.forEach(r => {
+            if (excl.includes(String(r.job || '').toUpperCase())) { excluded++; return; }
+            const k = rigKey(r); seen.add(k);
+            const cur = st.rows[k];
+            if (!cur) { st.rows[k] = { well: r.well, lat: r.lat, lng: r.lng, job: r.job, start: r.start, end: r.end, firstSeen: day, lastSeen: day, source: 'sheet', status: 'new', padId: null, padName: '', how: '', flag: '', nfzId: null, nfzName: '', nfzBody: null, pulled: '', note: '', changes: [] }; added++; }
+            else {
+                if (cur.start !== r.start || cur.end !== r.end) { cur.changes.unshift(`${day}: ${cur.start || '?'}→${r.start || '?'} / ${cur.end || '—'}→${r.end || '—'}`); cur.changes = cur.changes.slice(0, 10); if (cur.status === 'active' || cur.status === 'ending') changed++; }
+                cur.start = r.start; cur.end = r.end; cur.job = r.job; cur.lastSeen = day;
+                if (cur.lat == null && r.lat != null) { cur.lat = r.lat; cur.lng = r.lng; }
+                if (cur.status === 'ending' && cur.endedWhy === 'dropped') { cur.status = 'active'; cur.endedWhy = ''; }   // came back
+            }
+        });
+        Object.keys(st.rows).forEach(k => { const c = st.rows[k]; if (c.source !== 'sheet' || seen.has(k)) return; if (c.lastSeen && day >= rigAddDays(c.lastSeen, rigCfg().graceDays + 1) && (c.status === 'active')) { c.status = 'ending'; c.endedWhy = 'dropped'; c.endedAt = day; dropped++; } else if (c.status === 'new' || c.status === 'staged' || c.status === 'upcoming' || c.status === 'unmatched' || c.status === 'offsite') { c.status = 'cleared'; c.endedWhy = 'dropped before commit'; } });
+        st.day = day;
+        rigReclassify(sid);
+        rigLog(sid, `ingest ${day}: ${rows.length} rows — ${added} new · ${changed} active rows re-dated · ${dropped} dropped → verify${excluded ? ` · ${excluded} excluded by job type` : ''}`);
+        rigStateSave(sid);
+        return { added, changed, dropped, excluded };
+    }
+    function rigReclassify(sid) {
+        const st = rigStateLoad(sid); const today = rigToday();
+        Object.values(st.rows).forEach(c => {
+            if (c.status === 'cleared') return;
+            if (!c.padId || c.status === 'new' || c.status === 'unmatched' || c.status === 'offsite' || c.status === 'upcoming' || c.status === 'staged') {
+                const m = rigMatchRow(sid, c); c.padId = m.padId; c.padName = m.padName; c.how = m.how; c.flag = m.flag;
+                if (!c.padId) { c.status = (c.lat != null) ? 'offsite' : 'unmatched'; return; }
+            }
+            if (c.status === 'active' || c.status === 'ending') {
+                if (c.status === 'active' && c.end && today > c.end && !(c.snoozeUntil && today <= c.snoozeUntil)) { c.status = 'ending'; c.endedWhy = 'end date passed'; c.endedAt = today; }
+                return;
+            }
+            c.status = (c.start && c.start > today) ? 'upcoming' : 'staged';
+        });
+    }
+    function rigAddManual(sid, f) {
+        const st = rigStateLoad(sid); const k = `RPIC ${rigNorm(f.pad)} ${f.kind}`.trim();
+        st.rows[k] = { well: f.pad, lat: null, lng: null, job: f.kind || 'RPIC report', start: f.start || rigToday(), end: f.end || '', firstSeen: rigToday(), lastSeen: rigToday(), source: 'rpic', by: f.by || '', status: 'new', padId: null, padName: '', how: '', flag: '', nfzId: null, nfzName: '', nfzBody: null, pulled: f.pulled || '', note: f.note || '', changes: [] };
+        rigReclassify(sid); rigLog(sid, `RPIC report added: ${f.pad} (${f.kind}) by ${f.by || '?'}`); rigStateSave(sid);
+    }
+
+    // ---- commit (create-only, mirrors nfzCommit rails) ----
+    async function rigCommit(sid) {
+        if (liteBlockedWrite('create rig NFZs')) return;
+        if (String(sid) !== String(getCurrentSiteID())) { showToast('Site changed — reopen the generator', 'rgba(255,96,96,0.55)'); return; }
+        const st = rigStateLoad(sid);
+        const todo = Object.entries(st.rows).filter(([, c]) => c.status === 'staged' && c.padId);
+        const out = document.getElementById('aim-rig-result'); const say = (m, col) => { if (out) { out.textContent = m; out.style.color = col || '#cfd6dc'; } console.log(`${RIG_TAG} commit: ${m}`); };
+        if (!todo.length) { say('Nothing staged.'); return; }
+        const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
+        const geoms = todo.map(([k, c]) => ({ k, c, g: rigGeometry(sid, c.padId) })).filter(x => x.g && x.g.points.length >= 3 && !ringSelfIntersects(x.g.points));
+        if (dry) { say(`DRY RUN — would create ${geoms.length} NFZ(s): ${geoms.map(x => `RIG ${x.c.well}`).join(' · ')}. Untick Dry run in the header to write.`, '#ffb300'); return; }
+        const csrf = getCsrfToken(); if (!csrf) { showToast('No CSRF token — make one native save anywhere in Percepto first, then retry', 'rgba(255,96,96,0.55)'); return; }
+        let siteCfg = null; try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        const tmpl = ents.find(e => e.type === 4 && entityCoords(e)); let tmplBody = null;
+        if (tmpl) { try { tmplBody = buildWriteBody(tmpl, siteCfg); } catch (e) {} }
+        const used = new Set(ents.filter(e => e.type === 4 && e.name).map(e => e.name));
+        const uniq = (base) => { base = genCleanName(base) || 'RIG NFZ'; if (!used.has(base)) { used.add(base); return base; } let i = 2, n2; do { n2 = `${base} ${i++}`; } while (used.has(n2)); used.add(n2); return n2; };
+        const writes = geoms.map(x => { let b; if (tmplBody) { b = JSON.parse(JSON.stringify(tmplBody)); delete b.id; } else b = { type: 4, description: '', custom: {}, params: {}, asset_waypoints: null, constantly_present_asset_name: false, general_marker_type: '', marker_height: 0, restrictions: [], validated: false };
+            b.type = 4; b.name = uniq(`RIG ${x.c.well}`); b.description = `${RIG_TAG_PREFIX}${x.c.well}|${x.c.start || ''}|${x.c.end || ''}|${x.c.job || ''}|${x.c.source}`; b.site_id = sid; b.points = x.g.points; b.validated = false; b.arcs = []; b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain); return { x, body: b }; });
+        try { downloadJSONFile(`rig-nfz-${sid}-${Date.now()}.json`, JSON.stringify({ site: sid, at: new Date().toISOString(), nfzs: writes.map(w => w.body) }, null, 1)); } catch (e) {}
+        let ok = 0, fail = 0;
+        for (const w of writes) {
+            try {
+                const r = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-CSRFToken': csrf, 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify(w.body) });
+                const txt = await r.text(); let json = null; try { json = JSON.parse(txt); } catch (e) {}
+                const saved = json && json.map_objects;
+                if (r.status === 403) throw Object.assign(new Error('403 — write permission lost, ABORTING'), { fatal: true });
+                if (r.status === 200 && saved && saved.id != null) { ok++; w.x.c.status = 'active'; w.x.c.nfzId = saved.id; w.x.c.nfzName = w.body.name; w.x.c.nfzBody = w.body; w.x.c.committedAt = rigToday(); w.x.c.geomNote = w.x.g.note; }
+                else throw new Error(`server ${r.status} ${(txt || '').slice(0, 120)}`);
+            } catch (e) { fail++; console.warn(`${RIG_TAG} create "${w.body.name}":`, e.message); if (e.fatal) break; }
+        }
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        rigLog(sid, `commit: ${ok} NFZ(s) created${fail ? `, ${fail} failed` : ''}`); rigStateSave(sid);
+        say(`${ok} NFZ(s) created${fail ? `, ${fail} failed (see console)` : ''}. Percepto shows them after a reload.`, fail ? '#ff6060' : '#5fff5f');
+        rigRenderPanel(sid); rigDraw(sid);
+    }
+    async function rigConfirmGone(sid, key) {
+        if (liteBlockedWrite('delete a rig NFZ')) return;
+        const st = rigStateLoad(sid); const c = st.rows[key]; if (!c) return;
+        if (!c.nfzId) { c.status = 'cleared'; c.clearedAt = rigToday(); rigStateSave(sid); rigRenderPanel(sid); rigDraw(sid); return; }
+        if (!confirm(`Delete NFZ "${c.nfzName}" (${c.well})?\nThe NFZ JSON is kept in this panel's state for re-creation.`)) return;
+        const csrf = getCsrfToken(); if (!csrf) { showToast('No CSRF token — make one native save first', 'rgba(255,96,96,0.55)'); return; }
+        try {
+            const r = await fetch(`/map_objects/${c.nfzId}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'X-Requested-With': 'XMLHttpRequest' } });
+            if (!(r.status === 200 || r.status === 204)) throw new Error(`server ${r.status}`);
+            st.backups = st.backups || []; st.backups.unshift({ at: new Date().toISOString(), key, nfzId: c.nfzId, body: c.nfzBody }); st.backups = st.backups.slice(0, 50);
+            c.status = 'cleared'; c.clearedAt = rigToday(); c.deletedNfzId = c.nfzId; c.nfzId = null;
+            rigLog(sid, `confirmed gone: ${c.well} — NFZ ${c.deletedNfzId} deleted${c.pulled ? ` · RESTORE mission(s): ${c.pulled}` : ''}`);
+            if (c.pulled) showToast(`${c.well} cleared — restore the pulled mission(s): ${c.pulled}`, 'rgba(255,180,0,0.7)');
+            try { await fetchMapObjects(sid, true); } catch (e) {}
+        } catch (e) { console.warn(`${RIG_TAG} delete failed`, e); showToast(`Delete failed: ${e.message}`, 'rgba(255,96,96,0.55)'); }
+        rigStateSave(sid); rigRenderPanel(sid); rigDraw(sid);
+    }
+
+    // ---- map preview ----
+    function rigClearLayers() { const map = getLeafletMap(); rigLayers.forEach(l => { try { l.remove ? l.remove() : (map && map.removeLayer(l)); } catch (e) {} }); rigLayers = []; }
+    function rigDraw(sid) {
+        rigClearLayers();
+        const L = getLeafletL(), map = getLeafletMap(); if (!L || !map) return;
+        const st = rigStateLoad(sid);
+        Object.values(st.rows).forEach(c => {
+            if (!c.padId || c.status === 'cleared') return;
+            const g = rigGeometry(sid, c.padId); if (!g) return;
+            const col = RIG_STATUS_COLOR[c.status] || '#ff5555';
+            try { const pl = L.polygon(g.points.map(p => [p.lat, p.lng]), { color: col, weight: 3, opacity: 0.95, fillColor: col, fillOpacity: c.status === 'ending' ? 0.45 : 0.25, dashArray: c.status === 'active' ? null : '6,5', interactive: false }).addTo(map); rigLayers.push(pl); } catch (e) { console.warn(`${RIG_TAG} draw failed`, e); }
+        });
+    }
+
+    // ---- panel ----
+    function rigRenderPanel(sid) {
+        const host = document.getElementById('aim-rig-controls'); if (!host) return;
+        const st = rigStateLoad(sid); rigReclassify(sid);
+        const rows = Object.entries(st.rows).map(([k, c]) => ({ k, c }));
+        const order = { ending: 0, staged: 1, active: 2, upcoming: 3, unmatched: 4, new: 5, offsite: 6, cleared: 7 };
+        rows.sort((a, b) => (order[a.c.status] ?? 9) - (order[b.c.status] ?? 9) || String(a.c.well).localeCompare(String(b.c.well)));
+        const cnt = {}; rows.forEach(r => { cnt[r.c.status] = (cnt[r.c.status] || 0) + 1; });
+        const chip = (s) => cnt[s] ? `<span style="color:${RIG_STATUS_COLOR[s]};margin-right:10px"><b>${cnt[s]}</b> ${RIG_STATUS_LABEL[s] || s}</span>` : '';
+        const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+        const showCleared = !!(host.dataset.showCleared === '1');
+        const body = rows.filter(r => showCleared || r.c.status !== 'cleared').map(({ k, c }) => {
+            const col = RIG_STATUS_COLOR[c.status] || '#ccc';
+            const days = c.start ? Math.round((new Date(rigToday()) - new Date(c.start)) / 86400000) : null;
+            const act = c.status === 'ending' ? `<button data-rig-act="gone" data-k="${esc(k)}" style="background:rgba(255,96,96,0.2);border:1px solid #ff6060;color:#ffb0b0;border-radius:3px;padding:1px 6px;cursor:pointer">✓ Gone — remove NFZ</button> <button data-rig-act="snooze" data-k="${esc(k)}" style="background:none;border:1px solid #555;color:#ccc;border-radius:3px;padding:1px 6px;cursor:pointer">↩ Still there (${rigCfg().snoozeDays} d)</button>`
+                : c.status === 'active' ? `<button data-rig-act="end" data-k="${esc(k)}" style="background:none;border:1px solid #555;color:#ccc;border-radius:3px;padding:1px 6px;cursor:pointer">Mark gone</button>`
+                : (c.status === 'staged' || c.status === 'upcoming' || c.status === 'unmatched' || c.status === 'offsite') ? `<button data-rig-act="drop" data-k="${esc(k)}" style="background:none;border:1px solid #555;color:#999;border-radius:3px;padding:1px 6px;cursor:pointer">Ignore</button>` : '';
+            return `<tr data-rig-row="${esc(k)}" style="border-bottom:1px solid #222;cursor:pointer">
+                <td style="padding:3px 6px;color:${col};font-weight:700;white-space:nowrap">${esc(RIG_STATUS_LABEL[c.status] || c.status)}${c.endedWhy ? ` <span style="color:#888;font-weight:400">(${esc(c.endedWhy)})</span>` : ''}</td>
+                <td style="padding:3px 6px;color:#e6e6e6">${esc(c.well)}${c.source === 'rpic' ? ' <span style="color:#7adfe6" title="RPIC report">👁</span>' : ''}</td>
+                <td style="padding:3px 6px;color:#9aa">${esc(c.job)}</td>
+                <td style="padding:3px 6px;color:${c.padId ? '#cfd6dc' : '#ff6060'}" title="${esc(c.how)}${c.flag ? ' · ' + esc(c.flag) : ''}">${c.padId ? esc(c.padName) : '—'}${c.flag ? ' <span style="color:#ffb347">⚠</span>' : ''}</td>
+                <td style="padding:3px 6px;color:#9aa;white-space:nowrap">${esc(c.start || '?')} → ${esc(c.end || '—')}${c.changes && c.changes.length ? ` <span style="color:#ffb347" title="${esc(c.changes.join('\n'))}">✎${c.changes.length}</span>` : ''}</td>
+                <td style="padding:3px 6px;color:#9aa;text-align:center">${days != null && c.status !== 'upcoming' ? days : ''}</td>
+                <td style="padding:3px 6px;color:#9aa">${c.nfzName ? esc(c.nfzName) : ''}${c.pulled ? ` <span style="color:#ffb347" title="mission(s) pulled — restore when cleared">⛔ ${esc(c.pulled)}</span>` : ''}</td>
+                <td style="padding:3px 6px;white-space:nowrap">${act}</td></tr>`;
+        }).join('');
+        host.innerHTML = `
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+                <b style="color:#ff9a3d">🏗 Rigs & cranes</b>
+                <label style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">📂 Load today's CSV<input type="file" accept=".csv,text/csv" data-rig-file style="display:none"></label>
+                <span style="color:#888;font-size:10px">drag & drop works · sheet day from the file name (Diamondback_Rig_Data_10.16.26.csv) · last ingest: <b style="color:#cfd6dc">${esc(st.day || 'never')}</b></span>
+                <span style="flex:1"></span>
+                <button data-rig-act="manual" style="background:none;border:1px solid #7adfe6;color:#7adfe6;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">👁 Add RPIC report</button>
+                <button data-rig-act="commit" style="background:rgba(255,154,61,0.18);border:1px solid #ff9a3d;color:#ffb060;border-radius:3px;padding:2px 10px;cursor:pointer;font-size:11px;font-weight:700">⬠ Create staged NFZs${cnt.staged ? ` (${cnt.staged})` : ''}</button>
+                <label style="color:#888;font-size:10px;cursor:pointer"><input type="checkbox" data-rig-showcleared ${showCleared ? 'checked' : ''}> show cleared</label>
+                <button data-rig-act="export" title="Download this site's rig state (rows, NFZ bodies, log)" style="background:none;border:1px solid #555;color:#aaa;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px">⬇ state</button>
+            </div>
+            <div style="font-size:11px;margin-bottom:6px">${['ending', 'staged', 'active', 'upcoming', 'unmatched', 'offsite'].map(chip).join('')}${cnt.cleared ? `<span style="color:#666">${cnt.cleared} cleared</span>` : ''}</div>
+            <div data-rig-manual style="display:none;margin-bottom:8px;padding:6px 8px;background:rgba(122,223,230,0.06);border:1px solid rgba(122,223,230,0.3);border-radius:3px;font-size:11px">
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:6px">
+                    <input data-rig-f="pad" list="aim-rig-pads" placeholder="Pad / well name (as in site setup)" style="background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:3px 6px">
+                    <datalist id="aim-rig-pads">${rigPads(sid).assets.map(a => `<option value="${esc(a.name)}">`).join('')}</datalist>
+                    <input data-rig-f="kind" placeholder="What (crane / rig / workover…)" style="background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:3px 6px">
+                    <input data-rig-f="start" type="date" value="${rigToday()}" style="background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:3px 6px">
+                    <input data-rig-f="end" type="date" placeholder="expected end" style="background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:3px 6px">
+                    <input data-rig-f="by" placeholder="Reported by (RPIC)" style="background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:3px 6px">
+                    <input data-rig-f="pulled" placeholder="Mission(s) pulled because of it" style="background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:3px 6px">
+                </div>
+                <div style="margin-top:6px"><button data-rig-act="manual-add" style="background:rgba(122,223,230,0.15);border:1px solid #7adfe6;color:#7adfe6;border-radius:3px;padding:2px 10px;cursor:pointer">Add</button> <span style="color:#888">Same lifecycle as a sheet row: staged → NFZ → verify before removal; the pulled mission is shown until you clear it.</span></div>
+            </div>
+            <div style="max-height:300px;overflow:auto;border:1px solid #2a2a2a;border-radius:3px">
+                <table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr style="color:#7adfe6;text-align:left;position:sticky;top:0;background:#14171b"><th style="padding:4px 6px">Status</th><th style="padding:4px 6px">Well</th><th style="padding:4px 6px">Job</th><th style="padding:4px 6px">Pad</th><th style="padding:4px 6px">Start → End</th><th style="padding:4px 6px">Days</th><th style="padding:4px 6px">NFZ</th><th style="padding:4px 6px"></th></tr></thead>
+                <tbody>${body || `<tr><td colspan="8" style="padding:10px;color:#777">No rows yet — load today's CSV.</td></tr>`}</tbody></table>
+            </div>
+            <div id="aim-rig-result" style="margin-top:6px;font-size:11px;color:#cfd6dc"></div>
+            <div style="margin-top:4px;font-size:10px;color:#777">Rows are wells; each is matched to a pad by GPS inside a pad polygon, else the nearest pad within ${rigCfg().nearPadFt} ft, else by name (⚠ when name and GPS disagree). NFZ = pad ∩ FFZ inset ${rigCfg().insetFt} ft (= the pad exactly on a standard FFZ). Nothing is deleted without ✓ Gone. Click a row to pan.</div>
+            <details style="margin-top:4px;font-size:10px;color:#777"><summary style="cursor:pointer">log (${st.log.length})</summary><pre style="white-space:pre-wrap;margin:4px 0;color:#999">${esc(st.log.slice(0, 40).join('\n'))}</pre></details>`;
+        rigWire(sid, host);
+    }
+    function rigWire(sid, host) {
+        const file = host.querySelector('[data-rig-file]');
+        const load = (f) => { if (!f) return; const rd = new FileReader(); rd.onload = () => { try { const rows = rigParseCsv(String(rd.result || '')); const res = rigIngest(sid, rows, rigDayFromFilename(f.name)); showToast(`Rig sheet ${rigDayFromFilename(f.name)}: ${rows.length} rows · ${res.added} new · ${res.dropped} to verify`, 'rgba(255,154,61,0.6)'); } catch (e) { showToast(`CSV: ${e.message}`, 'rgba(255,96,96,0.55)'); console.warn(`${RIG_TAG} csv`, e); } rigRenderPanel(sid); rigDraw(sid); }; rd.readAsText(f); };
+        if (file) file.onchange = () => load(file.files && file.files[0]);
+        host.ondragover = (e) => { e.preventDefault(); host.style.outline = '2px dashed #ff9a3d'; };
+        host.ondragleave = () => { host.style.outline = ''; };
+        host.ondrop = (e) => { e.preventDefault(); host.style.outline = ''; load(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]); };
+        const sc = host.querySelector('[data-rig-showcleared]'); if (sc) sc.onchange = () => { host.dataset.showCleared = sc.checked ? '1' : '0'; rigRenderPanel(sid); };
+        host.querySelectorAll('[data-rig-act]').forEach(b => { b.onclick = (e) => {
+            e.stopPropagation(); const act = b.dataset.rigAct, k = b.dataset.k; const st = rigStateLoad(sid);
+            if (act === 'commit') rigCommit(sid);
+            else if (act === 'manual') { const m = host.querySelector('[data-rig-manual]'); m.style.display = m.style.display === 'none' ? 'block' : 'none'; }
+            else if (act === 'manual-add') { const f = {}; host.querySelectorAll('[data-rig-f]').forEach(i => { f[i.dataset.rigF] = i.value.trim(); }); if (!f.pad) { showToast('Pad / well name is required', 'rgba(255,96,96,0.55)'); return; } rigAddManual(sid, f); rigRenderPanel(sid); rigDraw(sid); }
+            else if (act === 'gone') rigConfirmGone(sid, k);
+            else if (act === 'snooze') { const c = st.rows[k]; if (c) { c.status = 'active'; c.snoozeUntil = rigAddDays(rigToday(), rigCfg().snoozeDays); c.endedWhy = ''; const n = prompt('Still there — note (who confirmed / what you saw)?', c.note || ''); if (n != null) c.note = n; rigLog(sid, `still there: ${c.well} until ${c.snoozeUntil}${n ? ' — ' + n : ''}`); rigStateSave(sid); rigRenderPanel(sid); rigDraw(sid); } }
+            else if (act === 'end') { const c = st.rows[k]; if (c) { c.status = 'ending'; c.endedWhy = 'marked by CSM'; c.endedAt = rigToday(); rigStateSave(sid); rigRenderPanel(sid); rigDraw(sid); } }
+            else if (act === 'drop') { const c = st.rows[k]; if (c) { c.status = 'cleared'; c.endedWhy = 'ignored by CSM'; rigStateSave(sid); rigRenderPanel(sid); rigDraw(sid); } }
+            else if (act === 'export') { try { downloadJSONFile(`rig-state-${sid}-${rigToday()}.json`, JSON.stringify(st, null, 1)); } catch (err) { showToast('Export failed', 'rgba(255,96,96,0.55)'); } }
+        }; });
+        host.querySelectorAll('tr[data-rig-row]').forEach(tr => { tr.onclick = () => { const c = rigStateLoad(sid).rows[tr.dataset.rigRow]; const map = getLeafletMap(); if (!c || !map) return; let ll = null; if (c.padId) { const g = rigGeometry(sid, c.padId); if (g) ll = g.points.reduce((a, p) => [a[0] + p.lat / g.points.length, a[1] + p.lng / g.points.length], [0, 0]); } else if (c.lat != null) ll = [c.lat, c.lng]; if (ll) { try { map.setView(ll, Math.max(map.getZoom(), 17)); } catch (e) {} } }; });
+    }
+    function rigRegisterCP() {
+        if (!controlChannel) return;
+        const c = rigCfg();
+        controlChannel.postMessage({ type: 'REGISTER', scriptId: RIG_SCRIPT_ID, name: '🏗 Rigs & cranes (temporary NFZs)', version: SCRIPT_VERSION, group: 'Site Setup', scope: 'site-setup', priority: 46,
+            description: 'Daily rig / crane sheet → NFZ per pad (pad ∩ FFZ inset) with a verify-before-delete lifecycle. Opens from ⊕ Generate → 🏗 Rigs & cranes.',
+            toggles: [
+                { id: 'nearPadFt', label: 'Match a well to the nearest pad within', type: 'number', min: 50, max: 2000, step: 10, default: c.nearPadFt, unit: 'ft' },
+                { id: 'insetFt', label: 'NFZ inset from a custom FFZ edge', type: 'number', min: 0, max: 100, step: 1, default: c.insetFt, unit: 'ft' },
+                { id: 'graceDays', label: 'Days a row may be missing before "verify"', type: 'number', min: 0, max: 10, step: 1, default: c.graceDays, unit: 'days' },
+                { id: 'snoozeDays', label: '"Still there" snooze', type: 'number', min: 1, max: 30, step: 1, default: c.snoozeDays, unit: 'days' },
+            ] });
+    }
+    function rigHandleToggle(msg) { const id = msg.toggleId; const v = Number(msg.value !== undefined ? msg.value : msg.enabled); if (!Object.prototype.hasOwnProperty.call(RIG_DEFAULT_CFG, id) || !isFinite(v)) return; rigCfgSet(id, v); }
+
     const GEN_PAGE_HELP = {
         ffz: { what: 'Auto-builds one DRAFT inspection FFZ per Normal asset that sits near a power line: a single edge box on the shielded side, inner edge the standoff off the asset, altitudes DEM-checked per zone. Nothing is written until Commit.',
             steps: ['Check the Power lines row says loaded (open the Map Styler tab once if not).', '1 · Settings — standoff, edge depth, AGL floor and Min/Max delta.', '2 · 👁 Preview on map — green = clean draft, red/blue = flagged. Drag / Q·E rotate / Alt-drag re-snap any draft; ✏️ Draw adds boxes by hand; 📥 Load site FFZs pulls existing zones in for editing.', '3 · Untick Dry run in the header → ✓ Commit draft FFZs. 💾 Save FFZ edits writes loaded zones back in place.'],
@@ -29938,11 +30274,12 @@
         imp: { what: 'Bring a client asset list into Percepto. Load a CSV or KML → points stage on the map (nothing written) → narrow with boundaries → map the type → ✓ Create makes real asset squares. Create-only, with dry run, backup manifest and undo.',
             steps: ['The page is five numbered sections in working order (plus Advanced). Each header shows where it stands; click to open / close, or use the jump chips at the top. The status line under the title shows the latest result.', 'Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', '✏ Shape draws the asset\'s real outline before it is created: click a dot, CTRL+drag a stroke across the asset (draw along the LONG side → a rectangle that long by the narrow side, default 15 ft; a loop → the tightest box). A red buffer ring (7.5 ft, editable) shows around the outline you are holding so you can see the 15 ft you must keep; ALT+click other dots to copy the held outline onto them — copies and dragged edges snap to a 15 ft gap from neighbours (gap editable, 0 = flush; Alt while dragging = no snap). Shift is left alone so Percepto\'s asset names stay visible. Drag inside the box to move it whole, drag an edge to pull it longer or shorter, drag a corner to move that corner; click an edge midpoint to add a corner, right-click a corner to remove it, Delete = back to a square. Colour / fill in the Control Panel.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', 'Undo: ↩ Undo last import reverts the last run (creates deleted, updates put back) and survives a reload via ↻ Resume. Independently, 🕘 Imports on this site lists every import found on the assets themselves (the "Imported by …" line) and can delete a run\'s created assets from any machine, any time.', '📊 Analyze (in Create / update): the quarterly compare — run it on a new list before Create to see what would change: new · gone (on the site but not in the list; nothing is deleted) · moved over N ft · tier / type changes · production changes vs our last notes. Click a row to zoom; 📤 Sheets for the review.', '5 · Enverus check: set the Developer API key once, pick the API-number column, Cross-check — every selected well gets its Enverus status / type / trajectory / operator / dates and location; anything not plainly producing lands in Placement › 🛢 Enverus and an "Enverus" block goes into the notes.', '🔍 Find missing wells (same section, after a cross-check): every well the operator has inside your boundaries whose API is not in the file, with status and the nearest mapped asset — tick the ones to add, ➕ Stage, and they become ordinary points (source noted) that go through tiers, flags and Create like the rest. They also appear in the client review as "Well on your pads that is not in the list".', 'Priority tiers (in 3 · Type & priority): pick the oil + water columns (or a single BLPD column, or a ready-made P1/P2/P3 column); every asset on a pad shares the pad total; the tier is written as a type prefix ("P1 - …") and a Priority / Prioritized block in the notes. "name matches → update type + notes" is the quarterly re-run: load the new list, review the Tier report, Create.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
             test: 'Load the list, add one boundary, confirm the selected count drops, Create with Dry run ON.' },
+        rig: { what: 'Temporary no-fly zones for pads with a crane or big rig on them, from Diamondback\'s daily sheet (or an RPIC report). Each well row is matched to its pad, an NFZ = pad ∩ FFZ-inset is staged, and committed create-only. When the end date passes or the row drops off the sheet, the row turns VERIFY — nothing is deleted until a CSM confirms the equipment is gone.', steps: ['📂 Load today\'s CSV (drag & drop). The sheet day comes from the file name.', 'Check the table: Staged rows have a pad (hover the pad for how it matched; ⚠ = name and GPS disagree). Unmatched / off-site rows are listed, never guessed.', 'Untick Dry run in the header → ⬠ Create staged NFZs. A backup JSON downloads first; each NFZ is verified by refetch.', 'Next day: load the new CSV. Re-dated rows show ✎; dropped rows and passed end dates turn VERIFY — click ✓ Gone to delete that NFZ or ↩ Still there to snooze.', '👁 Add RPIC report for a crane a pilot spotted: same lifecycle, plus the mission(s) pulled so the restore is not forgotten.'], test: 'Load Diamondback_Rig_Data_10.16.26.csv on Cobra 01 with Dry run on: four rows match pads, the rest are off-site. Then load 10.15 then 10.16 to watch the diff.' },
         sci: { what: 'Applies the Ortho Scanner review sheet\'s decisions: accepted NFZs and flight-path leg changes stage on the map (green / yellow, removed legs red), preflight runs, then Apply writes them — NFZs create-only, flight paths one POST each with Delete Guard backups.',
             steps: ['Load the decisions JSON and the scan bundle from the review sheet.', 'Check the staged plan on the map and the preflight result.', 'Untick Dry run → Apply.'],
             test: 'Load a bundle, confirm the staged counts match the sheet, Apply with Dry run ON.' },
     };
-    const GEN_PAGE_NAMES = { ffz: '⊕ Inspection FFZs', adv: '✦ Advanced Draw', nfz: '⬠ NFZs', fp: '🛩 Flight Paths', routes: '🟠 Convert Routes', elv: '🛗 Elevators', imp: '📥 Asset Import', sci: '🔍 Scan Import', szp: '🛟 Safe Zone Planner' };
+    const GEN_PAGE_NAMES = { ffz: '⊕ Inspection FFZs', adv: '✦ Advanced Draw', nfz: '⬠ NFZs', fp: '🛩 Flight Paths', routes: '🟠 Convert Routes', elv: '🛗 Elevators', imp: '📥 Asset Import', sci: '🔍 Scan Import', szp: '🛟 Safe Zone Planner', rig: '🏗 Rigs & cranes' };
     function genShowPage(page) {
         try { if (genShowPageLive) genShowPageLive(page); }
         catch (e) { console.warn(`${GEN_TAG} page switch failed:`, e); }
@@ -29964,6 +30301,7 @@
         try { setFpSnap(false); } catch (e) {}
         try { if (genVertEdit.active) exitGenVertEdit(false); } catch (e) {}
         try { clearDraftShielding(); } catch (e) {}
+        try { rigClearLayers(); } catch (e) {}
         genUndoStack = [];
         // Tear down Advanced Draw but DON'T clear its localStorage (so an in-progress
         // corridor survives close/reload — restored when the mode is re-armed).
@@ -30044,6 +30382,7 @@
                 </div>
                 <div class="gen-grp">Import</div>
                 <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-bottom:6px">
+                    ${genTile('rig', '🏗', '#ff9a3d', 'Rigs & cranes', 'Daily rig / crane sheet → temporary NFZ per pad, verify before removal')}
                     ${genTile('imp', '📥', '#7adfe6', 'Asset Import', 'CSV / KML asset list → staged points → real assets')}
                     ${genTile('sci', '🔍', '#7adfe6', 'Scan Import', 'Apply Ortho Scanner decisions: NFZs + path legs')}
                     ${genTile('ext:gmt', '📌', '#c39bd3', 'GM Stamper', 'Template-driven General Markers, one click each')}
@@ -30131,6 +30470,7 @@
                 <div id="aim-nfz-result" style="font-size:11px;color:#9ad;line-height:1.5">Drafts auto-grow by the Buffer, pad to the Min size, and pull inside the FFZ. Commit honors the Dry run checkbox below.</div>
             </div>
             <div id="aim-imp-controls" data-gen-sec="imp" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.35);border-radius:3px"></div>
+            <div id="aim-rig-controls" data-gen-sec="rig" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(255,154,61,0.06);border:1px dashed rgba(255,154,61,0.4);border-radius:3px"></div>
             <div id="aim-sci-controls" data-gen-sec="sci" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.35);border-radius:3px"></div>
             <div id="aim-elv-controls" data-gen-sec="elv" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(255,154,61,0.06);border:1px dashed rgba(255,154,61,0.35);border-radius:3px"></div>
             <div id="aim-szp-controls" data-gen-sec="szp" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(255,158,181,0.06);border:1px dashed rgba(255,158,181,0.35);border-radius:3px"></div>
@@ -30167,6 +30507,7 @@
             });
             const nm = box.querySelector('#aim-gen-page-name');
             if (nm) nm.textContent = page === 'menu' ? '' : ` · ${GEN_PAGE_NAMES[page]}`;
+            try { if (page === 'rig') { const sid0 = getCurrentSiteID(); if (sid0) { rigRenderPanel(sid0); rigDraw(sid0); } } else if (prev === 'rig') rigClearLayers(); } catch (e) { console.warn(`${RIG_TAG} page hook`, e); }
             const help = box.querySelector('#aim-gen-help');
             if (help) { help.style.display = 'none'; help.innerHTML = ''; }
             box.scrollTop = 0;
@@ -30564,6 +30905,7 @@
             if (opening && sci.plan) sciDraw(); else if (!opening) sciClearLayers();
         };
         if (sci.plan) { sciShowPanel(); sciDraw(); }
+        try { rigRenderPanel(siteID); } catch (e) { console.warn(`${RIG_TAG} panel render failed`, e); }   // v4.381 🏗
         // v4.327: 🛗 Elevators panel — staged crossings survive modal close on the SAME site; a new site resets.
         if (elv.siteID && elv.siteID !== String(siteID)) { elvClearLayers(); elv = { siteID: String(siteID), items: [], layers: [], writes: [], running: false, siteCfg: null, seq: 1 }; }
         elvRenderPanelBody();
