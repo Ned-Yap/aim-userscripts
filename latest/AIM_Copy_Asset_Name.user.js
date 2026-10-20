@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.386
+// @version      4.387
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.386';
+    const SCRIPT_VERSION = '4.387';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -29952,7 +29952,51 @@
         rigStateSid = String(sid);
         return rigRowsByKey;
     }
-    function rigStateSave(sid) { if (!rigRowsByKey) return; try { elevGmSet(`aim-rig-state:${rigEnvKey(sid)}`, rigRowsByKey); } catch (e) { console.warn(`${RIG_TAG} state save failed`, e); } }
+    // v4.387: the record of truth lives in the private data repo
+    // (aim-userscripts-data/rigs/<env-sid>.json); the GM copy is a cache.
+    // Save = GM now + debounced PUT; open = GET and take the newer stamp.
+    const rigSyncState = {};   // sid → { pulled, timer, status, at, dirty }
+    function rigRemotePath(sid) { return `rigs/${rigEnvKey(sid)}.json`; }
+    function rigStateSave(sid) {
+        if (!rigRowsByKey) return;
+        rigRowsByKey.updatedAt = new Date().toISOString(); rigRowsByKey.updatedBy = (typeof surveyLogin === 'string' && surveyLogin) || '';
+        try { elevGmSet(`aim-rig-state:${rigEnvKey(sid)}`, rigRowsByKey); } catch (e) { console.warn(`${RIG_TAG} state save failed`, e); }
+        const ss = rigSyncState[sid] = rigSyncState[sid] || {};
+        clearTimeout(ss.timer); ss.dirty = true;
+        ss.timer = setTimeout(() => rigPush(sid), 1500);
+    }
+    async function rigPush(sid) {
+        const ss = rigSyncState[sid] = rigSyncState[sid] || {};
+        if (!elevSharedToken) { ss.status = 'no token'; rigSyncBadge(sid); return; }
+        if (!rigRowsByKey || rigStateSid !== String(sid)) return;
+        try { ss.status = 'saving…'; rigSyncBadge(sid); await ghPutFile(rigRemotePath(sid), JSON.stringify(rigRowsByKey, null, 1), `[AIM rig] site ${sid}: ${rigRowsByKey.day || 'state'}`); ss.dirty = false; ss.status = 'synced'; ss.at = new Date(); }
+        catch (e) { ss.status = 'push failed'; console.warn(`${RIG_TAG} GitHub push failed`, e); showToast(`Rig state not saved to GitHub: ${e.message}`, 'rgba(255,96,96,0.55)'); }
+        rigSyncBadge(sid);
+    }
+    async function rigPull(sid, force) {
+        const ss = rigSyncState[sid] = rigSyncState[sid] || {};
+        if (ss.pulled && !force) return false;
+        if (!elevSharedToken) { ss.status = 'no token'; rigSyncBadge(sid); return false; }
+        ss.pulled = true;
+        try {
+            const remote = await ghGetJson(rigRemotePath(sid));
+            const local = rigStateLoad(sid);
+            if (remote && remote.rows && (!local.updatedAt || String(remote.updatedAt || '') > String(local.updatedAt))) {
+                rigRowsByKey = remote; rigStateSid = String(sid);
+                try { elevGmSet(`aim-rig-state:${rigEnvKey(sid)}`, remote); } catch (e) {}
+                ss.status = 'synced'; ss.at = new Date(); rigSyncBadge(sid); return true;
+            }
+            if (!remote && local.rows && Object.keys(local.rows).length) { rigPush(sid); return false; }   // first upload
+            if (ss.dirty) rigPush(sid); else { ss.status = 'synced'; ss.at = new Date(); }
+        } catch (e) { ss.status = 'pull failed'; console.warn(`${RIG_TAG} GitHub pull failed`, e); }
+        rigSyncBadge(sid); return false;
+    }
+    function rigSyncBadge(sid) {
+        const el = document.getElementById('aim-rig-sync'); if (!el) return;
+        const ss = rigSyncState[sid] || {}; const st = ss.status || 'not synced';
+        const ok = st === 'synced'; const col = ok ? '#5fff5f' : st === 'saving…' ? '#7adfe6' : '#ffb347';
+        el.innerHTML = `<span style="color:${col}" title="State file: aim-userscripts-data/${rigRemotePath(sid)}">☁ ${st}${ok && ss.at ? ` ${ss.at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}${st === 'no token' ? ' — set the GitHub token in the Control Panel' : ''}</span>`;
+    }
     function rigToday() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
     function rigAddDays(day, n) { const d = new Date(day + 'T12:00:00'); d.setDate(d.getDate() + n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
     function rigNorm(s) { return String(s || '').toUpperCase().replace(/[\s\-_]+/g, ' ').trim(); }
@@ -30201,7 +30245,7 @@
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
                 <b style="color:#ff9a3d">🏗 Rigs & cranes</b>
                 <label style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">📂 Load today's CSV<input type="file" accept=".csv,text/csv" data-rig-file style="display:none"></label>
-                <span style="color:#888;font-size:10px">drag & drop works · sheet day from the file name (Diamondback_Rig_Data_10.16.26.csv) · last ingest: <b style="color:#cfd6dc">${esc(st.day || 'never')}</b></span>
+                <span style="color:#888;font-size:10px">drag & drop works · sheet day from the file name (Diamondback_Rig_Data_10.16.26.csv) · last ingest: <b style="color:#cfd6dc">${esc(st.day || 'never')}</b> · <span id="aim-rig-sync"></span></span>
                 <span style="flex:1"></span>
                 <button data-rig-act="manual" style="background:none;border:1px solid #7adfe6;color:#7adfe6;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">👁 Add RPIC report</button>
                 <button data-rig-act="commit" style="background:rgba(255,154,61,0.18);border:1px solid #ff9a3d;color:#ffb060;border-radius:3px;padding:2px 10px;cursor:pointer;font-size:11px;font-weight:700">⬠ Create staged NFZs${cnt.staged ? ` (${cnt.staged})` : ''}</button>
@@ -30230,6 +30274,8 @@
             <div style="margin-top:4px;font-size:10px;color:#777">Rows are wells; each is matched to a pad by GPS inside a pad polygon, else the nearest pad within ${rigCfg().nearPadFt} ft, else by name (⚠ when name and GPS disagree). NFZ = pad ∩ FFZ inset ${rigCfg().insetFt} ft (= the pad exactly on a standard FFZ). Nothing is deleted without ✓ Gone. Click a row to pan.</div>
             <details style="margin-top:4px;font-size:10px;color:#777"><summary style="cursor:pointer">log (${st.log.length})</summary><pre style="white-space:pre-wrap;margin:4px 0;color:#999">${esc(st.log.slice(0, 40).join('\n'))}</pre></details>`;
         rigWire(sid, host);
+        rigSyncBadge(sid);
+        rigPull(sid, false).then(changed => { if (changed) { rigRenderPanel(sid); rigDraw(sid); } });
     }
     // v4.386: 📜 History — every obstruction this site has ever had, with stats
     // and ↻ Re-stage (the banked NFZ body or a fresh geometry → back to Staged).
