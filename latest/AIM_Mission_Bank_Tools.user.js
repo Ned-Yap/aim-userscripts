@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.30
+// @version      3.31
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -14,7 +14,10 @@
 // @match        https://qa.percepto.app/static/dist/react-pages/*
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
+// @connect      api.github.com
+// @connect      api.open-meteo.com
 // @run-at       document-start
 // ==/UserScript==
 
@@ -125,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.30';
+    const SCRIPT_VERSION = '3.31';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -1407,14 +1410,36 @@
     function schCfg() { if (schCfgCache) return schCfgCache; const o = gmGet(SCH_CFG_KEY, {}); schCfgCache = Object.assign({}, SCH_DEFAULT_CFG, (o && typeof o === 'object') ? o : {}); return schCfgCache; }
     function schCfgSet(k, v) { const c = schCfg(); if (c[k] === v) return; c[k] = v; gmSet(SCH_CFG_KEY, c); }
     // GitHub Contents API read (api.github.com allows cross-origin reads with a bearer token; no GM grant needed).
+    // v3.31: GM_xmlhttpRequest (same path as Site Setup Tools) — a plain fetch from the
+    // react-pages iframe failed live with "Failed to fetch" (page CSP / CORS preflight).
+    function mbGmRequest(opts) {
+        return new Promise((resolve) => {
+            try {
+                GM_xmlhttpRequest(Object.assign({}, opts, {
+                    onload: (r) => resolve({ ok: r.status >= 200 && r.status < 300, status: r.status, responseText: r.responseText }),
+                    onerror: (e) => resolve({ ok: false, status: 0, responseText: '', err: (e && e.error) || 'network error' }),
+                    ontimeout: () => resolve({ ok: false, status: 0, responseText: '', err: 'timeout' }),
+                }));
+            } catch (e) { resolve({ ok: false, status: 0, responseText: '', err: e.message || String(e) }); }
+        });
+    }
     async function mbGhGetJson(path) {
         if (!mbSharedToken) throw new Error('no GitHub token — set it in the Control Panel (⚙ → GitHub token)');
         const url = `https://api.github.com/repos/${SCH_REPO}/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=main&_t=${Date.now()}`;
-        const r = await fetch(url, { headers: { 'Authorization': `Bearer ${mbSharedToken}`, 'Accept': 'application/vnd.github.raw+json', 'Cache-Control': 'no-cache' } });
-        if (r.status === 404) return null;
-        if (r.status === 401 || r.status === 403) throw new Error(`GitHub token rejected (HTTP ${r.status})`);
-        if (!r.ok) throw new Error(`GitHub GET ${path}: HTTP ${r.status}`);
-        return r.json();
+        const headers = { 'Authorization': `Bearer ${mbSharedToken}`, 'Accept': 'application/vnd.github.raw+json', 'Cache-Control': 'no-cache' };
+        let status, text;
+        if (typeof GM_xmlhttpRequest === 'function') {
+            const r = await mbGmRequest({ method: 'GET', url, headers, timeout: 30000 });
+            if (!r.status) throw new Error(`GitHub GET ${path}: ${r.err || 'network error'}`);
+            status = r.status; text = r.responseText;
+        } else {
+            const r = await fetch(url, { headers });
+            status = r.status; text = await r.text();
+        }
+        if (status === 404) return null;
+        if (status === 401 || status === 403) throw new Error(`GitHub token rejected (HTTP ${status})`);
+        if (status < 200 || status >= 300) throw new Error(`GitHub GET ${path}: HTTP ${status}`);
+        try { return JSON.parse(text); } catch (e) { throw new Error(`GitHub GET ${path}: bad JSON`); }
     }
     // ---- dates: everything becomes a local YYYY-MM-DD ----
     const SCH_MON = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
@@ -2243,9 +2268,14 @@
         if (smtWx && smtWx.key === key && Date.now() - smtWx.at < SMT_WX_TTL_MS) return { hours: smtWx.hours, err: '' };
         const url = `https://api.open-meteo.com/v1/forecast?latitude=${base.lat.toFixed(4)}&longitude=${base.lng.toFixed(4)}&hourly=temperature_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m,precipitation&wind_speed_unit=mph&temperature_unit=fahrenheit&forecast_days=7&timezone=UTC`;
         try {
-            const r = await fetch(url);
-            if (!r.ok) throw new Error(`HTTP ${r.status}`);
-            const j = await r.json();
+            let j;
+            try { const r = await fetch(url); if (!r.ok) throw new Error(`HTTP ${r.status}`); j = await r.json(); }
+            catch (e1) {
+                if (typeof GM_xmlhttpRequest !== 'function') throw e1;
+                const r = await mbGmRequest({ method: 'GET', url, timeout: 20000 });
+                if (!r.ok) throw new Error(r.err || `HTTP ${r.status}`);
+                j = JSON.parse(r.responseText);
+            }
             const h = j && j.hourly; if (!h || !Array.isArray(h.time)) throw new Error('no hourly block');
             const hours = h.time.map((t, i) => ({ t: t.endsWith('Z') ? t : t + ':00Z', windMph: h.wind_speed_10m[i], gustMph: h.wind_gusts_10m[i], dirDeg: h.wind_direction_10m[i], tempF: h.temperature_2m[i], precipMm: h.precipitation[i] }));
             smtWx = { at: Date.now(), key, hours };
