@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.388
+// @version      4.389
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.388';
+    const SCRIPT_VERSION = '4.389';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -29997,6 +29997,42 @@
         const ok = st === 'synced'; const col = ok ? '#5fff5f' : st === 'saving…' ? '#7adfe6' : '#ffb347';
         el.innerHTML = `<span style="color:${col}" title="State file: aim-userscripts-data/${rigRemotePath(sid)}">☁ ${st}${ok && ss.at ? ` ${ss.at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}${st === 'no token' ? ' — set the GitHub token in the Control Panel' : ''}</span>`;
     }
+    // v4.389: 📡 feed — the laptop agent (aim-userscripts-data/rig-agent, plain Python on the
+    // work laptop) publishes the daily e-mail sheet to rigs/sheet/latest.json
+    // ({ day, fetchedAt, source, rows[{well,lat,lng,job,start,end}], diff }). When its day is
+    // newer than this site's last ingest it goes through the same rigIngest as a dropped CSV.
+    // Checked once per page load after the shared state is current; 📡 ↻ feed forces it.
+    const RIG_FEED_PATH = 'rigs/sheet/latest.json';
+    async function rigFeedCheck(sid, force) {
+        const ss = rigSyncState[sid] = rigSyncState[sid] || {};
+        if (ss.feedChecked && !force) { rigFeedBadge(sid); return; }
+        if (!elevSharedToken) { ss.feed = { status: 'no token' }; rigFeedBadge(sid); return; }
+        ss.feedChecked = true; ss.feed = { status: 'checking…' }; rigFeedBadge(sid);
+        try {
+            const feed = await ghGetJson(RIG_FEED_PATH);
+            if (!feed || !Array.isArray(feed.rows) || !feed.day) { ss.feed = { status: 'no feed yet' }; rigFeedBadge(sid); return; }
+            ss.feed = { status: 'ok', day: String(feed.day), at: feed.fetchedAt || '', n: feed.rows.length, source: feed.source || '' };
+            const st = rigStateLoad(sid);
+            if (st.day && String(st.day) >= String(feed.day)) { ss.feed.note = 'already ingested'; rigFeedBadge(sid); return; }
+            const num = v => (v == null || v === '' || !isFinite(Number(v))) ? null : Number(v);
+            const rows = feed.rows.map(r => ({ well: String(r.well || '').trim(), lat: num(r.lat), lng: num(r.lng), job: String(r.job || ''), start: String(r.start || ''), end: String(r.end || '') })).filter(r => r.well);
+            rigLog(sid, `feed ${feed.day} (${feed.source || 'agent'}, published ${feed.fetchedAt || '?'}): ${rows.length} rows`);
+            const res = rigIngest(sid, rows, String(feed.day));
+            ss.feed.note = `ingested ${feed.day}`;
+            showToast(`📡 Rig sheet ${feed.day} from the laptop agent: ${rows.length} rows · ${res.added} new · ${res.dropped} to verify`, 'rgba(255,154,61,0.6)');
+            rigRenderPanel(sid); rigDraw(sid);
+        } catch (e) { ss.feed = { status: 'feed failed', err: e && e.message || String(e) }; console.warn(`${RIG_TAG} feed`, e); showToast(`Rig feed: ${e && e.message || e}`, 'rgba(255,96,96,0.55)'); }
+        rigFeedBadge(sid);
+    }
+    function rigFeedBadge(sid) {
+        const el = document.getElementById('aim-rig-feed'); if (!el) return;
+        const f = (rigSyncState[sid] || {}).feed || { status: 'not checked' };
+        const col = f.status === 'ok' ? '#5fff5f' : f.status === 'checking…' ? '#7adfe6' : '#ffb347';
+        const when = f.at ? new Date(f.at) : null;
+        const whenTxt = when && !isNaN(when) ? ` ${when.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}` : '';
+        const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+        el.innerHTML = `<span style="color:${col}" title="Laptop agent feed: aim-userscripts-data/${RIG_FEED_PATH}${f.err ? '\n' + esc(f.err) : ''}">📡 ${f.status === 'ok' ? `feed ${esc(f.day)}${whenTxt}${f.note ? ' · ' + esc(f.note) : ''}` : esc(f.status)}${f.status === 'no token' ? ' — set the GitHub token in the Control Panel' : ''}</span>`;
+    }
     function rigToday() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
     function rigAddDays(day, n) { const d = new Date(day + 'T12:00:00'); d.setDate(d.getDate() + n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
     function rigNorm(s) { return String(s || '').toUpperCase().replace(/[\s\-_]+/g, ' ').trim(); }
@@ -30245,13 +30281,14 @@
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
                 <b style="color:#ff9a3d">🏗 Rigs & cranes</b>
                 <label style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">📂 Load today's CSV<input type="file" accept=".csv,text/csv" data-rig-file style="display:none"></label>
-                <span style="color:#888;font-size:10px">drag & drop works · sheet day from the file name (Diamondback_Rig_Data_10.16.26.csv) · last ingest: <b style="color:#cfd6dc">${esc(st.day || 'never')}</b> · <span id="aim-rig-sync"></span></span>
+                <span style="color:#888;font-size:10px">drag & drop works · sheet day from the file name (Diamondback_Rig_Data_10.16.26.csv) · last ingest: <b style="color:#cfd6dc">${esc(st.day || 'never')}</b> · <span id="aim-rig-sync"></span> · <span id="aim-rig-feed"></span></span>
                 <span style="flex:1"></span>
                 <button data-rig-act="manual" style="background:none;border:1px solid #7adfe6;color:#7adfe6;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">👁 Add RPIC report</button>
                 <button data-rig-act="commit" style="background:rgba(255,154,61,0.18);border:1px solid #ff9a3d;color:#ffb060;border-radius:3px;padding:2px 10px;cursor:pointer;font-size:11px;font-weight:700">⬠ Create staged NFZs${cnt.staged ? ` (${cnt.staged})` : ''}</button>
                 <label style="color:#888;font-size:10px;cursor:pointer"><input type="checkbox" data-rig-showcleared ${showCleared ? 'checked' : ''}> show cleared</label>
                 <button data-rig-act="view-history" title="Every obstruction this site has had: stats, outcomes, re-stage" style="background:none;border:1px solid #555;color:#aaa;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">📜 History</button>
                 <button data-rig-act="export" title="Download this site's rig state (rows, NFZ bodies, log)" style="background:none;border:1px solid #555;color:#aaa;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px">⬇ state</button>
+                <button data-rig-act="feed" title="Re-read the laptop agent's daily feed (aim-userscripts-data/rigs/sheet/latest.json) and ingest it if it is newer than this site's last ingest" style="background:none;border:1px solid #555;color:#aaa;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px">📡 ↻ feed</button>
             </div>
             <div style="font-size:11px;margin-bottom:6px">${['ending', 'staged', 'active', 'upcoming', 'unmatched', 'offsite'].map(chip).join('')}${cnt.cleared ? `<span style="color:#666">${cnt.cleared} cleared</span>` : ''}</div>
             <div data-rig-manual style="display:none;margin-bottom:8px;padding:6px 8px;background:rgba(122,223,230,0.06);border:1px solid rgba(122,223,230,0.3);border-radius:3px;font-size:11px">
@@ -30275,7 +30312,7 @@
             <details style="margin-top:4px;font-size:10px;color:#777"><summary style="cursor:pointer">log (${st.log.length})</summary><pre style="white-space:pre-wrap;margin:4px 0;color:#999">${esc(st.log.slice(0, 40).join('\n'))}</pre></details>`;
         rigWire(sid, host);
         rigSyncBadge(sid);
-        rigPull(sid, false).then(changed => { if (changed) { rigRenderPanel(sid); rigDraw(sid); } });
+        rigPull(sid, false).then(changed => { if (changed) { rigRenderPanel(sid); rigDraw(sid); } else rigFeedCheck(sid, false); });   // v4.389: feed check once the shared state is current
     }
     // v4.386: 📜 History — every obstruction this site has ever had, with stats
     // and ↻ Re-stage (the banked NFZ body or a fresh geometry → back to Staged).
@@ -30325,6 +30362,7 @@
             else if (act === 'end') { const c = st.rows[k]; if (c) { c.status = 'ending'; c.endedWhy = 'marked by CSM'; c.endedAt = rigToday(); rigStateSave(sid); rigRenderPanel(sid); rigDraw(sid); } }
             else if (act === 'drop') { const c = st.rows[k]; if (c) { c.status = 'cleared'; c.endedWhy = 'ignored by CSM'; rigStateSave(sid); rigRenderPanel(sid); rigDraw(sid); } }
             else if (act === 'export') { try { downloadJSONFile(`rig-state-${sid}-${rigToday()}.json`, JSON.stringify(st, null, 1)); } catch (err) { showToast('Export failed', 'rgba(255,96,96,0.55)'); } }
+            else if (act === 'feed') rigFeedCheck(sid, true);
         }; });
         host.querySelectorAll('tr[data-rig-row]').forEach(tr => { tr.onclick = () => { const c = rigStateLoad(sid).rows[tr.dataset.rigRow]; const map = getLeafletMap(); if (!c || !map) return; let ll = null; if (c.padId) { const g = rigGeometry(sid, c.padId); if (g) ll = g.points.reduce((a, p) => [a[0] + p.lat / g.points.length, a[1] + p.lng / g.points.length], [0, 0]); } else if (c.lat != null) ll = [c.lat, c.lng]; if (ll) { try { map.setView(ll, Math.max(map.getZoom(), 17)); } catch (e) {} } }; });
     }

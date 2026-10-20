@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.27
+// @version      3.28
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.27';
+    const SCRIPT_VERSION = '3.28';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -360,6 +360,9 @@
                 registerWithControlPanel();
                 registerMissionSop();
                 registerCoverage();
+                registerSchedule();
+            } else if (msg.type === 'TOKEN_VALUE') {
+                mbSharedToken = String(msg.token || '');   // v3.28: GitHub PAT for the 🗓 feed (read-only)
             } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
                 if (msg.toggleId === 'master') {
                     masterEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
@@ -475,6 +478,8 @@
                 handleMissionSopToggle(msg);
             } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === COV_SCRIPT_ID) {
                 handleCoverageToggle(msg);
+            } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCH_SCRIPT_ID) {
+                handleScheduleToggle(msg);
             } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === MISSION_SOP_SCRIPT_ID) {
                 // Cross-tab guard: BroadcastChannel delivers to EVERY open tab — only
                 // the tab that pressed/clicked may act (tabId from CP v1.43+; visibility
@@ -730,31 +735,14 @@
     // image progress) and planned-vs-captured asset counts to each record.
     // Images carry only the mission NAME, so the takeoff mission is the log
     // row with that app name whose start is closest before the image.
-    function covJoinMissions(sid, ent, recs) {
-        const cfg = covCfg();
-        const logRows = (logBySite[sid] && logBySite[sid].rows) ? buildLogRows(sid) : [];
-        const byId = new Map(logRows.map(r => [r.id, r]));
-        const byName = new Map();
-        const byGroup = new Map();
-        logRows.forEach(r => {
-            if (r.name && r.whenMs) { const k = r.name.toUpperCase(); if (!byName.has(k)) byName.set(k, []); byName.get(k).push(r); }
-            const g = (r.missionGroup != null && r.missionGroup !== '' && Number(r.missionGroup) >= 0) ? String(r.missionGroup) : null;
-            if (g) { if (!byGroup.has(g)) byGroup.set(g, []); byGroup.get(g).push(r); }
-        });
-        byName.forEach(list => list.sort((a, b) => a.whenMs - b.whenMs));
-        byGroup.forEach(list => list.sort((a, b) => a.whenMs - b.whenMs));
-        const findTakeoff = (name, atIso) => {
-            const list = byName.get(String(name || '').toUpperCase()); if (!list) return null;
-            const at = Date.parse(atIso); let best = null;
-            for (const r of list) { if (r.whenMs <= at + 10 * 60000 && (!best || r.whenMs > best.whenMs)) best = r; }
-            if (best && at - best.whenMs > 12 * 3600000) return null;   // nothing within 12 h → unknown
-            return best;
-        };
-        const flightOf = f => (f.mid && byId.get(f.mid)) || findTakeoff(f.mission, f.at);
-        // planned assets per mission NAME (Set of asset ids): pads the Mission
-        // Bank app visits + every asset nested under them. Missing name → null
-        // (renamed / deleted mission: plan unknown, nothing is filtered).
+    // v3.28: planned assets per mission NAME (Set of asset ids) + located steps per
+    // name — computed once per (missions fetch, entity set) and shared by the
+    // Coverage join and the 🗓 This week schedule.
+    const covPlanCache = {};   // sid → { rev, plannedByName, stepsByName }
+    function covPlansFor(sid, ent) {
         const apps = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
+        const rev = `${missionsBySite[sid] ? missionsBySite[sid].fetchedAt : 0}|${ent && ent.assets ? ent.assets.length : 0}`;
+        const hit = covPlanCache[sid]; if (hit && hit.rev === rev) return hit;
         const plannedByName = new Map();
         const stepsByName = new Map();   // v3.27: mission name → located steps, for the "nearest step" diagnostic
         if (apps.length && ent && ent.assets) {
@@ -782,6 +770,34 @@
                 plannedByName.set(String(app.name || '').trim().toUpperCase(), set);
             });
         }
+        const out = { rev, plannedByName, stepsByName }; covPlanCache[sid] = out; return out;
+    }
+    function covJoinMissions(sid, ent, recs) {
+        const cfg = covCfg();
+        const logRows = (logBySite[sid] && logBySite[sid].rows) ? buildLogRows(sid) : [];
+        const byId = new Map(logRows.map(r => [r.id, r]));
+        const byName = new Map();
+        const byGroup = new Map();
+        logRows.forEach(r => {
+            if (r.name && r.whenMs) { const k = r.name.toUpperCase(); if (!byName.has(k)) byName.set(k, []); byName.get(k).push(r); }
+            const g = (r.missionGroup != null && r.missionGroup !== '' && Number(r.missionGroup) >= 0) ? String(r.missionGroup) : null;
+            if (g) { if (!byGroup.has(g)) byGroup.set(g, []); byGroup.get(g).push(r); }
+        });
+        byName.forEach(list => list.sort((a, b) => a.whenMs - b.whenMs));
+        byGroup.forEach(list => list.sort((a, b) => a.whenMs - b.whenMs));
+        const findTakeoff = (name, atIso) => {
+            const list = byName.get(String(name || '').toUpperCase()); if (!list) return null;
+            const at = Date.parse(atIso); let best = null;
+            for (const r of list) { if (r.whenMs <= at + 10 * 60000 && (!best || r.whenMs > best.whenMs)) best = r; }
+            if (best && at - best.whenMs > 12 * 3600000) return null;   // nothing within 12 h → unknown
+            return best;
+        };
+        const flightOf = f => (f.mid && byId.get(f.mid)) || findTakeoff(f.mission, f.at);
+        // planned assets per mission NAME (Set of asset ids): pads the Mission
+        // Bank app visits + every asset nested under them. Missing name → null
+        // (renamed / deleted mission: plan unknown, nothing is filtered).
+        const apps = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
+        const { plannedByName, stepsByName } = covPlansFor(sid, ent);   // v3.28: shared with 🗓 This week
         const planOf = name => plannedByName.get(String(name || '').trim().toUpperCase()) || null;
         // v3.17 targeted-only: a fly counts for an asset only when that
         // mission PLANS the asset (a photo tags every asset in view, so
@@ -948,6 +964,7 @@
             try { covJoinMissions(sid, ent, recs); } catch (e) { console.warn(`${TAG} coverage: mission join failed`, e); }
             const bucket = { at: Date.now(), day: covDayKey(now.toISOString()), monthStart: monthStart.toISOString(), weekStart: weekStart.toISOString(), windowDays, recs };
             covRestatus(bucket);
+            try { if (schStore || (schStore = gmGet(SCH_CACHE_KEY, null))) schApplyPlanned(sid, bucket, ent, false); } catch (e) { console.warn(`${TAG} coverage: planned-this-week apply failed`, e); }   // v3.28 🗓
             covBySite[siteKey] = bucket;
             covPersist(siteKey, bucket);
             covBroadcast(siteKey, bucket);
@@ -1020,6 +1037,7 @@
         { id: 'week', label: '# week', title: 'Mon–Sun', def: true, sort: r => r.weekFlies, val: r => r.weekFlies, cell: r => `<td style="text-align:center">${r.weekFlies}</td>` },
         { id: 'window', label: '# in window', title: 'Distinct day + mission in the whole lookback window', def: false, sort: r => (r.flies || []).length, val: r => (r.flies || []).length, cell: r => `<td style="text-align:center">${(r.flies || []).length}</td>` },
         { id: 'status', label: 'Status', def: true, sort: r => ({ never: 0, over: 1, due: 2, behind: 3, ok: 4 })[r.status], val: r => COV_STATUS_LABEL[r.status], cell: r => `<td><span style="color:${COV_STATUS_COLORS[r.status]};font-weight:700">${COV_STATUS_LABEL[r.status]}</span></td>` },
+        { id: 'planned', label: 'Planned', title: 'Planned this Mon–Sun week by a Jira ROC ticket (🗓 This week) — mission name(s)', def: true, sort: r => (r.plannedBy || []).join(', ').toLowerCase(), asc: true, val: r => (r.plannedBy || []).join(', '), cell: r => `<td style="color:#14d2dc;white-space:nowrap">${r.planned ? '🗓 ' + escapeHtml((r.plannedBy || []).join(', ')) : ''}</td>` },
         { id: 'type', label: 'Type', title: 'custom.poi_type_str', def: false, sort: r => (r.poi || '').toLowerCase(), asc: true, val: r => r.poi || '', cell: r => `<td style="color:#9aa">${escapeHtml(r.poi || '')}</td>` },
     ];
     const COV_COL_BY_ID = Object.fromEntries(COV_COLS.map(c => [c.id, c]));
@@ -1355,6 +1373,381 @@
             const b = covLoadCached(covSiteKey(sid)); if (!b) return;
             covRestatus(b); covBroadcast(covSiteKey(sid), b);
         } catch (e) { console.warn(`${TAG} coverage: init broadcast failed`, e); }
+    }
+
+    // ========================================================
+    // 🗓 THIS WEEK — Jira ROC schedule (#293, v3.28)
+    // ========================================================
+    // Pilots fly from the Jira ROC board. The laptop agent (aim-userscripts-data/
+    // rig-agent) publishes the client's tickets to jira/diamondback.json; the
+    // panel joins them to Mission Bank missions by NAME (`Customer and Mission
+    // Selection`, else the summary "<Client> - <Mission> - FLY n"), to flown
+    // takeoff missions by the `Mission ID` fields, and to planned assets through
+    // the same step→asset rule the Coverage panel uses (covPlansFor). Tickets
+    // due this Mon–Sun week mark their assets `planned` on the Coverage records
+    // (dashed ring on the map). Fallback when there is no feed / token: paste or
+    // drop a Jira CSV export (all fields) — same columns, same join.
+    const SCH_SCRIPT_ID = 'aim-mb-schedule';
+    const SCH_CACHE_KEY = 'aim-mb-schedule';          // { tickets, at, source, fetchedAt, jql }
+    const SCH_CFG_KEY = 'aim-mb-schedule-cfg';
+    const SCH_BTN_ID = 'aim-mb-sch-btn';
+    const SCH_REPO = 'Ned-Yap/aim-userscripts-data';
+    const SCH_DEFAULT_CFG = { feedPath: 'jira/diamondback.json', jiraBase: 'https://percepto.atlassian.net/browse/', doneDays: 14, ttlMin: 30, allSites: false, aliases: '' };
+    const SCH_WIN_LABEL = { week: 'This week', overdue: 'Overdue', upcoming: 'Upcoming', unscheduled: 'Unscheduled', done: 'Done' };
+    const SCH_WIN_COLOR = { week: '#14d2dc', overdue: '#ff3b3b', upcoming: '#9aa', unscheduled: '#ffb300', done: '#39ff14' };
+    const SCH_WIN_ORDER = { overdue: 0, week: 1, upcoming: 2, unscheduled: 3, done: 4 };
+    let mbSharedToken = '';           // GitHub PAT from the Control Panel (TOKEN_VALUE) — read-only use here
+    let schCfgCache = null;
+    let schStore = null;              // loaded tickets (client-wide, not per site)
+    const schEnt = {};                // sid → entities (genFetchEntities) for planned-asset counts
+    let schLoading = null;
+    function schCfg() { if (schCfgCache) return schCfgCache; const o = gmGet(SCH_CFG_KEY, {}); schCfgCache = Object.assign({}, SCH_DEFAULT_CFG, (o && typeof o === 'object') ? o : {}); return schCfgCache; }
+    function schCfgSet(k, v) { const c = schCfg(); if (c[k] === v) return; c[k] = v; gmSet(SCH_CFG_KEY, c); }
+    // GitHub Contents API read (api.github.com allows cross-origin reads with a bearer token; no GM grant needed).
+    async function mbGhGetJson(path) {
+        if (!mbSharedToken) throw new Error('no GitHub token — set it in the Control Panel (⚙ → GitHub token)');
+        const url = `https://api.github.com/repos/${SCH_REPO}/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=main&_t=${Date.now()}`;
+        const r = await fetch(url, { headers: { 'Authorization': `Bearer ${mbSharedToken}`, 'Accept': 'application/vnd.github.raw+json', 'Cache-Control': 'no-cache' } });
+        if (r.status === 404) return null;
+        if (r.status === 401 || r.status === 403) throw new Error(`GitHub token rejected (HTTP ${r.status})`);
+        if (!r.ok) throw new Error(`GitHub GET ${path}: HTTP ${r.status}`);
+        return r.json();
+    }
+    // ---- dates: everything becomes a local YYYY-MM-DD ----
+    const SCH_MON = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+    function schDay(v) {
+        const s = String(v == null ? '' : v).trim(); if (!s) return '';
+        let m = s.match(/^(\d{4})-(\d{2})-(\d{2})(T.*)?$/);
+        if (m) return m[4] ? covDayKey(s) : `${m[1]}-${m[2]}-${m[3]}`;   // date-time with zone → local day; plain date → as is
+        m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);                   // Jira CSV export: dd/mm/yyyy HH:MM (verified on the ROC export)
+        if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+        m = s.match(/^(\d{1,2})\/([A-Za-z]{3})\/(\d{2,4})/);               // Jira classic: 16/Oct/26 8:02 AM
+        if (m && SCH_MON[m[2].toLowerCase()]) { const y = m[3].length === 2 ? '20' + m[3] : m[3]; return `${y}-${String(SCH_MON[m[2].toLowerCase()]).padStart(2, '0')}-${m[1].padStart(2, '0')}`; }
+        const d = new Date(s); return isNaN(d) ? '' : covDayKey(d.toISOString());
+    }
+    function schWeek(now) { const ws = covMonday(now || new Date()); const we = new Date(ws); we.setDate(we.getDate() + 6); return { ws, we, weekStart: covDayKey(ws.toISOString()), weekEnd: covDayKey(we.toISOString()) }; }
+    function schFmtDay(day) { if (!day) return '—'; const d = new Date(day + 'T12:00:00'); return isNaN(d) ? day : d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }); }
+    // ---- Jira CSV export (quoted multi-line cells, repeated "Mission ID" columns) ----
+    function schParseCsv(text) {
+        const s = String(text || '').replace(/^﻿/, ''); const rows = []; let row = [], cur = '', q = false;
+        for (let i = 0; i < s.length; i++) {
+            const ch = s[i];
+            if (q) { if (ch === '"') { if (s[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += ch; }
+            else if (ch === '"') q = true;
+            else if (ch === ',') { row.push(cur); cur = ''; }
+            else if (ch === '\n' || ch === '\r') { if (ch === '\r' && s[i + 1] === '\n') i++; row.push(cur); rows.push(row); row = []; cur = ''; }
+            else cur += ch;
+        }
+        if (cur.length || row.length) { row.push(cur); rows.push(row); }
+        return rows.filter(r => r.some(v => v !== ''));
+    }
+    function schTicketsFromCsv(text) {
+        const rows = schParseCsv(text); if (rows.length < 2) throw new Error('the CSV has no ticket rows');
+        const hdr = rows[0].map(h => h.trim()); const col = n => hdr.indexOf(n); const cols = n => hdr.map((h, i) => h === n ? i : -1).filter(i => i >= 0);
+        const miss = ['Summary', 'Issue key', 'Status'].filter(n => col(n) < 0); if (miss.length) throw new Error(`not a Jira export — no ${miss.join(' / ')} column`);
+        const C = { summary: col('Summary'), key: col('Issue key'), id: col('Issue id'), status: col('Status'), statusCat: col('Status Category'), assignee: col('Assignee'), created: col('Created'), updated: col('Updated'),
+            customer: col('Custom field (Customer)'), mission: col('Custom field (Customer and Mission Selection)'), site: col('Custom field (Site and Base Name)'), dueOn: col('Custom field (Due on)'),
+            pilot: col('Custom field (Mission Pilot)'), hold: col('Custom field (Mission Hold Reason)'), cancel: col('Custom field (Mission Cancellation Reason)'), prefTime: col('Custom field (Preferred Time to Fly)'),
+            expectedFlights: col('Custom field (Expected number of flights)'), flightsToComplete: col('Custom field (Number of flights to complete)') };
+        const mids = cols('Custom field (Mission ID)');
+        const g = (r, i) => (i >= 0 && i < r.length) ? String(r[i]).trim() : '';
+        return rows.slice(1).map(r => ({ key: g(r, C.key), id: g(r, C.id), summary: g(r, C.summary), status: g(r, C.status),
+            statusCategory: /done|closed|cancel/i.test(g(r, C.statusCat) || g(r, C.status)) ? 'done' : '', assignee: g(r, C.assignee), created: g(r, C.created), updated: g(r, C.updated),
+            customer: g(r, C.customer), mission: g(r, C.mission), site: g(r, C.site), dueOn: g(r, C.dueOn), pilot: g(r, C.pilot), hold: g(r, C.hold), cancel: g(r, C.cancel), prefTime: g(r, C.prefTime),
+            expectedFlights: g(r, C.expectedFlights), flightsToComplete: g(r, C.flightsToComplete), missionIds: mids.map(i => g(r, i)).filter(Boolean).map(v => v.replace(/\.0+$/, '')) })).filter(t => t.key);
+    }
+    // ---- joins ----
+    function schMissionCandidates(t) {
+        const out = []; const push = v => { v = String(v || '').trim(); if (v && !out.includes(v)) out.push(v); };
+        push(t.mission);
+        const sum = String(t.summary || '').trim();
+        const stripped = sum.replace(/\s+-\s+FLY\b.*$/i, '');
+        const m = stripped.match(/^(.*?)\s+-\s+(.+)$/);
+        if (m) { push(m[2]); const parts = m[2].split(/\s+-\s+/); if (parts.length > 1) push(parts[parts.length - 1]); }
+        push(stripped);
+        return out;
+    }
+    function schFly(t) { const m = String(t.summary || '').match(/FLY\s*(\d+(?:st|nd|rd|th)?)/i); return m ? m[1] : ''; }
+    function schNormSite(s) { return String(s || '').toLowerCase().replace(/\b0+(\d)/g, '$1').replace(/[^a-z0-9]+/g, ''); }
+    function schAliases() { const o = {}; String(schCfg().aliases || '').split(/\n/).forEach(l => { const m = l.match(/^\s*(.+?)\s*(?:=|=>|→)\s*(\d+)\s*$/); if (m) o[schNormSite(m[1])] = m[2]; }); return o; }
+    function schSiteMatches(t, sid, name) {
+        if (schCfg().allSites) return true;
+        const ts = schNormSite(t.site); if (!ts) return true;        // no site on the ticket → cannot exclude it
+        const al = schAliases(); if (al[ts]) return String(al[ts]) === String(sid);
+        const ns = schNormSite(name); if (!ns) return true;          // site name unknown → show everything (noted in the header)
+        return ts === ns || ns.startsWith(ts) || ts.startsWith(ns);
+    }
+    function schIsDone(t) { return t.statusCategory === 'done' || /^(done|closed|cancel)/i.test(String(t.status || '')); }
+    function schRows(sid) {
+        const tickets = (schStore && schStore.tickets) || [];
+        const apps = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
+        const appByName = new Map(apps.map(a => [String(a.name || '').trim().toUpperCase(), a]));
+        const logRows = logBySite[sid] ? buildLogRows(sid) : []; const byId = new Map(logRows.map(r => [String(r.id), r]));
+        const { weekStart, weekEnd } = schWeek(); const cfg = schCfg();
+        const cutoff = covDayKey(new Date(Date.now() - Math.max(0, Number(cfg.doneDays) || 0) * 86400000).toISOString());
+        const name = getCurrentSiteName();
+        const plans = schEnt[sid] ? covPlansFor(sid, schEnt[sid]) : null;
+        const assetById = schEnt[sid] ? new Map((schEnt[sid].assets || []).map(a => [a.id, a])) : null;
+        return tickets.filter(t => schSiteMatches(t, sid, name)).map(t => {
+            const cands = schMissionCandidates(t); let app = null, matched = '';
+            for (const c of cands) { app = appByName.get(c.toUpperCase()) || null; if (app) { matched = c; break; } }
+            const flights = (t.missionIds || []).map(id => { const r = byId.get(String(id)); return r ? { id, state: r.stateLabel, done: r.stateCode === 2 && !r._aborted, aborted: !!r._aborted, whenMs: r.whenMs, pilot: r.createdBy, images: r.images } : { id, state: '', unknown: true }; });
+            const due = schDay(t.dueOn); const done = schIsDone(t);
+            const win = (due && due >= weekStart && due <= weekEnd) ? 'week' : done ? 'done' : !due ? 'unscheduled' : due < weekStart ? 'overdue' : 'upcoming';
+            const plan = (plans && app) ? plans.plannedByName.get(String(app.name || '').trim().toUpperCase()) : null;
+            const tiers = { P1: 0, P2: 0, P3: 0, '': 0 }; let pads = 0;
+            if (plan && assetById) plan.forEach(id => { const a = assetById.get(id); if (!a) return; tiers[covTierOf(a.poi)]++; if (a.parentId == null) pads++; });
+            return { t, app, missionName: matched || cands[0] || '', fly: schFly(t), flights, due, done, win, updated: schDay(t.updated), assets: plan ? plan.size : null, tiers, pads, planKnown: !!plans };
+        }).filter(r => r.win !== 'done' || !r.updated || r.updated >= cutoff);
+    }
+    // ---- planned assets → Coverage records (dashed ring on the map) ----
+    function schApplyPlanned(sid, bucket, ent, force) {
+        if (!bucket || !ent) return false;
+        const rows = schStore ? schRows(sid) : [];
+        const plans = covPlansFor(sid, ent);
+        const byAsset = new Map();   // asset id → [mission names planned this week]
+        rows.filter(r => r.win === 'week' && r.app).forEach(r => { const set = plans.plannedByName.get(String(r.app.name || '').trim().toUpperCase()); if (!set) return; set.forEach(id => { if (!byAsset.has(id)) byAsset.set(id, []); const l = byAsset.get(id); if (!l.includes(r.app.name)) l.push(r.app.name); }); });
+        let changed = false;
+        bucket.recs.forEach(r => { const names = byAsset.get(r.id) || []; const p = names.length > 0; if (!!r.planned !== p || (r.plannedBy || []).join('|') !== names.join('|')) { r.planned = p; r.plannedBy = names; changed = true; } });
+        if (changed || force) { covPersist(covSiteKey(sid), bucket); if (!panelState || !panelState.cov || panelState.cov.paint !== false) covBroadcast(covSiteKey(sid), bucket); if (panelState && panelState.mode === 'coverage') { try { renderCoverageView(); } catch (e) {} } }
+        return changed;
+    }
+    async function schApplyPlannedAsync(sid, force) {
+        const bucket = covBySite[covSiteKey(sid)] || covLoadCached(covSiteKey(sid)); if (!bucket) return false;
+        const ent = schEnt[sid] || await genFetchEntities(sid); schEnt[sid] = ent;
+        return schApplyPlanned(sid, bucket, ent, force);
+    }
+    // ---- loading ----
+    function schWait(label, has, start) {
+        return new Promise(res => {
+            if (has()) return res();
+            let settled = false; const ok = () => { if (!settled) { settled = true; res(); } };
+            try { start(ok, (e) => { console.warn(`${TAG} schedule: ${label} unavailable — ${e}`); ok(); }); } catch (e) { console.warn(`${TAG} schedule: ${label} loader threw`, e); ok(); }
+            const t1 = Date.now(); const iv = setInterval(() => { if (settled) { clearInterval(iv); return; } if (has()) { clearInterval(iv); ok(); } else if (Date.now() - t1 > 90000) { clearInterval(iv); console.warn(`${TAG} schedule: ${label} not loaded after 90 s`); ok(); } }, 500);
+        });
+    }
+    async function schEnsureSite(sid) {
+        const ent = await genFetchEntities(sid); schEnt[sid] = ent;
+        await Promise.all([
+            schWait('mission log', () => !!logBySite[sid], (ok, err) => fetchMissionLog(sid, ok, err)),
+            schWait('missions', () => !!missionsBySite[sid], (ok, err) => fetchMissions(sid, ok, err)),
+        ]);
+    }
+    async function schLoadFeed() {
+        const cfg = schCfg();
+        const j = await mbGhGetJson(cfg.feedPath);
+        if (!j || !Array.isArray(j.tickets)) throw new Error(`no feed yet at ${cfg.feedPath} — run the laptop agent (python rig_agent.py jira) or paste a Jira CSV`);
+        schStore = { tickets: j.tickets, at: Date.now(), source: 'feed', fetchedAt: j.fetchedAt || '', jql: j.jql || '', client: j.client || '' };
+        gmSet(SCH_CACHE_KEY, schStore);
+        console.log(`${TAG} schedule: ${j.tickets.length} tickets from the feed (${j.fetchedAt || '?'})`);
+        return schStore;
+    }
+    function schLoadCsv(text) {
+        const tickets = schTicketsFromCsv(text);
+        schStore = { tickets, at: Date.now(), source: 'csv', fetchedAt: new Date().toISOString(), jql: '', client: '' };
+        gmSet(SCH_CACHE_KEY, schStore);
+        console.log(`${TAG} schedule: ${tickets.length} tickets from a Jira CSV export`);
+        return schStore;
+    }
+    function schOpen(sid, force) {
+        updateTitle();
+        setBodyHtml('<div style="padding:40px;text-align:center;color:#888">Loading this week — tickets, missions, log, entities…</div>');
+        if (schLoading) return schLoading;
+        schLoading = (async () => {
+            let feedErr = '';
+            try {
+                if (!schStore) schStore = gmGet(SCH_CACHE_KEY, null);
+                const ttl = Math.max(0, Number(schCfg().ttlMin) || 0) * 60000;
+                if (force || !schStore || (ttl && Date.now() - (schStore.at || 0) > ttl)) {
+                    if (mbSharedToken) await schLoadFeed();
+                    else if (!schStore) feedErr = 'no GitHub token in the Control Panel — paste a Jira CSV export, or set the token and press ↻ Feed';
+                }
+            } catch (e) { feedErr = e.message || String(e); console.warn(`${TAG} schedule: feed`, e); }
+            try { await schEnsureSite(sid); } catch (e) { console.warn(`${TAG} schedule: site data`, e); showToast(`Schedule: site data failed — ${e.message || e}`, '#ff5252'); }
+            try { await schApplyPlannedAsync(sid, false); } catch (e) { console.warn(`${TAG} schedule: planned apply`, e); }
+            panelState.sch = panelState.sch || { win: '', search: '' };
+            panelState.sch.feedErr = feedErr;
+            if (feedErr && schStore) showToast(`Schedule feed: ${feedErr} — showing the last loaded tickets`, '#ff9800');
+        })().finally(() => { schLoading = null; if (panelState && panelState.mode === 'schedule') renderScheduleView(); });
+        return schLoading;
+    }
+    // ---- render ----
+    function schVisibleRows(sid) {
+        const st = panelState.sch || (panelState.sch = { win: '', search: '' });
+        const q = (panelState.search || '').trim().toLowerCase();
+        let rows = schRows(sid).filter(r => (!st.win || r.win === st.win) && (!q || `${r.t.key} ${r.t.summary} ${r.missionName} ${r.t.pilot} ${r.t.assignee} ${r.t.status} ${(r.t.missionIds || []).join(' ')} ${r.t.hold}`.toLowerCase().includes(q)));
+        rows.sort((a, b) => (SCH_WIN_ORDER[a.win] - SCH_WIN_ORDER[b.win]) || String(a.due || '9999').localeCompare(String(b.due || '9999')) || String(a.missionName).localeCompare(String(b.missionName)));
+        return rows;
+    }
+    function renderScheduleView() {
+        const sid = getCurrentSiteID(); if (!sid) return;
+        panelState.drillId = null; updateTitle();
+        const st = panelState.sch || (panelState.sch = { win: '', search: '' });
+        const all = schStore ? schRows(sid) : [];
+        const rows = schVisibleRows(sid);
+        const { weekStart, weekEnd } = schWeek();
+        const cfg = schCfg();
+        const cnt = {}; all.forEach(r => { cnt[r.win] = (cnt[r.win] || 0) + 1; });
+        const week = all.filter(r => r.win === 'week');
+        const matched = week.filter(r => r.app);
+        const plannedIds = new Set(); const tiers = { P1: 0, P2: 0, P3: 0, '': 0 }; let pads = 0;
+        if (schEnt[sid]) { const plans = covPlansFor(sid, schEnt[sid]); const byId = new Map((schEnt[sid].assets || []).map(a => [a.id, a])); matched.forEach(r => { const s = plans.plannedByName.get(String(r.app.name || '').trim().toUpperCase()); if (s) s.forEach(id => plannedIds.add(id)); }); plannedIds.forEach(id => { const a = byId.get(id); if (!a) return; tiers[covTierOf(a.poi)]++; if (a.parentId == null) pads++; }); }
+        const name = getCurrentSiteName();
+        const chip = (label, active, attr, color) => `<button class="aim-mb-tbtn${active ? ' active' : ''}" ${attr} style="${color && !active ? `border-color:${color};color:${color}` : ''}">${label}</button>`;
+        const winChips = ['week', 'overdue', 'upcoming', 'unscheduled', 'done'].map(w => chip(`${SCH_WIN_LABEL[w]} <span style="opacity:.7">${cnt[w] || 0}</span>`, st.win === w, `data-sch-win="${w}"`, SCH_WIN_COLOR[w])).join('');
+        const src = schStore ? (schStore.source === 'feed' ? `feed ${schStore.fetchedAt ? new Date(schStore.fetchedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''}` : `CSV paste ${new Date(schStore.at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`) : 'nothing loaded';
+        const jiraUrl = k => cfg.jiraBase ? `${cfg.jiraBase.replace(/\/?$/, '/')}${encodeURIComponent(k)}` : '';
+        const body = rows.map(r => {
+            const t = r.t; const wc = SCH_WIN_COLOR[r.win];
+            const fl = r.flights; const doneN = fl.filter(f => f.done).length, abN = fl.filter(f => f.aborted).length;
+            const flightsHtml = fl.length ? fl.map(f => `<a href="${covMissionUrl(sid, f.id)}" data-sch-link="${escapeHtml(String(f.id))}" title="${f.unknown ? 'not in this site\'s mission log' : escapeHtml(`${f.state}${f.pilot ? ' · ' + f.pilot : ''}${f.whenMs ? ' · ' + new Date(f.whenMs).toLocaleString() : ''}${f.images != null ? ' · ' + f.images + ' images' : ''}`)}" style="color:${f.unknown ? '#777' : f.aborted ? '#ff5252' : f.done ? '#39ff14' : '#ffb300'};text-decoration:underline dotted;margin-right:4px">${escapeHtml(String(f.id))}</a>`).join('') + `<span style="color:#777"> ${doneN}/${fl.length} ✓${abN ? ` <span style="color:#ff5252">${abN} ✗</span>` : ''}</span>` : '<span style="color:#666">—</span>';
+            return `<tr data-sch-key="${escapeHtml(t.key)}" title="${escapeHtml(t.summary)}">
+                <td style="color:${wc};font-weight:700;white-space:nowrap">${SCH_WIN_LABEL[r.win]}${r.win === 'week' && r.done ? ' <span style="color:#39ff14" title="ticket is Done">✓</span>' : ''}</td>
+                <td style="white-space:nowrap">${jiraUrl(t.key) ? `<a href="${escapeHtml(jiraUrl(t.key))}" data-sch-jira="${escapeHtml(t.key)}" style="color:#9ad;text-decoration:underline" title="Open in Jira">${escapeHtml(t.key)}</a>` : escapeHtml(t.key)}</td>
+                <td>${r.app ? `<span data-sch-open-app="${escapeHtml(r.app.name)}" style="color:#9ad;cursor:pointer;text-decoration:underline dotted" title="Open "${escapeHtml(r.app.name)}" in the Mission Bank editor">${escapeHtml(r.app.name)}</span>` : `<span style="color:#ffb300" title="No Mission Bank mission with this name on this site — summary: ${escapeHtml(t.summary)}">⚠ ${escapeHtml(r.missionName || t.summary)}</span>`}${t.site && !schCfg().allSites && schNormSite(t.site) !== schNormSite(name) ? ` <span style="color:#777" title="ticket site: ${escapeHtml(t.site)}">(${escapeHtml(t.site)})</span>` : ''}</td>
+                <td style="text-align:center;color:#9aa">${escapeHtml(r.fly)}</td>
+                <td style="color:${r.done ? '#39ff14' : /progress/i.test(t.status) ? '#ffb300' : /review|insight/i.test(t.status) ? '#14d2dc' : '#9aa'};white-space:nowrap">${escapeHtml(t.status)}${t.hold && !/^(none|n\/a)$/i.test(t.hold) ? ` <span style="color:#ffb347" title="hold reason: ${escapeHtml(t.hold)}">⏸</span>` : ''}${t.cancel ? ` <span style="color:#ff5252" title="cancelled: ${escapeHtml(t.cancel)}">✗</span>` : ''}</td>
+                <td style="white-space:nowrap" title="${escapeHtml(t.dueOn || '')}">${schFmtDay(r.due)}</td>
+                <td style="color:#9aa">${escapeHtml(t.pilot || t.assignee || '')}</td>
+                <td style="white-space:nowrap">${flightsHtml}</td>
+                <td style="text-align:center" title="${r.app ? `planned assets of ${escapeHtml(r.app.name)}: P1 ${r.tiers.P1} · P2 ${r.tiers.P2} · P3 ${r.tiers.P3} · untiered ${r.tiers['']}` : ''}">${r.assets != null ? r.assets : (r.planKnown ? '' : '…')}</td>
+                <td style="text-align:center;color:#9aa">${r.assets != null ? r.pads : ''}</td>
+                <td style="color:#9aa;white-space:nowrap">${r.updated ? schFmtDay(r.updated) : ''}</td></tr>`;
+        }).join('');
+        const html = `
+            <div class="aim-mb-toolbar">
+                <input class="aim-mb-search" type="text" placeholder="Search ticket / mission / pilot / status / flight id…" value="${escapeHtml(panelState.search || '')}" />
+                ${winChips}
+                <span style="flex:1"></span>
+                <button class="aim-mb-tbtn" data-sch-act="feed" title="Re-read ${escapeHtml(cfg.feedPath)} from the data repo (written by the laptop agent)">↻ Feed</button>
+                <span style="position:relative"><button class="aim-mb-tbtn" data-sch-act="csv-menu" title="Load a Jira CSV export instead of the feed (Jira → list view → Export → CSV (all fields))">📂 Jira CSV ▾</button>
+                    <div data-sch-csvmenu style="display:none;position:absolute;right:0;top:26px;z-index:5;background:#1a1a1a;border:1px solid #444;border-radius:4px;padding:8px;min-width:320px;font-size:11px;box-shadow:0 4px 14px rgba(0,0,0,.5)">
+                        <label style="display:inline-block;background:rgba(20,210,220,0.12);color:#14d2dc;border:1px solid rgba(20,210,220,0.5);border-radius:3px;padding:2px 8px;cursor:pointer">📂 Choose CSV<input type="file" accept=".csv,text/csv" data-sch-file style="display:none"></label>
+                        <span style="color:#777;margin-left:6px">or paste the export below</span>
+                        <textarea data-sch-paste placeholder="Paste the Jira CSV export here (header row + tickets)" style="display:block;width:100%;height:90px;margin-top:6px;background:#0f1216;border:1px solid #444;color:#e6e6e6;font-size:10px;font-family:monospace"></textarea>
+                        <div style="margin-top:6px"><button class="aim-mb-tbtn" data-sch-act="csv-load">Load pasted CSV</button> <span style="color:#777">Jira → ROC list view → Export → CSV (all fields). Columns used: Summary, Issue key, Status, Customer, Customer and Mission Selection, Site and Base Name, Due on, Mission ID (all), Mission Pilot, Hold reason.</span></div>
+                    </div></span>
+                <span style="position:relative"><button class="aim-mb-tbtn" data-sch-act="gear" title="Schedule settings">⚙</button>
+                    <div data-sch-gear style="display:none;position:absolute;right:0;top:26px;z-index:5;background:#1a1a1a;border:1px solid #444;border-radius:4px;padding:8px;min-width:300px;font-size:11px;box-shadow:0 4px 14px rgba(0,0,0,.5)">
+                        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span>Jira browse URL</span><input type="text" data-sch-cfg="jiraBase" value="${escapeHtml(cfg.jiraBase)}" style="width:170px;background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"></div>
+                        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span>Feed path in the data repo</span><input type="text" data-sch-cfg="feedPath" value="${escapeHtml(cfg.feedPath)}" style="width:170px;background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"></div>
+                        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span>Show Done tickets updated within</span><span><input type="number" data-sch-cfg="doneDays" value="${cfg.doneDays}" min="0" max="90" step="1" style="width:56px;background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"> days</span></div>
+                        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span>Re-read the feed when older than</span><span><input type="number" data-sch-cfg="ttlMin" value="${cfg.ttlMin}" min="0" max="1440" step="5" style="width:56px;background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"> min</span></div>
+                        <label style="display:flex;gap:6px;align-items:center;margin-bottom:6px;cursor:pointer"><input type="checkbox" data-sch-cfg="allSites" ${cfg.allSites ? 'checked' : ''} style="accent-color:#14d2dc"> <span>Show tickets of every site (not just ones whose "Site and Base Name" matches this site)</span></label>
+                        <div style="margin-bottom:4px">Site aliases — one per line: <code>Jira site name = Percepto site id</code></div>
+                        <textarea data-sch-cfg="aliases" style="display:block;width:100%;height:50px;background:#0f1216;border:1px solid #444;color:#e6e6e6;font-size:10px;font-family:monospace">${escapeHtml(cfg.aliases || '')}</textarea>
+                        <div style="color:#777;margin-top:4px">This site reads as "${escapeHtml(name || '?')}" — tickets match by name ignoring case, spacing and leading zeros.</div>
+                    </div></span>
+                <button class="aim-mb-tbtn" data-sch-act="sheets" title="Rich table → paste into Google Sheets">📤 Sheets</button>
+                <button class="aim-mb-tbtn" data-sch-act="csv">⬇ CSV</button>
+                <button class="aim-mb-tbtn" data-sch-act="paint" title="Mark this week's planned assets on the Coverage records (dashed ring on the map via Map Styler → Assets → Coverage colours)">🎨 Planned → map</button>
+            </div>
+            <div style="padding:5px 10px;border-bottom:1px solid #2a2a2a;font-size:11px;color:#bbb;display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center">
+                <span><b style="color:#14d2dc">Week ${schFmtDay(weekStart)} → ${schFmtDay(weekEnd)}</b></span>
+                <span><b style="color:#e6e6e6">${week.length}</b> ticket${week.length === 1 ? '' : 's'} this week · <b style="color:#e6e6e6">${matched.length}</b> matched mission${matched.length === 1 ? '' : 's'}${week.length - matched.length ? ` · <span style="color:#ffb300">${week.length - matched.length} not in the Mission Bank</span>` : ''}</span>
+                <span><b style="color:#e6e6e6">${plannedIds.size}</b> assets planned on <b style="color:#e6e6e6">${pads}</b> pads <span style="color:#777">(<span style="color:${COV_TIER_COLORS.P1}">P1 ${tiers.P1}</span> · <span style="color:${COV_TIER_COLORS.P2}">P2 ${tiers.P2}</span> · <span style="color:${COV_TIER_COLORS.P3}">P3 ${tiers.P3}</span> · untiered ${tiers['']})</span></span>
+                ${cnt.overdue ? `<span style="color:#ff3b3b"><b>${cnt.overdue}</b> overdue</span>` : ''}
+                <span style="flex:1"></span>
+                <span style="color:#777">source: <b style="color:#cfd6dc">${escapeHtml(src)}</b>${schStore && schStore.tickets ? ` · ${schStore.tickets.length} tickets${all.length !== schStore.tickets.length ? ` (${all.length} for this site)` : ''}` : ''}${st.feedErr ? ` · <span style="color:#ffb300" title="${escapeHtml(st.feedErr)}">⚠ feed</span>` : ''}</span>
+            </div>
+            <div class="aim-mb-table-wrap">
+                <table>
+                    <thead><tr><th>Window</th><th>Ticket</th><th>Mission</th><th>Fly</th><th>Status</th><th>Due</th><th>Pilot</th><th title="Mission ID fields on the ticket → takeoff missions in this site's log (green = completed, amber = other, red = aborted); click → Mission Playback">Flights</th><th title="Assets the mission plans (pads within 150 ft of a step + nested)">Assets</th><th>Pads</th><th>Updated</th></tr></thead>
+                    <tbody>${body || `<tr><td colspan="11" style="color:#777;padding:14px">${schStore ? 'No tickets match.' : `No tickets loaded — ${escapeHtml(st.feedErr || 'press ↻ Feed or load a Jira CSV export.')}`}</td></tr>`}</tbody>
+                </table>
+            </div>
+            <div style="padding:4px 10px;border-top:1px solid #2a2a2a;font-size:10px;color:#777">${rows.length} of ${all.length} tickets · "This week" = Due on inside Mon–Sun · mission name opens the editor · flight id opens Playback · 🎨 marks planned assets on the Coverage map (dashed ring)</div>`;
+        setBodyHtml(html);
+        wireScheduleEvents(sid);
+    }
+    function wireScheduleEvents(sid) {
+        const body = panelEl.querySelector('#aim-mb-body'); if (!body) return;
+        const rerender = () => { const wrap = body.querySelector('.aim-mb-table-wrap'); const y = wrap ? wrap.scrollTop : 0; renderScheduleView(); const w2 = panelEl.querySelector('.aim-mb-table-wrap'); if (w2) w2.scrollTop = y; };
+        const search = body.querySelector('.aim-mb-search');
+        if (search) { search.oninput = () => { panelState.search = search.value; rerender(); const s2 = panelEl.querySelector('.aim-mb-search'); if (s2) { s2.focus(); s2.setSelectionRange(s2.value.length, s2.value.length); } }; }
+        body.querySelectorAll('[data-sch-win]').forEach(b => { b.onclick = () => { const st = panelState.sch; st.win = st.win === b.dataset.schWin ? '' : b.dataset.schWin; rerender(); }; });
+        body.querySelectorAll('a[data-sch-link],a[data-sch-jira]').forEach(a => { a.onclick = (e) => { e.preventDefault(); e.stopPropagation(); try { (window.top || window).open(a.href, '_blank'); } catch (err) { window.open(a.href, '_blank'); } }; });
+        body.querySelectorAll('[data-sch-open-app]').forEach(el => { el.onclick = (e) => { e.preventDefault(); e.stopPropagation(); covOpenInEditor(sid, el.dataset.schOpenApp); }; });
+        const loadCsvText = (text) => { try { schLoadCsv(text); panelState.sch.feedErr = ''; showToast(`Jira CSV: ${schStore.tickets.length} tickets loaded`, '#5fff5f'); schApplyPlannedAsync(sid, true).catch(() => {}); rerender(); } catch (e) { showToast(`Jira CSV: ${e.message}`, '#ff5252'); console.warn(`${TAG} schedule: csv`, e); } };
+        const file = body.querySelector('[data-sch-file]'); if (file) file.onchange = () => { const f = file.files && file.files[0]; if (!f) return; const rd = new FileReader(); rd.onload = () => loadCsvText(String(rd.result || '')); rd.readAsText(f); };
+        body.ondragover = (e) => { e.preventDefault(); }; body.ondrop = (e) => { const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; if (!f) return; e.preventDefault(); const rd = new FileReader(); rd.onload = () => loadCsvText(String(rd.result || '')); rd.readAsText(f); };
+        body.querySelectorAll('[data-sch-cfg]').forEach(inp => { inp.onchange = () => {
+            const k = inp.dataset.schCfg; const v = inp.type === 'checkbox' ? !!inp.checked : inp.type === 'number' ? Number(inp.value) : String(inp.value).trim();
+            if (typeof v === 'number' && !isFinite(v)) return;
+            schCfgSet(k, v);
+            try { if (controlChannel && (k === 'doneDays' || k === 'ttlMin' || k === 'allSites')) controlChannel.postMessage({ type: 'SET_TOGGLE', scriptId: SCH_SCRIPT_ID, toggleId: k, value: v }); } catch (e) {}
+            rerender(); const g = panelEl.querySelector('[data-sch-gear]'); if (g) g.style.display = 'block';
+        }; });
+        body.querySelectorAll('[data-sch-act]').forEach(b => { b.onclick = (e) => {
+            e.stopPropagation(); const act = b.dataset.schAct;
+            const menu = body.querySelector('[data-sch-csvmenu]'), gear = body.querySelector('[data-sch-gear]');
+            if (act === 'feed') { schOpen(sid, true); }
+            else if (act === 'csv-menu') { if (gear) gear.style.display = 'none'; if (menu) menu.style.display = menu.style.display === 'none' ? 'block' : 'none'; }
+            else if (act === 'csv-load') { const ta = body.querySelector('[data-sch-paste]'); if (ta && ta.value.trim()) loadCsvText(ta.value); else showToast('Paste the Jira CSV export first.', '#ff9800'); }
+            else if (act === 'gear') { if (menu) menu.style.display = 'none'; if (gear) gear.style.display = gear.style.display === 'none' ? 'block' : 'none'; }
+            else if (act === 'sheets') schExport(sid, 'sheets');
+            else if (act === 'csv') schExport(sid, 'csv');
+            else if (act === 'paint') {
+                const bucket = covBySite[covSiteKey(sid)] || covLoadCached(covSiteKey(sid));
+                if (!bucket) { showToast('No Coverage read for this site yet — open 📅 Coverage first, then press this again.', '#ff9800'); return; }
+                schApplyPlannedAsync(sid, true).then(() => showToast('Planned assets marked on the Coverage records (dashed ring with Map Styler → Assets → Coverage colours).', '#14d2dc')).catch(err => showToast(`Planned → map failed: ${err.message || err}`, '#ff5252'));
+            }
+        }; });
+        body.onclick = (e) => { if (e.target.closest('[data-sch-csvmenu],[data-sch-gear],[data-sch-act]')) return; body.querySelectorAll('[data-sch-csvmenu],[data-sch-gear]').forEach(m => { m.style.display = 'none'; }); };
+    }
+    function schExport(sid, kind) {
+        const rows = schVisibleRows(sid);
+        const cols = ['Window', 'Ticket', 'Mission', 'Fly', 'Status', 'Due', 'Pilot', 'Flights', 'Done', 'Aborted', 'Assets', 'Pads', 'Hold reason', 'Site', 'Updated', 'Summary'];
+        const vals = r => [SCH_WIN_LABEL[r.win], r.t.key, r.app ? r.app.name : `⚠ ${r.missionName}`, r.fly, r.t.status, r.due, r.t.pilot || r.t.assignee || '', (r.t.missionIds || []).join(' '), r.flights.filter(f => f.done).length, r.flights.filter(f => f.aborted).length, r.assets != null ? r.assets : '', r.assets != null ? r.pads : '', r.t.hold || '', r.t.site || '', r.updated, r.t.summary];
+        const { weekStart, weekEnd } = schWeek();
+        const title = `This week ${weekStart} → ${weekEnd} — ${getCurrentSiteName() || 'site ' + sid}`;
+        if (kind === 'csv') {
+            const esc = v => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+            const csv = [cols.join(',')].concat(rows.map(r => vals(r).map(esc).join(','))).join('\n');
+            try { downloadTextFile(`schedule-${sid}-${weekStart}.csv`, csv, 'text/csv'); } catch (e) { copyToClipboard(csv); showToast('Download blocked — CSV copied to clipboard.', '#ff9800'); }
+            return;
+        }
+        const th = 'background:#1a1a1a;color:#14d2dc;border:1px solid #444;padding:3px 6px;font-weight:700', td = 'border:1px solid #444;padding:3px 6px';
+        const html = `<table style="border-collapse:collapse;font-family:Arial;font-size:11px"><tr><td colspan="${cols.length}" style="font-weight:700;padding:2px 6px">${escapeHtml(title)}</td></tr><tr>${cols.map(c => `<th style="${th}">${escapeHtml(c)}</th>`).join('')}</tr>${rows.map(r => `<tr>${vals(r).map((v, i) => `<td style="${td}${i === 0 ? `;color:${SCH_WIN_COLOR[r.win]};font-weight:700` : ''}">${escapeHtml(String(v))}</td>`).join('')}</tr>`).join('')}</table>`;
+        const tsv = [title, cols.join('\t')].concat(rows.map(r => vals(r).map(v => String(v).replace(/[\t\n]/g, ' ')).join('\t'))).join('\n');
+        try {
+            navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([html], { type: 'text/html' }), 'text/plain': new Blob([tsv], { type: 'text/plain' }) })])
+                .then(() => showToast(`Schedule (${rows.length} rows) copied — paste into Google Sheets.`, '#5fff5f'), (e) => { console.warn(`${TAG} schedule: rich copy failed`, e); copyToClipboard(tsv); showToast('Copied as plain text (TSV).', '#ff9800'); });
+        } catch (e) { copyToClipboard(tsv); showToast('Copied as plain text (TSV).', '#ff9800'); }
+    }
+    // ---- launcher + Control Panel ----
+    function injectSchButton(doc, row) {
+        if (doc.getElementById(SCH_BTN_ID)) return;
+        const btn = doc.createElement('button');
+        btn.id = SCH_BTN_ID; btn.type = 'button'; btn.className = 'ant-btn'; btn.textContent = '🗓';
+        btn.title = 'This week — Jira ROC tickets → missions → planned assets (AIM Mission Bank Tools)';
+        Object.assign(btn.style, { minWidth: 'unset', width: '30px', padding: '0', height: '26px', fontSize: '13px', lineHeight: '24px', borderRadius: '4px', background: '#14d2dc', border: '1px solid #14d2dc', color: '#000', cursor: 'pointer', flex: '0 0 auto' });
+        try { btn.style.setProperty('color', '#000', 'important'); btn.style.setProperty('-webkit-text-fill-color', '#000', 'important'); } catch (e) {}
+        btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); openPanel('schedule'); };
+        row.appendChild(btn);
+    }
+    function registerSchedule() {
+        if (!controlChannel) return;
+        const c = schCfg();
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: SCH_SCRIPT_ID, name: '🗓 This week (Jira ROC schedule)',
+            description: 'Jira ROC tickets for the client → Mission Bank missions → flown flights + planned assets this Mon–Sun week. Opens from the 🗓 button on the Mission Bank; reads jira/diamondback.json written by the laptop agent (needs the GitHub token), or a pasted Jira CSV export.',
+            version: SCRIPT_VERSION, group: 'Mission Bank Macros', scope: 'mission-bank', priority: 26,
+            toggles: [
+                { id: 'doneDays', label: 'Show Done tickets updated within', type: 'number', min: 0, max: 90, step: 1, default: c.doneDays, unit: 'days' },
+                { id: 'ttlMin', label: 'Re-read the feed when the loaded copy is older than', type: 'number', min: 0, max: 1440, step: 5, default: c.ttlMin, unit: 'min' },
+                { id: 'allSites', label: 'Show tickets of every site (ignore "Site and Base Name")', type: 'boolean', default: !!c.allSites },
+            ],
+        });
+    }
+    function handleScheduleToggle(msg) {
+        const id = msg.toggleId; const val = msg.value !== undefined ? msg.value : msg.enabled;
+        if (!Object.prototype.hasOwnProperty.call(SCH_DEFAULT_CFG, id)) return;
+        const v = id === 'allSites' ? !!val : Number(val);
+        if (typeof v === 'number' && !isFinite(v)) return;
+        if (schCfg()[id] === v) return;
+        schCfgSet(id, v);
+        if (panelState && panelState.mode === 'schedule') { try { renderScheduleView(); } catch (e) {} }
     }
 
     // ========================================================
@@ -2404,6 +2797,7 @@
             injectButtonIntoRow(doc, row, header);
         }
         try { injectCovButton(doc, row); } catch (e) { console.warn(`${TAG} coverage button:`, e); }   // v3.09 📅 Coverage (after SUM, compact — v3.16)
+        try { injectSchButton(doc, row); } catch (e) { console.warn(`${TAG} schedule button:`, e); }   // v3.28 🗓 This week
     }
 
     // Neon-green SUM button styling — matches the Site Setup SUM button
@@ -12100,6 +12494,7 @@
         panelEl.style.display = 'flex';
         if (panelGeom.snap) snapPanel(panelGeom.snap); // re-fit dock to current map size
         if (mode === 'coverage') { covRefresh(siteID, false); return; }   // v3.09 (#292)
+        if (mode === 'schedule') { schOpen(siteID, false); return; }        // v3.28 (#293)
         if (mode === 'log') {
             const bucket = logBySite[siteID];
             if (!bucket) {
@@ -12666,7 +13061,7 @@
         const name = getCurrentSiteName();
         const sid = getCurrentSiteID();
         const site = name || (sid ? `Site ${sid}` : '?');
-        const prefix = (panelState && panelState.mode === 'log') ? '📋 Mission Log' : (panelState && panelState.mode === 'coverage') ? '📅 Coverage — flown vs SLA' : '📋 Mission Bank Summary';
+        const prefix = (panelState && panelState.mode === 'log') ? '📋 Mission Log' : (panelState && panelState.mode === 'coverage') ? '📅 Coverage — flown vs SLA' : (panelState && panelState.mode === 'schedule') ? '🗓 This week — Jira ROC schedule' : '📋 Mission Bank Summary';
         if (titleEl) titleEl.innerHTML = `${prefix} — <span data-site>${escapeHtml(site)}</span>`;
     }
 
@@ -12689,6 +13084,7 @@
         if (!panelState) initPanelState();
         if (panelState.mode === 'log') { renderLogTableView(); return; }
         if (panelState.mode === 'coverage') { renderCoverageView(); return; }
+        if (panelState.mode === 'schedule') { renderScheduleView(); return; }   // v3.28
         panelState.drillId = null;
         updateTitle();
         // Rebuild dynamic step-type columns from the loaded missions so
@@ -17709,6 +18105,8 @@ ${snapPlacemarks}
         registerWithControlPanel();
         registerMissionSop();
         registerCoverage();
+        registerSchedule();
+        try { if (controlChannel) controlChannel.postMessage({ type: 'REQUEST_TOKEN' }); } catch (e) {}   // v3.28: 🗓 feed needs the shared PAT
         covChannelGet();   // v3.14: no broadcast on load — the map paints only once the panel is opened / 🎨 Map pressed
         // Inject the force-show-dots CSS rule into the iframe head.
         // We use a class instead of inline !important styles so cleanup

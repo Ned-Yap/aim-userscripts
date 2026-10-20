@@ -1,3 +1,12 @@
+## 2026-10-20 — 🗓 This week: Jira ROC schedule — Mission Bank Tools latest v3.28 (latest only, feature #293)
+
+- **Mission Bank Tools (latest) v3.28 — 🗓 button next to 📅 on the Mission Bank toolbar.** The client's Jira ROC tickets (`<Client> - <Mission> - FLY n`, `Customer and Mission Selection`, `Site and Base Name`, `Due on`, the `Mission ID` fields) are joined to this site's Mission Bank missions by name, to flown takeoff missions by id (green = completed, red = aborted, click → Playback) and to **planned assets** (the same 150 ft step→asset rule as Coverage, nested-aware). Windows: **This week** (Due on inside Mon–Sun), Overdue, Upcoming, Unscheduled, Done (last 14 days). Header: tickets this week, matched missions, planned assets by tier and pads. Tickets of other sites are filtered by site name (case / spacing / leading zeros ignored; aliases + "show every site" in ⚙). 📤 Sheets / ⬇ CSV. **🎨 Planned → map** stamps this week's assets on the Coverage records → new **Planned** column in 📅 Coverage and the dashed ring on the map.
+- **Source:** `jira/diamondback.json` in the data repo, written by the laptop agent (needs the Control Panel GitHub token; read-only) — or paste / drop a Jira CSV export (all fields) when there is no feed. Own Control Panel card.
+
+## 2026-10-20 — 🏗 Rigs & cranes: 📡 laptop-agent feed — Site Setup Tools latest v4.389 (latest only, feature #291)
+
+- **v4.389 — the daily sheet arrives by itself.** A plain-Python agent on the work laptop (`aim-userscripts-data/rig-agent`, Task Scheduler 10:00 + logon) reads the "Diamondback Rig Data" e-mail attachment and publishes it to `rigs/sheet/latest.json` (+ one raw CSV per day). Opening ⊕ Generate → 🏗 ingests it through the same path as a dropped CSV whenever its day is newer than the site's last ingest; the header shows `📡 feed <day> <published>` and **📡 ↻ feed** re-checks. Nothing changes in the lifecycle — new rows stage, drop-offs go to VERIFY, nothing is deleted without ✓ Gone.
+
 ## 2026-10-20 — 🏗 Rigs & cranes live-verified on 1637 — Site Setup Tools latest v4.382 → v4.385 (latest only, feature #291)
 
 - **v4.382** rig constants hoisted to the top of the IIFE (TDZ in the Control Panel message handler killed the whole script — no ⊕ Generate button). **v4.383** "in N d" instead of a negative Days value for rows that haven't started. **v4.384** labelled header on the Control Panel block.
