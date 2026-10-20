@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.382
+// @version      4.383
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.382';
+    const SCRIPT_VERSION = '4.383';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -30181,7 +30181,7 @@
                 <td style="padding:3px 6px;color:#9aa">${esc(c.job)}</td>
                 <td style="padding:3px 6px;color:${c.padId ? '#cfd6dc' : '#ff6060'}" title="${esc(c.how)}${c.flag ? ' · ' + esc(c.flag) : ''}">${c.padId ? esc(c.padName) : '—'}${c.flag ? ' <span style="color:#ffb347">⚠</span>' : ''}</td>
                 <td style="padding:3px 6px;color:#9aa;white-space:nowrap">${esc(c.start || '?')} → ${esc(c.end || '—')}${c.changes && c.changes.length ? ` <span style="color:#ffb347" title="${esc(c.changes.join('\n'))}">✎${c.changes.length}</span>` : ''}</td>
-                <td style="padding:3px 6px;color:#9aa;text-align:center">${days != null && c.status !== 'upcoming' ? days : ''}</td>
+                <td style="padding:3px 6px;color:#9aa;text-align:center" title="days since start">${days != null && days >= 0 && c.status !== 'upcoming' ? days : (days != null && days < 0 ? `<span style="color:#666">in ${-days} d</span>` : '')}</td>
                 <td style="padding:3px 6px;color:#9aa">${c.nfzName ? esc(c.nfzName) : ''}${c.pulled ? ` <span style="color:#ffb347" title="mission(s) pulled — restore when cleared">⛔ ${esc(c.pulled)}</span>` : ''}</td>
                 <td style="padding:3px 6px;white-space:nowrap">${act}</td></tr>`;
         }).join('');
