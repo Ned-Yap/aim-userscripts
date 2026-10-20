@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.387
+// @version      4.388
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.387';
+    const SCRIPT_VERSION = '4.388';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -30283,7 +30283,9 @@
     function rigRenderHistory(sid, host) {
         const st = rigStateLoad(sid);
         const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
-        const rows = Object.entries(st.rows).map(([k, c]) => ({ k, c })).sort((a, b) => String(b.c.firstSeen || '').localeCompare(String(a.c.firstSeen || '')));
+        const all = host.dataset.histAll === '1';
+        // default = obstructions that touched a pad on THIS site (had a pad, an NFZ, or were cleared after one); off-site / unmatched noise behind a checkbox
+        const rows = Object.entries(st.rows).map(([k, c]) => ({ k, c })).filter(r => all || r.c.padId || r.c.nfzName || r.c.committedAt).sort((a, b) => String(b.c.start || b.c.firstSeen || '').localeCompare(String(a.c.start || a.c.firstSeen || '')));
         const done = rows.filter(r => r.c.status === 'cleared');
         const withDays = done.map(r => rigDaysOn(r.c)).filter(d => d != null);
         const avg = withDays.length ? (withDays.reduce((a, b) => a + b, 0) / withDays.length).toFixed(1) : '—';
@@ -30292,11 +30294,12 @@
         const months = Object.keys(byMonth).sort().slice(-6).map(m => `${m} <b style="color:#cfd6dc">${byMonth[m]}</b>`).join(' · ') || '—';
         const nfzN = rows.filter(r => r.c.committedAt).length, delN = rows.filter(r => r.c.deletedNfzId).length;
         const body = rows.map(({ k, c }) => { const col = RIG_STATUS_COLOR[c.status] || '#ccc'; const d = rigDaysOn(c);
-            return `<tr style="border-bottom:1px solid #222"><td style="padding:3px 6px;color:${col};white-space:nowrap">${esc(RIG_STATUS_LABEL[c.status] || c.status)}</td><td style="padding:3px 6px;color:#e6e6e6">${esc(c.well)}${c.source === 'rpic' ? ' <span style="color:#7adfe6">👁</span>' : ''}</td><td style="padding:3px 6px;color:#9aa">${esc(c.job)}</td><td style="padding:3px 6px;color:#9aa">${esc(c.padName || '—')}</td><td style="padding:3px 6px;color:#9aa;white-space:nowrap">${esc(c.start || '?')} → ${esc(c.end || '—')}</td><td style="padding:3px 6px;color:#9aa;text-align:center">${d == null ? '' : d}</td><td style="padding:3px 6px;color:#9aa;white-space:nowrap">${c.committedAt ? `NFZ ${esc(c.committedAt)}` : ''}${c.clearedAt ? ` → gone ${esc(c.clearedAt)}` : ''}</td><td style="padding:3px 6px;color:#9aa">${esc(c.endedWhy || '')}${c.pulled ? ` · ⛔ ${esc(c.pulled)}` : ''}${c.note ? ` · ${esc(c.note)}` : ''}</td><td style="padding:3px 6px;white-space:nowrap">${c.status === 'cleared' ? `<button data-rig-act="restage" data-k="${esc(k)}" title="Back to Staged — ⬠ Create re-creates the NFZ (banked body when it had one)" style="background:none;border:1px solid #7adfe6;color:#7adfe6;border-radius:3px;padding:1px 6px;cursor:pointer">↻ Re-stage</button>` : ''}</td></tr>`; }).join('');
+            return `<tr style="border-bottom:1px solid #222;white-space:nowrap"><td style="padding:3px 6px;color:${col}">${esc(RIG_STATUS_LABEL[c.status] || c.status)}</td><td style="padding:3px 6px;color:#e6e6e6">${esc(c.well)}${c.source === 'rpic' ? ' <span style="color:#7adfe6">👁</span>' : ''}</td><td style="padding:3px 6px;color:#9aa">${esc(c.job)}</td><td style="padding:3px 6px;color:#9aa">${esc(c.padName || '—')}</td><td style="padding:3px 6px;color:#9aa;white-space:nowrap">${esc(c.start || '?')} → ${esc(c.end || '—')}</td><td style="padding:3px 6px;color:#9aa;text-align:center">${d == null ? '' : d}</td><td style="padding:3px 6px;color:#9aa;white-space:nowrap">${c.committedAt ? `NFZ ${esc(c.committedAt)}` : ''}${c.clearedAt ? ` → gone ${esc(c.clearedAt)}` : ''}</td><td style="padding:3px 6px;color:#9aa">${esc(c.endedWhy || '')}${c.pulled ? ` · ⛔ ${esc(c.pulled)}` : ''}${c.note ? ` · ${esc(c.note)}` : ''}</td><td style="padding:3px 6px;white-space:nowrap">${c.status === 'cleared' ? `<button data-rig-act="restage" data-k="${esc(k)}" title="Back to Staged — ⬠ Create re-creates the NFZ (banked body when it had one)" style="background:none;border:1px solid #7adfe6;color:#7adfe6;border-radius:3px;padding:1px 6px;cursor:pointer">↻ Re-stage</button>` : ''}</td></tr>`; }).join('');
         host.innerHTML = `
-            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px"><b style="color:#ff9a3d">📜 Rigs & cranes — history</b><span style="flex:1"></span><button data-rig-act="hist-csv" style="background:none;border:1px solid #555;color:#aaa;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">⬇ CSV</button><button data-rig-act="view-live" style="background:rgba(255,154,61,0.18);border:1px solid #ff9a3d;color:#ffb060;border-radius:3px;padding:2px 10px;cursor:pointer;font-size:11px">← back to live</button></div>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px"><b style="color:#ff9a3d">📜 Rigs & cranes — history</b><span style="flex:1"></span><label style="color:#888;font-size:10px;cursor:pointer"><input type="checkbox" data-rig-histall ${all ? 'checked' : ''}> include off-site / unmatched</label><button data-rig-act="hist-csv" style="background:none;border:1px solid #555;color:#aaa;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">⬇ CSV</button><button data-rig-act="view-live" style="background:rgba(255,154,61,0.18);border:1px solid #ff9a3d;color:#ffb060;border-radius:3px;padding:2px 10px;cursor:pointer;font-size:11px">← back to live</button></div>
             <div style="font-size:11px;color:#bbb;line-height:1.7;margin-bottom:6px"><b style="color:#cfd6dc">${rows.length}</b> records · <b style="color:#cfd6dc">${done.length}</b> cleared · <b style="color:#cfd6dc">${nfzN}</b> NFZs created · <b style="color:#cfd6dc">${delN}</b> removed · avg <b style="color:#cfd6dc">${avg}</b> days on pad (cleared rows)<br>jobs: ${top(c => c.job)}<br>pads: ${top(c => c.padName)}<br>by month: ${months}</div>
             <div style="max-height:320px;overflow:auto;border:1px solid #2a2a2a;border-radius:3px"><table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr style="color:#7adfe6;text-align:left;position:sticky;top:0;background:#14171b"><th style="padding:4px 6px">Status</th><th style="padding:4px 6px">Well</th><th style="padding:4px 6px">Job</th><th style="padding:4px 6px">Pad</th><th style="padding:4px 6px">Start → End</th><th style="padding:4px 6px">Days</th><th style="padding:4px 6px">NFZ</th><th style="padding:4px 6px">Outcome</th><th></th></tr></thead><tbody>${body || '<tr><td colspan="9" style="padding:10px;color:#777">Nothing yet.</td></tr>'}</tbody></table></div>`;
+        const ha = host.querySelector('[data-rig-histall]'); if (ha) ha.onchange = () => { host.dataset.histAll = ha.checked ? '1' : '0'; rigRenderHistory(sid, host); };
         host.querySelectorAll('[data-rig-act]').forEach(b => { b.onclick = (e) => { e.stopPropagation(); const act = b.dataset.rigAct;
             if (act === 'view-live') { host.dataset.view = ''; rigRenderPanel(sid); }
             else if (act === 'restage') { const c = st.rows[b.dataset.k]; if (c) { c.status = 'staged'; c.endedWhy = ''; c.clearedAt = ''; c.deletedNfzId = null; c.nfzId = null; c.nfzName = ''; rigReclassify(sid); rigLog(sid, `re-staged from history: ${c.well}`); rigStateSave(sid); host.dataset.view = ''; rigRenderPanel(sid); rigDraw(sid); } }
