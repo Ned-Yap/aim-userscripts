@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.23
+// @version      3.24
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.23';
+    const SCRIPT_VERSION = '3.24';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -1249,11 +1249,14 @@
                 .then(() => showToast(`Coverage (${rows.length} rows) copied — paste into Google Sheets.`, '#5fff5f'), (e) => { console.warn(`${TAG} coverage: rich copy failed`, e); copyToClipboard(tsv); showToast('Copied as plain text (TSV).', '#ff9800'); });
         } catch (e) { console.warn(`${TAG} coverage: ClipboardItem unavailable`, e); copyToClipboard(tsv); showToast('Copied as plain text (TSV).', '#ff9800'); }
     }
+    // v3.24: downloads started inside the react-pages iframe are sandboxed
+    // away — build the anchor in the TOP document (same trick as the Site
+    // Setup Analyzer's KML export). Falls back to this frame, then clipboard.
     function downloadTextFile(name, text, mime) {
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(new Blob([text], { type: mime || 'text/plain' }));
-        a.download = name; document.body.appendChild(a); a.click(); a.remove();
-        setTimeout(() => { try { URL.revokeObjectURL(a.href); } catch (e) {} }, 2000);
+        const blob = new Blob([text], { type: mime || 'text/plain' });
+        const tryIn = (doc, win) => { const a = doc.createElement('a'); a.href = win.URL.createObjectURL(blob); a.download = name; a.style.display = 'none'; (doc.body || doc.documentElement).appendChild(a); a.click(); setTimeout(() => { try { a.remove(); win.URL.revokeObjectURL(a.href); } catch (e) {} }, 4000); };
+        try { const top = window.top; if (top && top !== window && top.document && top.document.body) { tryIn(top.document, top); return; } } catch (e) { console.warn(`${TAG} top-frame download blocked, trying this frame`, e); }
+        tryIn(document, window);
     }
 
     // ---- Control Panel card ----
