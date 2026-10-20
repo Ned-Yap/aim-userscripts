@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.20
+// @version      3.21
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.20';
+    const SCRIPT_VERSION = '3.21';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -570,6 +570,7 @@
     let covBySiteMonthStart = null, covBySiteWeekStart = null;   // set per fetch for the join's recount
     const covGroupsBySite = {};   // v3.18: sid → { groupId: { flights[], totals } } (rebuilt by every join; not persisted)
     const covFlightsBySite = {};  // v3.19: sid → { flightId: { gid, name, whenMs } } for id/group search
+    const covRejoinPending = {};  // v3.21: sid → rejoin in flight
     let covHasMissionId = null;   // v3.17: does /images/ `only=` accept mission_id? self-tested on the first read
     let covCfgCache = null;
     function covCfg() {
@@ -1002,7 +1003,9 @@
             const groups = covGroupsBySite[sid] || {}, flights = covFlightsBySite[sid] || {};
             const g = groups[idQ]; const fl = flights[idQ];
             const name = g ? g.name : fl ? fl.name : '';
-            idCtx = { kind: g ? 'group' : fl ? 'flight' : 'unknown', id: idQ, name, group: g || (fl && fl.gid ? groups[fl.gid] : null), planned: null };
+            const indexed = !!covGroupsBySite[sid];
+            if (!indexed && !covRejoinPending[sid]) { covRejoinPending[sid] = true; covRejoin(sid, bucket).finally(() => { covRejoinPending[sid] = false; }); }
+            idCtx = { kind: g ? 'group' : fl ? 'flight' : indexed ? 'unknown' : 'indexing', id: idQ, name, group: g || (fl && fl.gid ? groups[fl.gid] : null), planned: null };
             st.idCtx = idCtx;
         } else st.idCtx = null;
         const matchesId = r => { if (!idQ) return false; if (idCtx.kind === 'group') return (r.groupIds || []).includes(idQ); if (idCtx.kind === 'flight') return (r.flightIds || []).includes(idQ); return (r.flightIds || []).includes(idQ) || (r.groupIds || []).includes(idQ) || (r.lm && String(r.lm.id) === idQ); };
@@ -1076,7 +1079,7 @@
                 <button class="aim-mb-tbtn" data-cov-act="csv">⬇ CSV</button>
                 <button class="aim-mb-tbtn${st.paint === false ? '' : ' active'}" data-cov-act="paint" title="Paint these colours on the map (needs Map Styler → Assets → 📅 Coverage colours ON). Click to toggle.">🎨 Map ${st.paint === false ? 'off' : 'on'}</button>
             </div>
-            ${st.idCtx ? `<div style="padding:5px 10px;border-bottom:1px solid #2a2a2a;font-size:11px;background:rgba(20,210,220,0.06);color:#bbb">${st.idCtx.kind === 'unknown' ? `<b style="color:#ffb300">${escapeHtml(st.idCtx.id)}</b> is not a flight or group id in this site's log — showing assets whose last flight matches.` : `<b style="color:#14d2dc">${st.idCtx.kind === 'group' ? 'Group' : 'Flight'} ${escapeHtml(st.idCtx.id)}</b> <span style="color:#9aa">${escapeHtml(st.idCtx.name)}</span>${st.idCtx.group ? ` · ${st.idCtx.group.flights.length} flight${st.idCtx.group.flights.length === 1 ? '' : 's'} · ${escapeHtml(st.idCtx.group.label)} · assets ${st.idCtx.group.captured}${st.idCtx.group.plannedAssets != null ? ` / ${st.idCtx.group.plannedAssets} planned` : ''}${st.idCtx.group.incidental ? ` +${st.idCtx.group.incidental} incidental` : ''} · images ${st.idCtx.group.images}` : ''} — <b style="color:#e6e6e6">${rows.length}</b> asset${rows.length === 1 ? '' : 's'} captured (targeted or incidental) <span style="color:#777">· rows show this ${st.idCtx.kind === 'group' ? 'group' : 'flight'}'s fly for each asset</span>${st.idCtx.group ? ` <span data-cov-group="${escapeHtml(st.idCtx.group.id)}" style="color:#9ad;cursor:pointer;text-decoration:underline dotted">· flights ▾</span>` : ''}</span>`}</div>` : ''}
+            ${st.idCtx ? `<div style="padding:5px 10px;border-bottom:1px solid #2a2a2a;font-size:11px;background:rgba(20,210,220,0.06);color:#bbb">${st.idCtx.kind === 'indexing' ? `<b style="color:#14d2dc">Building the flight index…</b> <span style="color:#9aa">(mission log + Mission Bank) — results refine in a moment</span>` : st.idCtx.kind === 'unknown' ? `<b style="color:#ffb300">${escapeHtml(st.idCtx.id)}</b> is not a flight or group id in this site's log — showing assets whose last flight matches.` : `<b style="color:#14d2dc">${st.idCtx.kind === 'group' ? 'Group' : 'Flight'} ${escapeHtml(st.idCtx.id)}</b> <span style="color:#9aa">${escapeHtml(st.idCtx.name)}</span>${st.idCtx.group ? ` · ${st.idCtx.group.flights.length} flight${st.idCtx.group.flights.length === 1 ? '' : 's'} · ${escapeHtml(st.idCtx.group.label)} · assets ${st.idCtx.group.captured}${st.idCtx.group.plannedAssets != null ? ` / ${st.idCtx.group.plannedAssets} planned` : ''}${st.idCtx.group.incidental ? ` +${st.idCtx.group.incidental} incidental` : ''} · images ${st.idCtx.group.images}` : ''} — <b style="color:#e6e6e6">${rows.length}</b> asset${rows.length === 1 ? '' : 's'} captured (targeted or incidental) <span style="color:#777">· rows show this ${st.idCtx.kind === 'group' ? 'group' : 'flight'}'s fly for each asset</span>${st.idCtx.group ? ` <span data-cov-group="${escapeHtml(st.idCtx.group.id)}" style="color:#9ad;cursor:pointer;text-decoration:underline dotted">· flights ▾</span>` : ''}</span>`}</div>` : ''}
             <div style="padding:5px 10px;border-bottom:1px solid #2a2a2a;font-size:11px;color:#bbb;display:flex;flex-wrap:wrap;gap:4px 0;align-items:center">
                 ${sum}
                 <span style="flex:1"></span>
@@ -1196,7 +1199,13 @@
     function covRefresh(sid, force) {
         const siteKey = covSiteKey(sid);
         const cached = covLoadCached(siteKey);
-        if (cached && !force && Date.now() - cached.at < COV_TTL_MS) { covRestatus(cached); if (!panelState.cov || panelState.cov.paint !== false) covBroadcast(siteKey, cached); renderCoverageView(); return; }
+        if (cached && !force && Date.now() - cached.at < COV_TTL_MS) {
+            covRestatus(cached); if (!panelState.cov || panelState.cov.paint !== false) covBroadcast(siteKey, cached); renderCoverageView();
+            // v3.21: the flight / group index lives only in memory — rebuild it
+            // from the cached bucket after a reload so id searches work.
+            if (!covGroupsBySite[sid]) covRejoin(sid, cached);
+            return;
+        }
         updateTitle();
         setBodyHtml(`<div style="padding:40px 60px;text-align:center;color:#888">Reading flown coverage for site ${sid} (last ${covCfg().windowDays} days)…
             <div style="margin:14px auto 6px;max-width:520px;height:10px;background:#1a1a1a;border:1px solid #333;border-radius:5px;overflow:hidden"><div id="aim-mb-cov-bar" style="width:0%;height:100%;background:#14d2dc;transition:width .3s"></div></div>
