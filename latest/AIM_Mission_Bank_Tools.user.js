@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.21
+// @version      3.22
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.21';
+    const SCRIPT_VERSION = '3.22';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -565,6 +565,7 @@
         dueWithinDays: 7,                              // amber once this close to the floor
         windowDays: 92,                                // v3.16: lookback per asset read (⚙ in the panel / CP card)
         pool: 12,                                      // v3.16: parallel reads
+        ttlMin: 60,                                    // v3.22: cached results re-read automatically after this many minutes (0 = never auto, ↻ only)
         targetedOnly: true,                            // v3.17: a fly counts only when the mission PLANS the asset (incidental in-frame tags ignored)
     };
     let covBySiteMonthStart = null, covBySiteWeekStart = null;   // set per fetch for the join's recount
@@ -1072,6 +1073,7 @@
                         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span>Read back</span><span><input type="number" data-cov-cfg="windowDays" value="${cfg.windowDays}" min="31" max="730" step="1" style="width:64px;background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"> days</span></div>
                         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span>Rulebook</span><select data-cov-cfg="rulebook" style="background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"><option value="diamondback" ${cfg.rulebook === 'diamondback' ? 'selected' : ''}>Diamondback</option><option value="internal" ${cfg.rulebook === 'internal' ? 'selected' : ''}>Internal SLA</option></select></div>
                         <label style="display:flex;gap:6px;align-items:center;margin-bottom:6px;cursor:pointer"><input type="checkbox" data-cov-cfg="targetedOnly" ${cfg.targetedOnly !== false ? 'checked' : ''} style="accent-color:#14d2dc"> <span>Targeted only — a fly counts for an asset only when the mission <b>plans</b> that asset (in-frame neighbours ignored)</span></label>
+                        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span title="Opening the panel re-reads automatically once the cached result is older than this. 0 = only on ↻ Refresh.">Auto re-read after</span><span><input type="number" data-cov-cfg="ttlMin" value="${cfg.ttlMin}" min="0" max="1440" step="5" style="width:64px;background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"> min</span></div>
                         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span>Parallel reads</span><input type="number" data-cov-cfg="pool" value="${cfg.pool}" min="2" max="24" step="1" style="width:64px;background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"></div>
                         <div style="color:#777">Lookback / parallel reads apply on the next ↻ Refresh. Every number is also in the Control Panel card.</div>
                     </div></span>
@@ -1199,7 +1201,8 @@
     function covRefresh(sid, force) {
         const siteKey = covSiteKey(sid);
         const cached = covLoadCached(siteKey);
-        if (cached && !force && Date.now() - cached.at < COV_TTL_MS) {
+        const ttlMs = Math.max(0, Number(covCfg().ttlMin) || 0) * 60000;
+        if (cached && !force && (ttlMs === 0 || Date.now() - cached.at < ttlMs)) {
             covRestatus(cached); if (!panelState.cov || panelState.cov.paint !== false) covBroadcast(siteKey, cached); renderCoverageView();
             // v3.21: the flight / group index lives only in memory — rebuild it
             // from the cached bucket after a reload so id searches work.
@@ -1274,6 +1277,7 @@
                 { id: 'read-header', label: 'Reading', type: 'header' },
                 { id: 'windowDays', label: 'Read back (lookback per asset)', type: 'number', min: 31, max: 730, step: 1, default: c.windowDays, unit: 'days' },
                 { id: 'pool', label: 'Parallel reads', type: 'number', min: 2, max: 24, step: 1, default: c.pool },
+                { id: 'ttlMin', label: 'Auto re-read when cached result is older than (0 = ↻ only)', type: 'number', min: 0, max: 1440, step: 5, default: c.ttlMin, unit: 'min' },
             ],
         });
     }
