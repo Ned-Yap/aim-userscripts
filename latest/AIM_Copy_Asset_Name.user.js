@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.381
+// @version      4.382
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.381';
+    const SCRIPT_VERSION = '4.382';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -231,6 +231,17 @@
     // Declared HERE (not in the importer section) because registerWithControlPanel
     // runs at init and references them — a later const would TDZ-throw.
     const IMP_SCRIPT_ID = 'aim-asset-importer';
+    // v4.382: 🏗 Rigs & cranes declarations hoisted here — the CP message handler
+    // compares scriptIds on EVERY message and some frames return early before the
+    // module body below runs (TDZ → 'Cannot access RIG_SCRIPT_ID before initialization').
+    const RIG_SCRIPT_ID = 'aim-rig-nfz';
+    const RIG_TAG = '[AIM RIG]';
+    const RIG_TAG_PREFIX = 'AIM RIG NFZ|';
+    const RIG_COLS = ['WELL_NAME', 'SURFACE_LATITUDE', 'SURFACE_LONGITUDE', 'JOB_TYPE_CATEGORY', 'START_DATE', 'END_DATE'];
+    const RIG_DEFAULT_CFG = { nearPadFt: 500, insetFt: 15, graceDays: 1, snoozeDays: 3, exclude: '' };
+    const RIG_STATUS_LABEL = { upcoming: 'Upcoming', staged: 'Staged', active: 'Active NFZ', ending: 'VERIFY — gone?', cleared: 'Cleared', unmatched: 'Unmatched', offsite: 'Off-site' };
+    const RIG_STATUS_COLOR = { upcoming: '#ffb300', staged: '#7adfe6', active: '#ff5555', ending: '#ff9100', cleared: '#8a8f98', unmatched: '#ff6060', offsite: '#666' };
+    let rigCfgCache = null, rigLayers = [], rigRowsByKey = null, rigStateSid = null;
     let impMasterEnabled = true;
     // v4.325: 🔍 Scan Import (#289) — CP card ids + init-referenced lets (TDZ rule).
     const SCI_SCRIPT_ID = 'aim-scan-import';
@@ -29930,14 +29941,7 @@
     // not forgotten (LILLY 49 UNIT 3LS lost a month that way, 2026-09-22).
     // Source today = CSV dropped on the panel; the Apps Script bridge feeds the
     // same ingest later. State per site in GM (`aim-rig-state:<env-sid>`).
-    const RIG_SCRIPT_ID = 'aim-rig-nfz';
-    const RIG_TAG = '[AIM RIG]';
-    const RIG_TAG_PREFIX = 'AIM RIG NFZ|';
-    const RIG_COLS = ['WELL_NAME', 'SURFACE_LATITUDE', 'SURFACE_LONGITUDE', 'JOB_TYPE_CATEGORY', 'START_DATE', 'END_DATE'];
-    const RIG_DEFAULT_CFG = { nearPadFt: 500, insetFt: 15, graceDays: 1, snoozeDays: 3, exclude: '' };
-    const RIG_STATUS_LABEL = { upcoming: 'Upcoming', staged: 'Staged', active: 'Active NFZ', ending: 'VERIFY — gone?', cleared: 'Cleared', unmatched: 'Unmatched', offsite: 'Off-site' };
-    const RIG_STATUS_COLOR = { upcoming: '#ffb300', staged: '#7adfe6', active: '#ff5555', ending: '#ff9100', cleared: '#8a8f98', unmatched: '#ff6060', offsite: '#666' };
-    let rigCfgCache = null, rigLayers = [], rigRowsByKey = null, rigStateSid = null;
+    // (RIG_* constants + state live at the top of the IIFE — TDZ rule, see v4.382)
     function rigCfg() { if (rigCfgCache) return rigCfgCache; const o = elevGmGet('aim-rig-cfg', {}); rigCfgCache = Object.assign({}, RIG_DEFAULT_CFG, (o && typeof o === 'object') ? o : {}); return rigCfgCache; }
     function rigCfgSet(k, v) { const c = rigCfg(); if (c[k] === v) return; c[k] = v; elevGmSet('aim-rig-cfg', c); }
     function rigEnvKey(sid) { return `${/(^|\.)qa\.percepto\.app$/.test(location.hostname) ? 'qa-' : ''}${sid}`; }
