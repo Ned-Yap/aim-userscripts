@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.19
+// @version      3.20
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.19';
+    const SCRIPT_VERSION = '3.20';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -832,7 +832,7 @@
             else { groupLabel = 'Complete with aborts'; groupKind = 'mixed'; }
             const gid = t && t.missionGroup != null && Number(t.missionGroup) >= 0 ? String(t.missionGroup) : '';
             if (gid && !groups[gid]) groups[gid] = { id: gid, name: f0.mission, expected, doneN, progN, abortN, label: groupLabel, kind: groupKind, images: gImgs, plannedImages: gPlanned, captured: gT.size, incidental: gI.size, plannedAssets: plan ? plan.size : null,
-                flights: flights.map(fl => ({ id: fl.id, whenMs: fl.whenMs, pilot: fl.createdBy, drone: fl.drone, state: fl.stateLabel, aborted: !!fl._aborted, images: fl.images, plannedImages: fl.plannedImages, durationS: fl.durationS })) };
+                flights: flights.map(fl => { const c = capFor(fl, fl.name, covDayKey(new Date(fl.whenMs).toISOString())); return { id: fl.id, whenMs: fl.whenMs, pilot: fl.createdBy, drone: fl.drone, state: fl.stateLabel, aborted: !!fl._aborted, images: fl.images, plannedImages: fl.plannedImages, durationS: fl.durationS, captured: c.t.size, incidental: c.i.size }; }) };
             r.lm = {
                 id: t ? t.id : null, group: t ? t.missionGroup : '', pilot: t ? t.createdBy : '', state: t ? t.stateLabel : '', aborted: !!(t && t._aborted),
                 drone: t ? t.drone : '', durationS: t ? t.durationS : null, whenMs: t ? t.whenMs : null,
@@ -1008,6 +1008,23 @@
         const matchesId = r => { if (!idQ) return false; if (idCtx.kind === 'group') return (r.groupIds || []).includes(idQ); if (idCtx.kind === 'flight') return (r.flightIds || []).includes(idQ); return (r.flightIds || []).includes(idQ) || (r.groupIds || []).includes(idQ) || (r.lm && String(r.lm.id) === idQ); };
         let rows = bucket.recs.filter(r => (!st.tier || (r.tier || 'none') === st.tier) && (!st.status || r.status === st.status)
             && (!q || (idQ ? matchesId(r) : (r.name.toLowerCase().includes(q) || (r.pad || '').toLowerCase().includes(q) || (r.lastMission || '').toLowerCase().includes(q) || lmStr(r).includes(q)))));
+        // v3.20: in an id search every row describes the searched flight / group
+        // for that asset (its fly in that group, that flight's pilot / result /
+        // images), not the asset's own last flight.
+        if (idQ && idCtx.group) {
+            const g = idCtx.group; const flights = covFlightsBySite[sid] || {};
+            const inGroup = mid => mid != null && flights[String(mid)] && flights[String(mid)].gid === String(g.id);
+            rows = rows.map(r => {
+                const fly = (r.fliesAll || []).find(f => idCtx.kind === 'flight' ? String(f.mid) === idQ : inGroup(f.mid));
+                if (!fly) return r;
+                const fl = g.flights.find(x => String(x.id) === String(fly.mid)) || null;
+                const lm = { id: fl ? fl.id : fly.mid, group: g.id, pilot: fl ? fl.pilot : '', drone: fl ? fl.drone : '', state: fl ? fl.state : '', aborted: !!(fl && fl.aborted), durationS: fl ? fl.durationS : null, whenMs: fl ? fl.whenMs : null,
+                    images: fl ? fl.images : null, plannedImages: fl ? fl.plannedImages : null, captured: fl ? fl.captured : 0, incidental: fl ? fl.incidental : 0, plannedAssets: g.plannedAssets,
+                    flights: g.flights.length, expected: g.expected, doneN: g.doneN, progN: g.progN, abortN: g.abortN, groupKind: g.kind, groupLabel: g.label, groupDone: g.kind === 'done', groupAborted: g.kind === 'abort',
+                    groupCaptured: g.captured, groupIncidental: g.incidental, groupImages: g.images, groupPlannedImages: g.plannedImages };
+                return Object.assign({}, r, { lm, lastAt: fly.at, lastMission: fly.mission, _ctx: true });
+            });
+        }
         const col = COV_COL_BY_ID[panelState.sortKey] || COV_COL_BY_ID.status;
         const dir = panelState.sortDir === 'asc' ? 1 : -1;
         rows.sort((a, b) => { const x = col.sort(a), y = col.sort(b); return (x < y ? -1 : x > y ? 1 : a.name.localeCompare(b.name)) * dir; });
@@ -1059,7 +1076,7 @@
                 <button class="aim-mb-tbtn" data-cov-act="csv">⬇ CSV</button>
                 <button class="aim-mb-tbtn${st.paint === false ? '' : ' active'}" data-cov-act="paint" title="Paint these colours on the map (needs Map Styler → Assets → 📅 Coverage colours ON). Click to toggle.">🎨 Map ${st.paint === false ? 'off' : 'on'}</button>
             </div>
-            ${st.idCtx ? `<div style="padding:5px 10px;border-bottom:1px solid #2a2a2a;font-size:11px;background:rgba(20,210,220,0.06);color:#bbb">${st.idCtx.kind === 'unknown' ? `<b style="color:#ffb300">${escapeHtml(st.idCtx.id)}</b> is not a flight or group id in this site's log — showing assets whose last flight matches.` : `<b style="color:#14d2dc">${st.idCtx.kind === 'group' ? 'Group' : 'Flight'} ${escapeHtml(st.idCtx.id)}</b> <span style="color:#9aa">${escapeHtml(st.idCtx.name)}</span>${st.idCtx.group ? ` · ${st.idCtx.group.flights.length} flight${st.idCtx.group.flights.length === 1 ? '' : 's'} · ${escapeHtml(st.idCtx.group.label)} · assets ${st.idCtx.group.captured}${st.idCtx.group.plannedAssets != null ? ` / ${st.idCtx.group.plannedAssets} planned` : ''}${st.idCtx.group.incidental ? ` +${st.idCtx.group.incidental} incidental` : ''} · images ${st.idCtx.group.images}` : ''} — <b style="color:#e6e6e6">${rows.length}</b> asset${rows.length === 1 ? '' : 's'} captured (any flight, targeted or incidental)${st.idCtx.group ? ` <span data-cov-group="${escapeHtml(st.idCtx.group.id)}" style="color:#9ad;cursor:pointer;text-decoration:underline dotted">· flights ▾</span>` : ''}</span>`}</div>` : ''}
+            ${st.idCtx ? `<div style="padding:5px 10px;border-bottom:1px solid #2a2a2a;font-size:11px;background:rgba(20,210,220,0.06);color:#bbb">${st.idCtx.kind === 'unknown' ? `<b style="color:#ffb300">${escapeHtml(st.idCtx.id)}</b> is not a flight or group id in this site's log — showing assets whose last flight matches.` : `<b style="color:#14d2dc">${st.idCtx.kind === 'group' ? 'Group' : 'Flight'} ${escapeHtml(st.idCtx.id)}</b> <span style="color:#9aa">${escapeHtml(st.idCtx.name)}</span>${st.idCtx.group ? ` · ${st.idCtx.group.flights.length} flight${st.idCtx.group.flights.length === 1 ? '' : 's'} · ${escapeHtml(st.idCtx.group.label)} · assets ${st.idCtx.group.captured}${st.idCtx.group.plannedAssets != null ? ` / ${st.idCtx.group.plannedAssets} planned` : ''}${st.idCtx.group.incidental ? ` +${st.idCtx.group.incidental} incidental` : ''} · images ${st.idCtx.group.images}` : ''} — <b style="color:#e6e6e6">${rows.length}</b> asset${rows.length === 1 ? '' : 's'} captured (targeted or incidental) <span style="color:#777">· rows show this ${st.idCtx.kind === 'group' ? 'group' : 'flight'}'s fly for each asset</span>${st.idCtx.group ? ` <span data-cov-group="${escapeHtml(st.idCtx.group.id)}" style="color:#9ad;cursor:pointer;text-decoration:underline dotted">· flights ▾</span>` : ''}</span>`}</div>` : ''}
             <div style="padding:5px 10px;border-bottom:1px solid #2a2a2a;font-size:11px;color:#bbb;display:flex;flex-wrap:wrap;gap:4px 0;align-items:center">
                 ${sum}
                 <span style="flex:1"></span>
