@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.22
+// @version      3.23
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.22';
+    const SCRIPT_VERSION = '3.23';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -963,6 +963,8 @@
           cell: r => { const lm = r.lm; if (!lm) return '<td></td>'; return `<td style="text-align:center">${lm.captured}${lm.plannedAssets != null ? ` / ${lm.plannedAssets}` : ''}${lm.incidental ? ` <span style="color:#777">+${lm.incidental}</span>` : ''}</td>`; } },
         { id: 'gimgs', label: 'Images', title: 'Whole mission group: images uploaded / planned — ⏳ still capturing', def: true, sort: r => (r.lm && r.lm.groupImages) || 0, val: r => r.lm && r.lm.flights ? `${r.lm.groupImages}${r.lm.groupPlannedImages ? ' / ' + r.lm.groupPlannedImages : ''}` : '',
           cell: r => { const lm = r.lm; if (!lm || !lm.flights) return '<td></td>'; const inProg = lm.groupPlannedImages && lm.groupImages < lm.groupPlannedImages && !lm.groupDone; return `<td style="text-align:center;color:${inProg ? '#ffb300' : '#9aa'}">${lm.groupImages}${lm.groupPlannedImages ? ` / ${lm.groupPlannedImages}` : ''}${inProg ? ' ⏳' : ''}</td>`; } },
+        { id: 'gsnaps', label: 'Snapshots', title: 'Whole mission group: snapshots ≈ images ÷ 2 (RGB + thermal), ÷ 3 for an OGI drone', def: false, sort: r => (r.lm && r.lm.groupImages) || 0, val: r => r.lm && r.lm.flights ? covSnaps(r.lm.groupImages, r.lm.drone) : '', cell: r => `<td style="text-align:center;color:#9aa">${r.lm && r.lm.flights ? covSnaps(r.lm.groupImages, r.lm.drone) : ''}</td>` },
+        { id: 'snaps', label: 'Flight snapshots', title: 'This flight: images ÷ 2 (÷ 3 for an OGI drone)', def: false, sort: r => (r.lm && r.lm.images) || 0, val: r => r.lm && r.lm.images != null ? covSnaps(r.lm.images, r.lm.drone) : '', cell: r => `<td style="text-align:center;color:#9aa">${r.lm && r.lm.images != null ? covSnaps(r.lm.images, r.lm.drone) : ''}</td>` },
         { id: 'imgs', label: 'Flight images', title: 'This flight only: images uploaded / planned', def: false, sort: r => (r.lm && r.lm.images) || 0, val: r => r.lm && r.lm.images != null ? `${r.lm.images}${r.lm.plannedImages ? ' / ' + r.lm.plannedImages : ''}` : '',
           cell: r => { const lm = r.lm; const inProg = lm && lm.plannedImages && lm.images != null && lm.images < lm.plannedImages; return `<td style="text-align:center;color:${inProg ? '#ffb300' : '#9aa'}">${lm && lm.images != null ? `${lm.images}${lm.plannedImages ? ` / ${lm.plannedImages}` : ''}` : ''}${inProg ? ' ⏳' : ''}</td>`; } },
         { id: 'incidental', label: 'Incidental flies', title: 'Flies where this asset was only in frame (not planned by that mission) — ignored for status when "targeted only" is on', def: false, sort: r => r.incidental || 0, val: r => r.incidental || 0, cell: r => `<td style="text-align:center;color:#777">${r.incidental || 0}${r.lastIncidentalAt ? ` <span title="last incidental: ${escapeHtml(r.lastIncidentalMission || '')}">(${covFmtDate(r.lastIncidentalAt)})</span>` : ''}</td>` },
@@ -976,6 +978,9 @@
         { id: 'type', label: 'Type', title: 'custom.poi_type_str', def: false, sort: r => (r.poi || '').toLowerCase(), asc: true, val: r => r.poi || '', cell: r => `<td style="color:#9aa">${escapeHtml(r.poi || '')}</td>` },
     ];
     const COV_COL_BY_ID = Object.fromEntries(COV_COLS.map(c => [c.id, c]));
+    // v3.23: images per snapshot by drone — RGB + thermal = 2; an OGI drone adds the OGI frame = 3.
+    function covImgsPerSnap(drone) { return /\bogi\b/i.test(String(drone || '')) ? 3 : 2; }
+    function covSnaps(images, drone) { return images == null ? null : Math.round(images / covImgsPerSnap(drone)); }
     function covFmtDur(sec) { sec = Math.max(0, Math.round(sec)); const m = Math.floor(sec / 60), s2 = sec % 60; return `${m}:${String(s2).padStart(2, '0')}`; }
     let covColsCache = null;
     function covColsState() {
@@ -1169,11 +1174,11 @@
         const fmtWhen = ms => ms ? new Date(ms).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
         const rows = g.flights.slice().sort((a, b) => (a.whenMs || 0) - (b.whenMs || 0)).map((f, i) => {
             const bad = f.aborted || /abort|fail|cancel/i.test(f.state || ''); const ok = /complet/i.test(f.state || '') && !f.aborted;
-            return `<tr><td style="color:#777">${i + 1}</td><td><a href="${covMissionUrl(sid, f.id)}" data-cov-link style="color:#14d2dc">${f.id}</a></td><td>${escapeHtml(fmtWhen(f.whenMs))}</td><td style="color:#9aa">${escapeHtml(f.pilot || '')}</td><td style="color:#9aa">${escapeHtml(f.drone || '')}</td><td style="color:${ok ? '#39ff14' : bad ? '#ff5252' : '#ffb300'}">${escapeHtml(f.state || '')}${f.aborted && !/abort/i.test(f.state || '') ? ' (aborted)' : ''}</td><td style="text-align:center">${f.images != null ? `${f.images}${f.plannedImages ? ' / ' + f.plannedImages : ''}` : ''}</td><td style="text-align:center;color:#9aa">${f.durationS != null ? covFmtDur(f.durationS) : ''}</td></tr>`;
+            return `<tr><td style="color:#777">${i + 1}</td><td><a href="${covMissionUrl(sid, f.id)}" data-cov-link style="color:#14d2dc">${f.id}</a></td><td>${escapeHtml(fmtWhen(f.whenMs))}</td><td style="color:#9aa">${escapeHtml(f.pilot || '')}</td><td style="color:#9aa">${escapeHtml(f.drone || '')}</td><td style="color:${ok ? '#39ff14' : bad ? '#ff5252' : '#ffb300'}">${escapeHtml(f.state || '')}${f.aborted && !/abort/i.test(f.state || '') ? ' (aborted)' : ''}</td><td style="text-align:center">${f.images != null ? `${f.images}${f.plannedImages ? ' / ' + f.plannedImages : ''}` : ''}</td><td style="text-align:center;color:#9aa">${f.images != null ? covSnaps(f.images, f.drone) : ''}</td><td style="text-align:center;color:#9aa">${f.durationS != null ? covFmtDur(f.durationS) : ''}</td></tr>`;
         }).join('');
         pop.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><b style="color:#14d2dc">Group ${escapeHtml(String(g.id))}</b> <span style="color:#9aa">${escapeHtml(g.name)}</span> <span style="color:${col};font-weight:700">${escapeHtml(g.label)}</span> <span style="color:#777">${g.doneN} done${g.abortN ? ` · ${g.abortN} aborted` : ''}${g.progN ? ` · ${g.progN} in progress` : ''} of ${g.flights.length} flown${g.expected ? ` · ~${g.expected} expected` : ''}</span><span style="flex:1"></span><button data-cov-group-close style="background:none;border:1px solid #444;color:#aaa;border-radius:3px;cursor:pointer;padding:0 6px">✕</button></div>
             <div style="color:#9aa;margin-bottom:6px">Assets: <b style="color:#e6e6e6">${g.captured}${g.plannedAssets != null ? ` / ${g.plannedAssets}` : ''}</b>${g.incidental ? ` <span style="color:#777">+${g.incidental} incidental</span>` : ''} · Images: <b style="color:#e6e6e6">${g.images}${g.plannedImages ? ` / ${g.plannedImages}` : ''}</b></div>
-            <table style="width:100%;border-collapse:collapse"><thead><tr style="color:#14d2dc;text-align:left"><th>#</th><th>Flight</th><th>Start</th><th>Pilot</th><th>Drone</th><th>Result</th><th style="text-align:center">Images</th><th style="text-align:center">Dur</th></tr></thead><tbody>${rows}</tbody></table>
+            <table style="width:100%;border-collapse:collapse"><thead><tr style="color:#14d2dc;text-align:left"><th>#</th><th>Flight</th><th>Start</th><th>Pilot</th><th>Drone</th><th>Result</th><th style="text-align:center">Images</th><th style="text-align:center" title="images ÷ 2, ÷ 3 for an OGI drone">Snaps</th><th style="text-align:center">Dur</th></tr></thead><tbody>${rows}</tbody></table>
             <div style="color:#777;margin-top:6px">Expected flights = the median flight count of this mission's completed groups in the log (battery estimate when there is no history). Type the group id in the panel search to list every asset it captured or planned.</div>`;
         document.body.appendChild(pop);
         pop.querySelector('[data-cov-group-close]').onclick = () => pop.remove();

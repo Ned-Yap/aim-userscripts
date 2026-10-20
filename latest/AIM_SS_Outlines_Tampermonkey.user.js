@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.168
+// @version      34.169
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.168';
+    const SCRIPT_VERSION = '34.169';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1238,7 +1238,9 @@
         // type/state suggestion lists populate from it. Fetch is cached +
         // idempotent per site, so calling it each run is cheap.
         const assetByStateOn = !!(toggleState['asset.show'] && toggleState['asset.by-state']);
-        const covOn = !!(toggleState['asset.show'] && toggleState['asset.coverage']);   // v34.166 coverage colours
+        // v34.166 coverage colours — v34.169: never on Mission Playback (its FOV /
+        // aim polygons get mis-matched to assets → the whole map pulsed red).
+        const covOn = !!(toggleState['asset.show'] && toggleState['asset.coverage']) && !/\/past-mission\//.test(String((() => { try { return window.top.location.hash; } catch (e) { return location.hash; } })() || ''));
         // Coverage needs the asset polygons too, even when custom styles are off.
         const assetDataWanted = !!toggleState['asset.show'];
         if (assetDataWanted) {
