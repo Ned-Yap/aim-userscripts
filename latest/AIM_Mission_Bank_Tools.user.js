@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.16
+// @version      3.17
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.16';
+    const SCRIPT_VERSION = '3.17';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -565,7 +565,10 @@
         dueWithinDays: 7,                              // amber once this close to the floor
         windowDays: 92,                                // v3.16: lookback per asset read (⚙ in the panel / CP card)
         pool: 12,                                      // v3.16: parallel reads
+        targetedOnly: true,                            // v3.17: a fly counts only when the mission PLANS the asset (incidental in-frame tags ignored)
     };
+    let covBySiteMonthStart = null, covBySiteWeekStart = null;   // set per fetch for the join's recount
+    let covHasMissionId = null;   // v3.17: does /images/ `only=` accept mission_id? self-tested on the first read
     let covCfgCache = null;
     function covCfg() {
         if (covCfgCache) return covCfgCache;
@@ -655,7 +658,7 @@
 
     // ---- fetch ----
     function covImagesUrl(sid, assetId, afterSec, beforeSec, limit) {
-        const q = [`site=${encodeURIComponent(sid)}`, `poi=${encodeURIComponent(assetId)}`, `limit=${limit}`, 'only=id,created_at,mission_name,type'];
+        const q = [`site=${encodeURIComponent(sid)}`, `poi=${encodeURIComponent(assetId)}`, `limit=${limit}`, `only=id,created_at,mission_name,type${covHasMissionId === false ? '' : ',mission_id'}`];
         // Server 500s on when_after WITHOUT when_before (seen live 2026-10-19) — always send both or neither.
         if (afterSec && beforeSec) { q.push(`when_after=${afterSec}`); q.push(`when_before=${beforeSec}`); }
         return `/images/?${q.join('&')}`;
@@ -681,11 +684,18 @@
         const rec = { id: a.id, poiId: a.poiId, name: a.name, pad, tier: covTierOf(a.poi), poi: a.poi || '', lastAt: null, lastMission: '', lm: null, monthFlies: 0, weekFlies: 0, monthImages: 0, totalImages: null, flies: [], planned: false, err: '' };
         if (a.poiId == null) { rec.err = 'asset has no custom.poi_id — cannot query images'; return rec; }
         try {
-            const j = await covFetchJson(covImagesUrl(sid, a.poiId, monthStartSec, nowSec, 200));
+            let j;
+            try { j = await covFetchJson(covImagesUrl(sid, a.poiId, monthStartSec, nowSec, 200)); }
+            catch (e) {
+                // self-test: if the server rejects `mission_id` in only=, drop it for the rest of the run
+                if (covHasMissionId !== false && e && e.status === 400 && /mission_id|only/i.test(String(e.body || ''))) { covHasMissionId = false; console.warn(`${TAG} coverage: /images/ only= does not accept mission_id — joining flights by name + time`); j = await covFetchJson(covImagesUrl(sid, a.poiId, monthStartSec, nowSec, 200)); }
+                else throw e;
+            }
+            if (covHasMissionId === null) { const r0 = j && j.results && j.results[0]; covHasMissionId = !!(r0 && r0.mission_id != null); if (r0) console.log(`${TAG} coverage: image rows ${covHasMissionId ? 'carry' : 'do not carry'} mission_id`); }
             const rows = ((j && j.results) || []).filter(im => im && im.created_at);
-            const flies = new Map();          // "day|mission" → newest iso (whole window; month/week counted below)
-            rows.forEach(im => { const k = `${covDayKey(im.created_at)}|${im.mission_name || ''}`; if (!flies.has(k) || flies.get(k) < im.created_at) flies.set(k, im.created_at); });
-            rec.flies = [...flies.entries()].map(([k, at]) => ({ day: k.split('|')[0], mission: k.split('|')[1], at })).sort((x, y) => y.at < x.at ? -1 : 1);
+            const flies = new Map();          // flight (mission_id) or "day|mission" → newest iso
+            rows.forEach(im => { const k = im.mission_id != null ? `m${im.mission_id}` : `${covDayKey(im.created_at)}|${im.mission_name || ''}`; const cur = flies.get(k); if (!cur || cur.at < im.created_at) flies.set(k, { at: im.created_at, mission: im.mission_name || '', mid: im.mission_id != null ? im.mission_id : null }); });
+            rec.flies = [...flies.values()].map(v => ({ day: covDayKey(v.at), mission: v.mission, at: v.at, mid: v.mid })).sort((x, y) => y.at < x.at ? -1 : 1);
             rec.monthImages = rows.filter(im => new Date(im.created_at) >= monthStartLocal).length;
             rec.monthFlies = rec.flies.filter(f => new Date(f.at) >= monthStartLocal).length;
             rec.weekFlies = rec.flies.filter(f => new Date(f.at) >= weekStart).length;
@@ -711,10 +721,18 @@
     // Images carry only the mission NAME, so the takeoff mission is the log
     // row with that app name whose start is closest before the image.
     function covJoinMissions(sid, ent, recs) {
+        const cfg = covCfg();
         const logRows = (logBySite[sid] && logBySite[sid].rows) ? buildLogRows(sid) : [];
+        const byId = new Map(logRows.map(r => [r.id, r]));
         const byName = new Map();
-        logRows.forEach(r => { if (!r.name || !r.whenMs) return; const k = r.name.toUpperCase(); if (!byName.has(k)) byName.set(k, []); byName.get(k).push(r); });
+        const byGroup = new Map();
+        logRows.forEach(r => {
+            if (r.name && r.whenMs) { const k = r.name.toUpperCase(); if (!byName.has(k)) byName.set(k, []); byName.get(k).push(r); }
+            const g = (r.missionGroup != null && r.missionGroup !== '' && Number(r.missionGroup) >= 0) ? String(r.missionGroup) : null;
+            if (g) { if (!byGroup.has(g)) byGroup.set(g, []); byGroup.get(g).push(r); }
+        });
         byName.forEach(list => list.sort((a, b) => a.whenMs - b.whenMs));
+        byGroup.forEach(list => list.sort((a, b) => a.whenMs - b.whenMs));
         const findTakeoff = (name, atIso) => {
             const list = byName.get(String(name || '').toUpperCase()); if (!list) return null;
             const at = Date.parse(atIso); let best = null;
@@ -722,34 +740,92 @@
             if (best && at - best.whenMs > 12 * 3600000) return null;   // nothing within 12 h → unknown
             return best;
         };
-        // planned assets per mission NAME: pads the Mission Bank app visits + every asset nested under them
+        const flightOf = f => (f.mid && byId.get(f.mid)) || findTakeoff(f.mission, f.at);
+        // planned assets per mission NAME (Set of asset ids): pads the Mission
+        // Bank app visits + every asset nested under them. Missing name → null
+        // (renamed / deleted mission: plan unknown, nothing is filtered).
         const apps = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
         const plannedByName = new Map();
         if (apps.length && ent && ent.assets) {
             let det = null;
             try { det = mcvDetect(ent, apps); } catch (e) { console.warn(`${TAG} coverage: mcvDetect failed`, e); }
-            const byId = new Map(ent.assets.map(a => [a.id, a]));
+            const assetById = new Map(ent.assets.map(a => [a.id, a]));
             const padsOf = new Map();
             ((det && det.macros) || []).forEach(x => padsOf.set(x.mission.id, x.pads));
             ((det && det.solos) || []).forEach(x => padsOf.set(x.mission.id, [x.pad]));
             apps.forEach(app => {
                 const pads = padsOf.get(app.id) || [];
                 const set = new Set();
-                pads.forEach(p => { set.add(p.id); const a = byId.get(p.id); (a && a.descendants || []).forEach(d => set.add(d)); });
-                plannedByName.set(String(app.name || '').toUpperCase(), set.size);
+                pads.forEach(p => { set.add(p.id); const a = assetById.get(p.id); (a && a.descendants || []).forEach(d => set.add(d)); });
+                plannedByName.set(String(app.name || '').trim().toUpperCase(), set);
             });
         }
-        // captured so far = assets holding ≥1 image from (mission name, day)
-        const capturedByKey = new Map();
-        recs.forEach(r => (r.flies || []).forEach(f => { const k = `${String(f.mission).toUpperCase()}|${f.day}`; capturedByKey.set(k, (capturedByKey.get(k) || 0) + 1); }));
+        const planOf = name => plannedByName.get(String(name || '').trim().toUpperCase()) || null;
+        // v3.17 targeted-only: a fly counts for an asset only when that
+        // mission PLANS the asset (a photo tags every asset in view, so
+        // neighbours behind / beside the target get "inspected" for free).
+        recs.forEach(r => {
+            const all = r.fliesAll || r.flies || [];
+            r.fliesAll = all;
+            const targeted = all.filter(f => { const ps = planOf(f.mission); return !ps || ps.has(r.id); });
+            r.incidental = all.length - targeted.length;
+            const use = cfg.targetedOnly !== false ? targeted : all;
+            r.flies = use;
+            const mStart = new Date(covBySiteMonthStart || 0);
+            r.monthFlies = use.filter(f => new Date(f.at) >= mStart).length;
+            r.weekFlies = use.filter(f => new Date(f.at) >= new Date(covBySiteWeekStart || 0)).length;
+            if (use.length) { r.lastAt = use[0].at; r.lastMission = use[0].mission; }
+            else if (all.length) { r.lastAt = null; r.lastMission = ''; r.lastIncidentalAt = all[0].at; r.lastIncidentalMission = all[0].mission; }
+        });
+        // captured sets: per flight (mission id) and per (name, day) fallback,
+        // split into targeted vs incidental.
+        const capByFlight = new Map(), capByKey = new Map();
+        const add = (map, k, id, targeted) => { let o = map.get(k); if (!o) { o = { t: new Set(), i: new Set() }; map.set(k, o); } (targeted ? o.t : o.i).add(id); };
+        recs.forEach(r => (r.fliesAll || []).forEach(f => {
+            const ps = planOf(f.mission); const targeted = !ps || ps.has(r.id);
+            if (f.mid) add(capByFlight, String(f.mid), r.id, targeted);
+            add(capByKey, `${String(f.mission).toUpperCase()}|${f.day}`, r.id, targeted);
+        }));
+        const capFor = (flight, name, day) => (flight && capByFlight.get(String(flight.id))) || capByKey.get(`${String(name).toUpperCase()}|${day}`) || { t: new Set(), i: new Set() };
         recs.forEach(r => {
             r.lm = null;
-            if (!r.lastAt || !r.lastMission) return;
-            const t = findTakeoff(r.lastMission, r.lastAt);
-            const key = `${r.lastMission.toUpperCase()}|${covDayKey(r.lastAt)}`;
-            r.lm = { id: t ? t.id : null, group: t ? t.missionGroup : '', pilot: t ? t.createdBy : '', state: t ? t.stateLabel : '', aborted: !!(t && t._aborted), drone: t ? t.drone : '', durationS: t ? t.durationS : null, whenMs: t ? t.whenMs : null, images: t ? t.images : null, plannedImages: t ? t.plannedImages : null,
-                plannedAssets: plannedByName.has(r.lastMission.toUpperCase()) ? plannedByName.get(r.lastMission.toUpperCase()) : null, captured: capturedByKey.get(key) || 0 };
+            const f0 = (r.flies && r.flies[0]) || null;
+            if (!f0) return;
+            const t = flightOf(f0);
+            const plan = planOf(f0.mission);
+            const flights = (t && t.missionGroup != null && Number(t.missionGroup) >= 0 && byGroup.get(String(t.missionGroup))) || (t ? [t] : []);
+            const fc = capFor(t, f0.mission, f0.day);
+            const gT = new Set(), gI = new Set();
+            if (flights.length > 1) flights.forEach(fl => { const c = capFor(fl, fl.name, covDayKey(new Date(fl.whenMs).toISOString())); c.t.forEach(x => gT.add(x)); c.i.forEach(x => gI.add(x)); });
+            else { fc.t.forEach(x => gT.add(x)); fc.i.forEach(x => gI.add(x)); }
+            const done = flights.length > 0 && flights.every(fl => fl.stateCode === 2 && !fl._aborted);
+            const aborted = flights.some(fl => fl._aborted || fl.stateCode === 3 || fl.stateCode === 4 || fl.stateCode === 5);
+            const sum = k => flights.reduce((a, fl) => a + (Number(fl[k]) || 0), 0);
+            const gImgs = sum('images'), gPlanned = sum('plannedImages');
+            r.lm = {
+                id: t ? t.id : null, group: t ? t.missionGroup : '', pilot: t ? t.createdBy : '', state: t ? t.stateLabel : '', aborted: !!(t && t._aborted),
+                drone: t ? t.drone : '', durationS: t ? t.durationS : null, whenMs: t ? t.whenMs : null,
+                images: t ? t.images : null, plannedImages: t ? t.plannedImages : null,
+                captured: fc.t.size, incidental: fc.i.size, plannedAssets: plan ? plan.size : null,
+                flights: flights.length, groupDone: done, groupAborted: aborted, groupLabel: !flights.length ? '' : done ? 'Complete' : aborted ? 'Aborted' : 'In progress',
+                groupCaptured: gT.size, groupIncidental: gI.size, groupImages: gImgs, groupPlannedImages: gPlanned,
+            };
         });
+    }
+    // Re-run the mission join on a cached bucket (toggle flipped, reload): make
+    // sure entities / log / apps are loaded first, then restatus + repaint.
+    async function covRejoin(sid, bucket) {
+        try {
+            const ent = await genFetchEntities(sid);
+            await Promise.all([
+                new Promise(res => { if (logBySite[sid]) return res(); fetchMissionLog(sid, () => res(), () => res()); }),
+                new Promise(res => { if (missionsBySite[sid]) return res(); fetchMissions(sid, () => res(), () => res()); }),
+            ]);
+            covBySiteMonthStart = bucket.monthStart; covBySiteWeekStart = bucket.weekStart;
+            covJoinMissions(sid, ent, bucket.recs);
+            covRestatus(bucket); covPersist(covSiteKey(sid), bucket); covBroadcast(covSiteKey(sid), bucket);
+            if (panelState && panelState.mode === 'coverage') renderCoverageView();
+        } catch (e) { console.warn(`${TAG} coverage: re-join failed`, e); }
     }
     function covMissionUrl(sid, mid) { return `${location.origin}/#/site/${sid}/control-panel/past-mission/${mid}`; }
     function covFetch(sid, onProgress) {
@@ -771,6 +847,7 @@
             const windowDays = Math.max(31, Math.min(730, Number(cfg0.windowDays) || 92));
             const pool = Math.max(2, Math.min(24, Number(cfg0.pool) || 12));
             const winStart = new Date(now.getTime() - windowDays * 86400000);
+            covBySiteMonthStart = monthStart.toISOString(); covBySiteWeekStart = weekStart.toISOString();
             const monthStartSec = Math.floor(Math.min(monthStart.getTime(), winStart.getTime()) / 1000 / 86400) * 86400;
             const nowSec = Math.floor(now.getTime() / 1000 / 86400) * 86400 + 86400 - 1;
             // v3.15: mission log (takeoff missions: id / group / pilot / images / planned images)
@@ -840,14 +917,21 @@
           cell: r => r.lastMission ? `<td><span data-cov-open-app="${escapeHtml(r.lastMission)}" style="color:#9ad;cursor:pointer;text-decoration:underline dotted" title="Open "${escapeHtml(r.lastMission)}" in the Mission Bank editor">${escapeHtml(r.lastMission)}</span></td>` : '<td></td>' },
         { id: 'mid', label: 'ID', title: 'Takeoff mission id — opens Mission Playback in a new tab', def: true, sort: r => (r.lm && r.lm.id) || 0, val: r => (r.lm && r.lm.id) || '',
           cell: (r, sid) => { const lm = r.lm; return `<td>${lm && lm.id ? `<a href="${covMissionUrl(sid, lm.id)}" data-cov-link="${lm.id}" style="color:#14d2dc;text-decoration:underline" title="Open Mission Playback for ${lm.id}">${lm.id}</a>` : (lm ? '<span style="color:#666" title="No takeoff mission with this name within 12 h of the image">?</span>' : '')}</td>`; } },
-        { id: 'state', label: 'Result', title: 'Takeoff mission state from the Mission Log', def: true, sort: r => (r.lm && r.lm.state || '').toLowerCase(), asc: true, val: r => (r.lm && r.lm.state) || '',
-          cell: r => { const st = r.lm && r.lm.state || ''; const ok = /complet|success|landed/i.test(st) && !(r.lm && r.lm.aborted); const bad = (r.lm && r.lm.aborted) || /abort|fail|cancel|error/i.test(st); return `<td style="color:${ok ? '#39ff14' : bad ? '#ff5252' : '#ffb300'}">${escapeHtml(st)}${r.lm && r.lm.aborted && !/abort/i.test(st) ? ' (aborted)' : ''}</td>`; } },
+        { id: 'gstate', label: 'Group result', title: 'All flights in the mission group: Complete = every flight completed · In progress · Aborted = a flight aborted/failed/cancelled', def: true, sort: r => (r.lm && r.lm.groupLabel || '').toLowerCase(), asc: true, val: r => r.lm ? `${r.lm.groupLabel}${r.lm.flights > 1 ? ` (${r.lm.flights} flights)` : ''}` : '',
+          cell: r => { const lm = r.lm; if (!lm || !lm.groupLabel) return '<td></td>'; const col = lm.groupDone ? '#39ff14' : lm.groupAborted ? '#ff5252' : '#ffb300'; return `<td style="color:${col}">${lm.groupDone ? '✓ ' : lm.groupAborted ? '✗ ' : '⏳ '}${escapeHtml(lm.groupLabel)}${lm.flights > 1 ? ` <span style="color:#777">(${lm.flights} flights)</span>` : ''}</td>`; } },
+        { id: 'state', label: 'Flight result', title: 'This takeoff mission (flight) only', def: false, sort: r => (r.lm && r.lm.state || '').toLowerCase(), asc: true, val: r => (r.lm && r.lm.state) || '',
+          cell: r => { const st = r.lm && r.lm.state || ''; const ok = /complet/i.test(st) && !(r.lm && r.lm.aborted); const bad = (r.lm && r.lm.aborted) || /abort|fail|cancel/i.test(st); return `<td style="color:${ok ? '#39ff14' : bad ? '#ff5252' : '#ffb300'}">${escapeHtml(st)}${r.lm && r.lm.aborted && !/abort/i.test(st) ? ' (aborted)' : ''}</td>`; } },
         { id: 'group', label: 'Group', title: 'Mission group id', def: true, sort: r => (r.lm && r.lm.group) || 0, val: r => (r.lm && r.lm.group) || '', cell: r => `<td style="color:#9aa">${r.lm ? escapeHtml(String(r.lm.group || '')) : ''}</td>` },
         { id: 'pilot', label: 'Pilot', def: true, sort: r => (r.lm && r.lm.pilot || '').toLowerCase(), asc: true, val: r => (r.lm && r.lm.pilot) || '', cell: r => `<td style="color:#9aa">${r.lm ? escapeHtml(r.lm.pilot || '') : ''}</td>` },
-        { id: 'captured', label: 'Assets', title: 'Assets imaged by that mission that day / assets the Mission Bank mission plans to visit (pads + nested). Imaged can exceed planned: a photo tags every asset in view.', def: true, sort: r => (r.lm && r.lm.captured) || 0, val: r => r.lm ? `${r.lm.captured}${r.lm.plannedAssets != null ? ' / ' + r.lm.plannedAssets : ''}` : '',
-          cell: r => `<td style="text-align:center">${r.lm ? `${r.lm.captured}${r.lm.plannedAssets != null ? ` / ${r.lm.plannedAssets}` : ''}` : ''}</td>` },
-        { id: 'imgs', label: 'Images', title: 'Images uploaded / planned — ⏳ still capturing', def: true, sort: r => (r.lm && r.lm.images) || 0, val: r => r.lm && r.lm.images != null ? `${r.lm.images}${r.lm.plannedImages ? ' / ' + r.lm.plannedImages : ''}` : '',
+        { id: 'gcaptured', label: 'Assets', title: 'Whole mission group: planned assets captured / planned (pads the mission visits + nested). "+N" = extra assets tagged incidentally (in frame, not planned).', def: true, sort: r => (r.lm && r.lm.groupCaptured) || 0, val: r => r.lm ? `${r.lm.groupCaptured}${r.lm.plannedAssets != null ? ' / ' + r.lm.plannedAssets : ''}${r.lm.groupIncidental ? ' +' + r.lm.groupIncidental : ''}` : '',
+          cell: r => { const lm = r.lm; if (!lm) return '<td></td>'; return `<td style="text-align:center">${lm.groupCaptured}${lm.plannedAssets != null ? ` / ${lm.plannedAssets}` : ''}${lm.groupIncidental ? ` <span style="color:#777" title="incidental (in frame, not planned)">+${lm.groupIncidental}</span>` : ''}</td>`; } },
+        { id: 'captured', label: 'Flight assets', title: 'This flight only: planned assets captured / planned, +incidental', def: false, sort: r => (r.lm && r.lm.captured) || 0, val: r => r.lm ? `${r.lm.captured}${r.lm.plannedAssets != null ? ' / ' + r.lm.plannedAssets : ''}${r.lm.incidental ? ' +' + r.lm.incidental : ''}` : '',
+          cell: r => { const lm = r.lm; if (!lm) return '<td></td>'; return `<td style="text-align:center">${lm.captured}${lm.plannedAssets != null ? ` / ${lm.plannedAssets}` : ''}${lm.incidental ? ` <span style="color:#777">+${lm.incidental}</span>` : ''}</td>`; } },
+        { id: 'gimgs', label: 'Images', title: 'Whole mission group: images uploaded / planned — ⏳ still capturing', def: true, sort: r => (r.lm && r.lm.groupImages) || 0, val: r => r.lm && r.lm.flights ? `${r.lm.groupImages}${r.lm.groupPlannedImages ? ' / ' + r.lm.groupPlannedImages : ''}` : '',
+          cell: r => { const lm = r.lm; if (!lm || !lm.flights) return '<td></td>'; const inProg = lm.groupPlannedImages && lm.groupImages < lm.groupPlannedImages && !lm.groupDone; return `<td style="text-align:center;color:${inProg ? '#ffb300' : '#9aa'}">${lm.groupImages}${lm.groupPlannedImages ? ` / ${lm.groupPlannedImages}` : ''}${inProg ? ' ⏳' : ''}</td>`; } },
+        { id: 'imgs', label: 'Flight images', title: 'This flight only: images uploaded / planned', def: false, sort: r => (r.lm && r.lm.images) || 0, val: r => r.lm && r.lm.images != null ? `${r.lm.images}${r.lm.plannedImages ? ' / ' + r.lm.plannedImages : ''}` : '',
           cell: r => { const lm = r.lm; const inProg = lm && lm.plannedImages && lm.images != null && lm.images < lm.plannedImages; return `<td style="text-align:center;color:${inProg ? '#ffb300' : '#9aa'}">${lm && lm.images != null ? `${lm.images}${lm.plannedImages ? ` / ${lm.plannedImages}` : ''}` : ''}${inProg ? ' ⏳' : ''}</td>`; } },
+        { id: 'incidental', label: 'Incidental flies', title: 'Flies where this asset was only in frame (not planned by that mission) — ignored for status when "targeted only" is on', def: false, sort: r => r.incidental || 0, val: r => r.incidental || 0, cell: r => `<td style="text-align:center;color:#777">${r.incidental || 0}${r.lastIncidentalAt ? ` <span title="last incidental: ${escapeHtml(r.lastIncidentalMission || '')}">(${covFmtDate(r.lastIncidentalAt)})</span>` : ''}</td>` },
         { id: 'drone', label: 'Drone', def: false, sort: r => (r.lm && r.lm.drone || '').toLowerCase(), asc: true, val: r => (r.lm && r.lm.drone) || '', cell: r => `<td style="color:#9aa">${r.lm ? escapeHtml(r.lm.drone || '') : ''}</td>` },
         { id: 'dur', label: 'Duration', title: 'Takeoff mission duration', def: false, sort: r => (r.lm && r.lm.durationS) || 0, val: r => r.lm && r.lm.durationS != null ? covFmtDur(r.lm.durationS) : '', cell: r => `<td style="text-align:center;color:#9aa">${r.lm && r.lm.durationS != null ? covFmtDur(r.lm.durationS) : ''}</td>` },
         { id: 'when', label: 'Mission start', def: false, sort: r => (r.lm && r.lm.whenMs) || 0, val: r => r.lm && r.lm.whenMs ? new Date(r.lm.whenMs).toISOString() : '', cell: r => `<td style="color:#9aa">${r.lm && r.lm.whenMs ? escapeHtml(new Date(r.lm.whenMs).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })) : ''}</td>` },
@@ -921,6 +1005,7 @@
                     <div data-cov-gear style="display:none;position:absolute;right:0;top:26px;z-index:5;background:#1a1a1a;border:1px solid #444;border-radius:4px;padding:8px;min-width:260px;font-size:11px;box-shadow:0 4px 14px rgba(0,0,0,.5)">
                         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span>Read back</span><span><input type="number" data-cov-cfg="windowDays" value="${cfg.windowDays}" min="31" max="730" step="1" style="width:64px;background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"> days</span></div>
                         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span>Rulebook</span><select data-cov-cfg="rulebook" style="background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"><option value="diamondback" ${cfg.rulebook === 'diamondback' ? 'selected' : ''}>Diamondback</option><option value="internal" ${cfg.rulebook === 'internal' ? 'selected' : ''}>Internal SLA</option></select></div>
+                        <label style="display:flex;gap:6px;align-items:center;margin-bottom:6px;cursor:pointer"><input type="checkbox" data-cov-cfg="targetedOnly" ${cfg.targetedOnly !== false ? 'checked' : ''} style="accent-color:#14d2dc"> <span>Targeted only — a fly counts for an asset only when the mission <b>plans</b> that asset (in-frame neighbours ignored)</span></label>
                         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span>Parallel reads</span><input type="number" data-cov-cfg="pool" value="${cfg.pool}" min="2" max="24" step="1" style="width:64px;background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"></div>
                         <div style="color:#777">Lookback / parallel reads apply on the next ↻ Refresh. Every number is also in the Control Panel card.</div>
                     </div></span>
@@ -965,7 +1050,16 @@
         body.querySelectorAll('a[data-cov-link]').forEach(a => { a.onclick = (e) => { e.preventDefault(); e.stopPropagation(); try { (window.top || window).open(a.href, '_blank'); } catch (err) { window.open(a.href, '_blank'); } }; });
         body.querySelectorAll('[data-cov-open-app]').forEach(el => { el.onclick = (e) => { e.preventDefault(); e.stopPropagation(); covOpenInEditor(sid, el.dataset.covOpenApp); }; });
         body.querySelectorAll('[data-cov-col]').forEach(cb => { cb.onchange = () => { const st = covColsState(); if (cb.checked) st.hidden.delete(cb.dataset.covCol); else st.hidden.add(cb.dataset.covCol); covColsSave(); rerender(); const m = panelEl.querySelector('[data-cov-colsmenu]'); if (m) m.style.display = 'block'; }; });
-        body.querySelectorAll('[data-cov-cfg]').forEach(inp => { inp.onchange = () => { const k = inp.dataset.covCfg; const v = k === 'rulebook' ? String(inp.value) : Number(inp.value); if (k !== 'rulebook' && !isFinite(v)) return; covCfgSet(k, v); covRestatus(bucket); covBroadcast(covSiteKey(sid), bucket); registerCoverage(); rerender(); const g = panelEl.querySelector('[data-cov-gear]'); if (g) g.style.display = 'block'; }; });
+        body.querySelectorAll('[data-cov-cfg]').forEach(inp => { inp.onchange = () => {
+            const k = inp.dataset.covCfg; const v = k === 'rulebook' ? String(inp.value) : inp.type === 'checkbox' ? !!inp.checked : Number(inp.value);
+            if (typeof v === 'number' && !isFinite(v)) return;
+            covCfgSet(k, v);
+            // mirror into the Control Panel's stored prefs — otherwise its REGISTER echo restores the old value
+            try { if (controlChannel) controlChannel.postMessage({ type: 'SET_TOGGLE', scriptId: COV_SCRIPT_ID, toggleId: k, value: v }); } catch (e) {}
+            if (k === 'targetedOnly') { covRejoin(sid, bucket); return; }
+            covRestatus(bucket); covPersist(covSiteKey(sid), bucket); covBroadcast(covSiteKey(sid), bucket); rerender();
+            const g = panelEl.querySelector('[data-cov-gear]'); if (g) g.style.display = 'block';
+        }; });
         body.querySelectorAll('[data-cov-act]').forEach(b => {
             b.onclick = (e) => {
                 e.stopPropagation();
@@ -1074,6 +1168,7 @@
                 { id: 'intP3Days', label: 'P3 window', type: 'number', min: 1, max: 120, step: 1, default: c.intP3Days, unit: 'days' },
                 { id: 'noneDays', label: 'Untiered window', type: 'number', min: 1, max: 120, step: 1, default: c.noneDays, unit: 'days' },
                 { id: 'dueWithinDays', label: 'Show "Due" this many days before the floor', type: 'number', min: 0, max: 30, step: 1, default: c.dueWithinDays, unit: 'days' },
+                { id: 'targetedOnly', label: 'Targeted only — a fly counts only when the mission plans the asset', type: 'boolean', default: c.targetedOnly !== false },
                 { id: 'read-header', label: 'Reading', type: 'header' },
                 { id: 'windowDays', label: 'Read back (lookback per asset)', type: 'number', min: 31, max: 730, step: 1, default: c.windowDays, unit: 'days' },
                 { id: 'pool', label: 'Parallel reads', type: 'number', min: 2, max: 24, step: 1, default: c.pool },
@@ -1084,10 +1179,11 @@
         const id = msg.toggleId;
         const val = msg.value !== undefined ? msg.value : msg.enabled;
         if (!Object.prototype.hasOwnProperty.call(COV_DEFAULT_CFG, id)) return;
-        const v = id === 'rulebook' ? String(val) : Number(val);
-        if (id !== 'rulebook' && !isFinite(v)) return;
+        const v = id === 'rulebook' ? String(val) : id === 'targetedOnly' ? !!val : Number(val);
+        if (typeof v === 'number' && !isFinite(v)) return;
         if (covCfg()[id] === v) return;
         covCfgSet(id, v);
+        if (id === 'targetedOnly') { const sid = getCurrentSiteID(); const b = sid && covBySite[covSiteKey(sid)]; if (b) { covRejoin(sid, b); return; } }
         Object.keys(covBySite).forEach(k => { covRestatus(covBySite[k]); covBroadcast(k, covBySite[k]); });
         if (panelState && panelState.mode === 'coverage') { try { renderCoverageView(); } catch (e) {} }
     }
