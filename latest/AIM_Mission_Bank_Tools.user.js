@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.31
+// @version      3.32
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.31';
+    const SCRIPT_VERSION = '3.32';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -1845,12 +1845,16 @@
             'ops-window':  { label: 'Ops day', params: { start: '08:00', hours: 8, usePct: 80 } },
             'turnaround':  { label: 'Flight / charge minutes', params: { flightMin: 22, chargeMin: 80 } },
             'battery':     { label: 'Battery model', params: { reservePct: 25, usableFt: 36000, cruiseMph: 30, perStepPct: 1.2, perStepMin: 0.5 } },
-            'wind':        { label: 'Wind', params: { k: 1.0, maxMph: null, gustMaxMph: null } },
-            'temp':        { label: 'Temperature', params: { minF: null, maxF: null } },
-            'precip':      { label: 'Precipitation', params: { maxMmPerHour: null } },
+            // Percepto operational envelope (SLA wording, 2026-10-20): aerial wind 28 mph in-flight,
+            // ground wind 28 mph + gusts 18 mph at landing, 5–107 °F and ≤ 6 mm/h at takeoff.
+            'wind':        { label: 'Wind', params: { k: 1.0, maxMph: 28, gustMaxMph: 18, maxAloftMph: 28 } },
+            'temp':        { label: 'Temperature', params: { minF: 5, maxF: 107 } },
+            'precip':      { label: 'Precipitation', params: { maxMmPerHour: 6 } },
             'block':       { label: 'Blocked pads', params: { kinds: ['rig', 'hold', 'tfr'] } },
             'pending':     { label: 'Landed, images not in yet', params: { hours: 2 } },
-            'untiered':    { label: 'Assets with no tier prefix', params: { role: 'ignore', everyDays: 30 } },
+            // role 'auto' = ignore untiered pads when the site has tiers, else treat EVERY pad as an equal
+            // target (no tiers → the objective is simply the most pads in the fewest flights).
+            'untiered':    { label: 'Assets with no tier prefix', params: { role: 'auto', everyDays: 30 } },
         };
 
         const DEFAULT_RULES = Object.keys(RULE_KINDS).map(kind => ({
@@ -1929,6 +1933,7 @@
             const w = ruleParams(rules, 'wind'), t = ruleParams(rules, 'temp'), p = ruleParams(rules, 'precip');
             if (w && w.maxMph != null && h.windMph != null && h.windMph > w.maxMph) return `wind ${h.windMph} mph > ${w.maxMph}`;
             if (w && w.gustMaxMph != null && h.gustMph != null && h.gustMph > w.gustMaxMph) return `gust ${h.gustMph} mph > ${w.gustMaxMph}`;
+        if (w && w.maxAloftMph != null && h.windAloftMph != null && h.windAloftMph > w.maxAloftMph) return `wind aloft ${h.windAloftMph} mph > ${w.maxAloftMph}`;
             if (t && t.minF != null && h.tempF != null && h.tempF < t.minF) return `${h.tempF}°F < ${t.minF}`;
             if (t && t.maxF != null && h.tempF != null && h.tempF > t.maxF) return `${h.tempF}°F > ${t.maxF}`;
             if (p && p.maxMmPerHour != null && h.precipMm != null && h.precipMm > p.maxMmPerHour) return `precip ${h.precipMm} mm`;
@@ -1959,7 +1964,12 @@
             const reservePct = ruleParams(rules, 'battery') ? Number(bat.reservePct) || 0 : 0;
             const blockKinds = new Set((ruleParams(rules, 'block') || { kinds: [] }).kinds || []);
             const pendingHrs = ruleParams(rules, 'pending') ? Number(R('pending').hours) || 0 : 0;
-            const untiered = R('untiered');
+            const untiered = Object.assign({}, R('untiered'));
+        if (untiered.role === 'auto') {
+            const anyTiered = (input.pads || []).some(p => p && (p.tier ? tiers.some(t => String(t.id).toUpperCase() === String(p.tier).toUpperCase()) : tierOf(p.subtype, tiers, input.tierRegex).known));
+            untiered.role = anyTiered ? 'ignore' : 'target';
+            assumptions.push(anyTiered ? 'Untiered pads ignored (site has tiers).' : 'No tiers on this site — every pad is an equal target; objective = most pads in the fewest flights.');
+        }
             const base = input.site && input.site.base;
             const cruiseFtPerMin = (bat.cruiseMph || 30) * 5280 / 60;
             assumptions.push(`Cushion: ${reservePct}% battery reserve on every landing, ${ops.usePct}% of a ${ops.hours} h ops day from ${ops.start}.`);
@@ -2255,6 +2265,10 @@
         smtCfgCache = Object.assign({}, SMT_DEFAULT_CFG, (o && typeof o === 'object') ? o : {});
         if (!Array.isArray(smtCfgCache.tiers) || !smtCfgCache.tiers.length) smtCfgCache.tiers = JSON.parse(JSON.stringify(AIM_SMART_PLANNER.DEFAULT_TIERS));
         if (!Array.isArray(smtCfgCache.rules) || !smtCfgCache.rules.length) smtCfgCache.rules = JSON.parse(JSON.stringify(AIM_SMART_PLANNER.DEFAULT_RULES));
+        if ((smtCfgCache.rulesVer || 1) < 2) {   // v3.32: envelope limits + untiered 'auto' were null/'ignore' in lists saved by v3.29–3.31
+            smtCfgCache.rules.forEach(r => { const kd = AIM_SMART_PLANNER.RULE_KINDS[r.kind]; if (!kd) return; r.params = r.params || {}; Object.keys(kd.params).forEach(k => { if (r.params[k] == null || (r.kind === 'untiered' && k === 'role' && r.params[k] === 'ignore')) r.params[k] = kd.params[k]; }); });
+            smtCfgCache.rulesVer = 2; gmSet(SMT_CFG_KEY, smtCfgCache);
+        }
         return smtCfgCache;
     }
     function smtCfgSave(patch) { const c = Object.assign(smtCfg(), patch || {}); gmSet(SMT_CFG_KEY, c); smtCfgCache = c; return c; }
@@ -2266,7 +2280,7 @@
         if (!base || !isFinite(base.lat)) return { hours: null, err: 'no base position' };
         const key = `${base.lat.toFixed(3)},${base.lng.toFixed(3)}`;
         if (smtWx && smtWx.key === key && Date.now() - smtWx.at < SMT_WX_TTL_MS) return { hours: smtWx.hours, err: '' };
-        const url = `https://api.open-meteo.com/v1/forecast?latitude=${base.lat.toFixed(4)}&longitude=${base.lng.toFixed(4)}&hourly=temperature_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m,precipitation&wind_speed_unit=mph&temperature_unit=fahrenheit&forecast_days=7&timezone=UTC`;
+        const url = `https://api.open-meteo.com/v1/forecast?latitude=${base.lat.toFixed(4)}&longitude=${base.lng.toFixed(4)}&hourly=temperature_2m,wind_speed_10m,wind_speed_80m,wind_gusts_10m,wind_direction_10m,precipitation&wind_speed_unit=mph&temperature_unit=fahrenheit&forecast_days=7&timezone=UTC`;
         try {
             let j;
             try { const r = await fetch(url); if (!r.ok) throw new Error(`HTTP ${r.status}`); j = await r.json(); }
@@ -2277,7 +2291,7 @@
                 j = JSON.parse(r.responseText);
             }
             const h = j && j.hourly; if (!h || !Array.isArray(h.time)) throw new Error('no hourly block');
-            const hours = h.time.map((t, i) => ({ t: t.endsWith('Z') ? t : t + ':00Z', windMph: h.wind_speed_10m[i], gustMph: h.wind_gusts_10m[i], dirDeg: h.wind_direction_10m[i], tempF: h.temperature_2m[i], precipMm: h.precipitation[i] }));
+            const hours = h.time.map((t, i) => ({ t: t.endsWith('Z') ? t : t + ':00Z', windMph: h.wind_speed_10m[i], windAloftMph: Array.isArray(h.wind_speed_80m) ? h.wind_speed_80m[i] : null, gustMph: h.wind_gusts_10m[i], dirDeg: h.wind_direction_10m[i], tempF: h.temperature_2m[i], precipMm: h.precipitation[i] }));
             smtWx = { at: Date.now(), key, hours };
             return { hours, err: '' };
         } catch (e) { console.warn(`${TAG} smart: weather fetch failed`, e); return { hours: null, err: e.message || String(e) }; }
@@ -2560,7 +2574,7 @@
             <table class="aim-mb-table"><thead><tr><th>Id</th><th>Label</th><th>Rank</th><th>Every (d)</th><th>Role</th><th title="target-when-due: becomes a target this many days before due">Target within (d)</th><th title="filler: max minutes a detour may add">Filler max (min)</th><th title="filler: only when heading home">Homeward</th><th>Color</th><th></th></tr></thead><tbody>${tierRows}</tbody></table>
             <div style="display:flex;gap:16px;align-items:center;margin:8px 0 4px"><b style="color:#14d2dc">Flight rules</b>
                 <label>Add <select data-smt-cfg="addRule" style="background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;font-size:11px"><option value="">rule…</option>${Object.keys(kinds).map(k => `<option value="${k}">${escapeHtml(kinds[k].label)}</option>`).join('')}</select></label>
-                <span style="color:#777">Empty = no limit. Weather limits (wind / gust / °F) come from the drone spec — fill them in once you have the numbers.</span></div>
+                <span style="color:#777">Empty = no limit. Wind / gust / °F / mm·h defaults = Percepto's operational envelope (aloft = 80 m forecast wind in flight; wind + gust = 10 m at landing). Untiered role 'auto' = ignore when the site has tiers, else every pad is a target.</span></div>
             <table class="aim-mb-table"><thead><tr><th style="width:24px">On</th><th style="width:170px">Rule</th><th>Parameters</th><th></th></tr></thead><tbody>${ruleRows}</tbody></table>
         </div>`;
     }
