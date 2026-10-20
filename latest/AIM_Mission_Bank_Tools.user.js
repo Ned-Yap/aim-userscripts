@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.26
+// @version      3.27
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.26';
+    const SCRIPT_VERSION = '3.27';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -756,6 +756,7 @@
         // (renamed / deleted mission: plan unknown, nothing is filtered).
         const apps = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
         const plannedByName = new Map();
+        const stepsByName = new Map();   // v3.27: mission name → located steps, for the "nearest step" diagnostic
         if (apps.length && ent && ent.assets) {
             // v3.25: a mission PLANS every asset within 150 ft of any of its
             // located steps (nav / snapshot), plus everything nested on those.
@@ -768,6 +769,7 @@
             const boxes = list.map(a => agRingBbox(a.ring, tolM + 5));
             apps.forEach(app => {
                 const set = new Set();
+                stepsByName.set(String(app.name || '').trim().toUpperCase(), (app.instructions || []).filter(i => i && i.location && typeof i.location.lat === 'number').map(i => i.location));
                 (app.instructions || []).forEach(i => {
                     if (!i || !i.location || typeof i.location.lat !== 'number') return;
                     const p = i.location;
@@ -823,6 +825,13 @@
             const fids = new Set(), gids = new Set();
             (r.fliesAll || []).forEach(f => { const fl = flightOf(f); if (fl) { fids.add(String(fl.id)); if (fl.missionGroup != null && Number(fl.missionGroup) >= 0) gids.add(String(fl.missionGroup)); } });
             r.flightIds = [...fids]; r.groupIds = [...gids];
+            // v3.27: nearest mission step to this asset, per mission that photographed it (ft) — explains "incidental".
+            const a = ent && ent.assets ? ent.assets.find(x => x.id === r.id) : null;
+            r.nearStep = {};
+            if (a && a.ring && a.ring.length >= 3) {
+                const seen = new Set();
+                (r.fliesAll || []).forEach(f => { const k = String(f.mission || '').trim().toUpperCase(); if (!k || seen.has(k)) return; seen.add(k); const steps = stepsByName.get(k); if (!steps) { r.nearStep[f.mission] = null; return; } let best = Infinity; steps.forEach(pnt => { const d = mbPointToPolygonMeters(pnt.lat, pnt.lng, a.ring); if (d < best) best = d; }); r.nearStep[f.mission] = isFinite(best) ? Math.round(best * 3.28084) : null; });
+            }
             const f0 = (r.flies && r.flies[0]) || null;
             if (!f0) return;
             const t = flightOf(f0);
@@ -1002,7 +1011,8 @@
         { id: 'snaps', label: 'Flight snapshots', title: 'This flight: images ÷ 2 (÷ 3 for an OGI drone)', def: false, sort: r => (r.lm && r.lm.images) || 0, val: r => r.lm && r.lm.images != null ? covSnaps(r.lm.images, r.lm.drone) : '', cell: r => `<td style="text-align:center;color:#9aa">${r.lm && r.lm.images != null ? covSnaps(r.lm.images, r.lm.drone) : ''}</td>` },
         { id: 'imgs', label: 'Flight images', title: 'This flight only: images uploaded / planned', def: false, sort: r => (r.lm && r.lm.images) || 0, val: r => r.lm && r.lm.images != null ? `${r.lm.images}${r.lm.plannedImages ? ' / ' + r.lm.plannedImages : ''}` : '',
           cell: r => { const lm = r.lm; const inProg = lm && lm.plannedImages && lm.images != null && lm.images < lm.plannedImages; return `<td style="text-align:center;color:${inProg ? '#ffb300' : '#9aa'}">${lm && lm.images != null ? `${lm.images}${lm.plannedImages ? ` / ${lm.plannedImages}` : ''}` : ''}${inProg ? ' ⏳' : ''}</td>`; } },
-        { id: 'incidental', label: 'Incidental flies', title: 'Flies where this asset was only in frame (not planned by that mission) — ignored for status when "targeted only" is on', def: false, sort: r => r.incidental || 0, val: r => r.incidental || 0, cell: r => `<td style="text-align:center;color:#777">${r.incidental || 0}${r.lastIncidentalAt ? ` <span title="last incidental: ${escapeHtml(r.lastIncidentalMission || '')}">(${covFmtDate(r.lastIncidentalAt)})</span>` : ''}</td>` },
+        { id: 'incidental', label: 'Incidental flies', title: 'Flies where this asset was only in frame (not planned by that mission) — ignored for status when "targeted only" is on', def: false, sort: r => r.incidental || 0, val: r => r.incidental || 0, cell: r => `<td style="text-align:center;color:#777" title="${escapeHtml(covNearStepText(r))}">${r.incidental || 0}${r.lastIncidentalAt ? ` <span title="last incidental: ${escapeHtml(r.lastIncidentalMission || '')}">(${covFmtDate(r.lastIncidentalAt)})</span>` : ''}</td>` },
+        { id: 'nearstep', label: 'Nearest step', title: 'Closest mission step to this asset, per mission that photographed it (ft). ≤ 150 ft = planned. "no plan" = that mission name is not in the Mission Bank.', def: false, sort: r => { const v = Object.values(r.nearStep || {}).filter(x => x != null); return v.length ? Math.min(...v) : 1e9; }, asc: true, val: r => covNearStepText(r), cell: r => `<td style="color:#9aa;white-space:nowrap">${escapeHtml(covNearStepText(r))}</td>` },
         { id: 'drone', label: 'Drone', def: false, sort: r => (r.lm && r.lm.drone || '').toLowerCase(), asc: true, val: r => (r.lm && r.lm.drone) || '', cell: r => `<td style="color:#9aa">${r.lm ? escapeHtml(r.lm.drone || '') : ''}</td>` },
         { id: 'dur', label: 'Duration', title: 'Takeoff mission duration', def: false, sort: r => (r.lm && r.lm.durationS) || 0, val: r => r.lm && r.lm.durationS != null ? covFmtDur(r.lm.durationS) : '', cell: r => `<td style="text-align:center;color:#9aa">${r.lm && r.lm.durationS != null ? covFmtDur(r.lm.durationS) : ''}</td>` },
         { id: 'when', label: 'Mission start', def: false, sort: r => (r.lm && r.lm.whenMs) || 0, val: r => r.lm && r.lm.whenMs ? new Date(r.lm.whenMs).toISOString() : '', cell: r => `<td style="color:#9aa">${r.lm && r.lm.whenMs ? escapeHtml(new Date(r.lm.whenMs).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })) : ''}</td>` },
@@ -1016,6 +1026,7 @@
     // v3.23: images per snapshot by drone — RGB + thermal = 2; an OGI drone adds the OGI frame = 3.
     function covImgsPerSnap(drone) { return /\bogi\b/i.test(String(drone || '')) ? 3 : 2; }
     function covSnaps(images, drone) { return images == null ? null : Math.round(images / covImgsPerSnap(drone)); }
+    function covNearStepText(r) { const o = r.nearStep || {}; const ks = Object.keys(o); return ks.length ? ks.map(k => `${k}: ${o[k] == null ? 'no plan' : o[k] + ' ft'}`).join(' · ') : ''; }
     function covFmtDur(sec) { sec = Math.max(0, Math.round(sec)); const m = Math.floor(sec / 60), s2 = sec % 60; return `${m}:${String(s2).padStart(2, '0')}`; }
     let covColsCache = null;
     function covColsState() {
