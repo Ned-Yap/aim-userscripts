@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.34
+// @version      3.35
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.34';
+    const SCRIPT_VERSION = '3.35';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -2709,7 +2709,9 @@
                     pts.push(...leg);
                 }
                 f.pads.forEach(p => { const pd = padById.get(p.padId); if (!pd) return; n++;
-                    const m = L.marker([pd.lat, pd.lng], { interactive: false, icon: L.divIcon({ className: 'aim-smt-badge', html: `<div style="background:${col};color:#000;font:700 11px/18px Lato,sans-serif;width:18px;height:18px;border-radius:9px;text-align:center;border:1px solid #000;box-shadow:0 0 3px #000">${n}</div>`, iconSize: [18, 18], iconAnchor: [9, 9] }) });
+                    let at = [pd.lat, pd.lng];
+                    if (cur.geo) { const i = cur.geo.idxByPad.get(p.padId); const v = i != null ? cur.geo.built.graph.verts.get(cur.geo.padKeys[i]) : null; if (v) at = [v.lat, v.lng]; }
+                    const m = L.marker(at, { interactive: false, icon: L.divIcon({ className: 'aim-smt-badge', html: `<div style="background:${col};color:#000;font:700 11px/18px Lato,sans-serif;width:18px;height:18px;border-radius:9px;text-align:center;border:1px solid #000;box-shadow:0 0 3px #000">${n}</div>`, iconSize: [18, 18], iconAnchor: [9, 9] }) });
                     m.addTo(map); layers.push(m); });
                 if (pts.length >= 2) { const line = L.polyline(pts, { renderer, color: col, weight: 2.5, opacity: 0.9, dashArray: f.n % 2 ? null : '6 4', interactive: false }).addTo(map); layers.push(line); }
             });
@@ -7864,12 +7866,21 @@
                 let linked = 0;
                 const res = byAsset ? byAsset.get(r.asset.id) : null;
                 if (res && res.fi >= 0 && built.ffzs[res.fi]) {
-                    built.ffzs[res.fi].ring.forEach((rp, ri) => {
+                    // v3.35 (#303): only chords that STAY INSIDE the FFZ — on snake-shaped lane
+                    // FFZs a straight line to a far ring vertex cuts across the outside (the
+                    // smart overlay made that visible; distances were optimistic too).
+                    const fring = built.ffzs[res.fi].ring;
+                    let nearest = null;
+                    fring.forEach((rp, ri) => {
                         const rk = `r:${res.fi}:${ri}`;
                         if (!built.graph.adj.has(rk)) return;
-                        link(k, rk, mbApproxMeters(p.lat, p.lng, rp.lat, rp.lng));
+                        const w = mbApproxMeters(p.lat, p.lng, rp.lat, rp.lng);
+                        if (!nearest || w < nearest.w) nearest = { rk, w };
+                        if (!rngSegInside(p, rp, fring)) return;
+                        link(k, rk, w);
                         linked++;
                     });
+                    if (!linked && nearest) { link(k, nearest.rk, nearest.w); linked++; }   // keep connectivity (nav just outside the ring)
                 }
                 if (!linked) {
                     const arc = agNearestArcPoint(built.graph, r.asset.ring || [p], MB_REACH_FFZ_FT / 3.28084);
