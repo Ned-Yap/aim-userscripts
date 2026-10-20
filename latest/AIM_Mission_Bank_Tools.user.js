@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.15
+// @version      3.16
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.15';
+    const SCRIPT_VERSION = '3.16';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -547,8 +547,7 @@
     const COV_CACHE_KEY = 'aim-mb-coverage';          // { [siteKey]: { at, day, recs } }
     const COV_CFG_KEY = 'aim-mb-coverage-cfg';
     const COV_TIER_RE = /^P([1-3])\s*[-–—:]/i;
-    const COV_POOL = 12;
-    const COV_WINDOW_DAYS = 92;   // v3.15: one read per asset covers the last ~3 months; the all-time probe only runs when that is empty
+    // v3.15: one read per asset covers the lookback window (cfg.windowDays); the all-time probe only runs when that is empty
     const COV_TTL_MS = 60 * 60 * 1000;
     const COV_BTN_ID = 'aim-mb-cov-btn';
     const COV_TIER_COLORS = { P1: '#ff4d4d', P2: '#ff9f1c', P3: '#ffe66d', none: '#8a8f98' };
@@ -564,6 +563,8 @@
         intP1Days: 7, intP2Days: 14, intP3Days: 31,    // internal SLA rolling windows
         noneDays: 31,
         dueWithinDays: 7,                              // amber once this close to the floor
+        windowDays: 92,                                // v3.16: lookback per asset read (⚙ in the panel / CP card)
+        pool: 12,                                      // v3.16: parallel reads
     };
     let covCfgCache = null;
     function covCfg() {
@@ -746,7 +747,7 @@
             if (!r.lastAt || !r.lastMission) return;
             const t = findTakeoff(r.lastMission, r.lastAt);
             const key = `${r.lastMission.toUpperCase()}|${covDayKey(r.lastAt)}`;
-            r.lm = { id: t ? t.id : null, group: t ? t.missionGroup : '', pilot: t ? t.createdBy : '', state: t ? t.stateLabel : '', images: t ? t.images : null, plannedImages: t ? t.plannedImages : null,
+            r.lm = { id: t ? t.id : null, group: t ? t.missionGroup : '', pilot: t ? t.createdBy : '', state: t ? t.stateLabel : '', aborted: !!(t && t._aborted), drone: t ? t.drone : '', durationS: t ? t.durationS : null, whenMs: t ? t.whenMs : null, images: t ? t.images : null, plannedImages: t ? t.plannedImages : null,
                 plannedAssets: plannedByName.has(r.lastMission.toUpperCase()) ? plannedByName.get(r.lastMission.toUpperCase()) : null, captured: capturedByKey.get(key) || 0 };
         });
     }
@@ -766,7 +767,10 @@
             // (local-midnight Central = +5 h → 400, seen live). Day-align the
             // window (floor to the UTC day that contains month start, end of
             // today UTC) and apply the exact local month edge client-side.
-            const winStart = new Date(now.getTime() - COV_WINDOW_DAYS * 86400000);
+            const cfg0 = covCfg();
+            const windowDays = Math.max(31, Math.min(730, Number(cfg0.windowDays) || 92));
+            const pool = Math.max(2, Math.min(24, Number(cfg0.pool) || 12));
+            const winStart = new Date(now.getTime() - windowDays * 86400000);
             const monthStartSec = Math.floor(Math.min(monthStart.getTime(), winStart.getTime()) / 1000 / 86400) * 86400;
             const nowSec = Math.floor(now.getTime() / 1000 / 86400) * 86400 + 86400 - 1;
             // v3.15: mission log (takeoff missions: id / group / pilot / images / planned images)
@@ -782,20 +786,20 @@
                     const i = next++;
                     recs[i] = await covFetchAsset(sid, assets[i], monthStartSec, nowSec, weekStart, padOf(assets[i]), monthStart);
                     done++;
-                    if (onProgress && (done % 10 === 0 || done === assets.length)) onProgress(done, assets.length);
+                    if (onProgress && (done % 5 === 0 || done === assets.length)) onProgress(done, assets.length, Date.now() - t0);
                 }
             };
-            await Promise.all(Array.from({ length: Math.min(COV_POOL, assets.length) }, worker));
+            await Promise.all(Array.from({ length: Math.min(pool, assets.length) }, worker));
             await Promise.all([logP, appsP]);
             try { covJoinMissions(sid, ent, recs); } catch (e) { console.warn(`${TAG} coverage: mission join failed`, e); }
-            const bucket = { at: Date.now(), day: covDayKey(now.toISOString()), monthStart: monthStart.toISOString(), weekStart: weekStart.toISOString(), recs };
+            const bucket = { at: Date.now(), day: covDayKey(now.toISOString()), monthStart: monthStart.toISOString(), weekStart: weekStart.toISOString(), windowDays, recs };
             covRestatus(bucket);
             covBySite[siteKey] = bucket;
             covPersist(siteKey, bucket);
             covBroadcast(siteKey, bucket);
             const errs = recs.filter(r => r.err).length;
             covTimer = null;
-            console.log(`${TAG} coverage: ${recs.length} assets for site ${sid} in ${((Date.now() - t0) / 1000).toFixed(1)} s — ${reqN} requests, avg ${reqN ? Math.round(reqMs / reqN) : 0} ms, max ${reqMax} ms, pool ${COV_POOL}${errs ? ` (${errs} fetch errors)` : ''}`);
+            console.log(`${TAG} coverage: ${recs.length} assets for site ${sid} in ${((Date.now() - t0) / 1000).toFixed(1)} s — ${reqN} requests, avg ${reqN ? Math.round(reqMs / reqN) : 0} ms, max ${reqMax} ms, pool ${pool}, window ${windowDays} d${errs ? ` (${errs} fetch errors)` : ''}`);
             if (errs) showToast(`Coverage: ${errs} of ${recs.length} asset reads failed — first: ${recs.find(r => r.err).err}`.slice(0, 220), '#ff5252');
             covErrLogged = 0;
             return bucket;
@@ -811,29 +815,72 @@
         const btn = doc.createElement('button');
         btn.id = COV_BTN_ID; btn.type = 'button';
         btn.className = 'ant-btn';
-        btn.textContent = '📅 Coverage';
-        btn.title = 'Per-asset flown coverage vs SLA tiers (AIM Mission Bank Tools)';
-        Object.assign(btn.style, { minWidth: 'unset', padding: '0 12px', height: '26px', fontSize: '11px', fontWeight: '700', borderRadius: '4px', background: '#14d2dc', border: '1px solid #14d2dc', color: '#000', cursor: 'pointer' });
+        btn.textContent = '📅';
+        btn.title = 'Coverage — per-asset flown history vs SLA tiers (AIM Mission Bank Tools)';
+        Object.assign(btn.style, { minWidth: 'unset', width: '30px', padding: '0', height: '26px', fontSize: '13px', lineHeight: '24px', borderRadius: '4px', background: '#14d2dc', border: '1px solid #14d2dc', color: '#000', cursor: 'pointer', flex: '0 0 auto' });
         try { btn.style.setProperty('color', '#000', 'important'); btn.style.setProperty('-webkit-text-fill-color', '#000', 'important'); } catch (e) {}
         btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); openPanel('coverage'); };
         row.appendChild(btn);
     }
 
     // ---- render ----
+    // v3.16: column registry — every column is defined once (cell, export
+    // value, sort value). Visibility + order persist in GM; headers drag.
+    const COV_COLS_KEY = 'aim-mb-coverage-cols';
+    const COV_COLS = [
+        { id: 'name', label: 'Asset', def: true, sort: r => r.name.toLowerCase(), asc: true, val: r => r.name,
+          cell: r => `<td style="color:#e6e6e6">${escapeHtml(r.name)}${r.err ? ' <span style="color:#ff5252" title="' + escapeHtml(r.err) + '">⚠</span>' : ''}</td>` },
+        { id: 'pad', label: 'Pad', def: true, sort: r => (r.pad || '').toLowerCase(), asc: true, val: r => r.pad || '', cell: r => `<td style="color:#9aa">${escapeHtml(r.pad || '')}</td>` },
+        { id: 'tier', label: 'Tier', title: 'From the asset type prefix (P1 - …)', def: true, sort: r => ({ P1: 0, P2: 1, P3: 2, '': 3 })[r.tier], asc: true, val: r => r.tier || '',
+          cell: r => { const tc = COV_TIER_COLORS[r.tier || 'none']; return `<td><span style="display:inline-block;min-width:22px;text-align:center;border:1px solid ${tc};color:${tc};border-radius:3px;padding:0 4px;font-weight:700">${r.tier || '—'}</span></td>`; } },
+        { id: 'last', label: 'Last flown', def: true, sort: r => r.lastAt || '', val: r => r.lastAt ? covDayKey(r.lastAt) : '',
+          cell: r => { const age = covDaysAgo(r.lastAt); return `<td title="${escapeHtml(r.lastAt || '')}">${covFmtDate(r.lastAt)}${age != null ? ` <span style="color:#777">(${age}d)</span>` : ''}</td>`; } },
+        { id: 'ago', label: 'Days ago', def: false, sort: r => covDaysAgo(r.lastAt) == null ? 1e9 : covDaysAgo(r.lastAt), asc: true, val: r => covDaysAgo(r.lastAt) == null ? '' : covDaysAgo(r.lastAt), cell: r => `<td style="text-align:center">${covDaysAgo(r.lastAt) == null ? '' : covDaysAgo(r.lastAt)}</td>` },
+        { id: 'mission', label: 'Last mission', title: 'Click to open this mission in the Mission Bank editor', def: true, sort: r => (r.lastMission || '').toLowerCase(), asc: true, val: r => r.lastMission || '',
+          cell: r => r.lastMission ? `<td><span data-cov-open-app="${escapeHtml(r.lastMission)}" style="color:#9ad;cursor:pointer;text-decoration:underline dotted" title="Open "${escapeHtml(r.lastMission)}" in the Mission Bank editor">${escapeHtml(r.lastMission)}</span></td>` : '<td></td>' },
+        { id: 'mid', label: 'ID', title: 'Takeoff mission id — opens Mission Playback in a new tab', def: true, sort: r => (r.lm && r.lm.id) || 0, val: r => (r.lm && r.lm.id) || '',
+          cell: (r, sid) => { const lm = r.lm; return `<td>${lm && lm.id ? `<a href="${covMissionUrl(sid, lm.id)}" data-cov-link="${lm.id}" style="color:#14d2dc;text-decoration:underline" title="Open Mission Playback for ${lm.id}">${lm.id}</a>` : (lm ? '<span style="color:#666" title="No takeoff mission with this name within 12 h of the image">?</span>' : '')}</td>`; } },
+        { id: 'state', label: 'Result', title: 'Takeoff mission state from the Mission Log', def: true, sort: r => (r.lm && r.lm.state || '').toLowerCase(), asc: true, val: r => (r.lm && r.lm.state) || '',
+          cell: r => { const st = r.lm && r.lm.state || ''; const ok = /complet|success|landed/i.test(st) && !(r.lm && r.lm.aborted); const bad = (r.lm && r.lm.aborted) || /abort|fail|cancel|error/i.test(st); return `<td style="color:${ok ? '#39ff14' : bad ? '#ff5252' : '#ffb300'}">${escapeHtml(st)}${r.lm && r.lm.aborted && !/abort/i.test(st) ? ' (aborted)' : ''}</td>`; } },
+        { id: 'group', label: 'Group', title: 'Mission group id', def: true, sort: r => (r.lm && r.lm.group) || 0, val: r => (r.lm && r.lm.group) || '', cell: r => `<td style="color:#9aa">${r.lm ? escapeHtml(String(r.lm.group || '')) : ''}</td>` },
+        { id: 'pilot', label: 'Pilot', def: true, sort: r => (r.lm && r.lm.pilot || '').toLowerCase(), asc: true, val: r => (r.lm && r.lm.pilot) || '', cell: r => `<td style="color:#9aa">${r.lm ? escapeHtml(r.lm.pilot || '') : ''}</td>` },
+        { id: 'captured', label: 'Assets', title: 'Assets imaged by that mission that day / assets the Mission Bank mission plans to visit (pads + nested). Imaged can exceed planned: a photo tags every asset in view.', def: true, sort: r => (r.lm && r.lm.captured) || 0, val: r => r.lm ? `${r.lm.captured}${r.lm.plannedAssets != null ? ' / ' + r.lm.plannedAssets : ''}` : '',
+          cell: r => `<td style="text-align:center">${r.lm ? `${r.lm.captured}${r.lm.plannedAssets != null ? ` / ${r.lm.plannedAssets}` : ''}` : ''}</td>` },
+        { id: 'imgs', label: 'Images', title: 'Images uploaded / planned — ⏳ still capturing', def: true, sort: r => (r.lm && r.lm.images) || 0, val: r => r.lm && r.lm.images != null ? `${r.lm.images}${r.lm.plannedImages ? ' / ' + r.lm.plannedImages : ''}` : '',
+          cell: r => { const lm = r.lm; const inProg = lm && lm.plannedImages && lm.images != null && lm.images < lm.plannedImages; return `<td style="text-align:center;color:${inProg ? '#ffb300' : '#9aa'}">${lm && lm.images != null ? `${lm.images}${lm.plannedImages ? ` / ${lm.plannedImages}` : ''}` : ''}${inProg ? ' ⏳' : ''}</td>`; } },
+        { id: 'drone', label: 'Drone', def: false, sort: r => (r.lm && r.lm.drone || '').toLowerCase(), asc: true, val: r => (r.lm && r.lm.drone) || '', cell: r => `<td style="color:#9aa">${r.lm ? escapeHtml(r.lm.drone || '') : ''}</td>` },
+        { id: 'dur', label: 'Duration', title: 'Takeoff mission duration', def: false, sort: r => (r.lm && r.lm.durationS) || 0, val: r => r.lm && r.lm.durationS != null ? covFmtDur(r.lm.durationS) : '', cell: r => `<td style="text-align:center;color:#9aa">${r.lm && r.lm.durationS != null ? covFmtDur(r.lm.durationS) : ''}</td>` },
+        { id: 'when', label: 'Mission start', def: false, sort: r => (r.lm && r.lm.whenMs) || 0, val: r => r.lm && r.lm.whenMs ? new Date(r.lm.whenMs).toISOString() : '', cell: r => `<td style="color:#9aa">${r.lm && r.lm.whenMs ? escapeHtml(new Date(r.lm.whenMs).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })) : ''}</td>` },
+        { id: 'month', label: '# month', title: 'Distinct day + mission with an image of this asset, this calendar month', def: true, sort: r => r.monthFlies, val: r => r.monthFlies, cell: r => `<td style="text-align:center">${r.monthFlies}</td>` },
+        { id: 'week', label: '# week', title: 'Mon–Sun', def: true, sort: r => r.weekFlies, val: r => r.weekFlies, cell: r => `<td style="text-align:center">${r.weekFlies}</td>` },
+        { id: 'window', label: '# in window', title: 'Distinct day + mission in the whole lookback window', def: false, sort: r => (r.flies || []).length, val: r => (r.flies || []).length, cell: r => `<td style="text-align:center">${(r.flies || []).length}</td>` },
+        { id: 'status', label: 'Status', def: true, sort: r => ({ never: 0, over: 1, due: 2, behind: 3, ok: 4 })[r.status], val: r => COV_STATUS_LABEL[r.status], cell: r => `<td><span style="color:${COV_STATUS_COLORS[r.status]};font-weight:700">${COV_STATUS_LABEL[r.status]}</span></td>` },
+        { id: 'type', label: 'Type', title: 'custom.poi_type_str', def: false, sort: r => (r.poi || '').toLowerCase(), asc: true, val: r => r.poi || '', cell: r => `<td style="color:#9aa">${escapeHtml(r.poi || '')}</td>` },
+    ];
+    const COV_COL_BY_ID = Object.fromEntries(COV_COLS.map(c => [c.id, c]));
+    function covFmtDur(sec) { sec = Math.max(0, Math.round(sec)); const m = Math.floor(sec / 60), s2 = sec % 60; return `${m}:${String(s2).padStart(2, '0')}`; }
+    let covColsCache = null;
+    function covColsState() {
+        if (covColsCache) return covColsCache;
+        const o = gmGet(COV_COLS_KEY, {});
+        const order = Array.isArray(o && o.order) ? o.order.filter(id => COV_COL_BY_ID[id]) : [];
+        COV_COLS.forEach(c => { if (!order.includes(c.id)) order.push(c.id); });
+        const hidden = new Set(Array.isArray(o && o.hidden) ? o.hidden.filter(id => COV_COL_BY_ID[id]) : COV_COLS.filter(c => !c.def).map(c => c.id));
+        covColsCache = { order, hidden };
+        return covColsCache;
+    }
+    function covColsSave() { const st = covColsState(); gmSet(COV_COLS_KEY, { order: st.order, hidden: [...st.hidden] }); }
+    function covVisibleCols() { const st = covColsState(); return st.order.filter(id => !st.hidden.has(id)).map(id => COV_COL_BY_ID[id]); }
+
     function covVisibleRecs(bucket) {
         const st = panelState.cov || (panelState.cov = { tier: '', status: '', search: '' });
         const q = (panelState.search || '').trim().toLowerCase();
-        const lmStr = r => r.lm ? `${r.lm.id || ''} ${r.lm.group || ''} ${r.lm.pilot || ''}`.toLowerCase() : '';
+        const lmStr = r => r.lm ? `${r.lm.id || ''} ${r.lm.group || ''} ${r.lm.pilot || ''} ${r.lm.drone || ''}`.toLowerCase() : '';
         let rows = bucket.recs.filter(r => (!st.tier || (r.tier || 'none') === st.tier) && (!st.status || r.status === st.status)
             && (!q || r.name.toLowerCase().includes(q) || (r.pad || '').toLowerCase().includes(q) || (r.lastMission || '').toLowerCase().includes(q) || lmStr(r).includes(q)));
-        const key = panelState.sortKey || 'status', dir = panelState.sortDir === 'asc' ? 1 : -1;
-        const sRank = { never: 0, over: 1, due: 2, behind: 3, ok: 4 };
-        const tRank = { P1: 0, P2: 1, P3: 2, '': 3 };
-        const lm = r => r.lm || {};
-        const val = r => key === 'name' ? r.name.toLowerCase() : key === 'pad' ? (r.pad || '').toLowerCase() : key === 'tier' ? tRank[r.tier] : key === 'last' ? (r.lastAt || '') : key === 'mission' ? (r.lastMission || '').toLowerCase()
-            : key === 'mid' ? (lm(r).id || 0) : key === 'group' ? (lm(r).group || 0) : key === 'pilot' ? (lm(r).pilot || '').toLowerCase() : key === 'captured' ? (lm(r).captured || 0)
-            : key === 'month' ? r.monthFlies : key === 'week' ? r.weekFlies : key === 'status' ? sRank[r.status] : r.name.toLowerCase();
-        rows.sort((a, b) => { const x = val(a), y = val(b); return (x < y ? -1 : x > y ? 1 : a.name.localeCompare(b.name)) * dir; });
+        const col = COV_COL_BY_ID[panelState.sortKey] || COV_COL_BY_ID.status;
+        const dir = panelState.sortDir === 'asc' ? 1 : -1;
+        rows.sort((a, b) => { const x = col.sort(a), y = col.sort(b); return (x < y ? -1 : x > y ? 1 : a.name.localeCompare(b.name)) * dir; });
         return rows;
     }
     function covStats(bucket) {
@@ -853,41 +900,30 @@
         const rows = covVisibleRecs(bucket);
         const stats = covStats(bucket);
         const cfg = covCfg();
+        const cols = covVisibleCols();
         const ageMin = Math.round((Date.now() - bucket.at) / 60000);
         const chip = (label, active, attr, color) => `<button class="aim-mb-tbtn${active ? ' active' : ''}" ${attr} style="${color && !active ? `border-color:${color};color:${color}` : ''}">${label}</button>`;
         const tierChips = ['P1', 'P2', 'P3', 'none'].map(t => chip(`${t === 'none' ? 'Untiered' : t} <span style="opacity:.7">${stats[t === 'none' ? '' : t].n}</span>`, st.tier === t, `data-cov-tier="${t}"`, COV_TIER_COLORS[t])).join('');
         const statChips = ['ok', 'due', 'behind', 'over', 'never'].map(s => chip(COV_STATUS_LABEL[s], st.status === s, `data-cov-status="${s}"`, COV_STATUS_COLORS[s])).join('');
-        const th = (k, label, title) => `<th data-cov-sort="${k}" class="${panelState.sortKey === k ? 'sorted' : ''}" title="${title || ''}">${label}${panelState.sortKey === k ? (panelState.sortDir === 'asc' ? ' ▲' : ' ▼') : ''}</th>`;
+        const th = c => `<th data-cov-sort="${c.id}" draggable="true" class="${panelState.sortKey === c.id ? 'sorted' : ''}" title="${escapeHtml(c.title || '')} — drag to reorder">${c.label}${panelState.sortKey === c.id ? (panelState.sortDir === 'asc' ? ' ▲' : ' ▼') : ''}</th>`;
         const sum = ['P1', 'P2', 'P3', ''].map(t => { const o = stats[t]; if (!o.n) return ''; return `<span style="margin-right:14px;color:${COV_TIER_COLORS[t || 'none']}"><b>${t || 'Untiered'}</b> ${o.n} · <span style="color:#39ff14">${o.ok} ok</span> · <span style="color:#ffb300">${o.due} due</span> · <span style="color:#ff3b3b">${o.over} overdue</span></span>`; }).join('');
-        const body = rows.map(r => {
-            const sc = COV_STATUS_COLORS[r.status], tc = COV_TIER_COLORS[r.tier || 'none'];
-            const age = covDaysAgo(r.lastAt);
-            const lm = r.lm;
-            const inProg = lm && lm.plannedImages && lm.images != null && lm.images < lm.plannedImages;
-            const capTxt = lm ? `${lm.captured}${lm.plannedAssets != null ? ` / ${lm.plannedAssets}` : ''}` : '';
-            const imgTxt = lm && lm.images != null ? `${lm.images}${lm.plannedImages ? ` / ${lm.plannedImages}` : ''}` : '';
-            return `<tr data-cov-id="${r.id}" title="${escapeHtml(r.poi || '')}${r.err ? ' · fetch error: ' + escapeHtml(r.err) : ''}">
-                <td style="color:#e6e6e6">${escapeHtml(r.name)}${r.err ? ' <span style="color:#ff5252">⚠</span>' : ''}</td>
-                <td style="color:#9aa">${escapeHtml(r.pad || '')}</td>
-                <td><span style="display:inline-block;min-width:22px;text-align:center;border:1px solid ${tc};color:${tc};border-radius:3px;padding:0 4px;font-weight:700">${r.tier || '—'}</span></td>
-                <td title="${escapeHtml(r.lastAt || '')}">${covFmtDate(r.lastAt)}${age != null ? ` <span style="color:#777">(${age}d)</span>` : ''}</td>
-                <td style="color:#9aa">${escapeHtml(r.lastMission || '')}</td>
-                <td>${lm && lm.id ? `<a href="${covMissionUrl(sid, lm.id)}" target="_blank" data-cov-link style="color:#14d2dc;text-decoration:underline" title="Open Mission Playback for ${lm.id}${lm.state ? ' · ' + escapeHtml(lm.state) : ''}">${lm.id}</a>` : (lm ? '<span style="color:#666" title="No takeoff mission with this name within 12 h of the image">?</span>' : '')}</td>
-                <td style="color:#9aa">${lm ? escapeHtml(String(lm.group || '')) : ''}</td>
-                <td style="color:#9aa">${lm ? escapeHtml(lm.pilot || '') : ''}</td>
-                <td style="text-align:center" title="Assets with an image from that mission that day / assets the Mission Bank mission plans to visit (pads + nested)">${capTxt}</td>
-                <td style="text-align:center;color:${inProg ? '#ffb300' : '#9aa'}" title="Images uploaded / planned${inProg ? ' — still capturing' : ''}">${imgTxt}${inProg ? ' ⏳' : ''}</td>
-                <td style="text-align:center">${r.monthFlies}</td>
-                <td style="text-align:center">${r.weekFlies}</td>
-                <td><span style="color:${sc};font-weight:700">${COV_STATUS_LABEL[r.status]}</span></td>
-            </tr>`;
-        }).join('');
+        const body = rows.map(r => `<tr data-cov-id="${r.id}" title="${escapeHtml(r.poi || '')}">${cols.map(c => c.cell(r, sid)).join('')}</tr>`).join('');
+        const colsMenu = covColsState().order.map(id => { const c = COV_COL_BY_ID[id]; return `<label style="display:flex;gap:6px;align-items:center;padding:2px 4px;cursor:pointer"><input type="checkbox" data-cov-col="${id}" ${covColsState().hidden.has(id) ? '' : 'checked'} style="accent-color:#14d2dc"> ${escapeHtml(c.label)}</label>`; }).join('');
         const html = `
             <div class="aim-mb-toolbar">
-                <input class="aim-mb-search" type="text" placeholder="Search asset / pad / mission…" value="${escapeHtml(panelState.search || '')}" />
+                <input class="aim-mb-search" type="text" placeholder="Search asset / pad / mission / id / group / pilot…" value="${escapeHtml(panelState.search || '')}" />
                 ${tierChips}<span style="width:6px"></span>${statChips}
                 <span style="flex:1"></span>
-                <button class="aim-mb-tbtn" data-cov-act="refresh" title="Re-read every asset's images from Percepto (${bucket.recs.length} assets)">↻ Refresh <span style="opacity:.7">${ageMin < 1 ? 'now' : ageMin + ' min ago'}</span></button>
+                <button class="aim-mb-tbtn" data-cov-act="refresh" title="Re-read every asset's images from Percepto (${bucket.recs.length} assets, last ${cfg.windowDays} days)">↻ Refresh <span style="opacity:.7">${ageMin < 1 ? 'now' : ageMin + ' min ago'}</span></button>
+                <span style="position:relative"><button class="aim-mb-tbtn" data-cov-act="cols" title="Show / hide columns (drag headers to reorder)">☰ Columns ▾</button>
+                    <div data-cov-colsmenu style="display:none;position:absolute;right:0;top:26px;z-index:5;background:#1a1a1a;border:1px solid #444;border-radius:4px;padding:6px;min-width:170px;font-size:11px;box-shadow:0 4px 14px rgba(0,0,0,.5)">${colsMenu}<div style="border-top:1px solid #333;margin-top:4px;padding-top:4px"><button class="aim-mb-tbtn" data-cov-act="cols-reset">Reset</button></div></div></span>
+                <span style="position:relative"><button class="aim-mb-tbtn" data-cov-act="gear" title="Coverage settings">⚙</button>
+                    <div data-cov-gear style="display:none;position:absolute;right:0;top:26px;z-index:5;background:#1a1a1a;border:1px solid #444;border-radius:4px;padding:8px;min-width:260px;font-size:11px;box-shadow:0 4px 14px rgba(0,0,0,.5)">
+                        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span>Read back</span><span><input type="number" data-cov-cfg="windowDays" value="${cfg.windowDays}" min="31" max="730" step="1" style="width:64px;background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"> days</span></div>
+                        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span>Rulebook</span><select data-cov-cfg="rulebook" style="background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"><option value="diamondback" ${cfg.rulebook === 'diamondback' ? 'selected' : ''}>Diamondback</option><option value="internal" ${cfg.rulebook === 'internal' ? 'selected' : ''}>Internal SLA</option></select></div>
+                        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span>Parallel reads</span><input type="number" data-cov-cfg="pool" value="${cfg.pool}" min="2" max="24" step="1" style="width:64px;background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"></div>
+                        <div style="color:#777">Lookback / parallel reads apply on the next ↻ Refresh. Every number is also in the Control Panel card.</div>
+                    </div></span>
                 <button class="aim-mb-tbtn" data-cov-act="sheets" title="Rich table → paste into Google Sheets">📤 Sheets</button>
                 <button class="aim-mb-tbtn" data-cov-act="csv">⬇ CSV</button>
                 <button class="aim-mb-tbtn${st.paint === false ? '' : ' active'}" data-cov-act="paint" title="Paint these colours on the map (needs Map Styler → Assets → 📅 Coverage colours ON). Click to toggle.">🎨 Map ${st.paint === false ? 'off' : 'on'}</button>
@@ -895,41 +931,73 @@
             <div style="padding:5px 10px;border-bottom:1px solid #2a2a2a;font-size:11px;color:#bbb;display:flex;flex-wrap:wrap;gap:4px 0;align-items:center">
                 ${sum}
                 <span style="flex:1"></span>
-                <span style="color:#777">Rulebook: <b style="color:#14d2dc">${cfg.rulebook === 'internal' ? 'Internal SLA (P1 7d · P2 14d · P3 31d)' : `Diamondback (floor monthly${cfg.p3FloorDays > 31 ? ', P3 quarterly' : ''} · P1 ${cfg.p1WeekTarget}×/wk · P2 ${cfg.p2WeekTarget}×/wk)`}</b> · month from ${covFmtDate(bucket.monthStart)} · week from ${covFmtDate(bucket.weekStart)}</span>
+                <span style="color:#777">Rulebook: <b style="color:#14d2dc">${cfg.rulebook === 'internal' ? `Internal SLA (P1 ${cfg.intP1Days}d · P2 ${cfg.intP2Days}d · P3 ${cfg.intP3Days}d)` : `Diamondback (floor monthly${cfg.p3FloorDays > 31 ? ', P3 quarterly' : ''} · P1 ${cfg.p1WeekTarget}×/wk · P2 ${cfg.p2WeekTarget}×/wk)`}</b> · month from ${covFmtDate(bucket.monthStart)} · week from ${covFmtDate(bucket.weekStart)} · read back ${bucket.windowDays || cfg.windowDays} d</span>
             </div>
             <div class="aim-mb-table-wrap">
                 <table>
-                    <thead><tr>${th('name', 'Asset')}${th('pad', 'Pad')}${th('tier', 'Tier', 'From the asset type prefix (P1 - …)')}${th('last', 'Last flown')}${th('mission', 'Last mission')}${th('mid', 'ID', 'Takeoff mission id — opens Mission Playback')}${th('group', 'Group', 'Mission group id')}${th('pilot', 'Pilot')}${th('captured', 'Assets', 'captured so far / planned in the mission')}${th('imgs', 'Images', 'uploaded / planned')}${th('month', '# month', 'Distinct day + mission with an image of this asset, this calendar month')}${th('week', '# week', 'Mon–Sun')}${th('status', 'Status')}</tr></thead>
-                    <tbody>${body || `<tr><td colspan="13" style="color:#777;padding:14px">No assets match.</td></tr>`}</tbody>
+                    <thead><tr>${cols.map(th).join('')}</tr></thead>
+                    <tbody>${body || `<tr><td colspan="${cols.length}" style="color:#777;padding:14px">No assets match.</td></tr>`}</tbody>
                 </table>
             </div>
-            <div style="padding:4px 10px;border-top:1px solid #2a2a2a;font-size:10px;color:#777">${rows.length} of ${bucket.recs.length} assets · click a row to pan the map · tier colours = ring on the map, status = fill</div>`;
+            <div style="padding:4px 10px;border-top:1px solid #2a2a2a;font-size:10px;color:#777">${rows.length} of ${bucket.recs.length} assets · click a row to pan the map · mission name opens the editor · ID opens Playback · tier = ring, status = fill</div>`;
         setBodyHtml(html);
         wireCoverageEvents(sid, bucket);
     }
     function wireCoverageEvents(sid, bucket) {
         const body = panelEl.querySelector('#aim-mb-body'); if (!body) return;
+        const rerender = () => { const wrap = body.querySelector('.aim-mb-table-wrap'); const y = wrap ? wrap.scrollTop : 0; renderCoverageView(); const w2 = panelEl.querySelector('.aim-mb-table-wrap'); if (w2) w2.scrollTop = y; };
         const search = body.querySelector('.aim-mb-search');
-        if (search) { search.oninput = () => { panelState.search = search.value; const wrap = body.querySelector('.aim-mb-table-wrap'); const y = wrap ? wrap.scrollTop : 0; renderCoverageView(); const w2 = panelEl.querySelector('.aim-mb-table-wrap'); if (w2) w2.scrollTop = y; const s2 = panelEl.querySelector('.aim-mb-search'); if (s2) { s2.focus(); s2.setSelectionRange(s2.value.length, s2.value.length); } }; }
-        body.querySelectorAll('[data-cov-tier]').forEach(b => { b.onclick = () => { const st = panelState.cov; st.tier = st.tier === b.dataset.covTier ? '' : b.dataset.covTier; renderCoverageView(); }; });
-        body.querySelectorAll('[data-cov-status]').forEach(b => { b.onclick = () => { const st = panelState.cov; st.status = st.status === b.dataset.covStatus ? '' : b.dataset.covStatus; renderCoverageView(); }; });
-        body.querySelectorAll('th[data-cov-sort]').forEach(h => { h.onclick = () => { const k = h.dataset.covSort; if (panelState.sortKey === k) panelState.sortDir = panelState.sortDir === 'asc' ? 'desc' : 'asc'; else { panelState.sortKey = k; panelState.sortDir = (k === 'name' || k === 'pad' || k === 'tier' || k === 'mission') ? 'asc' : 'desc'; } renderCoverageView(); }; });
-        body.querySelectorAll('tr[data-cov-id]').forEach(tr => { tr.onclick = (e) => { if (e.target && e.target.closest && e.target.closest('[data-cov-link]')) return; covPanTo(sid, Number(tr.dataset.covId)); }; });
+        if (search) { search.oninput = () => { panelState.search = search.value; rerender(); const s2 = panelEl.querySelector('.aim-mb-search'); if (s2) { s2.focus(); s2.setSelectionRange(s2.value.length, s2.value.length); } }; }
+        body.querySelectorAll('[data-cov-tier]').forEach(b => { b.onclick = () => { const st = panelState.cov; st.tier = st.tier === b.dataset.covTier ? '' : b.dataset.covTier; rerender(); }; });
+        body.querySelectorAll('[data-cov-status]').forEach(b => { b.onclick = () => { const st = panelState.cov; st.status = st.status === b.dataset.covStatus ? '' : b.dataset.covStatus; rerender(); }; });
+        // header: click = sort, drag = reorder
+        let dragId = null;
+        body.querySelectorAll('th[data-cov-sort]').forEach(h => {
+            h.onclick = () => { const k = h.dataset.covSort; const c = COV_COL_BY_ID[k]; if (panelState.sortKey === k) panelState.sortDir = panelState.sortDir === 'asc' ? 'desc' : 'asc'; else { panelState.sortKey = k; panelState.sortDir = c && c.asc ? 'asc' : 'desc'; } rerender(); };
+            h.ondragstart = (e) => { dragId = h.dataset.covSort; try { e.dataTransfer.setData('text/plain', dragId); e.dataTransfer.effectAllowed = 'move'; } catch (e2) {} h.style.opacity = '0.5'; };
+            h.ondragend = () => { h.style.opacity = ''; dragId = null; body.querySelectorAll('th[data-cov-sort]').forEach(x => { x.style.borderLeft = ''; }); };
+            h.ondragover = (e) => { if (!dragId || dragId === h.dataset.covSort) return; e.preventDefault(); h.style.borderLeft = '2px solid #14d2dc'; };
+            h.ondragleave = () => { h.style.borderLeft = ''; };
+            h.ondrop = (e) => { e.preventDefault(); const to = h.dataset.covSort; if (!dragId || dragId === to) return; const st = covColsState(); const from = st.order.indexOf(dragId), at = st.order.indexOf(to); if (from < 0 || at < 0) return; st.order.splice(from, 1); st.order.splice(at, 0, dragId); covColsSave(); dragId = null; rerender(); };
+        });
+        body.querySelectorAll('tr[data-cov-id]').forEach(tr => { tr.onclick = (e) => { if (e.target && e.target.closest && e.target.closest('[data-cov-link],[data-cov-open-app]')) return; covPanTo(sid, Number(tr.dataset.covId)); }; });
+        // Playback link: left-click is swallowed somewhere between the panel and the iframe — open it ourselves.
+        body.querySelectorAll('a[data-cov-link]').forEach(a => { a.onclick = (e) => { e.preventDefault(); e.stopPropagation(); try { (window.top || window).open(a.href, '_blank'); } catch (err) { window.open(a.href, '_blank'); } }; });
+        body.querySelectorAll('[data-cov-open-app]').forEach(el => { el.onclick = (e) => { e.preventDefault(); e.stopPropagation(); covOpenInEditor(sid, el.dataset.covOpenApp); }; });
+        body.querySelectorAll('[data-cov-col]').forEach(cb => { cb.onchange = () => { const st = covColsState(); if (cb.checked) st.hidden.delete(cb.dataset.covCol); else st.hidden.add(cb.dataset.covCol); covColsSave(); rerender(); const m = panelEl.querySelector('[data-cov-colsmenu]'); if (m) m.style.display = 'block'; }; });
+        body.querySelectorAll('[data-cov-cfg]').forEach(inp => { inp.onchange = () => { const k = inp.dataset.covCfg; const v = k === 'rulebook' ? String(inp.value) : Number(inp.value); if (k !== 'rulebook' && !isFinite(v)) return; covCfgSet(k, v); covRestatus(bucket); covBroadcast(covSiteKey(sid), bucket); registerCoverage(); rerender(); const g = panelEl.querySelector('[data-cov-gear]'); if (g) g.style.display = 'block'; }; });
         body.querySelectorAll('[data-cov-act]').forEach(b => {
-            b.onclick = () => {
+            b.onclick = (e) => {
+                e.stopPropagation();
                 const act = b.dataset.covAct;
+                const menu = body.querySelector('[data-cov-colsmenu]'), gear = body.querySelector('[data-cov-gear]');
                 if (act === 'refresh') { covRefresh(sid, true); }
+                else if (act === 'cols') { if (gear) gear.style.display = 'none'; if (menu) menu.style.display = menu.style.display === 'none' ? 'block' : 'none'; }
+                else if (act === 'cols-reset') { covColsCache = null; gmSet(COV_COLS_KEY, {}); rerender(); }
+                else if (act === 'gear') { if (menu) menu.style.display = 'none'; if (gear) gear.style.display = gear.style.display === 'none' ? 'block' : 'none'; }
                 else if (act === 'sheets') { covExport(bucket, 'sheets'); }
                 else if (act === 'csv') { covExport(bucket, 'csv'); }
                 else if (act === 'paint') {
                     const st = panelState.cov; st.paint = st.paint === false;
                     if (st.paint) covBroadcast(covSiteKey(sid), bucket);
-                    try { const ch = covChannelGet(); if (ch) ch.postMessage({ type: 'COVERAGE_PAINT', siteKey: covSiteKey(sid), on: st.paint }); } catch (e) {}
+                    try { const ch = covChannelGet(); if (ch) ch.postMessage({ type: 'COVERAGE_PAINT', siteKey: covSiteKey(sid), on: st.paint }); } catch (err) {}
                     showToast(st.paint ? 'Map colours ON (Map Styler → Assets → 📅 Coverage colours must be on).' : 'Map colours OFF for this site until re-enabled.', '#14d2dc');
-                    renderCoverageView();
+                    rerender();
                 }
             };
         });
+        body.onclick = (e) => { if (e.target.closest('[data-cov-colsmenu],[data-cov-gear],[data-cov-act]')) return; body.querySelectorAll('[data-cov-colsmenu],[data-cov-gear]').forEach(m => { m.style.display = 'none'; }); };
+    }
+    // Open a Mission Bank mission in Percepto's editor: click its row link in
+    // the native list when it is rendered (keeps React state coherent), else
+    // route to it by id.
+    function covOpenInEditor(sid, name) {
+        const apps = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
+        const app = apps.find(a => String(a.name || '').trim().toUpperCase() === String(name || '').trim().toUpperCase());
+        if (!app) { showToast(`"${name}" is not in this site's Mission Bank (renamed or deleted?).`, '#ff9800'); return; }
+        const link = Array.from(document.querySelectorAll(`${MISSION_ROW_SELECTOR} ${MISSION_LINK_SELECTOR}`)).find(a => { const m = (a.getAttribute('href') || '').match(MISSION_HREF_RE); return m && Number(m[1]) === app.id; });
+        if (link) { link.click(); return; }
+        try { (window.top || window).location.hash = `#/site/${sid}/control-panel/mission-bank/${app.id}`; } catch (e) { location.hash = `#/site/${sid}/control-panel/mission-bank/${app.id}`; }
     }
     function covPanTo(sid, assetId) {
         const ent = genEntCache[sid]; const a = ent && ent.assets.find(x => x.id === assetId);
@@ -943,15 +1011,24 @@
         const cached = covLoadCached(siteKey);
         if (cached && !force && Date.now() - cached.at < COV_TTL_MS) { covRestatus(cached); if (!panelState.cov || panelState.cov.paint !== false) covBroadcast(siteKey, cached); renderCoverageView(); return; }
         updateTitle();
-        setBodyHtml(`<div style="padding:40px;text-align:center;color:#888">Reading flown coverage for site ${sid}…<div id="aim-mb-cov-prog" style="margin-top:8px;color:#14d2dc"></div></div>`);
-        covFetch(sid, (done, total) => { const el = panelEl && panelEl.querySelector('#aim-mb-cov-prog'); if (el) el.textContent = `${done} / ${total} assets`; })
+        setBodyHtml(`<div style="padding:40px 60px;text-align:center;color:#888">Reading flown coverage for site ${sid} (last ${covCfg().windowDays} days)…
+            <div style="margin:14px auto 6px;max-width:520px;height:10px;background:#1a1a1a;border:1px solid #333;border-radius:5px;overflow:hidden"><div id="aim-mb-cov-bar" style="width:0%;height:100%;background:#14d2dc;transition:width .3s"></div></div>
+            <div id="aim-mb-cov-prog" style="color:#14d2dc">starting…</div></div>`);
+        covFetch(sid, (done, total, ms) => {
+            const el = panelEl && panelEl.querySelector('#aim-mb-cov-prog'); const bar = panelEl && panelEl.querySelector('#aim-mb-cov-bar');
+            const pct = total ? done / total : 0; const eta = done ? Math.max(0, Math.round((ms / done) * (total - done) / 1000)) : null;
+            if (bar) bar.style.width = `${Math.round(pct * 100)}%`;
+            if (el) el.textContent = `${done} / ${total} assets · ${Math.round(pct * 100)} % · ${Math.round(ms / 1000)} s elapsed${eta != null ? ` · ~${eta} s left` : ''}`;
+        })
             .then(() => { if (panelState && panelState.mode === 'coverage') renderCoverageView(); })
             .catch(e => { console.error(`${TAG} coverage: fetch failed`, e); setBodyHtml(`<div style="padding:40px;text-align:center;color:#ff5252">Coverage read failed: ${escapeHtml(e.message || String(e))}</div>`); });
     }
     function covExport(bucket, kind) {
         const rows = covVisibleRecs(bucket);
-        const cols = ['Asset', 'Pad', 'Tier', 'Last flown', 'Days ago', 'Last mission', 'Mission ID', 'Group', 'Pilot', 'Assets captured', 'Assets planned', 'Images', 'Images planned', 'Flies this month', 'Flies this week', 'Status', 'Type'];
-        const vals = r => { const lm = r.lm || {}; return [r.name, r.pad || '', r.tier || '', r.lastAt ? covDayKey(r.lastAt) : '', covDaysAgo(r.lastAt) == null ? '' : covDaysAgo(r.lastAt), r.lastMission || '', lm.id || '', lm.group || '', lm.pilot || '', r.lm ? lm.captured : '', lm.plannedAssets == null ? '' : lm.plannedAssets, lm.images == null ? '' : lm.images, lm.plannedImages == null ? '' : lm.plannedImages, r.monthFlies, r.weekFlies, COV_STATUS_LABEL[r.status], r.poi || '']; };
+        const vcols = covVisibleCols();
+        const cols = vcols.map(c => c.label);
+        const vals = r => vcols.map(c => c.val(r));
+        const iStatus = vcols.findIndex(c => c.id === 'status'), iTier = vcols.findIndex(c => c.id === 'tier');
         const title = `Coverage — ${getCurrentSiteName() || 'site ' + getCurrentSiteID()} — ${bucket.day}`;
         if (kind === 'csv') {
             const esc = v => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
@@ -961,7 +1038,7 @@
         }
         const th = 'background:#1a1a1a;color:#14d2dc;border:1px solid #444;padding:3px 6px;font-weight:700';
         const td = 'border:1px solid #444;padding:3px 6px';
-        const html = `<table style="border-collapse:collapse;font-family:Arial;font-size:11px"><tr><td colspan="${cols.length}" style="font-weight:700;padding:2px 6px">${escapeHtml(title)}</td></tr><tr>${cols.map(c => `<th style="${th}">${escapeHtml(c)}</th>`).join('')}</tr>${rows.map(r => `<tr>${vals(r).map((v, i) => `<td style="${td}${i === 15 ? `;color:${COV_STATUS_COLORS[r.status]};font-weight:700` : i === 2 ? `;color:${COV_TIER_COLORS[r.tier || 'none']};font-weight:700` : ''}">${escapeHtml(String(v))}</td>`).join('')}</tr>`).join('')}</table>`;
+        const html = `<table style="border-collapse:collapse;font-family:Arial;font-size:11px"><tr><td colspan="${cols.length}" style="font-weight:700;padding:2px 6px">${escapeHtml(title)}</td></tr><tr>${cols.map(c => `<th style="${th}">${escapeHtml(c)}</th>`).join('')}</tr>${rows.map(r => `<tr>${vals(r).map((v, i) => `<td style="${td}${i === iStatus ? `;color:${COV_STATUS_COLORS[r.status]};font-weight:700` : i === iTier ? `;color:${COV_TIER_COLORS[r.tier || 'none']};font-weight:700` : ''}">${escapeHtml(String(v))}</td>`).join('')}</tr>`).join('')}</table>`;
         const tsv = [title, cols.join('\t')].concat(rows.map(r => vals(r).map(v => String(v).replace(/[\t\n]/g, ' ')).join('\t'))).join('\n');
         try {
             navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([html], { type: 'text/html' }), 'text/plain': new Blob([tsv], { type: 'text/plain' }) })])
@@ -997,6 +1074,9 @@
                 { id: 'intP3Days', label: 'P3 window', type: 'number', min: 1, max: 120, step: 1, default: c.intP3Days, unit: 'days' },
                 { id: 'noneDays', label: 'Untiered window', type: 'number', min: 1, max: 120, step: 1, default: c.noneDays, unit: 'days' },
                 { id: 'dueWithinDays', label: 'Show "Due" this many days before the floor', type: 'number', min: 0, max: 30, step: 1, default: c.dueWithinDays, unit: 'days' },
+                { id: 'read-header', label: 'Reading', type: 'header' },
+                { id: 'windowDays', label: 'Read back (lookback per asset)', type: 'number', min: 31, max: 730, step: 1, default: c.windowDays, unit: 'days' },
+                { id: 'pool', label: 'Parallel reads', type: 'number', min: 2, max: 24, step: 1, default: c.pool },
             ],
         });
     }
@@ -2062,11 +2142,12 @@
             });
             header.parentNode.insertBefore(row, header.nextSibling);
         }
-        try { injectCovButton(doc, row); } catch (e) { console.warn(`${TAG} coverage button:`, e); }   // v3.09 📅 Coverage
         const existing = doc.getElementById(SUM_BTN_ID);
-        if (existing && row.contains(existing)) return; // already placed
-        if (existing) existing.remove();
-        injectButtonIntoRow(doc, row, header);
+        if (!(existing && row.contains(existing))) {
+            if (existing) existing.remove();
+            injectButtonIntoRow(doc, row, header);
+        }
+        try { injectCovButton(doc, row); } catch (e) { console.warn(`${TAG} coverage button:`, e); }   // v3.09 📅 Coverage (after SUM, compact — v3.16)
     }
 
     // Neon-green SUM button styling — matches the Site Setup SUM button
