@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.24
+// @version      3.25
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.24';
+    const SCRIPT_VERSION = '3.25';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -751,16 +751,26 @@
         const apps = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
         const plannedByName = new Map();
         if (apps.length && ent && ent.assets) {
-            let det = null;
-            try { det = mcvDetect(ent, apps); } catch (e) { console.warn(`${TAG} coverage: mcvDetect failed`, e); }
-            const assetById = new Map(ent.assets.map(a => [a.id, a]));
-            const padsOf = new Map();
-            ((det && det.macros) || []).forEach(x => padsOf.set(x.mission.id, x.pads));
-            ((det && det.solos) || []).forEach(x => padsOf.set(x.mission.id, [x.pad]));
+            // v3.25: a mission PLANS every asset within 150 ft of any of its
+            // located steps (nav / snapshot), plus everything nested on those.
+            // (v3.17 used mcvDetect's one-tightest-polygon-per-step pad fold,
+            // which left sibling wells on the same pad reading as "in frame"
+            // → 61 real inspections showed as never flown on 1591.)
+            const tolM = 46;
+            const list = ent.assets.filter(a => a.ring && a.ring.length >= 3);
+            const assetById = new Map(list.map(a => [a.id, a]));
+            const boxes = list.map(a => agRingBbox(a.ring, tolM + 5));
             apps.forEach(app => {
-                const pads = padsOf.get(app.id) || [];
                 const set = new Set();
-                pads.forEach(p => { set.add(p.id); const a = assetById.get(p.id); (a && a.descendants || []).forEach(d => set.add(d)); });
+                (app.instructions || []).forEach(i => {
+                    if (!i || !i.location || typeof i.location.lat !== 'number') return;
+                    const p = i.location;
+                    for (let k = 0; k < list.length; k++) {
+                        const bb = boxes[k];
+                        if (p.lat < bb.s || p.lat > bb.n || p.lng < bb.w || p.lng > bb.e) continue;
+                        if (mbPointToPolygonMeters(p.lat, p.lng, list[k].ring) <= tolM) { set.add(list[k].id); (list[k].descendants || []).forEach(d => set.add(d)); if (list[k].parentId != null) set.add(list[k].parentId); }
+                    }
+                });
                 plannedByName.set(String(app.name || '').trim().toUpperCase(), set);
             });
         }
