@@ -1,3 +1,9 @@
+## 2026-10-20 — 🏗 Rigs & cranes live-verified on 1637 — Site Setup Tools latest v4.382 → v4.385 (latest only, feature #291)
+
+- **v4.382** rig constants hoisted to the top of the IIFE (TDZ in the Control Panel message handler killed the whole script — no ⊕ Generate button). **v4.383** "in N d" instead of a negative Days value for rows that haven't started. **v4.384** labelled header on the Control Panel block.
+- **v4.385 — half-pad safeguard.** LILLY 49 UNIT 3LS's asset polygon covers only half its pad, so the NFZ covered half. When a pad asset covers less than 75 % of its FFZ inset, the NFZ becomes the **whole FFZ inset** and the row shows ⚠ whole FFZ with the reason on hover. Threshold editable in the Control Panel block.
+- Live on 1637: three NFZs created from the 10.14 → 10.16 sheet diff plus an RPIC report, ✓ Gone deleted one with the restore-mission toast. Create, verify-before-delete and the Control Panel block all confirmed.
+
 ## 2026-10-20 — 🚧 Hazard Layer (#288): Enverus facilities — Map Styler latest v34.170 (latest only)
 
 - **Facilities are now a hazard source.** The Enverus `facilities` dataset became entitled on 2026-10-20: compressor stations, gas processing plants, tank batteries, pump stations and terminals. The builder pulls them per county (point only → 400 ft square); third-party ones draw charcoal like other third-party sites, abandoned ones grey. Cards show the facility type, status, compressor units / plant capacity and owner. Cobra 01 has none inside its box (Howard 34, Martin 31 county-wide). ([#288](https://github.com/Ned-Yap/aim-userscripts-issues/issues/288))
