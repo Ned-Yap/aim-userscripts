@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.389
+// @version      4.390
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.389';
+    const SCRIPT_VERSION = '4.390';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -30291,6 +30291,7 @@
                 <button data-rig-act="feed" title="Re-read the laptop agent's daily feed (aim-userscripts-data/rigs/sheet/latest.json) and ingest it if it is newer than this site's last ingest" style="background:none;border:1px solid #555;color:#aaa;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px">📡 ↻ feed</button>
             </div>
             <div style="font-size:11px;margin-bottom:6px">${['ending', 'staged', 'active', 'upcoming', 'unmatched', 'offsite'].map(chip).join('')}${cnt.cleared ? `<span style="color:#666">${cnt.cleared} cleared</span>` : ''}</div>
+            <div id="aim-rig-enverus" data-aim-rig="enverus" style="display:none;margin-bottom:8px;padding:6px 8px;background:rgba(255,96,96,0.07);border:1px solid rgba(255,96,96,0.45);border-radius:3px;font-size:11px"></div>
             <div data-rig-manual style="display:none;margin-bottom:8px;padding:6px 8px;background:rgba(122,223,230,0.06);border:1px solid rgba(122,223,230,0.3);border-radius:3px;font-size:11px">
                 <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:6px">
                     <input data-rig-f="pad" list="aim-rig-pads" placeholder="Pad / well name (as in site setup)" style="background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:3px 6px">
@@ -30312,7 +30313,47 @@
             <details style="margin-top:4px;font-size:10px;color:#777"><summary style="cursor:pointer">log (${st.log.length})</summary><pre style="white-space:pre-wrap;margin:4px 0;color:#999">${esc(st.log.slice(0, 40).join('\n'))}</pre></details>`;
         rigWire(sid, host);
         rigSyncBadge(sid);
+        rigEnverusPrompt(sid, host).catch(e => console.warn(`${RIG_TAG} Enverus prompt threw:`, e));   // v4.390 (#288↔#291)
         rigPull(sid, false).then(changed => { if (changed) { rigRenderPanel(sid); rigDraw(sid); } else rigFeedCheck(sid, false); });   // v4.389: feed check once the shared state is current
+    }
+    // v4.390 (#288 ↔ #291): "Enverus sees work on one of OUR pads that the rig sheet does not list."
+    // Reads the Hazard Layer's broadcast (Map Styler ≥34.171 adds reasons + signals), keeps the
+    // Enverus-sourced work-now features (rig / frac crew / drilling / telemetry), drops those the
+    // sheet already covers, and offers ➕ Add → the usual RPIC-row lifecycle (staged → NFZ → verify).
+    async function rigEnverusPrompt(sid, host) {
+        const box = host.querySelector('#aim-rig-enverus'); if (!box) return;
+        const hz = await hazardFeaturesFor(sid);
+        if (!hz || !Array.isArray(hz.features)) { box.style.display = 'none'; return; }
+        const { roots } = rigPads(sid);
+        const st = rigStateLoad(sid);
+        const covered = new Set(Object.values(st.rows).filter(c => c.padId && ['new', 'staged', 'active', 'ending', 'upcoming'].indexOf(c.status) !== -1).map(c => c.padId));
+        const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+        const items = [];
+        hz.features.forEach(f => {
+            const sg = f.sig || {};
+            if (f.cls !== 'work' || f.source === 'rigsheet' || sg.sheet_rig) return;
+            if (!(sg.rig_active || sg.frac_active || sg.drilling_wells || sg.telemetry_7d || /^(DRILLING|COMPLETING)$/i.test(sg.pad_status || ''))) return;
+            const ring = f.ring || [];
+            if (ring.length < 3) return;
+            const lat = ring.reduce((t, q) => t + q[0], 0) / ring.length, lng = ring.reduce((t, q) => t + q[1], 0) / ring.length;
+            let pad = roots.find(p => pointInPolygon(lat, lng, entityCoords(p))) || null;
+            if (!pad) { let best = null, bd = Infinity; roots.forEach(p => { const d = pointToPolygonMeters(lat, lng, entityCoords(p)) * 3.28084; if (d < bd) { bd = d; best = p; } }); if (best && bd <= rigCfg().nearPadFt) pad = best; }
+            if (!pad || covered.has(pad.id)) return;
+            const why = Array.isArray(f.reasons) && f.reasons.length ? f.reasons[0] : (sg.rig_active ? 'rig on the pad' : sg.frac_active ? 'frac crew on the pad' : 'work on the pad');
+            items.push({ pad, why, name: f.name || '', lat, lng });
+        });
+        if (!items.length) { box.style.display = 'none'; return; }
+        box.style.display = 'block';
+        box.innerHTML = `<div style="color:#ff8080;font-weight:700;margin-bottom:3px">📡 Enverus sees work on ${items.length} of our pad${items.length > 1 ? 's' : ''} that the rig sheet does not list</div>`
+            + items.map((it, i) => `<div style="display:flex;gap:8px;align-items:center;margin:2px 0"><span style="color:#e6e6e6"><b>${esc(it.pad.name || '#' + it.pad.id)}</b> <span style="color:#9aa">— ${esc(it.why)}${it.name && it.name !== it.pad.name ? ` (Enverus: ${esc(it.name)})` : ''}</span></span><span style="flex:1"></span><button data-rig-env-add="${i}" style="background:rgba(122,223,230,0.15);border:1px solid #7adfe6;color:#7adfe6;border-radius:3px;padding:1px 8px;cursor:pointer">➕ Add as report</button></div>`).join('')
+            + `<div style="color:#888;margin-top:3px">Enverus lags a few days and never sees cranes; the sheet never sees what nobody reported. Add = same lifecycle as an RPIC row (staged → NFZ → verify before removal).</div>`;
+        box.querySelectorAll('[data-rig-env-add]').forEach(b => { b.onclick = (e) => {
+            e.stopPropagation();
+            const it = items[Number(b.dataset.rigEnvAdd)]; if (!it) return;
+            rigAddManual(sid, { pad: it.pad.name || `#${it.pad.id}`, kind: `Enverus: ${it.why}`.slice(0, 80), start: rigToday(), by: 'Enverus' });
+            showToast(`Added ${it.pad.name} from Enverus — now staged`, 'rgba(255,154,61,0.6)');
+            rigRenderPanel(sid); rigDraw(sid);
+        }; });
     }
     // v4.386: 📜 History — every obstruction this site has ever had, with stats
     // and ↻ Re-stage (the banked NFZ body or a fresh geometry → back to Staged).

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.170
+// @version      34.171
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.170';
+    const SCRIPT_VERSION = '34.171';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -5731,6 +5731,13 @@
         const ps = String(sig.pad_status || '').toUpperCase();
         const fd = (s) => String(s || '').slice(0, 10);
         const n = (v) => Number(v) || 0;
+        const today = new Date(now).toISOString().slice(0, 10);
+        (Array.isArray(sig.sheet_rig) ? sig.sheet_rig : []).forEach(sr => {
+            const st = String(sr.status || '').toLowerCase(), start = fd(sr.start), end = fd(sr.end);
+            const txt = `${sr.source === 'rpic' ? 'RPIC report' : 'Diamondback rig sheet'}: ${sr.job || 'rig / crane'} on ${sr.well || '?'}`;
+            if (['active', 'staged', 'ending', 'new'].indexOf(st) !== -1 || (start && start <= today && (!end || end >= today))) red.push(txt + (start ? ` since ${start}` : '') + (end ? `, expected until ${end}` : '') + (st === 'active' ? ' — NFZ in place' : ''));
+            else if (st === 'upcoming' || (start && start > today)) purple.push(txt + ` from ${start}` + (end ? ` to ${end}` : ''));
+        });
         if (sig.rig_active) red.push(`rig on the pad now${Array.isArray(sig.rig_names) && sig.rig_names.filter(Boolean).length ? ` (${sig.rig_names.filter(Boolean).join(', ')})` : ''}`);
         const fl = hzMonthsAgo(sig.frac_last, now);
         if (sig.frac_active || (fl !== null && fl * 30.44 <= W.frac_active_days)) red.push(`frac crew on the pad (last frac day ${fd(sig.frac_last)})`);
@@ -6015,7 +6022,10 @@
                 type: 'HAZARDS_DATA', source: SCRIPT_ID, siteKey: hzData.siteKey, siteId: String(j.site_id || ''), env: j.env || (IS_QA ? 'qa' : 'prod'),
                 generated: j.generated || null, stale: hzIsStale(j), operatorsOurs: j.operators_ours || [], standoffFt: Number(j.standoff_ft) || 50,
                 features: hzData.feats.map(f => ({ id: f.id, cls: f.cls, kind: f.p.kind, ours: !!f.p.ours, name: f.p.name || '', operator: f.p.operator || '',
-                    status: f.p.status || '', standoffFt: Number(f.p.standoff_ft) || 0, newSince: f.p.new_since || null, source: f.p.source || '', ring: f.ring })),
+                    status: f.p.status || '', standoffFt: Number(f.p.standoff_ft) || 0, newSince: f.p.new_since || null, source: f.p.source || '', ring: f.ring,
+                    reasons: f.reasons || f.p.work_reason || null,
+                    sig: f.p.signals ? { rig_active: !!f.p.signals.rig_active, frac_active: !!f.p.signals.frac_active, frac_last: f.p.signals.frac_last || null, drilling_wells: Number(f.p.signals.drilling_wells) || 0,
+                        telemetry_7d: Number(f.p.signals.telemetry_7d) || 0, pad_status: f.p.signals.pad_status || null, sheet_rig: Array.isArray(f.p.signals.sheet_rig) ? f.p.signals.sheet_rig.length : 0 } : null })),
             });
         } catch (e) { console.warn(`${TAG} hazards: broadcast failed:`, e); }
     }
