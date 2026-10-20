@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.25
+// @version      3.26
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.25';
+    const SCRIPT_VERSION = '3.26';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -668,9 +668,15 @@
         return `/images/?${q.join('&')}`;
     }
     let covTimer = null;
+    const COV_REQ_TIMEOUT_MS = 25000;   // v3.26: a hung read can no longer freeze the whole run
     async function covFetchJson(url) {
         const t = Date.now();
-        const r = await fetch(url, { credentials: 'include' });
+        const ac = (typeof AbortController === 'function') ? new AbortController() : null;
+        const timer = ac ? setTimeout(() => { try { ac.abort(); } catch (e) {} }, COV_REQ_TIMEOUT_MS) : null;
+        let r;
+        try { r = await fetch(url, Object.assign({ credentials: 'include' }, ac ? { signal: ac.signal } : {})); }
+        catch (e) { if (timer) clearTimeout(timer); const err = new Error(`${e && e.name === 'AbortError' ? `timeout after ${COV_REQ_TIMEOUT_MS / 1000} s` : (e && e.message) || String(e)} ${url}`); err.status = 0; err.body = ''; throw err; }
+        if (timer) clearTimeout(timer);
         if (covTimer) covTimer(Date.now() - t);
         if (!r.ok) {
             let body = ''; try { body = await r.text(); } catch (e) {}
@@ -871,12 +877,19 @@
         } catch (e) { console.warn(`${TAG} coverage: re-join failed`, e); }
     }
     function covMissionUrl(sid, mid) { return `${location.origin}/#/site/${sid}/control-panel/past-mission/${mid}`; }
-    function covFetch(sid, onProgress) {
+    function covFetch(sid, onProgress, force) {
         const siteKey = covSiteKey(sid);
-        if (covInFlight && covInFlight.siteKey === siteKey) return covInFlight.p;
+        if (covInFlight && covInFlight.siteKey === siteKey) {
+            if (!force) return covInFlight.p;
+            console.warn(`${TAG} coverage: a read was already running for this site — starting a fresh one (the old result will be ignored)`);
+            covInFlight.stale = true;
+        }
         const p = (async () => {
+            const stage = (m) => console.log(`${TAG} coverage: ${m}`);
+            stage('entities…');
             const ent = await genFetchEntities(sid);
             const assets = ent.assets || [];
+            stage(`${assets.length} assets · reading images`);
             const byId = new Map(assets.map(a => [a.id, a]));
             const padOf = a => { let cur = a, guard = 0; while (cur && cur.parentId != null && byId.has(cur.parentId) && guard++ < 10) cur = byId.get(cur.parentId); return cur && cur !== a ? cur.name : (a.children && a.children.length ? a.name : ''); };
             const now = new Date();
@@ -895,22 +908,34 @@
             const nowSec = Math.floor(now.getTime() / 1000 / 86400) * 86400 + 86400 - 1;
             // v3.15: mission log (takeoff missions: id / group / pilot / images / planned images)
             // + Mission Bank apps (planned assets per mission) load alongside the image reads.
-            const logP = new Promise(res => { if (logBySite[sid]) return res(); fetchMissionLog(sid, () => res(), (e) => { console.warn(`${TAG} coverage: mission log unavailable — ${e}`); res(); }); });
-            const appsP = new Promise(res => { if (missionsBySite[sid]) return res(); fetchMissions(sid, () => res(), (e) => { console.warn(`${TAG} coverage: missions unavailable — ${e}`); res(); }); });
+            // v3.26: both loaders silently drop the callback when a fetch for this
+            // site is already in flight (their guards) — poll the cache as a fallback
+            // and never wait more than 90 s for either.
+            const waitFor = (label, has, start) => new Promise(res => {
+                if (has()) return res();
+                let settled = false; const ok = () => { if (!settled) { settled = true; res(); } };
+                try { start(ok, (e) => { console.warn(`${TAG} coverage: ${label} unavailable — ${e}`); ok(); }); } catch (e) { console.warn(`${TAG} coverage: ${label} loader threw`, e); ok(); }
+                const t1 = Date.now(); const iv = setInterval(() => { if (settled) { clearInterval(iv); return; } if (has()) { clearInterval(iv); ok(); } else if (Date.now() - t1 > 90000) { clearInterval(iv); console.warn(`${TAG} coverage: ${label} not loaded after 90 s — continuing without it`); ok(); } }, 500);
+            });
+            const logP = waitFor('mission log', () => !!logBySite[sid], (ok, err) => fetchMissionLog(sid, ok, err));
+            const appsP = waitFor('missions', () => !!missionsBySite[sid], (ok, err) => fetchMissions(sid, ok, err));
             const recs = new Array(assets.length);
             let next = 0, done = 0, reqN = 0, reqMs = 0, reqMax = 0;
-            const t0 = Date.now();
+            const t0 = Date.now(); let lastTick = Date.now();
             covTimer = (ms) => { reqN++; reqMs += ms; if (ms > reqMax) reqMax = ms; };
             const worker = async () => {
                 while (next < assets.length) {
                     const i = next++;
                     recs[i] = await covFetchAsset(sid, assets[i], monthStartSec, nowSec, weekStart, padOf(assets[i]), monthStart);
-                    done++;
+                    done++; lastTick = Date.now();
                     if (onProgress && (done % 5 === 0 || done === assets.length)) onProgress(done, assets.length, Date.now() - t0);
                 }
             };
-            await Promise.all(Array.from({ length: Math.min(pool, assets.length) }, worker));
+            const wd = setInterval(() => { if (Date.now() - lastTick > 60000) { console.warn(`${TAG} coverage: no asset read finished in 60 s (${done}/${assets.length} done, ${next - done} in flight)`); showToast(`Coverage: stalled at ${done}/${assets.length} — waiting on ${next - done} reads`, '#ff9800'); lastTick = Date.now(); } }, 10000);
+            try { await Promise.all(Array.from({ length: Math.min(pool, assets.length) }, worker)); } finally { clearInterval(wd); }
+            stage(`reads done (${reqN} requests) · waiting for mission log + missions`);
             await Promise.all([logP, appsP]);
+            stage('joining missions');
             try { covJoinMissions(sid, ent, recs); } catch (e) { console.warn(`${TAG} coverage: mission join failed`, e); }
             const bucket = { at: Date.now(), day: covDayKey(now.toISOString()), monthStart: monthStart.toISOString(), weekStart: weekStart.toISOString(), windowDays, recs };
             covRestatus(bucket);
@@ -925,7 +950,7 @@
             return bucket;
         })();
         covInFlight = { siteKey, p };
-        p.finally(() => { if (covInFlight && covInFlight.p === p) covInFlight = null; });
+        p.catch(e => console.error(`${TAG} coverage: run failed`, e)).finally(() => { if (covInFlight && covInFlight.p === p) covInFlight = null; });
         return p;
     }
 
@@ -1233,7 +1258,7 @@
             const pct = total ? done / total : 0; const eta = done ? Math.max(0, Math.round((ms / done) * (total - done) / 1000)) : null;
             if (bar) bar.style.width = `${Math.round(pct * 100)}%`;
             if (el) el.textContent = `${done} / ${total} assets · ${Math.round(pct * 100)} % · ${Math.round(ms / 1000)} s elapsed${eta != null ? ` · ~${eta} s left` : ''}`;
-        })
+        }, !!force)
             .then(() => { if (panelState && panelState.mode === 'coverage') renderCoverageView(); })
             .catch(e => { console.error(`${TAG} coverage: fetch failed`, e); setBodyHtml(`<div style="padding:40px;text-align:center;color:#ff5252">Coverage read failed: ${escapeHtml(e.message || String(e))}</div>`); });
     }
