@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.385
+// @version      4.386
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.385';
+    const SCRIPT_VERSION = '4.386';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -30108,7 +30108,7 @@
         const out = document.getElementById('aim-rig-result'); const say = (m, col) => { if (out) { out.textContent = m; out.style.color = col || '#cfd6dc'; } console.log(`${RIG_TAG} commit: ${m}`); };
         if (!todo.length) { say('Nothing staged.'); return; }
         const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
-        const geoms = todo.map(([k, c]) => ({ k, c, g: rigGeometry(sid, c.padId) })).filter(x => x.g && x.g.points.length >= 3 && !ringSelfIntersects(x.g.points));
+        const geoms = todo.map(([k, c]) => ({ k, c, g: (c.nfzBody && Array.isArray(c.nfzBody.points) && c.nfzBody.points.length >= 3) ? { points: c.nfzBody.points, note: 'banked NFZ body (re-created)' } : rigGeometry(sid, c.padId) })).filter(x => x.g && x.g.points.length >= 3 && !ringSelfIntersects(x.g.points));
         if (dry) { say(`DRY RUN — would create ${geoms.length} NFZ(s): ${geoms.map(x => `RIG ${x.c.well}`).join(' · ')}. Untick Dry run in the header to write.`, '#ffb300'); return; }
         const csrf = getCsrfToken(); if (!csrf) { showToast('No CSRF token — make one native save anywhere in Percepto first, then retry', 'rgba(255,96,96,0.55)'); return; }
         let siteCfg = null; try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
@@ -30172,6 +30172,7 @@
     // ---- panel ----
     function rigRenderPanel(sid) {
         const host = document.getElementById('aim-rig-controls'); if (!host) return;
+        if (host.dataset.view === 'history') { rigRenderHistory(sid, host); return; }
         const st = rigStateLoad(sid); rigReclassify(sid);
         const rows = Object.entries(st.rows).map(([k, c]) => ({ k, c }));
         const order = { ending: 0, staged: 1, active: 2, upcoming: 3, unmatched: 4, new: 5, offsite: 6, cleared: 7 };
@@ -30205,6 +30206,7 @@
                 <button data-rig-act="manual" style="background:none;border:1px solid #7adfe6;color:#7adfe6;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">👁 Add RPIC report</button>
                 <button data-rig-act="commit" style="background:rgba(255,154,61,0.18);border:1px solid #ff9a3d;color:#ffb060;border-radius:3px;padding:2px 10px;cursor:pointer;font-size:11px;font-weight:700">⬠ Create staged NFZs${cnt.staged ? ` (${cnt.staged})` : ''}</button>
                 <label style="color:#888;font-size:10px;cursor:pointer"><input type="checkbox" data-rig-showcleared ${showCleared ? 'checked' : ''}> show cleared</label>
+                <button data-rig-act="view-history" title="Every obstruction this site has had: stats, outcomes, re-stage" style="background:none;border:1px solid #555;color:#aaa;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">📜 History</button>
                 <button data-rig-act="export" title="Download this site's rig state (rows, NFZ bodies, log)" style="background:none;border:1px solid #555;color:#aaa;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px">⬇ state</button>
             </div>
             <div style="font-size:11px;margin-bottom:6px">${['ending', 'staged', 'active', 'upcoming', 'unmatched', 'offsite'].map(chip).join('')}${cnt.cleared ? `<span style="color:#666">${cnt.cleared} cleared</span>` : ''}</div>
@@ -30229,6 +30231,32 @@
             <details style="margin-top:4px;font-size:10px;color:#777"><summary style="cursor:pointer">log (${st.log.length})</summary><pre style="white-space:pre-wrap;margin:4px 0;color:#999">${esc(st.log.slice(0, 40).join('\n'))}</pre></details>`;
         rigWire(sid, host);
     }
+    // v4.386: 📜 History — every obstruction this site has ever had, with stats
+    // and ↻ Re-stage (the banked NFZ body or a fresh geometry → back to Staged).
+    function rigDaysOn(c) { if (!c.start) return null; const end = c.clearedAt || c.endedAt || (c.status === 'cleared' ? null : rigToday()); if (!end) return null; return Math.max(0, Math.round((new Date(end) - new Date(c.start)) / 86400000)); }
+    function rigRenderHistory(sid, host) {
+        const st = rigStateLoad(sid);
+        const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+        const rows = Object.entries(st.rows).map(([k, c]) => ({ k, c })).sort((a, b) => String(b.c.firstSeen || '').localeCompare(String(a.c.firstSeen || '')));
+        const done = rows.filter(r => r.c.status === 'cleared');
+        const withDays = done.map(r => rigDaysOn(r.c)).filter(d => d != null);
+        const avg = withDays.length ? (withDays.reduce((a, b) => a + b, 0) / withDays.length).toFixed(1) : '—';
+        const top = (fn) => { const m = {}; rows.forEach(r => { const v = fn(r.c); if (v) m[v] = (m[v] || 0) + 1; }); return Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${esc(k)} <span style="color:#777">×${n}</span>`).join(' · ') || '—'; };
+        const byMonth = {}; rows.forEach(r => { const m = String(r.c.start || r.c.firstSeen || '').slice(0, 7); if (m) byMonth[m] = (byMonth[m] || 0) + 1; });
+        const months = Object.keys(byMonth).sort().slice(-6).map(m => `${m} <b style="color:#cfd6dc">${byMonth[m]}</b>`).join(' · ') || '—';
+        const nfzN = rows.filter(r => r.c.committedAt).length, delN = rows.filter(r => r.c.deletedNfzId).length;
+        const body = rows.map(({ k, c }) => { const col = RIG_STATUS_COLOR[c.status] || '#ccc'; const d = rigDaysOn(c);
+            return `<tr style="border-bottom:1px solid #222"><td style="padding:3px 6px;color:${col};white-space:nowrap">${esc(RIG_STATUS_LABEL[c.status] || c.status)}</td><td style="padding:3px 6px;color:#e6e6e6">${esc(c.well)}${c.source === 'rpic' ? ' <span style="color:#7adfe6">👁</span>' : ''}</td><td style="padding:3px 6px;color:#9aa">${esc(c.job)}</td><td style="padding:3px 6px;color:#9aa">${esc(c.padName || '—')}</td><td style="padding:3px 6px;color:#9aa;white-space:nowrap">${esc(c.start || '?')} → ${esc(c.end || '—')}</td><td style="padding:3px 6px;color:#9aa;text-align:center">${d == null ? '' : d}</td><td style="padding:3px 6px;color:#9aa;white-space:nowrap">${c.committedAt ? `NFZ ${esc(c.committedAt)}` : ''}${c.clearedAt ? ` → gone ${esc(c.clearedAt)}` : ''}</td><td style="padding:3px 6px;color:#9aa">${esc(c.endedWhy || '')}${c.pulled ? ` · ⛔ ${esc(c.pulled)}` : ''}${c.note ? ` · ${esc(c.note)}` : ''}</td><td style="padding:3px 6px;white-space:nowrap">${c.status === 'cleared' ? `<button data-rig-act="restage" data-k="${esc(k)}" title="Back to Staged — ⬠ Create re-creates the NFZ (banked body when it had one)" style="background:none;border:1px solid #7adfe6;color:#7adfe6;border-radius:3px;padding:1px 6px;cursor:pointer">↻ Re-stage</button>` : ''}</td></tr>`; }).join('');
+        host.innerHTML = `
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px"><b style="color:#ff9a3d">📜 Rigs & cranes — history</b><span style="flex:1"></span><button data-rig-act="hist-csv" style="background:none;border:1px solid #555;color:#aaa;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">⬇ CSV</button><button data-rig-act="view-live" style="background:rgba(255,154,61,0.18);border:1px solid #ff9a3d;color:#ffb060;border-radius:3px;padding:2px 10px;cursor:pointer;font-size:11px">← back to live</button></div>
+            <div style="font-size:11px;color:#bbb;line-height:1.7;margin-bottom:6px"><b style="color:#cfd6dc">${rows.length}</b> records · <b style="color:#cfd6dc">${done.length}</b> cleared · <b style="color:#cfd6dc">${nfzN}</b> NFZs created · <b style="color:#cfd6dc">${delN}</b> removed · avg <b style="color:#cfd6dc">${avg}</b> days on pad (cleared rows)<br>jobs: ${top(c => c.job)}<br>pads: ${top(c => c.padName)}<br>by month: ${months}</div>
+            <div style="max-height:320px;overflow:auto;border:1px solid #2a2a2a;border-radius:3px"><table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr style="color:#7adfe6;text-align:left;position:sticky;top:0;background:#14171b"><th style="padding:4px 6px">Status</th><th style="padding:4px 6px">Well</th><th style="padding:4px 6px">Job</th><th style="padding:4px 6px">Pad</th><th style="padding:4px 6px">Start → End</th><th style="padding:4px 6px">Days</th><th style="padding:4px 6px">NFZ</th><th style="padding:4px 6px">Outcome</th><th></th></tr></thead><tbody>${body || '<tr><td colspan="9" style="padding:10px;color:#777">Nothing yet.</td></tr>'}</tbody></table></div>`;
+        host.querySelectorAll('[data-rig-act]').forEach(b => { b.onclick = (e) => { e.stopPropagation(); const act = b.dataset.rigAct;
+            if (act === 'view-live') { host.dataset.view = ''; rigRenderPanel(sid); }
+            else if (act === 'restage') { const c = st.rows[b.dataset.k]; if (c) { c.status = 'staged'; c.endedWhy = ''; c.clearedAt = ''; c.deletedNfzId = null; c.nfzId = null; c.nfzName = ''; rigReclassify(sid); rigLog(sid, `re-staged from history: ${c.well}`); rigStateSave(sid); host.dataset.view = ''; rigRenderPanel(sid); rigDraw(sid); } }
+            else if (act === 'hist-csv') { const cols = ['Status', 'Well', 'Source', 'Job', 'Pad', 'Start', 'End', 'Days on pad', 'First seen', 'Last seen', 'NFZ created', 'Cleared', 'Outcome', 'Missions pulled', 'Note']; const q = v => { const t = String(v == null ? '' : v); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; }; const csv = [cols.join(',')].concat(rows.map(({ c }) => [RIG_STATUS_LABEL[c.status] || c.status, c.well, c.source, c.job, c.padName, c.start, c.end, rigDaysOn(c) == null ? '' : rigDaysOn(c), c.firstSeen, c.lastSeen, c.committedAt || '', c.clearedAt || '', c.endedWhy || '', c.pulled || '', c.note || ''].map(q).join(','))).join('\n'); try { downloadJSONFile(`rig-history-${sid}-${rigToday()}.csv`, csv); } catch (err) { showToast('Export failed', 'rgba(255,96,96,0.55)'); } }
+        }; });
+    }
     function rigWire(sid, host) {
         const file = host.querySelector('[data-rig-file]');
         const load = (f) => { if (!f) return; const rd = new FileReader(); rd.onload = () => { try { const rows = rigParseCsv(String(rd.result || '')); const res = rigIngest(sid, rows, rigDayFromFilename(f.name)); showToast(`Rig sheet ${rigDayFromFilename(f.name)}: ${rows.length} rows · ${res.added} new · ${res.dropped} to verify`, 'rgba(255,154,61,0.6)'); } catch (e) { showToast(`CSV: ${e.message}`, 'rgba(255,96,96,0.55)'); console.warn(`${RIG_TAG} csv`, e); } rigRenderPanel(sid); rigDraw(sid); }; rd.readAsText(f); };
@@ -30240,6 +30268,7 @@
         host.querySelectorAll('[data-rig-act]').forEach(b => { b.onclick = (e) => {
             e.stopPropagation(); const act = b.dataset.rigAct, k = b.dataset.k; const st = rigStateLoad(sid);
             if (act === 'commit') rigCommit(sid);
+            else if (act === 'view-history') { host.dataset.view = 'history'; rigRenderPanel(sid); }
             else if (act === 'manual') { const m = host.querySelector('[data-rig-manual]'); m.style.display = m.style.display === 'none' ? 'block' : 'none'; }
             else if (act === 'manual-add') { const f = {}; host.querySelectorAll('[data-rig-f]').forEach(i => { f[i.dataset.rigF] = i.value.trim(); }); if (!f.pad) { showToast('Pad / well name is required', 'rgba(255,96,96,0.55)'); return; } rigAddManual(sid, f); rigRenderPanel(sid); rigDraw(sid); }
             else if (act === 'gone') rigConfirmGone(sid, k);
